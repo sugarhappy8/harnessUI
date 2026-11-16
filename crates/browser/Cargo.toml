@@ -33,6 +33,18 @@ tokio-util = { workspace = true }
 dunce = { workspace = true }
 # Ids for held navigations, so the app can link each decision to its audit row.
 uuid = { workspace = true }
+# [0.0.7 P7] The local time in the name of a website capture's folder (already in the app).
+chrono = { workspace = true }
+# [0.0.7 P7] A capture's index.html is parsed again the way a browser parses the saved file
+# and cleaned as a tree (capture/inert.rs); the versions crates/search already uses.
+dom_query = { workspace = true }
+html5ever = { workspace = true }
+# [0.0.7 P7] The CSS tokenizer dom_query is built on (0.37, already in the lock and the
+# notices): every address a style sheet names, escapes and all (capture/css.rs).
+cssparser = "0.37"
+# [0.0.7 P7] Saved SVG pictures are parsed as XML and written again from what was parsed
+# (capture/assets.rs). The version Tauri's plist already ships; no default features.
+quick-xml = { version = "0.42", default-features = false }
 # Reads the size of a PNG screenshot from its header.
 base64 = { workspace = true }
 # Unpacking the agent's own browser, a pinned Chrome for Testing archive (9.3). The
@@ -62,6 +74,8 @@ mcp-host = { workspace = true }
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "time", "net", "io-util"] }
 # The integration tests need the test hooks of this very crate.
 browser = { path = ".", features = ["test-hooks"] }
+# [0.0.7 P7] Compares screenshots of a captured page and of its copy (already in the app).
+image = { workspace = true }
 
 [lints]
 workspace = true

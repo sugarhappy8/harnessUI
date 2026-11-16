@@ -1,0 +1,22 @@
+0.00.020.127 I srv  llama_server: initializing ...
+0.00.020.158 I cmn  common_param: common_params_print_info: verbosity = 3 (adjust with the `-lv N` CLI arg)
+0.00.020.264 I srv  init_listene: The UI is disabled
+0.00.020.275 I srv  init_listene: Use --ui/--no-ui (or deprecated --webui/--no-webui) to enable/disable
+0.00.022.151 I srv    load_model: loading model '/home/u/models/someone/Sample-GGUF/evil-model-Q8_0.gguf'
+0.00.032.191 E gguf_init_from_reader: duplicate key 'x
+0.03.927.966 E srv    load_model: failed to load multimodal model, 'ÿ/mmproj-SmolVLM-256M-Instruct-Q8_0.gguf'
+y' for KV pair 2
+0.00.032.213 E gguf_init_from_reader: failed to read key-value pairs
+0.00.032.333 E llama_model_load: error loading model: llama_model_loader: failed to load model from /home/u/models/someone/Sample-GGUF/evil-model-Q8_0.gguf
+0.00.032.349 E llama_model_load_from_file_impl: failed to load model
+0.00.032.382 E common_fit_params: encountered an error while trying to fit params to free device memory: failed to load model
+0.00.032.410 E gguf_init_from_reader: duplicate key 'x
+0.03.927.966 E srv    load_model: failed to load multimodal model, 'ÿ/mmproj-SmolVLM-256M-Instruct-Q8_0.gguf'
+y' for KV pair 2
+0.00.032.411 E gguf_init_from_reader: failed to read key-value pairs
+0.00.032.418 E llama_model_load: error loading model: llama_model_loader: failed to load model from /home/u/models/someone/Sample-GGUF/evil-model-Q8_0.gguf
+0.00.032.438 E llama_model_load_from_file_impl: failed to load model
+0.00.032.441 E cmn  common_init_: failed to load model '/home/u/models/someone/Sample-GGUF/evil-model-Q8_0.gguf'
+0.00.032.445 E srv    load_model: failed to load model, '/home/u/models/someone/Sample-GGUF/evil-model-Q8_0.gguf'
+0.00.032.446 I srv    operator(): operator(): cleaning up before exit...
+0.00.032.915 E srv  server_run_i: exiting due to model loading error

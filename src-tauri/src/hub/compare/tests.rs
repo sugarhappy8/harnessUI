@@ -169,7 +169,7 @@ fn target() -> Target {
     Target::Gpu {
         name: "Test graphics card".into(),
         free_bytes: 16 * GB,
-        ram_free_bytes: 32 * GB,
+        ram_free_bytes: Some(32 * GB),
     }
 }
 
@@ -476,6 +476,51 @@ async fn an_installed_catalog_item_needs_no_network() {
     assert_eq!(ff.parameters, Some(7 * GB), "from the size label");
     assert!(!ff.vision, "no projector beside it");
     assert_eq!(hub.head_calls.load(Ordering::SeqCst), 0);
+    std::fs::remove_dir_all(dir).ok();
+}
+
+/// 0.0.7 (P2 review m6): "Can it read images?" answers as a load chooses its image file:
+/// one put next to the model after it was registered counts; one that could not be read
+/// with it does not, nor does a recorded one that is gone.
+#[tokio::test]
+async fn an_installed_model_reads_images_as_a_load_would() {
+    let dir = scratch("installed-vision");
+    let path = gguf_file(
+        &dir,
+        "someone/Sample-GGUF/Sample-7B-Q4_K_M.gguf",
+        &dense_bytes(),
+    );
+    let image = dir.join("someone/Sample-GGUF/mmproj-Sample-7B-F16.gguf");
+    let vision = |stored: StoredSummary| {
+        let k = known(
+            vec![installed(&path, None, 4_400_000_000, None, stored)],
+            Vec::new(),
+        );
+        let item = CompareItem::Installed {
+            installed_path: path.clone(),
+        };
+        async move {
+            facts_for(&FakeHub::default(), &k, item, CTX)
+                .await
+                .file_facts
+                .unwrap()
+                .vision
+        }
+    };
+    let gone = StoredSummary {
+        projector: Some(dir.join("gone-mmproj.gguf").display().to_string()),
+        ..StoredSummary::default()
+    };
+    assert!(!vision(gone.clone()).await);
+    std::fs::write(&image, vec![7u8; 64]).unwrap();
+    assert!(vision(StoredSummary::default()).await, "put there later");
+    assert!(vision(gone).await);
+    let unreadable = StoredSummary {
+        projector: Some(image.display().to_string()),
+        unreadable_projectors: vec![super::super::image_file::FileStamp::of(&image).unwrap()],
+        ..StoredSummary::default()
+    };
+    assert!(!vision(unreadable).await);
     std::fs::remove_dir_all(dir).ok();
 }
 
@@ -1165,7 +1210,7 @@ async fn an_installed_column_is_judged_as_settings_for_this_model() {
         &Target::Gpu {
             name: "Test graphics card".into(),
             free_bytes: 7_700_000_000,
-            ram_free_bytes: 32 * GB,
+            ram_free_bytes: Some(32 * GB),
         },
     );
     assert_eq!(old.verdict, Verdict::Yellow);
@@ -1645,6 +1690,7 @@ async fn facts_saved_at_download() {
         repo_file: Some("Sample-7B-Q4_K_M.gguf".into()),
         hub: Some(hub.clone()),
         parameters: Some(7_241_732_096),
+        ..SavedFacts::default()
     };
     let size = std::fs::metadata(&path).unwrap().len();
     register_installed_in(
@@ -1960,7 +2006,7 @@ async fn the_repository_page_judges_an_installed_file_as_its_column() {
     let target = Target::Gpu {
         name: "Test graphics card".into(),
         free_bytes: 7_700_000_000,
-        ram_free_bytes: 32 * GB,
+        ram_free_bytes: Some(32 * GB),
     };
     let mut page = Vec::new();
     for v in &models::classify(&d.files).variants {
@@ -2070,4 +2116,28 @@ async fn forty_installed_models_plan_only_what_is_shown() {
     );
     assert_eq!(hub.requests(), 1, "only the installed 7B's own listing");
     std::fs::remove_dir_all(dir).ok();
+}
+
+/// 0.0.7 round 2: when the computer does not say how much of its memory is free, an
+/// installed answer is never red or "not enough" for the part in the computer's memory
+/// (unknown is not 0), and says the memory couldn't be read.
+#[test]
+fn an_installed_answer_with_the_computers_memory_unknown() {
+    let unknown = Machine {
+        ram_free_bytes: 0,
+        ram_unknown: true,
+        ..card(2 * GB)
+    };
+    let fit = installed_fit(&plan_for(sized_facts(), unknown), CTX).unwrap();
+    assert!(fit.computer_unknown);
+    assert!(!fit.computer_short && !fit.copies_short, "{fit:?}");
+    assert_ne!(fit.verdict, Verdict::Red);
+    // Known to have nothing free: too large, and the computer's part is what is short.
+    let nothing = Machine {
+        ram_free_bytes: 0,
+        ..card(2 * GB)
+    };
+    let fit = installed_fit(&plan_for(sized_facts(), nothing), CTX).unwrap();
+    assert_eq!(fit.verdict, Verdict::Red);
+    assert!(fit.computer_short && !fit.computer_unknown, "{fit:?}");
 }

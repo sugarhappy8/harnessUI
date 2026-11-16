@@ -20,6 +20,25 @@ function legendNumbers(bar: HTMLElement): number[] {
 describe("OffloadPicture: where the model goes, before it loads", () => {
   afterEach(cleanup);
 
+  // 0.0.7: the saved copies of a long chat as their own item; round 2: a computer whose
+  // memory could not be read shows no size or free figure, and says so.
+  it("shows saved copies apart, and an unknown computer memory as unknown", () => {
+    show(picture({ computer: computerBar({ copiesBytes: gb(2.5) }) }));
+    expect(text()).toContain("Saved copies of long chats (up to 2.5 GB)");
+    cleanup();
+    show(
+      picture({
+        computerUnknown: true,
+        computer: computerBar({ totalBytes: 0, freeBytes: 0, otherBytes: 0 }),
+      }),
+    );
+    const computer = document.querySelector('[data-bar="computer"]') as HTMLElement;
+    expect(computer.textContent).toContain("Computer memory");
+    expect(computer.textContent).not.toContain("0 GB free");
+    expect(computer.textContent).not.toContain("Other programs");
+    expect(computer.textContent).toContain("The computer's memory couldn't be read.");
+  });
+
   it("draws the worked example: two bars whose legends add up, the needs line, the layers and the source", () => {
     show(picture());
     expect(screen.getByRole("heading", { name: "Where the model goes" })).toBeTruthy();

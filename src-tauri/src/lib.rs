@@ -118,6 +118,7 @@ pub fn run() {
             chat::send_message,
             chat::regenerate,
             chat::stop_generation,
+            chat::running_turn,
             attachments::get_attachment,
             mentions::search_mentions,
             mentions::resolve_mentions,
@@ -165,6 +166,10 @@ pub fn run() {
             hub::first_run_info,
             hub::complete_first_run,
             hub::refresh_catalog,
+            // [0.0.7 P2] An installed model's image file from its Hugging Face repository.
+            hub::image_file::image_file_offer,
+            hub::image_file::download_image_file,
+            hub::image_file::forget_unreadable_image_file,
             packs_cmd::list_packs,
             packs_cmd::download_pack,
             packs_cmd::cancel_pack_download,
@@ -178,6 +183,8 @@ pub fn run() {
             permissions::list_audit,
             permissions::export_audit,
             turns::resolve_approval,
+            // [0.0.7 P6] The approval cards waiting, for a window that reloaded.
+            turns::pending_approvals,
             approvals::get_approval_mode,
             approvals::set_approval_mode,
             approvals::get_allow_all_default,

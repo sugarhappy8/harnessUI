@@ -1,5 +1,5 @@
 import { memo, useEffect, useState } from "react";
-import { AtSign, ChevronLeft, ChevronRight, Copy, FileText, Pencil, RotateCcw, Check } from "lucide-react";
+import { AtSign, ChevronLeft, ChevronRight, Copy, FileText, Pencil, RotateCcw, Check, X } from "lucide-react";
 import { writeText } from "@tauri-apps/plugin-clipboard-manager";
 import type { MessageDto } from "../lib/types";
 import { Markdown } from "./Markdown";
@@ -8,8 +8,8 @@ import { ErrorBanner } from "./ErrorBanner";
 import { getAttachment, isTauri } from "../lib/ipc";
 import { PinMessageButton } from "./context/PinMessageButton";
 
-/** An attached image, loaded from the backend as a data: URI. */
-function AttachedImage(props: { id: number }) {
+/** An attached image, loaded from the backend as a data: URI. `small`: a thumbnail. */
+function AttachedImage(props: { id: number; small?: boolean }) {
   const [src, setSrc] = useState<string | null>(null);
   useEffect(() => {
     let alive = true;
@@ -20,7 +20,10 @@ function AttachedImage(props: { id: number }) {
       alive = false;
     };
   }, [props.id]);
-  if (!src) return <div className="h-24 w-24 rounded-md bg-bg-muted" aria-label="Image" />;
+  if (!src) return <div className={(props.small ? "h-16 w-16" : "h-24 w-24") + " rounded-md bg-bg-muted"} aria-label="Image" />;
+  if (props.small) {
+    return <img src={src} alt="Attached image" className="h-16 w-16 rounded-md border border-border object-cover" />;
+  }
   return <img src={src} alt="Attached image" className="max-h-48 max-w-xs rounded-md border border-border object-contain" />;
 }
 
@@ -29,7 +32,8 @@ interface Props {
   isLastAssistant: boolean;
   busy: boolean;
   onRegenerate: (id: number) => void;
-  onEditResend: (message: MessageDto, newText: string) => void;
+  /** [0.0.7 P6] With the attachments (by attachment id) the new message keeps. */
+  onEditResend: (message: MessageDto, newText: string, attachmentIds: number[]) => void;
   onSwitchBranch: (messageId: number) => void;
 }
 
@@ -71,6 +75,12 @@ export const MessageItem = memo(function MessageItem(props: Props) {
   const citations = useCitations(m.role === "assistant");
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState(m.text);
+  // [0.0.7 P6] The attachments the edited message keeps (by attachment id): all of them at
+  // first; each can be removed in the edit box.
+  const images = m.imageIds ?? [];
+  const documents = m.documents ?? [];
+  const mentions = m.mentions ?? [];
+  const [kept, setKept] = useState<number[]>([]);
   const [copied, setCopied] = useState(false);
 
   async function copy() {
@@ -92,11 +102,69 @@ export const MessageItem = memo(function MessageItem(props: Props) {
             className="w-full max-w-[85%]"
             onSubmit={(e) => {
               e.preventDefault();
+              // [0.0.7 P6a review] A box opened before a reply started stays open: it sends once
+              // the reply is done (the app writes one at a time), keeping what was written.
+              if (props.busy) return;
               const text = draft.trim();
-              if (text) props.onEditResend(m, text);
+              // With attachments left, the text may be empty (a message with only an image).
+              if (text || kept.length > 0) props.onEditResend(m, text, kept);
               setEditing(false);
             }}
           >
+            {kept.length > 0 && (
+              <div aria-label="Attachments" className="mb-1.5 flex flex-wrap items-center justify-end gap-2">
+                {images.map(
+                  (id, i) =>
+                    kept.includes(id) && (
+                      <div key={id} className="relative">
+                        <AttachedImage id={id} small />
+                        <button
+                          type="button"
+                          aria-label={`Remove image ${i + 1}`}
+                          onClick={() => setKept((old) => old.filter((k) => k !== id))}
+                          className="absolute -top-1.5 -right-1.5 rounded-full bg-bg p-0.5 shadow"
+                        >
+                          <X size={12} aria-hidden />
+                        </button>
+                      </div>
+                    ),
+                )}
+                {documents.map(
+                  (d) =>
+                    kept.includes(d.id) && (
+                      <span key={d.id} className="flex items-center gap-1 rounded-md border border-border px-2 py-1 text-xs">
+                        <FileText size={12} aria-hidden /> {d.name}
+                        <button
+                          type="button"
+                          aria-label={`Remove ${d.name}`}
+                          onClick={() => setKept((old) => old.filter((k) => k !== d.id))}
+                        >
+                          <X size={11} aria-hidden />
+                        </button>
+                      </span>
+                    ),
+                )}
+                {mentions.map(
+                  (mention) =>
+                    kept.includes(mention.attachmentId) && (
+                      <span
+                        key={mention.attachmentId}
+                        className="flex items-center gap-1 rounded-md border border-border bg-bg-subtle px-2 py-0.5 font-mono text-xs"
+                      >
+                        <AtSign size={11} className="text-accent" aria-hidden />
+                        {mention.label}
+                        <button
+                          type="button"
+                          aria-label={`Remove mention ${mention.label}`}
+                          onClick={() => setKept((old) => old.filter((k) => k !== mention.attachmentId))}
+                        >
+                          <X size={11} aria-hidden />
+                        </button>
+                      </span>
+                    ),
+                )}
+              </div>
+            )}
             <textarea
               aria-label="Edit message"
               value={draft}
@@ -108,7 +176,11 @@ export const MessageItem = memo(function MessageItem(props: Props) {
               <button type="button" onClick={() => setEditing(false)} className="px-2 py-1">
                 Cancel
               </button>
-              <button type="submit" className="rounded-md bg-accent px-3 py-1 text-accent-fg">
+              <button
+                type="submit"
+                disabled={props.busy || (!draft.trim() && kept.length === 0)}
+                className="rounded-md bg-accent px-3 py-1 text-accent-fg disabled:opacity-50"
+              >
                 Send
               </button>
             </div>
@@ -166,6 +238,7 @@ export const MessageItem = memo(function MessageItem(props: Props) {
               disabled={props.busy}
               onClick={() => {
                 setDraft(m.text);
+                setKept([...images, ...documents.map((d) => d.id), ...mentions.map((x) => x.attachmentId)]);
                 setEditing(true);
               }}
               className="text-fg-muted hover:text-fg disabled:opacity-30"

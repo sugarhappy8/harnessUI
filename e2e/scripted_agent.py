@@ -196,7 +196,12 @@ def run(fn, c):
 
 
 def idle(s):
-    return s.execute("return document.querySelector('button[aria-label=\"Stop\"]') === null;")
+    # [0.0.7 P6] No reply anywhere: no Stop in the open chat, and no line naming a reply that
+    # runs in another chat (Stop is in that chat only).
+    return s.execute(
+        "return document.querySelector('button[aria-label=\"Stop\"]') === null"
+        " && document.querySelector('[data-turn-elsewhere]') === null;"
+    )
 
 
 def send(s, text):
@@ -264,6 +269,45 @@ def answer_card(s, label, timeout=30):
     s.wait_for(lambda: "Allow once" in s.page_text(), timeout, "approval card")
     time.sleep(0.9)
     s.click_button(label)
+
+
+def reply_shown(s, text, timeout=5):
+    """Waits until the page shows `text` of a message drawn as a turn ended. Message rows use
+    `content-visibility: auto` (src/styles.css): WebKit lays out a new row, and only then puts
+    its text in innerText, at its next rendering update, which can come a moment after the turn
+    is idle."""
+    s.wait_for(lambda: text in s.page_text().replace("\u2009", " "), timeout, f"the page to show {text!r}")
+
+
+# [0.0.7] A button that sets the agent going (the step limit's Continue, the Task tab's Resume,
+# an approval card's choices) ignores clicks for a moment after it appears, and again when the
+# window is shown or the page becomes visible (`src/lib/useInputDelay.ts`). It shows
+# aria-disabled="true" until it takes clicks.
+FIND_BUTTON = """
+const [scope, label] = arguments;
+const b = [...document.querySelectorAll(scope)].flatMap(r => [...r.querySelectorAll('button')])
+  .find(b => (b.innerText || '').trim() === label);
+"""
+
+
+def wait_armed(s, scope, label, timeout=10):
+    """Waits until the button labelled `label` inside `scope` (a CSS selector) takes clicks."""
+    s.wait_for(lambda: s.execute(
+        FIND_BUTTON + "return !!b && !b.disabled && b.getAttribute('aria-disabled') !== 'true';", scope, label),
+        timeout, f"{label!r} to take clicks")
+
+
+def click_too_early(s, scope, label):
+    """Clicks the button while its input delay runs, which must do nothing: the page is made to
+    become visible again first, in the same script, so the delay has just started over."""
+    early = s.execute(
+        FIND_BUTTON + """
+        if (!b) return null;
+        document.dispatchEvent(new Event('visibilitychange'));
+        b.click();
+        return true;
+        """, scope, label)
+    assert early, f"no {label!r} button in {scope}"
 
 
 # ---------------------------------------------------------------------------------------
@@ -890,8 +934,8 @@ def p_stop(c, notes):
     Fake.queue.append({"content": "second version"})
     s.click_button("Regenerate")
     wait_idle(s)
-    assert "second version" in s.page_text()
-    assert "2 / 2" in s.page_text().replace(" ", " "), "no version arrows after regenerate"
+    reply_shown(s, "second version")
+    reply_shown(s, "2 / 2")  # the version arrows
 
 
 @probe("mcp-config")
@@ -935,7 +979,8 @@ def p_regen_error(c, notes):
     wait_idle(s)
     msgs = messages(s, chat)
     notes.append(str([(m["role"], m.get("status")) for m in msgs]))
-    assert msgs[-1]["status"] == "complete" and "worked the second time" in s.page_text()
+    assert msgs[-1]["status"] == "complete", msgs[-1]
+    reply_shown(s, "worked the second time")
     assert [m["role"] for m in msgs] == ["user", "assistant"], msgs
     # Edit and resend the user message.
     Fake.queue.append({"content": "answer to the edited one"})
@@ -948,7 +993,7 @@ def p_regen_error(c, notes):
     s.type(bid, " edited")
     s.click_button("Send")
     wait_idle(s)
-    assert "answer to the edited one" in s.page_text(), s.page_text()[-300:]
+    reply_shown(s, "answer to the edited one")
     users = [m["content"] for m in Fake.requests[-1]["messages"] if m["role"] == "user"]
     notes.append("user messages sent: " + json.dumps(users)[:200])
     assert len(users) == 1 and "first edited" in json.dumps(users), users
@@ -1125,13 +1170,22 @@ def p_subagent(c, notes):
     Fake.queue.append({"content": "PARENT-FINAL: the helper found the word."})
     send(s, "use a helper")
     s.wait_for(lambda: "Allow once" in s.page_text(), 30, "the helper's approval card")
-    # The tool card's own status arrives a moment after the approval card.
-    s.wait_for(lambda: "Waiting for you" in s.page_text(), 15, "the run_subagent tool card showing it is waiting")
+
+    def tool_card():
+        # The run_subagent tool card: the newest card whose header names the tool.
+        return s.execute(
+            "const b = [...document.querySelectorAll('button[aria-expanded]')].filter(b => b.innerText.includes('run_subagent')).pop();"
+            " return b ? b.parentElement.innerText : '';")
+
+    # The tool card's own status arrives a moment after the approval card. [0.0.7] Read on the
+    # card itself: the sidebar's mark of a chat waiting for approval ("Waiting for your
+    # approval") puts those words on the page before the card has them.
+    s.wait_for(lambda: "Waiting for you" in tool_card(), 15, "the run_subagent tool card showing it is waiting")
     card = s.page_text()
     s.screenshot(str(OUT / "subagent-card.png"))
     assert "Subagent: " in card, "the card does not say it comes from a subagent: " + card[-500:]
     assert not any(n in card for n in ("7,777", "7,787")), "the helper's token count is shown as the chat's"
-    assert f"read_file {path}"[:60] in card, "the tool card does not show what the helper is doing"
+    assert f"read_file {path}"[:60] in tool_card(), "the tool card does not show what the helper is doing: " + tool_card()
     time.sleep(0.9)
     s.click_button("Allow once")
     wait_idle(s)
@@ -1199,7 +1253,9 @@ def p_subagent(c, notes):
     reqs = list(Fake.requests)
     assert len(reqs) == 4, len(reqs)
     refusal = reqs[2]["messages"][-1]
-    assert refusal["role"] == "tool" and "No such tool: run_subagent" in json.dumps(refusal), refusal
+    # [0.0.7] The tool list in the helper's system message is the turn's, run_subagent included,
+    # so the call gets the helper's own refusal (`subagent::NoNesting::refusal`), not "No such tool".
+    assert refusal["role"] == "tool" and "A helper cannot start another helper." in json.dumps(refusal), refusal
     assert all("NESTED-TASK-552" not in json.dumps(r["messages"][1]) for r in reqs[1:3]), "a nested helper was started"
     assert "I could not delegate" in json.dumps(reqs[3]["messages"][-1])
     audit = s.invoke("list_audit", {"filter": {"chatId": chat}})
@@ -1280,6 +1336,11 @@ def p_step_limit(c, notes):
         assert messages(s, chat)[-1]["text"] == "I listed five folders. One is left."
         s.screenshot(str(OUT / "step-limit.png"))
         Fake.queue.append({"content": "The last one is listed too."})
+        # [0.0.7] Continue takes no click during its input delay, and one once it is over.
+        click_too_early(s, "[role=status]", "Continue")
+        time.sleep(0.5)
+        assert len(Fake.requests) == 6 and "step limit" in s.page_text(), "Continue took a click during its input delay"
+        wait_armed(s, "[role=status]", "Continue")
         s.click_button("Continue")
         wait_idle(s)
         msgs = [m for m in messages(s, chat) if m["role"] in ("user", "assistant")]
@@ -2822,6 +2883,13 @@ def p_task_state(c, notes):
     # 5. Resume sends the continue message; the request carries the task note, once.
     Fake.requests.clear()
     Fake.queue.append({"content": "Continuing with the switch."})
+    # [0.0.7] Resume takes no click during its input delay, and one once it is over: a click
+    # straight after the reload, as this one was before, may come too early.
+    click_too_early(s, aside, "Resume")
+    time.sleep(0.5)
+    assert not Fake.requests and status() == "paused", "Resume took a click during its input delay"
+    assert s.invoke("get_task", {"chatId": chat})["status"] == "paused", "Resume took a click during its input delay"
+    wait_armed(s, aside, "Resume")
     press("Resume")
     wait_idle(s)
     assert Fake.requests, "Resume sent nothing"

@@ -1,0 +1,18 @@
+0.00.012.365 I srv  llama_server: initializing ...
+0.00.012.393 I cmn  common_param: common_params_print_info: verbosity = 3 (adjust with the `-lv N` CLI arg)
+0.00.012.505 I srv  init_listene: The UI is disabled
+0.00.012.516 I srv  init_listene: Use --ui/--no-ui (or deprecated --webui/--no-webui) to enable/disable
+0.00.012.593 W srv  server_setup: security: no API key is set and CORS allows all origins (see https://github.com/ggml-org/llama.cpp/pull/25655)
+0.00.014.136 E gguf_init_from_reader: invalid magic characters: '?X??', expected 'GGUF'
+0.00.014.225 E mtmd_get_cap_from_file: failed to get capabilities from file '/home/u/models/someone/Sample-GGUF/mmproj-Sample-F16.gguf': clip_model_loader: failed to load CLIP model from /home/u/models/someone/Sample-GGUF/mmproj-Sample-F16.gguf. Does this file exist?
+0.00.014.268 I srv    load_model: loading model '/home/u/models/Qwen3-0.6B-Q8_0.gguf'
+0.00.014.344 E gguf_init_from_reader: invalid magic characters: '?X??', expected 'GGUF'
+0.00.014.372 E mtmd_get_memory_usage: error: Failed to load CLIP model from /home/u/models/someone/Sample-GGUF/mmproj-Sample-F16.gguf
+0.00.139.833 W load: control-looking token: 128247 '</s>' was not control-type; this is probably a bug in the model. its type will be overridden
+0.00.526.898 I cmn          init: llama threadpool init, n_threads = 4
+0.00.581.387 E gguf_init_from_reader: invalid magic characters: '?X??', expected 'GGUF'
+0.00.581.438 E clip_init: failed to load model '/home/u/models/someone/Sample-GGUF/mmproj-Sample-F16.gguf': clip_model_loader: failed to load CLIP model from /home/u/models/someone/Sample-GGUF/mmproj-Sample-F16.gguf. Does this file exist?
+0.00.581.446 E mtmd_init_from_file: error: Failed to load CLIP model from /home/u/models/someone/Sample-GGUF/mmproj-Sample-F16.gguf
+0.00.581.450 E srv    load_model: failed to load multimodal model, '/home/u/models/someone/Sample-GGUF/mmproj-Sample-F16.gguf'
+0.00.581.452 I srv    operator(): operator(): cleaning up before exit...
+0.00.582.318 E srv  server_run_i: exiting due to model loading error

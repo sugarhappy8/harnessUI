@@ -1,0 +1,4 @@
+cmd_child_to_router:state:{"state":"loading","payload":{"stages":["text_model","mmproj_model"],"current":"text_model","value":0.0}}
+cmd_child_to_router:state:{"state":"loading","payload":{"stages":["text_model","mmproj_model"],"current":"text_model","value":0.0}}
+cmd_child_to_router:state:{"state":"loading","payload":{"stages":["text_model","mmproj_model"],"current":"text_model","value":1.0}}
+cmd_child_to_router:state:{"state":"loading","payload":{"stage":"mmproj_model"}}

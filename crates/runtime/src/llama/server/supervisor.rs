@@ -26,6 +26,19 @@
 //!      As much as fits leaves free and where the conversation memory lives are kept. A
 //!      placement of 0 layers puts none of the model on the card, so As much as fits would
 //!      put more there than chosen: such a load steps down instead.
+//! - **Without the image file (0.0.7)** ([`LoadStage::RetryingWithoutImageFile`]), before
+//!   the retries above: the model loaded but its image file (`--mmproj`) could not be read
+//!   ([`LoadFailure::ImageFileInvalid`]). The load is tried again once with everything else
+//!   as it was, and the image file stays out for the rest of the load; the model then
+//!   cannot see images. Such a failure never steps down or retries anything else: it fails
+//!   the same everywhere. A server that crashed after it became ready had loaded its image
+//!   file, so a crash never leaves it out.
+//! - **Out of memory while the image file loads (0.0.7)**: a memory failure like any other
+//!   (retry 3, then stepping down), with the image file kept. Only when nothing else is
+//!   left, and the server had said it was loading the image file (after the model and its
+//!   context, [`StartError::while_loading_image_file`]), is the load tried once more
+//!   without it, as [`LoadStage::RetryingWithoutImageFile`] with `memory`; the file itself
+//!   is fine.
 //! - **Stepping down:** when a GPU backend still fails, and a lower backend passed its
 //!   probe, try the next one down (ROCm or CUDA → Vulkan → CPU) and report
 //!   [`ServerEvent::SteppedDown`]. The processor runs with [`GpuUse::Off`]; another
@@ -367,9 +380,10 @@ impl<S: Starter> Supervisor<S> {
     }
 
     /// Starts `spec`, trying a new port when the port is taken, the retries on the same
-    /// backend (Save memory off, As much as fits) and the next backend down when the
-    /// failure could be backend-specific. Returns the server and the spec it actually runs
-    /// with, so the caller can tell which load settings are in effect. A failure is
+    /// backend (without the image file, Save memory off, As much as fits) and the next
+    /// backend down when the failure could be backend-specific. Returns the server and the
+    /// spec it actually runs with (without `mmproj` when the image file was left out), so
+    /// the caller can tell which load settings are in effect. A failure is
     /// returned, not sent as [`ServerState::Failed`]: [`run`](Self::run) sends that.
     pub async fn start(&mut self, spec: StartSpec) -> Result<(S::Server, StartSpec), StartError> {
         let mut spec = spec;
@@ -404,6 +418,14 @@ impl<S: Starter> Supervisor<S> {
                 && let Some(lower) = self.step_down_spec(&spec, &failure)
             {
                 spec = lower;
+                port_attempts = 0;
+                continue;
+            }
+            if error.while_loading_image_file()
+                && failure.is_out_of_memory()
+                && let Some(retry) = self.without_image_file_for_memory(&spec)
+            {
+                spec = retry;
                 port_attempts = 0;
                 continue;
             }
@@ -450,7 +472,13 @@ impl<S: Starter> Supervisor<S> {
                 }
                 code = server.wait_exit() => code,
             };
-            let reason = server.crash_reason(code);
+            // A server that became ready had loaded its image file: whatever its log says
+            // (text a request echoed into it), the crash is never the image file's, so it is
+            // never left out for it (m2 of the P2 review).
+            let reason = match server.crash_reason(code) {
+                LoadFailure::ImageFileInvalid => LoadFailure::Unknown,
+                reason => reason,
+            };
             drop(server);
 
             let next = if let Some(attempt) = self.record_crash(Instant::now()) {
@@ -506,8 +534,8 @@ impl<S: Starter> Supervisor<S> {
     /// applies (see the module documentation).
     ///
     /// Each retry turns a setting down for the rest of the load, so it can happen only once:
-    /// Save memory is then off, fast attention is then Off, and the card is then at As much
-    /// as fits with no custom placement.
+    /// the image file is then left out, Save memory is then off, fast attention is then Off,
+    /// and the card is then at As much as fits with no custom placement.
     fn retry_spec(
         &self,
         spec: &StartSpec,
@@ -522,7 +550,12 @@ impl<S: Starter> Supervisor<S> {
         // processor a plain failure is a lack of memory, which turning it off makes worse.
         let fine = &spec.launch.fine;
         let custom = fine.custom_placement();
-        let stage = if spec.launch.save_memory
+        let stage = if *reason == LoadFailure::ImageFileInvalid && spec.launch.mmproj.is_some() {
+            // 0.0.7: the model loaded, its image file did not. Without it the model loads
+            // (it then cannot see images); every other setting stays as it was.
+            next.launch.mmproj = None;
+            LoadStage::RetryingWithoutImageFile { memory: false }
+        } else if spec.launch.save_memory
             && (save_memory_refused(stderr_tail) || (card && reason.save_memory_may_be_the_cause()))
         {
             next.launch.save_memory = false;
@@ -561,6 +594,20 @@ impl<S: Starter> Supervisor<S> {
             return None;
         };
         tracing::warn!(?stage, ?reason, "retrying the load on the same backend");
+        let _ = self.events.send(ServerEvent::Stage(stage));
+        Some(next)
+    }
+
+    /// The spec for loading without the image file after running out of memory while it
+    /// loaded, and the event that tells the user; `None` when there is no image file to
+    /// leave out (see the module documentation). The last retry of a load: everything else
+    /// was tried with the image file kept.
+    fn without_image_file_for_memory(&self, spec: &StartSpec) -> Option<StartSpec> {
+        spec.launch.mmproj.as_ref()?;
+        let mut next = spec.clone();
+        next.launch.mmproj = None;
+        let stage = LoadStage::RetryingWithoutImageFile { memory: true };
+        tracing::warn!(?stage, "retrying the load without the image file");
         let _ = self.events.send(ServerEvent::Stage(stage));
         Some(next)
     }
@@ -629,6 +676,8 @@ mod tests {
         Fail(LoadFailure),
         /// Fails to load with this reason and these last lines of its log.
         FailLog(LoadFailure, Vec<String>),
+        /// Fails with this reason after saying it was loading the image file (0.0.7).
+        FailWhileImageLoads(LoadFailure),
         /// Becomes ready, then exits after this long (`None`: runs until stopped).
         Run(Option<Duration>),
         /// Becomes ready, then crashes after this long with this reason in its log.
@@ -679,11 +728,19 @@ mod tests {
                     failure,
                     exit_code: Some(1),
                     stderr_tail: vec!["boom".into()],
+                    image_file_loading: false,
                 }),
                 Script::FailLog(failure, stderr_tail) => Err(StartError::Exited {
                     failure,
                     exit_code: Some(1),
                     stderr_tail,
+                    image_file_loading: false,
+                }),
+                Script::FailWhileImageLoads(failure) => Err(StartError::Exited {
+                    failure,
+                    exit_code: Some(134),
+                    stderr_tail: vec!["GGML_ASSERT(buffer) failed".into()],
+                    image_file_loading: true,
                 }),
                 Script::Run(exit_after) => Ok(FakeServer {
                     exit_after,
@@ -2405,6 +2462,386 @@ mod tests {
                 chosen_layers: None,
             })]
         );
+    }
+
+    /// [`spec_with`] with an image file (`--mmproj`).
+    fn with_image(mut spec: StartSpec) -> StartSpec {
+        spec.launch.mmproj = Some(PathBuf::from("/m/mmproj-model-F16.gguf"));
+        spec
+    }
+
+    /// Backend, graphics card use, Save memory and whether an image file was given, of
+    /// every start, in order.
+    fn image_attempts(log: &Arc<Mutex<Log>>) -> Vec<(BackendKind, GpuUse, bool, bool)> {
+        log.lock()
+            .expect("log")
+            .started
+            .iter()
+            .map(|s| {
+                (
+                    s.backend.kind,
+                    s.launch.gpu,
+                    s.launch.save_memory,
+                    s.launch.mmproj.is_some(),
+                )
+            })
+            .collect()
+    }
+
+    fn without_image_file() -> ServerEvent {
+        ServerEvent::Stage(LoadStage::RetryingWithoutImageFile { memory: false })
+    }
+
+    fn without_image_file_for_memory() -> ServerEvent {
+        ServerEvent::Stage(LoadStage::RetryingWithoutImageFile { memory: true })
+    }
+
+    /// 0.0.7 (the owner's Ministral model): the model loads, then its image file cannot be
+    /// read. The load is tried again once on the same backend with the same settings, only
+    /// without the image file, and says so with a typed stage. No Save memory retry, no
+    /// less on the graphics card and no step-down: the image file fails the same way
+    /// everywhere, and the model itself was fine.
+    #[tokio::test(start_paused = true)]
+    async fn a_broken_image_file_is_retried_once_without_it_on_the_same_backend() {
+        for (kind, device, gpu, save_memory) in [
+            (BackendKind::Cpu, None, GpuUse::Off, false),
+            (BackendKind::Cpu, None, GpuUse::Off, true),
+            (BackendKind::Vulkan, Some("Vulkan0"), GpuUse::All, true),
+            (BackendKind::Vulkan, Some("Vulkan0"), GpuUse::Fit, false),
+            (BackendKind::Metal, Some("MTL0"), GpuUse::All, false),
+        ] {
+            let script = vec![
+                Script::Fail(LoadFailure::ImageFileInvalid),
+                Script::Run(None),
+            ];
+            let (mut sup, log, mut rx) = supervisor(script, gpu_cpu());
+            let start = with_image(spec_with(kind, device, gpu, save_memory));
+            let (_server, running) = sup.start(start.clone()).await.expect("starts");
+            assert_eq!(running.launch.mmproj, None, "{kind} {gpu:?}");
+            assert_eq!(
+                StartSpec {
+                    launch: LaunchConfig {
+                        mmproj: start.launch.mmproj.clone(),
+                        ..running.launch.clone()
+                    },
+                    ..running.clone()
+                },
+                start,
+                "{kind} {gpu:?}: everything else as it was, the port too"
+            );
+            assert_eq!(
+                image_attempts(&log),
+                vec![
+                    (kind, gpu, save_memory, true),
+                    (kind, gpu, save_memory, false)
+                ],
+                "{kind} {gpu:?}"
+            );
+            assert_eq!(drain(&mut rx), vec![without_image_file()], "{kind} {gpu:?}");
+        }
+    }
+
+    /// Once per load: the image file is then gone, so the same failure again (which only a
+    /// load with an image file can show) changes nothing more, and a load without an image
+    /// file never drops one. Neither steps down or retries without Save memory.
+    #[tokio::test(start_paused = true)]
+    async fn the_image_file_retry_happens_once_and_never_steps_down() {
+        let script = vec![Script::Fail(LoadFailure::ImageFileInvalid); 3];
+        let (mut sup, log, mut rx) = supervisor(script, gpu_cpu());
+        let error = sup
+            .start(with_image(spec_with(
+                BackendKind::Vulkan,
+                Some("Vulkan0"),
+                GpuUse::All,
+                true,
+            )))
+            .await
+            .expect_err("fails");
+        assert_eq!(error.failure(), LoadFailure::ImageFileInvalid);
+        assert_eq!(
+            image_attempts(&log),
+            vec![
+                (BackendKind::Vulkan, GpuUse::All, true, true),
+                (BackendKind::Vulkan, GpuUse::All, true, false),
+            ]
+        );
+        assert_eq!(drain(&mut rx), vec![without_image_file()]);
+
+        let (mut sup, log, mut rx) = supervisor(
+            vec![
+                Script::Fail(LoadFailure::ImageFileInvalid),
+                Script::Run(None),
+            ],
+            gpu_cpu(),
+        );
+        let error = sup
+            .start(spec_with(
+                BackendKind::Vulkan,
+                Some("Vulkan0"),
+                GpuUse::All,
+                true,
+            ))
+            .await
+            .expect_err("nothing to leave out");
+        assert_eq!(error.failure(), LoadFailure::ImageFileInvalid);
+        assert_eq!(image_attempts(&log).len(), 1);
+        assert!(drain(&mut rx).is_empty());
+    }
+
+    /// Without the image file the load goes on as any other: here the context does not fit
+    /// with Save memory on a graphics card, then the weights do not fit. Each later retry
+    /// keeps the image file out.
+    #[tokio::test(start_paused = true)]
+    async fn after_the_image_file_the_rest_of_the_chain_still_runs() {
+        let script = vec![
+            Script::Fail(LoadFailure::ImageFileInvalid),
+            Script::Fail(LoadFailure::ContextTooLarge),
+            Script::Fail(LoadFailure::OutOfMemory),
+            Script::Fail(LoadFailure::OutOfMemory),
+            Script::Run(None),
+        ];
+        let (mut sup, log, mut rx) = supervisor(script, gpu_cpu());
+        let (_server, running) = sup
+            .start(with_image(spec_with(
+                BackendKind::Vulkan,
+                Some("Vulkan0"),
+                GpuUse::All,
+                true,
+            )))
+            .await
+            .expect("starts on the processor");
+        assert_eq!(running.launch.mmproj, None);
+        assert_eq!(
+            image_attempts(&log),
+            vec![
+                (BackendKind::Vulkan, GpuUse::All, true, true),
+                (BackendKind::Vulkan, GpuUse::All, true, false),
+                (BackendKind::Vulkan, GpuUse::All, false, false),
+                (BackendKind::Vulkan, GpuUse::Fit, false, false),
+                (BackendKind::Cpu, GpuUse::Off, false, false),
+            ]
+        );
+        assert_eq!(
+            drain(&mut rx),
+            vec![
+                without_image_file(),
+                without_save_memory(BackendKind::Vulkan),
+                with_less_gpu(BackendKind::Vulkan),
+                ServerEvent::SteppedDown {
+                    from: BackendKind::Vulkan,
+                    to: BackendKind::Cpu,
+                    reason: LoadFailure::OutOfMemory,
+                },
+            ]
+        );
+
+        // Running out of memory while the image file loads is a memory failure: less on the
+        // graphics card first, with the image file kept (As much as fits leaves room for it).
+        let script = vec![Script::Fail(LoadFailure::OutOfMemory), Script::Run(None)];
+        let (mut sup, log, mut rx) = supervisor(script, gpu_cpu());
+        let (_server, running) = sup
+            .start(with_image(spec_with(
+                BackendKind::Vulkan,
+                Some("Vulkan0"),
+                GpuUse::All,
+                false,
+            )))
+            .await
+            .expect("starts");
+        assert!(running.launch.mmproj.is_some());
+        assert_eq!(
+            image_attempts(&log),
+            vec![
+                (BackendKind::Vulkan, GpuUse::All, false, true),
+                (BackendKind::Vulkan, GpuUse::Fit, false, true),
+            ]
+        );
+        assert_eq!(drain(&mut rx), vec![with_less_gpu(BackendKind::Vulkan)]);
+    }
+
+    /// As the app runs it ([`Supervisor::run`]): the server it is told about runs without
+    /// the image file (the app checks `mmproj` to know the model cannot see images), and the
+    /// supervisor's one event is the stage.
+    #[tokio::test(start_paused = true)]
+    async fn the_app_is_told_the_model_runs_without_the_image_file() {
+        let script = vec![
+            Script::Fail(LoadFailure::ImageFileInvalid),
+            Script::Run(None),
+        ];
+        let (sup, log, mut rx) = supervisor(script, gpu_cpu());
+        let cancel = CancellationToken::new();
+        let stop = cancel.clone();
+        let mut ready = Vec::new();
+        let exit = sup
+            .run(
+                with_image(spec(BackendKind::Cpu, None)),
+                cancel,
+                |_, running| {
+                    ready.push(running.launch.mmproj.clone());
+                    stop.cancel();
+                },
+            )
+            .await;
+        assert_eq!(exit, SupervisorExit::Stopped);
+        assert_eq!(ready, vec![None]);
+        assert_eq!(log.lock().expect("log").started.len(), 2);
+        assert_eq!(drain(&mut rx), vec![without_image_file()]);
+    }
+
+    /// m2 of the P2 review: a server that crashed after it became ready had loaded its
+    /// image file, so the crash is never the image file's, whatever its log reads: the
+    /// image file stays, and the crash goes on as any unknown one (here, after the restarts
+    /// the policy allows, to the next backend down).
+    #[tokio::test(start_paused = true)]
+    async fn a_crash_never_drops_the_image_file() {
+        let script = vec![
+            Script::Crash(Duration::from_secs(1), LoadFailure::ImageFileInvalid),
+            Script::Run(None),
+        ];
+        let (sup, log, mut rx) = supervisor(script, gpu_cpu());
+        let sup = sup.with_policy(RestartPolicy {
+            max_restarts: 0,
+            ..RestartPolicy::default()
+        });
+        let cancel = CancellationToken::new();
+        let stop = cancel.clone();
+        let mut ready = Vec::new();
+        let exit = sup
+            .run(
+                with_image(spec_with(
+                    BackendKind::Vulkan,
+                    Some("Vulkan0"),
+                    GpuUse::All,
+                    false,
+                )),
+                cancel,
+                |_, running| {
+                    ready.push((running.backend.kind, running.launch.mmproj.is_some()));
+                    if ready.len() == 2 {
+                        stop.cancel();
+                    }
+                },
+            )
+            .await;
+        assert_eq!(exit, SupervisorExit::Stopped);
+        assert_eq!(
+            ready,
+            vec![(BackendKind::Vulkan, true), (BackendKind::Cpu, true)]
+        );
+        assert_eq!(
+            image_attempts(&log),
+            vec![
+                (BackendKind::Vulkan, GpuUse::All, false, true),
+                (BackendKind::Cpu, GpuUse::Off, false, true),
+            ]
+        );
+        assert_eq!(
+            drain(&mut rx),
+            vec![ServerEvent::SteppedDown {
+                from: BackendKind::Vulkan,
+                to: BackendKind::Cpu,
+                reason: LoadFailure::Unknown,
+            }]
+        );
+    }
+
+    /// m11 of the P2 review: running out of memory while the image file loads, after the
+    /// model and its context loaded. The usual chain runs first with the image file kept
+    /// (As much as fits leaves room for it, the processor has more memory); when nothing
+    /// else is left, the load is tried once more without it. The file is fine, and the
+    /// stage says it was memory, so the app does not remember it as unreadable.
+    #[tokio::test(start_paused = true)]
+    async fn out_of_memory_while_the_image_file_loads_last_loads_without_it() {
+        let oom = || Script::FailWhileImageLoads(LoadFailure::OutOfMemory);
+        let script = vec![oom(), oom(), oom(), Script::Run(None)];
+        let (mut sup, log, mut rx) = supervisor(script, gpu_cpu());
+        let (_server, running) = sup
+            .start(with_image(spec_with(
+                BackendKind::Vulkan,
+                Some("Vulkan0"),
+                GpuUse::All,
+                false,
+            )))
+            .await
+            .expect("starts without the image file");
+        assert_eq!(running.launch.mmproj, None);
+        assert_eq!(
+            image_attempts(&log),
+            vec![
+                (BackendKind::Vulkan, GpuUse::All, false, true),
+                (BackendKind::Vulkan, GpuUse::Fit, false, true),
+                (BackendKind::Cpu, GpuUse::Off, false, true),
+                (BackendKind::Cpu, GpuUse::Off, false, false),
+            ]
+        );
+        assert_eq!(
+            drain(&mut rx),
+            vec![
+                with_less_gpu(BackendKind::Vulkan),
+                ServerEvent::SteppedDown {
+                    from: BackendKind::Vulkan,
+                    to: BackendKind::Cpu,
+                    reason: LoadFailure::OutOfMemory,
+                },
+                without_image_file_for_memory(),
+            ]
+        );
+
+        // The processor alone: nothing else to try first.
+        let script = vec![oom(), Script::Run(None)];
+        let (mut sup, log, mut rx) = supervisor(script, vec![candidate(BackendKind::Cpu, None)]);
+        sup.start(with_image(spec(BackendKind::Cpu, None)))
+            .await
+            .expect("starts without the image file");
+        assert_eq!(
+            image_attempts(&log),
+            vec![
+                (BackendKind::Cpu, GpuUse::Off, false, true),
+                (BackendKind::Cpu, GpuUse::Off, false, false),
+            ]
+        );
+        assert_eq!(drain(&mut rx), vec![without_image_file_for_memory()]);
+    }
+
+    /// Only running out of memory while the image file loads drops it for memory, and only
+    /// once: the model itself running out of memory, another failure while the image file
+    /// loads, or a load without an image file end as before.
+    #[tokio::test(start_paused = true)]
+    async fn only_memory_while_the_image_file_loads_drops_it() {
+        for (script, image, starts) in [
+            (vec![Script::Fail(LoadFailure::OutOfMemory)], true, 1),
+            (
+                vec![Script::FailWhileImageLoads(LoadFailure::Unknown)],
+                true,
+                1,
+            ),
+            (
+                vec![Script::FailWhileImageLoads(LoadFailure::OutOfMemory)],
+                false,
+                1,
+            ),
+            (
+                vec![
+                    Script::FailWhileImageLoads(LoadFailure::OutOfMemory),
+                    Script::Fail(LoadFailure::OutOfMemory),
+                ],
+                true,
+                2,
+            ),
+        ] {
+            let what = format!("{script:?}");
+            let (mut sup, log, mut rx) =
+                supervisor(script, vec![candidate(BackendKind::Cpu, None)]);
+            let start = spec(BackendKind::Cpu, None);
+            let start = if image { with_image(start) } else { start };
+            sup.start(start).await.expect_err(&what);
+            assert_eq!(log.lock().expect("log").started.len(), starts, "{what}");
+            let dropped = drain(&mut rx)
+                .iter()
+                .filter(|e| **e == without_image_file_for_memory())
+                .count();
+            assert_eq!(dropped, starts - 1, "{what}");
+        }
     }
 
     /// Every retry happens once, with every setting on (Save memory, fast attention On, a

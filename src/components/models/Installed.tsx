@@ -12,6 +12,7 @@ import { ErrorBanner } from "../ErrorBanner";
 import { visiblePath } from "../FolderChip";
 import { ModelSettings } from "../ModelSettings";
 import { Badge } from "./Badge";
+import { ImageFileLine, seesImages } from "./ImageFile";
 
 const DOT: Record<Verdict, string> = { green: "bg-success", yellow: "bg-warning", red: "bg-danger" };
 
@@ -20,11 +21,40 @@ function markedTooLarge(info: ModelLoadInfo | undefined): boolean {
   return !!info && (info.tooLarge || info.fit === "red");
 }
 
+/** [0.0.7 P6b] Delete's question for a download: what really goes from disk (every part and the
+ *  image file the app downloaded, inside the models folder), and what stays outside it. */
+function deleteQuestion(m: InstalledModel, shown: string): string {
+  const bytes = m.deleteBytes ?? m.sizeBytes;
+  const outside = m.keptOutside ?? 0;
+  if (bytes > 0) {
+    const kept = outside > 0 ? " Files outside the models folder stay where they are." : "";
+    return `Delete ${shown}? This removes ${formatBytes(bytes)} from disk.${kept}`;
+  }
+  if (outside > 1) {
+    return `Remove ${shown} from the list? Its files are outside the models folder, so they stay where they are.`;
+  }
+  if (outside === 1) {
+    const what = m.onlyImageOutside ? "Its image file" : "Its file";
+    return `Remove ${shown} from the list? ${what} is outside the models folder, so it stays where it is.`;
+  }
+  // Round 2: a file another model on the list uses is on disk, and stays.
+  const inUse = m.keptInUse ?? 0;
+  if (inUse > 1) {
+    return `Remove ${shown} from the list? Another model on the list uses its files, so they stay where they are.`;
+  }
+  if (inUse === 1) {
+    return `Remove ${shown} from the list? Another model on the list uses its file, so it stays where it is.`;
+  }
+  return `Remove ${shown} from the list? Its file is no longer on disk.`;
+}
+
 /** Models → Installed: the models on this computer, with Use, their settings, Add to comparison and Delete. */
 export function Installed(props: { onClose: () => void }) {
   const [models, setModels] = useState<InstalledModel[] | null>(null);
   const [usage, setUsage] = useState<DiskUsage | null>(null);
   const [error, setError] = useState<ErrorInfo | null>(null);
+  // [0.0.7 P6] What the last Delete left in place (files outside the models folder).
+  const [note, setNote] = useState<string | null>(null);
   // Each model's fit at its own settings (`model_load_info`), by path.
   const [infos, setInfos] = useState<Record<string, ModelLoadInfo>>({});
   const [settingsFor, setSettingsFor] = useState<string | null>(null);
@@ -108,10 +138,9 @@ export function Installed(props: { onClose: () => void }) {
   async function remove(m: InstalledModel) {
     const files = m.source === "download";
     const shown = visiblePath(m.fileName);
-    const question = files
-      ? `Delete ${shown}? This removes ${formatBytes(m.sizeBytes)} from disk.`
-      : `Remove ${shown} from the list? The file itself stays where it is.`;
+    const question = files ? deleteQuestion(m, shown) : `Remove ${shown} from the list? The file itself stays where it is.`;
     if (!window.confirm(question)) return;
+    setNote(null);
     try {
       // The loaded model is unloaded first, the way Unload does it: when something uses it,
       // the D3 question comes first, and with Restart when it ends the delete waits for it
@@ -120,7 +149,7 @@ export function Installed(props: { onClose: () => void }) {
       const runtime = useApp.getState().runtime;
       const loaded = isLoadedNow(runtime, m.path) || (!!m.loadedAs && isLoadedNow(runtime, m.loadedAs));
       if (loaded && !(await unloadModel(runtime))) return;
-      await ipc.deleteModel(m.id, files);
+      setNote((await ipc.deleteModel(m.id, files)) ?? null);
       await load();
     } catch (err) {
       setError(toErrorInfo(err));
@@ -141,6 +170,11 @@ export function Installed(props: { onClose: () => void }) {
   return (
     <div className="space-y-3">
       {error && <ErrorBanner error={error} onDismiss={() => setError(null)} />}
+      {note && (
+        <p className="text-xs text-fg-muted" role="status">
+          {note}
+        </p>
+      )}
       <div className="flex items-center justify-between text-xs text-fg-muted">
         <span className="truncate" title={usage ? visiblePath(usage.modelsDir) : undefined}>
           {usage && (
@@ -168,6 +202,7 @@ export function Installed(props: { onClose: () => void }) {
             onUse={() => void use(m)}
             onSettings={() => setSettingsFor(m.path)}
             onRemove={() => void remove(m)}
+            onChanged={load}
           />
         ))}
         {models?.length === 0 && (
@@ -194,6 +229,8 @@ function Row(props: {
   onUse: () => void;
   onSettings: () => void;
   onRemove: () => void;
+  /** [0.0.7 P2] The row changed (its image file was downloaded): read the list again. */
+  onChanged: () => void;
 }) {
   const { model: m, info } = props;
   const compare = useAddToComparison({ installedPath: m.path });
@@ -216,7 +253,7 @@ function Row(props: {
           )}
           {m.summary?.templateTools && <Badge>tools</Badge>}
           {m.summary?.templateThinking && <Badge>thinking</Badge>}
-          {m.projectorPath && <Badge>vision</Badge>}
+          {seesImages(m) && <Badge>vision</Badge>}
           {m.summary?.isMoe && (
             <Badge title="It uses only part of itself at a time, so it runs faster than its size suggests.">
               uses part of itself at a time
@@ -229,6 +266,7 @@ function Row(props: {
             </span>
           )}
         </div>
+        <ImageFileLine model={m} onChanged={props.onChanged} />
         <div className="mt-1 flex flex-wrap items-center gap-3 text-xs text-fg-muted">
           {info && verdict && (
             <span

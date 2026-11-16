@@ -15,6 +15,9 @@
 //!
 //! What remains: a borderless window of another application at layer 0 with a clear
 //! background lets clicks through its fully transparent pixels, which no list shows.
+//!
+//! [`hit_test_behind`] and [`front_window`] answer the same questions for the moment this
+//! app has stepped aside (9.3): its windows are left out of the list.
 
 use crate::geometry::{GlobalPoint, Rect};
 
@@ -83,6 +86,38 @@ pub fn hit_test(
         return Hit::SelfBeneath(j);
     }
     Hit::Window(i)
+}
+
+/// Where a pointer event at `p` goes once this app's windows are out of the way: as
+/// [`hit_test`] over the other applications' windows. Indices are into `windows`.
+pub fn hit_test_behind(
+    windows: &[ListedWindow],
+    p: GlobalPoint,
+    is_mine: impl Fn(u32) -> bool,
+) -> Hit {
+    let kept: Vec<usize> = (0..windows.len())
+        .filter(|&i| !is_mine(windows[i].pid))
+        .collect();
+    let others: Vec<ListedWindow> = kept.iter().map(|&i| windows[i].clone()).collect();
+    match hit_test(&others, p, |_| false, &[]) {
+        Hit::Window(j) => Hit::Window(kept[j]),
+        Hit::SelfBeneath(j) => Hit::SelfBeneath(kept[j]),
+        other => other,
+    }
+}
+
+/// The window keyboard input goes to once this app's windows are out of the way: the
+/// frontmost ordinary window (layer 0, visible, with an area, not the Window Server's) of
+/// another application.
+pub fn front_window(windows: &[ListedWindow], is_mine: impl Fn(u32) -> bool) -> Option<usize> {
+    windows.iter().position(|w| {
+        w.layer == 0
+            && w.alpha > 0.0
+            && w.bounds.width > 0.0
+            && w.bounds.height > 0.0
+            && w.owner != "Window Server"
+            && !is_mine(w.pid)
+    })
 }
 
 #[cfg(test)]
@@ -160,6 +195,55 @@ mod tests {
                 "layer {layer}"
             );
         }
+    }
+
+    #[test]
+    fn behind_this_app_the_window_beneath_it_gets_the_click() {
+        let mut bar = w(1, 0, MENU_BAR_LAYER, 1.0, Rect::new(0.0, 0.0, 1000.0, 24.0));
+        bar.owner = "Window Server".into();
+        // The menu bar, this app's main window on the left, its overlay over everything,
+        // a browser behind on the whole screen.
+        let list = vec![
+            bar,
+            w(2, ME, 0, 1.0, Rect::new(0.0, 0.0, 400.0, 800.0)),
+            w(3, ME, 1000, 1.0, full()),
+            w(4, 50, 0, 1.0, full()),
+        ];
+        assert_eq!(hit_test(&list, p(100.0, 100.0), mine, &[]), Hit::Window(1));
+        assert_eq!(
+            hit_test_behind(&list, p(100.0, 100.0), mine),
+            Hit::Window(3)
+        );
+        assert_eq!(
+            hit_test_behind(&list, p(700.0, 100.0), mine),
+            Hit::Window(3)
+        );
+        // The menu bar stays the menu bar; nothing but this app is the desktop.
+        assert_eq!(hit_test_behind(&list, p(10.0, 10.0), mine), Hit::MenuBar);
+        let only_mine = vec![w(2, ME, 0, 1.0, full())];
+        assert_eq!(
+            hit_test_behind(&only_mine, p(10.0, 10.0), mine),
+            Hit::Desktop
+        );
+    }
+
+    #[test]
+    fn behind_this_app_the_frontmost_ordinary_window_gets_the_keyboard() {
+        let mut server_window = w(5, 0, 0, 1.0, full());
+        server_window.owner = "Window Server".into();
+        let list = vec![
+            w(1, ME, 0, 1.0, full()),
+            w(2, 77, 3, 1.0, full()),
+            w(3, 78, 0, 0.0, full()),
+            w(4, 79, 0, 1.0, Rect::new(10.0, 10.0, 0.0, 0.0)),
+            server_window,
+            w(6, 50, 0, 1.0, full()),
+            w(7, 51, 0, 1.0, full()),
+        ];
+        // This app's window, a floating panel, an invisible window, an empty one and the
+        // Window Server's are passed over.
+        assert_eq!(front_window(&list, mine), Some(5));
+        assert_eq!(front_window(&list[..5], mine), None);
     }
 
     #[test]

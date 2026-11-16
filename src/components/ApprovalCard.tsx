@@ -1,11 +1,15 @@
-import { useEffect, useRef, useState } from "react";
+import { useRef, useState } from "react";
 import { ShieldAlert, ShieldQuestion } from "lucide-react";
 import type { ApprovalRequest, KeepAsking } from "../lib/types";
 import { useApprovalMode, useChatMode } from "../lib/approvalMode";
 import { toErrorInfo, useApp } from "../store/app";
+import { useInputDelay } from "../lib/useInputDelay";
 import { AllowAllConfirm } from "./AllowAllButton";
 
-/** Clicks and keys on a card are ignored for this long after it appears (13.3). */
+/**
+ * Clicks and keys on a card are ignored for this long after it appears (13.3), and again
+ * after the window comes back on screen (0.0.7).
+ */
 export const CARD_INPUT_DELAY_MS = 700;
 
 const REASON_TEXT: Record<ApprovalRequest["reason"], string | null> = {
@@ -47,13 +51,18 @@ function reasonText(request: ApprovalRequest, allowAll: boolean): string | null 
  * as plain text (already escaped by the backend: control, bidi and zero-width characters
  * are visible). Allow never has default focus or an Enter binding, and input is ignored
  * for a short time after the card appears.
+ *
+ * [0.0.7] The window may have been minimised while computer use acted, and the app brings
+ * it back for the card, in front of the window the user was clicking in. So the delay
+ * starts again each time the app brings the window back, and whenever the page becomes
+ * visible again (`useInputDelay`).
  */
 export function ApprovalCard(props: {
   request: ApprovalRequest;
   onDecide: (decision: "allowOnce" | "allowForChat" | "deny", note: string | null) => void;
 }) {
   const { request } = props;
-  const [armed, setArmed] = useState(false);
+  const { armed, armedRef } = useInputDelay(CARD_INPUT_DELAY_MS);
   const [note, setNote] = useState("");
   const [showNote, setShowNote] = useState(false);
   const [confirmAll, setConfirmAll] = useState(false);
@@ -61,15 +70,10 @@ export function ApprovalCard(props: {
   const allowAll = useChatMode(request.chatId) !== "ask";
   const denyRef = useRef<HTMLButtonElement>(null);
 
-  useEffect(() => {
-    const t = window.setTimeout(() => setArmed(true), CARD_INPUT_DELAY_MS);
-    return () => window.clearTimeout(t);
-  }, []);
-
   const reason = reasonText(request, allowAll);
   const always = request.card === "onceOnly";
   const decide = (d: "allowOnce" | "allowForChat" | "deny") => {
-    if (!armed) return;
+    if (!armedRef.current) return;
     props.onDecide(d, d === "deny" && note.trim() ? note.trim() : null);
   };
   // "Allow all in this chat": the chat is switched first, and only then is this card
@@ -150,7 +154,7 @@ export function ApprovalCard(props: {
         {!always && !allowAll && (
           <button
             type="button"
-            onClick={() => armed && setConfirmAll(true)}
+            onClick={() => armedRef.current && setConfirmAll(true)}
             aria-disabled={!armed}
             className="rounded-md border border-border px-3 py-1 hover:bg-bg-muted aria-disabled:opacity-50"
           >

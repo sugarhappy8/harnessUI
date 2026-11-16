@@ -38,8 +38,8 @@ fn model(blocks: u32, dense: u64, expert: u64, edge: u64) -> ModelFacts {
         projector_bytes: 0,
         header: Some(HeaderFacts {
             trained_ctx: Some(40_960),
-            kv_f16: u64::from(blocks) * 2048,
-            kv_q8: u64::from(blocks) * 1088,
+            // 2,048 bytes a block and token in f16, 1,088 in q8_0 (16 heads of 32 values).
+            kv: models::kv::KvShape::plain(blocks as usize, 16, 32),
             vocab: 32_000,
             thinking: false,
         }),
@@ -47,8 +47,7 @@ fn model(blocks: u32, dense: u64, expert: u64, edge: u64) -> ModelFacts {
             blocks,
             experts: expert > 0,
             sizes: Some(sizes),
-            kv_f16: vec![2048; blocks as usize],
-            kv_q8: vec![1088; blocks as usize],
+            kv: models::kv::KvShape::plain(blocks as usize, 16, 32),
         }),
     }
 }
@@ -104,6 +103,7 @@ fn resolved(ctx: u32, gpu: GpuUse, fine: FineLaunch) -> ResolvedLoad {
         ctx,
         ctx_choice: ContextSize::Fixed(ctx),
         ctx_source: ContextSource::ModelSetting,
+        ctx_checkpoints: models::kv::MAX_CTX_CHECKPOINTS,
         gpu,
         save_memory: false,
         keep_in_memory: false,
@@ -431,7 +431,7 @@ fn unreadable_tables_give_the_estimate_from_the_file_sizes() {
     assert_eq!(need.model, 4_400_000_000);
     assert_eq!(need.context, 40 * 2048 * 8192);
     assert_eq!(need.image_reader, 100);
-    let input = d.fit_input(false).unwrap();
+    let input = d.fit_input(models::summary::KvCacheType::F16).unwrap();
     assert_eq!(
         p.mark,
         models::fit::verdict_at(&input, 8192, card(15 * GB).room(GpuUse::All))
@@ -1039,6 +1039,7 @@ fn model_on_card(sizes: &LayerSizes, layers: Layers, experts: ExpertsPick) -> u6
         &PlacementInput {
             sizes,
             kv_per_layer: Vec::new(),
+            copies: 0,
             compute_gpu: 0,
             compute_cpu: 0,
             projector: 0,
@@ -1226,6 +1227,8 @@ fn the_json_the_webview_reads() {
         keys,
         [
             "computer",
+            "computerUnknown",
+            "copiesShort",
             "custom",
             "expertLayersOnProcessor",
             "fits",
@@ -1254,9 +1257,15 @@ fn the_json_the_webview_reads() {
         "freeAfterUnload",
         "otherBytes",
         "need",
+        "copiesBytes",
     ] {
         assert!(bar.get(key).is_some(), "{key}");
     }
+    // 0.0.7: the saved copies of a long chat, apart from what the model needs (none for
+    // this model, which has no short-memory layers).
+    assert_eq!(v["copiesShort"], serde_json::json!(false));
+    assert_eq!(v["computerUnknown"], serde_json::json!(false));
+    assert_eq!(v["computer"]["copiesBytes"], serde_json::json!(0));
     assert_eq!(bar["need"]["imageReader"], serde_json::json!(5));
     assert_eq!(
         serde_json::to_value(PictureSource::Estimate {

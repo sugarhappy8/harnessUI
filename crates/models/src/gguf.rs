@@ -648,6 +648,14 @@ pub mod testing {
             }
             self
         }
+        /// An array of booleans (GGUF type 7), as `attention.sliding_window_pattern`.
+        pub fn bool_array(mut self, k: &str, v: &[bool]) -> Self {
+            self.key(k, 9);
+            self.kvs.extend(7u32.to_le_bytes());
+            self.kvs.extend((v.len() as u64).to_le_bytes());
+            self.kvs.extend(v.iter().map(|&b| u8::from(b)));
+            self
+        }
         pub fn str_array(mut self, k: &str, v: &[&str]) -> Self {
             self.key(k, 9);
             self.kvs.extend(8u32.to_le_bytes());

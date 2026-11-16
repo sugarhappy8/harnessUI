@@ -307,7 +307,8 @@ describe("ToolsPanel: the Browser group", () => {
   });
 
   it("keeps another group's per-tool reason on the tool", async () => {
-    const why = "This model cannot see images, which computer use needs. Pick a vision model.";
+    const why =
+      "This model was loaded without an image file, so it can't see the screen. If it has one, download it in Models → Installed; otherwise pick a model with the vision badge.";
     ipcMock.listChatTools.mockImplementation(async () => [
       tool("computer", "computer_screenshot", { available: false, schemaError: why }),
       tool("computer", "computer_click", { available: false, schemaError: why }),
@@ -413,6 +414,21 @@ describe("ToolsPanel: tools chosen for each task", () => {
     expect(screen.getByTitle("Tools for this chat").textContent).toContain("Tools (2)");
     // The context estimate is what a request carries: the shown tools, companions included.
     expect(screen.getByTitle("Context the tool descriptions take on every request").textContent).toContain("~440 tokens");
+  });
+
+  it("adds the list of tools and the call guide in the system message to the estimate once", async () => {
+    // [0.0.7] The backend gives the same number on every tool of the list.
+    ipcMock.listChatTools.mockImplementation(async () =>
+      [
+        tool("files", "read_file", { enabledInChat: true, shown: true }),
+        tool("git", "git_commit", { enabledInChat: true, shown: false }),
+        ...companions,
+      ].map((t) => ({ ...t, guideTokens: 250 })),
+    );
+    await openPanel();
+    expect(screen.getByTitle("Context the tool descriptions take on every request").textContent).toContain(
+      "~690 tokens",
+    );
   });
 
   it("lists the companions in one line, not as switches", async () => {
@@ -881,5 +897,210 @@ describe("ToolsPanel: the header button (header-layout r2)", () => {
     const button = screen.getByTitle("Tools for this chat");
     expect(button.textContent).toBe(" Tools (0)");
     expect(button.querySelector("[data-tools-label]")).toBeNull();
+  });
+});
+
+// [0.0.7 P6] Listening for tool changes starts asynchronously. A listener that started after
+// the panel had moved on (React's development mode mounts every effect twice; a quick chat
+// switch) stayed behind and later read the previous chat's tools into the panel, which the
+// next switch then saved to the chat on screen.
+describe("ToolsPanel: listening for tool changes (0.0.7 P6)", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    ipcMock.listApprovedFolders.mockImplementation(async () => []);
+    ipcMock.loadedSkills.mockImplementation(async () => []);
+  });
+  afterEach(() => {
+    cleanup();
+    ipcMock.onMcpChanged.mockImplementation(async () => () => undefined);
+    ipcMock.listChatTools.mockImplementation(async () => []);
+  });
+
+  it("stops every listener that starts after the panel moved on, and keeps the newest", async () => {
+    const { StrictMode } = await import("react");
+    const started: { unlisten: ReturnType<typeof vi.fn<() => undefined>>; ready: () => void }[] = [];
+    ipcMock.onMcpChanged.mockImplementation(
+      () =>
+        new Promise<() => undefined>((resolve) => {
+          const unlisten = vi.fn<() => undefined>();
+          started.push({ unlisten, ready: () => resolve(unlisten) });
+        }),
+    );
+    const { rerender } = render(
+      <StrictMode>
+        <ToolsPanel chatId={CHAT} nCtx={8192} />
+      </StrictMode>,
+    );
+    // Another chat is opened before any listener has started.
+    rerender(
+      <StrictMode>
+        <ToolsPanel chatId={CHAT + 1} nCtx={8192} />
+      </StrictMode>,
+    );
+    expect(started.length).toBeGreaterThan(1);
+    await act(async () => {
+      for (const s of started) s.ready();
+    });
+    const left = started.filter((s) => s.unlisten.mock.calls.length === 0);
+    expect(left).toEqual([started[started.length - 1]]);
+    cleanup();
+    expect(started[started.length - 1]!.unlisten).toHaveBeenCalledTimes(1);
+  });
+
+  it("drops tools read for a chat it no longer shows, so a switch never saves them to this chat", async () => {
+    const answers = new Map<number, (t: ToolDto[]) => void>();
+    ipcMock.listChatTools.mockImplementation((chatId) => new Promise((resolve) => answers.set(chatId, resolve)));
+    const { rerender } = render(<ToolsPanel chatId={CHAT} nCtx={8192} />);
+    rerender(<ToolsPanel chatId={CHAT + 1} nCtx={8192} />);
+    // The new chat's answer comes first, the old chat's after it.
+    await act(async () => answers.get(CHAT + 1)!([tool("files", "read_file", { enabledInChat: true })]));
+    await act(async () =>
+      answers.get(CHAT)!([
+        tool("files", "read_file", { enabledInChat: true }),
+        tool("files", "write_file", { enabledInChat: true }),
+        tool("terminal", "run_command", { enabledInChat: true }),
+      ]),
+    );
+    expect(screen.getByTitle("Tools for this chat").textContent).toBe(" Tools (1)");
+  });
+});
+
+// [0.0.7 P6a review] Which tools a chat may use decides what the model can do there. After a
+// chat switch the panel still held the previous chat's tools until the new chat's list came
+// (or for good, when that read failed), and a switch flipped meanwhile saved that whole list,
+// with the change, to the chat on screen. Coding apps switched on in one chat put that chat's
+// list into the next chat's panel when the programs were found after the switch.
+describe("ToolsPanel: after a chat switch (0.0.7 P6a review)", () => {
+  const chatOne = [
+    tool("files", "read_file", { enabledInChat: true }),
+    tool("files", "write_file", { enabledInChat: true }),
+    tool("terminal", "run_command", { enabledInChat: true }),
+    tool("coding_apps", "ask_claude_code"),
+    tool("subagents", "run_subagent"),
+  ];
+  const chatTwo = [tool("files", "read_file", { enabledInChat: true }), tool("subagents", "run_subagent")];
+  const FOUND: CodingAppsStatus = {
+    checked: true,
+    apps: [
+      {
+        app: "claudeCode",
+        label: "Claude Code",
+        tool: "ask_claude_code",
+        path: "/home/u/.local/bin/claude",
+        version: "2.1.322",
+        usable: true,
+        problem: null,
+      },
+    ],
+    message: null,
+  };
+  const subagents = () => screen.getByText("Subagents").closest("label")!.querySelector("input")!;
+  const codingSwitch = () => screen.getByRole("switch", { name: "Coding apps (experimental)" }) as HTMLInputElement;
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    ipcMock.listApprovedFolders.mockImplementation(async () => []);
+    ipcMock.loadedSkills.mockImplementation(async () => []);
+    ipcMock.codingAppsStatus.mockImplementation(async () => NOT_CHECKED);
+  });
+  afterEach(() => {
+    cleanup();
+    ipcMock.listChatTools.mockImplementation(async () => []);
+    ipcMock.findCodingApps.mockImplementation(async () => NOT_CHECKED);
+  });
+
+  it("lets nothing be switched until the chat's own list is read, and never saves another chat's tools to it", async () => {
+    let answerTwo!: (t: ToolDto[]) => void;
+    ipcMock.listChatTools.mockImplementation((chatId) =>
+      chatId === CHAT ? Promise.resolve(chatOne) : new Promise((resolve) => (answerTwo = resolve)),
+    );
+    let view!: ReturnType<typeof render>;
+    await act(async () => {
+      view = render(<ToolsPanel chatId={CHAT} nCtx={8192} />);
+    });
+    expect(screen.getByTitle("Tools for this chat").textContent).toBe(" Tools (3)");
+    // Another chat is opened; its list has not come yet.
+    await act(async () => {
+      view.rerender(<ToolsPanel chatId={CHAT + 1} nCtx={8192} />);
+    });
+    await act(async () => {
+      fireEvent.click(screen.getByTitle("Tools for this chat"));
+    });
+    // Nothing of the first chat is shown or can be switched.
+    expect(screen.getByTitle("Tools for this chat").textContent).toBe(" Tools (0)");
+    expect(screen.queryByText("Subagents")).toBeNull();
+    expect(screen.queryByText("run_command")).toBeNull();
+    expect(ipcMock.setChatTools).not.toHaveBeenCalled();
+    // Its own list comes: its tools are shown, and a switch saves them.
+    await act(async () => answerTwo(chatTwo));
+    expect(screen.getByTitle("Tools for this chat").textContent).toBe(" Tools (1)");
+    await act(async () => {
+      fireEvent.click(subagents());
+    });
+    expect(ipcMock.setChatTools).toHaveBeenCalledTimes(1);
+    expect(ipcMock.setChatTools).toHaveBeenCalledWith(CHAT + 1, ["read_file", "run_subagent"]);
+  });
+
+  it("switches Coding apps on before the chat's list is shown with that chat's own list only", async () => {
+    // The chat's own reads never come, except the one Coding apps makes after looking.
+    let looked = false;
+    ipcMock.findCodingApps.mockImplementation(async () => {
+      looked = true;
+      return FOUND;
+    });
+    ipcMock.listChatTools.mockImplementation((chatId) =>
+      chatId === CHAT
+        ? Promise.resolve(chatOne)
+        : looked
+          ? Promise.resolve([...chatTwo, tool("coding_apps", "ask_claude_code")])
+          : new Promise(() => undefined),
+    );
+    let view!: ReturnType<typeof render>;
+    await act(async () => {
+      view = render(<ToolsPanel chatId={CHAT} nCtx={8192} />);
+    });
+    await act(async () => {
+      view.rerender(<ToolsPanel chatId={CHAT + 1} nCtx={8192} />);
+    });
+    await act(async () => {
+      fireEvent.click(screen.getByTitle("Tools for this chat"));
+    });
+    expect(screen.getByTitle("Tools for this chat").textContent).toBe(" Tools (0)");
+    await act(async () => {
+      fireEvent.click(codingSwitch());
+    });
+    expect(ipcMock.setChatTools).toHaveBeenCalledTimes(1);
+    expect(ipcMock.setChatTools).toHaveBeenCalledWith(CHAT + 1, ["read_file", "ask_claude_code"]);
+  });
+
+  it("keeps the list read when Coding apps is switched on in the chat it was switched on in", async () => {
+    let found!: (s: CodingAppsStatus) => void;
+    ipcMock.findCodingApps.mockImplementation(() => new Promise((resolve) => (found = resolve)));
+    ipcMock.listChatTools.mockImplementation(async (chatId) => (chatId === CHAT ? chatOne : chatTwo));
+    let view!: ReturnType<typeof render>;
+    await act(async () => {
+      view = render(<ToolsPanel chatId={CHAT} nCtx={8192} />);
+    });
+    await act(async () => {
+      fireEvent.click(screen.getByTitle("Tools for this chat"));
+    });
+    await act(async () => {
+      fireEvent.click(codingSwitch());
+    });
+    // While the programs are looked for, another chat is opened and its own list comes.
+    await act(async () => {
+      view.rerender(<ToolsPanel chatId={CHAT + 1} nCtx={8192} />);
+    });
+    expect(screen.getByTitle("Tools for this chat").textContent).toBe(" Tools (1)");
+    await act(async () => found(FOUND));
+    // The first chat gets its coding app, as asked there; this chat's panel keeps its own list.
+    expect(ipcMock.setChatTools).toHaveBeenCalledWith(CHAT, ["read_file", "write_file", "run_command", "ask_claude_code"]);
+    expect(screen.getByTitle("Tools for this chat").textContent).toBe(" Tools (1)");
+    expect(screen.queryByText("run_command")).toBeNull();
+    ipcMock.setChatTools.mockClear();
+    await act(async () => {
+      fireEvent.click(subagents());
+    });
+    expect(ipcMock.setChatTools).toHaveBeenCalledWith(CHAT + 1, ["read_file", "run_subagent"]);
   });
 });

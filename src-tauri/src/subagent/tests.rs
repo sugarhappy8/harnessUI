@@ -458,8 +458,10 @@ async fn a_helper_starts_fresh_and_returns_its_answer() {
     );
 }
 
-/// A helper that calls `run_subagent` gets a refusal: the tool does not exist for it, the
-/// chat's own host is never asked to run it, and the attempt is in the audit log.
+/// A helper that calls `run_subagent` gets a refusal: the tool is not offered to it, the
+/// chat's own host is never asked to run it, and the attempt is in the audit log. [0.0.7] The
+/// helper's tool list is the turn's (so its prompt reuses the turn's cache) and names
+/// `run_subagent`, so the reply says plainly that a helper cannot start one.
 #[tokio::test]
 async fn a_helper_cannot_start_a_helper() {
     let endpoint = Endpoint::start(vec![
@@ -490,7 +492,11 @@ async fn a_helper_cannot_start_a_helper() {
         .and_then(|m| m.iter().find(|m| m["role"] == "tool"))
         .map(|m| m["content"].to_string())
         .expect("a tool result");
-    assert!(refusal.contains("No such tool: run_subagent"), "{refusal}");
+    assert!(
+        refusal.contains("A helper cannot start another helper."),
+        "{refusal}"
+    );
+    assert!(!refusal.contains("call_tool"), "{refusal}");
     let audits = rig.audits();
     assert_eq!(audits.len(), 1);
     assert_eq!(audits[0].tool, TOOL_NAME);
@@ -518,10 +524,44 @@ async fn nesting_is_refused_by_the_helpers_host_and_gate() {
         host.validate(TOOL_NAME, &Value::Object(task.clone())),
         Err(vec![NESTED_REFUSAL.to_owned()])
     );
+    // [0.0.7] What the loop answers a call to it, and to a coding app, from this host.
+    assert_eq!(host.refusal(TOOL_NAME).as_deref(), Some(NESTED_REFUSAL));
+    assert_eq!(
+        host.refusal(crate::outside_agent::CODEX_TOOL).as_deref(),
+        Some(crate::outside_agent::HELPER_REFUSAL)
+    );
+    assert_eq!(host.refusal("read_file"), None);
     assert!(matches!(
         host.describe(TOOL_NAME, &task).await,
         Described::Invalid(reason) if reason == NESTED_REFUSAL
     ));
+    // [0.0.7 review] Named through call_tool, they get the same plain answer from validate and
+    // describe, never the chat host's ("switched off in this chat…").
+    for (target, refusal) in [
+        (TOOL_NAME, NESTED_REFUSAL),
+        (
+            crate::outside_agent::CODEX_TOOL,
+            crate::outside_agent::HELPER_REFUSAL,
+        ),
+        (
+            crate::outside_agent::CLAUDE_TOOL,
+            crate::outside_agent::HELPER_REFUSAL,
+        ),
+    ] {
+        let through = json!({"name": target, "arguments": {"task": "x"}});
+        assert_eq!(
+            host.validate(crate::tool_select::finder::CALL_TOOL, &through),
+            Err(vec![refusal.to_owned()]),
+            "{target}"
+        );
+        assert!(
+            matches!(
+                host.describe(crate::tool_select::finder::CALL_TOOL, &args(through)).await,
+                Described::Invalid(reason) if reason == refusal
+            ),
+            "{target}"
+        );
+    }
     let Described::Action(action) = SubagentsServer
         .describe(TOOL_NAME, &task, &ChatContext::default())
         .await
@@ -1430,4 +1470,26 @@ async fn a_helper_never_gets_the_coding_apps() {
     )));
     assert!(!offered_to_helper(&registered(SERVER_NAME, TOOL_NAME)));
     assert!(offered_to_helper(&registered("files", "read_file")));
+}
+
+#[test]
+fn each_helper_has_a_conversation_of_its_own() {
+    // [0.0.7 P5] Claude's thinking a helper keeps, and a thinking block the API refuses in
+    // it, belong to that helper alone: never to the chat's conversation or another helper's.
+    let chat = OpenAiClient::new(ClientConfig::new(
+        "https://api.anthropic.com",
+        ProviderKind::Anthropic,
+    ))
+    .expect("client")
+    .for_conversation("chat 7");
+    let first = helper_client(chat.clone(), 7);
+    let second = helper_client(chat.clone(), 7);
+    let name = |client: &OpenAiClient| client.config().conversation.clone().unwrap_or_default();
+    assert!(
+        name(&first).starts_with("chat 7 helper "),
+        "{}",
+        name(&first)
+    );
+    assert_ne!(name(&first), name(&second));
+    assert_eq!(name(&chat), "chat 7");
 }

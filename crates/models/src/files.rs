@@ -157,8 +157,10 @@ pub fn bits_per_weight(label: &str) -> Option<f32> {
     })
 }
 
-/// Preference order for projectors when a repository offers several precisions.
-fn projector_rank(path: &str) -> u8 {
+/// Preference order for projectors when a repository offers several precisions (lower is
+/// better). Also used for image files found next to a model on disk (0.0.7), so both pick
+/// the same one.
+pub fn projector_rank(path: &str) -> u8 {
     match quant_label(path).as_deref() {
         Some("F16") => 0,
         Some("BF16") => 1,

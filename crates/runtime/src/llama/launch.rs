@@ -210,6 +210,11 @@ pub struct LaunchConfig {
     pub mmproj: Option<PathBuf>,
     /// Context length (`-c`). Explicit, so llama.cpp never shrinks it silently.
     pub ctx: u32,
+    /// Saved copies of the conversation llama-server may keep (`--ctx-checkpoints`), chosen
+    /// for each load from the computer's free memory (`models::fit::copies`). Passed as 1 to
+    /// [`MAX_CTX_CHECKPOINTS`] whatever it says; absent in a value written before: the most.
+    #[serde(default = "default_ctx_checkpoints")]
+    pub ctx_checkpoints: u32,
     /// Device name from the probe (`Vulkan0`, `ROCm0`, `MTL0`); `None` means CPU (`none`).
     pub device: Option<String>,
     /// Host prompt cache in MiB (`--cache-ram`).
@@ -249,6 +254,10 @@ fn default_alias() -> String {
     MODEL_ALIAS.to_owned()
 }
 
+fn default_ctx_checkpoints() -> u32 {
+    MAX_CTX_CHECKPOINTS
+}
+
 impl Default for LaunchConfig {
     /// The app's fixed choices (`-ngl all`, a 512 MiB prompt cache, no thinking budget,
     /// the fixed alias) with no model, port or key. Port 0 and an empty key are refused by
@@ -259,6 +268,7 @@ impl Default for LaunchConfig {
             model: PathBuf::new(),
             mmproj: None,
             ctx: 8192,
+            ctx_checkpoints: MAX_CTX_CHECKPOINTS,
             device: None,
             cache_ram_mib: 512,
             reasoning_budget: None,
@@ -317,6 +327,7 @@ impl std::fmt::Debug for LaunchConfig {
             .field("model", &self.model)
             .field("mmproj", &self.mmproj)
             .field("ctx", &self.ctx)
+            .field("ctx_checkpoints", &self.ctx_checkpoints)
             .field("device", &self.device)
             .field("cache_ram_mib", &self.cache_ram_mib)
             .field("reasoning_budget", &self.reasoning_budget)
@@ -357,6 +368,22 @@ pub const NO_FFMPEG_DIR: &str = "no-ffmpeg";
 /// The load mode with Keep the model in memory on (`-lm`).
 pub const KEEP_IN_MEMORY_LOAD_MODE: &str = "mmap+mlock";
 
+/// The most saved copies of the conversation a launch lets llama-server keep
+/// (`--ctx-checkpoints`, llama.cpp's "max number of context checkpoints to create per
+/// slot"; its default is 32). For a model with sliding-window layers each copy holds the
+/// window's cells of every such layer, and for a hybrid model its whole recurrent state, so
+/// it can take far more memory than it looks: 320 MiB for Gemma 4 12B, 1.5 GiB for OLMo 3
+/// 7B. Each load passes [`LaunchConfig::ctx_checkpoints`], from 1 to this, chosen from the
+/// computer's free memory; never 0, which would make the server read the whole
+/// conversation again whenever a message does not continue exactly where the last reply
+/// ended. Fewer copies only mean the server may read more of the conversation again after
+/// an edit (with one copy, an edit of the last message reads all of it again; the next
+/// message and a regenerated reply do not). `models::kv::MAX_CTX_CHECKPOINTS` is the same
+/// number (the app checks the two are equal). `llama-fit-params` does not take the flag
+/// (llama.cpp registers it for the server and the CLI only), and the copies are made while
+/// a chat goes on, so a measurement never has it.
+pub const MAX_CTX_CHECKPOINTS: u32 = 8;
+
 /// Longest alias passed to `-a`.
 const MAX_ALIAS_LEN: usize = 64;
 
@@ -365,9 +392,9 @@ const MAX_ALIAS_LEN: usize = 64;
 /// ```text
 /// --host 127.0.0.1 --port P --no-webui --no-slots --offline --jinja --cors-origins none
 /// --no-context-shift --video-ffmpeg-dir no-ffmpeg -a harnessui-local -m M [--mmproj X]
-/// -c C -np 1 --device D <placement> [--cpu-moe | --n-cpu-moe K] [-nkvo] [-t T]
-/// [-fa on | -fa off | -fa on -ctk q8_0 -ctv q8_0] [-lm mmap+mlock] --cache-ram R
-/// [--reasoning-budget B]
+/// -c C -np 1 --ctx-checkpoints N --device D <placement> [--cpu-moe | --n-cpu-moe K]
+/// [-nkvo] [-t T] [-fa on | -fa off | -fa on -ctk q8_0 -ctv q8_0] [-lm mmap+mlock]
+/// --cache-ram R [--reasoning-budget B]
 /// ```
 ///
 /// `D` is the device, or `none` for the processor and for [`GpuUse::Off`]. The placement
@@ -430,6 +457,10 @@ pub fn build_args(cfg: &LaunchConfig) -> Vec<String> {
         cfg.ctx.to_string(),
         "-np".to_owned(),
         "1".to_owned(),
+        "--ctx-checkpoints".to_owned(),
+        cfg.ctx_checkpoints
+            .clamp(1, MAX_CTX_CHECKPOINTS)
+            .to_string(),
         "--device".to_owned(),
         device.to_owned(),
     ]);
@@ -671,6 +702,8 @@ mod tests {
                 "8192",
                 "-np",
                 "1",
+                "--ctx-checkpoints",
+                "8",
                 "--device",
                 "Vulkan0",
                 "-ngl",
@@ -789,6 +822,8 @@ mod tests {
                 "8192",
                 "-np",
                 "1",
+                "--ctx-checkpoints",
+                "8",
                 "--device",
                 "Vulkan0",
                 "--fit",
@@ -809,6 +844,73 @@ mod tests {
         );
     }
 
+    /// Every launch passes the load's number of saved copies, from 1 to
+    /// [`MAX_CTX_CHECKPOINTS`] (llama.cpp's default of 32 can take 10 GiB of computer memory
+    /// with Gemma 4 12B in a long chat); never 0 (the server would read the whole
+    /// conversation again whenever it cannot continue where it stopped). `llama-fit-params`
+    /// refuses the flag ("invalid argument": llama.cpp registers it for the server and the
+    /// CLI only), so a measurement never carries it.
+    #[test]
+    fn the_server_keeps_the_loads_saved_copies_and_the_measurement_none() {
+        assert_eq!(MAX_CTX_CHECKPOINTS, 8);
+        assert_eq!(LaunchConfig::default().ctx_checkpoints, 8);
+        let copies_of = |args: &[String]| {
+            let at = args
+                .iter()
+                .position(|a| a == "--ctx-checkpoints")
+                .expect("--ctx-checkpoints");
+            assert_eq!(args[at - 2..at], ["-np", "1"]);
+            let n = args.iter().filter(|a| *a == "--ctx-checkpoints").count();
+            assert_eq!(n, 1, "{args:?}");
+            args[at + 1].clone()
+        };
+        for (asked, passed) in [
+            (1, "1"),
+            (3, "3"),
+            (8, "8"),
+            (0, "1"),
+            (9, "8"),
+            (u32::MAX, "8"),
+        ] {
+            let args = build_args(&LaunchConfig {
+                ctx_checkpoints: asked,
+                ..config()
+            });
+            assert_eq!(copies_of(&args), passed, "{asked}");
+        }
+        for gpu in [GpuUse::All, GpuUse::Fit, GpuUse::Off] {
+            for save_memory in [false, true] {
+                let args = build_args(&LaunchConfig {
+                    gpu,
+                    save_memory,
+                    ctx_checkpoints: 2,
+                    ..config()
+                });
+                assert_eq!(copies_of(&args), "2");
+                let measure = crate::llama::fit_params::build_measure_args(&crate::MeasureConfig {
+                    model: PathBuf::from("/models/m.gguf"),
+                    ctx: 8192,
+                    device: Some("Vulkan0".to_owned()),
+                    layers: crate::MeasureLayers::All,
+                    experts_on_cpu: ExpertsOnCpu::None,
+                    kv_in_computer_memory: false,
+                    save_memory,
+                    flash_attn: FlashAttn::Auto,
+                    hip_visible_devices: None,
+                });
+                assert!(
+                    !measure.iter().any(|a| a.contains("checkpoints")),
+                    "{measure:?}"
+                );
+            }
+        }
+        // A config written before has none: the most.
+        let mut old = serde_json::to_value(config()).unwrap();
+        old.as_object_mut().unwrap().remove("ctx_checkpoints");
+        let old: LaunchConfig = serde_json::from_value(old).unwrap();
+        assert_eq!(old.ctx_checkpoints, MAX_CTX_CHECKPOINTS);
+    }
+
     /// Whatever the choices, the fixed protections stay and the context stays explicit.
     #[test]
     fn every_choice_keeps_the_fixed_arguments() {
@@ -826,7 +928,7 @@ mod tests {
                         "--host 127.0.0.1 --port 40123 --no-webui --no-slots --offline --jinja",
                         "--cors-origins none --no-context-shift --video-ffmpeg-dir no-ffmpeg",
                         "-a harnessui-local",
-                        "-c 8192 -np 1 --device",
+                        "-c 8192 -np 1 --ctx-checkpoints 8 --device",
                         "--cache-ram 512",
                     ] {
                         assert!(joined.contains(fixed), "{fixed} missing from {joined}");
@@ -894,7 +996,16 @@ mod tests {
                                     (GpuUse::Off, _) | (_, None | Some("")) => "none",
                                     (_, Some(name)) => name,
                                 };
-                                want.extend(["-c", "8192", "-np", "1", "--device", shown]);
+                                want.extend([
+                                    "-c",
+                                    "8192",
+                                    "-np",
+                                    "1",
+                                    "--ctx-checkpoints",
+                                    "8",
+                                    "--device",
+                                    shown,
+                                ]);
                                 want.extend(gpu_words(gpu));
                                 if save_memory {
                                     want.extend(["-fa", "on", "-ctk", "q8_0", "-ctv", "q8_0"]);
@@ -917,6 +1028,7 @@ mod tests {
                                     "-m",
                                     "-c",
                                     "-np",
+                                    "--ctx-checkpoints",
                                     "--device",
                                     "--fit",
                                     "--cache-ram",
@@ -1361,7 +1473,7 @@ mod tests {
                 "--host 127.0.0.1 --port 40123 --no-webui --no-slots --offline --jinja",
                 "--cors-origins none --no-context-shift --video-ffmpeg-dir no-ffmpeg",
                 "-a harnessui-local",
-                "-c 8192 -np 1 --device",
+                "-c 8192 -np 1 --ctx-checkpoints 8 --device",
                 "--cache-ram 512",
             ] {
                 assert!(
@@ -1395,8 +1507,8 @@ mod tests {
             "--host 127.0.0.1 --port 40123 --no-webui --no-slots --offline --jinja \
              --cors-origins none --no-context-shift --video-ffmpeg-dir no-ffmpeg \
              -a harnessui-local -m /models/m.gguf --mmproj /models/p.gguf -c 8192 -np 1 \
-             --device Vulkan0 -ngl 12 --fit off --cpu-moe -nkvo -t 6 -fa on -lm mmap+mlock \
-             --cache-ram 512 --reasoning-budget 0"
+             --ctx-checkpoints 8 --device Vulkan0 -ngl 12 --fit off --cpu-moe -nkvo -t 6 \
+             -fa on -lm mmap+mlock --cache-ram 512 --reasoning-budget 0"
         );
     }
 
@@ -1789,8 +1901,19 @@ mod tests {
 
     #[test]
     fn free_port_is_bindable() {
-        let port = free_loopback_port().expect("port");
-        assert_ne!(port, 0);
-        TcpListener::bind((Ipv4Addr::LOCALHOST, port)).expect("port is free");
+        // Another test running in parallel may be given the same port by the system in
+        // the moment between `free_loopback_port` letting it go and the bind below (seen
+        // on CI's macOS runner). That is the race every caller already handles by asking
+        // again, so a few tries are allowed; the port must still be one that can be bound.
+        let mut last = None;
+        for _ in 0..5 {
+            let port = free_loopback_port().expect("port");
+            assert_ne!(port, 0);
+            match TcpListener::bind((Ipv4Addr::LOCALHOST, port)) {
+                Ok(_) => return,
+                Err(e) => last = Some(e),
+            }
+        }
+        panic!("no port given was free: {last:?}");
     }
 }

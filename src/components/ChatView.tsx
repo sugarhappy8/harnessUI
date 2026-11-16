@@ -1,11 +1,12 @@
-import { useCallback, useDeferredValue, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useDeferredValue, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { ArrowDown, Brain, FileText, PanelRight, Settings2 } from "lucide-react";
 import * as ipc from "../lib/ipc";
 import { aboutWords } from "../lib/words";
-import { useApp, toErrorInfo } from "../store/app";
+import { useApp, toErrorInfo, turnChatId } from "../store/app";
 import { MessageItem } from "./MessageItem";
 import { Composer } from "./Composer";
 import { ModelPicker } from "./ModelPicker";
+import { CloudMark } from "./CloudMark";
 import { RuntimeIndicator } from "./RuntimeIndicator";
 import { UsageLine } from "./UsageLine";
 import { openModelSettings } from "./ModelSettings";
@@ -19,6 +20,7 @@ import { ApprovalCard } from "./ApprovalCard";
 import { Markdown } from "./Markdown";
 import { EmptyChat, Welcome } from "./Welcome";
 import { formatCount } from "../lib/format";
+import { INPUT_DELAY_MS } from "../lib/useInputDelay";
 import type { MessageDto, ToolResultDto } from "../lib/types";
 
 /** The reply being written. Text arrives many times a second; when rendering it cannot
@@ -168,6 +170,11 @@ export function ChatView() {
     workbench,
     openWorkbench,
     closeWorkbench,
+    chats,
+    runningTurn,
+    stoppedTurns,
+    continueTurn,
+    dismissStoppedTurn,
   } = useApp();
   const [promptOpen, setPromptOpen] = useState(false);
   // Long chats render their latest messages; earlier ones on request.
@@ -176,7 +183,13 @@ export function ChatView() {
   // Follow new text only while the reader is at the bottom; scrolling up to read stops it.
   const pinnedRef = useRef(true);
   const [pinned, setPinned] = useState(true);
-  const busy = generation !== null;
+  // [0.0.7 P6] The chat whose reply is being written (the app writes one at a time; also one
+  // this window did not start). Nothing new can start meanwhile (`busy`); Stop belongs to
+  // that chat (`busyHere`), and any other chat names it instead (`elsewhere`).
+  const turnChat = turnChatId({ generation, runningTurn });
+  const busy = turnChat !== null;
+  const busyHere = detail !== null && turnChat === detail.chat.id;
+  const elsewhere = turnChat !== null && !busyHere ? turnChat : null;
   const messages = useMemo(
     () => (detail?.messages ?? []).filter((m) => m.role === "user" || m.role === "assistant"),
     [detail],
@@ -194,6 +207,31 @@ export function ChatView() {
   const shown = messages.slice(hidden);
   const live = generation && detail && generation.chatId === detail.chat.id ? generation : null;
   const chatApprovals = approvals.filter((a) => detail && a.chatId === detail.chat.id);
+  // [0.0.7 P6] The running turn's messages come after its chat's last user message (ids grow
+  // along a branch): a call stored before it without a result (the app closed while it ran)
+  // was cancelled, whatever runs now.
+  const lastUserId = [...messages].reverse().find((m) => m.role === "user")?.id ?? -1;
+  const stopped = detail ? (stoppedTurns[detail.chat.id] ?? null) : null;
+  // [0.0.7 P6a review] The sidebar's list holds only the chats a search finds: a running chat it
+  // leaves out is looked up in the whole list, so the line still names it.
+  const listedTitle = elsewhere !== null ? (chats.find((c) => c.id === elsewhere)?.title ?? null) : null;
+  const [lookedUp, setLookedUp] = useState<{ chatId: number; title: string } | null>(null);
+  useEffect(() => {
+    if (elsewhere === null || listedTitle !== null) return;
+    let alive = true;
+    ipc
+      .listChats(null)
+      .then((all) => {
+        const found = all.find((c) => c.id === elsewhere);
+        if (alive && found) setLookedUp({ chatId: elsewhere, title: found.title });
+      })
+      .catch(() => undefined);
+    return () => {
+      alive = false;
+    };
+  }, [elsewhere, listedTitle]);
+  const elsewhereTitle = listedTitle ?? (lookedUp?.chatId === elsewhere ? lookedUp.title : null);
+  const elsewhereWaits = elsewhere !== null && approvals.some((a) => a.chatId === elsewhere);
   // What makes the chat follow its end while it is there. [0.0.6 final pass] The reply's notes
   // count too: one can arrive after an approval card is drawn and push its buttons under the
   // message box. Joined, not added, so one part growing as another shrinks still counts.
@@ -239,6 +277,9 @@ export function ChatView() {
     disabledReason = "The model was unloaded to free memory. Choose Load at the top to load it again.";
   else if (modelRef.startsWith("local:") && runtime?.state !== "ready")
     disabledReason = "The model is not loaded. Pick it again from the list above.";
+  // [0.0.7 P6] The app writes one reply at a time; the line above the box names the chat.
+  if (disabledReason === null && elsewhere !== null)
+    disabledReason = "You can send when the reply in the other chat is done";
 
   // Context usage: the last known prompt + completion tokens against the context size.
   const lastAssistant = [...messages].reverse().find((m) => m.role === "assistant");
@@ -251,6 +292,11 @@ export function ChatView() {
           ? lastAssistant.promptTokens + (lastAssistant.completionTokens ?? 0)
           : null;
   const nCtx = live?.nCtx ?? (modelRef?.startsWith("local:") ? (runtime?.nCtx ?? null) : null);
+  // Thinking on and off: a local model that can think, or [0.0.7 P5] Claude on its endpoint.
+  const thinkingSwitch =
+    !!detail && ((!!modelRef?.startsWith("local:") && !!runtime?.thinking) || !!detail.chat.endpointThinking);
+  // [0.0.7 P5] A model whose thinking cannot stop (Claude Opus 5.5): "off" is "low".
+  const offWord = detail?.chat.endpointThinkingLow ? "low" : "off";
 
   // [0.0.5 memory] The summary the model gets instead of the earlier messages, and the
   // message its line goes under.
@@ -259,7 +305,19 @@ export function ChatView() {
   const localPath = modelRef?.startsWith("local:") ? modelRef.slice(6) : null;
 
   // Stable callbacks, so the memoised messages are not rendered again for every token.
-  const editResend = useCallback((m: MessageDto, text: string) => void send(text, m.parentId), [send]);
+  // [0.0.7 P6] The new message keeps the attachments left in the edit box.
+  const editResend = useCallback(
+    (m: MessageDto, text: string, attachmentIds: number[]) =>
+      void send(
+        text,
+        m.parentId,
+        undefined,
+        undefined,
+        undefined,
+        attachmentIds.length > 0 ? { messageId: m.id, attachmentIds } : undefined,
+      ),
+    [send],
+  );
   const onRegenerate = useCallback((id: number) => void regenerate(id), [regenerate]);
   const onSwitchBranch = useCallback((id: number) => void switchBranch(id), [switchBranch]);
 
@@ -296,6 +354,7 @@ export function ChatView() {
             className="flex items-center gap-x-1.5 gap-y-1 @max-[22.25rem]:flex-wrap @2xl:col-start-1 @2xl:row-start-1"
           >
             <ModelPicker />
+            <CloudMark host={detail?.chat.cloudHost} />
             <RuntimeIndicator />
           </div>
           {/* The usage line's row below @2xl; from @2xl its two parts are the grid's own, and
@@ -304,7 +363,7 @@ export function ChatView() {
             <div className="min-w-0 grow @2xl:col-span-2 @2xl:col-start-1 @2xl:row-start-2 @2xl:w-0 @2xl:min-w-full">
               <UsageLine />
             </div>
-            {(used !== null || live?.tokensPerSecond != null || (detail && modelRef?.startsWith("local:") && runtime?.thinking)) && (
+            {(used !== null || live?.tokensPerSecond != null || thinkingSwitch) && (
               <div
                 data-model-status
                 className="ml-auto flex shrink-0 items-center gap-1.5 @2xl:col-start-2 @2xl:row-start-1"
@@ -318,12 +377,18 @@ export function ChatView() {
                     {live.tokensPerSecond.toFixed(1)} tokens/s
                   </span>
                 )}
-                {detail && modelRef?.startsWith("local:") && runtime?.thinking && (
+                {detail && thinkingSwitch && (
                   <button
                     type="button"
                     aria-pressed={detail.chat.thinking}
-                    aria-label={`Thinking ${detail.chat.thinking ? "on" : "off"}`}
-                    title={detail.chat.thinking ? "Thinking is on: slower, often better answers" : "Thinking is off: faster answers"}
+                    aria-label={`Thinking ${detail.chat.thinking ? "on" : offWord}`}
+                    title={
+                      detail.chat.thinking
+                        ? "Thinking is on: slower, often better answers"
+                        : offWord === "low"
+                          ? "Thinking is low: this model always thinks a little; faster answers"
+                          : "Thinking is off: faster answers"
+                    }
                     onClick={() =>
                       void ipc
                         .setChatThinking(detail.chat.id, !detail.chat.thinking)
@@ -337,10 +402,10 @@ export function ChatView() {
                     {/* "On" or "Off" at every width; "Thinking on" from @5xl while the chat has no
                         meter yet, from @7xl beside the meter (which takes that room first). */}
                     <span data-thinking="short" className={used === null ? "@5xl:hidden" : "@7xl:hidden"}>
-                      {detail.chat.thinking ? "On" : "Off"}
+                      {detail.chat.thinking ? "On" : offWord === "low" ? "Low" : "Off"}
                     </span>
                     <span data-thinking="full" className={used === null ? "hidden @5xl:inline" : "hidden @7xl:inline"}>
-                      Thinking {detail.chat.thinking ? "on" : "off"}
+                      Thinking {detail.chat.thinking ? "on" : offWord}
                     </span>
                   </button>
                 )}
@@ -350,7 +415,10 @@ export function ChatView() {
         </div>
         {detail && (
           <div data-header-controls className="ml-auto flex max-w-full flex-wrap items-center justify-end gap-1 @md:gap-1.5">
+            {/* [0.0.7 P6a review] A panel of its own for each chat: nothing it held for the
+                previous chat (its tools, its folders, a lookup on its way) can be saved here. */}
             <ToolsPanel
+              key={detail.chat.id}
               chatId={detail.chat.id}
               nCtx={nCtx}
               workingFolder={detail.chat.workingFolder ?? null}
@@ -388,7 +456,7 @@ export function ChatView() {
         onScroll={onScroll}
         className="app-backdrop h-full overflow-y-auto"
         aria-live="polite"
-        aria-busy={busy}
+        aria-busy={busyHere}
       >
         {!detail && <Welcome />}
         {detail && messages.length === 0 && !live && <EmptyChat />}
@@ -430,7 +498,8 @@ export function ChatView() {
                   name: c.name,
                   arguments: c.arguments,
                   recovered: c.recovered,
-                  status: r?.status ?? (busy ? "running" : "cancelled"),
+                  // [0.0.7 P6] Running only while its own turn runs, in this chat.
+                  status: r?.status ?? (busyHere && m.id > lastUserId ? "running" : "cancelled"),
                   text: r?.text ?? "",
                 };
                 const view = waiting && stored.status === "running" ? { ...stored, status: "waiting" } : stored;
@@ -481,6 +550,18 @@ export function ChatView() {
               ))}
             </div>
           )}
+          {busyHere && !live && (
+            // [0.0.7 P6] A reply this window did not start (it went on while the window
+            // reloaded) sends no text here: its messages are read when it ends.
+            <div className="flex items-center gap-3 text-xs text-fg-muted" data-turn-detached>
+              <div className="typing-dots" aria-hidden>
+                <span />
+                <span />
+                <span />
+              </div>
+              The reply is still being written. It shows here when it is done.
+            </div>
+          )}
           {!live && detail && turnNotes?.chatId === detail.chat.id && (
             <div className="mb-6 space-y-1" aria-label="Notes from the last reply">
               {turnNotes.notes.map((n, i) => (
@@ -508,31 +589,65 @@ export function ChatView() {
         )}
       </div>
 
-      {error && (
+      {detail && stopped && (
+        // [0.0.7 P6] Why this chat's last turn stopped: kept with the chat, so it never shows
+        // in another one, and Continue goes on here.
         <div className="mx-auto w-full max-w-3xl px-4 pb-2">
-          {error.code === "stepCap" ? (
+          {stopped.code === "stepCap" ? (
             // Not a failure: the turn stopped at the step limit, and the model can go on.
+            // [0.0.7] Continue appears as the turn ends, when the app may also bring its window
+            // back after stepping aside for computer use: it ignores clicks for a moment.
             <ErrorBanner
-              error={error}
+              error={stopped}
               tone="notice"
-              onDismiss={() => showError(null)}
+              onDismiss={() => dismissStoppedTurn(detail.chat.id)}
               action={
                 busy
                   ? undefined
-                  : { label: "Continue", onClick: () => void send("Continue where you left off.") }
+                  : {
+                      label: "Continue",
+                      onClick: () => void continueTurn(detail.chat.id),
+                      delayMs: INPUT_DELAY_MS,
+                    }
               }
             />
           ) : (
-            <ErrorBanner error={error} onDismiss={() => showError(null)} />
+            <ErrorBanner error={stopped} onDismiss={() => dismissStoppedTurn(detail.chat.id)} />
           )}
         </div>
       )}
+      {error && (
+        <div className="mx-auto w-full max-w-3xl px-4 pb-2">
+          <ErrorBanner error={error} onDismiss={() => showError(null)} />
+        </div>
+      )}
+      {elsewhere !== null && (
+        // [0.0.7 P6] Not a Stop here: it would stop the other chat's reply.
+        <div className="mx-auto w-full max-w-3xl px-4 pb-1">
+          <p data-turn-elsewhere className="text-sm text-fg-muted">
+            {elsewhereTitle === null
+              ? elsewhereWaits
+                ? "A reply in another chat is waiting for your approval."
+                : "A reply is running in another chat."
+              : elsewhereWaits
+                ? `A reply in “${elsewhereTitle}” is waiting for your approval.`
+                : `A reply is running in “${elsewhereTitle}”.`}{" "}
+            <button
+              type="button"
+              onClick={() => void openChat(elsewhere).catch((e: unknown) => showError(toErrorInfo(e)))}
+              className="text-accent underline underline-offset-2 hover:text-fg"
+            >
+              Open it
+            </button>
+          </p>
+        </div>
+      )}
       <Composer
-        busy={busy}
+        busy={busyHere}
         disabledReason={disabledReason}
         chatId={detail?.chat.id ?? null}
         onSend={(t, images, documents, mentions) => void send(t, undefined, images, documents, mentions)}
-        onStop={() => void stop()}
+        onStop={() => void (detail ? stop(detail.chat.id) : undefined)}
       />
       <SystemPromptDialog
         open={promptOpen}

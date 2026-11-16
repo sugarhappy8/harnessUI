@@ -11,11 +11,17 @@
 //! inside the markers that say "this is data" (see [`needs_file_text`]). Messages a tool
 //! gives before the gate (an app note the model trusts) carry no text of any file, and name
 //! a path only as the model gave it, never where its links lead ([`said_path`]).
+//!
+//! [0.0.7] A command that failed because of a common mistake for its shell (`&&` or `rm -rf`
+//! in Windows PowerShell 5.1, an unquoted URL in zsh) gets a one-line hint ([`command_hints`]).
 
 use std::sync::LazyLock;
 
 use policy::path::{CheckedPath, Flavor, PathSandbox, default_case, is_within, lexical};
 use regex::Regex;
+
+mod hints;
+pub use hints::{HintShell, command_hints};
 
 /// Characters of one quoted file line.
 pub const MAX_LINE_CHARS: usize = 120;

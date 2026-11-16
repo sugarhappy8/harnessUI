@@ -310,11 +310,16 @@ async fn real_llama_server_agent_turn() {
         preserve_reasoning: false,
         images_in_tool_results: true,
     };
+    // Greedy decoding: with the server's default sampling the small model sometimes wrote a
+    // made-up tool result as text instead of calling the tool (macOS CI run 43815674194),
+    // so whether this test passed was down to chance.
     let mut template = RequestTemplate {
         model: "x".into(),
+        temperature: Some(0.0),
         ..RequestTemplate::default()
     };
     template.extra.insert("cache_prompt".into(), json!(true));
+    template.extra.insert("seed".into(), json!(1));
     let mut input = TurnInput::new(
         vec![HistoryMessage::user(
             "Use the read_file tool to read notes.txt, then tell me the secret word written in it.",
@@ -397,6 +402,7 @@ async fn real_llama_server_agent_turn() {
         caps,
         RequestTemplate {
             model: "x".into(),
+            temperature: Some(0.0),
             ..RequestTemplate::default()
         },
     );
@@ -423,5 +429,77 @@ async fn real_llama_server_agent_turn() {
         .iter()
         .any(|e| matches!(e, TurnEvent::ReasoningDelta { .. }));
     assert!(saw_reasoning);
+
+    // [0.0.7] The same task with the tool list and the call guide in the system message, as
+    // the app sends them: the template takes the larger system message and the model still
+    // calls the tool and answers from its result.
+    files.executed.lock().unwrap().clear();
+    let log = Log::default();
+    let deps = TurnDeps { sink: &log, ..deps };
+    let mut template = RequestTemplate {
+        model: "x".into(),
+        temperature: Some(0.0),
+        ..RequestTemplate::default()
+    };
+    template.extra.insert("cache_prompt".into(), json!(true));
+    template.extra.insert("seed".into(), json!(1));
+    let mut input = TurnInput::new(
+        vec![HistoryMessage::user(
+            "Use the read_file tool to read notes.txt, then tell me the secret word written in it.",
+        )],
+        caps,
+        template,
+    );
+    input.system_prompt = "You are a helpful assistant.".into();
+    input.thinking = false;
+    input.step_cap = 6;
+    input.tool_guide = Some(agent::prompt::ToolGuide {
+        groups: vec![agent::prompt::ToolGroup {
+            label: "Files".into(),
+            own: true,
+            tools: vec![agent::prompt::ListedTool {
+                name: "read_file".into(),
+                purpose: "Read a text file, or a range of lines from a long one.".into(),
+            }],
+        }],
+        reach: agent::prompt::Reach::All,
+        os: agent::prompt::GuideOs::this_os(),
+        budget: agent::prompt::tool_guide_budget(n_ctx),
+        sections: Vec::new(),
+    });
+    let outcome = tokio::time::timeout(
+        Duration::from_secs(300),
+        run_turn(deps, input, CancellationToken::new()),
+    )
+    .await
+    .expect("the turn with the tool list took too long");
+    let answer = outcome
+        .messages
+        .last()
+        .map(HistoryMessage::text)
+        .unwrap_or_default();
+    eprintln!(
+        "turn with the tool list: {:?}, answer {answer:?}, fixed overhead {:?}",
+        outcome.status,
+        outcome.budget.map(|b| b.fixed_overhead)
+    );
+    for message in &outcome.messages {
+        eprintln!("  {:?}: {:?}", message.role, message.parts);
+    }
+    assert_eq!(
+        outcome.status,
+        TurnStatus::Completed,
+        "{:?}",
+        outcome.messages
+    );
+    let executed = files.executed.lock().unwrap().clone();
+    assert!(
+        !executed.is_empty(),
+        "with the tool list the model never called read_file"
+    );
+    assert!(
+        answer.to_lowercase().contains(SECRET),
+        "the answer does not use the tool result: {answer:?}"
+    );
     drop(guard);
 }

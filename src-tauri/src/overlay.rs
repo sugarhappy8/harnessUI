@@ -74,12 +74,13 @@ pub fn show(app: &AppHandle, monitor: Option<tauri::Monitor>) -> bool {
     ok
 }
 
-/// Minimises the main window so computer use can reach what is behind it (9.3).
+/// Minimises the main window so computer use can reach what is behind it (9.3): the
+/// button a tool card shows when the window was in the way. With the chat of a running turn
+/// the window comes back with that chat's next card, the end of its turn or Stop, as when
+/// it steps aside by itself.
 #[tauri::command]
-pub fn minimize_main_window(app: AppHandle) {
-    if let Some(w) = app.get_webview_window(crate::MAIN_WINDOW) {
-        let _ = w.minimize();
-    }
+pub fn minimize_main_window(app: AppHandle, chat_id: Option<i64>) {
+    crate::computer_cmd::minimise_on_request(&app, chat_id);
 }
 
 /// Hides both indicator windows.

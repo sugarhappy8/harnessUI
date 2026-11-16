@@ -45,8 +45,8 @@ pub enum Convention {
     Grid1000,
     /// 0–1000 boxes `[x1, y1, x2, y2]`; the centre is used.
     Box1000,
-    /// 0–1000 boxes in `[y1, x1, y2, x2]` order (Gemma's `box_2d`; the axis order comes
-    /// from secondary sources).
+    /// 0–1000 boxes in `[y1, x1, y2, x2]` order (Gemma's `box_2d`, documented by Google
+    /// for Gemma 4; see `FAMILIES`).
     Box1000Yx,
 }
 
@@ -292,9 +292,15 @@ struct Family {
 /// before a shorter one.
 ///
 /// Not every row is equally certain. Documented by the publisher: UI-TARS-1.5, Fara-7B,
-/// Qwen3-VL, Holo-3.1 and Holo4. Inferred from the base model or from secondary sources:
-/// Holo1/1.5, Holo2, Qwen3.5, Fara1.5 and Gemma's axis order. The user can always choose
-/// another convention in Settings.
+/// Qwen3-VL, Holo-3.1, Holo4 and Gemma 4. Inferred from the base model or from secondary
+/// sources: Holo1/1.5, Holo2, Qwen3.5 to Qwen3.8, Fara1.5 and Gemma 3. The user can always
+/// choose another convention in Settings.
+///
+/// Mistral documents no way of writing screen positions for Ministral 3, Mistral Small 3.x
+/// or Pixtral (the model cards at huggingface.co/mistralai, for example
+/// Ministral-3-14B-Instruct-2512, Mistral-Small-3.2-24B-Instruct-2506 and Pixtral-12B-2409,
+/// and https://docs.mistral.ai/capabilities/vision, checked 2026-11-16), so they have no
+/// row and get the guess for an unknown model.
 const FAMILIES: &[Family] = &[
     // Only 1.5 is documented; other UI-TARS versions are not assumed to be the same.
     Family {
@@ -344,14 +350,24 @@ const FAMILIES: &[Family] = &[
         convention: Convention::Grid1000,
         lineage: Lineage::Qwen2,
     },
-    // Qwen3-VL, Qwen3.5 and later.
+    // Qwen3-VL, Qwen3.5 and later. Qwen3-VL is documented: relative coordinates from 0 to
+    // 1000 (https://github.com/QwenLM/Qwen3-VL/blob/main/cookbooks/2d_grounding.ipynb; the
+    // computer-use cookbook in the same folder reads clicks on a 1000 x 1000 grid). Qwen3.5
+    // to Qwen3.8 are built on it; their model cards (huggingface.co/Qwen/Qwen3.5-27B,
+    // Qwen3.6-27B, Qwen3.8-27B) report computer-use results but do not say how positions
+    // are written (checked 2026-11-16), so for them this row is an inference.
     Family {
         name: "Qwen3",
         needles: &[Needle::Anywhere("qwen3")],
         convention: Convention::Grid1000,
         lineage: Lineage::Qwen3,
     },
-    // Gemma's projector is not a Qwen one; with a 0–1000 convention that does not matter.
+    // Gemma 4 is documented by Google: boxes `box_2d` as [y1, x1, y2, x2], normalised to a
+    // 1000 x 1000 grid (https://ai.google.dev/gemma/docs/capabilities/vision/image, "Object
+    // Detection", whose example runs the Gemma 4 models). Gemma 3's model card
+    // (https://ai.google.dev/gemma/docs/core/model_card_3) documents no format; it is
+    // assumed to answer the same way. Gemma's projector is not a Qwen one; with a 0–1000
+    // convention that does not matter.
     Family {
         name: "Gemma",
         needles: &[Needle::Anywhere("gemma")],
@@ -761,6 +777,71 @@ mod tests {
             assert!(!auto.is_guess(), "{name}");
             assert_eq!(auto.profile.convention, convention, "{name}");
             assert_eq!(auto.profile.resize, resize, "{name}");
+        }
+    }
+
+    /// Newer releases of the known families, and fine-tunes that put their own words
+    /// around the base model's name (0.0.7; the first two are models the owner uses).
+    #[test]
+    fn newer_releases_and_fine_tunes_keep_their_family() {
+        use Convention::{Box1000Yx, Grid1000};
+        let table: &[(&str, Convention, &str)] = &[
+            (
+                "Qwen3.8-27B-Uncensored-HauhauCS-Aggressive",
+                Grid1000,
+                "Qwen3",
+            ),
+            (
+                "Qwen3.8-27B-Uncensored-HauhauCS-Aggressive.Q4_K_M.gguf",
+                Grid1000,
+                "Qwen3",
+            ),
+            (
+                "Huihui-Qwen3.8-27B-abliterated-Q4_K_M.gguf",
+                Grid1000,
+                "Qwen3",
+            ),
+            (
+                "huihui-ai/Huihui-Qwen3.8-27B-abliterated",
+                Grid1000,
+                "Qwen3",
+            ),
+            (
+                "local:C:\\Users\\u\\models\\mradermacher\\Qwen3.8-27B-Uncensored-HauhauCS-Aggressive-GGUF\\Qwen3.8-27B-Uncensored-HauhauCS-Aggressive.Q4_K_M.gguf",
+                Grid1000,
+                "Qwen3",
+            ),
+            ("Qwen3.6-35B-A3B-UD-Q4_K_XL.gguf", Grid1000, "Qwen3"),
+            ("Qwen3.5-27B-Q4_K_M.gguf", Grid1000, "Qwen3"),
+            ("remote:2:qwen/qwen3.8-27b", Grid1000, "Qwen3"),
+            ("gemma-4-31B-it-Q4_K_M.gguf", Box1000Yx, "Gemma"),
+            ("gemma-4-12B-coder-heretic.Q8_0.gguf", Box1000Yx, "Gemma"),
+            ("google/gemma-4-26B-A4B-it", Box1000Yx, "Gemma"),
+        ];
+        for &(name, convention, family) in table {
+            let auto = auto_profile(name);
+            assert_eq!(auto.family, Some(family), "{name}");
+            assert_eq!(auto.profile.convention, convention, "{name}");
+            assert_eq!(auto.profile.resize, q3(), "{name}");
+        }
+    }
+
+    /// Mistral documents no way of writing screen positions for Ministral 3, Mistral Small
+    /// 3.x or Pixtral (see `FAMILIES`), so they get the guess for an unknown model.
+    #[test]
+    fn mistral_vision_models_get_the_guess_for_an_unknown_model() {
+        for name in [
+            "Ministral-3-14B-Reasoning-2512-Uncensored.Q4_K_M.gguf",
+            "mistralai/Ministral-3-8B-Instruct-2512",
+            "Mistral-Small-3.2-24B-Instruct-2506-Q4_K_M.gguf",
+            "Mistral-Small-3.1-24B-Instruct-2503",
+            "pixtral-12b-2409",
+            "Pixtral-Large-Instruct-2411",
+            "remote:4:mistral-small-latest",
+        ] {
+            let auto = auto_profile(name);
+            assert!(auto.is_guess(), "{name}: {:?}", auto.family);
+            assert_eq!(auto.profile.convention, Convention::Grid1000, "{name}");
         }
     }
 

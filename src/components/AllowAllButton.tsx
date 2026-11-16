@@ -5,9 +5,11 @@ import * as ipc from "../lib/ipc";
 import type { ApprovalModeName } from "../lib/ipc";
 import { useApprovalMode, useChatMode } from "../lib/approvalMode";
 import { toErrorInfo, useApp } from "../store/app";
+import { useInputDelay } from "../lib/useInputDelay";
 
 /** Clicks on the confirm button are ignored for this long after the dialog opens, so a
- *  double click on the button that opened it cannot land on it. */
+ *  double click on the button that opened it cannot land on it, and again after the window
+ *  comes back on screen (0.0.7, `useInputDelay`). */
 export const CONFIRM_INPUT_DELAY_MS = 700;
 
 /** The three modes, safest first, as the header menu and Settings list them. */
@@ -306,13 +308,11 @@ const CONFIRM_TONE: Record<Tone, string> = {
   danger: "border-danger/60 bg-danger/10 text-danger hover:bg-danger/20",
 };
 
-/** Cancel and confirm. Mounted with the dialog, so the delay starts when it opens. */
+/** Cancel and confirm. Mounted with the dialog, so the delay starts when it opens. [0.0.7] It
+ *  starts again when the app brings its window back on screen after stepping aside for
+ *  computer use, in front of where the user may be clicking. */
 function ConfirmButtons(props: { label: string; cancelLabel: string; tone: Tone; onConfirm: () => void }) {
-  const [armed, setArmed] = useState(false);
-  useEffect(() => {
-    const t = window.setTimeout(() => setArmed(true), CONFIRM_INPUT_DELAY_MS);
-    return () => window.clearTimeout(t);
-  }, []);
+  const { armed, armedRef } = useInputDelay(CONFIRM_INPUT_DELAY_MS);
   return (
     <div className="flex shrink-0 justify-end gap-2 border-t border-border px-5 py-3">
       <AlertDialog.Cancel className="rounded-md border border-border px-3 py-1.5 hover:bg-bg-muted">
@@ -321,7 +321,7 @@ function ConfirmButtons(props: { label: string; cancelLabel: string; tone: Tone;
       <button
         type="button"
         aria-disabled={!armed}
-        onClick={() => armed && props.onConfirm()}
+        onClick={() => armedRef.current && props.onConfirm()}
         className={"rounded-md border px-3 py-1.5 font-medium aria-disabled:opacity-50 " + CONFIRM_TONE[props.tone]}
       >
         {props.label}

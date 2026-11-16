@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
-import type { InstalledModel, ModelBusy, ModelLoadInfo, RuntimeStatus } from "../../lib/types";
+import type { DownloadGroup, ImageFileOffer, InstalledModel, ModelBusy, ModelLoadInfo, RuntimeStatus } from "../../lib/types";
 import { FINE_LAUNCH_NONE, fineFacts, processorPicture } from "../fine.fixtures";
 
 const ipcMock = vi.hoisted(() => ({
@@ -11,13 +11,17 @@ const ipcMock = vi.hoisted(() => ({
   modelBusy: vi.fn<() => Promise<ModelBusy>>(async () => ({ chatTurns: 0, modelChecks: 0, otherApps: 0 })),
   loadLocalModel: vi.fn<(path: string, s?: unknown, w?: boolean) => Promise<boolean>>(async () => true),
   unloadModel: vi.fn<(w?: boolean) => Promise<boolean>>(async () => true),
-  deleteModel: vi.fn<(id: number, files: boolean) => Promise<void>>(async () => undefined),
+  deleteModel: vi.fn<(id: number, files: boolean) => Promise<string | null | void>>(async () => undefined),
   getLocalModelSettings: vi.fn(async () => {
     throw new Error("Use must not pass the defaults for all models");
   }),
   setChatModel: vi.fn(async () => undefined),
   getChat: vi.fn(async (id: number) => ({ chat: { id, modelRef: null }, messages: [] })),
   listModelOptions: vi.fn(async () => []),
+  // [0.0.7 P2] The image file line of a row with a repository and no image file.
+  imageFileOffer: vi.fn<(path: string) => Promise<ImageFileOffer>>(async () => ({ kind: "none" })),
+  downloadImageFile: vi.fn<(path: string) => Promise<string>>(async () => "group"),
+  onDownloadProgress: vi.fn<(h: (g: DownloadGroup) => void) => Promise<() => void>>(async () => () => undefined),
 }));
 vi.mock("../../lib/ipc", () => ipcMock);
 vi.mock("@tauri-apps/plugin-dialog", () => ({ open: vi.fn() }));
@@ -271,6 +275,72 @@ describe("Models → Installed", () => {
     confirm.mockRestore();
   });
 
+  it("[0.0.7 P6] says when Delete left a model's files in place, and the model leaves the list", async () => {
+    const confirm = vi.spyOn(window, "confirm").mockReturnValue(true);
+    await show();
+    const note = "Removed from the list. Its file is outside the models folder, so it was left where it is.";
+    ipcMock.deleteModel.mockResolvedValueOnce(note);
+    ipcMock.listInstalledModels.mockResolvedValue([BIG]);
+    await click(screen.getByRole("button", { name: "Delete small.gguf" }));
+    expect(ipcMock.deleteModel).toHaveBeenCalledWith(1, true);
+    expect(screen.getByText(note)).toBeTruthy();
+    expect(screen.queryByRole("alert")).toBeNull();
+    expect(screen.queryByRole("button", { name: "Delete small.gguf" })).toBeNull();
+    // The next Delete says nothing more.
+    ipcMock.deleteModel.mockResolvedValueOnce(null);
+    ipcMock.listInstalledModels.mockResolvedValue([]);
+    await click(screen.getByRole("button", { name: "Delete big.gguf" }));
+    expect(screen.queryByText(note)).toBeNull();
+    confirm.mockRestore();
+  });
+
+  it("[0.0.7 P6b] asks about what Delete really removes: its image file too, and not files outside the folder", async () => {
+    const confirm = vi.spyOn(window, "confirm").mockReturnValue(false);
+    ipcMock.listInstalledModels.mockResolvedValue([
+      { ...SMALL, deleteBytes: 1_300_000_000, keptOutside: 0 },
+      { ...BIG, deleteBytes: 1_000_000_000, keptOutside: 1 },
+      { ...model(3, "away.gguf"), deleteBytes: 0, keptOutside: 2 },
+      { ...model(4, "gone.gguf"), deleteBytes: 0, keptOutside: 0 },
+      { ...model(5, "far.gguf"), deleteBytes: 0, keptOutside: 1 },
+      { ...model(6, "lone.gguf"), deleteBytes: 0, keptOutside: 1, onlyImageOutside: true },
+      { ...model(7, "twin.gguf"), deleteBytes: 0, keptOutside: 0, keptInUse: 1 },
+      { ...model(8, "parts.gguf"), deleteBytes: 0, keptOutside: 0, keptInUse: 2 },
+    ]);
+    await show();
+    await click(screen.getByRole("button", { name: "Delete small.gguf" }));
+    expect(confirm).toHaveBeenLastCalledWith("Delete small.gguf? This removes 1.3 GB from disk.");
+    await click(screen.getByRole("button", { name: "Delete big.gguf" }));
+    expect(confirm).toHaveBeenLastCalledWith(
+      "Delete big.gguf? This removes 1.0 GB from disk. Files outside the models folder stay where they are.",
+    );
+    await click(screen.getByRole("button", { name: "Delete away.gguf" }));
+    expect(confirm).toHaveBeenLastCalledWith(
+      "Remove away.gguf from the list? Its files are outside the models folder, so they stay where they are.",
+    );
+    await click(screen.getByRole("button", { name: "Delete gone.gguf" }));
+    expect(confirm).toHaveBeenLastCalledWith("Remove gone.gguf from the list? Its file is no longer on disk.");
+    await click(screen.getByRole("button", { name: "Delete far.gguf" }));
+    expect(confirm).toHaveBeenLastCalledWith(
+      "Remove far.gguf from the list? Its file is outside the models folder, so it stays where it is.",
+    );
+    // Round 2: as the note after Delete says it, and never "no longer on disk" for a file
+    // another model on the list uses.
+    await click(screen.getByRole("button", { name: "Delete lone.gguf" }));
+    expect(confirm).toHaveBeenLastCalledWith(
+      "Remove lone.gguf from the list? Its image file is outside the models folder, so it stays where it is.",
+    );
+    await click(screen.getByRole("button", { name: "Delete twin.gguf" }));
+    expect(confirm).toHaveBeenLastCalledWith(
+      "Remove twin.gguf from the list? Another model on the list uses its file, so it stays where it is.",
+    );
+    await click(screen.getByRole("button", { name: "Delete parts.gguf" }));
+    expect(confirm).toHaveBeenLastCalledWith(
+      "Remove parts.gguf from the list? Another model on the list uses its files, so they stay where they are.",
+    );
+    expect(ipcMock.deleteModel).not.toHaveBeenCalled();
+    confirm.mockRestore();
+  });
+
   it("says what the model was made for in plain words: tokens with words, no jargon badges", async () => {
     ipcMock.listInstalledModels.mockResolvedValue([
       {
@@ -290,6 +360,54 @@ describe("Models → Installed", () => {
     expect(screen.getByText("remembers up to 40,960 tokens, about 30,000 words")).toBeTruthy();
     expect(screen.getByText("uses part of itself at a time")).toBeTruthy();
     expect(document.body.textContent).not.toMatch(/\bcontext\b|MoE|40k/);
+  });
+
+  it("[0.0.7] marks vision only for an image file the model can read, and says when it couldn't be read", async () => {
+    const seeing = { ...model(3, "seeing.gguf"), projectorPath: "/models/mmproj-seeing-F16.gguf" };
+    const broken = { ...model(4, "broken.gguf"), projectorPath: null, imageFileUnreadable: true };
+    ipcMock.listInstalledModels.mockResolvedValue([seeing, broken]);
+    await show();
+    expect(screen.getAllByText("vision")).toHaveLength(1);
+    expect(screen.getByText("The image file couldn't be read, so this model can't see images.")).toBeTruthy();
+    // No repository: nothing to ask Hugging Face.
+    expect(ipcMock.imageFileOffer).not.toHaveBeenCalled();
+  });
+
+  it("[0.0.7] downloads the image file from the row and reads the list again when it is done", async () => {
+    // [P2 review M2] What its repository offers was saved when it was downloaded: nothing is asked.
+    const fromHub: InstalledModel = {
+      ...model(5, "hub.gguf"),
+      repo: "someone/Hub-GGUF",
+      imageFileOffer: { kind: "available", file: "mmproj-F16.gguf", sizeBytes: 800_000_000 },
+    };
+    ipcMock.listInstalledModels.mockResolvedValue([fromHub]);
+    const listener: { progress: ((g: DownloadGroup) => void) | null } = { progress: null };
+    ipcMock.onDownloadProgress.mockImplementation(async (h) => {
+      listener.progress = h;
+      return () => undefined;
+    });
+    await show();
+    await click(screen.getByRole("button", { name: "Download the image file (800 MB)" }));
+    expect(ipcMock.downloadImageFile).toHaveBeenCalledWith("/models/hub.gguf");
+    expect(ipcMock.imageFileOffer).not.toHaveBeenCalled();
+    const reads = ipcMock.listInstalledModels.mock.calls.length;
+    await act(async () => {
+      listener.progress?.({
+        id: "group",
+        repo: "someone/Hub-GGUF",
+        label: "Image file",
+        fileCount: 1,
+        status: "done",
+        bytesDone: 800_000_000,
+        bytesTotal: 800_000_000,
+        error: null,
+        bytesPerSecond: null,
+        unverified: false,
+      });
+    });
+    expect(ipcMock.listInstalledModels.mock.calls.length).toBe(reads + 1);
+    // Not the model loaded now (P2 review m7).
+    expect(screen.getByText("Image file downloaded. It will be used the next time the model loads.")).toBeTruthy();
   });
 
   it("opens the model's settings from its gear", async () => {

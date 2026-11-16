@@ -8,9 +8,10 @@ use serde_json::{Map, Value};
 use tokio_util::sync::CancellationToken;
 
 use super::{
-    Approval, ApprovalRequest, CallDecision, CompactionStage, CompactionSummary, LOOP_STOP_AT,
-    LOOP_WARNING_AT, MAX_INVALID_CALLS_PER_TOOL, MAX_MISTAKES, NO_ANSWER_MESSAGE, SUMMARISING_NOTE,
+    Approval, ApprovalRequest, CallDecision, CompactionStage, CompactionSummary,
+    MAX_INVALID_CALLS_PER_TOOL, MAX_MISTAKES, NO_ANSWER_MESSAGE, SUMMARISING_NOTE,
     SUMMARY_FAILED_NOTE, TurnDeps, TurnEvent, TurnInput, TurnOutcome, TurnStatus, UsageTotals,
+    repeat_limit, repeat_warning_at,
 };
 use crate::client::ProviderKind;
 use crate::context::{
@@ -27,11 +28,11 @@ use crate::history::{
 };
 use crate::parse::{
     Recovered, RecoveryContext, ToolInfo, cut_off_call, recover_tool_calls, repair_arguments,
-    strip_tool_markup,
+    strip_tool_markup, writes_tool_result,
 };
 use crate::prompt::{
-    Preamble, Projection, SystemParts, append_result_note, pinned_for_prompt, project,
-    sanitize_schema, schema_has_raw_control_tokens, system_message,
+    Preamble, Projection, RUN_SUBAGENT, Reach, SystemParts, ToolGuide, append_result_note,
+    pinned_for_prompt, project, sanitize_schema, schema_has_raw_control_tokens, system_message,
 };
 use crate::stream::{
     AccumulatedToolCall, ArgumentsStatus, FinishReason, StreamEvent, Timings, ToolCallAccumulator,
@@ -50,6 +51,12 @@ const MAX_DESCRIPTION_CHARS: usize = 2_000;
 const MAX_SUMMARY_ROUNDS: u32 = 4;
 /// Candidate summary requests counted before a round gives up on finding one that fits.
 const MAX_SUMMARY_FIT_TRIES: usize = 6;
+/// [0.0.7] The app's tool that runs a tool that is on but not in the turn's list.
+const CALL_TOOL: &str = "call_tool";
+/// [0.0.7] The app note for the one retry after a reply that wrote a tool result itself.
+const WROTE_A_RESULT_NOTE: &str = super::WROTE_A_RESULT_NOTE;
+/// [0.0.7] What the user is told when the retry wrote one too.
+const MADE_UP_RESULT_NOTE: &str = super::MADE_UP_RESULT_NOTE;
 
 /// Which summary a request writes ([`Turn::write_summary`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -186,6 +193,8 @@ pub(super) struct Turn<'a> {
     /// Enabled tools left out because their schema has a control token where it cannot
     /// be cleaned.
     withheld_tools: Vec<String>,
+    /// [0.0.7] Those and the kept-back tools with such a schema: the tool list leaves them out.
+    unlisted_tools: Vec<String>,
     tools_on: bool,
     specs: Vec<ToolSpec>,
     exact_counting: bool,
@@ -226,6 +235,9 @@ pub(super) struct Turn<'a> {
     last_max_tokens: u32,
     /// The wrap-up instruction, appended to the last result in the wrap-up request only.
     wrap_note: Option<String>,
+    /// [0.0.7] A note for the next request only: the model wrote a tool result itself
+    /// ([`WROTE_A_RESULT_NOTE`]). Cleared as soon as that request is built.
+    retry_note: Option<&'static str>,
     truncation_noted: bool,
 }
 
@@ -252,18 +264,31 @@ impl<'a> Turn<'a> {
         });
         // A tool whose schema has a control token where it cannot be cleaned is not offered
         // (and so cannot be called); the user is told at the start of the turn.
+        let clean = |tool: &ToolInfo| {
+            !schema_has_raw_control_tokens(&tool.input_schema, deps.sanitizer)
+                && deps
+                    .tools
+                    .llama_schema(&tool.name)
+                    .is_none_or(|s| !schema_has_raw_control_tokens(&s, deps.sanitizer))
+        };
         let (tools, withheld): (Vec<ToolInfo>, Vec<ToolInfo>) = if input.caps.tools {
-            deps.tools.tools().into_iter().partition(|tool| {
-                !schema_has_raw_control_tokens(&tool.input_schema, deps.sanitizer)
-                    && deps
-                        .tools
-                        .llama_schema(&tool.name)
-                        .is_none_or(|s| !schema_has_raw_control_tokens(&s, deps.sanitizer))
-            })
+            deps.tools.tools().into_iter().partition(clean)
         } else {
             (Vec::new(), Vec::new())
         };
-        let withheld_tools = withheld.into_iter().map(|tool| tool.name).collect();
+        let withheld_tools: Vec<String> = withheld.into_iter().map(|tool| tool.name).collect();
+        // [0.0.7] The tool list leaves such a tool out whether or not this turn shows it, so
+        // the system message does not change on the turn it is first shown.
+        let mut unlisted_tools = withheld_tools.clone();
+        if input.caps.tools {
+            unlisted_tools.extend(
+                deps.tools
+                    .kept_back()
+                    .into_iter()
+                    .filter(|tool| !clean(tool))
+                    .map(|tool| tool.name),
+            );
+        }
         let tools_on = !tools.is_empty();
         let exact_counting =
             input.caps.local && deps.client.config().kind == ProviderKind::LlamaServer;
@@ -274,6 +299,7 @@ impl<'a> Turn<'a> {
             cancel,
             tools,
             withheld_tools,
+            unlisted_tools,
             tools_on,
             specs: Vec::new(),
             exact_counting,
@@ -302,6 +328,7 @@ impl<'a> Turn<'a> {
             cut_offs: HashMap::new(),
             last_max_tokens: 0,
             wrap_note: None,
+            retry_note: None,
             truncation_noted: false,
             input,
         };
@@ -456,17 +483,52 @@ impl<'a> Turn<'a> {
                 .unwrap_or_else(|| Preamble::for_this_os(Vec::new()))
         });
         let pinned: &[String] = if with_pinned { &self.input.pinned } else { &[] };
+        let tool_guide = self.tool_guide();
         system_message(
             &SystemParts {
                 chat_prompt: &self.input.system_prompt,
                 pinned,
                 preamble: preamble.as_ref(),
+                tool_guide: tool_guide.as_ref(),
                 skills_index: self.input.skills_index.as_deref(),
                 loaded_skills: &self.input.loaded_skills,
                 summary: self.summary.as_ref().map(|s| s.text.as_str()),
             },
             self.deps.sanitizer,
         )
+    }
+
+    /// [0.0.7] The tool list and guide for the system message: only when tools are on, and
+    /// without the tools that are never offered (`unlisted_tools`). How the model reaches a
+    /// listed tool this turn does not offer is decided here, from the tools the turn offers:
+    /// through `call_tool` only when the turn has it (a small context may have no room for
+    /// it). That only changes when the turn's tools change, so the cached prompt is lost no
+    /// more often than before.
+    fn tool_guide(&self) -> Option<ToolGuide> {
+        let guide = self.input.tool_guide.as_ref().filter(|_| self.tools_on)?;
+        let mut guide = if self.unlisted_tools.is_empty() {
+            guide.clone()
+        } else {
+            guide.without(&self.unlisted_tools)
+        };
+        let offered = |name: &str| self.tool(name).is_some();
+        // A tool this host never runs (a helper's `run_subagent`) is not one the turn left out:
+        // a helper's list then reads as its turn's, and keeps the cached prompt.
+        let refused = |name: &str| self.deps.tools.refusal(name).is_some();
+        guide.reach = if offered(CALL_TOOL) {
+            Reach::CallTool
+        } else if guide.names().all(|name| offered(name) || refused(name)) {
+            Reach::All
+        } else {
+            Reach::Only(
+                guide
+                    .names()
+                    .filter(|name| offered(name))
+                    .map(str::to_owned)
+                    .collect(),
+            )
+        };
+        Some(guide)
     }
 
     fn projection(&self) -> Projection {
@@ -529,10 +591,38 @@ impl<'a> Turn<'a> {
             request.tool_choice = Some(choice);
             request.parallel_tool_calls = Some(false);
         }
-        if self.input.caps.thinking && (thinking_off || !self.input.thinking) {
-            disable_thinking(&mut request, self.deps.client.config().kind);
+        if self.input.caps.thinking {
+            // [0.0.7 P5] Claude's Messages API is told whether to think either way.
+            let off = thinking_off || !self.input.thinking;
+            request.thinking = Some(!off);
+            if off {
+                disable_thinking(&mut request, self.deps.client.config().kind);
+            }
         }
+        self.mark_failed_results(&mut request.messages);
         request
+    }
+
+    /// [0.0.7 P5] Marks the tool results of calls that failed, were refused or did not run,
+    /// for servers that carry that apart from the text (Claude's `is_error`).
+    fn mark_failed_results(&self, messages: &mut [ChatMessage]) {
+        let failed: HashSet<&str> = self
+            .earlier
+            .iter()
+            .chain(self.turn.iter())
+            .flat_map(HistoryMessage::tool_results)
+            .filter(|result| result.status != CallStatus::Ok)
+            .map(|result| result.call_id.as_str())
+            .collect();
+        if failed.is_empty() {
+            return;
+        }
+        for message in messages.iter_mut().filter(|m| m.role == Role::Tool) {
+            message.is_error = message
+                .tool_call_id
+                .as_deref()
+                .is_some_and(|id| failed.contains(id));
+        }
     }
 
     fn request_for_view(
@@ -544,6 +634,9 @@ impl<'a> Turn<'a> {
         let sanitizer = self.deps.sanitizer;
         let mut messages = project(view, &self.system, &self.projection(), sanitizer);
         if let Some(note) = &self.wrap_note {
+            append_result_note(&mut messages, note, sanitizer);
+        }
+        if let Some(note) = self.retry_note {
             append_result_note(&mut messages, note, sanitizer);
         }
         self.build_request(messages, choice, thinking_off)
@@ -1063,13 +1156,18 @@ impl<'a> Turn<'a> {
 
     /// One model call with its recovery: a retry with thinking disabled after an empty reply,
     /// a server parse error or a reply that only thought; a forced compaction and one retry
-    /// after a context overflow.
+    /// after a context overflow; [0.0.7] one retry with a note after a reply that wrote a
+    /// tool result itself.
     async fn request(&mut self, choice: ToolChoice, wrap_up: bool) -> Result<Reply, TurnStatus> {
         let mut thinking_off = false;
         let mut retried = false;
         let mut overflow_retried = false;
+        let mut made_up_retried = false;
         loop {
-            let (request, baseline, sent) = self.prepare(choice, thinking_off).await?;
+            let prepared = self.prepare(choice, thinking_off).await;
+            // A retry note is for the request just built, never a later one.
+            self.retry_note = None;
+            let (request, baseline, sent) = prepared?;
             // The wrap-up reply is shown only once its tool-call markup is stripped.
             match self.stream(&request, !wrap_up).await {
                 Attempt::Cancelled { content, reasoning } => {
@@ -1118,12 +1216,45 @@ impl<'a> Turn<'a> {
                         reason: format!("the server could not parse the model output: {detail}"),
                     });
                 }
+                // [0.0.7 P5] What a reply the company's safety filter stopped wrote so far
+                // must not be used (Anthropic: discard it): it is neither shown nor stored.
+                Attempt::Failed(err @ ProviderError::Refused { .. }) => {
+                    self.emit(TurnEvent::AttemptDiscarded {
+                        reason: "the company's safety filter stopped the reply".to_owned(),
+                    });
+                    return Err(provider_failure(&err));
+                }
                 Attempt::Failed(err) => return Err(provider_failure(&err)),
                 Attempt::Done(reply) => {
                     if let Some(usage) = reply.usage {
                         self.observe(baseline, usage);
                     }
                     let no_content = reply.content.trim().is_empty() && reply.calls.is_empty();
+                    // [0.0.7] A reply that wrote a tool result itself instead of calling the
+                    // tool has made the result up: it is discarded and the step asked once
+                    // more, with a note. It counts as a mistake, so it cannot go on and on;
+                    // a second one is kept, and the user is told the result is made up.
+                    let made_up = !no_content
+                        && !wrap_up
+                        && self.tools_on
+                        && reply.calls.is_empty()
+                        && writes_tool_result(&reply.content, &self.returned_results());
+                    if made_up && !made_up_retried && self.mistakes < MAX_MISTAKES {
+                        made_up_retried = true;
+                        self.mistakes += 1;
+                        self.retry_note = Some(WROTE_A_RESULT_NOTE);
+                        self.emit(TurnEvent::AttemptDiscarded {
+                            reason: "the model wrote a tool result itself instead of calling a \
+                                     tool"
+                                .to_owned(),
+                        });
+                        continue;
+                    }
+                    if made_up {
+                        self.emit(TurnEvent::AppNote {
+                            text: MADE_UP_RESULT_NOTE.to_owned(),
+                        });
+                    }
                     if !no_content {
                         return Ok(reply);
                     }
@@ -1340,6 +1471,15 @@ impl<'a> Turn<'a> {
         self.tools.iter().find(|tool| tool.name == name)
     }
 
+    /// [0.0.7] The text of every tool result the app returned in this turn: a result block the
+    /// model writes that only quotes one of them is not a made-up result.
+    fn returned_results(&self) -> Vec<&str> {
+        self.turn
+            .iter()
+            .flat_map(|message| message.tool_results().map(|result| result.text.as_str()))
+            .collect()
+    }
+
     /// Checks a native call: known tool, readable arguments, repair, validation.
     fn check_native(&self, call: AccumulatedToolCall) -> Pending {
         let raw = match &call.status {
@@ -1438,6 +1578,34 @@ impl<'a> Turn<'a> {
     }
 
     fn no_such_tool(&self, name: &str) -> String {
+        // [0.0.7] A tool that is on in the chat but not in this turn's list: the tool list in
+        // the system message names it, so the model is told how to run it, or that it cannot
+        // this turn and why. A tool this host never runs is refused plainly.
+        if let Some(refusal) = self.deps.tools.refusal(name) {
+            return refusal;
+        }
+        let listed = self.tool_guide().is_some_and(|guide| guide.lists(name));
+        if listed && name == RUN_SUBAGENT {
+            return format!(
+                "{name} is on in this chat, but it does not fit in this model's context this \
+                 turn, and {CALL_TOOL} cannot run it, so it was not run. Do the task yourself \
+                 with the tools in your list of callable tools, or answer with what you have."
+            );
+        }
+        if listed && self.tool(CALL_TOOL).is_some() {
+            return format!(
+                "{name} is on in this chat but not in your list of callable tools this turn, so \
+                 it was not run. Run it with {CALL_TOOL}, giving \"name\": \"{name}\" and its \
+                 arguments in \"arguments\"."
+            );
+        }
+        if listed {
+            return format!(
+                "{name} is on in this chat, but it does not fit in this model's context this \
+                 turn, so it was not run. Use the tools in your list of callable tools, or \
+                 answer with what you have."
+            );
+        }
         let names: Vec<&str> = self.tools.iter().map(|tool| tool.name.as_str()).collect();
         format!("No such tool: {name}; available: {}.", names.join(", "))
     }
@@ -1627,14 +1795,16 @@ impl<'a> Turn<'a> {
             return processed;
         }
 
-        // Loop detection.
+        // Loop detection, at the user's repeat limit (0.0.7), held to its range whatever was
+        // stored.
+        let stop_at = repeat_limit(self.input.repeat_limit);
         if self.last_call.as_ref() == Some(&key) {
             self.repeats += 1;
         } else {
             self.last_call = Some(key.clone());
             self.repeats = 1;
         }
-        if self.repeats >= LOOP_STOP_AT {
+        if self.repeats >= stop_at {
             return Processed::synthetic(
                 record,
                 CallStatus::NotRun,
@@ -1646,13 +1816,16 @@ impl<'a> Turn<'a> {
                 Flow::LoopDetected,
             );
         }
-        let loop_note = (self.repeats >= LOOP_WARNING_AT).then(|| {
-            format!(
-                "You have made this same call with the same arguments {} times in a row. Do \
-                 something different, or answer with what you have.",
-                self.repeats
-            )
-        });
+        let loop_note = repeat_warning_at(stop_at)
+            .filter(|warn_at| self.repeats >= *warn_at)
+            .map(|_| {
+                format!(
+                    "You have made this same call with the same arguments {} times in a row; \
+                     {stop_at} times ends the turn. Do something different, or answer with what \
+                     you have.",
+                    self.repeats
+                )
+            });
 
         // Describe.
         let described = tokio::select! {
@@ -1922,6 +2095,7 @@ fn provider_failure(err: &ProviderError) -> TurnStatus {
         ProviderError::Decode(_) => "decode",
         ProviderError::Cancelled => "cancelled",
         ProviderError::InvalidRequest(_) => "invalid_request",
+        ProviderError::Refused { .. } => "refused",
     };
     failed(code, err.user_message())
 }
@@ -1936,8 +2110,15 @@ fn disable_thinking(request: &mut ChatRequest, kind: ProviderKind) {
         ProviderKind::Ollama => {
             request.set_extra("reasoning_effort", Value::String("none".to_owned()));
         }
-        // Elsewhere a plain retry.
-        ProviderKind::LmStudio | ProviderKind::Vllm | ProviderKind::Generic => {}
+        // [0.0.7 P5] Claude: `request.thinking` (set by `build_request`) becomes the Messages
+        // API's `thinking` parameter. Elsewhere a plain retry.
+        ProviderKind::Anthropic
+        | ProviderKind::LmStudio
+        | ProviderKind::Vllm
+        | ProviderKind::Generic
+        | ProviderKind::OpenAi
+        | ProviderKind::OpenRouter
+        | ProviderKind::Abliteration => {}
     }
 }
 

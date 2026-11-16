@@ -233,6 +233,26 @@ pub enum Pressable {
     Button(MouseButton),
 }
 
+/// A window to give the keyboard focus to: the platform's window id (the `HWND` value on
+/// Windows, the window number on macOS) and the process that owns it, both checked again
+/// before the window is used.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WindowRef {
+    pub window_id: u64,
+    pub pid: u32,
+}
+
+impl WindowRef {
+    /// The window of a target, when the target names the process that owns it.
+    pub fn of(target: &Target) -> Option<Self> {
+        target.pids.first().map(|&pid| Self {
+            window_id: target.window_id,
+            pid,
+        })
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, thiserror::Error)]
 pub enum InputError {
     /// Accessibility is not granted (macOS) or input cannot be simulated.
@@ -267,6 +287,51 @@ pub trait Injector: Send + Sync {
     /// Key names on cards and shortcut rules follow macOS (Cmd, Option).
     fn mac_keys(&self) -> bool {
         cfg!(target_os = "macos")
+    }
+    /// The window a pointer event at `p` would reach once this app's own windows are out
+    /// of the way (its main window minimised; ARCHITECTURE.md 9.3, "Stepping aside"): the
+    /// first window under the point that is not `me`'s. `None` when the platform cannot
+    /// tell; the point then counts as this app's.
+    fn target_at_behind(
+        &self,
+        p: GlobalPoint,
+        me: &SelfProcess,
+    ) -> Result<Option<Target>, InputError> {
+        let _ = (p, me);
+        Ok(None)
+    }
+    /// The window keyboard input would reach once this app's windows are out of the way:
+    /// the frontmost ordinary window of another application. `None` when the platform
+    /// cannot tell.
+    fn keyboard_target_behind(&self, me: &SelfProcess) -> Result<Option<Target>, InputError> {
+        let _ = me;
+        Ok(None)
+    }
+    /// Gives `window` the keyboard focus, bringing it (on macOS, its application, whose key
+    /// window comes forward) to the front, before keyboard input the user approved for that
+    /// window's application, so the focus goes back to where the input was planned. Only
+    /// while `me` still has the keyboard and `gate` is open, both checked in the same step
+    /// that moves the focus: the keyboard is never taken from another application, nor
+    /// from this app after Stop. Returns whether the focus was moved; the guard checks the
+    /// focus before every event all the same.
+    fn bring_to_front(
+        &self,
+        window: &WindowRef,
+        me: &SelfProcess,
+        gate: &Gate,
+    ) -> Result<bool, InputError> {
+        let _ = (window, me, gate);
+        Ok(false)
+    }
+    /// How long ago the last keyboard or mouse input reached the system, this app's own
+    /// injected input included. `None` when the platform cannot tell.
+    fn time_since_input(&self) -> Option<Duration> {
+        None
+    }
+    /// Where the pointer is now, in the coordinates of [`InputEvent::Move`]. `None` when the
+    /// platform cannot tell.
+    fn cursor(&self) -> Option<GlobalPoint> {
+        None
     }
 }
 

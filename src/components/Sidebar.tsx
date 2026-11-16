@@ -1,7 +1,7 @@
 import { Fragment, useEffect, useRef, useState } from "react";
-import { Boxes, Plus, Search, Settings, Trash2, Pencil } from "lucide-react";
+import { Boxes, Hand, Plus, Search, Settings, Trash2, Pencil } from "lucide-react";
 import { AlertDialog } from "radix-ui";
-import { useApp } from "../store/app";
+import { turnChatId, useApp } from "../store/app";
 import { APP_NAME } from "../lib/app";
 import { dayGroup } from "../lib/format";
 import { backendWords } from "../lib/words";
@@ -81,6 +81,10 @@ export function Sidebar(props: {
     renameChat,
     deleteChat,
   } = useApp();
+  // [0.0.7 P6] Which chat's reply runs, and which chats wait for an approval: their cards are
+  // drawn in their own chat only, so the list marks them.
+  const turnChat = useApp(turnChatId);
+  const waiting = useApp((s) => s.approvals);
   const [editing, setEditing] = useState<number | null>(null);
   const [draft, setDraft] = useState("");
   const [confirmDelete, setConfirmDelete] = useState<number | null>(null);
@@ -216,8 +220,30 @@ export function Sidebar(props: {
                           c.id === activeChatId ? "page" : undefined
                         }
                       >
-                        <span className="block truncate text-sm">
-                          {c.title}
+                        <span className="flex items-center gap-1.5">
+                          <span className="min-w-0 flex-1 truncate text-sm">
+                            {c.title}
+                          </span>
+                          {waiting.some((a) => a.chatId === c.id) ? (
+                            <span
+                              data-chat-mark="waiting"
+                              title="Waiting for your approval"
+                              className="shrink-0 text-warning"
+                            >
+                              <Hand size={12} aria-hidden />
+                              <span className="sr-only">Waiting for your approval</span>
+                            </span>
+                          ) : (
+                            turnChat === c.id && (
+                              <span
+                                data-chat-mark="running"
+                                title="A reply is running"
+                                className="pulse h-1.5 w-1.5 shrink-0 rounded-full bg-accent"
+                              >
+                                <span className="sr-only">A reply is running</span>
+                              </span>
+                            )
+                          )}
                         </span>
                         {c.snippet && (
                           <span className="block truncate text-xs text-fg-muted">

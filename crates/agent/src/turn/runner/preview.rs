@@ -89,6 +89,7 @@ impl Turn<'_> {
             chat_prompt: "",
             pinned: &[],
             preamble: None,
+            tool_guide: None,
             skills_index: None,
             loaded_skills: &[],
             summary: None,
@@ -99,6 +100,9 @@ impl Turn<'_> {
                 .clone()
                 .unwrap_or_else(|| Preamble::for_this_os(Vec::new()))
         });
+        // [0.0.7] The tool list and guide follow the agent instructions and are part of the
+        // same section of the Context tab ("Tool instructions").
+        let tool_guide = self.tool_guide();
         let mut parts: Vec<(SystemBlockKind, SystemParts)> = vec![
             (
                 SystemBlockKind::Prompt,
@@ -118,6 +122,7 @@ impl Turn<'_> {
                 SystemBlockKind::Preamble,
                 SystemParts {
                     preamble: preamble.as_ref(),
+                    tool_guide: tool_guide.as_ref(),
                     ..empty
                 },
             ),

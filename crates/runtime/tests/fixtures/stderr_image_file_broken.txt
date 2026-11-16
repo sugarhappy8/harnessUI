@@ -1,0 +1,14 @@
+0.00.011.686 I srv  llama_server: initializing ...
+0.00.011.718 I cmn  common_param: common_params_print_info: verbosity = 3 (adjust with the `-lv N` CLI arg)
+0.00.011.850 I srv  init_listene: The UI is disabled
+0.00.011.864 I srv  init_listene: Use --ui/--no-ui (or deprecated --webui/--no-webui) to enable/disable
+0.00.011.954 W srv  server_setup: security: no API key is set and CORS allows all origins (see https://github.com/ggml-org/llama.cpp/pull/25655)
+0.00.013.567 I srv    load_model: loading model '/home/u/models/Qwen3-0.6B-Q8_0.gguf'
+0.00.015.833 E mtmd_get_memory_usage: error: Failed to load CLIP model from /home/u/models/someone/Sample-GGUF/Sample.mmproj-f16.gguf
+0.00.169.251 W load: control-looking token: 128247 '</s>' was not control-type; this is probably a bug in the model. its type will be overridden
+0.00.749.433 I cmn          init: llama threadpool init, n_threads = 4
+0.00.800.213 E clip_init: failed to load model '/home/u/models/someone/Sample-GGUF/Sample.mmproj-f16.gguf': operator(): unable to find tensor v.token_embd.img_break
+0.00.800.357 E mtmd_init_from_file: error: Failed to load CLIP model from /home/u/models/someone/Sample-GGUF/Sample.mmproj-f16.gguf
+0.00.800.371 E srv    load_model: failed to load multimodal model, '/home/u/models/someone/Sample-GGUF/Sample.mmproj-f16.gguf'
+0.00.800.375 I srv    operator(): operator(): cleaning up before exit...
+0.00.801.094 E srv  server_run_i: exiting due to model loading error

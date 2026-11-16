@@ -1,0 +1,429 @@
+# 0.0.7 status
+
+Keep this current: a session can stop in the middle, and the next one starts from this file
+and `README.md`.
+
+## 2026-11-16
+- Branch `claude/0.0.6` restarted from `main` (d3a37c5, the 0.0.6 merge). Plan in `README.md`.
+- Packages, built in parallel, each reviewed independently before it is committed:
+  - P1 memory estimates (item 1a)
+  - P2 image files (items 1b, 1c)
+  - P3 computer use (item 1d)
+  - P4 tools in the system message, call and shell guide, repeat limit (items 2, 3)
+  - P5 cloud endpoints (item 1e)
+  - P6 bug hunt (item 4)
+- Baseline CI on the plan commit (run 43811806801) failed only the macOS
+  `progress_keeps_a_call_alive_and_its_text_stays_out` (mcp-host `managed_e2e`): ten progress
+  notes 300 ms apart against a 1 s limit and a 4 s cap came more than a second late on a busy
+  runner. Fixed in f65f107 (five notes 600 ms apart against a 2 s limit; same property).
+- CI on f65f107 (run 43815674194, code = 0.0.6 + that test fix): Linux, Windows (tests and
+  installer) and the Ghidra digest passed; the macOS `managed_e2e` passed too. macOS failed
+  `real_llama_server_agent_turn` (`crates/agent/tests/llama_agent.rs`): with the server's
+  default sampling the 0.6B model wrote a made-up `<tool_output>` block instead of calling
+  read_file. Fixed in aee9be3 (greedy decoding, fixed seed; passes locally with the real
+  model; to be confirmed by the next full CI run). The Intel Mac smoke test failed only
+  because the macOS job made no disk image. The made-up tool result was passed to P4 as a
+  real-model behaviour to handle.
+- Owner, after trying computer use: "the model still can't use my computer too well, they
+  don't know what tools they have". Cause found: adaptive tool selection shows the Computer
+  group only for words like "screen", "desktop", "mouse"; "open Notepad", "use my pc",
+  "take a screenshot" bring no computer tools (or the browser's). Added to P4.
+- P6 hunt finished. Findings (all fixed in P6a or P6b):
+  - P6a (started; chat and frontend): the step-limit notice and its Continue button follow
+    you into another chat; edit-and-resend drops attachments; a pending approval in another
+    chat is invisible; stale "running" tool cards; `send_message` saves before its busy check;
+    event-listener cleanup race (ToolsPanel can save the previous chat's tools).
+  - P6b (after P2, which edits the same files): resume re-downloads finished files from zero;
+    pausing after the first file leaves the group stuck as "downloading"; two groups for one
+    file corrupt each other; cancel leaves finished files on disk; a failure after the last
+    file leaves the group "downloading" forever; a downloaded model whose files are gone or
+    outside the models folder can't be removed from Installed; `load()` stops the old model
+    before checking the backend can run; deleting with files keeps the image file.
+    Added from P6a: an approval card pending when the window reloads is lost (keep the card
+    in `PendingCard` in `turns.rs` and read it back at startup).
+- P3 (computer use) built: harnessUI minimises itself before approved input and comes back
+  for cards, turn end and Stop; keyboard handed back to the planned window; 27 new tests.
+  Under independent review.
+- P6a (chat/frontend fixes) built: all six bugs fixed with tests (vitest 804, app 827).
+  Under independent review. To re-check in the integration e2e run: "stop and regenerate"
+  and "regenerate after error" failed in P6a's real-app run under 100% CPU (text present in
+  the rows, `innerText` caught up ~1.5 s later because of `content-visibility: auto`).
+- P6a review: nothing critical or major; five minor findings (ToolsPanel could still save the
+  previous chat's tools in a narrow window; the Task tab ignored a reply known only after a
+  reload; the edit box could send while a reply ran and blank it; a StrictMode late answer
+  could leave a reply shown as running; copied attachments skipped the per-message limits)
+  plus nits. All being fixed (P6a-r1).
+- P2 (image files), P1 (memory estimates, plus `--ctx-checkpoints 8`), P5 (cloud endpoints)
+  built. P2 and P5 under independent review; P1 finishing the checkpoint change.
+- Disk filled up once (139 MB free): a reviewer had built its own 5.7 GB target. Deleted;
+  agents told to build only in the shared target.
+
+- P3 review: no critical issue (the guard still checks every event against the real hit
+  test and foreground window). One major: the app now raises its own window, so an approval
+  card could already be armed when it appears (its 700 ms misclick delay ran while hidden).
+  Minor: a Stop racing the minimise could leave the window minimised; the second keyboard
+  hand-back ran after Stop; the window took the keyboard at turn end; under Allow all a
+  keyboard action could take the keyboard while the user typed in harnessUI; it minimised
+  even when not in the way; the state machine keyed on the chat, not the turn; hardening
+  (cloaked windows, ownership check on the main thread). All being fixed by P3 (round 1).
+- P4 built: `<tool_list>` + `<tool_call_guide>` in the system message (stable across turns,
+  ≤5 % of context / 2,400 tokens, steps down to shorter forms), computer keywords widened and
+  the whole computer group shown together, made-up `<tool_output>` replies retried once with
+  a note, hints after failed PowerShell/zsh commands, wrong-call messages list what a tool
+  takes, `sameCallLimit` setting (2–100, default 5) in Settings → General. Real model
+  (Qwen3-0.6B, greedy) still calls read_file with the list and guide. Under independent
+  review. Evals/benchmarks don't get the list (separate turn input) — note for later.
+- P5 review: no critical issue; 3 major: (M1) a one-character address typo (`http:/host`)
+  made the key check and the Cloud mark read a different host than the client (key over
+  plain http, no Cloud mark); (M2) Automatic planned 1,000,000 tokens for Claude models
+  (decided: Automatic = min(reported, company default) = 200,000 for Claude, 100,000 for
+  Haiku 5.5; larger only by explicit choice); (M3) a saved key followed an edited endpoint to
+  a new host. 7 minor (key left in mid-stream error text; refused partial reply kept;
+  "local network" by name not address; thinking off not really off on some Claude models;
+  history edits break replayed thinking; Claude's 10 MB image limit; Responses-only OpenAI
+  models listed) plus nits. All being fixed by P5 (round 1).
+- P2 review: no critical; 2 major + 11 minor recorded in `review-p2-findings.md` (the
+  automatic Hugging Face listing becomes user-triggered). To fix after P6b; m5 given to P6b.
+- P4 review: nothing critical; one major: at a 4,096-token context the list pointed models
+  to find_tools/call_tool that the turn didn't offer, and its size pushed edit_file out of
+  every turn. Minor: new computer keywords matched coding requests ("chrome extension code",
+  "open settings.json", "my laptop"); made-up-result detection fired on prose mentions; two
+  PowerShell hints misfired (`&` messages; cmdlet echoed in the output); a quadratic scan on
+  big outputs; the evals harness ran without the list. Plus nits. All being fixed by P4
+  (round 1).
+- P1 finished with `--ctx-checkpoints 8` (real server: at most 8 copies kept, memory grew
+  74 MB vs 275 MB with the default 32 on Gemma 3 270M). Gemma 4 12B at 65,536: 1,504 MiB on
+  the card, 2.5 GiB of saved copies in computer memory (10 GiB at the default 32). Under
+  independent review.
+- P3 round 1 done: all nine review findings fixed (cards re-armed when the window is shown;
+  three ways back: Stop focuses, a card comes to the front without the keyboard, turn end
+  restores without the keyboard; steps aside only when in the way; under a grant only right
+  after a card answer or 1.5 s without input; state keyed by turn; ownership checks on the
+  main thread). computer 146, app 849, vitest 832 pass. Independent verification running.
+- P5 round 1 done: all 3 major, 7 minor and the nits fixed (one shared address parser; cloud
+  Automatic = min(reported, company size): Claude 200K, Haiku 5.5 100K, OpenAI/OpenRouter
+  128K, abliteration.ai 32,768; keys never kept across a host change; stream errors scrubbed;
+  only localhost/private IP literals count as local — a `.local` name with a key now needs
+  https; effort low where thinking can't be switched off; earlier thinking replayed when
+  unchanged; 1-hour cache on system/tools; big pictures become a note for Claude).
+  agent 229 lib / 19 cloud / 84 turn_loop, vitest 832. Independent verification running.
+- P6a round 1 done: all five review findings and the nits fixed test-first (per-chat Tools
+  panel; Task tab follows a reply known only after a reload; edit Send off while busy and a
+  refused send no longer blanks the running reply; StrictMode-safe follower; copied
+  attachments can't be combined with new ones; the turn slot is taken first so Stop right
+  after sending works). app 849, vitest 832, clippy clean. Its verification is folded into
+  the whole-release review (all findings were minor).
+- P6b done: all nine bugs fixed test-first (resume keeps finished files and verifies instead
+  of refetching; paused groups show as paused and don't auto-resume; one atomic duplicate
+  check in `DownloadManager::start`, incl. the P2 review's m5; Cancel deletes finished files
+  no installed model uses; a failed last step shows and retries alone; Installed rows can
+  always be removed; `load()` picks the backend before stopping anything; Delete takes the
+  image file too unless shared; approval cards survive a window reload via
+  `pending_approvals`). app 849, models 137, vitest 832. NOTE: WIP commit 933c56a briefly
+  contains old-behaviour copies of downloads.rs/hub.rs/runtime_manager.rs/turns.rs (P6b
+  showing tests fail first); later commits have the real code. Under independent review
+  (deletion safety first).
+- P2 round 1 started (findings in `review-p2-findings.md`; Hugging Face listing becomes
+  user-triggered).
+- P4 round 1 done: all 10 findings fixed (the list says how tools are reached this turn from
+  the turn's own tools; `roster::fitted()` keeps the core file tools in at 4k; computer
+  keywords as phrases with bare words weak only; result-tag detection only for real
+  blocks; exact PowerShell texts; bounded scan; evals send the list; nits). agent 229,
+  tools 220, app 850, vitest 832; real model still calls read_file. Verification running.
+- P1 review: the port is exact against the real binary for 8 more architectures. Two major:
+  (M1) the loaded model's saved copies were counted twice when planning the next load (a
+  Reload after a long chat could drop Automatic to 4,096); (M2) a fixed 8 copies made
+  long-window models (OLMo 3 7B: 12 GiB of copies) "too large" at every size. Decided: the
+  copy count per load comes from a memory budget (1–8), copies never turn a verdict red or
+  drop Automatic to the floor. Plus 7 minor (hybrid models' copies, mistral4 MLA, wording,
+  Automatic vs marks, unreadable system memory). Being fixed by P1 (round 1).
+- P7 (website capture) built: `browser_capture_site` (rendered page with scripts removed +
+  CSP, style sheets, assets, animations.json, screenshots, report.md), a site+folder grant,
+  every capture request through the network checks; copy of a local test page matches the
+  original at 99.94 %, gsap.com 99.16 %. Under independent review. Still to wire: its short
+  method into the call guide (P4's guide.rs), and new built-in tools' default state for
+  users who changed their tool choices.
+- Disk: pruned 1,693 old test-build copies under target/debug/build (older than 2 h, newest
+  kept per crate): 3.9 GB → 14 GB free.
+- P3 verification: all nine round-1 findings fixed, no safety rule weakened. Seven residual
+  problems found (the Allow all / Full access confirms not re-armed when the window comes
+  back; a window event while still minimised counted as "brought back"; the card re-arm
+  reacting a little after the window shows; Stop racing turn end could restore without the
+  keyboard; the ±100 ms own-input window; docs; Windows quiet restores could still activate
+  the window). All being fixed by P3 (round 2), plus nine owner-checklist items.
+- P5 verification: all original findings fixed. New major from the m5 fix: the store of
+  Claude replies to send back was shared by every chat on an endpoint and keyed by the
+  reply's text, so a "Done." in one chat could carry another chat's thinking. Minor: some
+  this-computer addresses (`0.0.0.0`, `[::]`, `localhost.`) still went through the system
+  proxy; the host-change guard trusted a failing keychain; early turns of long chats
+  evicted; more than 20 pictures in one request (stricter size rule) not handled. Nits:
+  scrubbing too eager, one refusal cleared every chat, `drop_block` always on, picture size
+  read from 64 KiB. All being fixed by P5 (round 2).
+- P6b review: start check, start decisions, status, Delete, `load()` and
+  `pending_approvals` sound. One critical: Cancel deleted "finished" files the download
+  never wrote (a file already in place and only checked, or reached through a linked
+  folder). One major: Resume could add an unchecked same-size file after a failed fetch.
+  Minor: Cancel didn't wait for the task; an interrupted Cancel blocked that download for
+  good; resume/cancel without the start lock; Delete could remove an image file the app
+  didn't download; no progress while a file is checked in place; replies stopped before the
+  backend was refused. All being fixed by P6b (round 1); Cancel now deletes only files the
+  download itself wrote, inside the models folder.
+- P4 verification: 7 of 10 fixed; the computer phrases and made-up-result detection only
+  partly. New: helpers no longer shared the main turn's cached prompt (the helper's list
+  left out `run_subagent`); the computer phrases still matched coding requests ("the project
+  folder is on my desktop", "open excel files in python") and missed "open Google Chrome";
+  `fitted()` reserved more room than the sent form needs; mixed instructions for
+  `run_subagent` at 6–8k. All being fixed by P4 (round 2), which also wires P7's capture
+  method into the call guide.
+- P7 review (real captures of hostile local pages): paths and writes, size caps, the
+  address checks for ordinary requests, the text the model reads, the grant and keywords
+  sound. One critical: a hostile page could make the saved copy run script and call out
+  when opened (elements in a foreign namespace slipped past the in-page clean-up; a page
+  that replaced its root element left the no-script policy without effect; the picture
+  block could land before that policy). Three major: saved SVG pictures could run script
+  when opened directly; WebSocket traffic during a capture is not checked; `file://`
+  addresses kept in the copy (an SMB request on Windows). Minor: new tool off for anyone
+  who ever changed tools; no test with a hostile page. Decided: the copy is re-read in Rust
+  with a real HTML parser and cleaned from that tree (the tree a browser builds from the
+  file), SVGs rebuilt from a real XML parser, WebSocket blocked during a capture, and a new
+  built-in tool follows its group when the whole group is on. All being fixed by P7
+  (round 1).
+- P3 round 2 done: all seven fixed test-first and mutation-checked (one shared click-delay
+  hook for cards and the Allow all / Full access confirms; events while minimised ignored;
+  the re-arm signal sent before the window is restored; Stop pending gives the keyboard
+  whichever restore runs first; own-input window narrowed to 50 ms before / 25 ms after,
+  plus a pointer-position check; Windows quiet restores with `SW_SHOWNOACTIVATE`; docs).
+  computer 152 pass, clippy clean on Linux/Windows/macOS targets; app and vitest failures
+  only in other packages' files being edited. Its verification is folded into the
+  whole-release review.
+- P5 round 2 done: one store of Claude's thinking per chat (32 chats, least recently used
+  dropped whole), each reply keyed by everything sent before it plus what it showed;
+  this-computer addresses get a loopback client (no proxy); keychain failures can't let a
+  key follow a moved endpoint; many-picture rule (over 20: none above 3,000 px; at most 100
+  or 600); scrubbing only of long key pieces; `drop_block` only to recover. agent all pass
+  (lib 237, cloud 21, turn_loop 88), app providers/chat 49, clippy clean. A short
+  independent verification of round 2 is running.
+- Disk: 3.9 GB free at 10:26 UTC; removed build copies of the project's own crates idle
+  for an hour and 14 old test binaries: 6.4 GB free.
+- P6b round 1 done: Cancel deletes only files the download itself wrote (recorded per
+  group), inside the models folder, unused by installed models; a failed file is checked
+  again on Resume; Cancel waits for the task; half-finished cancels finished at start-up;
+  resume/cancel take the start lock; Delete removes only an image file the app downloaded;
+  "checking the file…" while a file is checked; the backend checked before replies are
+  stopped. models 145, app 875 (1 failure from P1's new field), vitest 844, clippy clean.
+  Verification of round 1 (deletion safety first) running.
+- P4 round 2 done: helpers share the turn's list and prompt cache; computer phrases need a
+  clear desktop request or a machine word ("my pc", "my screen"); "open Google Chrome" is
+  no longer a web search; `fitted()` counts exactly what is sent; the made-up-result check
+  only takes a block of its own; P7's capture method is in the call guide when that tool
+  is on. agent all pass, tools 220, real model still calls read_file.
+- Started the cross-package review of P3, P4 and P6a (also P3's and P4's last round and P6a's
+  only verification) while P1, P2 and P7 finish their rounds.
+- Disk: 3.4 GB free again at 10:40 UTC; removed idle build copies of the project's crates:
+  4.8 GB free.
+- P5 round-2 verification: the major is fixed (a fake API that runs Anthropic's documented
+  prefix check saw no thinking cross between chats in 35 requests over 12 scenarios,
+  including regenerate, edits, folds, model switches, helpers and evals); proxy, keychain,
+  pictures, refusals, recovery and picture size fixed; round 1 still holds. Left: a key
+  under 8 characters wasn't scrubbed; `localhost.` can go to DNS; whitespace-only system
+  prompt changes; the per-chat limit comment; helpers share the chat's store; the
+  over-20-pictures rule dropped two pictures it didn't need to. Small round 3 running.
+- P1 round 1 done: a Reload after a long chat no longer counts the running model's saved
+  copies twice (only what the computer's free memory fell by since the model became ready
+  counts as freed); the number of saved copies is chosen per load from memory (1–8, half
+  the computer's memory left after the 2 GB reserve and the model's own part there) and
+  passed as `--ctx-checkpoints N`; copies never turn a mark red or shrink Automatic; the
+  running state of hybrid models (Qwen 3.5, Qwen3-Next, Granite 4.0-H, RWKV, LFM2, …)
+  counted as llama.cpp does; mistral4 keys-only; Automatic follows the placement's marks;
+  unknown computer memory stays unknown; the bar shows the copies as their own item.
+  Measured: with 1 copy, editing the last message re-reads the whole chat (9,618 tokens
+  vs 787 with 8); kept the minimum at 1 so a computer short of memory is never pushed
+  further. models 145, runtime 208+contract, app 876, vitest 844. Verification running.
+- P6b round-1 verification: the critical is fixed — in every attack (files found in place,
+  failed rows' old files, linked folders, a changed or missing folder, missing or corrupt
+  records, a crash before recording, shards, links to installed files) Cancel deleted only
+  files the group itself wrote. New major with a rare trigger: after a Cancel that timed
+  out, the leftover cancelled row let a second download of the same file start, and the old
+  group's clean-up could then delete the new one's partial file. Minor: Delete could leave
+  a downloaded image file behind; the end of a timed-out cancel never showed; two windows
+  where a cut-short cancel wasn't finished at start-up. Nits: lock handling, a drop guard,
+  wording, long Windows paths. Round 2 running.
+- P2 round 1 done (all of `review-p2-findings.md` except m5, which P6b fixed): device
+  errors and backends that won't start are no longer taken for a broken image file;
+  *Try it again* and *Download the image file again*; no automatic Hugging Face requests
+  (a download saves the repository's image files; older downloads get *Look for an image
+  file*; e2e m8 offline passes); log matching hardened against names from downloaded files;
+  image files of other models never used; writing an `mmproj` file always asks; Windows
+  device names rejected; running out of memory while the image file loads keeps the image
+  file through the normal memory retries and drops it only as the last step. runtime
+  (real server) all pass, app 877, vitest 844. Not done: Browse's own model + image
+  download still takes the repository's first image file. Verification running.
+- Cross-package review of P3, P4, P6a: nothing critical, no safety rule weakened; P3's
+  last round and P6a verified (Stop, cards across reloads, per-chat Stop, attachments,
+  listeners). Real-model test passes. One major in P4: a made-up result written in the
+  app's own result format (`</tool_output id="…">`) wasn't caught. Minor: a helper asking
+  for a coding app through `call_tool` was told the user could switch it on; the computer
+  phrases still matched some coding requests ("write code to take a screenshot in
+  selenium") and missed some desktop ones ("close notepad"); a checklist step that can't be
+  done. Nits: a race that could leave the window minimised after a turn; *Continue* and
+  *Resume* without a click delay. Small last rounds for P4 and P3 running.
+- P3 round 3 done: "Minimise this window" pressed as a turn ends can't keep the window
+  down; *Continue* and the Task tab's *Resume* ignore clicks for a moment when the window
+  comes back; checklist items fixed. computer 153, vitest 847. P3 finished.
+- P6b round 2 done: cancelled rows count as busy (the same download resumes the old group,
+  anything else is refused); a "cancelling" marker saved before Cancel waits, finished at
+  start-up, with "cancelling…" on the row; Cancel releases the start lock while it waits;
+  clean-up deletes only its own partial files; Delete removes the image file its cancelled
+  download wrote and plans from the row as it is after the wait; a drop guard ends a task
+  that panics; Delete question wording; long Windows paths. app 888, models 145, vitest
+  121 (models), clippy clean. Its verification goes into the final review.
+- P4 round 3 done: a made-up result in the app's own format (and the other missed shapes)
+  is caught, prose still isn't, and a quote with parts left out counts as a quote; a
+  helper asking for a coding app through `call_tool` gets the plain refusal; code words
+  ("script", "python", "selenium", …) undo a computer phrase, "pc's" no longer matches,
+  and the missed desktop wordings ("close notepad", "take a screen shot") match. agent 241,
+  tools 220, app (tool selection, helpers, turns) 116, clippy clean. P4 finished.
+- P5 round 3 done: whole copies of any key of 4 characters or more scrubbed; `localhost.`
+  reached as `localhost`; the system prompt hashed exactly as sent; a chat's store starts
+  over at its limit; each helper has its own conversation, dropped when it ends; the
+  picture limits count only pictures really sent (oldest large ones dropped only until 20
+  are left); JPEG size read from segment heads only. agent all pass (lib 241, cloud 24),
+  app providers/chat/subagent 71, clippy clean. P5 finished.
+- 11:50 UTC: P3, P4, P5, P6a, P6b finished. Running: P7 round 1 (copy inertness, SVGs,
+  WebSocket, file: addresses, new-tool default), P1 and P2 verifications. Prepared for
+  integration (scratchpad): a script that merges the CHANGELOG package headings into
+  Added/Changed/Fixed/Known limits and the ARCHITECTURE "0.0.7." paragraph. Local CI
+  checks so far: docs test, spawn check, notices check pass; `cargo fmt --check` differs
+  only in P7's file being edited.
+- P7 round 1 done: the copy is re-read in Rust with html5ever as a browser would and
+  cleaned as a tree with allow-lists (resources only as saved files or `data:image/`;
+  links only #, http(s), mailto, tel), written as a real `<html><head>` with the no-script
+  policy first, then checked again (else the capture fails and its folder is removed);
+  saved SVGs rebuilt from a namespace-aware XML parse (any DOCTYPE/ENTITY → left out);
+  WebSockets blocked at the source with a `connect-src` policy added to the tab's
+  documents and workers, and a WebSocket/WebTransport/direct socket that starts anyway
+  stops the capture with nothing saved; WebRTC can't be blocked (documented); a new
+  built-in tool follows its group once at start-up. Hostile pages A–F replayed: no request
+  from any opened copy or SVG. Fidelity: local site 99.94 %, gsap.com 99.97 %, stripe.com
+  87.4 % (animation state only). browser 163 + capture_e2e 5 + browser_e2e 30, app 888.
+  Verification running.
+- P2 round-1 verification: M1, M2 (e2e m8 offline passes), m1, m2, m6, m7, m9, m10 fixed.
+  Two majors block the release: the new width check rejected valid image files
+  (MiniCPM-V/MiniCPM-o resampler files report width 0, Ultravox another width — those
+  models lost vision and Installed kept offering the same file); and running out of
+  memory while the image file loads usually shows only `GGML_ASSERT(buffer) failed`
+  (the allocator's lines are lost when llama.cpp aborts), so the "load without it" step
+  almost never ran. Minor: newlines in a crafted file's key or projector type could still
+  steer the classification; the automatic lookup's answer could be dropped; a nameless
+  old-style image file in a shared folder marked text-only models. Round 2 running (also
+  Browse taking the model's own image file).
+- P1 round-1 verification: both majors fixed; the per-layer port exact against the pinned
+  binary (9 short-memory models, 10 hybrid/recurrent models to the digit, 2 MLA models);
+  the real server keeps exactly the number of copies the app asks for; the owner's Gemma 4
+  12B table confirmed on a 16 GB card (Q8_0: Automatic 32,768 green, 65,536 yellow; Q6_K and
+  Q4_K_M green). No critical or major. Minor: unknown computer memory still made models
+  red on a graphics card (older than 0.0.7); a starting load's copies counted as freed;
+  Apple silicon sized copies against the Metal working set; the freed figure is
+  system-wide; the copy count not re-sized after a step-down; two doc figures. Small round
+  2 running.
+- Local CI run on the tree as of ~12:00 UTC (before P1/P2 round 2): `cargo fmt --check`,
+  `cargo clippy --workspace --all-targets -D warnings`, `npm run lint`, `npm run
+  typecheck`, `npm test` (78 files, 847 tests), `npm run build`, spawn check, notices
+  check, docs test, and `cargo test --workspace --no-fail-fast` with the real llama-server
+  and test model: 2,980 passed, 0 failed, 7 ignored.
+- e2e `scripted_agent.py` (debug app built 12:15 UTC, fake endpoint): 41 scenarios pass,
+  including stop-and-regenerate and regenerate-after-error; 4 fail. `compare-models` is a
+  real bug from P1: on a computer without a graphics card Compare said "Too large" while its
+  verdict and Settings for this model said it fits (the words still counted the saved
+  copies) — added to P1's round 2. `task-state`, `step-limit` (and likely `subagent`'s
+  approval) click *Resume*/*Continue* before the new 700 ms click delay arms them; the
+  `subagent` card no longer showed the helper's current call — an agent is checking
+  whether that's the test or the app and fixing the right one.
+- P2 round 2 done: image files whose header width llama.cpp doesn't use (MiniCPM-V,
+  MiniCPM-o, Ultravox) are used again (width only ranks); `GGML_ASSERT(buffer) failed`
+  counts as out of memory, so the load without the image file runs; an image file is
+  blamed only after the server's own stage line on stdout; the automatic lookup keeps its
+  answer; a nameless image file in a shared folder belongs to no one; Browse downloads the
+  chosen model's own image file. runtime (real server) all pass, models 147, app 160,
+  vitest 850. Quick re-verification running.
+- P2 round-2 re-verification: N1, N2 (all 6 real out-of-memory captures now classified as
+  out of memory), N4, N5, Browse and the nits fixed. Left: a crafted image file can still
+  fake a port-in-use or invalid-device line (those checks run before the image-file
+  verdict); and with width only ranking, text-only Gemma 2 could take Gemma 3's image file
+  in a shared folder. Quick round 3 running.
+- P2 round 3 done: once the server reached the image file, port-in-use and invalid-device
+  lines are no longer believed (real ones happen at start-up); a trusted header width
+  that differs from the model's rules a file out again (the recorded file stays exempt).
+  runtime (real server) all pass, app 112. P2 finished.
+- e2e: the three remaining failures were the scripts (the new 700 ms click delay on
+  *Continue*/*Resume*; the sidebar's new hidden "Waiting for your approval" text matching an
+  early wait; the helper refusal's new wording) — the scripts now wait for buttons to arm
+  and also check that an early click does nothing; `task-state`, `step-limit`, `subagent`
+  pass 3 times in a row, `stop-and-regenerate`/`regenerate-after-error` 3 times (with a
+  wait for new rows WebKit hasn't painted yet). `compare-models` passes on a fresh run (the
+  earlier failure compared answers taken at different free-memory levels on this busy
+  machine). No app code changed for e2e.
+- 13:02 UTC: version 0.0.7 (Cargo, npm, Tauri), CHANGELOG merged, ARCHITECTURE paragraph,
+  README lines, checklist "start here"; local fmt, workspace clippy, docs, spawn, lint,
+  typecheck and vitest (850) pass. Pushed d0aea01 without [skip ci]: CI run 43872030368.
+  P7's round-1 verification still running.
+- P7 round-1 verification (~45 hostile captures through the real tool): no script ran in
+  any copy or saved SVG; every WebSocket variant blocked or stopped; new-tool carry right;
+  fidelity kept. Three majors remain, so the release waits for them: CSS `var()` inside
+  `image-set()` slipped past the CSS cleaner (the opened copy fetched `file://host/share`
+  pictures — an SMB request on Windows); a saved style sheet starting with
+  `@charset "ISO-2022-JP"` was read differently by the cleaner and the browser (a hidden
+  `@import` from a share); shared-worker and service-worker requests weren't checked
+  during a capture (a LAN device's answer reached the copy, the report and the model).
+  Minor: unrecognised pictures saved as `.img`; a service worker held 15 s; 3xx pages
+  without Location. P7 round 2 running; CI run 43872030368 continues for everything else.
+- CI run 43872030368 (d0aea01), Windows: everything passed except (1) the tools test
+  `common_unix_habits_fail_with_a_hint` — Windows PowerShell 5.1 reads `--version` after a
+  quoted program as its `--` operator plus `version`, so the expected error text was
+  wrong (the hint itself was right); fixed in 8fe6ce4 with the real text; and (2) the app
+  crate's library test program would not start (STATUS_ENTRYPOINT_NOT_FOUND) — every other
+  test program, and the same one on 0.0.6, starts; an agent is finding the import by
+  cross-compiling for Windows here and comparing with 0.0.6.
+- Same CI run, macOS: everything passed except `free_port_is_bindable` (an older test: a
+  parallel test was given the same port in between; fixed in the test with a few tries,
+  still requiring a bindable port); the Intel Mac smoke test failed only because no disk
+  image was built. Linux: everything passed (lint, clippy, all workspace tests with the
+  real llama-server, cargo-deny).
+- P7 round 2 done (0a85cd3): CSS image functions keep only literal addresses (an allow-list;
+  `var()`, `env()`, `attr()` and unknown functions blank the value) in the page, saved
+  sheets and SVGs; saved sheets and index.html start with a UTF-8 BOM and lose any
+  `@charset` and control characters; shared workers' requests checked (Fetch on their own
+  session before they run); service workers held for the whole capture and closed after it,
+  running shared/service workers closed first (decided: hold rather than stop the capture —
+  a held worker runs no script, and stopping would make every site with one uncapturable);
+  pictures kept only when their bytes are a picture format; 3xx bodiless only with
+  Location; the last-choice lock. browser lib 167, browser_e2e 30, capture_e2e 7 (with the
+  verifier's hostile pages), app mcp_cmd/toolset 43. The verifier is re-checking with its
+  harness. Disk: 4.4 GB free → pruned idle build output → 11 GB.
+- P7 round-2 re-verification: all seven fixed — every round-1 hostile page re-captured
+  through the real tool and opened offline made no request and leaked nothing; ~20 minutes
+  of other attempts (escaped function names, @property, paint(), element(), image()
+  fallbacks, @font-face src forms, @import with layer/supports, nesting, @layer/@container/
+  @scope/@starting-style, data:/blob: shared workers, importScripts, EventSource,
+  worklets, a service worker registered mid-capture) got nothing through. Agrees holding
+  service workers is safe. Hardening nit left for later: check `waitingForDebugger` when a
+  web worker attaches. P7 finished.
+- Windows test program: the missing import was `COMCTL32.dll!TaskDialogIndirect` (Common
+  Controls 6 only). P6a's `TurnSlot` kept an owned `AppHandle`; tests dropping slots made
+  the drop chain AppHandle → menu manager → muda's About box reachable, so the linker kept
+  it, and the library's test program has no manifest asking for Common Controls 6 (only bin
+  targets get tauri-build's). Fixed by borrowing the handle (f58e71e); a relink of the
+  Windows test program here shows 0.0.6's imports plus `kernel32!RemoveDirectoryW`. A
+  durable fix (the manifest for the lib test program) is left for a later version.
+- 14:15 UTC: P7 verified; fmt, workspace clippy, docs, spawn and notices checks pass. CI
+  run on everything next.
+- CI run 43884489704 (5d79438), 14:19 UTC (18:19 UAE): Linux passed; the Windows test
+  program starts again (841 of 843 app_lib tests passed); macOS workspace tests passed.
+  Windows failed three tests, all in how the tests read things there, not in the app: two
+  checks that read their own source with `include_str!` looked for "\n}\n", which a
+  Windows checkout writes as "\r\n}\r\n" (now normalised first, as `mcp_cmd.rs` and
+  `pinned/tests.rs` already do); and the capture test's control page built
+  `//localhost` + `C:\...`, which is no address at all, so neither marker loaded (now the
+  path part of the folder's real `file:` address, `/C:/...` there). That also makes the
+  test's main checks meaningful on Windows: before, its trick pages named files with the
+  same broken address and could never have loaded them.

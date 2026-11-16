@@ -65,6 +65,10 @@ pub struct BrowserConfig {
     /// the request checks, to hold open the moment between "attached" and "checked".
     #[cfg(feature = "test-hooks")]
     pub test_setup_delay: Duration,
+    /// Tests only (feature `test-hooks`): a capture adds no policy to its tab's responses,
+    /// so a WebSocket can start and the capture's other line (stop, save nothing) is tested.
+    #[cfg(feature = "test-hooks")]
+    pub test_no_capture_policy: bool,
 }
 
 impl BrowserConfig {
@@ -91,6 +95,8 @@ impl BrowserConfig {
             test_dns_overrides: Vec::new(),
             #[cfg(feature = "test-hooks")]
             test_setup_delay: Duration::ZERO,
+            #[cfg(feature = "test-hooks")]
+            test_no_capture_policy: false,
         }
     }
 

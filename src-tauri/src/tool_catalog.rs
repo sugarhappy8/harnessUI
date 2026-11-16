@@ -53,8 +53,134 @@ pub struct Group {
 /// and their `weak` words add to a match but never make one. rea's tool names hold
 /// everyday words ("function", "strings", "python", "rust", "view") and its weak words
 /// ("program", "function", "library") are everyday coding words; none of them says a
-/// request is about reverse engineering (item5-spec.md R18).
-pub const OWN_WORDS_ONLY: &[&str] = &[reverse::server::SERVER_NAME];
+/// request is about reverse engineering (item5-spec.md R18). [0.0.7] The computer group
+/// likewise: its tool names ("drag", "scroll", "screenshot") and its weak words ("open",
+/// "type", "click", "app", "window", "laptop") are everyday coding words too, and a match
+/// brings in all seven of its tools (`tool_select::WHOLE_GROUPS`).
+pub const OWN_WORDS_ONLY: &[&str] = &[reverse::server::SERVER_NAME, computer::SERVER_NAME];
+
+/// [0.0.7] Phrases that mean a group only when the request also says whose machine it is
+/// about: (server, phrases, context). The computer group's "open settings", "set the volume",
+/// "open excel" or "open chrome" also name what a program does ("add a menu item to open
+/// settings", "how do I open excel files in python", "launch chrome with puppeteer"), so they
+/// count as strong words only beside one of the context phrases ("on my laptop, open
+/// settings"). A false match brings in all seven computer tools for the rest of the chat,
+/// while a missed one still leaves them in the tool list, reachable through `call_tool`.
+pub const WITH_CONTEXT: &[(&str, &[&str], &[&str])] = &[(
+    computer::SERVER_NAME,
+    &[
+        "open settings",
+        "set the volume",
+        "mute the sound",
+        "open excel",
+        "in excel",
+        "into excel",
+        "open word",
+        "into word",
+        "open powerpoint",
+        "open chrome",
+        "launch chrome",
+        "open firefox",
+        "launch firefox",
+        "open safari",
+        "launch safari",
+        "open edge",
+        "open photoshop",
+        "open vs code",
+        "open vscode",
+        "open finder",
+        "in finder",
+        "in file explorer",
+        "in task manager",
+        "in outlook",
+        "in discord",
+        "double click the",
+        "double click on",
+        "right click the",
+        "right click on",
+        "start button",
+        "switch to the other window",
+        "on the keyboard",
+        "with the keyboard",
+        "the taskbar",
+        "the wallpaper",
+        "open the settings",
+        "open the terminal app",
+    ],
+    &[
+        "my computer",
+        "my pc",
+        "my laptop",
+        "my mac",
+        "this computer",
+        "this pc",
+        "this laptop",
+        "this mac",
+        "my screen",
+        "my desktop",
+        "on the desktop",
+        "my downloads",
+        "my documents",
+    ],
+)];
+
+/// [0.0.7] Words that undo a group's match: with one of them a request is about code, not the
+/// desktop, however desktop-like its phrases ("write code to take a screenshot in selenium",
+/// "add a button to open notepad from my electron app", "the screenshot of my screen is
+/// attached, what is wrong with the CSS?"). (server, words)
+pub const CANCELLED_BY: &[(&str, &[&str])] = &[(
+    computer::SERVER_NAME,
+    &[
+        "code",
+        "coding",
+        "script",
+        "function",
+        "python",
+        "javascript",
+        "typescript",
+        "java",
+        "rust",
+        "react",
+        "node",
+        "html",
+        "css",
+        "api",
+        "sdk",
+        "library",
+        "selenium",
+        "playwright",
+        "puppeteer",
+        "electron",
+        "tauri",
+        "unity",
+        "component",
+        "bug",
+        "debug",
+        "compile",
+        "programmatically",
+        "attached",
+    ],
+)];
+
+/// [0.0.7] Words right after one of a group's phrases that make the phrase a name, not a
+/// request: "the open notepad button", "the calculator component", "file explorer
+/// integration", "my pc's GPU" (`'s` is read as the word "s"). (server, words)
+pub const PHRASE_ENDS: &[(&str, &[&str])] = &[(
+    computer::SERVER_NAME,
+    &[
+        "s",
+        "button",
+        "buttons",
+        "component",
+        "integration",
+        "feature",
+        "equivalent",
+        "function",
+        "method",
+        "api",
+        "dialog",
+    ],
+)];
 
 impl Group {
     /// Whether the words of its tools' names also point at this group (`tool_select`).
@@ -66,6 +192,31 @@ impl Group {
     /// words then adding to the match (`tool_select`, `find_tools`).
     pub fn needs_strong_word(&self) -> bool {
         OWN_WORDS_ONLY.contains(&self.server)
+    }
+
+    /// [0.0.7] Its phrases that count as strong words only beside one of its context phrases
+    /// ([`WITH_CONTEXT`]): (phrases, context).
+    pub fn with_context(&self) -> Option<(&'static [&'static str], &'static [&'static str])> {
+        WITH_CONTEXT
+            .iter()
+            .find(|(server, _, _)| *server == self.server)
+            .map(|(_, phrases, context)| (*phrases, *context))
+    }
+
+    /// [0.0.7] Its words that undo a match ([`CANCELLED_BY`]).
+    pub fn cancelled_by(&self) -> &'static [&'static str] {
+        CANCELLED_BY
+            .iter()
+            .find(|(server, _)| *server == self.server)
+            .map_or(&[], |(_, words)| words)
+    }
+
+    /// [0.0.7] Words after one of its phrases that make the phrase a name ([`PHRASE_ENDS`]).
+    pub fn phrase_ends(&self) -> &'static [&'static str] {
+        PHRASE_ENDS
+            .iter()
+            .find(|(server, _)| *server == self.server)
+            .map_or(&[], |(_, words)| words)
     }
 }
 
@@ -158,23 +309,177 @@ pub const GROUPS: &[Group] = &[
             "website", "url", "http", "https", "www", "browser", "browse", "click", "log in",
             "sign in", "login", "navigate", "visit", "webpage", "web page", "site",
         ],
+        // [0.0.7] "com", "org" and "go to" add to a match: "go to youtube.com".
+        // [0.0.7 P7] "design", "clone", "front end", "animation" and "look like" too: "copy
+        // the design of example.com", "clone the front end of …", "make it look like …".
         weak: &[
-            "page", "open", "form", "submit", "web", "online", "link", "tab",
+            "page",
+            "open",
+            "form",
+            "submit",
+            "web",
+            "online",
+            "link",
+            "tab",
+            "com",
+            "org",
+            "go to",
+            "design",
+            "clone",
+            "front end",
+            "frontend",
+            "animation",
+            "look like",
         ],
     },
     Group {
         server: "computer",
         label: "Computer",
+        // [0.0.7] A request is about the desktop only with one of these: something done on the
+        // machine ("use my pc", "take a screenshot", "minimize all windows"), a place on it
+        // ("open file explorer", "the start menu button") or an app named with what to do with
+        // it ("open notepad", "open google chrome", "open microsoft excel"). Words that also
+        // mean code ("chrome", "excel", "screen", "mouse", "laptop", "click") never match alone:
+        // they are weak words, which only add to a match (`OWN_WORDS_ONLY`); phrases that also
+        // name what a program does need the request to say whose machine it is
+        // (`WITH_CONTEXT`); and a phrase that runs into a file name ("open settings.json") is
+        // not the phrase (`tool_select::Wording`). Precision comes first: a missed request
+        // still finds the tools in the tool list.
         strong: &[
+            // The machine.
+            "use my computer",
+            "use my pc",
+            "use my laptop",
+            "use my mac",
+            "use the computer to",
+            "control my computer",
+            "control my pc",
+            "control my laptop",
+            "control my mac",
+            "take a screenshot",
+            "take a screen shot",
+            "make a screenshot",
+            "screenshot my screen",
+            "screenshot my desktop",
+            "screenshot of my screen",
+            "screenshot of my desktop",
+            "look at my screen",
+            "what is on my screen",
+            "what s on my screen",
+            "see my screen",
+            "move the mouse",
+            "move my mouse",
+            "open the start menu",
+            "open start menu",
+            "press the windows key",
+            "windows key",
+            "start menu button",
+            "open spotlight",
+            "open launchpad",
+            "minimize all windows",
+            "minimise all windows",
+            "turn up the volume",
+            "turn down the volume",
+            "change my wallpaper",
+            "open the settings app",
+            "open system settings",
+            "open system preferences",
+            "open windows settings",
+            "open file explorer",
+            "open the file explorer",
+            "open windows explorer",
+            "open task manager",
+            "open the task manager",
+            "open control panel",
+            "open the control panel",
+            "open the recycle bin",
+            "empty the recycle bin",
+            "empty the trash",
+            // Apps, with what to do with them.
+            "open notepad",
+            "launch notepad",
+            "start notepad",
+            "into notepad",
+            "close notepad",
+            "close the calculator",
+            "close calculator",
+            "close paint",
+            "close spotify",
+            "close google chrome",
+            "type this into word",
+            "type it into word",
+            "paste this into word",
+            "paste it into word",
+            "open microsoft word",
+            "launch microsoft word",
+            "open microsoft excel",
+            "launch microsoft excel",
+            "open microsoft edge",
+            "launch microsoft edge",
+            "open microsoft teams",
+            "launch microsoft teams",
+            "open teams",
+            "start teams",
+            "launch teams",
+            "open google chrome",
+            "launch google chrome",
+            "start google chrome",
+            "open outlook",
+            "launch outlook",
+            "open wordpad",
+            "open spotify",
+            "launch spotify",
+            "start spotify",
+            "music on spotify",
+            "open discord",
+            "launch discord",
+            "open slack",
+            "launch slack",
+            "start slack",
+            "open zoom",
+            "launch zoom",
+            "open whatsapp",
+            "open telegram",
+            "open paint",
+            "open the calculator",
+            "open calculator",
+            "launch calculator",
+            "start calculator",
+            "open vlc",
+            "launch vlc",
+            "open steam",
+            "launch steam",
+            "start steam",
+            "launch vs code",
+            "launch vscode",
+            "open the photos app",
+            "open the camera app",
+        ],
+        weak: &[
+            "computer",
+            "pc",
+            "laptop",
+            "mac",
             "screen",
             "desktop",
             "mouse",
-            "click on",
             "keyboard",
             "cursor",
-            "my computer",
+            "screenshot",
+            "window",
+            "app",
+            "application",
+            "program",
+            "pointer",
+            "open",
+            "launch",
+            "type",
+            "click",
+            "icon",
+            "press",
+            "volume",
+            "wallpaper",
         ],
-        weak: &["window", "app", "application", "program", "pointer"],
     },
     Group {
         server: "subagents",
@@ -242,10 +547,12 @@ pub const GROUPS: &[Group] = &[
             "internet",
             "research",
             "up to date",
+            // [0.0.7]
+            "weather",
         ],
         weak: &[
             "web", "online", "current", "recent", "release", "version", "source", "cite",
-            "official",
+            "official", "today", "price",
         ],
     },
     Group {
@@ -612,6 +919,37 @@ pub const ENTRIES: &[Entry] = &[
         keywords: &["previous", "return"],
         rank: 3,
         examples: &[r#"{}"#],
+    },
+    // [0.0.7 P7] Website capture: for studying a design and rebuilding it.
+    Entry {
+        name: "browser_capture_site",
+        group: "browser",
+        purpose: "Save a web page's look (styles, pictures, fonts, animations, screenshots) to rebuild its design with the user's own content.",
+        keywords: &[
+            "clone",
+            "copy",
+            "design",
+            "recreate",
+            "rebuild",
+            "replicate",
+            "redesign",
+            "look like",
+            "looks like",
+            "front end",
+            "frontend",
+            "animation",
+            "style",
+            "css",
+            "font",
+            "layout",
+            "theme",
+            "inspiration",
+        ],
+        rank: 3,
+        examples: &[
+            r#"{"url": "https://example.com"}"#,
+            r#"{"url": "https://example.com", "folder": "site-study", "widths": [1440, 390]}"#,
+        ],
     },
     // ---- computer ----
     Entry {
@@ -1658,6 +1996,22 @@ pub(crate) mod tests {
             assert!(!g.label.is_empty());
             for k in g.strong.iter().chain(g.weak) {
                 assert_eq!(*k, k.to_lowercase(), "{}: keyword {k}", g.server);
+            }
+            // [0.0.7] Phrases with a context: written as the matcher reads them.
+            let (phrases, context) = g.with_context().unwrap_or((&[], &[]));
+            for k in phrases
+                .iter()
+                .chain(context)
+                .chain(g.cancelled_by())
+                .chain(g.phrase_ends())
+            {
+                assert_eq!(*k, k.to_lowercase(), "{}: keyword {k}", g.server);
+                assert!(
+                    k.split(' ')
+                        .all(|w| !w.is_empty() && w.chars().all(char::is_alphanumeric)),
+                    "{}: keyword {k}",
+                    g.server
+                );
             }
             assert!(
                 ENTRIES.iter().any(|e| e.group == g.server),

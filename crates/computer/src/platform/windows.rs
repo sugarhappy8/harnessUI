@@ -19,31 +19,53 @@
 //! - **Elevation:** `OpenProcess` + `OpenProcessToken` + `TokenElevation`. Windows drops
 //!   synthetic input into elevated windows without an error (UIPI), so when this app is
 //!   not elevated, a target that is, or whose process cannot be opened, is refused.
+//! - **Behind this app** (stepping aside, 9.3): the top-level windows in z-order
+//!   (`EnumWindows`), skipping this app's, hidden, minimised, disabled and cloaked ones
+//!   (DWM cloaks suspended apps and windows on other virtual desktops) and click-through
+//!   ones (layered and transparent). For the keyboard, also tool windows and windows that
+//!   never take the focus, and always-on-top windows come last, as when Windows picks the
+//!   next window after a minimise. Handing the keyboard back is `SetForegroundWindow`, on
+//!   the main thread while this app's window has the focus (Windows lets only the program
+//!   in front give it away): in that one step it checks that this app still has the
+//!   focus, that Stop was not pressed, and that the handle still belongs to the same
+//!   process and is shown (not minimised, not cloaked).
+//! - **Latest input:** `GetLastInputInfo` against `GetTickCount` (injected input counts;
+//!   the guard leaves out this app's own), and `GetCursorPos`.
+//! - **The main window coming back without the keyboard** (stepping aside, 9.3):
+//!   [`restore_window_without_activating`].
 
 use std::cell::RefCell;
 use std::ffi::c_void;
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use windows::Win32::Foundation::{CloseHandle, HANDLE, HWND, LPARAM, POINT, RECT};
-use windows::Win32::Graphics::Dwm::{DWMWA_EXTENDED_FRAME_BOUNDS, DwmFlush, DwmGetWindowAttribute};
+use windows::Win32::Graphics::Dwm::{
+    DWMWA_CLOAKED, DWMWA_EXTENDED_FRAME_BOUNDS, DwmFlush, DwmGetWindowAttribute,
+};
 use windows::Win32::Security::{GetTokenInformation, TOKEN_ELEVATION, TOKEN_QUERY, TokenElevation};
+use windows::Win32::System::SystemInformation::GetTickCount;
 use windows::Win32::System::Threading::{
     OpenProcess, OpenProcessToken, PROCESS_NAME_WIN32, PROCESS_QUERY_LIMITED_INFORMATION,
     QueryFullProcessImageNameW,
 };
 use windows::Win32::UI::Input::KeyboardAndMouse::{
-    GetAsyncKeyState, INPUT, INPUT_0, INPUT_MOUSE, MOUSE_EVENT_FLAGS, MOUSEEVENTF_ABSOLUTE,
-    MOUSEEVENTF_HWHEEL, MOUSEEVENTF_LEFTDOWN, MOUSEEVENTF_LEFTUP, MOUSEEVENTF_MIDDLEDOWN,
-    MOUSEEVENTF_MIDDLEUP, MOUSEEVENTF_MOVE, MOUSEEVENTF_RIGHTDOWN, MOUSEEVENTF_RIGHTUP,
-    MOUSEEVENTF_VIRTUALDESK, MOUSEEVENTF_WHEEL, MOUSEINPUT, SendInput, VIRTUAL_KEY, VK_CONTROL,
-    VK_LBUTTON, VK_LWIN, VK_MBUTTON, VK_MENU, VK_RBUTTON, VK_RWIN, VK_SHIFT,
+    GetAsyncKeyState, GetLastInputInfo, INPUT, INPUT_0, INPUT_MOUSE, IsWindowEnabled,
+    LASTINPUTINFO, MOUSE_EVENT_FLAGS, MOUSEEVENTF_ABSOLUTE, MOUSEEVENTF_HWHEEL,
+    MOUSEEVENTF_LEFTDOWN, MOUSEEVENTF_LEFTUP, MOUSEEVENTF_MIDDLEDOWN, MOUSEEVENTF_MIDDLEUP,
+    MOUSEEVENTF_MOVE, MOUSEEVENTF_RIGHTDOWN, MOUSEEVENTF_RIGHTUP, MOUSEEVENTF_VIRTUALDESK,
+    MOUSEEVENTF_WHEEL, MOUSEINPUT, SendInput, VIRTUAL_KEY, VK_CONTROL, VK_LBUTTON, VK_LWIN,
+    VK_MBUTTON, VK_MENU, VK_RBUTTON, VK_RWIN, VK_SHIFT,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
-    EnumWindows, FindWindowExW, GA_ROOT, GA_ROOTOWNER, GetAncestor, GetClassNameW, GetCursorPos,
-    GetForegroundWindow, GetSystemMetrics, GetWindowDisplayAffinity, GetWindowRect, GetWindowTextW,
-    GetWindowThreadProcessId, IsWindowVisible, SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN,
-    SM_SWAPBUTTON, SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN, SetCursorPos, SetWindowDisplayAffinity,
-    WDA_EXCLUDEFROMCAPTURE, WDA_NONE, WindowFromPoint,
+    EnumWindows, FindWindowExW, GA_ROOT, GA_ROOTOWNER, GWL_EXSTYLE, GetAncestor, GetClassNameW,
+    GetCursorPos, GetForegroundWindow, GetSystemMetrics, GetWindowDisplayAffinity, GetWindowLongW,
+    GetWindowPlacement, GetWindowRect, GetWindowTextW, GetWindowThreadProcessId, IsIconic,
+    IsWindow, IsWindowVisible, SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN, SM_SWAPBUTTON,
+    SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN, SW_SHOWMAXIMIZED, SW_SHOWNOACTIVATE, SetCursorPos,
+    SetForegroundWindow, SetWindowDisplayAffinity, ShowWindow, WDA_EXCLUDEFROMCAPTURE, WDA_NONE,
+    WINDOWPLACEMENT, WPF_RESTORETOMAXIMIZED, WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW,
+    WS_EX_TOPMOST, WS_EX_TRANSPARENT, WindowFromPoint,
 };
 use windows::core::{BOOL, PWSTR, w};
 
@@ -52,7 +74,7 @@ use crate::geometry::{GlobalPoint, MonitorInfo, Rect, virtual_desk_absolute};
 use crate::keys::Key;
 use crate::platform::{
     Backends, Capture, CaptureError, Captured, Gate, Injector, InputError, InputEvent,
-    MAIN_THREAD_TIMEOUT, MainThread, MouseButton, PlatformError, Pressable, SelfProcess,
+    MAIN_THREAD_TIMEOUT, MainThread, MouseButton, PlatformError, Pressable, SelfProcess, WindowRef,
     run_on_main, run_on_main_even_late,
 };
 
@@ -101,6 +123,49 @@ fn process_path(pid: u32) -> Option<String> {
         Some(String::from_utf16_lossy(
             &buf[..(len as usize).min(buf.len())],
         ))
+    }
+}
+
+/// Brings one of this app's minimised windows back on screen without activating it, so the
+/// keyboard stays with the application in use: how the main window comes back after it
+/// stepped aside (9.3) for an approval card or at the end of a turn. Returns false when
+/// the window was not minimised.
+///
+/// `ShowWindow(SW_RESTORE)`, what Tauri's unminimise does, activates the window whenever
+/// Windows lets this app take the foreground (it got the last input, or Alt was pressed).
+/// `SW_SHOWNOACTIVATE` restores the window to its normal size and position without that. A
+/// window that was maximised when it was minimised would come back un-maximised that way,
+/// and no ShowWindow command maximises without activating, so such a window is restored
+/// with `SW_SHOWMAXIMIZED`; if that activated it, the foreground goes straight back to the
+/// window that had it.
+///
+/// # Safety
+///
+/// `hwnd` is one of this app's windows; call on the thread that owns it (the main thread).
+pub unsafe fn restore_window_without_activating(hwnd: *mut c_void) -> bool {
+    let hwnd = HWND(hwnd);
+    // SAFETY: plain calls on the caller's window; the placement is a valid struct of the
+    // size it says.
+    unsafe {
+        if !IsIconic(hwnd).as_bool() {
+            return false;
+        }
+        let mut wp = WINDOWPLACEMENT {
+            length: std::mem::size_of::<WINDOWPLACEMENT>() as u32,
+            ..Default::default()
+        };
+        let maximised =
+            GetWindowPlacement(hwnd, &mut wp).is_ok() && wp.flags.contains(WPF_RESTORETOMAXIMIZED);
+        if !maximised {
+            let _ = ShowWindow(hwnd, SW_SHOWNOACTIVATE);
+            return true;
+        }
+        let before = GetForegroundWindow();
+        let _ = ShowWindow(hwnd, SW_SHOWMAXIMIZED);
+        if GetForegroundWindow() == hwnd && !before.is_invalid() && before != hwnd {
+            let _ = SetForegroundWindow(before);
+        }
+        true
     }
 }
 
@@ -174,6 +239,99 @@ fn window_rect(hwnd: HWND) -> Option<Rect> {
 fn is_frame_host(path: &str) -> bool {
     path.to_ascii_lowercase()
         .ends_with("\\applicationframehost.exe")
+}
+
+unsafe extern "system" fn collect_all(hwnd: HWND, lparam: LPARAM) -> BOOL {
+    // SAFETY: lparam is the &mut Vec<isize> passed to EnumWindows by `top_level_windows`,
+    // alive for the call.
+    let out = unsafe { &mut *(lparam.0 as *mut Vec<isize>) };
+    out.push(hwnd.0 as isize);
+    BOOL(1)
+}
+
+/// Every top-level window, front to back (`EnumWindows` goes down the z-order).
+fn top_level_windows() -> Vec<HWND> {
+    let mut out: Vec<isize> = Vec::new();
+    // SAFETY: the callback only touches `out`, which outlives the call.
+    let _ = unsafe {
+        EnumWindows(
+            Some(collect_all),
+            LPARAM(&mut out as *mut Vec<isize> as isize),
+        )
+    };
+    out.into_iter().map(|h| HWND(h as *mut c_void)).collect()
+}
+
+fn ex_style(hwnd: HWND) -> u32 {
+    // SAFETY: plain call; a stale handle returns 0.
+    (unsafe { GetWindowLongW(hwnd, GWL_EXSTYLE) }) as u32
+}
+
+/// DWM hides the window: an app suspended in the background, or a window on another
+/// virtual desktop.
+fn is_cloaked(hwnd: HWND) -> bool {
+    let mut cloaked = 0u32;
+    // SAFETY: `cloaked` is a valid u32 of the size passed.
+    let ok = unsafe {
+        DwmGetWindowAttribute(
+            hwnd,
+            DWMWA_CLOAKED,
+            &mut cloaked as *mut u32 as *mut c_void,
+            std::mem::size_of::<u32>() as u32,
+        )
+    }
+    .is_ok();
+    ok && cloaked != 0
+}
+
+/// The window's outer frame, which hit tests use, when it has an area on some monitor.
+fn outer_rect_on_screen(hwnd: HWND) -> Option<RECT> {
+    let mut r = RECT::default();
+    // SAFETY: `r` is a valid RECT; a stale handle fails harmlessly.
+    unsafe { GetWindowRect(hwnd, &mut r) }.ok()?;
+    // SAFETY: GetSystemMetrics has no preconditions.
+    let (vx, vy, vw, vh) = unsafe {
+        (
+            GetSystemMetrics(SM_XVIRTUALSCREEN),
+            GetSystemMetrics(SM_YVIRTUALSCREEN),
+            GetSystemMetrics(SM_CXVIRTUALSCREEN),
+            GetSystemMetrics(SM_CYVIRTUALSCREEN),
+        )
+    };
+    let has_area = r.right > r.left && r.bottom > r.top;
+    let on_screen = r.right > vx && r.left < vx + vw && r.bottom > vy && r.top < vy + vh;
+    (has_area && on_screen).then_some(r)
+}
+
+/// A window the pointer can reach: shown, not minimised, enabled, not cloaked, and not
+/// letting clicks through (layered and transparent, like this app's own overlay).
+fn reachable(hwnd: HWND) -> bool {
+    // SAFETY: plain calls on an enumerated handle; a stale one fails harmlessly.
+    let shown = unsafe {
+        IsWindowVisible(hwnd).as_bool()
+            && !IsIconic(hwnd).as_bool()
+            && IsWindowEnabled(hwnd).as_bool()
+    };
+    let ex = ex_style(hwnd);
+    let click_through = ex & WS_EX_LAYERED.0 != 0 && ex & WS_EX_TRANSPARENT.0 != 0;
+    shown && !click_through && !is_cloaked(hwnd)
+}
+
+/// The process of a top-level window, and of the window that owns it.
+fn owner_pids(hwnd: HWND) -> Vec<u32> {
+    // SAFETY: GetAncestor accepts any handle and returns null for a stale one.
+    let owner = unsafe { GetAncestor(hwnd, GA_ROOTOWNER) };
+    let mut pids = vec![window_pid(hwnd)];
+    if !owner.is_invalid() {
+        pids.push(window_pid(owner));
+    }
+    pids
+}
+
+/// The top-level window belongs to `me`: its own process, or the process of the window
+/// that owns it.
+fn is_mine(hwnd: HWND, me: &SelfProcess) -> bool {
+    me.owns_any(&owner_pids(hwnd))
 }
 
 struct WinInjector {
@@ -505,6 +663,112 @@ impl Injector for WinInjector {
             ));
         }
         self.target_for(hwnd)
+    }
+
+    fn target_at_behind(
+        &self,
+        p: GlobalPoint,
+        me: &SelfProcess,
+    ) -> Result<Option<Target>, InputError> {
+        let (x, y) = p.device();
+        for hwnd in top_level_windows() {
+            if !reachable(hwnd) {
+                continue;
+            }
+            let Some(r) = outer_rect_on_screen(hwnd) else {
+                continue;
+            };
+            let under = x >= r.left && x < r.right && y >= r.top && y < r.bottom;
+            if under && !is_mine(hwnd, me) {
+                return self.target_for(hwnd).map(Some);
+            }
+        }
+        Ok(None)
+    }
+
+    fn keyboard_target_behind(&self, me: &SelfProcess) -> Result<Option<Target>, InputError> {
+        let mut topmost = None;
+        for hwnd in top_level_windows() {
+            let ex = ex_style(hwnd);
+            // Tool windows (the taskbar) and windows that never take the focus
+            // (notifications) do not get the keyboard.
+            if ex & (WS_EX_TOOLWINDOW.0 | WS_EX_NOACTIVATE.0) != 0
+                || !reachable(hwnd)
+                || outer_rect_on_screen(hwnd).is_none()
+                || is_mine(hwnd, me)
+            {
+                continue;
+            }
+            // Windows gives the keyboard to the next ordinary window before an
+            // always-on-top one.
+            if ex & WS_EX_TOPMOST.0 != 0 {
+                topmost.get_or_insert(hwnd);
+                continue;
+            }
+            return self.target_for(hwnd).map(Some);
+        }
+        topmost.map(|h| self.target_for(h)).transpose()
+    }
+
+    fn bring_to_front(
+        &self,
+        window: &WindowRef,
+        me: &SelfProcess,
+        gate: &Gate,
+    ) -> Result<bool, InputError> {
+        if me.owns_any(&[window.pid]) {
+            return Ok(false);
+        }
+        let (id, pid) = (window.window_id as usize, window.pid);
+        let mine = me.pids();
+        let gate = gate.clone();
+        // On the main thread, which owns this app's window that has the focus, and where
+        // Stop brings this app's window back: checked and done in one step.
+        run_on_main(&*self.main, MAIN_THREAD_TIMEOUT, move || {
+            // SAFETY: plain call.
+            let front = unsafe { GetForegroundWindow() };
+            let front_is_mine =
+                !front.is_invalid() && owner_pids(front).iter().any(|p| mine.contains(p));
+            if !front_is_mine || !gate.is_open() {
+                return false;
+            }
+            let hwnd = HWND(id as *mut c_void);
+            // SAFETY: plain calls. A handle that closed, or was reused by another
+            // process's window, fails the checks before SetForegroundWindow, as does a
+            // window DWM hides (cloaked: on another virtual desktop, or suspended).
+            unsafe {
+                IsWindow(Some(hwnd)).as_bool()
+                    && window_pid(hwnd) == pid
+                    && IsWindowVisible(hwnd).as_bool()
+                    && !IsIconic(hwnd).as_bool()
+                    && !is_cloaked(hwnd)
+                    && SetForegroundWindow(hwnd).as_bool()
+            }
+        })
+    }
+
+    fn cursor(&self) -> Option<GlobalPoint> {
+        let mut pt = POINT::default();
+        // SAFETY: pt is a valid POINT.
+        unsafe { GetCursorPos(&mut pt) }
+            .ok()
+            .map(|_| GlobalPoint::new(f64::from(pt.x), f64::from(pt.y)))
+    }
+
+    fn time_since_input(&self) -> Option<Duration> {
+        let mut info = LASTINPUTINFO {
+            cbSize: std::mem::size_of::<LASTINPUTINFO>() as u32,
+            dwTime: 0,
+        };
+        // SAFETY: `info` is a valid LASTINPUTINFO with its size set.
+        if !unsafe { GetLastInputInfo(&mut info) }.as_bool() {
+            return None;
+        }
+        // SAFETY: plain call. Both are milliseconds since boot, wrapping after 49.7 days.
+        let now = unsafe { GetTickCount() };
+        Some(Duration::from_millis(u64::from(
+            now.wrapping_sub(info.dwTime),
+        )))
     }
 
     fn send(&self, event: &InputEvent, gate: &Gate) -> Result<(), InputError> {

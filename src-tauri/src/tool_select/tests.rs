@@ -101,6 +101,20 @@ fn is_subsequence(earlier: &[String], later: &[String]) -> bool {
 
 // ---- words --------------------------------------------------------------------------------
 
+/// [0.0.7 review] A phrase that runs into a file name is not the phrase: "open settings.json"
+/// is about a file. A full stop and a program's file are not file names.
+#[test]
+fn a_phrase_does_not_run_into_a_file_name() {
+    assert!(!Wording::of("open settings.json and set tabSize").has("open settings"));
+    assert!(!Wording::of("Open Settings.JSON").has("open settings"));
+    // The word itself is still there.
+    assert!(Wording::of("open settings.json").has("settings"));
+    assert!(Wording::of("Please open settings.").has("open settings"));
+    assert!(Wording::of("open settings. Then wait").has("open settings"));
+    assert!(Wording::of("open notepad.exe").has("open notepad"));
+    assert!(Wording::of("go to youtube.com").has("go to"));
+}
+
 #[test]
 fn a_keyword_matches_its_plural_and_its_ing_and_ed_forms() {
     for (text, keyword) in [
@@ -238,6 +252,353 @@ fn requests_match_the_groups_they_are_about() {
     }
 }
 
+/// [0.0.7] The owner: "the model still can't use my computer too well, they don't know
+/// what tools they have". Everyday ways to ask for the desktop find the computer group, and
+/// the browser does not take them ("open notepad" is not a website); a website still goes to
+/// the browser. Every built-in group takes part, as in the table above.
+#[test]
+fn everyday_desktop_requests_find_the_computer_group() {
+    let all: Vec<Candidate> = on(&[
+        "files",
+        "terminal",
+        "git",
+        "skills",
+        "browser",
+        "computer",
+        "artifacts",
+        "search",
+    ])
+    .into_iter()
+    .filter(|t| !is_always_shown(t) && !is_core(t))
+    .collect();
+    let table: &[(&str, &[&str])] = &[
+        ("open Notepad and type hello", &["computer"]),
+        ("use my pc to open Chrome", &["computer"]),
+        ("on my laptop, open settings", &["computer"]),
+        ("type this into Word", &["computer"]),
+        // [0.0.7 review] An app with no name could be code: nothing.
+        ("open the app", &[]),
+        ("open File Explorer and show me my downloads", &["computer"]),
+        // "click" means the browser by itself (a page has buttons too); the desktop's own
+        // words bring the computer group in beside it.
+        (
+            "double-click the icon on the desktop",
+            &["browser", "computer"],
+        ),
+        ("press the Start menu button", &["computer"]),
+        // [0.0.7 verification] "in excel" also names what a program does: it needs the request
+        // to say whose machine it is.
+        ("put these numbers in Excel", &[]),
+        ("on my pc, put these numbers in Excel", &["computer"]),
+        ("can you use my computer?", &["computer"]),
+        // A screenshot may be of the agent's browser page or of the screen: both groups.
+        (
+            "take a screenshot and tell me what you see",
+            &["browser", "computer"],
+        ),
+        // A website is still the browser's.
+        ("open youtube.com", &["browser"]),
+        ("go to example.org and read it", &["browser"]),
+        // Other gaps of the same kind.
+        ("what's the weather in Paris", &["search"]),
+        ("bitcoin price today", &["search"]),
+        // Words that mean something in code bring in nothing alone.
+        ("open the file notes.txt", &[]),
+        ("what type is this variable?", &[]),
+        ("count the words in this file", &[]),
+        ("fix the edge case in the parser", &[]),
+    ];
+    for (message, expected) in table {
+        let got: BTreeSet<String> = matching_groups(&all, &Wording::of(message), &[])
+            .into_iter()
+            .map(|(group, _)| group)
+            .collect();
+        let want: BTreeSet<String> = expected.iter().map(|g| g.to_string()).collect();
+        assert_eq!(got, want, "{message}");
+    }
+}
+
+/// [0.0.7 review m1, verification] A match brings in all seven computer tools for the rest of
+/// the chat (about 1,500 tokens), while a miss still leaves them in the tool list, reachable
+/// through call_tool: so coding and file requests that share words with the desktop
+/// ("chrome", "excel", "my desktop", "with the keyboard", "open settings") never bring the
+/// group in, and the owner's everyday desktop requests do. Phrases that also name what a
+/// program does count only when the request says whose machine it is ("on my laptop, …").
+#[test]
+fn the_computer_group_needs_a_desktop_request() {
+    let all: Vec<Candidate> = on(&[
+        "files",
+        "terminal",
+        "git",
+        "skills",
+        "browser",
+        "computer",
+        "artifacts",
+        "search",
+    ])
+    .into_iter()
+    .filter(|t| !is_always_shown(t) && !is_core(t))
+    .collect();
+    let computer = |message: &str| {
+        matching_groups(&all, &Wording::of(message), &[])
+            .iter()
+            .any(|(group, _)| group == "computer")
+    };
+    for message in [
+        "chrome extension code",
+        "write a chrome extension that blocks ads",
+        "excel formula in python",
+        "read the excel file with pandas",
+        "open settings.json and set tabSize to 2",
+        "open utils.py and add type annotations",
+        "open the app.py file",
+        "open the calculator.py file and fix the add function",
+        "fix the click handler in my app",
+        "detect a click on the canvas",
+        "type the open function signature",
+        "press release about our new app",
+        "what model fits my laptop",
+        "which model runs best on my pc",
+        "computer science homework: explain recursion",
+        "the start menu of my game",
+        "mouse over event in javascript",
+        "keyboard shortcuts in vim",
+        "screen reader accessibility in react",
+        "cursor based pagination for the api",
+        "desktop app with tauri",
+        "make a program with a window and an icon",
+        "I attached a screenshot of the error",
+        "add infinite scroll to the list",
+        "implement drag and drop upload",
+        "if char in word: count it",
+        "build a task manager app in react",
+        "build a file explorer component",
+        // [0.0.7 verification] Coding and file requests that name a desktop thing.
+        "the project folder is on my desktop",
+        "save the report to my desktop",
+        "I have a python file on my desktop, run it",
+        "the website looks broken on my screen",
+        "the modal is cut off on my screen",
+        "make the dropdown usable with the keyboard",
+        "the menu should be navigable with the keyboard",
+        "change the mouse cursor to a pointer on hover",
+        "move the cursor to the end of the input field",
+        "handle double click on the table row",
+        "add a context menu on right click on the canvas",
+        "when I click start the timer does not begin",
+        "when I click the start button the game freezes",
+        "write a function to set the volume of the audio element",
+        "add a button to mute the sound",
+        "add a menu item to open settings",
+        "the csv opens with broken characters in excel",
+        "export the table so it opens in excel",
+        "how do I open excel files in python",
+        "how to open word documents with python-docx",
+        "generate a microsoft word document from markdown",
+        "the email renders badly in outlook",
+        "my bot does not respond in discord",
+        "write a microsoft teams bot in node",
+        "the flexbox layout breaks in microsoft edge",
+        "launch chrome with puppeteer in headless mode",
+        "how do I open chrome devtools",
+        "my app uses 90% cpu in task manager",
+        "show the file in file explorer from my electron app",
+        "reveal the file in finder from swift",
+        "open photos from the gallery in my react native app",
+        "the popup opens in the other window",
+        "open vs code settings and change the font",
+        "read the system settings from the registry in c#",
+        "detect when the user presses a key on the keyboard",
+        "write a script that changes the desktop wallpaper",
+        "open the terminal in vs code",
+        // [0.0.7 review] Code around a desktop phrase, and phrases that are names.
+        "write code to take a screenshot in selenium",
+        "write a function to take a screenshot of a web page with playwright",
+        "how do I take a screenshot in Unity",
+        "write a python script to move the mouse",
+        "open microsoft word documents with python-docx",
+        "use my pc's GPU for the model",
+        "add a button to open notepad from my electron app",
+        "the screenshot of my screen is attached, what is wrong with the CSS?",
+        "write a script that opens notepad",
+        "build a screenshot tool in rust",
+        "write a powershell script that minimizes all windows",
+        "the open notepad button does nothing",
+        "open the calculator component and fix the bug",
+        "open file explorer integration in my tauri app is broken",
+        "open task manager equivalent in linux?",
+        "create a calculator app in react",
+        "my pc has 16 GB of RAM, which model fits?",
+        "on my laptop the tests fail with a timeout",
+    ] {
+        assert!(!computer(message), "{message}");
+    }
+    for message in [
+        // The owner's own words.
+        "open Notepad and type hello",
+        "use my pc to open Chrome",
+        "take a screenshot",
+        "on my laptop, open settings",
+        "open Google Chrome",
+        "open Microsoft Excel",
+        "can you control my Mac?",
+        // More everyday ways to ask.
+        "open notepad.exe",
+        "open notepad++ and paste this",
+        "type hello into notepad",
+        "use my computer to open spotify",
+        "can you use my computer?",
+        "use my mac to open safari",
+        "take a screenshot and tell me what you see",
+        "what's on my screen",
+        "look at my screen and tell me what's wrong",
+        "type this into Word",
+        "open Microsoft Word and write a letter",
+        "launch google chrome",
+        "open microsoft edge",
+        "open the calculator",
+        "open calculator app",
+        "open paint",
+        "open teams",
+        "start teams",
+        "open vlc and play the movie",
+        "launch vs code",
+        "open steam",
+        "open the photos app",
+        "open outlook and check my mail",
+        "play some music on spotify",
+        "minimize all windows",
+        "change my wallpaper",
+        "open the recycle bin",
+        "press the Start menu button",
+        "open File Explorer and show me my downloads",
+        // Phrases that need to know whose machine it is, with it.
+        "on my mac, open safari",
+        "on my laptop, set the volume to 50%",
+        "click the start button on my screen",
+        "double-click the icon on the desktop",
+        // [0.0.7 review] More of the owner's ways to ask.
+        "take a screen shot",
+        "use the computer to open chrome",
+        "open the settings on my pc",
+        "press the windows key",
+        "close notepad",
+        "screenshot my desktop",
+        "can you see my screen?",
+        "Use my PC: open Chrome.",
+        "open my downloads folder in file explorer",
+        "open the terminal app on my mac",
+        "launch vs code and open my project",
+    ] {
+        assert!(computer(message), "{message}");
+    }
+    // [0.0.7 verification] "google" in "google chrome" is the program, not a web search.
+    let groups = |message: &str| -> BTreeSet<String> {
+        matching_groups(&all, &Wording::of(message), &[])
+            .into_iter()
+            .map(|(group, _)| group)
+            .collect()
+    };
+    assert_eq!(
+        groups("open Google Chrome"),
+        names(&["computer"]).into_iter().collect()
+    );
+    assert!(groups("google the latest tokio release").contains("search"));
+    assert!(groups("open google chrome and google the weather").contains("search"));
+}
+
+/// [0.0.7] The computer group comes whole: a model that can take a screenshot but not click
+/// or type is stuck. Whole when a message is about it or the chat was shown, used or found
+/// one of its tools, past the cap if need be; not at all when nothing points at it; and in
+/// a small context the tools it needs most come first.
+#[test]
+fn the_computer_group_is_shown_whole_or_not_at_all() {
+    let tools = on(&[
+        "files",
+        "browser",
+        "computer",
+        "artifacts",
+        "search",
+        "toolfinder",
+        "outputs",
+        "task",
+    ]);
+    let computer: Vec<String> = tools
+        .iter()
+        .filter(|t| t.server == "computer")
+        .map(|t| t.name.clone())
+        .collect();
+    assert_eq!(computer.len(), 7);
+    let all_of = |shown: &[String]| computer.iter().all(|n| shown.contains(n));
+    let none_of = |shown: &[String]| computer.iter().all(|n| !shown.contains(n));
+    assert!(none_of(&pick(
+        &tools,
+        &["Please read notes.txt and tell me what it says"],
+        &[],
+        &[]
+    )));
+    let desktop = pick(&tools, &["open Notepad and type hello"], &[], &[]);
+    assert!(all_of(&desktop), "{desktop:?}");
+    assert!(
+        BASE.iter().all(|n| desktop.contains(&n.to_string())),
+        "{desktop:?}"
+    );
+    assert_eq!(desktop.len(), BASE.len() + 7, "{desktop:?}");
+    assert!(desktop.len() > DEFAULT_MAX);
+    // One of its tools shown before, used or found: all of them, whatever is asked now.
+    let before = names(&["computer_screenshot"]);
+    let used = names(&["computer_click"]);
+    for (shown, wanted) in [(&before, &Vec::new()), (&Vec::new(), &used)] {
+        let list = pick(&tools, &["carry on"], shown, wanted);
+        assert!(all_of(&list), "{list:?}");
+    }
+    // The list still only grows: a later turn keeps all of them.
+    let later = pick(&tools, &["thanks"], &desktop, &[]);
+    assert!(
+        is_subsequence(&desktop, &later) && all_of(&later),
+        "{later:?}"
+    );
+    // The browser shares the screenshot request, and the computer group still comes whole.
+    let shot = pick(&tools, &["take a screenshot"], &[], &[]);
+    assert!(all_of(&shot), "{shot:?}");
+    assert!(shot.contains(&"browser_screenshot".to_string()), "{shot:?}");
+
+    // A small context: whole when it fits, else screenshot, click, type and key first.
+    let messages = texts(&["open Notepad and type hello"]);
+    let within = |allowance: u32| {
+        select(&Selecting {
+            tools: &tools,
+            messages: &messages,
+            shown: &[],
+            wanted: &[],
+            skills: &[],
+            skill_loaded: false,
+            max: DEFAULT_MAX,
+            allowance: Some(allowance),
+        })
+    };
+    // Every tool costs 100 here: the core five and the finder pair take 700.
+    let roomy = within(1_400);
+    assert!(all_of(&roomy), "{roomy:?}");
+    let tight = within(1_100);
+    let shown_computer: Vec<&str> = tight
+        .iter()
+        .map(String::as_str)
+        .filter(|n| n.starts_with("computer_"))
+        .collect();
+    assert_eq!(
+        shown_computer,
+        [
+            "computer_screenshot",
+            "computer_click",
+            "computer_type",
+            "computer_key"
+        ],
+        "{tight:?}"
+    );
+    assert!(cost_of(&tools, &tight) <= 1_100);
+}
+
 /// An external server has no catalog entry: its name, its tools' names and their
 /// descriptions are what a request is matched against.
 #[test]
@@ -345,12 +706,14 @@ fn reverse_engineering_matches_by_its_own_words_only() {
             .map_or(0, |(_, s)| s)
     };
     assert!(score("decompile this program") > score("decompile this"));
-    // "screenshot" and "drag" are only in the names of browser and computer tools.
+    // "screenshot" and "drag" are only in the names of browser and computer tools. The
+    // browser matches by the words of its tools' names; [0.0.7] the computer group matches by
+    // its own words only ("take a screenshot"), so "drag" brings in nothing.
     assert_eq!(
         groups(&all, "take a screenshot"),
         set(&["browser", "computer"])
     );
-    assert_eq!(groups(&all, "drag it to the left"), set(&["computer"]));
+    assert_eq!(groups(&all, "drag it to the left"), set(&[]));
     // An added server named like rea's group is an ordinary group: its tools' names count.
     let added = vec![external(
         "reverse",
@@ -387,7 +750,8 @@ fn a_request_to_organise_shows_the_folder_tools_in_full_access() {
 #[test]
 fn a_plain_request_shows_the_companions_and_the_core_file_tools() {
     let tools = default_set();
-    assert_eq!(tools.len(), 26);
+    // [0.0.7 P7] 27 since browser_capture_site.
+    assert_eq!(tools.len(), 27);
     let shown = pick(
         &tools,
         &["Please read notes.txt and tell me what it says"],
@@ -467,9 +831,55 @@ fn the_cap_keeps_companions_then_used_and_found_then_the_best_matches() {
         max: 30,
         allowance: None,
     });
+    // [0.0.7 P7] Eleven since browser_capture_site.
     assert_eq!(
         roomy.iter().filter(|n| n.starts_with("browser_")).count(),
-        10
+        11
+    );
+}
+
+/// [0.0.7 P7] Requests to copy a website's look bring the browser group and
+/// `browser_capture_site` among its tools; ordinary browsing does not.
+#[test]
+fn website_capture_requests_bring_the_capture_tool() {
+    let all: Vec<Candidate> = on(&["files", "terminal", "git", "browser", "artifacts", "search"])
+        .into_iter()
+        .filter(|t| !is_always_shown(t) && !is_core(t))
+        .collect();
+    for request in [
+        "clone this website",
+        "copy the design of example.com",
+        "recreate this site's animations",
+        "make a site that looks like stripe.com",
+        "clone the front end of linear.app",
+        "capture the look of apple.com so we can rebuild it",
+        "make my landing page look like vercel.com",
+    ] {
+        let wording = Wording::of(request);
+        let groups: Vec<String> = matching_groups(&all, &wording, &[])
+            .into_iter()
+            .map(|(group, _)| group)
+            .collect();
+        assert!(
+            groups.contains(&"browser".to_string()),
+            "{request}: {groups:?}"
+        );
+        // Under the cap, the group's places go to the tools the request points at most.
+        let shown = pick(&default_set(), &[request], &[], &[]);
+        assert!(
+            shown.contains(&"browser_capture_site".to_string()),
+            "{request}: {shown:?}"
+        );
+    }
+    let shown = pick(
+        &default_set(),
+        &["open the website and click the sign-in button"],
+        &[],
+        &[],
+    );
+    assert!(
+        !shown.contains(&"browser_capture_site".to_string()),
+        "{shown:?}"
     );
 }
 

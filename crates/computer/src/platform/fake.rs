@@ -2,16 +2,22 @@
 //! OS's idea of which keys and buttons are down. [`FakeDesktop::capture`] and
 //! [`FakeDesktop::injector`] implement the platform traits on top of it, record every
 //! event, and can be told to fail, stall or panic on a given event.
+//!
+//! Windows can be minimised ([`FakeDesktop::minimise`]): a minimised window receives no
+//! pointer events and is not drawn. Where the keyboard goes then follows Windows by
+//! default (the next window in front gets it) or macOS with
+//! [`FakeState::focus_stays_on_minimise`] (the application keeps it).
 
 use std::collections::BTreeSet;
 use std::sync::{Arc, Mutex, MutexGuard};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use crate::apps::{AppInfo, Target};
 use crate::geometry::{GlobalPoint, MonitorInfo, Rect};
 use crate::keys::Key;
 use crate::platform::{
-    Capture, CaptureError, Captured, Gate, Injector, InputError, InputEvent, MouseButton, Pressable,
+    Capture, CaptureError, Captured, Gate, Injector, InputError, InputEvent, MouseButton,
+    Pressable, SelfProcess, WindowRef,
 };
 
 /// A window on the fake desktop.
@@ -29,6 +35,8 @@ pub struct FakeWindow {
     pub elevated: bool,
     /// A console window (see [`Target::console`]).
     pub console: bool,
+    /// Minimised: no pointer events reach it and the capture does not draw it.
+    pub minimised: bool,
     /// RGB used when the fake capture draws it.
     pub colour: [u8; 3],
 }
@@ -45,6 +53,7 @@ impl FakeWindow {
             title: format!("window {id}"),
             elevated: false,
             console: false,
+            minimised: false,
             colour: [c, c.wrapping_add(90), c.wrapping_add(180)],
         }
     }
@@ -87,6 +96,20 @@ pub struct FakeState {
     /// Report OS key/button state (`is_pressed`), as Windows and macOS can.
     pub reports_state: bool,
     pub mac: bool,
+    /// macOS: minimising the window with the keyboard focus leaves the keyboard with its
+    /// application. Windows (false) gives it to the next window in front.
+    pub focus_stays_on_minimise: bool,
+    /// Windows brought to the front by [`Injector::bring_to_front`], in order.
+    pub fronted: Vec<u64>,
+    /// [`Injector::bring_to_front`] fails (macOS refusing an activation, say).
+    pub bring_to_front_fails: bool,
+    /// [`Injector::time_since_input`] reports the latest input, counting the events sent
+    /// here as Windows counts injected input. Off: the platform cannot tell.
+    pub reports_input_time: bool,
+    /// The user's latest keyboard or mouse input ([`FakeDesktop::user_input`]).
+    pub physical_input: Option<Instant>,
+    /// When the latest event was sent here.
+    pub injected_input: Option<Instant>,
 }
 
 /// Shared fake desktop. Clone it freely.
@@ -119,6 +142,36 @@ impl FakeDesktop {
 
     pub fn clear_events(&self) {
         self.state().events.clear();
+    }
+
+    /// Minimises a window. When it had the keyboard focus, the focus goes to the next window
+    /// in front that is not minimised, unless [`FakeState::focus_stays_on_minimise`].
+    pub fn minimise(&self, id: u64) {
+        let mut s = self.state();
+        let Some(w) = s.windows.iter_mut().find(|w| w.id == id) else {
+            return;
+        };
+        w.minimised = true;
+        if s.foreground == Some(id) && !s.focus_stays_on_minimise {
+            s.foreground = s.windows.iter().find(|w| !w.minimised).map(|w| w.id);
+        }
+    }
+
+    /// The user touched the keyboard or mouse `ago`.
+    pub fn user_input(&self, ago: Duration) {
+        self.state().physical_input = Instant::now().checked_sub(ago);
+    }
+
+    /// Restores a minimised window to the front, giving it the keyboard focus.
+    pub fn restore(&self, id: u64) {
+        let mut s = self.state();
+        let Some(i) = s.windows.iter().position(|w| w.id == id) else {
+            return;
+        };
+        let mut w = s.windows.remove(i);
+        w.minimised = false;
+        s.windows.insert(0, w);
+        s.foreground = Some(id);
     }
 
     pub fn capture(&self) -> Arc<dyn Capture> {
@@ -202,9 +255,10 @@ impl FakeCapture {
         for px in rgba.as_chunks_mut::<4>().0 {
             *px = [20, 20, 20, 255];
         }
-        // Back to front, skipping this app's windows.
+        // Back to front, skipping minimised windows and this app's.
         for win in s.windows.iter().rev() {
-            if s.capture_excludes.contains(&win.pid)
+            if win.minimised
+                || s.capture_excludes.contains(&win.pid)
                 || win
                     .root_pid
                     .is_some_and(|p| s.capture_excludes.contains(&p))
@@ -237,8 +291,26 @@ impl FakeCapture {
 
 struct FakeInjector(FakeDesktop);
 
-impl Injector for FakeInjector {
-    fn target_at(&self, p: GlobalPoint) -> Result<Target, InputError> {
+fn desktop_target() -> Target {
+    Target {
+        pids: vec![1],
+        app: desktop_app(),
+        elevated: false,
+        window_title: None,
+        window_id: 0,
+        window_rect: None,
+        console: false,
+    }
+}
+
+impl FakeInjector {
+    /// The first window under `p` that is not minimised and passes `keep`, else the
+    /// desktop.
+    fn under(
+        &self,
+        p: GlobalPoint,
+        keep: impl Fn(&FakeWindow) -> bool,
+    ) -> Result<Target, InputError> {
         let s = self.0.state();
         if !s.monitors.iter().any(|m| m.bounds.contains(p)) {
             return Err(InputError::NoTarget(
@@ -247,17 +319,62 @@ impl Injector for FakeInjector {
         }
         Ok(s.windows
             .iter()
-            .find(|w| w.rect.contains(p))
+            .find(|w| !w.minimised && w.rect.contains(p) && keep(w))
             .map(target_of)
-            .unwrap_or_else(|| Target {
-                pids: vec![1],
-                app: desktop_app(),
-                elevated: false,
-                window_title: None,
-                window_id: 0,
-                window_rect: None,
-                console: false,
-            }))
+            .unwrap_or_else(desktop_target))
+    }
+}
+
+impl Injector for FakeInjector {
+    fn target_at(&self, p: GlobalPoint) -> Result<Target, InputError> {
+        self.under(p, |_| true)
+    }
+
+    fn target_at_behind(
+        &self,
+        p: GlobalPoint,
+        me: &SelfProcess,
+    ) -> Result<Option<Target>, InputError> {
+        self.under(p, |w| !me.owns_any(&target_of(w).pids))
+            .map(Some)
+    }
+
+    fn keyboard_target_behind(&self, me: &SelfProcess) -> Result<Option<Target>, InputError> {
+        let s = self.0.state();
+        Ok(s.windows
+            .iter()
+            .find(|w| !w.minimised && !me.owns_any(&target_of(w).pids))
+            .map(target_of))
+    }
+
+    fn bring_to_front(
+        &self,
+        window: &WindowRef,
+        me: &SelfProcess,
+        gate: &Gate,
+    ) -> Result<bool, InputError> {
+        let mut s = self.0.state();
+        // Only while this app has the keyboard and Stop was not pressed, checked in the
+        // same step.
+        let mine = s
+            .foreground
+            .and_then(|id| s.windows.iter().find(|w| w.id == id))
+            .is_some_and(|w| me.owns_any(&target_of(w).pids));
+        if s.bring_to_front_fails || !mine || !gate.is_open() {
+            return Ok(false);
+        }
+        let Some(i) = s
+            .windows
+            .iter()
+            .position(|w| w.id == window.window_id && w.pid == window.pid && !w.minimised)
+        else {
+            return Ok(false);
+        };
+        let w = s.windows.remove(i);
+        s.windows.insert(0, w);
+        s.foreground = Some(window.window_id);
+        s.fronted.push(window.window_id);
+        Ok(true)
     }
 
     fn keyboard_target(&self) -> Result<Target, InputError> {
@@ -314,7 +431,21 @@ impl Injector for FakeInjector {
             InputEvent::Scroll { .. } | InputEvent::Text { .. } => {}
         }
         s.events.push(event.clone());
+        s.injected_input = Some(Instant::now());
         Ok(())
+    }
+
+    fn cursor(&self) -> Option<GlobalPoint> {
+        Some(self.0.state().cursor)
+    }
+
+    fn time_since_input(&self) -> Option<Duration> {
+        let s = self.0.state();
+        if !s.reports_input_time {
+            return None;
+        }
+        let latest = s.physical_input.max(s.injected_input);
+        Some(latest.map_or(Duration::from_secs(3600), |t| t.elapsed()))
     }
 
     fn is_pressed(&self, what: Pressable) -> Option<bool> {

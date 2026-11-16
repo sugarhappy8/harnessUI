@@ -5,12 +5,13 @@
 
 use agent::OpenAiClient;
 use serde_json::json;
-use tauri::State;
 use tauri::ipc::Channel;
+use tauri::{Emitter, State};
+use tokio_util::sync::CancellationToken;
 
 use crate::dto::{ChatDetailDto, ChatDto, ChatSummaryDto, MessageDto};
 use crate::error::{AppError, AppResult};
-use crate::state::AppState;
+use crate::state::{AppState, Generation};
 use crate::turns::TurnStreamEvent;
 
 const NEW_CHAT_TITLE: &str = "New chat";
@@ -33,6 +34,187 @@ fn text_content(text: &str) -> serde_json::Value {
     json!([{ "type": "text", "text": text }])
 }
 
+/// A user message's content: its text, then its attachment parts (images, documents and
+/// mentions) in order.
+fn user_content(text: &str, parts: Vec<serde_json::Value>) -> serde_json::Value {
+    let mut content = text_content(text);
+    if let Some(all) = content.as_array_mut() {
+        all.extend(parts);
+    }
+    content
+}
+
+/// [0.0.7 P6] Edit and resend: the user message being edited, and the attachments of it
+/// (images, documents and mentions, by attachment id) that the new message keeps.
+#[derive(Debug, Clone, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CopyAttachments {
+    pub message_id: store::MessageId,
+    pub attachment_ids: Vec<i64>,
+}
+
+/// [0.0.7 P6] The attachment parts of the edited message that the new one keeps, as they were
+/// stored, in their order: an image is the same file, a document or a mention the same text
+/// the model was sent (a mention is not read from its file again). Only a user message of
+/// `chat_id` lends its attachments, and only ones of that chat; an id it does not carry is
+/// refused, never dropped without a word.
+async fn copied_parts(
+    store: &store::Store,
+    chat_id: store::ChatId,
+    copy: &CopyAttachments,
+) -> AppResult<Vec<serde_json::Value>> {
+    let from = store
+        .get_message(copy.message_id)
+        .await?
+        .filter(|m| m.chat_id == chat_id && m.role == store::Role::User)
+        .ok_or_else(|| {
+            AppError::bad_request("That message's attachments can't be sent again here.")
+        })?;
+    let mut parts = Vec::new();
+    let mut found = std::collections::HashSet::new();
+    for part in from.content.as_array().into_iter().flatten() {
+        if !matches!(
+            part.get("type").and_then(|t| t.as_str()),
+            Some("image" | "document")
+        ) {
+            continue;
+        }
+        let Some(id) = part.get("attachment_id").and_then(|i| i.as_i64()) else {
+            continue;
+        };
+        if !copy.attachment_ids.contains(&id) || !found.insert(id) {
+            continue;
+        }
+        let row = store.get_attachment(store::AttachmentId(id)).await?;
+        if row.is_none_or(|a| a.chat_id != chat_id) {
+            return Err(AppError::new(
+                "attachment_missing",
+                "An attachment of that message is no longer there.",
+                "Attach the file again.",
+                format!("attachment {id}"),
+            ));
+        }
+        parts.push(part.clone());
+    }
+    if copy.attachment_ids.iter().any(|id| !found.contains(id)) {
+        return Err(AppError::new(
+            "attachment_missing",
+            "An attachment of that message is no longer there.",
+            "Attach the file again.",
+            String::new(),
+        ));
+    }
+    Ok(parts)
+}
+
+/// [0.0.7 P6a review] Edit and resend sends the edited message's attachments again and nothing
+/// new. Those come from a message that kept the limits for one message (8 images, 8 files, the
+/// mentions, and the share of the context files and mentions take together); the limits are
+/// checked on the new attachments alone, so copied and new ones together could go past them,
+/// further with each edit. The app's edit box never sends both.
+fn copied_alone(
+    copy: Option<&CopyAttachments>,
+    images: usize,
+    documents: usize,
+    mentions: usize,
+) -> AppResult<()> {
+    if copy.is_some() && images + documents + mentions > 0 {
+        return Err(AppError::new(
+            "bad_request",
+            "New attachments can't be added to an edited message.",
+            "Send the edited message, then attach the new files to a new message.",
+            String::new(),
+        ));
+    }
+    Ok(())
+}
+
+/// [0.0.7 P6] The main window's event naming the chat whose reply is being written (`null`
+/// when none): sent when a turn takes the slot and when it gives it back.
+const TURN_RUNNING: &str = "turn-running";
+
+/// [0.0.7 P6] A chat's hold on the one reply the app writes at a time. A send takes it before
+/// anything of the turn is stored, so a send refused as busy leaves no message behind, and
+/// [0.0.7 P6a review] before anything slow, so a Stop pressed meanwhile finds the turn; it is
+/// given back when dropped, also on an early error. The main window is told which chat holds
+/// it ([`TURN_RUNNING`]), and can ask after a reload ([`running_turn`]).
+struct TurnSlot<'a> {
+    generation: &'a Generation,
+    id: u64,
+    chat_id: store::ChatId,
+    cancel: CancellationToken,
+    /// Where to say so; `None` in tests. Borrowed, never a clone: the tests drop slots, and
+    /// dropping an owned handle would link Tauri's menu code, and with it muda's About box
+    /// (`TaskDialogIndirect`, only in Common Controls 6), into the library's test program,
+    /// which has no manifest asking for Common Controls 6; on Windows it then does not start
+    /// (0xc0000139, STATUS_ENTRYPOINT_NOT_FOUND).
+    app: Option<&'a tauri::AppHandle>,
+}
+
+impl<'a> TurnSlot<'a> {
+    fn take(
+        generation: &'a Generation,
+        chat_id: store::ChatId,
+        app: Option<&'a tauri::AppHandle>,
+    ) -> AppResult<Self> {
+        let Some((id, cancel)) = generation.start(chat_id.0) else {
+            return Err(AppError::new(
+                "busy",
+                "A reply is already being generated.",
+                "Wait for it to finish or press Stop.",
+                String::new(),
+            ));
+        };
+        if let Some(app) = app {
+            let _ = app.emit_to(crate::MAIN_WINDOW, TURN_RUNNING, Some(chat_id.0));
+        }
+        Ok(Self {
+            generation,
+            id,
+            chat_id,
+            cancel,
+            app,
+        })
+    }
+}
+
+impl Drop for TurnSlot<'_> {
+    fn drop(&mut self) {
+        self.generation.finish(self.id);
+        if let Some(app) = self.app {
+            // A newer turn may hold it already (one started while this one wound down).
+            let _ = app.emit_to(
+                crate::MAIN_WINDOW,
+                TURN_RUNNING,
+                self.generation.running_chat(),
+            );
+        }
+    }
+}
+
+/// [0.0.7 P6] Stores the user's message for the turn that holds `slot`, in the slot's chat:
+/// a message is never stored for a turn that cannot start.
+async fn store_user_message(
+    store: &store::Store,
+    slot: &TurnSlot<'_>,
+    parent_id: Option<store::MessageId>,
+    content: serde_json::Value,
+    search_text: String,
+) -> AppResult<store::MessageId> {
+    Ok(store
+        .insert_message(store::NewMessage {
+            chat_id: slot.chat_id,
+            parent_id,
+            role: store::Role::User,
+            content,
+            reasoning: None,
+            status: store::MessageStatus::Complete,
+            model_ref: None,
+            search_text,
+        })
+        .await?)
+}
+
 fn chat_dto(c: &store::Chat) -> ChatDto {
     ChatDto {
         id: c.id,
@@ -46,6 +228,10 @@ fn chat_dto(c: &store::Chat) -> ChatDto {
             .unwrap_or_default()
             .thinking_off,
         working_folder: c.working_folder.clone(),
+        // [0.0.7 P5] Filled by `get_chat`, which reads the endpoint.
+        cloud_host: None,
+        endpoint_thinking: false,
+        endpoint_thinking_low: false,
     }
 }
 
@@ -204,6 +390,11 @@ pub async fn get_chat(
     // [0.0.4 profile] Thinking as the next turn has it: the user's choice, else the
     // model's tested settings, else on.
     dto.thinking = crate::evals::profile::chat_thinking(&state, &chat).await;
+    // [0.0.7 P5] The "Cloud" mark and Claude's Thinking switch.
+    let marks = crate::providers::chat_marks(&state, chat.model_ref.as_deref()).await;
+    dto.cloud_host = marks.cloud_host;
+    dto.endpoint_thinking = marks.thinking;
+    dto.endpoint_thinking_low = marks.thinking_low;
     Ok(ChatDetailDto {
         chat: dto,
         messages,
@@ -352,12 +543,42 @@ pub async fn switch_branch(
     Ok(())
 }
 
+/// Stop. [0.0.7 P6] With a chat (the Stop of a chat on screen), only that chat's reply: never
+/// one that runs in another chat. Without one, whatever runs.
 #[tauri::command]
-pub async fn stop_generation(app: tauri::AppHandle, state: State<'_, AppState>) -> AppResult<()> {
-    state.generation.cancel();
-    crate::computer_cmd::release_all(&app);
-    crate::turns::cancel_all_pending(&app);
+pub async fn stop_generation(
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+    chat_id: Option<store::ChatId>,
+) -> AppResult<()> {
+    if stop_reply(&state.generation, chat_id) {
+        crate::computer_cmd::release_all(&app);
+        crate::turns::cancel_all_pending(&app);
+    }
     Ok(())
+}
+
+/// [0.0.7 P6] Stops the reply being written: with `chat_id`, only when it is that chat's.
+/// True when its tools and cards are to be stopped too (always without a chat).
+fn stop_reply(generation: &Generation, chat_id: Option<store::ChatId>) -> bool {
+    match chat_id {
+        Some(chat) => generation.cancel_chat(chat.0),
+        None => {
+            generation.cancel();
+            true
+        }
+    }
+}
+
+/// [0.0.7 P6] The chat whose reply is being written, if any. A window that reloaded while a
+/// reply ran learns of it here: that reply's own events went to the window before.
+#[tauri::command]
+pub fn running_turn(
+    window: tauri::WebviewWindow,
+    state: State<'_, AppState>,
+) -> AppResult<Option<i64>> {
+    crate::commands::only_main_window(window.label())?;
+    Ok(state.generation.running_chat())
 }
 
 #[tauri::command]
@@ -371,13 +592,35 @@ pub async fn send_message(
     images: Option<Vec<crate::attachments::ImageInput>>,
     documents: Option<Vec<crate::attachments::DocumentInput>>,
     mentions: Option<Vec<tools::symbols::resolve::MentionRequest>>,
+    copy_attachments: Option<CopyAttachments>,
     on_event: Channel<TurnStreamEvent>,
 ) -> AppResult<()> {
     let text = text.trim().to_string();
     let images = images.unwrap_or_default();
     let documents = documents.unwrap_or_default();
     let mentions = mentions.unwrap_or_default();
-    if text.is_empty() && images.is_empty() && documents.is_empty() && mentions.is_empty() {
+    copied_alone(
+        copy_attachments.as_ref(),
+        images.len(),
+        documents.len(),
+        mentions.len(),
+    )?;
+    // [0.0.7 P6] One reply at a time: a send while another runs (in any chat, also one the
+    // window does not know of after a reload) is refused before anything is stored. [0.0.7
+    // P6a review] Taken before anything slow too (below, a remote endpoint is asked about its
+    // model over the network), so a Stop pressed meanwhile finds this turn and stops it.
+    let slot = TurnSlot::take(&state.generation, chat_id, Some(&app))?;
+    // [0.0.7 P6] Edit and resend: the edited message's attachments that the new one keeps.
+    let copied = match &copy_attachments {
+        Some(copy) => copied_parts(&state.store, chat_id, copy).await?,
+        None => Vec::new(),
+    };
+    if text.is_empty()
+        && images.is_empty()
+        && documents.is_empty()
+        && mentions.is_empty()
+        && copied.is_empty()
+    {
         return Err(AppError::bad_request("The message is empty."));
     }
     let chat = state
@@ -386,11 +629,14 @@ pub async fn send_message(
         .await?
         .ok_or_else(|| AppError::not_found("chat"))?;
     let target = resolve_target(&state, chat.model_ref.as_deref()).await?;
-    if !images.is_empty() && target.local && !state.runtime.status().vision {
+    let copied_image = copied
+        .iter()
+        .any(|p| p.get("type").and_then(|t| t.as_str()) == Some("image"));
+    if (!images.is_empty() || copied_image) && target.local && !state.runtime.status().vision {
         return Err(AppError::new(
             "no_vision",
-            "This model cannot read images.",
-            "Use a model with the vision badge (it comes with an image projector), or remove the image.",
+            "This model was loaded without an image file, so it can't read images.",
+            "If it has one, download it in Models → Installed; otherwise pick a model with the vision badge, or remove the image.",
             String::new(),
         ));
     }
@@ -415,30 +661,17 @@ pub async fn send_message(
         counter,
     )
     .await?;
-    let mut content = text_content(&text);
-    if let Some(parts) = content.as_array_mut() {
-        parts.extend(crate::attachments::save_images(&app, &state, chat_id, &images).await?);
-        parts.extend(
-            crate::attachments::save_documents(
-                &app, &state, chat_id, &documents, n_ctx, shared_by, counter,
-            )
-            .await?,
-        );
-        parts.extend(mention_parts);
-    }
-    let user_id = state
-        .store
-        .insert_message(store::NewMessage {
-            chat_id,
-            parent_id,
-            role: store::Role::User,
-            content,
-            reasoning: None,
-            status: store::MessageStatus::Complete,
-            model_ref: None,
-            search_text: text.clone(),
-        })
-        .await?;
+    let mut parts = copied;
+    parts.extend(crate::attachments::save_images(&app, &state, chat_id, &images).await?);
+    parts.extend(
+        crate::attachments::save_documents(
+            &app, &state, chat_id, &documents, n_ctx, shared_by, counter,
+        )
+        .await?,
+    );
+    parts.extend(mention_parts);
+    let content = user_content(&text, parts);
+    let user_id = store_user_message(&state.store, &slot, parent_id, content, text.clone()).await?;
     if chat.title == NEW_CHAT_TITLE {
         let first = if text.is_empty() {
             "Image"
@@ -461,6 +694,7 @@ pub async fn send_message(
         Some(user_id),
         target,
         on_event,
+        slot,
     )
     .await
 }
@@ -473,6 +707,9 @@ pub async fn regenerate(
     assistant_message_id: store::MessageId,
     on_event: Channel<TurnStreamEvent>,
 ) -> AppResult<()> {
+    // [0.0.7 P6a review] The slot first, as in `send_message`: a Stop pressed while a remote
+    // endpoint is asked about its model finds this turn.
+    let slot = TurnSlot::take(&state.generation, chat_id, Some(&app))?;
     let chat = state
         .store
         .get_chat(chat_id)
@@ -493,7 +730,7 @@ pub async fn regenerate(
         .map(|m| m.id)
         .ok_or_else(|| AppError::bad_request("This message has nothing to regenerate from."))?;
     let target = resolve_target(&state, chat.model_ref.as_deref()).await?;
-    generate(&app, &state, &chat, parent, None, target, on_event).await
+    generate(&app, &state, &chat, parent, None, target, on_event, slot).await
 }
 
 /// Where a request goes.
@@ -558,27 +795,16 @@ pub(crate) async fn target_for(
         let id: i64 = id
             .parse()
             .map_err(|_| AppError::bad_request("This chat's model reference is malformed."))?;
-        let (client, _provider) =
-            crate::providers::client_for(state, store::ProviderId(id)).await?;
+        let (client, provider) = crate::providers::client_for(state, store::ProviderId(id)).await?;
         // A model that reports no context (or a failed check) gets the user's setting,
-        // 4,096 by default (8.4).
+        // 4,096 by default (8.4); [0.0.7 P5] a cloud company's model at most the company's
+        // size on "Automatic" (that size when the server says nothing), and every endpoint
+        // the size chosen for it in Settings → Endpoints.
         let reported = client.context_length(model).await.ok().flatten();
         if remember {
             crate::mcp_cmd::remember_context(model_ref, reported);
         }
-        let n_ctx = match reported {
-            Some(n) => n,
-            None => {
-                let stored: Option<serde_json::Value> = state
-                    .store
-                    .get_setting(crate::settings::REMOTE_CONTEXT_LENGTH)
-                    .await
-                    .ok()
-                    .flatten();
-                crate::settings::remote_context_length(stored.as_ref())
-            }
-        };
-        let n_ctx = Some(n_ctx);
+        let n_ctx = Some(crate::providers::context_for(state, &provider, model, reported).await);
         return Ok(Target {
             client,
             model: model.to_string(),
@@ -592,6 +818,9 @@ pub(crate) async fn target_for(
     ))
 }
 
+/// Runs the turn that holds `slot` ([0.0.7 P6] taken by the caller before anything of the
+/// turn was stored) and gives the slot back when it ends.
+#[allow(clippy::too_many_arguments)]
 async fn generate(
     app: &tauri::AppHandle,
     state: &AppState,
@@ -600,15 +829,9 @@ async fn generate(
     user_message_id: Option<store::MessageId>,
     target: Target,
     on_event: Channel<TurnStreamEvent>,
+    slot: TurnSlot<'_>,
 ) -> AppResult<()> {
-    let Some((generation_id, cancel)) = state.generation.start(chat.id.0) else {
-        return Err(AppError::new(
-            "busy",
-            "A reply is already being generated.",
-            "Wait for it to finish or press Stop.",
-            String::new(),
-        ));
-    };
+    let cancel = slot.cancel.clone();
     let _busy = crate::runtime_manager::use_local_model(
         state,
         &target.model_ref,
@@ -620,13 +843,16 @@ async fn generate(
         chat: chat.clone(),
         reply_to,
         user_message_id,
-        client: target.client,
+        // [0.0.7 P5] Claude's thinking is kept for this chat alone.
+        client: target
+            .client
+            .for_conversation(format!("chat {}", chat.id.0)),
         model_ref: target.model_ref,
         caps,
         template,
     };
     let result = crate::turns::run(app, req, on_event, cancel).await;
-    state.generation.finish(generation_id);
+    drop(slot);
     result
 }
 
@@ -636,6 +862,7 @@ pub(crate) fn turn_settings(
     target: &Target,
 ) -> (agent::ModelCaps, agent::RequestTemplate) {
     let status = state.runtime.status();
+    let kind = target.client.config().kind;
     let caps = agent::ModelCaps {
         tools: if target.local {
             status.supports_tools
@@ -647,9 +874,11 @@ pub(crate) fn turn_settings(
             .n_ctx
             .unwrap_or(crate::settings::DEFAULT_REMOTE_CONTEXT),
         local: target.local,
-        thinking: target.local && status.thinking,
+        // [0.0.7 P5] Claude's thinking is switched through its own API.
+        thinking: (target.local && status.thinking) || kind == agent::ProviderKind::Anthropic,
         preserve_reasoning: target.local && status.preserve_reasoning,
-        images_in_tool_results: !target.local,
+        // [0.0.7 P5] Not at OpenAI, whose tool messages take text only.
+        images_in_tool_results: !target.local && agent::images_in_tool_results(kind),
     };
     let mut template = agent::RequestTemplate {
         model: target.model.clone(),
@@ -825,5 +1054,386 @@ mod tests {
             serde_json::to_value(&none).unwrap()["summary"],
             serde_json::Value::Null
         );
+    }
+
+    async fn new_chat(store: &store::Store) -> store::ChatId {
+        store
+            .create_chat(store::NewChat {
+                title: "t".into(),
+                model_ref: None,
+                system_prompt: None,
+            })
+            .await
+            .unwrap()
+    }
+
+    async fn attachment(store: &store::Store, chat: store::ChatId, mime: &str, name: &str) -> i64 {
+        store
+            .insert_attachment(store::NewAttachment {
+                chat_id: chat,
+                sha256: format!("{name}-sha"),
+                mime: mime.into(),
+                file_name: name.into(),
+                size_bytes: 3,
+                bytes_path: format!("/attachments/{name}"),
+                extracted_text: (mime == "text/plain").then(|| "def add(a, b):".into()),
+            })
+            .await
+            .unwrap()
+            .0
+    }
+
+    async fn insert(
+        store: &store::Store,
+        chat: store::ChatId,
+        parent: Option<store::MessageId>,
+        role: store::Role,
+        content: serde_json::Value,
+    ) -> store::MessageId {
+        store
+            .insert_message(store::NewMessage {
+                chat_id: chat,
+                parent_id: parent,
+                role,
+                content,
+                reasoning: None,
+                status: store::MessageStatus::Complete,
+                model_ref: None,
+                search_text: String::new(),
+            })
+            .await
+            .unwrap()
+    }
+
+    /// [0.0.7 P6] Edit and resend keeps the attachments left in the edit box: the new user
+    /// message carries the same image, document and mention parts as stored (the same files,
+    /// the same text the model was sent), in the message's order, and leaves out the ones
+    /// removed. Before, it carried the new text only, and the model answered without them.
+    #[tokio::test]
+    async fn an_edited_message_keeps_the_attachments_it_was_sent_with() {
+        let store = store::Store::open_in_memory().unwrap();
+        let chat = new_chat(&store).await;
+        let image = attachment(&store, chat, "image/png", "screenshot.png").await;
+        let doc = attachment(&store, chat, "text/plain", "notes.txt").await;
+        let mention = attachment(&store, chat, "text/plain", "calc.py:add").await;
+        let image_part = json!({ "type": "image", "attachment_id": image });
+        let doc_part = json!({
+            "type": "document", "attachment_id": doc, "name": "notes.txt",
+            "cut": { "kept": 10, "total": 20 },
+        });
+        let mention_part = json!({
+            "type": "document", "attachment_id": mention, "name": "calc.py:add",
+            "mention": {
+                "path": "/w/calc.py", "kind": "function", "symbol": "add", "container": null,
+                "startLine": 4, "endLine": 5, "truncated": false,
+            },
+        });
+        let hello = insert(&store, chat, None, store::Role::User, text_content("hi")).await;
+        let reply = insert(
+            &store,
+            chat,
+            Some(hello),
+            store::Role::Assistant,
+            text_content("hello"),
+        )
+        .await;
+        let original = insert(
+            &store,
+            chat,
+            Some(reply),
+            store::Role::User,
+            user_content(
+                "What's wrong here?",
+                vec![image_part.clone(), doc_part.clone(), mention_part.clone()],
+            ),
+        )
+        .await;
+
+        // The text is edited and the document removed in the edit box.
+        let copy = CopyAttachments {
+            message_id: original,
+            attachment_ids: vec![mention, image],
+        };
+        let parts = copied_parts(&store, chat, &copy).await.unwrap();
+        assert_eq!(parts, vec![image_part.clone(), mention_part.clone()]);
+        let generation = Generation::default();
+        let slot = TurnSlot::take(&generation, chat, None).unwrap();
+        let text = "What is wrong in this picture?";
+        let edited = store_user_message(
+            &store,
+            &slot,
+            Some(reply),
+            user_content(text, parts),
+            text.into(),
+        )
+        .await
+        .unwrap();
+        drop(slot);
+        let new = store.get_message(edited).await.unwrap().unwrap();
+        assert_eq!((new.chat_id, new.role), (chat, store::Role::User));
+        assert_eq!(text_of(&new.content), text);
+        assert_eq!(crate::attachments::image_ids(&new.content), vec![image]);
+        assert!(crate::attachments::document_refs(&new.content).is_empty());
+        let mentions = crate::mentions::mention_refs(&new.content);
+        assert_eq!(mentions.len(), 1);
+        assert_eq!(
+            (mentions[0].attachment_id, mentions[0].label.as_str()),
+            (mention, "calc.py:add")
+        );
+        // A new version beside the original, which keeps all of its attachments.
+        assert_eq!(
+            store.siblings(edited).await.unwrap(),
+            vec![original, edited]
+        );
+        let old = store.get_message(original).await.unwrap().unwrap();
+        assert_eq!(crate::attachments::document_refs(&old.content).len(), 1);
+
+        // A message with only an image can be sent again: the image and no text.
+        let only = CopyAttachments {
+            message_id: original,
+            attachment_ids: vec![image],
+        };
+        assert_eq!(
+            user_content("", copied_parts(&store, chat, &only).await.unwrap()),
+            json!([{ "type": "text", "text": "" }, image_part])
+        );
+    }
+
+    /// [0.0.7 P6] Only a user message of the same chat lends its attachments, and only ones it
+    /// carries and that belong to that chat; anything else is refused, never dropped silently.
+    #[tokio::test]
+    async fn attachments_are_copied_only_from_a_user_message_of_the_chat() {
+        let store = store::Store::open_in_memory().unwrap();
+        let chat = new_chat(&store).await;
+        let other = new_chat(&store).await;
+        let image = attachment(&store, chat, "image/png", "a.png").await;
+        let elsewhere = attachment(&store, other, "image/png", "b.png").await;
+        let part = |id: i64| json!({ "type": "image", "attachment_id": id });
+        let asked = insert(
+            &store,
+            chat,
+            None,
+            store::Role::User,
+            user_content("look", vec![part(image)]),
+        )
+        .await;
+        let copy = |message_id, ids: Vec<i64>| CopyAttachments {
+            message_id,
+            attachment_ids: ids,
+        };
+        assert!(
+            copied_parts(&store, chat, &copy(asked, vec![image]))
+                .await
+                .is_ok()
+        );
+        // Another chat's message.
+        assert!(
+            copied_parts(&store, other, &copy(asked, vec![image]))
+                .await
+                .is_err()
+        );
+        // A reply of the model.
+        let answer = insert(
+            &store,
+            chat,
+            Some(asked),
+            store::Role::Assistant,
+            user_content("", vec![part(image)]),
+        )
+        .await;
+        assert!(
+            copied_parts(&store, chat, &copy(answer, vec![image]))
+                .await
+                .is_err()
+        );
+        // A message that does not exist.
+        let gone = store::MessageId(asked.0 + 1000);
+        assert!(
+            copied_parts(&store, chat, &copy(gone, vec![image]))
+                .await
+                .is_err()
+        );
+        // An attachment the message does not carry.
+        let err = copied_parts(&store, chat, &copy(asked, vec![image, image + 1000]))
+            .await
+            .unwrap_err();
+        assert_eq!(err.code, "attachment_missing");
+        // A part that names another chat's attachment.
+        let odd = insert(
+            &store,
+            chat,
+            None,
+            store::Role::User,
+            user_content("odd", vec![part(elsewhere)]),
+        )
+        .await;
+        let err = copied_parts(&store, chat, &copy(odd, vec![elsewhere]))
+            .await
+            .unwrap_err();
+        assert_eq!(err.code, "attachment_missing");
+        // The text part is never copied: the new text replaces it.
+        let parts = copied_parts(&store, chat, &copy(asked, vec![image]))
+            .await
+            .unwrap();
+        assert!(parts.iter().all(|p| p["type"] != "text"));
+    }
+
+    /// [0.0.7 P6] A send while another reply runs (in any chat, also one the window does not
+    /// know of because it reloaded meanwhile) is refused as busy before anything is stored:
+    /// before, the user message was stored first and stayed without an answer. The turn's
+    /// hold on the slot ends with it. That the commands take the slot before anything else is
+    /// pinned by `a_turn_takes_its_slot_before_anything_slow_or_stored`.
+    #[tokio::test]
+    async fn a_send_while_a_reply_runs_stores_nothing() {
+        let store = store::Store::open_in_memory().unwrap();
+        let chat = new_chat(&store).await;
+        let generation = Generation::default();
+        let (running, _) = generation.start(chat.0 + 1).unwrap();
+        let err = TurnSlot::take(&generation, chat, None)
+            .err()
+            .expect("refused while another reply runs");
+        assert_eq!(err.code, "busy");
+        assert!(store.current_path(chat).await.unwrap().is_empty());
+        assert_eq!(generation.running_chat(), Some(chat.0 + 1));
+
+        generation.finish(running);
+        let slot = TurnSlot::take(&generation, chat, None).unwrap();
+        assert_eq!(generation.running_chat(), Some(chat.0));
+        store_user_message(
+            &store,
+            &slot,
+            None,
+            user_content("hello", Vec::new()),
+            "hello".into(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(store.current_path(chat).await.unwrap().len(), 1);
+        // A second send in the same chat while this turn runs is refused too.
+        assert_eq!(
+            TurnSlot::take(&generation, chat, None).err().unwrap().code,
+            "busy"
+        );
+        drop(slot);
+        assert_eq!(generation.running_chat(), None);
+    }
+
+    /// [0.0.7 P6a review] `send_message` and `regenerate` take the turn's slot first, before
+    /// anything slow (reading the store, asking a remote endpoint about its model over the
+    /// network) and before anything is stored. A Stop pressed meanwhile finds the turn and
+    /// stops it: before, it found nothing, and the turn then ran. And a send refused as busy
+    /// leaves nothing behind (`a_send_while_a_reply_runs_stores_nothing` checks the slot; this
+    /// checks the commands really take it first). Every slow step and every write is awaited,
+    /// so nothing before the slot may be. Edit and resend's check that no new attachments come
+    /// with the copied ones is made before the slot too (it waits for nothing).
+    #[test]
+    fn a_turn_takes_its_slot_before_anything_slow_or_stored() {
+        // A checkout on Windows ends its lines in "\r\n".
+        let source = include_str!("chat.rs").replace("\r\n", "\n");
+        for command in ["pub async fn send_message(", "pub async fn regenerate("] {
+            let body = source.split_once(command).unwrap().1;
+            let body = body.split_once("\n}\n").unwrap().0;
+            let (before, after) = body
+                .split_once("TurnSlot::take(")
+                .unwrap_or_else(|| panic!("{command} takes the slot"));
+            assert!(
+                !before.contains(".await"),
+                "{command} waits for something before it takes the slot"
+            );
+            assert!(after.contains("generate("), "{command} runs the turn");
+        }
+        let send = source.split_once("pub async fn send_message(").unwrap().1;
+        let (before, after) = send.split_once("TurnSlot::take(").unwrap();
+        assert!(before.contains("copied_alone("));
+        let send = after.split_once("\n}\n").unwrap().0;
+        assert!(send.contains("store_user_message("));
+    }
+
+    /// [0.0.7 P6a review] Edit and resend sends the edited message's attachments and nothing
+    /// new. The limits for one message (8 images, 8 files, the mentions, the share of the
+    /// context files and mentions take) were checked on new attachments only, so a send that
+    /// copied some and added new ones could go past them, further with each edit.
+    #[test]
+    fn an_edited_message_takes_no_new_attachments() {
+        let copy = CopyAttachments {
+            message_id: store::MessageId(3),
+            attachment_ids: vec![5, 6],
+        };
+        for (images, documents, mentions) in [(1, 0, 0), (0, 1, 0), (0, 0, 1), (8, 8, 8)] {
+            let err = copied_alone(Some(&copy), images, documents, mentions).unwrap_err();
+            assert_eq!(err.code, "bad_request");
+            assert_eq!(
+                err.message,
+                "New attachments can't be added to an edited message."
+            );
+        }
+        // The copied ones alone, or new ones alone (each checked against the limits as before).
+        assert!(copied_alone(Some(&copy), 0, 0, 0).is_ok());
+        assert!(copied_alone(None, 8, 8, 8).is_ok());
+        assert!(copied_alone(None, 0, 0, 0).is_ok());
+    }
+
+    /// [0.0.7 P6] The Stop of a chat stops that chat's reply only, never one running in
+    /// another chat; Stop without a chat (the stop hotkey's path, older callers) stops
+    /// whatever runs.
+    #[test]
+    fn stop_in_a_chat_never_stops_another_chats_reply() {
+        let g = Generation::default();
+        let (_, token) = g.start(1).unwrap();
+        assert!(!stop_reply(&g, Some(store::ChatId(2))));
+        assert!(!token.is_cancelled());
+        assert!(stop_reply(&g, Some(store::ChatId(1))));
+        assert!(token.is_cancelled());
+        let g = Generation::default();
+        assert!(!stop_reply(&g, Some(store::ChatId(1))), "nothing runs");
+        let (_, token) = g.start(1).unwrap();
+        assert!(stop_reply(&g, None));
+        assert!(token.is_cancelled());
+    }
+
+    /// [0.0.7 P6] `running_turn` is the main window's alone: granted there only, registered,
+    /// and it checks the calling window first, like its neighbours.
+    #[test]
+    fn running_turn_is_for_the_main_window_only() {
+        assert!(include_str!("../capabilities/main.json").contains("\"allow-running-turn\""));
+        for other in [
+            include_str!("../capabilities/overlay.json"),
+            include_str!("../capabilities/indicator.json"),
+        ] {
+            assert!(!other.contains("running-turn"));
+        }
+        assert!(
+            include_str!("../commands.list")
+                .lines()
+                .any(|l| l.trim() == "running_turn")
+        );
+        assert!(include_str!("lib.rs").contains("chat::running_turn,"));
+        let body = include_str!("chat.rs")
+            .split_once("pub fn running_turn(")
+            .unwrap()
+            .1;
+        let body = body.split_once('{').unwrap().1;
+        let first = body.lines().map(str::trim).find(|l| !l.is_empty()).unwrap();
+        assert_eq!(first, "crate::commands::only_main_window(window.label())?;");
+    }
+
+    /// [0.0.7 P6] `copyAttachments` as the webview sends it (src/lib/ipc.ts `CopyAttachments`).
+    #[test]
+    fn copy_attachments_reads_the_webview_names() {
+        let c: CopyAttachments =
+            serde_json::from_value(json!({ "messageId": 3, "attachmentIds": [5, 7] })).unwrap();
+        assert_eq!(c.message_id, store::MessageId(3));
+        assert_eq!(c.attachment_ids, vec![5, 7]);
+    }
+
+    /// [0.0.7 P6] The webview listens for the event this file sends and calls the commands by
+    /// these names, with the arguments as Tauri names them (`chat_id` is `chatId`).
+    #[test]
+    fn the_webview_uses_these_names() {
+        let ipc = include_str!("../../src/lib/ipc.ts");
+        assert!(ipc.contains(&format!("listen<number | null>(\"{TURN_RUNNING}\"")));
+        assert!(ipc.contains("invoke<number | null>(\"running_turn\")"));
+        assert!(ipc.contains("invoke<void>(\"stop_generation\", { chatId: chatId ?? null })"));
+        assert!(ipc.contains("copyAttachments?: CopyAttachments;"));
     }
 }

@@ -23,7 +23,7 @@
 //!   any other result.
 
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -239,8 +239,21 @@ impl ToolHost for NoNesting {
             .filter(|tool| not_for_helpers(&tool.name).is_none())
             .collect()
     }
+    fn kept_back(&self) -> Vec<ToolInfo> {
+        self.0
+            .kept_back()
+            .into_iter()
+            .filter(|tool| not_for_helpers(&tool.name).is_none())
+            .collect()
+    }
+    fn refusal(&self, name: &str) -> Option<String> {
+        // [0.0.7] The tool list names them (it is the turn's), so a call gets the plain answer.
+        not_for_helpers(name)
+            .map(str::to_owned)
+            .or_else(|| self.0.refusal(name))
+    }
     fn validate(&self, name: &str, args: &Value) -> Result<(), Vec<String>> {
-        if let Some(refusal) = not_for_helpers(name) {
+        if let Some(refusal) = refused_for_helpers(name, args.get("name")) {
             return Err(vec![refusal.to_owned()]);
         }
         self.0.validate(name, args)
@@ -252,7 +265,7 @@ impl ToolHost for NoNesting {
         self.0.llama_schema(name)
     }
     async fn describe(&self, name: &str, args: &Map<String, Value>) -> Described {
-        if let Some(refusal) = not_for_helpers(name) {
+        if let Some(refusal) = refused_for_helpers(name, args.get("name")) {
             return Described::Invalid(refusal.to_owned());
         }
         self.0.describe(name, args).await
@@ -273,6 +286,18 @@ impl ToolHost for NoNesting {
         }
         self.0.execute(name, args, action, cancel).await
     }
+}
+
+/// [0.0.7] Why a helper may not make this call, if it may not: a tool it is not offered, also
+/// when `call_tool` names it (`target`, its "name"). The chat's own host would answer such a
+/// `call_tool` with what is true for the chat ("switched off in this chat…"), not for a helper.
+fn refused_for_helpers(name: &str, target: Option<&Value>) -> Option<&'static str> {
+    not_for_helpers(name).or_else(|| {
+        (name == crate::tool_select::finder::CALL_TOOL)
+            .then(|| target.and_then(Value::as_str))
+            .flatten()
+            .and_then(not_for_helpers)
+    })
 }
 
 /// What a helper inherits from the turn that starts it, for the policy engine.
@@ -546,6 +571,15 @@ fn handover_message(task: &str, context: &str, sanitizer: &Sanitizer) -> String 
     text
 }
 
+/// [0.0.7 P5] The chat's client for a conversation of the helper's own, so the thinking
+/// Claude's API returns in it is kept for the helper's steps alone: never sent in the chat
+/// or another helper, and a block the API refuses in it never clears the chat's.
+fn helper_client(client: OpenAiClient, chat_id: i64) -> OpenAiClient {
+    static HELPERS: AtomicU64 = AtomicU64::new(0);
+    let n = HELPERS.fetch_add(1, Ordering::Relaxed) + 1;
+    client.for_conversation(format!("chat {chat_id} helper {n}"))
+}
+
 /// Runs one helper to its end and returns its final answer as the tool result. Failures
 /// (stopped, step cap, repeated or invalid calls, a failed request) come back as error
 /// results that say what happened and carry what the helper had so far.
@@ -583,6 +617,7 @@ pub async fn run(
     ))];
     input.summary = None;
     input.app_notes.clear();
+    let client = helper_client(client, chat_id);
     let step_cap = input.step_cap;
     // A child of the call's token: Stop reaches the helper's stream and its running tool.
     // Cancelled as well if this call is dropped, so a helper never works on unattended.
@@ -611,6 +646,8 @@ pub async fn run(
             sanitizer: &sanitizer,
         };
         let outcome = agent::turn::run_turn(deps, input, token).await;
+        // The helper's conversation ends here: what it kept is not needed again.
+        client.end_conversation();
         sink.finish();
         tracing::info!(
             status = ?outcome.status,

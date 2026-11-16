@@ -90,3 +90,79 @@ describe("the sidebar's model chip, in plain words", () => {
     expect(new XMLSerializer().serializeToString(document.body)).not.toMatch(/[\u202E\u200B]/);
   });
 });
+
+// [0.0.7 P6] A reply waiting for an approval, or running, in a chat that is not open was
+// invisible: its card is drawn in its own chat only. The chat list marks such chats.
+describe("the chat list's marks for replies", () => {
+  afterEach(cleanup);
+
+  const chats = [
+    { id: 1, title: "Install the toolchain", updatedAt: 0, snippet: null },
+    { id: 2, title: "Holiday plans", updatedAt: 0, snippet: null },
+  ];
+  const card = {
+    id: "card-1",
+    chatId: 1,
+    callId: "c1",
+    server: "terminal",
+    tool: "run_command",
+    summary: "Run a command",
+    preview: "make",
+    card: "grantable" as const,
+    reason: "normal" as const,
+  };
+  const turn = (chatId: number) => ({
+    chatId,
+    text: "",
+    reasoning: "",
+    tools: [],
+    notes: [],
+    step: 1,
+    tokensPerSecond: null,
+    promptTokens: null,
+    completionTokens: null,
+    contextUsed: null,
+    nCtx: null,
+  });
+
+  function row(title: string): HTMLElement {
+    return screen.getByText(title).closest("button") as HTMLElement;
+  }
+
+  function show(patch: Partial<ReturnType<typeof useApp.getState>>) {
+    useApp.setState({
+      runtime: null,
+      chats: chats as never,
+      activeChatId: 2,
+      search: "",
+      approvals: [],
+      generation: null,
+      runningTurn: null,
+      ...patch,
+    });
+    render(<Sidebar onOpenSettings={() => undefined} onOpenModels={() => undefined} />);
+  }
+
+  it("marks a chat whose reply waits for an approval, in words a screen reader says too", () => {
+    show({ approvals: [card], generation: turn(1) });
+    expect(row("Install the toolchain").textContent).toContain("Waiting for your approval");
+    expect(row("Install the toolchain").querySelector("[data-chat-mark='waiting']")).toBeTruthy();
+    // Waiting says more than running: one mark.
+    expect(row("Install the toolchain").querySelector("[data-chat-mark='running']")).toBeNull();
+    expect(row("Holiday plans").querySelector("[data-chat-mark]")).toBeNull();
+  });
+
+  it("marks the chat whose reply is running, also one this window did not start", () => {
+    show({ generation: turn(1) });
+    expect(row("Install the toolchain").textContent).toContain("A reply is running");
+    expect(row("Install the toolchain").querySelector("[data-chat-mark='running']")).toBeTruthy();
+    expect(row("Holiday plans").querySelector("[data-chat-mark]")).toBeNull();
+    cleanup();
+    show({ runningTurn: 2 });
+    expect(row("Holiday plans").querySelector("[data-chat-mark='running']")).toBeTruthy();
+    expect(row("Install the toolchain").querySelector("[data-chat-mark]")).toBeNull();
+    cleanup();
+    show({});
+    expect(document.querySelector("[data-chat-mark]")).toBeNull();
+  });
+});

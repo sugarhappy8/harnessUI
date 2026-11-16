@@ -12,10 +12,15 @@
 //!   form-submission navigation is held until approved ([`intent`]); held requests that do
 //!   not match the approved intent go to the app's [`NavigationApprover`].
 //! - Each read, click and type re-checks the frame's actual origin before acting.
+//! - [0.0.7 P7] `browser_capture_site` ([`capture`]) saves a copy of a page's front end
+//!   into an approved folder for studying its design; while it runs, every web request of
+//!   the browser (not only page loads) goes through the address checks, and the captured
+//!   tab's WebSockets are refused (one that starts anyway stops the capture).
 //!
 //! Entry point: [`BrowserServer`], an `mcp_host::BuiltinServer`.
 
 pub mod approval;
+pub mod capture;
 pub mod cdp;
 pub mod config;
 pub mod discovery;

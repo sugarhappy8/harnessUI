@@ -12,9 +12,10 @@
 
 use serde::Serialize;
 
-use crate::fit::{AutoCtx, Room, SPARE_BYTES, Verdict};
-use crate::layers::{LayerSizes, MAX_BLOCKS};
-use crate::summary::{KvCacheType, ModelSummary};
+use crate::fit::{AutoCtx, Room, SPARE_BYTES, Sizes, Verdict};
+use crate::kv::KvLayout;
+use crate::layers::LayerSizes;
+use crate::summary::ModelSummary;
 
 /// The facts a placement is worked out from.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -23,6 +24,11 @@ pub struct PlacementInput<'a> {
     /// Conversation memory per block, in bytes, at the context and cache type chosen
     /// ([`kv_per_layer`]); a missing entry counts as 0.
     pub kv_per_layer: Vec<u64>,
+    /// What the saved copies of a long chat take at most, in the computer's memory wherever
+    /// the blocks are (`crate::fit::Copies::bytes`; 0 for a model without them). Kept apart
+    /// from what the model needs ([`Split::copies`]): they build up during a chat, and the
+    /// verdict never counts them.
+    pub copies: u64,
     /// The working space of the device that holds the output unit (fit.rs's allowance,
     /// [`crate::fit::FitInput::compute_bytes`]).
     pub compute_gpu: u64,
@@ -106,6 +112,9 @@ pub struct Split {
     pub units: u32,
     /// Blocks on the graphics card whose expert parts are on the processor.
     pub expert_layers_on_cpu: u32,
+    /// The saved copies of a long chat, in the computer's memory besides [`Self::cpu`]
+    /// (`PlacementInput::copies`).
+    pub copies: u64,
 }
 
 impl ExpertsPick {
@@ -148,6 +157,8 @@ fn add(to: &mut u64, bytes: u64) {
 ///   processor needs `compute_cpu` besides whenever it still does some of the work (a
 ///   block, an expert part or the conversation memory is there).
 /// - The image reader is on the graphics card whenever one is used.
+/// - The saved copies of a long chat (`copies`) are in computer memory whatever the
+///   placement, kept apart in [`Split::copies`] (0.0.7).
 /// - Without a graphics device everything is in computer memory, with the whole working
 ///   space.
 /// - A tied output (embeddings shared with the input) is counted twice wherever the output
@@ -171,6 +182,7 @@ pub fn split(input: &PlacementInput, place: &Where) -> Split {
             layers_on_gpu: 0,
             units,
             expert_layers_on_cpu: 0,
+            copies: input.copies,
         };
     }
     let on_card = units_on_card(place.layers, units);
@@ -235,6 +247,7 @@ pub fn split(input: &PlacementInput, place: &Where) -> Split {
         layers_on_gpu: on_card,
         units,
         expert_layers_on_cpu,
+        copies: input.copies,
     }
 }
 
@@ -382,6 +395,7 @@ pub fn explain(sizes: &LayerSizes, gpu_model_bytes: u64) -> Option<(Layers, Expe
     let model_only = PlacementInput {
         sizes,
         kv_per_layer: Vec::new(),
+        copies: 0,
         compute_gpu: 0,
         compute_cpu: 0,
         projector: 0,
@@ -441,24 +455,14 @@ pub fn effective_expert_layers(units: u32, layers: Layers, k: u32) -> u32 {
     k.min(blocks).saturating_sub(on_processor)
 }
 
-/// The conversation memory of each block, in bytes, for `ctx` tokens stored as `cache`:
-/// a key row and a value row per token, as [`ModelSummary::kv_bytes_per_token_as`] counts
-/// them (recurrent layers, with no key/value heads, hold none). One entry per block, at
-/// most [`MAX_BLOCKS`]; the same sliding-window caveat as the summary's (counted at full
-/// length, the safe side).
-pub fn kv_per_layer(summary: &ModelSummary, ctx: u64, cache: KvCacheType) -> Vec<u64> {
-    let blocks = usize::try_from(summary.block_count.min(MAX_BLOCKS)).unwrap_or(0);
-    summary
-        .head_count_kv
-        .iter()
-        .take(blocks)
-        .map(|&heads| {
-            cache
-                .row_bytes(heads.saturating_mul(summary.key_length))
-                .saturating_add(cache.row_bytes(heads.saturating_mul(summary.value_length)))
-                .saturating_mul(ctx)
-        })
-        .collect()
+/// The conversation memory of each block, in bytes, at a context of `ctx` tokens stored
+/// as `layout` says, as llama.cpp allocates it (`crate::kv`): a layer that keeps the whole
+/// conversation holds `GGML_PAD(ctx, 256)` cells, a short-memory layer only its window's
+/// cells, with its own head sizes; a layer that reads an earlier layer's memory, a
+/// linear-attention layer and an extra prediction layer hold none. One entry per block, at
+/// most [`crate::layers::MAX_BLOCKS`]; their sum is [`ModelSummary::kv_bytes`].
+pub fn kv_per_layer(summary: &ModelSummary, ctx: u64, layout: impl Into<KvLayout>) -> Vec<u64> {
+    summary.kv_shape().per_layer(ctx, layout.into())
 }
 
 /// The detail of the one verdict (section 4.1).
@@ -536,6 +540,8 @@ fn contract_kind(split: &Split) -> MemoryKind {
 /// - Processor: [`Room::verdict`] of the total (Green / `fits`, Red / `wontFitAtAll`).
 /// - Red / `wontFitAtAll` when the total with the spare is larger than `room.partial`, or
 ///   (`Separate`) the computer's part is larger than computer memory less the reserve.
+///   The saved copies of a long chat ([`Split::copies`]) are not counted: they are sized
+///   to what is left (`crate::fit::copies`), and say so apart.
 /// - As much as fits: Yellow / `partial` when any unit or expert part is on the
 ///   processor; else Green / `fits` when the card's part fits `room.whole` with the
 ///   spare, else Yellow / `tight`. Never `wontFitGraphics`: llama.cpp fits again at load
@@ -582,54 +588,15 @@ pub fn judge_in(
     }
 }
 
-/// The context sizes Automatic chooses from, as `fit::auto_ctx` does: the floor, the
-/// multiples of 1,024 between, and the cap (a floor above the cap gives the cap alone).
-/// Never built as a list: the cap may be any number.
-struct Sizes {
-    floor: u64,
-    cap: u64,
-    first_multiple: u64,
-    multiples: u64,
-}
-
-impl Sizes {
-    fn new(floor: u64, cap: u64) -> Self {
-        let floor = floor.min(cap);
-        let first_multiple = (floor / 1024)
-            .checked_add(1)
-            .and_then(|k| k.checked_mul(1024));
-        let multiples = match first_multiple {
-            Some(first) if cap > first => (cap - 1 - first) / 1024 + 1,
-            _ => 0,
-        };
-        Self {
-            floor,
-            cap,
-            first_multiple: first_multiple.unwrap_or(u64::MAX),
-            multiples,
-        }
-    }
-
-    /// The number of sizes (at least 1, at most u64::MAX / 1024 + 2).
-    fn len(&self) -> u64 {
-        1 + self.multiples + u64::from(self.cap > self.floor)
-    }
-
-    /// The `index`th size, smallest first.
-    fn get(&self, index: u64) -> u64 {
-        if index == 0 {
-            self.floor
-        } else if index <= self.multiples {
-            self.first_multiple + (index - 1) * 1024
-        } else {
-            self.cap
-        }
-    }
-}
-
 /// The largest size whose verdict is Green, else the largest that is Yellow, else `None`
-/// (the floor is Red). Assumes the verdict only gets worse as the size grows; a binary
-/// search, so a huge cap costs about 60 verdicts.
+/// (the floor is Red), among the sizes Automatic chooses from (`fit::Sizes`: the floor,
+/// the multiples of 1,024 between, and the cap). Assumes the verdict only gets worse as the
+/// size grows; a binary search, so a huge cap costs about 60 verdicts. For a verdict of
+/// the caller's own (Leave free's Automatic, `offload::Placer::auto`).
+pub fn auto_ctx_by(verdict: impl Fn(u64) -> Verdict, floor: u64, cap: u64) -> Option<AutoCtx> {
+    auto_by(verdict, floor, cap)
+}
+
 fn auto_by(verdict: impl Fn(u64) -> Verdict, floor: u64, cap: u64) -> Option<AutoCtx> {
     let sizes = Sizes::new(floor, cap);
     let wanted = verdict(sizes.get(0));
@@ -725,6 +692,10 @@ pub struct Bar {
     /// Free after loading: the free memory less what the model needs (0 when it needs
     /// more).
     pub free_after_bytes: u64,
+    /// What the saved copies of a long chat may take besides, later (computer memory only;
+    /// [`Split::copies`]). Not in [`Self::need`] or [`Self::free_after_bytes`]: they build up
+    /// during a chat.
+    pub copies_bytes: u64,
 }
 
 /// The bar of `capacity` holding `need`. A free figure above the size is cut to the size;
@@ -742,20 +713,21 @@ pub fn bar(capacity: Capacity, need: Parts) -> Bar {
         other_bytes: total_bytes - free_bytes,
         need,
         free_after_bytes: free_bytes.saturating_sub(need.total()),
+        copies_bytes: 0,
     }
 }
 
 /// The picture's bars for `split`: a graphics card gets its own bar (from `graphics`, or
 /// an empty one when its size is not known, so the need is never lost) beside computer
 /// memory; Apple silicon and the processor get one bar of computer memory holding both
-/// parts.
+/// parts. The computer's bar also shows the saved copies of a long chat.
 pub fn bars(
     split: &Split,
     kind: MemoryKind,
     graphics: Option<Capacity>,
     computer: Capacity,
 ) -> (Option<Bar>, Bar) {
-    match kind {
+    let (graphics, mut computer) = match kind {
         MemoryKind::Separate => (
             Some(bar(graphics.unwrap_or_default(), split.gpu)),
             bar(computer, split.cpu),
@@ -763,7 +735,9 @@ pub fn bars(
         MemoryKind::Processor | MemoryKind::Unified => {
             (None, bar(computer, split.gpu.plus(&split.cpu)))
         }
-    }
+    };
+    computer.copies_bytes = split.copies;
+    (graphics, computer)
 }
 
 #[cfg(test)]

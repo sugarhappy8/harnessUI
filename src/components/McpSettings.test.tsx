@@ -123,3 +123,38 @@ describe("McpSettings: programs with hidden and right-to-left characters", () =>
     expect(new XMLSerializer().serializeToString(document.body)).not.toContain("\u202E");
   });
 });
+
+// [0.0.7 P6] Listening for server changes starts asynchronously: a listener that starts after
+// the page closed (React's development mode mounts every effect twice) is stopped at once.
+describe("McpSettings: listening for server changes (0.0.7 P6)", () => {
+  afterEach(() => {
+    cleanup();
+    ipcMock.onMcpChanged.mockImplementation(async () => () => undefined);
+  });
+
+  it("stops a listener that starts after the page closed, and keeps the newest", async () => {
+    const { StrictMode } = await import("react");
+    ipcMock.getSetting.mockResolvedValue(null);
+    const started: { unlisten: ReturnType<typeof vi.fn<() => undefined>>; ready: () => void }[] = [];
+    ipcMock.onMcpChanged.mockImplementation(
+      () =>
+        new Promise<() => undefined>((resolve) => {
+          const unlisten = vi.fn<() => undefined>();
+          started.push({ unlisten, ready: () => resolve(unlisten) });
+        }),
+    );
+    render(
+      <StrictMode>
+        <McpSettings />
+      </StrictMode>,
+    );
+    expect(started).toHaveLength(2);
+    await act(async () => {
+      for (const s of started) s.ready();
+    });
+    expect(started[0]!.unlisten).toHaveBeenCalledTimes(1);
+    expect(started[1]!.unlisten).not.toHaveBeenCalled();
+    cleanup();
+    expect(started[1]!.unlisten).toHaveBeenCalledTimes(1);
+  });
+});

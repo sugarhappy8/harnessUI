@@ -76,6 +76,13 @@ pub enum Reply {
     Silence(Duration),
     /// A redirect with this status to `location`, with an empty body.
     Redirect { status: u16, location: String },
+    /// A complete response with extra headers (0.0.7: `retry-after`).
+    WithHeaders {
+        status: u16,
+        headers: Vec<(String, String)>,
+        content_type: String,
+        body: Vec<u8>,
+    },
 }
 
 impl Reply {
@@ -253,6 +260,25 @@ async fn serve(
             }
         }
         Reply::Silence(duration) => tokio::time::sleep(duration).await,
+        Reply::WithHeaders {
+            status,
+            headers,
+            content_type,
+            body,
+        } => {
+            let extra: String = headers
+                .iter()
+                .map(|(name, value)| format!("{name}: {value}\r\n"))
+                .collect();
+            let head = format!(
+                "HTTP/1.1 {status} {}\r\nContent-Type: {content_type}\r\n{extra}Content-Length: {}\r\nConnection: close\r\n\r\n",
+                reason(status),
+                body.len()
+            );
+            socket.write_all(head.as_bytes()).await?;
+            socket.write_all(&body).await?;
+            socket.shutdown().await?;
+        }
         Reply::Redirect { status, location } => {
             let head = format!(
                 "HTTP/1.1 {status} {}\r\nLocation: {location}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
@@ -275,6 +301,9 @@ fn reason(status: u16) -> &'static str {
         404 => "Not Found",
         500 => "Internal Server Error",
         503 => "Service Unavailable",
+        422 => "Unprocessable Entity",
+        429 => "Too Many Requests",
+        529 => "Overloaded",
         _ => "Status",
     }
 }

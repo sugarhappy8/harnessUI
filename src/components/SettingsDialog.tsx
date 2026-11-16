@@ -1,17 +1,11 @@
-import { useCallback, useEffect, useState } from "react";
+import { useEffect, useState } from "react";
 import { Dialog, Tabs } from "radix-ui";
-import { X, RefreshCw, Trash2, Plus } from "lucide-react";
+import { X, RefreshCw } from "lucide-react";
 import { writeText } from "@tauri-apps/plugin-clipboard-manager";
 import { applyTheme, loadTheme, type ThemeChoice } from "../lib/theme";
 import * as ipc from "../lib/ipc";
 import type { AppInfo } from "../lib/ipc";
-import type {
-  FirstRunInfo,
-  Provider,
-  ProviderKind,
-  UpdateInfo,
-  UpdateStatus,
-} from "../lib/types";
+import type { FirstRunInfo, UpdateInfo, UpdateStatus } from "../lib/types";
 import { APP_NAME } from "../lib/app";
 import { toErrorInfo, useApp } from "../store/app";
 import { askBeforeChange, backendWhenIdle, runChange } from "../store/modelChange";
@@ -29,6 +23,8 @@ import { ModelCheck } from "./evals/ModelCheck";
 import { LocalModels } from "./settings/LocalModels";
 import { OtherApps } from "./settings/OtherApps";
 import { Reverse } from "./settings/Reverse";
+import { Endpoints } from "./settings/Endpoints";
+import { SameCallLimit } from "./settings/SameCallLimit";
 import type { DiagnosticsReport, ErrorInfo } from "../lib/types";
 
 const THEMES: { value: ThemeChoice; label: string }[] = [
@@ -100,6 +96,7 @@ function General() {
         </p>
       </section>
       {ipc.isTauri() && <StepsPerTurn />}
+      {ipc.isTauri() && <SameCallLimit />}
       {ipc.isTauri() && <DefaultSystemPrompt />}
       {ipc.isTauri() && <Updates />}
       {ipc.isTauri() && <ModelCatalog />}
@@ -378,219 +375,6 @@ function Updates() {
         </div>
       )}
       {error && <ErrorBanner error={error} onDismiss={() => setError(null)} />}
-    </section>
-  );
-}
-
-const KINDS: { value: ProviderKind; label: string; example: string }[] = [
-  { value: "ollama", label: "Ollama", example: "http://127.0.0.1:11434" },
-  { value: "lmstudio", label: "LM Studio", example: "http://127.0.0.1:1234" },
-  { value: "vllm", label: "vLLM", example: "http://127.0.0.1:8000" },
-  { value: "generic", label: "Other OpenAI-compatible", example: "https://example.com/v1" },
-];
-
-function Endpoints() {
-  const [providers, setProviders] = useState<Provider[]>([]);
-  const [form, setForm] = useState<{ name: string; kind: ProviderKind; baseUrl: string; apiKey: string } | null>(null);
-  const [status, setStatus] = useState<Record<number, string>>({});
-  const [error, setError] = useState<ErrorInfo | null>(null);
-  const refreshModelOptions = useApp((s) => s.refreshModelOptions);
-
-  const load = useCallback(async () => {
-    try {
-      setProviders(await ipc.listProviders());
-    } catch (err) {
-      setError(toErrorInfo(err));
-    }
-  }, []);
-  useEffect(() => {
-    let alive = true;
-    ipc
-      .listProviders()
-      .then((p) => alive && setProviders(p))
-      .catch((err) => alive && setError(toErrorInfo(err)));
-    return () => {
-      alive = false;
-    };
-  }, []);
-
-  async function save() {
-    if (!form) return;
-    try {
-      await ipc.saveProvider({
-        id: null,
-        name: form.name.trim() || KINDS.find((k) => k.value === form.kind)!.label,
-        kind: form.kind,
-        baseUrl: form.baseUrl.trim(),
-        apiKey: form.apiKey.trim() || null,
-        clearApiKey: false,
-      });
-      setForm(null);
-      await load();
-      await refreshModelOptions();
-    } catch (err) {
-      setError(toErrorInfo(err));
-    }
-  }
-
-  async function test(id: number) {
-    setStatus((s) => ({ ...s, [id]: "Checking…" }));
-    try {
-      const models = await ipc.testProvider(id);
-      setStatus((s) => ({ ...s, [id]: `Connected · ${models.length} model(s)` }));
-      await refreshModelOptions();
-    } catch (err) {
-      setStatus((s) => ({ ...s, [id]: toErrorInfo(err).message }));
-    }
-  }
-
-  return (
-    <div className="space-y-4">
-      {error && <ErrorBanner error={error} onDismiss={() => setError(null)} />}
-      <p className="text-sm text-fg-muted">
-        Connect Ollama, LM Studio, vLLM or any OpenAI-compatible server. API keys are kept in
-        your system keychain.
-      </p>
-      <ul className="space-y-2">
-        {providers.map((p) => (
-          <li key={p.id} className="flex items-center gap-2 rounded-md border border-border px-3 py-2 text-sm">
-            <div className="min-w-0 flex-1">
-              <p className="font-medium">{p.name}</p>
-              <p className="truncate text-xs text-fg-muted">
-                {p.baseUrl}
-                {p.hasApiKey ? " · API key saved" : ""}
-              </p>
-              {status[p.id] && <p className="text-xs">{status[p.id]}</p>}
-            </div>
-            <button type="button" className="text-xs underline" onClick={() => void test(p.id)}>
-              Test
-            </button>
-            <button
-              type="button"
-              aria-label={`Remove ${p.name}`}
-              onClick={() => void ipc.deleteProvider(p.id).then(load).then(refreshModelOptions)}
-              className="text-fg-muted hover:text-danger"
-            >
-              <Trash2 size={14} aria-hidden />
-            </button>
-          </li>
-        ))}
-      </ul>
-      {form ? (
-        <form
-          className="grid grid-cols-[7rem_1fr] items-center gap-2 rounded-md border border-border p-3 text-sm"
-          onSubmit={(e) => {
-            e.preventDefault();
-            void save();
-          }}
-        >
-          <label htmlFor="p-kind">Type</label>
-          <select
-            id="p-kind"
-            value={form.kind}
-            onChange={(e) => {
-              const kind = e.target.value as ProviderKind;
-              setForm({ ...form, kind, baseUrl: KINDS.find((k) => k.value === kind)!.example });
-            }}
-            className="rounded-md border border-border bg-bg px-2 py-1"
-          >
-            {KINDS.map((k) => (
-              <option key={k.value} value={k.value}>
-                {k.label}
-              </option>
-            ))}
-          </select>
-          <label htmlFor="p-name">Name</label>
-          <input id="p-name" value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} className="rounded-md border border-border bg-bg px-2 py-1" />
-          <label htmlFor="p-url">Base URL</label>
-          <input id="p-url" required value={form.baseUrl} onChange={(e) => setForm({ ...form, baseUrl: e.target.value })} className="rounded-md border border-border bg-bg px-2 py-1 font-mono text-xs" />
-          <label htmlFor="p-key">API key</label>
-          <input id="p-key" type="password" autoComplete="off" value={form.apiKey} placeholder="optional" onChange={(e) => setForm({ ...form, apiKey: e.target.value })} className="rounded-md border border-border bg-bg px-2 py-1" />
-          <div className="col-span-2 flex justify-end gap-2">
-            <button type="button" onClick={() => setForm(null)} className="px-2 py-1">
-              Cancel
-            </button>
-            <button type="submit" className="rounded-md bg-accent px-3 py-1 text-accent-fg">
-              Save
-            </button>
-          </div>
-        </form>
-      ) : (
-        <button
-          type="button"
-          onClick={() => setForm({ name: "", kind: "ollama", baseUrl: KINDS[0]!.example, apiKey: "" })}
-          className="flex items-center gap-1 text-sm text-accent"
-        >
-          <Plus size={14} aria-hidden /> Add an endpoint
-        </button>
-      )}
-      <RemoteContext onError={setError} />
-    </div>
-  );
-}
-
-const REMOTE_CTX_OPTIONS = [2048, 4096, 8192, 16384, 32768];
-const REMOTE_CTX_DEFAULT = 4096;
-
-/** Context size for an endpoint whose model reports none (8.4; setting "remoteContextLength"). */
-function RemoteContext(props: { onError: (e: ErrorInfo) => void }) {
-  const [ctx, setCtx] = useState<number | null>(null);
-  const { onError } = props;
-  useEffect(() => {
-    let alive = true;
-    ipc
-      .getSetting<unknown>("remoteContextLength")
-      .then((v) => {
-        if (!alive) return;
-        // Missing or invalid means the default, as on the Rust side.
-        setCtx(typeof v === "number" && Number.isInteger(v) && v > 0 ? v : REMOTE_CTX_DEFAULT);
-      })
-      .catch((err) => {
-        if (!alive) return;
-        setCtx(REMOTE_CTX_DEFAULT);
-        onError(toErrorInfo(err));
-      });
-    return () => {
-      alive = false;
-    };
-  }, [onError]);
-  if (ctx === null) return null;
-  const options = REMOTE_CTX_OPTIONS.includes(ctx)
-    ? REMOTE_CTX_OPTIONS
-    : [...REMOTE_CTX_OPTIONS, ctx].sort((a, b) => a - b);
-  async function save(n: number) {
-    const before = ctx;
-    setCtx(n);
-    try {
-      await ipc.setSetting("remoteContextLength", n);
-    } catch (err) {
-      setCtx(before);
-      onError(toErrorInfo(err));
-    }
-  }
-  return (
-    <section className="space-y-1 border-t border-border pt-4 text-sm">
-      <label htmlFor="remote-ctx" className="block font-medium">
-        Context size when a server does not report one
-      </label>
-      <p id="remote-ctx-help" className="text-xs text-fg-muted">
-        Most servers say how much context their model uses. For one that does not, the app plans
-        with this size. If it is larger than what the server really uses, older messages can be
-        dropped without warning.
-      </p>
-      <select
-        id="remote-ctx"
-        aria-describedby="remote-ctx-help"
-        value={ctx}
-        onChange={(e) => void save(Number(e.target.value))}
-        className="rounded-md border border-border bg-bg px-2 py-1"
-      >
-        {options.map((n) => (
-          <option key={n} value={n}>
-            {n.toLocaleString()} tokens{n === REMOTE_CTX_DEFAULT ? " (default)" : ""}
-          </option>
-        ))}
-      </select>
     </section>
   );
 }

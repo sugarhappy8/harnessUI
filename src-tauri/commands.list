@@ -10,6 +10,7 @@ switch_branch
 send_message
 regenerate
 stop_generation
+running_turn
 runtime_status
 list_backends
 load_local_model
@@ -52,6 +53,9 @@ set_models_dir
 first_run_info
 complete_first_run
 refresh_catalog
+image_file_offer
+download_image_file
+forget_unreadable_image_file
 list_packs
 download_pack
 cancel_pack_download
@@ -68,6 +72,7 @@ set_chat_working_folder
 list_audit
 export_audit
 resolve_approval
+pending_approvals
 get_approval_mode
 set_approval_mode
 get_allow_all_default

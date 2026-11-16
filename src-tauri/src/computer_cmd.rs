@@ -9,6 +9,8 @@
 //! unchanged and is not here: the tools are off in a chat until the user switches them on,
 //! every kind of input asks per application, and the indicator and the stop hotkey must
 //! be working before any input is sent.
+//!
+//! While computer use acts, the main window steps aside (0.0.7, [`aside`]).
 
 use std::sync::Arc;
 
@@ -17,6 +19,12 @@ use tauri::{AppHandle, Manager, State};
 
 use crate::error::{AppError, AppResult};
 use crate::state::AppState;
+
+mod aside;
+pub use aside::{
+    approval_needed, card_approved, minimise_on_request, stop_requested, stopped, turn_ended,
+    turn_started,
+};
 
 /// The computer server, when this OS has one.
 #[derive(Default)]
@@ -84,9 +92,10 @@ pub async fn profile_for(state: &AppState, model_ref: &str) -> ChosenProfile {
     choose(stored, model_ref)
 }
 
-/// Shown on the Computer group in the Tools panel for a model without vision.
-pub const NO_VISION: &str =
-    "This model cannot see images, which computer use needs. Pick a vision model.";
+/// Shown on the Computer group in the Tools panel for a model without vision. A local model
+/// sees images only through its image file (0.0.7: say how to get one, for a model that has
+/// one; most models have none, P2 review m7).
+pub const NO_VISION: &str = "This model was loaded without an image file, so it can't see the screen. If it has one, download it in Models → Installed; otherwise pick a model with the vision badge.";
 
 /// Why the computer tools cannot be offered for a chat's model, if they cannot.
 ///
@@ -252,6 +261,7 @@ pub fn build(app: &AppHandle) -> Option<Arc<computer::ComputerServer>> {
         let config = computer::ComputerConfig {
             default_profile: unprepared_profile(),
             ready_check: Some(Arc::new(move || ready(&ready_app))),
+            step_aside: Some(step_aside(app)),
         };
         match computer::ComputerServer::native(Arc::new(TauriMainThread(app.clone())), me, config) {
             Ok(server) => Some(Arc::new(server)),
@@ -265,6 +275,22 @@ pub fn build(app: &AppHandle) -> Option<Arc<computer::ComputerServer>> {
     {
         let _ = (app, indicator_rects, child_pids);
         None
+    }
+}
+
+/// How the main window steps aside before approved input it is in the way of (9.3,
+/// "Stepping aside"): it minimises itself; [`aside`] brings it back.
+#[cfg_attr(not(any(target_os = "windows", target_os = "macos")), allow(dead_code))]
+fn step_aside(app: &AppHandle) -> computer::StepAside {
+    let aside_app = app.clone();
+    computer::StepAside {
+        app_name: app
+            .config()
+            .product_name
+            .clone()
+            .unwrap_or_else(|| "harnessUI".into()),
+        minimise: Arc::new(move |chat, cancel| aside::before_input(&aside_app, chat, cancel)),
+        approved_on_card: Arc::new(aside::take_card_approval),
     }
 }
 
@@ -559,7 +585,7 @@ mod tests {
         assert_eq!(unavailable_reason("remote:3:some-model", None, false), None);
         assert_eq!(
             NO_VISION,
-            "This model cannot see images, which computer use needs. Pick a vision model."
+            "This model was loaded without an image file, so it can't see the screen. If it has one, download it in Models → Installed; otherwise pick a model with the vision badge."
         );
     }
 }

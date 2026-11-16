@@ -100,6 +100,15 @@ export interface SendOptions {
   documents?: DocumentInput[];
   /** Mentions chosen in the picker. */
   mentions?: MentionInput[];
+  /** [0.0.7 P6] Edit and resend: the attachments of the edited message the new one keeps. */
+  copyAttachments?: CopyAttachments;
+}
+
+/** [0.0.7 P6] The user message being edited and the attachments of it (images, files and
+ *  mentions, by attachment id) that the new message keeps. */
+export interface CopyAttachments {
+  messageId: number;
+  attachmentIds: number[];
 }
 
 export function sendMessage(opts: SendOptions, onEvent: (e: TurnStreamEvent) => void) {
@@ -118,7 +127,15 @@ export function regenerate(
   return invoke<void>("regenerate", { chatId, assistantMessageId, onEvent: channel });
 }
 
-export const stopGeneration = () => invoke<void>("stop_generation");
+/** Stops the reply being written. [0.0.7 P6] With a chat, only when the reply is that chat's. */
+export const stopGeneration = (chatId?: number | null) => invoke<void>("stop_generation", { chatId: chatId ?? null });
+/** [0.0.7 P6] The chat whose reply the app is writing now (null: none). */
+export const runningTurn = () => invoke<number | null>("running_turn");
+/** [0.0.7 P6] Sent when a reply starts and when it ends: the chat whose reply is being
+ *  written now (null: none). */
+export function onTurnRunning(handler: (chatId: number | null) => void): Promise<UnlistenFn> {
+  return listen<number | null>("turn-running", (e) => handler(e.payload));
+}
 
 // Mentions
 export const searchMentions = (chatId: number | null, query: string, limit?: number) =>
@@ -212,7 +229,7 @@ export function onRuntimeStatus(handler: (s: RuntimeStatus) => void): Promise<Un
   return listen<RuntimeStatus>("runtime-status", (e) => handler(e.payload));
 }
 
-// Providers (OpenAI-compatible endpoints)
+// Providers (endpoints: servers on this computer or the network, and cloud AI companies)
 export const listProviders = () => invoke<Provider[]>("list_providers");
 export const saveProvider = (p: {
   id: number | null;
@@ -221,6 +238,8 @@ export const saveProvider = (p: {
   baseUrl: string;
   apiKey: string | null;
   clearApiKey: boolean;
+  /** [0.0.7 P5] The context size chosen for the endpoint; absent or null is Automatic. */
+  contextLength?: number | null;
 }) => invoke<Provider>("save_provider", { provider: p });
 export const deleteProvider = (id: number) => invoke<void>("delete_provider", { id });
 export const testProvider = (id: number) => invoke<ModelOption[]>("test_provider", { id });
@@ -254,8 +273,19 @@ export function onDownloadProgress(handler: (g: DownloadGroup) => void): Promise
 
 export const listInstalledModels = () => invoke<InstalledModel[]>("list_installed_models");
 export const importModel = (path: string) => invoke<InstalledModel>("import_model", { path });
+// [0.0.7 P2] An installed model's image file from its Hugging Face repository: what it offers
+// (asked only when the user looks for one, and saved on the model's row), and its download
+// (the id of the download group, followed through download-progress).
+export const imageFileOffer = (path: string) =>
+  invoke<import("./types").ImageFileOffer>("image_file_offer", { path });
+export const downloadImageFile = (path: string) => invoke<string>("download_image_file", { path });
+// [0.0.7 P2 review M1] "Try it again": forgets that its image file couldn't be read.
+export const forgetUnreadableImageFile = (path: string) =>
+  invoke<boolean>("forget_unreadable_image_file", { path });
+/** Takes a model off the Installed list (`deleteFiles`: and a download's files). [0.0.7 P6]
+ *  Resolves to a note for the user when files were left in place (outside the models folder). */
 export const deleteModel = (id: number, deleteFiles: boolean) =>
-  invoke<void>("delete_model", { id, deleteFiles });
+  invoke<string | null>("delete_model", { id, deleteFiles });
 export const diskUsage = () => invoke<DiskUsage>("disk_usage");
 export const setModelsDir = (path: string) => invoke<void>("set_models_dir", { path });
 export const hardwareInfo = () => invoke<HardwareInfo>("hardware_info");
@@ -304,6 +334,9 @@ export function onStopRequested(handler: () => void): Promise<UnlistenFn> {
 // Agent turns: approvals
 export const resolveApproval = (id: string, decision: "allowOnce" | "allowForChat" | "deny", note: string | null) =>
   invoke<void>("resolve_approval", { id, decision, note });
+/** [0.0.7 P6] The approval cards waiting for an answer now, oldest first (a window that
+ *  reloaded while one waited heard its `approval-request` before it reloaded). */
+export const pendingApprovals = () => invoke<ApprovalRequest[]>("pending_approvals");
 // Approval modes: Ask first, Allow all or Full access (only these commands change them)
 /** How a chat's tool calls are approved, as the app names the modes. */
 export type ApprovalModeName = "ask" | "allowAll" | "fullAccess";
@@ -433,7 +466,9 @@ export const gitInfo = () => invoke<GitInfo>("git_info");
 export const setGitToken = (host: string, token: string) => invoke<string[]>("set_git_token", { host, token });
 export const removeGitToken = (host: string) => invoke<string[]>("remove_git_token", { host });
 export const setGitIdentity = (identity: GitIdentity) => invoke<void>("set_git_identity", { identity });
-export const minimizeMainWindow = () => invoke<void>("minimize_main_window");
+/** With the chat of a running turn, the window comes back at its next card, the end of the turn or Stop. */
+export const minimizeMainWindow = (chatId?: number | null) =>
+  invoke<void>("minimize_main_window", { chatId: chatId ?? null });
 
 // Saved tool output (0.0.4): the whole text of a result the model saw shortened.
 export interface SavedToolOutput {

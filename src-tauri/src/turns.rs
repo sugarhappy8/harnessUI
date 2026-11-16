@@ -294,6 +294,48 @@ pub struct PendingApprovals(Mutex<HashMap<String, PendingCard>>);
 pub struct PendingCard {
     tx: tokio::sync::oneshot::Sender<Approval>,
     grantable: bool,
+    /// [0.0.7 P6] What the window was sent, so a window that reloads while the card waits
+    /// gets it again ([`pending_approvals`]); `seq` keeps the cards in the order they came.
+    dto: ApprovalDto,
+    seq: usize,
+}
+
+/// [0.0.7 P6] Numbers the cards in the order they came.
+static CARD_SEQ: AtomicUsize = AtomicUsize::new(0);
+
+impl PendingCard {
+    fn new(tx: tokio::sync::oneshot::Sender<Approval>, dto: ApprovalDto) -> Self {
+        Self {
+            tx,
+            grantable: dto.card == policy::CardKind::Grantable,
+            dto,
+            seq: CARD_SEQ.fetch_add(1, Ordering::Relaxed),
+        }
+    }
+}
+
+impl PendingApprovals {
+    /// [0.0.7 P6] The cards waiting for an answer, oldest first, as the window was sent them.
+    pub fn cards(&self) -> Vec<ApprovalDto> {
+        let Ok(m) = self.0.lock() else {
+            return Vec::new();
+        };
+        let mut cards: Vec<&PendingCard> = m.values().collect();
+        cards.sort_by_key(|c| c.seq);
+        cards.into_iter().map(|c| c.dto.clone()).collect()
+    }
+}
+
+/// [0.0.7 P6] The approval cards waiting for an answer, oldest first. A window that reloaded
+/// while a card waited gets it here: the card's own event went to the window before, and
+/// without it the turn waited until Stop.
+#[tauri::command]
+pub fn pending_approvals(
+    window: tauri::WebviewWindow,
+    pending: tauri::State<'_, PendingApprovals>,
+) -> AppResult<Vec<ApprovalDto>> {
+    crate::commands::only_main_window(window.label())?;
+    Ok(pending.cards())
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -421,15 +463,6 @@ pub async fn ask_during_call(
     let helper = crate::subagent::running_in(chat_id);
     let id = uuid::Uuid::new_v4().to_string();
     let (tx, rx) = tokio::sync::oneshot::channel();
-    if let Ok(mut m) = app.state::<PendingApprovals>().0.lock() {
-        m.insert(
-            id.clone(),
-            PendingCard {
-                tx,
-                grantable: false,
-            },
-        );
-    }
     let dto = ApprovalDto {
         id: id.clone(),
         chat_id,
@@ -445,6 +478,11 @@ pub async fn ask_during_call(
         reason: policy::AskReason::AlwaysAsk,
         keep_asking: None,
     };
+    if let Ok(mut m) = app.state::<PendingApprovals>().0.lock() {
+        m.insert(id.clone(), PendingCard::new(tx, dto.clone()));
+    }
+    // [0.0.7] A main window that stepped aside for computer use comes back for the card.
+    crate::computer_cmd::approval_needed(app, chat_id);
     let _ = app.emit_to(crate::MAIN_WINDOW, "approval-request", dto);
     let guard = CardGuard {
         app: app.clone(),
@@ -491,15 +529,6 @@ impl Approver for AppApprover {
     async fn ask(&self, req: ApprovalRequest) -> Approval {
         let id = uuid::Uuid::new_v4().to_string();
         let (tx, rx) = tokio::sync::oneshot::channel();
-        if let Ok(mut m) = self.app.state::<PendingApprovals>().0.lock() {
-            m.insert(
-                id.clone(),
-                PendingCard {
-                    tx,
-                    grantable: req.card == policy::CardKind::Grantable,
-                },
-            );
-        }
         let (call_id, summary) = match &self.helper_of {
             Some(parent_call) => (
                 parent_call.clone(),
@@ -521,6 +550,11 @@ impl Approver for AppApprover {
             reason: req.reason,
             keep_asking: req.action.keep_asking,
         };
+        if let Ok(mut m) = self.app.state::<PendingApprovals>().0.lock() {
+            m.insert(id.clone(), PendingCard::new(tx, dto.clone()));
+        }
+        // [0.0.7] A main window that stepped aside for computer use comes back for the card.
+        crate::computer_cmd::approval_needed(&self.app, self.chat_id);
         let _ = self
             .app
             .emit_to(crate::MAIN_WINDOW, "approval-request", dto);
@@ -534,6 +568,10 @@ impl Approver for AppApprover {
             _ = self.cancel.cancelled() => Approval::Cancelled,
         };
         drop(guard);
+        // [0.0.7] Computer input the user just allowed on its card may step aside at once.
+        if matches!(answer, Approval::AllowOnce | Approval::AllowForChat) {
+            crate::computer_cmd::card_approved(self.chat_id, &req.action);
+        }
         if answer == Approval::AllowForChat && req.card == policy::CardKind::Grantable {
             let scopes = match &req.action.scope {
                 policy::Scope::Commands { parts } => parts.clone(),
@@ -861,6 +899,10 @@ impl AppTools {
 impl ToolHost for AppTools {
     fn tools(&self) -> Vec<ToolInfo> {
         tool_infos(&self.enabled)
+    }
+    fn kept_back(&self) -> Vec<ToolInfo> {
+        // [0.0.7] Only checked by the loop, for the tool list (`ToolHost::kept_back`).
+        tool_infos(&self.hidden)
     }
     fn validate(&self, name: &str, args: &Value) -> Result<(), Vec<String>> {
         // [0.0.4 tool selection] A `call_tool` call is checked as the tool it names, against
@@ -1678,7 +1720,9 @@ pub(crate) async fn assemble(
     }
     // [0.0.4 tool selection] Of the tools that are on in the chat, the ones shown to the
     // model this turn. The rest stay reachable through `find_tools` and `call_tool`.
-    let (mut enabled, hidden) = if turn {
+    // [0.0.7] With them, the tool list for the system message, made from every tool that is
+    // on, so it does not change with what a turn shows (`tool_select::roster::fitted`).
+    let (mut enabled, hidden, tool_guide) = if turn {
         crate::tool_select::for_turn(&state, &req.chat, &history, enabled, req.caps.n_ctx).await
     } else {
         crate::tool_select::preview_for_turn(&state, &req.chat, &history, enabled, req.caps.n_ctx)
@@ -1721,6 +1765,16 @@ pub(crate) async fn assemble(
         .ok()
         .flatten();
     input.step_cap = crate::settings::steps_per_turn(stored_steps.as_ref());
+    // [0.0.7] How many identical calls in a row end the turn: read for every turn, held to
+    // 2..=100 whatever is stored.
+    let stored_limit: Option<serde_json::Value> = state
+        .store
+        .get_setting(crate::settings::SAME_CALL_LIMIT)
+        .await
+        .ok()
+        .flatten();
+    input.repeat_limit = crate::settings::same_call_limit(stored_limit.as_ref());
+    input.tool_guide = Some(tool_guide); // [0.0.7] used only when tools are on
     let chat_prefs: ChatTools =
         serde_json::from_value(req.chat.tool_prefs.clone()).unwrap_or_default();
     input.thinking = !chat_prefs.thinking_off;
@@ -1810,6 +1864,8 @@ pub async fn run(
 ) -> AppResult<()> {
     let state = app.state::<AppState>();
     let chat_id = req.chat.id;
+    // [0.0.7] Which turn a main window that steps aside for computer use was minimised for.
+    let aside_turn = crate::computer_cmd::turn_started(chat_id.0);
     let local_endpoint = req.caps.local;
     // Everything the turn sends, built where the Context tab builds it.
     let Assembled {
@@ -1933,6 +1989,9 @@ pub async fn run(
         helper_input.history = Vec::new();
         helper_input.summary = None;
         helper_input.app_notes.clear();
+        // [0.0.7] The same tool list too, unchanged, so its system message is the turn's and
+        // the model server reuses the cached prompt; its host refuses what a helper is not
+        // offered (`subagent::NoNesting::refusal`).
         tools.helper = Some(HelperSetup {
             app: app.clone(),
             client: req.client.clone(),
@@ -2001,6 +2060,8 @@ pub async fn run(
     }
     sink.flush_deltas();
     crate::computer_cmd::end_turn(app);
+    // [0.0.7] A main window that stepped aside for this turn's computer use comes back.
+    crate::computer_cmd::turn_ended(app, chat_id.0, aside_turn);
     // The persister ends when every sender is gone: the sink's and the one kept for helpers.
     drop(tools);
     drop(sink);
@@ -2729,5 +2790,93 @@ mod tests {
             );
             assert!(cut_document_notes(None, full_access).is_empty());
         }
+    }
+
+    fn card(id: &str, chat_id: i64, card: policy::CardKind) -> ApprovalDto {
+        ApprovalDto {
+            id: id.into(),
+            chat_id,
+            call_id: format!("call-{id}"),
+            server: "builtin".into(),
+            tool: "run_command".into(),
+            summary: format!("Run a command ({id})"),
+            preview: "ls".into(),
+            card,
+            reason: policy::AskReason::Normal,
+            keep_asking: None,
+        }
+    }
+
+    /// [0.0.7 P6] The bug: a card waiting when the window reloaded was lost (Rust kept only
+    /// its answer channel), so the reply showed as running and waited until Stop. The cards
+    /// waiting now are kept as the window was sent them, oldest first, until answered.
+    #[test]
+    fn the_cards_waiting_are_kept_for_a_window_that_reloads() {
+        let pending = PendingApprovals::default();
+        assert!(pending.cards().is_empty());
+        let mut answers = Vec::new();
+        for (id, chat, kind) in [
+            ("b", 3, policy::CardKind::Grantable),
+            ("a", 4, policy::CardKind::OnceOnly),
+            ("c", 3, policy::CardKind::OnceOnly),
+        ] {
+            let (tx, rx) = tokio::sync::oneshot::channel();
+            answers.push(rx);
+            pending
+                .0
+                .lock()
+                .unwrap()
+                .insert(id.into(), PendingCard::new(tx, card(id, chat, kind)));
+        }
+        let cards = pending.cards();
+        let ids: Vec<&str> = cards.iter().map(|c| c.id.as_str()).collect();
+        assert_eq!(ids, ["b", "a", "c"], "in the order they came");
+        assert_eq!(cards[0].chat_id, 3);
+        assert_eq!(cards[0].summary, "Run a command (b)");
+        // The buttons still follow the card that was sent.
+        let m = pending.0.lock().unwrap();
+        assert!(m["b"].grantable && !m["a"].grantable);
+        drop(m);
+        // An answered card is gone.
+        let answered = pending.0.lock().unwrap().remove("a").unwrap();
+        let _ = answered.tx.send(Approval::AllowOnce);
+        let ids: Vec<String> = pending.cards().into_iter().map(|c| c.id).collect();
+        assert_eq!(ids, vec!["b".to_string(), "c".to_string()]);
+        // As the webview reads it (src/lib/types.ts `ApprovalRequest`).
+        let json = serde_json::to_value(&pending.cards()[0]).unwrap();
+        assert_eq!(json["chatId"], 3);
+        assert_eq!(json["callId"], "call-b");
+        assert_eq!(json["card"], "grantable");
+    }
+
+    /// [0.0.7 P6] `pending_approvals` is the main window's alone: granted there only,
+    /// registered, and it checks the calling window first, like its neighbours. The webview
+    /// calls it by this name.
+    #[test]
+    fn pending_approvals_is_for_the_main_window_only() {
+        assert!(include_str!("../capabilities/main.json").contains("\"allow-pending-approvals\""));
+        for other in [
+            include_str!("../capabilities/overlay.json"),
+            include_str!("../capabilities/indicator.json"),
+        ] {
+            assert!(!other.contains("pending-approvals"));
+        }
+        assert!(
+            include_str!("../commands.list")
+                .lines()
+                .any(|l| l.trim() == "pending_approvals")
+        );
+        assert!(include_str!("lib.rs").contains("turns::pending_approvals,"));
+        let body = include_str!("turns.rs")
+            .split_once("pub fn pending_approvals(")
+            .unwrap()
+            .1;
+        let body = body.split_once('{').unwrap().1;
+        let first = body.lines().map(str::trim).find(|l| !l.is_empty()).unwrap();
+        assert_eq!(first, "crate::commands::only_main_window(window.label())?;");
+        assert!(
+            include_str!("../../src/lib/ipc.ts")
+                .contains("invoke<ApprovalRequest[]>(\"pending_approvals\")")
+        );
     }
 }

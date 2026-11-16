@@ -85,6 +85,37 @@ async fn a_solved_run_records_its_calls_tokens_and_audit_rows() {
     );
 }
 
+/// [0.0.7 review m5] A run sends the tool list and the call guide a chat with these tools
+/// sends, so it measures what chats send: the offered tools only, and every one of them in
+/// the model's list.
+#[tokio::test]
+async fn a_run_sends_the_tool_list_and_the_call_guide() {
+    let ws = Workspace::create().unwrap();
+    let endpoint = Endpoint::playing(vec![text("Nothing to change.")]).await;
+    let (audit, _rows) = audit_rows();
+    let record = run(
+        &model(&endpoint),
+        spec("look around", false),
+        &ws,
+        CancellationToken::new(),
+        audit,
+    )
+    .await;
+    assert_eq!(record.status, "completed", "{record:?}");
+    let system = endpoint.requests()[0]["messages"][0]["content"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    assert!(system.contains("<tool_list>"), "{system}");
+    assert!(
+        system.contains("All of them are in your list of callable tools."),
+        "{system}"
+    );
+    assert!(system.contains("edit_file"), "{system}");
+    assert!(!system.contains("delete_file"), "{system}");
+    assert!(system.contains("<tool_call_guide>"), "{system}");
+}
+
 #[tokio::test]
 async fn refused_calls_are_counted_as_blocked_and_the_run_goes_on() {
     let ws = Workspace::create().unwrap();

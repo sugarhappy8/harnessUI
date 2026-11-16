@@ -98,6 +98,8 @@ pub struct ContextView {
 /// The shown tools for the loop to list. Nothing is described or run.
 struct Listed {
     infos: Vec<ToolInfo>,
+    /// [0.0.7] The tools kept back, for the loop's check of the tool list.
+    kept_back: Vec<ToolInfo>,
     host: mcp_host::Host,
 }
 
@@ -105,6 +107,9 @@ struct Listed {
 impl agent::turn::ToolHost for Listed {
     fn tools(&self) -> Vec<ToolInfo> {
         self.infos.clone()
+    }
+    fn kept_back(&self) -> Vec<ToolInfo> {
+        self.kept_back.clone()
     }
     fn validate(&self, _: &str, _: &Value) -> Result<(), Vec<String>> {
         Ok(())
@@ -203,6 +208,7 @@ pub async fn inspect_context(
     let sanitizer = agent::prompt::Sanitizer::for_endpoint(&req.client).await;
     let listed = Listed {
         infos: crate::turns::tool_infos(&assembled.shown),
+        kept_back: crate::turns::tool_infos(&assembled.hidden),
         host: state.host.clone(),
     };
     let preview = agent::preview_turn(&req.client, &listed, &sanitizer, input).await;

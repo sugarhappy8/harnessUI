@@ -57,7 +57,13 @@ pub fn parse_child_line(line: &str) -> Option<ChildState> {
                 .and_then(Value::as_array)
                 .map(|stages| stages.iter().filter_map(Value::as_str).map(str::to_owned).collect())
                 .unwrap_or_default(),
-            current: payload.get("current").and_then(Value::as_str).map(str::to_owned),
+            // 0.0.7: the server starts the image file's stage with a bare
+            // `{"stage":"mmproj_model"}` (no progress): the stage in progress all the same.
+            current: payload
+                .get("current")
+                .or_else(|| payload.get("stage"))
+                .and_then(Value::as_str)
+                .map(str::to_owned),
             #[allow(clippy::cast_possible_truncation)] // a 0..1 progress value
             progress: payload.get("value").and_then(Value::as_f64).map(|v| v.clamp(0.0, 1.0) as f32),
         },
@@ -349,6 +355,36 @@ mod tests {
             }
             other => panic!("unexpected {other:?}"),
         }
+    }
+
+    /// 0.0.7: captured from the pinned build loading a model with an image file that is
+    /// not GGUF. After the model, the server names the image file's stage on its own
+    /// (`{"stage":"mmproj_model"}`) right before it loads it, and then exits: that line is
+    /// the last word on where the load was.
+    #[test]
+    fn the_image_files_stage_starts_with_its_own_line() {
+        let states: Vec<ChildState> =
+            include_str!("../../tests/fixtures/managed_stdout_image_file.txt")
+                .lines()
+                .filter_map(parse_child_line)
+                .collect();
+        assert_eq!(states.len(), 4);
+        assert_eq!(
+            states[0],
+            ChildState::Loading {
+                stages: vec!["text_model".into(), "mmproj_model".into()],
+                current: Some("text_model".into()),
+                progress: Some(0.0)
+            }
+        );
+        assert_eq!(
+            states[3],
+            ChildState::Loading {
+                stages: Vec::new(),
+                current: Some("mmproj_model".into()),
+                progress: None
+            }
+        );
     }
 
     #[test]

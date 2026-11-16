@@ -785,21 +785,30 @@ fn stored_file_facts(st: &StoredSummary, vision: bool) -> Option<FileFacts> {
 pub fn installed_fit(plan: &Plan, ctx: u32) -> Option<models::FitResult> {
     let facts = plan.facts.as_ref()?;
     let (r, machine) = (&plan.resolved, &plan.machine);
-    let input = facts.fit_input(r.save_memory)?;
+    let input = facts.fit_input(crate::load_settings::kv_layout(r.save_memory, &r.fine))?;
     let (gpu, fine) = (r.gpu, &r.fine);
     let kind = machine.memory_kind(gpu);
     let placer = crate::offload::Placer::new(facts, machine, r.save_memory);
     let tokens = u64::from(ctx);
+    let copies_at = |n: u64| match &placer {
+        Some(p) => p.work(n, gpu, fine).copies,
+        None => crate::load_settings::copies_without_sizes(&input, machine, gpu, n),
+    };
     let mark = |n: u64| match &placer {
         Some(p) => p.judge(n, gpu, fine).0,
-        None => models::fit::verdict_at(&input, n, machine.room(gpu)),
+        None => crate::load_settings::with_copies(
+            models::fit::verdict_at(&input, n, machine.room(gpu)),
+            &copies_at(n),
+        ),
     };
+    let copies = copies_at(tokens);
     let mut computer_free_bytes = 0;
     let mut computer_short = false;
     let (verdict, partial_offload, needed_bytes, computer_bytes) = match &placer {
         Some(p) => {
-            let split = p.work(tokens, gpu, fine).split;
-            let (verdict, fits) = p.judge_split(&split, gpu, fine);
+            let worked = p.work(tokens, gpu, fine);
+            let (verdict, fits) = p.judge_worked(&worked, gpu, fine);
+            let split = worked.split;
             // On a graphics card, the card's share and, as the panel's second bar, the part
             // in the computer's memory (compare-fit-minors: the screen gives both and the
             // whole, never only the card's share).
@@ -827,8 +836,10 @@ pub fn installed_fit(plan: &Plan, ctx: u32) -> Option<models::FitResult> {
             let verdict = mark(tokens);
             let needed = input.needed_at(tokens);
             let fit_choice = gpu == runtime::GpuUse::Fit && !fine.custom_placement();
-            let partial =
-                verdict == Verdict::Yellow && (fit_choice || needed > machine.room(gpu).whole);
+            // Yellow only for the saved copies is not part on the processor.
+            let partial = verdict == Verdict::Yellow
+                && !copies.short
+                && (fit_choice || needed > machine.room(gpu).whole);
             (verdict, partial, needed, 0)
         }
     };
@@ -854,6 +865,9 @@ pub fn installed_fit(plan: &Plan, ctx: u32) -> Option<models::FitResult> {
         computer_bytes,
         computer_free_bytes,
         computer_short,
+        copies_bytes: copies.bytes,
+        copies_short: copies.short,
+        computer_unknown: machine.ram_unknown,
         sentence: String::new(),
     })
 }
@@ -873,7 +887,7 @@ fn fit_for(
     let input = FitInput {
         weights_bytes,
         projector_bytes,
-        kv_bytes_per_token: s.kv_bytes_per_token(),
+        kv: s.kv_size(models::summary::KvCacheType::F16),
         vocab_size: s.vocab_size.unwrap_or(0),
         ctx: u64::from(ctx),
         max_ctx: s.context_length,
@@ -907,11 +921,12 @@ fn local_header(rec: &Installed) -> Option<Arc<ModelSummary>> {
     Some(summary)
 }
 
-/// The size of the projector beside an installed model; 0 when there is none.
+/// The size of the image file a load of an installed model uses; 0 when there is none.
+/// 0.0.7 (P2 review m6): as a load chooses it (`image_file::choose`), so a file put next
+/// to the model later counts, and one that could not be read does not.
 fn installed_projector_bytes(rec: &Installed) -> u64 {
-    rec.stored
-        .projector
-        .as_deref()
+    super::image_file::choice_of_row(&rec.path, &rec.stored)
+        .path
         .and_then(|p| std::fs::metadata(p).ok())
         .map_or(0, |m| m.len())
 }

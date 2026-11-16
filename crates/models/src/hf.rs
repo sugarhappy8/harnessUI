@@ -540,7 +540,10 @@ pub fn validate_repo_id(id: &str) -> Result<(&str, &str), HfError> {
 }
 
 /// Checks a file path inside a repository and returns its segments. Rejects
-/// anything that could escape the destination folder on Windows or macOS.
+/// anything that could escape the destination folder on Windows or macOS, a Windows
+/// device name, and characters that hide what a name says (invisible, bidirectional or
+/// control characters, [`is_invisible_or_control`], and the line and paragraph
+/// separators).
 pub fn validate_repo_path(path: &str) -> Result<Vec<&str>, HfError> {
     let bad = || HfError::InvalidName(path.to_string());
     if path.is_empty() || path.len() > 512 || path.starts_with('/') {
@@ -548,27 +551,46 @@ pub fn validate_repo_path(path: &str) -> Result<Vec<&str>, HfError> {
     }
     let segments: Vec<&str> = path.split('/').collect();
     for s in &segments {
-        let reserved = {
-            let stem = s.split('.').next().unwrap_or("").to_ascii_uppercase();
-            matches!(stem.as_str(), "CON" | "PRN" | "AUX" | "NUL")
-                || ((stem.starts_with("COM") || stem.starts_with("LPT"))
-                    && stem.len() == 4
-                    && stem.as_bytes()[3].is_ascii_digit())
-        };
         if s.is_empty()
             || *s == "."
             || *s == ".."
             || s.ends_with('.')
             || s.ends_with(' ')
-            || reserved
+            || is_device_name(s)
             || s.chars().any(|c| {
-                c.is_control() || matches!(c, '\\' | ':' | '*' | '?' | '"' | '<' | '>' | '|')
+                is_invisible_or_control(c)
+                    || matches!(
+                        c,
+                        '\\' | ':' | '*' | '?' | '"' | '<' | '>' | '|' | '\u{2028}' | '\u{2029}'
+                    )
             })
         {
             return Err(bad());
         }
     }
     Ok(segments)
+}
+
+/// Whether Windows reads the file name `segment` as a device: CON, PRN, AUX, NUL, COM and
+/// LPT with a digit or a superscript one, two or three, before any extension, whatever the
+/// case and with spaces before the first dot ("AUX .gguf" is AUX).
+fn is_device_name(segment: &str) -> bool {
+    let stem = segment
+        .split('.')
+        .next()
+        .unwrap_or("")
+        .trim_end_matches(' ')
+        .to_uppercase();
+    let numbered = |prefix: &str| {
+        stem.strip_prefix(prefix).is_some_and(|rest| {
+            let mut chars = rest.chars();
+            matches!(
+                (chars.next(), chars.next()),
+                (Some('0'..='9' | '\u{b9}' | '\u{b2}' | '\u{b3}'), None)
+            )
+        })
+    };
+    matches!(stem.as_str(), "CON" | "PRN" | "AUX" | "NUL") || numbered("COM") || numbered("LPT")
 }
 
 /// Whether a redirect target may be fetched (HTTPS on the Hub, its CDN, or the mirror).
@@ -1185,10 +1207,29 @@ mod tests {
             "",
             "x\u{0}.gguf",
             "what?.gguf",
+            // 0.0.7 (P2 review m10): Windows' other device names, a device name before
+            // spaces, and names that hide characters (a right-to-left override that shows
+            // "fs.gguf" for "fs\u{202e}fugg.exe", a zero-width space, a byte order mark).
+            "COM\u{b9}.gguf",
+            "lpt\u{b2}",
+            "COM\u{b3}.mmproj.gguf",
+            "AUX .mmproj.gguf",
+            "dir/con  .gguf",
+            "Nul .txt",
+            "COM0.gguf",
+            "mmproj\u{202e}fugg.exe",
+            "mmproj\u{200b}-F16.gguf",
+            "\u{feff}mmproj.gguf",
+            "a\u{2066}b/c.gguf",
+            "mmproj\u{2028}x.gguf",
+            "mmproj\u{2029}x.gguf",
         ] {
             assert!(validate_repo_path(bad).is_err(), "{bad:?}");
         }
         assert!(validate_repo_path("COMPUTE.gguf").is_ok());
+        assert!(validate_repo_path("COM10.gguf").is_ok());
+        assert!(validate_repo_path("AUXILIARY.gguf").is_ok());
+        assert!(validate_repo_path("Ünïcödé/modèle-日本語.gguf").is_ok());
     }
 
     #[test]

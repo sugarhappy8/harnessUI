@@ -4,9 +4,12 @@
 use serde::Serialize;
 
 use crate::gguf::{GgufHeader, Value};
+use crate::kv::{KvLayout, KvShape, KvSize, LayerKv};
 use crate::layers::MAX_BLOCKS;
 
-/// A model's GGUF summary. Stored in the `models` table and shown as badges.
+/// A model's GGUF summary. Shown as badges and used for the memory estimate; the badges'
+/// part is saved in the `models` table (`hub.rs`, `StoredSummary`), the memory facts never
+/// are: they are read from the header each time it is read.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ModelSummary {
@@ -24,6 +27,28 @@ pub struct ModelSummary {
     pub head_count_kv: Vec<u64>,
     pub key_length: u64,
     pub value_length: u64,
+    // ---- 0.0.7 P1: the conversation memory as llama.cpp lays it out (`crate::kv`).
+    /// The window of the short-memory (sliding-window) layers in tokens, as llama.cpp
+    /// uses it for this architecture (`n_swa`); 0 when no layer is short-memory.
+    pub sliding_window: u64,
+    /// Which layers are short-memory, one entry per block (at most [`MAX_BLOCKS`]); empty
+    /// when none is.
+    pub swa_layers: Vec<bool>,
+    /// Head sizes of the short-memory layers (`attention.key_length_swa` /
+    /// `value_length_swa`, else the full ones).
+    pub key_length_swa: u64,
+    pub value_length_swa: u64,
+    /// Which layers keep memory of their own, one entry per block: not a layer that reads
+    /// an earlier layer's (`attention.shared_kv_layers`), a linear-attention layer or an
+    /// extra prediction layer.
+    pub kv_layers: Vec<bool>,
+    /// Value rows are stored (false for a model that keeps keys only, MLA).
+    pub kv_values: bool,
+    /// Which layers keep a recurrent state, one entry per block (empty when none does:
+    /// not a recurrent or hybrid model).
+    pub recurrent_layers: Vec<bool>,
+    /// Bytes of each of those layers' recurrent state (`crate::kv`, f32).
+    pub recurrent_state_bytes: u64,
     pub expert_count: Option<u64>,
     pub expert_used_count: Option<u64>,
     pub vocab_size: Option<u64>,
@@ -87,6 +112,7 @@ impl ModelSummary {
         let value_length = h
             .arch_u64("attention.value_length")
             .unwrap_or(default_head_dim);
+        let memory = crate::kv::read_arch(h, &arch, block_count, &head_count_kv);
         let template = h.get_str("tokenizer.chat_template");
         let template_lower = template.map(str::to_ascii_lowercase).unwrap_or_default();
         let vocab_size = match h.get("tokenizer.ggml.tokens") {
@@ -110,6 +136,16 @@ impl ModelSummary {
             head_count_kv,
             key_length,
             value_length,
+            sliding_window: memory.window,
+            swa_layers: memory.swa_layers,
+            key_length_swa: h.arch_u64("attention.key_length_swa").unwrap_or(key_length),
+            value_length_swa: h
+                .arch_u64("attention.value_length_swa")
+                .unwrap_or(value_length),
+            kv_layers: memory.kv_layers,
+            kv_values: memory.values,
+            recurrent_layers: memory.recurrent_layers,
+            recurrent_state_bytes: memory.state_bytes,
             expert_count: h.arch_u64("expert_count").filter(|&n| n > 0),
             expert_used_count: h.arch_u64("expert_used_count").filter(|&n| n > 0),
             vocab_size,
@@ -125,33 +161,53 @@ impl ModelSummary {
         }
     }
 
-    /// KV-cache bytes per token of context, with an f16 cache:
-    /// `Σ layers (key + value length) × KV heads × 2 bytes`, as llama.cpp allocates it.
-    ///
-    /// Sliding-window layers are counted at full length, so the estimate is on the
-    /// safe side for models that use them; the bundled `llama-fit-params` gives the
-    /// exact figure once the file is local (ARCHITECTURE.md 11).
-    pub fn kv_bytes_per_token(&self) -> u64 {
-        // The same formula, saturating: header numbers may be anything (spec 2.0).
-        self.kv_bytes_per_token_as(KvCacheType::F16)
-    }
-
-    pub fn kv_bytes(&self, ctx: u64) -> u64 {
-        self.kv_bytes_per_token().saturating_mul(ctx)
-    }
-
-    /// KV-cache bytes per token of context with the cache stored as `cache`: per layer, one
-    /// key row (KV heads × key length values) and one value row, each laid out as `cache`
-    /// lays out a row. The same sliding-window caveat as [`Self::kv_bytes_per_token`].
-    pub fn kv_bytes_per_token_as(&self, cache: KvCacheType) -> u64 {
-        self.head_count_kv
-            .iter()
-            .map(|&n| {
-                cache
-                    .row_bytes(n.saturating_mul(self.key_length))
-                    .saturating_add(cache.row_bytes(n.saturating_mul(self.value_length)))
+    /// The conversation memory layer by layer, as llama.cpp lays it out (`crate::kv`):
+    /// one entry per block, at most [`MAX_BLOCKS`].
+    pub fn kv_shape(&self) -> KvShape {
+        let layers = (0..kept_layers(self.block_count))
+            .map(|il| {
+                let window = self.swa_layers.get(il).copied().unwrap_or(false);
+                LayerKv {
+                    heads: self.head_count_kv.get(il).copied().unwrap_or(0),
+                    key_length: if window {
+                        self.key_length_swa
+                    } else {
+                        self.key_length
+                    },
+                    value_length: if window {
+                        self.value_length_swa
+                    } else {
+                        self.value_length
+                    },
+                    window,
+                    own: self.kv_layers.get(il).copied().unwrap_or(true),
+                    recurrent: if self.recurrent_layers.get(il).copied().unwrap_or(false) {
+                        self.recurrent_state_bytes
+                    } else {
+                        0
+                    },
+                }
             })
-            .fold(0u64, u64::saturating_add)
+            .collect();
+        KvShape {
+            layers,
+            window: self.sliding_window,
+            values: self.kv_values,
+        }
+    }
+
+    /// The conversation memory as a function of the context, stored as `layout` says:
+    /// the layers that keep the whole conversation grow with it, the short-memory layers
+    /// stop at their window ([`KvSize::at`]). Every product saturates: header numbers may
+    /// be anything (spec 2.0).
+    pub fn kv_size(&self, layout: impl Into<KvLayout>) -> KvSize {
+        self.kv_shape().size(layout.into())
+    }
+
+    /// The conversation memory llama.cpp allocates at a context of `ctx` tokens, stored as
+    /// `layout` says.
+    pub fn kv_bytes(&self, ctx: u64, layout: impl Into<KvLayout>) -> u64 {
+        self.kv_size(layout).at(ctx)
     }
 
     /// Whether this is a mixture-of-experts model.
@@ -251,9 +307,13 @@ mod tests {
         assert_eq!(s.quantization.as_deref(), Some("Q4_K_M"));
         assert_eq!(s.key_length, 128);
         // 32 layers × (128 + 128) × 8 heads × 2 bytes = 131072 bytes per token.
-        assert_eq!(s.kv_bytes_per_token(), 131_072);
+        assert_eq!(s.kv_size(KvCacheType::F16), KvSize::per_token(131_072));
         // 8192 tokens → 1 GiB.
-        assert_eq!(s.kv_bytes(8192), 1 << 30);
+        assert_eq!(s.kv_bytes(8192, KvCacheType::F16), 1 << 30);
+        // No short-memory layer, every layer its own memory.
+        assert_eq!(s.sliding_window, 0);
+        assert!(s.swa_layers.is_empty());
+        assert_eq!(s.kv_layers, vec![true; 32]);
         assert!(!s.template_tools);
         assert!(s.has_chat_template);
         assert!(!s.is_moe());
@@ -277,7 +337,7 @@ mod tests {
                 )
                 .build(),
         );
-        assert_eq!(s.kv_bytes_per_token(), 28 * 256 * 8 * 2);
+        assert_eq!(s.kv_size(KvCacheType::F16).per_cell, 28 * 256 * 8 * 2);
         assert!(s.template_tools);
         assert!(s.template_thinking);
         assert_eq!(s.expert_count, None);
@@ -295,7 +355,12 @@ mod tests {
                 .u32_array("lfm2.attention.head_count_kv", &[8, 0, 8, 0])
                 .build(),
         );
-        assert_eq!(s.kv_bytes_per_token(), 2 * (64 + 64) * 8 * 2);
+        assert_eq!(
+            s.kv_size(KvCacheType::F16),
+            KvSize::per_token(2 * (64 + 64) * 8 * 2)
+        );
+        // The recurrent layers keep no memory of their own.
+        assert_eq!(s.kv_layers, vec![true, false, true, false]);
     }
 
     /// Save memory stores the cache as q8_0: 34 bytes per 32 values instead of 64.
@@ -312,13 +377,16 @@ mod tests {
                 .u32("llama.attention.head_count_kv", 8)
                 .build(),
         );
-        assert_eq!(s.kv_bytes_per_token_as(KvCacheType::F16), 131_072);
-        assert_eq!(
-            s.kv_bytes_per_token_as(KvCacheType::F16),
-            s.kv_bytes_per_token()
-        );
+        assert_eq!(s.kv_size(KvCacheType::F16).per_cell, 131_072);
+        assert_eq!(s.kv_size(KvCacheType::F16).fixed, 0);
         // 32 layers × 2 rows × 1,024 / 32 blocks × 34 bytes.
-        assert_eq!(s.kv_bytes_per_token_as(KvCacheType::Q8_0), 69_632);
+        assert_eq!(s.kv_size(KvCacheType::Q8_0).per_cell, 69_632);
+        // A quantized cache also gets rotation matrices: per layer 128² f32 entries for
+        // keys (128-value heads) and 64² for values (llama_kv_cache::init_rotation).
+        assert_eq!(
+            s.kv_size(KvCacheType::Q8_0).fixed,
+            32 * (128 * 128 * 4 + 64 * 64 * 4)
+        );
         // A hybrid model: the recurrent layers have no cache in either type.
         let hybrid = summary(
             Writer::new()
@@ -329,9 +397,11 @@ mod tests {
                 .u32_array("lfm2.attention.head_count_kv", &[8, 0, 8, 0])
                 .build(),
         );
+        assert_eq!(hybrid.kv_size(KvCacheType::Q8_0).per_cell, 2 * 2 * 16 * 34);
+        // Rotation matrices only for the two attention layers (64-value heads).
         assert_eq!(
-            hybrid.kv_bytes_per_token_as(KvCacheType::Q8_0),
-            2 * 2 * 16 * 34
+            hybrid.kv_size(KvCacheType::Q8_0).fixed,
+            2 * (64 * 64 * 4 + 64 * 64 * 4)
         );
         // A row that is not a whole number of blocks is rounded up to one more block.
         assert_eq!(KvCacheType::Q8_0.row_bytes(33), 68);
@@ -348,7 +418,7 @@ mod tests {
                 .build(),
         );
         assert!(s.is_projector);
-        assert_eq!(s.kv_bytes_per_token(), 0);
+        assert_eq!(s.kv_bytes(4096, KvCacheType::F16), 0);
     }
 
     /// A crafted header (0.0.6 item 6, spec 2.0): huge per-layer numbers never panic
@@ -369,15 +439,17 @@ mod tests {
         };
         // A key length near u64::MAX: the per-token figure saturates.
         let s = hostile(32, u64::MAX);
-        assert_eq!(s.kv_bytes_per_token(), u64::MAX);
-        assert_eq!(s.kv_bytes(4096), u64::MAX);
+        assert_eq!(s.kv_size(KvCacheType::F16).per_cell, u64::MAX);
+        assert_eq!(s.kv_bytes(4096, KvCacheType::F16), u64::MAX);
+        assert_eq!(s.kv_bytes(4096, KvCacheType::Q8_0), u64::MAX);
         // 2^61 blocks (a capacity overflow) and 2^40 blocks (an 8 TiB allocation): at most
         // MAX_BLOCKS entries, the header's number itself kept for display.
         for block_count in [1u64 << 61, 1 << 40, u64::MAX] {
             let s = hostile(block_count, 128);
             assert_eq!(s.block_count, block_count);
             assert_eq!(s.head_count_kv.len() as u64, crate::layers::MAX_BLOCKS);
-            assert!(s.kv_bytes_per_token() > 0);
+            assert_eq!(s.kv_layers.len() as u64, crate::layers::MAX_BLOCKS);
+            assert!(s.kv_size(KvCacheType::F16).per_cell > 0);
         }
         // Without head_count_kv the head count is used per layer, with the same cap.
         let s = summary(
@@ -398,7 +470,7 @@ mod tests {
         };
         let h = crate::gguf::read_file(std::path::Path::new(&path)).unwrap();
         let s = ModelSummary::from_header(&h);
-        assert!(s.kv_bytes_per_token() > 0);
+        assert!(s.kv_bytes(4096, KvCacheType::F16) > 0);
         assert!(s.vocab_size.unwrap_or(0) > 1000);
         assert!(s.has_chat_template);
     }

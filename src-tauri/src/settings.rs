@@ -35,6 +35,46 @@ pub fn steps_per_turn(stored: Option<&serde_json::Value>) -> u32 {
         .unwrap_or(DEFAULT_STEPS_PER_TURN)
 }
 
+/// [0.0.7] "Stop when the model makes the same call this many times in a row" (8.2, loop
+/// detection). Read when a turn starts; the model is told it repeats itself two calls before
+/// the limit (one call before at 3; at 2 there is no room for a warning).
+pub const SAME_CALL_LIMIT: &str = "sameCallLimit";
+
+/// [0.0.7] A repeat limit as it may be saved: a whole number from 2 to 100.
+pub fn parse_same_call_limit(value: &serde_json::Value) -> Option<u32> {
+    value
+        .as_u64()
+        .and_then(|n| u32::try_from(n).ok())
+        .filter(|n| (agent::turn::MIN_REPEAT_LIMIT..=agent::turn::MAX_REPEAT_LIMIT).contains(n))
+}
+
+/// [0.0.7] The repeat limit a turn uses: the stored whole number held to 2..=100 (one written
+/// some other way outside that range counts as the nearest end, a whole number written with a
+/// fraction such as 42.0 as that number), or 5 when it is missing, negative or not a whole
+/// number. The settings panel reads it the same way (`storedSameCallLimit`). A stored value can
+/// never end every turn at its first call, nor let a loop run on.
+pub fn same_call_limit(stored: Option<&serde_json::Value>) -> u32 {
+    let whole = stored.and_then(|value| {
+        value.as_u64().or_else(|| {
+            // 42.0, or a number past u64 such as 2^64: whole, so held to the range.
+            value
+                .as_f64()
+                .filter(|n| n.is_finite() && n.fract() == 0.0 && *n >= 0.0)
+                .map(|n| {
+                    if n >= f64::from(u32::MAX) {
+                        u64::from(u32::MAX)
+                    } else {
+                        n as u64
+                    }
+                })
+        })
+    });
+    match whole {
+        Some(n) => agent::turn::repeat_limit(u32::try_from(n).unwrap_or(u32::MAX)),
+        None => agent::turn::LOOP_STOP_AT,
+    }
+}
+
 /// A stored remote context size, if it is a sensible whole number of tokens.
 pub fn parse_remote_context(value: &serde_json::Value) -> Option<u32> {
     value
@@ -100,6 +140,51 @@ mod tests {
         ] {
             assert_eq!(parse_steps_per_turn(&bad), None, "{bad}");
             assert_eq!(steps_per_turn(Some(&bad)), DEFAULT_STEPS_PER_TURN, "{bad}");
+        }
+    }
+
+    /// [0.0.7] The repeat limit: 2 to 100 may be saved; what a turn reads is held to that
+    /// range, and anything that is not a whole number gives the default, 5.
+    #[test]
+    fn the_same_call_limit_is_checked_when_saved_and_held_to_its_range_when_read() {
+        assert_eq!(same_call_limit(None), 5);
+        for n in [2, 3, 5, 42, 100] {
+            assert_eq!(parse_same_call_limit(&json!(n)), Some(n), "{n}");
+            assert_eq!(same_call_limit(Some(&json!(n))), n, "{n}");
+        }
+        for bad in [
+            json!(0),
+            json!(1),
+            json!(101),
+            json!(-3),
+            json!(12.5),
+            json!("5"),
+            json!(null),
+            json!({"limit": 5}),
+            json!(u64::MAX),
+        ] {
+            assert_eq!(parse_same_call_limit(&bad), None, "{bad}");
+        }
+        // Tampered with in the database: held to the range, or the default.
+        for (stored, used) in [
+            (json!(0), 2),
+            (json!(1), 2),
+            (json!(101), 100),
+            (json!(u64::MAX), 100),
+            (json!(-3), 5),
+            (json!(12.5), 5),
+            (json!("100"), 5),
+            (json!(null), 5),
+            // [0.0.7 verification] As the settings panel reads them: a whole number written
+            // with a fraction is that number, one past u64 the top of the range.
+            (json!(42.0), 42),
+            (json!(1.0), 2),
+            (json!(-0.0), 2),
+            (json!(-3.0), 5),
+            (json!(18_446_744_073_709_551_616.0_f64), 100),
+            (json!(1e300), 100),
+        ] {
+            assert_eq!(same_call_limit(Some(&stored)), used, "{stored}");
         }
     }
 

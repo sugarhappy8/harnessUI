@@ -14,6 +14,19 @@ const ipcMock = vi.hoisted(() => ({
 }));
 vi.mock("../lib/ipc", () => ipcMock);
 
+// [0.0.7] The app's "main window shown" event, sent by hand here.
+const shown = vi.hoisted(() => ({ handlers: new Set<() => void>(), stopped: 0 }));
+vi.mock("../lib/windowShown", () => ({
+  MAIN_WINDOW_SHOWN: "main-window-shown",
+  onMainWindowShown: (handler: () => void) => {
+    shown.handlers.add(handler);
+    return () => {
+      shown.handlers.delete(handler);
+      shown.stopped += 1;
+    };
+  },
+}));
+
 const { ALLOW_ALL_AFTER_UNTRUSTED, ApprovalCard, CARD_INPUT_DELAY_MS, KEEP_ASKING_TEXT } = await import(
   "./ApprovalCard"
 );
@@ -271,5 +284,108 @@ describe("ApprovalCard: Allow all in this chat", () => {
     const labels = [...document.querySelectorAll("button")].map((b) => b.textContent ?? "");
     expect(labels.filter((l) => l.includes("Allow once"))).toEqual(["Allow once"]);
     expect(labels.filter((l) => l.includes("Deny"))).toEqual(["Deny"]);
+  });
+});
+
+describe("ApprovalCard after the window comes back (0.0.7)", () => {
+  let visibility: DocumentVisibilityState = "visible";
+  beforeEach(() => {
+    vi.useFakeTimers();
+    visibility = "visible";
+    Object.defineProperty(document, "visibilityState", { configurable: true, get: () => visibility });
+  });
+  afterEach(() => {
+    cleanup();
+    vi.useRealTimers();
+    // Back to jsdom's own.
+    Reflect.deleteProperty(document, "visibilityState");
+  });
+
+  const wait = (ms: number) =>
+    act(() => {
+      vi.advanceTimersByTime(ms);
+    });
+  const allowDisabled = () => screen.getByText("Allow once").getAttribute("aria-disabled");
+  const windowShown = () =>
+    act(() => {
+      for (const h of [...shown.handlers]) h();
+    });
+  const setVisibility = (v: DocumentVisibilityState) =>
+    act(() => {
+      visibility = v;
+      document.dispatchEvent(new Event("visibilitychange"));
+    });
+
+  it("ignores clicks again for a moment each time the app brings the window back", () => {
+    const onDecide = vi.fn();
+    render(<ApprovalCard request={base} onDecide={onDecide} />);
+    wait(CARD_INPUT_DELAY_MS + 10);
+    expect(allowDisabled()).toBe("false");
+    // The app restored its window for this card, in front of where the user was clicking.
+    windowShown();
+    expect(allowDisabled()).toBe("true");
+    fireEvent.click(screen.getByText("Allow once"));
+    expect(onDecide).not.toHaveBeenCalled();
+    wait(CARD_INPUT_DELAY_MS - 100);
+    fireEvent.click(screen.getByText("Allow once"));
+    expect(onDecide).not.toHaveBeenCalled();
+    wait(110);
+    fireEvent.click(screen.getByText("Allow once"));
+    expect(onDecide).toHaveBeenCalledWith("allowOnce", null);
+  });
+
+  it("does not count the time while the page is hidden", () => {
+    const onDecide = vi.fn();
+    // The card arrives while the window is minimised.
+    visibility = "hidden";
+    render(<ApprovalCard request={base} onDecide={onDecide} />);
+    wait(5000);
+    expect(allowDisabled()).toBe("true");
+    setVisibility("visible");
+    fireEvent.click(screen.getByText("Deny"));
+    expect(onDecide).not.toHaveBeenCalled();
+    wait(CARD_INPUT_DELAY_MS + 10);
+    expect(allowDisabled()).toBe("false");
+    // Hidden again (minimised by hand): disarmed until it is back.
+    setVisibility("hidden");
+    expect(allowDisabled()).toBe("true");
+  });
+
+  it("ignores a click in the same moment the window comes back, before the card is drawn again", () => {
+    const onDecide = vi.fn();
+    render(<ApprovalCard request={base} onDecide={onDecide} />);
+    wait(CARD_INPUT_DELAY_MS + 10);
+    const allow = screen.getByText("Allow once");
+    act(() => {
+      for (const h of [...shown.handlers]) h();
+      // A plain DOM click: React has not drawn the card again yet.
+      allow.click();
+    });
+    expect(onDecide).not.toHaveBeenCalled();
+  });
+
+  it("keeps working when the window merely gets the focus", () => {
+    const onDecide = vi.fn();
+    render(<ApprovalCard request={base} onDecide={onDecide} />);
+    wait(CARD_INPUT_DELAY_MS + 10);
+    // The click that focuses a card shown in front is the user's own.
+    act(() => {
+      window.dispatchEvent(new Event("focus"));
+    });
+    fireEvent.click(screen.getByText("Allow once"));
+    expect(onDecide).toHaveBeenCalledWith("allowOnce", null);
+  });
+
+  it("stops listening when it goes, and a late event starts nothing", () => {
+    const { unmount } = render(<ApprovalCard request={base} onDecide={() => {}} />);
+    const handler = [...shown.handlers][0];
+    expect(handler).toBeDefined();
+    const before = shown.stopped;
+    unmount();
+    expect(shown.stopped).toBe(before + 1);
+    expect(shown.handlers.size).toBe(0);
+    // Tauri can still call a listener once after its cleanup ran.
+    act(() => handler?.());
+    expect(vi.getTimerCount()).toBe(0);
   });
 });

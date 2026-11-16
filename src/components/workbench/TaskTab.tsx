@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { CheckCheck, Pause, Play, RotateCcw, Trash2 } from "lucide-react";
-import { useApp } from "../../store/app";
+import { turnChatId, useApp } from "../../store/app";
 import * as api from "../task/api";
 import { ClearTaskDialog } from "../task/ClearTaskDialog";
 import { NEXT_STATUS, ConstraintsEditor, StepsEditor, TextEditor } from "../task/TaskEditors";
@@ -8,6 +8,7 @@ import { ChangedFiles, Checks } from "../task/TaskFacts";
 import { ByYou, LinkButton, Section, STEP_LABEL, STEP_MARK, StatusChip, when } from "../task/TaskParts";
 import { toProblem, useTasks } from "../task/state";
 import type { Task, TaskEdit, TaskStatus } from "../task/types";
+import { INPUT_DELAY_MS, useInputDelay } from "../../lib/useInputDelay";
 
 /** The message Resume sends: an ordinary message, through the ordinary send path. */
 export const RESUME_MESSAGE = "Continue the task. Start with the next action.";
@@ -21,6 +22,25 @@ function headerButton(tone: "plain" | "accent" = "plain"): string {
   );
 }
 
+/** Resume. [0.0.7] It becomes usable as a reply ends, when the app may also bring its window
+ *  back after stepping aside for computer use: clicks are ignored for a moment after it
+ *  appears or becomes usable, and after the window comes back (`useInputDelay`). */
+function ResumeButton(props: { disabled: boolean; title: string | undefined; onResume: () => void }) {
+  const { armed, armedRef } = useInputDelay(INPUT_DELAY_MS);
+  return (
+    <button
+      type="button"
+      className={headerButton("accent") + " aria-disabled:opacity-50"}
+      disabled={props.disabled}
+      aria-disabled={!armed}
+      title={props.title}
+      onClick={() => armedRef.current && props.onResume()}
+    >
+      <Play size={12} aria-hidden /> Resume
+    </button>
+  );
+}
+
 /** The "Task" tab of the panel beside the chat: the goal, constraints, steps, changed files,
  *  checks and next action of the work in this chat, with Pause, Resume, Mark done and
  *  Clear. The user corrects the goal, constraints, steps and next action in place. */
@@ -28,7 +48,10 @@ export function TaskTab(props: { chatId: number }) {
   const { chatId } = props;
   const task = useTasks((s) => s.byChat[chatId]);
   const problem = useTasks((s) => s.problems[chatId]);
-  const generation = useApp((s) => s.generation);
+  // [0.0.7 P6a review] The chat whose reply is being written: this window's own, or one the app
+  // reports (also a reply that went on while the window reloaded, which sends this window no
+  // events).
+  const turnChat = useApp(turnChatId);
   const activeChatId = useApp((s) => s.activeChatId);
   // What is being edited, for the chat it was started in.
   const [edited, setEdited] = useState<{ chatId: number; what: Editing }>({ chatId, what: null });
@@ -41,8 +64,8 @@ export function TaskTab(props: { chatId: number }) {
     void useTasks.getState().load(chatId);
   }, [chatId]);
 
-  const runningHere = generation !== null && generation.chatId === chatId;
-  const anyRunning = generation !== null;
+  const runningHere = turnChat === chatId;
+  const anyRunning = turnChat !== null;
 
   async function act(f: () => Promise<Task | null | void>): Promise<boolean> {
     setBusy(true);
@@ -68,13 +91,15 @@ export function TaskTab(props: { chatId: number }) {
   async function pause() {
     if (!(await setStatus("paused"))) return;
     // The same stop as the Stop button, only for a turn of this chat.
-    const g = useApp.getState().generation;
-    if (g && g.chatId === chatId) await useApp.getState().stop();
+    if (turnChatId(useApp.getState()) === chatId) await useApp.getState().stop(chatId);
   }
 
   async function resume() {
+    // Not while a reply runs (the app writes one at a time): the task would be set active and
+    // nothing sent.
+    if (turnChatId(useApp.getState()) !== null) return;
     if (!(await setStatus("active"))) return;
-    if (useApp.getState().activeChatId === chatId && useApp.getState().generation === null) {
+    if (useApp.getState().activeChatId === chatId && turnChatId(useApp.getState()) === null) {
       await useApp.getState().send(RESUME_MESSAGE);
     }
   }
@@ -142,15 +167,13 @@ export function TaskTab(props: { chatId: number }) {
             </button>
           )}
           {task.status !== "done" && canResume && (
-            <button
-              type="button"
-              className={headerButton("accent")}
+            // A new delay when the reply ends and Resume can be used.
+            <ResumeButton
+              key={anyRunning ? "waiting" : "ready"}
               disabled={busy || anyRunning || activeChatId !== chatId}
               title={anyRunning ? "Wait until the current reply ends." : undefined}
-              onClick={() => void resume()}
-            >
-              <Play size={12} aria-hidden /> Resume
-            </button>
+              onResume={() => void resume()}
+            />
           )}
           {task.status !== "done" ? (
             <button type="button" className={headerButton()} disabled={busy} onClick={() => void setStatus("done")}>

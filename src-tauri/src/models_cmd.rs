@@ -72,11 +72,26 @@ fn existing_model(path: &str) -> AppResult<PathBuf> {
 
 /// Starts the load of `plan` and, once the model is ready, records whether it can think
 /// and starts the speed check.
+///
+/// 0.0.7 (P2): an image file the plan found next to the model is recorded on its Installed
+/// row first, and the load is told when the plan left out one that could not be read before,
+/// so the header says why the model cannot see images (`hub::image_file`).
 async fn run_load(state: &AppState, model: PathBuf, plan: &Plan) -> AppResult<()> {
+    let image_file_left_out = crate::hub::image_file::prepare_for_load(
+        &state.store,
+        &model.display().to_string(),
+        plan.resolved.mmproj.as_deref(),
+    )
+    .await;
     state
         .runtime
         .clone()
-        .load(model, plan.resolved.clone(), plan.footprint())
+        .load(
+            model,
+            plan.resolved.clone(),
+            plan.footprint(),
+            image_file_left_out,
+        )
         .await?;
     state.runtime.set_thinking(plan.thinking());
     // Settings saved while the model loaded could not mark it then (only a ready model is
@@ -87,6 +102,17 @@ async fn run_load(state: &AppState, model: PathBuf, plan: &Plan) -> AppResult<()
     let checker = state.runtime.clone();
     tauri::async_runtime::spawn(async move { checker.speed_check().await });
     Ok(())
+}
+
+/// 0.0.7 (P6b review m6): runs `change` (the D3 step that may stop a reply, a model check or
+/// another app's request) only once `check` (the backend the load would start on can run on
+/// this computer) passed. A refused check stops nothing and leaves the loaded model running.
+async fn after_backend_check<T>(
+    check: impl std::future::Future<Output = AppResult<()>>,
+    change: impl std::future::Future<Output = AppResult<T>>,
+) -> AppResult<T> {
+    check.await?;
+    change.await
 }
 
 /// After any settings change: whether the loaded model runs with older settings than the
@@ -137,10 +163,13 @@ pub async fn load_local_model(
         state.runtime.cancel_waiting();
         return result;
     }
-    let waited = state
-        .runtime
-        .before_change(&state.model_busy, when_idle.unwrap_or(false))
-        .await?;
+    let waited = after_backend_check(
+        state.runtime.check_backend(&plan.resolved),
+        state
+            .runtime
+            .before_change(&state.model_busy, when_idle.unwrap_or(false)),
+    )
+    .await?;
     // After a wait the settings may have changed meanwhile: use them as they are now.
     let plan = if waited {
         load::plan(&state, &path, settings).await
@@ -328,10 +357,11 @@ pub async fn reload_local_model(
         state.runtime.cancel_waiting();
         return Ok(());
     }
-    let waited = state
-        .runtime
-        .before_change(&state.model_busy, when_idle)
-        .await?;
+    let waited = after_backend_check(
+        state.runtime.check_backend(&plan.resolved),
+        state.runtime.before_change(&state.model_busy, when_idle),
+    )
+    .await?;
     let plan = if waited {
         load::plan(&state, &path, None).await
     } else {
@@ -463,6 +493,8 @@ const ALLOWED: &[&str] = &[
     settings::STEPS_PER_TURN,
     // [0.0.6] Closing the note about renamed MCP servers (only ever cleared this way).
     crate::mcp_cmd::RENAMED_SERVERS,
+    // [0.0.7] How many identical calls in a row end a turn (2 to 100).
+    settings::SAME_CALL_LIMIT,
 ];
 
 #[tauri::command]
@@ -484,6 +516,11 @@ pub async fn set_setting(
     if key == settings::STEPS_PER_TURN && settings::parse_steps_per_turn(&value).is_none() {
         return Err(AppError::bad_request(
             "The step limit must be a whole number from 5 to 500.",
+        ));
+    }
+    if key == settings::SAME_CALL_LIMIT && settings::parse_same_call_limit(&value).is_none() {
+        return Err(AppError::bad_request(
+            "The number of identical calls in a row must be a whole number from 2 to 100.",
         ));
     }
     if key == settings::REMOTE_CONTEXT_LENGTH && settings::parse_remote_context(&value).is_none() {
@@ -657,7 +694,12 @@ pub async fn run_diagnostics(
             match state
                 .runtime
                 .clone()
-                .load(PathBuf::from(&path), settings, load::Footprint::default())
+                .load(
+                    PathBuf::from(&path),
+                    settings,
+                    load::Footprint::default(),
+                    false,
+                )
                 .await
             {
                 Ok(()) if stop.is_cancelled() => break,
@@ -756,6 +798,7 @@ fn diagnostic_load(backend: &str, device: Option<String>) -> load::ResolvedLoad 
         ctx: 4096,
         ctx_choice: load::ContextSize::Fixed(4096),
         ctx_source: load::ContextSource::ModelSetting,
+        ctx_checkpoints: models::kv::MAX_CTX_CHECKPOINTS,
         gpu: load::GpuUse::All,
         save_memory: false,
         keep_in_memory: false,
@@ -769,6 +812,35 @@ fn diagnostic_load(backend: &str, device: Option<String>) -> load::ResolvedLoad 
 
 #[cfg(test)]
 mod tests {
+    /// 0.0.7 (P6b review m6): a load or reload whose backend cannot run here stops nothing.
+    /// Before, "Stop and restart" stopped the reply first and the backend was refused only
+    /// then.
+    #[tokio::test]
+    async fn a_backend_that_cannot_run_stops_nothing() {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicBool, Ordering};
+        let stopped = Arc::new(AtomicBool::new(false));
+        let stop = |flag: Arc<AtomicBool>| async move {
+            flag.store(true, Ordering::SeqCst);
+            Ok(true)
+        };
+        let refused = crate::error::AppError::new(
+            "backend_unavailable",
+            "The vulkan backend is not usable on this computer.",
+            "Pick Auto in Settings → Local models.",
+            String::new(),
+        );
+        let err = super::after_backend_check(async { Err(refused) }, stop(stopped.clone()))
+            .await
+            .unwrap_err();
+        assert_eq!(err.code, "backend_unavailable");
+        assert!(!stopped.load(Ordering::SeqCst), "nothing was stopped");
+        let waited = super::after_backend_check(async { Ok(()) }, stop(stopped.clone()))
+            .await
+            .unwrap();
+        assert!(waited && stopped.load(Ordering::SeqCst));
+    }
+
     /// D12: no tool, in any approval mode, reaches model settings through the generic
     /// setting command: neither the defaults for all models nor any model's own key is on
     /// its list (only their own validated commands write them).
@@ -783,6 +855,7 @@ mod tests {
                 crate::settings::REMOTE_CONTEXT_LENGTH,
                 crate::settings::STEPS_PER_TURN,
                 crate::mcp_cmd::RENAMED_SERVERS,
+                crate::settings::SAME_CALL_LIMIT,
             ],
             "the list changed: model settings must stay off it"
         );

@@ -355,7 +355,9 @@ fn projection_without_vision_uses_image_stubs() {
     assert!(matches!(tool_text, MessageContent::Text(_)));
     let text = tool_text.text();
     assert!(
-        text.contains("[image, 1280×800; this model cannot see images; use browser_snapshot or browser_read_text]"),
+        text.contains(&format!(
+            "[image, 1280×800; {NO_IMAGE_FILE}; use browser_snapshot or browser_read_text]"
+        )),
         "{text}"
     );
     // User images too.
@@ -377,7 +379,7 @@ fn projection_without_vision_uses_image_stubs() {
             .as_ref()
             .unwrap()
             .text()
-            .contains("[image, 10×20; this model cannot see images]")
+            .contains(&format!("[image, 10×20; {NO_IMAGE_FILE}]"))
     );
 }
 
@@ -687,6 +689,7 @@ fn golden_parts<'a>(
         chat_prompt: "You are helpful.",
         pinned,
         preamble: Some(preamble),
+        tool_guide: None,
         skills_index: Some("- pdf: read PDF files"),
         loaded_skills: skills,
         summary: Some("Goal: fix the bug"),

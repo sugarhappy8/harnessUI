@@ -559,3 +559,155 @@ proptest::proptest! {
         let _ = cut_off_call(&text);
     }
 }
+
+/// [0.0.7] A tool result the model wrote itself: the app's own result tag or a template's,
+/// in any letter case, outside code. An example inside code is not one.
+#[test]
+fn a_result_written_by_the_model_is_recognised_outside_code() {
+    let none: &[&str] = &[];
+    for made_up in [
+        // The block the test model wrote on macOS CI instead of calling read_file.
+        "<tool_output>\n{\"content\": \"secret_word\"}\n</tool_output>",
+        "<tool_output>\n{\"content\": \"plum\"}\n</tool_output>",
+        "The file says:\n<TOOL_OUTPUT id=\"1\" tool=\"read_file\">hello</TOOL_OUTPUT>",
+        "<tool_response>\n{\"content\": \"x\"}\n</tool_response>",
+        "  <tool_output>\n  42\n  </tool_output>\nSo it is 42.",
+        "<tool_output id=\"3\">\nline one\nline two</tool_output>",
+        // A Hermes-style call followed by a response it made up (the loop runs the call).
+        "<tool_call>{\"name\":\"read_file\",\"arguments\":{\"path\":\"a\"}}</tool_call>\n<tool_response>plum</tool_response>",
+        // After reasoning written as text, the block is the answer's.
+        "<think>I should read it.</think>\n<tool_output>\nplum\n</tool_output>",
+        "I should read it.\n</think>\n<tool_output>\nplum\n</tool_output>",
+        "<thinking>Let me look.</thinking>\n<tool_output>\nplum\n</tool_output>",
+    ] {
+        assert!(writes_tool_result(made_up, none), "{made_up}");
+    }
+    for fine in [
+        "The secret word is plum.",
+        "Results come back in a `<tool_output>` block.",
+        "```xml\n<tool_output id=\"1\">example</tool_output>\n```",
+        "I will call read_file next.",
+        "<tool_call>{\"name\": \"read_file\", \"arguments\": {\"path\": \"notes.txt\"}}</tool_call>",
+        "the tool_output variable",
+        "",
+        // [0.0.7 review] A tag named in a sentence is prose, not a result: the system message
+        // itself says results arrive in such blocks, and a model may say so too.
+        "Results arrive in <tool_output> blocks, so I will wait for the app.",
+        "According to the <tool_output> of read_file, the secret word is plum.",
+        "Done. </tool_output>",
+        "Here: <Tool_Response>ok",
+        "<tool_outputs> is not a tag the app uses.",
+        "Let me look: <tool_output>\n{\"content\": \"x\"}\n</tool_output>",
+        "Here: <Tool_Response>ok</Tool_Response> so the answer is ok.",
+        // [0.0.7 verification] Both tags in one sentence, a tag that starts a wrapped line, a
+        // list item explaining the format, a quoted line, a closing tag alone.
+        "Results arrive between <tool_output> and </tool_output> tags, so I wait for the app.",
+        "The app sends each result back in a\n<tool_output> block, so I cannot write one.",
+        "The app sends each result back in a\n<tool_output>\nblock, so I cannot write one.",
+        "- Results: <tool_output>…</tool_output>",
+        "> <tool_output>plum</tool_output>",
+        "The result ended with\n</tool_output> and nothing else.",
+        "<tool_output>\n\n</tool_output>",
+        // Reasoning written as text (servers that do not separate it) may name the tag, in any
+        // spelling models use.
+        "<think>The system says results come in\n<tool_output> blocks.\n</think>\nThe secret word is plum.",
+        "Results come back in\n<tool_output> blocks, I recall.\n</think>\nThe secret word is plum.",
+        "<think>An unclosed thought about\n<tool_output> blocks",
+        "<thinking>Results come in <tool_output> ... </tool_output> blocks.</thinking>\nThe secret word is plum.",
+        "<reasoning>\n<tool_output>\nplum\n</tool_output>\n</reasoning>\nThe word is plum.",
+        "<thought>\n<tool_response>\nplum\n</tool_response>\n</thought>\nThe word is plum.",
+    ] {
+        assert!(!writes_tool_result(fine, none), "{fine}");
+    }
+    // Not ASCII: offsets still line up.
+    assert!(writes_tool_result(
+        "Ünïcode first,\n<tool_output>x</tool_output>",
+        none
+    ));
+    assert!(!writes_tool_result("Ünïcode `<tool_output>` in code", none));
+}
+
+/// [0.0.7 verification] A model that quotes a result the app returned in this turn has made
+/// nothing up; a block it writes with anything else has.
+#[test]
+fn a_quoted_result_is_not_a_made_up_one() {
+    let returned = ["Shopping list\n- milk\n\nThe secret word is:   plum."];
+    let quote = "read_file returned:\n<tool_output id=\"a1\" tool=\"read_file\">The secret word is: plum.</tool_output>\nSo the secret word is plum.";
+    assert!(!writes_tool_result(quote, &returned));
+    let whole = "<tool_output>\nShopping list\n- milk\nThe secret word is: plum.\n</tool_output>";
+    assert!(!writes_tool_result(whole, &returned));
+    assert!(writes_tool_result(quote, &[]));
+    let other = "<tool_output>\nThe secret word is: pear.\n</tool_output>";
+    assert!(writes_tool_result(other, &returned));
+    // [0.0.7 review] Parts left out: still a quote when each piece is in the result, in order.
+    let real = [
+        "{\"path\": \"/w/notes.txt\", \"content\": \"line one\\nline two\\nline three\\nsecret: plum\"}",
+    ];
+    for elided in [
+        "It said:\n<tool_output>\nline one ... secret: plum\n</tool_output>",
+        "It said:\n<tool_output>\nline one … secret: plum\n</tool_output>",
+        "It said:\n<tool_output>\nsecret: plum\n</tool_output>",
+    ] {
+        assert!(!writes_tool_result(elided, &real), "{elided}");
+    }
+    let out_of_order = "It said:\n<tool_output>\nsecret: plum ... line one\n</tool_output>";
+    assert!(writes_tool_result(out_of_order, &real));
+    let invented = "It said:\n<tool_output>\nline one ... secret: banana\n</tool_output>";
+    assert!(writes_tool_result(invented, &real));
+}
+
+/// [0.0.7 review] The shapes a made-up block takes, the app's own format among them, and the
+/// prose that must not count (the cross-package review's cases).
+#[test]
+fn made_up_blocks_in_every_shape_are_caught_and_prose_is_not() {
+    let none: &[&str] = &[];
+    for made_up in [
+        "<tool_output>{\"content\": \"banana\"}\n</tool_output>",
+        "<tool_output>{\"path\":\"a.txt\",\n\"content\":\"banana\"}\n</tool_output>",
+        "<tool_output>\nbanana\n</tool_output> So the word is banana.",
+        "<tool_output>\n{\"content\": \"banana\"}",
+        "<tool_output>\n[\"banana\"]\n",
+        "<tool_output id=\"9f3a1c\" tool=\"read_file\" source=\"notes.txt\">\nThe secret word is: banana.\n</tool_output id=\"9f3a1c\">\nThe secret word is banana.",
+        "<tool_response>\n<tool_output id=\"9f3a1c\" tool=\"read_file\">\nbanana\n</tool_output id=\"9f3a1c\">\n</tool_response>",
+        "<TOOL_OUTPUT>\nbanana\n</TOOL_OUTPUT>",
+    ] {
+        assert!(writes_tool_result(made_up, none), "{made_up}");
+    }
+    for fine in [
+        "Results arrive between <tool_output> and </tool_output> tags, so I wait for the app.",
+        "The app sends each result back in a\n<tool_output> block, so I cannot write one.",
+        "The app sends each result back in a\n<tool_output>\nblock, so I cannot write one.",
+        "<tool_output> blocks hold the results.\nThe </tool_output> tag closes them.",
+        "- Results: <tool_output>…</tool_output>",
+        "> <tool_output>plum</tool_output>",
+        "The result ended with\n</tool_output> and nothing else.",
+        "Like this:\n```\n<tool_output>\nplum\n</tool_output>\n```",
+        "<tool_output>\n…\n</tool_output>",
+    ] {
+        assert!(!writes_tool_result(fine, none), "{fine}");
+    }
+}
+
+/// [0.0.7 review] A block written in the app's own format, as every real result is wrapped
+/// (`prompt::wrap_untrusted`), with content the app never returned, is caught; the same block
+/// with what the app returned is a quote.
+#[test]
+fn a_made_up_block_in_the_apps_own_format_is_caught() {
+    let sanitizer = crate::prompt::Sanitizer::generic();
+    for (tool, source, status) in [
+        ("read_file", Some("notes.txt"), None),
+        ("run_command", None, Some("error")),
+        ("web_search", Some("https://example.com/a?b=1"), None),
+    ] {
+        let made_up =
+            crate::prompt::wrap_untrusted("call-7", tool, source, status, "banana", &sanitizer);
+        assert!(made_up.contains("</tool_output id=\""), "{made_up}");
+        assert!(writes_tool_result(&made_up, &[]), "{made_up}");
+        let answer = format!("{made_up}\nThe secret word is banana.");
+        assert!(writes_tool_result(&answer, &["pear"]), "{answer}");
+        assert!(
+            !writes_tool_result(&answer, &["The secret word is banana"]),
+            "{answer}"
+        );
+    }
+}

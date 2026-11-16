@@ -362,6 +362,7 @@ mod tests {
             ctx,
             ctx_choice: ContextSize::Fixed(ctx),
             ctx_source: ContextSource::DefaultSetting,
+            ctx_checkpoints: models::kv::MAX_CTX_CHECKPOINTS,
             gpu: GpuUse::All,
             save_memory: false,
             keep_in_memory: false,
@@ -377,6 +378,7 @@ mod tests {
         ResolvedLoad {
             ctx_choice: ContextSize::Auto,
             ctx_source: ContextSource::Automatic,
+            ctx_checkpoints: models::kv::MAX_CTX_CHECKPOINTS,
             ..settings(ctx)
         }
     }

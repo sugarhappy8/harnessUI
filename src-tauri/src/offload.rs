@@ -102,6 +102,10 @@ pub struct MemoryBar {
     pub other_bytes: u64,
     /// What the model needs here.
     pub need: Parts,
+    /// What the saved copies of a long chat may take besides, later: computer memory only
+    /// (0.0.7, `placement::Bar::copies_bytes`), 0 elsewhere and for a model without them.
+    /// Not in [`Self::need`]: they build up during a chat.
+    pub copies_bytes: u64,
 }
 
 /// "Where the model goes" for one set of choices (contract 2.4).
@@ -131,6 +135,14 @@ pub struct OffloadPreview {
     pub fits: Fits,
     /// Fine control chose the layers or expert parts.
     pub custom: bool,
+    /// Not even one saved copy of a long chat fits what the computer has left (0.0.7,
+    /// `models::fit::Copies::short`): the mark is yellow at most for that, and the panel
+    /// says how much more of the computer's memory long chats will use (the computer's
+    /// bar's `copiesBytes`).
+    pub copies_short: bool,
+    /// The system did not say how much of the computer's memory is free (round 2): its bar
+    /// has no free figure, and nothing was checked against it.
+    pub computer_unknown: bool,
 }
 
 /// The key of the draft `overrides` of the model at `path`: the first 16 hex digits of
@@ -156,12 +168,15 @@ pub struct Placer<'a> {
     compute_gpu: u64,
 }
 
-/// One placement worked out: the split, where it puts things, and whether the layer count
-/// is As much as fits' own ("About").
+/// One placement worked out: the split, where it puts things, whether the layer count is
+/// As much as fits' own ("About"), and the saved copies of a long chat the load keeps
+/// (0.0.7: sized from what the split leaves of the computer's memory, in
+/// [`Split::copies`] too).
 pub struct Worked {
     pub split: Split,
     pub place: Where,
     pub about: bool,
+    pub copies: models::fit::Copies,
 }
 
 impl<'a> Placer<'a> {
@@ -184,10 +199,15 @@ impl<'a> Placer<'a> {
         })
     }
 
-    fn input(&self, ctx: u64) -> PlacementInput<'a> {
+    /// The facts of a split at `ctx` tokens with Fine control `fine` (whose fast attention
+    /// changes the conversation memory's layout, `load_settings::kv_layout`), without the
+    /// saved copies ([`Self::work`] adds them).
+    fn input(&self, ctx: u64, fine: &FineLaunch) -> PlacementInput<'a> {
+        let layout = crate::load_settings::kv_layout(self.save_memory, fine);
         PlacementInput {
             sizes: self.sizes,
-            kv_per_layer: self.layers.kv_at(ctx, self.save_memory),
+            kv_per_layer: self.layers.kv_at(ctx, layout),
+            copies: 0,
             compute_gpu: self.compute_gpu,
             compute_cpu: models::fit::COMPUTE_BASE_BYTES,
             projector: self.facts.projector_bytes,
@@ -199,15 +219,43 @@ impl<'a> Placer<'a> {
     /// processor without a graphics device; a custom placement as chosen; All of it every
     /// unit; As much as fits the app's working of llama.cpp's fit
     /// (`placement::fit_layers_where`) into the free graphics memory less the margin
-    /// (Leave free, else llama.cpp's 1,024 MiB), "About".
+    /// (Leave free, else llama.cpp's 1,024 MiB), "About". Then the saved copies of a long
+    /// chat, sized from what the split leaves of the computer's memory (0.0.7 review M2,
+    /// `Machine::copies`): on a graphics card its computer part, on the processor and on
+    /// Apple silicon all of it.
     pub fn work(&self, ctx: u64, gpu: GpuUse, fine: &FineLaunch) -> Worked {
-        let input = self.input(ctx);
+        let input = self.input(ctx, fine);
         let (place, about) = self.place(&input, gpu, fine);
+        let mut split = placement::split(&input, &place);
+        let copies = self.copies_of(&split, ctx, gpu, fine);
+        split.copies = copies.bytes;
         Worked {
-            split: placement::split(&input, &place),
+            split,
             place,
             about,
+            copies,
         }
+    }
+
+    /// The saved copies a load with `split` at `ctx` tokens keeps: sized from what it leaves
+    /// of the computer's memory (its computer part on a graphics card, all of it on the
+    /// processor and Apple silicon).
+    fn copies_of(
+        &self,
+        split: &Split,
+        ctx: u64,
+        gpu: GpuUse,
+        fine: &FineLaunch,
+    ) -> models::fit::Copies {
+        let computer_part = match self.machine.memory_kind(gpu) {
+            MemoryKind::Separate => split.cpu.total(),
+            MemoryKind::Processor | MemoryKind::Unified => {
+                split.gpu.total().saturating_add(split.cpu.total())
+            }
+        };
+        let layout = crate::load_settings::kv_layout(self.save_memory, fine);
+        let copy_bytes = self.layers.kv.size(layout).copy_bytes(ctx);
+        self.machine.copies(gpu, copy_bytes, computer_part)
     }
 
     fn place(&self, input: &PlacementInput, gpu: GpuUse, fine: &FineLaunch) -> (Where, bool) {
@@ -260,19 +308,33 @@ impl<'a> Placer<'a> {
         )
     }
 
-    /// The one verdict (section 4.1) for a split worked out for `gpu` and `fine`.
+    /// The one verdict (section 4.1) for a split worked out for `gpu` and `fine`, without
+    /// the saved copies (see [`Self::judge_worked`]).
     pub fn judge_split(&self, split: &Split, gpu: GpuUse, fine: &FineLaunch) -> (Verdict, Fits) {
         judge(self.machine, split, gpu, fine)
     }
 
-    /// The one verdict at `ctx` tokens with `gpu` and `fine`.
-    pub fn judge(&self, ctx: u64, gpu: GpuUse, fine: &FineLaunch) -> (Verdict, Fits) {
-        self.judge_split(&self.work(ctx, gpu, fine).split, gpu, fine)
+    /// The one verdict of `worked`: its split's, made yellow (never red) when not even one
+    /// saved copy of a long chat fits what is left (`load_settings::with_copies`).
+    pub fn judge_worked(&self, worked: &Worked, gpu: GpuUse, fine: &FineLaunch) -> (Verdict, Fits) {
+        let (mark, fits) = self.judge_split(&worked.split, gpu, fine);
+        (
+            crate::load_settings::with_copies(mark, &worked.copies),
+            fits,
+        )
     }
 
-    /// Automatic (D2b) for a custom placement or the conversation memory in computer
-    /// memory (item 6, 3.2): the largest size from the floor to the cap whose split the
-    /// verdict marks Green, else Yellow.
+    /// The one verdict at `ctx` tokens with `gpu` and `fine`.
+    pub fn judge(&self, ctx: u64, gpu: GpuUse, fine: &FineLaunch) -> (Verdict, Fits) {
+        self.judge_worked(&self.work(ctx, gpu, fine), gpu, fine)
+    }
+
+    /// Automatic (D2b, item 6 3.2; for every choice since 0.0.7, review m4): the largest
+    /// size from the floor to the cap whose split the verdict marks Green, else Yellow, so
+    /// it never picks a size the marks call too large. With As much as fits and Leave free
+    /// set, Green is a split that keeps every layer on the card (llama.cpp's fit then leaves
+    /// that much free), as fit.rs's Automatic with that margin counts it. The saved copies
+    /// of a long chat never count.
     pub fn auto(&self, gpu: GpuUse, fine: &FineLaunch) -> Option<models::fit::AutoCtx> {
         let trained = self.facts.trained_ctx().map(u64::from);
         let floor = trained.map_or(models::fit::AUTO_FLOOR_CTX, |t| {
@@ -281,6 +343,24 @@ impl<'a> Placer<'a> {
         let cap = trained.map_or(models::fit::AUTO_CAP_CTX, |t| {
             t.min(models::fit::AUTO_CAP_CTX)
         });
+        if is_fit(gpu, fine) && fine.fit_margin_mib.is_some() && self.machine.graphics(gpu) {
+            return placement::auto_ctx_by(
+                |ctx| {
+                    let split = self.work(ctx, gpu, fine).split;
+                    match self.judge_split(&split, gpu, fine).0 {
+                        Verdict::Red => Verdict::Red,
+                        _ if split.layers_on_gpu >= split.units
+                            && split.expert_layers_on_cpu == 0 =>
+                        {
+                            Verdict::Green
+                        }
+                        _ => Verdict::Yellow,
+                    }
+                },
+                floor,
+                cap,
+            );
+        }
         placement::auto_ctx_placed_in(
             |ctx| self.work(ctx, gpu, fine).split,
             self.machine.room(gpu),
@@ -330,7 +410,7 @@ pub fn estimate(
     match Placer::new(facts, machine, resolved.save_memory) {
         Some(placer) => {
             let worked = placer.work(u64::from(resolved.ctx), gpu, fine);
-            let verdict = placer.judge_split(&worked.split, gpu, fine);
+            let verdict = placer.judge_worked(&worked, gpu, fine);
             preview(
                 key,
                 PictureSource::estimate(EstimateWhy::Quick),
@@ -374,6 +454,8 @@ fn preview(
         mark,
         fits,
         custom: graphics && resolved.fine.custom_placement(),
+        copies_short: worked.copies.short,
+        computer_unknown: machine.ram_unknown,
     }
 }
 
@@ -423,6 +505,7 @@ fn memory_bar(name: String, bar: placement::Bar, free_after_unload: bool) -> Mem
         free_after_unload,
         other_bytes: bar.other_bytes,
         need: bar.need,
+        copies_bytes: bar.copies_bytes,
     }
 }
 
@@ -441,14 +524,17 @@ fn not_readable(
     let graphics = machine.graphics(gpu);
     let room = machine.room(gpu);
     let ctx = u64::from(resolved.ctx);
-    let (need, verdict) = match facts.fit_input(resolved.save_memory) {
+    let layout = crate::load_settings::kv_layout(resolved.save_memory, &resolved.fine);
+    // `copies`: the saved copies of a long chat, in computer memory either way.
+    let (need, copies, verdict) = match facts.fit_input(layout) {
         Some(input) => (
             Parts {
                 model: input.weights_bytes,
-                context: input.kv_bytes_per_token.saturating_mul(ctx),
+                context: input.kv.at(ctx),
                 compute: input.compute_bytes(),
                 image_reader: input.projector_bytes,
             },
+            crate::load_settings::copies_without_sizes(&input, machine, gpu, ctx),
             Some(room.verdict(input.needed_at(ctx))),
         ),
         None => (
@@ -457,6 +543,7 @@ fn not_readable(
                 image_reader: facts.projector_bytes,
                 ..Parts::default()
             },
+            models::fit::Copies::default(),
             None,
         ),
     };
@@ -476,6 +563,7 @@ fn not_readable(
         layers_on_gpu: 0,
         units: 0,
         expert_layers_on_cpu: 0,
+        copies: copies.bytes,
     };
     let (graphics_bar, computer_bar) = bars(&split, machine, gpu);
     OffloadPreview {
@@ -489,9 +577,11 @@ fn not_readable(
         graphics: graphics_bar,
         computer: computer_bar,
         graphics_limit_bytes: graphics_limit(machine, gpu),
-        mark: fits.0,
+        mark: crate::load_settings::with_copies(fits.0, &copies),
         fits: fits.1,
         custom: graphics && resolved.fine.custom_placement(),
+        copies_short: copies.short,
+        computer_unknown: machine.ram_unknown,
     }
 }
 
@@ -809,9 +899,15 @@ pub async fn measured(
         .await
     {
         Outcome::Rows(rows) => {
-            let split = measured_split(&rows, &worked.split, facts, machine.graphics(gpu));
-            let verdict = placer.judge_split(&split, gpu, fine);
-            let worked = Worked { split, ..worked };
+            let mut split = measured_split(&rows, &worked.split, facts, machine.graphics(gpu));
+            let copies = placer.copies_of(&split, u64::from(resolved.ctx), gpu, fine);
+            split.copies = copies.bytes;
+            let worked = Worked {
+                split,
+                copies,
+                ..worked
+            };
+            let verdict = placer.judge_worked(&worked, gpu, fine);
             preview(
                 picture.key,
                 PictureSource::Measured,
@@ -835,7 +931,9 @@ pub async fn measured(
 
 /// The split llama.cpp measured: device rows on the graphics side, the host and every
 /// buffer type in computer memory, the projector's file size as the estimate places it
-/// (llama.cpp does not measure it), the layer counts of the estimate's placement.
+/// (llama.cpp does not measure it), the layer counts of the estimate's placement. The saved
+/// copies of a long chat are made while a chat goes on, so not measured either: the caller
+/// sizes them for this split ([`Placer::copies_of`]).
 fn measured_split(
     rows: &[MemoryRow],
     estimate: &Split,
@@ -854,6 +952,7 @@ fn measured_split(
         layers_on_gpu: estimate.layers_on_gpu,
         units: estimate.units,
         expert_layers_on_cpu: estimate.expert_layers_on_cpu,
+        copies: 0,
     }
 }
 
@@ -970,6 +1069,7 @@ fn expert_layers_moved(sizes: &models::LayerSizes, layers: Layers, pick: Experts
     let input = PlacementInput {
         sizes,
         kv_per_layer: Vec::new(),
+        copies: 0,
         compute_gpu: 0,
         compute_cpu: 0,
         projector: 0,

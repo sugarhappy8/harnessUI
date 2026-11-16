@@ -223,7 +223,9 @@ async fn a_broken_model_file_is_classified() {
                 failure,
                 exit_code,
                 stderr_tail,
+                image_file_loading,
             } => {
+                assert!(!image_file_loading);
                 assert_eq!(
                     *failure,
                     LoadFailure::ModelFileInvalid,
@@ -1247,4 +1249,225 @@ async fn ready_reports_where_the_model_went() {
     let context: u64 = report.rows.iter().map(|r| r.context_bytes).sum();
     assert!(context > 0, "{report:?}");
     assert!(report.rows.iter().all(|r| r.compute_bytes < (1 << 40)));
+}
+
+/// Writes an image file (a vision projector, `general.architecture` `clip`) that the pinned
+/// build cannot use, to `path`.
+///
+/// With `encoder` it claims a vision encoder of the kind Mistral's models use (`pixtral`)
+/// with every setting that kind reads, and two of its three projection tensors, but not
+/// `v.token_embd.img_break`: the owner's Ministral image file failed on exactly that tensor.
+/// Without `encoder` it claims no encoder at all. About 270 KB, all weights zero.
+fn write_broken_image_file(path: &Path, encoder: bool) {
+    fn text(out: &mut Vec<u8>, s: &str) {
+        out.extend_from_slice(&(s.len() as u64).to_le_bytes());
+        out.extend_from_slice(s.as_bytes());
+    }
+    // GGUF value types.
+    const U32: u32 = 4;
+    const F32: u32 = 6;
+    const BOOL: u32 = 7;
+    const STRING: u32 = 8;
+    const ARRAY: u32 = 9;
+    let mut kvs: Vec<Vec<u8>> = Vec::new();
+    let mut kv = |key: &str, kind: u32, value: Vec<u8>| {
+        let mut out = Vec::new();
+        text(&mut out, key);
+        out.extend_from_slice(&kind.to_le_bytes());
+        out.extend_from_slice(&value);
+        kvs.push(out);
+    };
+    let string = |s: &str| {
+        let mut out = Vec::new();
+        text(&mut out, s);
+        out
+    };
+    let u32_value = |n: u32| n.to_le_bytes().to_vec();
+    let floats = |values: &[f32]| {
+        let mut out = F32.to_le_bytes().to_vec();
+        out.extend_from_slice(&(values.len() as u64).to_le_bytes());
+        for v in values {
+            out.extend_from_slice(&v.to_le_bytes());
+        }
+        out
+    };
+    kv("general.architecture", STRING, string("clip"));
+    kv("clip.has_vision_encoder", BOOL, vec![u8::from(encoder)]);
+    // (name, dimensions with the fastest first), all f32 zeros.
+    let mut tensors: Vec<(&str, Vec<u64>)> = Vec::new();
+    if encoder {
+        kv("clip.projector_type", STRING, string("pixtral"));
+        for (key, value) in [
+            ("clip.vision.embedding_length", 64),
+            ("clip.vision.attention.head_count", 2),
+            ("clip.vision.feed_forward_length", 128),
+            ("clip.vision.block_count", 0),
+            ("clip.vision.projection_dim", 1024),
+            ("clip.vision.image_size", 224),
+            ("clip.vision.patch_size", 16),
+        ] {
+            kv(key, U32, u32_value(value));
+        }
+        kv(
+            "clip.vision.attention.layer_norm_epsilon",
+            F32,
+            1e-5_f32.to_le_bytes().to_vec(),
+        );
+        kv("clip.vision.image_mean", ARRAY, floats(&[0.5; 3]));
+        kv("clip.vision.image_std", ARRAY, floats(&[0.5; 3]));
+        tensors.push(("mm.1.weight", vec![64, 64]));
+        tensors.push(("mm.2.weight", vec![64, 1024]));
+    }
+    const ALIGN: usize = 32;
+    let pad = |buf: &mut Vec<u8>| buf.resize(buf.len().div_ceil(ALIGN) * ALIGN, 0);
+    let (mut infos, mut data) = (Vec::new(), Vec::new());
+    for (name, dims) in &tensors {
+        pad(&mut data);
+        text(&mut infos, name);
+        infos.extend_from_slice(&(dims.len() as u32).to_le_bytes());
+        for dim in dims {
+            infos.extend_from_slice(&dim.to_le_bytes());
+        }
+        infos.extend_from_slice(&0_u32.to_le_bytes()); // GGML_TYPE_F32
+        infos.extend_from_slice(&(data.len() as u64).to_le_bytes());
+        let count: u64 = dims.iter().product();
+        data.resize(data.len() + 4 * count as usize, 0);
+    }
+    let mut file = b"GGUF".to_vec();
+    file.extend_from_slice(&3_u32.to_le_bytes());
+    file.extend_from_slice(&(tensors.len() as u64).to_le_bytes());
+    file.extend_from_slice(&(kvs.len() as u64).to_le_bytes());
+    file.extend(kvs.into_iter().flatten());
+    file.extend_from_slice(&infos);
+    if !tensors.is_empty() {
+        pad(&mut file);
+        file.extend_from_slice(&data);
+    }
+    std::fs::write(path, file).expect("write the test image file");
+}
+
+/// 0.0.7 (the owner's Ministral model): the model loads, then its image file cannot be
+/// read, through real llama-server processes at the pinned build.
+///
+/// A start with such a file fails with [`LoadFailure::ImageFileInvalid`], which no other
+/// backend could fix, for a file that misses a tensor (the pinned build names it in a
+/// `clip_init` line) and for one without an encoder (no `clip_init` line). Then the real
+/// supervisor, as the app runs it ([`runtime::Supervisor::run`]): the first start fails,
+/// it loads the model again once on the same backend without the image file, with a typed
+/// stage, and the model runs (it cannot see images then). The attempt that failed reports
+/// no `Failed`.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_broken_image_file_is_classified_and_the_model_loads_without_it() {
+    use runtime::Supervisor;
+    use runtime::llama::server::{Candidate, SupervisorExit};
+    use tokio_util::sync::CancellationToken;
+
+    let Some((bin, gguf)) =
+        env_paths("a_broken_image_file_is_classified_and_the_model_loads_without_it")
+    else {
+        return;
+    };
+    let dir = tempfile::tempdir().expect("tempdir");
+    let cpu = backend(&bin, BackendKind::Cpu);
+    for (name, encoder, line) in [
+        (
+            "Model.mmproj-f16.gguf",
+            true,
+            "unable to find tensor v.token_embd.img_break",
+        ),
+        ("mmproj-empty.gguf", false, "Failed to load CLIP model from"),
+    ] {
+        let image = dir.path().join(name);
+        write_broken_image_file(&image, encoder);
+        let (tx, _rx) = unbounded_channel();
+        let spec = StartSpec {
+            backend: cpu.clone(),
+            launch: LaunchConfig {
+                mmproj: Some(image.clone()),
+                ..launch(gguf.clone())
+            },
+            load_timeout: LOAD_TIMEOUT,
+        };
+        let error = start(spec, tx).await.expect_err("the image file fails");
+        let tail = error.stderr_tail().join("\n");
+        assert!(
+            matches!(error, StartError::Exited { .. }),
+            "{name}: {error}\n{tail}"
+        );
+        assert_eq!(
+            error.failure(),
+            LoadFailure::ImageFileInvalid,
+            "{name}\n{tail}"
+        );
+        assert!(!error.failure().may_succeed_on_another_backend());
+        // The server said it was loading the image file when it stopped (m11 of the P2
+        // review: what tells a memory failure there from the model's own).
+        assert!(error.while_loading_image_file(), "{name}\n{tail}");
+        assert!(
+            tail.contains(line),
+            "{name}: the pinned build's line\n{tail}"
+        );
+        assert!(
+            tail.contains("failed to load multimodal model"),
+            "{name}: the server's line\n{tail}"
+        );
+    }
+
+    let image = dir.path().join("Model.mmproj-f16.gguf");
+    let (tx, mut rx) = unbounded_channel();
+    let supervisor = Supervisor::local(
+        vec![Candidate {
+            backend: cpu.clone(),
+            device: None,
+            hip_visible_devices: None,
+        }],
+        tx,
+    );
+    let spec = StartSpec {
+        backend: cpu,
+        launch: LaunchConfig {
+            mmproj: Some(image),
+            ..launch(gguf)
+        },
+        load_timeout: LOAD_TIMEOUT,
+    };
+    let cancel = CancellationToken::new();
+    let mut loaded = None;
+    let exit = {
+        let stop = cancel.clone();
+        supervisor
+            .run(spec, cancel, |server, running| {
+                loaded = Some((
+                    running.backend.kind,
+                    running.launch.mmproj.clone(),
+                    server.props().modalities.vision,
+                    server.props().n_ctx,
+                ));
+                stop.cancel();
+            })
+            .await
+    };
+    let events = drain(&mut rx);
+    assert_eq!(exit, SupervisorExit::Stopped, "{}", log_lines(&events));
+    assert_eq!(
+        loaded,
+        Some((BackendKind::Cpu, None, false, 2048)),
+        "the model runs on the same backend, without the image file"
+    );
+    assert!(
+        log_lines(&events).contains("unable to find tensor v.token_embd.img_break"),
+        "{}",
+        log_lines(&events)
+    );
+    assert_eq!(
+        states_and_stages(&events),
+        vec![
+            &ServerEvent::State(ServerState::Starting),
+            &ServerEvent::Stage(LoadStage::RetryingWithoutImageFile { memory: false }),
+            &ServerEvent::State(ServerState::Starting),
+            &ServerEvent::State(ServerState::Ready),
+            &ServerEvent::State(ServerState::Stopping),
+            &ServerEvent::State(ServerState::Stopped),
+        ]
+    );
 }

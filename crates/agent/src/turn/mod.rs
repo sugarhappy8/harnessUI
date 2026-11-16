@@ -31,15 +31,20 @@
 //! - mistake budget: 3 consecutive invalid calls to one tool, or 6 consecutive mistakes
 //!   overall, end the turn with the same wrap-up; a success resets both; denials and tool
 //!   errors are not mistakes;
-//! - loop detection: the same tool with the same arguments three times in a row gets a note,
-//!   five times ends the turn with the wrap-up; a call identical to one denied earlier in the
-//!   turn is refused with the earlier note;
+//! - loop detection: the same tool with the same arguments [`TurnInput::repeat_limit`] times
+//!   in a row (5 unless the user chose 2 to 100, 0.0.7) ends the turn with the wrap-up, and
+//!   from two calls before ([`repeat_warning_at`]) each repeat gets a note; a call identical
+//!   to one denied earlier in the turn is refused with the earlier note;
 //! - output limit: a reply that only thought is retried once with thinking disabled; a
 //!   cut-off call is not run and is stored with `{}` arguments, and the model is told to
 //!   write smaller pieces; a second cut-off of the same tool ends the turn;
 //! - an empty reply or a server parse error is retried once with thinking disabled, its
 //!   streamed output discarded ([`TurnEvent::AttemptDiscarded`]); a second failure ends the
 //!   turn with "The model returned no answer";
+//! - [0.0.7] a reply that writes a tool result itself (a result block's tag outside code,
+//!   `parse::writes_tool_result`) is discarded and asked once more with
+//!   [`WROTE_A_RESULT_NOTE`]; it counts as a mistake, and a second one is kept as the answer
+//!   with [`MADE_UP_RESULT_NOTE`] for the user;
 //! - a call found in reasoning is never run; untrusted content (a tool result, an attachment)
 //!   makes outbound actions ask (`untrusted_in_turn`); recovered calls reach the policy gate
 //!   with `recovered = true`;
@@ -58,7 +63,7 @@ use crate::context::ContextBudget;
 use crate::estimate::TokenCalibrator;
 use crate::history::{CallRecord, HistoryMessage, ResultRecord};
 use crate::parse::ToolInfo;
-use crate::prompt::{LoadedSkill, Preamble, Sanitizer};
+use crate::prompt::{LoadedSkill, Preamble, Sanitizer, ToolGuide};
 use crate::stream::{Timings, Usage};
 use crate::thinking::ThinkingLimit;
 
@@ -68,10 +73,35 @@ pub const DEFAULT_STEP_CAP: u32 = 25;
 pub const MAX_INVALID_CALLS_PER_TOOL: u32 = 3;
 /// Consecutive mistakes overall that end the turn.
 pub const MAX_MISTAKES: u32 = 6;
-/// The same call this many times in a row gets a note.
+/// The same call this many times in a row gets a note, with the default repeat limit
+/// ([`repeat_warning_at`] of [`LOOP_STOP_AT`]).
 pub const LOOP_WARNING_AT: u32 = 3;
-/// The same call this many times in a row ends the turn.
+/// The same call this many times in a row ends the turn: the default repeat limit
+/// ([`TurnInput::repeat_limit`]).
 pub const LOOP_STOP_AT: u32 = 5;
+/// [0.0.7] The smallest repeat limit: the second identical call in a row ends the turn.
+pub const MIN_REPEAT_LIMIT: u32 = 2;
+/// [0.0.7] The largest repeat limit.
+pub const MAX_REPEAT_LIMIT: u32 = 100;
+
+/// [0.0.7] A repeat limit as the loop uses it: within [`MIN_REPEAT_LIMIT`] and
+/// [`MAX_REPEAT_LIMIT`], so a stored value nobody checked cannot end every turn at its first
+/// call or let a loop run on.
+pub fn repeat_limit(limit: u32) -> u32 {
+    limit.clamp(MIN_REPEAT_LIMIT, MAX_REPEAT_LIMIT)
+}
+
+/// [0.0.7] From which repeat on the model is told it is repeating itself, for a repeat limit:
+/// two calls before the stop, but never before the second identical call, which is the
+/// first one that can be a repeat. `None` when that would be the stop itself: with a limit
+/// of 2 the second identical call ends the turn with no note before it. A limit of 3 gets
+/// the note on the second call, 4 on the second, 5 on the third (as before 0.0.7), 100 on the
+/// 98th.
+pub fn repeat_warning_at(limit: u32) -> Option<u32> {
+    let stop = repeat_limit(limit);
+    let warn = stop.saturating_sub(2).max(MIN_REPEAT_LIMIT);
+    (warn < stop).then_some(warn)
+}
 /// The message when the model gives no answer twice.
 pub const NO_ANSWER_MESSAGE: &str = "The model returned no answer";
 /// The note ([`TurnEvent::AppNote`]) when a summary of earlier messages could not be written
@@ -81,6 +111,16 @@ pub const SUMMARY_FAILED_NOTE: &str = "Could not summarise earlier messages. The
                                        but this chat may run out of room soon.";
 /// The note ([`TurnEvent::AppNote`]) while the model writes a summary of earlier messages.
 pub const SUMMARISING_NOTE: &str = "Summarising earlier messages to make room.";
+/// [0.0.7] The app note (for the model, in that request only) when a reply wrote a tool
+/// result itself instead of calling the tool: the reply is discarded and the step asked once
+/// more with this note (`parse::writes_tool_result`). It counts as a mistake.
+pub const WROTE_A_RESULT_NOTE: &str = "You wrote a tool result yourself, so it was not used: \
+                                       only the app runs tools and writes their results. To use \
+                                       a tool, call it; its real result will come back.";
+/// [0.0.7] The note ([`TurnEvent::AppNote`]) for the user when the model wrote a tool result
+/// itself again after [`WROTE_A_RESULT_NOTE`]: that reply is kept as the answer.
+pub const MADE_UP_RESULT_NOTE: &str = "The model wrote a tool's result itself instead of using \
+                                       the tool, so that result is made up.";
 
 /// The stages that make room in a request (ARCHITECTURE.md 8.4), in the order the loop tries
 /// them. [`TurnEvent::Compacted`] carries the stage as its number
@@ -123,6 +163,19 @@ impl CompactionStage {
 pub trait ToolHost: Send + Sync {
     /// The tools enabled for this chat, in a fixed order.
     fn tools(&self) -> Vec<ToolInfo>;
+    /// [0.0.7] The tools that are on in the chat but kept back this turn (the app reaches them
+    /// through `call_tool`). The loop only checks their settings, so that the tool list in the
+    /// system message leaves out the ones it would never offer before a turn shows them.
+    fn kept_back(&self) -> Vec<ToolInfo> {
+        Vec::new()
+    }
+    /// [0.0.7] Why this host never runs a tool that is on in the chat, if it never does (a
+    /// helper is not offered `run_subagent` or the coding apps), in words for the model. The
+    /// tool list in the system message still names such a tool, so a helper's system message is
+    /// the turn's and the model server keeps its cached prompt; a call to it gets this answer.
+    fn refusal(&self, _name: &str) -> Option<String> {
+        None
+    }
     /// Validates arguments against the tool's full schema (compiled once in the host).
     ///
     /// # Errors
@@ -416,6 +469,10 @@ pub struct TurnInput {
     /// What the preamble says (approved folders, OS); used when tools are on. `None` uses
     /// this OS and no folders.
     pub preamble: Option<Preamble>,
+    /// [0.0.7] Every tool that is on in the chat, shown this turn or not, for the system
+    /// message's tool list and call guide ([`ToolGuide`]); used when tools are on, without
+    /// the tools the loop does not offer. `None`: neither block.
+    pub tool_guide: Option<ToolGuide>,
     /// The skills index.
     pub skills_index: Option<String>,
     /// Skills whose text is loaded.
@@ -426,6 +483,11 @@ pub struct TurnInput {
     pub caps: ModelCaps,
     /// Model calls per turn.
     pub step_cap: u32,
+    /// [0.0.7] The same call (same tool, same arguments) this many times in a row ends the
+    /// turn, the user's "Stop when the model makes the same call this many times in a row";
+    /// each repeat from two calls before gets a note ([`repeat_warning_at`]). The loop holds
+    /// it to [`MIN_REPEAT_LIMIT`]..=[`MAX_REPEAT_LIMIT`] ([`repeat_limit`]).
+    pub repeat_limit: u32,
     /// The request template.
     pub template: RequestTemplate,
     /// Whether thinking is on (ignored when the model cannot think).
@@ -442,18 +504,21 @@ pub struct TurnInput {
 }
 
 impl TurnInput {
-    /// Defaults: no system prompt, no pinned instructions, no skills, 25 steps, thinking on.
+    /// Defaults: no system prompt, no pinned instructions, no tool list, no skills, 25 steps,
+    /// the same call 5 times in a row ends the turn, thinking on.
     pub fn new(history: Vec<HistoryMessage>, caps: ModelCaps, template: RequestTemplate) -> Self {
         Self {
             history,
             system_prompt: String::new(),
             pinned: Vec::new(),
             preamble: None,
+            tool_guide: None,
             skills_index: None,
             loaded_skills: Vec::new(),
             summary: None,
             caps,
             step_cap: DEFAULT_STEP_CAP,
+            repeat_limit: LOOP_STOP_AT,
             template,
             thinking: true,
             thinking_limit: ThinkingLimit::NoLimit,
@@ -563,7 +628,7 @@ pub enum SystemBlockKind {
     Prompt,
     /// The user's pinned instructions.
     Pinned,
-    /// The agent preamble (tools on).
+    /// The agent preamble (tools on), with the tool list and call guide after it (0.0.7).
     Preamble,
     /// The skills index.
     SkillsIndex,
@@ -791,5 +856,31 @@ mod tests {
     fn a_new_turn_has_no_thinking_limit() {
         let input = TurnInput::new(Vec::new(), ModelCaps::default(), RequestTemplate::default());
         assert_eq!(input.thinking_limit, ThinkingLimit::NoLimit);
+    }
+
+    /// [0.0.7] The default limit is the one before 0.0.7: a note from the third identical
+    /// call, the end at the fifth. The note comes two calls before the stop, never before the
+    /// second call, and a limit of 2 has no note.
+    #[test]
+    fn the_repeat_note_comes_two_calls_before_the_stop() {
+        let input = TurnInput::new(Vec::new(), ModelCaps::default(), RequestTemplate::default());
+        assert_eq!(input.repeat_limit, LOOP_STOP_AT);
+        assert_eq!(repeat_warning_at(LOOP_STOP_AT), Some(LOOP_WARNING_AT));
+        for (limit, warning) in [
+            (2, None),
+            (3, Some(2)),
+            (4, Some(2)),
+            (5, Some(3)),
+            (6, Some(4)),
+            (100, Some(98)),
+        ] {
+            assert_eq!(repeat_warning_at(limit), warning, "{limit}");
+        }
+        // Out of range: held to 2..=100.
+        for (stored, used) in [(0, 2), (1, 2), (2, 2), (101, 100), (u32::MAX, 100)] {
+            assert_eq!(repeat_limit(stored), used, "{stored}");
+        }
+        assert_eq!(repeat_warning_at(0), None);
+        assert_eq!(repeat_warning_at(u32::MAX), Some(98));
     }
 }

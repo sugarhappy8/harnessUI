@@ -215,6 +215,15 @@ impl Generation {
             .lock()
             .is_ok_and(|g| g.as_ref().is_some_and(|r| r.chat == chat))
     }
+
+    /// [0.0.7 P6] The chat of the generation that has not finished (also while it winds
+    /// down), if any: what the main window shows as running, also after it reloaded.
+    pub fn running_chat(&self) -> Option<i64> {
+        self.running
+            .lock()
+            .ok()
+            .and_then(|g| g.as_ref().map(|r| r.chat))
+    }
 }
 
 #[cfg(test)]
@@ -336,5 +345,22 @@ mod tests {
         assert!(!g.running_in(2));
         // Stop with nothing running is harmless.
         g.cancel();
+    }
+
+    /// [0.0.7 P6] The chat whose reply runs, as the main window is told: until it finishes,
+    /// winding down included, and a newer one replaces it.
+    #[test]
+    fn it_names_the_chat_whose_reply_runs() {
+        let g = Generation::default();
+        assert_eq!(g.running_chat(), None);
+        let (old, _) = g.start(1).unwrap();
+        assert_eq!(g.running_chat(), Some(1));
+        g.cancel();
+        assert_eq!(g.running_chat(), Some(1), "still winding down");
+        let (new, _) = g.start(2).unwrap();
+        g.finish(old);
+        assert_eq!(g.running_chat(), Some(2));
+        g.finish(new);
+        assert_eq!(g.running_chat(), None);
     }
 }

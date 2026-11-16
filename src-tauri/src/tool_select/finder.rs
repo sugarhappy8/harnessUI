@@ -263,10 +263,13 @@ impl<'a> Routing<'a> {
             .host
             .validate(&tool.exposed, &Value::Object(arguments.clone()))
         {
-            return Err(format!(
-                "The arguments do not fit {said}: {}",
-                problems.join("; ")
-            ));
+            let mut message = format!("The arguments do not fit {said}: {}", problems.join("; "));
+            // [0.0.7] And how to call it, for one of the app's own tools.
+            if let Some(how) = self.how_to_call(&tool.exposed) {
+                message.push_str("; ");
+                message.push_str(&how);
+            }
+            return Err(message);
         }
         Ok(Unwrapped {
             name: tool.exposed.clone(),
@@ -314,7 +317,11 @@ impl<'a> Routing<'a> {
     /// as a call to a tool that is not offered does.
     pub fn validate(&self, name: &str, args: &Value) -> Result<(), Vec<String>> {
         if name != CALL_TOOL {
-            return self.host.validate(name, args);
+            // [0.0.7] The host's problems as they were, then how to call the tool.
+            return self.host.validate(name, args).map_err(|mut problems| {
+                problems.extend(self.how_to_call(name));
+                problems
+            });
         }
         self.host.validate(CALL_TOOL, args)?;
         let Some(call) = args.as_object() else {
@@ -324,6 +331,33 @@ impl<'a> Routing<'a> {
         self.unwrap_call(call)
             .map(|_| ())
             .map_err(|why| vec![why.trim_end_matches('.').to_string()])
+    }
+
+    /// [0.0.7] How to call one of the app's own tools, for a call whose arguments do not
+    /// fit: its arguments (name, type, whether required) and an example from the tool
+    /// catalog that fits the tool as it is registered. `None` for a tool of an added server:
+    /// the message is an app note the model trusts, and that tool's schema is the server's
+    /// text (13.9). The skill tools get no example: the catalog's names a skill that may not
+    /// exist.
+    fn how_to_call(&self, name: &str) -> Option<String> {
+        let (tool, _) = self.on(name)?;
+        let builtin = tool_catalog::builtin_servers(self.host).contains(&tool.server);
+        let entry = tool_catalog::entry_for(tool, builtin)?;
+        let mut how = format!(
+            "{name} takes {}",
+            tool_catalog::arguments_line(&tool.def.input_schema)
+        );
+        if entry.group != "skills"
+            && let Some(example) =
+                tool_catalog::fitting_examples(entry, &|text| text.to_string(), &|value| {
+                    self.host.validate(name, value).is_ok()
+                })
+                .into_iter()
+                .next()
+        {
+            how.push_str(&format!(", for example {example}"));
+        }
+        Some(how)
     }
 
     /// The policy action of a call. A `call_tool` call is described as the tool it names,
@@ -765,8 +799,10 @@ fn examples_for(
 }
 
 /// The first sentence of a description, on one line. External descriptions are a server's
-/// text: they were made safe when the tool was registered, and are cut short here.
-fn first_sentence(text: &str) -> String {
+/// text: they were made safe when the tool was registered, and are cut short here. Also the
+/// purpose the system message's tool list gives a tool of an added server (0.0.7,
+/// `roster::tool_guide`).
+pub(crate) fn first_sentence(text: &str) -> String {
     let trimmed = text.trim();
     let end = trimmed
         .char_indices()

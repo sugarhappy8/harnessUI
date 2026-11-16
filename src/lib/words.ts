@@ -99,6 +99,8 @@ export const LOAD_FAILURE_WORDS: Record<LoadFailure["code"], string> = {
   port_in_use: "could not get the connection it needs",
   model_file_invalid: "could not load this model",
   context_too_large: "ran out of memory",
+  // [0.0.7 P2] Never a reason to step down; listed so every failure has words.
+  image_file_invalid: "could not read the image file",
   unknown: "stopped while loading",
 };
 
@@ -163,6 +165,8 @@ export function loadStageWords(stage: LoadStage): string {
       return `${capitalise(stepDownCause(stage.from, stage.reason))}, so trying ${place(stage.to)}`;
     case "retryingWithoutFastAttention":
       return "Trying again without Fast attention";
+    case "retryingWithoutImageFile":
+      return "Trying again without the image file";
   }
 }
 
@@ -208,6 +212,8 @@ export function adjustmentWords(stage: LoadStage): string | null {
       if (stage.backend === "cpu") return "Fast attention doesn't work with this model, so it was turned off for this load.";
       if (stage.backend === "metal") return "Fast attention doesn't work with Apple graphics, so it was turned off for this load.";
       return "Fast attention doesn't work with this graphics card, so it was turned off for this load.";
+    case "retryingWithoutImageFile":
+      return stage.memory ? IMAGE_FILE_WORDS.loadedWithoutMemory : IMAGE_FILE_WORDS.loadedWithout;
   }
 }
 
@@ -217,6 +223,35 @@ export const SLOW_WORDS = {
     "Part of the model runs on the processor, so replies are slower. Save memory or a smaller memory size lets more fit on the graphics card.",
   afterRestart: "The first reply after a restart takes longer while the model rereads the chat.",
 } as const;
+
+/** [0.0.7 P2] The image file a model reads pictures with (llama.cpp's projector), in plain words. */
+export const IMAGE_FILE_WORDS = {
+  /** The header's note after a load without it, word for word as the owner was promised. */
+  loadedWithout: "Loaded without image input: the image file next to this model couldn't be read.",
+  /** The same, when it was left out because there was not enough memory for it too. */
+  loadedWithoutMemory: "Loaded without image input: there wasn't enough memory for the image file too.",
+  /** Models → Installed, on the model's row. */
+  unreadable: "The image file couldn't be read, so this model can't see images.",
+  tryAgain: "Try it again",
+  triedAgain: "It will be tried again the next time the model loads.",
+  download: "Download the image file",
+  downloadAnother: "Download another image file",
+  downloadAgain: "Download the image file again",
+  look: "Look for an image file",
+  looking: "Looking for an image file…",
+  noOther: "Its repository has no other image file.",
+  none: "Its repository has no image file.",
+  /** After the download: for the model loaded now, and for one that is not. */
+  done: "Image file downloaded. Reload the model to use it.",
+  doneNextLoad: "Image file downloaded. It will be used the next time the model loads.",
+} as const;
+
+/** [0.0.7 P2] An image file downloading on its model's Installed row ("Downloading the image file… 45%"). */
+export function imageFileProgress(done: number, total: number): string {
+  if (!(total > 0) || !Number.isFinite(done)) return "Downloading the image file…";
+  const pct = Math.min(100, Math.max(0, Math.floor((done / total) * 100)));
+  return `Downloading the image file… ${pct}%`;
+}
 
 /** Generation speed in words per second (three quarters of the tokens). */
 export function wordsPerSecond(tokensPerSecond: number): string {
@@ -356,8 +391,8 @@ export function fitLine(fit: FitResult): string {
       : `Needs about ${amountGb(fit.neededBytes)}; ${FIT_HAS[device](amountGb(fit.availableBytes))}`,
   ];
   if (fit.verdict === "red" && device === "graphicsCard" && fit.computerShort) {
-    // The part in the computer's memory does not fit there (with As much as fits, the only
-    // way a model is too large on a card), as Settings for this model's second bar shows.
+    // The model's part in the computer's memory does not fit there, as Settings for this
+    // model's second bar shows (the saved copies of a long chat never make it too large).
     parts.push(`The computer's memory has ${amountGb(fit.computerFreeBytes)} free, not enough for its part.`);
     if (fit.computerBytes <= fit.computerFreeBytes) {
       parts.push("Part of that memory is kept free for other programs.");
@@ -370,14 +405,36 @@ export function fitLine(fit: FitResult): string {
   } else if (device === "processor") {
     parts.push("It would run on the processor.");
   }
+  const copies = copiesShownBytes(fit.copiesBytes);
   if (fit.verdict !== "green") {
     if (fit.suggestedCtx !== null && fit.suggestedCtx > 0) {
       parts.push(`It has room if it remembers up to ${tokensWithWords(fit.suggestedCtx)}.`);
-    } else if (fit.verdict === "yellow") {
-      parts.push(fit.partialOffload ? "Part of it would run on the processor, which is slower." : "It only just fits.");
+    } else if (fit.verdict === "yellow" && fit.partialOffload) {
+      parts.push("Part of it would run on the processor, which is slower.");
+    } else if (fit.verdict === "yellow" && !(fit.copiesShort && copies > 0)) {
+      parts.push("It only just fits.");
     }
   }
+  if (fit.computerUnknown) {
+    parts.push("The computer's memory couldn't be read.");
+    if (copies > 0) parts.push(`Long chats will use up to ${amountGb(copies)} of it.`);
+  } else if (fit.copiesShort && copies > 0 && fit.verdict !== "red") {
+    parts.push(longChatsWords(copies));
+  }
   return parts.join(" ");
+}
+
+/** A saved copies figure as shown: a finite amount above zero, else 0. */
+function copiesShownBytes(bytes: number | undefined): number {
+  return bytes !== undefined && Number.isFinite(bytes) && bytes > 0 ? bytes : 0;
+}
+
+/**
+ * Why a model is only yellow when not even one saved copy of a long chat fits the computer's
+ * memory that is left (0.0.7): never "too large" for that.
+ */
+export function longChatsWords(copiesBytes: number): string {
+  return `Long chats will use about ${amountGb(copiesBytes)} more of the computer's memory, which may not have that much free.`;
 }
 
 /**
@@ -624,36 +681,58 @@ export function freeAfterLoading(bar: MemoryBar): number {
   return Math.max(0, bar.freeBytes - partsTotal(bar.need));
 }
 
-/** A bar's title: "Graphics card · AMD Radeon RX 9070 XT · 16 GB", "Computer memory · 32 GB". */
-export function barTitle(bar: MemoryBar, kind: "graphics" | "computer" | "shared"): string {
-  if (kind === "shared") return `Memory · shared by the processor and Apple graphics · ${capacityGb(bar.totalBytes)}`;
-  if (kind === "computer") return `Computer memory · ${capacityGb(bar.totalBytes)}`;
+/**
+ * A bar's title: "Graphics card · AMD Radeon RX 9070 XT · 16 GB", "Computer memory · 32 GB";
+ * without a size when the computer's memory could not be read (`unknown`).
+ */
+export function barTitle(bar: MemoryBar, kind: "graphics" | "computer" | "shared", unknown = false): string {
+  if (kind === "shared") {
+    return unknown ? "Memory · shared by the processor and Apple graphics" : `Memory · shared by the processor and Apple graphics · ${capacityGb(bar.totalBytes)}`;
+  }
+  if (kind === "computer") return unknown ? "Computer memory" : `Computer memory · ${capacityGb(bar.totalBytes)}`;
   const name = bar.name.trim();
   return name ? `Graphics card · ${name} · ${capacityGb(bar.totalBytes)}` : `Graphics card · ${capacityGb(bar.totalBytes)}`;
 }
 
-/** A bar's legend, part by part, in words and numbers (never colour alone). */
-export function barLegend(bar: MemoryBar): { part: "model" | "context" | "compute" | "imageReader" | "other" | "free"; words: string; bytes: number }[] {
-  const items: { part: "model" | "context" | "compute" | "imageReader" | "other" | "free"; words: string; bytes: number }[] = [
+/** One part of a bar's legend. */
+export type LegendPart = "model" | "context" | "compute" | "imageReader" | "other" | "copies" | "free";
+
+/**
+ * A bar's legend, part by part, in words and numbers (never colour alone). The saved copies
+ * of a long chat (computer memory, 0.0.7) are their own item, after other programs: they
+ * build up during a chat, so "Free after loading" does not count them.
+ */
+export function barLegend(bar: MemoryBar, unknown = false): { part: LegendPart; words: string; bytes: number }[] {
+  const items: { part: LegendPart; words: string; bytes: number }[] = [
     { part: "model", words: "Model", bytes: bar.need.model },
     { part: "context", words: "Conversation memory", bytes: bar.need.context },
     { part: "compute", words: "Working space", bytes: bar.need.compute },
   ];
   if (bar.need.imageReader > 0) items.push({ part: "imageReader", words: "Image reader", bytes: bar.need.imageReader });
-  items.push({ part: "other", words: "Other programs", bytes: bar.otherBytes });
+  // The computer's memory could not be read: what other programs use and what is left are
+  // not known either.
+  if (!unknown) items.push({ part: "other", words: "Other programs", bytes: bar.otherBytes });
+  const copies = copiesShownBytes(bar.copiesBytes);
+  if (copies > 0) items.push({ part: "copies", words: "Saved copies of long chats", bytes: copies });
+  if (unknown) return items;
   const free = freeAfterLoading(bar);
   // When the model needs more than is free, nothing is left; the needs line says by how much.
   if (free > 0 || partsTotal(bar.need) <= bar.freeBytes) items.push({ part: "free", words: "Free after loading", bytes: free });
   return items;
 }
 
-/** One legend item: "Model 9.9 GB". */
-export function legendWords(item: { words: string; bytes: number }): string {
+/** One legend item: "Model 9.9 GB"; the saved copies "Saved copies of long chats (up to 2.5 GB)". */
+export function legendWords(item: { part?: LegendPart; words: string; bytes: number }): string {
+  if (item.part === "copies") return `${item.words} (up to ${amountGb(item.bytes)})`;
   return `${item.words} ${amountGb(item.bytes)}`;
 }
 
-/** "Needs about 11.7 GB of the 15 GB free now." (or "… free once the loaded model is unloaded."). */
-export function needsWords(bar: MemoryBar): string {
+/**
+ * "Needs about 11.7 GB of the 15 GB free now." (or "… free once the loaded model is unloaded.");
+ * with the computer's memory unknown, the need and that it couldn't be read.
+ */
+export function needsWords(bar: MemoryBar, unknown = false): string {
+  if (unknown) return `Needs about ${amountGb(partsTotal(bar.need))}. The computer's memory couldn't be read.`;
   const when = bar.freeAfterUnload ? "free once the loaded model is unloaded" : "free now";
   return `Needs about ${amountGb(partsTotal(bar.need))} of the ${amountGb(bar.freeBytes)} ${when}.`;
 }
@@ -673,7 +752,10 @@ export function pictureWarning(p: OffloadPreview, opts: { apple: boolean; saveMe
   switch (p.fits) {
     case "fits":
     case "partial":
-      return null;
+      // Yellow only because not even one saved copy of a long chat fits what is left.
+      return p.copiesShort && copiesShownBytes(p.computer.copiesBytes) > 0
+        ? longChatsWords(copiesShownBytes(p.computer.copiesBytes))
+        : null;
     case "tight":
       return `It only just fits. Programs that use ${graphicsPlace(opts.apple)}, such as games or video, may stop it from loading.`;
     case "wontFitGraphics": {

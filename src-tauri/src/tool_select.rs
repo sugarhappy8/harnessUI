@@ -15,12 +15,19 @@
 //!   (ARCHITECTURE.md 8.5).
 //! - A tool that is on but not shown stays reachable: [`finder`] has `find_tools` and
 //!   `call_tool`, and the rules that make `call_tool` exactly as safe as a direct call.
+//! - [0.0.7] The system message lists every tool that is on ([`roster`]), so the model
+//!   knows what it can reach; what that list takes is left out of the definitions' room,
+//!   but never the room of the core file tools ([`roster::fitted`]). The computer group is
+//!   shown whole or not at all ([`WHOLE_GROUPS`]), and only a strong word of its own brings
+//!   it in (`tool_catalog::OWN_WORDS_ONLY`).
 
 pub mod finder;
+pub mod roster;
 
 use std::collections::BTreeSet;
 
 use agent::HistoryMessage;
+use agent::prompt::ToolGuide;
 use mcp_host::RegisteredTool;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -66,6 +73,12 @@ const CORE_FILE_TOOLS: &[&str] = &[
     "edit_file",
     "write_file",
 ];
+
+/// [0.0.7] Built-in groups whose tools are only of use together: a model that can take a
+/// screenshot but not click or type is stuck. When the request is about such a group, or
+/// the chat was shown, used or found one of its tools, the turn shows all of its tools that
+/// are on, past the cap if need be ([`select`]).
+pub const WHOLE_GROUPS: &[&str] = &[computer::SERVER_NAME];
 
 /// The `toolSelection` setting.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -158,16 +171,36 @@ pub struct Wording {
 }
 
 impl Wording {
-    /// Prepares a text.
+    /// Prepares a text. [0.0.7] A word that is the start of a file name (`settings` in
+    /// `settings.json`) ends every phrase there: "open settings.json" is about a file, not
+    /// about "open settings". A program's file (`notepad.exe`) is still the program.
     pub fn of(text: &str) -> Self {
         let lower = text.to_lowercase();
         let mut words = BTreeSet::new();
         let mut spaced = String::with_capacity(lower.len() + 2);
         spaced.push(' ');
+        let mut rest = lower.as_str();
         for word in split_words(&lower) {
+            // `split_words` gives the words in order, so each is found after the one before.
+            let at = rest.find(word).unwrap_or(0) + word.len();
+            rest = &rest[at..];
             spaced.push_str(word);
+            if starts_file_extension(rest) {
+                spaced.push('.');
+            }
             spaced.push(' ');
             words.extend(forms(word));
+        }
+        // [0.0.7] A word that only ever comes inside a program's name is not the word by
+        // itself: "open google chrome" is not a web search, "launch vs code" is not about code.
+        for name in PROGRAM_NAMES {
+            let within = spaced.matches(&format!(" {name} ")).count();
+            for word in name.split(' ') {
+                let alone = spaced.matches(&format!(" {word} ")).count();
+                if alone > 0 && alone == within * name.split(' ').filter(|w| w == &word).count() {
+                    words.remove(word);
+                }
+            }
         }
         Self { words, spaced }
     }
@@ -192,6 +225,28 @@ impl Wording {
     fn count(&self, keywords: &[&str]) -> u32 {
         keywords.iter().filter(|k| self.has(k)).count() as u32
     }
+
+    /// [0.0.7] Whether the text has this keyword where the word right after it is none of
+    /// `ends`: "open notepad" in "the open notepad button" names a button, "use my pc" in "use
+    /// my pc's GPU" is about the GPU (a phrase only; a word is [`Wording::has`]).
+    fn has_before(&self, keyword: &str, ends: &[&str]) -> bool {
+        if ends.is_empty() || !keyword.contains(' ') {
+            return self.has(keyword);
+        }
+        let needle = format!(" {keyword} ");
+        self.spaced.match_indices(&needle).any(|(at, _)| {
+            let next = self.spaced[at + needle.len()..]
+                .split(' ')
+                .next()
+                .unwrap_or("");
+            !ends.contains(&next)
+        })
+    }
+
+    /// How many of these keywords the text has, each as [`Wording::has_before`] finds it.
+    fn count_before(&self, keywords: &[&str], ends: &[&str]) -> u32 {
+        keywords.iter().filter(|k| self.has_before(k, ends)).count() as u32
+    }
 }
 
 /// The words of a lower-case text: runs of letters and digits.
@@ -199,6 +254,24 @@ fn split_words(lower: &str) -> impl Iterator<Item = &str> {
     lower
         .split(|c: char| !c.is_alphanumeric())
         .filter(|word| !word.is_empty())
+}
+
+/// [0.0.7] Programs whose name holds a word that means something else by itself
+/// ([`Wording::of`]).
+const PROGRAM_NAMES: &[&str] = &["google chrome", "vs code"];
+
+/// [0.0.7] Whether a text right after a word makes that word part of a file name: a dot and an
+/// extension (`.json`, `.py`), not a full stop before a space and not a program (`.exe`,
+/// `.app`).
+fn starts_file_extension(after: &str) -> bool {
+    let Some(extension) = after.strip_prefix('.') else {
+        return false;
+    };
+    let extension: String = extension
+        .chars()
+        .take_while(|c| c.is_alphanumeric())
+        .collect();
+    !extension.is_empty() && !matches!(extension.as_str(), "exe" | "app")
 }
 
 /// A word and what it may be a form of: "commits", "committing" and "committed" all give
@@ -618,8 +691,24 @@ fn group_score(
 
 /// How many of a built-in group's strong and weak words a text has. A group that needs a
 /// strong word (rea's, `tool_catalog::OWN_WORDS_ONLY`) gets no weak words without one.
+/// [0.0.7] Phrases that need a context (`tool_catalog::WITH_CONTEXT`) count as strong words
+/// only when the text has one of their context phrases.
 fn listed_words(group: &tool_catalog::Group, wording: &Wording) -> (u32, u32) {
-    let strong = wording.count(group.strong);
+    // [0.0.7] A word that says the request is about code undoes the match
+    // (`tool_catalog::CANCELLED_BY`); a phrase followed by a word that makes it a name does
+    // not count (`tool_catalog::PHRASE_ENDS`).
+    if group.cancelled_by().iter().any(|word| wording.has(word)) {
+        return (0, 0);
+    }
+    let ends = group.phrase_ends();
+    let mut strong = wording.count_before(group.strong, ends);
+    if let Some((phrases, context)) = group.with_context()
+        && context
+            .iter()
+            .any(|phrase| wording.has_before(phrase, ends))
+    {
+        strong += wording.count_before(phrases, ends);
+    }
     let weak = if strong == 0 && group.needs_strong_word() {
         0
     } else {
@@ -799,10 +888,33 @@ fn select_by_size(input: &Selecting<'_>, by_count: &[String], allowance: u32) ->
     if finder.iter().all(|i| by_count.contains(&tools[*i].name)) {
         add(&finder, &mut chosen);
     }
+    let mut whole_tried: Vec<&str> = Vec::new();
     for (index, tool) in tools.iter().enumerate() {
-        if by_count.contains(&tool.name) && !is_finder(tool) {
-            add(&[index], &mut chosen);
+        if !by_count.contains(&tool.name) || is_finder(tool) {
+            continue;
         }
+        // [0.0.7] A group whose tools only work together goes in whole when it fits, else
+        // the tools it needs most first (WHOLE_GROUPS).
+        if let Some(server) = whole_group_of(tool) {
+            if whole_tried.contains(&server) {
+                continue;
+            }
+            whole_tried.push(server);
+            let mut members: Vec<usize> = (0..tools.len())
+                .filter(|i| {
+                    whole_group_of(&tools[*i]) == Some(server) && by_count.contains(&tools[*i].name)
+                })
+                .collect();
+            add(&members, &mut chosen);
+            if members.iter().any(|i| !chosen[*i]) {
+                members.sort_by_key(|i| (rank_of(&tools[*i]), *i));
+                for i in members {
+                    add(&[i], &mut chosen);
+                }
+            }
+            continue;
+        }
+        add(&[index], &mut chosen);
     }
     tools
         .iter()
@@ -892,12 +1004,42 @@ fn select_by_count(input: &Selecting<'_>) -> Vec<String> {
             }
         }
     }
+    // [0.0.7] A group whose tools only work together comes whole, past the cap if need be:
+    // when the request is about it, or the chat was shown, used or found one of its tools.
+    // What was shown is kept from then on, so the list still only grows.
+    let wording = Wording::of(&input.messages.join("\n"));
+    for server in WHOLE_GROUPS {
+        let members: Vec<usize> = (0..tools.len())
+            .filter(|i| whole_group_of(&tools[*i]) == Some(*server))
+            .collect();
+        let named = |i: &usize| {
+            picked.chosen[*i]
+                || input.shown.contains(&tools[*i].name)
+                || input.wanted.contains(&tools[*i].name)
+        };
+        let refs: Vec<&Candidate> = members.iter().map(|i| &tools[*i]).collect();
+        let asked =
+            !refs.is_empty() && group_score(server, &refs, &wording, input.skills) >= MATCH_AT;
+        if asked || members.iter().any(named) {
+            for index in members {
+                picked.keep(index);
+            }
+        }
+    }
     tools
         .iter()
         .zip(&picked.chosen)
         .filter(|(_, chosen)| **chosen)
         .map(|(tool, _)| tool.name.clone())
         .collect()
+}
+
+/// [0.0.7] The group of [`WHOLE_GROUPS`] a tool belongs to, if it is one of the app's own.
+fn whole_group_of(tool: &Candidate) -> Option<&'static str> {
+    WHOLE_GROUPS
+        .iter()
+        .copied()
+        .find(|server| tool.builtin && tool.server == *server)
 }
 
 /// What to remember for the chat after a turn showed `shown`: everything remembered so
@@ -1060,13 +1202,15 @@ pub fn waiting_with(waiting: &[String], names: &[String], first: bool) -> Vec<St
 /// Splits the tools that are on in the chat into those shown to the model this turn and
 /// those kept back (reachable through `find_tools` and `call_tool`). Decided once, when
 /// the turn starts; what was shown is remembered for the chat, so the list only grows.
+/// [0.0.7] Also the tool list and guide for the system message, made from every tool that is
+/// on and held to what is left once the tools that come first are counted ([`roster::fitted`]).
 pub async fn for_turn(
     state: &AppState,
     chat: &store::Chat,
     history: &[HistoryMessage],
     enabled: Vec<RegisteredTool>,
     n_ctx: u32,
-) -> (Vec<RegisteredTool>, Vec<RegisteredTool>) {
+) -> (Vec<RegisteredTool>, Vec<RegisteredTool>, ToolGuide) {
     choose(state, chat, history, enabled, n_ctx, true).await
 }
 
@@ -1078,7 +1222,7 @@ pub async fn preview_for_turn(
     history: &[HistoryMessage],
     enabled: Vec<RegisteredTool>,
     n_ctx: u32,
-) -> (Vec<RegisteredTool>, Vec<RegisteredTool>) {
+) -> (Vec<RegisteredTool>, Vec<RegisteredTool>, ToolGuide) {
     choose(state, chat, history, enabled, n_ctx, false).await
 }
 
@@ -1089,14 +1233,24 @@ async fn choose(
     enabled: Vec<RegisteredTool>,
     n_ctx: u32,
     remember: bool,
-) -> (Vec<RegisteredTool>, Vec<RegisteredTool>) {
+) -> (Vec<RegisteredTool>, Vec<RegisteredTool>, ToolGuide) {
     let setting = settings(state).await;
-    if !setting.auto || enabled.is_empty() {
-        return (enabled, Vec::new());
-    }
-    // What the definitions may take of this model's context.
-    let room = allowance(n_ctx, other_fixed_for_turn(state, chat, history).await);
+    // [0.0.7] The tool list and guide, from every tool that is on (the same whatever a turn
+    // shows), and what the definitions may take of this model's context besides them. They
+    // never take the room of the core file tools, nor of any tool when every tool is shown.
     let builtin = tool_catalog::builtin_servers(&state.host);
+    let other = other_fixed_for_turn(state, chat, history).await;
+    let fitted = roster::fitted(
+        &enabled,
+        &builtin,
+        n_ctx,
+        other.tokens_in(n_ctx),
+        !setting.auto,
+    );
+    if !setting.auto || enabled.is_empty() {
+        return (enabled, Vec::new(), fitted.guide);
+    }
+    let room = fitted.room;
     let candidates: Vec<Candidate> = enabled
         .iter()
         .map(|tool| Candidate::of(tool, builtin.contains(&tool.server)))
@@ -1121,7 +1275,8 @@ async fn choose(
         allowance: Some(room),
     });
     if !remember {
-        return split(enabled, &shown);
+        let (shown, hidden) = split(enabled, &shown);
+        return (shown, hidden, fitted.guide);
     }
     let stored = crate::mcp_cmd::change_selection_memory(state, chat.id, |was_shown, found| {
         *was_shown = remembered(was_shown, &shown);
@@ -1136,7 +1291,8 @@ async fn choose(
             e.message
         );
     }
-    split(enabled, &shown)
+    let (shown, hidden) = split(enabled, &shown);
+    (shown, hidden, fitted.guide)
 }
 
 #[cfg(test)]

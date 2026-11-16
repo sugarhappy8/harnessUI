@@ -31,7 +31,7 @@ pub use llama::devices::{
     Device, ProbeError, ProbeResult, backend_of, parse_list_devices, pick_device, probe,
     probe_with_env,
 };
-pub use llama::failure::{LoadFailure, classify};
+pub use llama::failure::{LoadFailure, classify, classify_load};
 pub use llama::fit_params::{
     FIT_PARAMS_TIMEOUT, FitParamsError, MeasureConfig, MeasureLayers, build_measure_args,
     measurable, measure, parse_measure_output,

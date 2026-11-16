@@ -1,8 +1,14 @@
 //! The first-tier fit check (ARCHITECTURE.md 11): will this model fit before it is
 //! downloaded? Weights + KV cache + projector + a stated compute allowance, compared
-//! with the memory the selected backend can use.
+//! with the memory the selected backend can use. The KV cache is a function of the
+//! context ([`KvSize`]): short-memory layers stop growing at their window. The saved
+//! copies llama-server keeps in the computer's memory during a long chat (context
+//! checkpoints) are sized for each load from what the computer has left ([`copies`]) and
+//! never decide the context or turn a verdict red.
 
 use serde::Serialize;
+
+use crate::kv::{KvSize, MAX_CTX_CHECKPOINTS};
 
 /// Headroom that a green verdict must leave free.
 pub const SPARE_BYTES: u64 = 1_000_000_000;
@@ -19,14 +25,19 @@ pub const RAM_RESERVE_BYTES: u64 = 2_000_000_000;
 #[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase", tag = "kind")]
 pub enum Target {
-    /// A discrete or integrated GPU with its own free memory figure.
+    /// A discrete or integrated GPU with its own free memory figure, and the computer's
+    /// (`None` when the system does not say).
     Gpu {
         name: String,
         free_bytes: u64,
-        ram_free_bytes: u64,
+        ram_free_bytes: Option<u64>,
     },
-    /// Apple silicon: the Metal working-set limit applies.
-    AppleUnified { working_set_bytes: u64 },
+    /// Apple silicon: the Metal working-set limit applies; the computer's free memory
+    /// (`None` when the system does not say) holds the saved copies of a long chat.
+    AppleUnified {
+        working_set_bytes: u64,
+        ram_free_bytes: Option<u64>,
+    },
     /// CPU only.
     Cpu { ram_free_bytes: u64 },
 }
@@ -35,7 +46,9 @@ impl Target {
     fn primary_bytes(&self) -> u64 {
         match *self {
             Target::Gpu { free_bytes, .. } => free_bytes,
-            Target::AppleUnified { working_set_bytes } => working_set_bytes,
+            Target::AppleUnified {
+                working_set_bytes, ..
+            } => working_set_bytes,
             Target::Cpu { ram_free_bytes } => ram_free_bytes.saturating_sub(RAM_RESERVE_BYTES),
         }
     }
@@ -59,9 +72,48 @@ impl Target {
     fn free_bytes(&self) -> u64 {
         match *self {
             Target::Gpu { free_bytes, .. } => free_bytes,
-            Target::AppleUnified { working_set_bytes } => working_set_bytes,
+            Target::AppleUnified {
+                working_set_bytes, ..
+            } => working_set_bytes,
             Target::Cpu { ram_free_bytes } => ram_free_bytes,
         }
+    }
+    /// The memory as [`Room`] counts it: on a graphics card its free memory and, with part
+    /// of the model on the processor, the computer's memory besides (unbounded when the
+    /// computer's memory could not be read: not checked); on Apple silicon the working set
+    /// only (the part beyond it is not estimated here).
+    fn room(&self) -> Room {
+        match *self {
+            Target::Gpu {
+                free_bytes,
+                ram_free_bytes: Some(ram),
+                ..
+            } => Room::graphics_card(free_bytes, ram),
+            Target::Gpu {
+                free_bytes,
+                ram_free_bytes: None,
+                ..
+            } => Room::graphics_card_unknown_computer(free_bytes),
+            Target::AppleUnified {
+                working_set_bytes, ..
+            } => Room {
+                whole: working_set_bytes,
+                partial: working_set_bytes,
+                separate: false,
+            },
+            Target::Cpu { ram_free_bytes } => Room::processor(ram_free_bytes),
+        }
+    }
+    /// The computer's memory less the reserve, which the model's own part there and the
+    /// saved copies of a long chat share; `None` when the system did not say.
+    fn computer(&self) -> Option<u64> {
+        match *self {
+            Target::Gpu { ram_free_bytes, .. } | Target::AppleUnified { ram_free_bytes, .. } => {
+                ram_free_bytes
+            }
+            Target::Cpu { ram_free_bytes } => Some(ram_free_bytes),
+        }
+        .map(|ram| ram.saturating_sub(RAM_RESERVE_BYTES))
     }
 }
 
@@ -86,8 +138,9 @@ pub struct FitInput {
     pub weights_bytes: u64,
     /// The projector's size, when images will be used.
     pub projector_bytes: u64,
-    /// From [`crate::summary::ModelSummary::kv_bytes_per_token`].
-    pub kv_bytes_per_token: u64,
+    /// The conversation memory as a function of the context, from
+    /// [`crate::summary::ModelSummary::kv_size`] (0.0.7 P1; it was bytes per token).
+    pub kv: KvSize,
     pub vocab_size: u64,
     /// Context the user wants.
     pub ctx: u64,
@@ -100,11 +153,73 @@ impl FitInput {
     pub fn compute_bytes(&self) -> u64 {
         COMPUTE_BASE_BYTES.saturating_add(self.vocab_size.saturating_mul(UBATCH).saturating_mul(4))
     }
+    /// What the model needs where it runs at `ctx` tokens: weights, projector, the
+    /// conversation memory llama.cpp allocates ([`KvSize::at`]) and the working space.
     pub fn needed_at(&self, ctx: u64) -> u64 {
         self.weights_bytes
             .saturating_add(self.projector_bytes)
-            .saturating_add(self.kv_bytes_per_token.saturating_mul(ctx))
+            .saturating_add(self.kv.at(ctx))
             .saturating_add(self.compute_bytes())
+    }
+    /// The saved copies llama-server may keep at `ctx` tokens with `spare` bytes of the
+    /// computer's memory left for them ([`copies`]; `None` when the computer's memory could
+    /// not be read).
+    pub fn copies_at(&self, ctx: u64, spare: Option<u64>) -> Copies {
+        copies(self.kv.copy_bytes(ctx), spare)
+    }
+    /// Whether `ctx` tokens fit `room` leaving `spare` free: (green, at all), as
+    /// [`Room::verdict`] counts it.
+    fn fits(&self, ctx: u64, room: Room, spare: u64) -> (bool, bool) {
+        room.fits(self.needed_at(ctx), spare)
+    }
+}
+
+/// The share of the computer's spare memory the saved copies may take: they get half of
+/// what is left after the reserve and the model's own part there, so a long chat leaves as
+/// much again for other programs.
+pub const COPIES_SHARE_DIVISOR: u64 = 2;
+
+/// The saved copies of the conversation a load lets llama-server keep (0.0.7: context
+/// checkpoints, `--ctx-checkpoints`). They build up during a long chat, in the computer's
+/// memory wherever the model runs.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Copies {
+    /// How many (`--ctx-checkpoints`): 1 to [`MAX_CTX_CHECKPOINTS`].
+    pub count: u32,
+    /// What that many take at most.
+    pub bytes: u64,
+    /// Not even one copy fits the computer's memory that is left after the reserve and the
+    /// model's own part there: long chats may run short of memory. Never when that memory
+    /// is unknown.
+    pub short: bool,
+}
+
+/// How many saved copies of `copy_bytes` each ([`KvSize::copy_bytes`]) a load keeps when
+/// `spare` bytes of the computer's memory are left after the reserve and the model's own
+/// part there: as many as fit [`COPIES_SHARE_DIVISOR`]'s share of it, at least 1 and at most
+/// [`MAX_CTX_CHECKPOINTS`]. Never 0: without a copy llama-server reads the whole
+/// conversation again whenever the next message does not continue exactly where the last
+/// reply ended (a thinking model's reply is shortened in the history). With one, the next
+/// message and a regenerated reply still read only what is new, but an edit of the last
+/// message reads the whole conversation again (measured with the pinned server: 9,618
+/// tokens with one copy, 787 with 8, ARCHITECTURE.md 7.3). With `spare` unknown the app
+/// cannot size them and passes the most, a quarter of what llama.cpp keeps by itself. A
+/// model without copies (`copy_bytes` 0) also gets the most, which costs nothing.
+pub fn copies(copy_bytes: u64, spare: Option<u64>) -> Copies {
+    let count = match spare {
+        Some(spare) if copy_bytes > 0 => {
+            let fit = spare / COPIES_SHARE_DIVISOR / copy_bytes;
+            u32::try_from(fit)
+                .unwrap_or(u32::MAX)
+                .clamp(1, MAX_CTX_CHECKPOINTS)
+        }
+        _ => MAX_CTX_CHECKPOINTS,
+    };
+    Copies {
+        count,
+        bytes: u64::from(count).saturating_mul(copy_bytes),
+        short: spare.is_some_and(|spare| copy_bytes > spare),
     }
 }
 
@@ -135,7 +250,7 @@ pub struct FitResult {
     pub device: FitDevice,
     /// On a graphics card, what the model needs besides in the computer's memory when its
     /// placement is known (an installed file); 0 otherwise: on Apple graphics and the
-    /// processor [`Self::needed_bytes`] counts all of it, and this estimate does not split.
+    /// processor [`Self::needed_bytes`] counts all of it.
     pub computer_bytes: u64,
     /// With [`Self::computer_bytes`] known, the computer's free memory as the system reports
     /// it (the settings panel's second bar); 0 otherwise.
@@ -144,6 +259,16 @@ pub struct FitResult {
     /// free memory less [`RAM_RESERVE_BYTES`] (`placement::judge_in`), not only because the
     /// whole does not fit: the screen then names the computer's memory as what is short.
     pub computer_short: bool,
+    /// What the saved copies of a long chat take at most in the computer's memory, with
+    /// as many as this computer gives the model ([`Copies`]); 0 for a model without them.
+    /// Not in [`Self::needed_bytes`]: they build up during a chat.
+    pub copies_bytes: u64,
+    /// Not even one saved copy fits what the computer has left ([`Copies::short`]): the
+    /// verdict is then yellow at most for that, never red.
+    pub copies_short: bool,
+    /// The computer's free memory could not be read (a graphics card's computer): the
+    /// copies and any part on the processor are not checked against it.
+    pub computer_unknown: bool,
     /// The 0.0.4 sentence (logs and scripts). The 0.0.6 screens word the figures instead
     /// (`fitLine` in src/lib/words.ts); empty when the placement judge made the result.
     pub sentence: String,
@@ -154,20 +279,82 @@ pub fn gb(bytes: u64) -> String {
     format!("{:.1} GB", bytes as f64 / 1e9)
 }
 
-/// The largest context (a multiple of 1024, at least [`MIN_USEFUL_CTX`]) that leaves
-/// [`SPARE_BYTES`] free in `available`.
-fn largest_ctx(input: &FitInput, available: u64) -> Option<u64> {
-    let fixed = input.needed_at(0).saturating_add(SPARE_BYTES);
-    if fixed >= available || input.kv_bytes_per_token == 0 {
+/// The largest context that is green in `room` with [`SPARE_BYTES`] to spare: a multiple
+/// of 1024 from [`MIN_USEFUL_CTX`] up to the context asked for and the trained length, or
+/// the smaller of those two itself.
+fn largest_ctx(input: &FitInput, room: Room) -> Option<u64> {
+    let cap = input.max_ctx.map_or(input.ctx, |max| max.min(input.ctx));
+    if cap < MIN_USEFUL_CTX {
         return None;
     }
-    let tokens = (available - fixed) / input.kv_bytes_per_token;
-    let mut ctx = tokens / 1024 * 1024;
-    if let Some(max) = input.max_ctx {
-        ctx = ctx.min(max);
+    largest_size(MIN_USEFUL_CTX, cap, |ctx| {
+        input.fits(ctx, room, SPARE_BYTES).0
+    })
+}
+
+/// The context sizes a search chooses from: the floor, the multiples of 1,024 between, and
+/// the cap (a floor above the cap gives the cap alone). Never built as a list: the cap may
+/// be any number.
+pub(crate) struct Sizes {
+    floor: u64,
+    cap: u64,
+    first_multiple: u64,
+    multiples: u64,
+}
+
+impl Sizes {
+    pub(crate) fn new(floor: u64, cap: u64) -> Self {
+        let floor = floor.min(cap);
+        let first_multiple = (floor / 1024)
+            .checked_add(1)
+            .and_then(|k| k.checked_mul(1024));
+        let multiples = match first_multiple {
+            Some(first) if cap > first => (cap - 1 - first) / 1024 + 1,
+            _ => 0,
+        };
+        Self {
+            floor,
+            cap,
+            first_multiple: first_multiple.unwrap_or(u64::MAX),
+            multiples,
+        }
     }
-    ctx = ctx.min(input.ctx);
-    (ctx >= MIN_USEFUL_CTX).then_some(ctx)
+
+    /// The number of sizes (at least 1, at most u64::MAX / 1024 + 2).
+    pub(crate) fn len(&self) -> u64 {
+        1 + self.multiples + u64::from(self.cap > self.floor)
+    }
+
+    /// The `index`th size, smallest first.
+    pub(crate) fn get(&self, index: u64) -> u64 {
+        if index == 0 {
+            self.floor
+        } else if index <= self.multiples {
+            self.first_multiple + (index - 1) * 1024
+        } else {
+            self.cap
+        }
+    }
+}
+
+/// The largest of [`Sizes::new`]`(floor, cap)` that `fits`, or `None` when not even the
+/// floor does. `fits` must hold for every size below one that it holds for (memory only
+/// grows with the context); a binary search, so a huge cap costs about 60 calls.
+pub(crate) fn largest_size(floor: u64, cap: u64, fits: impl Fn(u64) -> bool) -> Option<u64> {
+    let sizes = Sizes::new(floor, cap);
+    if !fits(sizes.get(0)) {
+        return None;
+    }
+    let (mut low, mut high) = (0u64, sizes.len() - 1);
+    while low < high {
+        let mid = low + (high - low).div_ceil(2);
+        if fits(sizes.get(mid)) {
+            low = mid;
+        } else {
+            high = mid - 1;
+        }
+    }
+    Some(sizes.get(low))
 }
 
 // ---- 0.0.5: Automatic sizing and fit marks per choice (D2b, WP1b) -------------------
@@ -189,6 +376,10 @@ pub struct Room {
     /// after a graphics-card memory failure also reaches): `whole` plus system memory less
     /// the reserve. The same as `whole` when the model runs on the processor.
     pub partial: u64,
+    /// The main device has memory of its own (a graphics card), so the computer's memory
+    /// is `partial − whole` (0.0.7). False on the processor and on Apple silicon, where it
+    /// is all one memory.
+    pub separate: bool,
 }
 
 impl Room {
@@ -198,6 +389,7 @@ impl Room {
         Self {
             whole,
             partial: whole,
+            separate: false,
         }
     }
 
@@ -207,6 +399,18 @@ impl Room {
         Self {
             whole: free_bytes,
             partial: free_bytes.saturating_add(ram_free_bytes.saturating_sub(RAM_RESERVE_BYTES)),
+            separate: true,
+        }
+    }
+
+    /// A graphics card whose computer did not say how much of its memory is free (0.0.7
+    /// review): the card is checked as ever, the computer's side not at all (unknown is not
+    /// 0), so a model is never red for what stays in the computer's memory.
+    pub fn graphics_card_unknown_computer(free_bytes: u64) -> Self {
+        Self {
+            whole: free_bytes,
+            partial: u64::MAX,
+            separate: true,
         }
     }
 
@@ -217,6 +421,7 @@ impl Room {
         Self {
             whole: working_set_bytes,
             partial: working_set_bytes.max(ram_free_bytes.saturating_sub(RAM_RESERVE_BYTES)),
+            separate: false,
         }
     }
 
@@ -224,18 +429,23 @@ impl Room {
     /// device with [`SPARE_BYTES`] to spare, yellow when it fits only with part of it on
     /// the processor, red otherwise.
     pub fn verdict(&self, needed: u64) -> Verdict {
-        let needed = needed.saturating_add(SPARE_BYTES);
-        if needed <= self.whole {
-            Verdict::Green
-        } else if needed <= self.partial {
-            Verdict::Yellow
-        } else {
-            Verdict::Red
+        match self.fits(needed, SPARE_BYTES) {
+            (true, _) => Verdict::Green,
+            (false, true) => Verdict::Yellow,
+            (false, false) => Verdict::Red,
         }
+    }
+
+    /// (green, at all) for `needed` bytes leaving `spare` free.
+    fn fits(&self, needed: u64, spare: u64) -> (bool, bool) {
+        let device = needed.saturating_add(spare);
+        let green = device <= self.whole;
+        (green, green || device <= self.partial)
     }
 }
 
-/// The fit mark of `input` at a context of `ctx` tokens.
+/// The fit mark of `input` at a context of `ctx` tokens (the saved copies left out: they
+/// never decide it, [`check`]).
 pub fn verdict_at(input: &FitInput, ctx: u64, room: Room) -> Verdict {
     room.verdict(input.needed_at(ctx))
 }
@@ -263,37 +473,50 @@ pub fn auto_ctx(input: &FitInput, room: Room) -> Option<AutoCtx> {
 
 /// [`auto_ctx`] leaving `spare_bytes` free instead of [`SPARE_BYTES`] (0.0.6 item 6: As
 /// much as fits with "Leave free on the graphics card" set).
+///
+/// The memory is not a straight line in the context (0.0.7 P1): short-memory layers stop
+/// growing at their window and llama.cpp counts cells in steps of 256, so the largest
+/// size is searched for exactly among the sizes Automatic chooses from ([`largest_size`]),
+/// each checked with [`FitInput::needed_at`], which only grows with the context. The saved
+/// copies of a long chat are not counted: they are sized to what is left ([`copies`]).
 pub fn auto_ctx_with_margin(input: &FitInput, room: Room, spare_bytes: u64) -> Option<AutoCtx> {
     let floor = input
         .max_ctx
         .map_or(AUTO_FLOOR_CTX, |m| m.min(AUTO_FLOOR_CTX));
     let cap = input.max_ctx.map_or(AUTO_CAP_CTX, |m| m.min(AUTO_CAP_CTX));
-    // The largest context that leaves the spare free in `available`, if it reaches the
-    // floor.
-    let largest = |available: u64| {
-        let fixed = input.needed_at(0).saturating_add(spare_bytes);
-        let left = available.checked_sub(fixed)?;
-        let tokens = left
-            .checked_div(input.kv_bytes_per_token)
-            .unwrap_or(u64::MAX);
-        (tokens >= floor).then(|| (tokens / 1024 * 1024).max(floor).min(cap))
-    };
-    if let Some(ctx) = largest(room.whole) {
+    if let Some(ctx) = largest_size(floor, cap, |ctx| input.fits(ctx, room, spare_bytes).0) {
         return Some(AutoCtx {
             ctx,
             verdict: Verdict::Green,
         });
     }
-    largest(room.partial).map(|ctx| AutoCtx {
+    largest_size(floor, cap, |ctx| input.fits(ctx, room, spare_bytes).1).map(|ctx| AutoCtx {
         ctx,
         verdict: Verdict::Yellow,
     })
 }
 
+/// Will `input` fit `target`? The verdict counts what a load takes ([`FitInput::needed_at`]);
+/// the saved copies of a long chat are sized from what the computer has left after the
+/// model's own part there ([`copies`]: on a graphics card nothing when the whole model fits
+/// on it, else what does not; elsewhere all of it) and, when not even one fits, make a
+/// green verdict yellow, never red (0.0.7).
 pub fn check(input: &FitInput, target: &Target) -> FitResult {
     let needed = input.needed_at(input.ctx);
     let available = target.primary_bytes();
+    let room = target.room();
     let place = target.place();
+    let graphics = matches!(target, Target::Gpu { .. });
+    let (green, at_all) = room.fits(needed, SPARE_BYTES);
+    let computer_part = match (graphics, green) {
+        (true, true) => 0,
+        (true, false) => needed
+            .saturating_add(SPARE_BYTES)
+            .saturating_sub(room.whole),
+        (false, _) => needed,
+    };
+    let computer = target.computer();
+    let copies = input.copies_at(input.ctx, computer.map(|c| c.saturating_sub(computer_part)));
     let base = |verdict, suggested_ctx, partial_offload, sentence| FitResult {
         verdict,
         needed_bytes: needed,
@@ -304,17 +527,25 @@ pub fn check(input: &FitInput, target: &Target) -> FitResult {
         computer_bytes: 0,
         computer_free_bytes: 0,
         computer_short: false,
+        copies_bytes: copies.bytes,
+        copies_short: copies.short,
+        computer_unknown: computer.is_none(),
         sentence,
     };
 
-    if needed.saturating_add(SPARE_BYTES) <= available {
+    if green {
         let free_word = if matches!(target, Target::AppleUnified { .. }) {
             ""
         } else {
             " free"
         };
+        let verdict = if copies.short {
+            Verdict::Yellow
+        } else {
+            Verdict::Green
+        };
         return base(
-            Verdict::Green,
+            verdict,
             None,
             false,
             format!(
@@ -325,7 +556,7 @@ pub fn check(input: &FitInput, target: &Target) -> FitResult {
         );
     }
 
-    if let Some(ctx) = largest_ctx(input, available) {
+    if let Some(ctx) = largest_ctx(input, room) {
         return base(
             Verdict::Yellow,
             Some(ctx),
@@ -339,20 +570,17 @@ pub fn check(input: &FitInput, target: &Target) -> FitResult {
         );
     }
 
-    if let Target::Gpu { ram_free_bytes, .. } = *target {
-        let combined = available.saturating_add(ram_free_bytes.saturating_sub(RAM_RESERVE_BYTES));
-        if needed.saturating_add(SPARE_BYTES) <= combined {
-            return base(
-                Verdict::Yellow,
-                None,
-                true,
-                format!(
-                    "Needs about {}; {place} {} free, so some layers will run on the CPU and replies will be slower.",
-                    gb(needed),
-                    gb(available)
-                ),
-            );
-        }
+    if graphics && at_all {
+        return base(
+            Verdict::Yellow,
+            None,
+            true,
+            format!(
+                "Needs about {}; {place} {} free, so some layers will run on the CPU and replies will be slower.",
+                gb(needed),
+                gb(available)
+            ),
+        );
     }
 
     base(
@@ -377,7 +605,7 @@ mod tests {
         FitInput {
             weights_bytes: weights,
             projector_bytes: 0,
-            kv_bytes_per_token: 131_072, // 8B-class model, f16 cache
+            kv: KvSize::per_token(131_072), // 8B-class model, f16 cache
             vocab_size: 128_256,
             ctx,
             max_ctx: Some(131_072),
@@ -399,7 +627,7 @@ mod tests {
             &Target::Gpu {
                 name: "GPU".into(),
                 free_bytes: needed + SPARE_BYTES,
-                ram_free_bytes: 0,
+                ram_free_bytes: Some(0),
             },
         );
         assert_eq!(r.verdict, Verdict::Green);
@@ -410,7 +638,7 @@ mod tests {
             &Target::Gpu {
                 name: "GPU".into(),
                 free_bytes: needed + SPARE_BYTES - 1,
-                ram_free_bytes: 0,
+                ram_free_bytes: Some(0),
             },
         );
         assert_ne!(r.verdict, Verdict::Green);
@@ -425,7 +653,7 @@ mod tests {
             &Target::Gpu {
                 name: "GPU".into(),
                 free_bytes: 12 * GB,
-                ram_free_bytes: 0,
+                ram_free_bytes: Some(0),
             },
         );
         assert_eq!(r.verdict, Verdict::Yellow);
@@ -443,7 +671,7 @@ mod tests {
             &Target::Gpu {
                 name: "GPU".into(),
                 free_bytes: 8 * GB,
-                ram_free_bytes: 32 * GB,
+                ram_free_bytes: Some(32 * GB),
             },
         );
         assert_eq!(r.verdict, Verdict::Yellow);
@@ -458,6 +686,7 @@ mod tests {
             &i,
             &Target::AppleUnified {
                 working_set_bytes: 11 * GB,
+                ram_free_bytes: Some(16 * GB),
             },
         );
         assert_eq!(r.verdict, Verdict::Red);
@@ -499,7 +728,7 @@ mod tests {
             &Target::Gpu {
                 name: "GPU".into(),
                 free_bytes: 6 * GB,
-                ram_free_bytes: 0,
+                ram_free_bytes: Some(0),
             },
         );
         // 65,536 tokens need ~8.6 GB of KV; the suggestion is capped by memory, not above training.
@@ -515,7 +744,7 @@ mod tests {
     fn eight_b(kv: u64) -> FitInput {
         FitInput {
             weights_bytes: 4_900_000_000,
-            kv_bytes_per_token: kv,
+            kv: KvSize::per_token(kv),
             vocab_size: 128_256,
             max_ctx: Some(131_072),
             ..Default::default()
@@ -616,7 +845,7 @@ mod tests {
         // A 14B-class model (8.4 GB, 48 layers: 196,608 cache bytes per token).
         let fourteen = FitInput {
             weights_bytes: 8_400_000_000,
-            kv_bytes_per_token: 196_608,
+            kv: KvSize::per_token(196_608),
             vocab_size: 152_064,
             max_ctx: Some(40_960),
             ..Default::default()
@@ -658,7 +887,7 @@ mod tests {
         };
         assert_eq!(auto_ctx(&unknown_length, room).map(|a| a.ctx), Some(32_768));
         let no_cache = FitInput {
-            kv_bytes_per_token: 0,
+            kv: KvSize::default(),
             ..eight_b(F16)
         };
         assert_eq!(auto_ctx(&no_cache, room).map(|a| a.ctx), Some(32_768));
@@ -667,15 +896,21 @@ mod tests {
         let tight = Room {
             whole: fixed + F16 * 4_500,
             partial: fixed + F16 * 4_500,
+            separate: false,
         };
         assert_eq!(auto_ctx(&eight_b(F16), tight).map(|a| a.ctx), Some(4096));
         let too_tight = Room {
             whole: fixed + F16 * 4_095,
             partial: fixed + F16 * 4_095,
+            separate: false,
         };
         assert_eq!(auto_ctx(&eight_b(F16), too_tight), None);
         assert_eq!(verdict_at(&eight_b(F16), 4096, too_tight), Verdict::Red);
-        assert_eq!(verdict_at(&eight_b(F16), 4095, too_tight), Verdict::Green);
+        // 0.0.7 P1: llama.cpp gives a context cells in steps of 256 (`GGML_PAD(n_ctx,
+        // 256)`), so 4,095 tokens take 4,096 cells, and 3,841 too; 3,840 is 15 steps.
+        assert_eq!(verdict_at(&eight_b(F16), 4095, too_tight), Verdict::Red);
+        assert_eq!(verdict_at(&eight_b(F16), 3841, too_tight), Verdict::Red);
+        assert_eq!(verdict_at(&eight_b(F16), 3840, too_tight), Verdict::Green);
     }
 
     /// 0.0.6 item 6: the margin can be chosen; at SPARE_BYTES it is `auto_ctx` itself.
@@ -691,6 +926,7 @@ mod tests {
             Room {
                 whole: u64::MAX,
                 partial: u64::MAX,
+                separate: false,
             },
         ];
         let inputs = [
@@ -701,12 +937,12 @@ mod tests {
                 ..eight_b(F16)
             },
             FitInput {
-                kv_bytes_per_token: 0,
+                kv: KvSize::default(),
                 ..eight_b(F16)
             },
             FitInput {
                 weights_bytes: u64::MAX,
-                kv_bytes_per_token: u64::MAX,
+                kv: KvSize::per_token(u64::MAX),
                 vocab_size: u64::MAX,
                 ..eight_b(F16)
             },
@@ -752,7 +988,7 @@ mod tests {
         let i = FitInput {
             weights_bytes: 11_000_000_000,
             projector_bytes: 0,
-            kv_bytes_per_token: 0,
+            kv: KvSize::default(),
             vocab_size: 0,
             ctx: 4096,
             max_ctx: None,
@@ -762,7 +998,7 @@ mod tests {
             &Target::Gpu {
                 name: "RX".into(),
                 free_bytes: 15_200_000_000,
-                ram_free_bytes: 0,
+                ram_free_bytes: Some(0),
             },
         );
         assert_eq!(
@@ -782,7 +1018,7 @@ mod tests {
             &Target::Gpu {
                 name: "RX".into(),
                 free_bytes: 15 * GB,
-                ram_free_bytes: 30 * GB,
+                ram_free_bytes: Some(30 * GB),
             },
         );
         assert_eq!(
@@ -793,6 +1029,7 @@ mod tests {
             &i,
             &Target::AppleUnified {
                 working_set_bytes: 10 * GB,
+                ram_free_bytes: Some(12 * GB),
             },
         );
         assert_eq!(
@@ -822,5 +1059,473 @@ mod tests {
             serde_json::to_value(&cpu).unwrap()["device"],
             serde_json::json!("processor")
         );
+    }
+
+    // ---- 0.0.7 P1: short-memory layers (Gemma 4) ---------------------------------------
+
+    const GIB: u64 = 1024 * 1024 * 1024;
+
+    /// Gemma 4 12B's conversation memory in f16, as `ModelSummary::kv_size` reads its
+    /// header (`crate::kv` tests): 8 full layers of 16,384 bytes a cell, 40 short-memory
+    /// layers of 327,680 bytes for at most 1,536 cells, saved copies of 1,024 cells.
+    fn gemma4_kv() -> KvSize {
+        KvSize {
+            per_cell: 16_384,
+            window_per_cell: 327_680,
+            window: 1024,
+            fixed: 0,
+            checkpoint_per_cell: 327_680,
+            copy_fixed: 0,
+        }
+    }
+
+    /// One saved copy of Gemma 4 12B in f16: 1,024 cells of 327,680 bytes (320 MiB).
+    const GEMMA4_COPY: u64 = 335_544_320;
+
+    /// What 0.0.6 counted for the same header: every layer at full length with the full
+    /// layers' head size, 328 heads × (512 + 512) × 2 bytes a token.
+    fn gemma4_kv_0_0_6() -> KvSize {
+        KvSize::per_token(671_744)
+    }
+
+    /// The files of `gemma-4-12B-coder-fable5-composer2.5-v1-uncensored-heretic-GGUF`, with
+    /// its image file (122,031,232 bytes) as the repository page counts it.
+    fn gemma4(weights: u64, kv: KvSize) -> FitInput {
+        FitInput {
+            weights_bytes: weights,
+            projector_bytes: 122_031_232,
+            kv,
+            vocab_size: 262_144,
+            ctx: 65_536,
+            max_ctx: Some(262_144),
+        }
+    }
+    const Q8_0: u64 = 12_669_649_120;
+    const Q6_K: u64 = 9_786_024_160;
+    const Q4_K_M: u64 = 7_381_385_440;
+
+    /// The owner's screen: a 16 GB graphics card with 15.1 GB free (the app shows binary
+    /// gigabytes) and 65,536 tokens. 0.0.6 said Q8_0 was too large ("needs about 53.7
+    /// GB") and Q6_K fitted only up to 6,144 tokens; both fit.
+    #[test]
+    fn the_owners_gemma4_screen() {
+        let card = Target::Gpu {
+            name: "AMD Radeon RX 9070 XT".into(),
+            free_bytes: 15 * GIB + GIB / 10,
+            ram_free_bytes: Some(24 * GB),
+        };
+        // 0.0.6's numbers, reproduced: 57.6 GB (53.7 binary GB), too large; Q6_K up to
+        // 6,144 tokens.
+        let old = check(&gemma4(Q8_0, gemma4_kv_0_0_6()), &card);
+        assert_eq!(old.verdict, Verdict::Red);
+        assert_eq!(
+            (old.needed_bytes as f64 / GIB as f64 * 10.0).round() / 10.0,
+            53.7
+        );
+        let old = check(&gemma4(Q6_K, gemma4_kv_0_0_6()), &card);
+        assert_eq!(
+            (old.verdict, old.suggested_ctx),
+            (Verdict::Yellow, Some(6144))
+        );
+        // Now: Q8_0 needs 12,669,649,120 + 122,031,232 + 1,577,058,304 (the memory llama.cpp
+        // allocates at 65,536 tokens) + 805,306,368 (working space) = 15,174,045,024 bytes,
+        // which fits the card with the 1 GB spare. With 22 GB of the computer's memory left
+        // after the reserve, a long chat may keep the most saved copies, 8 of 320 MiB
+        // (2.5 GiB), besides.
+        let q8 = check(&gemma4(Q8_0, gemma4_kv()), &card);
+        assert_eq!(q8.verdict, Verdict::Green);
+        assert_eq!(q8.needed_bytes, 15_174_045_024);
+        assert_eq!(q8.copies_bytes, 8 * GEMMA4_COPY);
+        assert_eq!(q8.copies_bytes, 5 * GIB / 2);
+        assert!(!q8.copies_short && !q8.computer_unknown && !q8.computer_short);
+        assert_eq!(q8.computer_bytes, 0);
+        let q6 = check(&gemma4(Q6_K, gemma4_kv()), &card);
+        assert_eq!(q6.verdict, Verdict::Green);
+        // With 15.05 GB free Q8_0 only just misses the spare at 65,536 tokens: a shorter
+        // memory fits (KV ≤ free − spare − the rest: 64,512 tokens), never "too large".
+        let tighter = Target::Gpu {
+            name: "AMD Radeon RX 9070 XT".into(),
+            free_bytes: 15 * GIB + GIB / 20,
+            ram_free_bytes: Some(24 * GB),
+        };
+        let q8 = check(&gemma4(Q8_0, gemma4_kv()), &tighter);
+        assert_eq!(
+            (q8.verdict, q8.suggested_ctx),
+            (Verdict::Yellow, Some(64_512))
+        );
+        // At the trained 262,144 tokens Q4_K_M still fits whole; Q8_0 up to 67,584 tokens:
+        // 16,213,501,542 free − 1,000,000,000 spare − 13,596,986,720 for the rest leave
+        // 1,616,514,822 bytes, of which the short layers take 503,316,480 and the full ones
+        // 16,384 a token (67,944 tokens, 66 × 1,024).
+        let mut long = gemma4(Q4_K_M, gemma4_kv());
+        long.ctx = 262_144;
+        assert_eq!(check(&long, &card).verdict, Verdict::Green);
+        let mut long = gemma4(Q8_0, gemma4_kv());
+        long.ctx = 262_144;
+        assert_eq!(check(&long, &card).suggested_ctx, Some(67_584));
+    }
+
+    /// Automatic on the same card reaches its cap instead of a few thousand tokens.
+    #[test]
+    fn gemma4_automatic_on_a_16_gb_card() {
+        let room = Room::graphics_card(15 * GIB + GIB / 10, 24 * GB);
+        // 0.0.6: (free − weights − working space − spare) / 671,744 = 10,460 tokens.
+        let mut old = gemma4(Q4_K_M, gemma4_kv_0_0_6());
+        old.projector_bytes = 0;
+        assert_eq!(auto_ctx(&old, room).map(|a| a.ctx), Some(10_240));
+        let mut q4 = gemma4(Q4_K_M, gemma4_kv());
+        q4.projector_bytes = 0;
+        assert_eq!(
+            auto_ctx(&q4, room),
+            Some(AutoCtx {
+                ctx: AUTO_CAP_CTX,
+                verdict: Verdict::Green
+            })
+        );
+        // Q8_0: 0.0.6 had to put part of it on the processor; now all of it fits the card.
+        let mut old = gemma4(Q8_0, gemma4_kv_0_0_6());
+        old.projector_bytes = 0;
+        assert_eq!(
+            auto_ctx(&old, room).map(|a| a.verdict),
+            Some(Verdict::Yellow)
+        );
+        let mut q8 = gemma4(Q8_0, gemma4_kv());
+        q8.projector_bytes = 0;
+        assert_eq!(
+            auto_ctx(&q8, room),
+            Some(AutoCtx {
+                ctx: AUTO_CAP_CTX,
+                verdict: Verdict::Green
+            })
+        );
+    }
+
+    /// Automatic's answer is the largest size it chooses from that fits, found exactly for
+    /// memory that is not a straight line (short-memory layers, 256-cell steps): the same as
+    /// trying every size.
+    #[test]
+    fn automatic_is_exact_for_short_memory_layers() {
+        let gpt_oss = KvSize {
+            per_cell: 24_576,
+            window_per_cell: 24_576,
+            window: 128,
+            fixed: 0,
+            checkpoint_per_cell: 24_576,
+            copy_fixed: 0,
+        };
+        let kvs = [
+            gemma4_kv(),
+            gpt_oss,
+            KvSize::per_token(131_072),
+            KvSize::default(),
+        ];
+        for kv in kvs {
+            for max_ctx in [None, Some(2048), Some(20_000), Some(262_144)] {
+                let input = FitInput {
+                    weights_bytes: 7 * GB,
+                    kv,
+                    vocab_size: 262_144,
+                    max_ctx,
+                    ..Default::default()
+                };
+                for free in (8..18).map(|g| g * GB / 2 + 123_456_789) {
+                    for ram in [0, 3 * GB, 40 * GB] {
+                        let room = Room::graphics_card(free, ram);
+                        for spare in [0, SPARE_BYTES, 3 * GB] {
+                            let got = auto_ctx_with_margin(&input, room, spare);
+                            let floor = max_ctx.map_or(AUTO_FLOOR_CTX, |m| m.min(AUTO_FLOOR_CTX));
+                            let cap = max_ctx.map_or(AUTO_CAP_CTX, |m| m.min(AUTO_CAP_CTX));
+                            let sizes = Sizes::new(floor, cap);
+                            let all: Vec<u64> = (0..sizes.len()).map(|i| sizes.get(i)).collect();
+                            let best = |which: fn((bool, bool)) -> bool| {
+                                all.iter()
+                                    .copied()
+                                    .take_while(|&c| which(input.fits(c, room, spare)))
+                                    .last()
+                            };
+                            let want = best(|f| f.0)
+                                .map(|ctx| AutoCtx {
+                                    ctx,
+                                    verdict: Verdict::Green,
+                                })
+                                .or_else(|| {
+                                    best(|f| f.1).map(|ctx| AutoCtx {
+                                        ctx,
+                                        verdict: Verdict::Yellow,
+                                    })
+                                });
+                            assert_eq!(got, want, "{kv:?} {max_ctx:?} {free} {ram} {spare}");
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// How many saved copies a load keeps: as many as fit half of what the computer has
+    /// left after the reserve and the model's own part there, from 1 to 8; the most when
+    /// that is unknown or the model keeps none.
+    #[test]
+    fn copies_take_half_of_what_is_left() {
+        let copy = GB;
+        let at = |spare: u64| copies(copy, Some(spare));
+        assert_eq!(
+            at(0),
+            Copies {
+                count: 1,
+                bytes: GB,
+                short: true
+            }
+        );
+        // One copy fits but takes more than half: still one, never none.
+        assert_eq!((at(GB).count, at(GB).short), (1, false));
+        assert_eq!(at(3 * GB).count, 1);
+        assert_eq!(at(4 * GB).count, 2);
+        assert_eq!((at(17 * GB).count, at(17 * GB).bytes), (8, 8 * GB));
+        assert_eq!(at(1000 * GB).count, MAX_CTX_CHECKPOINTS);
+        assert_eq!(at(u64::MAX).count, MAX_CTX_CHECKPOINTS);
+        // The computer's memory unknown: the most, and never short.
+        assert_eq!(
+            copies(copy, None),
+            Copies {
+                count: 8,
+                bytes: 8 * GB,
+                short: false
+            }
+        );
+        // A model without copies.
+        for spare in [None, Some(0), Some(GB)] {
+            assert_eq!(
+                copies(0, spare),
+                Copies {
+                    count: 8,
+                    bytes: 0,
+                    short: false
+                }
+            );
+        }
+        // Hostile sizes saturate.
+        assert_eq!(copies(u64::MAX, Some(u64::MAX)).count, 1);
+        assert_eq!(copies(u64::MAX, None).bytes, u64::MAX);
+    }
+
+    /// The saved copies never turn a verdict red or change the context (review M2): when
+    /// not even one fits what is left, the verdict is yellow at most. The room they get:
+    /// the computer's memory less the reserve, and less the model where it is there.
+    #[test]
+    fn copies_never_make_a_model_too_large() {
+        let input = FitInput {
+            ctx: 32_768,
+            projector_bytes: 0,
+            ..gemma4(Q8_0, gemma4_kv())
+        };
+        let card = |ram: Option<u64>| Target::Gpu {
+            name: "GPU".into(),
+            free_bytes: 15 * GIB,
+            ram_free_bytes: ram,
+        };
+        // Gemma 4 Q8_0 at 32,768 tokens fits a 15 GB card (15,515,142,880 bytes with the
+        // spare). 0.0.7 before the review: red with 4 GB of the computer's memory free,
+        // because 8 copies (2.5 GiB) did not fit the 2 GB left; now 2 GB / 2 = 1 GB holds 2.
+        let r = check(&input, &card(Some(4 * GB)));
+        assert_eq!(r.verdict, Verdict::Green);
+        assert_eq!((r.copies_bytes, r.copies_short), (2 * GEMMA4_COPY, false));
+        assert_eq!(
+            auto_ctx(&input, Room::graphics_card(15 * GIB, 4 * GB)),
+            Some(AutoCtx {
+                ctx: 32_768,
+                verdict: Verdict::Green
+            })
+        );
+        // 2.2 GB free: one copy (320 MiB) does not fit the 200 MB left: yellow, not red.
+        let r = check(&input, &card(Some(2_200_000_000)));
+        assert_eq!(r.verdict, Verdict::Yellow);
+        assert_eq!((r.copies_bytes, r.copies_short), (GEMMA4_COPY, true));
+        assert_eq!((r.suggested_ctx, r.partial_offload), (None, false));
+        // Nothing free at all: the same.
+        assert_eq!(check(&input, &card(Some(0))).verdict, Verdict::Yellow);
+        // The computer's memory unknown (review m5): not checked, and said so.
+        let r = check(&input, &card(None));
+        assert_eq!(r.verdict, Verdict::Green);
+        assert_eq!((r.copies_bytes, r.copies_short), (8 * GEMMA4_COPY, false));
+        assert!(r.computer_unknown);
+        assert!(!check(&input, &card(Some(0))).computer_unknown);
+        // On the processor the model is in the same memory: what it needs, 14,515,142,880
+        // bytes, is not counted twice; the copies get half of the rest.
+        let r = check(
+            &input,
+            &Target::Cpu {
+                ram_free_bytes: 20 * GB,
+            },
+        );
+        assert_eq!(r.needed_bytes, input.needed_at(32_768));
+        let rest = 18 * GB - input.needed_at(32_768);
+        assert_eq!(r.copies_bytes, (rest / 2 / GEMMA4_COPY) * GEMMA4_COPY);
+        assert_eq!((r.verdict, r.computer_bytes), (Verdict::Green, 0));
+        // With part of the model on the processor (a 12 GB card), the part that does not
+        // fit the card is the computer's too.
+        let r = check(
+            &input,
+            &Target::Gpu {
+                name: "GPU".into(),
+                free_bytes: 12 * GB,
+                ram_free_bytes: Some(32 * GB),
+            },
+        );
+        assert!(r.partial_offload);
+        let spill = input.needed_at(32_768) + SPARE_BYTES - 12 * GB;
+        let left = 30 * GB - spill;
+        assert_eq!(
+            r.copies_bytes,
+            (left / 2 / GEMMA4_COPY).min(8) * GEMMA4_COPY
+        );
+        // A model without copies takes nothing more.
+        let r = check(&input_without_window(), &card(Some(0)));
+        assert_eq!(
+            (r.copies_bytes, r.copies_short, r.verdict),
+            (0, false, Verdict::Green)
+        );
+    }
+
+    /// Round 2, item 1: a graphics card whose computer did not say how much memory is free
+    /// checks the card as ever and the computer's side not at all: unknown is not 0, so a
+    /// model that does not fit the card is yellow (part of it would be on the processor),
+    /// never red, and the answer says the computer's memory could not be read.
+    #[test]
+    fn unknown_computer_memory_is_not_zero() {
+        let room = Room::graphics_card_unknown_computer(15 * GIB);
+        assert_eq!(room.verdict(10 * GB), Verdict::Green);
+        assert_eq!(room.verdict(15 * GIB), Verdict::Yellow);
+        assert_eq!(room.verdict(u64::MAX), Verdict::Yellow);
+        let input = FitInput {
+            ctx: 32_768,
+            projector_bytes: 0,
+            ..gemma4(Q8_0, gemma4_kv())
+        };
+        let card = |free: u64| Target::Gpu {
+            name: "GPU".into(),
+            free_bytes: free,
+            ram_free_bytes: None,
+        };
+        let r = check(&input, &card(15 * GIB));
+        assert_eq!((r.verdict, r.computer_unknown), (Verdict::Green, true));
+        // An 8 GB card: part of it on the processor, which cannot be checked: not red.
+        let r = check(&input, &card(8 * GIB));
+        assert_eq!(r.verdict, Verdict::Yellow);
+        assert!(r.partial_offload && r.computer_unknown && !r.copies_short);
+        // Known to have nothing free, the same model is too large for the 8 GB card.
+        let r = check(
+            &input,
+            &Target::Gpu {
+                name: "GPU".into(),
+                free_bytes: 8 * GIB,
+                ram_free_bytes: Some(0),
+            },
+        );
+        assert_eq!((r.verdict, r.computer_unknown), (Verdict::Red, false));
+    }
+
+    /// Round 2, item 3: on Apple silicon the saved copies take the computer's memory, not
+    /// the Metal working set. A 16 GB Mac with a 10.7 GB working set and 6 GB free: OLMo 3
+    /// 7B at 8,192 tokens (7.8 GB) fits the working set, but the 4 GB left after the reserve
+    /// does not hold even one copy of 1.5 GiB besides it: yellow, never red.
+    #[test]
+    fn apple_copies_take_the_computers_memory() {
+        let olmo3 = KvSize {
+            per_cell: 8 * 16_384,
+            window_per_cell: 24 * 16_384,
+            window: 4096,
+            fixed: 0,
+            checkpoint_per_cell: 24 * 16_384,
+            copy_fixed: 0,
+        };
+        let input = FitInput {
+            weights_bytes: 4_470_000_000,
+            kv: olmo3,
+            vocab_size: 100_278,
+            ctx: 8192,
+            max_ctx: Some(65_536),
+            ..Default::default()
+        };
+        let mac = |ram: Option<u64>| Target::AppleUnified {
+            working_set_bytes: 10_700_000_000,
+            ram_free_bytes: ram,
+        };
+        let r = check(&input, &mac(Some(6 * GB)));
+        assert!(input.needed_at(8192) + SPARE_BYTES <= 10_700_000_000);
+        assert_eq!(r.verdict, Verdict::Yellow);
+        assert_eq!((r.copies_bytes, r.copies_short), (3 * GIB / 2, true));
+        // With 20 GB free the copies fit: half of what is left after the model holds 3.
+        let r = check(&input, &mac(Some(20 * GB)));
+        assert_eq!(r.verdict, Verdict::Green);
+        let left = 18 * GB - input.needed_at(8192);
+        assert_eq!(r.copies_bytes, (left / 2 / (3 * GIB / 2)) * (3 * GIB / 2));
+        assert!(!r.copies_short);
+        // Unknown: not checked, and said.
+        let r = check(&input, &mac(None));
+        assert_eq!(
+            (r.verdict, r.computer_unknown, r.copies_short),
+            (Verdict::Green, true, false)
+        );
+    }
+
+    /// The models whose copies are largest, on a 16 GB card with 16 GB of computer memory
+    /// of which 8 GB is free (review M2): never too large because of the copies. Their
+    /// conversation memory as `crate::kv` reads their headers (see its tests): OLMo 3 7B
+    /// (24 short-memory layers of 32 heads of 128 values, a window of 4,096: a copy of 1.5
+    /// GiB, 12 GiB for 8), Llama 4 Scout (36 chunked layers of 8 heads, 8,192 tokens: 1.125
+    /// GiB) and Gemma 3 27B (52 short-memory layers of 16 heads, 1,024 tokens: 416 MiB).
+    #[test]
+    fn long_window_models_on_a_16_gb_card() {
+        let olmo3 = KvSize {
+            per_cell: 8 * 16_384,
+            window_per_cell: 24 * 16_384,
+            window: 4096,
+            fixed: 0,
+            checkpoint_per_cell: 24 * 16_384,
+            copy_fixed: 0,
+        };
+        assert_eq!(olmo3.copy_bytes(32_768), 3 * GIB / 2);
+        let input = FitInput {
+            weights_bytes: 4_470_000_000,
+            kv: olmo3,
+            vocab_size: 100_278,
+            ctx: 32_768,
+            max_ctx: Some(65_536),
+            ..Default::default()
+        };
+        let card = Target::Gpu {
+            name: "GPU".into(),
+            free_bytes: 15 * GIB,
+            ram_free_bytes: Some(8 * GB),
+        };
+        // About 11 GB on the card; 6 GB left in the computer's memory: one copy (1.5 GiB),
+        // where 0.0.7 before the review said red (12 GiB of copies, "not enough").
+        let r = check(&input, &card);
+        assert!(input.needed_at(32_768) < 11_100_000_000);
+        assert_eq!(r.verdict, Verdict::Green);
+        assert_eq!((r.copies_bytes, r.copies_short), (3 * GIB / 2, false));
+        assert_eq!(auto_ctx(&input, card.room()).map(|a| a.ctx), Some(32_768));
+        // Llama 4 Scout's and Gemma 3 27B's copies, at the same computer's 6 GB left.
+        for (copy, count) in [(9 * GIB / 8, 2), (416 * 1024 * 1024, 6)] {
+            let c = copies(copy, Some(6 * GB));
+            assert_eq!((c.count, c.short), (count, false), "{copy}");
+        }
+        // Every amount free: never red, and Automatic never gives up, because of copies.
+        for ram in (0..=16).map(|g| g * GB) {
+            let card = Target::Gpu {
+                name: "GPU".into(),
+                free_bytes: 15 * GIB,
+                ram_free_bytes: Some(ram),
+            };
+            let r = check(&input, &card);
+            assert_ne!(r.verdict, Verdict::Red, "{ram}");
+            assert_eq!(r.copies_short, ram < 2 * GB + 3 * GIB / 2, "{ram}");
+            assert!(auto_ctx(&input, card.room()).is_some(), "{ram}");
+        }
+    }
+
+    fn input_without_window() -> FitInput {
+        input(4 * GB, 8192)
     }
 }

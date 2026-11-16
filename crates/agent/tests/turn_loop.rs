@@ -35,6 +35,10 @@ enum Behaviour {
 
 struct FakeTools {
     tools: Vec<ToolInfo>,
+    /// [0.0.7] On in the chat but kept back this turn.
+    kept_back: Vec<ToolInfo>,
+    /// [0.0.7] On in the chat but never run by this host (a helper's), with the reply.
+    refusals: Vec<(String, String)>,
     validators: Vec<(String, jsonschema::Validator)>,
     behaviour: Mutex<HashMap<String, Behaviour>>,
     executed: Mutex<Vec<(String, Map<String, Value>)>>,
@@ -85,6 +89,8 @@ impl FakeTools {
             .collect();
         Self {
             tools,
+            kept_back: Vec::new(),
+            refusals: Vec::new(),
             validators,
             behaviour: Mutex::new(HashMap::new()),
             executed: Mutex::new(Vec::new()),
@@ -102,12 +108,33 @@ impl FakeTools {
     fn executed(&self) -> Vec<(String, Map<String, Value>)> {
         self.executed.lock().unwrap().clone()
     }
+
+    fn keeping_back(mut self, tools: Vec<ToolInfo>) -> Self {
+        self.kept_back = tools;
+        self
+    }
+
+    fn refusing(mut self, name: &str, why: &str) -> Self {
+        self.refusals.push((name.to_owned(), why.to_owned()));
+        self
+    }
 }
 
 #[async_trait]
 impl ToolHost for FakeTools {
     fn tools(&self) -> Vec<ToolInfo> {
         self.tools.clone()
+    }
+
+    fn kept_back(&self) -> Vec<ToolInfo> {
+        self.kept_back.clone()
+    }
+
+    fn refusal(&self, name: &str) -> Option<String> {
+        self.refusals
+            .iter()
+            .find(|(refused, _)| refused == name)
+            .map(|(_, why)| why.clone())
     }
 
     fn validate(&self, name: &str, args: &Value) -> Result<(), Vec<String>> {
@@ -815,6 +842,721 @@ async fn the_same_call_repeated_gets_a_note_then_ends_the_turn() {
             > noted.find("</tool_output").unwrap(),
         "{noted}"
     );
+    // The note says where the turn ends.
+    assert!(
+        results[2].notes[0].contains("; 5 times ends the turn."),
+        "{:?}",
+        results[2].notes
+    );
+}
+
+// ---- [0.0.7] the repeat limit the user sets ------------------------------------------------
+
+/// `calls` identical calls, then an answer, with the repeat limit `limit`, in a context
+/// large enough for a hundred steps.
+async fn repeated(limit: u32, calls: usize) -> (TurnOutcome, Harness) {
+    let same = || reply_text(sse::tool_call("c", "read_file", json!({"path": "/p/a"})));
+    let mut replies: Vec<Reply> = (0..calls).map(|_| same()).collect();
+    replies.push(reply_text(sse::text("Stopping.")));
+    let h = Harness::new(replies).await;
+    h.grant_files();
+    let mut turn = input("Read a");
+    turn.repeat_limit = limit;
+    turn.step_cap = 200;
+    turn.caps.n_ctx = 131_072;
+    let outcome = h.run(turn).await;
+    (outcome, h)
+}
+
+/// A limit of 2: the second identical call ends the turn, with no note before it.
+#[tokio::test]
+async fn a_repeat_limit_of_two_ends_the_turn_at_the_second_identical_call() {
+    let (outcome, h) = repeated(2, 2).await;
+    assert_eq!(outcome.status, TurnStatus::LoopDetected);
+    assert_eq!(h.tools.executed().len(), 1);
+    let results = results(&outcome);
+    assert_eq!(results.len(), 2);
+    assert!(results[0].notes.is_empty(), "{:?}", results[0].notes);
+    assert_eq!(results[1].status, CallStatus::NotRun);
+    assert!(
+        results[1].notes[0].contains("2 times in a row"),
+        "{:?}",
+        results[1].notes
+    );
+    assert_eq!(h.chats().last().unwrap()["tool_choice"], json!("none"));
+}
+
+/// 5, the default, set by the user: as before 0.0.7.
+#[tokio::test]
+async fn a_repeat_limit_of_five_notes_from_the_third_call() {
+    let (outcome, h) = repeated(5, 5).await;
+    assert_eq!(outcome.status, TurnStatus::LoopDetected);
+    assert_eq!(h.tools.executed().len(), 4);
+    let results = results(&outcome);
+    assert!(results[1].notes.is_empty());
+    assert!(results[2].notes[0].contains("3 times in a row; 5 times ends the turn."));
+    assert_eq!(results[4].status, CallStatus::NotRun);
+}
+
+/// 100, the most: the same call runs 99 times, with the note from the 98th.
+#[tokio::test]
+async fn a_repeat_limit_of_one_hundred_lets_the_call_run_ninety_nine_times() {
+    let (outcome, h) = repeated(100, 100).await;
+    assert_eq!(outcome.status, TurnStatus::LoopDetected);
+    assert_eq!(h.tools.executed().len(), 99);
+    let results = results(&outcome);
+    assert_eq!(results.len(), 100);
+    assert!(results[96].notes.is_empty(), "{:?}", results[96].notes);
+    assert!(
+        results[97].notes[0].contains("98 times in a row; 100 times ends the turn."),
+        "{:?}",
+        results[97].notes
+    );
+    assert!(results[98].notes[0].contains("99 times in a row"));
+    assert_eq!(results[99].status, CallStatus::NotRun);
+    assert!(results[99].notes[0].contains("100 times in a row"));
+}
+
+/// A stored value nobody checked (0, or far too many) is held to 2..=100: it neither ends
+/// the turn at the first call nor lets a loop run on.
+#[tokio::test]
+async fn a_tampered_repeat_limit_is_held_to_its_range() {
+    for limit in [0, 1] {
+        let (outcome, h) = repeated(limit, 2).await;
+        assert_eq!(outcome.status, TurnStatus::LoopDetected, "{limit}");
+        assert_eq!(h.tools.executed().len(), 1, "{limit}");
+    }
+    let (outcome, h) = repeated(u32::MAX, 100).await;
+    assert_eq!(outcome.status, TurnStatus::LoopDetected);
+    assert_eq!(h.tools.executed().len(), 99);
+    // A different call in between starts the count again.
+    let call = |path: &str| reply_text(sse::tool_call("c", "read_file", json!({"path": path})));
+    let h = Harness::new(vec![
+        call("/p/a"),
+        call("/p/b"),
+        call("/p/a"),
+        reply_text(sse::text("Done.")),
+    ])
+    .await;
+    h.grant_files();
+    let mut turn = input("Read");
+    turn.repeat_limit = 2;
+    assert_eq!(h.run(turn).await.status, TurnStatus::Completed);
+    assert_eq!(h.tools.executed().len(), 3);
+}
+
+// ---- [0.0.7] the tool list in the system message --------------------------------------------
+
+/// Every tool that is on: the three the turn shows, `call_tool`, and two it keeps back.
+fn listed_tools() -> agent::prompt::ToolGuide {
+    let own = |label: &str, tools: &[(&str, &str)]| agent::prompt::ToolGroup {
+        label: label.into(),
+        own: true,
+        tools: tools
+            .iter()
+            .map(|(name, purpose)| agent::prompt::ListedTool {
+                name: (*name).into(),
+                purpose: (*purpose).into(),
+            })
+            .collect(),
+    };
+    agent::prompt::ToolGuide {
+        groups: vec![
+            own(
+                "Files",
+                &[
+                    ("read_file", "Read a text file."),
+                    ("write_file", "Write a text file."),
+                ],
+            ),
+            own("Web", &[("fetch", "Fetch a URL.")]),
+            own(
+                "Git",
+                &[
+                    ("git_status", "Show which files have changed."),
+                    ("git_commit", "Commit the changes."),
+                ],
+            ),
+        ],
+        reach: agent::prompt::Reach::CallTool,
+        os: agent::prompt::GuideOs::Windows,
+        budget: agent::prompt::tool_guide_budget(8_192),
+        sections: Vec::new(),
+    }
+}
+
+fn call_tool() -> ToolInfo {
+    tool(
+        "call_tool",
+        "Run a tool that is on in this chat but is not in your tool list this turn.",
+        json!({"type": "object", "properties": {"name": {"type": "string"}, "arguments": {"type": "object"}}, "required": ["name"], "additionalProperties": false}),
+    )
+}
+
+/// The list goes into the system message of every request when tools are on, the same in
+/// each, and names the tools the turn keeps back; without tool support there is none.
+#[tokio::test]
+async fn the_tool_list_is_in_every_request_while_tools_are_on() {
+    let mut h = Harness::new(vec![
+        reply_text(sse::tool_call("c1", "read_file", json!({"path": "/p/a"}))),
+        reply_text(sse::text("Done.")),
+    ])
+    .await;
+    let mut tools = default_tools();
+    tools.push(call_tool());
+    h.tools = FakeTools::new(tools);
+    h.grant_files();
+    let mut turn = input("Read a");
+    turn.tool_guide = Some(listed_tools());
+    assert_eq!(h.run(turn).await.status, TurnStatus::Completed);
+    let chats = h.chats();
+    assert_eq!(chats.len(), 2);
+    let system = |chat: &Value| chat["messages"][0]["content"].as_str().unwrap().to_owned();
+    assert_eq!(system(&chats[0]), system(&chats[1]));
+    let first = system(&chats[0]);
+    assert!(
+        first.contains("</agent_instructions>\n\n<tool_list>\n"),
+        "{first}"
+    );
+    assert!(first.contains("git_commit"), "{first}");
+    assert!(first.contains("run it with call_tool"), "{first}");
+    assert!(first.contains("<tool_call_guide>"), "{first}");
+
+    // A model without tool support gets neither the preamble nor the list.
+    let h = Harness::new(vec![reply_text(sse::text("Hello."))]).await;
+    let mut turn = input("Hi");
+    turn.caps.tools = false;
+    turn.tool_guide = Some(listed_tools());
+    assert_eq!(h.run(turn).await.status, TurnStatus::Completed);
+    let first = system(&h.chats()[0]);
+    assert!(
+        !first.contains("tool_list") && !first.contains("agent_instructions"),
+        "{first}"
+    );
+}
+
+/// A model that calls a tool the list names but the turn did not show is told to run it
+/// with call_tool; an unknown name still gets the list of the tools it has.
+#[tokio::test]
+async fn a_listed_tool_that_is_not_shown_is_run_with_call_tool() {
+    let mut h = Harness::new(vec![
+        reply_text(sse::tool_call("c1", "git_status", json!({}))),
+        reply_text(sse::tool_call("c2", "made_up", json!({}))),
+        reply_text(sse::text("Done.")),
+    ])
+    .await;
+    let mut tools = default_tools();
+    tools.push(call_tool());
+    h.tools = FakeTools::new(tools);
+    let mut turn = input("What changed?");
+    turn.tool_guide = Some(listed_tools());
+    let outcome = h.run(turn).await;
+    assert_eq!(outcome.status, TurnStatus::Completed);
+    let results = results(&outcome);
+    assert_eq!(
+        results[0].notes[0],
+        "git_status is on in this chat but not in your list of callable tools this turn, so it \
+         was not run. Run it with call_tool, giving \"name\": \"git_status\" and its arguments in \
+         \"arguments\"."
+    );
+    assert!(
+        results[1].notes[0].starts_with("No such tool: made_up; available: read_file"),
+        "{:?}",
+        results[1].notes
+    );
+    // [0.0.7 review M1] Without call_tool in the turn's list (no room for it), the model is
+    // told the tool does not fit this turn, not sent to call_tool.
+    let h = Harness::new(vec![
+        reply_text(sse::tool_call("c1", "git_status", json!({}))),
+        reply_text(sse::text("Done.")),
+    ])
+    .await;
+    let mut turn = input("What changed?");
+    turn.tool_guide = Some(listed_tools());
+    let outcome = h.run(turn).await;
+    assert_eq!(
+        results_of_first(&outcome),
+        "git_status is on in this chat, but it does not fit in this model's context this turn, \
+         so it was not run. Use the tools in your list of callable tools, or answer with what \
+         you have."
+    );
+}
+
+/// [0.0.7 review M1] A small context may leave no room for call_tool: the list then never
+/// sends the model to it, nor says that every tool is in its list. With every listed tool in
+/// the turn's list, it says so.
+#[tokio::test]
+async fn without_call_tool_the_list_says_the_others_cannot_be_used_this_turn() {
+    let system = |h: &Harness| {
+        h.chats()[0]["messages"][0]["content"]
+            .as_str()
+            .unwrap()
+            .to_owned()
+    };
+    let h = Harness::new(vec![reply_text(sse::text("Done."))]).await;
+    let mut turn = input("What changed?");
+    turn.tool_guide = Some(listed_tools());
+    assert_eq!(h.run(turn).await.status, TurnStatus::Completed);
+    let some = system(&h);
+    assert!(
+        some.contains(
+            "Only the ones in your list of callable tools can be used this turn: the others do \
+             not fit in this model's context."
+        ),
+        "{some}"
+    );
+    for word in ["call_tool", "find_tools", "All of them"] {
+        assert!(!some.contains(word), "{word} in {some}");
+    }
+    assert!(some.contains("\nGit: git_status, git_commit\n"), "{some}");
+
+    let mut h = Harness::new(vec![reply_text(sse::text("Done."))]).await;
+    let mut all = default_tools();
+    all.push(tool("git_status", "Status.", json!({"type": "object"})));
+    all.push(tool("git_commit", "Commit.", json!({"type": "object"})));
+    h.tools = FakeTools::new(all);
+    let mut turn = input("Hi");
+    turn.tool_guide = Some(listed_tools());
+    assert_eq!(h.run(turn).await.status, TurnStatus::Completed);
+    let every = system(&h);
+    assert!(
+        every.contains("All of them are in your list of callable tools."),
+        "{every}"
+    );
+    assert!(!every.contains("call_tool"), "{every}");
+}
+
+fn results_of_first(outcome: &TurnOutcome) -> String {
+    results(outcome)[0].notes[0].clone()
+}
+
+/// The list with `run_subagent` on as well, last as the app lists it.
+fn listed_with_subagent() -> agent::prompt::ToolGuide {
+    let mut guide = listed_tools();
+    guide.groups.push(agent::prompt::ToolGroup {
+        label: "Subagents".into(),
+        own: true,
+        tools: vec![agent::prompt::ListedTool {
+            name: "run_subagent".into(),
+            purpose: "Hand a task to a helper.".into(),
+        }],
+    });
+    guide
+}
+
+fn run_subagent() -> ToolInfo {
+    tool(
+        "run_subagent",
+        "Hand a self-contained task to a helper.",
+        json!({"type": "object", "properties": {"task": {"type": "string"}}, "required": ["task"]}),
+    )
+}
+
+const NO_NESTING: &str =
+    "A helper cannot start another helper. Do the work yourself with the tools you have.";
+
+/// [0.0.7 verification] A helper gets the turn's tool list unchanged, so its system message is
+/// the turn's and its tool definitions are the start of the turn's (`run_subagent` comes last):
+/// the model server reuses the turn's cached prompt for it. A call to a tool its host never
+/// runs gets that host's plain refusal, not a pointer to call_tool.
+#[tokio::test]
+async fn a_helper_shares_the_turns_system_message_and_tool_definitions() {
+    let system = |chat: &Value| chat["messages"][0]["content"].as_str().unwrap().to_owned();
+    let names = |chat: &Value| -> Vec<String> {
+        chat["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|t| t["function"]["name"].as_str().unwrap().to_owned())
+            .collect()
+    };
+    for with_call_tool in [true, false] {
+        let mut turn_tools = default_tools();
+        if with_call_tool {
+            turn_tools.push(call_tool());
+        }
+        let mut helper_tools = turn_tools.clone();
+        turn_tools.push(run_subagent());
+        let mut turn = Harness::new(vec![reply_text(sse::text("Done."))]).await;
+        turn.tools = FakeTools::new(turn_tools);
+        let mut input_turn = input("Read a");
+        input_turn.tool_guide = Some(listed_with_subagent());
+        assert_eq!(turn.run(input_turn).await.status, TurnStatus::Completed);
+
+        let mut helper = Harness::new(vec![
+            reply_text(sse::tool_call(
+                "c1",
+                "run_subagent",
+                json!({"task": "read it"}),
+            )),
+            reply_text(sse::text("Done.")),
+        ])
+        .await;
+        helper_tools.retain(|t| t.name != "run_subagent");
+        helper.tools = FakeTools::new(helper_tools).refusing("run_subagent", NO_NESTING);
+        let mut input_helper = input("Read a");
+        input_helper.tool_guide = Some(listed_with_subagent());
+        let outcome = helper.run(input_helper).await;
+        assert_eq!(outcome.status, TurnStatus::Completed);
+
+        let (a, b) = (&turn.chats()[0], &helper.chats()[0]);
+        assert_eq!(system(a), system(b), "call_tool offered: {with_call_tool}");
+        let (turn_names, helper_names) = (names(a), names(b));
+        assert_eq!(turn_names[..helper_names.len()], helper_names[..]);
+        assert_eq!(results_of_first(&outcome), NO_NESTING);
+    }
+}
+
+/// The system message of a turn that offers `tools`, with `guide` as its tool list.
+async fn system_with(tools: Vec<ToolInfo>, guide: agent::prompt::ToolGuide) -> String {
+    let mut h = Harness::new(vec![reply_text(sse::text("Done."))]).await;
+    h.tools = FakeTools::new(tools);
+    let mut turn = input("Hi");
+    turn.tool_guide = Some(guide);
+    assert_eq!(h.run(turn).await.status, TurnStatus::Completed);
+    h.chats()[0]["messages"][0]["content"]
+        .as_str()
+        .unwrap()
+        .to_owned()
+}
+
+/// [0.0.7] The list and the guide follow what is on, not what a turn shows: turns that show
+/// different tools (call_tool among them) send the same system message, the parts of the guide
+/// the app writes about its own tools included.
+#[tokio::test]
+async fn the_list_and_guide_do_not_follow_what_a_turn_shows() {
+    let mut guide = listed_tools();
+    guide.groups.push(agent::prompt::ToolGroup {
+        label: "Browser".into(),
+        own: true,
+        tools: vec![agent::prompt::ListedTool {
+            name: "browser_capture_site".into(),
+            purpose: "Save a web page's look.".into(),
+        }],
+    });
+    guide.sections.push(agent::prompt::GuideSection {
+        tool: "browser_capture_site".into(),
+        full: vec!["Rebuilding a website's look (browser_capture_site):".into()],
+        short: "Website capture: rebuild with the user's own content.".into(),
+    });
+    let mut few = default_tools();
+    few.truncate(1);
+    few.push(call_tool());
+    let mut many = default_tools();
+    many.push(call_tool());
+    many.push(tool("git_status", "Status.", json!({"type": "object"})));
+    let a = system_with(few, guide.clone()).await;
+    let b = system_with(many, guide).await;
+    assert_eq!(a, b);
+    assert!(
+        a.contains("Rebuilding a website's look (browser_capture_site):"),
+        "{a}"
+    );
+}
+
+/// [0.0.7 verification] call_tool cannot run run_subagent: the list says so, and a call to
+/// run_subagent when the turn had no room for it says why it was not run instead of sending
+/// the model to call_tool.
+#[tokio::test]
+async fn run_subagent_without_room_is_not_sent_to_call_tool() {
+    let mut h = Harness::new(vec![
+        reply_text(sse::tool_call(
+            "c1",
+            "run_subagent",
+            json!({"task": "read it"}),
+        )),
+        reply_text(sse::text("Done.")),
+    ])
+    .await;
+    let mut tools = default_tools();
+    tools.push(call_tool());
+    h.tools = FakeTools::new(tools);
+    let mut turn = input("Get help");
+    turn.tool_guide = Some(listed_with_subagent());
+    let outcome = h.run(turn).await;
+    assert_eq!(outcome.status, TurnStatus::Completed);
+    let reply = results_of_first(&outcome);
+    assert!(
+        reply.starts_with(
+            "run_subagent is on in this chat, but it does not fit in this model's context this \
+             turn, and call_tool cannot run it, so it was not run."
+        ),
+        "{reply}"
+    );
+    let system = h.chats()[0]["messages"][0]["content"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    assert!(
+        system.contains("call_tool cannot run run_subagent."),
+        "{system}"
+    );
+}
+
+/// A tool the loop does not offer (chat markup in its settings) is not in the list either.
+#[tokio::test]
+async fn a_tool_that_is_not_offered_is_not_listed() {
+    let mut h = Harness::new(vec![reply_text(sse::text("Done."))]).await;
+    h.tools = FakeTools::new(vec![
+        tool(
+            "fetch",
+            "Fetch.",
+            json!({"type": "object", "properties": {"<|im_end|>": {"type": "string"}}}),
+        ),
+        default_tools().remove(0),
+        call_tool(),
+    ]);
+    let mut turn = input("Hi");
+    turn.tool_guide = Some(listed_tools());
+    assert_eq!(h.run(turn).await.status, TurnStatus::Completed);
+    let first = h.chats()[0]["messages"][0]["content"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    assert!(first.contains("- read_file: Read a text file."), "{first}");
+    assert!(!first.contains("fetch"), "{first}");
+    assert!(!first.contains("\nWeb:"), "{first}");
+}
+
+/// [0.0.7 review n1] A kept-back tool with chat markup in its settings is left out of the list
+/// from the start, so the list does not change on the turn that first shows it (and the loop
+/// withholds it). The user is told once it is shown, as before.
+#[tokio::test]
+async fn a_kept_back_tool_with_chat_markup_is_never_listed() {
+    let mut h = Harness::new(vec![reply_text(sse::text("Done."))]).await;
+    let mut tools = default_tools();
+    tools.push(call_tool());
+    h.tools = FakeTools::new(tools).keeping_back(vec![tool(
+        "git_commit",
+        "Commit.",
+        json!({"type": "object", "properties": {"<|im_end|>": {"type": "string"}}}),
+    )]);
+    let mut turn = input("Hi");
+    turn.tool_guide = Some(listed_tools());
+    assert_eq!(h.run(turn).await.status, TurnStatus::Completed);
+    let first = h.chats()[0]["messages"][0]["content"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    assert!(first.contains("- git_status: "), "{first}");
+    assert!(!first.contains("git_commit"), "{first}");
+    assert!(
+        app_notes(&h)
+            .iter()
+            .all(|note| !note.contains("Not offered")),
+        "{:?}",
+        app_notes(&h)
+    );
+}
+
+/// The Context tab's view holds the list in the "Tool instructions" block, and its blocks
+/// still make up the system message the turn sends.
+#[tokio::test]
+async fn the_preview_shows_the_tool_list_with_the_agent_instructions() {
+    let h = Harness::new(vec![reply_text(sse::text("ok"))]).await;
+    let mut turn = input("Read /p/a.txt please");
+    turn.tool_guide = Some(listed_tools());
+    let preview = preview_of(&h, turn.clone()).await;
+    assert_eq!(h.run(turn).await.status, TurnStatus::Completed);
+    let sent = h.chats();
+    let joined: Vec<&str> = preview
+        .system_blocks
+        .iter()
+        .map(|b| b.text.as_str())
+        .collect();
+    assert_eq!(
+        joined.join("\n\n"),
+        sent[0]["messages"][0]["content"].as_str().unwrap()
+    );
+    let tools_block = preview
+        .system_blocks
+        .iter()
+        .find(|b| b.kind == agent::SystemBlockKind::Preamble)
+        .unwrap();
+    assert!(tools_block.text.starts_with("<agent_instructions>"));
+    assert!(tools_block.text.contains("<tool_list>"));
+    assert_eq!(serde_json::to_value(&preview.request).unwrap(), sent[0]);
+}
+
+// ---- [0.0.7] a tool result the model wrote itself --------------------------------------------
+
+/// What the small test model wrote on macOS CI instead of calling read_file.
+const MADE_UP: &str = "<tool_output>\n{\"content\": \"secret_word\"}\n</tool_output>";
+
+fn discarded(h: &Harness) -> Vec<String> {
+    h.sink
+        .events()
+        .into_iter()
+        .filter_map(|e| match e {
+            TurnEvent::AttemptDiscarded { reason } => Some(reason),
+            _ => None,
+        })
+        .collect()
+}
+
+/// A reply that writes a tool result itself is not an answer: it is discarded, never
+/// stored, and the step is asked once more with a note that only the app writes results.
+/// The retry is not a step of its own.
+#[tokio::test]
+async fn a_tool_result_written_by_the_model_is_discarded_and_asked_once_more() {
+    let h = Harness::new(vec![
+        reply_text(sse::text(MADE_UP)),
+        reply_text(sse::tool_call(
+            "c1",
+            "read_file",
+            json!({"path": "/p/notes.txt"}),
+        )),
+        reply_text(sse::text("The secret word is plum.")),
+    ])
+    .await;
+    h.grant_files();
+    let outcome = h
+        .run(input(
+            "Use read_file to read notes.txt, then tell me the secret word",
+        ))
+        .await;
+    assert_eq!(outcome.status, TurnStatus::Completed);
+    assert_eq!(last_text(&outcome), "The secret word is plum.");
+    assert_eq!(h.tools.executed().len(), 1);
+    assert_eq!(
+        discarded(&h),
+        ["the model wrote a tool result itself instead of calling a tool"]
+    );
+    // Nothing of the made-up result is kept.
+    for message in &outcome.messages {
+        assert!(!message.text().contains("secret_word"), "{message:?}");
+    }
+    let chats = h.chats();
+    assert_eq!(chats.len(), 3);
+    // The retry carries the note after the user's message; the first request and the one
+    // after it do not.
+    let note = format!("[App note] {}", agent::turn::WROTE_A_RESULT_NOTE);
+    assert!(!all_text(&chats[0]).contains(&note));
+    let user = message_contents(&chats[1]).last().cloned().unwrap();
+    assert!(user.ends_with(&note), "{user}");
+    assert!(!all_text(&chats[2]).contains(&note));
+    assert!(
+        agent::turn::WROTE_A_RESULT_NOTE
+            .contains("only the app runs tools and writes their results")
+    );
+    let steps = h
+        .sink
+        .events()
+        .iter()
+        .filter(|e| matches!(e, TurnEvent::StepStarted { .. }))
+        .count();
+    assert_eq!(steps, 2);
+    // The user is not told of a made-up result: none was kept.
+    assert!(
+        !app_notes(&h)
+            .iter()
+            .any(|n| n == agent::turn::MADE_UP_RESULT_NOTE),
+        "{:?}",
+        app_notes(&h)
+    );
+}
+
+/// Asked once more, the model writes one again: that reply is the answer, the user is told
+/// the result is made up, and nothing is asked a third time.
+#[tokio::test]
+async fn a_second_made_up_result_is_kept_and_the_user_is_told() {
+    let again = "Here it is:\n<TOOL_OUTPUT>{\"content\": \"plum\"}</TOOL_OUTPUT>";
+    let h = Harness::new(vec![
+        reply_text(sse::text(MADE_UP)),
+        reply_text(sse::text(again)),
+    ])
+    .await;
+    let outcome = h.run(input("Read notes.txt")).await;
+    assert_eq!(outcome.status, TurnStatus::Completed);
+    assert_eq!(last_text(&outcome), again);
+    assert_eq!(h.chats().len(), 2);
+    assert_eq!(discarded(&h).len(), 1);
+    let told: Vec<String> = app_notes(&h)
+        .into_iter()
+        .filter(|n| n == agent::turn::MADE_UP_RESULT_NOTE)
+        .collect();
+    assert_eq!(told.len(), 1, "{:?}", app_notes(&h));
+}
+
+/// The tag inside code is an example, and without tools nothing is asked again.
+#[tokio::test]
+async fn a_result_tag_in_code_or_without_tools_is_an_answer() {
+    let example = "Results come back in a `<tool_output>` block, like this:\n```\n<tool_output>…</tool_output>\n```";
+    let h = Harness::new(vec![reply_text(sse::text(example))]).await;
+    let outcome = h.run(input("How do tool results look?")).await;
+    assert_eq!(outcome.status, TurnStatus::Completed);
+    assert_eq!(last_text(&outcome), example);
+    assert_eq!(h.chats().len(), 1);
+    assert!(discarded(&h).is_empty());
+
+    let h = Harness::new(vec![reply_text(sse::text(MADE_UP))]).await;
+    let mut turn = input("Hi");
+    turn.caps.tools = false;
+    let outcome = h.run(turn).await;
+    assert_eq!(outcome.status, TurnStatus::Completed);
+    assert_eq!(h.chats().len(), 1);
+    assert!(discarded(&h).is_empty());
+}
+
+/// [0.0.7 verification] A model that quotes the result it got in a result block has made
+/// nothing up: the answer stands.
+#[tokio::test]
+async fn a_model_that_quotes_the_result_it_got_has_made_nothing_up() {
+    let answer = "read_file returned:\n<tool_output>\nThe secret word is plum.\n</tool_output>\nSo \
+                  the secret word is plum.";
+    let h = Harness::new(vec![
+        reply_text(sse::tool_call("c1", "read_file", json!({"path": "/p/a"}))),
+        reply_text(sse::text(answer)),
+    ])
+    .await;
+    h.grant_files();
+    h.tools.set(
+        "read_file",
+        Behaviour::Text("The secret word is plum.".into()),
+    );
+    let outcome = h.run(input("What is the secret word?")).await;
+    assert_eq!(outcome.status, TurnStatus::Completed);
+    assert_eq!(last_text(&outcome), answer);
+    assert_eq!(h.chats().len(), 2);
+    assert!(discarded(&h).is_empty());
+}
+
+/// [0.0.7 review m2] A tag named in a sentence is prose: the answer is the model's, kept as it
+/// is, and nothing is asked again.
+#[tokio::test]
+async fn a_result_tag_named_in_a_sentence_is_an_answer() {
+    let answer = "Results arrive in <tool_output> blocks. According to the <tool_output> of \
+                  read_file, the secret word is plum.";
+    let h = Harness::new(vec![reply_text(sse::text(answer))]).await;
+    let outcome = h.run(input("What does the file say?")).await;
+    assert_eq!(outcome.status, TurnStatus::Completed);
+    assert_eq!(last_text(&outcome), answer);
+    assert_eq!(h.chats().len(), 1);
+    assert!(discarded(&h).is_empty());
+}
+
+/// It counts as a mistake, so it cannot go on and on: five calls to tools that do not exist,
+/// then a made-up result (the sixth mistake), and the call the retry makes is not run: the
+/// turn ends on its mistake budget.
+#[tokio::test]
+async fn a_made_up_result_counts_as_a_mistake() {
+    let mut replies: Vec<Reply> = (1..=5)
+        .map(|i| reply_text(sse::tool_call("c", &format!("tool_{i}"), json!({}))))
+        .collect();
+    replies.push(reply_text(sse::text(MADE_UP)));
+    replies.push(reply_text(sse::tool_call(
+        "c6",
+        "read_file",
+        json!({"path": "/p/notes.txt"}),
+    )));
+    replies.push(reply_text(sse::text("I could not finish.")));
+    let h = Harness::new(replies).await;
+    h.grant_files();
+    let outcome = h.run(input("Do things")).await;
+    assert_eq!(outcome.status, TurnStatus::MistakeBudget);
+    assert_eq!(discarded(&h).len(), 1);
+    assert!(h.tools.executed().is_empty());
+    assert_eq!(h.chats().len(), 8);
 }
 
 #[tokio::test]

@@ -36,7 +36,19 @@ built, not by the model's good behaviour:
 - An approval is resolved by a random request id created in Rust and delivered only to
   the main window.
 - Computer-use input is refused on the app's own windows, so a model cannot click
-  *Allow* on its own approval card.
+  *Allow* on its own approval card. Since 0.0.7 the app minimises its window before
+  approved computer input that the window is in the way of, and brings it back for every
+  approval card of that chat, in front of your other windows but without taking the
+  keyboard. Each time it comes back, approval cards and the Allow all and Full access
+  confirmations ignore clicks for a moment, so a click meant for another app cannot
+  approve an action or switch the mode. Without a card answered just now (a grant, Allow
+  all) the app steps aside only when you have not touched the keyboard or mouse for 1.5
+  seconds (a key pressed within a few hundredths of a second of the model's own input can
+  be taken for the model's). It hands the
+  keyboard to the window the input was planned for only while it has the keyboard itself
+  and Stop was not pressed, checked in the step that moves it. The check before every
+  input event is unchanged, so input that would still reach the app's window (it did not
+  go, or you brought it back) is refused.
 
 **It can use permissions you already granted.** If you allowed reads in a folder and also
 allowed an action that sends data out, data can leave without a new card. To close the
@@ -141,6 +153,105 @@ folder ("harnessUI + 2 more"), "No folder · Choose", or "Whole computer" in Ful
 menu lists the full paths, with hidden characters shown as visible escapes. In Allow all it
 says that terminal commands are not held to these folders; in Full access it says that a
 program the terminal starts could still reach harnessUI's own folders.
+
+## Website capture (0.0.7)
+
+`browser_capture_site` saves a copy of a web page's front end so a model can study its
+design and rebuild it with your own content. The tool's description tells the model it is
+not for reproducing other people's logos, brand names or sign-in pages; nothing in the app
+can check what a model then does with the copy.
+
+- **What it saves, and where.** Into a new folder inside a folder you approved (never
+  overwriting anything): the page as shown, every style sheet, the pictures, fonts, icons,
+  Lottie animations and small videos the page loaded, its scripts as `.txt` files,
+  `animations.json`, screenshots and `report.md`. At most 300 MB and 2,000 files, and no file
+  over 25 MB; what was left out is listed with the reason. Saving is a write: in Ask first a
+  card says what, where and how much, and *Allow for this chat* covers that site into that
+  folder only. A folder outside the approved ones, the app's own folders and skill folders
+  are refused in every mode; a `.git`, ssh or autostart folder always asks. The folder is
+  checked again just before writing, every file is created new, and file names come from
+  the app (lower-case letters, digits, `-`, `_`, `.`; no Windows device names; at most 80
+  bytes), never from the website.
+- **Network rules.** The page opens in the agent's own browser with its own profile, so
+  your sign-ins and cookies are never used. While the capture runs, every web request of
+  that browser (pictures, fonts, scripts and style sheets too, not only pages) is paused and
+  checked like a page load: http and https only, nothing on loopback, private, link-local
+  or other blocked addresses, judged on the address the name resolves to. That includes
+  the requests of the page's workers: a shared worker's are paused on its own debugging
+  session before it may run, a dedicated worker's where the browser pauses them, with its
+  page's. **Service workers do not run during a capture**: the browser accepts the request
+  checks on one but does not apply them to a service worker that a site installed earlier
+  and that starts again (tried in Chrome 153), so every service worker that starts during
+  the capture is kept waiting and stopped when it ends; the report says that anything the
+  page would have had from it is missing. Shared and service workers that already run when
+  the capture starts are stopped first, because what they hold came from requests that
+  were never checked one by one. If one cannot be stopped, or a shared worker's requests
+  cannot be paused, the capture stops and saves nothing. Only responses to
+  requests that passed those checks are saved, and a response that reached the browser from
+  a blocked address on a direct connection is refused even if the name looked public when
+  it was checked. The capture only reads: it never clicks, types or submits, so no form is
+  sent; the site's own scripts run in the agent's browser while the page is open, as on any
+  visit.
+- **Connections those checks cannot see.** The browser's request checks see web requests,
+  not WebSocket, WebTransport or WebRTC connections. During a capture the page being
+  captured (its documents, including frames' documents where the browser lets the app
+  change them and a redirect without a `Location` that the browser shows as a page, and its
+  workers' scripts) gets an extra policy that refuses WebSocket
+  connections, so a page cannot read a device on your network through one. The tab, its
+  frames and its workers, and any shared or service worker, are also watched: if a
+  WebSocket, WebTransport or direct-socket connection starts anyway, the capture stops and
+  saves nothing, because what came over it could be from your own network. **WebRTC cannot
+  be blocked or watched this way**: a page can still use it while it is open (in the
+  capture as in normal browsing), for example to probe addresses on your network; nothing
+  received over it is told apart in the copy. A WebTransport connection to a public address
+  is not refused by that policy (it is stopped by the watch above). Current Chrome and Edge
+  also refuse, by themselves, a public page's connections to private and local addresses
+  (their Local Network Access check, with permission prompts denied in the agent's browser);
+  older browsers do not.
+- **The copy runs nothing and loads nothing from elsewhere.** `index.html` is built in two
+  steps. The page script copies the page into an inert document, without scripts, frames'
+  contents, embedded objects, event handlers and `javascript:`/`file:` addresses. Then the
+  app parses that HTML again exactly as a browser opening the file would (so elements a
+  page disguised, a replaced root or an attribute named like a tag become the real thing)
+  and cleans the tree: no `script`, `noscript`, `iframe` (kept as an empty box), `embed`,
+  `object`, `frame`, `base`, SVG `foreignObject` or animations that set an address, no
+  `<meta>` but the copy's own policy, character set and description, no `<link>` but style
+  sheets and icons saved in the copy, no event handler or made-up attribute, no attribute
+  that sends something. Every address of a picture, style sheet, font or video must name a
+  file saved in the copy's own `assets/` or `styles/` folder, by a relative address that stays
+  in the folder (a picture may also be a `data:image/` address); anything else, including
+  `file:` and `//host` addresses (on Windows a network share, which would send your Windows
+  sign-in hash) and every web address, is removed. Links keep only `http(s)`, `mailto:` and
+  `tel:` addresses. CSS in the page and in the saved style sheets is read with a real CSS
+  tokenizer (escaped names included) and held to the same rule; inside `image-set()`,
+  `image()` and `cross-fade()` only literal addresses and plain values are allowed, so
+  anything else there (`var()`, `env()`, `attr()` or a function the list does not know)
+  makes the whole value blank. `index.html` and every saved style sheet start with a UTF-8
+  byte order mark and carry no leading `@charset` and no control characters other than tab
+  and line ends, so a browser reads them as the UTF-8 that was checked (a sheet declaring
+  ISO-2022-JP, for example, could otherwise hide an address in what the check read as a
+  comment); CSS in saved SVG pictures and in the page's own style attributes loses the same
+  characters. A file asked for as a picture or icon is kept only when its first bytes are a
+  picture format the copy keeps (PNG, JPEG, GIF, WebP, AVIF, SVG, ICO or BMP). The result is written with a
+  real `<html><head>` whose first child is a policy that allows no script, loads nothing
+  from the internet and sends nothing, and a last check parses the output once more: unless
+  the root is `<html>`, the policy is the first thing in the head and cleaning it again
+  changes nothing, the copy is not saved (the capture's folder is removed again). SVG
+  pictures are parsed as XML and written again with only drawing elements from a fixed list,
+  without handlers and with only fragment or `data:` picture addresses; a picture that is
+  not well-formed or declares a document type (whose entities could hold markup) is left
+  out. Scripts are saved as `.js.txt`, because a `.js` file runs when double-clicked on
+  Windows.
+- **What the model reads.** The report quotes page text (titles, headings, labels) as data:
+  one line, quoted, invisible and direction-changing characters shown as escapes, and the
+  characters that could start a link or markup escaped. It reaches the model as untrusted
+  tool output like any page.
+- **Limits.** A capture can save whatever a public page shows, including other people's
+  pictures and text; what you do with the copy is up to you. Only what is fetched during
+  the capture is checked: what a site stored in the agent's browser on an earlier visit
+  (its storage and caches, from requests normal browsing does not check one by one) can
+  still reach the page and the copy, as it reaches the screen in normal browsing. A stopped
+  capture can leave a partly saved folder.
 
 ## The terminal is not a sandbox
 
@@ -382,9 +493,51 @@ build machine, and its Windows and macOS jobs have not run at all.
   uploads nothing.) With no model downloaded and nothing clicked, the app makes no network request. Every network use is listed in
   ARCHITECTURE.md 13.6. 0.0.6 adds two of its own, both only when you ask: Compare looks
   up the models you add on Hugging Face, and Settings → Reverse engineering downloads what
-  you click. A task you let the model hand to Claude Code or Codex also leaves this
+  you click. 0.0.7 adds one more, also only when you ask: Models → Installed offers a
+  model's image file from the file list saved when you downloaded the model, without asking
+  Hugging Face; it asks for that model's file list when you click *Look for an image file*
+  (models downloaded before 0.0.7) or *Download the image file*, and by itself only once:
+  the next time Installed shows that model after its image file couldn't be read. *Download the image file* downloads it
+  like any model file (checked against its published size and checksum, saved only in the
+  model's own folder). An image file next to a model is loaded with it, so writing a file
+  named like one (a `.gguf` file with "mmproj" in its name) always asks, also in Allow all;
+  links next to a model are not followed. A task you let the model hand to
+  Claude Code or Codex also leaves this
   computer: that program sends the task and the files it reads to its company (Anthropic or
   OpenAI) with your account, unless it is set up to use the model in harnessUI.
+- **Cloud AI companies (0.0.7).** A chat whose model is on an endpoint on the internet, such
+  as Anthropic, OpenAI, OpenRouter or abliteration.ai, sends that company everything the
+  model reads: your messages, the system prompt and pinned instructions, the files and
+  pictures you attach, the tools' descriptions and what the tools return (file contents,
+  command output, web pages, screenshots), and with Claude its own earlier thinking (kept in
+  memory for each chat and sent back only in that chat; a helper's is its own and forgotten
+  when it answers). The
+  company's own terms say what it keeps and for how long; OpenRouter passes the chat on to
+  the company that runs the model you picked. The chat header shows a *Cloud* mark for such
+  a chat, with the host in its tooltip. Only `localhost` and local network IP addresses
+  (such as 192.168.1.20) count as not on the internet: a server named any other way, a
+  `.local` or one-word name included, gets the mark, because the name leads wherever the
+  name server says. Server answers are untrusted data like any model output. On *Automatic*
+  a long chat sends at most the company's size with each message (200,000 tokens for
+  Claude); a larger size, chosen per endpoint, sends more of the chat each time.
+- An endpoint's API key goes only to that endpoint's own address, in the header its API
+  uses (`x-api-key` for Anthropic, `Authorization` for the others). A redirect to another
+  address is not followed, and a saved key does not follow an edited endpoint to a new
+  scheme, host or port: the new address needs its own key, and the old key is removed
+  before the endpoint is saved. A keychain that cannot be read counts as holding a key, so
+  these rules never pass by default, and a save whose key removal the keychain refuses
+  saves nothing. The address is read the same way
+  for this check, the *Cloud* mark and the requests, and an address that cannot be read gets
+  no key. The key is never written to the database or the logs, and it is removed from every
+  error text before the error is shown or stored (every copy of a key of 4 characters or
+  more, so a local server's short key too), also from errors inside a reply and from a
+  server message cut short across the key. It is never sent over plain http:// except to
+  this computer or a local network IP address: the app refuses to save another such endpoint
+  with a key and does not use a key saved earlier for one. Over http:// to this computer or
+  a local network address a key is still sent (servers there rarely have https), directly
+  and never through a system proxy (also for `0.0.0.0`, `[::]` and `localhost.`, which is
+  reached as `localhost`, so no name server decides where it goes); anyone who can watch
+  that network can read it.
 - The usage line under the model name (0.0.6) is read from this computer's own counters,
   only while the window is visible. Nothing is sent anywhere, and the model is never told
   the figures.

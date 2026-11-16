@@ -940,6 +940,16 @@ fn rule4_a_command_that_names_a_sensitive_place_still_asks() {
             "Copy-Item x 'C:\\Users\\me\\AppData\\Roaming\\Microsoft\\Windows\\Start Menu\\Programs\\Startup\\x.lnk'",
         ),
         (PS, "Set-Content -Path .git\\hooks\\pre-commit -Value x"),
+        // 0.0.7 (P2 review m9): an image file next to a model is loaded with it.
+        (
+            SH,
+            "curl -L -o ~/models/someone/Model-GGUF/mmproj-Model-F16.gguf https://example.com/x",
+        ),
+        (SH, "cp x.bin /home/u/models/Model.mmproj-f16.gguf"),
+        (
+            PS,
+            "Invoke-WebRequest -OutFile C:\\Users\\me\\harnessUI\\models\\x\\mmproj-F16.gguf https://example.com/x",
+        ),
     ];
     for (shell, line) in rows {
         assert_eq!(
@@ -962,6 +972,7 @@ fn rule4_a_command_that_names_a_sensitive_place_still_asks() {
         (SH, "cp a.txt b.txt"),
         (PS, "Get-Content .git\\HEAD"),
         (PS, "Copy-Item a.txt b.txt"),
+        (SH, "ls -l models/x/mmproj-F16.gguf"),
     ] {
         assert_eq!(
             kind(shell, line),

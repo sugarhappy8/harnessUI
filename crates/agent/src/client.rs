@@ -1,14 +1,20 @@
 //! A streaming client for OpenAI-compatible chat completions, with the llama-server, Ollama,
-//! LM Studio and vLLM extras the app needs (ARCHITECTURE.md 7.5 and 8.4).
+//! LM Studio and vLLM extras the app needs (ARCHITECTURE.md 7.5 and 8.4), and (0.0.7) for
+//! Claude's own Messages API: an endpoint of kind [`ProviderKind::Anthropic`] gets the same
+//! [`ChatRequest`] translated by [`crate::anthropic`] and gives back the same
+//! [`StreamEvent`]s, so the turn runner works with either protocol unchanged.
 //!
 //! Proxy rules (ARCHITECTURE.md 13.6): a loopback client (the managed llama-server, a local
 //! Ollama or LM Studio) is built with proxies and redirects disabled, so a system proxy never
-//! sees local chat or its key. Every other endpoint uses the system proxy.
+//! sees local chat or its key; (0.0.7) neither does a server at a local network address.
+//! Every other endpoint uses the system proxy. Every client but the loopback one follows
+//! redirects only within its own origin. A key is never sent over plain `http://` to a server
+//! on the internet ([`crate::cloud`]).
 
 use std::collections::VecDeque;
 use std::fmt;
-use std::net::IpAddr;
 use std::pin::Pin;
+use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll};
 use std::time::Duration;
 
@@ -19,6 +25,8 @@ use serde_json::{Value, json};
 use tokio_util::sync::CancellationToken;
 use url::Url;
 
+use crate::anthropic::{MessagesDecoder, ThinkingReplay};
+use crate::cloud;
 use crate::error::{ProviderError, as_u32, bounded, error_from_body};
 use crate::stream::{ChunkParser, StreamDecoder, StreamEvent};
 use crate::types::ChatRequest;
@@ -30,9 +38,12 @@ const MAX_JSON_BODY: usize = 8 * 1024 * 1024;
 const MAX_ERROR_BODY: usize = 64 * 1024;
 /// The largest body accepted when a server answers a streaming request with plain JSON.
 const MAX_COMPLETION_BODY: usize = 32 * 1024 * 1024;
+/// Requests sent again for one chat request after a server refused a parameter (0.0.7).
+const MAX_FIX_ROUNDS: usize = 3;
 
 /// Which kind of server an endpoint is. Decides where context length and token counts come
-/// from; the chat protocol is the same for all.
+/// from, which request fields the server accepts, and (0.0.7) the chat protocol: Chat
+/// Completions for all but [`ProviderKind::Anthropic`], which speaks Claude's Messages API.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ProviderKind {
     /// The app's managed llama-server: exact token counts, `/props`, timings.
@@ -45,6 +56,15 @@ pub enum ProviderKind {
     Vllm,
     /// Any other OpenAI-compatible endpoint.
     Generic,
+    /// Anthropic (Claude) through its own Messages API (0.0.7).
+    Anthropic,
+    /// OpenAI's Chat Completions API (0.0.7): only OpenAI's own fields,
+    /// `max_completion_tokens`, chat models only in the model list.
+    OpenAi,
+    /// OpenRouter's OpenAI-compatible API (0.0.7).
+    OpenRouter,
+    /// abliteration.ai's OpenAI-compatible API (0.0.7): only the fields it lists.
+    Abliteration,
 }
 
 /// How to reach an endpoint.
@@ -54,7 +74,8 @@ pub struct ClientConfig {
     /// `https://api.example.com/v1`. `/v1` is added when the path has no version segment, and
     /// a pasted `/chat/completions` suffix is removed (see [`OpenAiClient::chat_completions_url`]).
     pub base_url: String,
-    /// The API key, sent as `Authorization: Bearer`. Never logged: `Debug` redacts it.
+    /// The API key, sent as `Authorization: Bearer` (to Anthropic as `x-api-key`). Never
+    /// logged: `Debug` redacts it.
     pub api_key: Option<String>,
     /// The kind of server.
     pub kind: ProviderKind,
@@ -69,6 +90,10 @@ pub struct ClientConfig {
     /// that for the local llama-server, which reads the whole prompt before it sends its
     /// headers and can take minutes on a long prompt.
     pub request_timeout: Option<Duration>,
+    /// [0.0.7 P5] The conversation (chat) the requests belong to: Claude's thinking is kept
+    /// for each conversation and sent back only within it, also in its later turns. `None`
+    /// keeps it for this client only (one turn).
+    pub conversation: Option<String>,
 }
 
 impl fmt::Debug for ClientConfig {
@@ -80,6 +105,7 @@ impl fmt::Debug for ClientConfig {
             .field("loopback", &self.loopback)
             .field("connect_timeout", &self.connect_timeout)
             .field("request_timeout", &self.request_timeout)
+            .field("conversation", &self.conversation)
             .finish()
     }
 }
@@ -97,6 +123,7 @@ impl ClientConfig {
             loopback,
             connect_timeout: Duration::from_secs(10),
             request_timeout: Some(Duration::from_secs(300)),
+            conversation: None,
         }
     }
 
@@ -110,22 +137,16 @@ impl ClientConfig {
             loopback: true,
             connect_timeout: Duration::from_secs(5),
             request_timeout: None,
+            conversation: None,
         }
     }
 }
 
+/// [0.0.7 P5] This computer, as the key check and the "Cloud" mark read it
+/// ([`cloud::endpoint_place`]): `localhost` (also with a trailing dot), loopback addresses and
+/// the unspecified ones (`0.0.0.0`, `0`, `[::]`), so none of them goes through a system proxy.
 fn is_loopback_url(base_url: &str) -> bool {
-    let Ok((url, _)) = parse_base(base_url) else {
-        return false;
-    };
-    match url.host() {
-        Some(url::Host::Domain(domain)) => domain.eq_ignore_ascii_case("localhost"),
-        Some(url::Host::Ipv4(ip)) => IpAddr::V4(ip).is_loopback(),
-        Some(url::Host::Ipv6(ip)) => {
-            IpAddr::V6(ip).is_loopback() || ip.to_ipv4_mapped().is_some_and(|v4| v4.is_loopback())
-        }
-        None => false,
-    }
+    cloud::endpoint_place(base_url) == cloud::EndpointPlace::ThisComputer
 }
 
 /// A model an endpoint offers.
@@ -135,6 +156,18 @@ pub struct ModelInfo {
     pub id: String,
     /// The context the server reports for it, when the listing says (llama-server's allocated
     /// context, vLLM's `max_model_len`). Never a trained maximum.
+    pub context_length: Option<u32>,
+}
+
+/// A model in an endpoint's list, with what the list says about it (0.0.7).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ListedModel {
+    /// The id to put in `ChatRequest::model`.
+    pub id: String,
+    /// A name for people, when the list has one (Anthropic's `display_name`, OpenRouter's and
+    /// abliteration.ai's `name`).
+    pub display_name: Option<String>,
+    /// The context the server reports for it, as in [`ModelInfo::context_length`].
     pub context_length: Option<u32>,
 }
 
@@ -167,7 +200,64 @@ impl Stream for ChatStream {
     }
 }
 
-/// Client for one OpenAI-compatible endpoint.
+/// What sending a streaming request gave.
+pub(crate) enum Sent {
+    /// The server accepted it; the body is still unread.
+    Accepted(reqwest::Response),
+    /// The server refused it with an error status (after any retries).
+    Refused {
+        /// The HTTP status.
+        status: u16,
+        /// The start of the error body.
+        body: Vec<u8>,
+        /// The status's canonical phrase.
+        reason: String,
+        /// How long the server asked to wait (`retry-after`), when it said.
+        retry_after: Option<Duration>,
+    },
+}
+
+/// How a response's events are read: chat-completion chunks or Claude's event stream.
+pub(crate) enum WireDecoder {
+    /// Chat Completions.
+    Chat(StreamDecoder),
+    /// Claude's Messages API.
+    Messages(MessagesDecoder),
+}
+
+impl WireDecoder {
+    fn push(&mut self, bytes: &[u8], out: &mut Vec<StreamEvent>) -> Result<(), ProviderError> {
+        match self {
+            Self::Chat(decoder) => decoder.push(bytes, out),
+            Self::Messages(decoder) => decoder.push(bytes, out),
+        }
+    }
+
+    fn finish(&mut self, out: &mut Vec<StreamEvent>) -> Result<(), ProviderError> {
+        match self {
+            Self::Chat(decoder) => decoder.finish(out),
+            Self::Messages(decoder) => decoder.finish(out),
+        }
+    }
+
+    fn is_done(&self) -> bool {
+        match self {
+            Self::Chat(decoder) => decoder.is_done(),
+            Self::Messages(decoder) => decoder.is_done(),
+        }
+    }
+
+    /// Events for a server that answered a streaming request with one JSON body.
+    fn whole(&self, body: &[u8]) -> Result<Vec<StreamEvent>, ProviderError> {
+        match self {
+            Self::Chat(_) => events_from_completion(body),
+            Self::Messages(_) => crate::anthropic::events_from_message(body),
+        }
+    }
+}
+
+/// Client for one endpoint: OpenAI-compatible, or (0.0.7) Claude's Messages API for
+/// [`ProviderKind::Anthropic`].
 #[derive(Debug, Clone)]
 pub struct OpenAiClient {
     http: reqwest::Client,
@@ -176,13 +266,41 @@ pub struct OpenAiClient {
     api: Url,
     /// The server root for vendor endpoints (`/props`, `/api/ps`, `/api/v1/models`).
     root: Url,
+    /// Claude's thinking kept for this client's requests when they belong to no
+    /// conversation ([`ClientConfig::conversation`]; shared by clones).
+    replay: Arc<Mutex<ThinkingReplay>>,
+}
+
+/// [0.0.7 P5] The redirect rule of a client for a server that is not on this machine: at most
+/// ten redirects, each to the scheme, host and port the request started with. So the chat and
+/// the API key never reach a host the user did not add, nor plain `http://` after `https://`
+/// (reqwest drops `Authorization` on a redirect to another host, but not a key in a header of
+/// the API's own, such as Anthropic's `x-api-key`). A redirect elsewhere ends the request with
+/// the redirect's own status.
+fn same_origin_redirects() -> reqwest::redirect::Policy {
+    reqwest::redirect::Policy::custom(|attempt| {
+        let origin = |url: &reqwest::Url| {
+            (
+                url.scheme().to_owned(),
+                url.host_str().map(str::to_ascii_lowercase),
+                url.port_or_known_default(),
+            )
+        };
+        let home = attempt.previous().first().map(origin);
+        if home == Some(origin(attempt.url())) && attempt.previous().len() <= 10 {
+            attempt.follow()
+        } else {
+            attempt.stop()
+        }
+    })
 }
 
 impl OpenAiClient {
     /// Builds a client and its HTTP connection pool.
     ///
     /// # Errors
-    /// [`ProviderError::InvalidRequest`] for a base URL that is not http(s);
+    /// [`ProviderError::InvalidRequest`] for a base URL that is not http(s), or for a key
+    /// that would travel over plain `http://` to a server on the internet;
     /// [`ProviderError::Network`] if the HTTP client cannot be built (for example no TLS
     /// backend).
     pub fn new(config: ClientConfig) -> Result<Self, ProviderError> {
@@ -191,6 +309,13 @@ impl OpenAiClient {
             builder = builder
                 .no_proxy()
                 .redirect(reqwest::redirect::Policy::none());
+        } else {
+            builder = builder.redirect(same_origin_redirects());
+            // [0.0.7 P5] A server at a local network address is reached directly: a system
+            // proxy would see its plain-http traffic, key included.
+            if cloud::endpoint_place(&config.base_url) == cloud::EndpointPlace::LocalNetwork {
+                builder = builder.no_proxy();
+            }
         }
         let http = builder
             .build()
@@ -202,18 +327,44 @@ impl OpenAiClient {
     /// caller is responsible for its proxy and redirect settings.
     ///
     /// # Errors
-    /// [`ProviderError::InvalidRequest`] for a base URL that is not http(s).
+    /// [`ProviderError::InvalidRequest`] for a base URL that is not http(s), or for a key
+    /// that would travel over plain `http://` to a server on the internet.
     pub fn with_http_client(
         config: ClientConfig,
         http: reqwest::Client,
     ) -> Result<Self, ProviderError> {
         let (api, root) = parse_base(&config.base_url).map_err(ProviderError::InvalidRequest)?;
+        if config
+            .api_key
+            .as_deref()
+            .is_some_and(|key| !key.trim().is_empty())
+        {
+            cloud::check_key_transport(&config.base_url).map_err(ProviderError::InvalidRequest)?;
+        }
         Ok(Self {
             http,
             config,
             api,
             root,
+            replay: Arc::default(),
         })
+    }
+
+    /// [0.0.7 P5] The same client for the requests of one conversation (a chat), so Claude's
+    /// thinking is kept for that conversation alone ([`ClientConfig::conversation`]).
+    #[must_use]
+    pub fn for_conversation(mut self, conversation: impl Into<String>) -> Self {
+        self.config.conversation = Some(conversation.into());
+        self
+    }
+
+    /// [0.0.7 P5] Forgets what this client's conversation kept (Claude's thinking), for a
+    /// conversation that does not go on: a helper's, once it has answered. Nothing for a
+    /// client without a conversation.
+    pub fn end_conversation(&self) {
+        if let Some(conversation) = &self.config.conversation {
+            crate::anthropic::forget_conversation(self.api.as_str(), conversation);
+        }
     }
 
     /// The configuration this client was built from.
@@ -226,8 +377,23 @@ impl OpenAiClient {
         join(&self.api, "chat/completions")
     }
 
+    /// The API root (`.../v1`).
+    pub(crate) fn api_url(&self) -> &Url {
+        &self.api
+    }
+
+    /// Claude's thinking kept for this client's requests that belong to no conversation.
+    pub(crate) fn own_replay(&self) -> &Arc<Mutex<ThinkingReplay>> {
+        &self.replay
+    }
+
     /// Streams a chat completion. The request is always sent with `stream: true` and
-    /// `stream_options.include_usage`.
+    /// `stream_options.include_usage`. (0.0.7) An endpoint of kind
+    /// [`ProviderKind::Anthropic`] is sent the same request in Claude's Messages API form;
+    /// any other endpoint but llama-server gets only the fields its server accepts, and a
+    /// request refused for an unsupported parameter is sent again once without it. Requests
+    /// to a cloud company are tried again on a rate limit (when the server says how long to
+    /// wait), on overload and on server errors.
     ///
     /// The HTTP status is checked before the body is read as a stream, so an overflow or a
     /// bad key comes back here as an error rather than inside the stream. Cancelling `cancel`
@@ -241,37 +407,186 @@ impl OpenAiClient {
         req: &ChatRequest,
         cancel: CancellationToken,
     ) -> Result<ChatStream, ProviderError> {
+        let result = if self.config.kind == ProviderKind::Anthropic {
+            crate::anthropic::stream(self, req, cancel).await
+        } else {
+            self.stream_completion(req, cancel).await
+        };
+        let key = self.config.api_key.clone();
+        match result {
+            // [0.0.7 P5] Errors inside the stream (an `error` event, an error object in a
+            // chunk) can echo the key too.
+            Ok(stream) => Ok(ChatStream {
+                inner: stream
+                    .inner
+                    .map(move |item| item.map_err(|err| cloud::scrub_key(err, key.as_deref())))
+                    .boxed(),
+            }),
+            Err(err) => Err(cloud::scrub_key(err, key.as_deref())),
+        }
+    }
+
+    async fn stream_completion(
+        &self,
+        req: &ChatRequest,
+        cancel: CancellationToken,
+    ) -> Result<ChatStream, ProviderError> {
         req.validate_media()
             .map_err(ProviderError::InvalidRequest)?;
-        let body = req.to_body(true);
-        let request = self
-            .authorize(self.http.post(self.chat_completions_url()))
-            .header(reqwest::header::ACCEPT, "text/event-stream")
-            .json(&body);
+        let kind = self.config.kind;
+        let endpoint = self.api.as_str().to_owned();
+        let max_output = cloud::known_facts(&endpoint, &req.model).and_then(|f| f.max_output);
+        let mut rounds = 0;
+        // Fixes found for this request: kept for the model once a request with them is
+        // accepted, not before.
+        let mut pending: Vec<cloud::Fix> = Vec::new();
+        loop {
+            let mut fixes = cloud::remembered_fixes(&endpoint, &req.model);
+            for fix in &pending {
+                fixes.add(fix);
+            }
+            let mut body = req.to_body(true);
+            if kind != ProviderKind::LlamaServer
+                && let Value::Object(map) = &mut body
+            {
+                cloud::shape_chat_body(kind, map, &fixes, max_output);
+            }
+            match self
+                .send_stream_request(self.chat_completions_url(), &body, &cancel, None)
+                .await?
+            {
+                Sent::Accepted(response) => {
+                    for fix in &pending {
+                        cloud::remember_fix(&endpoint, &req.model, fix);
+                    }
+                    return self
+                        .open_stream(response, cancel, WireDecoder::Chat(StreamDecoder::new()))
+                        .await;
+                }
+                Sent::Refused {
+                    status,
+                    body: error_body,
+                    reason,
+                    retry_after,
+                } => {
+                    // A server other than llama-server that refused a parameter: once more
+                    // without it, and never again for this model while the app runs.
+                    if kind != ProviderKind::LlamaServer
+                        && rounds < MAX_FIX_ROUNDS
+                        && let Value::Object(sent) = &body
+                    {
+                        rounds += 1;
+                        let mut changed = false;
+                        for fix in cloud::fixes_for_error(status, &error_body, sent) {
+                            if fixes.add(&fix) {
+                                pending.push(fix);
+                                changed = true;
+                            }
+                        }
+                        if changed {
+                            continue;
+                        }
+                    }
+                    let err = error_from_body(Some(status), &error_body, &reason);
+                    return Err(with_wait(err, retry_after));
+                }
+            }
+        }
+    }
+
+    /// Sends a streaming request and reads the status. Requests to a cloud company are tried
+    /// again, up to twice, on a rate limit with `retry-after`, on overload (529), on server
+    /// errors and when the connection fails; other servers get one try, as before.
+    ///
+    /// # Errors
+    /// [`ProviderError::Network`] when sending fails, [`ProviderError::Cancelled`].
+    pub(crate) async fn send_stream_request(
+        &self,
+        url: Url,
+        body: &Value,
+        cancel: &CancellationToken,
+        beta: Option<&str>,
+    ) -> Result<Sent, ProviderError> {
+        let retries = cloud::is_cloud_company(self.config.kind);
         let limit = self.config.request_timeout;
-        let send = within(limit, "the server sent no response", async {
-            request.send().await.map_err(network_error)
-        });
-        let response = tokio::select! {
-            biased;
-            () = cancel.cancelled() => return Err(ProviderError::Cancelled),
-            response = send => response?,
-        };
-        let status = response.status();
-        if !status.is_success() {
+        let mut attempt = 0;
+        loop {
+            let mut request = self
+                .authorize(self.http.post(url.clone()))
+                .header(reqwest::header::ACCEPT, "text/event-stream");
+            // [0.0.7 P5] An API feature in beta that this request uses (`anthropic-beta`).
+            if let Some(beta) = beta {
+                request = request.header("anthropic-beta", beta);
+            }
+            let request = request.json(body);
+            let send = within(limit, "the server sent no response", async {
+                request.send().await.map_err(network_error)
+            });
+            let sent = tokio::select! {
+                biased;
+                () = cancel.cancelled() => return Err(ProviderError::Cancelled),
+                sent = send => sent,
+            };
+            let response = match sent {
+                Ok(response) => response,
+                // A connection that failed (not a server that went silent) is tried again.
+                Err(ProviderError::Network(detail))
+                    if retries
+                        && attempt < 2
+                        && !detail.contains("timed out")
+                        && !detail.contains(" within ") =>
+                {
+                    wait(Duration::from_secs(1u64 << attempt), cancel).await?;
+                    attempt += 1;
+                    continue;
+                }
+                Err(err) => return Err(err),
+            };
+            let status = response.status();
+            if status.is_success() {
+                return Ok(Sent::Accepted(response));
+            }
+            let retry_after = response
+                .headers()
+                .get(reqwest::header::RETRY_AFTER)
+                .and_then(|value| value.to_str().ok())
+                .and_then(cloud::parse_retry_after);
             let reason = status.canonical_reason().unwrap_or("").to_owned();
             let read = within(
                 limit,
                 "the server did not finish its error response",
                 read_capped(response, MAX_ERROR_BODY, true),
             );
-            let body = tokio::select! {
+            let error_body = tokio::select! {
                 biased;
                 () = cancel.cancelled() => return Err(ProviderError::Cancelled),
                 body = read => body?,
             };
-            return Err(error_from_body(Some(status.as_u16()), &body, &reason));
+            if retries
+                && let Some(delay) = cloud::retry_delay(status.as_u16(), retry_after, attempt)
+            {
+                wait(delay, cancel).await?;
+                attempt += 1;
+                continue;
+            }
+            return Ok(Sent::Refused {
+                status: status.as_u16(),
+                body: error_body,
+                reason,
+                retry_after,
+            });
         }
+    }
+
+    /// Turns an accepted response into a [`ChatStream`] read with `decoder`; a whole JSON
+    /// body instead of an event stream is accepted too.
+    pub(crate) async fn open_stream(
+        &self,
+        response: reqwest::Response,
+        cancel: CancellationToken,
+        decoder: WireDecoder,
+    ) -> Result<ChatStream, ProviderError> {
+        let limit = self.config.request_timeout;
         let is_json = response
             .headers()
             .get(reqwest::header::CONTENT_TYPE)
@@ -288,12 +603,12 @@ impl OpenAiClient {
                 () = cancel.cancelled() => return Err(ProviderError::Cancelled),
                 body = read => body?,
             };
-            let events = events_from_completion(&body)?;
+            let events = decoder.whole(&body)?;
             // Same state machine as a live stream, already finished, so cancelling still
             // yields `Cancelled` instead of the queued events.
             let state = StreamState {
                 body: None,
-                decoder: StreamDecoder::new(),
+                decoder,
                 pending: events.into_iter().map(Ok).collect(),
                 cancel,
                 idle_limit: None,
@@ -305,7 +620,7 @@ impl OpenAiClient {
         }
         let state = StreamState {
             body: Some(response.bytes_stream().boxed()),
-            decoder: StreamDecoder::new(),
+            decoder,
             pending: VecDeque::new(),
             cancel,
             idle_limit: self.config.request_timeout,
@@ -323,6 +638,30 @@ impl OpenAiClient {
     /// # Errors
     /// Any [`ProviderError`].
     pub async fn list_models(&self) -> Result<Vec<ModelInfo>, ProviderError> {
+        Ok(self
+            .list_model_entries()
+            .await?
+            .into_iter()
+            .map(|model| ModelInfo {
+                id: model.id,
+                context_length: model.context_length,
+            })
+            .collect())
+    }
+
+    /// The model list with what it says about each model (0.0.7): display names from
+    /// Anthropic, OpenRouter and abliteration.ai; Anthropic's list from its own
+    /// `GET /v1/models`; OpenAI's without the models that cannot chat (embedding, speech,
+    /// image, moderation and the like). What a cloud company's list says about a model's
+    /// output limit is kept for this run, so requests stay within it.
+    ///
+    /// # Errors
+    /// Any [`ProviderError`].
+    pub async fn list_model_entries(&self) -> Result<Vec<ListedModel>, ProviderError> {
+        let kind = self.config.kind;
+        if kind == ProviderKind::Anthropic {
+            return crate::anthropic::list_models(self).await;
+        }
         let value = self.get_json(join(&self.api, "models")).await?;
         let entries = value
             .get("data")
@@ -331,6 +670,7 @@ impl OpenAiClient {
             .ok_or_else(|| {
                 ProviderError::Decode("the model list has no 'data' array".to_owned())
             })?;
+        let endpoint = self.api.as_str().to_owned();
         Ok(entries
             .iter()
             .filter_map(|entry| {
@@ -338,9 +678,52 @@ impl OpenAiClient {
                     .iter()
                     .find_map(|key| entry.get(*key).and_then(Value::as_str))
                     .filter(|id| !id.is_empty())?;
-                Some(ModelInfo {
+                if kind == ProviderKind::OpenAi && !cloud::openai_can_chat(id) {
+                    return None;
+                }
+                // A model that cannot write text (an image or video generator).
+                let writes_text = |modalities: Option<&Value>| {
+                    modalities
+                        .and_then(Value::as_array)
+                        .is_none_or(|list| list.iter().any(|m| m.as_str() == Some("text")))
+                };
+                if matches!(kind, ProviderKind::OpenRouter | ProviderKind::Abliteration)
+                    && !(writes_text(entry.pointer("/architecture/output_modalities"))
+                        && writes_text(entry.get("output_modalities")))
+                {
+                    return None;
+                }
+                let context_length = self.listed_context_length(entry);
+                let display_name =
+                    matches!(kind, ProviderKind::OpenRouter | ProviderKind::Abliteration)
+                        .then(|| {
+                            ["display_name", "name"]
+                                .iter()
+                                .find_map(|key| entry.get(*key).and_then(Value::as_str))
+                                .map(str::trim)
+                                .filter(|name| !name.is_empty() && *name != id)
+                                .map(str::to_owned)
+                        })
+                        .flatten();
+                if cloud::is_cloud_company(kind) {
+                    let max_output = ["/top_provider/max_completion_tokens", "/max_output_length"]
+                        .iter()
+                        .find_map(|path| entry.pointer(path).and_then(as_u32))
+                        .filter(|n| *n > 0);
+                    cloud::remember_facts(
+                        &endpoint,
+                        id,
+                        cloud::ModelFacts {
+                            context: context_length,
+                            max_output,
+                            thinking: None,
+                        },
+                    );
+                }
+                Some(ListedModel {
                     id: id.to_owned(),
-                    context_length: self.listed_context_length(entry),
+                    display_name,
+                    context_length,
                 })
             })
             .collect())
@@ -351,9 +734,21 @@ impl OpenAiClient {
             ProviderKind::LlamaServer => entry.pointer("/meta/n_ctx").and_then(as_u32),
             ProviderKind::Vllm => entry.get("max_model_len").and_then(as_u32),
             ProviderKind::Ollama | ProviderKind::LmStudio => None,
-            ProviderKind::Generic => ["context_length", "context_window", "max_model_len"]
-                .iter()
-                .find_map(|key| entry.get(*key).and_then(as_u32)),
+            ProviderKind::Generic | ProviderKind::OpenAi => {
+                ["context_length", "context_window", "max_model_len"]
+                    .iter()
+                    .find_map(|key| entry.get(*key).and_then(as_u32))
+            }
+            // OpenRouter and abliteration.ai report `context_length` for every model.
+            ProviderKind::OpenRouter | ProviderKind::Abliteration => entry
+                .get("context_length")
+                .or_else(|| entry.pointer("/top_provider/context_length"))
+                .and_then(as_u32)
+                .filter(|n| *n > 0),
+            ProviderKind::Anthropic => entry
+                .get("max_input_tokens")
+                .and_then(as_u32)
+                .filter(|n| *n > 0),
         }
     }
 
@@ -366,10 +761,12 @@ impl OpenAiClient {
     /// - LM Studio: `loaded_instances[].config.context_length` from `/api/v1/models`; on an
     ///   older LM Studio without that API, `loaded_context_length` from `/api/v0/models` when
     ///   present (its `max_context_length` is the trained maximum and is not used);
-    /// - vLLM and generic: the model list.
+    /// - vLLM, generic, OpenAI, OpenRouter and abliteration.ai: the model list;
+    /// - Anthropic: `max_input_tokens` from its model list (0.0.7).
     ///
     /// `Ok(None)` means the server does not say; the app then uses the user's setting
-    /// (default 4,096).
+    /// (default 4,096), or for a cloud company the size it documents
+    /// ([`crate::cloud::default_context`]).
     ///
     /// # Errors
     /// Any [`ProviderError`] other than "endpoint not found", which gives `Ok(None)`.
@@ -383,6 +780,30 @@ impl OpenAiClient {
             }
             ProviderKind::Ollama => self.ollama_context_length(model).await,
             ProviderKind::LmStudio => self.lm_studio_context_length(model).await,
+            ProviderKind::Anthropic => crate::anthropic::context_length(self, model).await,
+            // [0.0.7 P5] A cloud company's list is read once a run (it is long, and every
+            // turn asks), as for Anthropic.
+            ProviderKind::OpenAi | ProviderKind::OpenRouter | ProviderKind::Abliteration => {
+                let endpoint = self.api.as_str().to_owned();
+                if let Some(known) = cloud::known_facts(&endpoint, model) {
+                    return Ok(known.context);
+                }
+                match self.list_model_entries().await {
+                    Ok(models) => {
+                        let found = models
+                            .into_iter()
+                            .find(|listed| listed.id == model)
+                            .and_then(|listed| listed.context_length);
+                        // A model the list does not have is not looked for again either.
+                        if cloud::known_facts(&endpoint, model).is_none() {
+                            cloud::remember_facts(&endpoint, model, cloud::ModelFacts::default());
+                        }
+                        Ok(found)
+                    }
+                    Err(err) if is_not_found(&err) => Ok(None),
+                    Err(err) => Err(err),
+                }
+            }
             ProviderKind::Vllm | ProviderKind::Generic => match self.list_models().await {
                 Ok(models) => Ok(models
                     .into_iter()
@@ -594,13 +1015,28 @@ impl OpenAiClient {
     }
 
     fn authorize(&self, request: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
-        match self.config.api_key.as_deref().filter(|key| !key.is_empty()) {
+        let key = self.config.api_key.as_deref().filter(|key| !key.is_empty());
+        if self.config.kind == ProviderKind::Anthropic {
+            // Claude's API: the key in `x-api-key` (marked sensitive, so it never appears in
+            // a debug print) and the API version on every request.
+            let request = request.header("anthropic-version", crate::anthropic::API_VERSION);
+            return match key.map(|key| reqwest::header::HeaderValue::from_str(key.trim())) {
+                Some(Ok(mut value)) => {
+                    value.set_sensitive(true);
+                    request.header("x-api-key", value)
+                }
+                // A key with characters a header cannot carry is not sent at all; the server
+                // then says the key is missing.
+                Some(Err(_)) | None => request,
+            };
+        }
+        match key {
             Some(key) => request.bearer_auth(key),
             None => request,
         }
     }
 
-    async fn get_json(&self, url: Url) -> Result<Value, ProviderError> {
+    pub(crate) async fn get_json(&self, url: Url) -> Result<Value, ProviderError> {
         self.send_json(self.http.get(url)).await
     }
 
@@ -609,6 +1045,15 @@ impl OpenAiClient {
     }
 
     async fn send_json(&self, request: reqwest::RequestBuilder) -> Result<Value, ProviderError> {
+        self.send_json_unscrubbed(request)
+            .await
+            .map_err(|err| cloud::scrub_key(err, self.config.api_key.as_deref()))
+    }
+
+    async fn send_json_unscrubbed(
+        &self,
+        request: reqwest::RequestBuilder,
+    ) -> Result<Value, ProviderError> {
         let mut request = self.authorize(request);
         if let Some(limit) = self.config.request_timeout {
             request = request.timeout(limit);
@@ -636,25 +1081,8 @@ impl OpenAiClient {
 ///   `https://host/v1beta/openai` stays as typed.
 /// - The server root is the path without a trailing version segment.
 fn parse_base(raw: &str) -> Result<(Url, Url), String> {
-    let trimmed = raw.trim();
-    if trimmed.is_empty() {
-        return Err("the base URL is empty".to_owned());
-    }
-    let mut url = match Url::parse(trimmed) {
-        Ok(url) if url.scheme() == "http" || url.scheme() == "https" => url,
-        Ok(_) | Err(_) if !trimmed.contains("://") => Url::parse(&format!("http://{trimmed}"))
-            .map_err(|err| format!("'{trimmed}' is not a valid URL ({err})"))?,
-        Ok(url) => {
-            return Err(format!(
-                "the base URL must start with http:// or https://, not {}://",
-                url.scheme()
-            ));
-        }
-        Err(err) => return Err(format!("'{trimmed}' is not a valid URL ({err})")),
-    };
-    if url.host().is_none() {
-        return Err(format!("'{trimmed}' has no host"));
-    }
+    // [0.0.7 P5] The same parse as the key check and the "Cloud" mark.
+    let mut url = cloud::endpoint_url(raw)?;
     url.set_fragment(None);
     let mut segments: Vec<String> = url
         .path_segments()
@@ -668,6 +1096,12 @@ fn parse_base(raw: &str) -> Result<(Url, Url), String> {
     if segments.ends_with(&["chat".to_owned(), "completions".to_owned()]) {
         segments.truncate(segments.len() - 2);
     } else if segments.last().is_some_and(|last| last == "models") {
+        segments.pop();
+    } else if segments.len() >= 2
+        && segments.last().is_some_and(|last| last == "messages")
+        && is_version_segment(&segments[segments.len() - 2])
+    {
+        // A pasted Messages API address (`https://api.anthropic.com/v1/messages`, 0.0.7).
         segments.pop();
     }
     let mut api_segments = segments.clone();
@@ -697,7 +1131,15 @@ fn is_version_segment(segment: &str) -> bool {
 }
 
 /// Appends a relative path to a base URL, keeping its query string.
-fn join(base: &Url, path: &str) -> Url {
+/// The API URL a client for `base_url` uses (`https://api.anthropic.com/v1`), the key of
+/// what the app remembers about its models; `None` for an address that cannot be read.
+pub(crate) fn api_url_of(base_url: &str) -> Option<String> {
+    parse_base(base_url)
+        .ok()
+        .map(|(api, _)| api.as_str().to_owned())
+}
+
+pub(crate) fn join(base: &Url, path: &str) -> Url {
     let mut url = base.clone();
     let joined = format!("{}/{}", base.path().trim_end_matches('/'), path);
     url.set_path(&joined);
@@ -716,6 +1158,42 @@ async fn within<T>(
             .await
             .map_err(|_| ProviderError::Network(format!("{what} within {}", describe(limit))))?,
         None => future.await,
+    }
+}
+
+/// Waits `delay`, unless the request is cancelled first.
+async fn wait(delay: Duration, cancel: &CancellationToken) -> Result<(), ProviderError> {
+    tokio::select! {
+        biased;
+        () = cancel.cancelled() => Err(ProviderError::Cancelled),
+        () = tokio::time::sleep(delay) => Ok(()),
+    }
+}
+
+/// Adds how long the server asked to wait to a rate-limit or overload error that was not
+/// retried because the wait is long, so the message says when to try again (0.0.7). Other
+/// errors are returned unchanged.
+pub(crate) fn with_wait(err: ProviderError, retry_after: Option<Duration>) -> ProviderError {
+    match (err, retry_after) {
+        (
+            ProviderError::Http {
+                status: status @ (429 | 503 | 529),
+                message,
+            },
+            Some(after),
+        ) if after > Duration::from_secs(30) => {
+            let secs = after.as_secs();
+            let when = if secs >= 120 {
+                format!("about {} minutes", secs.div_ceil(60))
+            } else {
+                format!("{secs} seconds")
+            };
+            ProviderError::Http {
+                status,
+                message: format!("{message} (it asks to try again in {when})"),
+            }
+        }
+        (err, _) => err,
     }
 }
 
@@ -746,7 +1224,7 @@ fn num_ctx_parameter(parameters: &str) -> Option<u32> {
     })
 }
 
-fn is_not_found(err: &ProviderError) -> bool {
+pub(crate) fn is_not_found(err: &ProviderError) -> bool {
     matches!(
         err,
         ProviderError::Http {
@@ -825,7 +1303,7 @@ fn events_from_completion(body: &[u8]) -> Result<Vec<StreamEvent>, ProviderError
 struct StreamState {
     /// The response body; `None` once the stream finished, so the connection is released.
     body: Option<BoxStream<'static, reqwest::Result<Bytes>>>,
-    decoder: StreamDecoder,
+    decoder: WireDecoder,
     pending: VecDeque<Result<StreamEvent, ProviderError>>,
     cancel: CancellationToken,
     idle_limit: Option<Duration>,

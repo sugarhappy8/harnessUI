@@ -130,7 +130,9 @@ describe("streamed turn events", () => {
   it("reports a step-limit finish and ends the generation", async () => {
     emit({ type: "finished", status: "stepCap", message: "The step limit for one turn was reached." });
     await flush();
-    expect(useApp.getState().error?.code).toBe("stepCap");
+    // [0.0.7 P6] Kept with its chat (1), not as an error for whatever chat is open.
+    expect(useApp.getState().stoppedTurns[1]?.code).toBe("stepCap");
+    expect(useApp.getState().error).toBeNull();
     expect(useApp.getState().generation).toBeNull();
     finishSend();
   });

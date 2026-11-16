@@ -27,6 +27,13 @@ export interface Chat {
   thinking: boolean;
   /** The folder relative file paths start from. Null: the first approved folder. */
   workingFolder: string | null;
+  /** [0.0.7 P5] The host the chat's messages go to when its model is on an endpoint on the
+   *  internet (the header's "Cloud" mark); null or absent on this computer or the local network. */
+  cloudHost?: string | null;
+  /** [0.0.7 P5] The model is on an endpoint whose thinking the app switches (Claude). */
+  endpointThinking?: boolean;
+  /** [0.0.7 P5] ...but its thinking cannot stop: "off" asks it to think little ("Low"). */
+  endpointThinkingLow?: boolean;
 }
 
 export type Role = "system" | "user" | "assistant" | "tool";
@@ -221,7 +228,17 @@ export interface BackendInfo {
   error: string | null;
 }
 
-export type ProviderKind = "ollama" | "lmstudio" | "vllm" | "generic";
+/** [0.0.7 P5] With the cloud AI companies: "anthropic" speaks Claude's own Messages API, the
+ *  others the OpenAI-compatible Chat Completions API. */
+export type ProviderKind =
+  | "ollama"
+  | "lmstudio"
+  | "vllm"
+  | "generic"
+  | "anthropic"
+  | "openai"
+  | "openrouter"
+  | "abliteration";
 
 export interface Provider {
   id: number;
@@ -230,6 +247,10 @@ export interface Provider {
   baseUrl: string;
   hasApiKey: boolean;
   enabled: boolean;
+  /** [0.0.7 P5] The server is on the internet, not this computer or the local network. */
+  cloud?: boolean;
+  /** [0.0.7 P5] The context size chosen for this endpoint; null or absent is Automatic. */
+  contextLength?: number | null;
 }
 
 export interface ModelOption {
@@ -355,6 +376,15 @@ export interface FitResult {
    * (its free memory less what is kept for other programs), not only the whole.
    */
   computerShort: boolean;
+  /**
+   * What the saved copies of a long chat take at most in the computer's memory (0.0.7), not in
+   * `neededBytes`: they build up during a chat. Absent from older answers: 0.
+   */
+  copiesBytes?: number;
+  /** Not even one saved copy fits what the computer has left: yellow at most, never red. */
+  copiesShort?: boolean;
+  /** The computer's free memory could not be read (a graphics card's computer). */
+  computerUnknown?: boolean;
   /** The backend's 0.0.4 sentence; the screens word the figures with `fitLine` (words.ts). */
   sentence: string;
 }
@@ -396,7 +426,9 @@ export type DownloadStatus =
   | "verifying"
   | "done"
   | "error"
-  | "cancelled";
+  | "cancelled"
+  /** [0.0.7 P6b] Cancel is stopping it and deleting its files. */
+  | "cancelling";
 
 export interface DownloadGroup {
   id: string;
@@ -410,6 +442,8 @@ export interface DownloadGroup {
   bytesPerSecond: number | null;
   /** A file without a published checksum is part of this download. */
   unverified: boolean;
+  /** [0.0.7 P6b] A file is being checked (minutes for a large one): the row says so. */
+  checking?: boolean;
 }
 
 export interface ModelSummaryView {
@@ -435,7 +469,31 @@ export interface InstalledModel {
   /** [0.0.6 item 8] The path the model loaded now was loaded with, when it is this row's file
    *  under any spelling (a link, a mapped drive). Sent only then. */
   loadedAs?: string;
+  /** [0.0.7 P2] Its image file could not be read and no other usable one is there, so it loads
+   *  without image input. */
+  imageFileUnreadable?: boolean;
+  /** [0.0.7 P2 review M2] What its repository offers as its image file, saved when it was
+   *  downloaded; null when not known (no repository, or downloaded before 0.0.7: "Look for an
+   *  image file" asks then). Never asked for by itself. */
+  imageFileOffer?: ImageFileOffer | null;
+  /** [0.0.7 P6b] For a download: what Delete would remove from disk (its parts and the image
+   *  file the app downloaded, inside the models folder), and how many of its files would
+   *  stay because they are outside the models folder. */
+  deleteBytes?: number;
+  keptOutside?: number;
+  /** [0.0.7 P6b] The one file Delete would leave outside the models folder is the image file. */
+  onlyImageOutside?: boolean;
+  /** [0.0.7 P6b] How many of its files Delete would leave because another model on the list uses them. */
+  keptInUse?: number;
 }
+
+/** [0.0.7 P2] What an installed model's Hugging Face repository offers as its image file.
+ *  `again`: the one that couldn't be read is all it has, but the copy here may differ from it. */
+export type ImageFileOffer =
+  | { kind: "available"; file: string; sizeBytes: number }
+  | { kind: "again"; file: string; sizeBytes: number }
+  | { kind: "noOther" }
+  | { kind: "none" };
 
 export interface HardwareInfo {
   target: "gpu" | "apple" | "cpu";
@@ -590,6 +648,8 @@ export interface ToolDto {
   companion: boolean;
   /** On, and in the list the model gets whatever the next message says. On but not shown: "on request". */
   shown: boolean;
+  /** [0.0.7] Tokens the list of tools and the call guide take in the system message; the same on every tool. */
+  guideTokens?: number;
 }
 
 /** The `toolSelection` setting: choose the tools for each task, and how many a turn shows at most. */
@@ -762,6 +822,8 @@ export type LoadFailure =
   | { code: "port_in_use" }
   | { code: "model_file_invalid" }
   | { code: "context_too_large" }
+  // [0.0.7 P2] The model loaded, its image file could not be read.
+  | { code: "image_file_invalid" }
   | { code: "unknown" };
 
 /** One step of loading a model, or a transition between attempts. */
@@ -774,7 +836,11 @@ export type LoadStage =
   | { kind: "retryingWithoutSaveMemory"; backend: BackendKind }
   | { kind: "retryingWithLessGpu"; backend: BackendKind; custom?: boolean; chosenLayers?: number }
   | { kind: "steppingDown"; from: BackendKind; to: BackendKind; reason: LoadFailure }
-  | { kind: "retryingWithoutFastAttention"; backend: BackendKind };
+  | { kind: "retryingWithoutFastAttention"; backend: BackendKind }
+  // [0.0.7 P2] Loaded again without its image file, which could not be read (also listed when a
+  // load leaves out one remembered as unreadable).
+  // [0.0.7 P2] `memory`: left out because there was not enough memory for it too (the file is fine).
+  | { kind: "retryingWithoutImageFile"; memory?: boolean };
 
 /** "Use the graphics card": All of it, As much as fits, Don't use it. */
 export type GpuUse = "all" | "fit" | "off";
@@ -1207,6 +1273,11 @@ export interface MemoryBar {
   freeAfterUnload: boolean;
   otherBytes: number;
   need: Parts;
+  /**
+   * What the saved copies of a long chat may take besides, later (computer memory only;
+   * 0.0.7). Not in `need`: they build up during a chat. Absent from older answers: 0.
+   */
+  copiesBytes?: number;
 }
 
 export type PictureSource =
@@ -1240,6 +1311,13 @@ export interface OffloadPreview {
   mark: Verdict;
   fits: Fits;
   custom: boolean;
+  /**
+   * Not even one saved copy of a long chat fits what the computer has left (0.0.7): the mark
+   * is yellow at most for that; the computer bar's `copiesBytes` says how much.
+   */
+  copiesShort?: boolean;
+  /** The computer's free memory could not be read: its bar has no free figure. */
+  computerUnknown?: boolean;
 }
 
 /** Where the loaded model went (the ready line's memory report). */

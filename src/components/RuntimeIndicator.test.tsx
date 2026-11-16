@@ -329,6 +329,50 @@ describe("RuntimeIndicator: the local model's state in plain words", () => {
     ]);
   });
 
+  it("[0.0.7] says the model loaded without its image file, and Learn more opens Models → Installed", async () => {
+    const without = status({ vision: false, adjustments: [{ kind: "retryingWithoutImageFile" }] });
+    expect(runtimeNotes(without, { restarted: false, hasMessages: false })).toEqual([
+      {
+        text: "Loaded without image input: the image file next to this model couldn't be read.",
+        action: "installed",
+      },
+    ]);
+    const opened: unknown[] = [];
+    const onOpen = (e: Event) => opened.push((e as CustomEvent<unknown>).detail);
+    window.addEventListener("app:open-models", onOpen);
+    try {
+      await show(without);
+      expect(screen.getByRole("status").textContent).toBe(
+        "Loaded without image input: the image file next to this model couldn't be read.Learn more",
+      );
+      await click(screen.getByRole("button", { name: "Learn more" }));
+      expect(opened).toEqual(["installed"]);
+      expect(ipcMock.reloadLocalModel).not.toHaveBeenCalled();
+    } finally {
+      window.removeEventListener("app:open-models", onOpen);
+    }
+    // With a step-down too, the step-down comes first and the image file note stays.
+    const both = runtimeNotes(
+      status({
+        backend: "cpu",
+        adjustments: [
+          { kind: "retryingWithoutImageFile" },
+          { kind: "steppingDown", from: "vulkan", to: "cpu", reason: { code: "out_of_memory" } },
+        ],
+      }),
+      { restarted: false, hasMessages: false },
+    );
+    expect(both.map((n) => n.action)).toEqual(["reload", "installed"]);
+    // [P2 review m11] Left out for memory: Model settings can make room; Installed has nothing to add.
+    const memory = status({ vision: false, adjustments: [{ kind: "retryingWithoutImageFile", memory: true }] });
+    expect(runtimeNotes(memory, { restarted: false, hasMessages: false })).toEqual([
+      {
+        text: "Loaded without image input: there wasn't enough memory for the image file too.",
+        action: "settings",
+      },
+    ]);
+  });
+
   it("lists every note in order, most important first", () => {
     const notes = runtimeNotes(
       status({

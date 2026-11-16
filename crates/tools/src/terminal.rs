@@ -16,7 +16,10 @@
 //!   kills the tree.
 //! - A failure says what to do next (app 0.0.4): a program that is not there is named
 //!   with close names on PATH, a timeout says how to allow more time, a working folder
-//!   that is not allowed names the allowed ones.
+//!   that is not allowed names the allowed ones. A command that failed because of a common
+//!   mistake for the shell (0.0.7: `&&`, `rm -rf`, `grep`, `export` or `/dev/null` in Windows
+//!   PowerShell 5.1, an unquoted URL in zsh) ends with a one-line hint
+//!   (`errors::command_hints`); what ran and the exit code are not changed.
 //!
 //! The classifier in `policy::command` decides what a grant can cover; it fails closed.
 
@@ -982,6 +985,13 @@ impl BuiltinServer for TerminalServer {
         {
             note(&line);
         }
+        // [0.0.7] A common mistake for this shell: one line on what to write instead. Text
+        // only: what ran and the exit code stay as they are.
+        if failed {
+            for hint in errors::command_hints(self.hint_shell(), command, &text) {
+                note(&format!("[{hint}]"));
+            }
+        }
         let budget = shorten::budget_bytes(ctx.chat.result_cap_tokens);
         let ui = Some(json!({ "command": command, "cwd": cwd }));
         // A failed command also shows the end of its error stream, wherever that ended up.
@@ -1003,6 +1013,25 @@ impl BuiltinServer for TerminalServer {
 }
 
 impl TerminalServer {
+    /// [0.0.7] The shell for [`errors::command_hints`]: Windows PowerShell 5.1 (PowerShell 7,
+    /// `pwsh.exe`, has `&&` and gets none of its hints), zsh, or another.
+    fn hint_shell(&self) -> errors::HintShell {
+        match &self.config.shell {
+            TerminalShell::PowerShell { program } => {
+                let pwsh = program
+                    .file_stem()
+                    .is_some_and(|stem| stem.eq_ignore_ascii_case("pwsh"));
+                if pwsh {
+                    errors::HintShell::Other
+                } else {
+                    errors::HintShell::WindowsPowerShell
+                }
+            }
+            TerminalShell::Zsh => errors::HintShell::Zsh,
+            TerminalShell::Sh => errors::HintShell::Other,
+        }
+    }
+
     /// The names of the programs on PATH (without `.exe` and the like on Windows).
     fn programs_on_path(&self) -> Vec<String> {
         let Some(path) = self.path_var() else {
@@ -1567,6 +1596,95 @@ mod tests {
         );
     }
 
+    /// A stand-in for `powershell.exe` that prints `stderr` to its error stream and exits
+    /// with `code`, whatever it is given (the real one is tested on Windows below). Its PATH
+    /// holds only its own folder, so no Unix program is found there.
+    fn fake_powershell(dir: &std::path::Path, stderr: &str, code: i32) -> TerminalServer {
+        use std::os::unix::fs::PermissionsExt;
+        let script = dir.join("powershell");
+        let quoted = stderr.replace('\'', "'\\''");
+        std::fs::write(
+            &script,
+            format!("#!/bin/sh\nprintf '%s\\n' '{quoted}' >&2\nexit {code}\n"),
+        )
+        .unwrap();
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let base: BTreeMap<String, String> =
+            [("PATH".to_string(), dir.display().to_string())].into();
+        TerminalServer::new(TerminalConfig {
+            shell: TerminalShell::PowerShell { program: script },
+            base_env: base,
+            pass_through: vec![],
+        })
+    }
+
+    /// [0.0.7] A failed command whose output shows a common mistake for Windows PowerShell
+    /// 5.1 ends with a hint on its own line; its exit code and its output stay as they were.
+    /// A command that succeeded gets none, and neither does another shell.
+    #[tokio::test]
+    async fn a_powershell_mistake_gets_a_hint_and_nothing_else_changes() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dunce::canonicalize(dir.path()).unwrap();
+        let bin = tempfile::tempdir().unwrap();
+        let c = chat(&root);
+        let error = "At line:2 char:11\n+ cd client && npm install\n+           ~~\nThe token '&&' is not a valid statement separator in this version.\n    + CategoryInfo          : ParserError: (:) [], ParentContainsErrorRecordException\n    + FullyQualifiedErrorId : InvalidEndOfLine";
+        let s = fake_powershell(bin.path(), error, 1);
+        let out = run(&s, &c, json!({"command": "cd client && npm install"})).await;
+        assert!(out.is_error);
+        let text = out.joined_text();
+        assert!(text.starts_with("Exit code 1 ("), "{text}");
+        assert!(text.contains(error), "{text}");
+        assert_eq!(
+            text.lines().last(),
+            Some(
+                "[Windows PowerShell 5.1 has no && or ||: put ; between commands, or run the next one only if a program succeeded with: first; if ($LASTEXITCODE -eq 0) { second }]"
+            ),
+            "{text}"
+        );
+        // Exit code 0: the same text, no hint.
+        let s = fake_powershell(bin.path(), error, 0);
+        let out = run(&s, &c, json!({"command": "cd client && npm install"})).await;
+        assert!(!out.is_error);
+        assert!(
+            !out.joined_text().contains("[Windows PowerShell 5.1"),
+            "{}",
+            out.joined_text()
+        );
+        // PowerShell 7 has && and gets no such hint.
+        let pwsh = bin.path().join("pwsh");
+        std::fs::copy(bin.path().join("powershell"), &pwsh).unwrap();
+        let s = TerminalServer::new(TerminalConfig {
+            shell: TerminalShell::PowerShell { program: pwsh },
+            base_env: std::env::vars().filter(|(k, _)| k == "PATH").collect(),
+            pass_through: vec![],
+        });
+        assert_eq!(s.hint_shell(), errors::HintShell::Other);
+        // /bin/sh: no PowerShell hints for the same words.
+        let out = run(
+            &server(&[]),
+            &c,
+            json!({"command": "echo \"The token '&&' is not a valid statement separator in this version.\"; exit 1"}),
+        )
+        .await;
+        assert!(out.is_error);
+        assert!(
+            !out.joined_text().contains("[Windows PowerShell"),
+            "{}",
+            out.joined_text()
+        );
+        // A missing Unix program: the not-found note, then the hint.
+        let missing = "grep : The term 'grep' is not recognized as the name of a cmdlet, function, script file, or operable program. Check the spelling of the name, or if a path was included, verify that the path is correct and try again.\n    + FullyQualifiedErrorId : CommandNotFoundException";
+        let s = fake_powershell(bin.path(), missing, 1);
+        let out = run(&s, &c, json!({"command": "grep TODO notes.txt"})).await;
+        let text = out.joined_text();
+        assert!(text.contains("[\"grep\" was not found"), "{text}");
+        assert_eq!(
+            text.lines().last(),
+            Some("[PowerShell has no grep: use Select-String -Pattern 'text' -Path <file>]"),
+            "{text}"
+        );
+    }
+
     #[tokio::test]
     async fn a_timeout_says_how_long_it_ran_what_it_printed_and_how_to_allow_more() {
         let dir = tempfile::tempdir().unwrap();
@@ -1873,6 +1991,64 @@ mod windows_tests {
         let text = run("Write-Output fine").await;
         assert!(
             text.starts_with("Exit code 0") && text.contains("fine"),
+            "{text}"
+        );
+    }
+
+    /// [0.0.7] The mistakes models make most, in the real Windows PowerShell 5.1: its own
+    /// error text is shown and the hint follows it. (Programs that may be on a runner's PATH,
+    /// such as grep from Git, are left out: they would not fail.)
+    #[tokio::test]
+    async fn common_unix_habits_fail_with_a_hint() {
+        for (command, error, hint) in [
+            (
+                "echo one && echo two",
+                "is not a valid statement separator in this version",
+                "[Windows PowerShell 5.1 has no && or ||",
+            ),
+            (
+                "rm -rf no-such-folder",
+                "A parameter cannot be found that matches parameter name 'rf'",
+                "[In PowerShell, rm is Remove-Item: delete a folder with Remove-Item -Recurse -Force <path>]",
+            ),
+            (
+                "ls -la",
+                "A parameter cannot be found that matches parameter name 'la'",
+                "[In PowerShell, ls is Get-ChildItem",
+            ),
+            (
+                "export FOO=1",
+                "The term 'export' is not recognized as",
+                "[PowerShell has no export: set a variable with $env:NAME = 'value'",
+            ),
+            (
+                "Write-Output hi > /dev/null",
+                "Could not find a part of the path",
+                "[Windows has no /dev/null: use 2>$null, > $null or | Out-Null]",
+            ),
+            (
+                "cat <<EOF",
+                "operator is reserved for future use",
+                "[PowerShell has no < input redirection",
+            ),
+            (
+                // Windows PowerShell 5.1 reads `--version` here as its `--` operator
+                // followed by the word `version` (as CI's Windows runner showed).
+                "\"C:\\Windows\\System32\\where.exe\" --version",
+                "Unexpected token 'version' in expression or statement",
+                "[To run a program at a quoted path, put & in front",
+            ),
+        ] {
+            let text = run(command).await;
+            assert!(text.starts_with("Exit code 1"), "{command}: {text}");
+            assert!(text.contains(error), "{command}: {text}");
+            assert!(text.contains(hint), "{command}: {text}");
+            assert!(!text.contains("<Objs"), "{command}: {text}");
+        }
+        // What succeeded gets no hint.
+        let text = run("Write-Output 'a && b'").await;
+        assert!(
+            text.starts_with("Exit code 0") && !text.contains("[Windows PowerShell"),
             "{text}"
         );
     }
