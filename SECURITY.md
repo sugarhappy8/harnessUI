@@ -402,7 +402,8 @@ build machine, and its Windows and macOS jobs have not run at all.
   this computer or the local network has no mark. Server answers are untrusted data like any
   model output.
 - An endpoint's API key goes only to that endpoint's own address, in the header its API
-  uses (`x-api-key` for Anthropic, `Authorization` for the others). It is never written to
+  uses (`x-api-key` for Anthropic, `Authorization` for the others); a redirect to another
+  address is not followed, so neither the key nor the chat goes there. It is never written to
   the database or the logs, and it is removed from any error a server sends back before the
   error is shown. It is never sent over plain http:// to a server on the internet, where
   anyone on the way could read it: the app refuses to save such an endpoint with a key and

@@ -2,6 +2,20 @@
 
 Each package adds what it could not check here (no Windows PC or Mac in the build machine).
 
+## Memory estimates (P1)
+On the Windows PC (RX 9070 XT, 16 GB), with `gemma-4-12B-coder…heretic`:
+1. Browse at 65,536 tokens: Q8_0 says it fits (or offers a little less memory if less than
+   about 15 GB is free on the card), never "Too large".
+2. *Settings for this model*: Automatic reaches 32,768 tokens (green); 65,536 is yellow for
+   Q8_0 and green for Q6_K and Q4_K_M.
+3. Load Q6_K at 65,536 tokens and look at the log: the conversation memory on the graphics
+   card is about 1,024 + 480 MiB (about 820 MiB with *Save memory*).
+4. During a long chat (15 or more turns or tool calls), llama-server's memory in Task
+   Manager grows a little and then levels off (the saved conversation copies; see the
+   final figure in `STATUS.md`).
+5. With *Fast attention* off, the estimate rises to about 3 GB of conversation memory at
+   65,536 tokens.
+
 ## Computer use (P3)
 On the Windows PC:
 1. Load a model that can see (for example Qwen 3.8 27B with its image file), switch on
