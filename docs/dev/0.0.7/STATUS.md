@@ -228,3 +228,14 @@ and `README.md`.
   under 8 characters wasn't scrubbed; `localhost.` can go to DNS; whitespace-only system
   prompt changes; the per-chat limit comment; helpers share the chat's store; the
   over-20-pictures rule dropped two pictures it didn't need to. Small round 3 running.
+- P1 round 1 done: a Reload after a long chat no longer counts the running model's saved
+  copies twice (only what the computer's free memory fell by since the model became ready
+  counts as freed); the number of saved copies is chosen per load from memory (1–8, half
+  the computer's memory left after the 2 GB reserve and the model's own part there) and
+  passed as `--ctx-checkpoints N`; copies never turn a mark red or shrink Automatic; the
+  running state of hybrid models (Qwen 3.5, Qwen3-Next, Granite 4.0-H, RWKV, LFM2, …)
+  counted as llama.cpp does; mistral4 keys-only; Automatic follows the placement's marks;
+  unknown computer memory stays unknown; the bar shows the copies as their own item.
+  Measured: with 1 copy, editing the last message re-reads the whole chat (9,618 tokens
+  vs 787 with 8); kept the minimum at 1 so a computer short of memory is never pushed
+  further. models 145, runtime 208+contract, app 876, vitest 844. Verification running.

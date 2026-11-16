@@ -210,7 +210,14 @@ fn have_browser() -> bool {
 }
 
 fn server(ports: &[u16], profile: &Path) -> BrowserServer {
+    server_with(ports, profile, false)
+}
+
+/// `no_policy`: the capture adds no WebSocket-blocking policy (test hook), so the line
+/// behind it (stop, save nothing) is what is tested.
+fn server_with(ports: &[u16], profile: &Path, no_policy: bool) -> BrowserServer {
     let mut config = BrowserConfig::new(profile.join("profile"));
+    config.test_no_capture_policy = no_policy;
     config.headless = true;
     config.no_sandbox = true;
     config.connection = ConnectionMode::Pipe;
@@ -259,6 +266,12 @@ fn png_size(path: &Path) -> (u32, u32) {
 
 /// Runs the browser by itself on a local file, offline, and returns what it printed.
 async fn run_browser_on_file(extra: &[String], file: &Path, work: &Path) -> String {
+    // Offline: every web request goes to a closed port.
+    run_browser_through(extra, file, work, "127.0.0.1:9").await
+}
+
+/// Like [`run_browser_on_file`], with every request (loopback ones too) sent to `proxy`.
+async fn run_browser_through(extra: &[String], file: &Path, work: &Path, proxy: &str) -> String {
     let exe = browser::find_browser(None, None).unwrap().path;
     // A profile folder of its own makes this browser build wait for ever with --dump-dom,
     // so the run uses the temporary profile headless mode makes by itself.
@@ -269,8 +282,9 @@ async fn run_browser_on_file(extra: &[String], file: &Path, work: &Path) -> Stri
         "--hide-scrollbars".into(),
         "--force-device-scale-factor=1".into(),
         "--no-first-run".into(),
-        // Offline: every web request goes to a closed port.
-        "--proxy-server=127.0.0.1:9".into(),
+        "--disable-background-networking".into(),
+        format!("--proxy-server={proxy}"),
+        "--proxy-bypass-list=<-loopback>".into(),
     ];
     list.extend(extra.iter().cloned());
     list.push(format!("file://{}", file.display()));
@@ -794,4 +808,285 @@ async fn a_public_site_can_be_captured_when_asked() {
         copy_tree(&folder, &PathBuf::from(keep).join("public"));
     }
     server.shutdown().await;
+}
+
+// ----- hostile pages (the independent review of round 1) --------------------------------
+
+/// The pages of the independent review: each made an earlier copy load or run something
+/// when opened. `beacon` is a loopback port the capture may not reach; every address a
+/// copy must never use points there or at `attacker.example`.
+fn hostile_pages(beacon: u16, ws: u16) -> HashMap<String, Page> {
+    use base64::Engine;
+    let b = format!("http://127.0.0.1:{beacon}");
+    let svg_doc = format!(
+        "<svg xmlns=\"http://www.w3.org/2000/svg\" onload=\"fetch('{b}/BEACON-A-svgdoc-onload')\"><script>fetch(\"{b}/BEACON-A-svgdoc-script\")</script><circle r=\"40\" cx=\"50\" cy=\"50\" fill=\"red\"/></svg>"
+    );
+    let svg64 = base64::engine::general_purpose::STANDARD.encode(svg_doc);
+    let html = |s: String| Page {
+        mime: "text/html; charset=utf-8",
+        body: s.into_bytes(),
+    };
+    let svg = |s: String| Page {
+        mime: "image/svg+xml",
+        body: s.into_bytes(),
+    };
+    let page_a = format!(
+        r#"<!DOCTYPE html><html lang="en"><head><title>Root swap</title><style>h1{{color:#c00}}</style></head><body><h1>Live page</h1>
+<script>
+(function(){{
+  var root = document.createElement('div');
+  root.innerHTML = '<h1>Copy of the page</h1><p>Some text.</p>';
+  function el(ns, name, attrs){{ var e = document.createElementNS(ns, name); for (var k in attrs) e.setAttribute(k, attrs[k]); root.appendChild(e); return e; }}
+  el('urn:x', 'embed', {{src: 'data:image/svg+xml;base64,{svg64}', type: 'image/svg+xml', width: '100', height: '100'}});
+  el('urn:x', 'iframe', {{src: 'data:image/svg+xml;base64,{svg64}', width: '100', height: '100'}});
+  el('urn:x', 'img', {{src: '{b}/BEACON-A-ns-img.png'}});
+  el('http://www.w3.org/2000/svg', 'link', {{rel: 'stylesheet', href: '{b}/BEACON-A-svg-link.css'}});
+  el('urn:x', 'meta', {{'http-equiv': 'refresh', content: '0;url={b}/BEACON-A-refresh'}});
+  el('urn:x', 'img', {{src: 'x', onerror: "fetch('{b}/BEACON-A-onerror')"}});
+  document.documentElement.replaceWith(root);
+}})();
+</script></body></html>"#
+    );
+    let page_b = r#"<!DOCTYPE html>
+<html <body="1" lang="en"><head><title>Static page</title></head>
+<body><h1>A static page</h1>
+<svg width="40" height="40"><use href="/b/sprite.svg#dot"></use></svg>
+<svg width="40" height="40"><use href="/b/sprite2.svg#dot2"></use></svg>
+<p>No script on this page.</p></body></html>"#
+        .to_string();
+    let sprite_b = format!(
+        "<svg xmlns=\"http://www.w3.org/2000/svg\"><symbol id=\"dot\" viewBox=\"0 0 10 10\"><circle cx=\"5\" cy=\"5\" r=\"4\" fill=\"#33f\"/></symbol><1 a=\"<img x='>' src=x onerror=fetch('{b}/BEACON-B-sprite-onerror')>\"/></svg>"
+    );
+    let sprite_b2 = format!(
+        "<svg xmlns=\"http://www.w3.org/2000/svg\"><symbol id=\"dot2\" viewBox=\"0 0 10 10\"><circle cx=\"5\" cy=\"5\" r=\"4\" fill=\"#3a3\"/></symbol><_:script xmlns:_=\"http://www.w3.org/2000/svg\">fetch(\"{b}/BEACON-B-sprite2\")</_:script><title>&lt;img src=x onerror=fetch('{b}/BEACON-B-title')&gt;</title></svg>"
+    );
+    let c1 = format!("<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"20\" height=\"20\"><rect width=\"20\" height=\"20\" fill=\"green\"/><_:script xmlns:_=\"http://www.w3.org/2000/svg\">document.documentElement.setAttribute(\"data-pwned\",\"C1\");fetch(\"{b}/BEACON-C1\")</_:script></svg>");
+    let c2 = format!("<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"20\" height=\"20\"><rect width=\"20\" height=\"20\" fill=\"blue\"/><h.x:script xmlns:h.x=\"http://www.w3.org/1999/xhtml\">document.documentElement.setAttribute(\"data-pwned\",\"C2\");fetch(\"{b}/BEACON-C2\")</h.x:script></svg>");
+    let c3 = format!("<?xml version=\"1.0\"?><!DOCTYPE svg [<!ENTITY x \"&#60;script&#62;document.documentElement.setAttribute(&#34;data-pwned&#34;,&#34;C3&#34;);fetch(&#34;{b}/BEACON-C3&#34;)&#60;/script&#62;\">]><svg xmlns=\"http://www.w3.org/2000/svg\" width=\"20\" height=\"20\"><rect width=\"20\" height=\"20\" fill=\"orange\"/>&x;</svg>");
+    let c4 = format!("<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"20\" height=\"20\" x=\">\" onload=\"document.documentElement.setAttribute('data-pwned','C4');fetch('{b}/BEACON-C4')\"><rect width=\"20\" height=\"20\"/></svg>");
+    let page_c = r#"<!DOCTYPE html><html><head><title>Pictures</title></head><body><h1>Pictures</h1>
+<img src="/c/p1.svg" width="20" height="20"><img src="/c/p2.svg" width="20" height="20">
+<img src="/c/p3.svg" width="20" height="20"><img src="/c/p4.svg" width="20" height="20">
+</body></html>"#
+        .to_string();
+    let page_f = r#"<!DOCTYPE html><html><head><title>Files</title><link rel="stylesheet" href="/f/site.css"></head><body>
+<img src="file://attacker.example/share/pic.png" width="10" height="10">
+<div style="width:10px;height:10px;background:url('file://attacker.example/share/bg.png')"></div>
+<video poster="file://attacker.example/share/poster.png" width="10" height="10"></video>
+<a href="file:///etc/passwd">a local file</a><p class="x y">body text</p></body></html>"#
+        .to_string();
+    let css_f = "@import url(file://attacker.example/share/imp.css);\n.x { background: url(file://attacker.example/share/css.png); }\n.y { border-image: u\\72l(//attacker.example/share/esc.png) 30; }\n";
+    let page_e = format!(
+        r#"<!DOCTYPE html><html><head><title>Sockets</title></head><body><h1>Sockets</h1><p id="out">waiting</p>
+<script>try {{ var ws = new WebSocket('ws://127.0.0.1:{ws}/ws-secret'); ws.onmessage = function(m){{ document.getElementById('out').textContent = 'LAN data: ' + m.data; }}; }} catch (e) {{}}</script></body></html>"#
+    );
+    HashMap::from([
+        ("/a/".to_string(), html(page_a)),
+        ("/b/".to_string(), html(page_b)),
+        ("/b/sprite.svg".to_string(), svg(sprite_b)),
+        ("/b/sprite2.svg".to_string(), svg(sprite_b2)),
+        ("/c/".to_string(), html(page_c)),
+        ("/c/p1.svg".to_string(), svg(c1)),
+        ("/c/p2.svg".to_string(), svg(c2)),
+        ("/c/p3.svg".to_string(), svg(c3)),
+        ("/c/p4.svg".to_string(), svg(c4)),
+        ("/f/".to_string(), html(page_f)),
+        (
+            "/f/site.css".to_string(),
+            Page {
+                mime: "text/css",
+                body: css_f.as_bytes().to_vec(),
+            },
+        ),
+        ("/e/".to_string(), html(page_e)),
+    ])
+}
+
+/// Captures `url` into a new folder below `into`; the result's error flag and text.
+async fn capture_into(
+    server: &BrowserServer,
+    chat: &ChatContext,
+    url: &str,
+    into: &Path,
+) -> (bool, String) {
+    let request = json!({"url": url, "folder": into.display().to_string(), "widths": [1024]});
+    let action = describe(server, request.clone(), chat).await;
+    assert!(action.hard_limit.is_none(), "{:?}", action.hard_limit);
+    let out = server
+        .call(
+            "browser_capture_site",
+            &args(request),
+            &action,
+            CallContext {
+                chat: chat.clone(),
+                cancel: CancellationToken::new(),
+                progress: None,
+            },
+        )
+        .await;
+    (out.is_error, out.joined_text())
+}
+
+/// The text of a saved file without the copy's own policy (which names `file:`, the
+/// scheme the copy's own files load with).
+fn without_policy(text: &str) -> String {
+    text.replace(browser::capture::html::COPY_POLICY, "")
+}
+
+/// Nothing in a saved copy points anywhere but at its own files.
+fn assert_inert_files(folder: &Path, beacon: u16, site: u16) {
+    let index = std::fs::read_to_string(folder.join("index.html")).unwrap();
+    assert!(
+        index.contains("<html") && index.contains("<head><meta http-equiv=\"Content-Security-Policy\""),
+        "the policy comes first: {index}"
+    );
+    let text = without_policy(&index).to_ascii_lowercase();
+    for bad in [
+        "<script",
+        "<embed",
+        "<object",
+        "<iframe",
+        "<frame",
+        "<base",
+        "<noscript",
+        "<foreignobject",
+        "javascript:",
+        "onerror",
+        "onload",
+        "refresh",
+        "file:",
+        "attacker.example",
+        "beacon",
+        "data:image/svg+xml",
+        "127.0.0.1",
+    ] {
+        assert!(!text.contains(bad), "{bad} in {}:\n{index}", folder.display());
+    }
+    let _ = (beacon, site);
+    if let Ok(dir) = std::fs::read_dir(folder.join("styles")) {
+        for e in dir {
+            let css = std::fs::read_to_string(e.unwrap().path()).unwrap();
+            for bad in ["file:", "attacker.example", "u\\72l", "127.0.0.1"] {
+                assert!(!css.contains(bad), "{bad} in a saved style sheet: {css}");
+            }
+        }
+    }
+}
+
+/// Opens `file` from disk in a separate browser run with every request sent to a
+/// recording proxy, and returns its DOM and what reached the proxy or the beacon server.
+async fn open_recorded(file: &Path, work: &Path, beacon: &Site) -> (String, Vec<String>) {
+    let recorder = serve(HashMap::new()).await;
+    let dom = run_browser_through(
+        &["--virtual-time-budget=4000".into(), "--dump-dom".into()],
+        file,
+        work,
+        &format!("127.0.0.1:{}", recorder.port),
+    )
+    .await;
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    let mut seen: Vec<String> = recorder
+        .requests()
+        .into_iter()
+        // The browser's own background requests (time, updates) are not the copy's.
+        .filter(|r| {
+            !["google.com", "googleapis.com", "gvt1.com", "gstatic.com"]
+                .iter()
+                .any(|h| r.contains(h))
+        })
+        .collect();
+    seen.extend(beacon.requests());
+    (dom, seen)
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn hostile_pages_leave_an_inert_copy_that_loads_nothing() {
+    if !have_browser() {
+        return;
+    }
+    let beacon = serve(HashMap::new()).await;
+    let ws = serve(HashMap::new()).await;
+    let site = serve(hostile_pages(beacon.port, ws.port)).await;
+    let work = tempfile::tempdir().unwrap();
+    let approved = work.path().join("approved");
+    std::fs::create_dir(&approved).unwrap();
+    let chat = chat(&approved);
+    let server = server(&[site.port], work.path());
+
+    for page in ["a", "b", "c", "f", "e"] {
+        let into = approved.join(page);
+        let (failed, text) = capture_into(&server, &chat, &site.url(&format!("/{page}/")), &into).await;
+        assert!(!failed, "/{page}/: {text}");
+        let folder = only_dir(&dunce::canonicalize(&into).unwrap());
+        assert_inert_files(&folder, beacon.port, site.port);
+        let (dom, seen) = open_recorded(&folder.join("index.html"), work.path(), &beacon).await;
+        assert!(seen.is_empty(), "/{page}/: the copy made requests: {seen:?}");
+        assert!(!dom.contains("data-pwned"), "/{page}/: {dom}");
+        let index = std::fs::read_to_string(folder.join("index.html")).unwrap();
+        match page {
+            "a" => assert!(index.contains("Copy of the page"), "{index}"),
+            "b" => {
+                assert!(index.contains("<html lang=\"en\">"), "{index}");
+                assert!(index.contains("<symbol id=\"dot2\""), "the clean shapes are copied in: {index}");
+                assert!(!index.contains("<symbol id=\"dot\""), "a malformed picture is left out: {index}");
+            }
+            "c" => {
+                let svgs: Vec<PathBuf> = std::fs::read_dir(folder.join("assets"))
+                    .unwrap()
+                    .map(|e| e.unwrap().path())
+                    .filter(|p| p.extension().is_some_and(|x| x == "svg"))
+                    .collect();
+                assert_eq!(svgs.len(), 3, "the picture with a document type is left out: {svgs:?}");
+                for svg in svgs {
+                    let text = std::fs::read_to_string(&svg).unwrap();
+                    assert!(!text.contains("script") && !text.contains("onload"), "{text}");
+                    let (dom, seen) = open_recorded(&svg, work.path(), &beacon).await;
+                    assert!(seen.is_empty(), "{}: requests {seen:?}", svg.display());
+                    assert!(!dom.contains("data-pwned"), "{}: {dom}", svg.display());
+                }
+            }
+            "e" => {
+                assert!(index.contains("<p id=\"out\">waiting</p>"), "{index}");
+                assert!(!index.contains("LAN data"), "{index}");
+            }
+            _ => {}
+        }
+    }
+    // The capture itself never reached the beacon, and the policy kept the WebSocket from
+    // even connecting.
+    assert!(beacon.requests().is_empty(), "{:?}", beacon.requests());
+    assert!(ws.requests().is_empty(), "the WebSocket connected: {:?}", ws.requests());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_websocket_that_starts_stops_the_capture_and_nothing_is_saved() {
+    if !have_browser() {
+        return;
+    }
+    let beacon = serve(HashMap::new()).await;
+    let ws = serve(HashMap::new()).await;
+    let site = serve(hostile_pages(beacon.port, ws.port)).await;
+    let work = tempfile::tempdir().unwrap();
+    let approved = work.path().join("approved");
+    std::fs::create_dir(&approved).unwrap();
+    let chat = chat(&approved);
+    // Without the blocking policy (test hook), the WebSocket starts.
+    let server = server_with(&[site.port], work.path(), true);
+    let into = approved.join("e");
+    let (failed, text) = capture_into(&server, &chat, &site.url("/e/"), &into).await;
+    assert!(failed, "the capture went on: {text}");
+    assert!(
+        text.contains("opened a WebSocket to ws://127.0.0.1:")
+            && text.contains("nothing was saved"),
+        "{text}"
+    );
+    assert!(
+        ws.requests().iter().any(|r| r.starts_with("/ws-secret")),
+        "the WebSocket did start here: {:?}",
+        ws.requests()
+    );
+    let left = std::fs::read_dir(&into)
+        .map(|d| d.count())
+        .unwrap_or(0);
+    assert_eq!(left, 0, "no capture folder is left");
 }

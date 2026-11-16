@@ -1621,7 +1621,11 @@ impl Browser {
             }
         };
         let failed = params.get("responseErrorReason").is_some();
-        if failed || !ours || !(100..300).contains(&status) || status == 204 {
+        #[cfg(feature = "test-hooks")]
+        let ours = ours && !self.config.test_no_capture_policy;
+        // A redirect has no page of its own; a response without a body has nothing to run.
+        let bodiless = (300..400).contains(&status) || matches!(status, 204 | 205) || status < 100;
+        if failed || !ours || bodiless {
             self.continue_response(&session, &request_id, None).await;
             return;
         }

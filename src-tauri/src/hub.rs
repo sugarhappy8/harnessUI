@@ -1018,7 +1018,7 @@ pub async fn list_installed_models(
                 .clone()
                 .filter(|l| crate::model_options::same_file(l, &m.path)),
             image_file_unreadable: image.left_out,
-            image_file_offer: image_file::saved_offer(m.repo.as_deref(), &stored),
+            image_file_offer: image_file::saved_offer(m.repo.as_deref(), &m.path, &stored),
             delete_bytes,
             kept_outside,
         });

@@ -882,6 +882,9 @@ mod tests {
         let out = make_inert(html, &[sprite.to_string()], &files())
             .unwrap()
             .html;
+        eprintln!("=====\n{out}\n=====");
+        let plain = make_inert(html, &[], &files()).unwrap().html;
+        eprintln!("=====\n{plain}\n=====");
         let policy = out.find("Content-Security-Policy").unwrap();
         let shapes = out.find("<symbol id=\"dot\"").expect("the shapes are copied in");
         assert!(policy < shapes, "{out}");

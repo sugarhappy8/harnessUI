@@ -25,6 +25,9 @@ fn downloaded_stamp(path: &Path, size: u64, sha256: &str) -> FileStamp {
     }
 }
 
+/// The model a repository's image files are offered for, in the offer tests.
+const MODEL: &str = "/models/someone/Model-GGUF/Model-Q4_K_M.gguf";
+
 fn repo_file(path: &str, size: u64) -> RepoFile {
     RepoFile {
         path: path.into(),
@@ -283,7 +286,7 @@ fn the_image_file_a_repository_offers() {
         repo_file("mmproj-Model-BF16.gguf", 300),
         repo_file("sub/Model.mmproj-f16.gguf", 300),
     ];
-    let (offer, file) = pick(&files, &[]);
+    let (offer, file) = pick(&files, &[], MODEL);
     assert_eq!(
         offer,
         Offer::Available {
@@ -294,7 +297,7 @@ fn the_image_file_a_repository_offers() {
     assert_eq!(file.unwrap().path, "sub/Model.mmproj-f16.gguf");
 
     let bad_f16 = stamp(Path::new("/models/x/Model.mmproj-f16.gguf"), 300, 1);
-    let (offer, file) = pick(&files, std::slice::from_ref(&bad_f16));
+    let (offer, file) = pick(&files, std::slice::from_ref(&bad_f16), MODEL);
     assert_eq!(
         offer,
         Offer::Available {
@@ -307,7 +310,7 @@ fn the_image_file_a_repository_offers() {
     // The same name, another size: the repository has a newer upload of it.
     let older = stamp(Path::new("/models/x/Model.mmproj-f16.gguf"), 299, 1);
     assert_eq!(
-        pick(&files, &[older]).1.unwrap().path,
+        pick(&files, &[older], MODEL).1.unwrap().path,
         "sub/Model.mmproj-f16.gguf"
     );
 
@@ -325,14 +328,14 @@ fn the_image_file_a_repository_offers() {
         &"ab".repeat(32),
     );
     assert_eq!(
-        pick(&only, std::slice::from_ref(&same_upload)),
+        pick(&only, std::slice::from_ref(&same_upload), MODEL),
         (Offer::NoOther, None)
     );
     let again = Offer::Again {
         file: "Model.mmproj-f16.gguf".into(),
         size_bytes: 300,
     };
-    let (offer, file) = pick(&only, std::slice::from_ref(&bad_f16));
+    let (offer, file) = pick(&only, std::slice::from_ref(&bad_f16), MODEL);
     assert_eq!(offer, again);
     assert_eq!(file.unwrap().path, "Model.mmproj-f16.gguf");
     let other_upload = downloaded_stamp(
@@ -340,25 +343,58 @@ fn the_image_file_a_repository_offers() {
         300,
         &"cd".repeat(32),
     );
-    assert_eq!(pick(&only, &[other_upload]).0, again);
+    assert_eq!(pick(&only, &[other_upload], MODEL).0, again);
     let unpublished = vec![RepoFile {
         sha256: None,
         ..repo_file("Model.mmproj-f16.gguf", 300)
     }];
     assert_eq!(
-        pick(&unpublished, std::slice::from_ref(&same_upload)).0,
+        pick(&unpublished, std::slice::from_ref(&same_upload), MODEL).0,
         again
     );
     assert_eq!(
-        pick(&files, &[same_upload.clone(), bad_f16.clone()]).0,
+        pick(&files, &[same_upload.clone(), bad_f16.clone()], MODEL).0,
         Offer::Available {
             file: "mmproj-Model-BF16.gguf".into(),
             size_bytes: 300
         }
     );
     // None at all.
-    assert_eq!(pick(&only[..1], &[]), (Offer::NoImageFile, None));
-    assert_eq!(pick(&[], &[]), (Offer::NoImageFile, None));
+    assert_eq!(pick(&only[..1], &[], MODEL), (Offer::NoImageFile, None));
+    assert_eq!(pick(&[], &[], MODEL), (Offer::NoImageFile, None));
+}
+
+/// m4: a repository with the image files of several models (sizes of one model) offers the
+/// one named after the model first, whatever their sizes; then one named after no model.
+/// For a model whose name names nothing, the best precision and the smallest, as before.
+#[test]
+fn a_repository_of_several_models_offers_the_models_own() {
+    let files = vec![
+        repo_file("mmproj-Sample-4B-F16.gguf", 800),
+        repo_file("mmproj-Sample-27B-F16.gguf", 900),
+        repo_file("mmproj-Sample-27B-Q8_0.gguf", 500),
+        repo_file("mmproj-F16.gguf", 850),
+    ];
+    let offered = |model: &str| pick(&files, &[], model).1.unwrap().path;
+    assert_eq!(
+        offered("/m/Sample-27B-Q4_K_M.gguf"),
+        "mmproj-Sample-27B-F16.gguf"
+    );
+    assert_eq!(
+        offered("/m/Sample-4B-Q4_K_M.gguf"),
+        "mmproj-Sample-4B-F16.gguf"
+    );
+    assert_eq!(offered("/m/Other-7B-Q4_K_M.gguf"), "mmproj-F16.gguf");
+    assert_eq!(offered("/m/model-Q4_K_M.gguf"), "mmproj-Sample-4B-F16.gguf");
+    // Its own could not be read: the next of its own, before any other model's.
+    let bad = stamp(Path::new("/m/mmproj-Sample-27B-F16.gguf"), 900, 1);
+    assert_eq!(
+        pick(&files, &[bad], "/m/Sample-27B-Q4_K_M.gguf")
+            .1
+            .unwrap()
+            .path,
+        "mmproj-Sample-27B-Q8_0.gguf"
+    );
 }
 
 /// The webview reads these shapes (src/lib/types.ts `ImageFileOffer`).
@@ -723,16 +759,16 @@ async fn the_offer_comes_from_what_is_saved() {
         repo_file("Model.mmproj-f16.gguf", 300),
     ];
     let mut s = StoredSummary::default();
-    assert_eq!(saved_offer(Some("someone/Model-GGUF"), &s), None);
+    assert_eq!(saved_offer(Some("someone/Model-GGUF"), MODEL, &s), None);
     s.repo_image_files = Some(Vec::new());
     assert_eq!(
-        saved_offer(Some("someone/Model-GGUF"), &s),
+        saved_offer(Some("someone/Model-GGUF"), MODEL, &s),
         Some(Offer::NoImageFile)
     );
-    assert_eq!(saved_offer(None, &s), None);
+    assert_eq!(saved_offer(None, MODEL, &s), None);
     s.repo_image_files = Some(files.clone());
     assert_eq!(
-        saved_offer(Some("someone/Model-GGUF"), &s),
+        saved_offer(Some("someone/Model-GGUF"), MODEL, &s),
         Some(Offer::Available {
             file: "Model.mmproj-f16.gguf".into(),
             size_bytes: 300

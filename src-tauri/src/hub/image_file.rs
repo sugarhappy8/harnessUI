@@ -179,6 +179,27 @@ pub(crate) fn name_words(name: &str) -> Vec<String> {
         .collect()
 }
 
+/// How an image file's name relates to the model it may be for (0.0.7 review m4), from the
+/// model's [`name_words`]: 0 named after it, 1 named after no model (or the model's own name
+/// names nothing), 2 named after another model.
+fn name_tier(model_words: &[String], file_name: &str) -> u8 {
+    let words = name_words(file_name);
+    if words.is_empty() || model_words.is_empty() {
+        1
+    } else if words.iter().all(|w| model_words.contains(w)) {
+        0
+    } else {
+        2
+    }
+}
+
+/// The [`name_words`] of the file at `path`.
+fn file_words(path: &Path) -> Vec<String> {
+    path.file_name()
+        .map(|n| name_words(&n.to_string_lossy()))
+        .unwrap_or_default()
+}
+
 /// What an image file's header says about whether it is the image file of a model whose
 /// embedding length is `embedding_length` (0.0.7 review m4): `Some(true)` when the width of
 /// what it makes (`clip.vision.projection_dim`, or the audio one) equals it, which llama.cpp
@@ -212,10 +233,7 @@ fn width_fits(image: &Path, embedding_length: Option<u64>) -> Option<bool> {
 /// names nothing, no name counts against a file. `embedding_length` is the model's, when
 /// known.
 pub fn candidates(model: &Path, embedding_length: Option<u64>) -> Vec<PathBuf> {
-    let model_words = model
-        .file_name()
-        .map(|n| name_words(&n.to_string_lossy()))
-        .unwrap_or_default();
+    let model_words = file_words(model);
     let mut tiered: Vec<(u8, PathBuf)> = beside(model)
         .into_iter()
         .filter_map(|path| {
@@ -223,16 +241,10 @@ pub fn candidates(model: &Path, embedding_length: Option<u64>) -> Vec<PathBuf> {
                 Some(true) => 0,
                 Some(false) => return None,
                 None => {
-                    let words = path
-                        .file_name()
-                        .map(|n| name_words(&n.to_string_lossy()))
-                        .unwrap_or_default();
-                    if words.is_empty() || model_words.is_empty() {
-                        1
-                    } else if words.iter().all(|w| model_words.contains(w)) {
-                        0
-                    } else {
-                        return None;
+                    let name = path.file_name()?.to_string_lossy().into_owned();
+                    match name_tier(&model_words, &name) {
+                        2 => return None,
+                        tier => tier,
                     }
                 }
             };
@@ -327,16 +339,25 @@ fn last_part(path: &str) -> &str {
     path.rsplit('/').next().unwrap_or(path)
 }
 
-/// The image file to download from a repository listing: the best by the ranking Browse
-/// uses ([`models::classify`], F16 first), skipping one remembered as unreadable (the same
-/// name and size). When those are all there is, one whose copy here may differ from the
-/// repository's (its SHA-256 unknown here or published anew) is offered again. Returns what
-/// to offer and the file.
-pub fn pick(files: &[RepoFile], unreadable: &[FileStamp]) -> (Offer, Option<RepoFile>) {
-    let projectors = models::classify(files).projectors;
+/// The image file to download from a repository listing for the model at `model`: those
+/// named after it first, then those named after no model, then the others (0.0.7 review
+/// m4: a repository may hold the image files of several sizes of a model), each by the
+/// ranking Browse uses ([`models::classify`], F16 first); skipping one remembered as
+/// unreadable (the same name and size). When those are all there is, one whose copy here
+/// may differ from the repository's (its SHA-256 unknown here or published anew) is offered
+/// again. Returns what to offer and the file.
+pub fn pick(
+    files: &[RepoFile],
+    unreadable: &[FileStamp],
+    model: &str,
+) -> (Offer, Option<RepoFile>) {
+    let mut projectors = models::classify(files).projectors;
     if projectors.is_empty() {
         return (Offer::NoImageFile, None);
     }
+    let model_words = file_words(Path::new(model));
+    // Stable: the ranking stays within each tier.
+    projectors.sort_by_key(|f| name_tier(&model_words, last_part(&f.path)));
     let remembered = |f: &RepoFile| {
         unreadable
             .iter()
@@ -367,14 +388,18 @@ pub fn pick(files: &[RepoFile], unreadable: &[FileStamp]) -> (Offer, Option<Repo
     }
 }
 
-/// What Installed offers for a model's image file from what is saved on its row (0.0.7
-/// review M2), without asking Hugging Face. `None` when the model has no repository, or
-/// the app never saw its repository's image files (a model downloaded before 0.0.7):
-/// Installed then offers to look ([`image_file_offer`]).
-pub(super) fn saved_offer(repo: Option<&str>, stored: &StoredSummary) -> Option<Offer> {
+/// What Installed offers for the image file of the model at `model` from what is saved on
+/// its row (0.0.7 review M2), without asking Hugging Face. `None` when the model has no
+/// repository, or the app never saw its repository's image files (a model downloaded
+/// before 0.0.7): Installed then offers to look ([`image_file_offer`]).
+pub(super) fn saved_offer(
+    repo: Option<&str>,
+    model: &str,
+    stored: &StoredSummary,
+) -> Option<Offer> {
     repo?;
     let files = stored.repo_image_files.as_deref()?;
-    Some(pick(files, &stored.unreadable_projectors).0)
+    Some(pick(files, &stored.unreadable_projectors, model).0)
 }
 
 /// Where a downloaded image file goes: the model's own folder, under the last part of its
@@ -543,7 +568,7 @@ pub async fn save_repo_image_files(
         return Ok(None);
     };
     let files = models::classify(listing).projectors;
-    let offer = pick(&files, &stored.unreadable_projectors).0;
+    let offer = pick(&files, &stored.unreadable_projectors, &rec.path).0;
     stored.repo_image_files = Some(files);
     save(store, &rec, &stored).await?;
     Ok(Some(offer))
@@ -642,7 +667,7 @@ pub async fn download_image_file(
     if let Err(e) = save_repo_image_files(&state.store, &rec.path, &detail.files).await {
         tracing::warn!("could not save the repository's image files: {e}");
     }
-    let file = match pick(&detail.files, &stored.unreadable_projectors) {
+    let file = match pick(&detail.files, &stored.unreadable_projectors, &rec.path) {
         (_, Some(file)) => file,
         (Offer::NoOther, None) => {
             return Err(AppError::bad_request(
