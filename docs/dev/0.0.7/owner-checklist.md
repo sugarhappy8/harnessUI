@@ -21,21 +21,34 @@ On the Windows PC:
 1. Load a model that can see (for example Qwen 3.8 27B with its image file), switch on
    Computer use, keep harnessUI in front (also try it maximised), and ask: "Open Notepad and
    type hello."
-   - The cards say harnessUI will minimise itself while the input runs.
-   - After Allow, harnessUI minimises; the red border and the Stop bar stay on screen.
+   - The cards say harnessUI minimises its window while the input runs, if the window is in
+     the way.
+   - After Allow, harnessUI minimises when it covers the click or has the keyboard; the red
+     border and the Stop bar stay on screen. A click elsewhere on the screen leaves it where
+     it is.
    - Clicks and typing land in the app behind harnessUI.
-   - harnessUI comes back, in front, for each card and at the end of the turn.
+   - For each card harnessUI comes back in front of Notepad, but typing on the keyboard
+     still goes to Notepad, and its taskbar button flashes. Clicking *Allow* at once does
+     nothing; a moment later it works.
+   - At the end of the turn harnessUI comes back without taking the keyboard (type
+     something: it goes to Notepad) and its taskbar button flashes.
 2. With harnessUI focused and Notepad behind it, ask the model to type without clicking
    first. The card names Notepad and the text lands there, also with *Allow once*.
 3. Press the stop hotkey (Ctrl+Alt+Backspace) or the Stop button while harnessUI is
-   minimised: it comes back at once and no key stays held down.
-4. Bring harnessUI back by hand during a turn: it stays up until the next approved input.
-   Minimise it yourself before a turn: it stays minimised after the turn.
-5. When harnessUI comes back, Notepad's menu bar is not left highlighted (the app taps Alt
-   so Windows lets it take the focus).
+   minimised: it comes back at once, with the keyboard, and no key stays held down.
+4. Bring harnessUI back by hand during a turn: it stays up until the next input it is in
+   the way of. Minimise it yourself before a turn: it stays minimised after the turn.
+5. After Stop, Notepad's menu bar is not left highlighted (only Stop focuses harnessUI, and
+   the app may tap Alt so Windows lets it take the focus). After a card or the end of a
+   turn no Alt is tapped.
 6. Typing into Start's search box always asks, and answering that card moves the focus to
    harnessUI, which closes the Start menu (as before 0.0.7). If a model gets stuck there,
    suggest Win+R or a shortcut instead.
+7. Choose *Allow for this chat* for clicks in Notepad, then keep moving the mouse over
+   harnessUI's window while the model clicks where harnessUI covers Notepad: the click is
+   refused ("covered by this app's own window") and harnessUI stays. Let go of the mouse
+   for two seconds: the next such click minimises harnessUI and lands in Notepad. Do the
+   same with Allow all and with typing while harnessUI has the keyboard.
 
 ## Image files (P2)
 On the Windows PC:
@@ -59,8 +72,9 @@ On the Windows PC:
 
 ## Computer use (P3), on the Mac
 Repeat the Windows computer-use steps (first section) with TextEdit: typing reaches TextEdit
-after answering a card, and harnessUI's window comes to the front for a card even while
-TextEdit is active.
+after answering a card, harnessUI's window comes to the front for a card even while
+TextEdit is active (TextEdit stays the active app until you click the card), and the Dock
+icon bounces for a card and at the end of the turn.
 
 ## Cloud endpoints (P5) — needs your own API keys
 1. **Anthropic (Claude):** Settings → Endpoints → Anthropic, paste the key. *Test* lists the

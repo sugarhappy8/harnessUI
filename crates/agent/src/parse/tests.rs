@@ -568,8 +568,12 @@ fn a_result_written_by_the_model_is_recognised_outside_code() {
         "<tool_output>\n{\"content\": \"secret_word\"}\n</tool_output>",
         "The file says:\n<TOOL_OUTPUT id=\"1\" tool=\"read_file\">hello</TOOL_OUTPUT>",
         "<tool_response>\n{\"content\": \"x\"}\n</tool_response>",
-        "Done. </tool_output>",
-        "Here: <Tool_Response>ok",
+        "  <tool_output>\n42",
+        "Let me look: <tool_output>\n{\"content\": \"x\"}\n</tool_output>",
+        "Here: <Tool_Response>ok</Tool_Response> so the answer is ok.",
+        // After reasoning written as text, the block is the answer's.
+        "<think>I should read it.</think>\n<tool_output>\nplum\n</tool_output>",
+        "I should read it.\n</think>\n<tool_output>\nplum\n</tool_output>",
     ] {
         assert!(writes_tool_result(made_up), "{made_up}");
     }
@@ -581,6 +585,17 @@ fn a_result_written_by_the_model_is_recognised_outside_code() {
         "<tool_call>{\"name\": \"read_file\", \"arguments\": {\"path\": \"notes.txt\"}}</tool_call>",
         "the tool_output variable",
         "",
+        // [0.0.7 review] A tag named in a sentence is prose, not a result: the system message
+        // itself says results arrive in such blocks, and a model may say so too.
+        "Results arrive in <tool_output> blocks, so I will wait for the app.",
+        "According to the <tool_output> of read_file, the secret word is plum.",
+        "Done. </tool_output>",
+        "Here: <Tool_Response>ok",
+        "<tool_outputs> is not a tag the app uses.",
+        // Reasoning written as text (servers that do not separate it) may name the tag.
+        "<think>The system says results come in\n<tool_output> blocks.\n</think>\nThe secret word is plum.",
+        "Results come back in\n<tool_output> blocks, I recall.\n</think>\nThe secret word is plum.",
+        "<think>An unclosed thought about\n<tool_output> blocks",
     ] {
         assert!(!writes_tool_result(fine), "{fine}");
     }

@@ -512,7 +512,8 @@ export const useApp = create<AppState>((set, get) => {
         );
       } catch (err) {
         // Only this send's own view is cleared, never one that took its place.
-        set(get().generation === generation ? { generation: null, error: toErrorInfo(err) } : { error: toErrorInfo(err) });
+        const error = toErrorInfo(err);
+        set(get().generation === generation ? { generation: null, error } : { error });
       }
     },
 
@@ -530,7 +531,8 @@ export const useApp = create<AppState>((set, get) => {
       try {
         await ipc.regenerate(chatId, assistantMessageId, (e) => onStreamEvent(chatId, e));
       } catch (err) {
-        set(get().generation === generation ? { generation: null, error: toErrorInfo(err) } : { error: toErrorInfo(err) });
+        const error = toErrorInfo(err);
+        set(get().generation === generation ? { generation: null, error } : { error });
       }
     },
 

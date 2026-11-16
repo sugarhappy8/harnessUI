@@ -12,18 +12,24 @@
 //!   accepts. Sampling values are never sent (API version 2026-10-21 removed them).
 //! - **Thinking:** with the chat's thinking on, the model's own form (`adaptive`, or
 //!   `enabled` with a budget on models before 4.6), with `display: "summarized"` so the
-//!   Thinking area shows it; off, `disabled` or `between_tools` where the model accepts one.
-//!   Which forms a model accepts comes from Anthropic's model list
-//!   (`capabilities.thinking.types`), else from its name ([`guess`]).
-//! - **Thinking blocks are sent back unchanged within a tool-use loop**, as the
-//!   documentation requires: [`ThinkingReplay`] keeps each response that called tools,
-//!   keyed by its call ids, and the next request of the same loop replays it block for
-//!   block. Earlier turns go without their thinking (allowed: a leading run of thinking
-//!   blocks may be left out). A request the API refuses because a block no longer matches
-//!   is sent again once without any.
+//!   Thinking area shows it; off, `disabled` or `between_tools` where the model accepts one,
+//!   else (Claude Opus 5.5, Fable, Mythos: thinking cannot stop) `output_config.effort: low`
+//!   with room in `max_tokens` for a short thought. Which forms a model accepts comes from
+//!   Anthropic's model list (`capabilities.thinking.types`), else from its name ([`guess`]).
+//! - **Thinking blocks are sent back unchanged**, as the documentation requires within a
+//!   tool-use loop and recommends across turns (models that keep earlier thinking read it,
+//!   and an unchanged history keeps the prompt cache): [`ThinkingReplay`] keeps each
+//!   response that thought, keyed by its call ids or its text, for each endpoint and model
+//!   while the app runs, and a later request replays it block for block when the app's copy
+//!   of that reply is unchanged. On models with preserved thinking the request also says
+//!   `block_binding.prefix_mismatch_behavior: drop_block` (beta
+//!   `thinking-binding-controls-2026-08-01`), so a block whose earlier history the app
+//!   shortened is dropped by the API instead of failing the request. A request the API
+//!   refuses because of a block anyway is sent again once without any.
 //! - **Prompt caching:** a `cache_control` breakpoint on the system prompt (which caches the
-//!   tools with it) and one on the newest message, so each step of a long chat reads what
-//!   the step before wrote.
+//!   tools with it) with the one-hour lifetime, so a chat that waits for an approval or a
+//!   reply keeps it, and one with the five-minute lifetime on the newest message, so each
+//!   step of a long chat reads what the step before wrote.
 //! - **Model list** from `GET /v1/models` with display names, context size
 //!   (`max_input_tokens`) and output limit (`max_tokens`).
 
@@ -32,8 +38,11 @@ mod stream;
 #[cfg(test)]
 mod tests;
 
-use std::collections::VecDeque;
-use std::time::Duration;
+use std::collections::hash_map::DefaultHasher;
+use std::collections::{HashMap, VecDeque};
+use std::hash::{Hash, Hasher};
+use std::sync::{Arc, LazyLock, Mutex};
+use std::time::{Duration, Instant};
 
 use serde_json::Value;
 use tokio_util::sync::CancellationToken;
@@ -49,9 +58,16 @@ pub(crate) use stream::{MessagesDecoder, events_from_message};
 /// `temperature`, `top_p` and `top_k`, which the app never sends to Claude.
 pub(crate) const API_VERSION: &str = "2026-10-21";
 
-/// Responses kept for sending their thinking back. A tool-use loop needs only its latest
-/// steps; older entries are dropped first.
-const MAX_REPLAY_ENTRIES: usize = 64;
+/// Responses kept for sending their thinking back, for each endpoint and model; older
+/// entries are dropped first.
+const MAX_REPLAY_ENTRIES: usize = 256;
+/// Endpoints and models with kept responses; a handful at most.
+const MAX_REPLAY_STORES: usize = 32;
+/// How long a model lookup that failed is not tried again.
+const FAILED_LOOKUP_PAUSE: Duration = Duration::from_secs(120);
+/// The beta that lets a request say what to do with a thinking block whose earlier history
+/// changed (Anthropic's preserved thinking documentation).
+pub(crate) const BINDING_BETA: &str = "thinking-binding-controls-2026-08-01";
 /// Fixes tried for one request (a parameter left out, thinking blocks dropped).
 const MAX_FIX_ROUNDS: usize = 3;
 /// How long the first request to a model waits for its entry in the model list.
@@ -59,32 +75,51 @@ const FACTS_LOOKUP: Duration = Duration::from_secs(10);
 /// Pages of the model list read (1,000 models each).
 const MAX_MODEL_PAGES: usize = 5;
 
-/// The content blocks of responses that called tools and thought, kept so the next request
-/// of the same tool-use loop can send them back exactly as received.
+/// What finds a kept response in a later request: the ids of the tools it called, in
+/// order, or for a reply that called none, its text.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum ReplayKey {
+    /// The `tool_use` ids, in order.
+    Calls(Vec<String>),
+    /// A hash of the reply's whole text.
+    Text(u64),
+}
+
+impl ReplayKey {
+    /// The key of a reply without tool calls whose whole text is `text`.
+    pub(crate) fn text(text: &str) -> Self {
+        let mut hasher = DefaultHasher::new();
+        text.hash(&mut hasher);
+        Self::Text(hasher.finish())
+    }
+}
+
+/// The content blocks of responses that thought, kept so later requests can send them back
+/// exactly as received.
 #[derive(Debug, Default)]
 pub(crate) struct ThinkingReplay {
-    entries: VecDeque<(Vec<String>, Vec<Value>)>,
+    entries: VecDeque<(ReplayKey, Vec<Value>)>,
 }
 
 impl ThinkingReplay {
-    /// Keeps the blocks of a response whose `tool_use` blocks have these ids, in order.
-    pub(crate) fn store(&mut self, call_ids: Vec<String>, blocks: Vec<Value>) {
-        if call_ids.is_empty() {
+    /// Keeps the blocks of a response. A key without call ids keeps nothing.
+    pub(crate) fn store(&mut self, key: ReplayKey, blocks: Vec<Value>) {
+        if key == ReplayKey::Calls(Vec::new()) {
             return;
         }
-        self.entries.retain(|(ids, _)| *ids != call_ids);
+        self.entries.retain(|(kept, _)| *kept != key);
         if self.entries.len() >= MAX_REPLAY_ENTRIES {
             self.entries.pop_front();
         }
-        self.entries.push_back((call_ids, blocks));
+        self.entries.push_back((key, blocks));
     }
 
-    /// The blocks of the response that made exactly these calls, in this order.
-    pub(crate) fn find(&self, call_ids: &[String]) -> Option<&Vec<Value>> {
+    /// The blocks of the response with this key.
+    pub(crate) fn find(&self, key: &ReplayKey) -> Option<&Vec<Value>> {
         self.entries
             .iter()
             .rev()
-            .find(|(ids, _)| ids.as_slice() == call_ids)
+            .find(|(kept, _)| kept == key)
             .map(|(_, blocks)| blocks)
     }
 
@@ -92,6 +127,22 @@ impl ThinkingReplay {
     pub(crate) fn clear(&mut self) {
         self.entries.clear();
     }
+}
+
+static REPLAYS: LazyLock<Mutex<HashMap<String, Arc<Mutex<ThinkingReplay>>>>> =
+    LazyLock::new(Default::default);
+
+/// The kept responses of `model` at `endpoint` (its API URL), for this run of the app: a
+/// chat's next turn finds the thinking of the turns before it.
+pub(crate) fn replay_for(endpoint: &str, model: &str) -> Arc<Mutex<ThinkingReplay>> {
+    let Ok(mut stores) = REPLAYS.lock() else {
+        return Arc::default();
+    };
+    let key = format!("{endpoint}\n{model}");
+    if !stores.contains_key(&key) && stores.len() >= MAX_REPLAY_STORES {
+        stores.clear();
+    }
+    stores.entry(key).or_default().clone()
 }
 
 /// A Claude model's family, from its name.
@@ -114,6 +165,10 @@ pub(crate) struct Guess {
     /// It accepts `tool_choice: any` (Claude Opus 5.5, Claude Sonnet 5.5 and Fable 5.1 or
     /// later refuse forced tool use).
     pub forced_tool_use: bool,
+    /// Its thinking blocks are bound to the conversation before them ("preserved thinking":
+    /// Fable and Mythos 5.1 and later, Opus, Sonnet and Haiku 5.5 and later), so the request
+    /// can ask for `drop_block`.
+    pub preserved_thinking: bool,
 }
 
 /// The family and version in a model id: `claude-opus-4-5-20251101` → (Opus, 4, 5),
@@ -162,6 +217,7 @@ pub(crate) fn guess(model: &str) -> Guess {
         },
         max_output: 32_000,
         forced_tool_use: true,
+        preserved_thinking: false,
     };
     let Some((line, major, minor)) = parse_version(model) else {
         return modern;
@@ -176,6 +232,7 @@ pub(crate) fn guess(model: &str) -> Guess {
             thinking: always_on,
             max_output: 128_000,
             forced_tool_use: version < (5, 1),
+            preserved_thinking: version >= (5, 1),
         };
     }
     if version >= (4, 6) {
@@ -189,6 +246,7 @@ pub(crate) fn guess(model: &str) -> Guess {
             },
             max_output: 128_000,
             forced_tool_use: !newest,
+            preserved_thinking: version >= (5, 5),
         };
     }
     let budget = ThinkingModes {
@@ -207,6 +265,7 @@ pub(crate) fn guess(model: &str) -> Guess {
             thinking: budget,
             max_output,
             forced_tool_use: true,
+            preserved_thinking: false,
         };
     }
     Guess {
@@ -216,7 +275,30 @@ pub(crate) fn guess(model: &str) -> Guess {
         },
         max_output: if version >= (3, 5) { 8_192 } else { 4_096 },
         forced_tool_use: true,
+        preserved_thinking: false,
     }
+}
+
+/// The context the app plans with for a Claude model on "Automatic" (at most what the model
+/// takes): 200,000 tokens, and 100,000 for Claude Haiku 5.5 and later Haiku models, which
+/// cost five times as much per token above 100,000 (Anthropic's model overview).
+pub(crate) fn default_context(model: &str) -> u32 {
+    match parse_version(model) {
+        Some((Line::Haiku, major, minor)) if (major, minor) >= (5, 5) => 100_000,
+        _ => 200_000,
+    }
+}
+
+/// [0.0.7 P5] Whether the chat's Thinking switch can stop the thinking of Claude `model` at
+/// the endpoint with this address: the model accepts `disabled` or `between_tools`
+/// (Anthropic's model list, when the app has read it this run, else the model's name). When
+/// not, the switch's "off" asks for less thinking (`effort: low`).
+pub fn thinking_can_stop(base_url: &str, model: &str) -> bool {
+    let known = crate::client::api_url_of(base_url)
+        .and_then(|endpoint| cloud::known_facts(&endpoint, model))
+        .and_then(|facts| facts.thinking);
+    let modes = known.unwrap_or_else(|| guess(model).thinking);
+    modes.disabled || modes.between_tools || !modes.adaptive
 }
 
 /// A model entry of `GET /v1/models` (or `GET /v1/models/{id}`).
@@ -267,25 +349,50 @@ fn parse_model(entry: &Value) -> Option<(ListedModel, ModelFacts)> {
     ))
 }
 
+static FAILED_LOOKUPS: LazyLock<Mutex<HashMap<String, Instant>>> = LazyLock::new(Default::default);
+
 /// What the model list says about `model`: from this run's memory, else from
-/// `GET /v1/models/{id}`. A model the list does not describe gets nothing; the request then
-/// goes by its name ([`guess`]). Remembered either way, so the list is asked once a run.
+/// `GET /v1/models/{id}`. A model the list does not describe gets nothing, and is not asked
+/// for again this run; the request then goes by its name ([`guess`]). A lookup that failed
+/// (no answer, a server error) is tried again after two minutes.
 async fn facts(client: &OpenAiClient, model: &str) -> ModelFacts {
     let endpoint = client.api_url().as_str().to_owned();
     if let Some(known) = cloud::known_facts(&endpoint, model) {
         return known;
+    }
+    let lookup_key = format!("{endpoint}\n{model}");
+    let failed_lately = FAILED_LOOKUPS.lock().ok().is_some_and(|failed| {
+        failed
+            .get(&lookup_key)
+            .is_some_and(|at| at.elapsed() < FAILED_LOOKUP_PAUSE)
+    });
+    if failed_lately {
+        return ModelFacts::default();
     }
     let mut url = crate::client::join(client.api_url(), "models");
     if let Ok(mut segments) = url.path_segments_mut() {
         segments.push(model);
     }
     let found = match tokio::time::timeout(FACTS_LOOKUP, client.get_json(url)).await {
-        Ok(Ok(value)) => parse_model(&value).map(|(_, facts)| facts),
+        Ok(Ok(value)) => Some(parse_model(&value).map(|(_, facts)| facts).unwrap_or_default()),
+        Ok(Err(err)) if crate::client::is_not_found(&err) => Some(ModelFacts::default()),
         _ => None,
     };
-    let facts = found.unwrap_or_default();
-    cloud::remember_facts(&endpoint, model, facts.clone());
-    facts
+    match found {
+        Some(facts) => {
+            cloud::remember_facts(&endpoint, model, facts.clone());
+            facts
+        }
+        None => {
+            if let Ok(mut failed) = FAILED_LOOKUPS.lock() {
+                if failed.len() >= MAX_REPLAY_STORES {
+                    failed.clear();
+                }
+                failed.insert(lookup_key, Instant::now());
+            }
+            ModelFacts::default()
+        }
+    }
 }
 
 /// The context size of `model` from Anthropic's model list (`max_input_tokens`); `Ok(None)`
@@ -368,11 +475,24 @@ fn thinking_block_refused(body: &[u8]) -> bool {
             || text.contains("invalid signature"))
 }
 
+/// The API refused the `block_binding` setting or its beta (an account or platform without
+/// the beta: "block_binding: Extra inputs are not permitted", or the header's value). Not the
+/// refusal of a thinking block, which names the setting as a way out.
+fn binding_refused(body: &[u8]) -> bool {
+    let text = String::from_utf8_lossy(body).to_lowercase();
+    text.contains("anthropic-beta")
+        || text.contains(BINDING_BETA)
+        || (text.contains("block_binding")
+            && ["extra inputs", "not permitted", "unknown", "unexpected", "not supported"]
+                .iter()
+                .any(|words| text.contains(words)))
+}
+
 /// Streams one reply in Claude's own format. The request is translated, sent with this
 /// endpoint's key in `x-api-key`, and its event stream read into the same events as a chat
-/// completion. A request refused for a parameter is sent again once without it (and the
-/// parameter is left out for this model until the app quits); one refused for a thinking
-/// block sent back is sent again without thinking blocks.
+/// completion. A request refused for a parameter is sent again without it (and once that is
+/// accepted, the parameter is left out for this model until the app quits); one refused for
+/// a thinking block sent back is sent again without thinking blocks.
 ///
 /// # Errors
 /// Any [`ProviderError`]; [`ProviderError::Refused`] inside the stream when the company's
@@ -392,21 +512,34 @@ pub(crate) async fn stream(
     };
     let endpoint = client.api_url().as_str().to_owned();
     let url = crate::client::join(client.api_url(), "messages");
+    let replay = replay_for(&endpoint, &req.model);
     let mut replay_thinking = true;
     let mut round = 0;
+    // Fixes found for this request: kept for the model once a request with them is accepted.
+    let mut pending: Vec<cloud::Fix> = Vec::new();
     loop {
-        let fixes = cloud::remembered_fixes(&endpoint, &req.model);
+        let mut fixes = cloud::remembered_fixes(&endpoint, &req.model);
+        for fix in &pending {
+            fixes.add(fix);
+        }
         let body = {
-            let replay = client.replay().lock().ok();
-            let replay = replay.as_deref().filter(|_| replay_thinking);
-            request::messages_body(req, &facts, replay, &fixes)
+            let kept = replay.lock().ok();
+            let kept = kept.as_deref().filter(|_| replay_thinking);
+            request::messages_body(req, &facts, kept, &fixes)
         };
+        let beta = body
+            .pointer("/thinking/block_binding")
+            .is_some()
+            .then_some(BINDING_BETA);
         match client
-            .send_stream_request(url.clone(), &body, &cancel)
+            .send_stream_request(url.clone(), &body, &cancel, beta)
             .await?
         {
             Sent::Accepted(response) => {
-                let decoder = MessagesDecoder::new(Some(client.replay().clone()));
+                for fix in &pending {
+                    cloud::remember_fix(&endpoint, &req.model, fix);
+                }
+                let decoder = MessagesDecoder::new(Some(replay.clone()));
                 return client
                     .open_stream(response, cancel, WireDecoder::Messages(decoder))
                     .await;
@@ -420,16 +553,28 @@ pub(crate) async fn stream(
                 if round < MAX_FIX_ROUNDS {
                     round += 1;
                     if status == 400 && replay_thinking && thinking_block_refused(&error_body) {
-                        if let Ok(mut replay) = client.replay().lock() {
-                            replay.clear();
+                        if let Ok(mut kept) = replay.lock() {
+                            kept.clear();
                         }
                         replay_thinking = false;
+                        continue;
+                    }
+                    let binding = cloud::Fix::Drop("block_binding".to_owned());
+                    if status == 400
+                        && beta.is_some()
+                        && binding_refused(&error_body)
+                        && fixes.add(&binding)
+                    {
+                        pending.push(binding);
                         continue;
                     }
                     if let Value::Object(sent) = &body {
                         let mut changed = false;
                         for fix in cloud::fixes_for_error(status, &error_body, sent) {
-                            changed |= cloud::remember_fix(&endpoint, &req.model, &fix);
+                            if fixes.add(&fix) {
+                                pending.push(fix);
+                                changed = true;
+                            }
                         }
                         if changed {
                             continue;

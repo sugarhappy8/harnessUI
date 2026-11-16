@@ -796,24 +796,6 @@ async fn work(
     budget.force(page_html.len() as u64 + 64 * 1024);
     budget.files += 2;
 
-    // Screenshots.
-    let mut screenshot_lines: Vec<(String, u32, u32)> = Vec::new();
-    for shot in &shots {
-        let label = if shot.full {
-            "full-page"
-        } else {
-            "first-screen"
-        };
-        let name = format!("w{}-{label}.{}", shot.width, shot.ext);
-        match budget.take(shot.data.len() as u64) {
-            Ok(()) => {
-                let rel = w.write("screenshots", &name, &shot.data)?;
-                screenshot_lines.push((rel, shot.size.0, shot.size.1));
-            }
-            Err(why) => skipped.push((format!("screenshots/{name}"), why.words(&plan.caps))),
-        }
-    }
-
     // Style sheets come first among the files: room is set aside for them now, and they
     // are written once the files they name are saved.
     let mut style_room: Vec<bool> = Vec::new();
@@ -829,6 +811,24 @@ async fn work(
                 skipped.push((what, why.words(&plan.caps)));
                 style_room.push(false);
             }
+        }
+    }
+
+    // Screenshots.
+    let mut screenshot_lines: Vec<(String, u32, u32)> = Vec::new();
+    for shot in &shots {
+        let label = if shot.full {
+            "full-page"
+        } else {
+            "first-screen"
+        };
+        let name = format!("w{}-{label}.{}", shot.width, shot.ext);
+        match budget.take(shot.data.len() as u64) {
+            Ok(()) => {
+                let rel = w.write("screenshots", &name, &shot.data)?;
+                screenshot_lines.push((rel, shot.size.0, shot.size.1));
+            }
+            Err(why) => skipped.push((format!("screenshots/{name}"), why.words(&plan.caps))),
         }
     }
 

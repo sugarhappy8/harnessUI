@@ -21,7 +21,9 @@ use crate::error::{AppError, AppResult};
 use crate::state::AppState;
 
 mod aside;
-pub use aside::{approval_needed, minimise_on_request, stopped, turn_ended};
+pub use aside::{
+    approval_needed, card_approved, minimise_on_request, stopped, turn_ended, turn_started,
+};
 
 /// The computer server, when this OS has one.
 #[derive(Default)]
@@ -274,8 +276,8 @@ pub fn build(app: &AppHandle) -> Option<Arc<computer::ComputerServer>> {
     }
 }
 
-/// How the main window steps aside before approved input (9.3, "Stepping aside"): it
-/// minimises itself; [`aside`] brings it back.
+/// How the main window steps aside before approved input it is in the way of (9.3,
+/// "Stepping aside"): it minimises itself; [`aside`] brings it back.
 #[cfg_attr(not(any(target_os = "windows", target_os = "macos")), allow(dead_code))]
 fn step_aside(app: &AppHandle) -> computer::StepAside {
     let aside_app = app.clone();
@@ -286,6 +288,7 @@ fn step_aside(app: &AppHandle) -> computer::StepAside {
             .clone()
             .unwrap_or_else(|| "harnessUI".into()),
         minimise: Arc::new(move |chat, cancel| aside::before_input(&aside_app, chat, cancel)),
+        approved_on_card: Arc::new(aside::take_card_approval),
     }
 }
 

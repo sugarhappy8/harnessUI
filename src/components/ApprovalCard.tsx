@@ -3,9 +3,13 @@ import { ShieldAlert, ShieldQuestion } from "lucide-react";
 import type { ApprovalRequest, KeepAsking } from "../lib/types";
 import { useApprovalMode, useChatMode } from "../lib/approvalMode";
 import { toErrorInfo, useApp } from "../store/app";
+import { onMainWindowShown } from "../lib/windowShown";
 import { AllowAllConfirm } from "./AllowAllButton";
 
-/** Clicks and keys on a card are ignored for this long after it appears (13.3). */
+/**
+ * Clicks and keys on a card are ignored for this long after it appears (13.3), and again
+ * after the window comes back on screen (0.0.7).
+ */
 export const CARD_INPUT_DELAY_MS = 700;
 
 const REASON_TEXT: Record<ApprovalRequest["reason"], string | null> = {
@@ -47,6 +51,12 @@ function reasonText(request: ApprovalRequest, allowAll: boolean): string | null 
  * as plain text (already escaped by the backend: control, bidi and zero-width characters
  * are visible). Allow never has default focus or an Enter binding, and input is ignored
  * for a short time after the card appears.
+ *
+ * [0.0.7] The window may have been minimised while computer use acted, and the app brings
+ * it back for the card, in front of the window the user was clicking in. So the delay
+ * starts again each time the app brought the window back, and whenever the page becomes
+ * visible again; time while it is hidden does not count. Not when the window merely gets
+ * the focus: the click that focuses a card shown in front is the user's deliberate one.
  */
 export function ApprovalCard(props: {
   request: ApprovalRequest;
@@ -62,8 +72,25 @@ export function ApprovalCard(props: {
   const denyRef = useRef<HTMLButtonElement>(null);
 
   useEffect(() => {
-    const t = window.setTimeout(() => setArmed(true), CARD_INPUT_DELAY_MS);
-    return () => window.clearTimeout(t);
+    let live = true;
+    let timer: number | undefined;
+    const restart = () => {
+      // A Tauri listener can still be called once after the cleanup.
+      if (!live) return;
+      window.clearTimeout(timer);
+      setArmed(false);
+      if (document.visibilityState === "hidden") return;
+      timer = window.setTimeout(() => setArmed(true), CARD_INPUT_DELAY_MS);
+    };
+    restart();
+    document.addEventListener("visibilitychange", restart);
+    const stopShown = onMainWindowShown(restart);
+    return () => {
+      live = false;
+      window.clearTimeout(timer);
+      document.removeEventListener("visibilitychange", restart);
+      stopShown();
+    };
   }, []);
 
   const reason = reasonText(request, allowAll);

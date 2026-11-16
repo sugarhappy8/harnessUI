@@ -338,9 +338,11 @@ async fn claude_gets_its_own_headers_and_format() {
     assert_eq!(body["max_tokens"], json!(1_000));
     assert_eq!(body["stream"], json!(true));
     assert_eq!(body["system"][0]["text"], json!("Be brief."));
+    // The tools and the system prompt stay cached for an hour (a chat waiting for an
+    // approval keeps them); the newest message for five minutes.
     assert_eq!(
         body["system"][0]["cache_control"],
-        json!({"type": "ephemeral"})
+        json!({"type": "ephemeral", "ttl": "1h"})
     );
     assert_eq!(
         body["messages"],
@@ -446,7 +448,18 @@ async fn a_tool_using_turn_against_claude() {
     assert_eq!(result["cache_control"], json!({"type": "ephemeral"}));
     assert_eq!(
         second["system"][0]["cache_control"],
-        json!({"type": "ephemeral"})
+        json!({"type": "ephemeral", "ttl": "1h"})
+    );
+    // Claude Opus 5.5 binds thinking blocks to the conversation: a block whose earlier
+    // history the app changed is dropped by the API instead of failing the request.
+    assert!(requests[0].header("anthropic-beta").is_none());
+    assert_eq!(
+        requests[1].header("anthropic-beta"),
+        Some("thinking-binding-controls-2026-08-01")
+    );
+    assert_eq!(
+        second["thinking"],
+        json!({"type": "adaptive", "display": "summarized", "block_binding": {"prefix_mismatch_behavior": "drop_block"}})
     );
     assert_eq!(
         first["system"], second["system"],
@@ -485,8 +498,11 @@ async fn claude_thinking_off_and_failed_calls() {
     let outcome = run_turn(deps, input, CancellationToken::new()).await;
     assert_eq!(outcome.status, TurnStatus::Completed);
     let requests = messages_requests(&server);
-    // The model list says this model cannot switch thinking off: the parameter is left out.
-    assert!(requests[0].json().get("thinking").is_none());
+    // The model list says this model cannot switch thinking off: it is asked to think
+    // little, with room for that.
+    let first = requests[0].json();
+    assert!(first.get("thinking").is_none());
+    assert_eq!(first["output_config"], json!({"effort": "low"}));
     // A refused call goes back with is_error.
     let second = requests[1].json();
     let result = &second["messages"][2]["content"][0];
@@ -653,6 +669,9 @@ async fn claude_refused_thinking_blocks_are_dropped_once() {
         retried["messages"][1]["content"],
         json!([{"type": "tool_use", "id": "toolu_03", "name": "get_weather", "input": {"city": "Paris"}}])
     );
+    // Nothing replayed, nothing to bind.
+    assert!(retried["thinking"].get("block_binding").is_none());
+    assert!(requests[2].header("anthropic-beta").is_none());
 }
 
 #[tokio::test]
@@ -977,4 +996,245 @@ fn keys_never_travel_in_clear_text_to_the_internet() {
         ))
         .is_ok()
     );
+}
+
+// ---- review findings (0.0.7 P5 r1) ----------------------------------------------------------
+
+/// The reviewer's key-echoing server (`review-p5/srv/server.py`): a model list refused with
+/// the key across the 2,000-character cut, and a reply whose stream ends in an `error` event
+/// that echoes the key.
+const ECHOED_KEY: &str = "sk-ant-api03-PROBEKEY0123456789abcdefghijklmnopqrstuvwxyz";
+
+async fn key_echoing_server() -> MockServer {
+    MockServer::start(|request: &Recorded| {
+        if request.method == "GET" {
+            let message = format!("{} key {ECHOED_KEY} tail", "x".repeat(1_980));
+            return Reply::json(400, &error("invalid_request_error", &message));
+        }
+        let event = event(
+            "error",
+            &json!({"type": "error", "error": {"type": "overloaded_error", "message": format!("upstream said {ECHOED_KEY}")}}),
+        );
+        sse(event.into_bytes())
+    })
+    .await
+}
+
+/// No piece of the key of 12 characters or more is in `text`.
+fn holds_no_key_piece(text: &str) -> bool {
+    (0..=ECHOED_KEY.len() - 12).all(|at| !text.contains(&ECHOED_KEY[at..at + 12]))
+}
+
+#[tokio::test]
+async fn keys_are_cleaned_from_errors_inside_streams_and_from_cut_messages() {
+    let server = key_echoing_server().await;
+    for kind in [ProviderKind::Anthropic, ProviderKind::Generic] {
+        let mut config = ClientConfig::new(server.url(), kind);
+        config.api_key = Some(ECHOED_KEY.into());
+        let client = OpenAiClient::new(config).unwrap();
+        // The error body cut at 2,000 characters across the key.
+        let err = client.list_models().await.unwrap_err();
+        let shown = format!("{err} {}", err.user_message());
+        assert!(holds_no_key_piece(&shown), "{kind:?}: {shown}");
+        assert!(shown.contains("[API key]"), "{kind:?}: {shown}");
+        // An error event inside an accepted stream.
+        let mut request = simple_request("claude-opus-5-5");
+        request.max_tokens = Some(100);
+        let mut stream = client
+            .stream_chat(&request, CancellationToken::new())
+            .await
+            .unwrap();
+        let mut failure = None;
+        while let Some(item) = stream.next().await {
+            if let Err(err) = item {
+                failure = Some(err);
+                break;
+            }
+        }
+        let err = failure.expect("the stream ends with the error");
+        let shown = format!("{err} {}", err.user_message());
+        assert!(holds_no_key_piece(&shown), "{kind:?}: {shown}");
+        assert!(shown.contains("upstream said [API key]"), "{kind:?}: {shown}");
+    }
+}
+
+#[tokio::test]
+async fn a_reply_stopped_by_the_safety_filter_is_discarded() {
+    // Anthropic: what a refused reply wrote must not be used. The text streamed so far is
+    // discarded (neither shown nor stored), and the turn fails in plain words.
+    let mut refused = start(100, 0);
+    refused += &event(
+        "content_block_start",
+        &json!({"type": "content_block_start", "index": 0, "content_block": {"type": "text", "text": ""}}),
+    );
+    refused += &event(
+        "content_block_delta",
+        &json!({"type": "content_block_delta", "index": 0, "delta": {"type": "text_delta", "text": "Here is how to"}}),
+    );
+    refused += &event(
+        "message_delta",
+        &json!({"type": "message_delta", "delta": {"stop_reason": "refusal", "stop_details": {"explanation": "Stopped."}}, "usage": {"output_tokens": 4}}),
+    );
+    let server = claude_server(vec![sse(refused.into_bytes())]).await;
+    let client = claude(&server);
+    let template = RequestTemplate {
+        model: "claude-opus-5-5".into(),
+        ..RequestTemplate::default()
+    };
+    let (outcome, _, events) = run(&client, caps(true), template).await;
+    match &outcome.status {
+        TurnStatus::Failed { code, message } => {
+            assert_eq!(code, "refused");
+            assert!(message.starts_with("The model declined to answer"), "{message}");
+        }
+        other => panic!("{other:?}"),
+    }
+    let events = events.0.lock().unwrap();
+    let streamed = events
+        .iter()
+        .position(|e| matches!(e, TurnEvent::ContentDelta { text } if text.contains("Here is how to")))
+        .expect("the partial text streamed");
+    let discarded = events
+        .iter()
+        .position(|e| matches!(e, TurnEvent::AttemptDiscarded { .. }))
+        .expect("the partial text is discarded");
+    assert!(discarded > streamed);
+    // No assistant message keeps it.
+    assert!(!events.iter().any(|e| matches!(
+        e,
+        TurnEvent::MessageCompleted { message } if message.text().contains("Here is how to")
+    )));
+}
+
+#[tokio::test]
+async fn a_thinking_binding_the_api_refuses_is_left_out_and_remembered() {
+    // An account or platform without the beta: the setting is refused, the request goes
+    // again with the thinking blocks but without it, and later requests leave it out.
+    let server = {
+        let replies = Arc::new(Mutex::new(std::collections::VecDeque::from(vec![
+            sse(thinking_tool_stream("toolu_09")),
+            sse(text_stream("Done.")),
+            sse(thinking_tool_stream("toolu_10")),
+            sse(text_stream("Done again.")),
+        ])));
+        MockServer::start(move |request: &Recorded| {
+            let path = request.path();
+            if let Some(id) = path.strip_prefix("/v1/models/") {
+                return Reply::json(200, &model_entry(id));
+            }
+            if request.json()["thinking"].get("block_binding").is_some() {
+                return Reply::json(
+                    400,
+                    &error("invalid_request_error", "thinking.block_binding: Extra inputs are not permitted"),
+                );
+            }
+            replies
+                .lock()
+                .unwrap()
+                .pop_front()
+                .unwrap_or_else(|| sse(text_stream("(more)")))
+        })
+        .await
+    };
+    let client = claude(&server);
+    let template = RequestTemplate {
+        model: "claude-opus-5-5".into(),
+        ..RequestTemplate::default()
+    };
+    let (outcome, _, _) = run(&client, caps(true), template.clone()).await;
+    assert_eq!(outcome.status, TurnStatus::Completed);
+    let requests = messages_requests(&server);
+    assert_eq!(requests.len(), 3, "first step, refused binding, retried");
+    assert!(requests[1].json()["thinking"].get("block_binding").is_some());
+    let retried = requests[2].json();
+    assert!(retried["thinking"].get("block_binding").is_none());
+    assert!(requests[2].header("anthropic-beta").is_none());
+    assert_eq!(retried["messages"][1]["content"][0]["type"], json!("thinking"));
+    // The next turn replays its step's thinking without asking for the binding again.
+    let (outcome, _, _) = run(&client, caps(true), template).await;
+    assert_eq!(outcome.status, TurnStatus::Completed);
+    let later = messages_requests(&server);
+    assert_eq!(later.len(), 5, "no refused request in the second turn");
+    assert_eq!(later[4].json()["messages"][1]["content"][0]["type"], json!("thinking"));
+    assert!(later[3..].iter().all(|r| r.json()["thinking"].get("block_binding").is_none()));
+}
+
+#[tokio::test]
+async fn a_fix_is_kept_only_once_the_retried_request_is_accepted() {
+    // The server refuses `top_k`, and then refuses the fixed request for another reason: the
+    // app does not learn "no top_k" from that, so the next request still sends it.
+    let server = {
+        let posts = Arc::new(Mutex::new(0));
+        MockServer::start(move |request: &Recorded| {
+            let mut posts = posts.lock().unwrap();
+            *posts += 1;
+            match *posts {
+                1 => openai_error("Unsupported parameter: 'top_k'", Some("top_k"), Some("unsupported_parameter")),
+                2 => Reply::json(400, &json!({"error": {"message": "The model is busy with another request."}})),
+                _ => {
+                    assert!(request.json().get("top_k").is_some(), "top_k was remembered too early");
+                    common::sse_reply(common::sse::text("Fine."))
+                }
+            }
+        })
+        .await
+    };
+    let client = OpenAiClient::new(ClientConfig::new(server.url(), ProviderKind::Generic)).unwrap();
+    let mut request = simple_request("some-model");
+    request.top_k = Some(40);
+    assert!(collect(&client, &request).await.is_err());
+    let events = collect(&client, &request).await.unwrap();
+    assert!(events.contains(&StreamEvent::Content("Fine.".into())));
+}
+
+#[tokio::test]
+async fn a_cloud_companys_model_list_is_read_once_a_run_for_context_sizes() {
+    let server = MockServer::start(|request: &Recorded| {
+        if request.path() == "/v1/models" {
+            return Reply::json(200, &json!({"data": [
+                {"id": "openai/gpt-x", "name": "GPT X", "context_length": 400_000},
+                {"id": "small/model", "name": "Small", "context_length": 0}
+            ]}));
+        }
+        Reply::not_found()
+    })
+    .await;
+    let client =
+        OpenAiClient::new(ClientConfig::new(server.url(), ProviderKind::OpenRouter)).unwrap();
+    assert_eq!(client.context_length("openai/gpt-x").await.unwrap(), Some(400_000));
+    assert_eq!(server.requests().len(), 1, "after the first");
+    assert_eq!(client.context_length("openai/gpt-x").await.unwrap(), Some(400_000));
+    assert_eq!(server.requests().len(), 1, "after the second");
+    assert_eq!(client.context_length("small/model").await.unwrap(), None);
+    assert_eq!(server.requests().len(), 1, "after small");
+    // A model the list did not have is looked for once more (the list may have changed
+    // since), and then not again.
+    assert_eq!(client.context_length("gone/model").await.unwrap(), None);
+    assert_eq!(server.requests().len(), 2, "looked for once");
+    assert_eq!(client.context_length("gone/model").await.unwrap(), None);
+    // Another client for the same endpoint (the next turn) uses the same memory.
+    let next = OpenAiClient::new(ClientConfig::new(server.url(), ProviderKind::OpenRouter)).unwrap();
+    assert_eq!(next.context_length("openai/gpt-x").await.unwrap(), Some(400_000));
+    assert_eq!(server.requests().len(), 2, "{:?}", server.requests());
+}
+
+#[tokio::test]
+async fn a_model_the_claude_list_does_not_describe_is_asked_for_once() {
+    let server = MockServer::start(|request: &Recorded| {
+        if request.method == "GET" {
+            return Reply::not_found();
+        }
+        sse(text_stream("Hi."))
+    })
+    .await;
+    let client = claude(&server);
+    let request = simple_request("claude-unlisted-1");
+    collect(&client, &request).await.unwrap();
+    collect(&client, &request).await.unwrap();
+    let lookups = server
+        .requests()
+        .iter()
+        .filter(|r| r.method == "GET")
+        .count();
+    assert_eq!(lookups, 1);
 }

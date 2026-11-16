@@ -1606,7 +1606,8 @@ fn typed(d: &FakeDesktop) -> String {
         .collect()
 }
 
-const ASIDE_LINE: &str = "harnessUI minimises its window while this runs, if the window is in the way.";
+const ASIDE_LINE: &str =
+    "harnessUI minimises its window while this runs, if the window is in the way.";
 
 #[tokio::test]
 async fn a_click_on_this_apps_window_goes_to_the_window_behind_once_it_steps_aside() {
@@ -1983,7 +1984,10 @@ async fn this_app_does_not_minimise_when_it_is_not_in_the_way() {
     let out = s.call(TOOL_TYPE, &args(json!({})), &a, ctx()).await;
     assert!(!out.is_error, "{}", out.joined_text());
     assert_eq!(typed(&d), "hi");
-    assert!(calls.lock().unwrap().is_empty(), "minimised although not in the way");
+    assert!(
+        calls.lock().unwrap().is_empty(),
+        "minimised although not in the way"
+    );
     assert!(!minimised(&d, 2));
     assert!(d.state().fronted.is_empty());
 }

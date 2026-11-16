@@ -227,6 +227,7 @@ fn chat_dto(c: &store::Chat) -> ChatDto {
         // [0.0.7 P5] Filled by `get_chat`, which reads the endpoint.
         cloud_host: None,
         endpoint_thinking: false,
+        endpoint_thinking_low: false,
     }
 }
 
@@ -386,8 +387,10 @@ pub async fn get_chat(
     // model's tested settings, else on.
     dto.thinking = crate::evals::profile::chat_thinking(&state, &chat).await;
     // [0.0.7 P5] The "Cloud" mark and Claude's Thinking switch.
-    (dto.cloud_host, dto.endpoint_thinking) =
-        crate::providers::chat_marks(&state, chat.model_ref.as_deref()).await;
+    let marks = crate::providers::chat_marks(&state, chat.model_ref.as_deref()).await;
+    dto.cloud_host = marks.cloud_host;
+    dto.endpoint_thinking = marks.thinking;
+    dto.endpoint_thinking_low = marks.thinking_low;
     Ok(ChatDetailDto {
         chat: dto,
         messages,
@@ -790,14 +793,14 @@ pub(crate) async fn target_for(
             .map_err(|_| AppError::bad_request("This chat's model reference is malformed."))?;
         let (client, provider) = crate::providers::client_for(state, store::ProviderId(id)).await?;
         // A model that reports no context (or a failed check) gets the user's setting,
-        // 4,096 by default (8.4); [0.0.7 P5] a cloud company's model the size the company
-        // documents, and every endpoint at most the size chosen for it in Settings →
-        // Endpoints.
+        // 4,096 by default (8.4); [0.0.7 P5] a cloud company's model at most the company's
+        // size on "Automatic" (that size when the server says nothing), and every endpoint
+        // the size chosen for it in Settings → Endpoints.
         let reported = client.context_length(model).await.ok().flatten();
         if remember {
             crate::mcp_cmd::remember_context(model_ref, reported);
         }
-        let n_ctx = Some(crate::providers::context_for(state, &provider, reported).await);
+        let n_ctx = Some(crate::providers::context_for(state, &provider, model, reported).await);
         return Ok(Target {
             client,
             model: model.to_string(),

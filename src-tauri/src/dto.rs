@@ -38,6 +38,9 @@ pub struct ChatDto {
     /// [0.0.7 P5] The chat's model is on an endpoint whose thinking the app switches
     /// (Claude), so the header offers Thinking on and off for it.
     pub endpoint_thinking: bool,
+    /// [0.0.7 P5] ...but the model's thinking cannot stop, so "off" asks it to think little
+    /// (the header says "Low").
+    pub endpoint_thinking_low: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]

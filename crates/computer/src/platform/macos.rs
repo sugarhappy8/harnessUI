@@ -55,11 +55,10 @@ use objc2_core_graphics::{
     CGBitmapContextCreate, CGColorSpace, CGContext, CGDirectDisplayID, CGDisplayBounds,
     CGDisplayCopyDisplayMode, CGDisplayIsBuiltin, CGDisplayMode, CGError, CGEvent, CGEventFlags,
     CGEventSource, CGEventSourceStateID, CGEventType, CGGetActiveDisplayList, CGImage,
-    CGImageAlphaInfo,
-    CGImageByteOrderInfo, CGMainDisplayID, CGMouseButton, CGPreflightScreenCaptureAccess,
-    CGRectMakeWithDictionaryRepresentation, CGWindowImageOption, CGWindowListCopyWindowInfo,
-    CGWindowListOption, kCGWindowAlpha, kCGWindowBounds, kCGWindowLayer, kCGWindowName,
-    kCGWindowNumber, kCGWindowOwnerName, kCGWindowOwnerPID,
+    CGImageAlphaInfo, CGImageByteOrderInfo, CGMainDisplayID, CGMouseButton,
+    CGPreflightScreenCaptureAccess, CGRectMakeWithDictionaryRepresentation, CGWindowImageOption,
+    CGWindowListCopyWindowInfo, CGWindowListOption, kCGWindowAlpha, kCGWindowBounds,
+    kCGWindowLayer, kCGWindowName, kCGWindowNumber, kCGWindowOwnerName, kCGWindowOwnerPID,
 };
 use objc2_foundation::{NSArray, NSError};
 use objc2_screen_capture_kit::{

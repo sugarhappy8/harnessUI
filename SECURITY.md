@@ -37,9 +37,15 @@ built, not by the model's good behaviour:
   the main window.
 - Computer-use input is refused on the app's own windows, so a model cannot click
   *Allow* on its own approval card. Since 0.0.7 the app minimises its window before
-  approved computer input and brings it back for every approval card of that chat; the
-  check before every input event is unchanged, so input that would still reach the app's
-  window (it did not go, or you brought it back) is refused.
+  approved computer input that the window is in the way of, and brings it back for every
+  approval card of that chat, in front of your other windows but without taking the
+  keyboard; the card then ignores clicks for a moment, so a click meant for another app
+  cannot approve it. Without a card answered just now (a grant, Allow all) the app steps
+  aside only when you have not touched the keyboard or mouse for 1.5 seconds. It hands the
+  keyboard to the window the input was planned for only while it has the keyboard itself
+  and Stop was not pressed, checked in the step that moves it. The check before every
+  input event is unchanged, so input that would still reach the app's window (it did not
+  go, or you brought it back) is refused.
 
 **It can use permissions you already granted.** If you allowed reads in a folder and also
 allowed an action that sends data out, data can leave without a new card. To close the
@@ -144,6 +150,51 @@ folder ("harnessUI + 2 more"), "No folder · Choose", or "Whole computer" in Ful
 menu lists the full paths, with hidden characters shown as visible escapes. In Allow all it
 says that terminal commands are not held to these folders; in Full access it says that a
 program the terminal starts could still reach harnessUI's own folders.
+
+## Website capture (0.0.7)
+
+`browser_capture_site` saves a copy of a web page's front end so a model can study its
+design and rebuild it with your own content. The tool's description tells the model it is
+not for reproducing other people's logos, brand names or sign-in pages; nothing in the app
+can check what a model then does with the copy.
+
+- **What it saves, and where.** Into a new folder inside a folder you approved (never
+  overwriting anything): the page as shown, every style sheet, the pictures, fonts, icons,
+  Lottie animations and small videos the page loaded, its scripts as `.txt` files,
+  `animations.json`, screenshots and `report.md`. At most 300 MB and 2,000 files, and no file
+  over 25 MB; what was left out is listed with the reason. Saving is a write: in Ask first a
+  card says what, where and how much, and *Allow for this chat* covers that site into that
+  folder only. A folder outside the approved ones, the app's own folders and skill folders
+  are refused in every mode; a `.git`, ssh or autostart folder always asks. The folder is
+  checked again just before writing, every file is created new, and file names come from
+  the app (lower-case letters, digits, `-`, `_`, `.`; no Windows device names; at most 80
+  bytes), never from the website.
+- **Network rules.** The page opens in the agent's own browser with its own profile, so
+  your sign-ins and cookies are never used. While the capture runs, every request of that
+  browser (pictures, fonts, scripts and style sheets too, not only pages) is paused and
+  checked like a page load: http and https only, nothing on loopback, private, link-local
+  or other blocked addresses, judged on the address the name resolves to. Only responses to
+  requests that passed those checks are saved, and a response that reached the browser from
+  a blocked address on a direct connection is refused even if the name looked public when
+  it was checked. The capture only reads: it never clicks, types or submits, so no form is
+  sent; the site's own scripts run in the agent's browser while the page is open, as on any
+  visit, and background requests they make are held only for a site in strict mode, as in
+  normal browsing.
+- **The copy runs nothing.** `index.html` is built from an inert copy of the page: scripts,
+  `noscript`, frames' contents, `object` and `embed`, event handler attributes and
+  `javascript:` addresses are removed, and the page's first element is a policy that allows
+  no script and loads nothing from the internet (only files next to the copy), sends
+  nothing and submits no form. Pictures and files that were not saved keep their original
+  address, which that policy keeps from loading, so opening the copy contacts no one. SVG
+  pictures lose any scripts and event handlers or are left out; scripts are saved as
+  `.js.txt`, because a `.js` file runs when double-clicked on Windows.
+- **What the model reads.** The report quotes page text (titles, headings, labels) as data:
+  one line, quoted, invisible and direction-changing characters shown as escapes, and the
+  characters that could start a link or markup escaped. It reaches the model as untrusted
+  tool output like any page.
+- **Limits.** A capture can save whatever a public page shows, including other people's
+  pictures and text; what you do with the copy is up to you. A stopped capture can leave a
+  partly saved folder.
 
 ## The terminal is not a sandbox
 

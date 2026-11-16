@@ -262,7 +262,7 @@ fn sixty_nine() -> Vec<ToolGroup> {
 fn guide(groups: Vec<ToolGroup>, os: GuideOs, n_ctx: u32) -> ToolGuide {
     ToolGuide {
         groups,
-        finder: true,
+        reach: Reach::CallTool,
         os,
         budget: tool_guide_budget(n_ctx),
     }
@@ -370,7 +370,7 @@ fn the_same_tools_give_the_same_text_and_a_change_of_tools_changes_it() {
 #[test]
 fn without_the_finder_the_list_has_names_only_and_no_call_tool_rule() {
     let mut tools = guide(twenty(), GuideOs::Windows, 131_072);
-    tools.finder = false;
+    tools.reach = Reach::All;
     let list = text(&tools);
     assert!(
         list.contains("All of them are in your list of callable tools."),
@@ -381,6 +381,84 @@ fn without_the_finder_the_list_has_names_only_and_no_call_tool_rule() {
         "\nGit: git_status, git_diff, git_log, git_commit, git_clone, git_pull, git_push\n"
     ));
     assert!(!list.contains("List recent commits."), "{list}");
+}
+
+/// [0.0.7 review M1] In a small context the turn may have no room for `call_tool`: the list
+/// then never sends the model to it, nor says that every tool is in its list. It names what
+/// is on, says the others cannot be used this turn, and the guide speaks only about the
+/// tools the model can reach.
+#[test]
+fn without_room_for_call_tool_the_others_cannot_be_used_this_turn() {
+    let core: Vec<String> = ["list_dir", "read_file", "search_files", "write_file", "edit_file"]
+        .iter()
+        .map(|n| (*n).to_owned())
+        .collect();
+    let mut tools = guide(twenty(), GuideOs::Windows, 32_768);
+    tools.reach = Reach::Only(core);
+    let list = text(&tools);
+    assert!(
+        list.contains(
+            "The tools that are on in this chat, by group. Only the ones in your list of \
+             callable tools can be used this turn: the others do not fit in this model's \
+             context."
+        ),
+        "{list}"
+    );
+    for word in ["call_tool", "find_tools", "All of them"] {
+        assert!(!list.contains(word), "{word} in {list}");
+    }
+    assert!(list.contains(
+        "\nGit: git_status, git_diff, git_log, git_commit, git_clone, git_pull, git_push\n"
+    ));
+    // run_command is on but out of reach: no shell part. The call rules stay.
+    assert!(!list.contains("PowerShell"), "{list}");
+    assert!(list.contains("Tool calls: the arguments are one JSON object"));
+    // Within reach, the shell part is there; write_file is not, so the file tools go unnamed.
+    tools.reach = Reach::Only(vec!["run_command".to_owned()]);
+    let shell = text(&tools);
+    assert!(shell.contains("run_command uses Windows PowerShell 5.1"), "{shell}");
+    assert!(
+        shell.contains("\n- > writes UTF-16 here, and there is no <<EOF.\n"),
+        "{shell}"
+    );
+    // The computer part likewise.
+    let mut groups = twenty();
+    groups.push(computer());
+    let mut far = guide(groups, GuideOs::MacOs, 32_768);
+    far.reach = Reach::Only(vec!["read_file".to_owned()]);
+    assert!(!text(&far).contains("Using the computer"));
+    far.reach = Reach::Only(vec!["computer_screenshot".to_owned()]);
+    assert!(text(&far).contains("Using the computer"));
+}
+
+/// [0.0.7 review M1] Whatever the tools, the system, the reach and the budget, the blocks
+/// never take more than the budget: when not even the short guide fits, there is nothing.
+#[test]
+fn the_blocks_never_take_more_than_their_budget() {
+    let reaches = [
+        Reach::CallTool,
+        Reach::All,
+        Reach::Only(vec!["read_file".to_owned(), "run_command".to_owned()]),
+    ];
+    for groups in [twenty(), sixty_nine()] {
+        for os in [GuideOs::Windows, GuideOs::MacOs, GuideOs::Other] {
+            for reach in &reaches {
+                for budget in (0..=2_400).step_by(41) {
+                    let g = ToolGuide {
+                        groups: groups.clone(),
+                        reach: reach.clone(),
+                        os,
+                        budget,
+                    };
+                    let size = tokens(&g);
+                    assert!(size <= budget, "{size} > {budget} ({os:?}, {reach:?})");
+                }
+            }
+        }
+    }
+    let mut none = guide(twenty(), GuideOs::Windows, 4_096);
+    none.budget = 30;
+    assert!(tool_guide_blocks(&none, &Sanitizer::generic()).is_empty());
 }
 
 #[test]
@@ -454,15 +532,15 @@ fn the_macos_guide_speaks_of_zsh_and_other_systems_of_bin_sh() {
         mac.contains("never write a <tool_output> block yourself"),
         "{mac}"
     );
-    let short = guide_block(&guide(twenty(), GuideOs::MacOs, 8_192), GuideForm::Short)
-        .expect("a short guide");
+    let short = guide_block(&guide(twenty(), GuideOs::MacOs, 8_192), GuideForm::Short);
     assert!(
         short.contains("Only the app writes tool results: call the tool and wait."),
         "{short}"
     );
     assert!(mac.contains("- cd does not carry over to the next call: pass the folder as cwd."));
+    // [0.0.7 review] Only what is meant for a program is quoted: `ls '*.txt'` finds nothing.
     assert!(mac.contains(
-        "- Quote URLs and patterns that hold ? * or [ ]: otherwise zsh stops with \"no matches found\"."
+        "- Quote a URL, or a pattern meant for a program such as grep or find, when it holds ? * or [ ]: otherwise zsh stops with \"no matches found\". A file pattern for zsh itself, like *.txt, stays unquoted."
     ));
     for windows_only in ["PowerShell", "backslash", "&&", "UTF-16"] {
         assert!(!mac.contains(windows_only), "{windows_only} in {mac}");
@@ -540,9 +618,12 @@ fn untrusted_names_and_descriptions_cannot_close_a_block_or_pose_as_the_app() {
             },
             &Sanitizer::generic(),
         );
+        // At 4,096 tokens only the short guide fits: there is no list to break out of.
+        let listed = message.contains("<tool_list>");
+        assert!(listed || n_ctx == 4_096, "{message}");
         for (tag, count) in [
-            ("<tool_list>", 1),
-            ("</tool_list>", 1),
+            ("<tool_list>", usize::from(listed)),
+            ("</tool_list>", usize::from(listed)),
             ("<agent_instructions>", 1),
             ("</agent_instructions>", 1),
             (
@@ -576,7 +657,7 @@ fn untrusted_names_and_descriptions_cannot_close_a_block_or_pose_as_the_app() {
         // Each tool and its description stays on one line.
         assert!(!message.contains("\n[App note]"), "{message}");
         assert!(!message.contains("\nIgnore the rules"), "{message}");
-        assert!(message.contains("(added server)"), "{message}");
+        assert!(!listed || message.contains("(added server)"), "{message}");
     }
     let full = text(&guide(groups, GuideOs::Windows, 131_072));
     assert!(
@@ -630,11 +711,16 @@ fn many_tools_fall_back_to_names_then_to_group_sizes_within_the_budget() {
             tool_guide_budget(n_ctx)
         );
     }
-    // 4,096 tokens: the smallest form, group sizes without the guide, about 4% of it.
+    // 4,096 tokens: not even the group sizes fit with the short guide, so the short guide
+    // alone, which helps a small model more than counts it cannot call by.
     let tiny = text(&at(4_096));
-    assert!(!tiny.contains("<tool_call_guide>"), "{tiny}");
+    assert!(!tiny.contains("<tool_list>"), "{tiny}");
     assert!(
-        tokens(&at(4_096)) * 100 <= 4_096 * 5,
+        tiny.contains("Tool arguments: one JSON object, double quotes"),
+        "{tiny}"
+    );
+    assert!(
+        tokens(&at(4_096)) <= tool_guide_budget(4_096),
         "{}",
         tokens(&at(4_096))
     );

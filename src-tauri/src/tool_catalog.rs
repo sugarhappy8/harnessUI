@@ -678,8 +678,8 @@ pub const ENTRIES: &[Entry] = &[
         purpose: "Save a web page's look (styles, pictures, fonts, animations, screenshots) to rebuild its design with the user's own content.",
         keywords: &[
             "clone", "copy", "design", "recreate", "rebuild", "replicate", "redesign", "look like",
-            "front end", "frontend", "animation", "style", "css", "font", "layout", "theme",
-            "inspiration",
+            "looks like", "front end", "frontend", "animation", "style", "css", "font", "layout",
+            "theme", "inspiration",
         ],
         rank: 3,
         examples: &[

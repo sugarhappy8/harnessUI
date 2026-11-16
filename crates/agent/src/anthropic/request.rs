@@ -2,7 +2,7 @@
 
 use serde_json::{Map, Value, json};
 
-use super::{ThinkingReplay, guess};
+use super::{ReplayKey, ThinkingReplay, guess};
 use crate::cloud::{ModelFacts, ParamFixes, ThinkingModes};
 use crate::history::STOPPED_TEXT;
 use crate::types::{ChatMessage, ChatRequest, ContentPart, MessageContent, Role, ToolChoice};
@@ -15,7 +15,23 @@ const MIN_THINKING_BUDGET: u32 = 1_024;
 /// The image types the Messages API reads.
 const IMAGE_TYPES: &[&str] = &["image/jpeg", "image/png", "image/gif", "image/webp"];
 /// Top-level fields a request may go without when the API refuses them.
-const OPTIONAL_FIELDS: &[&str] = &["thinking", "tool_choice", "temperature", "top_p", "top_k"];
+const OPTIONAL_FIELDS: &[&str] = &[
+    "thinking",
+    "tool_choice",
+    "temperature",
+    "top_p",
+    "top_k",
+    "output_config",
+];
+/// The output limit at least, when the model thinks although the app asked for no thinking
+/// (a model whose thinking cannot stop): room for a short thought and the answer, so a
+/// small request (a summary) does not come back empty. Anthropic: size `max_tokens` for the
+/// thinking as well as the reply.
+const ROOM_WITH_THINKING: u32 = 8_192;
+/// The largest picture Claude takes: 10 MB of base64 (Anthropic's vision documentation).
+const MAX_IMAGE_BASE64: usize = 10_000_000;
+/// The longest side of a picture Claude takes, in pixels.
+const MAX_IMAGE_SIDE: u32 = 8_000;
 
 /// The Messages API body for `req`, streamed. `facts` is what the model list said about the
 /// model (the name decides what it did not say); `replay` holds the thinking blocks of this
@@ -33,9 +49,19 @@ pub(crate) fn messages_body(
         .or(facts.max_output)
         .unwrap_or(guessed.max_output)
         .max(1);
-    let max_tokens = req.max_tokens.unwrap_or(DEFAULT_MAX_TOKENS).clamp(1, cap);
+    let modes = facts.thinking.unwrap_or(guessed.thinking);
+    // A model whose thinking cannot stop thinks a little at `effort: low` when the app wants
+    // no thinking (Claude Opus 5.5, Fable, Mythos).
+    let cannot_stop = modes.adaptive && !modes.disabled && !modes.between_tools;
+    let lowered = req.thinking == Some(false) && cannot_stop;
+    let mut max_tokens = req.max_tokens.unwrap_or(DEFAULT_MAX_TOKENS).clamp(1, cap);
+    if lowered {
+        max_tokens = max_tokens.max(ROOM_WITH_THINKING.min(cap));
+    }
     let with_tools = !req.tools.is_empty();
-    let converted = convert(&req.messages, with_tools, replay);
+    // Earlier turns' thinking goes back too while the model thinks.
+    let replay_earlier = req.thinking == Some(true) || lowered;
+    let converted = convert(&req.messages, with_tools, replay, replay_earlier);
     let mut messages = converted.messages;
     mark_newest_block(&mut messages);
 
@@ -44,19 +70,35 @@ pub(crate) fn messages_body(
     body.insert("max_tokens".into(), Value::from(max_tokens));
     let system = system_text(&req.messages);
     if !system.trim().is_empty() {
+        // The one-hour lifetime: the tools and the system prompt stay cached while a chat
+        // waits for an approval or a reply (Anthropic: for gaps of 5 to 60 minutes). Longer
+        // lifetimes come first, as required: the newest message's marker is five minutes.
         body.insert(
             "system".into(),
-            json!([{"type": "text", "text": system, "cache_control": {"type": "ephemeral"}}]),
+            json!([{"type": "text", "text": system, "cache_control": {"type": "ephemeral", "ttl": "1h"}}]),
         );
     }
     body.insert("messages".into(), Value::Array(messages));
-    let modes = facts.thinking.unwrap_or(guessed.thinking);
-    let thinking = thinking_param(req.thinking, modes, max_tokens, converted.unreplayed);
+    let mut thinking = thinking_param(req.thinking, modes, max_tokens, converted.unreplayed);
     let thinking_on = thinking
         .as_ref()
         .and_then(|t| t.get("type"))
         .and_then(Value::as_str)
         .is_some_and(|kind| kind == "adaptive" || kind == "enabled");
+    // Preserved thinking: a replayed block whose earlier history changed (the app shortened
+    // an old tool result, a summary replaced old turns) is dropped instead of failing the
+    // request. Only with thinking on (Anthropic refuses it beside `between_tools`).
+    if thinking_on
+        && converted.replayed_thinking
+        && guessed.preserved_thinking
+        && !fixes.drops("block_binding")
+        && let Some(Value::Object(param)) = thinking.as_mut()
+    {
+        param.insert(
+            "block_binding".into(),
+            json!({"prefix_mismatch_behavior": "drop_block"}),
+        );
+    }
     if with_tools {
         body.insert("tools".into(), tools(req));
         if let Some(choice) = tool_choice(req, thinking_on || !guessed.forced_tool_use) {
@@ -65,6 +107,9 @@ pub(crate) fn messages_body(
     }
     if let Some(thinking) = thinking {
         body.insert("thinking".into(), thinking);
+    }
+    if lowered {
+        body.insert("output_config".into(), json!({"effort": "low"}));
     }
     body.insert("stream".into(), Value::Bool(true));
     for key in OPTIONAL_FIELDS {
@@ -176,10 +221,67 @@ struct Converted {
     /// An assistant step of the current tool-use loop goes without the thinking blocks it
     /// was answered with.
     unreplayed: bool,
+    /// A kept response with thinking blocks is sent back.
+    replayed_thinking: bool,
 }
 
-/// The messages after the system message, as Messages API turns.
-fn convert(chat: &[ChatMessage], with_tools: bool, replay: Option<&ThinkingReplay>) -> Converted {
+/// The kept blocks of an assistant step, when the app's copy of it is what the model wrote:
+/// the same text and the same tool calls (id, name and arguments). A step the app changed
+/// (an old call's long arguments shortened) goes as the app has it, without its thinking.
+fn kept_blocks(
+    message: &ChatMessage,
+    with_tools: bool,
+    replay: &ThinkingReplay,
+) -> Option<Vec<Value>> {
+    let calls = message.tool_calls.as_deref().unwrap_or_default();
+    let text = message
+        .content
+        .as_ref()
+        .map(MessageContent::text)
+        .unwrap_or_default();
+    let key = if calls.is_empty() {
+        if text.is_empty() {
+            return None;
+        }
+        ReplayKey::text(&text)
+    } else {
+        if !with_tools {
+            return None;
+        }
+        ReplayKey::Calls(calls.iter().map(|call| call.id.clone()).collect())
+    };
+    let blocks = replay.find(&key)?;
+    let kept_text: String = blocks
+        .iter()
+        .filter(|block| block.get("type").and_then(Value::as_str) == Some("text"))
+        .filter_map(|block| block.get("text").and_then(Value::as_str))
+        .collect();
+    let kept_calls: Vec<&Value> = blocks
+        .iter()
+        .filter(|block| block.get("type").and_then(Value::as_str) == Some("tool_use"))
+        .collect();
+    let same_calls = kept_calls.len() == calls.len()
+        && kept_calls.iter().zip(calls).all(|(kept, call)| {
+            let input = serde_json::from_str::<Value>(&call.function.arguments)
+                .ok()
+                .filter(Value::is_object)
+                .unwrap_or_else(|| json!({}));
+            kept.get("id").and_then(Value::as_str) == Some(call.id.as_str())
+                && kept.get("name").and_then(Value::as_str) == Some(call.function.name.as_str())
+                && kept.get("input") == Some(&input)
+        });
+    (kept_text == text && same_calls).then(|| blocks.clone())
+}
+
+/// The messages after the system message, as Messages API turns. With `replay`, kept
+/// responses go back block for block: the steps of the current tool-use loop always, and
+/// with `replay_earlier` the earlier turns too.
+fn convert(
+    chat: &[ChatMessage],
+    with_tools: bool,
+    replay: Option<&ThinkingReplay>,
+    replay_earlier: bool,
+) -> Converted {
     let body: Vec<&ChatMessage> = chat.iter().filter(|m| m.role != Role::System).collect();
     // The current tool-use loop starts after the last user message that is not part of
     // answering tool calls (the images message after tool results is part of it).
@@ -193,6 +295,7 @@ fn convert(chat: &[ChatMessage], with_tools: bool, replay: Option<&ThinkingRepla
         .map_or(0, |(index, _)| index + 1);
     let mut messages: Vec<Value> = Vec::new();
     let mut unreplayed = false;
+    let mut replayed_thinking = false;
     for (index, message) in body.iter().enumerate() {
         match message.role {
             Role::System => {}
@@ -200,13 +303,19 @@ fn convert(chat: &[ChatMessage], with_tools: bool, replay: Option<&ThinkingRepla
             Role::Assistant => {
                 let calls = message.tool_calls.as_deref().unwrap_or_default();
                 let in_loop = with_tools && index >= loop_start && !calls.is_empty();
-                let ids: Vec<String> = calls.iter().map(|call| call.id.clone()).collect();
                 let kept = replay
-                    .filter(|_| in_loop)
-                    .and_then(|replay| replay.find(&ids))
-                    .cloned();
+                    .filter(|_| in_loop || replay_earlier)
+                    .and_then(|replay| kept_blocks(message, with_tools, replay));
                 let blocks = match kept {
-                    Some(blocks) => blocks,
+                    Some(blocks) => {
+                        replayed_thinking |= blocks.iter().any(|block| {
+                            matches!(
+                                block.get("type").and_then(Value::as_str),
+                                Some("thinking" | "redacted_thinking")
+                            )
+                        });
+                        blocks
+                    }
                     None => {
                         unreplayed |= in_loop;
                         assistant_blocks(message, with_tools)
@@ -230,6 +339,7 @@ fn convert(chat: &[ChatMessage], with_tools: bool, replay: Option<&ThinkingRepla
     Converted {
         messages,
         unreplayed,
+        replayed_thinking,
     }
 }
 
@@ -291,13 +401,95 @@ fn image_block(url: &str) -> Value {
     } else {
         mime
     };
-    if IMAGE_TYPES.contains(&mime.as_str()) {
-        json!({"type": "image", "source": {"type": "base64", "media_type": mime, "data": data}})
-    } else {
-        text_block(&format!(
+    if !IMAGE_TYPES.contains(&mime.as_str()) {
+        return text_block(&format!(
             "[image of type {mime}: Claude reads only JPEG, PNG, GIF and WebP images]"
-        ))
+        ));
     }
+    // A picture Claude refuses would fail every later request of the chat, so it goes as a
+    // note (the app accepts attachments up to 20 MB).
+    if data.len() > MAX_IMAGE_BASE64 {
+        return text_block(
+            "[A picture was left out here: it is larger than the 10 MB that Claude takes.]",
+        );
+    }
+    if let Some((width, height)) = picture_size(&head_bytes(data))
+        && width.max(height) > MAX_IMAGE_SIDE
+    {
+        return text_block(&format!(
+            "[A picture was left out here: at {width} x {height} pixels it is larger than the \
+             8,000 pixels a side that Claude takes.]"
+        ));
+    }
+    json!({"type": "image", "source": {"type": "base64", "media_type": mime, "data": data}})
+}
+
+/// The first 64 KiB or so of base64 `data`, decoded (enough for a picture's header).
+fn head_bytes(data: &str) -> Vec<u8> {
+    use base64::Engine as _;
+    let take = data.len().min(87_380) / 4 * 4;
+    let head = data.get(..take).unwrap_or_default();
+    base64::engine::general_purpose::STANDARD
+        .decode(head)
+        .unwrap_or_default()
+}
+
+/// The width and height a picture's header gives (PNG, GIF, WebP, JPEG); `None` when the
+/// header is not in `bytes` or cannot be read.
+fn picture_size(bytes: &[u8]) -> Option<(u32, u32)> {
+    let be16 = |at: usize| Some(u32::from(u16::from_be_bytes([*bytes.get(at)?, *bytes.get(at + 1)?])));
+    let le16 = |at: usize| Some(u32::from(u16::from_le_bytes([*bytes.get(at)?, *bytes.get(at + 1)?])));
+    let le24 = |at: usize| {
+        Some(u32::from_le_bytes([*bytes.get(at)?, *bytes.get(at + 1)?, *bytes.get(at + 2)?, 0]))
+    };
+    if bytes.starts_with(b"\x89PNG\r\n\x1a\n") {
+        let width = u32::from_be_bytes(bytes.get(16..20)?.try_into().ok()?);
+        let height = u32::from_be_bytes(bytes.get(20..24)?.try_into().ok()?);
+        return Some((width, height));
+    }
+    if bytes.starts_with(b"GIF87a") || bytes.starts_with(b"GIF89a") {
+        return Some((le16(6)?, le16(8)?));
+    }
+    if bytes.get(0..4) == Some(b"RIFF") && bytes.get(8..12) == Some(b"WEBP") {
+        return match bytes.get(12..16)? {
+            // Lossy: frame tag, start code, then 14-bit sides.
+            b"VP8 " => Some((le16(26)? & 0x3FFF, le16(28)? & 0x3FFF)),
+            // Lossless: a signature byte, then 14 bits each of side − 1.
+            b"VP8L" => {
+                let bits = u32::from_le_bytes(bytes.get(21..25)?.try_into().ok()?);
+                Some(((bits & 0x3FFF) + 1, ((bits >> 14) & 0x3FFF) + 1))
+            }
+            // Extended: 24 bits each of the canvas side − 1.
+            b"VP8X" => Some((le24(24)? + 1, le24(27)? + 1)),
+            _ => None,
+        };
+    }
+    if bytes.starts_with(&[0xFF, 0xD8]) {
+        let mut at = 2;
+        loop {
+            if *bytes.get(at)? != 0xFF {
+                return None;
+            }
+            let marker = *bytes.get(at + 1)?;
+            match marker {
+                // Fill bytes, and markers without a length.
+                0xFF => at += 1,
+                0x01 | 0xD0..=0xD8 => at += 2,
+                // A start of frame: precision, then height and width.
+                0xC0..=0xC3 | 0xC5..=0xC7 | 0xC9..=0xCB | 0xCD..=0xCF => {
+                    return Some((be16(at + 7)?, be16(at + 5)?));
+                }
+                _ => {
+                    let length = usize::try_from(be16(at + 2)?).ok()?;
+                    if length < 2 {
+                        return None;
+                    }
+                    at += 2 + length;
+                }
+            }
+        }
+    }
+    None
 }
 
 fn user_blocks(message: &ChatMessage) -> Vec<Value> {

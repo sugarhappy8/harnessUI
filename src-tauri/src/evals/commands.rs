@@ -151,7 +151,7 @@ async fn model_for(state: &AppState, model_ref: &str) -> AppResult<(Model, Ident
         .ok_or_else(malformed)?;
     // [0.0.7 P5] The context a chat with this endpoint plans with.
     let reported = client.context_length(model).await.ok().flatten();
-    let n_ctx = crate::providers::context_for(state, &provider, reported).await;
+    let n_ctx = crate::providers::context_for(state, &provider, model, reported).await;
     let caps = agent::ModelCaps {
         tools: true,
         vision: true,

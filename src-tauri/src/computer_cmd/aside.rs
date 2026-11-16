@@ -1,114 +1,109 @@
 //! The main window steps aside while computer use acts (ARCHITECTURE.md 9.3, "Stepping
-//! aside"): the window calls for [`computer::WindowAside`], which makes the decisions.
+//! aside"). What to do and in which order is [`computer::Aside`]'s, tested there with a fake
+//! window; this module reads and moves Tauri's main window for it, and tells it about turns
+//! and approval cards.
 //!
-//! Before an approved input action the main window is minimised when it is on screen. It
-//! comes back (restored and focused) when an approval card of that chat needs the user,
-//! when that chat's turn ends and on Stop, if the app minimised it and it is still
-//! minimised. The red border and the Stop window are windows of their own and stay.
+//! Before approved input that the main window is in the way of, the window is minimised
+//! when it is on screen. It comes back, if the app minimised it and it is still minimised:
 //!
-//! The decisions are made under a lock that is never held across a window call: those wait
-//! for the main thread, which may itself want the lock (the stop hotkey runs there). A
-//! minimise and a restore run one at a time, on blocking threads, under a second lock that
-//! the main thread never takes, so a restore for a card answered at once cannot land in the
-//! middle of the minimise that follows it.
+//! - for an approval card of that chat: in front of the other windows without taking the
+//!   keyboard (Windows: raised as always-on-top for a moment; macOS: ordered in front), and
+//!   its taskbar button flashes or its Dock icon bounces. The page is told, and every card
+//!   on screen starts its input delay again, so a click meant for another application
+//!   cannot land on Allow;
+//! - at the end of that turn: restored without taking the keyboard, and the user is told
+//!   the same way;
+//! - on Stop: restored and given the keyboard, since the user asked for it.
+//!
+//! Restoring a window is `ShowWindow(SW_RESTORE)` on Windows, which Windows does not let
+//! take the keyboard from the application the user works in (the taskbar button flashes
+//! instead), and `deminiaturize` on macOS, which leaves the active application active. Only
+//! Stop focuses the window (`set_focus`, which on Windows may tap Alt to be allowed to).
+//!
+//! The red border and the Stop window are windows of their own and stay.
 
-use std::sync::{Mutex, MutexGuard};
-use std::time::{Duration, Instant};
+use std::sync::Once;
 
-use computer::{AsideEvent, WindowAside, WindowNow, WindowStep};
-use tauri::{AppHandle, Manager, WebviewWindow};
+use computer::{Aside, Comeback, MainWindow, WindowNow};
+use tauri::{AppHandle, Emitter, Manager, UserAttentionType, WebviewWindow, WindowEvent};
 use tokio_util::sync::CancellationToken;
 
 use crate::state::AppState;
 
-/// How long the app waits for its window to go or to come back (both are animated).
-const WAIT: Duration = Duration::from_secs(1);
-const POLL: Duration = Duration::from_millis(25);
-/// After the window reports minimised, while the system may still be animating it away.
-const SETTLE: Duration = Duration::from_millis(100);
+/// Sent to the main window each time the app brought it back on screen.
+pub const MAIN_WINDOW_SHOWN: &str = "main-window-shown";
 
-static ASIDE: Mutex<WindowAside> = Mutex::new(WindowAside::new());
-/// Held for a whole minimise or restore. Never taken on the main thread.
-static WINDOW_OPS: Mutex<()> = Mutex::new(());
+static ASIDE: Aside = Aside::new();
+/// The window events that tell the app the user brought the window back are followed from
+/// the first minimise on.
+static FOLLOW: Once = Once::new();
 
-fn aside() -> MutexGuard<'static, WindowAside> {
-    ASIDE.lock().unwrap_or_else(|e| e.into_inner())
+struct TauriWindow {
+    app: AppHandle,
+    w: WebviewWindow,
 }
 
-fn one_at_a_time() -> MutexGuard<'static, ()> {
-    WINDOW_OPS.lock().unwrap_or_else(|e| e.into_inner())
-}
+impl TauriWindow {
+    fn get(app: &AppHandle) -> Option<Self> {
+        let w = app.get_webview_window(crate::MAIN_WINDOW)?;
+        Some(Self {
+            app: app.clone(),
+            w,
+        })
+    }
 
-fn main_window(app: &AppHandle) -> Option<WebviewWindow> {
-    app.get_webview_window(crate::MAIN_WINDOW)
-}
-
-fn now(w: &WebviewWindow) -> WindowNow {
-    WindowNow {
-        visible: w.is_visible().unwrap_or(false),
-        minimised: w.is_minimized().unwrap_or(false),
+    fn tell_the_user(&self) {
+        let _ = self
+            .w
+            .request_user_attention(Some(UserAttentionType::Informational));
     }
 }
 
-/// Waits until the window is (or is no longer) minimised, at most [`WAIT`].
-fn wait_until_minimised(w: &WebviewWindow, minimised: bool) -> bool {
-    let start = Instant::now();
-    loop {
-        if w.is_minimized().is_ok_and(|m| m == minimised) {
-            return true;
+impl MainWindow for TauriWindow {
+    fn now(&self) -> WindowNow {
+        WindowNow {
+            visible: self.w.is_visible().unwrap_or(false),
+            minimised: self.w.is_minimized().unwrap_or(false),
         }
-        if start.elapsed() >= WAIT {
-            return false;
+    }
+
+    fn minimise(&self) {
+        let _ = self.w.minimize();
+    }
+
+    fn unminimise(&self) {
+        let _ = self.w.unminimize();
+    }
+
+    fn present(&self, how: Comeback) {
+        match how {
+            Comeback::Focused => {
+                let _ = self.w.set_focus();
+                #[cfg(target_os = "macos")]
+                order_front(&self.app, &self.w);
+            }
+            Comeback::InFront => {
+                in_front(&self.app, &self.w);
+                self.tell_the_user();
+            }
+            Comeback::Quietly => self.tell_the_user(),
         }
-        std::thread::sleep(POLL);
+        let _ = self.app.emit_to(crate::MAIN_WINDOW, MAIN_WINDOW_SHOWN, ());
     }
 }
 
-/// Before an approved input action, on a blocking thread (the computer server's hook):
-/// minimises the main window when it is on screen and waits until it is gone, at most
-/// about a second. A call stopped meanwhile (while a restore held the window) does not
-/// minimise it: its turn is ending and nothing would bring the window back.
-pub(super) fn before_input(app: &AppHandle, chat_id: i64, cancel: &CancellationToken) {
-    let Some(w) = main_window(app) else { return };
-    let _one = one_at_a_time();
-    if cancel.is_cancelled() {
-        return;
+/// In front of the other windows, without taking the keyboard.
+fn in_front(app: &AppHandle, w: &WebviewWindow) {
+    #[cfg(target_os = "macos")]
+    order_front(app, w);
+    #[cfg(not(target_os = "macos"))]
+    {
+        // Always-on-top windows are above all others; leaving that state keeps the window
+        // at the top of the rest. Neither step activates it.
+        let _ = app;
+        let _ = w.set_always_on_top(true);
+        let _ = w.set_always_on_top(false);
     }
-    let seen = now(&w);
-    let step = aside().decide(AsideEvent::InputApproved(chat_id), seen);
-    if step != WindowStep::Minimise {
-        return;
-    }
-    if w.minimize().is_ok() && wait_until_minimised(&w, true) {
-        std::thread::sleep(SETTLE);
-    }
-    aside().minimise_finished();
-}
-
-/// Brings the main window back if `event` calls for it, on a blocking thread.
-fn bring_back_if_needed(app: &AppHandle, event: AsideEvent) {
-    // Nothing to do without computer use, or for a chat that minimised nothing.
-    let has_server = app
-        .try_state::<super::ComputerHandle>()
-        .is_some_and(|h| h.0.is_some());
-    if !has_server || !aside().concerns(event) {
-        return;
-    }
-    let app = app.clone();
-    tauri::async_runtime::spawn_blocking(move || {
-        let Some(w) = main_window(&app) else { return };
-        let _one = one_at_a_time();
-        let seen = now(&w);
-        if aside().decide(event, seen) != WindowStep::Restore {
-            return;
-        }
-        let _ = w.unminimize();
-        // Focusing a window that is still coming back does nothing.
-        wait_until_minimised(&w, false);
-        let _ = w.set_focus();
-        #[cfg(target_os = "macos")]
-        order_front(&app, &w);
-    });
 }
 
 /// macOS 14 and later may not let the app activate itself while another application is
@@ -126,19 +121,79 @@ fn order_front(app: &AppHandle, w: &WebviewWindow) {
     });
 }
 
-/// An approval card of this chat waits for the user.
-pub fn approval_needed(app: &AppHandle, chat_id: i64) {
-    bring_back_if_needed(app, AsideEvent::ApprovalNeeded(chat_id));
+/// The user brought the window back (from the taskbar, the Dock, Alt+Tab): it is theirs
+/// until the next approved input that it is in the way of. The app's own restore is told
+/// apart by [`computer::Aside::brought_back`].
+fn follow_window_events(w: &WebviewWindow) {
+    FOLLOW.call_once(|| {
+        w.on_window_event(|event| match event {
+            WindowEvent::Focused(true) => ASIDE.brought_back(),
+            WindowEvent::Resized(size) if size.width > 0 && size.height > 0 => ASIDE.brought_back(),
+            _ => {}
+        });
+    });
 }
 
-/// This chat's turn ended: done, failed or stopped.
-pub fn turn_ended(app: &AppHandle, chat_id: i64) {
-    bring_back_if_needed(app, AsideEvent::TurnEnded(chat_id));
+/// Before approved input that the main window is in the way of, on a blocking thread (the
+/// computer server's hook): minimises the window when it is on screen and waits until it
+/// is gone, at most about a second.
+pub(super) fn before_input(app: &AppHandle, chat_id: i64, cancel: &CancellationToken) {
+    let Some(w) = TauriWindow::get(app) else {
+        return;
+    };
+    follow_window_events(&w.w);
+    ASIDE.before_input(&w, chat_id, cancel);
+}
+
+/// Whether the user approved this chat's computer input on its card just now (the computer
+/// server asks once per input action; see [`computer::StepAside::approved_on_card`]).
+pub(super) fn take_card_approval(chat_id: i64) -> bool {
+    ASIDE.take_card_approval(chat_id)
+}
+
+/// A turn of this chat starts: returns the key [`turn_ended`] takes.
+pub fn turn_started(chat_id: i64) -> u64 {
+    ASIDE.turn_started(chat_id)
+}
+
+/// The user answered an approval card of this chat with Allow. Counts for stepping aside
+/// only for computer input.
+pub fn card_approved(chat_id: i64, action: &policy::Action) {
+    if matches!(action.scope, policy::Scope::ComputerInput { .. }) {
+        ASIDE.card_approved(chat_id);
+    }
+}
+
+/// Runs `f` on a blocking thread when this OS has computer use (window calls wait for the
+/// main thread).
+fn on_blocking_thread(app: &AppHandle, f: impl FnOnce(&TauriWindow) + Send + 'static) {
+    let has_server = app
+        .try_state::<super::ComputerHandle>()
+        .is_some_and(|h| h.0.is_some());
+    if !has_server {
+        return;
+    }
+    let app = app.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        if let Some(w) = TauriWindow::get(&app) {
+            f(&w);
+        }
+    });
+}
+
+/// An approval card of this chat waits for the user.
+pub fn approval_needed(app: &AppHandle, chat_id: i64) {
+    on_blocking_thread(app, move |w| ASIDE.approval_needed(w, chat_id));
+}
+
+/// This turn of the chat ended: done, failed or stopped.
+pub fn turn_ended(app: &AppHandle, chat_id: i64, turn: u64) {
+    on_blocking_thread(app, move |w| ASIDE.turn_ended(w, chat_id, turn));
 }
 
 /// The user pressed Stop: the stop hotkey or the indicator's Stop button.
 pub fn stopped(app: &AppHandle) {
-    bring_back_if_needed(app, AsideEvent::Stopped);
+    on_blocking_thread(app, |w| ASIDE.stopped(w));
 }
 
 /// The "Minimise this window while the agent works" button of a tool card. For a chat
@@ -158,7 +213,7 @@ pub fn minimise_on_request(app: &AppHandle, chat_id: Option<i64>) {
             });
         }
         None => {
-            if let Some(w) = main_window(app) {
+            if let Some(w) = app.get_webview_window(crate::MAIN_WINDOW) {
                 let _ = w.minimize();
             }
         }
@@ -168,8 +223,10 @@ pub fn minimise_on_request(app: &AppHandle, chat_id: Option<i64>) {
 #[cfg(test)]
 mod tests {
     /// The window comes back wherever the user is needed: every approval card the app
-    /// raises (in a turn and during a call), the end of every turn, and Stop. The decisions
-    /// themselves are tested in `computer::window_aside`.
+    /// raises (in a turn and during a call), the end of every turn, keyed by the turn that
+    /// started, and Stop. An answer on a card counts for stepping aside. The decisions
+    /// themselves are tested in `computer::window_aside`, and the step aside in
+    /// `computer::server`.
     #[test]
     fn the_window_is_brought_back_wherever_the_user_is_needed() {
         let turns = include_str!("../turns.rs");
@@ -184,11 +241,36 @@ mod tests {
         );
         assert_eq!(
             turns
-                .matches("crate::computer_cmd::turn_ended(app, chat_id.0);")
+                .matches("let aside_turn = crate::computer_cmd::turn_started(chat_id.0);")
                 .count(),
+            1
+        );
+        assert_eq!(
+            turns
+                .matches("crate::computer_cmd::turn_ended(app, chat_id.0, aside_turn);")
+                .count(),
+            1
+        );
+        assert_eq!(
+            turns.matches("crate::computer_cmd::card_approved(").count(),
             1
         );
         let hotkey = include_str!("../hotkey.rs");
         assert!(hotkey.contains("crate::computer_cmd::stopped(app);"));
+        let wiring = include_str!("../computer_cmd.rs");
+        assert!(wiring.contains("approved_on_card: Arc::new(aside::take_card_approval)"));
+    }
+
+    /// The page listens for the event the app sends when it brought the window back
+    /// (approval cards start their input delay again).
+    #[test]
+    fn the_page_listens_for_the_window_coming_back() {
+        let page = include_str!("../../../src/lib/windowShown.ts");
+        assert!(page.contains(&format!(
+            "export const MAIN_WINDOW_SHOWN = \"{}\";",
+            super::MAIN_WINDOW_SHOWN
+        )));
+        let card = include_str!("../../../src/components/ApprovalCard.tsx");
+        assert!(card.contains("onMainWindowShown(restart)"));
     }
 }

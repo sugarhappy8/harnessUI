@@ -462,7 +462,7 @@ async fn real_llama_server_agent_turn() {
                 purpose: "Read a text file, or a range of lines from a long one.".into(),
             }],
         }],
-        finder: false,
+        reach: agent::prompt::Reach::All,
         os: agent::prompt::GuideOs::this_os(),
         budget: agent::prompt::tool_guide_budget(n_ctx),
     });

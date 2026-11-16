@@ -31,8 +31,8 @@ use crate::parse::{
     strip_tool_markup, writes_tool_result,
 };
 use crate::prompt::{
-    Preamble, Projection, SystemParts, ToolGuide, append_result_note, pinned_for_prompt, project,
-    sanitize_schema, schema_has_raw_control_tokens, system_message,
+    Preamble, Projection, Reach, SystemParts, ToolGuide, append_result_note, pinned_for_prompt,
+    project, sanitize_schema, schema_has_raw_control_tokens, system_message,
 };
 use crate::stream::{
     AccumulatedToolCall, ArgumentsStatus, FinishReason, StreamEvent, Timings, ToolCallAccumulator,
@@ -193,6 +193,8 @@ pub(super) struct Turn<'a> {
     /// Enabled tools left out because their schema has a control token where it cannot
     /// be cleaned.
     withheld_tools: Vec<String>,
+    /// [0.0.7] Those and the kept-back tools with such a schema: the tool list leaves them out.
+    unlisted_tools: Vec<String>,
     tools_on: bool,
     specs: Vec<ToolSpec>,
     exact_counting: bool,
@@ -262,18 +264,31 @@ impl<'a> Turn<'a> {
         });
         // A tool whose schema has a control token where it cannot be cleaned is not offered
         // (and so cannot be called); the user is told at the start of the turn.
+        let clean = |tool: &ToolInfo| {
+            !schema_has_raw_control_tokens(&tool.input_schema, deps.sanitizer)
+                && deps
+                    .tools
+                    .llama_schema(&tool.name)
+                    .is_none_or(|s| !schema_has_raw_control_tokens(&s, deps.sanitizer))
+        };
         let (tools, withheld): (Vec<ToolInfo>, Vec<ToolInfo>) = if input.caps.tools {
-            deps.tools.tools().into_iter().partition(|tool| {
-                !schema_has_raw_control_tokens(&tool.input_schema, deps.sanitizer)
-                    && deps
-                        .tools
-                        .llama_schema(&tool.name)
-                        .is_none_or(|s| !schema_has_raw_control_tokens(&s, deps.sanitizer))
-            })
+            deps.tools.tools().into_iter().partition(clean)
         } else {
             (Vec::new(), Vec::new())
         };
-        let withheld_tools = withheld.into_iter().map(|tool| tool.name).collect();
+        let withheld_tools: Vec<String> = withheld.into_iter().map(|tool| tool.name).collect();
+        // [0.0.7] The tool list leaves such a tool out whether or not this turn shows it, so
+        // the system message does not change on the turn it is first shown.
+        let mut unlisted_tools = withheld_tools.clone();
+        if input.caps.tools {
+            unlisted_tools.extend(
+                deps.tools
+                    .kept_back()
+                    .into_iter()
+                    .filter(|tool| !clean(tool))
+                    .map(|tool| tool.name),
+            );
+        }
         let tools_on = !tools.is_empty();
         let exact_counting =
             input.caps.local && deps.client.config().kind == ProviderKind::LlamaServer;
@@ -284,6 +299,7 @@ impl<'a> Turn<'a> {
             cancel,
             tools,
             withheld_tools,
+            unlisted_tools,
             tools_on,
             specs: Vec::new(),
             exact_counting,
@@ -483,14 +499,33 @@ impl<'a> Turn<'a> {
     }
 
     /// [0.0.7] The tool list and guide for the system message: only when tools are on, and
-    /// without the tools that are not offered (`withheld_tools`).
+    /// without the tools that are never offered (`unlisted_tools`). How the model reaches a
+    /// listed tool this turn does not offer is decided here, from the tools the turn offers:
+    /// through `call_tool` only when the turn has it (a small context may have no room for
+    /// it). That only changes when the turn's tools change, so the cached prompt is lost no
+    /// more often than before.
     fn tool_guide(&self) -> Option<ToolGuide> {
         let guide = self.input.tool_guide.as_ref().filter(|_| self.tools_on)?;
-        Some(if self.withheld_tools.is_empty() {
+        let mut guide = if self.unlisted_tools.is_empty() {
             guide.clone()
         } else {
-            guide.without(&self.withheld_tools)
-        })
+            guide.without(&self.unlisted_tools)
+        };
+        let offered = |name: &str| self.tool(name).is_some();
+        guide.reach = if offered(CALL_TOOL) {
+            Reach::CallTool
+        } else if guide.names().all(offered) {
+            Reach::All
+        } else {
+            Reach::Only(
+                guide
+                    .names()
+                    .filter(|name| offered(name))
+                    .map(str::to_owned)
+                    .collect(),
+            )
+        };
+        Some(guide)
     }
 
     fn projection(&self) -> Projection {
@@ -1178,6 +1213,14 @@ impl<'a> Turn<'a> {
                         reason: format!("the server could not parse the model output: {detail}"),
                     });
                 }
+                // [0.0.7 P5] What a reply the company's safety filter stopped wrote so far
+                // must not be used (Anthropic: discard it): it is neither shown nor stored.
+                Attempt::Failed(err @ ProviderError::Refused { .. }) => {
+                    self.emit(TurnEvent::AttemptDiscarded {
+                        reason: "the company's safety filter stopped the reply".to_owned(),
+                    });
+                    return Err(provider_failure(&err));
+                }
                 Attempt::Failed(err) => return Err(provider_failure(&err)),
                 Attempt::Done(reply) => {
                     if let Some(usage) = reply.usage {
@@ -1524,13 +1567,21 @@ impl<'a> Turn<'a> {
 
     fn no_such_tool(&self, name: &str) -> String {
         // [0.0.7] A tool that is on in the chat but not in this turn's list: the tool list in
-        // the system message names it, so the model is told how to run it.
+        // the system message names it, so the model is told how to run it, or that it cannot
+        // this turn.
         let listed = self.tool_guide().is_some_and(|guide| guide.lists(name));
         if listed && self.tool(CALL_TOOL).is_some() {
             return format!(
                 "{name} is on in this chat but not in your list of callable tools this turn, so \
                  it was not run. Run it with {CALL_TOOL}, giving \"name\": \"{name}\" and its \
                  arguments in \"arguments\"."
+            );
+        }
+        if listed {
+            return format!(
+                "{name} is on in this chat, but it does not fit in this model's context this \
+                 turn, so it was not run. Use the tools in your list of callable tools, or \
+                 answer with what you have."
             );
         }
         let names: Vec<&str> = self.tools.iter().map(|tool| tool.name.as_str()).collect();

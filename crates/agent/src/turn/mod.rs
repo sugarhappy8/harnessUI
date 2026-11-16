@@ -163,6 +163,12 @@ impl CompactionStage {
 pub trait ToolHost: Send + Sync {
     /// The tools enabled for this chat, in a fixed order.
     fn tools(&self) -> Vec<ToolInfo>;
+    /// [0.0.7] The tools that are on in the chat but kept back this turn (the app reaches them
+    /// through `call_tool`). The loop only checks their settings, so that the tool list in the
+    /// system message leaves out the ones it would never offer before a turn shows them.
+    fn kept_back(&self) -> Vec<ToolInfo> {
+        Vec::new()
+    }
     /// Validates arguments against the tool's full schema (compiled once in the host).
     ///
     /// # Errors

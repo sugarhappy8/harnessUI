@@ -269,6 +269,9 @@ pub fn card(
     preview.push_str(&format!(
         "{open}{scroll}, and save a copy of its front end into a new folder inside:\n{folder_shown}\n"
     ));
+    if !folder.exists {
+        preview.push_str("That folder does not exist yet; it will be created.\n");
+    }
     preview.push_str(&format!(
         "It saves the page as shown (with its scripts switched off), its style sheets, pictures, fonts and videos, a list of its animations, screenshots {widths} pixels wide, and a short report for the model.\n"
     ));

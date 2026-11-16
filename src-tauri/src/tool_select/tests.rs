@@ -621,10 +621,47 @@ fn the_cap_keeps_companions_then_used_and_found_then_the_best_matches() {
         max: 30,
         allowance: None,
     });
+    // [0.0.7 P7] Eleven since browser_capture_site.
     assert_eq!(
         roomy.iter().filter(|n| n.starts_with("browser_")).count(),
-        10
+        11
     );
+}
+
+/// [0.0.7 P7] Requests to copy a website's look bring the browser group and
+/// `browser_capture_site` among its tools; ordinary browsing does not.
+#[test]
+fn website_capture_requests_bring_the_capture_tool() {
+    let all: Vec<Candidate> = on(&["files", "terminal", "git", "browser", "artifacts", "search"])
+        .into_iter()
+        .filter(|t| !is_always_shown(t) && !is_core(t))
+        .collect();
+    for request in [
+        "clone this website",
+        "copy the design of example.com",
+        "recreate this site's animations",
+        "make a site that looks like stripe.com",
+        "clone the front end of linear.app",
+        "capture the look of apple.com so we can rebuild it",
+        "make my landing page look like vercel.com",
+    ] {
+        let wording = Wording::of(request);
+        let groups: Vec<String> = matching_groups(&all, &wording, &[])
+            .into_iter()
+            .map(|(group, _)| group)
+            .collect();
+        assert!(groups.contains(&"browser".to_string()), "{request}: {groups:?}");
+        // Under the cap, the group's places go to the tools the request points at most.
+        let shown = pick(&default_set(), &[request], &[], &[]);
+        assert!(shown.contains(&"browser_capture_site".to_string()), "{request}: {shown:?}");
+    }
+    let shown = pick(
+        &default_set(),
+        &["open the website and click the sign-in button"],
+        &[],
+        &[],
+    );
+    assert!(!shown.contains(&"browser_capture_site".to_string()), "{shown:?}");
 }
 
 /// Two groups match and not everything fits: they take turns, so the smaller group is not

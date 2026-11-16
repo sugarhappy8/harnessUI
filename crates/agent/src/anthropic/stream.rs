@@ -19,7 +19,7 @@ use std::sync::{Arc, Mutex};
 
 use serde_json::{Map, Value, json};
 
-use super::{ThinkingReplay, error_from};
+use super::{ReplayKey, ThinkingReplay, error_from};
 use crate::error::{ProviderError, as_u32, bounded};
 use crate::sse::{SseDecoder, SseEvent};
 use crate::stream::{FinishReason, StreamEvent, Usage};
@@ -401,23 +401,30 @@ impl MessagesDecoder {
         }
     }
 
-    /// Keeps a finished response that called tools and thought, exactly as received, for the
-    /// next request of the tool-use loop. Not kept: a reply cut off, one with a block the app
-    /// cannot send back, one with arguments that are not a JSON object.
+    /// Keeps a finished response that thought, exactly as received, for later requests: one
+    /// that called tools under its call ids, a finished reply without calls under its text.
+    /// Not kept: a reply cut off, one with a block the app cannot send back, one with
+    /// arguments that are not a JSON object.
     fn keep_for_replay(&mut self) {
         let Some(replay) = &self.replay else {
             return;
         };
-        if self.stop_reason.as_deref() != Some("tool_use") {
-            return;
-        }
+        let calls_tools = match self.stop_reason.as_deref() {
+            Some("tool_use") => true,
+            Some("end_turn" | "stop_sequence") => false,
+            _ => return,
+        };
         let mut blocks = Vec::new();
         let mut call_ids = Vec::new();
+        let mut text = String::new();
         let mut thought = false;
         for block in self.blocks.values() {
             match block {
-                Block::Text(text) if text.is_empty() => {}
-                Block::Text(text) => blocks.push(json!({"type": "text", "text": text})),
+                Block::Text(piece) if piece.is_empty() => {}
+                Block::Text(piece) => {
+                    text.push_str(piece);
+                    blocks.push(json!({"type": "text", "text": piece}));
+                }
                 Block::Thinking { signature, .. } if signature.is_empty() => return,
                 Block::Thinking {
                     thinking,
@@ -448,8 +455,13 @@ impl MessagesDecoder {
                 Block::Other => return,
             }
         }
+        let key = match (calls_tools, call_ids.is_empty()) {
+            (true, false) => ReplayKey::Calls(call_ids),
+            (false, true) if !text.is_empty() => ReplayKey::text(&text),
+            _ => return,
+        };
         if thought && let Ok(mut replay) = replay.lock() {
-            replay.store(call_ids, blocks);
+            replay.store(key, blocks);
         }
     }
 }

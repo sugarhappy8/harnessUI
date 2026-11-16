@@ -59,22 +59,26 @@ async fn chosen_context(state: &AppState, id: store::ProviderId) -> Option<u32> 
         .and_then(crate::settings::parse_remote_context)
 }
 
-/// [0.0.7 P5] How a model's context is decided, from what is known: what the server
-/// reports, held to the size chosen for the endpoint (a lower size spends less on a cloud
-/// company's long chats); when the server does not say, the chosen size, else the size the
-/// company documents (ready-made cloud choices), else `setting` (the user's size for
-/// servers that do not say, 4,096 by default).
+/// [0.0.7 P5] How a model's context is decided, from what is known. A size chosen for the
+/// endpoint in Settings → Endpoints: that, at most what the server reports. "Automatic":
+/// what the server reports, at most the company's size for a cloud company
+/// ([`agent::default_context`]: a long chat sends up to this much with every message, and
+/// Claude's current models report 1,000,000), and when the server does not say, the
+/// company's size, else `setting` (the user's size for servers that do not say, 4,096 by
+/// default).
 pub fn plan_context(
     kind: ProviderKind,
+    model: &str,
     reported: Option<u32>,
     chosen: Option<u32>,
     setting: u32,
 ) -> u32 {
+    let company = agent::default_context(kind, model);
     match (reported, chosen) {
         (Some(reported), Some(chosen)) => reported.min(chosen),
-        (Some(reported), None) => reported,
         (None, Some(chosen)) => chosen,
-        (None, None) => agent::default_context(kind).unwrap_or(setting),
+        (Some(reported), None) => company.map_or(reported, |size| reported.min(size)),
+        (None, None) => company.unwrap_or(setting),
     }
 }
 
@@ -88,15 +92,17 @@ async fn global_context_setting(state: &AppState) -> u32 {
     crate::settings::remote_context_length(stored.as_ref())
 }
 
-/// [0.0.7 P5] The context a turn plans with for a model on `provider` that reported
+/// [0.0.7 P5] The context a turn plans with for `model` on `provider` that reported
 /// `reported` ([`plan_context`]).
 pub async fn context_for(
     state: &AppState,
     provider: &store::Provider,
+    model: &str,
     reported: Option<u32>,
 ) -> u32 {
     plan_context(
         kind_of(&provider.kind),
+        model,
         reported,
         chosen_context(state, provider.id).await,
         global_context_setting(state).await,
@@ -114,12 +120,21 @@ pub async fn context_parts(
     let Some(provider) = provider_of(state, model_ref).await else {
         return (reported, setting);
     };
+    let model = model_of(model_ref);
     let chosen = chosen_context(state, provider.id).await;
     let kind = kind_of(&provider.kind);
     (
-        reported.map(|r| chosen.map_or(r, |c| r.min(c))),
-        plan_context(kind, None, chosen, setting),
+        reported.map(|r| plan_context(kind, model, Some(r), chosen, setting)),
+        plan_context(kind, model, None, chosen, setting),
     )
+}
+
+/// The model of a `remote:<id>:<model>` reference.
+fn model_of(model_ref: &str) -> &str {
+    model_ref
+        .strip_prefix("remote:")
+        .and_then(|rest| rest.split_once(':'))
+        .map_or("", |(_, model)| model)
 }
 
 /// The endpoint a `remote:<id>:<model>` reference names, if it still exists.
@@ -134,24 +149,68 @@ async fn provider_of(state: &AppState, model_ref: &str) -> Option<store::Provide
         .flatten()
 }
 
-/// [0.0.7 P5] What the chat header shows for a chat's model: the host its messages go to when
-/// the endpoint is on the internet (the "Cloud" mark), and whether the app can switch the
-/// model's thinking (Claude).
-pub async fn chat_marks(state: &AppState, model_ref: Option<&str>) -> (Option<String>, bool) {
-    let Some(provider) = (match model_ref {
-        Some(model_ref) => provider_of(state, model_ref).await,
-        None => None,
-    }) else {
-        return (None, false);
-    };
-    let cloud = (agent::endpoint_place(&provider.base_url) == EndpointPlace::Internet)
-        .then(|| agent::endpoint_host(&provider.base_url))
-        .flatten();
-    (cloud, kind_of(&provider.kind) == ProviderKind::Anthropic)
+/// [0.0.7 P5] What the chat header shows for a chat's model.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ChatMarks {
+    /// Where the chat's messages go when the endpoint is on the internet (the "Cloud" mark):
+    /// its host, or the address itself when no host can be read from it.
+    pub cloud_host: Option<String>,
+    /// The app switches the model's thinking on and off (Claude).
+    pub thinking: bool,
+    /// The model's thinking cannot stop, so "off" asks it to think little (Claude Opus 5.5,
+    /// Fable, Mythos).
+    pub thinking_low: bool,
 }
 
-/// Validates a base URL: http(s) only, no credentials embedded in it.
+/// [0.0.7 P5] The marks of an endpoint at `base_url` of `kind`, for `model`.
+pub fn marks_for(kind: ProviderKind, base_url: &str, model: &str) -> ChatMarks {
+    let cloud_host = (agent::endpoint_place(base_url) == EndpointPlace::Internet)
+        .then(|| agent::endpoint_host(base_url).unwrap_or_else(|| base_url.trim().to_owned()));
+    let thinking = kind == ProviderKind::Anthropic;
+    ChatMarks {
+        cloud_host,
+        thinking,
+        thinking_low: thinking && !agent::thinking_can_stop(base_url, model),
+    }
+}
+
+/// [0.0.7 P5] The marks of a chat's model ([`marks_for`]); none without an endpoint.
+pub async fn chat_marks(state: &AppState, model_ref: Option<&str>) -> ChatMarks {
+    let Some(model_ref) = model_ref else {
+        return ChatMarks::default();
+    };
+    match provider_of(state, model_ref).await {
+        Some(provider) => marks_for(
+            kind_of(&provider.kind),
+            &provider.base_url,
+            model_of(model_ref),
+        ),
+        None => ChatMarks::default(),
+    }
+}
+
+/// [0.0.7 P5] Whether a key saved for an endpoint at `old_base_url` may stay with it at
+/// `new_base_url`: only to the same scheme, host and port, as the client reads them.
+pub fn key_may_stay(old_base_url: &str, new_base_url: &str) -> bool {
+    matches!(
+        (agent::endpoint_origin(old_base_url), agent::endpoint_origin(new_base_url)),
+        (Some(old), Some(new)) if old == new
+    )
+}
+
+/// [0.0.7 P5] What a saved key that would follow an endpoint to another address gets.
+const PASTE_THE_NEW_KEY: &str = "The saved API key is not sent to a new address. Paste the API \
+     key for the new address, or remove the saved key.";
+
+/// Validates a base URL: http(s) only, written in full (`http://` or `https://`, so every
+/// reader of it agrees where it leads), no credentials embedded in it.
 fn check_base_url(url: &str) -> AppResult<()> {
+    let lower = url.trim().to_ascii_lowercase();
+    if !lower.starts_with("http://") && !lower.starts_with("https://") {
+        return Err(AppError::bad_request(
+            "The address must start with http:// or https://.",
+        ));
+    }
     let parsed = url::Url::parse(url).map_err(|_| {
         AppError::bad_request(
             "The address is not a valid URL (for example http://127.0.0.1:11434).",
@@ -228,6 +287,16 @@ pub async fn save_provider(
             .is_some_and(|id| state.secrets.get(&secret_key(id)).ok().flatten().is_some());
     if new_key || kept_key {
         agent::check_key_transport(&base_url).map_err(AppError::bad_request)?;
+    }
+    // [0.0.7 P5] A key saved for one address never follows the endpoint to another one (a
+    // changed company or address): the new address needs its own key.
+    if kept_key
+        && !new_key
+        && let Some(id) = provider.id
+        && let Some(saved) = state.store.get_provider(id).await?
+        && !key_may_stay(&saved.base_url, &base_url)
+    {
+        return Err(AppError::bad_request(PASTE_THE_NEW_KEY));
     }
     if let Some(n) = provider.context_length
         && crate::settings::parse_remote_context(&serde_json::json!(n)).is_none()
@@ -336,6 +405,72 @@ mod tests {
         assert!(check_base_url("ftp://example.com").is_err());
         assert!(check_base_url("https://user:pw@example.com").is_err());
         assert!(check_base_url("not a url").is_err());
+        // [0.0.7 P5] Written in full, so the key check, the "Cloud" mark and the requests
+        // read it alike: `http:/host`, `http:host` and `host:port` are refused.
+        for half in [
+            "http:/api.example.com",
+            "http:api.example.com",
+            "https:/api.anthropic.com",
+            "http:\\\\api.example.com/v1",
+            "api.example.com:8080",
+        ] {
+            assert!(check_base_url(half).is_err(), "{half}");
+        }
+        assert!(check_base_url("HTTPS://api.anthropic.com").is_ok());
+    }
+
+    /// [0.0.7 P5] A saved key stays with an edited endpoint only at the same scheme, host
+    /// and port.
+    #[test]
+    fn a_saved_key_stays_with_its_address_only() {
+        assert!(key_may_stay(
+            "https://api.openai.com/v1",
+            "https://api.openai.com/v1/"
+        ));
+        assert!(key_may_stay(
+            "https://api.anthropic.com",
+            "https://API.anthropic.com:443/v1"
+        ));
+        assert!(key_may_stay("http://192.168.1.5:8000", "http://192.168.1.5:8000/v1"));
+        // Another company, host, port or scheme.
+        assert!(!key_may_stay("https://api.openai.com/v1", "https://openrouter.ai/api/v1"));
+        assert!(!key_may_stay("http://192.168.1.5:8000", "http://192.168.1.6:8000"));
+        assert!(!key_may_stay("http://192.168.1.5:8000", "http://192.168.1.5:8001"));
+        assert!(!key_may_stay("https://example.com", "http://example.com"));
+        assert!(!key_may_stay("not a url", "not a url"));
+        assert!(PASTE_THE_NEW_KEY.contains("Paste the API key for the new address"));
+    }
+
+    /// [0.0.7 P5] The chat header's marks: "Cloud" with the host for the internet, and how
+    /// Claude's Thinking switch reads.
+    #[test]
+    fn chat_marks_for_endpoints() {
+        use ProviderKind::{Anthropic, Generic, OpenAi};
+        let claude = marks_for(Anthropic, "https://api.anthropic.com", "claude-sonnet-5-5");
+        assert_eq!(claude.cloud_host.as_deref(), Some("api.anthropic.com"));
+        assert!(claude.thinking && !claude.thinking_low);
+        // Claude Opus 5.5 cannot stop thinking: "off" asks for less.
+        let opus = marks_for(Anthropic, "https://api.anthropic.com", "claude-opus-5-5");
+        assert!(opus.thinking && opus.thinking_low);
+        assert!(marks_for(Anthropic, "https://api.anthropic.com", "claude-fable-5-2").thinking_low);
+        let openai = marks_for(OpenAi, "https://api.openai.com/v1", "gpt-5.5");
+        assert_eq!(openai.cloud_host.as_deref(), Some("api.openai.com"));
+        assert!(!openai.thinking && !openai.thinking_low);
+        assert_eq!(marks_for(Generic, "http://127.0.0.1:11434", "m"), ChatMarks::default());
+        assert_eq!(marks_for(Generic, "http://192.168.1.5:8000", "m"), ChatMarks::default());
+        // A name other than localhost can lead anywhere: marked.
+        assert_eq!(
+            marks_for(Generic, "http://nas.local:11434", "m").cloud_host.as_deref(),
+            Some("nas.local")
+        );
+        // An address no host can be read from is marked with the address itself.
+        assert_eq!(
+            marks_for(Generic, "http://", "m").cloud_host.as_deref(),
+            Some("http://")
+        );
+        assert_eq!(model_of("remote:3:claude-opus-5-5"), "claude-opus-5-5");
+        assert_eq!(model_of("remote:3:org/model:free"), "org/model:free");
+        assert_eq!(model_of("local:/m.gguf"), "");
     }
 
     /// [0.0.7 P5] The ready-made choices map to their protocols; unknown kinds stay generic.
@@ -353,24 +488,46 @@ mod tests {
     /// report, the chosen size, else the company's documented size, else the user's setting.
     #[test]
     fn context_plans() {
-        use ProviderKind::{Anthropic, Generic, OpenAi};
+        use ProviderKind::{Abliteration, Anthropic, Generic, OpenAi, OpenRouter};
+        let opus = "claude-opus-5-5";
+        // "Automatic" for Claude: at most 200,000 of the 1,000,000 the model takes, so a long
+        // chat does not send close to a million tokens with every message.
+        assert_eq!(plan_context(Anthropic, opus, Some(1_000_000), None, 4_096), 200_000);
+        // Claude Haiku 5.5 costs five times as much per token above 100,000.
         assert_eq!(
-            plan_context(Anthropic, Some(1_000_000), None, 4_096),
+            plan_context(Anthropic, "claude-haiku-5-5", Some(1_000_000), None, 4_096),
+            100_000
+        );
+        assert_eq!(
+            plan_context(Anthropic, "claude-haiku-4-5", Some(200_000), None, 4_096),
+            200_000
+        );
+        // A larger size is the user's choice, held to what the model takes.
+        assert_eq!(
+            plan_context(Anthropic, opus, Some(1_000_000), Some(1_000_000), 4_096),
             1_000_000
         );
         assert_eq!(
-            plan_context(Anthropic, Some(1_000_000), Some(200_000), 4_096),
-            200_000
+            plan_context(Anthropic, opus, Some(1_000_000), Some(400_000), 4_096),
+            400_000
         );
         assert_eq!(
-            plan_context(Anthropic, Some(100_000), Some(200_000), 4_096),
+            plan_context(Anthropic, opus, Some(100_000), Some(200_000), 4_096),
             100_000
         );
-        assert_eq!(plan_context(OpenAi, None, None, 4_096), 128_000);
-        assert_eq!(plan_context(OpenAi, None, Some(65_536), 4_096), 65_536);
-        assert_eq!(plan_context(Anthropic, None, None, 16_384), 200_000);
-        assert_eq!(plan_context(Generic, None, None, 16_384), 16_384);
-        assert_eq!(plan_context(Generic, Some(8_192), None, 16_384), 8_192);
+        assert_eq!(plan_context(Anthropic, opus, None, None, 16_384), 200_000);
+        assert_eq!(plan_context(OpenAi, "gpt-5.5", None, None, 4_096), 128_000);
+        assert_eq!(plan_context(OpenAi, "gpt-5.5", None, Some(65_536), 4_096), 65_536);
+        assert_eq!(
+            plan_context(OpenRouter, "x/y", Some(1_048_576), None, 4_096),
+            128_000
+        );
+        assert_eq!(plan_context(OpenRouter, "x/y", Some(32_768), None, 4_096), 32_768);
+        assert_eq!(plan_context(Abliteration, "m", Some(131_072), None, 4_096), 32_768);
+        // Servers that are not a company's: what they report, else the user's setting.
+        assert_eq!(plan_context(Generic, "m", None, None, 16_384), 16_384);
+        assert_eq!(plan_context(Generic, "m", Some(8_192), None, 16_384), 8_192);
+        assert_eq!(plan_context(Generic, "m", Some(262_144), None, 16_384), 262_144);
     }
 
     /// [0.0.7 P5] The endpoint list says which endpoints are on the internet.

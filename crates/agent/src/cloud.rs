@@ -964,7 +964,10 @@ mod tests {
             ("http://[::1]:8000", ThisComputer),
             ("http://[::ffff:127.0.0.1]:8000", ThisComputer),
             ("http://0.0.0.0:8000", ThisComputer),
-            ("http://api.localhost", ThisComputer),
+            ("http://LOCALHOST.:8080", ThisComputer),
+            // Hexadecimal and IPv4-in-IPv6 spellings read as the address they are.
+            ("http://0x7f000001:8080", ThisComputer),
+            ("http://[::ffff:7f00:1]", ThisComputer),
             ("http://192.168.1.5:11434", LocalNetwork),
             ("http://10.0.0.7:8000", LocalNetwork),
             ("http://172.16.4.2", LocalNetwork),
@@ -973,10 +976,12 @@ mod tests {
             ("http://[fd12:3456::1]:8000", LocalNetwork),
             ("http://[fe80::1]:8000", LocalNetwork),
             ("http://[::ffff:10.0.0.1]:8000", LocalNetwork),
-            ("http://nas:8000", LocalNetwork),
-            ("http://studio.local:1234", LocalNetwork),
-            ("http://gpu-box.lan", LocalNetwork),
-            ("http://ollama.home.arpa", LocalNetwork),
+            // A name leads wherever the name server says: only `localhost` is known.
+            ("http://nas:8000", Internet),
+            ("http://studio.local:1234", Internet),
+            ("http://gpu-box.lan", Internet),
+            ("http://ollama.home.arpa", Internet),
+            ("http://api.localhost", Internet),
             ("https://api.anthropic.com", Internet),
             ("https://api.openai.com/v1", Internet),
             ("https://openrouter.ai/api/v1", Internet),
@@ -987,9 +992,68 @@ mod tests {
             ("http://localhost.example.com", Internet),
             ("not a url at all", Internet),
             ("", Internet),
+            ("ftp://192.168.1.5", Internet),
         ] {
             assert_eq!(place(url), expected, "{url}");
         }
+    }
+
+    #[test]
+    fn the_key_check_the_mark_and_the_client_read_an_address_alike() {
+        // The reviewer's addresses: the URL standard reads `http:/host`, `http:host` and
+        // backslashes as `http://host`, and so do the requests.
+        for (raw, host, scheme) in [
+            ("http:/api.example.com", "api.example.com", "http"),
+            ("http:api.example.com", "api.example.com", "http"),
+            ("http:\\\\api.example.com/v1", "api.example.com", "http"),
+            ("https:/api.anthropic.com", "api.anthropic.com", "https"),
+            ("https:api.anthropic.com", "api.anthropic.com", "https"),
+            ("http://api.example.com", "api.example.com", "http"),
+            ("api.example.com:8080/v1", "api.example.com", "http"),
+        ] {
+            let url = endpoint_url(raw).unwrap();
+            assert_eq!(url.host_str(), Some(host), "{raw}");
+            assert_eq!(url.scheme(), scheme, "{raw}");
+            assert_eq!(endpoint_host(raw).as_deref(), Some(host), "{raw}");
+            assert_eq!(place(raw), EndpointPlace::Internet, "{raw}");
+            let mut config = crate::ClientConfig::new(raw, ProviderKind::Generic);
+            config.api_key = Some("sk-test-0123456789".into());
+            let client = crate::OpenAiClient::new(config);
+            if scheme == "http" {
+                // No key over plain http to the internet, however the address is written.
+                assert_eq!(check_key_transport(raw), Err(KEY_OVER_HTTP.to_owned()), "{raw}");
+                assert!(client.is_err(), "{raw}");
+            } else {
+                assert!(check_key_transport(raw).is_ok(), "{raw}");
+                assert_eq!(
+                    client.unwrap().chat_completions_url().host_str(),
+                    Some(host),
+                    "{raw}"
+                );
+            }
+        }
+        // An address that cannot be read gets no key, and no client is made for it.
+        for raw in ["", "http://", "::", "ftp://api.example.com", "http://exa mple.com"] {
+            assert_eq!(
+                check_key_transport(raw),
+                Err(UNREADABLE_ADDRESS.to_owned()),
+                "{raw:?}"
+            );
+            assert_eq!(endpoint_host(raw), None, "{raw:?}");
+        }
+        assert_eq!(
+            endpoint_origin("https:/API.anthropic.com/v1/messages").as_deref(),
+            Some("https://api.anthropic.com:443")
+        );
+        assert_eq!(
+            endpoint_origin("http://192.168.1.5:11434").as_deref(),
+            Some("http://192.168.1.5:11434")
+        );
+        assert_ne!(
+            endpoint_origin("https://api.openai.com/v1"),
+            endpoint_origin("https://openrouter.ai/api/v1")
+        );
+        assert_eq!(endpoint_origin("ftp://x"), None);
     }
 
     #[test]
@@ -1009,8 +1073,13 @@ mod tests {
     fn keys_never_go_over_plain_http_to_the_internet() {
         assert!(check_key_transport("https://api.openai.com/v1").is_ok());
         assert!(check_key_transport("http://127.0.0.1:11434").is_ok());
+        assert!(check_key_transport("http://localhost:11434").is_ok());
         assert!(check_key_transport("http://192.168.1.5:8000/v1").is_ok());
-        assert!(check_key_transport("http://nas:8000").is_ok());
+        assert!(check_key_transport("https://nas:8000").is_ok());
+        // A local-looking name can lead anywhere: https, or the server's IP address.
+        for name in ["http://nas:8000", "http://studio.local", "http://box.lan/v1"] {
+            assert_eq!(check_key_transport(name), Err(KEY_OVER_HTTP.to_owned()), "{name}");
+        }
         assert_eq!(
             check_key_transport("http://api.example.com/v1"),
             Err(KEY_OVER_HTTP.to_owned())
@@ -1023,11 +1092,28 @@ mod tests {
 
     #[test]
     fn company_defaults() {
-        assert_eq!(default_context(ProviderKind::Anthropic), Some(200_000));
-        assert_eq!(default_context(ProviderKind::OpenAi), Some(128_000));
-        assert_eq!(default_context(ProviderKind::OpenRouter), Some(32_768));
-        assert_eq!(default_context(ProviderKind::Generic), None);
-        assert_eq!(default_context(ProviderKind::Ollama), None);
+        assert_eq!(
+            default_context(ProviderKind::Anthropic, "claude-opus-5-5"),
+            Some(200_000)
+        );
+        assert_eq!(
+            default_context(ProviderKind::Anthropic, "claude-sonnet-5-5"),
+            Some(200_000)
+        );
+        // Claude Haiku 5.5 costs five times as much per token above 100,000.
+        assert_eq!(
+            default_context(ProviderKind::Anthropic, "claude-haiku-5-5"),
+            Some(100_000)
+        );
+        assert_eq!(
+            default_context(ProviderKind::Anthropic, "claude-haiku-4-5-20251001"),
+            Some(200_000)
+        );
+        assert_eq!(default_context(ProviderKind::OpenAi, "gpt-5.5"), Some(128_000));
+        assert_eq!(default_context(ProviderKind::OpenRouter, "x/y"), Some(128_000));
+        assert_eq!(default_context(ProviderKind::Abliteration, "m"), Some(32_768));
+        assert_eq!(default_context(ProviderKind::Generic, "m"), None);
+        assert_eq!(default_context(ProviderKind::Ollama, "m"), None);
         assert!(images_in_tool_results(ProviderKind::Anthropic));
         assert!(images_in_tool_results(ProviderKind::Generic));
         assert!(!images_in_tool_results(ProviderKind::OpenAi));
@@ -1482,6 +1568,40 @@ mod tests {
             scrub_key(ProviderError::Network("abc".into()), Some("abc")),
             ProviderError::Network("abc".into())
         );
+    }
+
+    #[test]
+    fn a_key_cut_off_with_the_message_is_scrubbed_too() {
+        // A server message is cut at 2,000 characters before the key is known; the piece of
+        // the key before the cut must not stay.
+        let key = "sk-ant-api03-PROBEKEY0123456789abcdefghijklmnopqrstuvwxyz";
+        let long = format!("{} key {key} tail", "x".repeat(1_980));
+        let cut = crate::error::bounded(&long);
+        assert!(cut.ends_with('…') && !cut.contains(key), "the probe must straddle the cut");
+        let err = scrub_key(
+            ProviderError::Http {
+                status: 400,
+                message: cut,
+            },
+            Some(key),
+        );
+        let ProviderError::Http { message, .. } = &err else {
+            unreachable!()
+        };
+        assert!(message.ends_with("key [API key]…"), "{}", &message[1_950..]);
+        assert!(!message.contains(&key[..KEY_PIECE]), "{}", &message[1_950..]);
+        // Before an ellipsis followed by more text (a wait the server asked for).
+        let text = format!("said {}… (it asks to try again in 40 seconds)", &key[..20]);
+        assert_eq!(
+            without_key(&text, key),
+            "said [API key]… (it asks to try again in 40 seconds)"
+        );
+        // A whole key mid-text, and a cut without an ellipsis.
+        assert_eq!(without_key(&format!("a {key} b"), key), "a [API key] b");
+        assert_eq!(without_key(&format!("a {}", &key[..12]), key), "a [API key]");
+        // Too short a piece to say, and text that only looks alike, stay.
+        assert_eq!(without_key("ends with sk-", key), "ends with sk-");
+        assert_eq!(without_key("nothing here", key), "nothing here");
     }
 
     #[test]

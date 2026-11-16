@@ -15,7 +15,6 @@ use std::collections::VecDeque;
 use std::fmt;
 use std::net::IpAddr;
 use std::pin::Pin;
-use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll};
 use std::time::Duration;
 
@@ -26,7 +25,7 @@ use serde_json::{Value, json};
 use tokio_util::sync::CancellationToken;
 use url::Url;
 
-use crate::anthropic::{MessagesDecoder, ThinkingReplay};
+use crate::anthropic::MessagesDecoder;
 use crate::cloud;
 use crate::error::{ProviderError, as_u32, bounded, error_from_body};
 use crate::stream::{ChunkParser, StreamDecoder, StreamEvent};
@@ -267,8 +266,6 @@ pub struct OpenAiClient {
     api: Url,
     /// The server root for vendor endpoints (`/props`, `/api/ps`, `/api/v1/models`).
     root: Url,
-    /// Claude's thinking blocks to send back within a tool-use loop (shared by clones).
-    replay: Arc<Mutex<ThinkingReplay>>,
 }
 
 /// [0.0.7 P5] The redirect rule of a client for a server that is not on this machine: at most
@@ -346,7 +343,6 @@ impl OpenAiClient {
             config,
             api,
             root,
-            replay: Arc::default(),
         })
     }
 
@@ -363,11 +359,6 @@ impl OpenAiClient {
     /// The API root (`.../v1`).
     pub(crate) fn api_url(&self) -> &Url {
         &self.api
-    }
-
-    /// Claude's thinking blocks kept for this endpoint's tool-use loops.
-    pub(crate) fn replay(&self) -> &Arc<Mutex<ThinkingReplay>> {
-        &self.replay
     }
 
     /// Streams a chat completion. The request is always sent with `stream: true` and
@@ -1114,6 +1105,14 @@ fn is_version_segment(segment: &str) -> bool {
 }
 
 /// Appends a relative path to a base URL, keeping its query string.
+/// The API URL a client for `base_url` uses (`https://api.anthropic.com/v1`), the key of
+/// what the app remembers about its models; `None` for an address that cannot be read.
+pub(crate) fn api_url_of(base_url: &str) -> Option<String> {
+    parse_base(base_url)
+        .ok()
+        .map(|(api, _)| api.as_str().to_owned())
+}
+
 pub(crate) fn join(base: &Url, path: &str) -> Url {
     let mut url = base.clone();
     let joined = format!("{}/{}", base.path().trim_end_matches('/'), path);
@@ -1199,7 +1198,7 @@ fn num_ctx_parameter(parameters: &str) -> Option<u32> {
     })
 }
 
-fn is_not_found(err: &ProviderError) -> bool {
+pub(crate) fn is_not_found(err: &ProviderError) -> bool {
     matches!(
         err,
         ProviderError::Http {

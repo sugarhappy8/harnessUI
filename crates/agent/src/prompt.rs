@@ -36,7 +36,7 @@ use crate::types::{ChatMessage, ContentPart, ImageUrl, MessageContent, Role, Too
 // `<tool_call_guide>`, after the agent instructions).
 mod guide;
 pub use guide::{
-    GUIDE_TAG, GuideOs, LIST_TAG, ListedTool, ToolGroup, ToolGuide, tool_guide_blocks,
+    GUIDE_TAG, GuideOs, LIST_TAG, ListedTool, Reach, ToolGroup, ToolGuide, tool_guide_blocks,
     tool_guide_budget,
 };
 

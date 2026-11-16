@@ -7,7 +7,8 @@ use serde_json::{Value, json};
 
 use super::request::messages_body;
 use super::{
-    MessagesDecoder, ThinkingReplay, events_from_message, guess, parse_model, parse_version,
+    MessagesDecoder, ReplayKey, ThinkingReplay, events_from_message, guess, parse_model,
+    parse_version,
 };
 use crate::cloud::{Fix, ModelFacts, ParamFixes, ThinkingModes};
 use crate::error::ProviderError;
@@ -41,6 +42,13 @@ fn adaptive_facts() -> ModelFacts {
 
 fn body(req: &ChatRequest, facts: &ModelFacts, replay: Option<&ThinkingReplay>) -> Value {
     messages_body(req, facts, replay, &ParamFixes::default())
+}
+
+/// A one-message request to `model`.
+fn simple(model: &str) -> ChatRequest {
+    let mut request = ChatRequest::new(model, vec![ChatMessage::user("Hi")]);
+    request.max_tokens = Some(2_000);
+    request
 }
 
 /// A tool-using conversation: an earlier turn, then this turn's call and its failed result.
@@ -95,7 +103,9 @@ fn translates_a_tool_using_conversation() {
             "model": "claude-sonnet-4-6",
             // The app's limit, held to what the model accepts.
             "max_tokens": 128_000,
-            "system": [{"type": "text", "text": "You are a helpful assistant.", "cache_control": {"type": "ephemeral"}}],
+            // The tools and the system prompt stay cached for an hour; the newest message
+            // for five minutes.
+            "system": [{"type": "text", "text": "You are a helpful assistant.", "cache_control": {"type": "ephemeral", "ttl": "1h"}}],
             "messages": [
                 {"role": "user", "content": [{"type": "text", "text": "Hi"}]},
                 {"role": "assistant", "content": [{"type": "text", "text": "Hello."}]},
@@ -269,13 +279,28 @@ fn forced_tool_use_only_where_allowed() {
     );
 }
 
+fn call_key(ids: &[&str]) -> ReplayKey {
+    ReplayKey::Calls(ids.iter().map(|id| (*id).to_owned()).collect())
+}
+
+/// The last assistant turn of a translated body.
+fn last_assistant(body: &Value) -> Value {
+    body["messages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .rfind(|m| m["role"] == "assistant")
+        .unwrap()
+        .clone()
+}
+
 #[test]
-fn thinking_blocks_are_replayed_within_the_tool_loop_only() {
+fn unchanged_replies_go_back_with_their_thinking() {
     let thinking = json!({"type": "thinking", "thinking": "Check the city.", "signature": "sig-1"});
     let redacted = json!({"type": "redacted_thinking", "data": "opaque"});
     let mut replay = ThinkingReplay::default();
     replay.store(
-        vec!["toolu_01".into()],
+        call_key(&["toolu_01"]),
         vec![
             thinking.clone(),
             json!({"type": "text", "text": "Let me check."}),
@@ -283,17 +308,27 @@ fn thinking_blocks_are_replayed_within_the_tool_loop_only() {
             json!({"type": "tool_use", "id": "toolu_01", "name": "get_weather", "input": {"city": "Atlantis"}}),
         ],
     );
-    // The same call in an earlier turn is not replayed: its turn is over.
+    // An earlier turn: a call, and a finished reply kept under its text.
     replay.store(
-        vec!["toolu_00".into()],
+        call_key(&["toolu_00"]),
         vec![
             thinking.clone(),
             json!({"type": "tool_use", "id": "toolu_00", "name": "get_weather", "input": {}}),
         ],
     );
+    replay.store(
+        ReplayKey::text("Hello."),
+        vec![
+            json!({"type": "thinking", "thinking": "Greet.", "signature": "sig-0"}),
+            json!({"type": "text", "text": "Hello."}),
+        ],
+    );
     let mut request = tool_conversation();
+    request
+        .messages
+        .insert(3, ChatMessage::user("And the weather at home?"));
     request.messages.insert(
-        2,
+        4,
         ChatMessage::assistant_tool_calls(
             None,
             vec![ToolCall::function("toolu_00", "get_weather", "{}")],
@@ -301,33 +336,185 @@ fn thinking_blocks_are_replayed_within_the_tool_loop_only() {
     );
     request
         .messages
-        .insert(3, ChatMessage::tool_result("toolu_00", "sunny"));
-    let body = body(&request, &adaptive_facts(), Some(&replay));
-    let messages = body["messages"].as_array().unwrap();
-    // Earlier turn: rebuilt, no thinking.
+        .insert(5, ChatMessage::tool_result("toolu_00", "sunny"));
+    let sent = body(&request, &adaptive_facts(), Some(&replay));
+    let messages = sent["messages"].as_array().unwrap();
+    // With thinking on, earlier turns go back as they were written: the model reads its
+    // earlier thinking, and the prompt cache stays valid.
     assert_eq!(
         messages[1]["content"],
-        json!([{"type": "tool_use", "id": "toolu_00", "name": "get_weather", "input": {}}])
+        json!([{"type": "thinking", "thinking": "Greet.", "signature": "sig-0"}, {"type": "text", "text": "Hello."}])
     );
+    assert_eq!(messages[3]["content"][0], thinking, "{sent}");
     // This turn: exactly as received, thinking and order kept.
-    let current = messages.iter().rfind(|m| m["role"] == "assistant").unwrap();
+    let current = last_assistant(&sent);
     assert_eq!(current["content"][0], thinking);
     assert_eq!(current["content"][2], redacted);
     assert_eq!(current["content"].as_array().unwrap().len(), 4);
-    // Without a replay store nothing is replayed.
-    let plain =
-        super::request::messages_body(&request, &adaptive_facts(), None, &ParamFixes::default());
-    let current = plain["messages"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .rfind(|m| m["role"] == "assistant")
-        .unwrap()
-        .clone();
+    // claude-sonnet-4-6 has no preserved thinking: no block_binding.
+    assert!(sent["thinking"].get("block_binding").is_none(), "{sent}");
+
+    // With thinking off, only this turn's steps go back with their thinking.
+    request.thinking = Some(false);
+    let off = body(&request, &adaptive_facts(), Some(&replay));
+    let messages = off["messages"].as_array().unwrap();
+    assert_eq!(messages[1]["content"], json!([{"type": "text", "text": "Hello."}]));
+    assert_eq!(last_assistant(&off)["content"][0], thinking);
+    request.thinking = Some(true);
+
+    // A step the app changed (an old call's arguments shortened) goes as the app has it.
+    if let Some(calls) = request.messages[4].tool_calls.as_mut() {
+        calls[0].function.arguments = r#"{"city":"[shortened]"}"#.into();
+    }
+    let changed = body(&request, &adaptive_facts(), Some(&replay));
     assert_eq!(
-        current["content"][0],
+        changed["messages"][3]["content"],
+        json!([{"type": "tool_use", "id": "toolu_00", "name": "get_weather", "input": {"city": "[shortened]"}}])
+    );
+    // So does a reply whose text changed.
+    request.messages[2] = ChatMessage::assistant("Hello!");
+    let changed = body(&request, &adaptive_facts(), Some(&replay));
+    assert_eq!(changed["messages"][1]["content"], json!([{"type": "text", "text": "Hello!"}]));
+
+    // Without a replay store nothing is replayed.
+    let plain = body(&request, &adaptive_facts(), None);
+    assert_eq!(
+        last_assistant(&plain)["content"][0],
         json!({"type": "text", "text": "Let me check."})
     );
+}
+
+#[test]
+fn preserved_thinking_asks_for_drop_block_when_it_replays() {
+    let mut replay = ThinkingReplay::default();
+    replay.store(
+        call_key(&["toolu_01"]),
+        vec![
+            json!({"type": "thinking", "thinking": "Check.", "signature": "sig-1"}),
+            json!({"type": "text", "text": "Let me check."}),
+            json!({"type": "tool_use", "id": "toolu_01", "name": "get_weather", "input": {"city": "Atlantis"}}),
+        ],
+    );
+    let always = ModelFacts {
+        thinking: Some(ThinkingModes {
+            adaptive: true,
+            ..ThinkingModes::default()
+        }),
+        ..adaptive_facts()
+    };
+    for model in ["claude-opus-5-5", "claude-sonnet-5-5", "claude-haiku-5-5", "claude-fable-5-2"] {
+        let mut request = tool_conversation();
+        request.model = model.into();
+        let sent = body(&request, &always, Some(&replay));
+        assert_eq!(
+            sent["thinking"]["block_binding"],
+            json!({"prefix_mismatch_behavior": "drop_block"}),
+            "{model}"
+        );
+        // Nothing replayed: nothing to bind.
+        let sent = body(&request, &always, None);
+        assert!(sent["thinking"].get("block_binding").is_none(), "{model}");
+    }
+    // Models before preserved thinking, and a refused setting, go without it.
+    let mut request = tool_conversation();
+    request.model = "claude-opus-5".into();
+    assert!(body(&request, &always, Some(&replay))["thinking"].get("block_binding").is_none());
+    request.model = "claude-opus-5-5".into();
+    let mut fixes = ParamFixes::default();
+    fixes.add(&Fix::Drop("block_binding".into()));
+    let sent = messages_body(&request, &always, Some(&replay), &fixes);
+    assert!(sent["thinking"].get("block_binding").is_none());
+    assert_eq!(sent["thinking"]["type"], json!("adaptive"));
+}
+
+#[test]
+fn thinking_off_on_a_model_that_cannot_stop_asks_for_low_effort() {
+    // Claude Opus 5.5 accepts neither `disabled` nor `between_tools`: "off" is low effort,
+    // and a small request gets room for a short thought.
+    let always = ModelFacts {
+        thinking: Some(ThinkingModes {
+            adaptive: true,
+            ..ThinkingModes::default()
+        }),
+        ..adaptive_facts()
+    };
+    let mut request = simple("claude-opus-5-5");
+    request.thinking = Some(false);
+    request.max_tokens = Some(1_024);
+    let sent = body(&request, &always, None);
+    assert_eq!(sent["output_config"], json!({"effort": "low"}));
+    assert!(sent.get("thinking").is_none(), "{sent}");
+    assert_eq!(sent["max_tokens"], json!(8_192));
+    // Within the model's own limit.
+    let small = ModelFacts {
+        max_output: Some(4_096),
+        ..always.clone()
+    };
+    assert_eq!(body(&request, &small, None)["max_tokens"], json!(4_096));
+    // A model that can stop thinking stops, with the app's limit.
+    let sent = body(&request, &adaptive_facts(), None);
+    assert_eq!(sent["thinking"], json!({"type": "disabled"}));
+    assert!(sent.get("output_config").is_none());
+    assert_eq!(sent["max_tokens"], json!(1_024));
+    // Thinking on: no effort setting.
+    request.thinking = Some(true);
+    assert!(body(&request, &always, None).get("output_config").is_none());
+    // A server that refused `output_config` gets none.
+    request.thinking = Some(false);
+    let mut fixes = ParamFixes::default();
+    fixes.add(&Fix::Drop("output_config".into()));
+    assert!(messages_body(&request, &always, None, &fixes).get("output_config").is_none());
+}
+
+#[test]
+fn pictures_larger_than_claude_takes_become_a_note() {
+    use base64::Engine as _;
+    let encode = |bytes: &[u8]| base64::engine::general_purpose::STANDARD.encode(bytes);
+    // PNG with a 9,000 x 100 header.
+    let mut png = b"\x89PNG\r\n\x1a\n\0\0\0\rIHDR".to_vec();
+    png.extend_from_slice(&9_000u32.to_be_bytes());
+    png.extend_from_slice(&100u32.to_be_bytes());
+    png.extend_from_slice(&[8, 6, 0, 0, 0]);
+    // JPEG: SOI, an APP0 segment, then a start of frame of 8,001 x 50.
+    let mut jpeg = vec![0xFF, 0xD8, 0xFF, 0xE0, 0x00, 0x04, 0x4A, 0x46];
+    jpeg.extend_from_slice(&[0xFF, 0xC0, 0x00, 0x11, 0x08, 0x00, 0x32, 0x1F, 0x41, 0x03]);
+    // GIF of 7,000 x 7,000 is fine.
+    let mut gif = b"GIF89a".to_vec();
+    gif.extend_from_slice(&7_000u16.to_le_bytes());
+    gif.extend_from_slice(&7_000u16.to_le_bytes());
+    // WebP (extended): a 12,000 x 10 canvas.
+    let mut webp = b"RIFF\0\0\0\0WEBPVP8X\x0a\0\0\0\0\0\0\0".to_vec();
+    webp.extend_from_slice(&(12_000u32 - 1).to_le_bytes()[..3]);
+    webp.extend_from_slice(&(10u32 - 1).to_le_bytes()[..3]);
+    let picture = |mime: &str, bytes: &[u8]| {
+        let mut request = simple("claude-opus-5-5");
+        request.messages = vec![ChatMessage::user(vec![
+            ContentPart::text("Look"),
+            ContentPart::image(ImageUrl::from_base64(mime, &encode(bytes)).unwrap()),
+        ])];
+        body(&request, &adaptive_facts(), None)["messages"][0]["content"][1].clone()
+    };
+    for (mime, bytes, size) in [
+        ("image/png", &png, "9000 x 100"),
+        ("image/jpeg", &jpeg, "8001 x 50"),
+        ("image/webp", &webp, "12000 x 10"),
+    ] {
+        let block = picture(mime, bytes);
+        assert_eq!(block["type"], json!("text"), "{mime}");
+        assert!(
+            block["text"].as_str().unwrap().contains(&format!("at {size} pixels")),
+            "{block}"
+        );
+    }
+    assert_eq!(picture("image/gif", &gif)["type"], json!("image"));
+    // More than 10 MB of base64.
+    let mut request = simple("claude-opus-5-5");
+    let big = "A".repeat(10_000_004);
+    request.messages = vec![ChatMessage::user(vec![ContentPart::image(ImageUrl {
+        url: format!("data:image/png;base64,{big}"),
+    })])];
+    let block = body(&request, &adaptive_facts(), None)["messages"][0]["content"][0].clone();
+    assert!(block["text"].as_str().unwrap().contains("10 MB"), "{}", block["type"]);
 }
 
 #[test]
@@ -341,9 +528,10 @@ fn budget_thinking_needs_its_blocks_back() {
     assert!(body.get("thinking").is_none(), "{body}");
     let mut replay = ThinkingReplay::default();
     replay.store(
-        vec!["toolu_01".into()],
+        call_key(&["toolu_01"]),
         vec![
             json!({"type": "thinking", "thinking": "", "signature": "sig"}),
+            json!({"type": "text", "text": "Let me check."}),
             json!({"type": "tool_use", "id": "toolu_01", "name": "get_weather", "input": {"city": "Atlantis"}}),
         ],
     );
@@ -673,7 +861,7 @@ fn reads_a_tool_call_in_pieces() {
         replay
             .lock()
             .unwrap()
-            .find(&["toolu_01T1x1fJ34qAmk2tNTrN7Up6".into()])
+            .find(&call_key(&["toolu_01T1x1fJ34qAmk2tNTrN7Up6"]))
             .is_none()
     );
 }
@@ -733,7 +921,7 @@ fn thinking_streams_as_reasoning_and_is_kept_with_its_signature() {
     let kept = replay
         .lock()
         .unwrap()
-        .find(&["toolu_02".into()])
+        .find(&call_key(&["toolu_02"]))
         .cloned()
         .unwrap();
     assert_eq!(
@@ -744,6 +932,41 @@ fn thinking_streams_as_reasoning_and_is_kept_with_its_signature() {
             json!({"type": "tool_use", "id": "toolu_02", "name": "get_weather", "input": {"city": "Paris"}}),
         ]
     );
+}
+
+#[test]
+fn a_finished_reply_that_thought_is_kept_under_its_text() {
+    let stream = [
+        r#"{"type":"message_start","message":{"usage":{"input_tokens":5}}}"#,
+        r#"{"type":"content_block_start","index":0,"content_block":{"type":"thinking","thinking":"","signature":""}}"#,
+        r#"{"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"Greet."}}"#,
+        r#"{"type":"content_block_delta","index":0,"delta":{"type":"signature_delta","signature":"sig-0"}}"#,
+        r#"{"type":"content_block_stop","index":0}"#,
+        r#"{"type":"content_block_start","index":1,"content_block":{"type":"text","text":""}}"#,
+        r#"{"type":"content_block_delta","index":1,"delta":{"type":"text_delta","text":"Hel"}}"#,
+        r#"{"type":"content_block_delta","index":1,"delta":{"type":"text_delta","text":"lo."}}"#,
+        r#"{"type":"content_block_stop","index":1}"#,
+        r#"{"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":9}}"#,
+        r#"{"type":"message_stop"}"#,
+    ]
+    .iter()
+    .map(|data| format!("event: x\ndata: {data}\n\n"))
+    .collect::<String>();
+    let replay = Arc::new(Mutex::new(ThinkingReplay::default()));
+    let (_, err) = decode(&stream, Some(replay.clone()));
+    assert_eq!(err, None);
+    assert_eq!(
+        replay.lock().unwrap().find(&ReplayKey::text("Hello.")).cloned(),
+        Some(vec![
+            json!({"type": "thinking", "thinking": "Greet.", "signature": "sig-0"}),
+            json!({"type": "text", "text": "Hello."}),
+        ])
+    );
+    // A reply cut by the output limit is not kept.
+    let cut = stream.replace("end_turn", "max_tokens");
+    let replay = Arc::new(Mutex::new(ThinkingReplay::default()));
+    decode(&cut, Some(replay.clone()));
+    assert!(replay.lock().unwrap().find(&ReplayKey::text("Hello.")).is_none());
 }
 
 #[test]
@@ -767,7 +990,7 @@ fn a_cut_stream_is_unfinished_and_not_kept() {
             StreamEvent::Done
         ]
     );
-    assert!(replay.lock().unwrap().find(&["toolu_02".into()]).is_none());
+    assert!(replay.lock().unwrap().find(&call_key(&["toolu_02"])).is_none());
 }
 
 #[test]
@@ -892,19 +1115,32 @@ fn a_whole_message_instead_of_a_stream() {
 #[test]
 fn the_replay_store_is_bounded_and_exact() {
     let mut replay = ThinkingReplay::default();
-    for n in 0..(super::MAX_REPLAY_ENTRIES + 5) {
-        replay.store(vec![format!("c{n}")], vec![json!({"n": n})]);
+    let last = super::MAX_REPLAY_ENTRIES + 4;
+    for n in 0..=last {
+        replay.store(call_key(&[&format!("c{n}")]), vec![json!({"n": n})]);
     }
     assert!(
-        replay.find(&["c0".into()]).is_none(),
+        replay.find(&call_key(&["c0"])).is_none(),
         "the oldest are dropped"
     );
-    assert!(replay.find(&["c68".into()]).is_some());
+    let newest = format!("c{last}");
+    let before = format!("c{}", last - 1);
+    assert!(replay.find(&call_key(&[&newest])).is_some());
     assert!(
-        replay.find(&["c68".into(), "c67".into()]).is_none(),
+        replay.find(&call_key(&[&newest, &before])).is_none(),
         "ids must match exactly"
     );
-    replay.store(Vec::new(), vec![json!({})]);
+    replay.store(ReplayKey::text("Hi"), vec![json!({"text": "Hi"})]);
+    assert!(replay.find(&ReplayKey::text("Hi")).is_some());
+    assert!(replay.find(&ReplayKey::text("Hi!")).is_none());
+    replay.store(ReplayKey::Calls(Vec::new()), vec![json!({})]);
+    assert!(replay.find(&ReplayKey::Calls(Vec::new())).is_none());
     replay.clear();
-    assert!(replay.find(&["c68".into()]).is_none());
+    assert!(replay.find(&call_key(&[&newest])).is_none());
+    // One store for each endpoint and model, shared by the requests of a run.
+    let a = super::replay_for("https://api.anthropic.com/v1", "claude-opus-5-5");
+    let b = super::replay_for("https://api.anthropic.com/v1", "claude-opus-5-5");
+    let c = super::replay_for("https://api.anthropic.com/v1", "claude-sonnet-5-5");
+    assert!(Arc::ptr_eq(&a, &b));
+    assert!(!Arc::ptr_eq(&a, &c));
 }

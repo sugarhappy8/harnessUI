@@ -744,3 +744,54 @@ async fn a_capture_is_refused_outside_the_approved_folders_and_for_blocked_addre
     assert_eq!(a.keep_asking, Some(policy::KeepAsking::Sensitive));
     server.shutdown().await;
 }
+
+/// A capture of a real public site, run only when `CAPTURE_E2E_URL` names one (it needs the
+/// internet). The copy is checked like the local one; `CAPTURE_E2E_KEEP` keeps it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_public_site_can_be_captured_when_asked() {
+    let Some(url) = std::env::var_os("CAPTURE_E2E_URL").map(|u| u.to_string_lossy().to_string())
+    else {
+        eprintln!("skipping the public-site capture: set CAPTURE_E2E_URL to run it");
+        return;
+    };
+    if !have_browser() {
+        return;
+    }
+    let work = tempfile::tempdir().unwrap();
+    let approved = work.path().join("approved");
+    std::fs::create_dir(&approved).unwrap();
+    let chat = chat(&approved);
+    let server = server(&[], work.path());
+    let request = json!({"url": url});
+    let action = describe(&server, request.clone(), &chat).await;
+    assert!(action.hard_limit.is_none(), "{:?}", action.hard_limit);
+    let started = std::time::Instant::now();
+    let out = server
+        .call(
+            "browser_capture_site",
+            &args(request),
+            &action,
+            CallContext {
+                chat: chat.clone(),
+                cancel: CancellationToken::new(),
+                progress: None,
+            },
+        )
+        .await;
+    let text = out.joined_text();
+    assert!(!out.is_error, "the capture failed: {text}");
+    eprintln!(
+        "capture of {url} took {:.1} s\n{text}",
+        started.elapsed().as_secs_f64()
+    );
+    let folder = only_dir(&dunce::canonicalize(&approved).unwrap());
+    let index = std::fs::read_to_string(folder.join("index.html")).unwrap();
+    assert!(!index.to_ascii_lowercase().contains("<script"));
+    for file in ["w1440-first-screen.png", "w390-first-screen.png"] {
+        assert!(folder.join("screenshots").join(file).is_file(), "{file}");
+    }
+    if let Some(keep) = std::env::var_os("CAPTURE_E2E_KEEP") {
+        copy_tree(&folder, &PathBuf::from(keep).join("public"));
+    }
+    server.shutdown().await;
+}

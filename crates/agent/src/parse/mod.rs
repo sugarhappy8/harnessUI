@@ -310,27 +310,80 @@ pub fn strip_tool_markup(text: &str) -> String {
     out.trim().to_owned()
 }
 
-/// Tags of tool-result blocks: the app's own (`prompt::DELIMITER_TAG`) and the one common
+/// Names of tool-result blocks: the app's own (`prompt::DELIMITER_TAG`) and the one common
 /// chat templates (Qwen, Hermes) put results in.
-const RESULT_TAGS: &[&str] = &[
-    "<tool_output",
-    "</tool_output",
-    "<tool_response",
-    "</tool_response",
-];
+const RESULT_TAGS: &[&str] = &["tool_output", "tool_response"];
 
-/// [0.0.7] Whether a reply holds a tool result the model wrote itself: the opening or closing
-/// tag of a tool-result block ([`RESULT_TAGS`], any ASCII letter case) outside code blocks
-/// and inline code. Only the app writes results; a small model that was told results arrive
-/// in such blocks sometimes writes one instead of calling the tool, and makes the result up.
-/// An example inside code (the user asked how results look) does not count.
+/// [0.0.7] Whether a reply holds a tool result the model wrote itself: a tool-result block
+/// ([`RESULT_TAGS`], any ASCII letter case) as a block, not as a word. That is a line that
+/// starts with its opening or closing tag, or an opening tag whose closing tag follows; outside
+/// code blocks, inline code and reasoning written as `<think>` text. Only the app writes
+/// results; a small model that was told results arrive in such blocks sometimes writes one
+/// instead of calling the tool, and makes the result up. A tag named in a sentence ("results
+/// arrive in <tool_output> blocks", as the system message itself says), an example in code,
+/// or reasoning about one does not count: such an answer is a real one.
 pub fn writes_tool_result(text: &str) -> bool {
-    // ASCII lower case keeps every byte offset, so the code map of the text fits it.
-    let lower = text.to_ascii_lowercase();
-    let code = CodeMap::new(text);
-    RESULT_TAGS
-        .iter()
-        .any(|tag| find_outside_code(&lower, tag, &code).next().is_some())
+    // ASCII lower case keeps every byte offset, and so does blanking the reasoning out.
+    let visible = without_think(&text.to_ascii_lowercase());
+    let code = CodeMap::new(&visible);
+    let tags_at = |tag: &str| -> Vec<usize> {
+        find_outside_code(&visible, tag, &code)
+            .filter(|at| tag_ends(&visible[at + tag.len()..]))
+            .collect()
+    };
+    RESULT_TAGS.iter().any(|name| {
+        let opening = tags_at(&format!("<{name}"));
+        let closing = tags_at(&format!("</{name}"));
+        let starts_line = |at: &usize| {
+            visible[..*at]
+                .rsplit('\n')
+                .next()
+                .is_none_or(|before| before.trim().is_empty())
+        };
+        opening.iter().chain(&closing).any(starts_line)
+            || opening
+                .iter()
+                .any(|open| closing.iter().any(|close| close > open))
+    })
+}
+
+/// Whether a tag name ends where it was found: `<tool_output>`, `<tool_output id="1">` or a
+/// tag cut off at the end of the text, not `<tool_outputs`.
+fn tag_ends(after: &str) -> bool {
+    after
+        .chars()
+        .next()
+        .is_none_or(|c| c == '>' || c == '/' || c.is_whitespace())
+}
+
+/// The text with reasoning written as `<think>` text blanked out, so offsets stay the same:
+/// from `<think>` to the end of its `</think>` (or to the end of the text), and from the
+/// start to a first `</think>` that has no `<think>` before it (the chat template opened it
+/// in the prompt).
+fn without_think(lower: &str) -> String {
+    const OPEN: &str = "<think>";
+    const CLOSE: &str = "</think>";
+    let mut spans: Vec<std::ops::Range<usize>> = Vec::new();
+    let mut from = 0;
+    if let Some(close) = lower.find(CLOSE)
+        && lower.find(OPEN).is_none_or(|open| close < open)
+    {
+        from = close + CLOSE.len();
+        spans.push(0..from);
+    }
+    while let Some(open) = lower[from..].find(OPEN).map(|at| from + at) {
+        let end = lower[open..]
+            .find(CLOSE)
+            .map_or(lower.len(), |at| open + at + CLOSE.len());
+        spans.push(open..end);
+        from = end;
+    }
+    let mut bytes = lower.as_bytes().to_vec();
+    for span in spans {
+        // Whole characters only: each span starts at `<` and ends after `>` or at the end.
+        bytes[span].fill(b' ');
+    }
+    String::from_utf8(bytes).unwrap_or_default()
 }
 
 /// A tool call written as text that the output limit cut off: an opening marker (outside

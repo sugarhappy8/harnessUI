@@ -568,6 +568,10 @@ impl Approver for AppApprover {
             _ = self.cancel.cancelled() => Approval::Cancelled,
         };
         drop(guard);
+        // [0.0.7] Computer input the user just allowed on its card may step aside at once.
+        if matches!(answer, Approval::AllowOnce | Approval::AllowForChat) {
+            crate::computer_cmd::card_approved(self.chat_id, &req.action);
+        }
         if answer == Approval::AllowForChat && req.card == policy::CardKind::Grantable {
             let scopes = match &req.action.scope {
                 policy::Scope::Commands { parts } => parts.clone(),
@@ -1861,6 +1865,8 @@ pub async fn run(
 ) -> AppResult<()> {
     let state = app.state::<AppState>();
     let chat_id = req.chat.id;
+    // [0.0.7] Which turn a main window that steps aside for computer use was minimised for.
+    let aside_turn = crate::computer_cmd::turn_started(chat_id.0);
     let local_endpoint = req.caps.local;
     // Everything the turn sends, built where the Context tab builds it.
     let Assembled {
@@ -2057,8 +2063,8 @@ pub async fn run(
     }
     sink.flush_deltas();
     crate::computer_cmd::end_turn(app);
-    // [0.0.7] A main window that stepped aside for this chat's computer use comes back.
-    crate::computer_cmd::turn_ended(app, chat_id.0);
+    // [0.0.7] A main window that stepped aside for this turn's computer use comes back.
+    crate::computer_cmd::turn_ended(app, chat_id.0, aside_turn);
     // The persister ends when every sender is gone: the sink's and the one kept for helpers.
     drop(tools);
     drop(sink);

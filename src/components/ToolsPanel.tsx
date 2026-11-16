@@ -253,7 +253,8 @@ export function ToolsPanel(props: {
       toggle(codingNames, false);
       return;
     }
-    if (!ownList) return;
+    // Usable before the chat's list is shown: it reads that chat's own list below and saves
+    // only that, never what the panel holds.
     const chatId = props.chatId;
     setFinding(true);
     try {
@@ -520,7 +521,7 @@ export function ToolsPanel(props: {
                   type="checkbox"
                   role="switch"
                   checked={codingOn}
-                  disabled={finding || !ownList}
+                  disabled={finding}
                   onChange={(e) => void switchCodingApps(e.target.checked)}
                 />
                 Coding apps (experimental)

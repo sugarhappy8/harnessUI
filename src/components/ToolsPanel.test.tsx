@@ -1030,21 +1030,47 @@ describe("ToolsPanel: after a chat switch (0.0.7 P6a review)", () => {
     expect(screen.getByTitle("Tools for this chat").textContent).toBe(" Tools (0)");
     expect(screen.queryByText("Subagents")).toBeNull();
     expect(screen.queryByText("run_command")).toBeNull();
-    expect(codingSwitch().disabled).toBe(true);
-    await act(async () => {
-      fireEvent.click(codingSwitch());
-    });
-    expect(ipcMock.findCodingApps).not.toHaveBeenCalled();
     expect(ipcMock.setChatTools).not.toHaveBeenCalled();
     // Its own list comes: its tools are shown, and a switch saves them.
     await act(async () => answerTwo(chatTwo));
     expect(screen.getByTitle("Tools for this chat").textContent).toBe(" Tools (1)");
-    expect(codingSwitch().disabled).toBe(false);
     await act(async () => {
       fireEvent.click(subagents());
     });
     expect(ipcMock.setChatTools).toHaveBeenCalledTimes(1);
     expect(ipcMock.setChatTools).toHaveBeenCalledWith(CHAT + 1, ["read_file", "run_subagent"]);
+  });
+
+  it("switches Coding apps on before the chat's list is shown with that chat's own list only", async () => {
+    // The chat's own reads never come, except the one Coding apps makes after looking.
+    let looked = false;
+    ipcMock.findCodingApps.mockImplementation(async () => {
+      looked = true;
+      return FOUND;
+    });
+    ipcMock.listChatTools.mockImplementation((chatId) =>
+      chatId === CHAT
+        ? Promise.resolve(chatOne)
+        : looked
+          ? Promise.resolve([...chatTwo, tool("coding_apps", "ask_claude_code")])
+          : new Promise(() => undefined),
+    );
+    let view!: ReturnType<typeof render>;
+    await act(async () => {
+      view = render(<ToolsPanel chatId={CHAT} nCtx={8192} />);
+    });
+    await act(async () => {
+      view.rerender(<ToolsPanel chatId={CHAT + 1} nCtx={8192} />);
+    });
+    await act(async () => {
+      fireEvent.click(screen.getByTitle("Tools for this chat"));
+    });
+    expect(screen.getByTitle("Tools for this chat").textContent).toBe(" Tools (0)");
+    await act(async () => {
+      fireEvent.click(codingSwitch());
+    });
+    expect(ipcMock.setChatTools).toHaveBeenCalledTimes(1);
+    expect(ipcMock.setChatTools).toHaveBeenCalledWith(CHAT + 1, ["read_file", "ask_claude_code"]);
   });
 
   it("keeps the list read when Coding apps is switched on in the chat it was switched on in", async () => {

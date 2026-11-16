@@ -554,7 +554,8 @@ async function (opts) {
     const SKIP = new Set(['script', 'style', 'link', 'meta', 'head', 'title', 'noscript', 'template', 'br']);
     let counted = 0;
     const all = document.body ? document.body.getElementsByTagName('*') : [];
-    for (let i = 0; i < all.length && counted < MAX_STAT; i++) {
+    // Hidden elements are skipped without counting, so the walk itself is bounded too.
+    for (let i = 0; i < all.length && i < MAX_STAT * 10 && counted < MAX_STAT; i++) {
       const el = all[i];
       if (SKIP.has(el.localName)) continue;
       const r = el.getBoundingClientRect();
@@ -629,7 +630,7 @@ async function (opts) {
         password: !!el.querySelector('input[type="password"]'),
       };
     };
-    for (const el of all) {
+    for (const el of all.slice(0, 2000)) {
       let d = 0;
       for (let p = el.parentElement; p; p = p.parentElement) {
         try {
