@@ -8,7 +8,9 @@
 //! ([`policy::Scope::SiteCapture`]).
 
 use mcp_host::ChatContext;
-use policy::path::{CaseRule, Flavor, LexicalPath, PathSandbox, RealFs, is_within, lexical, volume_case};
+use policy::path::{
+    CaseRule, Flavor, LexicalPath, PathSandbox, RealFs, is_within, lexical, volume_case,
+};
 use serde_json::{Map, Value};
 
 use crate::capture::assets::{Caps, MAX_FILE_BYTES, megabytes, thousands};
@@ -44,7 +46,9 @@ pub fn parse_args(args: &Map<String, Value>) -> Result<Args, String> {
     if let Some(list) = args.get("widths").and_then(Value::as_array) {
         for w in list {
             let Some(n) = w.as_u64() else {
-                return Err("widths must be whole numbers of pixels, for example [1440, 390]".into());
+                return Err(
+                    "widths must be whole numbers of pixels, for example [1440, 390]".into(),
+                );
             };
             let n = u32::try_from(n).unwrap_or(u32::MAX);
             if !(MIN_WIDTH..=MAX_WIDTH).contains(&n) {
@@ -108,7 +112,11 @@ fn sandbox(chat: &ChatContext, flavor: Flavor) -> PathSandbox {
 /// Full access the whole computer, as the chat context already says), never in the app's
 /// own folders or a skill folder, and a real folder when it exists. `Err` is a hard limit,
 /// in words for the model.
-pub fn check_folder(chat: &ChatContext, folder: Option<&str>, flavor: Flavor) -> Result<Folder, String> {
+pub fn check_folder(
+    chat: &ChatContext,
+    folder: Option<&str>,
+    flavor: Flavor,
+) -> Result<Folder, String> {
     let sb = sandbox(chat, flavor);
     let base = chat
         .working_folder
@@ -145,7 +153,10 @@ pub fn check_folder(chat: &ChatContext, folder: Option<&str>, flavor: Flavor) ->
         ));
     }
     let sep = if flavor == Flavor::Windows { '\\' } else { '/' };
-    let sample = format!("{}{sep}capture{sep}index.html", checked.canonical.trim_end_matches(['/', '\\']));
+    let sample = format!(
+        "{}{sep}capture{sep}index.html",
+        checked.canonical.trim_end_matches(['/', '\\'])
+    );
     let always_asks = policy::files::always_ask_reason(&sample, policy::WriteKind::Create, flavor);
     Ok(Folder {
         approved: sb
@@ -310,7 +321,11 @@ mod tests {
         assert!(!b.scroll);
         assert_eq!(b.caps.total, 20 * 1024 * 1024);
         assert_eq!(b.caps.files, 10);
-        for bad in [json!({"widths": [100]}), json!({"widths": [99999]}), json!({"widths": [400, 500, 600, 700, 800]})] {
+        for bad in [
+            json!({"widths": [100]}),
+            json!({"widths": [99999]}),
+            json!({"widths": [400, 500, 600, 700, 800]}),
+        ] {
             assert!(parse_args(bad.as_object().unwrap()).is_err(), "{bad}");
         }
     }
@@ -320,7 +335,12 @@ mod tests {
         let approved = tempfile::tempdir().unwrap();
         let outside = tempfile::tempdir().unwrap();
         let chat = chat_with(&[approved.path()]);
-        let ok = check_folder(&chat, Some(&approved.path().join("designs").display().to_string()), Flavor::native()).unwrap();
+        let ok = check_folder(
+            &chat,
+            Some(&approved.path().join("designs").display().to_string()),
+            Flavor::native(),
+        )
+        .unwrap();
         assert!(!ok.exists, "a folder that does not exist yet is fine");
         assert!(ok.always_asks.is_none());
         let def = check_folder(&chat, None, Flavor::native()).unwrap();
@@ -329,7 +349,12 @@ mod tests {
             dunce::canonicalize(approved.path()).unwrap(),
             "without a folder the copy goes into the working folder"
         );
-        let err = check_folder(&chat, Some(&outside.path().display().to_string()), Flavor::native()).unwrap_err();
+        let err = check_folder(
+            &chat,
+            Some(&outside.path().display().to_string()),
+            Flavor::native(),
+        )
+        .unwrap_err();
         assert!(err.contains("Approved folders:"), "{err}");
         let err = check_folder(&chat, Some("../../etc"), Flavor::native()).unwrap_err();
         assert!(err.contains("Approved folders:"), "{err}");
@@ -338,18 +363,47 @@ mod tests {
         // The app's own folders are never reachable.
         let mut forbidden = chat_with(&[approved.path()]);
         forbidden.forbidden_folders = vec![approved.path().join("app-data").display().to_string()];
-        assert!(check_folder(&forbidden, Some(&approved.path().join("app-data").display().to_string()), Flavor::native()).is_err());
+        assert!(
+            check_folder(
+                &forbidden,
+                Some(&approved.path().join("app-data").display().to_string()),
+                Flavor::native()
+            )
+            .is_err()
+        );
         // Skill folders are written only by the skills UI.
         let mut skills = chat_with(&[approved.path()]);
         skills.skill_roots = vec![approved.path().join("skills").display().to_string()];
-        let err = check_folder(&skills, Some(&approved.path().join("skills").join("x").display().to_string()), Flavor::native()).unwrap_err();
+        let err = check_folder(
+            &skills,
+            Some(
+                &approved
+                    .path()
+                    .join("skills")
+                    .join("x")
+                    .display()
+                    .to_string(),
+            ),
+            Flavor::native(),
+        )
+        .unwrap_err();
         assert!(err.contains("skills folder"), "{err}");
         // A file is not a folder.
         std::fs::write(approved.path().join("notes.txt"), "x").unwrap();
-        let err = check_folder(&chat, Some(&approved.path().join("notes.txt").display().to_string()), Flavor::native()).unwrap_err();
+        let err = check_folder(
+            &chat,
+            Some(&approved.path().join("notes.txt").display().to_string()),
+            Flavor::native(),
+        )
+        .unwrap_err();
         assert!(err.contains("is a file"), "{err}");
         // A .git folder always asks.
-        let git = check_folder(&chat, Some(&approved.path().join(".git").display().to_string()), Flavor::native()).unwrap();
+        let git = check_folder(
+            &chat,
+            Some(&approved.path().join(".git").display().to_string()),
+            Flavor::native(),
+        )
+        .unwrap();
         assert!(git.always_asks.is_some());
     }
 
@@ -361,7 +415,8 @@ mod tests {
         let chat = chat_with(&[approved.path()]);
         let target = approved.path().join("site");
         std::fs::create_dir(&target).unwrap();
-        let folder = check_folder(&chat, Some(&target.display().to_string()), Flavor::native()).unwrap();
+        let folder =
+            check_folder(&chat, Some(&target.display().to_string()), Flavor::native()).unwrap();
         assert!(recheck_folder(&chat, &folder, Flavor::native()).is_ok());
         std::fs::remove_dir(&target).unwrap();
         std::os::unix::fs::symlink(outside.path(), &target).unwrap();
@@ -378,8 +433,19 @@ mod tests {
             always_asks: None,
         };
         let args = parse_args(json!({}).as_object().unwrap()).unwrap();
-        let (summary, preview) = card("example.com", "https://example.com/", "https://example.com", "93.184.215.14", &folder, &args, false);
-        assert_eq!(summary, "Save a copy of how example.com looks into /home/u/site");
+        let (summary, preview) = card(
+            "example.com",
+            "https://example.com/",
+            "https://example.com",
+            "93.184.215.14",
+            &folder,
+            &args,
+            false,
+        );
+        assert_eq!(
+            summary,
+            "Save a copy of how example.com looks into /home/u/site"
+        );
         for part in [
             "Open https://example.com/ in the agent's browser, scroll through it",
             "/home/u/site",
@@ -399,7 +465,15 @@ mod tests {
             always_asks: Some("writing inside a .git folder always asks"),
             ..folder
         };
-        let (_, preview) = card("example.com", "https://example.com/", "https://example.com", "", &git, &args, true);
+        let (_, preview) = card(
+            "example.com",
+            "https://example.com/",
+            "https://example.com",
+            "",
+            &git,
+            &args,
+            true,
+        );
         assert!(preview.starts_with("Writing inside a .git folder always asks.\n\nLoad the page open in the agent's browser again"), "{preview}");
     }
 }

@@ -2,19 +2,23 @@
 //! key may be sent to it, the request rules of OpenAI-compatible cloud servers, and what the
 //! app learns about an endpoint's models while it runs.
 //!
-//! - **Where a server is** ([`endpoint_place`]) comes from its address only: this computer,
-//!   the local network (private and link-local addresses, `.local`-style names, one-word
-//!   host names), or the internet. The chat header marks chats that go to the internet.
+//! - **Where a server is** ([`endpoint_place`]) comes from the address the client really
+//!   uses ([`endpoint_url`], the same parse as the client's): `localhost` and loopback
+//!   addresses are this computer; private, link-local, shared and unique-local IP addresses
+//!   are the local network; every other address, any other host name included, is the
+//!   internet, since a name leads wherever the name server says at the time of the request.
+//!   The chat header marks chats that go to the internet.
 //! - **A key never travels in clear text over the internet** ([`check_key_transport`]): an
-//!   endpoint on the internet with a key must use `https://`.
+//!   endpoint on the internet with a key must use `https://`, and an address that cannot be
+//!   read gets no key.
 //! - **Requests a server accepts** ([`shape_chat_body`]): llama-server's own fields are never
 //!   sent to another server; OpenAI and abliteration.ai get only fields of the OpenAI API
 //!   (both reject unknown ones), OpenAI gets `max_completion_tokens` instead of the
 //!   deprecated `max_tokens` and no sampling values on its reasoning models.
 //! - **What a server refused once is not sent again** ([`fixes_for_error`]): an HTTP 400 or
 //!   422 that names an unsupported or unknown parameter, or an output limit that is too
-//!   large, is retried once without it (or within the limit), and the fix is kept for that
-//!   endpoint and model until the app quits.
+//!   large, is retried without it (or within the limit), and once the retried request is
+//!   accepted the fix is kept for that endpoint and model until the app quits.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::net::{Ipv4Addr, Ipv6Addr};
@@ -32,39 +36,62 @@ use crate::error::ProviderError;
 pub enum EndpointPlace {
     /// This computer: `localhost`, 127.0.0.0/8, `::1`.
     ThisComputer,
-    /// The local network: private, shared (100.64.0.0/10) and link-local addresses, IPv6
-    /// unique-local addresses, names ending in `.local`, `.lan`, `.home.arpa`, `.internal`
-    /// or `.localdomain`, and one-word host names.
+    /// The local network: private (10/8, 172.16/12, 192.168/16), shared (100.64.0.0/10) and
+    /// link-local IP addresses, and IPv6 unique-local and link-local addresses.
     LocalNetwork,
-    /// Anywhere else. What is sent there leaves this computer and the local network.
+    /// Anywhere else, every host name but `localhost` included. What is sent there leaves
+    /// this computer and the local network, or may.
     Internet,
 }
 
-/// Names that only resolve inside a local network.
-const LOCAL_SUFFIXES: &[&str] = &[".local", ".lan", ".home.arpa", ".internal", ".localdomain"];
-
 /// The error when a key would be sent over plain `http://` to the internet.
-pub const KEY_OVER_HTTP: &str = "An API key is sent to a server on the internet only over \
-     https://, so that no one on the way can read it. Change the address to start with \
-     https://.";
+pub const KEY_OVER_HTTP: &str = "An API key is sent over plain http:// only to this computer \
+     or to a local network address such as 192.168.1.20, so that no one on the way can read \
+     it. Change the address to start with https://, or use the server's local IP address.";
 
-fn parse(raw: &str) -> Option<Url> {
+/// The error when a key would be sent to an address that cannot be read.
+pub const UNREADABLE_ADDRESS: &str = "The address could not be read, so the API key is not \
+     sent. Write it in full, for example https://api.example.com/v1.";
+
+/// The URL the client sends requests to for the address `raw` (the parse
+/// [`crate::OpenAiClient`] uses, so the key check, the "Cloud" mark and the requests agree):
+/// an `http://` or `https://` URL as the URL standard reads it (`http:/host` and
+/// `http:host` are `http://host`), or a bare `host:port` taken as `http://`.
+///
+/// # Errors
+/// What is wrong with the address, for an empty one, one with another scheme, or one
+/// without a host.
+pub(crate) fn endpoint_url(raw: &str) -> Result<Url, String> {
     let trimmed = raw.trim();
-    let url = if trimmed.contains("://") {
-        Url::parse(trimmed).ok()?
-    } else {
-        Url::parse(&format!("http://{trimmed}")).ok()?
+    if trimmed.is_empty() {
+        return Err("the base URL is empty".to_owned());
+    }
+    let url = match Url::parse(trimmed) {
+        Ok(url) if url.scheme() == "http" || url.scheme() == "https" => url,
+        Ok(_) | Err(_) if !trimmed.contains("://") => Url::parse(&format!("http://{trimmed}"))
+            .map_err(|err| format!("'{trimmed}' is not a valid URL ({err})"))?,
+        Ok(url) => {
+            return Err(format!(
+                "the base URL must start with http:// or https://, not {}://",
+                url.scheme()
+            ));
+        }
+        Err(err) => return Err(format!("'{trimmed}' is not a valid URL ({err})")),
     };
-    url.host()?;
-    Some(url)
+    if url.host().is_none() {
+        return Err(format!("'{trimmed}' has no host"));
+    }
+    Ok(url)
 }
 
 /// Where the server at `base_url` is. An address that cannot be read counts as the internet,
 /// so it is never treated as safer than it is.
 pub fn endpoint_place(base_url: &str) -> EndpointPlace {
-    let Some(url) = parse(base_url) else {
-        return EndpointPlace::Internet;
-    };
+    endpoint_url(base_url).map_or(EndpointPlace::Internet, |url| url_place(&url))
+}
+
+/// Where the server of a URL the client uses is ([`endpoint_place`]).
+pub(crate) fn url_place(url: &Url) -> EndpointPlace {
     match url.host() {
         Some(url::Host::Domain(domain)) => domain_place(domain),
         Some(url::Host::Ipv4(ip)) => ipv4_place(ip),
@@ -73,12 +100,13 @@ pub fn endpoint_place(base_url: &str) -> EndpointPlace {
     }
 }
 
+/// Only `localhost` is known without asking a name server (the hosts file answers it). Any
+/// other name, `.local`, `.lan` and one-word names included, can lead to the internet: a
+/// search domain, a misconfigured or hostile name server, or DNS rebinding decide.
 fn domain_place(domain: &str) -> EndpointPlace {
     let domain = domain.trim_end_matches('.').to_ascii_lowercase();
-    if domain == "localhost" || domain.ends_with(".localhost") {
+    if domain == "localhost" {
         EndpointPlace::ThisComputer
-    } else if !domain.contains('.') || LOCAL_SUFFIXES.iter().any(|s| domain.ends_with(s)) {
-        EndpointPlace::LocalNetwork
     } else {
         EndpointPlace::Internet
     }
@@ -109,40 +137,58 @@ fn ipv6_place(ip: Ipv6Addr) -> EndpointPlace {
     }
 }
 
-/// The host of `base_url` as the user wrote it (`api.anthropic.com`), for "Messages … go to
-/// <host>".
+/// The host the client sends `base_url`'s requests to (`api.anthropic.com`), for "Messages …
+/// go to <host>"; `None` for an address that cannot be read.
 pub fn endpoint_host(base_url: &str) -> Option<String> {
-    parse(base_url).and_then(|url| url.host_str().map(str::to_owned))
+    endpoint_url(base_url)
+        .ok()
+        .and_then(|url| url.host_str().map(str::to_owned))
 }
 
-/// Whether an API key may be sent to `base_url`: not over plain `http://` to the internet.
-/// This computer and the local network are allowed over `http://` (Ollama, LM Studio or a
-/// vLLM on a home server rarely have https), and so is every `https://` address.
+/// Whether an API key may be sent to `base_url`: never over plain `http://` to the
+/// internet, and never to an address that cannot be read. `http://` to this computer or a
+/// local network IP address is allowed (Ollama, LM Studio or a vLLM on a home server rarely
+/// have https), and so is every `https://` address.
 ///
 /// # Errors
-/// [`KEY_OVER_HTTP`] for an `http://` address on the internet.
+/// [`KEY_OVER_HTTP`] for an `http://` address on the internet, [`UNREADABLE_ADDRESS`] for
+/// one that cannot be read.
 pub fn check_key_transport(base_url: &str) -> Result<(), String> {
-    match parse(base_url) {
-        Some(url)
-            if url.scheme() == "http" && endpoint_place(base_url) == EndpointPlace::Internet =>
-        {
-            Err(KEY_OVER_HTTP.to_owned())
-        }
-        _ => Ok(()),
+    let url = endpoint_url(base_url).map_err(|_| UNREADABLE_ADDRESS.to_owned())?;
+    if url.scheme() == "http" && url_place(&url) == EndpointPlace::Internet {
+        Err(KEY_OVER_HTTP.to_owned())
+    } else {
+        Ok(())
     }
 }
 
-/// The context size the app plans with for a model of a cloud company when its server does
-/// not say (ARCHITECTURE.md 8.4): Claude models have at least 200,000 tokens (the current
-/// ones 1,000,000, which Anthropic's model list reports); OpenAI's chat models at least
-/// 128,000 (OpenAI's model list reports none); OpenRouter and abliteration.ai report each
-/// model's size, so their default is only for a model listed without one. `None` for
-/// servers that are not a cloud company's: the user's setting applies.
-pub fn default_context(kind: ProviderKind) -> Option<u32> {
+/// The scheme, host and port the client sends `base_url`'s requests to, as text
+/// (`https://api.anthropic.com:443`): a key saved for one origin is never sent to another
+/// one. `None` for an address that cannot be read.
+pub fn endpoint_origin(base_url: &str) -> Option<String> {
+    let url = endpoint_url(base_url).ok()?;
+    Some(format!(
+        "{}://{}:{}",
+        url.scheme(),
+        url.host_str()?.to_ascii_lowercase(),
+        url.port_or_known_default()?
+    ))
+}
+
+/// The context size the app plans with for a model of a cloud company: the most it sends in
+/// one request on "Automatic", and the size when the server does not say (ARCHITECTURE.md
+/// 8.4). Claude 200,000 tokens, though the current models take 1,000,000: a long chat sends
+/// up to this much with every message, so more is the user's choice in Settings → Endpoints;
+/// Claude Haiku 5.5 100,000, above which Anthropic charges five times as much per token.
+/// OpenAI's chat models 128,000 (OpenAI's model list reports none). OpenRouter 128,000 and
+/// abliteration.ai 32,768: both report each model's size, and the smaller of that and this
+/// is used. `None` for servers that are not a cloud company's: what they report, else the
+/// user's setting.
+pub fn default_context(kind: ProviderKind, model: &str) -> Option<u32> {
     match kind {
-        ProviderKind::Anthropic => Some(200_000),
-        ProviderKind::OpenAi => Some(128_000),
-        ProviderKind::OpenRouter | ProviderKind::Abliteration => Some(32_768),
+        ProviderKind::Anthropic => Some(crate::anthropic::default_context(model)),
+        ProviderKind::OpenAi | ProviderKind::OpenRouter => Some(128_000),
+        ProviderKind::Abliteration => Some(32_768),
         ProviderKind::LlamaServer
         | ProviderKind::Ollama
         | ProviderKind::LmStudio
@@ -466,7 +512,7 @@ impl ParamFixes {
     }
 
     /// Adds a fix; false when it changes nothing (the server refused the same thing again).
-    fn add(&mut self, fix: &Fix) -> bool {
+    pub(crate) fn add(&mut self, fix: &Fix) -> bool {
         match fix {
             Fix::Drop(key) => self.dropped.insert(key.clone()),
             Fix::Rename { from, to } => {
@@ -507,8 +553,8 @@ pub(crate) fn remembered_fixes(endpoint: &str, model: &str) -> ParamFixes {
         .unwrap_or_default()
 }
 
-/// Keeps a fix for `endpoint` and `model` until the app quits. False when it was already
-/// kept, so a server that refuses the fixed request again is not asked a third time.
+/// Keeps a fix for `endpoint` and `model` until the app quits (once a request with it was
+/// accepted). False when it was already kept.
 pub(crate) fn remember_fix(endpoint: &str, model: &str, fix: &Fix) -> bool {
     let Ok(mut map) = FIXES.lock() else {
         return false;
@@ -776,12 +822,36 @@ pub(crate) fn parse_retry_after(value: &str) -> Option<Duration> {
         .map(Duration::from_secs_f64)
 }
 
+/// The shortest piece of a key that counts as part of it at the end of a cut text.
+const KEY_PIECE: usize = 4;
+
+/// `text` without `key`: every whole copy, and a piece of its beginning left where the text
+/// was cut short (before an ellipsis, or at the end of the text).
+fn without_key(text: &str, key: &str) -> String {
+    let mut text = text.replace(key, "[API key]");
+    // Where a cut can be: before each ellipsis, and the end. Last first, so earlier
+    // positions stay valid while pieces are replaced.
+    let mut cuts: Vec<usize> = text.match_indices('…').map(|(at, _)| at).collect();
+    cuts.push(text.len());
+    for end in cuts.into_iter().rev() {
+        let body = &text[..end];
+        let piece = (KEY_PIECE..key.len())
+            .rev()
+            .filter(|n| key.is_char_boundary(*n))
+            .find(|n| body.ends_with(&key[..*n]));
+        if let Some(n) = piece {
+            text.replace_range(end - n..end, "[API key]");
+        }
+    }
+    text
+}
+
 /// Removes the API key from an error's text, in case a server or a proxy echoed it.
 pub(crate) fn scrub_key(err: ProviderError, key: Option<&str>) -> ProviderError {
     let Some(key) = key.map(str::trim).filter(|key| key.len() >= 8) else {
         return err;
     };
-    let clean = |text: String| text.replace(key, "[API key]");
+    let clean = |text: String| without_key(&text, key);
     match err {
         ProviderError::Http { status, message } => ProviderError::Http {
             status,
@@ -865,9 +935,14 @@ pub(crate) fn openai_can_chat(id: &str) -> bool {
         "realtime",
         "sora",
         "computer-use",
+        // Models served by the Responses API only (OpenAI's model pages): Codex and deep
+        // research models, and the `-pro` models.
+        "codex",
+        "deep-research",
     ];
     let id = id.to_ascii_lowercase();
-    !NOT_CHAT.iter().any(|word| id.contains(word))
+    let pro = id.ends_with("-pro") || id.contains("-pro-");
+    !pro && !NOT_CHAT.iter().any(|word| id.contains(word))
 }
 
 #[cfg(test)]
@@ -1435,8 +1510,19 @@ mod tests {
             "gpt-realtime",
             "sora-2",
             "computer-use-preview",
+            // Responses API only.
+            "o1-pro",
+            "o3-pro",
+            "o3-pro-2025-06-10",
+            "gpt-5-pro",
+            "codex-mini-latest",
+            "gpt-5-codex",
+            "o3-deep-research",
+            "o4-mini-deep-research",
         ] {
             assert!(!openai_can_chat(id), "{id}");
         }
+        // "pro" inside a word is not the `-pro` suffix.
+        assert!(openai_can_chat("gpt-5-proto"));
     }
 }

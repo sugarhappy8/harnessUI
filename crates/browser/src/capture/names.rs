@@ -19,8 +19,8 @@ const MAX_STEM: usize = 56;
 /// Names Windows keeps for devices, whatever the extension (`con.png` opens the console).
 const WINDOWS_DEVICES: &[&str] = &[
     "con", "prn", "aux", "nul", "conin$", "conout$", "clock$", "com0", "com1", "com2", "com3",
-    "com4", "com5", "com6", "com7", "com8", "com9", "lpt0", "lpt1", "lpt2", "lpt3", "lpt4",
-    "lpt5", "lpt6", "lpt7", "lpt8", "lpt9",
+    "com4", "com5", "com6", "com7", "com8", "com9", "lpt0", "lpt1", "lpt2", "lpt3", "lpt4", "lpt5",
+    "lpt6", "lpt7", "lpt8", "lpt9",
 ];
 
 /// A stem made safe: lower-case ASCII letters, digits, `-` and `_`; runs of anything else
@@ -300,11 +300,23 @@ mod tests {
         assert_eq!(safe_extension("../exe"), "exe");
         assert_eq!(safe_extension(""), "bin");
         assert_eq!(safe_extension("png%00.exe"), "png00.exe");
-        assert_eq!(extension_of_url("https://a.example/x/Logo.SVG?v=2"), Some("svg".into()));
+        assert_eq!(
+            extension_of_url("https://a.example/x/Logo.SVG?v=2"),
+            Some("svg".into())
+        );
         assert_eq!(extension_of_url("https://a.example/x/"), None);
-        assert_eq!(extension_of_url("https://a.example/x.toolongextension"), None);
-        assert_eq!(stem_of_url("https://a.example/img/Hero%20Shot.webp", "p"), "hero-shot");
-        assert_eq!(stem_of_url("https://cdn.example.com/", "p"), "cdn-example-com");
+        assert_eq!(
+            extension_of_url("https://a.example/x.toolongextension"),
+            None
+        );
+        assert_eq!(
+            stem_of_url("https://a.example/img/Hero%20Shot.webp", "p"),
+            "hero-shot"
+        );
+        assert_eq!(
+            stem_of_url("https://cdn.example.com/", "p"),
+            "cdn-example-com"
+        );
     }
 
     #[test]
@@ -315,13 +327,22 @@ mod tests {
             .single()
             .unwrap();
         let name = |u: &str| capture_folder_name(&Url::parse(u).unwrap(), now);
-        assert_eq!(name("https://www.example.com/a/b"), "www.example.com-2026-11-16-153012");
-        assert_eq!(name("http://127.0.0.1:8080/"), "127.0.0.1-8080-2026-11-16-153012");
+        assert_eq!(
+            name("https://www.example.com/a/b"),
+            "www.example.com-2026-11-16-153012"
+        );
+        assert_eq!(
+            name("http://127.0.0.1:8080/"),
+            "127.0.0.1-8080-2026-11-16-153012"
+        );
         assert_eq!(name("https://[::1]:9/"), "1-9-2026-11-16-153012");
         assert_eq!(
             name("https://xn--bcher-kva.example/"),
             "xn--bcher-kva.example-2026-11-16-153012"
         );
-        assert_eq!(name("https://con.example/"), "site-con.example-2026-11-16-153012");
+        assert_eq!(
+            name("https://con.example/"),
+            "site-con.example-2026-11-16-153012"
+        );
     }
 }

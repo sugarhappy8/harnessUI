@@ -196,21 +196,42 @@ mod tests {
         log.on_event("Network.requestWillBeSent", &json!({"requestId": "1", "type": "Image", "frameId": "F", "request": {"url": "https://a.example/logo"}}));
         log.on_event("Network.requestWillBeSent", &json!({"requestId": "1", "request": {"url": "https://cdn.example/logo.png"}, "redirectResponse": {}}));
         log.on_event("Network.responseReceived", &json!({"requestId": "1", "type": "Image", "response": {"url": "https://cdn.example/logo.png", "status": 200, "mimeType": "image/png", "remoteIPAddress": "93.184.215.14", "remotePort": 443}}));
-        log.on_event("Network.dataReceived", &json!({"requestId": "1", "dataLength": 100}));
-        log.on_event("Network.dataReceived", &json!({"requestId": "1", "dataLength": 50}));
+        log.on_event(
+            "Network.dataReceived",
+            &json!({"requestId": "1", "dataLength": 100}),
+        );
+        log.on_event(
+            "Network.dataReceived",
+            &json!({"requestId": "1", "dataLength": 50}),
+        );
         assert_eq!(log.pending(), 1);
-        log.on_event("Network.loadingFinished", &json!({"requestId": "1", "encodedDataLength": 120.0}));
+        log.on_event(
+            "Network.loadingFinished",
+            &json!({"requestId": "1", "encodedDataLength": 120.0}),
+        );
         let e = &log.entries["1"];
-        assert_eq!(e.urls, ["https://a.example/logo", "https://cdn.example/logo.png"]);
+        assert_eq!(
+            e.urls,
+            ["https://a.example/logo", "https://cdn.example/logo.png"]
+        );
         assert_eq!(e.final_url(), "https://cdn.example/logo.png");
-        assert_eq!((e.status, e.decoded_len, e.encoded_len, e.finished), (200, 150, 120, true));
+        assert_eq!(
+            (e.status, e.decoded_len, e.encoded_len, e.finished),
+            (200, 150, 120, true)
+        );
         assert_eq!(e.remote_ip.as_deref(), Some("93.184.215.14"));
         assert_eq!(e.remote_port, Some(443));
         assert_eq!(log.pending(), 0);
         log.on_event("Network.requestWillBeSent", &json!({"requestId": "2", "type": "Font", "request": {"url": "https://a.example/f.woff2"}}));
         log.on_event("Network.loadingFailed", &json!({"requestId": "2", "errorText": "net::ERR_FAILED", "blockedReason": "inspector"}));
         assert_eq!(log.entries["2"].failed.as_deref(), Some("inspector"));
-        assert_eq!(log.ordered().iter().map(|e| e.request_id.as_str()).collect::<Vec<_>>(), ["1", "2"]);
+        assert_eq!(
+            log.ordered()
+                .iter()
+                .map(|e| e.request_id.as_str())
+                .collect::<Vec<_>>(),
+            ["1", "2"]
+        );
         log.note_blocked("http://10.0.0.1/x.png", "private");
         log.note_blocked("http://10.0.0.1/x.png", "private");
         assert_eq!(log.blocked.len(), 1);

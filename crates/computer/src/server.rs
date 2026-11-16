@@ -18,16 +18,18 @@
 //! - Stepping aside ([`StepAside`], 0.0.7): screenshots leave this app's windows out, so the
 //!   model aims at what is behind them. With the app's hook, `describe` plans for the window
 //!   behind this app's own window (under the point, or in front once this app's window is
-//!   gone), and `call` has the app minimise its main window first, handing the keyboard back
-//!   to the window the input was planned for when this app has it. The guard's checks are
-//!   unchanged: input that would still reach this app is refused.
+//!   gone), and `call` has the app minimise its main window first when it is in the way,
+//!   handing the keyboard back to the window the input was planned for when this app has
+//!   it. Without a card answered just now (a grant, Allow all), only once the user has left
+//!   the keyboard and mouse alone for a moment. The guard's checks are unchanged: input
+//!   that would still reach this app is refused.
 //!
 //! Screenshots are returned as plain tool output; what they show is untrusted data and
 //! the agent loop treats it as such.
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, MutexGuard};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
 use base64::Engine;
@@ -40,11 +42,13 @@ use crate::apps::{Target, target_always_ask_reason};
 use crate::geometry::{
     GlobalPoint, MonitorInfo, ScreenshotGeometry, monitor_for_window, order_monitors,
 };
-use crate::guard::{Expect, Held, InputGuard, OpError, StopHandle, refuse_point, refuse_target};
+use crate::guard::{
+    Expect, Held, InputGuard, OpError, Refusal, StopHandle, refuse_point, refuse_target,
+};
 use crate::image_ops;
 use crate::keys::{Key, KeyCombo, TextPart, parse_combo, system_shortcut, text_events};
 use crate::platform::{
-    Capture, CaptureError, Injector, InputError, MouseButton, SelfProcess, WindowRef,
+    Capture, CaptureError, Gate, Injector, InputError, MouseButton, SelfProcess, WindowRef,
 };
 use crate::profile::ModelProfile;
 
@@ -69,6 +73,10 @@ const SETTLE: Duration = Duration::from_millis(150);
 /// the input (a hit test can lag behind the minimise while the system animates it).
 const ASIDE_WAIT: Duration = Duration::from_secs(1);
 const ASIDE_POLL: Duration = Duration::from_millis(25);
+/// Without a card answered just now (a grant, Allow all), this app steps aside only once
+/// the user has left the keyboard and mouse alone this long: its window must not vanish,
+/// nor the keyboard move, under someone working in it.
+pub const IDLE_BEFORE_STEPPING_ASIDE: Duration = Duration::from_millis(1500);
 
 /// Called before every input action. `Err(reason)` refuses the action: the overlay is not
 /// visible on the active Space, the stop hotkey is not registered, …
@@ -76,18 +84,28 @@ pub type ReadyCheck = Arc<dyn Fn() -> Result<(), String> + Send + Sync>;
 
 /// The app's call that minimises its main window (see [`StepAside::minimise`]).
 pub type MinimiseFn = Arc<dyn Fn(i64, &tokio_util::sync::CancellationToken) + Send + Sync>;
+/// The app's answer to whether the user just approved a chat's input on a card (see
+/// [`StepAside::approved_on_card`]).
+pub type ApprovedOnCardFn = Arc<dyn Fn(i64) -> bool + Send + Sync>;
 
 /// How this app moves its main window out of the way of input (ARCHITECTURE.md 9.3,
 /// "Stepping aside").
 #[derive(Clone)]
 pub struct StepAside {
-    /// The app's name, for the card: "<name> will minimise itself while this runs."
+    /// The app's name, for the card: "<name> minimises its window while this runs, if the
+    /// window is in the way."
     pub app_name: String,
-    /// Called before every approved input action, on a blocking thread, with the chat's id
-    /// and the call's cancellation: minimises the main window when it is on screen and
-    /// returns once it is gone, or after a short wait (about a second). Once the call is
-    /// stopped it must not minimise any more: nothing would bring the window back.
+    /// Called before an approved input action that this app's window is in the way of, on
+    /// a blocking thread, with the chat's id and the call's cancellation: minimises the
+    /// main window when it is on screen and returns once it is gone, or after a short wait
+    /// (about a second). Once the call is stopped it must not minimise any more: nothing
+    /// would bring the window back.
     pub minimise: MinimiseFn,
+    /// Called once at the start of every approved input action, with the chat's id:
+    /// whether the user approved this very action on a card just now (not a grant, not
+    /// Allow all). The answer is used up. Without it, this app steps aside only once the
+    /// user has left the keyboard and mouse alone for [`IDLE_BEFORE_STEPPING_ASIDE`].
+    pub approved_on_card: ApprovedOnCardFn,
 }
 
 impl std::fmt::Debug for StepAside {
@@ -209,6 +227,15 @@ enum Step {
 }
 
 impl Step {
+    /// The plan sends keys: typing, key presses, or the modifier keys of a click.
+    fn uses_keyboard(&self) -> bool {
+        match self {
+            Step::Type { .. } | Step::Key { .. } => true,
+            Step::Click { modifiers, .. } => !modifiers.is_empty(),
+            Step::Move { .. } | Step::Drag { .. } | Step::Scroll { .. } => false,
+        }
+    }
+
     /// The points pointer input will reach, as [`run_plan`] checks them (none for keyboard
     /// input).
     fn points(&self) -> Vec<GlobalPoint> {
@@ -479,7 +506,7 @@ impl ComputerServer {
             .as_ref()
             .map(|a| {
                 format!(
-                    "\n{} will minimise itself while this runs.",
+                    "\n{} minimises its window while this runs, if the window is in the way.",
                     policy::sanitize::one_line(&a.app_name, 40)
                 )
             })
@@ -1166,6 +1193,13 @@ impl ComputerServer {
                 );
             }
         }
+        // Whether the user approved this very action on a card just now: asked for every
+        // action, so that an answer only ever counts for the action it was given for.
+        let on_card = self
+            .config
+            .step_aside
+            .as_ref()
+            .is_some_and(|a| (a.approved_on_card)(ctx.chat.chat_id));
         if let Some(check) = self.config.ready_check.clone() {
             // The app's check may wait for its main thread (showing the indicator, asking
             // AppKit whether it is on the active Space): not on an async worker.
@@ -1201,19 +1235,31 @@ impl ComputerServer {
             l = self.op_lock.clone().lock_owned() => l,
             _ = ctx.cancel.cancelled() => return op_output(Err(OpError::Stopped)),
         };
-        // This app steps aside (under the lock: handing the keyboard over must not disturb
-        // another chat's operation). Stop does not wait for it.
-        if let Some(aside) = self.config.step_aside.clone() {
-            let inj = self.guard.injector().clone();
-            let me = self.guard.self_process().clone();
-            let chat = ctx.chat.chat_id;
-            let plan = plan.clone();
-            let cancel = ctx.cancel.clone();
-            tokio::select! {
-                _ = Self::blocking(move || step_aside(&*inj, &me, &aside, chat, &plan, &cancel)) => {}
-                _ = ctx.cancel.cancelled() => return op_output(Err(OpError::Stopped)),
+        // This app steps aside, under the lock (handing the keyboard over must not disturb
+        // another chat's operation), which the step keeps until it ends. Stop does not wait
+        // for it.
+        let lock = match self.config.step_aside.clone() {
+            Some(aside) => {
+                let guard = self.guard.clone();
+                let gate = self.guard.gate();
+                let chat = ctx.chat.chat_id;
+                let plan = plan.clone();
+                let cancel = ctx.cancel.clone();
+                let step = Self::blocking(move || {
+                    let r = step_aside(&guard, &aside, chat, &plan, on_card, &gate, &cancel);
+                    (lock, r)
+                });
+                tokio::select! {
+                    r = step => match r {
+                        Ok((lock, Ok(()))) => lock,
+                        Ok((_, Err(refusal))) => return op_output(Err(OpError::Refused(refusal))),
+                        Err(e) => return ToolOutput::error(e),
+                    },
+                    _ = ctx.cancel.cancelled() => return op_output(Err(OpError::Stopped)),
+                }
             }
-        }
+            None => lock,
+        };
         let guard = self.guard.clone();
         let cancel = ctx.cancel.clone();
         // Only an action the user approved on an always-ask card may reach a target that
@@ -1258,50 +1304,68 @@ fn lerp(a: GlobalPoint, b: GlobalPoint, f: f64) -> GlobalPoint {
 
 /// Moves this app out of the way of an approved plan. Blocking; runs on a blocking thread.
 ///
-/// When this app has the keyboard and the plan names the window its keyboard input was
-/// planned for, the keyboard is handed back to that window first, while this app is still
-/// in front (Windows lets only the program in front give the focus away), and again after
-/// the minimise (macOS leaves the keyboard with this app when its window is minimised).
-/// Then the app minimises its main window, and this waits until neither the plan's points
-/// nor the keyboard are this app's, or [`ASIDE_WAIT`] passed. The guard checks every event
-/// afterwards, whatever happened here; the keyboard is never taken from another
-/// application.
+/// Only when this app is in the way: a point of the plan lies on one of its windows, or
+/// the plan sends keys while it has the keyboard. Then, unless the user approved this very
+/// action on a card just now (`on_card`), only once the user has left the keyboard and
+/// mouse alone for [`IDLE_BEFORE_STEPPING_ASIDE`]; otherwise the input is refused as it was
+/// before this app could step aside, and nothing moves.
+///
+/// When the plan names the window its keyboard input was planned for, the keyboard is
+/// handed back to that window first, while this app is still in front (Windows lets only
+/// the program in front give the focus away), and again after the minimise (macOS leaves
+/// the keyboard with this app when its window is minimised): never once the call is
+/// stopped, and the platform moves the focus only while this app has it and Stop was not
+/// pressed, checked in the step that moves it. Then the app minimises its main window,
+/// and this waits until neither the plan's points nor the keyboard are this app's, or
+/// [`ASIDE_WAIT`] passed. The guard checks every event afterwards, whatever happened here.
 fn step_aside(
-    inj: &dyn Injector,
-    me: &SelfProcess,
+    guard: &InputGuard,
     aside: &StepAside,
     chat: i64,
     plan: &InputPlan,
+    on_card: bool,
+    gate: &Gate,
     cancel: &tokio_util::sync::CancellationToken,
-) {
+) -> Result<(), Refusal> {
+    let inj = &**guard.injector();
+    let me = guard.self_process();
     let keyboard_is_mine = || inj.keyboard_target().is_ok_and(|t| me.owns_any(&t.pids));
+    let covered = |p: &GlobalPoint| inj.target_at(*p).is_ok_and(|t| me.owns_any(&t.pids));
+    let points = plan.step.points();
+    let pointer_in_the_way = points.iter().any(covered);
+    let keyboard_in_the_way = plan.step.uses_keyboard() && keyboard_is_mine();
+    if cancel.is_cancelled() || !(pointer_in_the_way || keyboard_in_the_way) {
+        return Ok(());
+    }
+    let user_away = guard
+        .user_idle_for()
+        .is_some_and(|idle| idle >= IDLE_BEFORE_STEPPING_ASIDE);
+    if !on_card && !user_away {
+        return Err(if pointer_in_the_way {
+            Refusal::SelfPointer
+        } else {
+            Refusal::SelfKeyboard
+        });
+    }
     let focus = plan.focus.filter(|f| !me.owns_any(&[f.pid]));
     let hand_back = || {
         if let Some(f) = &focus
-            && keyboard_is_mine()
-            && let Err(e) = inj.bring_to_front(f)
+            && !cancel.is_cancelled()
+            && let Err(e) = inj.bring_to_front(f, me, gate)
         {
             tracing::debug!(error = %e, "could not hand the keyboard back");
         }
     };
-    if cancel.is_cancelled() {
-        return;
-    }
     hand_back();
     (aside.minimise)(chat, cancel);
     hand_back();
-    let points = plan.step.points();
-    let deadline = std::time::Instant::now() + ASIDE_WAIT;
+    let deadline = Instant::now() + ASIDE_WAIT;
     loop {
-        let pointer_clear = points
-            .iter()
-            .all(|p| inj.target_at(*p).map_or(true, |t| !me.owns_any(&t.pids)));
+        let pointer_clear = !points.iter().any(covered);
         let keyboard_clear = focus.is_none() || !keyboard_is_mine();
-        if (pointer_clear && keyboard_clear)
-            || cancel.is_cancelled()
-            || std::time::Instant::now() >= deadline
+        if (pointer_clear && keyboard_clear) || cancel.is_cancelled() || Instant::now() >= deadline
         {
-            return;
+            return Ok(());
         }
         std::thread::sleep(ASIDE_POLL);
     }

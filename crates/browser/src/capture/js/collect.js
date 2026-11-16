@@ -86,7 +86,9 @@ async function (opts) {
     );
   }
   const urlIdx = new Map();
-  function urlToken(v, base) {
+  // `kind` is 'u', or 'v' for a shape another SVG file holds (`<use href="icons.svg#x">`),
+  // which the app may copy into the page: a page opened from disk cannot use another file's.
+  function urlToken(v, base, kind) {
     const a = absUrl(v, base);
     if (!a || !isHttp(a)) return null;
     const hash = a.indexOf('#');
@@ -98,7 +100,7 @@ async function (opts) {
       out.urls.push(file);
       urlIdx.set(file, i);
     }
-    return pre + 'u' + i + frag;
+    return pre + (kind || 'u') + i + frag;
   }
   function srcsetToken(v, base) {
     const list = [];
@@ -318,7 +320,7 @@ async function (opts) {
             if (ab && /^https?:/i.test(ab)) nv = ab;
             else continue;
           } else if (!/^\s*data:/i.test(v)) {
-            const t = urlToken(v);
+            const t = urlToken(v, undefined, lower === 'use' ? 'v' : 'u');
             if (t) nv = t;
             else continue;
           }

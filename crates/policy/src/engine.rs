@@ -1299,7 +1299,10 @@ mod tests {
         };
         assert_eq!(evaluate(&capture, &ready(), &none), card);
         assert_eq!(evaluate(&capture, &ready(), &others), card);
-        assert_eq!(evaluate(&capture, &ready(), &granted), Decision::AllowedByGrant);
+        assert_eq!(
+            evaluate(&capture, &ready(), &granted),
+            Decision::AllowedByGrant
+        );
         assert!(!granted.covers(&scope("https://b.example", "/p")));
         assert!(!granted.covers(&scope("https://a.example", "/q")));
         assert!(!granted.covers(&Scope::Site {
@@ -1323,7 +1326,10 @@ mod tests {
             allow_all: true,
             ..ready()
         };
-        assert_eq!(evaluate(&capture, &allow_all, &none), Decision::AllowedByMode);
+        assert_eq!(
+            evaluate(&capture, &allow_all, &none),
+            Decision::AllowedByMode
+        );
         assert_eq!(
             evaluate(
                 &capture,
@@ -1358,7 +1364,10 @@ mod tests {
             untrusted_in_turn: true,
             ..ready()
         };
-        assert_eq!(evaluate(&capture, &full, &none), Decision::AllowedByFullAccess);
+        assert_eq!(
+            evaluate(&capture, &full, &none),
+            Decision::AllowedByFullAccess
+        );
         let mut limited = capture.clone();
         limited.hard_limit = Some("outside the approved folders".into());
         for t in [ready(), allow_all, full] {

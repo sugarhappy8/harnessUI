@@ -107,7 +107,10 @@ async fn restore(b: &Browser, session: &str) {
     b.set_capture_checks(false).await;
     for (method, params) in [
         ("Emulation.clearDeviceMetricsOverride", json!({})),
-        ("Emulation.setTouchEmulationEnabled", json!({"enabled": false})),
+        (
+            "Emulation.setTouchEmulationEnabled",
+            json!({"enabled": false}),
+        ),
         ("Network.setCacheDisabled", json!({"cacheDisabled": false})),
         ("Network.setBypassServiceWorker", json!({"bypass": false})),
         ("Network.disable", json!({})),
@@ -223,7 +226,13 @@ async fn quiet(b: &Browser, calm: Duration, max: Duration) {
     }
 }
 
-async fn snapshot(b: &Browser, session: &str, world: i64, log: &mut anim::AnimationLog, when: &str) {
+async fn snapshot(
+    b: &Browser,
+    session: &str,
+    world: i64,
+    log: &mut anim::AnimationLog,
+    when: &str,
+) {
     if let Ok(v) = call_fn(b, session, world, ANIMATIONS_JS, json!({"max": 300}), CMD).await {
         log.add_snapshot(&v, when);
     }
@@ -231,9 +240,19 @@ async fn snapshot(b: &Browser, session: &str, world: i64, log: &mut anim::Animat
 
 /// Scrolls to `y`; returns (position, page height, screen height, scrolls inside an
 /// element).
-async fn scroll_to(b: &Browser, session: &str, world: i64, y: u64) -> Result<(u64, u64, u64, bool), String> {
+async fn scroll_to(
+    b: &Browser,
+    session: &str,
+    world: i64,
+    y: u64,
+) -> Result<(u64, u64, u64, bool), String> {
     let r = call_fn(b, session, world, SCROLL_JS, json!({"y": y}), CMD).await?;
-    let n = |k: &str| r.get(k).and_then(Value::as_f64).map(|f| f.max(0.0) as u64).unwrap_or(0);
+    let n = |k: &str| {
+        r.get(k)
+            .and_then(Value::as_f64)
+            .map(|f| f.max(0.0) as u64)
+            .unwrap_or(0)
+    };
     Ok((
         n("y"),
         n("height"),
@@ -263,7 +282,7 @@ async fn scroll_through(
         let (at, height, screen, scrolls_inside) = scroll_to(b, session, world, y).await?;
         inner |= scrolls_inside;
         tokio::time::sleep(pause).await;
-        snapshot(b, session, world, log, &format!("{label} (at {} px)", thousands(at))).await;
+        snapshot(b, session, world, log, label).await;
         if at + screen + 2 >= height {
             break;
         }
@@ -278,7 +297,10 @@ async fn scroll_through(
         }
         y = at + (screen * 85 / 100).max(200);
         if y > MAX_SCROLL {
-            notes.push(format!("Scrolling stopped at {} px.", thousands(MAX_SCROLL)));
+            notes.push(format!(
+                "Scrolling stopped at {} px.",
+                thousands(MAX_SCROLL)
+            ));
             break;
         }
     }
@@ -298,7 +320,12 @@ struct Shot {
 async fn capture_picture(b: &Browser, session: &str, params: Value) -> Result<String, String> {
     let r = b
         .cdp
-        .call("Page.captureScreenshot", params, Some(session), Duration::from_secs(60))
+        .call(
+            "Page.captureScreenshot",
+            params,
+            Some(session),
+            Duration::from_secs(60),
+        )
         .await
         .map_err(cdp_text)?;
     r.get("data")
@@ -323,7 +350,12 @@ async fn take_shots(
     first_screens: &mut Vec<(u32, String)>,
     notes: &mut Vec<String>,
 ) -> Result<(), String> {
-    let first = capture_picture(b, session, json!({"format": "png", "captureBeyondViewport": false})).await?;
+    let first = capture_picture(
+        b,
+        session,
+        json!({"format": "png", "captureBeyondViewport": false}),
+    )
+    .await?;
     let size = crate::page::png_size(&first).unwrap_or((width, 0));
     if let Some(data) = decode(&first) {
         shots.push(Shot {
@@ -439,7 +471,11 @@ async fn body(b: &Browser, session: &str, request_id: &str) -> Result<Vec<u8>, S
 
 /// Whether the capture may use a response: it passed the request checks during the
 /// capture, it finished, and it is a whole, successful one. `Err` says why not.
-fn usable(e: &NetEntry, checked: &HashSet<String>, policy: &AddressPolicy) -> Result<(), SkipReason> {
+fn usable(
+    e: &NetEntry,
+    checked: &HashSet<String>,
+    policy: &AddressPolicy,
+) -> Result<(), SkipReason> {
     if !checked.contains(&e.request_id) {
         return Err(SkipReason::Blocked(
             "it was not checked by the capture's request checks".into(),
@@ -455,7 +491,10 @@ fn usable(e: &NetEntry, checked: &HashSet<String>, policy: &AddressPolicy) -> Re
         return Err(SkipReason::Partial);
     }
     if !(200..300).contains(&e.status) {
-        return Err(SkipReason::Failed(format!("the server answered {}", e.status)));
+        return Err(SkipReason::Failed(format!(
+            "the server answered {}",
+            e.status
+        )));
     }
     // The browser resolves names itself: a site that answered from a private address on a
     // direct connection (the port the address names) is refused even though its name
@@ -507,12 +546,27 @@ async fn work(
         }),
     )
     .await?;
-    let _ = cdp(b, session, "Network.setCacheDisabled", json!({"cacheDisabled": true})).await;
-    let _ = cdp(b, session, "Network.setBypassServiceWorker", json!({"bypass": true})).await;
+    let _ = cdp(
+        b,
+        session,
+        "Network.setCacheDisabled",
+        json!({"cacheDisabled": true}),
+    )
+    .await;
+    let _ = cdp(
+        b,
+        session,
+        "Network.setBypassServiceWorker",
+        json!({"bypass": true}),
+    )
+    .await;
     let first_width = plan.widths.first().copied().unwrap_or(1440);
     set_width(b, session, first_width).await?;
 
-    progress(format!("Opening {}", policy::sanitize::one_line(plan.url.as_str(), 200)));
+    progress(format!(
+        "Opening {}",
+        policy::sanitize::one_line(plan.url.as_str(), 200)
+    ));
     if let Some(note) = b.navigate(tab, plan.url.as_str(), cancel).await? {
         notes.push(note);
     }
@@ -570,7 +624,12 @@ async fn work(
         .unwrap_or_else(|| json!({}));
 
     progress("Reading the page".into());
-    let nonce: String = uuid::Uuid::new_v4().simple().to_string().chars().take(16).collect();
+    let nonce: String = uuid::Uuid::new_v4()
+        .simple()
+        .to_string()
+        .chars()
+        .take(16)
+        .collect();
     let page = call_fn(
         b,
         session,
@@ -602,23 +661,45 @@ async fn work(
         .or_else(|| Url::parse(&page_href).ok())
         .unwrap_or_else(|| plan.url.clone());
     if netpolicy_origin(&page_href) != netpolicy_origin(plan.url.as_str()) {
-        notes.push(format!("The page moved to {} while it loaded.", page_url(&page_href)));
+        notes.push(format!(
+            "The page moved to {} while it loaded.",
+            page_url(&page_href)
+        ));
     }
 
     let mut shots: Vec<Shot> = Vec::new();
     let mut first_screens: Vec<(u32, String)> = Vec::new();
     progress(format!("Taking screenshots {first_width} pixels wide"));
-    take_shots(b, session, world, first_width, plan.caps.per_file, &mut shots, &mut first_screens, &mut notes).await?;
+    take_shots(
+        b,
+        session,
+        world,
+        first_width,
+        plan.caps.per_file,
+        &mut shots,
+        &mut first_screens,
+        &mut notes,
+    )
+    .await?;
 
     // Stills of canvases (drawn by scripts, so not in the copy otherwise).
     let mut canvas_stills: Vec<Option<Vec<u8>>> = Vec::new();
-    for c in page.get("canvases").and_then(Value::as_array).cloned().unwrap_or_default() {
+    for c in page
+        .get("canvases")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default()
+    {
         let n = |k: &str| c.get(k).and_then(Value::as_f64).unwrap_or(0.0);
         let clip = json!({"x": n("x").max(0.0), "y": n("y").max(0.0), "width": n("w").max(1.0), "height": n("h").max(1.0), "scale": 1});
-        let still = capture_picture(b, session, json!({"format": "png", "captureBeyondViewport": true, "clip": clip}))
-            .await
-            .ok()
-            .and_then(|d| decode(&d));
+        let still = capture_picture(
+            b,
+            session,
+            json!({"format": "png", "captureBeyondViewport": true, "clip": clip}),
+        )
+        .await
+        .ok()
+        .and_then(|d| decode(&d));
         canvas_stills.push(still);
     }
 
@@ -627,7 +708,10 @@ async fn work(
     // Pictures the sheets name that the page never loaded (hover states, other widths).
     let missing = missing_pictures(b, &sheets);
     if !missing.is_empty() {
-        progress(format!("Asking for {} picture(s) the style sheets name", missing.len()));
+        progress(format!(
+            "Asking for {} picture(s) the style sheets name",
+            missing.len()
+        ));
         let _ = call_fn(
             b,
             session,
@@ -661,8 +745,25 @@ async fn work(
             scroll_to(b, session, world, 0).await?;
             tokio::time::sleep(Duration::from_millis(500)).await;
         }
-        snapshot(b, session, world, &mut anims, &format!("{width} px wide, at the top")).await;
-        take_shots(b, session, world, width, plan.caps.per_file, &mut shots, &mut first_screens, &mut notes).await?;
+        snapshot(
+            b,
+            session,
+            world,
+            &mut anims,
+            &format!("{width} px wide, at the top"),
+        )
+        .await;
+        take_shots(
+            b,
+            session,
+            world,
+            width,
+            plan.caps.per_file,
+            &mut shots,
+            &mut first_screens,
+            &mut notes,
+        )
+        .await?;
     }
     if plan.widths.len() > 1 {
         set_width(b, session, first_width).await?;
@@ -698,7 +799,11 @@ async fn work(
     // Screenshots.
     let mut screenshot_lines: Vec<(String, u32, u32)> = Vec::new();
     for shot in &shots {
-        let label = if shot.full { "full-page" } else { "first-screen" };
+        let label = if shot.full {
+            "full-page"
+        } else {
+            "first-screen"
+        };
         let name = format!("w{}-{label}.{}", shot.width, shot.ext);
         match budget.take(shot.data.len() as u64) {
             Ok(()) => {
@@ -746,13 +851,17 @@ async fn work(
         if let Err(why) = usable(e, &checked, &plan.policy) {
             // Requests the checks refused are listed under "Not captured" with the reason;
             // data the page failed to fetch is not part of its look.
-            if !was_blocked(e) && (!matches!(why, SkipReason::Failed(_)) || kind != Kind::Animation) {
+            if !was_blocked(e) && (!matches!(why, SkipReason::Failed(_)) || kind != Kind::Animation)
+            {
                 skipped.push((label, why.words(&plan.caps)));
             }
             continue;
         }
         if saving_started.elapsed() > Duration::from_secs(180) {
-            skipped.push((label, "saving took too long, so the rest was left out".into()));
+            skipped.push((
+                label,
+                "saving took too long, so the rest was left out".into(),
+            ));
             continue;
         }
         let estimate = e.decoded_len.max(e.encoded_len);
@@ -867,7 +976,11 @@ async fn work(
 
     // Scripts, for reference: saved as text, never linked. Their starts tell the libraries.
     let mut samples: Vec<(String, String)> = Vec::new();
-    let page_scripts = page.get("scripts").and_then(Value::as_array).cloned().unwrap_or_default();
+    let page_scripts = page
+        .get("scripts")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
     let mut script_entries: Vec<&NetEntry> = entries
         .iter()
         .filter(|e| e.resource_type == "Script" && e.final_url().starts_with("http"))
@@ -887,11 +1000,18 @@ async fn work(
         };
         if samples.len() < MAX_SCRIPT_SAMPLES {
             let head = &bytes[..bytes.len().min(SCRIPT_SAMPLE_BYTES)];
-            samples.push((e.final_url().to_string(), String::from_utf8_lossy(head).into_owned()));
+            samples.push((
+                e.final_url().to_string(),
+                String::from_utf8_lossy(head).into_owned(),
+            ));
         }
         match budget.take(bytes.len() as u64) {
             Ok(()) => {
-                let name = w.name("scripts", &names::stem_of_url(e.final_url(), "script"), "js.txt");
+                let name = w.name(
+                    "scripts",
+                    &names::stem_of_url(e.final_url(), "script"),
+                    "js.txt",
+                );
                 w.write("scripts", &name, &bytes)?;
             }
             Err(why) => skipped.push((label, why.words(&plan.caps))),
@@ -905,10 +1025,17 @@ async fn work(
         }
         inline_n += 1;
         if samples.len() < MAX_SCRIPT_SAMPLES {
-            samples.push((String::new(), text.chars().take(SCRIPT_SAMPLE_BYTES).collect()));
+            samples.push((
+                String::new(),
+                text.chars().take(SCRIPT_SAMPLE_BYTES).collect(),
+            ));
         }
         let kind = s.get("type").and_then(Value::as_str).unwrap_or("");
-        let ext = if kind.contains("json") { "json.txt" } else { "js.txt" };
+        let ext = if kind.contains("json") {
+            "json.txt"
+        } else {
+            "js.txt"
+        };
         if budget.take(text.len() as u64).is_ok() {
             let name = w.name("scripts", &format!("inline-{inline_n}"), ext);
             w.write("scripts", &name, text.as_bytes())?;
@@ -918,7 +1045,10 @@ async fn work(
     // index.html.
     let urls_table: Vec<String> = string_list(&page, "urls");
     let targets = html::Targets {
-        urls: urls_table.iter().map(|u| saved.get(strip_fragment(u)).cloned()).collect(),
+        urls: urls_table
+            .iter()
+            .map(|u| saved.get(strip_fragment(u)).cloned())
+            .collect(),
         url_originals: urls_table.clone(),
         styles: page
             .get("styles")
@@ -952,7 +1082,10 @@ async fn work(
                                         let p = p.as_array()?;
                                         Some((
                                             p.first()?.as_str()?.to_string(),
-                                            p.get(1).and_then(Value::as_str).unwrap_or("").to_string(),
+                                            p.get(1)
+                                                .and_then(Value::as_str)
+                                                .unwrap_or("")
+                                                .to_string(),
                                         ))
                                     })
                                     .collect()
@@ -964,8 +1097,34 @@ async fn work(
             })
             .unwrap_or_default(),
         canvases: canvas_paths.clone(),
+        inlined: Vec::new(),
     };
-    let copy = html::replace_tokens(page_html, &nonce, &targets);
+    // Shapes kept in other SVG files are copied into the page (a page opened from disk
+    // cannot use another file's), when that file was saved and is small.
+    let mut targets = targets;
+    targets.inlined = vec![false; urls_table.len()];
+    let mut sprites: Vec<String> = Vec::new();
+    for n in html::sprite_indexes(page_html, &nonce) {
+        let Some(Some(path)) = targets.urls.get(n) else {
+            continue;
+        };
+        if !path.ends_with(".svg") {
+            continue;
+        }
+        let Ok(text) = std::fs::read_to_string(w.root().join(path)) else {
+            continue;
+        };
+        if text.len() <= html::MAX_SPRITE_BYTES
+            && sprites.iter().map(String::len).sum::<usize>() + text.len()
+                <= 4 * html::MAX_SPRITE_BYTES
+        {
+            sprites.push(text);
+            if let Some(flag) = targets.inlined.get_mut(n) {
+                *flag = true;
+            }
+        }
+    }
+    let copy = html::inject_sprites(&html::replace_tokens(page_html, &nonce, &targets), &sprites);
     if html::has_active_content(&copy) {
         notes.push("index.html was not saved: something that could run was still in it after the scripts were removed.".into());
     } else {
@@ -982,7 +1141,10 @@ async fn work(
         .and_then(Value::as_array)
         .map(|c| c.len())
         .unwrap_or(0);
-    let webgl = if samples.iter().any(|(_, t)| t.contains("webgl") || t.contains("WebGL")) {
+    let webgl = if samples
+        .iter()
+        .any(|(_, t)| t.contains("webgl") || t.contains("WebGL"))
+    {
         webgl
     } else {
         0
@@ -1028,8 +1190,14 @@ async fn work(
             };
             (
                 kind.to_string(),
-                a.get("name").and_then(Value::as_str).unwrap_or("").to_string(),
-                a.get("target").and_then(Value::as_str).unwrap_or("").to_string(),
+                a.get("name")
+                    .and_then(Value::as_str)
+                    .unwrap_or("")
+                    .to_string(),
+                a.get("target")
+                    .and_then(Value::as_str)
+                    .unwrap_or("")
+                    .to_string(),
             )
         })
         .collect();
@@ -1037,7 +1205,11 @@ async fn work(
     let folder_text = w.root().display().to_string();
     let skipped_lines: Vec<(String, String)> = skipped.clone();
     let captured_text = captured_at.format("%Y-%m-%d %H:%M").to_string();
-    let title = page.get("title").and_then(Value::as_str).unwrap_or("").to_string();
+    let title = page
+        .get("title")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_string();
     let input = ReportInput {
         title: &title,
         url: &page_href,
@@ -1110,13 +1282,25 @@ async fn gather_sheets(b: &Browser, session: &str, page: &Value, page_base: &Url
     };
     let mut sheets: Vec<Sheet> = Vec::new();
     let (mut inline_n, mut adopted_n) = (0usize, 0usize);
-    let styles = page.get("styles").and_then(Value::as_array).cloned().unwrap_or_default();
+    let styles = page
+        .get("styles")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
     for (i, s) in styles.iter().enumerate() {
         let kind = s.get("kind").and_then(Value::as_str).unwrap_or("");
-        let page_text = s.get("text").and_then(Value::as_str).unwrap_or("").to_string();
+        let page_text = s
+            .get("text")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_string();
         match kind {
             "link" => {
-                let href = s.get("href").and_then(Value::as_str).unwrap_or("").to_string();
+                let href = s
+                    .get("href")
+                    .and_then(Value::as_str)
+                    .unwrap_or("")
+                    .to_string();
                 let (text, base) = match fetch(&href) {
                     Some(e) => match body(b, session, &e.request_id).await {
                         Ok(bytes) => (
@@ -1221,7 +1405,10 @@ fn missing_pictures(b: &Browser, sheets: &[Sheet]) -> Vec<String> {
             }
             let url = strip_fragment(&r.url).to_string();
             let picture = names::extension_of_url(&url).is_some_and(|e| {
-                matches!(e.as_str(), "png" | "jpg" | "jpeg" | "gif" | "webp" | "avif" | "svg" | "ico" | "bmp")
+                matches!(
+                    e.as_str(),
+                    "png" | "jpg" | "jpeg" | "gif" | "webp" | "avif" | "svg" | "ico" | "bmp"
+                )
             });
             if picture && !known.contains(&url) && !out.contains(&url) {
                 out.push(url);
@@ -1242,7 +1429,11 @@ fn not_captured_lines(
     canvas_paths: &[Option<String>],
 ) -> Vec<String> {
     let mut lines = Vec::new();
-    let frames = page.get("frames").and_then(Value::as_array).cloned().unwrap_or_default();
+    let frames = page
+        .get("frames")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
     if !frames.is_empty() {
         let list = frames
             .iter()
@@ -1255,10 +1446,18 @@ fn not_captured_lines(
         lines.push(format!(
             "{} frame(s) (another page shown inside this one); they are empty in the copy{}",
             frames.len(),
-            if list.is_empty() { String::new() } else { format!(": {list}") }
+            if list.is_empty() {
+                String::new()
+            } else {
+                format!(": {list}")
+            }
         ));
     }
-    let canvases = page.get("markers").and_then(|m| m.get("canvases")).and_then(Value::as_u64).unwrap_or(0);
+    let canvases = page
+        .get("markers")
+        .and_then(|m| m.get("canvases"))
+        .and_then(Value::as_u64)
+        .unwrap_or(0);
     if canvases > 0 {
         let stills = canvas_paths.iter().filter(|p| p.is_some()).count();
         lines.push(format!(
@@ -1268,7 +1467,11 @@ fn not_captured_lines(
     let streams = page
         .get("media")
         .and_then(Value::as_array)
-        .map(|m| m.iter().filter(|x| x.get("stream").and_then(Value::as_bool) == Some(true)).count())
+        .map(|m| {
+            m.iter()
+                .filter(|x| x.get("stream").and_then(Value::as_bool) == Some(true))
+                .count()
+        })
         .unwrap_or(0);
     if streams > 0 {
         lines.push(format!("{streams} video stream(s) loaded in parts by a script: only their poster pictures are kept"));
@@ -1286,13 +1489,19 @@ fn not_captured_lines(
         ));
     }
     if log_full {
-        lines.push("The page made more requests than the capture records; later files are missing.".into());
+        lines.push(
+            "The page made more requests than the capture records; later files are missing.".into(),
+        );
     }
     lines
 }
 
 /// The fonts the page uses, with the files saved for them.
-fn font_lines(page: &Value, facts: &[(String, css::SheetFacts)], saved: &HashMap<String, String>) -> Vec<FontLine> {
+fn font_lines(
+    page: &Value,
+    facts: &[(String, css::SheetFacts)],
+    saved: &HashMap<String, String>,
+) -> Vec<FontLine> {
     let mut lines: Vec<FontLine> = Vec::new();
     let used = page
         .pointer("/stats/fonts")
@@ -1310,7 +1519,10 @@ fn font_lines(page: &Value, facts: &[(String, css::SheetFacts)], saved: &HashMap
         if family.is_empty() {
             continue;
         }
-        match lines.iter_mut().find(|l| l.family.eq_ignore_ascii_case(family)) {
+        match lines
+            .iter_mut()
+            .find(|l| l.family.eq_ignore_ascii_case(family))
+        {
             Some(l) => {
                 l.used += count;
                 if !weight.is_empty() && !l.weights.iter().any(|w| w == weight) {
@@ -1319,7 +1531,11 @@ fn font_lines(page: &Value, facts: &[(String, css::SheetFacts)], saved: &HashMap
             }
             None => lines.push(FontLine {
                 family: family.to_string(),
-                weights: if weight.is_empty() { vec![] } else { vec![weight.to_string()] },
+                weights: if weight.is_empty() {
+                    vec![]
+                } else {
+                    vec![weight.to_string()]
+                },
                 used: count,
                 ..Default::default()
             }),
@@ -1327,7 +1543,10 @@ fn font_lines(page: &Value, facts: &[(String, css::SheetFacts)], saved: &HashMap
     }
     for (_, f) in facts {
         for face in &f.font_faces {
-            let line = match lines.iter_mut().position(|l| l.family.eq_ignore_ascii_case(&face.family)) {
+            let line = match lines
+                .iter_mut()
+                .position(|l| l.family.eq_ignore_ascii_case(&face.family))
+            {
                 Some(i) => &mut lines[i],
                 None => {
                     if lines.len() >= 20 {
@@ -1346,7 +1565,10 @@ fn font_lines(page: &Value, facts: &[(String, css::SheetFacts)], saved: &HashMap
                     && !line.files.contains(p)
                 {
                     line.files.push(p.clone());
-                    if let Some(h) = Url::parse(src).ok().as_ref().and_then(policy::sanitize::display_host)
+                    if let Some(h) = Url::parse(src)
+                        .ok()
+                        .as_ref()
+                        .and_then(policy::sanitize::display_host)
                         && !line.hosts.contains(&h)
                     {
                         line.hosts.push(h);
@@ -1401,17 +1623,35 @@ mod tests {
             request_id: "2".into(),
             ..ok.clone()
         };
-        assert!(matches!(usable(&unchecked, &checked, &policy), Err(SkipReason::Blocked(_))));
-        let partial = NetEntry { status: 206, ..ok.clone() };
-        assert_eq!(usable(&partial, &checked, &policy), Err(SkipReason::Partial));
-        let failed = NetEntry { failed: Some("net::ERR_ABORTED".into()), ..ok.clone() };
-        assert!(matches!(usable(&failed, &checked, &policy), Err(SkipReason::Failed(_))));
+        assert!(matches!(
+            usable(&unchecked, &checked, &policy),
+            Err(SkipReason::Blocked(_))
+        ));
+        let partial = NetEntry {
+            status: 206,
+            ..ok.clone()
+        };
+        assert_eq!(
+            usable(&partial, &checked, &policy),
+            Err(SkipReason::Partial)
+        );
+        let failed = NetEntry {
+            failed: Some("net::ERR_ABORTED".into()),
+            ..ok.clone()
+        };
+        assert!(matches!(
+            usable(&failed, &checked, &policy),
+            Err(SkipReason::Failed(_))
+        ));
         // A public name that answered from a private address on a direct connection.
         let rebound = NetEntry {
             remote_ip: Some("192.168.1.1".into()),
             ..ok.clone()
         };
-        assert!(matches!(usable(&rebound, &checked, &policy), Err(SkipReason::Blocked(_))));
+        assert!(matches!(
+            usable(&rebound, &checked, &policy),
+            Err(SkipReason::Blocked(_))
+        ));
         // Through a proxy (another port) the address says nothing about the site.
         let proxied = NetEntry {
             remote_ip: Some("10.0.0.8".into()),

@@ -6,7 +6,8 @@
 //!
 //! Proxy rules (ARCHITECTURE.md 13.6): a loopback client (the managed llama-server, a local
 //! Ollama or LM Studio) is built with proxies and redirects disabled, so a system proxy never
-//! sees local chat or its key. Every other endpoint uses the system proxy and follows
+//! sees local chat or its key; (0.0.7) neither does a server at a local network address.
+//! Every other endpoint uses the system proxy. Every client but the loopback one follows
 //! redirects only within its own origin. A key is never sent over plain `http://` to a server
 //! on the internet ([`crate::cloud`]).
 
@@ -310,6 +311,11 @@ impl OpenAiClient {
                 .redirect(reqwest::redirect::Policy::none());
         } else {
             builder = builder.redirect(same_origin_redirects());
+            // [0.0.7 P5] A server at a local network address is reached directly: a system
+            // proxy would see its plain-http traffic, key included.
+            if cloud::endpoint_place(&config.base_url) == cloud::EndpointPlace::LocalNetwork {
+                builder = builder.no_proxy();
+            }
         }
         let http = builder
             .build()
@@ -389,7 +395,18 @@ impl OpenAiClient {
         } else {
             self.stream_completion(req, cancel).await
         };
-        result.map_err(|err| cloud::scrub_key(err, self.config.api_key.as_deref()))
+        let key = self.config.api_key.clone();
+        match result {
+            // [0.0.7 P5] Errors inside the stream (an `error` event, an error object in a
+            // chunk) can echo the key too.
+            Ok(stream) => Ok(ChatStream {
+                inner: stream
+                    .inner
+                    .map(move |item| item.map_err(|err| cloud::scrub_key(err, key.as_deref())))
+                    .boxed(),
+            }),
+            Err(err) => Err(cloud::scrub_key(err, key.as_deref())),
+        }
     }
 
     async fn stream_completion(
@@ -403,19 +420,28 @@ impl OpenAiClient {
         let endpoint = self.api.as_str().to_owned();
         let max_output = cloud::known_facts(&endpoint, &req.model).and_then(|f| f.max_output);
         let mut rounds = 0;
+        // Fixes found for this request: kept for the model once a request with them is
+        // accepted, not before.
+        let mut pending: Vec<cloud::Fix> = Vec::new();
         loop {
+            let mut fixes = cloud::remembered_fixes(&endpoint, &req.model);
+            for fix in &pending {
+                fixes.add(fix);
+            }
             let mut body = req.to_body(true);
             if kind != ProviderKind::LlamaServer
                 && let Value::Object(map) = &mut body
             {
-                let fixes = cloud::remembered_fixes(&endpoint, &req.model);
                 cloud::shape_chat_body(kind, map, &fixes, max_output);
             }
             match self
-                .send_stream_request(self.chat_completions_url(), &body, &cancel)
+                .send_stream_request(self.chat_completions_url(), &body, &cancel, None)
                 .await?
             {
                 Sent::Accepted(response) => {
+                    for fix in &pending {
+                        cloud::remember_fix(&endpoint, &req.model, fix);
+                    }
                     return self
                         .open_stream(response, cancel, WireDecoder::Chat(StreamDecoder::new()))
                         .await;
@@ -435,7 +461,10 @@ impl OpenAiClient {
                         rounds += 1;
                         let mut changed = false;
                         for fix in cloud::fixes_for_error(status, &error_body, sent) {
-                            changed |= cloud::remember_fix(&endpoint, &req.model, &fix);
+                            if fixes.add(&fix) {
+                                pending.push(fix);
+                                changed = true;
+                            }
                         }
                         if changed {
                             continue;
@@ -459,15 +488,20 @@ impl OpenAiClient {
         url: Url,
         body: &Value,
         cancel: &CancellationToken,
+        beta: Option<&str>,
     ) -> Result<Sent, ProviderError> {
         let retries = cloud::is_cloud_company(self.config.kind);
         let limit = self.config.request_timeout;
         let mut attempt = 0;
         loop {
-            let request = self
+            let mut request = self
                 .authorize(self.http.post(url.clone()))
-                .header(reqwest::header::ACCEPT, "text/event-stream")
-                .json(body);
+                .header(reqwest::header::ACCEPT, "text/event-stream");
+            // [0.0.7 P5] An API feature in beta that this request uses (`anthropic-beta`).
+            if let Some(beta) = beta {
+                request = request.header("anthropic-beta", beta);
+            }
+            let request = request.json(body);
             let send = within(limit, "the server sent no response", async {
                 request.send().await.map_err(network_error)
             });
@@ -1011,25 +1045,8 @@ impl OpenAiClient {
 ///   `https://host/v1beta/openai` stays as typed.
 /// - The server root is the path without a trailing version segment.
 fn parse_base(raw: &str) -> Result<(Url, Url), String> {
-    let trimmed = raw.trim();
-    if trimmed.is_empty() {
-        return Err("the base URL is empty".to_owned());
-    }
-    let mut url = match Url::parse(trimmed) {
-        Ok(url) if url.scheme() == "http" || url.scheme() == "https" => url,
-        Ok(_) | Err(_) if !trimmed.contains("://") => Url::parse(&format!("http://{trimmed}"))
-            .map_err(|err| format!("'{trimmed}' is not a valid URL ({err})"))?,
-        Ok(url) => {
-            return Err(format!(
-                "the base URL must start with http:// or https://, not {}://",
-                url.scheme()
-            ));
-        }
-        Err(err) => return Err(format!("'{trimmed}' is not a valid URL ({err})")),
-    };
-    if url.host().is_none() {
-        return Err(format!("'{trimmed}' has no host"));
-    }
+    // [0.0.7 P5] The same parse as the key check and the "Cloud" mark.
+    let mut url = cloud::endpoint_url(raw)?;
     url.set_fragment(None);
     let mut segments: Vec<String> = url
         .path_segments()

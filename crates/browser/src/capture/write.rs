@@ -97,7 +97,10 @@ impl Writer {
 
     /// A free name in `sub` (`""` for the capture folder itself).
     pub fn name(&mut self, sub: &str, stem: &str, ext: &str) -> String {
-        self.books.entry(sub.to_string()).or_default().take(stem, ext)
+        self.books
+            .entry(sub.to_string())
+            .or_default()
+            .take(stem, ext)
     }
 
     /// Writes a new file `sub/name` and returns its path inside the capture (with `/`).
@@ -115,14 +118,19 @@ impl Writer {
                 match std::fs::create_dir(&d) {
                     Ok(()) => {}
                     Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
-                        let meta = std::fs::symlink_metadata(&d)
-                            .map_err(|e| format!("could not check {}: {}", d.display(), plain_io(&e)))?;
+                        let meta = std::fs::symlink_metadata(&d).map_err(|e| {
+                            format!("could not check {}: {}", d.display(), plain_io(&e))
+                        })?;
                         if !meta.file_type().is_dir() {
                             return Err(format!("{} is not a folder any more", d.display()));
                         }
                     }
                     Err(e) => {
-                        return Err(format!("could not create {}: {}", d.display(), plain_io(&e)));
+                        return Err(format!(
+                            "could not create {}: {}",
+                            d.display(),
+                            plain_io(&e)
+                        ));
                     }
                 }
                 self.made.push(sub.to_string());
@@ -216,7 +224,10 @@ mod tests {
         assert_eq!(w.write("assets", &n, b"png").unwrap(), "assets/logo.png");
         let again = w.name("assets", "LOGO", "png");
         assert_eq!(again, "logo-2.png");
-        assert!(w.write("assets", "logo.png", b"x").is_err(), "an existing file is never replaced");
+        assert!(
+            w.write("assets", "logo.png", b"x").is_err(),
+            "an existing file is never replaced"
+        );
         assert!(w.write("../outside", "x.png", b"x").is_err());
         assert!(w.write("assets", "../x.png", b"x").is_err());
         assert!(w.write("assets", "a/b.png", b"x").is_err());

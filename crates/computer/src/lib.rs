@@ -38,9 +38,9 @@ pub use platform::{
 };
 pub use profile::{AutoProfile, Convention, ModelProfile, ResizeRule, SmartResize, auto_profile};
 pub use server::{
-    ComputerConfig, ComputerServer, MAX_HOLD_MS, MAX_TYPE_CHARS, MinimiseFn, ReadyCheck,
-    SERVER_NAME, StepAside, TOOL_CLICK, TOOL_DRAG, TOOL_KEY, TOOL_MOVE, TOOL_SCREENSHOT,
-    TOOL_SCROLL, TOOL_TYPE,
+    ApprovedOnCardFn, ComputerConfig, ComputerServer, IDLE_BEFORE_STEPPING_ASIDE, MAX_HOLD_MS,
+    MAX_TYPE_CHARS, MinimiseFn, ReadyCheck, SERVER_NAME, StepAside, TOOL_CLICK, TOOL_DRAG,
+    TOOL_KEY, TOOL_MOVE, TOOL_SCREENSHOT, TOOL_SCROLL, TOOL_TYPE,
 };
 pub use window_aside::{
     Aside, AsideEvent, Comeback, MainWindow, WindowAside, WindowNow, WindowStep,

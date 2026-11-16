@@ -123,14 +123,22 @@ impl SkipReason {
                 megabytes(caps.per_file)
             ),
             SkipReason::TotalReached => {
-                format!("the {} limit for the whole copy was reached", megabytes(caps.total))
+                format!(
+                    "the {} limit for the whole copy was reached",
+                    megabytes(caps.total)
+                )
             }
             SkipReason::FileCountReached => {
-                format!("the limit of {} files was reached", thousands(caps.files as u64))
+                format!(
+                    "the limit of {} files was reached",
+                    thousands(caps.files as u64)
+                )
             }
             SkipReason::Blocked(why) => format!("blocked by the browser's network rules ({why})"),
             SkipReason::NotKept => "not a kind of file the copy keeps".into(),
-            SkipReason::Partial => "the page loaded it in parts (a stream), so no whole copy exists".into(),
+            SkipReason::Partial => {
+                "the page loaded it in parts (a stream), so no whole copy exists".into()
+            }
             SkipReason::Gone => "the browser no longer held it".into(),
             SkipReason::UnsafePicture => {
                 "an SVG picture with scripts in it that could not be removed safely".into()
@@ -160,7 +168,7 @@ pub fn thousands(n: u64) -> String {
     let s = n.to_string();
     let mut out = String::new();
     for (i, c) in s.chars().enumerate() {
-        if i > 0 && (s.len() - i) % 3 == 0 {
+        if i > 0 && (s.len() - i).is_multiple_of(3) {
             out.push(',');
         }
         out.push(c);
@@ -219,7 +227,12 @@ impl Budget {
 /// response's media type; `None` for what the copy does not keep (documents, data the page
 /// asked for, beacons).
 pub fn kind_of(resource_type: &str, mime: &str, url: &str) -> Option<Kind> {
-    let mime = mime.split(';').next().unwrap_or("").trim().to_ascii_lowercase();
+    let mime = mime
+        .split(';')
+        .next()
+        .unwrap_or("")
+        .trim()
+        .to_ascii_lowercase();
     let ext = crate::capture::names::extension_of_url(url).unwrap_or_default();
     match resource_type {
         "Stylesheet" => Some(Kind::StyleSheet),
@@ -262,7 +275,11 @@ pub fn kind_of(resource_type: &str, mime: &str, url: &str) -> Option<Kind> {
 }
 
 fn is_icon(mime: &str, ext: &str) -> bool {
-    mime == "image/x-icon" || mime == "image/vnd.microsoft.icon" || ext == "ico" || mime == "image/svg+xml" || ext == "svg"
+    mime == "image/x-icon"
+        || mime == "image/vnd.microsoft.icon"
+        || ext == "ico"
+        || mime == "image/svg+xml"
+        || ext == "svg"
 }
 
 fn is_font_ext(ext: &str) -> bool {
@@ -283,7 +300,12 @@ pub fn extension_for(kind: Kind, mime: &str, url: &str, head: &[u8]) -> &'static
         // A picture's bytes decide; a font that sniffs as a picture is still a picture.
         return e;
     }
-    let mime = mime.split(';').next().unwrap_or("").trim().to_ascii_lowercase();
+    let mime = mime
+        .split(';')
+        .next()
+        .unwrap_or("")
+        .trim()
+        .to_ascii_lowercase();
     let by_mime = match mime.as_str() {
         "image/png" => Some("png"),
         "image/jpeg" | "image/jpg" | "image/pjpeg" => Some("jpg"),
@@ -295,7 +317,9 @@ pub fn extension_for(kind: Kind, mime: &str, url: &str, head: &[u8]) -> &'static
         "image/bmp" => Some("bmp"),
         "font/woff2" | "application/font-woff2" => Some("woff2"),
         "font/woff" | "application/font-woff" | "application/x-font-woff" => Some("woff"),
-        "font/ttf" | "application/x-font-ttf" | "font/sfnt" | "application/font-sfnt" => Some("ttf"),
+        "font/ttf" | "application/x-font-ttf" | "font/sfnt" | "application/font-sfnt" => {
+            Some("ttf")
+        }
         "font/otf" | "application/x-font-otf" | "font/opentype" => Some("otf"),
         "application/vnd.ms-fontobject" => Some("eot"),
         "application/json" => Some("json"),
@@ -312,7 +336,9 @@ pub fn extension_for(kind: Kind, mime: &str, url: &str, head: &[u8]) -> &'static
     }
     let allowed: &[&'static str] = match kind {
         Kind::Font => &["woff2", "woff", "ttf", "otf", "eot"],
-        Kind::Picture | Kind::Icon => &["png", "jpg", "jpeg", "gif", "webp", "avif", "svg", "ico", "bmp"],
+        Kind::Picture | Kind::Icon => &[
+            "png", "jpg", "jpeg", "gif", "webp", "avif", "svg", "ico", "bmp",
+        ],
         Kind::Animation => &["json", "lottie"],
         Kind::Video => &["mp4", "webm", "ogv", "mp3", "ogg", "wav"],
         Kind::StyleSheet | Kind::Script => &[],
@@ -340,7 +366,10 @@ pub fn sniff(head: &[u8]) -> Option<&'static str> {
         Some("gif")
     } else if head.len() >= 12 && &head[..4] == b"RIFF" && &head[8..12] == b"WEBP" {
         Some("webp")
-    } else if head.len() >= 12 && &head[4..8] == b"ftyp" && (&head[8..12] == b"avif" || &head[8..12] == b"avis") {
+    } else if head.len() >= 12
+        && &head[4..8] == b"ftyp"
+        && (&head[8..12] == b"avif" || &head[8..12] == b"avis")
+    {
         Some("avif")
     } else if starts(b"wOF2") {
         Some("woff2")
@@ -403,7 +432,10 @@ pub fn neutralise_svg(text: &str) -> Option<String> {
         }
         // Comments, CDATA and declarations are copied as they are (they cannot run).
         if lower[i..].starts_with("<!--") {
-            let end = lower[i..].find("-->").map(|e| i + e + 3).unwrap_or(bytes.len());
+            let end = lower[i..]
+                .find("-->")
+                .map(|e| i + e + 3)
+                .unwrap_or(bytes.len());
             out.push_str(&text[i..end]);
             i = end;
             continue;
@@ -415,15 +447,24 @@ pub fn neutralise_svg(text: &str) -> Option<String> {
             .collect();
         let bare = name.trim_start_matches('/');
         let bare = bare.rsplit(':').next().unwrap_or(bare);
-        if matches!(bare, "script" | "foreignobject" | "iframe" | "embed" | "object" | "handler" | "listener") {
+        if matches!(
+            bare,
+            "script" | "foreignobject" | "iframe" | "embed" | "object" | "handler" | "listener"
+        ) {
             if name.starts_with('/') {
                 // A stray closing tag: drop it.
-                let end = lower[i..].find('>').map(|e| i + e + 1).unwrap_or(bytes.len());
+                let end = lower[i..]
+                    .find('>')
+                    .map(|e| i + e + 1)
+                    .unwrap_or(bytes.len());
                 i = end;
                 continue;
             }
             // Drop the element and everything up to its end tag.
-            let tag_end = lower[i..].find('>').map(|e| i + e + 1).unwrap_or(bytes.len());
+            let tag_end = lower[i..]
+                .find('>')
+                .map(|e| i + e + 1)
+                .unwrap_or(bytes.len());
             if text[i..tag_end].trim_end_matches('>').ends_with('/') {
                 i = tag_end;
                 continue;
@@ -435,7 +476,10 @@ pub fn neutralise_svg(text: &str) -> Option<String> {
                 .or_else(|| lower[tag_end..].find(&alt))
                 .map(|e| {
                     let at = tag_end + e;
-                    lower[at..].find('>').map(|g| at + g + 1).unwrap_or(bytes.len())
+                    lower[at..]
+                        .find('>')
+                        .map(|g| at + g + 1)
+                        .unwrap_or(bytes.len())
                 })
                 .unwrap_or(bytes.len());
             i = end;
@@ -564,18 +608,20 @@ fn has_event_attribute(lower: &str) -> bool {
         match bytes[i] {
             b'<' => in_tag = true,
             b'>' => in_tag = false,
-            c if in_tag && (c.is_ascii_whitespace() || c == b'"' || c == b'\'' || c == b'/') => {
-                if bytes[i + 1] == b'o' && bytes[i + 2] == b'n' {
-                    let mut j = i + 3;
-                    while j < bytes.len() && bytes[j].is_ascii_alphanumeric() {
-                        j += 1;
-                    }
-                    while j < bytes.len() && bytes[j].is_ascii_whitespace() {
-                        j += 1;
-                    }
-                    if j > i + 3 && j < bytes.len() && bytes[j] == b'=' {
-                        return true;
-                    }
+            c if in_tag
+                && (c.is_ascii_whitespace() || c == b'"' || c == b'\'' || c == b'/')
+                && bytes[i + 1] == b'o'
+                && bytes[i + 2] == b'n' =>
+            {
+                let mut j = i + 3;
+                while j < bytes.len() && bytes[j].is_ascii_alphanumeric() {
+                    j += 1;
+                }
+                while j < bytes.len() && bytes[j].is_ascii_whitespace() {
+                    j += 1;
+                }
+                if j > i + 3 && j < bytes.len() && bytes[j] == b'=' {
+                    return true;
                 }
             }
             _ => {}
@@ -619,7 +665,10 @@ mod tests {
         b.force(1000);
         assert_eq!(b.files, 4);
         let caps = Caps::default();
-        assert_eq!(SkipReason::TooLarge.words(&caps), "larger than the 25 MB limit for one file");
+        assert_eq!(
+            SkipReason::TooLarge.words(&caps),
+            "larger than the 25 MB limit for one file"
+        );
         assert_eq!(
             SkipReason::FileCountReached.words(&caps),
             "the limit of 2,000 files was reached"
@@ -631,30 +680,73 @@ mod tests {
 
     #[test]
     fn kinds_and_extensions_come_from_the_app() {
-        assert_eq!(kind_of("Image", "image/png", "https://a/x.png"), Some(Kind::Picture));
-        assert_eq!(kind_of("Image", "image/svg+xml", "https://a/i.svg"), Some(Kind::Icon));
-        assert_eq!(kind_of("Font", "font/woff2", "https://a/f"), Some(Kind::Font));
+        assert_eq!(
+            kind_of("Image", "image/png", "https://a/x.png"),
+            Some(Kind::Picture)
+        );
+        assert_eq!(
+            kind_of("Image", "image/svg+xml", "https://a/i.svg"),
+            Some(Kind::Icon)
+        );
+        assert_eq!(
+            kind_of("Font", "font/woff2", "https://a/f"),
+            Some(Kind::Font)
+        );
         assert_eq!(kind_of("Document", "text/html", "https://a/"), None);
         assert_eq!(kind_of("Fetch", "text/html", "https://a/x"), None);
-        assert_eq!(kind_of("XHR", "application/json", "https://a/anim.json"), Some(Kind::Animation));
+        assert_eq!(
+            kind_of("XHR", "application/json", "https://a/anim.json"),
+            Some(Kind::Animation)
+        );
         assert_eq!(kind_of("Ping", "", "https://a/x"), None);
-        assert_eq!(kind_of("Media", "video/mp4", "https://a/v.mp4"), Some(Kind::Video));
+        assert_eq!(
+            kind_of("Media", "video/mp4", "https://a/v.mp4"),
+            Some(Kind::Video)
+        );
         // The bytes decide over the media type, and a hostile name never gives the extension.
         let png = b"\x89PNG\r\n\x1a\n0000";
-        assert_eq!(extension_for(Kind::Picture, "text/html", "https://a/x.exe", png), "png");
-        assert_eq!(extension_for(Kind::Picture, "application/octet-stream", "https://a/x.exe", b"??"), "img");
-        assert_eq!(extension_for(Kind::Picture, "", "https://a/x.JPEG", b"??"), "jpg");
-        assert_eq!(extension_for(Kind::Font, "", "https://a/f.woff2?v=1", b"wOF2..."), "woff2");
-        assert_eq!(extension_for(Kind::Script, "text/javascript", "https://a/app.js", b""), "js.txt");
-        assert_eq!(extension_for(Kind::StyleSheet, "text/css", "https://a/x.css", b""), "css");
-        assert_eq!(extension_for(Kind::Video, "", "https://a/x.html", b"??"), "media");
+        assert_eq!(
+            extension_for(Kind::Picture, "text/html", "https://a/x.exe", png),
+            "png"
+        );
+        assert_eq!(
+            extension_for(
+                Kind::Picture,
+                "application/octet-stream",
+                "https://a/x.exe",
+                b"??"
+            ),
+            "img"
+        );
+        assert_eq!(
+            extension_for(Kind::Picture, "", "https://a/x.JPEG", b"??"),
+            "jpg"
+        );
+        assert_eq!(
+            extension_for(Kind::Font, "", "https://a/f.woff2?v=1", b"wOF2..."),
+            "woff2"
+        );
+        assert_eq!(
+            extension_for(Kind::Script, "text/javascript", "https://a/app.js", b""),
+            "js.txt"
+        );
+        assert_eq!(
+            extension_for(Kind::StyleSheet, "text/css", "https://a/x.css", b""),
+            "css"
+        );
+        assert_eq!(
+            extension_for(Kind::Video, "", "https://a/x.html", b"??"),
+            "media"
+        );
         assert_eq!(sniff(b"<?xml version=\"1.0\"?><svg"), Some("svg"));
         assert_eq!(sniff(b"RIFF\0\0\0\0WEBPVP8 "), Some("webp"));
     }
 
     #[test]
     fn lottie_files_are_told_apart_from_other_data() {
-        assert!(is_lottie(br#"{"v":"5.7.4","fr":30,"ip":0,"op":60,"w":100,"h":100,"layers":[]}"#));
+        assert!(is_lottie(
+            br#"{"v":"5.7.4","fr":30,"ip":0,"op":60,"w":100,"h":100,"layers":[]}"#
+        ));
         assert!(!is_lottie(br#"{"user":"ada","email":"ada@example.com"}"#));
         assert!(!is_lottie(b"not json"));
     }
@@ -665,9 +757,15 @@ mod tests {
         let clean = neutralise_svg(svg).expect("kept");
         let lower = clean.to_ascii_lowercase();
         assert!(!lower.contains("script"), "{clean}");
-        assert!(!lower.contains("onload") && !lower.contains("onclick"), "{clean}");
+        assert!(
+            !lower.contains("onload") && !lower.contains("onclick"),
+            "{clean}"
+        );
         assert!(!lower.contains("javascript"), "{clean}");
-        assert!(!lower.contains("iframe") && !lower.contains("foreignobject"), "{clean}");
+        assert!(
+            !lower.contains("iframe") && !lower.contains("foreignobject"),
+            "{clean}"
+        );
         assert!(clean.contains("<circle r=\"4\" fill=\"#33f\"/>"), "{clean}");
         assert!(clean.contains("<text>ok</text>"), "{clean}");
         // A plain icon is unchanged.
@@ -675,7 +773,13 @@ mod tests {
         assert_eq!(neutralise_svg(icon).as_deref(), Some(icon));
         // Encoded tricks are not guessed at: the picture is left out.
         assert!(neutralise_svg(r#"<svg><a href="&#106;avascript:alert(1)">x</a></svg>"#).is_none());
-        assert!(neutralise_svg(r#"<svg><SCRIPT>alert(1)</SCRIPT></svg>"#).is_some_and(|s| !s.to_ascii_lowercase().contains("script")));
-        assert!(neutralise_svg(r#"<svg><svg:script>alert(1)</svg:script></svg>"#).is_some_and(|s| !s.contains("alert")));
+        assert!(
+            neutralise_svg(r#"<svg><SCRIPT>alert(1)</SCRIPT></svg>"#)
+                .is_some_and(|s| !s.to_ascii_lowercase().contains("script"))
+        );
+        assert!(
+            neutralise_svg(r#"<svg><svg:script>alert(1)</svg:script></svg>"#)
+                .is_some_and(|s| !s.contains("alert"))
+        );
     }
 }

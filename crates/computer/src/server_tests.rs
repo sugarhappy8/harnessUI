@@ -1560,16 +1560,22 @@ async fn an_input_that_allow_all_could_let_through_never_reaches_a_protected_tar
 // ---- Stepping aside (0.0.7) ---------------------------------------------------------
 //
 // Screenshots leave this app's windows out, so the model aims at what is behind them. With
-// a step-aside hook the app minimises its main window before approved input, so an action
-// is planned for what is behind this app's window and the input reaches it; the guard still
-// checks every event.
+// a step-aside hook the app minimises its main window before approved input it is in the
+// way of, so an action is planned for what is behind this app's window and the input
+// reaches it; the guard still checks every event.
 
 /// What a step-aside hook did, by chat.
 type AsideCalls = Arc<std::sync::Mutex<Vec<i64>>>;
 
 /// A step-aside hook that minimises this app's window (id 2) on the fake desktop, as the
-/// app minimises its main window, and records which chat asked.
+/// app minimises its main window, and records which chat asked. Every action counts as
+/// approved on its card just now.
 fn stepping_aside(d: &FakeDesktop) -> (ComputerConfig, AsideCalls) {
+    stepping_aside_with(d, true)
+}
+
+/// The same, with `on_card` false for actions approved by a grant or Allow all.
+fn stepping_aside_with(d: &FakeDesktop, on_card: bool) -> (ComputerConfig, AsideCalls) {
     let calls: AsideCalls = Arc::default();
     let (desk, seen) = (d.clone(), calls.clone());
     let config = ComputerConfig {
@@ -1579,6 +1585,7 @@ fn stepping_aside(d: &FakeDesktop) -> (ComputerConfig, AsideCalls) {
                 seen.lock().unwrap().push(chat);
                 desk.minimise(2);
             }),
+            approved_on_card: Arc::new(move |_| on_card),
         }),
         ..Default::default()
     };
@@ -1599,7 +1606,7 @@ fn typed(d: &FakeDesktop) -> String {
         .collect()
 }
 
-const ASIDE_LINE: &str = "harnessUI will minimise itself while this runs.";
+const ASIDE_LINE: &str = "harnessUI minimises its window while this runs, if the window is in the way.";
 
 #[tokio::test]
 async fn a_click_on_this_apps_window_goes_to_the_window_behind_once_it_steps_aside() {
@@ -1787,6 +1794,7 @@ async fn when_this_apps_window_does_not_go_the_input_is_still_refused() {
         step_aside: Some(StepAside {
             app_name: "harnessUI".into(),
             minimise: Arc::new(move |chat, _| seen.lock().unwrap().push(chat)),
+            approved_on_card: Arc::new(|_| true),
         }),
         ..Default::default()
     };
@@ -1880,12 +1888,14 @@ async fn stop_while_stepping_aside_returns_at_once() {
             app_name: "harnessUI".into(),
             // The app's main thread is slow to minimise the window.
             minimise: Arc::new(|_, _| std::thread::sleep(Duration::from_secs(2))),
+            approved_on_card: Arc::new(|_| true),
         }),
         ..Default::default()
     };
     let s = server_with(&d, config);
     screenshot(&s).await;
-    let a = describe(&s, TOOL_CLICK, json!({"coordinate": [100, 100]}))
+    // Under this app's window.
+    let a = describe(&s, TOOL_CLICK, json!({"coordinate": [700, 300]}))
         .await
         .unwrap();
     let c = ctx();
@@ -1933,6 +1943,7 @@ async fn the_step_aside_hook_gets_the_calls_stop() {
                 *keep.lock().unwrap() = Some(cancel.clone());
                 desk.minimise(2);
             }),
+            approved_on_card: Arc::new(|_| true),
         }),
         ..Default::default()
     };
@@ -1950,4 +1961,466 @@ async fn the_step_aside_hook_gets_the_calls_stop() {
     assert!(!token.is_cancelled());
     stop.cancel();
     assert!(token.is_cancelled());
+}
+
+#[tokio::test]
+async fn this_app_does_not_minimise_when_it_is_not_in_the_way() {
+    let d = desktop();
+    let (config, calls) = stepping_aside(&d);
+    let s = server_with(&d, config);
+    screenshot(&s).await;
+    // A click far from this app's window (x 600 to 1000) while Notepad has the keyboard.
+    let a = describe(&s, TOOL_CLICK, json!({"coordinate": [100, 100]}))
+        .await
+        .unwrap();
+    let out = s.call(TOOL_CLICK, &args(json!({})), &a, ctx()).await;
+    assert!(!out.is_error, "{}", out.joined_text());
+    assert_eq!(buttons(&d).len(), 2);
+    // Typing while Notepad has the keyboard.
+    let a = describe(&s, TOOL_TYPE, json!({"text": "hi"}))
+        .await
+        .unwrap();
+    let out = s.call(TOOL_TYPE, &args(json!({})), &a, ctx()).await;
+    assert!(!out.is_error, "{}", out.joined_text());
+    assert_eq!(typed(&d), "hi");
+    assert!(calls.lock().unwrap().is_empty(), "minimised although not in the way");
+    assert!(!minimised(&d, 2));
+    assert!(d.state().fronted.is_empty());
+}
+
+#[tokio::test]
+async fn a_console_behind_this_apps_window_always_asks() {
+    let d = desktop();
+    let mut console = FakeWindow::new(5, Rect::new(650.0, 400.0, 200.0, 200.0), 70, app("python"));
+    console.console = true;
+    {
+        let mut st = d.state();
+        let at = st.windows.iter().position(|w| w.id == 2).unwrap() + 1;
+        st.windows.insert(at, console);
+    }
+    let (config, _) = stepping_aside(&d);
+    let s = server_with(&d, config);
+    screenshot(&s).await;
+    let a = describe(&s, TOOL_CLICK, json!({"coordinate": [700, 450]}))
+        .await
+        .unwrap();
+    assert_eq!(a.hard_limit, None);
+    assert_eq!(a.risk, Risk::AlwaysAsk, "{}", a.preview);
+    assert!(a.keep_asking.is_some());
+}
+
+#[tokio::test]
+async fn typing_behind_this_app_into_a_console_always_asks() {
+    let d = desktop();
+    let mut console = FakeWindow::new(5, Rect::new(0.0, 0.0, 300.0, 300.0), 70, app("python"));
+    console.console = true;
+    {
+        let mut st = d.state();
+        let at = st.windows.iter().position(|w| w.id == 2).unwrap() + 1;
+        st.windows.insert(at, console);
+        st.foreground = Some(2);
+    }
+    let (config, _) = stepping_aside(&d);
+    let s = server_with(&d, config);
+    let a = describe(&s, TOOL_TYPE, json!({"text": "dir"}))
+        .await
+        .unwrap();
+    assert_eq!(a.hard_limit, None);
+    assert_eq!(a.risk, Risk::AlwaysAsk, "{}", a.preview);
+    assert!(a.keep_asking.is_some());
+}
+
+#[tokio::test]
+async fn another_application_at_the_point_by_the_time_it_runs_is_refused() {
+    let d = desktop();
+    let (config, _) = stepping_aside(&d);
+    let s = server_with(&d, config);
+    screenshot(&s).await;
+    // Planned through this app's window, for Notepad.
+    let a = describe(&s, TOOL_CLICK, json!({"coordinate": [700, 300]}))
+        .await
+        .unwrap();
+    assert_eq!(a.hard_limit, None);
+    // Mail opened behind this app's window, over the point.
+    let mail = FakeWindow::new(8, Rect::new(650.0, 250.0, 200.0, 200.0), 61, app("mail"));
+    {
+        let mut st = d.state();
+        let at = st.windows.iter().position(|w| w.id == 2).unwrap() + 1;
+        st.windows.insert(at, mail);
+    }
+    d.clear_events();
+    let out = s.call(TOOL_CLICK, &args(json!({})), &a, ctx()).await;
+    assert!(out.is_error);
+    assert!(
+        out.joined_text().contains("would now go to"),
+        "{}",
+        out.joined_text()
+    );
+    assert!(buttons(&d).is_empty());
+}
+
+#[tokio::test]
+async fn stop_during_the_minimise_leaves_the_keyboard_with_this_app() {
+    let d = desktop();
+    let desk = d.clone();
+    let config = ComputerConfig {
+        step_aside: Some(StepAside {
+            app_name: "harnessUI".into(),
+            minimise: Arc::new(move |_, cancel| {
+                desk.minimise(2);
+                // Stop: the call is cancelled and the window comes back, focused.
+                cancel.cancel();
+                desk.restore(2);
+            }),
+            approved_on_card: Arc::new(|_| true),
+        }),
+        ..Default::default()
+    };
+    let s = server_with(&d, config);
+    // Planned while Notepad has the focus.
+    let a = describe(&s, TOOL_TYPE, json!({"text": "hi"}))
+        .await
+        .unwrap();
+    assert_eq!(a.hard_limit, None);
+    // The card brought this app back; the user pressed Allow in it.
+    d.restore(2);
+    d.clear_events();
+    let out = s.call(TOOL_TYPE, &args(json!({})), &a, ctx()).await;
+    assert!(out.is_error, "{}", out.joined_text());
+    assert!(
+        out.joined_text().contains("Stopped"),
+        "{}",
+        out.joined_text()
+    );
+    // Let the blocking step finish.
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    let st = d.state();
+    // Handed back once, before the minimise; never after Stop.
+    assert_eq!(st.fronted, vec![1]);
+    assert_eq!(st.foreground, Some(2));
+    assert!(st.events.is_empty());
+}
+
+#[tokio::test]
+async fn stop_pressed_on_the_main_thread_during_the_minimise_closes_the_hand_back() {
+    // Stop closes the gates at once, before the app brings its window back; the call's own
+    // cancellation can come later. The platform checks the gate as it moves the focus.
+    let d = desktop();
+    d.state().focus_stays_on_minimise = true;
+    let desk = d.clone();
+    let slot: Arc<std::sync::Mutex<Option<StopHandle>>> = Arc::default();
+    let stop = slot.clone();
+    let config = ComputerConfig {
+        step_aside: Some(StepAside {
+            app_name: "harnessUI".into(),
+            minimise: Arc::new(move |_, _| {
+                desk.minimise(2);
+                stop.lock().unwrap().as_ref().unwrap().release_all();
+                desk.restore(2);
+            }),
+            approved_on_card: Arc::new(|_| true),
+        }),
+        ..Default::default()
+    };
+    let s = server_with(&d, config);
+    *slot.lock().unwrap() = Some(s.guard.stop_handle());
+    let a = describe(&s, TOOL_TYPE, json!({"text": "hi"}))
+        .await
+        .unwrap();
+    d.restore(2);
+    d.clear_events();
+    let out = s.call(TOOL_TYPE, &args(json!({})), &a, ctx()).await;
+    assert!(out.is_error, "{}", out.joined_text());
+    let st = d.state();
+    assert_eq!(st.fronted, vec![1]);
+    assert_eq!(st.foreground, Some(2));
+    assert!(
+        !st.events
+            .iter()
+            .any(|e| matches!(e, InputEvent::Text { .. })),
+        "{:?}",
+        st.events
+    );
+}
+
+#[tokio::test]
+async fn another_operation_waits_until_a_stopped_step_aside_has_ended() {
+    let d = desktop();
+    let ended: Arc<std::sync::Mutex<Option<std::time::Instant>>> = Arc::default();
+    let mark = ended.clone();
+    let config = ComputerConfig {
+        step_aside: Some(StepAside {
+            app_name: "harnessUI".into(),
+            // The app's main thread is slow to minimise the window.
+            minimise: Arc::new(move |_, _| {
+                std::thread::sleep(Duration::from_millis(500));
+                *mark.lock().unwrap() = Some(std::time::Instant::now());
+            }),
+            approved_on_card: Arc::new(|_| true),
+        }),
+        ..Default::default()
+    };
+    let s = server_with(&d, config);
+    screenshot(&s).await;
+    let first = describe(&s, TOOL_CLICK, json!({"coordinate": [700, 300]}))
+        .await
+        .unwrap();
+    let second = describe(&s, TOOL_CLICK, json!({"coordinate": [100, 100]}))
+        .await
+        .unwrap();
+    let c = ctx();
+    let cancel = c.cancel.clone();
+    tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        cancel.cancel();
+    });
+    let out = s.call(TOOL_CLICK, &args(json!({})), &first, c).await;
+    assert!(
+        out.joined_text().contains("Stopped"),
+        "{}",
+        out.joined_text()
+    );
+    // Stop did not wait for the step, which still runs.
+    assert!(ended.lock().unwrap().is_none());
+    d.clear_events();
+    let out = s.call(TOOL_CLICK, &args(json!({})), &second, ctx()).await;
+    assert!(!out.is_error, "{}", out.joined_text());
+    // The next operation only ran once the step had ended.
+    let ended = ended.lock().unwrap().expect("the step ended first");
+    assert!(d.state().injected_input.unwrap() >= ended);
+    assert_eq!(buttons(&d).len(), 2);
+}
+
+#[tokio::test]
+async fn under_a_grant_this_app_steps_aside_only_once_the_user_has_stopped_working() {
+    let d = desktop();
+    d.state().reports_input_time = true;
+    let (config, calls) = stepping_aside_with(&d, false);
+    let s = server_with(&d, config);
+    screenshot(&s).await;
+    let a = describe(&s, TOOL_CLICK, json!({"coordinate": [700, 300]}))
+        .await
+        .unwrap();
+    assert_eq!(a.hard_limit, None);
+    // The user moved the mouse a moment ago: refused as before, nothing moves.
+    d.user_input(Duration::from_millis(200));
+    d.clear_events();
+    let out = s.call(TOOL_CLICK, &args(json!({})), &a, ctx()).await;
+    assert!(out.is_error);
+    assert_eq!(out.joined_text(), Refusal::SelfPointer.to_string());
+    assert!(calls.lock().unwrap().is_empty());
+    assert!(!minimised(&d, 2));
+    assert!(d.events().is_empty());
+    // A few seconds later the same action steps aside and runs.
+    d.user_input(Duration::from_secs(5));
+    let out = s.call(TOOL_CLICK, &args(json!({})), &a, ctx()).await;
+    assert!(!out.is_error, "{}", out.joined_text());
+    assert_eq!(*calls.lock().unwrap(), vec![CHAT]);
+    assert_eq!(buttons(&d).len(), 2);
+}
+
+#[tokio::test]
+async fn under_a_grant_typing_while_the_user_types_in_this_app_is_refused() {
+    let d = desktop();
+    d.state().reports_input_time = true;
+    d.state().foreground = Some(2);
+    let (config, calls) = stepping_aside_with(&d, false);
+    let s = server_with(&d, config);
+    let a = describe(&s, TOOL_TYPE, json!({"text": "hi"}))
+        .await
+        .unwrap();
+    assert_eq!(a.hard_limit, None);
+    d.user_input(Duration::ZERO);
+    let out = s.call(TOOL_TYPE, &args(json!({})), &a, ctx()).await;
+    assert!(out.is_error);
+    assert_eq!(out.joined_text(), Refusal::SelfKeyboard.to_string());
+    assert!(calls.lock().unwrap().is_empty());
+    let st = d.state();
+    assert!(st.fronted.is_empty());
+    assert_eq!(st.foreground, Some(2));
+    assert!(st.events.is_empty());
+}
+
+#[tokio::test]
+async fn under_a_grant_this_app_does_not_step_aside_when_the_system_cannot_tell() {
+    let d = desktop();
+    let (config, calls) = stepping_aside_with(&d, false);
+    let s = server_with(&d, config);
+    screenshot(&s).await;
+    let a = describe(&s, TOOL_CLICK, json!({"coordinate": [700, 300]}))
+        .await
+        .unwrap();
+    d.clear_events();
+    let out = s.call(TOOL_CLICK, &args(json!({})), &a, ctx()).await;
+    assert!(out.is_error);
+    assert_eq!(out.joined_text(), Refusal::SelfPointer.to_string());
+    assert!(calls.lock().unwrap().is_empty());
+    assert!(d.events().is_empty());
+}
+
+#[tokio::test]
+async fn a_card_answered_just_now_steps_aside_although_the_user_just_clicked() {
+    let d = desktop();
+    d.state().reports_input_time = true;
+    let (config, calls) = stepping_aside(&d);
+    let s = server_with(&d, config);
+    screenshot(&s).await;
+    let a = describe(&s, TOOL_CLICK, json!({"coordinate": [700, 300]}))
+        .await
+        .unwrap();
+    // The click on Allow.
+    d.user_input(Duration::ZERO);
+    let out = s.call(TOOL_CLICK, &args(json!({})), &a, ctx()).await;
+    assert!(!out.is_error, "{}", out.joined_text());
+    assert_eq!(*calls.lock().unwrap(), vec![CHAT]);
+}
+
+#[tokio::test]
+async fn this_apps_own_input_does_not_count_as_the_users() {
+    let d = desktop();
+    d.state().reports_input_time = true;
+    d.user_input(Duration::from_secs(5));
+    let (config, calls) = stepping_aside_with(&d, false);
+    let s = server_with(&d, config);
+    screenshot(&s).await;
+    let first = describe(&s, TOOL_CLICK, json!({"coordinate": [100, 100]}))
+        .await
+        .unwrap();
+    let second = describe(&s, TOOL_CLICK, json!({"coordinate": [700, 300]}))
+        .await
+        .unwrap();
+    let out = s.call(TOOL_CLICK, &args(json!({})), &first, ctx()).await;
+    assert!(!out.is_error, "{}", out.joined_text());
+    assert!(calls.lock().unwrap().is_empty());
+    // Right after this app's own click, which the system counts as input.
+    let out = s.call(TOOL_CLICK, &args(json!({})), &second, ctx()).await;
+    assert!(!out.is_error, "{}", out.joined_text());
+    assert_eq!(*calls.lock().unwrap(), vec![CHAT]);
+}
+
+#[tokio::test]
+async fn the_card_answer_is_asked_for_once_per_action() {
+    let d = desktop();
+    let asked = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let count = asked.clone();
+    let desk = d.clone();
+    let config = ComputerConfig {
+        step_aside: Some(StepAside {
+            app_name: "harnessUI".into(),
+            minimise: Arc::new(move |_, _| desk.minimise(2)),
+            approved_on_card: Arc::new(move |chat| {
+                assert_eq!(chat, CHAT);
+                count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                true
+            }),
+        }),
+        ..Default::default()
+    };
+    let s = server_with(&d, config);
+    screenshot(&s).await;
+    // Not in the way: asked all the same, so the answer is not left for a later action.
+    let a = describe(&s, TOOL_CLICK, json!({"coordinate": [100, 100]}))
+        .await
+        .unwrap();
+    let out = s.call(TOOL_CLICK, &args(json!({})), &a, ctx()).await;
+    assert!(!out.is_error, "{}", out.joined_text());
+    assert_eq!(asked.load(std::sync::atomic::Ordering::SeqCst), 1);
+    let a = describe(&s, TOOL_CLICK, json!({"coordinate": [700, 300]}))
+        .await
+        .unwrap();
+    let out = s.call(TOOL_CLICK, &args(json!({})), &a, ctx()).await;
+    assert!(!out.is_error, "{}", out.joined_text());
+    assert_eq!(asked.load(std::sync::atomic::Ordering::SeqCst), 2);
+    // Describing asks nothing.
+    assert!(describe(&s, TOOL_TYPE, json!({"text": "x"})).await.is_ok());
+    assert_eq!(asked.load(std::sync::atomic::Ordering::SeqCst), 2);
+}
+
+#[tokio::test]
+async fn the_keyboard_is_not_handed_to_a_window_that_now_belongs_to_another_program() {
+    for mac in [false, true] {
+        let d = desktop();
+        d.state().focus_stays_on_minimise = mac;
+        d.state().foreground = Some(2);
+        let (config, _) = stepping_aside(&d);
+        let s = server_with(&d, config);
+        let a = describe(&s, TOOL_TYPE, json!({"text": "hi"}))
+            .await
+            .unwrap();
+        assert_eq!(a.hard_limit, None);
+        // Notepad closed and Windows gave its handle to Mail's new window.
+        {
+            let mut st = d.state();
+            let w = st.windows.iter_mut().find(|w| w.id == 1).unwrap();
+            w.pid = 61;
+            w.app = app("mail");
+        }
+        d.clear_events();
+        let out = s.call(TOOL_TYPE, &args(json!({})), &a, ctx()).await;
+        assert!(out.is_error, "mac {mac}: {}", out.joined_text());
+        assert!(d.state().fronted.is_empty(), "mac {mac}");
+        assert_eq!(typed(&d), "", "mac {mac}");
+    }
+}
+
+#[tokio::test]
+async fn when_macos_refuses_the_activation_the_typing_is_refused() {
+    let d = desktop();
+    {
+        let mut st = d.state();
+        st.mac = true;
+        st.focus_stays_on_minimise = true;
+        st.bring_to_front_fails = true;
+        st.foreground = Some(2);
+    }
+    let (config, calls) = stepping_aside(&d);
+    let s = server_with(&d, config);
+    let a = describe(&s, TOOL_TYPE, json!({"text": "hi"}))
+        .await
+        .unwrap();
+    assert_eq!(a.hard_limit, None);
+    d.clear_events();
+    let out = s.call(TOOL_TYPE, &args(json!({})), &a, ctx()).await;
+    assert!(out.is_error);
+    assert_eq!(out.joined_text(), Refusal::SelfKeyboard.to_string());
+    // This app stepped aside, but the keyboard stayed with it: nothing was typed.
+    assert_eq!(*calls.lock().unwrap(), vec![CHAT]);
+    assert!(minimised(&d, 2));
+    assert!(d.state().fronted.is_empty());
+    assert!(d.events().is_empty());
+}
+
+#[tokio::test]
+async fn the_second_hand_back_never_takes_the_keyboard_from_another_application() {
+    let d = desktop();
+    d.state().focus_stays_on_minimise = true;
+    let mut mail = FakeWindow::new(8, Rect::new(0.0, 500.0, 300.0, 300.0), 61, app("mail"));
+    mail.colour = [9, 9, 9];
+    d.state().windows.push(mail);
+    let desk = d.clone();
+    let config = ComputerConfig {
+        step_aside: Some(StepAside {
+            app_name: "harnessUI".into(),
+            minimise: Arc::new(move |_, _| {
+                desk.minimise(2);
+                // The user switched to Mail meanwhile.
+                desk.state().foreground = Some(8);
+            }),
+            approved_on_card: Arc::new(|_| true),
+        }),
+        ..Default::default()
+    };
+    let s = server_with(&d, config);
+    let a = describe(&s, TOOL_TYPE, json!({"text": "hi"}))
+        .await
+        .unwrap();
+    d.restore(2);
+    d.clear_events();
+    let out = s.call(TOOL_TYPE, &args(json!({})), &a, ctx()).await;
+    assert!(out.is_error);
+    let st = d.state();
+    // Handed back before the minimise only; Mail keeps the keyboard.
+    assert_eq!(st.fronted, vec![1]);
+    assert_eq!(st.foreground, Some(8));
+    assert!(st.events.is_empty());
 }

@@ -27,10 +27,12 @@ pub struct AnimationLog {
 }
 
 impl AnimationLog {
-    /// Adds what `js/animations.js` returned, seen at `when` ("at the top", "scrolled to
-    /// 1,200 px", "390 px wide").
+    /// Adds what `js/animations.js` returned, seen at `when` ("at the top", "while
+    /// scrolling", "390 px wide, at the top"). A new animation also keeps the scroll position
+    /// it was first seen at, which tells where an effect that starts on scroll begins.
     pub fn add_snapshot(&mut self, snapshot: &Value, when: &str) {
         let total = snapshot.get("total").and_then(Value::as_u64).unwrap_or(0);
+        let y = snapshot.get("y").and_then(Value::as_u64).unwrap_or(0);
         self.most_at_once = self.most_at_once.max(total);
         let Some(list) = snapshot.get("list").and_then(Value::as_array) else {
             return;
@@ -55,8 +57,9 @@ impl AnimationLog {
                         continue;
                     }
                     self.order.push(key.clone());
-                    self.by_key
-                        .insert(key, (clean_animation(obj), vec![when.to_string()]));
+                    let mut v = clean_animation(obj);
+                    v["first_seen_at_scroll_px"] = json!(y);
+                    self.by_key.insert(key, (v, vec![when.to_string()]));
                 }
             }
         }
@@ -356,7 +359,8 @@ pub fn detect_libraries(
                     .filter(|s| {
                         !s.is_empty()
                             && s.len() <= 24
-                            && s.chars().all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '-')
+                            && s.chars()
+                                .all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '-')
                     })
                     .map(|s| format!(" (version {s})"))
                     .unwrap_or_default();
@@ -389,7 +393,9 @@ pub fn detect_libraries(
             }
         }
         if sig.name == "Lottie" && lottie_files > 0 {
-            by.push(format!("{lottie_files} Lottie animation file(s) were loaded"));
+            by.push(format!(
+                "{lottie_files} Lottie animation file(s) were loaded"
+            ));
         }
         if !by.is_empty() {
             out.push(Library {
@@ -410,7 +416,9 @@ pub fn detect_libraries(
     if smil > 0 {
         out.push(Library {
             name: "SVG animation (SMIL)",
-            detected_by: vec![format!("{smil} <animate> or <set> element(s) in SVG pictures")],
+            detected_by: vec![format!(
+                "{smil} <animate> or <set> element(s) in SVG pictures"
+            )],
         });
     }
     out
@@ -464,7 +472,8 @@ pub fn document(
             transitions.push(json!({"selector": selector, "transition": value, "sheet": file}));
         }
         for (selector, declarations) in &f.scroll_driven {
-            scroll_driven.push(json!({"selector": selector, "declarations": declarations, "sheet": file}));
+            scroll_driven
+                .push(json!({"selector": selector, "declarations": declarations, "sheet": file}));
         }
     }
     let cap = |v: &mut Vec<Value>, n: usize| {
@@ -526,19 +535,30 @@ mod tests {
     fn snapshots_merge_without_repeats_and_keep_where_they_were_seen() {
         let mut log = AnimationLog::default();
         log.add_snapshot(&snapshot(), "at the top");
-        log.add_snapshot(&snapshot(), "scrolled to 900 px");
+        let mut later = snapshot();
+        later["y"] = json!(900);
+        log.add_snapshot(&later, "while scrolling");
         log.add_snapshot(&snapshot(), "at the top");
         let running = log.running();
         assert_eq!(running.len(), 2);
-        assert_eq!(running[0]["seen"], json!(["at the top", "scrolled to 900 px"]));
+        assert_eq!(running[0]["seen"], json!(["at the top", "while scrolling"]));
+        assert_eq!(running[0]["first_seen_at_scroll_px"], 0);
         assert_eq!(log.counts(), (1, 0, 1));
         let script = &running[1];
         assert_eq!(script["timing"]["iterations"], "infinite");
         assert_eq!(script["timing"]["duration"], 2000);
-        assert!(script.get("unknown").is_none(), "only known fields are kept");
+        assert!(
+            script.get("unknown").is_none(),
+            "only known fields are kept"
+        );
         assert!(script["timeline"].get("extra").is_none());
         let frame = script["keyframes"][0].as_object().unwrap();
-        assert!(frame.keys().all(|k| k.chars().all(|c| c.is_ascii_alphanumeric() || c == '-')), "{frame:?}");
+        assert!(
+            frame
+                .keys()
+                .all(|k| k.chars().all(|c| c.is_ascii_alphanumeric() || c == '-')),
+            "{frame:?}"
+        );
     }
 
     #[test]
@@ -555,9 +575,21 @@ mod tests {
             "2026-11-16T15:30:12Z",
             &log,
             &[("styles/site.css".into(), facts)],
-            &[Library { name: "GSAP", detected_by: vec!["window.gsap is set".into()] }],
+            &[Library {
+                name: "GSAP",
+                detected_by: vec!["window.gsap is set".into()],
+            }],
         );
-        for key in ["running", "keyframes", "hover_focus_rules", "transitions", "scroll_driven", "libraries", "counts", "cut"] {
+        for key in [
+            "running",
+            "keyframes",
+            "hover_focus_rules",
+            "transitions",
+            "scroll_driven",
+            "libraries",
+            "counts",
+            "cut",
+        ] {
             assert!(doc.get(key).is_some(), "{key}");
         }
         assert_eq!(doc["counts"]["css_animations"], 1);
@@ -573,13 +605,31 @@ mod tests {
         let globals = json!({"gsap": "3.12.5", "ScrollTrigger": true, "lottie": "<b>evil</b>"});
         let markers = json!({"aos": 3, "lenis": 1, "svgSmil": 0});
         let scripts = [
-            ScriptSample { url: "https://cdn.example/libs/gsap.min.js", text: "/* GreenSock */" },
-            ScriptSample { url: "", text: "new Lenis({lerp: .1})" },
+            ScriptSample {
+                url: "https://cdn.example/libs/gsap.min.js",
+                text: "/* GreenSock */",
+            },
+            ScriptSample {
+                url: "",
+                text: "new Lenis({lerp: .1})",
+            },
         ];
         let libs = detect_libraries(&globals, &markers, &scripts, 0, 0);
         let names: Vec<&str> = libs.iter().map(|l| l.name).collect();
-        assert_eq!(names, ["GSAP", "GSAP ScrollTrigger", "Lottie", "Lenis smooth scroll", "AOS (animate on scroll)"]);
-        assert_eq!(libs[0].detected_by[0], "window.gsap is set (version 3.12.5)");
+        assert_eq!(
+            names,
+            [
+                "GSAP",
+                "GSAP ScrollTrigger",
+                "Lottie",
+                "Lenis smooth scroll",
+                "AOS (animate on scroll)"
+            ]
+        );
+        assert_eq!(
+            libs[0].detected_by[0],
+            "window.gsap is set (version 3.12.5)"
+        );
         assert!(libs[0].detected_by.iter().any(|d| d.contains("gsap")));
         // A version that is not a plain version string is not quoted.
         assert_eq!(libs[2].detected_by, ["window.lottie is set"]);

@@ -84,3 +84,10 @@ and `README.md`.
   models listed) plus nits. All being fixed by P5 (round 1).
 - P2 review: no critical; 2 major + 11 minor recorded in `review-p2-findings.md` (the
   automatic Hugging Face listing becomes user-triggered). To fix after P6b; m5 given to P6b.
+- P4 review: nothing critical; one major: at a 4,096-token context the list pointed models
+  to find_tools/call_tool that the turn didn't offer, and its size pushed edit_file out of
+  every turn. Minor: new computer keywords matched coding requests ("chrome extension code",
+  "open settings.json", "my laptop"); made-up-result detection fired on prose mentions; two
+  PowerShell hints misfired (`&` messages; cmdlet echoed in the output); a quadratic scan on
+  big outputs; the evals harness ran without the list. Plus nits. All being fixed by P4
+  (round 1).

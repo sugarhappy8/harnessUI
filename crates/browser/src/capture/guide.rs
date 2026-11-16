@@ -41,10 +41,22 @@ mod tests {
     #[test]
     fn the_method_names_every_step_and_the_limits() {
         let all = METHOD.join("\n");
-        for word in ["report", "screenshots", "sections", "user's own", "animations.json", "artifact", "Compare"] {
+        for word in [
+            "report",
+            "screenshots",
+            "sections",
+            "user's own",
+            "animations.json",
+            "artifact",
+            "Compare",
+        ] {
             assert!(all.contains(word), "{word}");
         }
-        assert!(PURPOSE.contains("logos") && PURPOSE.contains("brand names") && PURPOSE.contains("sign-in pages"));
+        assert!(
+            PURPOSE.contains("logos")
+                && PURPOSE.contains("brand names")
+                && PURPOSE.contains("sign-in pages")
+        );
         assert!(GUIDE.join("\n").contains("logos"));
         assert!(GUIDE_SHORT.len() < 220);
         for line in METHOD.iter().chain(GUIDE) {

@@ -924,7 +924,8 @@ impl BrowserServer {
         let current = running.as_ref().and_then(|b| {
             let st = b.lock();
             let tab = st.active.clone()?;
-            st.main_frame(&tab).map(|f| (f.url.clone(), f.origin.clone()))
+            st.main_frame(&tab)
+                .map(|f| (f.url.clone(), f.origin.clone()))
         });
         let (url, reload) = match &a.url {
             Some(raw) => match netpolicy::parse_user_url(raw) {
@@ -956,13 +957,17 @@ impl BrowserServer {
         };
         let origin = netpolicy::origin_of(&url).unwrap_or_else(|| "null".into());
         let host = policy::sanitize::display_host(&url).unwrap_or_default();
-        let folder = match capture::describe::check_folder(chat, a.folder.as_deref(), Flavor::native())
-        {
-            Ok(f) => f,
-            Err(why) => {
-                return hard_limit(tool, a.folder.as_deref().unwrap_or("the working folder"), why);
-            }
-        };
+        let folder =
+            match capture::describe::check_folder(chat, a.folder.as_deref(), Flavor::native()) {
+                Ok(f) => f,
+                Err(why) => {
+                    return hard_limit(
+                        tool,
+                        a.folder.as_deref().unwrap_or("the working folder"),
+                        why,
+                    );
+                }
+            };
         let addresses = ips
             .iter()
             .map(ToString::to_string)
@@ -1660,8 +1665,9 @@ impl BrowserServer {
     ) -> Result<ToolOutput, Stopped> {
         let p = &action.payload;
         let out: Result<ToolOutput, String> = async {
-            let url = Url::parse(payload_str(p, "url").ok_or("internal error: no address was approved")?)
-                .map_err(|e| e.to_string())?;
+            let url =
+                Url::parse(payload_str(p, "url").ok_or("internal error: no address was approved")?)
+                    .map_err(|e| e.to_string())?;
             // The address may resolve differently now; check again right before.
             netpolicy::check_url(&url, &self.address_policy(), &self.inner.dns).await?;
             let folder = capture::describe::Folder {
@@ -1670,7 +1676,10 @@ impl BrowserServer {
                     .to_string(),
                 approved: payload_str(p, "approved").unwrap_or("").to_string(),
                 exists: p.get("exists").and_then(Value::as_bool).unwrap_or(false),
-                was_symlink: p.get("wasSymlink").and_then(Value::as_bool).unwrap_or(false),
+                was_symlink: p
+                    .get("wasSymlink")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false),
                 always_asks: None,
             };
             capture::describe::recheck_folder(&ctx.chat, &folder, Flavor::native())?;
@@ -1682,7 +1691,8 @@ impl BrowserServer {
                         .filter_map(Value::as_u64)
                         .filter_map(|n| u32::try_from(n).ok())
                         .filter(|n| {
-                            (capture::describe::MIN_WIDTH..=capture::describe::MAX_WIDTH).contains(n)
+                            (capture::describe::MIN_WIDTH..=capture::describe::MAX_WIDTH)
+                                .contains(n)
                         })
                         .take(capture::describe::MAX_WIDTHS)
                         .collect()

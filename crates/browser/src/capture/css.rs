@@ -317,7 +317,11 @@ fn unescape(raw: &str) -> String {
                 chars.next();
             }
             let cp = u32::from_str_radix(&hex, 16).unwrap_or(0xFFFD);
-            out.push(char::from_u32(cp).filter(|c| *c != '\0').unwrap_or('\u{FFFD}'));
+            out.push(
+                char::from_u32(cp)
+                    .filter(|c| *c != '\0')
+                    .unwrap_or('\u{FFFD}'),
+            );
         }
     }
     out
@@ -560,7 +564,9 @@ impl Parser<'_> {
                 .join("; ");
             cut_at(&s, 600)
         };
-        if [":hover", ":focus", ":active"].iter().any(|s| lower.contains(s))
+        if [":hover", ":focus", ":active"]
+            .iter()
+            .any(|s| lower.contains(s))
             && self.facts.states.len() < MAX_FACTS
             && !decls.is_empty()
         {
@@ -932,7 +938,10 @@ mod tests {
         let refs = find_urls(css, &base());
         let out = rewrite(css, &refs, |_| Some("../assets/x.png".into()));
         // The whole string token was one address and is replaced as one.
-        assert!(out.starts_with("a{background:url(\"../assets/x.png\")"), "{out}");
+        assert!(
+            out.starts_with("a{background:url(\"../assets/x.png\")"),
+            "{out}"
+        );
     }
 
     #[test]
@@ -956,46 +965,94 @@ mod tests {
             f.keyframes.iter().map(|k| k.0.as_str()).collect::<Vec<_>>(),
             ["fade-up", "spin"]
         );
-        assert!(f.keyframes[0].1.starts_with("@keyframes fade-up {"), "{:?}", f.keyframes);
+        assert!(
+            f.keyframes[0].1.starts_with("@keyframes fade-up {"),
+            "{:?}",
+            f.keyframes
+        );
         assert!(f.keyframes[0].1.ends_with('}'));
         let states: Vec<&str> = f.states.iter().map(|s| s.0.as_str()).collect();
         assert_eq!(
             states,
-            [".cta:hover", "a:focus-visible", ".grid:hover", ".card:hover", ".x:active"]
+            [
+                ".cta:hover",
+                "a:focus-visible",
+                ".grid:hover",
+                ".card:hover",
+                ".x:active"
+            ]
         );
         assert_eq!(f.states[2].2, "(min-width: 768px)");
         assert!(f.states[0].1.contains("background-color: #2244dd"));
-        assert_eq!(f.transitions, vec![(".cta".into(), "background-color .2s ease, transform .2s ease".into())]);
+        assert_eq!(
+            f.transitions,
+            vec![(
+                ".cta".into(),
+                "background-color .2s ease, transform .2s ease".into()
+            )]
+        );
         assert_eq!(f.scroll_driven.len(), 1);
-        assert!(f.scroll_driven[0].1.contains("animation-timeline: scroll(root)"));
+        assert!(
+            f.scroll_driven[0]
+                .1
+                .contains("animation-timeline: scroll(root)")
+        );
         assert_eq!(f.font_faces.len(), 1);
         assert_eq!(f.font_faces[0].family, "Studio Sans");
         assert_eq!(f.font_faces[0].weight, "400 700");
         assert_eq!(
             f.font_faces[0].sources,
-            ["https://cdn.example.com/fonts/s.woff2", "https://cdn.example.com/fonts/s.woff"]
+            [
+                "https://cdn.example.com/fonts/s.woff2",
+                "https://cdn.example.com/fonts/s.woff"
+            ]
         );
         assert_eq!(
             f.custom_properties,
-            vec![("--brand".into(), "#3355ff".into()), ("--radius".into(), "12px".into())]
+            vec![
+                ("--brand".into(), "#3355ff".into()),
+                ("--radius".into(), "12px".into())
+            ]
         );
         let bp = breakpoints(f.media.iter());
-        assert_eq!(bp, vec![("max-width: 600px".into(), 1), ("min-width: 768px".into(), 1)]);
+        assert_eq!(
+            bp,
+            vec![
+                ("max-width: 600px".into(), 1),
+                ("min-width: 768px".into(), 1)
+            ]
+        );
         assert!(!f.cut);
     }
 
     #[test]
     fn broken_and_huge_sheets_end_without_panicking() {
         for css in [
-            "", "{", "}", "a{", "@media", "@media (", "a{b:url(", "a{b:\"unclosed", "/* open",
-            "@keyframes x { from { opacity: 0 }", "a{b:c}}}}", "@import", "url(", "\\", "@font-face{src:url(\\",
+            "",
+            "{",
+            "}",
+            "a{",
+            "@media",
+            "@media (",
+            "a{b:url(",
+            "a{b:\"unclosed",
+            "/* open",
+            "@keyframes x { from { opacity: 0 }",
+            "a{b:c}}}}",
+            "@import",
+            "url(",
+            "\\",
+            "@font-face{src:url(\\",
         ] {
             let _ = facts(css, &base());
             let _ = find_urls(css, &base());
         }
         let big = "a{color:red}".repeat(50_000);
         let f = facts(&big, &base());
-        assert!(f.cut, "a sheet with more rules than the limit says it was cut");
+        assert!(
+            f.cut,
+            "a sheet with more rules than the limit says it was cut"
+        );
         assert_eq!(f.rules, MAX_RULES);
     }
 }

@@ -167,15 +167,27 @@ var s = document.createElement('style'); document.head.appendChild(s); s.sheet.i
     };
     add("/", "text/html; charset=utf-8", html.into_bytes());
     add("/css/site.css", "text/css", css.as_bytes().to_vec());
-    add("/js/app.js", "application/javascript", js.as_bytes().to_vec());
+    add(
+        "/js/app.js",
+        "application/javascript",
+        js.as_bytes().to_vec(),
+    );
     add("/fonts/studio.woff2", "font/woff2", font());
     add("/img/hero.png", "image/png", png(200, 100, [40, 120, 200]));
-    add("/img/hero2x.png", "image/png", png(400, 200, [40, 120, 200]));
+    add(
+        "/img/hero2x.png",
+        "image/png",
+        png(400, 200, [40, 120, 200]),
+    );
     add("/img/lazy.png", "image/png", png(200, 100, [200, 80, 40]));
     add("/img/dots.png", "image/png", png(8, 8, [10, 200, 10]));
     add("/img/bg.png", "image/png", png(64, 64, [230, 230, 250]));
     add("/img/hover.png", "image/png", png(4, 4, [1, 1, 1]));
-    add("/img/sprite.svg", "image/svg+xml", sprite.as_bytes().to_vec());
+    add(
+        "/img/sprite.svg",
+        "image/svg+xml",
+        sprite.as_bytes().to_vec(),
+    );
     pages
 }
 
@@ -183,7 +195,9 @@ var s = document.createElement('style'); document.head.appendChild(s); s.sheet.i
 
 fn have_browser() -> bool {
     if !cfg!(target_os = "linux") && std::env::var_os("HARNESS_BROWSER_E2E").is_none() {
-        eprintln!("skipping capture end-to-end test: set HARNESS_BROWSER_E2E=1 to run it against this computer's browser");
+        eprintln!(
+            "skipping capture end-to-end test: set HARNESS_BROWSER_E2E=1 to run it against this computer's browser"
+        );
         return false;
     }
     match browser::find_browser(None, None) {
@@ -220,7 +234,10 @@ fn args(v: Value) -> Map<String, Value> {
 }
 
 async fn describe(server: &BrowserServer, a: Value, chat: &ChatContext) -> policy::Action {
-    match server.describe("browser_capture_site", &args(a), chat).await {
+    match server
+        .describe("browser_capture_site", &args(a), chat)
+        .await
+    {
         Described::Action(action) => action,
         Described::Invalid(why) => panic!("not describable: {why}"),
     }
@@ -228,7 +245,12 @@ async fn describe(server: &BrowserServer, a: Value, chat: &ChatContext) -> polic
 
 fn png_size(path: &Path) -> (u32, u32) {
     let bytes = std::fs::read(path).unwrap();
-    assert_eq!(&bytes[..8], b"\x89PNG\r\n\x1a\n", "{} is a PNG", path.display());
+    assert_eq!(
+        &bytes[..8],
+        b"\x89PNG\r\n\x1a\n",
+        "{} is a PNG",
+        path.display()
+    );
     (
         u32::from_be_bytes(bytes[16..20].try_into().unwrap()),
         u32::from_be_bytes(bytes[20..24].try_into().unwrap()),
@@ -259,7 +281,8 @@ async fn run_browser_on_file(extra: &[String], file: &Path, work: &Path) -> Stri
     let mut child = runtime::spawn::spawn(spec).expect("start the browser");
     let mut out = String::new();
     if let Some(mut stdout) = child.take_stdout() {
-        let _ = tokio::time::timeout(Duration::from_secs(60), stdout.read_to_string(&mut out)).await;
+        let _ =
+            tokio::time::timeout(Duration::from_secs(60), stdout.read_to_string(&mut out)).await;
     }
     let _ = tokio::time::timeout(Duration::from_secs(30), child.wait()).await;
     out
@@ -275,7 +298,11 @@ fn match_percent(a: &Path, b: &Path) -> f64 {
         for x in 0..w {
             let p = a.get_pixel(x, y);
             let q = b.get_pixel(x, y);
-            if p.0.iter().zip(q.0.iter()).all(|(c, d)| c.abs_diff(*d) <= 24) {
+            if p.0
+                .iter()
+                .zip(q.0.iter())
+                .all(|(c, d)| c.abs_diff(*d) <= 24)
+            {
                 same += 1;
             }
         }
@@ -332,8 +359,17 @@ async fn a_capture_saves_the_page_styles_files_animations_and_screenshots() {
             folder: canonical.display().to_string(),
         }
     );
-    assert!(action.summary.starts_with("Save a copy of how 127.0.0.1:"), "{}", action.summary);
-    for part in ["scripts switched off", "At most 300 MB and 2,000 files", "does not click, type or send forms", "1440 and 390 pixels wide"] {
+    assert!(
+        action.summary.starts_with("Save a copy of how 127.0.0.1:"),
+        "{}",
+        action.summary
+    );
+    for part in [
+        "scripts switched off",
+        "At most 300 MB and 2,000 files",
+        "does not click, type or send forms",
+        "1440 and 390 pixels wide",
+    ] {
         assert!(action.preview.contains(part), "{part}:\n{}", action.preview);
     }
 
@@ -347,29 +383,44 @@ async fn a_capture_saves_the_page_styles_files_animations_and_screenshots() {
             CallContext {
                 chat: chat.clone(),
                 cancel: CancellationToken::new(),
-                progress: Some(Arc::new(move |line: String| progress2.lock().unwrap().push(line))),
+                progress: Some(Arc::new(move |line: String| {
+                    progress2.lock().unwrap().push(line)
+                })),
             },
         )
         .await;
     let text = out.joined_text();
     assert!(!out.is_error, "the capture failed: {text}");
-    assert!(text.starts_with("Saved a copy of the front end of 127.0.0.1:"), "{text}");
+    assert!(
+        text.starts_with("Saved a copy of the front end of 127.0.0.1:"),
+        "{text}"
+    );
     assert!(text.contains("## How to rebuild it"), "{text}");
     let images = out
         .content
         .iter()
         .filter(|c| matches!(c, Content::Image { mime, .. } if mime == "image/jpeg"))
         .count();
-    assert_eq!(images, 2, "the first screen at each width comes with the result");
+    assert_eq!(
+        images, 2,
+        "the first screen at each width comes with the result"
+    );
     assert!(
-        progress.lock().unwrap().iter().any(|l| l.contains("Scrolling")),
+        progress
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|l| l.contains("Scrolling")),
         "{:?}",
         progress.lock().unwrap()
     );
 
     let folder = only_dir(&canonical);
     let name = folder.file_name().unwrap().to_string_lossy().to_string();
-    assert!(name.starts_with(&format!("127.0.0.1-{}-", site.port)), "{name}");
+    assert!(
+        name.starts_with(&format!("127.0.0.1-{}-", site.port)),
+        "{name}"
+    );
     for f in ["index.html", "report.md", "animations.json"] {
         assert!(folder.join(f).is_file(), "{f}");
     }
@@ -378,8 +429,17 @@ async fn a_capture_saves_the_page_styles_files_animations_and_screenshots() {
     // is not allowed, and nothing was saved from it or from the private address.
     assert!(secret.requests().is_empty(), "{:?}", secret.requests());
     let requested = site.requests();
-    for path in ["/", "/css/site.css", "/fonts/studio.woff2", "/img/lazy.png", "/img/hover.png"] {
-        assert!(requested.iter().any(|r| r == path), "{path} in {requested:?}");
+    for path in [
+        "/",
+        "/css/site.css",
+        "/fonts/studio.woff2",
+        "/img/lazy.png",
+        "/img/hover.png",
+    ] {
+        assert!(
+            requested.iter().any(|r| r == path),
+            "{path} in {requested:?}"
+        );
     }
 
     // Files: pictures (the lazy one and the one only named for hover too), the font, the
@@ -388,12 +448,28 @@ async fn a_capture_saves_the_page_styles_files_animations_and_screenshots() {
         .unwrap()
         .map(|e| e.unwrap().file_name().to_string_lossy().to_string())
         .collect();
-    for want in ["hero.png", "lazy.png", "dots.png", "bg.png", "hover.png", "studio.woff2", "sprite.svg"] {
+    for want in [
+        "hero.png",
+        "lazy.png",
+        "dots.png",
+        "bg.png",
+        "hover.png",
+        "studio.woff2",
+        "sprite.svg",
+    ] {
         assert!(assets.iter().any(|a| a == want), "{want} in {assets:?}");
     }
-    assert!(!assets.iter().any(|a| a.contains("secret") || a.contains("private")), "{assets:?}");
+    assert!(
+        !assets
+            .iter()
+            .any(|a| a.contains("secret") || a.contains("private")),
+        "{assets:?}"
+    );
     let sprite = std::fs::read_to_string(folder.join("assets/sprite.svg")).unwrap();
-    assert!(!sprite.contains("script") && sprite.contains("<circle"), "{sprite}");
+    assert!(
+        !sprite.contains("script") && sprite.contains("<circle"),
+        "{sprite}"
+    );
     let scripts: Vec<String> = std::fs::read_dir(folder.join("scripts"))
         .unwrap()
         .map(|e| e.unwrap().file_name().to_string_lossy().to_string())
@@ -408,63 +484,105 @@ async fn a_capture_saves_the_page_styles_files_animations_and_screenshots() {
         .collect();
     assert!(styles.iter().any(|s| s == "site.css"), "{styles:?}");
     let site_css = std::fs::read_to_string(folder.join("styles/site.css")).unwrap();
-    assert!(site_css.contains("url(\"../assets/studio.woff2\")"), "{site_css}");
+    assert!(
+        site_css.contains("url(\"../assets/studio.woff2\")"),
+        "{site_css}"
+    );
     assert!(site_css.contains("url(\"../assets/bg.png\")"), "{site_css}");
-    assert!(site_css.contains("url(\"../assets/hover.png\")"), "{site_css}");
+    assert!(
+        site_css.contains("url(\"../assets/hover.png\")"),
+        "{site_css}"
+    );
     assert!(site_css.contains("@keyframes fade-up"), "{site_css}");
     let all_css: String = styles
         .iter()
         .map(|s| std::fs::read_to_string(folder.join("styles").join(s)).unwrap())
         .collect();
-    assert!(all_css.contains(".css-in-js"), "rules added by a script are kept: {styles:?}");
+    assert!(
+        all_css.contains(".css-in-js"),
+        "rules added by a script are kept: {styles:?}"
+    );
 
     // The page: no scripts, no handlers, the copy's own policy first, local files.
     let index = std::fs::read_to_string(folder.join("index.html")).unwrap();
     let lower = index.to_ascii_lowercase();
     assert!(!lower.contains("<script"), "{index}");
-    assert!(!lower.contains("onclick") && !lower.contains("javascript:"), "{index}");
+    assert!(
+        !lower.contains("onclick") && !lower.contains("javascript:"),
+        "{index}"
+    );
     assert!(!lower.contains("http-equiv=\"refresh\""), "{index}");
     assert!(!lower.contains("noscript"), "{index}");
-    assert!(lower.contains("http-equiv=\"content-security-policy\""), "{index}");
+    assert!(
+        lower.contains("http-equiv=\"content-security-policy\""),
+        "{index}"
+    );
     assert!(lower.contains("script-src 'none'"), "{index}");
     assert!(index.contains("href=\"styles/site.css\""), "{index}");
     assert!(index.contains("src=\"assets/hero.png\""), "{index}");
     assert!(index.contains("src=\"assets/lazy.png\""), "{index}");
-    assert!(index.contains("assets/sprite.svg#dot"), "{index}");
+    // The sprite's shapes are copied into the page (a page opened from disk cannot use
+    // another file's), without the sprite's script.
+    assert!(index.contains("<use href=\"#dot\">"), "{index}");
+    assert!(index.contains("<symbol id=\"dot\""), "{index}");
     assert!(index.contains("data-runs=\"1\""), "{index}");
 
     // animations.json: the CSS animations, the transition rule, the hover rule and the
     // script animation with its keyframes and timing.
-    let doc: Value = serde_json::from_slice(&std::fs::read(folder.join("animations.json")).unwrap()).unwrap();
+    let doc: Value =
+        serde_json::from_slice(&std::fs::read(folder.join("animations.json")).unwrap()).unwrap();
     let running = doc["running"].as_array().unwrap();
     let find = |kind: &str, name: &str| {
         running
             .iter()
             .find(|a| a["kind"] == kind && a["name"] == name)
-            .unwrap_or_else(|| panic!("{kind} {name} in {}", serde_json::to_string_pretty(running).unwrap()))
+            .unwrap_or_else(|| {
+                panic!(
+                    "{kind} {name} in {}",
+                    serde_json::to_string_pretty(running).unwrap()
+                )
+            })
     };
     let fade = find("css-animation", "fade-up");
-    assert!(fade["target"].as_str().unwrap().contains("h1.fade-in"), "{fade}");
+    assert!(
+        fade["target"].as_str().unwrap().contains("h1.fade-in"),
+        "{fade}"
+    );
     assert_eq!(fade["timing"]["duration"], 400);
     assert_eq!(fade["keyframes"][0]["opacity"], "0");
     let spin = find("css-animation", "spin");
     assert_eq!(spin["timing"]["iterations"], "infinite");
     let slide = find("script", "slide");
-    assert!(slide["target"].as_str().unwrap().contains("#mover"), "{slide}");
+    assert!(
+        slide["target"].as_str().unwrap().contains("#mover"),
+        "{slide}"
+    );
     assert_eq!(slide["timing"]["duration"], 2000);
     assert_eq!(slide["timing"]["iterations"], "infinite");
     assert_eq!(slide["timing"]["direction"], "alternate");
     assert_eq!(slide["timing"]["easing"], "ease-in-out");
     assert_eq!(slide["keyframes"][1]["transform"], "translateX(100px)");
-    let keyframes: Vec<&str> = doc["keyframes"].as_array().unwrap().iter().filter_map(|k| k["name"].as_str()).collect();
-    assert!(keyframes.contains(&"fade-up") && keyframes.contains(&"spin"), "{keyframes:?}");
+    let keyframes: Vec<&str> = doc["keyframes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|k| k["name"].as_str())
+        .collect();
+    assert!(
+        keyframes.contains(&"fade-up") && keyframes.contains(&"spin"),
+        "{keyframes:?}"
+    );
     let transitions = doc["transitions"].as_array().unwrap();
     assert!(
-        transitions.iter().any(|t| t["selector"] == ".cta" && t["transition"] == "background-color 0.2s ease, transform 0.2s ease"),
+        transitions.iter().any(|t| t["selector"] == ".cta"
+            && t["transition"] == "background-color 0.2s ease, transform 0.2s ease"),
         "{transitions:?}"
     );
     let states = doc["hover_focus_rules"].as_array().unwrap();
-    assert!(states.iter().any(|s| s["selector"] == ".cta:hover"), "{states:?}");
+    assert!(
+        states.iter().any(|s| s["selector"] == ".cta:hover"),
+        "{states:?}"
+    );
 
     // Screenshots at both widths, with the right widths.
     for (file, width) in [
@@ -478,7 +596,10 @@ async fn a_capture_saves_the_page_styles_files_animations_and_screenshots() {
         assert!(h > 0, "{file}");
     }
     let (_, full_h) = png_size(&folder.join("screenshots/w1440-full-page.png"));
-    assert!(full_h > 2400, "the full page is taller than one screen: {full_h}");
+    assert!(
+        full_h > 2400,
+        "the full page is taller than one screen: {full_h}"
+    );
 
     // The report: title, fonts, animations, what was blocked, the files and the method.
     let report = std::fs::read_to_string(folder.join("report.md")).unwrap();
@@ -498,7 +619,10 @@ async fn a_capture_saves_the_page_styles_files_animations_and_screenshots() {
         "## How to rebuild it",
         "logos, brand names or sign-in pages",
     ] {
-        assert!(report.contains(part), "{part} missing from the report:\n{report}");
+        assert!(
+            report.contains(part),
+            "{part} missing from the report:\n{report}"
+        );
     }
 
     // Opened offline from disk: the same look, and no script runs.
@@ -513,9 +637,17 @@ async fn a_capture_saves_the_page_styles_files_animations_and_screenshots() {
         work.path(),
     )
     .await;
-    assert!(copy_shot.is_file(), "the browser saved a screenshot of the copy");
-    let percent = match_percent(&folder.join("screenshots/w1440-first-screen.png"), &copy_shot);
-    eprintln!("capture e2e: the copy's first screen matches the original's at 1440 px: {percent:.2}%");
+    assert!(
+        copy_shot.is_file(),
+        "the browser saved a screenshot of the copy"
+    );
+    let percent = match_percent(
+        &folder.join("screenshots/w1440-first-screen.png"),
+        &copy_shot,
+    );
+    eprintln!(
+        "capture e2e: the copy's first screen matches the original's at 1440 px: {percent:.2}%"
+    );
     assert!(percent >= 90.0, "the copy looks different: {percent:.2}%");
     let dom = run_browser_on_file(
         &["--virtual-time-budget=3000".into(), "--dump-dom".into()],
@@ -524,7 +656,10 @@ async fn a_capture_saves_the_page_styles_files_animations_and_screenshots() {
     )
     .await;
     assert!(dom.contains("data-runs=\"1\""), "{dom}");
-    assert!(!dom.contains("data-runs=\"2\""), "a script of the page ran in the copy:\n{dom}");
+    assert!(
+        !dom.contains("data-runs=\"2\""),
+        "a script of the page ran in the copy:\n{dom}"
+    );
     // To look at what was saved: CAPTURE_E2E_KEEP=<folder> keeps a copy there.
     if let Some(keep) = std::env::var_os("CAPTURE_E2E_KEEP") {
         let keep = PathBuf::from(keep);
@@ -568,17 +703,33 @@ async fn a_capture_is_refused_outside_the_approved_folders_and_for_blocked_addre
     .await;
     let why = a.hard_limit.expect("a hard limit");
     assert!(why.contains("Approved folders:"), "{why}");
-    let a = describe(&server, json!({"url": "http://93.184.215.14/", "folder": "../outside"}), &chat).await;
+    let a = describe(
+        &server,
+        json!({"url": "http://93.184.215.14/", "folder": "../outside"}),
+        &chat,
+    )
+    .await;
     assert!(a.hard_limit.is_some());
     // Private and loopback addresses are hard limits, as for browser_navigate.
-    for url in ["http://10.0.0.1/", "http://127.0.0.1:9/", "http://localhost/", "file:///etc/passwd"] {
-        match server.describe("browser_capture_site", &args(json!({"url": url})), &chat).await {
+    for url in [
+        "http://10.0.0.1/",
+        "http://127.0.0.1:9/",
+        "http://localhost/",
+        "file:///etc/passwd",
+    ] {
+        match server
+            .describe("browser_capture_site", &args(json!({"url": url})), &chat)
+            .await
+        {
             Described::Action(a) => assert!(a.hard_limit.is_some(), "{url}"),
             Described::Invalid(_) => {}
         }
     }
     // Without a page open and without url there is nothing to capture.
-    match server.describe("browser_capture_site", &args(json!({})), &chat).await {
+    match server
+        .describe("browser_capture_site", &args(json!({})), &chat)
+        .await
+    {
         Described::Invalid(why) => assert!(why.contains("Give url"), "{why}"),
         Described::Action(a) => panic!("{a:?}"),
     }
