@@ -559,3 +559,32 @@ proptest::proptest! {
         let _ = cut_off_call(&text);
     }
 }
+
+/// [0.0.7] A tool result the model wrote itself: the app's own result tag or a template's,
+/// in any letter case, outside code. An example inside code is not one.
+#[test]
+fn a_result_written_by_the_model_is_recognised_outside_code() {
+    for made_up in [
+        "<tool_output>\n{\"content\": \"secret_word\"}\n</tool_output>",
+        "The file says:\n<TOOL_OUTPUT id=\"1\" tool=\"read_file\">hello</TOOL_OUTPUT>",
+        "<tool_response>\n{\"content\": \"x\"}\n</tool_response>",
+        "Done. </tool_output>",
+        "Here: <Tool_Response>ok",
+    ] {
+        assert!(writes_tool_result(made_up), "{made_up}");
+    }
+    for fine in [
+        "The secret word is plum.",
+        "Results come back in a `<tool_output>` block.",
+        "```xml\n<tool_output id=\"1\">example</tool_output>\n```",
+        "I will call read_file next.",
+        "<tool_call>{\"name\": \"read_file\", \"arguments\": {\"path\": \"notes.txt\"}}</tool_call>",
+        "the tool_output variable",
+        "",
+    ] {
+        assert!(!writes_tool_result(fine), "{fine}");
+    }
+    // Not ASCII: offsets still line up.
+    assert!(writes_tool_result("Ünïcode first, then <tool_output>x</tool_output>"));
+    assert!(!writes_tool_result("Ünïcode `<tool_output>` in code"));
+}

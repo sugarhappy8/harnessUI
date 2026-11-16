@@ -88,6 +88,23 @@ A bug hunt over the flows the owner uses most (loading models, chat with tools, 
 settings, computer use); confirmed bugs are fixed test-first. The owner can add bugs at any
 time.
 
+## Item 5: a tool to capture a website's front end (added 2026-11-16)
+The owner: "I also wanted a new tool, if any, maybe you can find on GitHub or anywhere, to
+basically allow a model to clone the front end and animations and everything of an existing
+website."
+Prior art (MIT unless noted): `Manish-Tamang/dittu` (Playwright capture of markup, style
+sheets and animations, then pixel-diff checks), `Jane-xiaoer/claude-skill-web-clone`
+(method: real source first, record states, design tokens), `JCodesMore/ai-website-cloner-template`,
+`TaewoooPark/UIForge`, `SarthakMishra/site-cloner`, `Y2Z/monolith` (CC0).
+**Build (P7):** a tool in the built-in browser (which already drives Chrome/Edge with its own
+profile and network rules) that saves the page as rendered, every style sheet (keeping
+animations, fonts and breakpoints), pictures and fonts, a list of every animation with its
+keyframes and timing, screenshots at desktop and phone widths, and a short report for the
+model, into an approved folder; the site's scripts are kept for reference but never run from
+the copy. Plus a short method for the model: capture, rebuild with the user's own content,
+preview, compare, fix. It is for studying a design and rebuilding it with your own content,
+not for copying other people's logos, brands or sign-in pages.
+
 ## Decisions taken without asking (the owner can change any)
 - Repeat limit default 5, range 2 to 100.
 - harnessUI minimises itself during computer use (rather than moving or shrinking).

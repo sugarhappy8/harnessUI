@@ -6,6 +6,7 @@ import { useApp, toErrorInfo, turnChatId } from "../store/app";
 import { MessageItem } from "./MessageItem";
 import { Composer } from "./Composer";
 import { ModelPicker } from "./ModelPicker";
+import { CloudMark } from "./CloudMark";
 import { RuntimeIndicator } from "./RuntimeIndicator";
 import { UsageLine } from "./UsageLine";
 import { openModelSettings } from "./ModelSettings";
@@ -272,6 +273,9 @@ export function ChatView() {
           ? lastAssistant.promptTokens + (lastAssistant.completionTokens ?? 0)
           : null;
   const nCtx = live?.nCtx ?? (modelRef?.startsWith("local:") ? (runtime?.nCtx ?? null) : null);
+  // Thinking on and off: a local model that can think, or [0.0.7 P5] Claude on its endpoint.
+  const thinkingSwitch =
+    !!detail && ((!!modelRef?.startsWith("local:") && !!runtime?.thinking) || !!detail.chat.endpointThinking);
 
   // [0.0.5 memory] The summary the model gets instead of the earlier messages, and the
   // message its line goes under.
@@ -329,6 +333,7 @@ export function ChatView() {
             className="flex items-center gap-x-1.5 gap-y-1 @max-[22.25rem]:flex-wrap @2xl:col-start-1 @2xl:row-start-1"
           >
             <ModelPicker />
+            <CloudMark host={detail?.chat.cloudHost} />
             <RuntimeIndicator />
           </div>
           {/* The usage line's row below @2xl; from @2xl its two parts are the grid's own, and
@@ -337,7 +342,7 @@ export function ChatView() {
             <div className="min-w-0 grow @2xl:col-span-2 @2xl:col-start-1 @2xl:row-start-2 @2xl:w-0 @2xl:min-w-full">
               <UsageLine />
             </div>
-            {(used !== null || live?.tokensPerSecond != null || (detail && modelRef?.startsWith("local:") && runtime?.thinking)) && (
+            {(used !== null || live?.tokensPerSecond != null || thinkingSwitch) && (
               <div
                 data-model-status
                 className="ml-auto flex shrink-0 items-center gap-1.5 @2xl:col-start-2 @2xl:row-start-1"
@@ -351,7 +356,7 @@ export function ChatView() {
                     {live.tokensPerSecond.toFixed(1)} tokens/s
                   </span>
                 )}
-                {detail && modelRef?.startsWith("local:") && runtime?.thinking && (
+                {detail && thinkingSwitch && (
                   <button
                     type="button"
                     aria-pressed={detail.chat.thinking}

@@ -310,6 +310,29 @@ pub fn strip_tool_markup(text: &str) -> String {
     out.trim().to_owned()
 }
 
+/// Tags of tool-result blocks: the app's own (`prompt::DELIMITER_TAG`) and the one common
+/// chat templates (Qwen, Hermes) put results in.
+const RESULT_TAGS: &[&str] = &[
+    "<tool_output",
+    "</tool_output",
+    "<tool_response",
+    "</tool_response",
+];
+
+/// [0.0.7] Whether a reply holds a tool result the model wrote itself: the opening or closing
+/// tag of a tool-result block ([`RESULT_TAGS`], any ASCII letter case) outside code blocks
+/// and inline code. Only the app writes results; a small model that was told results arrive
+/// in such blocks sometimes writes one instead of calling the tool, and makes the result up.
+/// An example inside code (the user asked how results look) does not count.
+pub fn writes_tool_result(text: &str) -> bool {
+    // ASCII lower case keeps every byte offset, so the code map of the text fits it.
+    let lower = text.to_ascii_lowercase();
+    let code = CodeMap::new(text);
+    RESULT_TAGS
+        .iter()
+        .any(|tag| find_outside_code(&lower, tag, &code).next().is_some())
+}
+
 /// A tool call written as text that the output limit cut off: an opening marker (outside
 /// code) at the end of the message whose closing marker is missing or whose call cannot be
 /// read.

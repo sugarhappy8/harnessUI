@@ -229,6 +229,9 @@ pub(super) struct Turn<'a> {
     last_max_tokens: u32,
     /// The wrap-up instruction, appended to the last result in the wrap-up request only.
     wrap_note: Option<String>,
+    /// [0.0.7] A note for the next request only: the model wrote a tool result itself
+    /// ([`WROTE_A_RESULT_NOTE`]). Cleared as soon as that request is built.
+    retry_note: Option<&'static str>,
     truncation_noted: bool,
 }
 
@@ -305,6 +308,7 @@ impl<'a> Turn<'a> {
             cut_offs: HashMap::new(),
             last_max_tokens: 0,
             wrap_note: None,
+            retry_note: None,
             truncation_noted: false,
             input,
         };
@@ -588,6 +592,9 @@ impl<'a> Turn<'a> {
         let sanitizer = self.deps.sanitizer;
         let mut messages = project(view, &self.system, &self.projection(), sanitizer);
         if let Some(note) = &self.wrap_note {
+            append_result_note(&mut messages, note, sanitizer);
+        }
+        if let Some(note) = self.retry_note {
             append_result_note(&mut messages, note, sanitizer);
         }
         self.build_request(messages, choice, thinking_off)
@@ -1107,13 +1114,18 @@ impl<'a> Turn<'a> {
 
     /// One model call with its recovery: a retry with thinking disabled after an empty reply,
     /// a server parse error or a reply that only thought; a forced compaction and one retry
-    /// after a context overflow.
+    /// after a context overflow; [0.0.7] one retry with a note after a reply that wrote a
+    /// tool result itself.
     async fn request(&mut self, choice: ToolChoice, wrap_up: bool) -> Result<Reply, TurnStatus> {
         let mut thinking_off = false;
         let mut retried = false;
         let mut overflow_retried = false;
+        let mut made_up_retried = false;
         loop {
-            let (request, baseline, sent) = self.prepare(choice, thinking_off).await?;
+            let prepared = self.prepare(choice, thinking_off).await;
+            // A retry note is for the request just built, never a later one.
+            self.retry_note = None;
+            let (request, baseline, sent) = prepared?;
             // The wrap-up reply is shown only once its tool-call markup is stripped.
             match self.stream(&request, !wrap_up).await {
                 Attempt::Cancelled { content, reasoning } => {
