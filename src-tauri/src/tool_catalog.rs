@@ -159,8 +159,11 @@ pub const GROUPS: &[Group] = &[
             "sign in", "login", "navigate", "visit", "webpage", "web page", "site",
         ],
         // [0.0.7] "com", "org" and "go to" add to a match: "go to youtube.com".
+        // [0.0.7 P7] "design", "clone", "front end", "animation" and "look like" too: "copy
+        // the design of example.com", "clone the front end of …", "make it look like …".
         weak: &[
             "page", "open", "form", "submit", "web", "online", "link", "tab", "com", "org", "go to",
+            "design", "clone", "front end", "frontend", "animation", "look like",
         ],
     },
     Group {
@@ -667,6 +670,22 @@ pub const ENTRIES: &[Entry] = &[
         keywords: &["previous", "return"],
         rank: 3,
         examples: &[r#"{}"#],
+    },
+    // [0.0.7 P7] Website capture: for studying a design and rebuilding it.
+    Entry {
+        name: "browser_capture_site",
+        group: "browser",
+        purpose: "Save a web page's look (styles, pictures, fonts, animations, screenshots) to rebuild its design with the user's own content.",
+        keywords: &[
+            "clone", "copy", "design", "recreate", "rebuild", "replicate", "redesign", "look like",
+            "front end", "frontend", "animation", "style", "css", "font", "layout", "theme",
+            "inspiration",
+        ],
+        rank: 3,
+        examples: &[
+            r#"{"url": "https://example.com"}"#,
+            r#"{"url": "https://example.com", "folder": "site-study", "widths": [1440, 390]}"#,
+        ],
     },
     // ---- computer ----
     Entry {

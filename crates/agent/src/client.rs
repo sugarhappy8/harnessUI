@@ -764,11 +764,30 @@ impl OpenAiClient {
             ProviderKind::Ollama => self.ollama_context_length(model).await,
             ProviderKind::LmStudio => self.lm_studio_context_length(model).await,
             ProviderKind::Anthropic => crate::anthropic::context_length(self, model).await,
-            ProviderKind::Vllm
-            | ProviderKind::Generic
-            | ProviderKind::OpenAi
-            | ProviderKind::OpenRouter
-            | ProviderKind::Abliteration => match self.list_models().await {
+            // [0.0.7 P5] A cloud company's list is read once a run (it is long, and every
+            // turn asks), as for Anthropic.
+            ProviderKind::OpenAi | ProviderKind::OpenRouter | ProviderKind::Abliteration => {
+                let endpoint = self.api.as_str().to_owned();
+                if let Some(known) = cloud::known_facts(&endpoint, model) {
+                    return Ok(known.context);
+                }
+                match self.list_model_entries().await {
+                    Ok(models) => {
+                        let found = models
+                            .into_iter()
+                            .find(|listed| listed.id == model)
+                            .and_then(|listed| listed.context_length);
+                        // A model the list does not have is not looked for again either.
+                        if cloud::known_facts(&endpoint, model).is_none() {
+                            cloud::remember_facts(&endpoint, model, cloud::ModelFacts::default());
+                        }
+                        Ok(found)
+                    }
+                    Err(err) if is_not_found(&err) => Ok(None),
+                    Err(err) => Err(err),
+                }
+            }
+            ProviderKind::Vllm | ProviderKind::Generic => match self.list_models().await {
                 Ok(models) => Ok(models
                     .into_iter()
                     .find(|info| info.id == model)
