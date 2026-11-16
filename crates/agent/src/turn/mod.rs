@@ -107,6 +107,16 @@ pub const SUMMARY_FAILED_NOTE: &str = "Could not summarise earlier messages. The
                                        but this chat may run out of room soon.";
 /// The note ([`TurnEvent::AppNote`]) while the model writes a summary of earlier messages.
 pub const SUMMARISING_NOTE: &str = "Summarising earlier messages to make room.";
+/// [0.0.7] The app note (for the model, in that request only) when a reply wrote a tool
+/// result itself instead of calling the tool: the reply is discarded and the step asked once
+/// more with this note (`parse::writes_tool_result`). It counts as a mistake.
+pub const WROTE_A_RESULT_NOTE: &str = "You wrote a tool result yourself, so it was not used: \
+                                       only the app runs tools and writes their results. To use \
+                                       a tool, call it; its real result will come back.";
+/// [0.0.7] The note ([`TurnEvent::AppNote`]) for the user when the model wrote a tool result
+/// itself again after [`WROTE_A_RESULT_NOTE`]: that reply is kept as the answer.
+pub const MADE_UP_RESULT_NOTE: &str = "The model wrote a tool's result itself instead of using \
+                                       the tool, so that result is made up.";
 
 /// The stages that make room in a request (ARCHITECTURE.md 8.4), in the order the loop tries
 /// them. [`TurnEvent::Compacted`] carries the stage as its number

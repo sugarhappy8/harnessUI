@@ -28,7 +28,7 @@ use crate::history::{
 };
 use crate::parse::{
     Recovered, RecoveryContext, ToolInfo, cut_off_call, recover_tool_calls, repair_arguments,
-    strip_tool_markup,
+    strip_tool_markup, writes_tool_result,
 };
 use crate::prompt::{
     Preamble, Projection, SystemParts, ToolGuide, append_result_note, pinned_for_prompt, project,
@@ -53,6 +53,10 @@ const MAX_SUMMARY_ROUNDS: u32 = 4;
 const MAX_SUMMARY_FIT_TRIES: usize = 6;
 /// [0.0.7] The app's tool that runs a tool that is on but not in the turn's list.
 const CALL_TOOL: &str = "call_tool";
+/// [0.0.7] The app note for the one retry after a reply that wrote a tool result itself.
+const WROTE_A_RESULT_NOTE: &str = super::WROTE_A_RESULT_NOTE;
+/// [0.0.7] What the user is told when the retry wrote one too.
+const MADE_UP_RESULT_NOTE: &str = super::MADE_UP_RESULT_NOTE;
 
 /// Which summary a request writes ([`Turn::write_summary`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1180,6 +1184,31 @@ impl<'a> Turn<'a> {
                         self.observe(baseline, usage);
                     }
                     let no_content = reply.content.trim().is_empty() && reply.calls.is_empty();
+                    // [0.0.7] A reply that wrote a tool result itself instead of calling the
+                    // tool has made the result up: it is discarded and the step asked once
+                    // more, with a note. It counts as a mistake, so it cannot go on and on;
+                    // a second one is kept, and the user is told the result is made up.
+                    let made_up = !no_content
+                        && !wrap_up
+                        && self.tools_on
+                        && reply.calls.is_empty()
+                        && writes_tool_result(&reply.content);
+                    if made_up && !made_up_retried && self.mistakes < MAX_MISTAKES {
+                        made_up_retried = true;
+                        self.mistakes += 1;
+                        self.retry_note = Some(WROTE_A_RESULT_NOTE);
+                        self.emit(TurnEvent::AttemptDiscarded {
+                            reason: "the model wrote a tool result itself instead of calling a \
+                                     tool"
+                                .to_owned(),
+                        });
+                        continue;
+                    }
+                    if made_up {
+                        self.emit(TurnEvent::AppNote {
+                            text: MADE_UP_RESULT_NOTE.to_owned(),
+                        });
+                    }
                     if !no_content {
                         return Ok(reply);
                     }
