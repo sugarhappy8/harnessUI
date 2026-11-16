@@ -1344,13 +1344,19 @@ async fn a_websocket_that_starts_stops_the_capture_and_nothing_is_saved() {
     assert_eq!(left, 0, "no capture folder is left");
 }
 
+/// The path part of `path`'s `file:` address: `/tmp/x/marks` here, `/C:/Users/x/marks` on
+/// Windows, so `//localhost{this}/red.png` names a file in that folder on every system.
+fn file_url_path(path: &Path) -> String {
+    url::Url::from_file_path(path).unwrap().path().to_string()
+}
+
 /// Pages whose CSS hides addresses from a check that reads it differently than a browser
 /// does, and responses asked for as pictures that are not pictures (the round-1
 /// verification's V1, V2, U and U2). `marks` is a folder outside every copy: a copy that
 /// names a file there would load it when opened (`//localhost/...` is a `file:` address).
 fn trick_pages(beacon: u16, marks: &Path) -> HashMap<String, Page> {
     let b = format!("http://127.0.0.1:{beacon}");
-    let mark = marks.display();
+    let mark = file_url_path(marks);
     let page = |mime: &'static str, body: String| Page {
         status: 200,
         mime,
@@ -1519,7 +1525,7 @@ async fn css_tricks_and_odd_pictures_leave_a_copy_that_loads_nothing() {
         control.join("index.html"),
         format!(
             "<!DOCTYPE html><link rel=\"stylesheet\" href=\"iso.css\"><style>:root {{ --l: \"//localhost{}/red.png\"; }} .v {{ width:9px; height:9px; background-image: image-set(var(--l) 1x); }}</style><div class=\"v\"></div><div class=\"m\"></div><img src=\"//attacker.example/share/control.png\">",
-            marks.display()
+            file_url_path(&marks)
         ),
     )
     .unwrap();
@@ -1527,7 +1533,7 @@ async fn css_tricks_and_odd_pictures_leave_a_copy_that_loads_nothing() {
         control.join("iso.css"),
         format!(
             "@charset \"ISO-2022-JP\";\n.m {{ width:9px; height:9px; /* *\x1b(B/background-image:url(//localhost{}/cyan.png);/**/ }}\n",
-            marks.display()
+            file_url_path(&marks)
         ),
     )
     .unwrap();

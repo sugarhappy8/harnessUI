@@ -417,3 +417,13 @@ and `README.md`.
   durable fix (the manifest for the lib test program) is left for a later version.
 - 14:15 UTC: P7 verified; fmt, workspace clippy, docs, spawn and notices checks pass. CI
   run on everything next.
+- CI run 43884489704 (5d79438), 14:19 UTC (18:19 UAE): Linux passed; the Windows test
+  program starts again (841 of 843 app_lib tests passed); macOS workspace tests passed.
+  Windows failed three tests, all in how the tests read things there, not in the app: two
+  checks that read their own source with `include_str!` looked for "\n}\n", which a
+  Windows checkout writes as "\r\n}\r\n" (now normalised first, as `mcp_cmd.rs` and
+  `pinned/tests.rs` already do); and the capture test's control page built
+  `//localhost` + `C:\...`, which is no address at all, so neither marker loaded (now the
+  path part of the folder's real `file:` address, `/C:/...` there). That also makes the
+  test's main checks meaningful on Windows: before, its trick pages named files with the
+  same broken address and could never have loaded them.

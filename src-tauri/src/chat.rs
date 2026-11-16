@@ -1328,7 +1328,8 @@ mod tests {
     /// with the copied ones is made before the slot too (it waits for nothing).
     #[test]
     fn a_turn_takes_its_slot_before_anything_slow_or_stored() {
-        let source = include_str!("chat.rs");
+        // A checkout on Windows ends its lines in "\r\n".
+        let source = include_str!("chat.rs").replace("\r\n", "\n");
         for command in ["pub async fn send_message(", "pub async fn regenerate("] {
             let body = source.split_once(command).unwrap().1;
             let body = body.split_once("\n}\n").unwrap().0;

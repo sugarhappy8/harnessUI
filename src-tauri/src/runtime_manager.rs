@@ -1934,7 +1934,8 @@ mod tests {
     /// current load or stops anything, and a refused pick changes nothing.
     #[test]
     fn a_load_picks_its_backend_before_it_stops_the_loaded_model() {
-        let source = include_str!("runtime_manager.rs");
+        // A checkout on Windows ends its lines in "\r\n".
+        let source = include_str!("runtime_manager.rs").replace("\r\n", "\n");
         let start = source.find("    pub async fn load(\n").expect("load");
         let body = &source[start..];
         let body = &body[..body.find("\n    }\n").expect("the end of load")];
