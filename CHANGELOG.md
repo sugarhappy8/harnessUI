@@ -2,6 +2,23 @@
 
 All notable changes, by milestone. Dates are UTC.
 
+## 0.0.7 (unreleased)
+
+<!-- Work in progress: each package adds its lines under its own heading below; the
+     headings are merged into Added / Changed / Fixed when the release is put together. -->
+
+### P1 memory estimates
+
+### P2 image files
+
+### P3 computer use
+
+### P4 tools, call guide, repeat limit
+
+### P5 cloud endpoints
+
+### P6 bug fixes
+
 ## 0.0.6 (2026-11-13)
 
 The owner asked for eight things after 0.0.4. The first four (how much each model remembers, loading settings in plain words, talking to Claude Code and Codex, comparing models) were started as 0.0.5 and paused when the owner chose to ship Full access first. Four more were added while 0.0.5 was finished: reverse engineering with rea and a free decompiler, a view of how busy the computer is with finer control over where the model goes, showing which folders a chat can use, and new downloads appearing in the chat's model list. All eight are built, and each part had an independent security review and a correctness review, then fixes. The plans, the owner's answers and the developers' reports are in `docs/dev/0.0.6/`.
