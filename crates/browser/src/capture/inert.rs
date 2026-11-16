@@ -399,7 +399,7 @@ fn clean(doc: &Document, files: &HashSet<String>) {
                     }
                     Rule::Keep => {}
                 }
-                let local = name.local.to_ascii_lowercase();
+                let local = name.local.as_ref().to_ascii_lowercase();
                 if !(local == "meta" && is_our_policy(&node)) {
                     clean_attributes(&node, &name, files);
                 }
@@ -431,7 +431,7 @@ fn clean(doc: &Document, files: &HashSet<String>) {
 }
 
 fn rule(node: &NodeRef<'_>, name: &QualName, files: &HashSet<String>) -> Rule {
-    let local = name.local.to_ascii_lowercase();
+    let local = name.local.as_ref().to_ascii_lowercase();
     if !plain_name(&local) {
         return Rule::Unwrap;
     }
@@ -489,7 +489,7 @@ fn attrs_of(node: &NodeRef<'_>) -> Vec<(String, String)> {
         NodeData::Element(e) => e
             .attrs
             .iter()
-            .map(|a| (a.name.local.to_ascii_lowercase(), a.value.to_string()))
+            .map(|a| (a.name.local.as_ref().to_ascii_lowercase(), a.value.to_string()))
             .collect(),
         _ => Vec::new(),
     })
@@ -609,7 +609,7 @@ fn plain_name(name: &str) -> bool {
 }
 
 fn clean_attributes(node: &NodeRef<'_>, el: &QualName, files: &HashSet<String>) {
-    let el_local = el.local.to_ascii_lowercase();
+    let el_local = el.local.as_ref().to_ascii_lowercase();
     let is_link = el.ns == ns!(html) && el_local == "link";
     let is_meta = el.ns == ns!(html) && el_local == "meta";
     node.update(|n| {
@@ -619,7 +619,7 @@ fn clean_attributes(node: &NodeRef<'_>, el: &QualName, files: &HashSet<String>) 
         let old = std::mem::take(&mut e.attrs);
         let mut seen: HashSet<(String, String)> = HashSet::new();
         for mut a in old {
-            let local = a.name.local.to_ascii_lowercase();
+            let local = a.name.local.as_ref().to_ascii_lowercase();
             if is_link && !matches!(local.as_str(), "rel" | "href" | "media" | "type" | "sizes" | "color") {
                 continue;
             }
@@ -826,7 +826,8 @@ mod tests {
 
     /// No element or attribute in the copy can load, run or send anything.
     fn assert_quiet(out: &str) {
-        let lower = out.to_ascii_lowercase();
+        // The policy itself names `file:` (the copy's own files load from disk).
+        let lower = out.replace(COPY_POLICY, "").to_ascii_lowercase();
         for bad in [
             "<script",
             "<embed",

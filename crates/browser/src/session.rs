@@ -28,6 +28,13 @@ use crate::netpolicy::{self, AddressPolicy, DnsCache};
 /// Timeout for ordinary CDP commands.
 pub(crate) const CMD: Duration = Duration::from_secs(15);
 
+/// [0.0.7 P7] The policy the capture's tab gets while a capture runs: the page's own
+/// requests over HTTP(S) go on (each is checked), WebSocket connections, which the checks
+/// cannot see, are refused.
+pub(crate) const CAPTURE_POLICY: &str = "connect-src http: https: blob: data:";
+/// [0.0.7 P7] A document larger than this keeps its own response (and no added policy).
+const MAX_FULFILLED_BASE64: usize = 24 * 1024 * 1024;
+
 /// How long a browser that was just started may take to answer for the first time. A
 /// first start on a busy machine with a cold disk has been seen to take more than 20
 /// seconds; a browser that answers sooner is used at once, so this only bounds a failure.
@@ -748,11 +755,17 @@ impl Browser {
                 let this = self.clone();
                 tokio::spawn(async move { this.on_request_paused(session, params).await });
             }
-            // [0.0.7 P7] What each request of a capture's tab became.
+            // [0.0.7 P7] What each request of a capture's tab became, and the connections
+            // of the tab, its frames and workers that the request checks cannot see.
             m if m.starts_with("Network.") => {
                 let mut s = self.lock();
-                if let Some(log) = s.capture.as_mut().filter(|l| l.session == session) {
-                    log.on_event(m, &params);
+                if let Some(log) = s.capture.as_mut() {
+                    if log.session == session {
+                        log.on_event(m, &params);
+                    }
+                    if log.watches(&session) {
+                        log.note_socket(m, &params);
+                    }
                 }
             }
             _ => {}
@@ -875,9 +888,118 @@ impl Browser {
                 let this = self.clone();
                 tokio::spawn(async move { this.setup_session(session, TargetKind::Frame).await });
             }
+            "worker" | "shared_worker" | "service_worker" if self.watch_worker(parent_session, kind, &session) => {}
             _ => self.release_other(parent_session, &session),
         }
         self.bump();
+    }
+
+    /// [0.0.7 P7] While a capture runs, a worker of its tab (and any shared or service
+    /// worker, which may talk to the tab) stays attached with its network events on, so a
+    /// connection it opens is seen. `false` when no capture wants it.
+    fn watch_worker(&self, parent_session: &str, kind: &str, session: &str) -> bool {
+        {
+            let mut s = self.lock();
+            let Some(log) = s.capture.as_mut() else {
+                return false;
+            };
+            let wanted = kind != "worker" || log.watches(parent_session);
+            if !wanted {
+                return false;
+            }
+            log.watch.insert(session.to_string());
+            if log.workers.len() < 400 {
+                log.workers.push(session.to_string());
+            }
+        }
+        let cdp = self.cdp.clone();
+        let session = session.to_string();
+        tokio::spawn(async move {
+            for (method, params) in [
+                ("Network.enable", json!({})),
+                (
+                    "Target.setAutoAttach",
+                    json!({"autoAttach": true, "waitForDebuggerOnStart": true, "flatten": true}),
+                ),
+                ("Runtime.runIfWaitingForDebugger", json!({})),
+            ] {
+                if let Err(e) = cdp.call(method, params, Some(&session), CMD).await {
+                    tracing::debug!(%method, error = %e, "worker set-up step failed");
+                }
+            }
+        });
+        true
+    }
+
+    /// [0.0.7 P7] Starts watching the capture's tab: network events on its frames, and
+    /// shared and service workers that already run attached (new ones attach by themselves).
+    pub(crate) async fn watch_capture(&self, tab: &str) {
+        let frames: Vec<String> = {
+            let mut s = self.lock();
+            let frames: Vec<String> = s
+                .sessions
+                .iter()
+                .filter(|(_, i)| i.tab == tab && i.kind == TargetKind::Frame)
+                .map(|(id, _)| id.clone())
+                .collect();
+            if let Some(log) = s.capture.as_mut() {
+                log.watch.extend(frames.iter().cloned());
+            }
+            frames
+        };
+        for session in frames {
+            let _ = self
+                .cdp
+                .call("Network.enable", json!({}), Some(&session), CMD)
+                .await;
+        }
+        let Ok(targets) = self.cdp.call("Target.getTargets", json!({}), None, CMD).await else {
+            return;
+        };
+        for t in targets
+            .get("targetInfos")
+            .and_then(Value::as_array)
+            .cloned()
+            .unwrap_or_default()
+        {
+            let kind = t.get("type").and_then(Value::as_str).unwrap_or("");
+            let attached = t.get("attached").and_then(Value::as_bool) == Some(true);
+            if matches!(kind, "shared_worker" | "service_worker")
+                && !attached
+                && let Some(id) = t.get("targetId").and_then(Value::as_str)
+            {
+                let _ = self
+                    .cdp
+                    .call(
+                        "Target.attachToTarget",
+                        json!({"targetId": id, "flatten": true}),
+                        None,
+                        CMD,
+                    )
+                    .await;
+            }
+        }
+    }
+
+    /// [0.0.7 P7] Lets go of what [`Self::watch_capture`] and [`Self::watch_worker`] held.
+    pub(crate) async fn unwatch_capture(&self, watched: Vec<String>, workers: Vec<String>) {
+        for session in workers {
+            let _ = self
+                .cdp
+                .call(
+                    "Target.detachFromTarget",
+                    json!({"sessionId": session}),
+                    None,
+                    CMD,
+                )
+                .await;
+        }
+        for session in watched {
+            let _ = self
+                .cdp
+                .call("Network.disable", json!({}), Some(&session), CMD)
+                .await;
+        }
     }
 
     /// Workers and other targets: let them run and detach; their requests are not
@@ -916,7 +1038,14 @@ impl Browser {
             .capture_checks
             .load(std::sync::atomic::Ordering::SeqCst)
         {
-            return json!([{"urlPattern": "*", "requestStage": "Request"}]);
+            // Responses of documents and scripts are paused too, so the capture's tab gets
+            // a policy that blocks WebSockets (`on_response_paused`).
+            return json!([
+                {"urlPattern": "*", "requestStage": "Request"},
+                {"urlPattern": "*", "resourceType": "Document", "requestStage": "Response"},
+                {"urlPattern": "*", "resourceType": "Script", "requestStage": "Response"},
+                {"urlPattern": "*", "resourceType": "Other", "requestStage": "Response"}
+            ]);
         }
         let mut patterns =
             vec![json!({"urlPattern": "*", "resourceType": "Document", "requestStage": "Request"})];
@@ -1004,7 +1133,7 @@ impl Browser {
         // A target waiting for the debugger answers some of these only once it runs, so
         // they are all sent in order, with the resume last, and awaited together. Fetch is
         // already on, so the target's first request is checked whatever happens here.
-        let steps = [
+        let mut steps = vec![
             ("Page.enable", json!({})),
             ("Page.setLifecycleEventsEnabled", json!({"enabled": true})),
             (
@@ -1017,8 +1146,20 @@ impl Browser {
                 json!({"autoAttach": true, "waitForDebuggerOnStart": true, "flatten": true}),
             ),
             ("Page.getFrameTree", json!({})),
-            ("Runtime.runIfWaitingForDebugger", json!({})),
         ];
+        // [0.0.7 P7] A frame of a tab being captured reports its network events, so a
+        // WebSocket it opens is seen.
+        if kind == TargetKind::Frame {
+            let mut st = self.lock();
+            let tab = st.sessions.get(&session).map(|i| i.tab.clone());
+            if let (Some(log), Some(tab)) = (st.capture.as_mut(), tab)
+                && log.tab == tab
+            {
+                log.watch.insert(session.clone());
+                steps.push(("Network.enable", json!({})));
+            }
+        }
+        steps.push(("Runtime.runIfWaitingForDebugger", json!({})));
         let calls = steps
             .iter()
             .map(|(method, params)| self.cdp.call(method, params.clone(), s, CMD));
@@ -1299,6 +1440,11 @@ impl Browser {
     // ----- request enforcement -----------------------------------------------------------
 
     async fn on_request_paused(self: Arc<Self>, session: String, params: Value) {
+        if params.get("responseStatusCode").is_some() || params.get("responseErrorReason").is_some()
+        {
+            self.on_response_paused(session, params).await;
+            return;
+        }
         let Some(request_id) = params.get("requestId").and_then(Value::as_str) else {
             tracing::warn!("requestPaused without a request id");
             return;
@@ -1449,6 +1595,119 @@ impl Browser {
                 })
                 .await;
             }
+        }
+    }
+
+    /// [0.0.7 P7] A response paused while a capture runs (only documents and scripts are).
+    /// On the capture's tab it gets [`CAPTURE_POLICY`], which blocks WebSocket connections
+    /// (the request checks cannot see them): a document's response is fulfilled with the
+    /// policy added (a header added on the way does not reach a document's policy), a
+    /// script's (a worker's main script) gets it as a header. Everything else, and anything
+    /// that cannot be read, continues as it came.
+    async fn on_response_paused(self: Arc<Self>, session: String, params: Value) {
+        let Some(request_id) = params.get("requestId").and_then(Value::as_str) else {
+            return;
+        };
+        let request_id = request_id.to_string();
+        let status = params
+            .get("responseStatusCode")
+            .and_then(Value::as_i64)
+            .unwrap_or(0);
+        let ours = {
+            let s = self.lock();
+            match (s.capture.as_ref(), s.sessions.get(&session)) {
+                (Some(c), Some(info)) => info.tab == c.tab,
+                _ => false,
+            }
+        };
+        let failed = params.get("responseErrorReason").is_some();
+        if failed || !ours || !(100..300).contains(&status) || status == 204 {
+            self.continue_response(&session, &request_id, None).await;
+            return;
+        }
+        let mut headers: Vec<Value> = params
+            .get("responseHeaders")
+            .and_then(Value::as_array)
+            .cloned()
+            .unwrap_or_default();
+        headers.push(json!({"name": "Content-Security-Policy", "value": CAPTURE_POLICY}));
+        let document = params.get("resourceType").and_then(Value::as_str) == Some("Document");
+        if !document {
+            self.continue_response(&session, &request_id, Some((status, headers)))
+                .await;
+            return;
+        }
+        let body = self
+            .cdp
+            .call(
+                "Fetch.getResponseBody",
+                json!({"requestId": request_id}),
+                Some(&session),
+                CMD,
+            )
+            .await
+            .ok()
+            .and_then(|r| {
+                let text = r.get("body").and_then(Value::as_str)?;
+                if r.get("base64Encoded").and_then(Value::as_bool) == Some(true) {
+                    Some(text.to_string())
+                } else {
+                    Some(base64::Engine::encode(
+                        &base64::engine::general_purpose::STANDARD,
+                        text.as_bytes(),
+                    ))
+                }
+            })
+            .filter(|b| b.len() <= MAX_FULFILLED_BASE64);
+        let Some(body) = body else {
+            self.continue_response(&session, &request_id, None).await;
+            return;
+        };
+        // The body comes decoded; the headers must not say otherwise.
+        headers.retain(|h| {
+            let name = h
+                .get("name")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .to_ascii_lowercase();
+            !matches!(
+                name.as_str(),
+                "content-encoding" | "content-length" | "transfer-encoding"
+            )
+        });
+        let fulfilled = self
+            .cdp
+            .call(
+                "Fetch.fulfillRequest",
+                json!({"requestId": request_id, "responseCode": status, "responseHeaders": headers, "body": body}),
+                Some(&session),
+                CMD,
+            )
+            .await;
+        if let Err(e) = fulfilled {
+            tracing::debug!(error = %e, "could not add the capture's policy to a page");
+            self.continue_response(&session, &request_id, None).await;
+        }
+    }
+
+    async fn continue_response(
+        &self,
+        session: &str,
+        request_id: &str,
+        changed: Option<(i64, Vec<Value>)>,
+    ) {
+        let params = match changed {
+            Some((status, headers)) => {
+                json!({"requestId": request_id, "responseCode": status, "responseHeaders": headers})
+            }
+            None => json!({"requestId": request_id}),
+        };
+        if let Err(e) = self
+            .cdp
+            .call("Fetch.continueResponse", params, Some(session), CMD)
+            .await
+        {
+            tracing::debug!(error = %e, "continueResponse failed");
         }
     }
 

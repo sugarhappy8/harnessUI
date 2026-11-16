@@ -17,7 +17,7 @@ use crate::capture::report::{FontLine, ReportInput, page_text, page_url};
 use crate::capture::write::Writer;
 use crate::capture::{
     ANIMATIONS_JS, COLLECT_JS, FETCH_MISSING_JS, GLOBALS_JS, SCROLL_JS, anim, assets, css, html,
-    names, report,
+    inert, names, report,
 };
 use crate::netpolicy::AddressPolicy;
 use crate::session::{Browser, CMD};
@@ -57,10 +57,12 @@ pub(crate) struct Captured {
     pub bytes: u64,
 }
 
-/// Puts the browser into capture mode for one tab and takes it out again: every request is
-/// checked (not only page loads) and recorded, the cache and service workers are bypassed so
-/// every file is fetched under those checks. Dropped without [`Guard::finish`] (Stop), it
-/// restores the browser on a task of its own.
+/// Puts the browser into capture mode for one tab and takes it out again: every HTTP request
+/// is checked (not only page loads) and recorded, the tab's documents and workers get a
+/// policy that blocks WebSockets, the tab's frames and workers are watched for connections
+/// the checks cannot see, and the cache and service workers are bypassed so every file is
+/// fetched under those checks. Dropped without [`Guard::finish`] (Stop), it restores the
+/// browser on a task of its own.
 struct Guard {
     b: Arc<Browser>,
     session: String,
@@ -68,9 +70,10 @@ struct Guard {
 }
 
 impl Guard {
-    async fn start(b: &Arc<Browser>, session: &str) -> Self {
-        b.lock().capture = Some(CaptureLog::new(session));
+    async fn start(b: &Arc<Browser>, session: &str, tab: &str) -> Self {
+        b.lock().capture = Some(CaptureLog::new(session, tab));
         b.set_capture_checks(true).await;
+        b.watch_capture(tab).await;
         Self {
             b: b.clone(),
             session: session.to_string(),
@@ -80,8 +83,8 @@ impl Guard {
 
     async fn finish(mut self) {
         self.done = true;
-        self.b.lock().capture = None;
-        restore(&self.b, &self.session).await;
+        let log = self.b.lock().capture.take();
+        restore(&self.b, &self.session, log).await;
     }
 }
 
@@ -90,19 +93,28 @@ impl Drop for Guard {
         if self.done {
             return;
         }
-        self.b.lock().capture = None;
+        let log = self.b.lock().capture.take();
         let b = self.b.clone();
         let session = self.session.clone();
         if let Ok(handle) = tokio::runtime::Handle::try_current() {
-            handle.spawn(async move { restore(&b, &session).await });
+            handle.spawn(async move { restore(&b, &session, log).await });
         }
     }
 }
 
-async fn restore(b: &Browser, session: &str) {
+async fn restore(b: &Browser, session: &str, log: Option<CaptureLog>) {
     // A capture that started meanwhile keeps its own settings.
     if b.lock().capture.is_some() {
         return;
+    }
+    if let Some(log) = log {
+        let frames: Vec<String> = log
+            .watch
+            .iter()
+            .filter(|s| !log.workers.contains(s))
+            .cloned()
+            .collect();
+        b.unwatch_capture(frames, log.workers).await;
     }
     b.set_capture_checks(false).await;
     for (method, params) in [
@@ -116,6 +128,20 @@ async fn restore(b: &Browser, session: &str) {
         ("Network.disable", json!({})),
     ] {
         let _ = b.cdp.call(method, params, Some(session), CMD).await;
+    }
+}
+
+/// Stops the capture when the page opened a connection the request checks cannot see
+/// (a WebSocket, WebTransport or direct socket that started): what came over it could be
+/// from the user's own network, so nothing of this page is kept.
+fn connection_check(b: &Browser) -> Result<(), String> {
+    let s = b.lock();
+    match s.capture.as_ref().and_then(|c| c.sockets.first()) {
+        Some(what) => Err(format!(
+            "The page opened {}, a connection the browser's network rules cannot check, so the capture stopped and nothing was saved (what it received could have come from your own network).",
+            page_text(what, 200)
+        )),
+        None => Ok(()),
     }
 }
 
@@ -519,7 +545,7 @@ pub(crate) async fn run(
     progress: &(dyn Fn(String) + Send + Sync),
 ) -> Result<Captured, String> {
     let session = b.tab_session(tab)?;
-    let guard = Guard::start(b, &session).await;
+    let guard = Guard::start(b, &session, tab).await;
     let result = work(b, tab, &session, plan, cancel, progress).await;
     guard.finish().await;
     result
@@ -610,6 +636,7 @@ async fn work(
     if inner_scroll {
         notes.push("The page scrolls inside one element, so its full-page screenshots show only the first screen.".into());
     }
+    connection_check(b)?;
     let globals = b
         .cdp
         .call(
@@ -639,6 +666,7 @@ async fn work(
         Duration::from_secs(90),
     )
     .await?;
+    connection_check(b)?;
     let page_html = page.get("html").and_then(Value::as_str).unwrap_or("");
     if page_html.is_empty() {
         return Err("The page could not be read (it has no document to copy).".into());
@@ -771,8 +799,11 @@ async fn work(
     }
 
     // ---- saving ------------------------------------------------------------------------
+    // Everything kept was read by now: a connection the checks cannot see that started at
+    // any point up to here means nothing is saved.
+    connection_check(b)?;
     progress("Saving the copy".into());
-    let (entries, checked, blocked, log_full) = {
+    let (entries, checked, blocked, log_full, tried) = {
         let s = b.lock();
         match s.capture.as_ref() {
             Some(c) => (
@@ -784,8 +815,9 @@ async fn work(
                 c.checked.clone(),
                 c.blocked.clone(),
                 c.full,
+                c.tried.clone(),
             ),
-            None => (Vec::new(), HashSet::new(), Vec::new(), false),
+            None => (Vec::new(), HashSet::new(), Vec::new(), false, Vec::new()),
         }
     };
     let folder_name = names::capture_folder_name(&plan.url, chrono::Local::now());
@@ -834,6 +866,8 @@ async fn work(
 
     // Pictures, fonts, icons, animation files and videos.
     let mut saved: HashMap<String, String> = HashMap::new();
+    // Cleaned SVG pictures small enough to be copied into the page as shapes, by path.
+    let mut svg_texts: HashMap<String, String> = HashMap::new();
     let mut lottie_files = 0usize;
     let mut candidates: Vec<(Kind, &NetEntry)> = entries
         .iter()
@@ -896,9 +930,15 @@ async fn work(
             }
             lottie_files += 1;
         }
+        let mut svg_text: Option<String> = None;
         if ext == "svg" {
             match assets::neutralise_svg(&String::from_utf8_lossy(&bytes)) {
-                Some(clean) => bytes = clean.into_bytes(),
+                Some(clean) => {
+                    if clean.len() <= html::MAX_SPRITE_BYTES {
+                        svg_text = Some(clean.clone());
+                    }
+                    bytes = clean.into_bytes();
+                }
                 None => {
                     budget.give_back(bytes.len() as u64);
                     skipped.push((label, SkipReason::UnsafePicture.words(&plan.caps)));
@@ -915,6 +955,9 @@ async fn work(
         };
         let name = w.name("assets", &names::stem_of_url(e.final_url(), fallback), ext);
         let rel = w.write("assets", &name, &bytes)?;
+        if let Some(text) = svg_text {
+            svg_texts.insert(rel.clone(), text);
+        }
         for u in &e.urls {
             saved.insert(strip_fragment(u).to_string(), rel.clone());
         }
@@ -954,18 +997,50 @@ async fn work(
         let Some(path) = sheet.path.clone() else {
             continue;
         };
-        let refs = css::find_urls(&sheet.text, &sheet.base);
-        let rewritten = css::rewrite(&sheet.text, &refs, |r| {
-            let (file, frag) = match r.url.find('#') {
-                Some(i) => (&r.url[..i], &r.url[i..]),
-                None => (r.url.as_str(), ""),
-            };
-            if r.import {
-                sheet_by_url.get(file).map(|f| format!("{f}{frag}"))
-            } else {
-                saved.get(file).map(|p| format!("../{p}{frag}"))
+        // Every address the sheet names becomes the saved file, or `about:invalid`;
+        // fragments and data: stay. Then the same rule the page gets checks the result.
+        let refs = css::find_raw_urls(&sheet.text).refs;
+        let rewritten = css::rewrite_raw(&sheet.text, &refs, |r| {
+            let raw = css::url_text(&r.raw);
+            let lower = raw.to_ascii_lowercase();
+            if !r.bad && !r.import && (raw.starts_with('#') || lower.starts_with("data:")) {
+                return None;
             }
+            let local = (!r.bad)
+                .then(|| sheet.base.join(&raw).ok())
+                .flatten()
+                .filter(|u| matches!(u.scheme(), "http" | "https"))
+                .and_then(|u| {
+                    let url = u.to_string();
+                    let (file, frag) = match url.find('#') {
+                        Some(i) => (&url[..i], &url[i..]),
+                        None => (url.as_str(), ""),
+                    };
+                    if r.import {
+                        sheet_by_url.get(file).map(|f| format!("{f}{frag}"))
+                    } else {
+                        saved.get(file).map(|p| format!("../{p}{frag}"))
+                    }
+                });
+            Some(local.unwrap_or_else(|| css::INERT_URL.to_string()))
         });
+        let linkable: HashSet<String> = w
+            .files
+            .iter()
+            .map(|f| f.path.clone())
+            .chain(sheets.iter().filter_map(|s| s.path.clone()))
+            .collect();
+        let Some(rewritten) =
+            css::confine(&rewritten, |t| inert::local_file(t, &path, &linkable))
+        else {
+            let what = if sheet.url.is_empty() {
+                format!("style sheet {}", sheet.stem)
+            } else {
+                page_url(&sheet.url)
+            };
+            skipped.push((what, "its rules are nested too deeply to be checked".into()));
+            continue;
+        };
         let file_name = path.trim_start_matches("styles/");
         let rel = w.write("styles", file_name, rewritten.as_bytes())?;
         facts.push((rel.clone(), css::facts(&sheet.text, &sheet.base)));
@@ -1044,29 +1119,15 @@ async fn work(
 
     // index.html.
     let urls_table: Vec<String> = string_list(&page, "urls");
-    let targets = html::Targets {
+    let mut targets = html::Targets {
         urls: urls_table
             .iter()
             .map(|u| saved.get(strip_fragment(u)).cloned())
             .collect(),
-        url_originals: urls_table.clone(),
         styles: page
             .get("styles")
             .and_then(Value::as_array)
-            .map(|list| {
-                list.iter()
-                    .enumerate()
-                    .map(|(i, s)| match style_paths.get(&i) {
-                        Some(p) => p.clone(),
-                        None => s
-                            .get("href")
-                            .and_then(Value::as_str)
-                            .filter(|h| !h.is_empty())
-                            .map(str::to_string)
-                            .unwrap_or_else(|| "about:invalid".into()),
-                    })
-                    .collect()
-            })
+            .map(|list| (0..list.len()).map(|i| style_paths.get(&i).cloned()).collect())
             .unwrap_or_default(),
         srcsets: page
             .get("srcsets")
@@ -1097,39 +1158,47 @@ async fn work(
             })
             .unwrap_or_default(),
         canvases: canvas_paths.clone(),
-        inlined: Vec::new(),
+        inlined: vec![false; urls_table.len()],
     };
     // Shapes kept in other SVG files are copied into the page (a page opened from disk
-    // cannot use another file's), when that file was saved and is small.
-    let mut targets = targets;
-    targets.inlined = vec![false; urls_table.len()];
+    // cannot use another file's), when that file was saved and is small. The cleaned text
+    // kept in memory is used, not the file read back.
     let mut sprites: Vec<String> = Vec::new();
     for n in html::sprite_indexes(page_html, &nonce) {
         let Some(Some(path)) = targets.urls.get(n) else {
             continue;
         };
-        if !path.ends_with(".svg") {
-            continue;
-        }
-        let Ok(text) = std::fs::read_to_string(w.root().join(path)) else {
+        let Some(text) = svg_texts.get(path) else {
             continue;
         };
-        if text.len() <= html::MAX_SPRITE_BYTES
-            && sprites.iter().map(String::len).sum::<usize>() + text.len()
-                <= 4 * html::MAX_SPRITE_BYTES
+        if sprites.iter().map(String::len).sum::<usize>() + text.len()
+            <= 4 * html::MAX_SPRITE_BYTES
         {
-            sprites.push(text);
+            sprites.push(text.clone());
             if let Some(flag) = targets.inlined.get_mut(n) {
                 *flag = true;
             }
         }
     }
-    let copy = html::inject_sprites(&html::replace_tokens(page_html, &nonce, &targets), &sprites);
-    if html::has_active_content(&copy) {
-        notes.push("index.html was not saved: something that could run was still in it after the scripts were removed.".into());
-    } else {
-        w.write("", "index.html", copy.as_bytes())?;
+    let linkable: HashSet<String> = w.files.iter().map(|f| f.path.clone()).collect();
+    let copy = match inert::make_inert(
+        &html::replace_tokens(page_html, &nonce, &targets),
+        &sprites,
+        &linkable,
+    ) {
+        Ok(copy) => copy,
+        Err(why) => {
+            let folder = w.root().display().to_string();
+            w.discard();
+            return Err(format!(
+                "The copy of the page could not be made safe to open ({why}), so nothing was saved (the folder {folder} was removed again)."
+            ));
+        }
+    };
+    if !copy.whole {
+        notes.push("The page was too large to read whole in time; the copy (index.html) stops there.".into());
     }
+    w.write("", "index.html", copy.html.as_bytes())?;
 
     // animations.json.
     let script_refs: Vec<anim::ScriptSample<'_>> = samples
@@ -1168,7 +1237,7 @@ async fn work(
     skipped.reverse();
     skipped.retain(|(what, _)| once.insert(what.clone()));
     skipped.reverse();
-    let not_captured = not_captured_lines(&page, &blocked, log_full, &canvas_paths);
+    let not_captured = not_captured_lines(&page, &blocked, log_full, &canvas_paths, &tried);
     let fonts = font_lines(&page, &facts, &saved);
     let mut all_media: Vec<String> = Vec::new();
     let mut custom = Vec::new();
@@ -1432,8 +1501,21 @@ fn not_captured_lines(
     blocked: &[(String, String)],
     log_full: bool,
     canvas_paths: &[Option<String>],
+    tried: &[String],
 ) -> Vec<String> {
     let mut lines = Vec::new();
+    if !tried.is_empty() {
+        let list = tried
+            .iter()
+            .take(4)
+            .map(|t| page_text(t, 160))
+            .collect::<Vec<_>>()
+            .join("; ");
+        lines.push(format!(
+            "{} connection(s) the network rules cannot check (WebSocket and the like) were blocked during the capture, so anything the page shows from them is missing: {list}",
+            tried.len()
+        ));
+    }
     let frames = page
         .get("frames")
         .and_then(Value::as_array)

@@ -221,3 +221,10 @@ and `README.md`.
   only verification) while P1, P2 and P7 finish their rounds.
 - Disk: 3.4 GB free again at 10:40 UTC; removed idle build copies of the project's crates:
   4.8 GB free.
+- P5 round-2 verification: the major is fixed (a fake API that runs Anthropic's documented
+  prefix check saw no thinking cross between chats in 35 requests over 12 scenarios,
+  including regenerate, edits, folds, model switches, helpers and evals); proxy, keychain,
+  pictures, refusals, recovery and picture size fixed; round 1 still holds. Left: a key
+  under 8 characters wasn't scrubbed; `localhost.` can go to DNS; whitespace-only system
+  prompt changes; the per-chat limit comment; helpers share the chat's store; the
+  over-20-pictures rule dropped two pictures it didn't need to. Small round 3 running.

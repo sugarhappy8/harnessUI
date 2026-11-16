@@ -27,6 +27,7 @@ pub mod css;
 pub(crate) mod describe;
 pub mod guide;
 pub mod html;
+pub mod inert;
 pub mod names;
 pub(crate) mod netlog;
 pub mod report;

@@ -1227,6 +1227,7 @@ fn the_json_the_webview_reads() {
         keys,
         [
             "computer",
+            "copiesShort",
             "custom",
             "expertLayersOnProcessor",
             "fits",
@@ -1255,9 +1256,14 @@ fn the_json_the_webview_reads() {
         "freeAfterUnload",
         "otherBytes",
         "need",
+        "copiesBytes",
     ] {
         assert!(bar.get(key).is_some(), "{key}");
     }
+    // 0.0.7: the saved copies of a long chat, apart from what the model needs (none for
+    // this model, which has no short-memory layers).
+    assert_eq!(v["copiesShort"], serde_json::json!(false));
+    assert_eq!(v["computer"]["copiesBytes"], serde_json::json!(0));
     assert_eq!(bar["need"]["imageReader"], serde_json::json!(5));
     assert_eq!(
         serde_json::to_value(PictureSource::Estimate {

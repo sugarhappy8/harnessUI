@@ -158,6 +158,26 @@ impl Writer {
         Ok(rel)
     }
 
+    /// Removes what this capture wrote: its files, the sub-folders it made and the capture
+    /// folder itself, each only when it is still what was written (a regular file, an empty
+    /// folder). Nothing is done when the folder was replaced since it was made.
+    pub fn discard(self) {
+        if self.still_ours().is_err() {
+            return;
+        }
+        for f in &self.files {
+            let path = self.root.join(&f.path);
+            if std::fs::symlink_metadata(&path).is_ok_and(|m| m.file_type().is_file()) {
+                let _ = std::fs::remove_file(&path);
+            }
+        }
+        for sub in &self.made {
+            // Only an empty folder goes (remove_dir never removes what is inside).
+            let _ = std::fs::remove_dir(self.root.join(sub));
+        }
+        let _ = std::fs::remove_dir(&self.root);
+    }
+
     /// Refuses when the capture folder was replaced (by a link, or moved) since it was made.
     fn still_ours(&self) -> Result<(), String> {
         let meta = std::fs::symlink_metadata(&self.root).map_err(|e| {
@@ -235,6 +255,26 @@ mod tests {
         assert!(w.write("", "index.html", b"<p>").is_ok());
         assert_eq!(w.files.len(), 2);
         assert!(!tmp.path().join("x.png").exists());
+    }
+
+    #[test]
+    fn a_discarded_capture_leaves_nothing_but_what_others_put_there() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut w = Writer::create(tmp.path(), "cap").unwrap();
+        w.write("assets", "a.png", b"png").unwrap();
+        w.write("styles", "s.css", b"css").unwrap();
+        w.write("", "report.md", b"r").unwrap();
+        let root = w.root().to_path_buf();
+        w.discard();
+        assert!(!root.exists(), "the whole capture is gone");
+        // A file someone else put in a sub-folder meanwhile keeps that folder.
+        let mut w = Writer::create(tmp.path(), "cap").unwrap();
+        w.write("assets", "a.png", b"png").unwrap();
+        let root = w.root().to_path_buf();
+        std::fs::write(root.join("assets").join("theirs.txt"), b"x").unwrap();
+        w.discard();
+        assert!(root.join("assets").join("theirs.txt").exists());
+        assert!(!root.join("assets").join("a.png").exists());
     }
 
     #[cfg(unix)]

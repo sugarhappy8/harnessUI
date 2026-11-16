@@ -23,6 +23,8 @@ async function (opts) {
   const MAX_SCRIPTS = 400;
   const MAX_CANVASES = opts.maxCanvases || 8;
   const HTML_NS = 'http://www.w3.org/1999/xhtml';
+  const SVG_NS = 'http://www.w3.org/2000/svg';
+  const MATHML_NS = 'http://www.w3.org/1998/Math/MathML';
   const BASE = document.baseURI;
   const pre = 'hcap-' + NONCE + '-';
   const out = {
@@ -79,6 +81,7 @@ async function (opts) {
     return (
       t.startsWith('javascript:') ||
       t.startsWith('vbscript:') ||
+      t.startsWith('file:') ||
       t.startsWith('data:text/html') ||
       t.startsWith('data:application/xhtml') ||
       t.startsWith('data:text/xml') ||
@@ -138,7 +141,7 @@ async function (opts) {
       if (/^\s*(data:|#)/i.test(raw)) return m;
       if (isScriptUrl(raw)) return 'none';
       const t = urlToken(raw, BASE);
-      return t ? 'url("' + t + '")' : m;
+      return 'url("' + (t || 'about:invalid') + '")';
     });
   }
 
@@ -240,7 +243,7 @@ async function (opts) {
   // text the serialiser writes unescaped (`<xmp>` holding `</xmp><script>` would become a
   // script in the copy).
   const DROP = new Set(['script', 'noscript', 'base', 'object', 'embed', 'applet', 'frame', 'frameset', 'portal', 'fencedframe', 'param', 'xmp', 'noembed', 'noframes', 'plaintext']);
-  const SKIP_ATTRS = new Set(['nonce', 'integrity', 'srcdoc', 'crossorigin', 'ping', 'http-equiv', 'formaction', 'shadowrootmode', 'shadowroot', 'shadowrootdelegatesfocus', 'shadowrootclonable', 'shadowrootserializable']);
+  const SKIP_ATTRS = new Set(['nonce', 'integrity', 'srcdoc', 'crossorigin', 'ping', 'http-equiv', 'formaction', 'action', 'attributionsrc', 'codebase', 'archive', 'classid', 'longdesc', 'manifest', 'lowsrc', 'dynsrc', 'imagesrcset', 'shadowrootmode', 'shadowroot', 'shadowrootdelegatesfocus', 'shadowrootclonable', 'shadowrootserializable']);
   const URL_ATTRS = new Set(['src', 'href', 'poster', 'action', 'data', 'background', 'xlink:href', 'codebase', 'cite', 'longdesc', 'manifest', 'icon', 'lowsrc', 'dynsrc', 'to', 'from', 'values', 'by']);
 
   function recordScript(el) {
@@ -265,66 +268,70 @@ async function (opts) {
     }
   }
 
+  // A value that starts with two slashes (either kind) names another host when the copy
+  // is opened from disk (`//host/x` becomes `file://host/x`).
+  function otherHost(v) {
+    const t = String(v).trim();
+    const slash = (ch) => ch === '/' || ch.charCodeAt(0) === 92;
+    return t.length > 1 && slash(t[0]) && slash(t[1]);
+  }
+  function dataPicture(v) {
+    return /^\s*data:image\//i.test(String(v));
+  }
+  // Every address in the copy is a token the app replaces with a saved file, a fragment, a
+  // link (a and area only) or a data: picture; anything else is dropped, whatever the
+  // element's namespace (the app parses the copy again and checks the same).
   function copyAttributes(el, c, lower, isHtml) {
     for (const a of Array.from(el.attributes)) {
       const name = a.name;
       const lname = name.toLowerCase();
+      const local = lname.slice(lname.indexOf(':') + 1);
       const v = a.value;
       if (lname.startsWith('on')) continue;
       if (SKIP_ATTRS.has(lname)) continue;
-      // An address that runs code is dropped from any attribute, not only the known ones.
+      // An address that runs code or reads local files is dropped from any attribute.
       if (isScriptUrl(v)) continue;
       let nv = v;
       if (lname === 'style') {
         nv = rewriteInlineCss(v);
-      } else if (isHtml) {
-        if (lname === 'action' && lower === 'form') continue;
-        if (lname === 'target' && lower === 'form') continue;
-        if (lname === 'src' && (lower === 'img' || lower === 'source' || lower === 'input' || lower === 'track' || lower === 'audio' || lower === 'video')) {
-          let pick = v;
-          if ((lower === 'img' || lower === 'video' || lower === 'audio') && el.currentSrc) pick = el.currentSrc;
-          if (/^\s*blob:/i.test(pick)) {
-            nv = v;
-          } else {
-            const t = urlToken(pick);
-            if (t) nv = t;
-            else if (!/^\s*data:/i.test(v)) {
-              const ab = absUrl(v);
-              if (ab) nv = ab;
-            }
-          }
-        } else if (lname === 'srcset' && (lower === 'img' || lower === 'source')) {
-          const t = srcsetToken(v);
+      } else if (local === 'src') {
+        let pick = v;
+        if ((lower === 'img' || lower === 'video' || lower === 'audio') && el.currentSrc) pick = el.currentSrc;
+        if (dataPicture(pick) && (lower === 'img' || lower === 'input' || lower === 'source')) {
+          nv = String(pick).trim();
+        } else {
+          const t = urlToken(pick);
           if (!t) continue;
           nv = t;
-        } else if (lname === 'poster' && lower === 'video') {
-          const t = urlToken(v);
-          if (t) nv = t;
-        } else if (lname === 'background') {
-          const t = urlToken(v);
-          if (t) nv = t;
-        } else if (lname === 'href' && (lower === 'a' || lower === 'area')) {
-          if (!/^\s*#/.test(v)) {
-            const ab = absUrl(v);
-            if (ab && /^(https?|mailto|tel):/i.test(ab)) nv = ab;
-            else continue;
-          }
         }
-      } else {
-        // SVG and MathML: addresses of pictures and of shapes kept in other files.
-        if (lname === 'href' || lname === 'xlink:href') {
-          if (/^\s*#/.test(v)) {
-            nv = v;
-          } else if (lower === 'a') {
-            const ab = absUrl(v);
-            if (ab && /^https?:/i.test(ab)) nv = ab;
-            else continue;
-          } else if (!/^\s*data:/i.test(v)) {
-            const t = urlToken(v, undefined, lower === 'use' ? 'v' : 'u');
-            if (t) nv = t;
-            else continue;
-          }
+      } else if (local === 'srcset') {
+        const t = srcsetToken(v);
+        if (!t) continue;
+        nv = t;
+      } else if (local === 'poster' || local === 'background') {
+        if (dataPicture(v)) {
+          nv = String(v).trim();
+        } else {
+          const t = urlToken(v);
+          if (!t) continue;
+          nv = t;
         }
+      } else if (local === 'href') {
+        if (/^\s*#/.test(v)) {
+          nv = v;
+        } else if (lower === 'a' || lower === 'area') {
+          const ab = absUrl(v);
+          if (ab && /^(https?|mailto|tel):/i.test(ab)) nv = ab;
+          else continue;
+        } else if (!isHtml && (lower === 'image' || lower === 'feimage') && dataPicture(v)) {
+          nv = String(v).trim();
+        } else {
+          const t = urlToken(v, undefined, !isHtml && lower === 'use' ? 'v' : 'u');
+          if (!t) continue;
+          nv = t;
+        }
+      } else if (otherHost(v)) {
+        continue;
       }
       setAttr(c, a, nv);
     }
@@ -371,7 +378,9 @@ async function (opts) {
       return null;
     }
     const ns = el.namespaceURI;
-    const isHtml = ns === HTML_NS || ns == null;
+    // An element in a made-up namespace serialises as the HTML element of its name, so it
+    // follows the HTML rules (an `embed` in "urn:x" is an `<embed>` in the copy).
+    const isHtml = ns !== SVG_NS && ns !== MATHML_NS;
     const tag = el.localName;
     const lower = tag.toLowerCase();
     if (lower === 'script') {
