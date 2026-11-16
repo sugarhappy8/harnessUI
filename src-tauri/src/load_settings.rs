@@ -3598,7 +3598,14 @@ mod tests {
             ram_free_bytes: 20 * GB,
             ..mac.clone()
         };
-        let copies = copies_for(&facts, &roomy, GpuUse::All, false, &FineLaunch::default(), 8192);
+        let copies = copies_for(
+            &facts,
+            &roomy,
+            GpuUse::All,
+            false,
+            &FineLaunch::default(),
+            8192,
+        );
         assert_eq!((copies.count, copies.short), (3, false));
     }
 

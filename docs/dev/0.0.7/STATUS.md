@@ -331,3 +331,11 @@ and `README.md`.
   typecheck`, `npm test` (78 files, 847 tests), `npm run build`, spawn check, notices
   check, docs test, and `cargo test --workspace --no-fail-fast` with the real llama-server
   and test model: 2,980 passed, 0 failed, 7 ignored.
+- e2e `scripted_agent.py` (debug app built 12:15 UTC, fake endpoint): 41 scenarios pass,
+  including stop-and-regenerate and regenerate-after-error; 4 fail. `compare-models` is a
+  real bug from P1: on a computer without a graphics card Compare said "Too large" while its
+  verdict and Settings for this model said it fits (the words still counted the saved
+  copies) — added to P1's round 2. `task-state`, `step-limit` (and likely `subagent`'s
+  approval) click *Resume*/*Continue* before the new 700 ms click delay arms them; the
+  `subagent` card no longer showed the helper's current call — an agent is checking
+  whether that's the test or the app and fixing the right one.

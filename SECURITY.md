@@ -473,8 +473,8 @@ build machine, and its Windows and macOS jobs have not run at all.
   you click. 0.0.7 adds one more, also only when you ask: Models → Installed offers a
   model's image file from the file list saved when you downloaded the model, without asking
   Hugging Face; it asks for that model's file list when you click *Look for an image file*
-  (models downloaded before 0.0.7) or *Download the image file*, and by itself only once,
-  right after that model's image file couldn't be read. *Download the image file* downloads it
+  (models downloaded before 0.0.7) or *Download the image file*, and by itself only once:
+  the next time Installed shows that model after its image file couldn't be read. *Download the image file* downloads it
   like any model file (checked against its published size and checksum, saved only in the
   model's own folder). An image file next to a model is loaded with it, so writing a file
   named like one (a `.gguf` file with "mmproj" in its name) always asks, also in Allow all;

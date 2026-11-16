@@ -516,10 +516,7 @@ pub fn check(input: &FitInput, target: &Target) -> FitResult {
         (false, _) => needed,
     };
     let computer = target.computer();
-    let copies = input.copies_at(
-        input.ctx,
-        computer.map(|c| c.saturating_sub(computer_part)),
-    );
+    let copies = input.copies_at(input.ctx, computer.map(|c| c.saturating_sub(computer_part)));
     let base = |verdict, suggested_ctx, partial_offload, sentence| FitResult {
         verdict,
         needed_bytes: needed,
@@ -1466,7 +1463,10 @@ mod tests {
         assert!(!r.copies_short);
         // Unknown: not checked, and said.
         let r = check(&input, &mac(None));
-        assert_eq!((r.verdict, r.computer_unknown, r.copies_short), (Verdict::Green, true, false));
+        assert_eq!(
+            (r.verdict, r.computer_unknown, r.copies_short),
+            (Verdict::Green, true, false)
+        );
     }
 
     /// The models whose copies are largest, on a 16 GB card with 16 GB of computer memory
