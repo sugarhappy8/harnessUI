@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex as StdMutex};
 use std::time::{Duration, Instant};
 
-use models::download::{FileSpec, Progress, download_file, resumable_bytes};
+use models::download::{FileSpec, Progress, download_file_checked, resumable_bytes};
 use serde::{Deserialize, Serialize};
 use store::{DownloadPatch, DownloadStatus, ModelSource, NewDownload};
 use tauri::{AppHandle, Emitter, Manager};
@@ -1050,6 +1050,8 @@ impl DownloadManager {
                 )
                 .await?;
         }
+        // Its files belong to the model now: no Cancel will look for them.
+        let _ = state.store.delete_setting(&written_key(group)).await;
         Ok(())
     }
 
@@ -1059,20 +1061,21 @@ impl DownloadManager {
         group: &str,
         file: &str,
         row_id: store::DownloadId,
-        n: u64,
+        p: Progress,
     ) {
         let now = Instant::now();
         let (emit, persist) = {
             let Ok(mut all) = self.live.lock() else {
                 return;
             };
-            all.entry(group.to_string())
-                .or_default()
-                .note(file, Progress::Bytes(n), now)
+            all.entry(group.to_string()).or_default().note(file, p, now)
         };
         if !(emit || persist) {
             return;
         }
+        let n = match p {
+            Progress::Bytes(n) | Progress::Checking(n) => n,
+        };
         let app = app.clone();
         let group = group.to_string();
         tauri::async_runtime::spawn(async move {
@@ -1133,11 +1136,18 @@ impl DownloadManager {
             Some(meta.repo.clone()),
             size,
             sha,
-            projector,
+            projector.clone(),
             ModelSource::Download,
             saved_facts(meta),
         )
         .await?;
+        // 0.0.7 (P6b review m4): an image file this download wrote itself is one Delete may
+        // remove with the model; one it found in place is not.
+        if let Some(image) = projector
+            && written_by(&state.store, group).await.contains(&image)
+        {
+            crate::hub::note_downloaded_image(&state.store, &first, Path::new(&image)).await?;
+        }
         tracing::info!(repo = %meta.repo, label = %meta.label, "download finished");
         Ok(())
     }
@@ -1162,16 +1172,21 @@ impl DownloadManager {
             return Err(AppError::internal("finished download has no image file"));
         };
         crate::hub::image_file::attach(&state.store, model, &image).await?;
+        // 0.0.7 (P6b review m4): written by this download, so Delete may remove it.
+        let dest = image.display().to_string();
+        if written_by(&state.store, group).await.contains(&dest) {
+            crate::hub::note_downloaded_image(&state.store, model, &image).await?;
+        }
         tracing::info!(repo = %meta.repo, "image file downloaded");
         Ok(())
     }
 
     pub fn pause(&self, group: &str) {
         if let Ok(mut r) = self.running.lock()
-            && let Some((token, paused)) = r.get_mut(group)
+            && let Some(running) = r.get_mut(group)
         {
-            *paused = true;
-            token.cancel();
+            running.paused = true;
+            running.token.cancel();
         }
     }
 
@@ -1192,24 +1207,67 @@ impl DownloadManager {
     }
 
     /// Stops the group, deletes its partial files and forgets it. 0.0.7 (P6): the files it
-    /// finished go too, unless an installed model uses them ([`files_to_delete_on_cancel`]).
+    /// wrote itself go too, unless an installed model uses them
+    /// ([`files_to_delete_on_cancel`]). P6b review: it waits for the group's task to end
+    /// first (m1), so nothing is written, renamed or added after it looked, and it holds
+    /// `starting` (m3), so no start or resume comes in between. A group that finished before
+    /// it could stop is left as it is.
     pub async fn cancel(&self, app: &AppHandle, group: &str) -> AppResult<()> {
-        let token = self
-            .running
-            .lock()
-            .ok()
-            .and_then(|r| r.get(group).map(|(t, _)| t.clone()));
-        if let Some(t) = token {
-            t.cancel();
-            // Give the task a moment to close its file handles.
-            tokio::time::sleep(Duration::from_millis(300)).await;
-        }
         let state = app.state::<AppState>();
+        let _starting = self.starting.lock().await;
+        let task = self.running.lock().ok().and_then(|r| {
+            r.get(group)
+                .map(|r| (r.token.clone(), r.ended.clone()))
+        });
+        if let Some((token, ended)) = task {
+            token.cancel();
+            if tokio::time::timeout(CANCEL_WAIT, ended.cancelled())
+                .await
+                .is_err()
+            {
+                return Err(AppError::new(
+                    "download_stopping",
+                    "The download is still stopping.",
+                    "Wait a moment, then cancel it again.",
+                    String::new(),
+                ));
+            }
+        }
+        let rows = state.store.list_downloads(Some(group.to_string())).await?;
+        if !rows.is_empty() && rows.iter().all(|r| r.status == DownloadStatus::Completed) {
+            if let Ok(Some(dto)) = self.group_dto(&state.store, group).await {
+                self.emit(app, dto);
+            }
+            return Ok(());
+        }
         let mut dto = self.group_dto(&state.store, group).await?;
         clean_up(&state.store, group, &crate::hub::models_dir(app).await).await?;
         if let Some(d) = dto.as_mut() {
             d.status = "cancelled".into();
             self.emit(app, d.clone());
+        }
+        Ok(())
+    }
+
+    /// 0.0.7 (P6b review m1): cancels the downloads of an image file for the installed model
+    /// at `model` (Delete of that model), so none finishes after the model is gone and leaves
+    /// its file behind.
+    pub async fn cancel_image_files_for(&self, app: &AppHandle, model: &str) -> AppResult<()> {
+        let state = app.state::<AppState>();
+        let mut groups: Vec<String> = Vec::new();
+        for r in state.store.list_downloads(None).await? {
+            if r.status != DownloadStatus::Completed && !groups.contains(&r.group_id) {
+                groups.push(r.group_id);
+            }
+        }
+        for g in groups {
+            let meta: Option<GroupMeta> = state.store.get_setting(&meta_key(&g)).await.ok().flatten();
+            if meta
+                .and_then(|m| m.image_file_for)
+                .is_some_and(|m| crate::model_options::same_file(&m, model))
+            {
+                self.cancel(app, &g).await?;
+            }
         }
         Ok(())
     }

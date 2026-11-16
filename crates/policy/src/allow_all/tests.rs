@@ -972,7 +972,7 @@ fn rule4_a_command_that_names_a_sensitive_place_still_asks() {
         (SH, "cp a.txt b.txt"),
         (PS, "Get-Content .git\\HEAD"),
         (PS, "Copy-Item a.txt b.txt"),
-        (SH, "ls -l ~/models/x/mmproj-F16.gguf"),
+        (SH, "ls -l models/x/mmproj-F16.gguf"),
     ] {
         assert_eq!(
             kind(shell, line),

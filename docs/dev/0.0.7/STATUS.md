@@ -188,3 +188,11 @@ and `README.md`.
   file), SVGs rebuilt from a real XML parser, WebSocket blocked during a capture, and a new
   built-in tool follows its group when the whole group is on. All being fixed by P7
   (round 1).
+- P3 round 2 done: all seven fixed test-first and mutation-checked (one shared click-delay
+  hook for cards and the Allow all / Full access confirms; events while minimised ignored;
+  the re-arm signal sent before the window is restored; Stop pending gives the keyboard
+  whichever restore runs first; own-input window narrowed to 50 ms before / 25 ms after,
+  plus a pointer-position check; Windows quiet restores with `SW_SHOWNOACTIVATE`; docs).
+  computer 152 pass, clippy clean on Linux/Windows/macOS targets; app and vitest failures
+  only in other packages' files being edited. Its verification is folded into the
+  whole-release review.

@@ -458,8 +458,10 @@ async fn a_helper_starts_fresh_and_returns_its_answer() {
     );
 }
 
-/// A helper that calls `run_subagent` gets a refusal: the tool does not exist for it, the
-/// chat's own host is never asked to run it, and the attempt is in the audit log.
+/// A helper that calls `run_subagent` gets a refusal: the tool is not offered to it, the
+/// chat's own host is never asked to run it, and the attempt is in the audit log. [0.0.7] The
+/// helper's tool list is the turn's (so its prompt reuses the turn's cache) and names
+/// `run_subagent`, so the reply says plainly that a helper cannot start one.
 #[tokio::test]
 async fn a_helper_cannot_start_a_helper() {
     let endpoint = Endpoint::start(vec![
@@ -490,7 +492,11 @@ async fn a_helper_cannot_start_a_helper() {
         .and_then(|m| m.iter().find(|m| m["role"] == "tool"))
         .map(|m| m["content"].to_string())
         .expect("a tool result");
-    assert!(refusal.contains("No such tool: run_subagent"), "{refusal}");
+    assert!(
+        refusal.contains("A helper cannot start another helper."),
+        "{refusal}"
+    );
+    assert!(!refusal.contains("call_tool"), "{refusal}");
     let audits = rig.audits();
     assert_eq!(audits.len(), 1);
     assert_eq!(audits[0].tool, TOOL_NAME);
@@ -518,6 +524,13 @@ async fn nesting_is_refused_by_the_helpers_host_and_gate() {
         host.validate(TOOL_NAME, &Value::Object(task.clone())),
         Err(vec![NESTED_REFUSAL.to_owned()])
     );
+    // [0.0.7] What the loop answers a call to it, and to a coding app, from this host.
+    assert_eq!(host.refusal(TOOL_NAME).as_deref(), Some(NESTED_REFUSAL));
+    assert_eq!(
+        host.refusal("ask_codex").as_deref(),
+        Some(crate::outside_agent::HELPER_REFUSAL)
+    );
+    assert_eq!(host.refusal("read_file"), None);
     assert!(matches!(
         host.describe(TOOL_NAME, &task).await,
         Described::Invalid(reason) if reason == NESTED_REFUSAL
