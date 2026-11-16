@@ -355,3 +355,15 @@ and `README.md`.
   lines are no longer believed (real ones happen at start-up); a trusted header width
   that differs from the model's rules a file out again (the recorded file stays exempt).
   runtime (real server) all pass, app 112. P2 finished.
+- e2e: the three remaining failures were the scripts (the new 700 ms click delay on
+  *Continue*/*Resume*; the sidebar's new hidden "Waiting for your approval" text matching an
+  early wait; the helper refusal's new wording) — the scripts now wait for buttons to arm
+  and also check that an early click does nothing; `task-state`, `step-limit`, `subagent`
+  pass 3 times in a row, `stop-and-regenerate`/`regenerate-after-error` 3 times (with a
+  wait for new rows WebKit hasn't painted yet). `compare-models` passes on a fresh run (the
+  earlier failure compared answers taken at different free-memory levels on this busy
+  machine). No app code changed for e2e.
+- 13:02 UTC: version 0.0.7 (Cargo, npm, Tauri), CHANGELOG merged, ARCHITECTURE paragraph,
+  README lines, checklist "start here"; local fmt, workspace clippy, docs, spawn, lint,
+  typecheck and vitest (850) pass. Pushed d0aea01 without [skip ci]: CI run 43872030368.
+  P7's round-1 verification still running.
