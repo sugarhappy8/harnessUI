@@ -1643,9 +1643,32 @@ mod tests {
         assert_eq!(err.to_string(), "HTTP 400: bad key [API key] sent");
         let err = scrub_key(ProviderError::Network(format!("to {key}")), Some(key));
         assert!(!err.to_string().contains(key));
-        // Short or missing keys change nothing.
+        // A short key, such as a local server's `--api-key secret7`, is scrubbed wherever a
+        // whole copy of it is: from 4 characters on.
+        let err = scrub_key(
+            ProviderError::Http {
+                status: 401,
+                message: "bad key secret7 sent".into(),
+            },
+            Some("secret7"),
+        );
+        assert_eq!(err.to_string(), "HTTP 401: bad key [API key] sent");
+        assert_eq!(
+            scrub_key(ProviderError::Decode("said pw12 twice: pw12".into()), Some(" pw12 ")),
+            ProviderError::Decode("said [API key] twice: [API key]".into())
+        );
+        // A cut piece of a short key is too short to be secret (12 characters at least).
+        assert_eq!(
+            scrub_key(ProviderError::Network("bad key secret…".into()), Some("secret7")),
+            ProviderError::Network("bad key secret…".into())
+        );
+        // Shorter keys and missing ones change nothing.
         assert_eq!(
             scrub_key(ProviderError::Network("abc".into()), Some("abc")),
+            ProviderError::Network("abc".into())
+        );
+        assert_eq!(
+            scrub_key(ProviderError::Network("abc".into()), None),
             ProviderError::Network("abc".into())
         );
     }
