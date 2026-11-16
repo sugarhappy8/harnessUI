@@ -487,7 +487,10 @@ fn attrs_of(node: &NodeRef<'_>) -> Vec<(String, String)> {
 /// goes, the copy's own too: [`finish`] writes those, first in the head.
 fn meta_kept(node: &NodeRef<'_>) -> bool {
     let attrs = attrs_of(node);
-    if attrs.iter().any(|(n, _)| n == "http-equiv" || n == "charset") {
+    if attrs
+        .iter()
+        .any(|(n, _)| n == "http-equiv" || n == "charset")
+    {
         return false;
     }
     attrs.iter().any(|(n, v)| {
@@ -858,6 +861,10 @@ mod tests {
         );
         assert_quiet(&out);
         assert!(!out.contains("svg+xml"), "{out}");
+        // The page's own head lines (it put them in its <div>) are gone; the copy's are once.
+        assert_eq!(out.matches("Content-Security-Policy").count(), 1, "{out}");
+        assert_eq!(out.matches("charset").count(), 1, "{out}");
+        assert_eq!(out.matches(COMMENT).count(), 1, "{out}");
     }
 
     #[test]

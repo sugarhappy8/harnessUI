@@ -283,3 +283,9 @@ and `README.md`.
   ("script", "python", "selenium", …) undo a computer phrase, "pc's" no longer matches,
   and the missed desktop wordings ("close notepad", "take a screen shot") match. agent 241,
   tools 220, app (tool selection, helpers, turns) 116, clippy clean. P4 finished.
+- P5 round 3 done: whole copies of any key of 4 characters or more scrubbed; `localhost.`
+  reached as `localhost`; the system prompt hashed exactly as sent; a chat's store starts
+  over at its limit; each helper has its own conversation, dropped when it ends; the
+  picture limits count only pictures really sent (oldest large ones dropped only until 20
+  are left); JPEG size read from segment heads only. agent all pass (lib 241, cloud 24),
+  app providers/chat/subagent 71, clippy clean. P5 finished.

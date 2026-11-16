@@ -2,24 +2,29 @@
 //! saves a copy of a web page's front end, so a model can study its design and rebuild it
 //! with the user's own content.
 //!
-//! The capture opens the page in the agent's own browser (its own profile, every request
-//! under the network rules), scrolls through it, reads it from an isolated world and saves,
-//! into a new folder inside an approved folder:
+//! The capture opens the page in the agent's own browser (its own profile, every web
+//! request under the network rules, WebSockets refused and other unchecked connections
+//! watched), scrolls through it, reads it from an isolated world and saves, into a new
+//! folder inside an approved folder:
 //!
-//! - `index.html`: the page as shown, from an inert copy of its DOM: scripts, event
-//!   handlers, frames' contents and `javascript:` addresses removed, pictures, fonts and
-//!   style sheets pointing at the local copies, and a policy that runs nothing and loads
-//!   nothing from the web ([`html::COPY_POLICY`]);
+//! - `index.html`: the page as shown, from an inert copy of its DOM, parsed again as a
+//!   browser parses the file and cleaned as a tree ([`inert`]): nothing that runs or loads
+//!   documents, every resource address one of the copy's own files, a policy that runs
+//!   nothing and loads nothing from the web first in the head ([`html::COPY_POLICY`]), and a
+//!   last check before it is written;
 //! - `styles/`: every style sheet (linked, inline, CSS-in-JS rules, adopted), addresses
 //!   rewritten ([`css`]);
 //! - `assets/`: pictures, fonts, icons, Lottie files and small videos, from the bodies the
-//!   browser already received ([`assets`] decides what is kept and the limits);
+//!   browser already received ([`assets`] decides what is kept and the limits; SVG pictures
+//!   are parsed as XML and written again with drawing elements only);
 //! - `scripts/`: the page's scripts as `.js.txt`, for reference, never linked;
 //! - `screenshots/`: the first screen and the full page at each width;
 //! - `animations.json` ([`anim`]) and `report.md` ([`report`]), which is also the result.
 //!
 //! Only responses to requests that passed the browser's request checks during the capture
-//! are saved ([`netlog`]). The page is never clicked, typed into or submitted.
+//! are saved ([`netlog`]); a WebSocket, WebTransport or direct-socket connection that
+//! starts during the capture stops it before anything is written. The page is never
+//! clicked, typed into or submitted.
 
 pub mod anim;
 pub mod assets;
