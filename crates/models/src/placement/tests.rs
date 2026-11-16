@@ -46,7 +46,7 @@ fn input(
     PlacementInput {
         sizes,
         kv_per_layer: kv,
-        checkpoints: 0,
+        copies: 0,
         compute_gpu,
         compute_cpu,
         projector,
@@ -86,6 +86,7 @@ fn split_a_dense_model() {
             layers_on_gpu: 5,
             units: 5,
             expert_layers_on_cpu: 0,
+            copies: 0,
         }
     );
     // Three units: the output and blocks 3 and 2; blocks 0 and 1 on the processor.
@@ -713,6 +714,7 @@ fn sp(gpu: u64, cpu: u64, layers_on_gpu: u32, units: u32, experts: u32) -> Split
         layers_on_gpu,
         units,
         expert_layers_on_cpu: experts,
+        copies: 0,
     }
 }
 
@@ -771,6 +773,7 @@ fn judge_on_the_processor_is_room_verdict() {
                     layers_on_gpu: 0,
                     units: 5,
                     expert_layers_on_cpu: 0,
+                    copies: 0,
                 };
                 #[allow(deprecated)]
                 let contract = judge(&s, room, fit);
@@ -1144,6 +1147,7 @@ fn auto_ctx_placed_never_panics_or_hangs() {
         layers_on_gpu: u32::MAX,
         units: u32::MAX,
         expert_layers_on_cpu: u32::MAX,
+        copies: 0,
     };
     let any = Room {
         whole: u64::MAX,
@@ -1209,29 +1213,34 @@ fn auto_ctx_placed_never_panics_or_hangs() {
 
 // ---- 0.0.7 P1: saved copies of short-memory layers -------------------------------------
 
-/// The saved copies llama-server keeps of short-memory layers (context checkpoints) are in
-/// computer memory whatever the placement, and the verdict counts them there.
+/// The saved copies of a long chat are in computer memory whatever the placement, apart
+/// from what the model needs: the verdict never counts them (review M2), the computer's
+/// bar shows them.
 #[test]
-fn checkpoints_stay_in_computer_memory() {
+fn copies_stay_apart_in_computer_memory() {
     let s = dense();
     let mut i = input(&s, vec![1, 2, 3, 4], 7, 3, 9);
-    i.checkpoints = 1000;
+    i.copies = 1000;
     let all = split(&i, &on_card(Layers::All, ExpertsPick::None));
-    assert_eq!((all.gpu.context, all.cpu.context), (10, 1000));
+    assert_eq!((all.gpu.context, all.cpu.context, all.copies), (10, 0, 1000));
     // No work on the processor: its working space is not needed for the copies.
     assert_eq!(all.cpu.compute, 0);
     // Blocks 0 and 1 on the processor (3 of 5 units on the card).
     let part = split(&i, &on_card(Layers::Count(3), ExpertsPick::None));
-    assert_eq!((part.gpu.context, part.cpu.context), (7, 1 + 2 + 1000));
+    assert_eq!((part.gpu.context, part.cpu.context, part.copies), (7, 3, 1000));
     let mut kv_in_ram = on_card(Layers::All, ExpertsPick::None);
     kv_in_ram.kv_on_gpu = false;
-    assert_eq!(split(&i, &kv_in_ram).cpu.context, 1010);
+    assert_eq!(split(&i, &kv_in_ram).cpu.context, 10);
     let processor = Where {
         graphics: false,
         ..on_card(Layers::All, ExpertsPick::None)
     };
-    assert_eq!(split(&i, &processor).cpu.context, 1010);
-    // A graphics card with 500 bytes of computer memory: the model fits, the copies do not.
+    assert_eq!(
+        (split(&i, &processor).cpu.context, split(&i, &processor).copies),
+        (10, 1000)
+    );
+    // A graphics card with 500 bytes of computer memory: the model fits, and the copies
+    // never make it too large.
     let room = Room {
         whole: 2 * GB,
         partial: 2 * GB + 500,
@@ -1239,14 +1248,23 @@ fn checkpoints_stay_in_computer_memory() {
     };
     assert_eq!(
         judge_in(&all, room, false, MemoryKind::Separate),
-        (Verdict::Red, Fits::WontFitAtAll)
-    );
-    i.checkpoints = 0;
-    let all = split(&i, &on_card(Layers::All, ExpertsPick::None));
-    assert_eq!(
-        judge_in(&all, room, false, MemoryKind::Separate),
         (Verdict::Green, Fits::Fits)
     );
+    // The bars: the computer's shows them besides what the model needs.
+    let free = Capacity {
+        total_bytes: 10_000,
+        free_bytes: 5000,
+    };
+    for kind in [MemoryKind::Separate, MemoryKind::Processor, MemoryKind::Unified] {
+        let (graphics, computer) = bars(&all, kind, Some(free), free);
+        assert_eq!(computer.copies_bytes, 1000, "{kind:?}");
+        assert_eq!(
+            computer.free_after_bytes,
+            5000 - computer.need.total(),
+            "{kind:?}"
+        );
+        assert!(graphics.is_none_or(|g| g.copies_bytes == 0));
+    }
 }
 
 // ---- conversation memory per block ------------------------------------------------------
@@ -1326,6 +1344,7 @@ fn bars_add_up() {
         layers_on_gpu: 30,
         units: 41,
         expert_layers_on_cpu: 0,
+        copies: 0,
     };
     let (g, c) = bars(&s, MemoryKind::Separate, Some(graphics), computer);
     let g = g.unwrap();

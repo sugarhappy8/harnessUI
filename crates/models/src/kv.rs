@@ -1,7 +1,7 @@
 //! The conversation memory (llama.cpp's KV cache) a model gets, layer by layer, as the
 //! pinned llama.cpp build allocates it with the app's launch words: `-c C -np 1
-//! --ctx-checkpoints 8`, no `-b`, `-ub` or `--swa-full`, flash attention `auto` unless Fine control
-//! turns it off, and Save memory's `-fa on -ctk q8_0 -ctv q8_0`
+//! --ctx-checkpoints N`, no `-b`, `-ub` or `--swa-full`, flash attention `auto` unless Fine
+//! control turns it off, and Save memory's `-fa on -ctk q8_0 -ctv q8_0`
 //! (`crates/runtime/src/llama/launch.rs`).
 //!
 //! Ported from llama.cpp b12110, commit cd959bae99ff4bed22bef2604f45241c09bbb8c8 (file and
@@ -960,6 +960,7 @@ mod tests {
                 window: 1024,
                 fixed: 0,
                 checkpoint_per_cell: 327_680,
+                copy_fixed: 0,
             }
         );
         // 65,536 tokens: 16,384 × 65,536 + 327,680 × 1,536 = 1,073,741,824 + 503,316,480
@@ -1011,22 +1012,24 @@ mod tests {
         assert_eq!(KvLayout::launch(false, false), KvLayout::from(F16));
     }
 
-    /// The saved copies llama-server keeps of the short-memory layers: with the app's
-    /// `--ctx-checkpoints 8`, 8 of 1,024 cells of 327,680 bytes, 2,684,354,560 bytes (2.5
-    /// GiB) at most in a long chat (llama.cpp's default of 32 would be 10 GiB).
+    /// The saved copies llama-server keeps of the short-memory layers: one is 1,024 cells
+    /// of 327,680 bytes (320 MiB), so the most the app lets it keep, 8, is 2,684,354,560
+    /// bytes (2.5 GiB) in a long chat (llama.cpp's default of 32 would be 10 GiB).
     #[test]
     fn gemma4_12b_checkpoints() {
         let size = summary(gemma4_12b()).kv_size(F16);
-        assert_eq!(CTX_CHECKPOINTS, 8);
-        assert_eq!(size.checkpoints_at(65_536), 8 * 1024 * 327_680);
-        assert_eq!(size.checkpoints_at(65_536), 2560 * MIB);
+        assert_eq!(MAX_CTX_CHECKPOINTS, 8);
+        assert_eq!(size.copy_bytes(65_536), 1024 * 327_680);
+        assert_eq!(size.checkpoints_at(65_536, 8), 8 * 1024 * 327_680);
+        assert_eq!(size.checkpoints_at(65_536, 8), 2560 * MIB);
+        assert_eq!(size.checkpoints_at(65_536, 1), 320 * MIB);
         // A context shorter than the window holds fewer cells.
-        assert_eq!(size.checkpoints_at(512), 8 * 512 * 327_680);
+        assert_eq!(size.checkpoints_at(512, 8), 8 * 512 * 327_680);
         // q8_0 copies are q8_0 rows: 40 × 2 × 2,176 bytes a cell.
         let q8 = summary(gemma4_12b()).kv_size(Q8);
-        assert_eq!(q8.checkpoints_at(65_536), 8 * 1024 * 40 * 2 * 2176);
-        // A model without short-memory layers keeps none.
-        assert_eq!(KvSize::per_token(131_072).checkpoints_at(65_536), 0);
+        assert_eq!(q8.checkpoints_at(65_536, 8), 8 * 1024 * 40 * 2 * 2176);
+        // A model without short-memory layers or a recurrent state keeps none.
+        assert_eq!(KvSize::per_token(131_072).copy_bytes(65_536), 0);
     }
 
     /// Gemma 3 270M (`ggml-org/gemma-3-270m-it-GGUF`, Q8_0): no pattern array, so
@@ -1079,8 +1082,8 @@ mod tests {
         );
         // A saved copy: 512 cells × 15 layers × 1,024 bytes = 7,864,320 (llama-server
         // logged "size = 7.506 MiB" with its few bytes a cell of positions); 8 at most with
-        // the app's `--ctx-checkpoints 8`.
-        assert_eq!(s.kv_size(F16).checkpoints_at(16_384), 8 * 7_864_320);
+        // `--ctx-checkpoints 8`, the most the app passes.
+        assert_eq!(s.kv_size(F16).checkpoints_at(16_384, 8), 8 * 7_864_320);
     }
 
     /// Without the window llama.cpp's Gemma 3 has no short-memory layers; Phi-3 reads the
@@ -1316,7 +1319,7 @@ mod tests {
         assert_eq!(s.kv_size(F16), KvSize::per_token(114_688));
         assert_eq!(s.kv_bytes(4096, F16), 469_762_048);
         assert_eq!(s.kv_bytes(40_960, F16), 114_688 * 40_960);
-        assert_eq!(s.kv_size(F16).checkpoints_at(40_960), 0);
+        assert_eq!(s.kv_size(F16).copy_bytes(40_960), 0);
     }
 
     /// Extra prediction layers (`nextn_predict_layers`) are not in the main context, and a
@@ -1403,9 +1406,9 @@ mod tests {
     /// 6.38 + 7.97 MiB with rotation buffers of 0.80 + 3.98 MiB; its saved copies were
     /// logged at 7.506 MiB each (7,864,320 bytes of rows and 512 cells' positions). In a
     /// 20-turn chat of 16,058 tokens llama.cpp's default kept 32 and the server's memory grew
-    /// by 275 MB before it levelled off; with the app's `--ctx-checkpoints 8` it never kept
-    /// more than 8 (7 there, as it also thins them) and grew by 74 MB, about 12 MB of it the
-    /// first reply's other buffers.
+    /// by 275 MB before it levelled off; with `--ctx-checkpoints 8` it never kept more than
+    /// 8 (7 there, as it also thins them) and grew by 74 MB, about 12 MB of it the first
+    /// reply's other buffers.
     #[test]
     fn real_short_memory_model_if_available() {
         let Ok(path) = std::env::var("TEST_SWA_GGUF") else {
@@ -1437,7 +1440,7 @@ mod tests {
             s.kv_bytes(4096, Q8),
             6_684_672 + 8_355_840 + 835_584 + 4_177_920
         );
-        assert_eq!(s.kv_size(F16).checkpoints_at(16_384), 8 * 7_864_320);
+        assert_eq!(s.kv_size(F16).checkpoints_at(16_384, 8), 8 * 7_864_320);
     }
 
     /// Hostile headers (spec 2.0): any length of pattern array, absurd windows and head
@@ -1466,13 +1469,13 @@ mod tests {
         let zero = summary(gemma4_12b_except(&[window]).u32("gemma4.attention.sliding_window", 0));
         // llama.cpp still gives the short layers one batch: GGML_PAD(0 + 512, 256) cells.
         assert_eq!(zero.kv_bytes(65_536, F16), 16_384 * 65_536 + 327_680 * 512);
-        assert_eq!(zero.kv_size(F16).checkpoints_at(65_536), 0);
+        assert_eq!(zero.kv_size(F16).copy_bytes(65_536), 0);
         let huge =
             summary(gemma4_12b_except(&[window]).u64("gemma4.attention.sliding_window", u64::MAX));
         assert_eq!(huge.sliding_window, u64::from(u32::MAX));
         // At full length: the safe side.
         assert_eq!(huge.kv_bytes(65_536, F16), (16_384 + 327_680) * 65_536);
-        assert!(huge.kv_size(F16).checkpoints_at(u64::MAX) > 0);
+        assert!(huge.kv_size(F16).checkpoints_at(u64::MAX, u32::MAX) > 0);
         // Absurd short-memory head sizes saturate.
         let wide = summary(
             gemma4_12b_except(&["attention.key_length_swa"])
@@ -1480,7 +1483,7 @@ mod tests {
         );
         assert_eq!(wide.kv_bytes(65_536, F16), u64::MAX);
         assert_eq!(wide.kv_bytes(65_536, Q8), u64::MAX);
-        assert_eq!(wide.kv_size(F16).checkpoints_at(65_536), u64::MAX);
+        assert_eq!(wide.kv_size(F16).checkpoints_at(65_536, 1), u64::MAX);
         // More shared layers than layers: none keeps memory (llama.cpp would not load it).
         let shared = summary(
             gemma4_12b_except(&["attention.shared_kv_layers"])

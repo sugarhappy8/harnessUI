@@ -175,15 +175,14 @@ pub fn split(input: &PlacementInput, place: &Where) -> Split {
             gpu: Parts::default(),
             cpu: Parts {
                 model: sizes.total(),
-                context: (0..blocks)
-                    .map(kv)
-                    .fold(input.checkpoints, u64::saturating_add),
+                context: (0..blocks).map(kv).fold(0, u64::saturating_add),
                 compute: input.compute_gpu,
                 image_reader: input.projector,
             },
             layers_on_gpu: 0,
             units,
             expert_layers_on_cpu: 0,
+            copies: input.copies,
         };
     }
     let on_card = units_on_card(place.layers, units);
@@ -199,7 +198,6 @@ pub fn split(input: &PlacementInput, place: &Where) -> Split {
     let mut gpu = Parts::default();
     let mut cpu = Parts {
         model: sizes.input_bytes,
-        context: input.checkpoints,
         ..Parts::default()
     };
     let output = sizes.output_bytes.saturating_add(sizes.other_bytes);
@@ -249,6 +247,7 @@ pub fn split(input: &PlacementInput, place: &Where) -> Split {
         layers_on_gpu: on_card,
         units,
         expert_layers_on_cpu,
+        copies: input.copies,
     }
 }
 
@@ -396,7 +395,7 @@ pub fn explain(sizes: &LayerSizes, gpu_model_bytes: u64) -> Option<(Layers, Expe
     let model_only = PlacementInput {
         sizes,
         kv_per_layer: Vec::new(),
-        checkpoints: 0,
+        copies: 0,
         compute_gpu: 0,
         compute_cpu: 0,
         projector: 0,
@@ -541,6 +540,8 @@ fn contract_kind(split: &Split) -> MemoryKind {
 /// - Processor: [`Room::verdict`] of the total (Green / `fits`, Red / `wontFitAtAll`).
 /// - Red / `wontFitAtAll` when the total with the spare is larger than `room.partial`, or
 ///   (`Separate`) the computer's part is larger than computer memory less the reserve.
+///   The saved copies of a long chat ([`Split::copies`]) are not counted: they are sized
+///   to what is left (`crate::fit::copies`), and say so apart.
 /// - As much as fits: Yellow / `partial` when any unit or expert part is on the
 ///   processor; else Green / `fits` when the card's part fits `room.whole` with the
 ///   spare, else Yellow / `tight`. Never `wontFitGraphics`: llama.cpp fits again at load
@@ -686,6 +687,10 @@ pub struct Bar {
     /// Free after loading: the free memory less what the model needs (0 when it needs
     /// more).
     pub free_after_bytes: u64,
+    /// What the saved copies of a long chat may take besides, later (computer memory only;
+    /// [`Split::copies`]). Not in [`Self::need`] or [`Self::free_after_bytes`]: they build up
+    /// during a chat.
+    pub copies_bytes: u64,
 }
 
 /// The bar of `capacity` holding `need`. A free figure above the size is cut to the size;
@@ -703,20 +708,21 @@ pub fn bar(capacity: Capacity, need: Parts) -> Bar {
         other_bytes: total_bytes - free_bytes,
         need,
         free_after_bytes: free_bytes.saturating_sub(need.total()),
+        copies_bytes: 0,
     }
 }
 
 /// The picture's bars for `split`: a graphics card gets its own bar (from `graphics`, or
 /// an empty one when its size is not known, so the need is never lost) beside computer
 /// memory; Apple silicon and the processor get one bar of computer memory holding both
-/// parts.
+/// parts. The computer's bar also shows the saved copies of a long chat.
 pub fn bars(
     split: &Split,
     kind: MemoryKind,
     graphics: Option<Capacity>,
     computer: Capacity,
 ) -> (Option<Bar>, Bar) {
-    match kind {
+    let (graphics, mut computer) = match kind {
         MemoryKind::Separate => (
             Some(bar(graphics.unwrap_or_default(), split.gpu)),
             bar(computer, split.cpu),
@@ -724,7 +730,9 @@ pub fn bars(
         MemoryKind::Processor | MemoryKind::Unified => {
             (None, bar(computer, split.gpu.plus(&split.cpu)))
         }
-    }
+    };
+    computer.copies_bytes = split.copies;
+    (graphics, computer)
 }
 
 #[cfg(test)]

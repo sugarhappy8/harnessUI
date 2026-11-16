@@ -159,3 +159,12 @@ and `README.md`.
   evicted; more than 20 pictures in one request (stricter size rule) not handled. Nits:
   scrubbing too eager, one refusal cleared every chat, `drop_block` always on, picture size
   read from 64 KiB. All being fixed by P5 (round 2).
+- P6b review: start check, start decisions, status, Delete, `load()` and
+  `pending_approvals` sound. One critical: Cancel deleted "finished" files the download
+  never wrote (a file already in place and only checked, or reached through a linked
+  folder). One major: Resume could add an unchecked same-size file after a failed fetch.
+  Minor: Cancel didn't wait for the task; an interrupted Cancel blocked that download for
+  good; resume/cancel without the start lock; Delete could remove an image file the app
+  didn't download; no progress while a file is checked in place; replies stopped before the
+  backend was refused. All being fixed by P6b (round 1); Cancel now deletes only files the
+  download itself wrote, inside the models folder.
