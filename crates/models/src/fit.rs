@@ -404,20 +404,30 @@ pub fn check(input: &FitInput, target: &Target) -> FitResult {
     let available = target.primary_bytes();
     let room = target.room();
     let place = target.place();
-    let base = |verdict, suggested_ctx, partial_offload, sentence| FitResult {
+    let graphics = matches!(target, Target::Gpu { .. });
+    // The saved copies of short-memory layers stay in the computer's memory: on a graphics
+    // card they are its part besides the card's share (shown as the computer's part);
+    // elsewhere they are in the memory that holds the model.
+    let (needed_bytes, computer_bytes, computer_free_bytes) = match *target {
+        Target::Gpu { ram_free_bytes, .. } if computer > 0 => (needed, computer, ram_free_bytes),
+        Target::Gpu { .. } => (needed, 0, 0),
+        _ => (needed.saturating_add(computer), 0, 0),
+    };
+    let base = |verdict, suggested_ctx, partial_offload, computer_short, sentence| FitResult {
         verdict,
-        needed_bytes: needed,
+        needed_bytes,
         available_bytes: target.free_bytes(),
         suggested_ctx,
         partial_offload,
         device: target.device(),
-        computer_bytes: 0,
-        computer_free_bytes: 0,
-        computer_short: false,
+        computer_bytes,
+        computer_free_bytes,
+        computer_short,
         sentence,
     };
+    let (green, at_all) = room.fits(needed, computer, SPARE_BYTES);
 
-    if needed.saturating_add(SPARE_BYTES) <= available {
+    if green {
         let free_word = if matches!(target, Target::AppleUnified { .. }) {
             ""
         } else {
@@ -427,51 +437,54 @@ pub fn check(input: &FitInput, target: &Target) -> FitResult {
             Verdict::Green,
             None,
             false,
+            false,
             format!(
                 "Needs about {}; {place} {}{free_word}. Fits.",
-                gb(needed),
+                gb(needed_bytes),
                 gb(available)
             ),
         );
     }
 
-    if let Some(ctx) = largest_ctx(input, available) {
+    if let Some(ctx) = largest_ctx(input, room) {
         return base(
             Verdict::Yellow,
             Some(ctx),
             false,
+            false,
             format!(
                 "Needs about {} at this context; {place} {}. Fits with a context of {} tokens.",
-                gb(needed),
+                gb(needed_bytes),
                 gb(available),
                 ctx
             ),
         );
     }
 
-    if let Target::Gpu { ram_free_bytes, .. } = *target {
-        let combined = available.saturating_add(ram_free_bytes.saturating_sub(RAM_RESERVE_BYTES));
-        if needed.saturating_add(SPARE_BYTES) <= combined {
-            return base(
-                Verdict::Yellow,
-                None,
-                true,
-                format!(
-                    "Needs about {}; {place} {} free, so some layers will run on the CPU and replies will be slower.",
-                    gb(needed),
-                    gb(available)
-                ),
-            );
-        }
+    if graphics && at_all {
+        return base(
+            Verdict::Yellow,
+            None,
+            true,
+            false,
+            format!(
+                "Needs about {}; {place} {} free, so some layers will run on the CPU and replies will be slower.",
+                gb(needed_bytes),
+                gb(available)
+            ),
+        );
     }
 
+    // On a graphics card the computer's part on its own may be what does not fit.
+    let computer_short = graphics && computer > room.partial.saturating_sub(room.whole);
     base(
         Verdict::Red,
         None,
         false,
+        computer_short,
         format!(
             "Needs about {}; {place} only {}. Too large for this computer.",
-            gb(needed),
+            gb(needed_bytes),
             gb(available)
         ),
     )
@@ -487,7 +500,7 @@ mod tests {
         FitInput {
             weights_bytes: weights,
             projector_bytes: 0,
-            kv_bytes_per_token: 131_072, // 8B-class model, f16 cache
+            kv: KvSize::per_token(131_072), // 8B-class model, f16 cache
             vocab_size: 128_256,
             ctx,
             max_ctx: Some(131_072),
@@ -625,7 +638,7 @@ mod tests {
     fn eight_b(kv: u64) -> FitInput {
         FitInput {
             weights_bytes: 4_900_000_000,
-            kv_bytes_per_token: kv,
+            kv: KvSize::per_token(kv),
             vocab_size: 128_256,
             max_ctx: Some(131_072),
             ..Default::default()
@@ -726,7 +739,7 @@ mod tests {
         // A 14B-class model (8.4 GB, 48 layers: 196,608 cache bytes per token).
         let fourteen = FitInput {
             weights_bytes: 8_400_000_000,
-            kv_bytes_per_token: 196_608,
+            kv: KvSize::per_token(196_608),
             vocab_size: 152_064,
             max_ctx: Some(40_960),
             ..Default::default()
@@ -768,7 +781,7 @@ mod tests {
         };
         assert_eq!(auto_ctx(&unknown_length, room).map(|a| a.ctx), Some(32_768));
         let no_cache = FitInput {
-            kv_bytes_per_token: 0,
+            kv: KvSize::default(),
             ..eight_b(F16)
         };
         assert_eq!(auto_ctx(&no_cache, room).map(|a| a.ctx), Some(32_768));
@@ -785,7 +798,11 @@ mod tests {
         };
         assert_eq!(auto_ctx(&eight_b(F16), too_tight), None);
         assert_eq!(verdict_at(&eight_b(F16), 4096, too_tight), Verdict::Red);
-        assert_eq!(verdict_at(&eight_b(F16), 4095, too_tight), Verdict::Green);
+        // 0.0.7 P1: llama.cpp gives a context cells in steps of 256 (`GGML_PAD(n_ctx,
+        // 256)`), so 4,095 tokens take 4,096 cells, and 3,841 too; 3,840 is 15 steps.
+        assert_eq!(verdict_at(&eight_b(F16), 4095, too_tight), Verdict::Red);
+        assert_eq!(verdict_at(&eight_b(F16), 3841, too_tight), Verdict::Red);
+        assert_eq!(verdict_at(&eight_b(F16), 3840, too_tight), Verdict::Green);
     }
 
     /// 0.0.6 item 6: the margin can be chosen; at SPARE_BYTES it is `auto_ctx` itself.
@@ -811,12 +828,12 @@ mod tests {
                 ..eight_b(F16)
             },
             FitInput {
-                kv_bytes_per_token: 0,
+                kv: KvSize::default(),
                 ..eight_b(F16)
             },
             FitInput {
                 weights_bytes: u64::MAX,
-                kv_bytes_per_token: u64::MAX,
+                kv: KvSize::per_token(u64::MAX),
                 vocab_size: u64::MAX,
                 ..eight_b(F16)
             },
@@ -862,7 +879,7 @@ mod tests {
         let i = FitInput {
             weights_bytes: 11_000_000_000,
             projector_bytes: 0,
-            kv_bytes_per_token: 0,
+            kv: KvSize::default(),
             vocab_size: 0,
             ctx: 4096,
             max_ctx: None,

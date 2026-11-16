@@ -236,6 +236,13 @@ export const IMAGE_FILE_WORDS = {
   done: "Image file downloaded. Reload the model to use it.",
 } as const;
 
+/** [0.0.7 P2] An image file downloading on its model's Installed row ("Downloading the image file… 45%"). */
+export function imageFileProgress(done: number, total: number): string {
+  if (!(total > 0) || !Number.isFinite(done)) return "Downloading the image file…";
+  const pct = Math.min(100, Math.max(0, Math.floor((done / total) * 100)));
+  return `Downloading the image file… ${pct}%`;
+}
+
 /** Generation speed in words per second (three quarters of the tokens). */
 export function wordsPerSecond(tokensPerSecond: number): string {
   const words = Math.round(Math.max(0, tokensPerSecond) * 0.75);

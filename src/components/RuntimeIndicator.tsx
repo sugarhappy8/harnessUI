@@ -19,8 +19,8 @@ import { reloadModel, switchModel, unloadModel, useRestartNote, useWaiting } fro
 import { visiblePath } from "./FolderChip";
 import { ModelSettingsHost, openModelSettings, QuestionHost } from "./ModelSettings";
 
-/** What a note's one button does. */
-export type NoteAction = "reload" | "apply" | "settings";
+/** What a note's one button does ([0.0.7 P2] "installed": Models → Installed, for the image file). */
+export type NoteAction = "reload" | "apply" | "settings" | "installed";
 
 export interface RuntimeNote {
   text: string;
@@ -31,6 +31,7 @@ const ACTION_LABEL: Record<NoteAction, string> = {
   reload: "Reload",
   apply: "Apply and restart",
   settings: "Model settings…",
+  installed: "Learn more",
 };
 
 /**
@@ -45,10 +46,7 @@ export function runtimeNotes(rt: RuntimeStatus, opts: { restarted: boolean; hasM
   if (rt.settingsChanged) add("Settings changed. Restart the model to use them.", "apply");
   const adjustments = currentAdjustments(rt.adjustments);
   for (const a of adjustments) {
-    add(
-      adjustmentWords(a),
-      a.kind === "steppingDown" ? stepDownAction(a.reason) : a.kind === "restarting" ? null : "settings",
-    );
+    add(adjustmentWords(a), adjustmentAction(a));
   }
   const gpu = rt.backend !== null && rt.backend !== "cpu";
   const partial = gpu && partOnProcessor(rt);
@@ -56,6 +54,26 @@ export function runtimeNotes(rt: RuntimeStatus, opts: { restarted: boolean; hasM
   if (rt.slow && rt.speedTps !== null) add(slowSpeedWords(rt.speedTps), "settings");
   if (opts.restarted && opts.hasMessages) add(SLOW_WORDS.afterRestart, null);
   return notes;
+}
+
+/** The one action of an adjustment's note: what can help after it. */
+function adjustmentAction(a: LoadStage): NoteAction | null {
+  switch (a.kind) {
+    case "steppingDown":
+      return stepDownAction(a.reason);
+    case "restarting":
+      return null;
+    // [0.0.7 P2] Models → Installed says why and offers another image file.
+    case "retryingWithoutImageFile":
+      return "installed";
+    default:
+      return "settings";
+  }
+}
+
+/** [0.0.7 P2] Opens Models on its Installed tab (App opens the dialog; ModelsDialog picks the tab). */
+export function openInstalledModels() {
+  window.dispatchEvent(new CustomEvent("app:open-models", { detail: "installed" }));
 }
 
 /**
@@ -202,7 +220,13 @@ function Status() {
     const notes = runtimeNotes(runtime, { restarted, hasMessages: (detail?.messages.length ?? 0) > 0 });
     const top = notes[0] ?? null;
     const run = (action: NoteAction) =>
-      action === "reload" ? reload(true) : action === "apply" ? reload(false) : settings();
+      action === "reload"
+        ? reload(true)
+        : action === "apply"
+          ? reload(false)
+          : action === "installed"
+            ? openInstalledModels()
+            : settings();
     // The ready line (D1) in a header that other parts crowd ([0.0.6 header-layout]). The
     // indicator is a size container that asks the header only for "About N words" (`min-w`;
     // the number alone in the narrowest header, more with a note under it) and takes what the

@@ -46,7 +46,8 @@ pub use window_aside::{AsideEvent, WindowAside, WindowNow, WindowStep};
 #[cfg(target_os = "macos")]
 pub use platform::macos::{
     ACCESSIBILITY_SETTINGS_URL, SCREEN_RECORDING_SETTINGS_URL, accessibility_granted,
-    screen_recording_granted, set_overlay_window_behavior, window_is_on_active_space,
+    order_window_front, screen_recording_granted, set_overlay_window_behavior,
+    window_is_on_active_space,
 };
 
 /// System Settings → Privacy & Security → Screen Recording (undocumented by Apple; the

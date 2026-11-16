@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { Dialog, Tabs } from "radix-ui";
 import { X } from "lucide-react";
 import { Browse } from "./models/Browse";
@@ -13,8 +13,22 @@ import { Installed } from "./models/Installed";
 const tabClass =
   "rounded-md px-3 py-1.5 text-sm data-[state=active]:bg-bg-muted data-[state=active]:font-medium hover:bg-bg-muted";
 
+/** The tabs a component elsewhere may ask for when it opens the dialog (`app:open-models`). */
+const TABS = ["installed", "browse", "compare", "downloads"];
+
 export function ModelsDialog(props: { open: boolean; onOpenChange: (open: boolean) => void }) {
   const [tab, setTab] = useState("installed");
+
+  // [0.0.7 P2] "Learn more" after a load without the image file opens the dialog on Installed:
+  // the event's detail names the tab (App opens the dialog itself).
+  useEffect(() => {
+    const onOpen = (event: Event) => {
+      const wanted: unknown = (event as CustomEvent<unknown>).detail;
+      if (typeof wanted === "string" && TABS.includes(wanted)) setTab(wanted);
+    };
+    window.addEventListener("app:open-models", onOpen);
+    return () => window.removeEventListener("app:open-models", onOpen);
+  }, []);
 
   return (
     <Dialog.Root open={props.open} onOpenChange={props.onOpenChange}>
