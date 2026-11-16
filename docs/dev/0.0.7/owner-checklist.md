@@ -23,5 +23,27 @@ On the Windows PC:
    harnessUI, which closes the Start menu (as before 0.0.7). If a model gets stuck there,
    suggest Win+R or a shortcut instead.
 
-On the Mac, repeat with TextEdit: typing reaches TextEdit after answering a card, and
-harnessUI's window comes to the front for a card even while TextEdit is active.
+## Image files (P2)
+On the Windows PC:
+1. **Ministral 3 14B Reasoning Uncensored (mradermacher), with its broken image file:**
+   - Load it: one retry on the same graphics card, no stepping down to the processor, and
+     the header says "Loaded without image input: the image file next to this model couldn't
+     be read." with *Learn more*.
+   - *Learn more* opens Models → Installed; the row says the image file couldn't be read and
+     offers another one, or says the repository has no other one.
+   - Load it again: it goes straight through (the log shows no "failed to load multimodal
+     model").
+   - Make a load fail some other way on the graphics card: the message no longer mentions
+     the CPU backend.
+2. **Qwen 3.8 27B Uncensored (HauhauCS), downloaded without its image file:**
+   - Models → Installed shows "Download the image file" with its size (the BF16 file, as
+     that repository has no F16).
+   - Download it (progress also under Downloads), then *Reload*: the model can see images,
+     the Tools panel's Computer group can be switched on, and computer use works.
+3. **A model with no image file:** put an `mmproj…gguf` next to it by hand and load it: it
+   can now see images.
+
+## Computer use (P3), on the Mac
+Repeat the Windows computer-use steps (first section) with TextEdit: typing reaches TextEdit
+after answering a card, and harnessUI's window comes to the front for a card even while
+TextEdit is active.

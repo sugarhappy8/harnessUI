@@ -169,8 +169,9 @@ pub struct FitResult {
     /// Where the model would run.
     pub device: FitDevice,
     /// On a graphics card, what the model needs besides in the computer's memory when its
-    /// placement is known (an installed file); 0 otherwise: on Apple graphics and the
-    /// processor [`Self::needed_bytes`] counts all of it, and this estimate does not split.
+    /// placement is known (an installed file), and in any case the saved copies of its
+    /// short-memory layers ([`FitInput::computer_at`], 0.0.7); 0 otherwise: on Apple
+    /// graphics and the processor [`Self::needed_bytes`] counts all of it.
     pub computer_bytes: u64,
     /// With [`Self::computer_bytes`] known, the computer's free memory as the system reports
     /// it (the settings panel's second bar); 0 otherwise.

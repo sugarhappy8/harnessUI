@@ -6,8 +6,9 @@
 //!
 //! Proxy rules (ARCHITECTURE.md 13.6): a loopback client (the managed llama-server, a local
 //! Ollama or LM Studio) is built with proxies and redirects disabled, so a system proxy never
-//! sees local chat or its key. Every other endpoint uses the system proxy. A key is never
-//! sent over plain `http://` to a server on the internet ([`crate::cloud`]).
+//! sees local chat or its key. Every other endpoint uses the system proxy and follows
+//! redirects only within its own origin. A key is never sent over plain `http://` to a server
+//! on the internet ([`crate::cloud`]).
 
 use std::collections::VecDeque;
 use std::fmt;
@@ -73,7 +74,8 @@ pub struct ClientConfig {
     /// `https://api.example.com/v1`. `/v1` is added when the path has no version segment, and
     /// a pasted `/chat/completions` suffix is removed (see [`OpenAiClient::chat_completions_url`]).
     pub base_url: String,
-    /// The API key, sent as `Authorization: Bearer`. Never logged: `Debug` redacts it.
+    /// The API key, sent as `Authorization: Bearer` (to Anthropic as `x-api-key`). Never
+    /// logged: `Debug` redacts it.
     pub api_key: Option<String>,
     /// The kind of server.
     pub kind: ProviderKind,
@@ -268,6 +270,30 @@ pub struct OpenAiClient {
     replay: Arc<Mutex<ThinkingReplay>>,
 }
 
+/// [0.0.7 P5] The redirect rule of a client for a server that is not on this machine: at most
+/// ten redirects, each to the scheme, host and port the request started with. So the chat and
+/// the API key never reach a host the user did not add, nor plain `http://` after `https://`
+/// (reqwest drops `Authorization` on a redirect to another host, but not a key in a header of
+/// the API's own, such as Anthropic's `x-api-key`). A redirect elsewhere ends the request with
+/// the redirect's own status.
+fn same_origin_redirects() -> reqwest::redirect::Policy {
+    reqwest::redirect::Policy::custom(|attempt| {
+        let origin = |url: &reqwest::Url| {
+            (
+                url.scheme().to_owned(),
+                url.host_str().map(str::to_ascii_lowercase),
+                url.port_or_known_default(),
+            )
+        };
+        let home = attempt.previous().first().map(origin);
+        if home == Some(origin(attempt.url())) && attempt.previous().len() <= 10 {
+            attempt.follow()
+        } else {
+            attempt.stop()
+        }
+    })
+}
+
 impl OpenAiClient {
     /// Builds a client and its HTTP connection pool.
     ///
@@ -282,6 +308,8 @@ impl OpenAiClient {
             builder = builder
                 .no_proxy()
                 .redirect(reqwest::redirect::Policy::none());
+        } else {
+            builder = builder.redirect(same_origin_redirects());
         }
         let http = builder
             .build()

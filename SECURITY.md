@@ -392,6 +392,23 @@ build machine, and its Windows and macOS jobs have not run at all.
   Claude Code or Codex also leaves this
   computer: that program sends the task and the files it reads to its company (Anthropic or
   OpenAI) with your account, unless it is set up to use the model in harnessUI.
+- **Cloud AI companies (0.0.7).** A chat whose model is on an endpoint on the internet, such
+  as Anthropic, OpenAI, OpenRouter or abliteration.ai, sends that company everything the
+  model reads: your messages, the system prompt and pinned instructions, the files and
+  pictures you attach, the tools' descriptions and what the tools return (file contents,
+  command output, web pages, screenshots). The company's own terms say what it keeps and for
+  how long; OpenRouter passes the chat on to the company that runs the model you picked. The
+  chat header shows a *Cloud* mark for such a chat, with the host in its tooltip; a server on
+  this computer or the local network has no mark. Server answers are untrusted data like any
+  model output.
+- An endpoint's API key goes only to that endpoint's own address, in the header its API
+  uses (`x-api-key` for Anthropic, `Authorization` for the others). It is never written to
+  the database or the logs, and it is removed from any error a server sends back before the
+  error is shown. It is never sent over plain http:// to a server on the internet, where
+  anyone on the way could read it: the app refuses to save such an endpoint with a key and
+  does not use a key saved earlier for one until the address starts with https://. Over
+  http:// to this computer or the local network a key is still sent, because servers there
+  rarely have https; anyone who can watch that network can read it.
 - The usage line under the model name (0.0.6) is read from this computer's own counters,
   only while the window is visible. Nothing is sent anywhere, and the model is never told
   the figures.

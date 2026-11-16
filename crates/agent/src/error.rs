@@ -130,6 +130,14 @@ impl ProviderError {
                  create a key for one workspace and paste it in Settings → Endpoints."
                     .to_owned()
             }
+            // [0.0.7 P5] A redirect the client did not follow (13.6, 7.5).
+            Self::Http {
+                status: 301 | 302 | 303 | 307 | 308,
+                ..
+            } => "The server sent the request on to another address, which the app does not \
+                  follow, so the chat and the API key stay with the address you added. Check \
+                  the address in Settings → Endpoints."
+                .to_owned(),
             Self::Http {
                 status: 404,
                 message,
@@ -574,6 +582,13 @@ mod tests {
         let limited = http(429, "rate_limit_error").user_message();
         assert!(limited.starts_with("Too many requests"), "{limited}");
         assert!(http(402, "credit").user_message().contains("billing"));
+        for status in [301, 302, 303, 307, 308] {
+            let moved = http(status, "").user_message();
+            assert!(
+                moved.starts_with("The server sent the request on to another address"),
+                "{moved}"
+            );
+        }
         assert!(http(403, "no").user_message().contains("permissions"));
         let workspace = http(
             400,
