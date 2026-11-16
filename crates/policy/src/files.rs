@@ -346,7 +346,14 @@ mod tests {
         ] {
             assert!(always_ask_reason(p, WriteKind::Create, P).is_some(), "{p}");
             assert_eq!(
-                keep_asking(p, WriteKind::Overwrite { existing_len: 3, new_len: 9 }, P),
+                keep_asking(
+                    p,
+                    WriteKind::Overwrite {
+                        existing_len: 3,
+                        new_len: 9
+                    },
+                    P
+                ),
                 Some(KeepAsking::Sensitive),
                 "{p}"
             );

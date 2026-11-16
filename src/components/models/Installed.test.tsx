@@ -357,9 +357,13 @@ describe("Models → Installed", () => {
   });
 
   it("[0.0.7] downloads the image file from the row and reads the list again when it is done", async () => {
-    const fromHub = { ...model(5, "hub.gguf"), repo: "someone/Hub-GGUF" };
+    // [P2 review M2] What its repository offers was saved when it was downloaded: nothing is asked.
+    const fromHub: InstalledModel = {
+      ...model(5, "hub.gguf"),
+      repo: "someone/Hub-GGUF",
+      imageFileOffer: { kind: "available", file: "mmproj-F16.gguf", sizeBytes: 800_000_000 },
+    };
     ipcMock.listInstalledModels.mockResolvedValue([fromHub]);
-    ipcMock.imageFileOffer.mockResolvedValueOnce({ kind: "available", file: "mmproj-F16.gguf", sizeBytes: 800_000_000 });
     const listener: { progress: ((g: DownloadGroup) => void) | null } = { progress: null };
     ipcMock.onDownloadProgress.mockImplementation(async (h) => {
       listener.progress = h;
@@ -368,6 +372,7 @@ describe("Models → Installed", () => {
     await show();
     await click(screen.getByRole("button", { name: "Download the image file (800 MB)" }));
     expect(ipcMock.downloadImageFile).toHaveBeenCalledWith("/models/hub.gguf");
+    expect(ipcMock.imageFileOffer).not.toHaveBeenCalled();
     const reads = ipcMock.listInstalledModels.mock.calls.length;
     await act(async () => {
       listener.progress?.({
@@ -384,7 +389,8 @@ describe("Models → Installed", () => {
       });
     });
     expect(ipcMock.listInstalledModels.mock.calls.length).toBe(reads + 1);
-    expect(screen.getByText("Image file downloaded. Reload the model to use it.")).toBeTruthy();
+    // Not the model loaded now (P2 review m7).
+    expect(screen.getByText("Image file downloaded. It will be used the next time the model loads.")).toBeTruthy();
   });
 
   it("opens the model's settings from its gear", async () => {

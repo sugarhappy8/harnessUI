@@ -485,10 +485,17 @@ async fn an_installed_catalog_item_needs_no_network() {
 #[tokio::test]
 async fn an_installed_model_reads_images_as_a_load_would() {
     let dir = scratch("installed-vision");
-    let path = gguf_file(&dir, "someone/Sample-GGUF/Sample-7B-Q4_K_M.gguf", &dense_bytes());
+    let path = gguf_file(
+        &dir,
+        "someone/Sample-GGUF/Sample-7B-Q4_K_M.gguf",
+        &dense_bytes(),
+    );
     let image = dir.join("someone/Sample-GGUF/mmproj-Sample-7B-F16.gguf");
     let vision = |stored: StoredSummary| {
-        let k = known(vec![installed(&path, None, 4_400_000_000, None, stored)], Vec::new());
+        let k = known(
+            vec![installed(&path, None, 4_400_000_000, None, stored)],
+            Vec::new(),
+        );
         let item = CompareItem::Installed {
             installed_path: path.clone(),
         };

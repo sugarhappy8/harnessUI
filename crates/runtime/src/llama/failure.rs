@@ -323,7 +323,12 @@ fn same_file(printed: &str, given: &str) -> bool {
     if printed == given {
         return true;
     }
-    let name = |path: &str| path.rsplit(['/', '\\']).next().unwrap_or_default().to_owned();
+    let name = |path: &str| {
+        path.rsplit(['/', '\\'])
+            .next()
+            .unwrap_or_default()
+            .to_owned()
+    };
     printed.contains('\u{FFFD}') && !name(given).is_empty() && name(printed) == name(given)
 }
 
@@ -409,8 +414,11 @@ impl<'a> Line<'a> {
     /// Whether a clause of what the line said (its start, or what follows ": " or ", ")
     /// starts with one of `signatures`.
     fn says(&self, signatures: &[&str]) -> bool {
-        clause_starts(&self.lower)
-            .any(|clause| signatures.iter().any(|signature| clause.starts_with(signature)))
+        clause_starts(&self.lower).any(|clause| {
+            signatures
+                .iter()
+                .any(|signature| clause.starts_with(signature))
+        })
     }
 
     /// The device of "invalid device: X", printed when the backend has no such device.
@@ -434,8 +442,10 @@ impl<'a> Line<'a> {
     /// Whether the line is one the server prints when it measures the image file before
     /// the model loads (and goes on after).
     fn is_measuring(&self) -> bool {
-        matches!(self.func, "mtmd_get_memory_usage" | "mtmd_get_cap_from_file")
-            || self.func == "load_model" && self.text.starts_with("[mtmd] failed to get memory usage")
+        matches!(
+            self.func,
+            "mtmd_get_memory_usage" | "mtmd_get_cap_from_file"
+        ) || self.func == "load_model" && self.text.starts_with("[mtmd] failed to get memory usage")
     }
 }
 
@@ -445,7 +455,9 @@ fn message(line: &str) -> &str {
     let mut rest = line.trim();
     if let Some((stamp, after)) = rest.split_once(' ')
         && stamp.contains('.')
-        && stamp.bytes().all(|byte| byte.is_ascii_digit() || byte == b'.')
+        && stamp
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || byte == b'.')
     {
         rest = after;
     }
@@ -489,7 +501,9 @@ fn without_quotes(text: &str) -> String {
         let is_quote = |at: usize| {
             let inside_word = at > 0
                 && chars[at - 1].1.is_alphanumeric()
-                && chars.get(at + 1).is_some_and(|(_, next)| next.is_alphanumeric());
+                && chars
+                    .get(at + 1)
+                    .is_some_and(|(_, next)| next.is_alphanumeric());
             chars[at].1 == quote && !inside_word
         };
         let Some(first) = (0..chars.len()).find(|&at| is_quote(at)) else {
@@ -743,9 +757,16 @@ mod tests {
             "{clip}\n{mtmd}\n{server}\n0.03.929.912 E srv  server_run_i: exiting due to model loading error"
         ));
         assert_eq!(with_image(&all, path), LoadFailure::ImageFileInvalid);
-        assert_eq!(with_image(&lines(&server), path), LoadFailure::ImageFileInvalid);
+        assert_eq!(
+            with_image(&lines(&server), path),
+            LoadFailure::ImageFileInvalid
+        );
         for alone in [&clip, &mtmd] {
-            assert_eq!(with_image(&lines(alone), path), LoadFailure::Unknown, "{alone}");
+            assert_eq!(
+                with_image(&lines(alone), path),
+                LoadFailure::Unknown,
+                "{alone}"
+            );
         }
         // Another image file, none given, or the words somewhere else in a line.
         assert_eq!(
@@ -785,7 +806,10 @@ mod tests {
             assert!(failure.may_succeed_on_another_backend());
         }
         assert_eq!(
-            with_image(&tail("vk::Device::allocateMemory: ErrorOutOfDeviceMemory"), path),
+            with_image(
+                &tail("vk::Device::allocateMemory: ErrorOutOfDeviceMemory"),
+                path
+            ),
             LoadFailure::OutOfMemory
         );
         // The file's own faults stay its own.
@@ -795,7 +819,11 @@ mod tests {
             "Key not found: clip.vision.image_size",
             "clip_model_loader: failed to load CLIP model from /m/mmproj-F16.gguf. Does this file exist?",
         ] {
-            assert_eq!(with_image(&tail(what), path), LoadFailure::ImageFileInvalid, "{what}");
+            assert_eq!(
+                with_image(&tail(what), path),
+                LoadFailure::ImageFileInvalid,
+                "{what}"
+            );
         }
         // The mismatch llama.cpp checks after clip_init, on the mtmd line.
         let mismatch = lines(&format!(
@@ -873,7 +901,11 @@ mod tests {
             .take_while(|l| !l.contains("control-looking token"))
             .cloned()
             .collect();
-        assert!(before_model.iter().any(|l| l.contains("invalid magic characters")));
+        assert!(
+            before_model
+                .iter()
+                .any(|l| l.contains("invalid magic characters"))
+        );
         let device_lost = lines(
             "0.00.900.000 E llama_model_load: error loading model: vk::Queue::submit: ErrorDeviceLost\n\
              0.00.900.001 E llama_model_load_from_file_impl: failed to load model\n\
@@ -959,7 +991,10 @@ mod tests {
             "0.03.927.960 E clip_init: failed to load model '/m/mmproj.gguf': load_hparams: unknown projector type: out of memory\n\
              0.03.927.966 E srv    load_model: failed to load multimodal model, '/m/mmproj.gguf'",
         );
-        assert_eq!(with_image(&crafted, "/m/mmproj.gguf"), LoadFailure::ImageFileInvalid);
+        assert_eq!(
+            with_image(&crafted, "/m/mmproj.gguf"),
+            LoadFailure::ImageFileInvalid
+        );
         // A path the model loader prints without quotes, in a folder named like an error.
         let unquoted = lines(
             "0.00.015.353 E gguf_init_from_file: failed to open GGUF file '/home/u/Out of memory tests/model.gguf' (No such file or directory)\n\
@@ -969,7 +1004,12 @@ mod tests {
         assert_eq!(classify(&unquoted, Some(1)), LoadFailure::ModelFileInvalid);
         // An apostrophe in a word is not a quote ("couldn't").
         assert_eq!(
-            classify(&lines("0.00.011.000 E srv  init_listene: couldn't bind HTTP server socket, hostname: 127.0.0.1, port: 8080"), Some(1)),
+            classify(
+                &lines(
+                    "0.00.011.000 E srv  init_listene: couldn't bind HTTP server socket, hostname: 127.0.0.1, port: 8080"
+                ),
+                Some(1)
+            ),
             LoadFailure::PortInUse
         );
     }
@@ -1017,7 +1057,10 @@ mod tests {
              E llama_model_load: error loading model: vk::Queue::submit: ErrorDeviceLost",
         );
         assert_eq!(classify(&unrelated, Some(1)), LoadFailure::Unknown);
-        assert_eq!(with_image(&unrelated, "/m/mmproj.gguf"), LoadFailure::Unknown);
+        assert_eq!(
+            with_image(&unrelated, "/m/mmproj.gguf"),
+            LoadFailure::Unknown
+        );
     }
 
     /// An unknown failure is shown after the supervisor tried every backend it could, down

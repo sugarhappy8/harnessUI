@@ -470,6 +470,10 @@ export interface InstalledModel {
   /** [0.0.7 P2] Its image file could not be read and no other usable one is there, so it loads
    *  without image input. */
   imageFileUnreadable?: boolean;
+  /** [0.0.7 P2 review M2] What its repository offers as its image file, saved when it was
+   *  downloaded; null when not known (no repository, or downloaded before 0.0.7: "Look for an
+   *  image file" asks then). Never asked for by itself. */
+  imageFileOffer?: ImageFileOffer | null;
   /** [0.0.7 P6b] For a download: what Delete would remove from disk (its parts and the image
    *  file the app downloaded, inside the models folder), and how many of its files would
    *  stay because they are outside the models folder. */
@@ -477,9 +481,11 @@ export interface InstalledModel {
   keptOutside?: number;
 }
 
-/** [0.0.7 P2] What an installed model's Hugging Face repository offers as its image file. */
+/** [0.0.7 P2] What an installed model's Hugging Face repository offers as its image file.
+ *  `again`: the one that couldn't be read is all it has, but the copy here may differ from it. */
 export type ImageFileOffer =
   | { kind: "available"; file: string; sizeBytes: number }
+  | { kind: "again"; file: string; sizeBytes: number }
   | { kind: "noOther" }
   | { kind: "none" };
 
@@ -827,7 +833,8 @@ export type LoadStage =
   | { kind: "retryingWithoutFastAttention"; backend: BackendKind }
   // [0.0.7 P2] Loaded again without its image file, which could not be read (also listed when a
   // load leaves out one remembered as unreadable).
-  | { kind: "retryingWithoutImageFile" };
+  // [0.0.7 P2] `memory`: left out because there was not enough memory for it too (the file is fine).
+  | { kind: "retryingWithoutImageFile"; memory?: boolean };
 
 /** "Use the graphics card": All of it, As much as fits, Don't use it. */
 export type GpuUse = "all" | "fit" | "off";

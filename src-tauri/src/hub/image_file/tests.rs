@@ -324,7 +324,10 @@ fn the_image_file_a_repository_offers() {
         300,
         &"ab".repeat(32),
     );
-    assert_eq!(pick(&only, std::slice::from_ref(&same_upload)), (Offer::NoOther, None));
+    assert_eq!(
+        pick(&only, std::slice::from_ref(&same_upload)),
+        (Offer::NoOther, None)
+    );
     let again = Offer::Again {
         file: "Model.mmproj-f16.gguf".into(),
         size_bytes: 300,
@@ -342,7 +345,10 @@ fn the_image_file_a_repository_offers() {
         sha256: None,
         ..repo_file("Model.mmproj-f16.gguf", 300)
     }];
-    assert_eq!(pick(&unpublished, std::slice::from_ref(&same_upload)).0, again);
+    assert_eq!(
+        pick(&unpublished, std::slice::from_ref(&same_upload)).0,
+        again
+    );
     assert_eq!(
         pick(&files, &[same_upload.clone(), bad_f16.clone()]).0,
         Offer::Available {
@@ -512,7 +518,9 @@ async fn a_later_image_file_is_used_and_an_unreadable_one_is_left_out() {
     let downloaded = dir.path().join("mmproj-Model-F16.gguf");
     std::fs::write(&downloaded, vec![2u8; 70]).unwrap();
     let before = store.model_by_path(&model_text).await.unwrap().unwrap();
-    attach(&store, &model_text, &downloaded, None).await.unwrap();
+    attach(&store, &model_text, &downloaded, None)
+        .await
+        .unwrap();
     let saved = stored(&store, &model).await;
     assert_eq!(
         saved.projector.as_deref(),
@@ -641,7 +649,12 @@ async fn an_unreadable_image_file_can_be_tried_again() {
     mark_unreadable(&store, &model, &image).await;
     assert!(choice_for(&store, &model_text).await.left_out);
     assert!(forget_unreadable(&store, &model_text).await.unwrap());
-    assert!(stored(&store, &model).await.unreadable_projectors.is_empty());
+    assert!(
+        stored(&store, &model)
+            .await
+            .unreadable_projectors
+            .is_empty()
+    );
     let choice = choice_for(&store, &model_text).await;
     assert_eq!(choice.path, Some(image.display().to_string()));
     assert!(!choice.left_out);
@@ -663,7 +676,10 @@ async fn the_checksum_of_a_downloaded_image_file_is_remembered_with_it() {
     attach(&store, &model_text, &downloaded, Some(sha.clone()))
         .await
         .unwrap();
-    assert_eq!(stored(&store, &model).await.projector_sha256, Some(sha.clone()));
+    assert_eq!(
+        stored(&store, &model).await.projector_sha256,
+        Some(sha.clone())
+    );
     mark_unreadable(&store, &model, &downloaded).await;
     let saved = stored(&store, &model).await;
     assert_eq!(saved.unreadable_projectors[0].sha256, Some(sha));
@@ -675,16 +691,24 @@ async fn the_checksum_of_a_downloaded_image_file_is_remembered_with_it() {
     let store = installed(&model, Some("someone/Model-GGUF")).await;
     let image = dir.path().join("mmproj-Model-BF16.gguf");
     std::fs::write(&image, vec![0u8; 64]).unwrap();
-    attach(&store, &model_text, &dir.path().join("gone.gguf"), Some("aa".repeat(32)))
-        .await
-        .unwrap();
+    attach(
+        &store,
+        &model_text,
+        &dir.path().join("gone.gguf"),
+        Some("aa".repeat(32)),
+    )
+    .await
+    .unwrap();
     let image_text = image.display().to_string();
     assert!(!prepare_for_load(&store, &model_text, Some(&image_text)).await);
     let saved = stored(&store, &model).await;
     assert_eq!(saved.projector.as_deref(), Some(image_text.as_str()));
     assert_eq!(saved.projector_sha256, None);
     mark_unreadable(&store, &model, &image).await;
-    assert_eq!(stored(&store, &model).await.unreadable_projectors[0].sha256, None);
+    assert_eq!(
+        stored(&store, &model).await.unreadable_projectors[0].sha256,
+        None
+    );
 }
 
 /// M2: Installed offers an image file from what is saved on the model's row, without
@@ -701,7 +725,10 @@ async fn the_offer_comes_from_what_is_saved() {
     let mut s = StoredSummary::default();
     assert_eq!(saved_offer(Some("someone/Model-GGUF"), &s), None);
     s.repo_image_files = Some(Vec::new());
-    assert_eq!(saved_offer(Some("someone/Model-GGUF"), &s), Some(Offer::NoImageFile));
+    assert_eq!(
+        saved_offer(Some("someone/Model-GGUF"), &s),
+        Some(Offer::NoImageFile)
+    );
     assert_eq!(saved_offer(None, &s), None);
     s.repo_image_files = Some(files.clone());
     assert_eq!(
@@ -732,7 +759,10 @@ async fn the_offer_comes_from_what_is_saved() {
     )
     .await
     .unwrap();
-    assert_eq!(stored(&store, &model).await.repo_image_files, Some(files.clone()));
+    assert_eq!(
+        stored(&store, &model).await.repo_image_files,
+        Some(files.clone())
+    );
     register_installed_in(
         &store,
         &model,
@@ -745,7 +775,10 @@ async fn the_offer_comes_from_what_is_saved() {
     )
     .await
     .unwrap();
-    assert_eq!(stored(&store, &model).await.repo_image_files, Some(files.clone()));
+    assert_eq!(
+        stored(&store, &model).await.repo_image_files,
+        Some(files.clone())
+    );
 
     // Looked for later: what the listing has is saved, only its image files, best first.
     let store = installed(&model, Some("someone/Model-GGUF")).await;
@@ -783,7 +816,10 @@ async fn the_offer_comes_from_what_is_saved() {
         .await
         .unwrap();
     assert_eq!(offer, Some(Offer::NoImageFile));
-    assert_eq!(stored(&store, &model).await.repo_image_files, Some(Vec::new()));
+    assert_eq!(
+        stored(&store, &model).await.repo_image_files,
+        Some(Vec::new())
+    );
 }
 
 /// The header of a model with this embedding length.
@@ -823,12 +859,24 @@ async fn image_files_of_other_models_are_not_used() {
     let at = |name: &str| dir.path().join(name);
     std::fs::write(at("Gemma-3-12B-it-Q4_K_M.gguf"), model_header(3840)).unwrap();
     std::fs::write(at("Qwen3-8B-Q4_K_M.gguf"), model_header(4096)).unwrap();
-    std::fs::write(at("mmproj-Gemma-3-12B-it-f16.gguf"), image_header("gemma3", 3840)).unwrap();
-    std::fs::write(at("mmproj-Mistral-Small-24B-f16.gguf"), image_header("pixtral", 5120)).unwrap();
+    std::fs::write(
+        at("mmproj-Gemma-3-12B-it-f16.gguf"),
+        image_header("gemma3", 3840),
+    )
+    .unwrap();
+    std::fs::write(
+        at("mmproj-Mistral-Small-24B-f16.gguf"),
+        image_header("pixtral", 5120),
+    )
+    .unwrap();
     // Renamed by hand, but made for Gemma: the width says so.
     std::fs::write(at("mmproj-renamed-F16.gguf"), image_header("gemma3", 3840)).unwrap();
     // Named after Gemma, but another width: not Gemma's.
-    std::fs::write(at("mmproj-Gemma-3-12B-it-BF16.gguf"), image_header("gemma3", 2560)).unwrap();
+    std::fs::write(
+        at("mmproj-Gemma-3-12B-it-BF16.gguf"),
+        image_header("gemma3", 2560),
+    )
+    .unwrap();
     // Named after nothing, and the old LLaVA kind that names CLIP's own width there.
     std::fs::write(at("mmproj-model-f16.gguf"), image_header("mlp", 768)).unwrap();
     // Not an image file at all, though named like one.
@@ -838,15 +886,26 @@ async fn image_files_of_other_models_are_not_used() {
     let qwen = at("Qwen3-8B-Q4_K_M.gguf");
     assert_eq!(
         names(&candidates(&gemma, Some(3840))),
-        ["mmproj-Gemma-3-12B-it-f16.gguf", "mmproj-renamed-F16.gguf", "mmproj-model-f16.gguf"]
+        [
+            "mmproj-Gemma-3-12B-it-f16.gguf",
+            "mmproj-renamed-F16.gguf",
+            "mmproj-model-f16.gguf"
+        ]
     );
     // The text-only model: only the file that names no model, of a kind whose width the
     // header does not give.
-    assert_eq!(names(&candidates(&qwen, Some(4096))), ["mmproj-model-f16.gguf"]);
+    assert_eq!(
+        names(&candidates(&qwen, Some(4096))),
+        ["mmproj-model-f16.gguf"]
+    );
     // Its width unknown (a row saved before 0.0.7): by name only.
     assert_eq!(
         names(&candidates(&gemma, None)),
-        ["mmproj-Gemma-3-12B-it-f16.gguf", "mmproj-Gemma-3-12B-it-BF16.gguf", "mmproj-model-f16.gguf"]
+        [
+            "mmproj-Gemma-3-12B-it-f16.gguf",
+            "mmproj-Gemma-3-12B-it-BF16.gguf",
+            "mmproj-model-f16.gguf"
+        ]
     );
     assert_eq!(names(&candidates(&qwen, None)), ["mmproj-model-f16.gguf"]);
     std::fs::remove_file(at("mmproj-model-f16.gguf")).unwrap();
@@ -903,7 +962,11 @@ async fn the_embedding_length_is_filled_in_when_a_load_asks() {
     let model = dir.path().join("Qwen3-8B-Q4_K_M.gguf");
     std::fs::write(&model, model_header(4096)).unwrap();
     // Named after nothing, made for another model: only the width tells.
-    std::fs::write(dir.path().join("mmproj-F16.gguf"), image_header("gemma3", 3840)).unwrap();
+    std::fs::write(
+        dir.path().join("mmproj-F16.gguf"),
+        image_header("gemma3", 3840),
+    )
+    .unwrap();
     let store = installed(&model, None).await;
     let rec = store
         .model_by_path(&model.display().to_string())
@@ -915,7 +978,10 @@ async fn the_embedding_length_is_filled_in_when_a_load_asks() {
     old.projector = None;
     save(&store, &rec, &old).await.unwrap();
     assert_eq!(names(&candidates(&model, None)), ["mmproj-F16.gguf"]);
-    assert_eq!(choice_for(&store, &model.display().to_string()).await, Choice::default());
+    assert_eq!(
+        choice_for(&store, &model.display().to_string()).await,
+        Choice::default()
+    );
     assert_eq!(stored(&store, &model).await.embedding_length, Some(4096));
 }
 
@@ -936,7 +1002,10 @@ fn the_words_that_name_a_model() {
         ("mmproj-F16.gguf", vec![]),
         ("mmproj-model-f16.gguf", vec![]),
         ("Model-UD-IQ4_XS.gguf", vec![]),
-        ("google_gemma-3-4b-it-Q8_0.gguf", vec!["google", "gemma", "4b", "it"]),
+        (
+            "google_gemma-3-4b-it-Q8_0.gguf",
+            vec!["google", "gemma", "4b", "it"],
+        ),
     ] {
         assert_eq!(name_words(name), words, "{name}");
     }

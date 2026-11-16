@@ -100,7 +100,7 @@ const STAGES: Record<LoadStage["kind"], LoadStage[]> = {
     BACKENDS.flatMap((to) => Object.values(FAILURES).map((reason) => ({ kind: "steppingDown" as const, from, to, reason }))),
   ),
   retryingWithoutFastAttention: BACKENDS.map((backend) => ({ kind: "retryingWithoutFastAttention", backend })),
-  retryingWithoutImageFile: [{ kind: "retryingWithoutImageFile" }],
+  retryingWithoutImageFile: [{ kind: "retryingWithoutImageFile" }, { kind: "retryingWithoutImageFile", memory: true }],
 };
 
 const SOURCES: Record<ContextSource, true> = {
@@ -210,6 +210,13 @@ describe("plain words", () => {
       "Loaded without image input: the image file next to this model couldn't be read.",
     );
     expect(loadStageWords({ kind: "retryingWithoutImageFile" })).toBe("Trying again without the image file");
+    // [P2 review m11] Left out for memory: the file is fine, and the note says so.
+    expect(adjustmentWords({ kind: "retryingWithoutImageFile", memory: true })).toBe(
+      "Loaded without image input: there wasn't enough memory for the image file too.",
+    );
+    expect(loadStageWords({ kind: "retryingWithoutImageFile", memory: true })).toBe(
+      "Trying again without the image file",
+    );
     expect(LOAD_FAILURE_WORDS.image_file_invalid).toBe("could not read the image file");
     for (const text of [
       adjustmentWords({ kind: "retryingWithoutImageFile" }) ?? "",

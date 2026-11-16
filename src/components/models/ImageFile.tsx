@@ -6,43 +6,72 @@ import { formatBytes } from "../../lib/format";
 import { IMAGE_FILE_WORDS, imageFileProgress } from "../../lib/words";
 import { toErrorInfo, useApp } from "../../store/app";
 import { isLoadedNow, reloadModel } from "../../store/modelChange";
+import { visiblePath } from "../FolderChip";
 
 /** Whether the model loads with an image file it can read (the "vision" badge). */
 export function seesImages(m: InstalledModel): boolean {
   return !!m.projectorPath && !m.imageFileUnreadable;
 }
 
+/** Models whose repository was asked by itself this session (after their image file couldn't
+ *  be read), so it happens once. */
+const askedOnce = new Set<string>();
+
 /**
  * [0.0.7 P2] An installed model's image file, on its row in Models → Installed: that it
- * couldn't be read (the model then loads without image input), and, for a model with a
- * Hugging Face repository and no image file it can read, the one its repository offers
- * ("Download the image file"; another one when it couldn't be read), with the download's
- * progress and what to do after it. Nothing shows for a model that sees images, or one
- * whose repository has none. The repository is asked once per row (the backend reuses its
- * listing for a while); offline, nothing is offered.
+ * couldn't be read (the model then loads without image input), with "Try it again"; and, for
+ * a model with a Hugging Face repository and no image file it can read, what its repository
+ * offers ("Download the image file"; another one, or the same one again, when it couldn't be
+ * read), with the download's progress and what to do after it. Nothing shows for a model that
+ * sees images, or one whose repository is known to have none.
+ *
+ * What the repository offers was saved on the model's row when it was downloaded, so the row
+ * asks Hugging Face for nothing (P2 review M2). For a model downloaded before 0.0.7, "Look for
+ * an image file" asks when clicked; the row asks by itself only once, for a model whose image
+ * file couldn't be read.
  */
 export function ImageFileLine(props: { model: InstalledModel; onChanged: () => void }) {
   const { model: m, onChanged } = props;
   const unreadable = !!m.imageFileUnreadable;
   const wanted = !!m.repo && !seesImages(m);
-  const [offer, setOffer] = useState<ImageFileOffer | null>(null);
+  // What was asked for on this row, over what was saved with the model.
+  const [looked, setLooked] = useState<ImageFileOffer | null>(null);
+  const offer = looked ?? m.imageFileOffer ?? null;
+  const [looking, setLooking] = useState(false);
   const [download, setDownload] = useState<{ id: string; done: number; total: number } | null>(null);
   const [finished, setFinished] = useState(false);
+  const [triedAgain, setTriedAgain] = useState(false);
   const [starting, setStarting] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const runtime = useApp((s) => s.runtime);
 
+  async function look() {
+    setError(null);
+    setLooking(true);
+    try {
+      setLooked(await ipc.imageFileOffer(m.path));
+    } catch (err) {
+      setError(toErrorInfo(err).message);
+    } finally {
+      setLooking(false);
+    }
+  }
+
+  // Right after its image file couldn't be read, another one is looked for once by itself
+  // (offline, nothing is said: the link stays).
+  const askNow = wanted && unreadable && m.imageFileOffer == null && !askedOnce.has(m.path);
   useEffect(() => {
-    if (!wanted) return;
+    if (!askNow) return;
+    askedOnce.add(m.path);
     let alive = true;
     ipc
       .imageFileOffer(m.path)
-      .then((o) => alive && setOffer(o))
-      .catch(() => alive && setOffer(null));
+      .then((o) => alive && setLooked(o))
+      .catch(() => undefined);
     return () => {
       alive = false;
     };
-  }, [m.path, wanted, unreadable]);
+  }, [askNow, m.path]);
 
   // The download's progress, until it is done or stops.
   const downloadId = download?.id ?? null;
@@ -89,25 +118,49 @@ export function ImageFileLine(props: { model: InstalledModel; onChanged: () => v
     }
   }
 
+  async function tryAgain() {
+    setError(null);
+    try {
+      await ipc.forgetUnreadableImageFile(m.path);
+      setTriedAgain(true);
+      onChanged();
+    } catch (err) {
+      setError(toErrorInfo(err).message);
+    }
+  }
+
+  const loadedNow = isLoadedNow(runtime, m.path);
   const reload = () => void reloadModel(useApp.getState().runtime, true).catch((err) => setError(toErrorInfo(err).message));
+  const reloadButton = loadedNow && (
+    <button type="button" onClick={reload} className="underline hover:text-fg">
+      Reload
+    </button>
+  );
+  const link = "flex items-center gap-1 underline hover:text-fg disabled:opacity-50";
 
   const lines: ReactNode[] = [];
-  if (unreadable && !finished) {
+  if (unreadable && !finished && !triedAgain) {
     lines.push(
       <span key="unreadable" className="text-warning">
         {IMAGE_FILE_WORDS.unreadable}
       </span>,
+      <button key="try" type="button" onClick={() => void tryAgain()} className={link}>
+        {IMAGE_FILE_WORDS.tryAgain}
+      </button>,
     );
   }
   if (finished) {
     lines.push(
       <span key="done" className="flex items-center gap-1.5">
-        {IMAGE_FILE_WORDS.done}
-        {isLoadedNow(runtime, m.path) && (
-          <button type="button" onClick={reload} className="underline hover:text-fg">
-            Reload
-          </button>
-        )}
+        {loadedNow ? IMAGE_FILE_WORDS.done : IMAGE_FILE_WORDS.doneNextLoad}
+        {reloadButton}
+      </span>,
+    );
+  } else if (triedAgain) {
+    lines.push(
+      <span key="tried" className="flex items-center gap-1.5">
+        {IMAGE_FILE_WORDS.triedAgain}
+        {reloadButton}
       </span>,
     );
   } else if (download) {
@@ -116,22 +169,41 @@ export function ImageFileLine(props: { model: InstalledModel; onChanged: () => v
         {imageFileProgress(download.done, download.total)}
       </span>,
     );
-  } else if (wanted && offer?.kind === "available") {
-    const label = unreadable ? IMAGE_FILE_WORDS.downloadAnother : IMAGE_FILE_WORDS.download;
+  } else if (wanted && (offer?.kind === "available" || offer?.kind === "again")) {
+    const label =
+      offer.kind === "again"
+        ? IMAGE_FILE_WORDS.downloadAgain
+        : unreadable
+          ? IMAGE_FILE_WORDS.downloadAnother
+          : IMAGE_FILE_WORDS.download;
     lines.push(
       <button
         key="download"
         type="button"
         disabled={starting}
         onClick={() => void start(offer.sizeBytes)}
-        title={offer.file}
-        className="flex items-center gap-1 underline hover:text-fg disabled:opacity-50"
+        title={visiblePath(offer.file)}
+        className={link}
       >
         <Download size={12} aria-hidden /> {label} ({formatBytes(offer.sizeBytes)})
       </button>,
     );
-  } else if (wanted && unreadable && (offer?.kind === "noOther" || offer?.kind === "none")) {
+  } else if (wanted && offer?.kind === "noOther" && unreadable) {
     lines.push(<span key="none">{IMAGE_FILE_WORDS.noOther}</span>);
+  } else if (wanted && offer?.kind === "none" && (unreadable || looked !== null)) {
+    lines.push(<span key="none">{IMAGE_FILE_WORDS.none}</span>);
+  } else if (wanted && offer === null) {
+    lines.push(
+      looking ? (
+        <span key="looking" role="status">
+          {IMAGE_FILE_WORDS.looking}
+        </span>
+      ) : (
+        <button key="look" type="button" onClick={() => void look()} className={link}>
+          {IMAGE_FILE_WORDS.look}
+        </button>
+      ),
+    );
   }
   if (error) {
     lines.push(

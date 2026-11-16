@@ -205,3 +205,19 @@ and `README.md`.
   independent verification of round 2 is running.
 - Disk: 3.9 GB free at 10:26 UTC; removed build copies of the project's own crates idle
   for an hour and 14 old test binaries: 6.4 GB free.
+- P6b round 1 done: Cancel deletes only files the download itself wrote (recorded per
+  group), inside the models folder, unused by installed models; a failed file is checked
+  again on Resume; Cancel waits for the task; half-finished cancels finished at start-up;
+  resume/cancel take the start lock; Delete removes only an image file the app downloaded;
+  "checking the file…" while a file is checked; the backend checked before replies are
+  stopped. models 145, app 875 (1 failure from P1's new field), vitest 844, clippy clean.
+  Verification of round 1 (deletion safety first) running.
+- P4 round 2 done: helpers share the turn's list and prompt cache; computer phrases need a
+  clear desktop request or a machine word ("my pc", "my screen"); "open Google Chrome" is
+  no longer a web search; `fitted()` counts exactly what is sent; the made-up-result check
+  only takes a block of its own; P7's capture method is in the call guide when that tool
+  is on. agent all pass, tools 220, real model still calls read_file.
+- Started the cross-package review of P3, P4 and P6a (also P3's and P4's last round and P6a's
+  only verification) while P1, P2 and P7 finish their rounds.
+- Disk: 3.4 GB free again at 10:40 UTC; removed idle build copies of the project's crates:
+  4.8 GB free.

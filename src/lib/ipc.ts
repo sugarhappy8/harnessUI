@@ -273,11 +273,15 @@ export function onDownloadProgress(handler: (g: DownloadGroup) => void): Promise
 
 export const listInstalledModels = () => invoke<InstalledModel[]>("list_installed_models");
 export const importModel = (path: string) => invoke<InstalledModel>("import_model", { path });
-// [0.0.7 P2] An installed model's image file from its Hugging Face repository: what it offers,
-// and its download (the id of the download group, followed through download-progress).
+// [0.0.7 P2] An installed model's image file from its Hugging Face repository: what it offers
+// (asked only when the user looks for one, and saved on the model's row), and its download
+// (the id of the download group, followed through download-progress).
 export const imageFileOffer = (path: string) =>
   invoke<import("./types").ImageFileOffer>("image_file_offer", { path });
 export const downloadImageFile = (path: string) => invoke<string>("download_image_file", { path });
+// [0.0.7 P2 review M1] "Try it again": forgets that its image file couldn't be read.
+export const forgetUnreadableImageFile = (path: string) =>
+  invoke<boolean>("forget_unreadable_image_file", { path });
 /** Takes a model off the Installed list (`deleteFiles`: and a download's files). [0.0.7 P6]
  *  Resolves to a note for the user when files were left in place (outside the models folder). */
 export const deleteModel = (id: number, deleteFiles: boolean) =>

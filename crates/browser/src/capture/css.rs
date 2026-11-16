@@ -1,12 +1,18 @@
 //! Reading style sheets for `browser_capture_site` (ARCHITECTURE.md 9.3): the addresses a
-//! sheet names (`url(…)`, `@import`, `image-set(…)`), rewritten to the local copies, and
-//! the facts the report and `animations.json` need (`@keyframes`, hover and focus rules,
-//! transitions, scroll-driven animations, `@font-face`, custom properties, breakpoints).
+//! sheet names (`url(…)`, `src(…)`, `@import`, `image-set(…)`), rewritten to the local
+//! copies, and the facts the report and `animations.json` need (`@keyframes`, hover and
+//! focus rules, transitions, scroll-driven animations, `@font-face`, custom properties,
+//! breakpoints).
 //!
-//! A small scanner of our own, not a CSS engine: it skips comments and strings, so an
-//! address inside either is never touched, and it runs in one pass over the text. Sheet
-//! text is page data; nothing here runs or follows anything.
+//! Addresses are found with the CSS tokenizer browsers' engines share (`cssparser`, the one
+//! Servo and Firefox use), so a name written with escapes (`u\72l(…)`, `@\69mport`) or an
+//! address inside a comment or a string is seen exactly as a browser sees it. [`confine`]
+//! is the rule for the copy: an address is one of the copy's own files, a fragment or
+//! `data:`, or it becomes `about:invalid`. The facts come from a small scanner of our own
+//! that skips comments and strings. Sheet text is page data; nothing here runs or follows
+//! anything.
 
+use cssparser::{ParseError, Parser as CssParser, ParserInput, Token};
 use url::Url;
 
 /// The largest sheet analysed for facts (addresses are rewritten in any sheet).
@@ -15,6 +21,10 @@ pub const MAX_ANALYSED: usize = 8 * 1024 * 1024;
 const MAX_RULES: usize = 40_000;
 /// Facts of one kind kept per sheet at most.
 const MAX_FACTS: usize = 400;
+/// Blocks inside blocks followed at most; text nested deeper cannot be confined.
+const MAX_NESTING: usize = 64;
+/// What an address the copy may not keep becomes.
+pub const INERT_URL: &str = "about:invalid";
 
 /// One address named in a sheet.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -29,131 +39,247 @@ pub struct UrlRef {
     pub import: bool,
 }
 
-/// Every address a sheet names, in order. `data:` addresses and fragment-only ones
-/// (`url(#gradient)`) are left alone and not listed.
-pub fn find_urls(css: &str, base: &Url) -> Vec<UrlRef> {
-    let b = css.as_bytes();
-    let mut out = Vec::new();
-    let mut i = 0;
-    // Depth of an image-set( … ) whose strings are addresses, if inside one.
-    let mut image_set: Option<usize> = None;
-    let mut depth = 0usize;
-    while i < b.len() {
-        let c = b[i];
-        if c == b'/' && b.get(i + 1) == Some(&b'*') {
-            i = skip_comment(b, i);
-            continue;
-        }
-        if c == b'"' || c == b'\'' {
-            let (end, value) = read_string(css, i);
-            if image_set == Some(depth)
-                && let Some(url) = resolve(&value, base)
-            {
-                out.push(UrlRef {
-                    start: i,
-                    end,
-                    url,
-                    import: false,
-                });
-            }
-            i = end;
-            continue;
-        }
-        if c == b'(' {
-            depth += 1;
-            i += 1;
-            continue;
-        }
-        if c == b')' {
-            if image_set == Some(depth) {
-                image_set = None;
-            }
-            depth = depth.saturating_sub(1);
-            i += 1;
-            continue;
-        }
-        if (c == b'u' || c == b'U')
-            && starts_with_ci(b, i, b"url(")
-            && (i == 0 || !is_ident_byte(b[i - 1]))
-        {
-            if let Some((end, value)) = read_url_token(css, i) {
-                if let Some(url) = resolve(&value, base) {
-                    let import = preceded_by_import(b, i);
-                    out.push(UrlRef {
-                        start: i,
-                        end,
-                        url,
-                        import,
-                    });
-                }
-                i = end;
-                continue;
-            }
-            i += 4;
-            continue;
-        }
-        if c == b'@' && starts_with_ci(b, i, b"@import") {
-            let mut j = i + 7;
-            loop {
-                while j < b.len() && b[j].is_ascii_whitespace() {
-                    j += 1;
-                }
-                if b.get(j) == Some(&b'/') && b.get(j + 1) == Some(&b'*') {
-                    j = skip_comment(b, j);
-                    continue;
-                }
-                break;
-            }
-            if j < b.len() && (b[j] == b'"' || b[j] == b'\'') {
-                let (end, value) = read_string(css, j);
-                if let Some(url) = resolve(&value, base) {
-                    out.push(UrlRef {
-                        start: j,
-                        end,
-                        url,
-                        import: true,
-                    });
-                }
-                i = end;
-                continue;
-            }
-            i = j;
-            continue;
-        }
-        if (c == b'i' || c == b'-')
-            && (i == 0 || !is_ident_byte(b[i - 1]))
-            && (starts_with_ci(b, i, b"image-set(") || starts_with_ci(b, i, b"-webkit-image-set("))
-        {
-            let open = i + css[i..].find('(').unwrap_or(0);
-            depth += 1;
-            image_set = Some(depth);
-            i = open + 1;
-            continue;
-        }
-        i += 1;
-    }
+/// One address-bearing token as written, of any kind (`data:`, fragments, any scheme).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RawRef {
+    /// Byte range of the whole token, as for [`UrlRef`].
+    pub start: usize,
+    pub end: usize,
+    /// The address with CSS escapes undone, not resolved.
+    pub raw: String,
+    /// Named by `@import`.
+    pub import: bool,
+    /// A malformed `url(` token, which browsers ignore.
+    pub bad: bool,
+}
+
+/// Every address-bearing token of a text, and whether all of it could be read.
+#[derive(Debug, Default)]
+pub struct RawUrls {
+    pub refs: Vec<RawRef>,
+    /// False when blocks are nested deeper than [`MAX_NESTING`]: tokens deeper than that
+    /// were not looked at.
+    pub complete: bool,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Pending {
+    None,
+    Import,
+    Namespace,
+}
+
+/// Every token of `css` that names an address: `url(…)` in either form (and malformed
+/// ones), `src(…)`, the string or `url(…)` after `@import`, and the strings inside
+/// `image-set(…)`, `-webkit-image-set(…)` and `image(…)`. The address of `@namespace` is
+/// not one (nothing is fetched) and is left out.
+pub fn find_raw_urls(css: &str) -> RawUrls {
+    let mut input = ParserInput::new(css);
+    let mut parser = CssParser::new(&mut input);
+    let mut out = RawUrls {
+        refs: Vec::new(),
+        complete: true,
+    };
+    walk(&mut parser, &mut out, 0, false);
     out
+}
+
+fn walk<'i>(p: &mut CssParser<'i, '_>, out: &mut RawUrls, depth: usize, strings_are_urls: bool) {
+    let mut pending = Pending::None;
+    loop {
+        let start = p.position().byte_index();
+        let token = match p.next_including_whitespace_and_comments() {
+            Ok(t) => t.clone(),
+            Err(_) => return,
+        };
+        match token {
+            Token::WhiteSpace(_) | Token::Comment(_) => {}
+            Token::UnquotedUrl(value) => {
+                if pending != Pending::Namespace {
+                    out.refs.push(RawRef {
+                        start,
+                        end: p.position().byte_index(),
+                        raw: value.to_string(),
+                        import: pending == Pending::Import,
+                        bad: false,
+                    });
+                }
+                pending = Pending::None;
+            }
+            Token::BadUrl(value) => {
+                out.refs.push(RawRef {
+                    start,
+                    end: p.position().byte_index(),
+                    raw: value.to_string(),
+                    import: pending == Pending::Import,
+                    bad: true,
+                });
+                pending = Pending::None;
+            }
+            Token::QuotedString(value) => {
+                if pending == Pending::Import || (strings_are_urls && pending == Pending::None) {
+                    out.refs.push(RawRef {
+                        start,
+                        end: p.position().byte_index(),
+                        raw: value.to_string(),
+                        import: pending == Pending::Import,
+                        bad: false,
+                    });
+                }
+                pending = Pending::None;
+            }
+            Token::Function(name) => {
+                let lname = name.to_ascii_lowercase();
+                if lname == "url" || lname == "src" {
+                    // `url("…")`: the first string inside is the address.
+                    let mut raw: Option<String> = None;
+                    let _ = p.parse_nested_block(|q| -> Result<(), ParseError<'i, ()>> {
+                        while let Ok(t) = q.next_including_whitespace_and_comments() {
+                            if let Token::QuotedString(s) = t
+                                && raw.is_none()
+                            {
+                                raw = Some(s.to_string());
+                            }
+                        }
+                        Ok(())
+                    });
+                    if pending != Pending::Namespace {
+                        out.refs.push(RawRef {
+                            start,
+                            end: p.position().byte_index(),
+                            raw: raw.unwrap_or_default(),
+                            import: pending == Pending::Import,
+                            bad: false,
+                        });
+                    }
+                } else if depth >= MAX_NESTING {
+                    // The block is skipped by the next token read; what it holds is unknown.
+                    out.complete = false;
+                } else {
+                    let urls = matches!(lname.as_str(), "image-set" | "-webkit-image-set" | "image");
+                    let _ = p.parse_nested_block(|q| -> Result<(), ParseError<'i, ()>> {
+                        walk(q, out, depth + 1, urls);
+                        Ok(())
+                    });
+                }
+                pending = Pending::None;
+            }
+            Token::ParenthesisBlock | Token::SquareBracketBlock | Token::CurlyBracketBlock => {
+                if depth >= MAX_NESTING {
+                    out.complete = false;
+                } else {
+                    let _ = p.parse_nested_block(|q| -> Result<(), ParseError<'i, ()>> {
+                        walk(q, out, depth + 1, false);
+                        Ok(())
+                    });
+                }
+                pending = Pending::None;
+            }
+            Token::AtKeyword(keyword) => {
+                pending = if keyword.eq_ignore_ascii_case("import") {
+                    Pending::Import
+                } else if keyword.eq_ignore_ascii_case("namespace") {
+                    Pending::Namespace
+                } else {
+                    Pending::None
+                };
+            }
+            // `@namespace svg url(…)`: the prefix comes first.
+            Token::Ident(_) if pending == Pending::Namespace => {}
+            _ => pending = Pending::None,
+        }
+    }
+}
+
+/// Every address a sheet names, made absolute (only `http` and `https` ones), in order.
+/// `data:` addresses, fragment-only ones (`url(#gradient)`) and malformed tokens are left
+/// alone and not listed.
+pub fn find_urls(css: &str, base: &Url) -> Vec<UrlRef> {
+    find_raw_urls(css)
+        .refs
+        .into_iter()
+        .filter(|r| !r.bad)
+        .filter_map(|r| {
+            let url = resolve(&r.raw, base)?;
+            Some(UrlRef {
+                start: r.start,
+                end: r.end,
+                url,
+                import: r.import,
+            })
+        })
+        .collect()
 }
 
 /// The sheet with each listed address replaced by what `replace` gives (written as
 /// `url("…")`), or left as written when it gives nothing.
 pub fn rewrite(css: &str, refs: &[UrlRef], replace: impl Fn(&UrlRef) -> Option<String>) -> String {
+    rewrite_spans(css, refs.iter().map(|r| (r.start, r.end, replace(r))))
+}
+
+/// [`rewrite`] for the tokens of [`find_raw_urls`].
+pub fn rewrite_raw(
+    css: &str,
+    refs: &[RawRef],
+    replace: impl Fn(&RawRef) -> Option<String>,
+) -> String {
+    rewrite_spans(css, refs.iter().map(|r| (r.start, r.end, replace(r))))
+}
+
+fn rewrite_spans(
+    css: &str,
+    spans: impl Iterator<Item = (usize, usize, Option<String>)>,
+) -> String {
     let mut out = String::with_capacity(css.len());
     let mut last = 0;
-    for r in refs {
-        if r.start < last || r.end > css.len() {
+    for (start, end, new) in spans {
+        if start < last || end > css.len() || !css.is_char_boundary(start) || !css.is_char_boundary(end)
+        {
             continue;
         }
-        if let Some(new) = replace(r) {
-            out.push_str(&css[last..r.start]);
+        if let Some(new) = new {
+            out.push_str(&css[last..start]);
             out.push_str("url(\"");
             out.push_str(&escape_css_string(&new));
             out.push_str("\")");
-            last = r.end;
+            last = end;
         }
     }
     out.push_str(&css[last..]);
     out
+}
+
+/// The text of an address as the URL parser reads it: tabs and line breaks dropped,
+/// spaces and control characters trimmed at both ends.
+pub fn url_text(raw: &str) -> String {
+    let kept: String = raw
+        .chars()
+        .filter(|c| !matches!(c, '\t' | '\n' | '\r'))
+        .collect();
+    kept.trim_matches(|c: char| c <= ' ').to_string()
+}
+
+/// `css` with every address the copy may not keep replaced by [`INERT_URL`]: kept are
+/// fragments (`url(#clip)`), `data:` addresses and addresses for which `is_local` says the
+/// text names one of the copy's own files; an `@import` is kept only when it names one of
+/// those. `None` when the text is nested too deeply to be read whole.
+pub fn confine(css: &str, is_local: impl Fn(&str) -> bool) -> Option<String> {
+    let found = find_raw_urls(css);
+    if !found.complete {
+        return None;
+    }
+    Some(rewrite_raw(css, &found.refs, |r| {
+        let t = url_text(&r.raw);
+        let lower = t.to_ascii_lowercase();
+        let keep = !r.bad
+            && !t.is_empty()
+            && if r.import {
+                is_local(&t)
+            } else {
+                t.starts_with('#') || lower.starts_with("data:") || is_local(&t)
+            };
+        (!keep).then(|| INERT_URL.to_string())
+    }))
 }
 
 /// A value safe inside a double-quoted CSS string.
@@ -183,14 +309,6 @@ fn resolve(raw: &str, base: &Url) -> Option<String> {
     }
     let u = base.join(t).ok()?;
     matches!(u.scheme(), "http" | "https").then(|| u.to_string())
-}
-
-fn is_ident_byte(c: u8) -> bool {
-    c.is_ascii_alphanumeric() || c == b'-' || c == b'_' || c >= 0x80
-}
-
-fn starts_with_ci(b: &[u8], i: usize, pat: &[u8]) -> bool {
-    b.len() >= i + pat.len() && b[i..i + pat.len()].eq_ignore_ascii_case(pat)
 }
 
 fn skip_comment(b: &[u8], i: usize) -> usize {
@@ -233,59 +351,6 @@ fn read_string(css: &str, i: usize) -> (usize, String) {
     let start = (i + 1).min(raw_end);
     let raw = css.get(start..raw_end).unwrap_or("");
     (end.min(b.len()), unescape(raw))
-}
-
-/// Reads a `url(` token at `i`: its end (past the `)`) and the address. `None` when it is
-/// not a well-formed token (then it is left alone).
-fn read_url_token(css: &str, i: usize) -> Option<(usize, String)> {
-    let b = css.as_bytes();
-    let mut j = i + 4;
-    while j < b.len() && b[j].is_ascii_whitespace() {
-        j += 1;
-    }
-    if j >= b.len() {
-        return None;
-    }
-    let value;
-    if b[j] == b'"' || b[j] == b'\'' {
-        let (end, v) = read_string(css, j);
-        value = v;
-        j = end;
-        while j < b.len() && b[j].is_ascii_whitespace() {
-            j += 1;
-        }
-        // `url("x" format(…))` is not a url token; leave it.
-        if b.get(j) != Some(&b')') {
-            return None;
-        }
-        return Some((j + 1, value));
-    }
-    let start = j;
-    while j < b.len() {
-        match b[j] {
-            b'\\' => j += 2,
-            b')' => break,
-            c if c.is_ascii_whitespace() => break,
-            b'"' | b'\'' | b'(' => return None,
-            _ => j += 1,
-        }
-    }
-    let raw = css.get(start..j.min(b.len()))?;
-    while j < b.len() && b[j].is_ascii_whitespace() {
-        j += 1;
-    }
-    if b.get(j) != Some(&b')') {
-        return None;
-    }
-    Some((j + 1, unescape(raw)))
-}
-
-fn preceded_by_import(b: &[u8], i: usize) -> bool {
-    let mut j = i;
-    while j > 0 && b[j - 1].is_ascii_whitespace() {
-        j -= 1;
-    }
-    j >= 7 && b[j - 7..j].eq_ignore_ascii_case(b"@import")
 }
 
 /// Undoes CSS escapes: `\` + up to six hex digits (and one space), or `\` + a character.
@@ -930,6 +995,61 @@ mod tests {
             "a{background:url(\"../assets/a.png\") no-repeat}@import url(\"b.css\");c{x:url(data:image/gif;base64,R0)}d{y:url(missing.png)}"
         );
         assert_eq!(escape_css_string("a\"b\\c\nd"), "a\\22 b\\5c c\\a d");
+    }
+
+    #[test]
+    fn names_written_with_escapes_are_addresses_too() {
+        // A browser reads `u\72l(` as `url(` and `@\69mport` as `@import`.
+        let css = "a{background:u\\72l(file://attacker.example/share/a.png)}@\\69mport 'x.css';b{c:\\55 RL(\"//evil.example/b.png\")}d{e:url(a b)}f{g:src(\"s.png\")}@namespace svg url(http://www.w3.org/2000/svg);";
+        let found = find_raw_urls(css);
+        assert!(found.complete);
+        let raws: Vec<(&str, bool, bool)> = found
+            .refs
+            .iter()
+            .map(|r| (r.raw.as_str(), r.import, r.bad))
+            .collect();
+        assert_eq!(
+            raws,
+            [
+                ("file://attacker.example/share/a.png", false, false),
+                ("x.css", true, false),
+                ("//evil.example/b.png", false, false),
+                ("a b", false, true),
+                ("s.png", false, false),
+            ],
+            "@namespace names no file: {:?}",
+            found.refs
+        );
+        // Each range covers the whole token, so a rewrite replaces it whole.
+        let first = &found.refs[0];
+        assert_eq!(
+            &css[first.start..first.end],
+            "u\\72l(file://attacker.example/share/a.png)"
+        );
+    }
+
+    #[test]
+    fn the_copy_keeps_only_its_own_files_fragments_and_data() {
+        let local = |t: &str| t == "../assets/a.png" || t == "theme.css";
+        let css = "a{background:url(../assets/a.png),url(file://attacker.example/s/x.png)}\
+                   b{mask:url(#m);background:url(data:image/png;base64,AA)}\
+                   @import url(theme.css);@import \"https://evil.example/x.css\";\
+                   @import url(data:text/css,b{x:y});c{d:u\\72l(//evil.example/y.png)}\
+                   e{f:url(a b)}g{h:image-set(\"https://cdn.example/i.png\" 1x)}i{j:url(\"\")}";
+        let out = confine(css, local).unwrap();
+        assert!(out.contains("url(../assets/a.png)"), "{out}");
+        assert!(out.contains("url(#m)") && out.contains("url(data:image/png;base64,AA)"), "{out}");
+        assert!(out.contains("@import url(theme.css)"), "{out}");
+        for gone in ["attacker.example", "evil.example", "cdn.example", "data:text/css", "a b"] {
+            assert!(!out.contains(gone), "{gone} is still in {out}");
+        }
+        assert_eq!(out.matches(INERT_URL).count(), 7, "{out}");
+        // Confining again changes nothing.
+        assert_eq!(confine(&out, local).unwrap(), out);
+        // Text nested deeper than can be read is not confined at all.
+        let deep = format!("{}url(file://x/y){}", "(".repeat(MAX_NESTING + 5), ")".repeat(MAX_NESTING + 5));
+        assert!(confine(&deep, local).is_none());
+        assert_eq!(url_text(" \tda\nta:image/png,x "), "data:image/png,x");
     }
 
     #[test]

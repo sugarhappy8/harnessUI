@@ -377,8 +377,9 @@ pub const KEEP_IN_MEMORY_LOAD_MODE: &str = "mmap+mlock";
 /// computer's free memory; never 0, which would make the server read the whole
 /// conversation again whenever a message does not continue exactly where the last reply
 /// ended. Fewer copies only mean the server may read more of the conversation again after
-/// an edit or a regenerated reply. `models::kv::MAX_CTX_CHECKPOINTS` is the same number
-/// (the app checks the two are equal). `llama-fit-params` does not take the flag
+/// an edit (with one copy, an edit of the last message reads all of it again; the next
+/// message and a regenerated reply do not). `models::kv::MAX_CTX_CHECKPOINTS` is the same
+/// number (the app checks the two are equal). `llama-fit-params` does not take the flag
 /// (llama.cpp registers it for the server and the CLI only), and the copies are made while
 /// a chat goes on, so a measurement never has it.
 pub const MAX_CTX_CHECKPOINTS: u32 = 8;

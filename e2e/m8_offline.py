@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """Offline gate (ARCHITECTURE.md 17): the app, with every proxy variable pointing at a
-recording proxy that refuses everything, starts, loads a local model, answers a chat
-and opens every settings page without a single outbound request.
+recording proxy that refuses everything, starts, loads a local model, answers a chat,
+opens Models → Installed with a model that has a Hugging Face repository, and opens every
+settings page without a single outbound request.
 
 Loopback is exempt (NO_PROXY): the UI is served from the dev server and llama-server
 listens on 127.0.0.1. The app's loopback client never uses a proxy anyway.
@@ -13,6 +14,7 @@ import os
 import pathlib
 import shutil
 import socket
+import sqlite3
 import subprocess
 import sys
 import tempfile
@@ -28,6 +30,9 @@ APP = os.environ.get("APP_BIN", str(ROOT / "target" / "debug" / "app"))
 MODEL = os.environ.get("TEST_GGUF", "/home/user/llama-dev/Qwen3-0.6B-Q8_0.gguf")
 LLAMA_DIR = os.environ.get("APP_DEV_LLAMA_DIR", str(ROOT / ".cache" / "llama-linux"))
 OUT = pathlib.Path(os.environ.get("E2E_OUT", tempfile.mkdtemp(prefix="e2e-m8-")))
+IDENTIFIER = "io.github.sugarhappy8.harnessui"
+# A repository for the installed model (never asked for: nothing reaches the network).
+REPO = "Qwen/Qwen3-0.6B-GGUF"
 
 # Every tab of the settings dialog, in the order src/components/SettingsDialog.tsx shows them.
 SETTINGS_PAGES = [
@@ -115,6 +120,25 @@ def main() -> int:
         chat_id = s.invoke("list_chats", {"query": None})[0]["id"]
         msgs = s.invoke("get_chat", {"chatId": chat_id})["messages"]
         assert msgs[-1]["role"] == "assistant" and msgs[-1]["text"].strip(), msgs[-1]
+        # 0.0.7 (P2 review M2): Models → Installed with a model from Hugging Face asks it for
+        # nothing. What it offers as an image file is what was saved when the model was
+        # downloaded; a model with none saved (as if downloaded before 0.0.7, here: imported
+        # and given a repository) shows "Look for an image file", which asks only when clicked.
+        installed = s.invoke("import_model", {"path": MODEL})
+        con = sqlite3.connect(home / "data" / IDENTIFIER / "app.db")
+        con.execute("UPDATE models SET repo = ? WHERE id = ?", (REPO, installed["id"]))
+        con.commit()
+        con.close()
+        rows = s.invoke("list_installed_models")
+        row = next(r for r in rows if r["id"] == installed["id"])
+        assert row["repo"] == REPO and row.get("imageFileOffer") is None, row
+        s.click_button("Models")
+        s.wait_text("Installed", 10)
+        s.click_button("Installed")
+        s.wait_text("Look for an image file", 15)
+        time.sleep(2)
+        s.execute("document.dispatchEvent(new KeyboardEvent('keydown', {key: 'Escape', bubbles: true}));")
+        s.wait_for(lambda: "Look for an image file" not in s.page_text(), 10, "Models closed")
         s.click_button("Settings")
         for tab in SETTINGS_PAGES:
             s.click_button(tab)

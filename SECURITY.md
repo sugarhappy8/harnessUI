@@ -439,10 +439,15 @@ build machine, and its Windows and macOS jobs have not run at all.
   uploads nothing.) With no model downloaded and nothing clicked, the app makes no network request. Every network use is listed in
   ARCHITECTURE.md 13.6. 0.0.6 adds two of its own, both only when you ask: Compare looks
   up the models you add on Hugging Face, and Settings → Reverse engineering downloads what
-  you click. 0.0.7 adds one more: Models → Installed asks Hugging Face for the file list of
-  a model you downloaded from there when it has no image file it can read, to offer one, and
-  *Download the image file* downloads it like any model file (checked against its published
-  size and checksum, saved only in the model's own folder). A task you let the model hand to
+  you click. 0.0.7 adds one more, also only when you ask: Models → Installed offers a
+  model's image file from the file list saved when you downloaded the model, without asking
+  Hugging Face; it asks for that model's file list when you click *Look for an image file*
+  (models downloaded before 0.0.7) or *Download the image file*, and by itself only once,
+  right after that model's image file couldn't be read. *Download the image file* downloads it
+  like any model file (checked against its published size and checksum, saved only in the
+  model's own folder). An image file next to a model is loaded with it, so writing a file
+  named like one (a `.gguf` file with "mmproj" in its name) always asks, also in Allow all;
+  links next to a model are not followed. A task you let the model hand to
   Claude Code or Codex also leaves this
   computer: that program sends the task and the files it reads to its company (Anthropic or
   OpenAI) with your account, unless it is set up to use the model in harnessUI.

@@ -184,10 +184,12 @@ pub struct Copies {
 /// part there: as many as fit [`COPIES_SHARE_DIVISOR`]'s share of it, at least 1 and at most
 /// [`MAX_CTX_CHECKPOINTS`]. Never 0: without a copy llama-server reads the whole
 /// conversation again whenever the next message does not continue exactly where the last
-/// reply ended (a thinking model's reply is shortened in the history), and with one it
-/// still goes back to the end of the last message. With `spare` unknown the app cannot
-/// size them and passes the most, a quarter of what llama.cpp keeps by itself. A model
-/// without copies (`copy_bytes` 0) also gets the most, which costs nothing.
+/// reply ended (a thinking model's reply is shortened in the history). With one, the next
+/// message and a regenerated reply still read only what is new, but an edit of the last
+/// message reads the whole conversation again (measured with the pinned server: 9,618
+/// tokens with one copy, 787 with 8, ARCHITECTURE.md 7.3). With `spare` unknown the app
+/// cannot size them and passes the most, a quarter of what llama.cpp keeps by itself. A
+/// model without copies (`copy_bytes` 0) also gets the most, which costs nothing.
 pub fn copies(copy_bytes: u64, spare: Option<u64>) -> Copies {
     let count = match spare {
         Some(spare) if copy_bytes > 0 => {

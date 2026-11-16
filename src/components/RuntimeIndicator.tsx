@@ -63,9 +63,10 @@ function adjustmentAction(a: LoadStage): NoteAction | null {
       return stepDownAction(a.reason);
     case "restarting":
       return null;
-    // [0.0.7 P2] Models → Installed says why and offers another image file.
+    // [0.0.7 P2] Models → Installed says why and offers another image file. Left out for
+    // memory (the file is fine), Model settings can make room for it.
     case "retryingWithoutImageFile":
-      return "installed";
+      return a.memory ? "settings" : "installed";
     default:
       return "settings";
   }

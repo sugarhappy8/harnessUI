@@ -851,4 +851,40 @@ mod tests {
         assert!(checks.windows(2).all(|w| w[0] < w[1]), "{checks:?}");
         assert_eq!(events.last(), Some(&Progress::Bytes(b.len() as u64)));
     }
+
+    /// P6b review m1: checking a file stops as soon as the download is cancelled. Cancel
+    /// waits for the download to stop before it deletes anything, so the check of a large
+    /// file must not run on to the end; the file found in place stays as it was.
+    #[tokio::test]
+    async fn a_cancelled_download_stops_checking_the_file() {
+        let b = body(8 << 20);
+        let sha = sha_of(&b);
+        let (url, hits) = server(b.clone(), sha.clone(), None).await;
+        let client = HfClient::for_test(&url);
+        let dir = tempfile::tempdir().unwrap();
+        let dest = dir.path().join("m.gguf");
+        std::fs::write(&dest, &b).unwrap();
+        let cancel = CancellationToken::new();
+        let checked = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let progress = {
+            let (cancel, checked) = (cancel.clone(), checked.clone());
+            move |p: Progress| {
+                if let Progress::Checking(n) = p {
+                    checked.lock().unwrap().push(n);
+                    cancel.cancel();
+                }
+            }
+        };
+        let err = download_file_checked(&client, &spec(&b, Some(sha)), &dest, &cancel, &progress)
+            .await
+            .unwrap_err();
+        assert!(matches!(err, DownloadError::Cancelled), "{err:?}");
+        assert_eq!(hits.load(Ordering::SeqCst), 0, "nothing fetched");
+        let checked = checked.lock().unwrap().clone();
+        assert!(
+            checked.last().is_some_and(|n| *n < b.len() as u64),
+            "stopped part way: {checked:?}"
+        );
+        assert_eq!(std::fs::read(&dest).unwrap(), b);
+    }
 }

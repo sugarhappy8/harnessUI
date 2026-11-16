@@ -213,7 +213,7 @@ export function adjustmentWords(stage: LoadStage): string | null {
       if (stage.backend === "metal") return "Fast attention doesn't work with Apple graphics, so it was turned off for this load.";
       return "Fast attention doesn't work with this graphics card, so it was turned off for this load.";
     case "retryingWithoutImageFile":
-      return IMAGE_FILE_WORDS.loadedWithout;
+      return stage.memory ? IMAGE_FILE_WORDS.loadedWithoutMemory : IMAGE_FILE_WORDS.loadedWithout;
   }
 }
 
@@ -228,12 +228,22 @@ export const SLOW_WORDS = {
 export const IMAGE_FILE_WORDS = {
   /** The header's note after a load without it, word for word as the owner was promised. */
   loadedWithout: "Loaded without image input: the image file next to this model couldn't be read.",
+  /** The same, when it was left out because there was not enough memory for it too. */
+  loadedWithoutMemory: "Loaded without image input: there wasn't enough memory for the image file too.",
   /** Models → Installed, on the model's row. */
   unreadable: "The image file couldn't be read, so this model can't see images.",
+  tryAgain: "Try it again",
+  triedAgain: "It will be tried again the next time the model loads.",
   download: "Download the image file",
   downloadAnother: "Download another image file",
+  downloadAgain: "Download the image file again",
+  look: "Look for an image file",
+  looking: "Looking for an image file…",
   noOther: "Its repository has no other image file.",
+  none: "Its repository has no image file.",
+  /** After the download: for the model loaded now, and for one that is not. */
   done: "Image file downloaded. Reload the model to use it.",
+  doneNextLoad: "Image file downloaded. It will be used the next time the model loads.",
 } as const;
 
 /** [0.0.7 P2] An image file downloading on its model's Installed row ("Downloading the image file… 45%"). */

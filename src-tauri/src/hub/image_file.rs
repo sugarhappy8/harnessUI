@@ -188,8 +188,8 @@ pub(crate) fn name_words(name: &str) -> Vec<String> {
 /// encoder's own width there and llama.cpp reads theirs from the weights).
 fn width_fits(image: &Path, embedding_length: Option<u64>) -> Option<bool> {
     let header = models::read_file(image).ok()?;
-    let image_file = header.architecture() == Some("clip")
-        || header.get_str("general.type") == Some("mmproj");
+    let image_file =
+        header.architecture() == Some("clip") || header.get_str("general.type") == Some("mmproj");
     if !image_file {
         return Some(false);
     }

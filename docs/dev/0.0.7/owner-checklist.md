@@ -87,19 +87,36 @@ On the Windows PC:
    - Load it: one retry on the same graphics card, no stepping down to the processor, and
      the header says "Loaded without image input: the image file next to this model couldn't
      be read." with *Learn more*.
-   - *Learn more* opens Models → Installed; the row says the image file couldn't be read and
-     offers another one, or says the repository has no other one.
+   - *Learn more* opens Models → Installed; the row says the image file couldn't be read,
+     with *Try it again*. As the model was downloaded before 0.0.7, the row asks Hugging Face
+     once by itself and then offers *Download the image file again* (the copy here may differ
+     from the repository's). Download it: it is checked, found to be the repository's file and
+     not downloaded again; the next load fails the same way, and after that the row says
+     "Its repository has no other image file."
    - Load it again: it goes straight through (the log shows no "failed to load multimodal
      model").
+   - *Try it again*, then load it: the image file is tried (one retry and the same note).
    - Make a load fail some other way on the graphics card: the message no longer mentions
      the CPU backend.
 2. **Qwen 3.8 27B Uncensored (HauhauCS), downloaded without its image file:**
-   - Models → Installed shows "Download the image file" with its size (the BF16 file, as
-     that repository has no F16).
-   - Download it (progress also under Downloads), then *Reload*: the model can see images,
-     the Tools panel's Computer group can be switched on, and computer use works.
+   - Downloaded with this version: Models → Installed shows "Download the image file" with
+     its size (the BF16 file, as that repository has no F16) at once. Downloaded before: it
+     shows *Look for an image file*; click it and the button appears.
+   - Download it (progress also under Downloads): the row says "It will be used the next
+     time the model loads." (when it is the model loaded now: to reload it, with *Reload*).
+     Then the model can see images, the Tools panel's Computer group can be switched on, and
+     computer use works.
 3. **A model with no image file:** put an `mmproj…gguf` next to it by hand and load it: it
-   can now see images.
+   can now see images. A text-only model in a folder with other models' image files gets
+   none and shows no note.
+4. **Offline** (network cable out or Wi-Fi off): Models → Installed opens at once and says
+   nothing about Hugging Face; *Look for an image file* says it couldn't be reached only when
+   clicked.
+5. **If a vision model runs out of memory while its image file loads** (a large one with *How
+   much it can remember* set high): the app first puts less on the graphics card, then uses
+   the processor; only if nothing else works does it load without the image file, with "Loaded
+   without image input: there wasn't enough memory for the image file too." Installed then
+   does not say the image file couldn't be read.
 
 ## Computer use (P3), on the Mac
 Repeat the Windows computer-use steps (first section) with TextEdit: typing reaches TextEdit
@@ -146,8 +163,16 @@ front only makes harnessUI the active app (expected on a Mac); click again to an
    again from Browse while it downloads: it follows the running one.
 3. Cancel a download after its first file finished: the finished file is deleted (unless
    an installed model uses it).
-4. Delete a model's folder in Explorer, then remove it from Installed: the row goes away.
-5. With a reply waiting for your approval, reload the window (Ctrl+R): the card comes back
+4. Copy a model file you have into the models folder at the place its download would use
+   (`<models folder>\<owner>\<repo>\<file>`), then download that model from Browse: the
+   row says "checking the file…" while its bar fills (no time left is shown), and the file
+   is not downloaded again. For a vision model, cancel while its image file downloads: the
+   file you copied in stays.
+5. Delete a model's folder in Explorer, then remove it from Installed: the row goes away.
+6. Delete a vision model you downloaded: the question counts the model and its image file
+   ("This removes … GB from disk"), and both go. An image file you put next to a model
+   yourself stays when that model is deleted.
+7. With a reply waiting for your approval, reload the window (Ctrl+R): the card comes back
    and answering it works.
 
 ## Website capture (P7)

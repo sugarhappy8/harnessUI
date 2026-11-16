@@ -363,6 +363,14 @@ describe("RuntimeIndicator: the local model's state in plain words", () => {
       { restarted: false, hasMessages: false },
     );
     expect(both.map((n) => n.action)).toEqual(["reload", "installed"]);
+    // [P2 review m11] Left out for memory: Model settings can make room; Installed has nothing to add.
+    const memory = status({ vision: false, adjustments: [{ kind: "retryingWithoutImageFile", memory: true }] });
+    expect(runtimeNotes(memory, { restarted: false, hasMessages: false })).toEqual([
+      {
+        text: "Loaded without image input: there wasn't enough memory for the image file too.",
+        action: "settings",
+      },
+    ]);
   });
 
   it("lists every note in order, most important first", () => {
