@@ -289,11 +289,22 @@ pub struct CreationQuery {
     pub since: Option<i64>,
     /// Only runs made before this Unix ms.
     pub until: Option<i64>,
-    /// The page cursor: only runs made before this Unix ms (the `created_at` of the previous
+    /// The page cursor: only runs that come after this one in the list's order (the previous
     /// page's last run).
-    pub before: Option<i64>,
+    pub before: Option<RunCursor>,
     /// Maximum runs (the newest ones); 0 means no limit.
     pub limit: u32,
+}
+
+/// A place in [`Store::list_creation_runs`]'s order (`created_at` newest first, then `id`):
+/// the last run of a page, so the next page starts just after it. Both fields are needed
+/// because runs can share a creation time.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RunCursor {
+    /// The run's `created_at`.
+    pub created_at: i64,
+    /// The run's id.
+    pub id: String,
 }
 
 /// What Studio's files take, for Settings → Studio.
@@ -474,7 +485,22 @@ fn insert_run(conn: &mut Connection, run: NewCreationRun) -> Result<(), StoreErr
     Ok(())
 }
 
-fn update_run(conn: &Connection, id: &str, patch: CreationPatch) -> Result<(), StoreError> {
+fn update_run(conn: &Connection, id: &str, mut patch: CreationPatch) -> Result<(), StoreError> {
+    let is_stub: bool = conn
+        .query_row(
+            "SELECT deleted_at IS NOT NULL FROM creation_runs WHERE id = ?1",
+            [id],
+            |r| r.get(0),
+        )
+        .optional()?
+        .ok_or_else(|| no_run(id))?;
+    if is_stub {
+        // A stub keeps these cleared; its status, cost, error and times still change (a
+        // cost that arrives after the delete still counts).
+        patch.upstream = None;
+        patch.device = None;
+        patch.elapsed_ms = None;
+    }
     let mut sets: Vec<(&'static str, SqlValue)> = Vec::new();
     if let Some(v) = patch.status {
         sets.push(("status", SqlValue::Text(v.as_str().to_owned())));
@@ -510,16 +536,10 @@ fn update_run(conn: &Connection, id: &str, patch: CreationPatch) -> Result<(), S
     if let Some(v) = patch.device {
         sets.push(("device", sql_opt_text(v)));
     }
-    let found = if sets.is_empty() {
-        conn.query_row(
-            "SELECT EXISTS(SELECT 1 FROM creation_runs WHERE id = ?1)",
-            [id],
-            |r| r.get(0),
-        )?
-    } else {
-        update_columns_by_text(conn, "creation_runs", "id", id, sets)? > 0
-    };
-    if found { Ok(()) } else { Err(no_run(id)) }
+    if !sets.is_empty() && update_columns_by_text(conn, "creation_runs", "id", id, sets)? == 0 {
+        return Err(no_run(id));
+    }
+    Ok(())
 }
 
 fn get_run(conn: &Connection, id: &str) -> Result<Option<CreationRun>, StoreError> {
@@ -561,8 +581,11 @@ fn list_runs(conn: &Connection, q: CreationQuery) -> Result<Vec<CreationRun>, St
         values.push(SqlValue::Integer(until));
     }
     if let Some(before) = q.before {
-        rest.push_str(" AND created_at < ?");
-        values.push(SqlValue::Integer(before));
+        // The same order as ORDER BY, so runs sharing a creation time are neither skipped
+        // nor repeated at a page break.
+        rest.push_str(" AND (created_at, id) < (?, ?)");
+        values.push(SqlValue::Integer(before.created_at));
+        values.push(SqlValue::Text(before.id));
     }
     rest.push_str(" ORDER BY created_at DESC, id DESC LIMIT ?");
     values.push(SqlValue::Integer(sql_limit(q.limit)));
@@ -755,7 +778,8 @@ impl Store {
     }
 
     /// Changes the fields `patch` sets on run `id`. A spending stub can still be changed
-    /// (a cost that arrives after a delete still counts); a run that does not exist is
+    /// (a cost that arrives after a delete still counts), except `upstream`, `device` and
+    /// `elapsed_ms`, which a stub keeps cleared; a run that does not exist is
     /// [`StoreError::InvalidInput`].
     pub async fn update_creation_run(
         &self,
@@ -918,7 +942,7 @@ mod tests {
 
     const DAY_MS: i64 = 86_400_000;
     /// 2026-11-17 00:00 UTC.
-    const DAY_START: i64 = 1_763_337_600_000;
+    const DAY_START: i64 = 1_794_873_600_000;
 
     fn run(id: &str) -> NewCreationRun {
         NewCreationRun {
@@ -1374,13 +1398,58 @@ mod tests {
         );
         assert_eq!(
             list(CreationQuery {
-                before: Some(at(3)),
+                before: Some(RunCursor {
+                    created_at: at(3),
+                    id: "c".into(),
+                }),
                 limit: 2,
                 ..CreationQuery::default()
             })
             .await,
             ["b", "a"],
             "the next page starts below the cursor"
+        );
+    }
+
+    #[tokio::test]
+    async fn paging_walks_runs_that_share_a_creation_time() {
+        let store = Store::open_in_memory().expect("open");
+        // A fixed clock gives every run the same creation time.
+        for id in ["r2", "r1", "r3"] {
+            store
+                .insert_creation_run(NewCreationRun {
+                    created_at: DAY_START + 5_000,
+                    ..run(id)
+                })
+                .await
+                .expect("insert");
+        }
+        let mut seen: Vec<String> = Vec::new();
+        let mut cursor: Option<RunCursor> = None;
+        loop {
+            let page = store
+                .list_creation_runs(CreationQuery {
+                    before: cursor.clone(),
+                    limit: 1,
+                    ..CreationQuery::default()
+                })
+                .await
+                .expect("list");
+            let Some(last) = page.last() else {
+                break;
+            };
+            assert_eq!(page.len(), 1, "the limit holds");
+            cursor = Some(RunCursor {
+                created_at: last.created_at,
+                id: last.id.clone(),
+            });
+            seen.push(last.id.clone());
+            assert!(seen.len() <= 3, "the pages end: {seen:?}");
+        }
+        assert_eq!(
+            seen,
+            ["r3", "r2", "r1"],
+            "each run once, in created_at DESC, id DESC order"
         );
     }
 
@@ -1741,6 +1810,88 @@ mod tests {
             (None, None, None)
         );
         assert_eq!(stub.cost_usd, Some(0.0));
+    }
+
+    #[tokio::test]
+    async fn a_patch_to_a_stub_takes_the_cost_and_keeps_the_cleared_fields_cleared() {
+        let store = Store::open_in_memory().expect("open");
+        insert_done(
+            &store,
+            NewCreationRun {
+                device: Some("Processor".into()),
+                ..run("r1")
+            },
+            1,
+        )
+        .await;
+        store
+            .update_creation_run(
+                "r1",
+                CreationPatch {
+                    upstream: Some(Some("Acme Cloud".into())),
+                    elapsed_ms: Some(Some(1_000)),
+                    ..CreationPatch::default()
+                },
+            )
+            .await
+            .expect("update");
+        store
+            .delete_creation_runs(vec!["r1".into()], DAY_START)
+            .await
+            .expect("delete");
+
+        // A late answer arrives after the delete.
+        store
+            .update_creation_run(
+                "r1",
+                CreationPatch {
+                    status: Some(CreationStatus::Failed),
+                    cost_usd: Some(Some(0.07)),
+                    upstream: Some(Some("Other Cloud".into())),
+                    device: Some(Some("Radeon RX 7600 (Vulkan)".into())),
+                    elapsed_ms: Some(Some(228_000)),
+                    ..CreationPatch::default()
+                },
+            )
+            .await
+            .expect("a stub can still be patched");
+        let since = store.creation_runs_since(DAY_START).await.expect("since");
+        assert_eq!(since.len(), 1);
+        let stub = &since[0];
+        assert!(stub.deleted_at.is_some(), "still a stub");
+        assert_eq!(
+            (stub.status, stub.cost_usd),
+            (CreationStatus::Failed, Some(0.07)),
+            "spending sees the late cost and status"
+        );
+        assert_eq!(
+            (
+                stub.upstream.as_deref(),
+                stub.device.as_deref(),
+                stub.elapsed_ms
+            ),
+            (None, None, None),
+            "a stub keeps these cleared"
+        );
+
+        // A patch of only those fields is accepted and changes nothing.
+        store
+            .update_creation_run(
+                "r1",
+                CreationPatch {
+                    upstream: Some(Some("Other Cloud".into())),
+                    ..CreationPatch::default()
+                },
+            )
+            .await
+            .expect("accepted");
+        let stub = store
+            .creation_runs_since(DAY_START)
+            .await
+            .expect("since")
+            .pop()
+            .expect("stub");
+        assert_eq!(stub.upstream, None);
     }
 
     #[tokio::test]

@@ -49,7 +49,8 @@ pub use config::{
 };
 pub use creations::{
     CreationKind, CreationOutput, CreationPatch, CreationQuery, CreationRun, CreationStatus,
-    CreationUsage, Deleted, MAX_CREATION_RUNS, NewCreationOutput, NewCreationRun, RunsOn,
+    CreationUsage, Deleted, MAX_CREATION_RUNS, NewCreationOutput, NewCreationRun, RunCursor,
+    RunsOn,
 };
 pub use error::{ParseEnumError, StoreError};
 pub use ids::{
