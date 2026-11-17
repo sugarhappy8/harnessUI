@@ -1,9 +1,9 @@
-//! Studio (0.1.0): OpenRouter's picture and video endpoints against a local fake server that
-//! answers in the documented formats. The request that creates a run or a job is sent at most
-//! once: never again after a timeout, a server error or a cut connection; once more only on a
-//! short rate limit or a connection that never opened. A video's result is downloaded with the
-//! key from OpenRouter's own host only; a link elsewhere is handed back, not followed. No API
-//! key or network needed.
+//! Studio (0.1.0): OpenRouter's picture and video endpoints, and OpenAI's picture endpoints,
+//! against a local fake server that answers in the documented formats. The request that
+//! creates a run or a job is sent at most once: never again after a timeout, a server error or
+//! a cut connection; once more only on a short rate limit or a connection that never opened. A
+//! video's result is downloaded with the key from OpenRouter's own host only; a link elsewhere
+//! is handed back, not followed. No API key or network needed.
 
 mod common;
 
@@ -16,8 +16,9 @@ use std::time::{Duration, Instant};
 use agent::media::openrouter::place_extra;
 use agent::media::{
     Company, Cost, FailureKind, Fetched, JobDone, JobState, LocalIo, MediaError, MediaFailure,
-    MediaKind, MediaLimits, MediaProvider, MediaRequest, OpenRouterMedia, RefImage, RefRole,
-    Routing, SignedUrl, Started, media_provider, openrouter_image_models,
+    MediaKind, MediaLimits, MediaProvider, MediaRequest, OpenAiImages, OpenRouterMedia, RefImage,
+    RefRole, Routing, SignedUrl, Stage, Started, media_provider, openrouter_image_models,
+    parse_catalog,
 };
 use agent::{ClientConfig, OpenAiClient, ProviderKind};
 use base64::Engine as _;
@@ -1097,5 +1098,240 @@ async fn the_video_preview_shows_frames_by_their_hash() {
     assert_eq!(frame["frame_type"], "first_frame");
     let shown = frame["image_url"]["url"].as_str().unwrap();
     assert!(shown.starts_with("picture 1 (sha 3f2a9c41d0b7"), "{shown}");
+    assert!(server.requests().is_empty(), "a preview sends nothing");
+}
+
+// ---- OpenAI pictures -------------------------------------------------------------------------
+
+const OPENAI_KEY: &str = "sk-proj-studio-test-key-0123456789";
+const OPENAI_FLARE: &str = "gpt-image-2.6-flare";
+const OPENAI_MODELS: &str = include_str!("fixtures/media/openai-models.json");
+const OPENAI_ANSWER: &str = include_str!("fixtures/media/openai-images-answer.json");
+const OPENAI_BLOCKED: &str = include_str!("fixtures/media/openai-moderation-blocked.json");
+const OPENAI_UNVERIFIED: &str = include_str!("fixtures/media/openai-org-verification.json");
+
+fn openai(server: &MockServer) -> OpenAiImages {
+    let mut config = ClientConfig::new(format!("{}/v1", server.url()), ProviderKind::OpenAi);
+    config.api_key = Some(OPENAI_KEY.into());
+    OpenAiImages::new(OpenAiClient::new(config).expect("client")).with_limits(quick())
+}
+
+/// A low-quality square GPT Image 2.6 Flare picture.
+fn openai_req() -> MediaRequest {
+    MediaRequest {
+        model: OPENAI_FLARE.into(),
+        params: object(json!({"n": 1, "size": "1024x1024", "quality": "low"})),
+        ..req()
+    }
+}
+
+/// [`openai_req`] with one added picture, written into `pictures`.
+fn openai_req_with_ref(pictures: &Path) -> MediaRequest {
+    MediaRequest {
+        model: OPENAI_FLARE.into(),
+        params: object(json!({"n": 1, "size": "1024x1024", "quality": "low"})),
+        ..req_with_ref(pictures)
+    }
+}
+
+fn openai_error(status: u16, body: &str) -> Reply {
+    Reply::WithHeaders {
+        status,
+        headers: vec![("x-request-id".into(), "req_8f2".into())],
+        content_type: "application/json".into(),
+        body: body.as_bytes().to_vec(),
+    }
+}
+
+#[tokio::test]
+async fn an_openai_endpoint_has_a_media_provider() {
+    let mut config = ClientConfig::new("https://api.openai.com/v1", ProviderKind::OpenAi);
+    config.api_key = Some(OPENAI_KEY.into());
+    let media = media_provider(OpenAiClient::new(config).unwrap()).expect("OpenAI makes pictures");
+    assert_eq!(media.company(), Company::OpenAi);
+    assert_eq!(media.host(), "api.openai.com");
+    // The prices are in the bundled settings: nothing to fetch.
+    assert_eq!(media.fetch_image_price(OPENAI_FLARE).await, Ok(Value::Null));
+}
+
+#[tokio::test]
+async fn the_openai_list_keeps_picture_models_only() {
+    let server = MockServer::start(|request| match request.path() {
+        "/v1/models" => Reply::raw_json(200, OPENAI_MODELS.as_bytes()),
+        _ => Reply::not_found(),
+    })
+    .await;
+    let raw = openai(&server).fetch_catalog().await.expect("model list");
+    assert_eq!(
+        raw.images,
+        serde_json::from_str::<Value>(OPENAI_MODELS).unwrap()
+    );
+    assert_eq!(raw.videos, None);
+    let models = parse_catalog(Company::OpenAi, &raw, &BTreeMap::new());
+    let ids: Vec<&str> = models.iter().map(|m| m.id.as_str()).collect();
+    assert_eq!(ids, ["gpt-image-2.6-flare", "gpt-image-2.6-sunburst"]);
+    assert_eq!(models[0].display_name, "GPT Image 2.6 Flare");
+    assert_eq!(models[0].created, Some(1_793_835_351));
+
+    let requests = server.requests();
+    assert_eq!(requests.len(), 1);
+    assert_eq!(requests[0].method, "GET");
+    assert_eq!(
+        requests[0].header("authorization"),
+        Some(format!("Bearer {OPENAI_KEY}").as_str())
+    );
+}
+
+#[tokio::test]
+async fn an_openai_picture_is_one_json_post() {
+    let server = MockServer::start(|_| Reply::raw_json(200, OPENAI_ANSWER.as_bytes())).await;
+    let dir = tempfile::tempdir().unwrap();
+    let Started::Done { outputs, cost } = openai(&server)
+        .start(&openai_req(), dir.path())
+        .await
+        .unwrap()
+    else {
+        panic!("pictures come back done")
+    };
+    assert_eq!(outputs.len(), 1);
+    assert_eq!(std::fs::read(&outputs[0].path).unwrap(), PNG_A_BYTES);
+    assert_eq!(outputs[0].mime, "image/png");
+    // 50 text tokens at $5 and 272 picture tokens at $30, per million.
+    let cost = cost.expect("worked out from the usage");
+    assert!((cost.usd - 0.008_41).abs() < 1e-9, "{cost:?}");
+    assert!(!cost.reported);
+    assert_eq!(files_in(dir.path()), 1, "the answer's own file is gone");
+
+    let requests = server.requests();
+    assert_eq!(requests.len(), 1);
+    assert_eq!(requests[0].method, "POST");
+    assert_eq!(requests[0].path(), "/v1/images/generations");
+    assert_eq!(
+        requests[0].header("authorization"),
+        Some(format!("Bearer {OPENAI_KEY}").as_str())
+    );
+    assert_eq!(
+        requests[0].json(),
+        json!({
+            "model": OPENAI_FLARE,
+            "prompt": "a lighthouse at dusk",
+            "n": 1,
+            "size": "1024x1024",
+            "quality": "low"
+        })
+    );
+}
+
+#[tokio::test]
+async fn an_openai_edit_is_one_multipart_post() {
+    let server = MockServer::start(|_| Reply::raw_json(200, OPENAI_ANSWER.as_bytes())).await;
+    let pictures = tempfile::tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let started = openai(&server)
+        .start(&openai_req_with_ref(pictures.path()), dir.path())
+        .await;
+    assert!(matches!(started, Ok(Started::Done { .. })), "{started:?}");
+
+    let requests = server.requests();
+    assert_eq!(requests.len(), 1);
+    assert_eq!(requests[0].method, "POST");
+    assert_eq!(requests[0].path(), "/v1/images/edits");
+    let kind = requests[0].header("content-type").expect("a content type");
+    let boundary = kind
+        .strip_prefix("multipart/form-data; boundary=")
+        .unwrap_or_else(|| panic!("not a form: {kind}"));
+    let text = |name: &str, value: &str| {
+        format!(
+            "--{boundary}\r\nContent-Disposition: form-data; name=\"{name}\"\r\n\r\n{value}\r\n"
+        )
+    };
+    let mut expected = Vec::new();
+    for (name, value) in [
+        ("model", OPENAI_FLARE),
+        ("prompt", "a lighthouse at dusk"),
+        ("n", "1"),
+        ("quality", "low"),
+        ("size", "1024x1024"),
+    ] {
+        expected.extend(text(name, value).into_bytes());
+    }
+    expected.extend(
+        format!(
+            "--{boundary}\r\nContent-Disposition: form-data; name=\"image[]\"; \
+             filename=\"picture-1.png\"\r\nContent-Type: image/png\r\n\r\n"
+        )
+        .into_bytes(),
+    );
+    expected.extend(PNG_A_BYTES);
+    expected.extend(format!("\r\n--{boundary}--\r\n").into_bytes());
+    assert_eq!(
+        String::from_utf8_lossy(&requests[0].body),
+        String::from_utf8_lossy(&expected)
+    );
+}
+
+#[tokio::test]
+async fn moderation_blocked_is_explained() {
+    let server = MockServer::start(|_| openai_error(400, OPENAI_BLOCKED)).await;
+    let dir = tempfile::tempdir().unwrap();
+    let f = answered(openai(&server).start(&openai_req(), dir.path()).await);
+    assert_eq!(f.kind, FailureKind::Blocked);
+    assert_eq!(f.company_code.as_deref(), Some("moderation_blocked"));
+    assert_eq!(f.request_id.as_deref(), Some("req_8f2"));
+    assert_eq!(f.stage, Some(Stage::Prompt), "moderation_stage: input");
+    assert_eq!(f.charged, None, "OpenAI says nothing about the charge");
+    assert_eq!(f.status, Some(400));
+    assert!(
+        f.message.starts_with("Your request was rejected"),
+        "{}",
+        f.message
+    );
+    assert_eq!(server.requests().len(), 1, "never sent again");
+}
+
+#[tokio::test]
+async fn organization_verification_is_named() {
+    let server = MockServer::start(|_| openai_error(403, OPENAI_UNVERIFIED)).await;
+    let dir = tempfile::tempdir().unwrap();
+    let f = answered(openai(&server).start(&openai_req(), dir.path()).await);
+    assert_eq!(f.kind, FailureKind::OrgVerification);
+    assert_eq!(f.charged, Some(false));
+    assert_eq!(f.request_id.as_deref(), Some("req_8f2"));
+    assert_eq!(server.requests().len(), 1);
+}
+
+#[tokio::test]
+async fn an_openai_500_is_never_sent_again() {
+    let server = MockServer::start(|_| {
+        openai_error(
+            500,
+            r#"{"error": {"message": "The server had an error", "code": null}}"#,
+        )
+    })
+    .await;
+    let dir = tempfile::tempdir().unwrap();
+    let result = openai(&server).start(&openai_req(), dir.path()).await;
+    assert!(matches!(result, Err(MediaError::Unknown(_))), "{result:?}");
+    assert_eq!(server.requests().len(), 1);
+}
+
+#[tokio::test]
+async fn the_openai_preview_names_the_endpoint_and_hides_pictures() {
+    let server = MockServer::start(|_| Reply::not_found()).await;
+    let media = openai(&server);
+    let p = media.preview(&openai_req());
+    assert_eq!(p.method, "POST");
+    assert_eq!(p.url, format!("{}/v1/images/generations", server.url()));
+    assert_eq!(p.host, "127.0.0.1");
+    assert_eq!(p.body["n"], 1);
+
+    let pictures = tempfile::tempdir().unwrap();
+    let p = media.preview(&openai_req_with_ref(pictures.path()));
+    assert_eq!(p.url, format!("{}/v1/images/edits", server.url()));
+    assert_eq!(p.body["model"], OPENAI_FLARE);
+    assert_eq!(p.body["n"], "1", "a form sends text");
+    let shown = p.body["image[]"][0].as_str().unwrap();
+    assert!(shown.starts_with("picture 1 (sha 3f2a9c41d0b7"), "{shown}");
+    assert!(!p.body.to_string().contains(OPENAI_KEY));
     assert!(server.requests().is_empty(), "a preview sends nothing");
 }

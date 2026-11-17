@@ -30,7 +30,7 @@ use url::Url;
 
 use crate::client::ProviderKind;
 use crate::error::ProviderError;
-use crate::media::Company;
+use crate::media::{Company, MediaKind};
 
 /// Where an endpoint's server is, as far as its address says.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -1044,6 +1044,14 @@ pub(crate) fn openai_can_chat(id: &str) -> bool {
     !pro && !NOT_CHAT.iter().any(|word| id.contains(word))
 }
 
+/// What an OpenAI model id makes in Studio (0.1.0): GPT Image models (`gpt-image-…` and
+/// `chatgpt-image-…`) make pictures. The reverse of [`openai_can_chat`] for those models;
+/// DALL·E and Sora, both shut down, make nothing here.
+pub(crate) fn openai_media_kind(id: &str) -> Option<MediaKind> {
+    let id = id.to_ascii_lowercase();
+    (id.starts_with("gpt-image") || id.starts_with("chatgpt-image")).then_some(MediaKind::Image)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1910,5 +1918,21 @@ mod tests {
         }
         // "pro" inside a word is not the `-pro` suffix.
         assert!(openai_can_chat("gpt-5-proto"));
+    }
+
+    #[test]
+    fn openai_media_kind_is_the_reverse_of_chat() {
+        for id in [
+            "gpt-image-2.6-flare",
+            "gpt-image-2.6-sunburst",
+            "gpt-image-1.5",
+            "chatgpt-image-latest",
+        ] {
+            assert_eq!(openai_media_kind(id), Some(MediaKind::Image), "{id}");
+            assert!(!openai_can_chat(id), "{id}");
+        }
+        for id in ["gpt-5.5", "dall-e-3", "sora-2"] {
+            assert_eq!(openai_media_kind(id), None, "{id}");
+        }
     }
 }

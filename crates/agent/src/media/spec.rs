@@ -14,6 +14,9 @@
 //!   length of at least 4 s and 720p (or the lowest resolution). Extra settings are named in
 //!   a note but not offered: OpenRouter keys them by the company a job is routed to, which
 //!   the video catalogue does not name.
+//! - **OpenAI pictures** ([`super::openai::openai_image_models`]): the GPT Image models of
+//!   `GET /v1/models`, each with the controls of its entry in the bundled, dated settings
+//!   file.
 //! - **This computer**: the models the local provider built, read as they are.
 
 use std::collections::BTreeMap;
@@ -317,10 +320,12 @@ pub enum Invalid {
 /// A video's price is its `pricing_skus` ([`parse_pricing_skus`]); a picture with no saved
 /// answer, or a video without one, has [`Price::Unknown`].
 ///
-/// OpenRouter gives its pictures, then its videos. OpenAI's list is read against a bundled
-/// settings file, so it gives no models here. For [`Company::Local`], `raw.images` is the
-/// JSON array of models the local provider built, read as it is (with the [`Price::Free`]
-/// it gave them); none when it cannot be read.
+/// OpenRouter gives its pictures, then its videos. OpenAI gives the picture models of its
+/// `/v1/models` list in the list's order, each read against the bundled settings file
+/// ([`super::openai::openai_image_models`]); `image_prices` plays no part, since that file
+/// carries OpenAI's prices. For [`Company::Local`], `raw.images` is the JSON array of models
+/// the local provider built, read as it is (with the [`Price::Free`] it gave them); none when
+/// it cannot be read.
 pub fn parse_catalog(
     company: Company,
     raw: &RawCatalog,
@@ -334,7 +339,7 @@ pub fn parse_catalog(
             }
             models
         }
-        Company::OpenAi => Vec::new(),
+        Company::OpenAi => super::openai::openai_image_models(&raw.images),
         Company::Local => Vec::<MediaModel>::deserialize(&raw.images).unwrap_or_default(),
     }
 }
@@ -545,7 +550,7 @@ pub(crate) fn routing_allows(routing: Option<&Routing>, tag: &str) -> bool {
 // ---- reading the catalogues ------------------------------------------------------------------
 
 /// The entries of a model list: its `data` array, or the list itself when it is an array.
-fn entries(list: &Value) -> impl Iterator<Item = &Value> {
+pub(super) fn entries(list: &Value) -> impl Iterator<Item = &Value> {
     list.get("data")
         .unwrap_or(list)
         .as_array()
@@ -574,7 +579,7 @@ fn display_name(entry: &Value, id: &str) -> String {
 }
 
 /// A field with no help, default, starting value, price effect or requirement.
-fn field(
+pub(super) fn field(
     key: &str,
     canonical: Option<Canonical>,
     label: &str,
@@ -617,7 +622,7 @@ fn seed_field(kind: MediaKind) -> ParamSpec {
 }
 
 /// A value's name on screen.
-fn choice_label(value: &Value) -> String {
+pub(super) fn choice_label(value: &Value) -> String {
     let Some(text) = value.as_str() else {
         return value.to_string();
     };
@@ -780,7 +785,7 @@ fn whole(n: f64) -> u32 {
 }
 
 /// GPT Image 2.6's animated GIF fields, which need `output_format` = `gif`.
-fn gif_fields() -> [ParamSpec; 2] {
+pub(super) fn gif_fields() -> [ParamSpec; 2] {
     let gif = || {
         Some(Requires {
             key: "output_format".to_owned(),

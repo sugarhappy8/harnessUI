@@ -1,0 +1,12 @@
+{
+  "error": {
+    "message": "Your request was rejected by the safety system. This request could not be completed because it did not meet safety requirements.",
+    "type": "image_generation_user_error",
+    "param": null,
+    "code": "moderation_blocked",
+    "moderation_details": {
+      "moderation_stage": "input",
+      "categories": ["harassment"]
+    }
+  }
+}

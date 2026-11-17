@@ -4,7 +4,9 @@
 //! - [`spec`]: the controls each model offers ([`ParamSpec`]), read from the companies' own
 //!   catalogues, and [`validate`], which checks a request against them;
 //! - [`price`]: what a model costs ([`Price`]) and what a run would cost ([`estimate`]);
-//! - [`openrouter`]: OpenRouter's lists, prices, pictures and video jobs ([`OpenRouterMedia`]).
+//! - [`openrouter`]: OpenRouter's lists, prices, pictures and video jobs ([`OpenRouterMedia`]);
+//! - [`openai`]: OpenAI's picture models, read against a bundled, dated settings file, and its
+//!   pictures and edits ([`OpenAiImages`]).
 //!
 //! The companies are OpenRouter (pictures and video), OpenAI (pictures) and this computer
 //! ([`Company::Local`]). A request goes only to the chosen endpoint's host; a run on this
@@ -25,15 +27,18 @@ use crate::client::OpenAiClient;
 use crate::cloud::{parse_retry_after, scrub_text};
 use crate::error::{ProviderError, bounded};
 
+mod multipart;
+pub mod openai;
 pub mod openrouter;
 pub mod price;
 pub mod spec;
 
 pub use crate::cloud::media_company;
+pub use openai::OpenAiImages;
 pub use openrouter::OpenRouterMedia;
 pub use price::{
-    Mode, Price, PriceChoice, PriceRow, Table, choice_for, estimate, parse_image_endpoints,
-    parse_pricing_skus,
+    Mode, OpenAiRates, Price, PriceChoice, PriceRow, Table, choice_for, estimate, openai_cost,
+    parse_image_endpoints, parse_pricing_skus,
 };
 pub use spec::{
     Canonical, Choice, EndpointCompany, Invalid, Layer, OPENAI_SIZE_RULES, ParamKind, ParamSpec,
@@ -459,12 +464,13 @@ pub trait MediaProvider: Send + Sync {
     }
 }
 
-/// The media provider for an endpoint's client: OpenRouter's for an OpenRouter endpoint;
-/// none for any other kind.
+/// The media provider for an endpoint's client: OpenRouter's for an OpenRouter endpoint,
+/// OpenAI's for an OpenAI endpoint; none for any other kind.
 pub fn media_provider(client: OpenAiClient) -> Option<Arc<dyn MediaProvider>> {
     match media_company(client.config().kind)? {
         Company::OpenRouter => Some(Arc::new(OpenRouterMedia::new(client))),
-        Company::OpenAi | Company::Local => None,
+        Company::OpenAi => Some(Arc::new(OpenAiImages::new(client))),
+        Company::Local => None,
     }
 }
 

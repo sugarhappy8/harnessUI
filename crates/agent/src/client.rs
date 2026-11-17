@@ -229,6 +229,13 @@ pub(crate) enum Sent {
 pub(crate) enum OnceBody {
     /// A JSON body.
     Json(Value),
+    /// A `multipart/form-data` body (OpenAI's picture edits).
+    Multipart {
+        /// The boundary between the parts, found in none of them.
+        boundary: String,
+        /// The whole body.
+        bytes: Bytes,
+    },
 }
 
 /// What the company answered to a request sent with [`OpenAiClient::post_once`].
@@ -1168,6 +1175,12 @@ impl OpenAiClient {
             let request = self.authorize(self.http.post(url.clone())).timeout(limit);
             let request = match &body {
                 OnceBody::Json(value) => request.json(value),
+                OnceBody::Multipart { boundary, bytes } => request
+                    .header(
+                        reqwest::header::CONTENT_TYPE,
+                        format!("multipart/form-data; boundary={boundary}"),
+                    )
+                    .body(bytes.clone()),
             };
             let response = match request.send().await {
                 Ok(response) => response,

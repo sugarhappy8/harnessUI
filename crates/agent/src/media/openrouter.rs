@@ -139,8 +139,8 @@ impl OpenRouterMedia {
                         })
                 };
                 let _ = tokio::fs::remove_file(&path).await;
-                let (outputs, cost) =
-                    saved.map_err(|err| naming_the_answer(err, &headers, self.key()))?;
+                let (outputs, cost) = saved
+                    .map_err(|err| naming_the_answer(err, &headers, self.key(), "OpenRouter"))?;
                 Ok(Started::Done { outputs, cost })
             }
             OnceReply::Error {
@@ -173,8 +173,8 @@ impl OpenRouterMedia {
                 let answer = tokio::fs::read(&path).await;
                 let _ = tokio::fs::remove_file(&path).await;
                 let answer = answer.map_err(|err| MediaError::Local(LocalIo::from_io(&err)))?;
-                let remote_id =
-                    job_id(&answer).map_err(|err| naming_the_answer(err, &headers, self.key()))?;
+                let remote_id = job_id(&answer)
+                    .map_err(|err| naming_the_answer(err, &headers, self.key(), "OpenRouter"))?;
                 Ok(Started::Job { remote_id })
             }
             OnceReply::Error {
@@ -421,13 +421,18 @@ fn check_failed(err: ProviderError, key: Option<&str>) -> MediaError {
 }
 
 /// An accepted answer whose pictures cannot be read: the run may have been charged.
-fn unreadable(what: String) -> MediaError {
+pub(super) fn unreadable(what: String) -> MediaError {
     MediaError::Unknown(ProviderError::Decode(what))
 }
 
 /// An unreadable answer's error, naming the answer's type when it is not JSON (a proxy's
-/// page, for example). Other errors are returned unchanged.
-fn naming_the_answer(err: MediaError, headers: &HeaderMap, key: Option<&str>) -> MediaError {
+/// page, for example) and the `company` that sent it. Other errors are returned unchanged.
+pub(super) fn naming_the_answer(
+    err: MediaError,
+    headers: &HeaderMap,
+    key: Option<&str>,
+    company: &str,
+) -> MediaError {
     let kind = headers
         .get(reqwest::header::CONTENT_TYPE)
         .and_then(|value| value.to_str().ok())
@@ -435,7 +440,7 @@ fn naming_the_answer(err: MediaError, headers: &HeaderMap, key: Option<&str>) ->
     match (err, kind) {
         (MediaError::Unknown(ProviderError::Decode(what)), Some(kind)) => {
             let kind = scrub_text(&bounded(kind), key);
-            unreadable(format!("{what} (OpenRouter answered with {kind})"))
+            unreadable(format!("{what} ({company} answered with {kind})"))
         }
         (err, _) => err,
     }
@@ -508,7 +513,7 @@ fn provider(req: &MediaRequest) -> Option<Value> {
 }
 
 /// An added picture as the preview shows it: `picture 1 (sha 3f2a9c41d0b7…, 1.2 MB)`.
-fn picture_label(n: usize, picture: &RefImage) -> String {
+pub(super) fn picture_label(n: usize, picture: &RefImage) -> String {
     let sha: String = picture.sha256.chars().take(12).collect();
     format!(
         "picture {n} (sha {sha}…, {})",
@@ -536,11 +541,13 @@ struct PictureAnswer {
     usage: Option<AnswerUsage>,
 }
 
-/// One picture of the answer.
+/// One picture of a picture answer (OpenRouter's, and OpenAI's without `media_type`).
 #[derive(Deserialize)]
-struct AnswerPicture {
-    b64_json: String,
-    media_type: Option<String>,
+pub(super) struct AnswerPicture {
+    /// The picture, in base64.
+    pub(super) b64_json: String,
+    /// Its media type, when the answer gives it.
+    pub(super) media_type: Option<String>,
 }
 
 /// The answer's usage figures.
@@ -550,8 +557,7 @@ struct AnswerUsage {
 }
 
 /// Reads the answer in the file `answer` and writes each picture to `scratch/<uuid>-<n>`, one
-/// at a time; what the run cost, when the answer says. The pictures already written are
-/// removed when a later one fails.
+/// at a time ([`write_pictures`]); what the run cost, when the answer says.
 fn save_pictures(
     answer: &Path,
     scratch: &Path,
@@ -561,9 +567,21 @@ fn save_pictures(
         std::fs::File::open(answer).map_err(|err| MediaError::Local(LocalIo::from_io(&err)))?;
     let parsed: PictureAnswer = serde_json::from_reader(BufReader::new(file))
         .map_err(|err| unreadable(format!("the answer is not a picture answer ({err})")))?;
+    let saved = write_pictures(parsed.data, scratch, picture_cap)?;
+    Ok((saved, reported(parsed.usage.and_then(|usage| usage.cost))))
+}
+
+/// Writes each picture of an answer to `scratch/<uuid>-<n>`, one at a time, each at most
+/// `picture_cap` bytes. The pictures already written are removed when a later one fails; an
+/// answer without pictures cannot be read.
+pub(super) fn write_pictures(
+    pictures: Vec<AnswerPicture>,
+    scratch: &Path,
+    picture_cap: u64,
+) -> Result<Vec<Saved>, MediaError> {
     let stem = uuid::Uuid::new_v4();
     let mut saved: Vec<Saved> = Vec::new();
-    for (n, picture) in parsed.data.into_iter().enumerate() {
+    for (n, picture) in pictures.into_iter().enumerate() {
         match save_picture(picture, &scratch.join(format!("{stem}-{n}")), picture_cap) {
             Ok(one) => saved.push(one),
             Err(err) => {
@@ -577,7 +595,7 @@ fn save_pictures(
     if saved.is_empty() {
         return Err(unreadable("the answer has no pictures".to_owned()));
     }
-    Ok((saved, reported(parsed.usage.and_then(|usage| usage.cost))))
+    Ok(saved)
 }
 
 /// A cost the company reported, when it is a sound amount.

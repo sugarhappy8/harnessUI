@@ -5,6 +5,9 @@
 //!   2026-11-17 are read; any other key makes the price [`Price::Unknown`], never a guess.
 //! - **OpenRouter pictures** ([`parse_image_endpoints`]): the saved `/endpoints` answer, a
 //!   price per picture for each company that runs the model.
+//! - **OpenAI pictures**: the bundled settings file's prices per picture, where OpenAI states
+//!   them (built in [`super::openai`]), and what a finished run cost from the answer's token
+//!   counts ([`openai_cost`]).
 //! - **An estimate** ([`estimate`]) for the settings of a request ([`choice_for`]): `None`
 //!   when the price is not known; a run on this computer costs nothing.
 
@@ -88,6 +91,19 @@ pub struct PriceChoice {
     pub start_frame: bool,
     /// How many pictures are sent with the request.
     pub input_images: u32,
+}
+
+/// An OpenAI picture model's token prices, in US dollars per million tokens, as its entry in
+/// the bundled settings file states them.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OpenAiRates {
+    /// Text input (the prompt); `None` where OpenAI states no price for it.
+    pub text_input: Option<f64>,
+    /// Picture input (added pictures).
+    pub image_input: f64,
+    /// Picture output.
+    pub image_output: f64,
 }
 
 impl Price {
@@ -303,14 +319,42 @@ pub fn estimate(price: &Price, choice: &PriceChoice) -> Option<f64> {
     )
 }
 
+/// What a finished OpenAI picture run cost, in US dollars, from its answer's `usage` and the
+/// model's token prices: text input tokens at the text price, picture input tokens at the
+/// picture input price, and every output token at the picture output price (the dearest).
+/// Input tokens the answer does not name as text or picture are counted at the dearer input
+/// price, so the cost is never too low.
+///
+/// `None` when the usage has no whole `input_tokens` and `output_tokens`, or when text may
+/// have been sent and the model has no text price.
+pub fn openai_cost(usage: &Value, rates: &OpenAiRates) -> Option<f64> {
+    let tokens = |value: &Value, key: &str| value.get(key).and_then(Value::as_u64);
+    let input = tokens(usage, "input_tokens")?;
+    let output = tokens(usage, "output_tokens")?;
+    let details = usage.get("input_tokens_details");
+    let named = |key: &str| details.and_then(|d| tokens(d, key)).unwrap_or(0);
+    let image = named("image_tokens").min(input);
+    let text = named("text_tokens").min(input - image);
+    let unnamed = input - image - text;
+    let text_cost = match (text + unnamed, rates.text_input) {
+        (0, _) => 0.0,
+        (_, None) => return None,
+        (_, Some(price)) => text as f64 * price + unnamed as f64 * price.max(rates.image_input),
+    };
+    let total = text_cost + image as f64 * rates.image_input + output as f64 * rates.image_output;
+    Some(total / 1e6)
+}
+
 /// The settings of `req` that its price depends on. A setting that is not sent counts as
 /// its company default.
 ///
 /// The count is `n` (1 when absent; always 1 for a video); the length is `duration`; the
 /// resolution is `resolution`, else a picture's `size` as sent (`1024x1024`); a video's
 /// `size`, sent in place of its resolution, gives its shorter side (`1280x720` → `720p`,
-/// `3840x2160` → `4K`). The quality is `quality`, the sound `generate_audio`; a start frame
-/// is noted, and every added picture counts.
+/// `3840x2160` → `4K`). What the request sends comes first: the company defaults of
+/// `resolution` and `size` are read, in the same order, only when it sends neither. The
+/// quality is `quality`, the sound `generate_audio`; a start frame is noted, and every added
+/// picture counts.
 pub fn choice_for(model: &MediaModel, req: &MediaRequest) -> PriceChoice {
     let setting = |key: &str| {
         req.params.get(key).or_else(|| {
@@ -323,6 +367,12 @@ pub fn choice_for(model: &MediaModel, req: &MediaRequest) -> PriceChoice {
         })
     };
     let text = |key: &str| setting(key).and_then(Value::as_str).map(str::to_owned);
+    let sent = |key: &str| {
+        req.params
+            .get(key)
+            .and_then(Value::as_str)
+            .map(str::to_owned)
+    };
     let video = model.kind == MediaKind::Video;
     let count = if video {
         1
@@ -333,14 +383,17 @@ pub fn choice_for(model: &MediaModel, req: &MediaRequest) -> PriceChoice {
             // A count is a small whole number; `as` saturates anything else.
             .map_or(1, |n| n.round() as u32)
     };
-    let resolution = if video {
-        text("size")
-            .as_deref()
-            .and_then(shorter_side)
-            .or_else(|| text("resolution"))
-    } else {
-        text("resolution").or_else(|| text("size"))
+    let resolution_from = |read: &dyn Fn(&str) -> Option<String>| {
+        if video {
+            read("size")
+                .as_deref()
+                .and_then(shorter_side)
+                .or_else(|| read("resolution"))
+        } else {
+            read("resolution").or_else(|| read("size"))
+        }
     };
+    let resolution = resolution_from(&sent).or_else(|| resolution_from(&text));
     PriceChoice {
         count,
         seconds: setting("duration")
@@ -1149,6 +1202,81 @@ mod tests {
         let mischief = model(&models, "tbc/mischief-1");
         assert_eq!(
             choice_for(&mischief, &request(&mischief, json!({}))).audio,
+            None
+        );
+    }
+
+    #[test]
+    fn what_the_request_sends_comes_before_any_default() {
+        let models = openrouter_models(&BTreeMap::new());
+        // A picture model whose resolution and size both have a company default.
+        let mut nano = model(&models, "google/gemini-nano-banana-2.1");
+        let resolution = nano
+            .params
+            .iter_mut()
+            .find(|p| p.key == "resolution")
+            .unwrap();
+        resolution.company_default = Some(json!("1K"));
+        let mut size = resolution.clone();
+        size.key = "size".into();
+        size.company_default = Some(json!("auto"));
+        nano.params.push(size);
+        let sent_size = request(&nano, json!({"size": "1536x1024"}));
+        assert_eq!(
+            choice_for(&nano, &sent_size).resolution.as_deref(),
+            Some("1536x1024")
+        );
+        let neither = request(&nano, json!({}));
+        assert_eq!(
+            choice_for(&nano, &neither).resolution.as_deref(),
+            Some("1K")
+        );
+
+        // A video whose size has a default: a sent resolution comes first.
+        let mut veo = model(&models, "google/veo-3.1");
+        let mut size = veo
+            .params
+            .iter()
+            .find(|p| p.key == "resolution")
+            .unwrap()
+            .clone();
+        size.key = "size".into();
+        size.company_default = Some(json!("3840x2160"));
+        veo.params.retain(|p| p.key != "size");
+        veo.params.push(size);
+        let sent = request(&veo, json!({"resolution": "720p"}));
+        assert_eq!(choice_for(&veo, &sent).resolution.as_deref(), Some("720p"));
+        let neither = request(&veo, json!({}));
+        assert_eq!(choice_for(&veo, &neither).resolution.as_deref(), Some("4K"));
+    }
+
+    #[test]
+    fn openai_cost_counts_unnamed_input_at_the_dearer_rate() {
+        let rates = OpenAiRates {
+            text_input: Some(5.0),
+            image_input: 8.0,
+            image_output: 30.0,
+        };
+        // No details: the 1,000 input tokens may be pictures.
+        let bare = json!({"input_tokens": 1000, "output_tokens": 100});
+        usd(
+            openai_cost(&bare, &rates),
+            (1000.0 * 8.0 + 100.0 * 30.0) / 1e6,
+        );
+        // Only picture tokens sent: no text rate is needed.
+        let pictures = json!({"input_tokens": 500, "input_tokens_details": {"text_tokens": 0, "image_tokens": 500}, "output_tokens": 10});
+        let no_text = OpenAiRates {
+            text_input: None,
+            ..rates.clone()
+        };
+        usd(
+            openai_cost(&pictures, &no_text),
+            (500.0 * 8.0 + 10.0 * 30.0) / 1e6,
+        );
+        assert_eq!(openai_cost(&bare, &no_text), None, "the tokens may be text");
+        assert_eq!(openai_cost(&json!({"input_tokens": 5}), &rates), None);
+        assert_eq!(
+            openai_cost(&json!({"input_tokens": -5, "output_tokens": 1}), &rates),
             None
         );
     }

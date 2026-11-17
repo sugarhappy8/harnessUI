@@ -1,0 +1,125 @@
+{
+  "checked": "2026-11-17",
+  "sources": [
+    "https://developers.openai.com/api/docs/pricing",
+    "https://developers.openai.com/api/docs/guides/image-generation",
+    "https://developers.openai.com/api/reference/resources/images/methods/generate",
+    "https://developers.openai.com/api/docs/deprecations"
+  ],
+  "models": [
+    {
+      "prefix": "gpt-image-2.6-sunburst",
+      "label": "GPT Image 2.6 Sunburst",
+      "note": "Made for detail: dense pictures, text, and edits that keep the details.",
+      "retires": null,
+      "maxN": 10,
+      "maxRefs": 16,
+      "qualities": ["auto", "low", "medium", "high", "xhigh", "max"],
+      "formats": ["png", "jpeg", "webp"],
+      "svg": true,
+      "gif": true,
+      "rates": {"textInput": 5.0, "imageInput": 8.0, "imageOutput": 30.0},
+      "perImage": {}
+    },
+    {
+      "prefix": "gpt-image-2.6-flare",
+      "label": "GPT Image 2.6 Flare",
+      "note": "Made for speed: quick everyday pictures and edits.",
+      "retires": null,
+      "maxN": 10,
+      "maxRefs": 16,
+      "qualities": ["auto", "low", "medium", "high", "xhigh", "max"],
+      "formats": ["png", "jpeg", "webp"],
+      "svg": true,
+      "gif": true,
+      "rates": {"textInput": 5.0, "imageInput": 8.0, "imageOutput": 30.0},
+      "perImage": {}
+    },
+    {
+      "prefix": "gpt-image-2",
+      "label": "GPT Image 2",
+      "note": null,
+      "retires": "2027-02-10",
+      "maxN": 10,
+      "maxRefs": 16,
+      "qualities": ["auto", "low", "medium", "high"],
+      "formats": ["png", "jpeg", "webp"],
+      "svg": false,
+      "gif": false,
+      "rates": {"textInput": 5.0, "imageInput": 8.0, "imageOutput": 30.0},
+      "perImage": {
+        "low|1024x1024": 0.006,
+        "low|1024x1536": 0.005,
+        "low|1536x1024": 0.005,
+        "medium|1024x1024": 0.053,
+        "medium|1024x1536": 0.041,
+        "medium|1536x1024": 0.041,
+        "high|1024x1024": 0.211,
+        "high|1024x1536": 0.165,
+        "high|1536x1024": 0.165
+      }
+    },
+    {
+      "prefix": "gpt-image-1.5",
+      "label": "GPT Image 1.5",
+      "note": null,
+      "retires": "2026-12-01",
+      "maxN": 10,
+      "maxRefs": 16,
+      "qualities": ["auto", "low", "medium", "high"],
+      "formats": ["png", "jpeg", "webp"],
+      "svg": false,
+      "gif": false,
+      "rates": {"textInput": 5.0, "imageInput": 8.0, "imageOutput": 32.0},
+      "perImage": {
+        "low|1024x1024": 0.009,
+        "low|1024x1536": 0.013,
+        "low|1536x1024": 0.013,
+        "medium|1024x1024": 0.034,
+        "medium|1024x1536": 0.05,
+        "medium|1536x1024": 0.05,
+        "high|1024x1024": 0.133,
+        "high|1024x1536": 0.2,
+        "high|1536x1024": 0.2
+      }
+    },
+    {
+      "prefix": "gpt-image-1-mini",
+      "label": "GPT Image 1 Mini",
+      "note": null,
+      "retires": "2026-12-01",
+      "maxN": 10,
+      "maxRefs": 16,
+      "qualities": ["auto", "low", "medium", "high"],
+      "formats": ["png", "jpeg", "webp"],
+      "svg": false,
+      "gif": false,
+      "rates": {"textInput": 2.0, "imageInput": 2.5, "imageOutput": 8.0},
+      "perImage": {
+        "low|1024x1024": 0.005,
+        "low|1024x1536": 0.006,
+        "low|1536x1024": 0.006,
+        "medium|1024x1024": 0.011,
+        "medium|1024x1536": 0.015,
+        "medium|1536x1024": 0.015,
+        "high|1024x1024": 0.036,
+        "high|1024x1536": 0.052,
+        "high|1536x1024": 0.052
+      }
+    },
+    {
+      "prefix": "chatgpt-image-latest",
+      "label": "ChatGPT Image (latest)",
+      "note": null,
+      "retires": "2026-12-01",
+      "maxN": 10,
+      "maxRefs": 16,
+      "qualities": ["auto", "low", "medium", "high"],
+      "formats": ["png", "jpeg", "webp"],
+      "svg": false,
+      "gif": false,
+      "rates": {"textInput": 5.0, "imageInput": 8.0, "imageOutput": 32.0},
+      "perImage": {}
+    }
+  ]
+}
