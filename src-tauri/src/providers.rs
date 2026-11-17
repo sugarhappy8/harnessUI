@@ -9,6 +9,7 @@ use tauri::State;
 use crate::dto::{ModelOptionDto, ProviderDto, SaveProvider};
 use crate::error::{AppError, AppResult};
 use crate::state::AppState;
+use crate::studio::catalog;
 
 pub(crate) fn kind_of(s: &str) -> ProviderKind {
     match s {
@@ -200,7 +201,10 @@ pub fn key_may_stay(old_base_url: &str, new_base_url: &str) -> bool {
 
 /// [0.0.7 P5] Whether a key may be saved for the endpoint: anything but "the keychain has
 /// none" (a keychain that cannot be read may still hold one), so no check passes by default.
-fn may_hold_key(secrets: &dyn store::secrets::SecretStore, id: store::ProviderId) -> bool {
+pub(crate) fn may_hold_key(
+    secrets: &dyn store::secrets::SecretStore,
+    id: store::ProviderId,
+) -> bool {
     !matches!(secrets.get(&secret_key(id)), Ok(None))
 }
 
@@ -293,10 +297,19 @@ pub async fn client_for(
             e.to_string(),
         )
     })?;
-    let mut config = ClientConfig::new(provider.base_url.clone(), kind_of(&provider.kind));
-    config.api_key = api_key;
-    let client = OpenAiClient::new(config).map_err(AppError::from)?;
+    let client = client_from(&provider, api_key)?;
     Ok((client, provider))
+}
+
+/// [0.1.0] The client of an endpoint, with `key` (its saved key, read by the caller): the
+/// same for chat and for Studio.
+pub(crate) fn client_from(
+    provider: &store::Provider,
+    key: Option<String>,
+) -> AppResult<OpenAiClient> {
+    let mut config = ClientConfig::new(provider.base_url.clone(), kind_of(&provider.kind));
+    config.api_key = key;
+    OpenAiClient::new(config).map_err(AppError::from)
 }
 
 #[tauri::command]
@@ -390,6 +403,8 @@ pub async fn delete_provider(state: State<'_, AppState>, id: store::ProviderId) 
     let _ = state.secrets.delete(&secret_key(id));
     let _ = state.store.delete_setting(&context_key(id)).await;
     state.store.delete_provider(id).await?;
+    // [0.1.0] After the endpoint is gone, so lists still on their way are not saved.
+    catalog::forget(&state.store, id).await;
     let _ = state
         .store
         .set_setting::<Vec<ModelOptionDto>>(&crate::settings::provider_models_key(id), &Vec::new())
@@ -398,7 +413,8 @@ pub async fn delete_provider(state: State<'_, AppState>, id: store::ProviderId) 
 }
 
 /// Connects to the endpoint, lists its models and caches them for the model picker
-/// (so the picker works offline).
+/// (so the picker works offline). [0.1.0] For an endpoint that makes pictures or video, its
+/// picture and video lists are fetched and saved too ([`catalog::refresh`]).
 #[tauri::command]
 pub async fn test_provider(
     state: State<'_, AppState>,
@@ -425,6 +441,17 @@ pub async fn test_provider(
         .store
         .set_setting(&crate::settings::provider_models_key(id), &options)
         .await?;
+    // [0.1.0] A failure here is only logged: it never fails Test, and Studio offers to get
+    // the lists again.
+    if let Some(media) = agent::media::media_provider(client.clone()) {
+        let now = jiff::Timestamp::now().as_millisecond();
+        if let Err(err) = catalog::refresh(&state.store, id, &*media, now).await {
+            tracing::warn!(
+                "the picture and video lists of endpoint {} could not be fetched: {err}",
+                id.0
+            );
+        }
+    }
     Ok(options)
 }
 
@@ -748,6 +775,32 @@ mod tests {
             plan_context(Generic, "m", Some(262_144), None, 16_384),
             262_144
         );
+    }
+
+    /// [0.1.0] Chat and Studio build an endpoint's client alike: its address, its kind and
+    /// the key given, under the key-transport rule.
+    #[test]
+    fn a_client_is_built_from_the_endpoint_and_its_key() {
+        let provider = |kind: &str, base_url: &str| store::Provider {
+            id: store::ProviderId(4),
+            name: "x".into(),
+            kind: kind.into(),
+            base_url: base_url.into(),
+            secret_ref: None,
+            enabled: true,
+            created_at: 0,
+        };
+        let openrouter = provider("openrouter", "https://openrouter.ai/api/v1");
+        let client = client_from(&openrouter, Some("sk-or-test".into())).unwrap();
+        assert_eq!(client.config().kind, ProviderKind::OpenRouter);
+        assert_eq!(client.config().base_url, "https://openrouter.ai/api/v1");
+        assert_eq!(client.config().api_key.as_deref(), Some("sk-or-test"));
+        let local = client_from(&provider("ollama", "http://127.0.0.1:11434"), None).unwrap();
+        assert_eq!(local.config().kind, ProviderKind::Ollama);
+        assert_eq!(local.config().api_key, None);
+        // A key never goes over plain http to the internet.
+        let plain = provider("generic", "http://api.example.com/v1");
+        assert!(client_from(&plain, Some("sk-test".into())).is_err());
     }
 
     /// [0.0.7 P5] The endpoint list says which endpoints are on the internet.
