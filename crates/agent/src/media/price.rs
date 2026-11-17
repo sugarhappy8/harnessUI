@@ -117,7 +117,8 @@ struct SkuFamily {
 
 /// The per-second key families, in the order of the lookup. When two keys name the same
 /// settings (`duration_seconds_720p` and `cents_per_second_output_720p`), the earlier
-/// family's price is kept.
+/// family's price is kept, and a plain `duration_seconds` leaves out every later family:
+/// the lookup stops at it before any cents key.
 const SKU_FAMILIES: &[SkuFamily] = &[
     SkuFamily {
         prefix: "duration_seconds_with_audio",
@@ -204,8 +205,18 @@ pub fn parse_pricing_skus(skus: &Map<String, Value>) -> Price {
         return Price::PerToken;
     }
     rows.sort_by_key(|(rank, _)| *rank);
+    // The lookup stops at a row that fits every choice (plain `duration_seconds`), so the
+    // rows of later families (the cents keys) are never reached; `second_price` tries every
+    // resolution row before a plain one, so they are left out here.
+    let last_rank = rows
+        .iter()
+        .find(|(_, row)| row.mode.is_none() && row.audio.is_none() && row.resolution.is_none())
+        .map(|(rank, _)| *rank);
     let mut kept: Vec<PriceRow> = Vec::new();
-    for (_, row) in rows {
+    for (rank, row) in rows {
+        if last_rank.is_some_and(|last| rank > last) {
+            continue;
+        }
         let same = |other: &PriceRow| {
             other.mode == row.mode
                 && other.audio == row.audio
@@ -554,7 +565,9 @@ fn specificity(row: &PriceRow) -> usize {
 
 /// The price of one second of video, tried in this order: with or without sound at the
 /// resolution, then with or without sound; then, whatever the sound, the mode at the
-/// resolution, the resolution, and the plain price. `None` when no row fits.
+/// resolution, the resolution, and the plain price. `None` when no row fits. (A table from
+/// [`parse_pricing_skus`] has no cents row beside a plain `duration_seconds`, so this follows
+/// the key order of [`SKU_FAMILIES`].)
 fn second_price(table: &Table, choice: &PriceChoice) -> Option<f64> {
     let resolution = choice.resolution.as_deref().filter(|r| !r.is_empty());
     let mut tries: Vec<(Option<Mode>, Option<&str>, Option<bool>)> = Vec::new();
@@ -782,6 +795,38 @@ mod tests {
         let p = sku("google/veo-3.1-fast");
         usd(secs(&p, 8.0, "720p", Some(true), false, 0), 0.80);
         usd(secs(&p, 8.0, "1080p", Some(true), false, 0), 0.96);
+    }
+
+    /// The price of a synthetic `pricing_skus` object, for key mixes no recorded model has.
+    fn skus(object: Value) -> Price {
+        parse_pricing_skus(object.as_object().unwrap())
+    }
+
+    #[test]
+    fn cents_keys_come_after_every_dollar_key() {
+        // Plain `duration_seconds` comes before every cents key, even one for the resolution.
+        let p = skus(json!({
+            "duration_seconds": 0.10,
+            "cents_per_video_output_second_720p": 50,
+            "cents_per_second_output_1080p": 60,
+            "cents_per_second_output": 70,
+        }));
+        usd(secs(&p, 5.0, "720p", Some(true), false, 0), 0.50);
+        usd(secs(&p, 5.0, "1080p", None, false, 0), 0.50);
+        usd(secs(&p, 5.0, "", None, false, 0), 0.50);
+        assert_eq!(p.range(), Some((0.10, 0.10)));
+        // Without it: a dollar row for the resolution, then a cents row for the resolution,
+        // then the plain cents price.
+        let p = skus(json!({
+            "duration_seconds_1080p": 0.20,
+            "cents_per_video_output_second_720p": 30,
+            "cents_per_second_output_720p": 40,
+            "cents_per_second_output_1080p": 90,
+            "cents_per_second_output": 10,
+        }));
+        usd(secs(&p, 5.0, "720p", None, false, 0), 1.50);
+        usd(secs(&p, 5.0, "1080p", None, false, 0), 1.00);
+        usd(secs(&p, 5.0, "480p", None, false, 0), 0.50);
     }
 
     #[test]
