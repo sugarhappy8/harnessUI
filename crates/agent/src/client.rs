@@ -31,7 +31,7 @@ use url::Url;
 use crate::anthropic::{MessagesDecoder, ThinkingReplay};
 use crate::cloud;
 use crate::error::{ProviderError, as_u32, bounded, error_from_body};
-use crate::media::{LocalIo, MediaError};
+use crate::media::{Fetched, LocalIo, MediaError, Saved, base_failure};
 use crate::stream::{ChunkParser, StreamDecoder, StreamEvent};
 use crate::types::ChatRequest;
 
@@ -324,13 +324,6 @@ pub struct OpenAiClient {
 /// the redirect's own status.
 pub(crate) fn same_origin_redirects() -> reqwest::redirect::Policy {
     reqwest::redirect::Policy::custom(|attempt| {
-        let origin = |url: &reqwest::Url| {
-            (
-                url.scheme().to_owned(),
-                url.host_str().map(str::to_ascii_lowercase),
-                url.port_or_known_default(),
-            )
-        };
         let home = attempt.previous().first().map(origin);
         if home == Some(origin(attempt.url())) && attempt.previous().len() <= 10 {
             attempt.follow()
@@ -338,6 +331,15 @@ pub(crate) fn same_origin_redirects() -> reqwest::redirect::Policy {
             attempt.stop()
         }
     })
+}
+
+/// A URL's origin as the redirect rules compare it: its scheme, host (lowercased) and port.
+fn origin(url: &Url) -> (String, Option<String>, Option<u16>) {
+    (
+        url.scheme().to_owned(),
+        url.host_str().map(str::to_ascii_lowercase),
+        url.port_or_known_default(),
+    )
 }
 
 impl OpenAiClient {
@@ -1085,12 +1087,35 @@ impl OpenAiClient {
         self.send_json(self.http.get(url)).await
     }
 
+    /// A `GET` like [`Self::get_json`], with `limit` on the whole request (its body included)
+    /// in place of the client's own request limit: a check on a video job (0.1.0 Studio).
+    ///
+    /// # Errors
+    /// Any [`ProviderError`]; a request that runs out of time is a [`ProviderError::Network`].
+    pub(crate) async fn get_json_within(
+        &self,
+        url: Url,
+        limit: Duration,
+    ) -> Result<Value, ProviderError> {
+        self.send_json_within(self.http.get(url), Some(limit)).await
+    }
+
     async fn post_json(&self, url: Url, body: &Value) -> Result<Value, ProviderError> {
         self.send_json(self.http.post(url).json(body)).await
     }
 
     async fn send_json(&self, request: reqwest::RequestBuilder) -> Result<Value, ProviderError> {
-        self.send_json_unscrubbed(request)
+        self.send_json_within(request, self.config.request_timeout)
+            .await
+    }
+
+    /// [`Self::send_json`] with `limit` on the whole request in place of the client's own.
+    async fn send_json_within(
+        &self,
+        request: reqwest::RequestBuilder,
+        limit: Option<Duration>,
+    ) -> Result<Value, ProviderError> {
+        self.send_json_unscrubbed(request, limit)
             .await
             .map_err(|err| cloud::scrub_key(err, self.config.api_key.as_deref()))
     }
@@ -1098,9 +1123,10 @@ impl OpenAiClient {
     async fn send_json_unscrubbed(
         &self,
         request: reqwest::RequestBuilder,
+        limit: Option<Duration>,
     ) -> Result<Value, ProviderError> {
         let mut request = self.authorize(request);
-        if let Some(limit) = self.config.request_timeout {
+        if let Some(limit) = limit {
             request = request.timeout(limit);
         }
         let response = request.send().await.map_err(network_error)?;
@@ -1200,6 +1226,113 @@ impl OpenAiClient {
             });
         }
     }
+
+    /// Streams to `dest` through [`stream_body_to`] (at most `cap` bytes, at most `idle`
+    /// between chunks; local failures come back as [`MediaError::Local`]). A 3xx whose
+    /// Location is another origin comes back as [`Fetched::Elsewhere`] and is never followed
+    /// with the key.
+    ///
+    /// For a result on the endpoint's own host, fetched with the key (0.1.0 Studio: a video's
+    /// content). `idle` also limits the wait for the answer and for an error body. `dest` is
+    /// opened with `File::create` (which follows a link) only once the answer is a success,
+    /// and removed when the download fails. A redirect within the origin is followed by the
+    /// client's own rule (never by a client for this computer). Error texts never carry the
+    /// key.
+    ///
+    /// # Errors
+    /// [`MediaError::NotSent`] when the connection did not open; [`MediaError::Answered`]
+    /// for an error status or a redirect that was not followed, with `charged: None` (a
+    /// download says nothing about what the result cost); [`MediaError::Unknown`] when the
+    /// answer did not come or stopped coming; [`MediaError::Local`] when the file could not
+    /// be written or the result is larger than `cap`.
+    pub(crate) async fn download_to_file(
+        &self,
+        url: Url,
+        dest: &Path,
+        cap: u64,
+        idle: Duration,
+    ) -> Result<Fetched, MediaError> {
+        let key = self.config.api_key.as_deref();
+        let unknown = |err: ProviderError| MediaError::Unknown(cloud::scrub_key(err, key));
+        let request = self.authorize(self.http.get(url.clone()));
+        let response = match tokio::time::timeout(idle, request.send()).await {
+            Ok(Ok(response)) => response,
+            Ok(Err(err)) if err.is_connect() => {
+                return Err(MediaError::NotSent(cloud::scrub_key(
+                    network_error(err),
+                    key,
+                )));
+            }
+            Ok(Err(err)) => return Err(unknown(network_error(err))),
+            Err(_) => {
+                return Err(unknown(ProviderError::Network(format!(
+                    "no answer for {}",
+                    describe(idle)
+                ))));
+            }
+        };
+        let status = response.status();
+        if status.is_redirection()
+            && let Some(link) = elsewhere(&response, &url)
+        {
+            return Ok(Fetched::Elsewhere(link));
+        }
+        let headers = response.headers().clone();
+        if !status.is_success() {
+            let body = within(
+                Some(idle),
+                "the server did not finish its error response",
+                read_capped(response, MAX_ERROR_BODY, true),
+            )
+            .await
+            .map_err(unknown)?;
+            let mut failure = base_failure(status.as_u16(), &headers, &body, key);
+            failure.charged = None;
+            return Err(MediaError::Answered(failure));
+        }
+        let mime = headers
+            .get(reqwest::header::CONTENT_TYPE)
+            .and_then(|value| value.to_str().ok())
+            .and_then(|value| value.split(';').next())
+            .map(|value| value.trim().to_ascii_lowercase())
+            .filter(|value| !value.is_empty())
+            .unwrap_or_else(|| "application/octet-stream".to_owned());
+        let mut file = tokio::fs::File::create(dest)
+            .await
+            .map_err(|err| MediaError::Local(LocalIo::from_io(&err)))?;
+        let written = stream_body_to(response, &mut file, cap, Some(idle)).await;
+        // Closed only once its writes have finished, so it can be removed on every system.
+        drop(file.into_std().await);
+        match written {
+            Ok(size_bytes) => Ok(Fetched::Saved(Saved {
+                path: dest.to_owned(),
+                mime,
+                size_bytes,
+                width: None,
+                height: None,
+                duration_ms: None,
+            })),
+            Err(err) => {
+                let _ = tokio::fs::remove_file(dest).await;
+                Err(match err {
+                    BodyError::Local(io) => MediaError::Local(io),
+                    BodyError::Network(err) => unknown(err),
+                })
+            }
+        }
+    }
+}
+
+/// Where a redirect sends a request when that is another origin than `asked`'s, over http or
+/// https; `None` for a redirect within the origin or one without a readable `Location`.
+fn elsewhere(response: &reqwest::Response, asked: &Url) -> Option<Url> {
+    let location = response
+        .headers()
+        .get(reqwest::header::LOCATION)?
+        .to_str()
+        .ok()?;
+    let link = response.url().join(location.trim()).ok()?;
+    (matches!(link.scheme(), "http" | "https") && origin(&link) != origin(asked)).then_some(link)
 }
 
 /// Streams an accepted answer into a new file in `scratch`: its path and size. The file is

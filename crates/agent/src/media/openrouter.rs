@@ -1,4 +1,4 @@
-//! OpenRouter's model lists, picture prices and pictures (0.1.0 Studio).
+//! OpenRouter's model lists, picture prices, pictures and video jobs (0.1.0 Studio).
 //!
 //! - **Lists and prices**: `GET {api}/images/models` and `{api}/videos/models`, and a picture
 //!   model's `/endpoints` answer (`GET {api}/images/models/{id}/endpoints`), all through the
@@ -10,7 +10,18 @@
 //!   `zdr`) and each company's extra settings under `provider.options[<provider_slug>]`
 //!   ([`place_extra`]). The answer is streamed to a file, then its pictures are written one
 //!   at a time.
-//! - **Failures**: [`openrouter_failure`]. A moderation refusal and a 502 are not charged.
+//! - **Video**: `POST {api}/videos`, sent at most once, starts a job; its body follows the
+//!   video docs as checked on 2026-11-17: the typed settings, and the start and end frames as
+//!   `frame_images` items `{"type": "image_url", "image_url": {"url": "data:…"},
+//!   "frame_type": "first_frame" | "last_frame"}`. It carries no `provider` and no extra
+//!   settings: OpenRouter keys a video's extra settings by the company the job is routed to
+//!   (nested in `parameters` for Veo), which its video list does not name. `GET
+//!   {api}/videos/{id}` checks on the job, each check within its own time limit, and `GET
+//!   {api}/videos/{id}/content?index=N` downloads a result with the key
+//!   ([`OpenAiClient::download_to_file`]); a link to another host is handed back, never
+//!   followed with the key.
+//! - **Failures**: [`openrouter_failure`]. A moderation refusal and a 502 are not charged,
+//!   nor is a video job that failed.
 
 use std::collections::BTreeMap;
 use std::io::BufReader;
@@ -27,14 +38,22 @@ use url::Url;
 use super::{
     Company, Cost, FailureKind, Fetched, JobDone, JobState, LocalIo, MediaError, MediaFailure,
     MediaKind, MediaLimits, MediaModel, MediaProvider, MediaRequest, RawCatalog, RefImage, RefRole,
-    RequestPreview, Routing, Saved, Stage, Started, base_failure,
+    RequestPreview, Routing, Saved, SignedUrl, Stage, Started, base_failure,
 };
 use crate::client::{OnceBody, OnceReply, OpenAiClient, join};
 use crate::cloud::scrub_text;
 use crate::error::{ProviderError, bounded};
 
-/// Why a video request is refused here: video jobs are not offered through this provider yet.
-const NO_VIDEO_YET: &str = "OpenRouter video jobs are not available yet.";
+/// The settings a video request sends besides `model`, `prompt` and the frames, in this
+/// order. `size`, when set, replaces `resolution` and `aspect_ratio`.
+const VIDEO_FIELDS: [&str; 6] = [
+    "duration",
+    "resolution",
+    "aspect_ratio",
+    "size",
+    "generate_audio",
+    "seed",
+];
 
 /// Pictures and video through an OpenRouter endpoint.
 #[derive(Debug, Clone)]
@@ -66,12 +85,104 @@ impl OpenRouterMedia {
         join(self.client.api_url(), path)
     }
 
+    /// `{api}/videos/{id}` followed by `tail`, the id as one path segment (escaped).
+    fn job_url(&self, remote_id: &str, tail: &[&str]) -> Url {
+        let mut url = self.url("videos");
+        if let Ok(mut path) = url.path_segments_mut() {
+            path.push(remote_id).extend(tail);
+        }
+        url
+    }
+
     /// A read through the endpoint's client: a model list or a price answer.
     async fn read(&self, url: Url) -> Result<Value, MediaError> {
         self.client
             .get_json(url)
             .await
             .map_err(|err| read_failed(err, self.key()))
+    }
+
+    /// Makes pictures: one request whose answer carries them.
+    async fn start_pictures(
+        &self,
+        req: &MediaRequest,
+        scratch: &Path,
+    ) -> Result<Started, MediaError> {
+        let mut items = Vec::new();
+        for picture in references(req) {
+            let url = data_url(picture).await?;
+            items.push(json!({"type": "image_url", "image_url": {"url": url}}));
+        }
+        let reply = self
+            .client
+            .post_once(
+                self.url("images"),
+                OnceBody::Json(picture_body(req, items)),
+                self.limits.picture_timeout,
+                self.limits.response_cap,
+                scratch,
+            )
+            .await?;
+        match reply {
+            OnceReply::Success { path, len, headers } => {
+                let saved = if len == 0 {
+                    Err(unreadable("the answer was empty".to_owned()))
+                } else {
+                    let (answer, folder) = (path.clone(), scratch.to_owned());
+                    let cap = self.limits.picture_cap;
+                    tokio::task::spawn_blocking(move || save_pictures(&answer, &folder, cap))
+                        .await
+                        .unwrap_or_else(|err| {
+                            Err(MediaError::Local(LocalIo::Io(format!(
+                                "the pictures were not written ({err})"
+                            ))))
+                        })
+                };
+                let _ = tokio::fs::remove_file(&path).await;
+                let (outputs, cost) =
+                    saved.map_err(|err| naming_the_answer(err, &headers, self.key()))?;
+                Ok(Started::Done { outputs, cost })
+            }
+            OnceReply::Error {
+                status,
+                body,
+                headers,
+            } => Err(refused(status, &headers, &body, self.key())),
+        }
+    }
+
+    /// Starts a video job: one request whose answer carries the job's id.
+    async fn start_video(&self, req: &MediaRequest, scratch: &Path) -> Result<Started, MediaError> {
+        let mut items = Vec::new();
+        for (picture, frame_type) in frames(req) {
+            items.push(frame_item(data_url(picture).await?, frame_type));
+        }
+        // The whole-request limit of a picture request: the frames go out with it.
+        let reply = self
+            .client
+            .post_once(
+                self.url("videos"),
+                OnceBody::Json(video_body(req, items)),
+                self.limits.picture_timeout,
+                self.limits.response_cap,
+                scratch,
+            )
+            .await?;
+        match reply {
+            OnceReply::Success { path, headers, .. } => {
+                let answer = tokio::fs::read(&path).await;
+                let _ = tokio::fs::remove_file(&path).await;
+                let answer = answer.map_err(|err| MediaError::Local(LocalIo::from_io(&err)))?;
+                let remote_id =
+                    job_id(&answer).map_err(|err| naming_the_answer(err, &headers, self.key()))?;
+                Ok(Started::Job { remote_id })
+            }
+            OnceReply::Error {
+                status,
+                body,
+                headers,
+            } => Err(refused(status, &headers, &body, self.key())),
+        }
     }
 }
 
@@ -121,7 +232,15 @@ impl MediaProvider for OpenRouterMedia {
                     .map(|(i, picture)| Value::String(picture_label(i + 1, picture)))
                     .collect(),
             ),
-            MediaKind::Video => Value::Null,
+            MediaKind::Video => video_body(
+                req,
+                frames(req)
+                    .enumerate()
+                    .map(|(i, (picture, frame_type))| {
+                        frame_item(picture_label(i + 1, picture), frame_type)
+                    })
+                    .collect(),
+            ),
         };
         RequestPreview {
             method: "POST".to_owned(),
@@ -132,69 +251,54 @@ impl MediaProvider for OpenRouterMedia {
     }
 
     async fn start(&self, req: &MediaRequest, scratch: &Path) -> Result<Started, MediaError> {
-        if req.kind == MediaKind::Video {
-            return Err(not_offered());
+        match req.kind {
+            MediaKind::Image => self.start_pictures(req, scratch).await,
+            MediaKind::Video => self.start_video(req, scratch).await,
         }
-        let mut items = Vec::new();
-        for picture in references(req) {
-            let bytes = tokio::fs::read(&picture.path).await.map_err(|err| {
-                MediaError::NotSent(ProviderError::InvalidRequest(format!(
-                    "could not read an added picture: {err}"
-                )))
-            })?;
-            let url = format!("data:{};base64,{}", picture.mime, STANDARD.encode(&bytes));
-            items.push(json!({"type": "image_url", "image_url": {"url": url}}));
-        }
-        let reply = self
+    }
+
+    /// `GET {api}/videos/{id}`, within `check_timeout`. A 404 means OpenRouter no longer has
+    /// the job ([`JobState::Gone`]); a check that got no answer is an error, not a state.
+    async fn check(&self, remote_id: &str) -> Result<JobState, MediaError> {
+        match self
             .client
-            .post_once(
-                self.url("images"),
-                OnceBody::Json(picture_body(req, items)),
-                self.limits.picture_timeout,
-                self.limits.response_cap,
-                scratch,
-            )
-            .await?;
-        match reply {
-            OnceReply::Success { path, len, headers } => {
-                let saved = if len == 0 {
-                    Err(unreadable("the answer was empty".to_owned()))
-                } else {
-                    let (answer, folder) = (path.clone(), scratch.to_owned());
-                    let cap = self.limits.picture_cap;
-                    tokio::task::spawn_blocking(move || save_pictures(&answer, &folder, cap))
-                        .await
-                        .unwrap_or_else(|err| {
-                            Err(MediaError::Local(LocalIo::Io(format!(
-                                "the pictures were not written ({err})"
-                            ))))
-                        })
-                };
-                let _ = tokio::fs::remove_file(&path).await;
-                let (outputs, cost) =
-                    saved.map_err(|err| naming_the_answer(err, &headers, self.key()))?;
-                Ok(Started::Done { outputs, cost })
-            }
-            OnceReply::Error {
-                status,
-                body,
-                headers,
-            } => Err(refused(status, &headers, &body, self.key())),
+            .get_json_within(self.job_url(remote_id, &[]), self.limits.check_timeout)
+            .await
+        {
+            Ok(answer) => job_state(&answer, self.key()),
+            Err(ProviderError::Http { status: 404, .. }) => Ok(JobState::Gone),
+            Err(err) => Err(check_failed(err, self.key())),
         }
     }
 
-    async fn check(&self, _remote_id: &str) -> Result<JobState, MediaError> {
-        Err(not_offered())
-    }
-
+    /// `GET {api}/videos/{id}/content?index=N` with the key, streamed to `dest` (at most
+    /// `video_cap`, at most `download_idle` without data); the docs say a result stays there
+    /// for as long as the output is available. When the job gave only signed links, result
+    /// `index`'s link is handed back for the guarded fetcher instead, as is a redirect to
+    /// another host. A 404 or 410 means the result has expired.
     async fn download(
         &self,
-        _remote_id: &str,
-        _job: &JobDone,
-        _index: usize,
-        _dest: &Path,
+        remote_id: &str,
+        job: &JobDone,
+        index: usize,
+        dest: &Path,
     ) -> Result<Fetched, MediaError> {
-        Err(not_offered())
+        if let Some(link) = job.signed.get(index) {
+            return Ok(Fetched::Elsewhere(link.url.clone()));
+        }
+        let mut url = self.job_url(remote_id, &["content"]);
+        url.query_pairs_mut()
+            .append_pair("index", &index.to_string());
+        self.client
+            .download_to_file(url, dest, self.limits.video_cap, self.limits.download_idle)
+            .await
+            .map_err(|err| match err {
+                MediaError::Answered(mut failure) if matches!(failure.status, Some(404 | 410)) => {
+                    failure.kind = FailureKind::Expired;
+                    MediaError::Answered(failure)
+                }
+                other => other,
+            })
     }
 }
 
@@ -248,9 +352,7 @@ pub(crate) fn openrouter_failure(
     let metadata = serde_json::from_slice::<Value>(body)
         .ok()
         .and_then(|value| value.pointer("/error/metadata").cloned());
-    let lower = failure.message.to_lowercase();
-    let moderation = lower.contains("moderation")
-        || lower.contains("flagged")
+    let moderation = speaks_of_moderation(&failure.message)
         || metadata
             .as_ref()
             .is_some_and(|m| m.get("moderation").is_some() || m.get("flagged_input").is_some());
@@ -265,6 +367,12 @@ pub(crate) fn openrouter_failure(
         failure.charged = Some(false);
     }
     failure
+}
+
+/// Whether an error message speaks of moderation or a flag, as OpenRouter's refusals do.
+fn speaks_of_moderation(message: &str) -> bool {
+    let lower = message.to_lowercase();
+    lower.contains("moderation") || lower.contains("flagged")
 }
 
 /// The error for a create the company refused: its failure, except a server failure whose
@@ -299,9 +407,17 @@ fn read_failed(err: ProviderError, key: Option<&str>) -> MediaError {
     }
 }
 
-/// The error for a request this provider does not make yet: refused before sending.
-fn not_offered() -> MediaError {
-    MediaError::NotSent(ProviderError::InvalidRequest(NO_VIDEO_YET.to_owned()))
+/// A check on a video job that failed. An error status is the company's answer, which says
+/// nothing about what the job cost; anything else means no answer came.
+fn check_failed(err: ProviderError, key: Option<&str>) -> MediaError {
+    match read_failed(err, key) {
+        MediaError::Answered(mut failure) => {
+            failure.charged = None;
+            MediaError::Answered(failure)
+        }
+        MediaError::NotSent(err) => MediaError::Unknown(err),
+        other => other,
+    }
 }
 
 /// An accepted answer whose pictures cannot be read: the run may have been charged.
@@ -326,6 +442,21 @@ fn naming_the_answer(err: MediaError, headers: &HeaderMap, key: Option<&str>) ->
 }
 
 // ---- the picture request -----------------------------------------------------------------------
+
+/// An added picture as a `data:` URL, read from its file. A file that cannot be read stops
+/// the request before it is sent.
+async fn data_url(picture: &RefImage) -> Result<String, MediaError> {
+    let bytes = tokio::fs::read(&picture.path).await.map_err(|err| {
+        MediaError::NotSent(ProviderError::InvalidRequest(format!(
+            "could not read an added picture: {err}"
+        )))
+    })?;
+    Ok(format!(
+        "data:{};base64,{}",
+        picture.mime,
+        STANDARD.encode(&bytes)
+    ))
+}
 
 /// The added pictures a picture request sends: its references.
 fn references(req: &MediaRequest) -> impl Iterator<Item = &RefImage> {
@@ -446,15 +577,16 @@ fn save_pictures(
     if saved.is_empty() {
         return Err(unreadable("the answer has no pictures".to_owned()));
     }
-    let cost = parsed
-        .usage
-        .and_then(|usage| usage.cost)
-        .filter(|usd| usd.is_finite() && *usd >= 0.0)
+    Ok((saved, reported(parsed.usage.and_then(|usage| usage.cost))))
+}
+
+/// A cost the company reported, when it is a sound amount.
+fn reported(usd: Option<f64>) -> Option<Cost> {
+    usd.filter(|usd| usd.is_finite() && *usd >= 0.0)
         .map(|usd| Cost {
             usd,
             reported: true,
-        });
-    Ok((saved, cost))
+        })
 }
 
 /// Decodes one picture and writes it to `path`. Its type is the answer's `media_type`, else
@@ -502,6 +634,192 @@ fn sniff(bytes: &[u8]) -> Option<&'static str> {
         let head = head.trim_start_matches('\u{feff}').trim_start();
         (head.starts_with("<svg") || (head.starts_with("<?xml") && head.contains("<svg")))
             .then_some("image/svg+xml")
+    }
+}
+
+// ---- the video request -------------------------------------------------------------------------
+
+/// The added pictures a video request sends, with their `frame_type`: its start frame
+/// (`first_frame`) and end frame (`last_frame`).
+fn frames(req: &MediaRequest) -> impl Iterator<Item = (&RefImage, &'static str)> {
+    req.refs.iter().filter_map(|picture| match picture.role {
+        RefRole::StartFrame => Some((picture, "first_frame")),
+        RefRole::EndFrame => Some((picture, "last_frame")),
+        RefRole::Reference => None,
+    })
+}
+
+/// One `frame_images` item: `{"type": "image_url", "image_url": {"url": …}, "frame_type": …}`.
+fn frame_item(url: String, frame_type: &str) -> Value {
+    json!({"type": "image_url", "image_url": {"url": url}, "frame_type": frame_type})
+}
+
+/// The video request's body: `model` and `prompt`, the typed settings of [`VIDEO_FIELDS`]
+/// that are set (`size` in place of `resolution` and `aspect_ratio`), and the frames as
+/// `frame_images`. Never `provider` or any other key.
+fn video_body(req: &MediaRequest, frames: Vec<Value>) -> Value {
+    let mut body = Map::new();
+    body.insert("model".to_owned(), Value::String(req.model.clone()));
+    body.insert("prompt".to_owned(), Value::String(req.prompt.clone()));
+    let sized = req.params.contains_key("size");
+    for key in VIDEO_FIELDS {
+        if sized && matches!(key, "resolution" | "aspect_ratio") {
+            continue;
+        }
+        if let Some(value) = req.params.get(key) {
+            body.insert(key.to_owned(), value.clone());
+        }
+    }
+    if !frames.is_empty() {
+        body.insert("frame_images".to_owned(), Value::Array(frames));
+    }
+    Value::Object(body)
+}
+
+// ---- the video answers -------------------------------------------------------------------------
+
+/// The job's id in the answer to a video request (`{"id": …, "polling_url": …, "status": …}`).
+fn job_id(answer: &[u8]) -> Result<String, MediaError> {
+    let value: Value = serde_json::from_slice(answer)
+        .map_err(|err| unreadable(format!("the answer is not a video job ({err})")))?;
+    value
+        .get("id")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|id| !id.is_empty())
+        .map(str::to_owned)
+        .ok_or_else(|| unreadable("the answer has no job id".to_owned()))
+}
+
+/// What a check's answer says: `pending`, `in_progress` (with `progress`), `completed`, or
+/// `failed`, `cancelled` and `expired`. Any other status is an answer Studio cannot read.
+fn job_state(answer: &Value, key: Option<&str>) -> Result<JobState, MediaError> {
+    let status = answer
+        .get("status")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    Ok(match status {
+        "pending" => JobState::Pending,
+        "in_progress" => JobState::Running {
+            progress: answer.get("progress").and_then(progress_of),
+        },
+        "completed" => JobState::Done(job_done(answer)),
+        "failed" | "cancelled" | "expired" => JobState::Failed(job_failure(status, answer, key)),
+        other => {
+            return Err(unreadable(format!(
+                "the job's status is not one Studio knows ({})",
+                scrub_text(&bounded(other), key)
+            )));
+        }
+    })
+}
+
+/// How far along a job is, from 0 to 1: a number from 0 to 1 as it is, one up to 100 as a
+/// percentage; `None` for anything else.
+fn progress_of(value: &Value) -> Option<f32> {
+    let n = value.as_f64().filter(|n| n.is_finite() && *n >= 0.0)?;
+    let fraction = if n <= 1.0 {
+        n
+    } else if n <= 100.0 {
+        n / 100.0
+    } else {
+        return None;
+    };
+    Some(fraction as f32)
+}
+
+/// A completed job: as many results as it lists links for (at least one) and its reported
+/// cost. Its signed `urls` are kept only when it gives no `unsigned_urls`: those are on
+/// OpenRouter's own host and fetched with the key, so the signed links are needed only when
+/// they are all there is. They are kept in order up to the first that cannot be read, so
+/// link `n` is always result `n`'s.
+fn job_done(answer: &Value) -> JobDone {
+    let listed = |key: &str| answer.get(key).and_then(Value::as_array);
+    let unsigned = listed("unsigned_urls").map_or(0, Vec::len);
+    let signed = listed("urls")
+        .filter(|_| unsigned == 0)
+        .into_iter()
+        .flatten()
+        .map_while(signed_url)
+        .collect();
+    JobDone {
+        outputs: unsigned.max(listed("urls").map_or(0, Vec::len)).max(1),
+        signed,
+        cost: reported(answer.pointer("/usage/cost").and_then(Value::as_f64)),
+    }
+}
+
+/// One signed link: `{"url": …, "expires_at": …}`, or the bare link; http or https only.
+fn signed_url(item: &Value) -> Option<SignedUrl> {
+    let (link, expires_at) = match item {
+        Value::String(link) => (link.as_str(), None),
+        Value::Object(map) => (
+            map.get("url")?.as_str()?,
+            map.get("expires_at").and_then(Value::as_i64),
+        ),
+        _ => return None,
+    };
+    let url = Url::parse(link.trim())
+        .ok()
+        .filter(|url| matches!(url.scheme(), "http" | "https"))?;
+    Some(SignedUrl { url, expires_at })
+}
+
+/// A job that ended without a result. The message is the answer's `error` (a text, or an
+/// object with `message` and `code`), else a plain sentence; one that speaks of moderation
+/// is [`FailureKind::Blocked`], and an expired job is [`FailureKind::Expired`]. OpenRouter
+/// does not bill a job that failed or was cancelled; an expired one had finished, so what it
+/// cost is unknown; a cost the answer reports decides over both. The request id is the
+/// answer's `generation_id`, else the job's id.
+fn job_failure(status: &str, answer: &Value, key: Option<&str>) -> MediaFailure {
+    let clean = |text: &str| scrub_text(&bounded(text), key);
+    let error = answer.get("error").filter(|error| !error.is_null());
+    let text = match error {
+        Some(Value::String(text)) => Some(text.as_str()),
+        Some(Value::Object(map)) => ["message", "detail"]
+            .iter()
+            .find_map(|name| map.get(*name).and_then(Value::as_str)),
+        _ => None,
+    }
+    .map(str::trim)
+    .filter(|text| !text.is_empty());
+    let message = text.map_or_else(
+        || {
+            match status {
+                "cancelled" => "The job was cancelled.",
+                "expired" => "The result has expired.",
+                _ => "The job failed.",
+            }
+            .to_owned()
+        },
+        clean,
+    );
+    let kind = if status == "expired" {
+        FailureKind::Expired
+    } else if speaks_of_moderation(&message) {
+        FailureKind::Blocked
+    } else {
+        FailureKind::Other
+    };
+    let charged = match reported(answer.pointer("/usage/cost").and_then(Value::as_f64)) {
+        Some(cost) => Some(cost.usd > 0.0),
+        None => (status != "expired").then_some(false),
+    };
+    MediaFailure {
+        kind,
+        stage: None,
+        charged,
+        company_code: error
+            .and_then(|error| error.get("code"))
+            .and_then(Value::as_str)
+            .map(clean),
+        request_id: ["generation_id", "id"]
+            .iter()
+            .find_map(|name| answer.get(*name).and_then(Value::as_str))
+            .map(clean),
+        status: None,
+        message,
+        retry_after: None,
     }
 }
 
@@ -700,6 +1018,88 @@ mod tests {
             Some("image/svg+xml")
         );
         assert_eq!(sniff(b"<html>"), None);
+    }
+
+    #[test]
+    fn progress_is_read_as_a_fraction() {
+        assert_eq!(progress_of(&json!(0.4)), Some(0.4));
+        assert_eq!(progress_of(&json!(1)), Some(1.0));
+        assert_eq!(progress_of(&json!(75)), Some(0.75), "a percentage");
+        assert_eq!(progress_of(&json!(0)), Some(0.0));
+        assert_eq!(progress_of(&json!(150)), None);
+        assert_eq!(progress_of(&json!(-0.5)), None);
+        assert_eq!(progress_of(&json!("40%")), None);
+    }
+
+    #[test]
+    fn a_job_answer_becomes_a_state() {
+        let state = |answer: Value| job_state(&answer, None);
+        assert_eq!(
+            state(json!({"status": "in_progress"})).unwrap(),
+            JobState::Running { progress: None }
+        );
+        // With both kinds of link, the content endpoint is used: no signed links are kept.
+        let Ok(JobState::Done(job)) = state(json!({
+            "status": "completed",
+            "unsigned_urls": ["https://openrouter.ai/api/v1/videos/v/content?index=0"],
+            "urls": ["https://cdn.example/a.mp4", "https://cdn.example/b.mp4"]
+        })) else {
+            panic!("done")
+        };
+        assert_eq!((job.outputs, job.signed.len(), job.cost), (2, 0, None));
+        // Signed links stay in order, up to the first that cannot be read.
+        let Ok(JobState::Done(job)) = state(json!({
+            "status": "completed",
+            "urls": ["https://cdn.example/a.mp4", "file:///etc/passwd", "https://cdn.example/c.mp4"]
+        })) else {
+            panic!("done")
+        };
+        assert_eq!(job.outputs, 3);
+        assert_eq!(job.signed.len(), 1);
+        assert_eq!(job.signed[0].url.as_str(), "https://cdn.example/a.mp4");
+        assert_eq!(job.signed[0].expires_at, None);
+        // A completed job without links still has its one result at the content endpoint.
+        let Ok(JobState::Done(job)) = state(json!({"status": "completed"})) else {
+            panic!("done")
+        };
+        assert_eq!(job.outputs, 1);
+
+        assert!(matches!(
+            state(json!({"status": "queued"})),
+            Err(MediaError::Unknown(ProviderError::Decode(_)))
+        ));
+        assert!(state(json!({"id": "v"})).is_err(), "no status");
+    }
+
+    #[test]
+    fn a_job_that_ended_without_a_result_says_why() {
+        let failed = |answer: Value| match job_state(&answer, Some("sk-or-v1-secret")) {
+            Ok(JobState::Failed(f)) => f,
+            other => panic!("expected a failed state, got {other:?}"),
+        };
+        let f = failed(json!({"id": "vid_9", "status": "cancelled"}));
+        assert_eq!(f.kind, FailureKind::Other);
+        assert_eq!(f.charged, Some(false));
+        assert_eq!(f.message, "The job was cancelled.");
+        assert_eq!(f.request_id.as_deref(), Some("vid_9"));
+        assert_eq!(f.status, None);
+
+        let f = failed(json!({
+            "status": "failed",
+            "error": {"code": "content_policy", "message": "The output was flagged by the provider"}
+        }));
+        assert_eq!(f.kind, FailureKind::Blocked);
+        assert_eq!(f.company_code.as_deref(), Some("content_policy"));
+        assert_eq!(f.charged, Some(false));
+
+        // A cost the answer reports decides whether it was charged.
+        let f = failed(json!({"status": "failed", "usage": {"cost": 0.12}}));
+        assert_eq!(f.charged, Some(true));
+        let f = failed(json!({"status": "expired", "usage": {"cost": 0}}));
+        assert_eq!((f.kind, f.charged), (FailureKind::Expired, Some(false)));
+
+        let f = failed(json!({"status": "failed", "error": "bad key sk-or-v1-secret"}));
+        assert!(!f.message.contains("sk-or-v1-secret"), "{}", f.message);
     }
 
     #[test]

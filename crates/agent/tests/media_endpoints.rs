@@ -1,7 +1,9 @@
-//! Studio (0.1.0): OpenRouter's picture endpoints against a local fake server that answers in
-//! the documented formats. The request that creates a run is sent at most once: never again
-//! after a timeout, a server error or a cut connection; once more only on a short rate limit
-//! or a connection that never opened. No API key or network needed.
+//! Studio (0.1.0): OpenRouter's picture and video endpoints against a local fake server that
+//! answers in the documented formats. The request that creates a run or a job is sent at most
+//! once: never again after a timeout, a server error or a cut connection; once more only on a
+//! short rate limit or a connection that never opened. A video's result is downloaded with the
+//! key from OpenRouter's own host only; a link elsewhere is handed back, not followed. No API
+//! key or network needed.
 
 mod common;
 
@@ -9,19 +11,20 @@ use std::collections::BTreeMap;
 use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use agent::media::openrouter::place_extra;
 use agent::media::{
-    Company, Cost, FailureKind, LocalIo, MediaError, MediaFailure, MediaKind, MediaLimits,
-    MediaProvider, MediaRequest, OpenRouterMedia, RefImage, RefRole, Routing, Started,
-    media_provider, openrouter_image_models,
+    Company, Cost, FailureKind, Fetched, JobDone, JobState, LocalIo, MediaError, MediaFailure,
+    MediaKind, MediaLimits, MediaProvider, MediaRequest, OpenRouterMedia, RefImage, RefRole,
+    Routing, SignedUrl, Started, media_provider, openrouter_image_models,
 };
 use agent::{ClientConfig, OpenAiClient, ProviderKind};
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD;
 use common::{MockServer, Reply, StreamEnd};
 use serde_json::{Map, Value, json};
+use url::Url;
 
 const KEY: &str = "sk-or-v1-studio-test-key-0123456789";
 const FLARE: &str = "openai/gpt-image-2.6-flare";
@@ -563,5 +566,536 @@ async fn the_preview_hides_pictures_and_the_key() {
     assert_eq!(p.body["model"], FLARE);
     assert_eq!(p.body["n"], 2);
     assert!(!p.body.to_string().contains(KEY));
+    assert!(server.requests().is_empty(), "a preview sends nothing");
+}
+
+// ---- video -----------------------------------------------------------------------------------
+
+const VEO: &str = "google/veo-3.1";
+/// A small file that starts like an MP4 video (an `ftyp` box).
+const MP4_BYTES: &[u8] = b"\0\0\0\x18ftypmp42\0\0\0\0mp42isom video";
+
+/// A Veo 3.1 request with a start frame, written into `pictures`.
+fn video_req(pictures: &Path) -> MediaRequest {
+    let path = pictures.join("first.png");
+    std::fs::write(&path, PNG_A_BYTES).expect("write the start frame");
+    MediaRequest {
+        kind: MediaKind::Video,
+        model: VEO.into(),
+        prompt: "waves rolling onto a beach".into(),
+        params: object(json!({
+            "duration": 4,
+            "resolution": "720p",
+            "aspect_ratio": "16:9",
+            "generate_audio": false,
+            "seed": 81723
+        })),
+        extra: Map::new(),
+        refs: vec![RefImage {
+            role: RefRole::StartFrame,
+            mime: "image/png".into(),
+            path,
+            sha256: "3f2a9c41d0b7e6a5f4c3b2a1908f7e6d5c4b3a291807f6e5d4c3b2a190817263".into(),
+            size_bytes: PNG_A_BYTES.len() as u64,
+        }],
+        routing: None,
+        provider_options: BTreeMap::new(),
+    }
+}
+
+/// A finished job with one result and no signed links.
+fn done() -> JobDone {
+    JobDone {
+        outputs: 1,
+        signed: Vec::new(),
+        cost: None,
+    }
+}
+
+fn submitted() -> Reply {
+    Reply::json(
+        202,
+        &json!({
+            "id": "vid_1",
+            "polling_url": "https://openrouter.ai/api/v1/videos/vid_1",
+            "status": "pending"
+        }),
+    )
+}
+
+fn mp4(body: &[u8]) -> Reply {
+    Reply::Raw {
+        status: 200,
+        content_type: "video/mp4".into(),
+        body: body.to_vec(),
+    }
+}
+
+/// A server whose job check always gives `answer`.
+async fn checked(answer: Reply) -> MockServer {
+    MockServer::start(move |request| match request.path() {
+        "/api/v1/videos/vid_1" => answer.clone(),
+        _ => Reply::not_found(),
+    })
+    .await
+}
+
+/// A server whose content endpoint always gives `reply`.
+async fn content(reply: Reply) -> MockServer {
+    MockServer::start(move |request| match request.path() {
+        "/api/v1/videos/vid_1/content" => reply.clone(),
+        _ => Reply::not_found(),
+    })
+    .await
+}
+
+fn with(server: &MockServer, limits: MediaLimits) -> OpenRouterMedia {
+    openrouter(server).with_limits(limits)
+}
+
+#[tokio::test]
+async fn a_video_job_starts_checks_and_downloads() {
+    let checks = Arc::new(AtomicUsize::new(0));
+    let seen = Arc::clone(&checks);
+    let server = MockServer::start(move |request| {
+        match (request.method.as_str(), request.path()) {
+            ("POST", "/api/v1/videos") => submitted(),
+            ("GET", "/api/v1/videos/vid_1") => match seen.fetch_add(1, Ordering::SeqCst) {
+                0 => Reply::json(200, &json!({"id": "vid_1", "status": "pending"})),
+                1 => Reply::json(
+                    200,
+                    &json!({"id": "vid_1", "status": "in_progress", "progress": 0.4}),
+                ),
+                _ => Reply::json(
+                    200,
+                    &json!({
+                        "id": "vid_1",
+                        "generation_id": "gen-1234567890-abcdef",
+                        "status": "completed",
+                        "unsigned_urls": ["https://openrouter.ai/api/v1/videos/vid_1/content?index=0"],
+                        "usage": {"cost": 0.36, "is_byok": false}
+                    }),
+                ),
+            },
+            ("GET", "/api/v1/videos/vid_1/content") => mp4(MP4_BYTES),
+            _ => Reply::not_found(),
+        }
+    })
+    .await;
+    let media = openrouter(&server);
+    let pictures = tempfile::tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
+
+    assert_eq!(
+        media
+            .start(&video_req(pictures.path()), dir.path())
+            .await
+            .unwrap(),
+        Started::Job {
+            remote_id: "vid_1".into()
+        }
+    );
+    assert_eq!(files_in(dir.path()), 0, "the answer's own file is gone");
+    assert_eq!(media.check("vid_1").await.unwrap(), JobState::Pending);
+    assert_eq!(
+        media.check("vid_1").await.unwrap(),
+        JobState::Running {
+            progress: Some(0.4)
+        }
+    );
+    let JobState::Done(job) = media.check("vid_1").await.unwrap() else {
+        panic!("the third check finds it done")
+    };
+    assert_eq!(
+        job,
+        JobDone {
+            outputs: 1,
+            signed: Vec::new(),
+            cost: Some(Cost {
+                usd: 0.36,
+                reported: true
+            }),
+        }
+    );
+
+    let dest = dir.path().join("v.mp4");
+    let Fetched::Saved(saved) = media.download("vid_1", &job, 0, &dest).await.unwrap() else {
+        panic!("the result is on OpenRouter's own host")
+    };
+    assert_eq!(saved.path, dest);
+    assert_eq!(saved.mime, "video/mp4");
+    assert_eq!(saved.size_bytes, MP4_BYTES.len() as u64);
+    assert_eq!(std::fs::read(&dest).unwrap(), MP4_BYTES);
+
+    let requests = server.requests();
+    let bearer = format!("Bearer {KEY}");
+    let trail: Vec<String> = requests
+        .iter()
+        .map(|r| format!("{} {}", r.method, r.target))
+        .collect();
+    assert_eq!(
+        trail,
+        [
+            "POST /api/v1/videos",
+            "GET /api/v1/videos/vid_1",
+            "GET /api/v1/videos/vid_1",
+            "GET /api/v1/videos/vid_1",
+            "GET /api/v1/videos/vid_1/content?index=0",
+        ]
+    );
+    for request in &requests {
+        assert_eq!(request.header("authorization"), Some(bearer.as_str()));
+    }
+    let sent = requests[0].json();
+    assert_eq!(sent["model"], VEO);
+    assert_eq!(sent["prompt"], "waves rolling onto a beach");
+    assert_eq!(sent["duration"], 4);
+    assert_eq!(sent["resolution"], "720p");
+    assert_eq!(sent["aspect_ratio"], "16:9");
+    assert_eq!(sent["generate_audio"], false);
+    assert_eq!(sent["seed"], 81723);
+    assert_eq!(sent["frame_images"][0]["frame_type"], "first_frame");
+    let url = sent["frame_images"][0]["image_url"]["url"]
+        .as_str()
+        .unwrap();
+    assert_eq!(
+        STANDARD
+            .decode(url.strip_prefix("data:image/png;base64,").unwrap())
+            .unwrap(),
+        PNG_A_BYTES
+    );
+}
+
+#[tokio::test]
+async fn a_failed_job_says_whether_it_was_charged() {
+    let server = checked(Reply::json(
+        200,
+        &json!({
+            "id": "vid_1",
+            "generation_id": "gen-77",
+            "status": "failed",
+            "error": "The provider could not make this video"
+        }),
+    ))
+    .await;
+    let JobState::Failed(f) = openrouter(&server).check("vid_1").await.unwrap() else {
+        panic!("a failed job is a failed state")
+    };
+    assert_eq!(f.kind, FailureKind::Other);
+    assert_eq!(
+        f.charged,
+        Some(false),
+        "OpenRouter does not bill a failed job"
+    );
+    assert_eq!(f.message, "The provider could not make this video");
+    assert_eq!(f.request_id.as_deref(), Some("gen-77"));
+
+    // A job whose result has expired: OpenRouter reported it done before.
+    let server = checked(Reply::json(
+        200,
+        &json!({"id": "vid_1", "status": "expired"}),
+    ))
+    .await;
+    let JobState::Failed(f) = openrouter(&server).check("vid_1").await.unwrap() else {
+        panic!("an expired job is a failed state")
+    };
+    assert_eq!(f.kind, FailureKind::Expired);
+    assert_eq!(f.charged, None);
+}
+
+#[tokio::test]
+async fn a_job_the_company_no_longer_has_is_gone() {
+    let server = checked(Reply::not_found()).await;
+    assert_eq!(
+        openrouter(&server).check("vid_1").await.unwrap(),
+        JobState::Gone
+    );
+}
+
+#[tokio::test]
+async fn a_check_that_times_out_is_an_error_not_a_state() {
+    let server = checked(Reply::Silence(Duration::from_secs(3))).await;
+    let media = with(
+        &server,
+        MediaLimits {
+            check_timeout: Duration::from_secs(1),
+            ..quick()
+        },
+    );
+    let begun = Instant::now();
+    let result = media.check("vid_1").await;
+    assert!(matches!(result, Err(MediaError::Unknown(_))), "{result:?}");
+    assert!(begun.elapsed() < Duration::from_millis(2500));
+}
+
+#[tokio::test]
+async fn content_gone_after_done_is_expired() {
+    for status in [404, 410] {
+        let server = content(Reply::json(
+            status,
+            &json!({"error": {"code": status, "message": "Video not found"}}),
+        ))
+        .await;
+        let dir = tempfile::tempdir().unwrap();
+        let dest = dir.path().join("v.mp4");
+        let result = openrouter(&server)
+            .download("vid_1", &done(), 0, &dest)
+            .await;
+        let Err(MediaError::Answered(f)) = result else {
+            panic!("{status}: expected an answered failure, got {result:?}")
+        };
+        assert_eq!(f.kind, FailureKind::Expired, "{status}");
+        assert_eq!(f.status, Some(status));
+        assert!(!dest.exists());
+    }
+}
+
+#[tokio::test]
+async fn a_download_over_the_cap_removes_the_partial_file() {
+    let body = vec![7u8; 4096];
+    // Once with its length stated, once streamed in pieces without it.
+    let streamed = Reply::Stream {
+        status: 200,
+        content_type: "video/mp4".into(),
+        chunks: body.chunks(1024).map(<[u8]>::to_vec).collect(),
+        delay: Duration::ZERO,
+        end: StreamEnd::Clean,
+    };
+    for reply in [mp4(&body), streamed] {
+        let server = content(reply).await;
+        let media = with(
+            &server,
+            MediaLimits {
+                video_cap: 1024,
+                ..quick()
+            },
+        );
+        let dir = tempfile::tempdir().unwrap();
+        let dest = dir.path().join("v.mp4");
+        let result = media.download("vid_1", &done(), 0, &dest).await;
+        assert!(
+            matches!(result, Err(MediaError::Local(LocalIo::TooLarge(1024)))),
+            "{result:?}"
+        );
+        assert!(!dest.exists());
+    }
+}
+
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn a_full_disk_while_downloading_is_named() {
+    let server = content(mp4(MP4_BYTES)).await;
+    let dir = tempfile::tempdir().unwrap();
+    // /dev/full accepts the open and refuses every write with ENOSPC. A link to it, so that
+    // removing the partial file removes only the link.
+    let dest = dir.path().join("v.mp4");
+    std::os::unix::fs::symlink("/dev/full", &dest).unwrap();
+    let result = openrouter(&server)
+        .download("vid_1", &done(), 0, &dest)
+        .await;
+    assert!(
+        matches!(result, Err(MediaError::Local(LocalIo::DiskFull))),
+        "{result:?}"
+    );
+    assert!(
+        std::fs::symlink_metadata(&dest).is_err(),
+        "the link is gone"
+    );
+    assert!(Path::new("/dev/full").exists());
+}
+
+#[tokio::test]
+async fn a_stalled_download_stops_after_the_idle_limit() {
+    let server = content(Reply::Stream {
+        status: 200,
+        content_type: "video/mp4".into(),
+        chunks: vec![vec![0u8; 1024]],
+        delay: Duration::ZERO,
+        end: StreamEnd::HoldOpen,
+    })
+    .await;
+    let media = with(
+        &server,
+        MediaLimits {
+            download_idle: Duration::from_millis(200),
+            ..quick()
+        },
+    );
+    let dir = tempfile::tempdir().unwrap();
+    let dest = dir.path().join("v.mp4");
+    let begun = Instant::now();
+    let result = media.download("vid_1", &done(), 0, &dest).await;
+    assert!(matches!(result, Err(MediaError::Unknown(_))), "{result:?}");
+    assert!(begun.elapsed() < Duration::from_secs(1));
+    assert!(!dest.exists());
+}
+
+#[tokio::test]
+async fn the_video_body_matches_openrouters_documented_shape() {
+    let server = MockServer::start(|_| submitted()).await;
+    let pictures = tempfile::tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    // Routing, extra settings and company settings are never sent for video.
+    let request = MediaRequest {
+        extra: object(json!({"watermark": false})),
+        routing: Some(Routing {
+            order: vec!["google-vertex".into()],
+            only: true,
+            allow_fallbacks: false,
+            zdr: true,
+        }),
+        provider_options: BTreeMap::from([(
+            "google-vertex".to_owned(),
+            object(json!({"parameters": {"personGeneration": "allow"}})),
+        )]),
+        ..video_req(pictures.path())
+    };
+    openrouter(&server)
+        .start(&request, dir.path())
+        .await
+        .unwrap();
+    let sent = server.requests()[0].json();
+    assert_same_shape(
+        &sent["frame_images"][0],
+        &example("video_frame_images")["frame_images"][0],
+    );
+    assert!(sent.get("provider").is_none());
+    let mut keys: Vec<&str> = sent
+        .as_object()
+        .unwrap()
+        .keys()
+        .map(String::as_str)
+        .collect();
+    keys.sort_unstable();
+    assert_eq!(
+        keys,
+        [
+            "aspect_ratio",
+            "duration",
+            "frame_images",
+            "generate_audio",
+            "model",
+            "prompt",
+            "resolution",
+            "seed"
+        ],
+        "no other key"
+    );
+    assert_eq!(server.requests()[0].path(), "/api/v1/videos");
+}
+
+#[tokio::test]
+async fn a_video_size_sends_neither_resolution_nor_shape() {
+    let server = MockServer::start(|_| submitted()).await;
+    let pictures = tempfile::tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let mut request = video_req(pictures.path());
+    request.params.insert("size".to_owned(), json!("1280x720"));
+    openrouter(&server)
+        .start(&request, dir.path())
+        .await
+        .unwrap();
+    let sent = server.requests()[0].json();
+    assert_eq!(sent["size"], "1280x720");
+    assert!(sent.get("resolution").is_none(), "{sent}");
+    assert!(sent.get("aspect_ratio").is_none(), "{sent}");
+    assert_eq!(sent["duration"], 4);
+}
+
+#[tokio::test]
+async fn a_video_create_is_sent_at_most_twice_on_rate_limits() {
+    let server = MockServer::start(|_| Reply::WithHeaders {
+        status: 429,
+        headers: vec![("retry-after".into(), "1".into())],
+        content_type: "application/json".into(),
+        body: br#"{"error":{"code":429,"message":"Rate limit exceeded"}}"#.to_vec(),
+    })
+    .await;
+    let pictures = tempfile::tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let f = answered(
+        openrouter(&server)
+            .start(&video_req(pictures.path()), dir.path())
+            .await,
+    );
+    assert_eq!(f.kind, FailureKind::RateLimited);
+    assert_eq!(server.requests().len(), 2);
+}
+
+#[tokio::test]
+async fn a_link_to_another_host_is_handed_back_not_followed() {
+    let other = MockServer::start(|_| mp4(MP4_BYTES)).await;
+    let link = format!("{}/v.mp4", other.url());
+    let server = content(Reply::Redirect {
+        status: 302,
+        location: link.clone(),
+    })
+    .await;
+    let dir = tempfile::tempdir().unwrap();
+    let dest = dir.path().join("v.mp4");
+    assert_eq!(
+        openrouter(&server)
+            .download("vid_1", &done(), 0, &dest)
+            .await
+            .unwrap(),
+        Fetched::Elsewhere(Url::parse(&link).unwrap())
+    );
+    assert!(other.requests().is_empty(), "{:?}", other.requests());
+    assert_eq!(server.requests().len(), 1);
+    assert!(!dest.exists());
+}
+
+#[tokio::test]
+async fn signed_urls_are_kept_for_the_guarded_fetcher() {
+    let server = checked(Reply::json(
+        200,
+        &json!({
+            "id": "vid_1",
+            "status": "completed",
+            "urls": [{"url": "https://cdn.example/v.mp4", "expires_at": 1_794_900_000}],
+            "usage": {"cost": 0.5}
+        }),
+    ))
+    .await;
+    let media = openrouter(&server);
+    let JobState::Done(job) = media.check("vid_1").await.unwrap() else {
+        panic!("a completed job is done")
+    };
+    assert_eq!(job.outputs, 1);
+    assert_eq!(
+        job.signed[0],
+        SignedUrl {
+            url: Url::parse("https://cdn.example/v.mp4").unwrap(),
+            expires_at: Some(1_794_900_000),
+        }
+    );
+    // Only a signed link: it goes to the guarded fetcher, without the key.
+    let dir = tempfile::tempdir().unwrap();
+    assert_eq!(
+        media
+            .download("vid_1", &job, 0, &dir.path().join("v.mp4"))
+            .await
+            .unwrap(),
+        Fetched::Elsewhere(Url::parse("https://cdn.example/v.mp4").unwrap())
+    );
+    assert_eq!(
+        server.requests().len(),
+        1,
+        "the content endpoint was not asked"
+    );
+}
+
+#[tokio::test]
+async fn the_video_preview_shows_frames_by_their_hash() {
+    let server = MockServer::start(|_| submitted()).await;
+    let pictures = tempfile::tempdir().unwrap();
+    let p = openrouter(&server).preview(&video_req(pictures.path()));
+    assert_eq!(p.url, format!("{}/api/v1/videos", server.url()));
+    assert_eq!(p.body["model"], VEO);
+    assert_eq!(p.body["duration"], 4);
+    let frame = &p.body["frame_images"][0];
+    assert_eq!(frame["frame_type"], "first_frame");
+    let shown = frame["image_url"]["url"].as_str().unwrap();
+    assert!(shown.starts_with("picture 1 (sha 3f2a9c41d0b7"), "{shown}");
     assert!(server.requests().is_empty(), "a preview sends nothing");
 }

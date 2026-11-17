@@ -4,7 +4,7 @@
 //! - [`spec`]: the controls each model offers ([`ParamSpec`]), read from the companies' own
 //!   catalogues, and [`validate`], which checks a request against them;
 //! - [`price`]: what a model costs ([`Price`]) and what a run would cost ([`estimate`]);
-//! - [`openrouter`]: OpenRouter's lists, prices and pictures ([`OpenRouterMedia`]).
+//! - [`openrouter`]: OpenRouter's lists, prices, pictures and video jobs ([`OpenRouterMedia`]).
 //!
 //! The companies are OpenRouter (pictures and video), OpenAI (pictures) and this computer
 //! ([`Company::Local`]). A request goes only to the chosen endpoint's host; a run on this
