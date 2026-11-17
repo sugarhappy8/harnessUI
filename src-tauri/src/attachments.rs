@@ -29,15 +29,13 @@ pub struct ImageInput {
 }
 
 /// Checks the bytes really are the claimed image type (magic numbers), so a renamed
-/// file cannot be passed off as an image.
-fn sniff(mime: &str, bytes: &[u8]) -> bool {
-    match mime {
-        "image/png" => bytes.starts_with(b"\x89PNG\r\n\x1a\n"),
-        "image/jpeg" => bytes.starts_with(&[0xFF, 0xD8, 0xFF]),
-        "image/gif" => bytes.starts_with(b"GIF87a") || bytes.starts_with(b"GIF89a"),
-        "image/webp" => bytes.len() > 12 && &bytes[0..4] == b"RIFF" && &bytes[8..12] == b"WEBP",
-        _ => false,
-    }
+/// file cannot be passed off as an image. Only PNG, JPEG, GIF and WebP count; the magic
+/// numbers are Studio's ([`crate::studio::gallery::sniff_media`]).
+pub(crate) fn sniff(mime: &str, bytes: &[u8]) -> bool {
+    matches!(
+        mime,
+        "image/png" | "image/jpeg" | "image/gif" | "image/webp"
+    ) && crate::studio::gallery::sniff_media(bytes) == Some(mime)
 }
 
 fn extension(mime: &str) -> &'static str {
@@ -577,8 +575,9 @@ async fn stored_pictures_with(worker: &PictureWorker, parts: &mut [agent::histor
 
 /// A composer picture checked (its size, and that its bytes really are the type it claims)
 /// and in the form it is stored and sent: its MIME type, file extension and bytes. [0.0.6] A
-/// WebP picture comes back as JPEG or PNG ([`picture_for_model`]).
-async fn checked_picture(
+/// WebP picture comes back as JPEG or PNG ([`picture_for_model`]). Studio's added pictures
+/// pass the same checks (`studio::gallery::Gallery::add_ref`).
+pub(crate) async fn checked_picture(
     worker: &PictureWorker,
     img: &ImageInput,
 ) -> AppResult<(String, &'static str, Vec<u8>)> {
