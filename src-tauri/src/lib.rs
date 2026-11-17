@@ -46,6 +46,8 @@ mod settings;
 mod share;
 mod skills_cmd;
 mod state;
+#[allow(dead_code, reason = "wired up in Task A16")]
+mod studio;
 mod subagent;
 mod task;
 mod tool_catalog;
