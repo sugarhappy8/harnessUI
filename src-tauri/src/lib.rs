@@ -387,15 +387,16 @@ pub fn run() {
             }
             // "Allow all in every chat", if the user switched it on (a saved setting).
             approvals::load_default(&handle);
-            // Before the startup check below, which records what it finds here.
-            app.manage(updates::LastFound::default());
+            // Before the automatic check below, which records what it finds here.
+            app.manage(updates::Updates::default());
             toolset::forward_events(handle.clone(), host);
             {
                 let handle = handle.clone();
                 tauri::async_runtime::spawn(async move {
                     toolset::reload_skills(&handle).await;
                     toolset::start_saved_servers(&handle).await;
-                    updates::auto_check(handle.clone()).await;
+                    // Never returns: checks now, then every six hours (when turned on).
+                    updates::check_regularly(handle.clone()).await;
                 });
             }
             app.manage(packs_cmd::PackDownloads::default());

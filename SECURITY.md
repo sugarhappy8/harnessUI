@@ -490,7 +490,11 @@ build machine, and its Windows and macOS jobs have not run at all.
   operating system's keychain, never in plain files. The database stores only references.
 - No telemetry, no crash upload, no account. (On Windows, a crash of a program the app
   starts is handled by Windows Error Reporting as your Windows settings say; the app itself
-  uploads nothing.) With no model downloaded and nothing clicked, the app makes no network request. Every network use is listed in
+  uploads nothing.) With no model downloaded and nothing clicked, the app makes one kind of
+  network request: from 0.0.8, the check for updates, shortly after it starts and every 6 hours,
+  to github.com (*Settings → General → Updates* turns it off). It carries nothing about you or
+  your chats. A newer version it finds is downloaded and its signature checked against the key
+  built into the app, and it is installed only when you click *Restart and update*. Every network use is listed in
   ARCHITECTURE.md 13.6. 0.0.6 adds two of its own, both only when you ask: Compare looks
   up the models you add on Hugging Face, and Settings → Reverse engineering downloads what
   you click. 0.0.7 adds one more, also only when you ask: Models → Installed offers a
@@ -546,6 +550,26 @@ build machine, and its Windows and macOS jobs have not run at all.
   The sharing proxy, when you switch it on, listens only on 127.0.0.1 too.
 - On Windows the webview runtime's crash reporter is switched off so a crashed page,
   which can contain chat text, is not uploaded. See the known issues in CHANGELOG.md.
+
+## Updates
+
+- From 0.0.8 a release build asks github.com for a newer version shortly after it starts and
+  every 6 hours (*Settings → General → Updates* turns that off). As with any visit to a
+  website, GitHub sees the computer's IP address with each check and each download; nothing
+  about you or your chats is sent.
+- Only a file signed with the owner's updater key is installed. The app checks the downloaded
+  file's signature against the public key built into it before it offers the update, and
+  nothing is installed until you click *Restart and update*.
+- The signature also covers the version number: the release build writes the version into
+  each update file's signature, and the app refuses a file whose signed version is not the
+  one the release's `latest.json` announces, or that carries no version at all. The app
+  installs only a version newer than the one running, so someone who could change a release
+  on GitHub without the key cannot pass an older signed build of harnessUI off as a newer
+  one.
+- Someone who had both the private key (with its password) and the right to publish releases
+  could send any program to every installed copy, and only your click on *Restart and update*
+  stands in the way. The owner keeps the key and its password in a password manager and as
+  repository secrets, which reach only the release jobs that need them.
 
 ## The webview
 

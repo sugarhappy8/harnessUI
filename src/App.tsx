@@ -7,6 +7,7 @@ import { ModelsDialog } from "./components/ModelsDialog";
 import { FirstRun } from "./components/FirstRun";
 import { ShortcutsDialog } from "./components/ShortcutsDialog";
 import { AppNotices } from "./components/AppNotices";
+import type { UpdatePlacement } from "./components/UpdateBox";
 import { FullAccessStartCheck } from "./components/AllowAllButton";
 import { followApprovals, followRunningTurn, turnChatId, useApp, toErrorInfo } from "./store/app";
 import * as ipc from "./lib/ipc";
@@ -109,8 +110,12 @@ export default function App() {
       <ShortcutsDialog open={shortcutsOpen} onOpenChange={setShortcutsOpen} />
     </>
   );
-  const notices = (
+  // The update box floats where it covers neither the message box nor the header's controls
+  // (UpdateBox.tsx): over the foot of the sidebar, or under the header when the sidebar is
+  // hidden, or in the corner of the first-run screen.
+  const notices = (updatePlacement: UpdatePlacement) => (
     <AppNotices
+      updatePlacement={updatePlacement}
       onOpenSettings={(tab) => {
         setSettingsTab(tab);
         setSettingsOpen(true);
@@ -122,7 +127,7 @@ export default function App() {
   if (!firstRunDone) {
     return (
       <div className="flex h-full flex-col">
-        {notices}
+        {notices("corner")}
         <div className="min-h-0 flex-1">
           <FirstRun
             onDone={() => {
@@ -143,7 +148,7 @@ export default function App() {
 
   return (
     <div className="flex h-full flex-col">
-      {notices}
+      {notices(sidebarOpen ? "sidebar" : "below-header")}
       <div className="flex min-h-0 flex-1">
         {sidebarOpen && (
           <Sidebar

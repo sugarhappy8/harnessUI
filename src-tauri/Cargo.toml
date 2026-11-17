@@ -44,8 +44,10 @@ search = { workspace = true }
 reverse = { workspace = true }
 computer = { workspace = true }
 mcp-host = { workspace = true }
-# Signed, opt-in updates (registered only when the build carries the updater key).
+# Signed updates (registered only when the build carries the updater key).
 tauri-plugin-updater = { workspace = true }
+# Orders versions the way the updater plugin does (updates.rs).
+semver = { workspace = true }
 # The agent and MCP host traits are async-trait traits; the app implements them.
 async-trait = { workspace = true }
 uuid = { workspace = true }

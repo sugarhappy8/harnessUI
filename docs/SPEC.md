@@ -4,7 +4,7 @@
 Build a cross-platform desktop app (Windows .exe installer, macOS .dmg) that gives local AI models the agentic capabilities of the Claude, ChatGPT and Kimi desktop apps: chat, tools, skills and MCP. It is for people who run models on their own hardware. Keep the app name in one config constant so it's easy to change.
 
 Non-negotiable:
-- Works fully offline once a model is downloaded. Network use happens only when the user starts it: Hugging Face search and downloads, git clone/pull, the browser tool, remote endpoints and MCP servers the user adds, and an opt-in update check.
+- Works fully offline once a model is downloaded. Network use happens only when the user starts it: Hugging Face search and downloads, git clone/pull, the browser tool, remote endpoints and MCP servers the user adds, and an opt-in update check. *(Changed in 0.0.8 at the owner's request: the update check is automatic unless the user turns it off; see [docs/dev/0.0.8/README.md](dev/0.0.8/README.md).)*
 - No account, no telemetry, no remote crash reporting. Logs stay on disk.
 - All user data (chats, settings, audit log) is stored locally.
 
@@ -114,7 +114,7 @@ Non-negotiable:
 ## Packaging and release
 - GitHub Actions builds the Windows installer and the macOS .dmg on every tag, using tauri-action.
 - Prepare code signing: macOS Developer ID signing plus notarization, and Windows code signing. Leave the secrets as placeholders for me to fill in later, and document how to open unsigned builds in the meantime.
-- Updates: opt-in check only, using Tauri's updater with signature verification.
+- Updates: opt-in check only, using Tauri's updater with signature verification. *(Changed in 0.0.8 at the owner's request: the update check is automatic unless the user turns it off; see [docs/dev/0.0.8/README.md](dev/0.0.8/README.md).)*
 - Include third-party license notices for llama.cpp and every other bundled binary.
 
 ## Out of scope for v1

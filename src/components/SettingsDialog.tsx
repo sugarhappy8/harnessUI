@@ -5,9 +5,10 @@ import { writeText } from "@tauri-apps/plugin-clipboard-manager";
 import { applyTheme, loadTheme, type ThemeChoice } from "../lib/theme";
 import * as ipc from "../lib/ipc";
 import type { AppInfo } from "../lib/ipc";
-import type { FirstRunInfo, UpdateInfo, UpdateStatus } from "../lib/types";
+import type { FirstRunInfo, UpdateStatus } from "../lib/types";
 import { APP_NAME } from "../lib/app";
-import { toErrorInfo, useApp } from "../store/app";
+import { toErrorInfo, turnChatId, useApp } from "../store/app";
+import { listenInEffect } from "../lib/listen";
 import { askBeforeChange, backendWhenIdle, runChange } from "../store/modelChange";
 import { ErrorBanner } from "./ErrorBanner";
 import { visibleLines, visiblePath } from "./FolderChip";
@@ -285,46 +286,107 @@ function ModelCatalog() {
   );
 }
 
-/** Opt-in updates: nothing is checked unless the user asks or turns on automatic checks. */
-function Updates() {
+/** The line under "Check now": what the updater is doing or found since the app started. */
+function updateLine(s: UpdateStatus): string | null {
+  if (s.ready) return `Version ${s.ready.version} is ready to install.`;
+  if (s.downloading) return `Downloading version ${s.downloading}…`;
+  if (s.checking) return "Checking for updates…";
+  // Only the automatic check tries again on its own.
+  if (s.error) return `${s.error} ${s.autoCheck ? "The app tries again at the next check." : "Click Check now to try again."}`;
+  if (s.available) return `Version ${s.available.version} is available.`;
+  if (s.checked) return `You have the latest version (${s.currentVersion}).`;
+  return null;
+}
+
+/**
+ * Updates (0.0.8): the app checks github.com on its own, at start and every six hours, unless
+ * the user turns that off here. A newer version is downloaded and its signature checked in the
+ * background; then this section and the small "Update ready" box offer "Restart and update".
+ * Nothing is installed without that click.
+ */
+export function Updates() {
   const [status, setStatus] = useState<UpdateStatus | null>(null);
-  const [found, setFound] = useState<UpdateInfo | null | undefined>(undefined);
   const [busy, setBusy] = useState(false);
+  const [installing, setInstalling] = useState(false);
   const [error, setError] = useState<ErrorInfo | null>(null);
+  const replying = useApp((s) => turnChatId(s) !== null);
   useEffect(() => {
     let alive = true;
-    let off: (() => void) | undefined;
-    ipc
-      .updateStatus()
-      .then((s) => {
+    let loaded = false;
+    // A change that arrives before the status does cannot be applied yet, and the status may
+    // have been read just before it: then read the status again, after the change.
+    let missed = false;
+    const read = () =>
+      ipc
+        .updateStatus()
+        .then((s) => {
+          if (!alive) return;
+          loaded = true;
+          setStatus(s);
+          if (missed) {
+            missed = false;
+            void read();
+          }
+        })
+        .catch(() => {
+          if (alive && !loaded) setStatus(null);
+        });
+    // Checking, downloading, ready or failed, also when the automatic check does it.
+    const stop = listenInEffect(() =>
+      ipc.onUpdateState((state) => {
         if (!alive) return;
-        setStatus(s);
-        // Found by the check at start (or an earlier "Check now") since the app started.
-        const available = s.available;
-        if (available) setFound((cur) => cur ?? available);
-      })
-      .catch(() => alive && setStatus(null));
-    void ipc.onUpdateAvailable(setFound).then((u) => {
-      if (alive) off = u;
-      else u();
-    });
+        if (!loaded) missed = true;
+        else setStatus((cur) => (cur ? { ...cur, ...state } : cur));
+      }),
+    );
+    void read();
     return () => {
       alive = false;
-      off?.();
+      stop();
     };
   }, []);
   if (!status) return null;
-  async function run<T>(f: () => Promise<T>, then: (v: T) => void) {
+  async function run(f: () => Promise<unknown>) {
     setBusy(true);
     setError(null);
     try {
-      then(await f());
+      await f();
     } catch (e) {
       setError(toErrorInfo(e));
     } finally {
       setBusy(false);
     }
   }
+  async function checkNow() {
+    await run(async () => {
+      try {
+        await ipc.checkForUpdate();
+      } catch (e) {
+        // A check that did not work is in the status line below; say it only once.
+        if (toErrorInfo(e).code !== "update_check") throw e;
+      }
+      // What the check found, and whether a download started (it may already be running).
+      const s = await ipc.updateStatus();
+      setStatus(s);
+    });
+  }
+  async function install() {
+    setInstalling(true);
+    setError(null);
+    try {
+      // On success the app restarts and this never returns.
+      await ipc.installUpdate();
+    } catch (e) {
+      setError(toErrorInfo(e));
+    } finally {
+      setInstalling(false);
+    }
+  }
+  const line = updateLine(status);
+  // The notes of the version that is ready, or else of the one found.
+  const shown = status.ready ?? status.available;
+  const notes = shown?.notes?.trim() ? shown.notes : null;
+  const working = busy || status.checking || status.downloading !== null;
   return (
     <section aria-label="Updates">
       <h3 className="mb-1 text-sm font-medium">Updates</h3>
@@ -338,40 +400,48 @@ function Updates() {
             <input
               type="checkbox"
               checked={status.autoCheck}
-              onChange={(e) =>
-                void run(
-                  () => ipc.setUpdateAutoCheck(e.target.checked),
-                  () => setStatus({ ...status, autoCheck: e.target.checked }),
-                )
-              }
+              onChange={(e) => {
+                const on = e.target.checked;
+                void run(async () => {
+                  await ipc.setUpdateAutoCheck(on);
+                  setStatus((cur) => (cur ? { ...cur, autoCheck: on } : cur));
+                });
+              }}
             />
-            Check for updates when the app starts (off by default; contacts github.com)
+            Check for updates automatically (contacts github.com)
           </label>
-          <div className="flex items-center gap-2">
+          <div className="flex flex-wrap items-center gap-2">
             <button
               type="button"
-              disabled={busy}
-              onClick={() => void run(() => ipc.checkForUpdate(), setFound)}
+              disabled={working || installing}
+              onClick={() => void checkNow()}
               className="rounded-md border border-border px-3 py-1 disabled:opacity-40"
             >
               Check now
             </button>
-            {found === null && <span className="text-fg-muted">You have the latest version ({status.currentVersion}).</span>}
-            {found && (
-              <>
-                <span>Version {found.version} is available.</span>
-                <button
-                  type="button"
-                  disabled={busy}
-                  onClick={() => void run(() => ipc.installUpdate(), () => undefined)}
-                  className="rounded-md bg-accent px-3 py-1 text-accent-fg disabled:opacity-40"
-                >
-                  Install and restart
-                </button>
-              </>
+            {line && <span className={status.ready ? undefined : "text-fg-muted"}>{line}</span>}
+            {status.ready && (
+              <button
+                type="button"
+                disabled={installing || busy}
+                onClick={() => void install()}
+                className="rounded-md bg-accent px-3 py-1 text-accent-fg disabled:opacity-40"
+              >
+                {installing ? "Updating…" : "Restart and update"}
+              </button>
             )}
           </div>
-          {found?.notes && <p className="whitespace-pre-wrap text-xs text-fg-muted">{found.notes}</p>}
+          {status.ready && replying && <p className="text-xs text-fg-muted">Updating stops the current reply.</p>}
+          {notes && (
+            <div
+              role="region"
+              aria-label="Release notes"
+              tabIndex={0}
+              className="max-h-40 overflow-y-auto text-xs break-words whitespace-pre-wrap text-fg-muted"
+            >
+              {notes}
+            </div>
+          )}
         </div>
       )}
       {error && <ErrorBanner error={error} onDismiss={() => setError(null)} />}
