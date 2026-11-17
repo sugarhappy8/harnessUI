@@ -399,7 +399,14 @@ async fn a_refused_connection_was_not_sent() {
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         listener.local_addr().unwrap().port()
     };
-    let media = openrouter_at(&format!("http://127.0.0.1:{port}/api/v1"));
+    // Windows refuses a closed loopback port only after about 2 s, so the limit must cover
+    // the first connect, the 1 s retry wait and the second connect; a timeout would be
+    // Unknown, never NotSent.
+    let media =
+        openrouter_at(&format!("http://127.0.0.1:{port}/api/v1")).with_limits(MediaLimits {
+            picture_timeout: Duration::from_secs(15),
+            ..quick()
+        });
     let dir = tempfile::tempdir().unwrap();
     let result = media.start(&req(), dir.path()).await;
     assert!(matches!(result, Err(MediaError::NotSent(_))), "{result:?}");
