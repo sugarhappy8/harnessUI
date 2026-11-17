@@ -285,7 +285,7 @@ pub async fn run_all(
 /// A new run id: the local time, and four random hex digits.
 pub fn new_id() -> String {
     let random = &uuid::Uuid::new_v4().simple().to_string()[..4];
-    format!("{}-{random}", chrono::Local::now().format("%Y%m%d-%H%M%S"))
+    format!("{}-{random}", jiff::Zoned::now().strftime("%Y%m%d-%H%M%S"))
 }
 
 /// Whether `id` is one [`new_id`] could have made (and so a safe file name).

@@ -2369,8 +2369,9 @@ after its licenses are shown.
 | inout | 0.1.4 | MIT OR Apache-2.0 |
 | ipnet | 2.12.2 | MIT OR Apache-2.0 |
 | itoa | 1.0.19 | MIT OR Apache-2.0 |
-| jiff | 0.2.42 | Unlicense OR MIT |
-| jiff-core | 0.1.4 | Unlicense OR MIT |
+| jiff | 0.2.46 | Unlicense OR MIT |
+| jiff-core | 0.1.8 | Unlicense OR MIT |
+| jiff-static | 0.2.46 | Unlicense OR MIT |
 | jiff-tzdb | 0.1.9 | Unlicense OR MIT |
 | jiff-tzdb-platform | 0.1.3 | Unlicense OR MIT |
 | json-patch | 4.2.0 | MIT/Apache-2.0 |
@@ -3200,7 +3201,7 @@ IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 DEALINGS IN THE SOFTWARE.
 ```
 
-Used by: aho-corasick 1.1.5, byteorder 1.5.0, jiff 0.2.42, jiff-core 0.1.4, jiff-tzdb 0.1.9, jiff-tzdb-platform 0.1.3, memchr 2.8.3, same-file 1.0.6, walkdir 2.5.0, winapi-util 0.1.11
+Used by: aho-corasick 1.1.5, byteorder 1.5.0, jiff 0.2.46, jiff-core 0.1.8, jiff-static 0.2.46, jiff-tzdb 0.1.9, jiff-tzdb-platform 0.1.3, memchr 2.8.3, same-file 1.0.6, walkdir 2.5.0, winapi-util 0.1.11
 
 ```text
 This project is dual-licensed under the Unlicense and MIT licenses.
@@ -3208,7 +3209,7 @@ This project is dual-licensed under the Unlicense and MIT licenses.
 You may use this code under the terms of either license.
 ```
 
-Used by: aho-corasick 1.1.5, byteorder 1.5.0, byteorder-lite 0.1.0, encoding_rs_io 0.1.8, jiff 0.2.42, jiff-core 0.1.4, jiff-tzdb 0.1.9, jiff-tzdb-platform 0.1.3, memchr 2.8.3, walkdir 2.5.0
+Used by: aho-corasick 1.1.5, byteorder 1.5.0, byteorder-lite 0.1.0, encoding_rs_io 0.1.8, jiff 0.2.46, jiff-core 0.1.8, jiff-static 0.2.46, jiff-tzdb 0.1.9, jiff-tzdb-platform 0.1.3, memchr 2.8.3, walkdir 2.5.0
 
 ```text
 The MIT License (MIT)
@@ -3234,7 +3235,7 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
 THE SOFTWARE.
 ```
 
-Used by: aho-corasick 1.1.5, byteorder 1.5.0, byteorder-lite 0.1.0, jiff 0.2.42, jiff-core 0.1.4, jiff-tzdb 0.1.9, jiff-tzdb-platform 0.1.3, memchr 2.8.3, same-file 1.0.6, walkdir 2.5.0, winapi-util 0.1.11
+Used by: aho-corasick 1.1.5, byteorder 1.5.0, byteorder-lite 0.1.0, jiff 0.2.46, jiff-core 0.1.8, jiff-static 0.2.46, jiff-tzdb 0.1.9, jiff-tzdb-platform 0.1.3, memchr 2.8.3, same-file 1.0.6, walkdir 2.5.0, winapi-util 0.1.11
 
 ```text
 This is free and unencumbered software released into the public domain.

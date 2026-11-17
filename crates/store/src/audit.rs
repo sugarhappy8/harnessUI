@@ -261,8 +261,8 @@ fn list_audit(conn: &Connection, q: &AuditQuery) -> Result<Vec<AuditRow>, StoreE
 
 /// RFC 3339 UTC time for a Unix ms timestamp; empty if out of range.
 fn rfc3339(ts: i64) -> String {
-    chrono::DateTime::from_timestamp_millis(ts)
-        .map(|t| t.to_rfc3339_opts(chrono::SecondsFormat::Millis, true))
+    jiff::Timestamp::from_millisecond(ts)
+        .map(|t| format!("{t:.3}"))
         .unwrap_or_default()
 }
 
@@ -667,6 +667,17 @@ mod tests {
         assert_eq!(first["decision"], json!("allow_once"));
         assert_eq!(first["time"], json!("1970-01-01T00:00:05.000Z"));
         assert_eq!(first["preview"], json!("multi\nline"));
+    }
+
+    /// The export `time` is RFC 3339 UTC with exactly three fractional digits and `Z`;
+    /// a timestamp that cannot be a date gives an empty string.
+    #[test]
+    fn export_time_is_rfc3339_utc_with_milliseconds() {
+        assert_eq!(rfc3339(1_794_918_896_789), "2026-11-17T12:34:56.789Z");
+        assert_eq!(rfc3339(1_794_918_896_000), "2026-11-17T12:34:56.000Z");
+        assert_eq!(rfc3339(-1), "1969-12-31T23:59:59.999Z");
+        assert_eq!(rfc3339(i64::MAX), "");
+        assert_eq!(rfc3339(i64::MIN), "");
     }
 
     /// A call that a chat's Allow all mode let through is stored, filtered and exported

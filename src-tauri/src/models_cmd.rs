@@ -754,7 +754,7 @@ pub async fn run_diagnostics(
         std::fs::create_dir_all(&dir).ok()?;
         let file = dir.join(format!(
             "diagnostics-{}.txt",
-            chrono::Utc::now().format("%Y%m%d-%H%M%S")
+            jiff::Timestamp::now().strftime("%Y%m%d-%H%M%S")
         ));
         std::fs::write(&file, &report).ok()?;
         Some(file.display().to_string())
