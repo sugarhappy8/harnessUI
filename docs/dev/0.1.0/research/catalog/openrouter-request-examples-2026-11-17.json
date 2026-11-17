@@ -1,0 +1,133 @@
+{
+  "_recorded": "2026-11-17",
+  "_sources": {
+    "image": "https://openrouter.ai/docs/guides/overview/multimodal/image-generation",
+    "video": "https://openrouter.ai/docs/guides/overview/multimodal/video-generation"
+  },
+  "_note": "Example request bodies copied from OpenRouter's docs on the date above. Studio's request builders are checked against their shape (key paths and value types), not their values.",
+  "image_references": {
+    "model": "openai/gpt-image-1",
+    "prompt": "make this scene look like a watercolor painting",
+    "input_references": [
+      {
+        "type": "image_url",
+        "image_url": {
+          "url": "https://example.com/photo.jpg"
+        }
+      }
+    ]
+  },
+  "image_routing": {
+    "model": "google/gemini-2.5-flash-image",
+    "prompt": "a red panda astronaut floating in space",
+    "provider": {
+      "only": [
+        "google-ai-studio"
+      ],
+      "allow_fallbacks": false
+    }
+  },
+  "image_provider_options": {
+    "model": "black-forest-labs/flux.2-pro",
+    "prompt": "a dramatic portrait",
+    "provider": {
+      "options": {
+        "black-forest-labs": {
+          "steps": 40,
+          "guidance": 3
+        }
+      }
+    }
+  },
+  "image_resolution": {
+    "model": "bytedance-seed/seedream-4.5",
+    "prompt": "a landscape photo",
+    "resolution": "2K",
+    "aspect_ratio": "16:9"
+  },
+  "video_frame_images": {
+    "model": "alibaba/wan-2.7",
+    "prompt": "A character walking through a forest",
+    "frame_images": [
+      {
+        "type": "image_url",
+        "image_url": {
+          "url": "https://example.com/first-frame.png"
+        },
+        "frame_type": "first_frame"
+      }
+    ],
+    "resolution": "1080p"
+  },
+  "video_references": {
+    "model": "alibaba/wan-2.7",
+    "prompt": "A colossal solar flare beside a planet",
+    "input_references": [
+      {
+        "type": "image_url",
+        "image_url": {
+          "url": "https://example.com/style-ref.png"
+        }
+      }
+    ],
+    "resolution": "1080p"
+  },
+  "video_provider_options_veo": {
+    "model": "google/veo-3.1",
+    "prompt": "A time-lapse of a flower blooming",
+    "provider": {
+      "options": {
+        "google-vertex": {
+          "parameters": {
+            "personGeneration": "allow",
+            "negativePrompt": "blurry, low quality"
+          }
+        }
+      }
+    }
+  },
+  "video_provider_options_seedance": {
+    "model": "bytedance/seedance-2.0",
+    "prompt": "A time-lapse of a flower blooming",
+    "provider": {
+      "options": {
+        "seed": {
+          "watermark": false
+        }
+      }
+    }
+  },
+  "video_submit_answer": {
+    "id": "abc123",
+    "polling_url": "https://openrouter.ai/api/v1/videos/abc123",
+    "status": "pending"
+  },
+  "video_poll_answer": {
+    "id": "abc123",
+    "generation_id": "gen-1234567890-abcdef",
+    "polling_url": "https://openrouter.ai/api/v1/videos/abc123",
+    "status": "completed",
+    "unsigned_urls": [
+      "https://openrouter.ai/api/v1/videos/abc123/content?index=0"
+    ],
+    "usage": {
+      "cost": 0.25,
+      "is_byok": false
+    }
+  },
+  "image_answer": {
+    "created": 1748372400,
+    "data": [
+      {
+        "b64_json": "<base64-encoded-image>",
+        "media_type": "image/png"
+      }
+    ],
+    "usage": {
+      "prompt_tokens": 0,
+      "completion_tokens": 4175,
+      "total_tokens": 4175,
+      "cost": 0.04
+    }
+  }
+}

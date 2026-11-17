@@ -20,21 +20,24 @@ Every commit message ends with the attribution trailer your session requires. Ru
 - **Companies:** OpenRouter (pictures and video) and OpenAI (pictures only; its video API shut down Sep 24, 2026). Anthropic, abliteration.ai and Generic endpoints get nothing in 0.1.0.
 - **Hosts:** prompts and added pictures go only to the chosen endpoint's host (`openrouter.ai` or `api.openai.com`); results come from that host, or from the company's file host through the guarded fetcher **without the key**.
 - **Keys:** no new key or secret; Studio reads `provider-api-key:<id>`. A key goes only to its endpoint's own scheme, host and port, never to a result link on another host.
-- **No automatic requests:** opening Studio or Settings → Studio sends nothing. Lists are fetched only on Test, *Get the list*, *Update model lists*/*Update now*, or picking an OpenRouter picture model (its price).
+- **No automatic requests:** opening Studio or Settings → Studio sends nothing. Lists are fetched only on Test, *Get the list*, *Update model lists*/*Update now*, or picking an OpenRouter picture model or pressing *Get the price* (its price); a model restored when Studio opens fetches nothing.
 - **Confirm before:** every video, any run estimated at **$1** or more, any run whose price is unknown. The backend refuses with `studio_needs_confirmation` when `confirmed` is false and a rule applies.
-- **Daily limit:** **$10**, on by default, per local calendar day, enforced in the backend (`studio_daily_limit`) whatever the webview sends. A run that would take today's spending past it is not sent. An unknown price counts as passing unless at least **$5** remains and the user confirms.
+- **Daily limit:** **$10**, on by default, per local calendar day, enforced in the backend (`studio_daily_limit`) whatever the webview sends. A run that would take today's spending past it is not sent. An unknown price counts as passing unless at least **$5** remains and the user confirms. Deleting a result never lowers today's spending: a run deleted on the day it was made keeps a spending stub (no prompt, no settings) until the next day.
+- **Charges:** each run records whether it was charged (`yes`, `no`, `unknown`), and spending follows it: "not sent" is never charged; OpenRouter does not bill a picture that failed or was cancelled (its image docs, "Billing and Cancellation"); an OpenAI picture that was stopped, and a video that started, may be charged; once a video job reports done its cost is recorded before the download.
 - **Cost colours:** text always; colour is a second cue: under $1 plain, $1–$2.50 amber, over $2.50 red.
 - **Never pay twice:** the request that creates a run or job is sent at most once. No retry on a timeout, a 5xx or a dropped connection after sending; one retry only on 429 with `Retry-After` of at most 30 s, or on a connect failure before any byte was sent. Resume, cancel, *Get it anyway* and *Check again* never send a create.
 - **Safety refusals:** explained in plain words with the company, the stage when known, whether charged, and the request id; never retried automatically; no "rewrite to get past the filter" helper.
 - **Queue:** up to 2 picture runs and 2 video jobs at once per endpoint; more wait, shown as "waiting".
-- **Timeouts:** connect 10 s; picture request 5 min whole; video checks every 5 s for the first minute, then every 10 s, then every 20 s, each check limited to 30 s; after 30 min of watching the card says "still not ready" with *Check again*.
-- **Caps:** picture response streamed to a temporary file, cap 192 MiB; 50 MiB per picture; 1 GiB per video; 20 MiB per added picture; the simple layer's "How many" chips stop at 4.
+- **Timeouts:** connect 10 s; picture request 5 min whole; video checks every 5 s for the first minute, then every 10 s, then every 20 s, each check limited to 30 s; after 30 min of watching the card says "still not ready" with *Check again*; a keyed result download stops after 60 s without data; a download from a company's file host is limited to 10 min.
+- **Caps:** picture response streamed to a temporary file, cap 192 MiB; 50 MiB per picture; 1 GiB per video; 20 MiB per added picture; the simple layer's "How many" chips stop at 4; the viewer plays a video from a `blob:` up to 256 MiB and offers *Show in folder* above that.
+- **Request shape (OpenRouter, checked against its docs on 2026-11-17):** pictures as `input_references` items `{"type":"image_url","image_url":{"url":"data:…"}}`; video frames as `frame_images` items with `frame_type`; routing in `provider` (`only`/`order` lists of `provider_tag`, `allow_fallbacks`, `zdr`); extra settings under `provider.options[<provider_slug>]`, never at the top level. Video extra settings are not sent in 0.1.0 (the catalogue gives no company slug to key them by).
 - **Events:** `studio-progress` (payload `RunDto`) to the main window, at most 4 per second per run; state is also readable through `studio_runs` and `studio_live`, because events are not replayed.
 - **Files:** gallery default `<home>/harnessUI/studio`; `<gallery>/YYYY-MM/<run_id>-<n>.<ext>`, sidecar `<gallery>/YYYY-MM/<run_id>.json` (never the key), `<gallery>/refs/<sha256>.<ext>`, `<gallery>/.thumbs/<output_id>.jpg` (512 px JPEG), `<gallery>/.partial/` for downloads in progress. Allowed types: PNG, JPEG, WebP, GIF, SVG, MP4, WebM. Files are kept exactly as the company sent them.
-- **Database:** migration V3 appended to `MIGRATIONS`; V1 and V2 are never edited; at most 20,000 runs.
+- **Database:** migration V3 appended to `MIGRATIONS`; V1 and V2 are never edited; at most 20,000 runs (spending stubs not counted).
 - **Esc never cancels a Studio job.** In Studio, Esc only closes the viewer or a popup. The global stop hotkey stops chat turns and tools only.
 - **CSP:** add `media-src blob:` to `src-tauri/tauri.conf.json` and to the pinned CSP test in `src-tauri/src/commands.rs`; video plays from `blob:` URLs made from `studio_output_bytes`.
-- **Audit:** one row per run: server `studio`, tool `picture` or `video`, no chat, decision `allowed_without_prompt` decided by `user`, the prompt's length but never the prompt, completed when the run ends (also after a restart, through `audit_id`).
+- **Audit:** one row per run: server `studio`, tool `picture` or `video`, no chat, decision `allowed_without_prompt` decided by `user`, the prompt's length but never the prompt, completed when the run ends (also after a restart, through `audit_id`). A completed row is never changed (`complete_audit` is write-once); *Get it anyway* on an ended run appends a follow-up row with `parent_audit_id` set and completes that one.
+- **Preferences:** Settings → Studio changes apply at once: the manager holds the current prefs, new runs read them, and `studio_set_prefs` takes only the fields that changed.
 - **Commands:** each new command is listed in `src-tauri/commands.list`, granted as `allow-<cmd>` in `src-tauri/capabilities/main.json` (main window only) and registered in `generate_handler!` in `src-tauri/src/lib.rs`; each checks `commands::only_main_window`.
 - **Navigation:** sidebar button between Models and Settings (sparkle icon), shortcut Ctrl/⌘ G, window event `app:open-studio`.
 - **Defaults:** video length = the shortest of at least 4 s, resolution = 720p (or the lowest offered), sound as the company defaults; Studio picks and sends a random seed whenever the model takes one.
@@ -44,13 +47,13 @@ Every commit message ends with the attribution trailer your session requires. Ru
 
 ## Review Focus
 
-1. **App closed mid-run, then reopened.** A video in `waiting` or `downloading` is checked and downloaded again with no second create; a run left in `sending` becomes `interrupted` ("may or may not have started"); a `queued` run is never sent after a restart. Pinned in Task A14 (`resume_after_restart_finishes_the_video_without_a_second_create`, `a_run_left_sending_becomes_interrupted_and_is_never_sent_again`, `a_queued_run_is_not_sent_after_a_restart`) and Task D1.
-2. **The result is gone before it is downloaded** (signed link expired overnight, content endpoint answers 404/410 after the job finished). The run fails with `studio_result_expired`, keeps its remote id and estimate as "may have been charged", and never re-creates. Pinned in Task A5 (`content_gone_after_done_is_expired`) and Task A14 (`an_expired_result_says_so_and_keeps_the_remote_id`).
-3. **Disk full or a result over its cap.** The partial file is removed, the run fails with `studio_disk_full` or `studio_too_large`, and the remote id stays so *Get it anyway* downloads again without a new create. Pinned in Task A5 (`a_download_over_the_cap_removes_the_partial_file`), Task A9 (`a_full_disk_is_named`) and Task A14 (`a_full_disk_keeps_the_remote_id_for_get_it_anyway`).
-4. **Money at the edges:** a run created at 23:59 counts on that day; queued and in-flight runs count by their estimate; an unknown price reserves $5; reaching the limit exactly is allowed, a cent over is not. Pinned in Task A3 (`reaching_the_limit_exactly_is_allowed`, `a_run_counts_on_the_day_it_was_created`, `an_unknown_price_needs_five_dollars_left`) and Task A13 (`queued_and_running_estimates_count_against_the_limit`).
-5. **Duplicate Create** (double click, Enter plus click, *Again* pressed twice): one run, one charge, and two concurrent starts cannot both slip under the limit. Pinned in Task A13 (`the_same_create_press_twice_makes_one_run`, `two_starts_at_once_cannot_both_pass_the_limit`) and Task B7 (`Create is disabled while a start is on its way`).
+1. **App closed mid-video, then reopened:** the video is checked and downloaded exactly once by the new manager with no second create, `sending` becomes `interrupted` ("may or may not have started"), `queued` is never sent. Pinned in A14 (`resume_after_restart_finishes_the_video_without_a_second_create` with `shutdown()`, one output row, one content download; `a_run_left_sending_becomes_interrupted_and_is_never_sent_again`; `a_queued_run_is_not_sent_after_a_restart`) and D1.
+2. **The result cannot be saved** (link expired, disk full while streaming, over its cap): the failure is caught where bytes are written (`MediaError::Local`), the partial file goes, the run keeps its remote id and recorded cost, *Get it anyway* fetches again with no create, and the audit gets a linked follow-up row instead of a store error. Pinned in A5 (`content_gone_after_done_is_expired`, `a_full_disk_while_downloading_is_named`, `a_download_over_the_cap_removes_the_partial_file`) and A14 (`an_expired_result_says_so_and_keeps_the_remote_id`, `a_full_disk_keeps_the_remote_id_for_get_it_anyway`, `stop_watching_then_get_it_anyway_records_done_with_the_cost`).
+3. **Money at the edges:** the day boundary, deleting results (never lowers spending), unknown prices (token-priced pictures, OpenAI per-picture) against the $10 limit, a picture stopped while sending, a run that was never sent. Pinned in A3 (`a_run_counts_on_the_day_it_was_created`, `reaching_the_limit_exactly_is_allowed`, `an_unknown_price_needs_five_dollars_left`), A13 (`three_openai_runs_in_a_row_stay_within_the_limit`, `an_openai_picture_cancelled_while_sending_may_be_charged_and_counts`, `a_run_that_was_not_sent_counts_nothing`) and A16 (`deleting_todays_results_does_not_lower_spent_today`).
+4. **The request OpenRouter receives** differs from what Studio assumed (reference, frame and routing shapes, where extra settings go): the builders are checked against the request examples recorded from OpenRouter's docs, and the owner's real run saves the accepted bodies over the fixtures. Pinned in A4 (`the_picture_body_matches_openrouters_documented_shape`, `extra_settings_go_under_provider_options_for_each_company_that_lists_them`), A5 (`the_video_body_matches_openrouters_documented_shape`) and D2 (owner checklist).
+5. **Nothing without a click, and one click is one run:** opening Studio with a restored OpenRouter picture model sends no request; a double click, Enter plus click, or *Again* pressed twice starts one run; two starts at once cannot both pass the limit; a refused unconfirmed press followed by the confirmed one makes one run. Pinned in B3 (`a restored model fetches no price when Studio opens`), B7 (`Create is disabled while a start is on its way`), B9 (`Again pressed twice while starting starts once`), A13 (`the_same_create_press_twice_makes_one_run`, `two_starts_at_once_cannot_both_pass_the_limit`, `a_refused_unconfirmed_press_then_the_confirmed_one_makes_one_run`) and D1 (`opening_studio_makes_no_request`).
 
-Also covered where they belong: switching to a model that lacks a setting (Task B4 notes, Task A1 `validate_refuses_a_field_the_model_does_not_list`), and safety refusals (Tasks A4, A7, A13, B8).
+Also covered where they belong: switching to a model with incompatible settings (B4 notes; A1 `validate_refuses_a_field_the_model_does_not_list`; A13 refuses before sending), safety refusals (A4, A7, A13, B8), and the overlay window (every Studio command checks `only_main_window`).
 
 ---
 
@@ -60,19 +63,19 @@ Also covered where they belong: switching to a model that lacks a setting (Task 
 
 | File | Responsibility |
 |---|---|
-| `src/media/mod.rs` (new) | Media types (`MediaKind`, `Company`, `MediaModel`, `MediaRequest`, `Started`, `JobState`, `MediaFailure`, `MediaError`, `MediaLimits`), the `MediaProvider` trait, `media_provider()` |
+| `src/media/mod.rs` (new) | Media types (`MediaKind`, `Company`, `MediaModel`, `MediaRequest`, `Started`, `JobState`, `MediaFailure`, `MediaError`, `LocalIo`, `MediaLimits`, `EndpointCompany`), the `MediaProvider` trait, `media_provider()`, re-export of `cloud::media_company` |
 | `src/media/spec.rs` (new) | `ParamSpec` and its kinds; catalogue → `MediaModel`; `validate` |
 | `src/media/price.rs` (new) | `Price`, `pricing_skus` and `/endpoints` parsing, `estimate`, OpenAI cost from usage |
 | `src/media/openrouter.rs` (new) | `OpenRouterMedia`: catalogues, picture runs, video jobs, failure mapping |
 | `src/media/openai.rs` (new) | `OpenAiImages`: bundled spec matching, generations, edits, failure mapping |
 | `src/media/multipart.rs` (new) | Hand-built `multipart/form-data` body for OpenAI edits (reqwest's `multipart` feature would add `mime_guess`) |
 | `src/media/specs/openai_images.json` (new) | Dated OpenAI settings, retire dates and prices |
-| `src/client.rs` | `pub(crate)` helpers; `post_once`, `download_to_file`, `get_json_within` |
-| `src/cloud.rs` | `media_company`, `openai_media_kind` |
+| `src/client.rs` | `pub(crate)` helpers; `post_once`, `download_to_file`, `get_json_within`, the shared capped writer `stream_body_to` |
+| `src/cloud.rs` | `media_company`, `openai_media_kind`, `scrub_text` (`pub(crate)`) |
 | `src/lib.rs` | `pub mod media` and re-exports |
 | `tests/media_endpoints.rs` (new) | Both adapters against `tests/common` `MockServer` |
 | `tests/media_redirects.rs` (new) | Single-test binary: a non-loopback redirect to another origin carries no key |
-| `tests/fixtures/media/` (new) | Catalogue snapshots, recorded `/endpoints` answers, OpenAI sample answers |
+| `tests/fixtures/media/` (new) | Copies of `docs/dev/0.1.0/research/catalog/` (catalogues, `/endpoints` answers and OpenRouter's documented request examples, all recorded 2026-11-17); OpenAI sample answers |
 
 **Rust, other crates**
 
@@ -81,7 +84,8 @@ Also covered where they belong: switching to a model that lacks a setting (Task 
 | `crates/search/src/fetch.rs` | `Fetcher::fetch_to_file`: binary, streamed, capped, same address rules, never a key |
 | `crates/search/tests/fetch.rs` | Its tests (test hooks) |
 | `crates/store/src/schema.rs` | V3 |
-| `crates/store/src/creations.rs` (new) | `creation_runs` / `creation_outputs` accessors |
+| `crates/store/src/creations.rs` (new) | `creation_runs` / `creation_outputs` accessors, spending stubs |
+| `crates/store/src/ids.rs` | `update_columns_by_text` (the text-key sibling of `update_columns`) |
 | `crates/store/src/lib.rs`, `error.rs` | Re-exports; `StoreError::TooManyCreations` |
 
 **Rust, `src-tauri`**
@@ -96,12 +100,13 @@ Also covered where they belong: switching to a model that lacks a setting (Task 
 | `src/studio/deps.rs` (new) | `ProviderSource`, `StudioSink`, `ForeignFetch`, `Clock` traits and their app implementations |
 | `src/studio/manager.rs` (new) | `StudioManager`: start, queue, run tasks, video jobs, resume, cancel, audit, events |
 | `src/studio/manager_tests.rs` (new) | Manager tests with fakes |
-| `src/studio/commands.rs` (new) | Tauri commands |
+| `src/studio/test_support.rs` (new, `#[cfg(test)]`) | `Scratch` folder (temp dir + uuid, removed on Drop, as in `downloads.rs`), PNG/MP4 samples |
+| `src/studio/commands.rs` (new) | Tauri commands (thin: each calls a tested function) |
 | `src/studio/errors.rs` (new) | Studio `AppError`s and their copy |
 | `src/studio/wire_tests.rs` (new) | Phase D: a whole run against a local OpenRouter mock |
 | `src/dto.rs` | Studio DTOs |
 | `src/providers.rs` | Test caches media lists; delete forgets them; `may_hold_key` `pub(crate)` |
-| `src/attachments.rs`, `src/main.rs` | `sniff`/`checked_picture` `pub(crate)`; the picture worker's thumbnail mode |
+| `src/attachments.rs`, `src/main.rs` | `sniff`/`checked_picture` `pub(crate)`; `ImageInput` also `Serialize`; the picture worker's thumbnail mode |
 | `src/artifacts.rs` | `export_target` takes an extension, `pub(crate)` |
 | `src/lib.rs`, `commands.list`, `capabilities/main.json` | Registration, `manage`, resume at start |
 | `tauri.conf.json`, `src/commands.rs` | `media-src blob:`; version test |
@@ -112,7 +117,7 @@ Also covered where they belong: switching to a model that lacks a setting (Task 
 |---|---|
 | `src/components/studio/types.ts` (new) | TS mirrors of the DTOs |
 | `src/components/studio/api.ts` (new) | Typed `invoke` wrappers and `onStudioProgress` |
-| `src/components/studio/fixtures/models.json` (new, generated) | Six models as the backend serialises them, shared by Rust and vitest |
+| `src/components/studio/fixtures/models.ts` (new, generated) | Six models and one run as the backend serialises them, written by a Rust test as typed `MediaModel[]` / `Run` literals, so a serde/TS mismatch fails `npm run typecheck` |
 | `src/store/studio.ts` (new) | zustand store: view, endpoints, drafts, runs, live progress, prefs, usage |
 | `src/components/studio/canonical.ts` (new) | Defaults, carrying values between models, the change note, model families |
 | `src/components/studio/cost.ts` (new) | Formatting and colour of prices |
@@ -133,7 +138,7 @@ Also covered where they belong: switching to a model that lacks a setting (Task 
 | `src/components/Composer.tsx`, `MessageItem.tsx` | `app:compose-images`; *Open in Studio* |
 | `src/lib/words.ts` | All Studio copy |
 
-**Docs, scripts, e2e:** `README.md`, `CHANGELOG.md`, `ARCHITECTURE.md` (7.5, 12, 13.6, 13.7, 14, 17), `SECURITY.md`, `docs/SPEC.md`, `docs/dev/0.1.0/README.md`, `docs/dev/0.1.0/owner-checklist.md` (new), `scripts/docs_test.py`, `e2e/m8_offline.py`, `e2e/m12_studio.py` (new); version in `Cargo.toml`, `Cargo.lock`, `package.json`, `package-lock.json`, `src-tauri/tauri.conf.json`.
+**Docs, scripts, e2e:** `README.md`, `CHANGELOG.md`, `ARCHITECTURE.md` (7.5, 12, 13.2, 13.6, 13.7, 14, 17), `SECURITY.md`, `docs/SPEC.md`, `docs/dev/0.1.0/README.md`, `docs/dev/0.1.0/owner-checklist.md` (new), `scripts/docs_test.py`, `e2e/m8_offline.py`, `e2e/m12_studio.py` (new); version in `Cargo.toml`, `Cargo.lock`, `package.json`, `package-lock.json`, `src-tauri/tauri.conf.json`.
 
 ---
 
@@ -143,7 +148,7 @@ Also covered where they belong: switching to a model that lacks a setting (Task 
 
 **Files:**
 - Create: `crates/agent/src/media/mod.rs`, `crates/agent/src/media/spec.rs`, `crates/agent/src/media/price.rs` (types only here)
-- Create: `crates/agent/tests/fixtures/media/openrouter-images-2026-11-17.json`, `openrouter-videos-2026-11-17.json` (copies of `docs/dev/0.1.0/research/catalog/`)
+- Create: `crates/agent/tests/fixtures/media/` with copies of the four files in `docs/dev/0.1.0/research/catalog/`: `openrouter-images-2026-11-17.json`, `openrouter-videos-2026-11-17.json`, `openrouter-image-endpoints-2026-11-17.json` (the public `GET /api/v1/images/models/{id}/endpoints` answers for gpt-image-2.6-flare, gemini-nano-banana-2.1, flux-3-image and seedream-5-5, recorded unchanged under `answers[id]`), `openrouter-request-examples-2026-11-17.json` (the example bodies on OpenRouter's image and video docs pages)
 - Modify: `crates/agent/src/lib.rs` (`pub mod media;`), `crates/agent/src/cloud.rs` (`media_company`)
 - Test: inline `#[cfg(test)] mod tests` in `spec.rs`
 
@@ -151,11 +156,11 @@ Also covered where they belong: switching to a model that lacks a setting (Task 
 - Consumes: `agent::ProviderKind`, `agent::ProviderError`.
 - Produces (`agent::media`):
 ```rust
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)] #[serde(rename_all = "lowercase")]
-pub enum MediaKind { Image, Video }
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)] #[serde(rename_all = "lowercase")]
+pub enum MediaKind { Image, Video }                // Ord: Task A12 keys a BTreeMap by it
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)] #[serde(rename_all = "lowercase")]
 pub enum Company { OpenRouter, OpenAi }            // "openrouter" | "openai"
-// cloud.rs: pub fn media_company(kind: ProviderKind) -> Option<Company>;
+// cloud.rs: pub fn media_company(kind: ProviderKind) -> Option<Company>;   mod.rs: pub use crate::cloud::media_company;
 
 // spec.rs (serde camelCase; mirrored by src/components/studio/types.ts)
 pub struct ParamSpec { pub key: String, pub canonical: Option<Canonical>, pub label: String, pub help: Option<String>,
@@ -163,8 +168,10 @@ pub struct ParamSpec { pub key: String, pub canonical: Option<Canonical>, pub la
     pub affects_price: bool, pub requires: Option<Requires> }
 pub enum Canonical { Shape, Count, Quality, Resolution, Length, Sound, Seed, References, StartFrame, EndFrame, Size, Format, Background }
 pub enum Layer { Simple, Advanced }
-#[serde(tag = "type")] pub enum ParamKind { Enum { values: Vec<Choice> }, Range { min: f64, max: f64, step: Option<f64>, unit: Option<String> },
+#[serde(tag = "type", rename_all = "camelCase", rename_all_fields = "camelCase")]   // fields too: Extra → "allowedKeys"
+pub enum ParamKind { Enum { values: Vec<Choice> }, Range { min: f64, max: f64, step: Option<f64>, unit: Option<String> },
     Boolean, Seed { max: u64 }, Images { min: u32, max: u32, role: RefRole }, Size { rules: SizeRules }, Extra { allowed_keys: Vec<String> } }
+pub struct EndpointCompany { pub slug: String, pub tag: String, pub name: String, pub passthrough: Vec<String> }  // one `/endpoints` record
 pub struct Choice { pub value: Value, pub label: String }          // value: string or number, sent as is
 pub struct Requires { pub key: String, pub values: Vec<Value> }
 pub struct SizeRules { pub multiple_of: u32, pub min_ratio: f64, pub max_ratio: f64, pub max_side: u32, pub min_pixels: u64, pub max_pixels: u64 }
@@ -174,12 +181,14 @@ pub const SEED_MAX: u64 = 2_147_483_647;
 // mod.rs
 pub struct MediaModel { pub id: String, pub display_name: String, pub family: String, pub kind: MediaKind,
     pub accepts_images: bool, pub params: Vec<ParamSpec>, pub price: Price, pub notes: Vec<String>,
-    pub usable: Option<String>, pub created: Option<i64> }
+    pub usable: Option<String>, pub created: Option<i64>,
+    pub companies: Vec<EndpointCompany> }                      // from the saved `/endpoints` answer (OpenRouter pictures), else empty
 #[serde(rename_all = "camelCase")] pub enum RefRole { Reference, StartFrame, EndFrame }
 pub struct RefImage { pub role: RefRole, pub mime: String, pub path: PathBuf, pub sha256: String, pub size_bytes: u64 }
-pub struct Routing { pub order: Vec<String>, pub only: bool, pub allow_fallbacks: bool, pub zdr: bool }
+pub struct Routing { pub order: Vec<String>, pub only: bool, pub allow_fallbacks: bool, pub zdr: bool }   // order: provider_tag values
 pub struct MediaRequest { pub kind: MediaKind, pub model: String, pub prompt: String,
-    pub params: Map<String, Value>, pub extra: Map<String, Value>, pub refs: Vec<RefImage>, pub routing: Option<Routing> }
+    pub params: Map<String, Value>, pub extra: Map<String, Value>, pub refs: Vec<RefImage>, pub routing: Option<Routing>,
+    pub provider_options: BTreeMap<String, Map<String, Value>> }   // extra settings by provider_slug (OpenRouter pictures, Task A4)
 pub struct RawCatalog { pub images: Value, pub videos: Option<Value> }
 pub struct Saved { pub path: PathBuf, pub mime: String, pub size_bytes: u64, pub width: Option<u32>, pub height: Option<u32>, pub duration_ms: Option<u64> }
 pub struct Cost { pub usd: f64, pub reported: bool }
@@ -193,9 +202,11 @@ pub enum Stage { Prompt, Output }
 pub enum FailureKind { Blocked, Unauthorized, NoCredit, OrgVerification, RateLimited, BadRequest, NotFound, Expired, Server, Other }
 pub struct MediaFailure { pub kind: FailureKind, pub stage: Option<Stage>, pub charged: Option<bool>, pub company_code: Option<String>,
     pub request_id: Option<String>, pub status: Option<u16>, pub message: String, pub retry_after: Option<Duration> }
-pub enum MediaError { NotSent(ProviderError), Answered(MediaFailure), Unknown(ProviderError) }
-pub struct MediaLimits { pub response_cap: u64, pub picture_cap: u64, pub video_cap: u64, pub picture_timeout: Duration, pub check_timeout: Duration }
-impl Default for MediaLimits  // 192 MiB, 50 MiB, 1 GiB, 300 s, 30 s
+pub enum LocalIo { DiskFull, TooLarge(u64), Io(String) }          // failures writing bytes on this computer
+pub enum MediaError { NotSent(ProviderError), Answered(MediaFailure), Unknown(ProviderError), Local(LocalIo) }
+pub struct MediaLimits { pub response_cap: u64, pub picture_cap: u64, pub video_cap: u64, pub picture_timeout: Duration,
+    pub check_timeout: Duration, pub download_idle: Duration }
+impl Default for MediaLimits  // 192 MiB, 50 MiB, 1 GiB, 300 s, 30 s, 60 s
 #[async_trait] pub trait MediaProvider: Send + Sync {
     fn company(&self) -> Company;
     fn host(&self) -> String;
@@ -207,9 +218,10 @@ impl Default for MediaLimits  // 192 MiB, 50 MiB, 1 GiB, 300 s, 30 s
     async fn check(&self, remote_id: &str) -> Result<JobState, MediaError>;
     async fn download(&self, remote_id: &str, job: &JobDone, index: usize, dest: &Path) -> Result<Fetched, MediaError>;
 }
-// spec.rs
+// spec.rs (`image_prices`: saved `/endpoints` answers by model id; they give picture prices, companies and extra-setting names)
 pub fn parse_catalog(company: Company, raw: &RawCatalog, image_prices: &BTreeMap<String, Value>) -> Vec<MediaModel>;
-pub fn openrouter_image_models(list: &Value) -> Vec<MediaModel>;
+pub fn openrouter_image_models(list: &Value, image_prices: &BTreeMap<String, Value>) -> Vec<MediaModel>;
+pub fn endpoint_companies(answer: &Value) -> Vec<EndpointCompany>;   // one per `/endpoints` record, in answer order
 pub fn openrouter_video_models(list: &Value) -> Vec<MediaModel>;
 pub fn family_of(id: &str) -> String;
 pub enum Invalid { NotOffered(String), BadValue(String), Requires { key: String, needs: String }, TooManyPictures { role: RefRole, max: u32 },
@@ -221,15 +233,16 @@ pub struct Table { pub rows: Vec<PriceRow>, pub per_input_image_usd: Option<f64>
 pub struct PriceRow { pub mode: Option<Mode>, pub resolution: Option<String>, pub quality: Option<String>, pub audio: Option<bool>, pub usd: f64 }
 pub enum Mode { TextToVideo, ImageToVideo }
 ```
-`MediaRequest` holds the structured request; the run's `params_json` later stores `{params, extra, routing}` exactly as sent. Every public type above derives `Debug, Clone, PartialEq, Serialize, Deserialize` (camelCase), except the trait and `MediaError`; `RawCatalog` is what Task A11 caches.
+`MediaRequest` holds the structured request; `extra` holds only top-level extras once `place_extra` (Task A4) has moved passthrough keys (those some `companies[].passthrough` lists) into `provider_options`. The run's `params_json` stores `{params, extra, routing}` as the user set them (Reuse places them again). Every public type above derives `Debug, Clone, PartialEq, Serialize, Deserialize` (camelCase), except the trait and `MediaError`; `RawCatalog` is what Task A11 caches.
 
 - [ ] **Step 1: Write the failing tests** (`crates/agent/src/media/spec.rs`)
 ```rust
 const IMAGES: &str = include_str!("../../tests/fixtures/media/openrouter-images-2026-11-17.json");
 const VIDEOS: &str = include_str!("../../tests/fixtures/media/openrouter-videos-2026-11-17.json");
+const ENDPOINTS: &str = include_str!("../../tests/fixtures/media/openrouter-image-endpoints-2026-11-17.json");
 
 #[test] fn the_picture_catalogue_gives_68_models() {
-    let m = openrouter_image_models(&serde_json::from_str(IMAGES).unwrap());
+    let m = openrouter_image_models(&serde_json::from_str(IMAGES).unwrap(), &BTreeMap::new());
     assert_eq!(m.len(), 68);
     assert!(m.iter().all(|m| m.kind == MediaKind::Image && m.usable.is_none()));
 }
@@ -256,7 +269,26 @@ const VIDEOS: &str = include_str!("../../tests/fixtures/media/openrouter-videos-
         ParamKind::Images { min: 1, max: 8, role: RefRole::Reference });
 }
 #[test] fn no_catalogue_parameter_is_dropped() {
-    // every supported_parameters key is a typed field or an Extra-field hint
+    for (id, entry) in catalogue_entries(IMAGES) {
+        let m = image(&id);
+        for key in entry["supported_parameters"].as_object().unwrap().keys() {
+            let typed = maybe(&m, key).is_some() || (key == "n" && entry["supported_parameters"]["n"]["max"] == 1)
+                || (key == "input_references" && entry["supported_parameters"][key]["max"] == 0);
+            let hinted = matches!(maybe(&m, "extra").map(|p| &p.kind), Some(ParamKind::Extra { allowed_keys }) if allowed_keys.contains(key));
+            assert!(typed || hinted, "{id}: {key}");
+        }
+    }
+}
+#[test] fn the_param_kinds_serialise_as_the_webview_reads_them() {
+    assert_eq!(serde_json::to_value(ParamKind::Extra { allowed_keys: vec!["moderation".into()] }).unwrap(),
+        json!({"type": "extra", "allowedKeys": ["moderation"]}));
+    assert_eq!(serde_json::to_value(ParamKind::Images { min: 0, max: 16, role: RefRole::Reference }).unwrap(),
+        json!({"type": "images", "min": 0, "max": 16, "role": "reference"}));
+}
+#[test] fn picture_extra_settings_come_from_the_saved_endpoints_answer() {
+    let flare = image_with_endpoints("openai/gpt-image-2.6-flare");
+    assert!(matches!(&param(&flare, "extra").kind, ParamKind::Extra { allowed_keys } if allowed_keys == &["moderation", "complexity"]));
+    assert!(maybe(&image("openai/gpt-image-2.6-flare"), "extra").is_none());   // no saved answer yet: nothing to offer
 }
 #[test] fn the_video_catalogue_gives_33_models_and_4_need_a_video() {
     let m = openrouter_video_models(&serde_json::from_str(VIDEOS).unwrap());
@@ -281,9 +313,10 @@ const VIDEOS: &str = include_str!("../../tests/fixtures/media/openrouter-videos-
     assert!(veo.notes.iter().any(|n| n == "OpenRouter video is not covered by zero data retention."));
     assert!(veo.notes.iter().any(|n| n == "Google adds an invisible SynthID watermark."));
 }
-#[test] fn passthrough_names_become_extra_fields() {
+#[test] fn video_extra_settings_are_named_but_not_sent() {
     let veo = video("google/veo-3.1");
-    assert!(matches!(&param(&veo, "extra").kind, ParamKind::Extra { allowed_keys } if allowed_keys.contains(&"negativePrompt".to_string())));
+    assert!(maybe(&veo, "extra").is_none());
+    assert!(veo.notes.iter().any(|n| n.contains("negativePrompt") && n.contains("Studio cannot send them for video yet")));
 }
 #[test] fn families_group_versions() {
     assert_eq!(family_of("google/veo-3.1-fast"), "google/veo");
@@ -301,22 +334,26 @@ const VIDEOS: &str = include_str!("../../tests/fixtures/media/openrouter-videos-
     assert!(validate(&flare, &request_p(json!({"output_format": "webp", "output_compression": 80}))).is_ok());
     assert_eq!(validate(&image("krea/k3-edit"), &request_p(json!({}))).unwrap_err(),
         vec![Invalid::TooFewPictures { role: RefRole::Reference, min: 1 }]);
-    let veo = video("google/veo-3.1");
-    assert_eq!(validate(&veo, &request_x(json!({"foo": 1}))), Err(vec![Invalid::NotOffered("foo".into())]));
-    assert_eq!(validate(&veo, &request_x(json!({"duration": 4}))), Err(vec![Invalid::Reserved("duration".into())]));
+    let flare = image_with_endpoints("openai/gpt-image-2.6-flare");
+    assert!(validate(&flare, &request_x(json!({"moderation": "low"}))).is_ok());
+    assert_eq!(validate(&flare, &request_x(json!({"foo": 1}))), Err(vec![Invalid::NotOffered("foo".into())]));
+    assert_eq!(validate(&flare, &request_x(json!({"quality": "low"}))), Err(vec![Invalid::Reserved("quality".into())]));
+    assert_eq!(validate(&video("google/veo-3.1"), &request_x(json!({"negativePrompt": "rain"}))),
+        Err(vec![Invalid::NotOffered("negativePrompt".into())]));
 }
 ```
-(`image`, `video`, `param`, `maybe`, `values`, `request*` are small helpers in the test module.)
+(`image`, `image_with_endpoints` (with `ENDPOINTS` answers as `image_prices`), `video`, `catalogue_entries`, `param`, `maybe`, `values`, `request*` are small helpers in the test module.)
 
 - [ ] **Step 2: Run to see them fail**
 Run: `cargo test -p agent --lib media::spec`
 Expected: FAIL to compile, `error[E0433]: failed to resolve: could not find 'media'`.
 
 - [ ] **Step 3: Implement** the types above and the parsers in `spec.rs`. Rules the tests do not fully pin:
-  - Picture `supported_parameters`: `aspect_ratio` → Shape, simple, enum; `n` → Count, simple, range step 1, **omitted when max is 1**; `resolution` → Resolution, simple, affects price; `quality` → Quality, simple, affects price; `input_references` → References, simple, `Images{min, max}`, omitted when max is 0; `output_format` → Format, advanced; `background` → Background, advanced; `output_compression` → advanced range, requires `output_format` in `["jpeg","webp"]`; `seed: boolean` → Seed, advanced, `Seed{max: SEED_MAX}`; `size: boolean` → Size with `OPENAI_SIZE_RULES` for `openai/` ids, else an Extra hint; any other key → Extra hint. For `openai/gpt-image-2.6-*` with `gif` in `output_format`: `frame_count` range 2–16 and `frame_duration_ms` range 20–2000 (unit `ms`), both requiring `output_format = "gif"`.
-  - Video fields: `supported_aspect_ratios` → `aspect_ratio` (Shape); `supported_durations` → `duration` (Length, numbers, `-1` dropped, ascending, labels "4 s", initial = shortest ≥ 4 else the longest); `supported_resolutions` → `resolution` (initial `720p`, else the lowest by its number); `generate_audio == true` → `generate_audio` (Sound, boolean, company default `true`, affects price); `supported_frame_images` → `first_frame` (StartFrame, simple, `Images{0,1}`) and `last_frame` (EndFrame, advanced); `seed == true` → Seed; `supported_sizes` → `size` (Size, advanced enum; when set, `aspect_ratio` and `resolution` are not sent); `allowed_passthrough_parameters` → `extra` (`Extra{allowed_keys}`). `usable = Some("Needs a video to start from, which Studio does not offer yet.")` when `supported_durations` is null or empty.
+  - Picture `supported_parameters`: `aspect_ratio` → Shape, simple, enum; `n` → Count, simple, range step 1, **omitted when max is 1**; `resolution` → Resolution, simple, affects price; `quality` → Quality, simple, affects price; `input_references` → References, simple, `Images{min, max}`, omitted when max is 0; `output_format` → Format, advanced; `background` → Background, advanced; `output_compression` → advanced range, requires `output_format` in `["jpeg","webp"]`; `seed: boolean` → Seed, advanced, `Seed{max: SEED_MAX}`; `size: boolean` → Size with `OPENAI_SIZE_RULES` for `openai/` ids, else an Extra key; any other key → an Extra key (sent at the top level, as the catalogue lists it). For `openai/gpt-image-2.6-*` with `gif` in `output_format`: `frame_count` range 2–16 and `frame_duration_ms` range 20–2000 (unit `ms`), both requiring `output_format = "gif"`.
+  - Picture extra settings: when `image_prices` holds the model's `/endpoints` answer, `companies = endpoint_companies(answer)` and each record's `allowed_passthrough_parameters` joins the Extra field's `allowed_keys` (in record order, no duplicates); these are sent under `provider.options[<that record's provider_slug>]` (Task A4). No saved answer and no unknown top-level key → no Extra field (the drawer says "Pick the model to see its extra settings.").
+  - Video fields: `supported_aspect_ratios` → `aspect_ratio` (Shape); `supported_durations` → `duration` (Length, numbers, `-1` dropped, ascending, labels "4 s", initial = shortest ≥ 4 else the longest); `supported_resolutions` → `resolution` (initial `720p`, else the lowest by its number); `generate_audio == true` → `generate_audio` (Sound, boolean, company default `true`, affects price); `supported_frame_images` → `first_frame` (StartFrame, simple, `Images{0,1}`) and `last_frame` (EndFrame, advanced); `seed == true` → Seed; `supported_sizes` → `size` (Size, advanced enum; when set, `aspect_ratio` and `resolution` are not sent); a non-empty `allowed_passthrough_parameters` → the note "OpenRouter lists extra settings for this model (<names>), but Studio cannot send them for video yet." (OpenRouter keys them by the company the job is routed to, which the video catalogue does not name). `usable = Some("Needs a video to start from, which Studio does not offer yet.")` when `supported_durations` is null or empty.
   - Display name: catalogue `name` without its `"<Maker>: "` prefix. Family: `<maker>/` + the name cut before the first `-` followed by a digit, or by `v` and a digit.
-  - `validate`: param keys must be offered non-picture fields; enum values from the list; ranges within bounds and on the step; seeds integers in `0..=max`; sizes pass `SizeRules` or are in the list; `requires` met; extra keys only from `allowed_keys` and never a typed key, `model` or `prompt` (`Reserved`); pictures per role within `min..=max`; prompt 1–32,000 characters; an unusable model is refused.
+  - `validate`: param keys must be offered non-picture fields; enum values from the list; ranges within bounds and on the step; seeds integers in `0..=max`; sizes pass `SizeRules` or are in the list; `requires` met; extra keys only from `allowed_keys` (a passthrough key also needs a company the request's routing allows that lists it) and never a typed key, `model`, `prompt` or `provider` (`Reserved`); pictures per role within `min..=max`; prompt 1–32,000 characters; an unusable model is refused.
   - `cloud::media_company`: `OpenRouter → Some(Company::OpenRouter)`, `OpenAi → Some(Company::OpenAi)`, everything else `None`.
 
 - [ ] **Step 4: Run to see them pass**
@@ -333,8 +370,7 @@ git commit -m "Studio: media types and controls built from OpenRouter's catalogu
 
 **Files:**
 - Modify: `crates/agent/src/media/price.rs`, `crates/agent/src/media/spec.rs` (fill `MediaModel.price`)
-- Create: `crates/agent/tests/fixtures/media/openrouter-image-endpoints-gpt-image-2.6-flare.json`, `...-gemini-nano-banana-2.1.json`, `...-flux-3-image.json`
-- Test: inline in `price.rs`
+- Test: inline in `price.rs` (fixtures from Task A1)
 
 **Interfaces:**
 - Consumes: Task A1 types.
@@ -343,20 +379,22 @@ git commit -m "Studio: media types and controls built from OpenRouter's catalogu
 pub struct PriceChoice { pub count: u32, pub seconds: Option<f64>, pub resolution: Option<String>, pub quality: Option<String>,
     pub audio: Option<bool>, pub start_frame: bool, pub input_images: u32 }
 pub fn parse_pricing_skus(skus: &Map<String, Value>) -> Price;
-pub fn parse_image_endpoints(answer: &Value, pinned: Option<&str>) -> Price;   // pinned = routing's first company
+/// One saved `/endpoints` answer. With several companies the dearest is used, unless `routing` pins one
+/// (`only`, or `allow_fallbacks == false`): then that company's price.
+pub fn parse_image_endpoints(answer: &Value, routing: Option<&Routing>) -> Price;
 pub fn estimate(price: &Price, choice: &PriceChoice) -> Option<f64>;          // None = price unknown
 pub fn choice_for(model: &MediaModel, req: &MediaRequest) -> PriceChoice;
-pub fn endpoint_companies(answer: &Value) -> Vec<String>;                      // company names in an `/endpoints` answer (routing choices)
 impl Price { pub fn range(&self) -> Option<(f64, f64)>; }                     // for the picker's price hint
 ```
-
-- [ ] **Step 0: Record the picture price answers.** `curl -sS https://openrouter.ai/api/v1/images/models/openai/gpt-image-2.6-flare/endpoints` (and the same for `google/gemini-nano-banana-2.1` and `black-forest-labs/flux-3-image`; public, no key) into the three fixture files, with `"_recorded": "<date>"` added at the top. If the host cannot be reached, write the fixtures by hand from the doc page and keep the parser returning `Price::Unknown` for any shape it does not recognise, so every picture run asks first.
+The recorded `/endpoints` shape (2026-11-17): `{id, endpoints: [{provider_name, provider_slug, provider_tag, supported_parameters, allowed_passthrough_parameters, pricing: [{billable: "output_image"|"input_image"|"input_text"|"input_reference", unit: "image"|"megapixel"|"token", cost_usd, variant?}]}]}`. On that day GPT Image 2.6 Flare and Nano Banana 2.1 were priced per token only, FLUX 3 Image per picture by resolution (`variant` "768", "1k", "1.5k", "2k", "4k"), Seedream 5.5 per picture plus a `high_resolution` variant and `input_image` per picture.
 
 - [ ] **Step 1: Write the failing tests**
 ```rust
 fn sku(id: &str) -> Price { /* parse_pricing_skus of that model in the video fixture */ }
 fn secs(price: &Price, s: f64, res: &str, audio: Option<bool>, start: bool, images: u32) -> Option<f64>;
 fn usd(a: Option<f64>, b: f64) { assert!((a.unwrap() - b).abs() < 1e-9, "{a:?} != {b}"); }
+// also: endpoints_price(id, routing) from the recorded answers, pics(count, resolution, input_images) -> PriceChoice,
+// two_companies, only(tag), order(tag, allow_fallbacks), row(resolution, usd), catalogue_videos()
 
 #[test] fn veo_3_1_prices() {
     let p = sku("google/veo-3.1");
@@ -402,14 +440,34 @@ fn usd(a: Option<f64>, b: f64) { assert!((a.unwrap() - b).abs() < 1e-9, "{a:?} !
     usd(secs(&sku("black-forest-labs/flux-3-video"), 5.0, "720p", Some(true), false, 0), 0.85);
 }
 #[test] fn every_catalogue_video_gets_a_price_or_says_why() {
-    // all 33 parse without panic; exactly the four ids above and the five seedance ids are not PerSecond
+    let prices: Vec<(String, Price)> = catalogue_videos().map(|(id, skus)| (id, parse_pricing_skus(&skus))).collect();
+    assert_eq!(prices.len(), 33);
+    let unknown: Vec<_> = prices.iter().filter(|(_, p)| *p == Price::Unknown).map(|(id, _)| id.as_str()).collect();
+    assert_eq!(unknown.len(), 3, "{unknown:?}");                         // the three ids above
+    assert_eq!(prices.iter().filter(|(_, p)| *p == Price::PerToken).count(), 5);   // the seedance models
+    assert_eq!(prices.iter().filter(|(_, p)| matches!(p, Price::PerSecond(_))).count(), 25);
 }
 #[test] fn picture_prices_from_the_recorded_endpoints() {
-    // gpt-image-2.6-flare: a number per picture for (quality, size) or Unknown; nano banana 1K/2K/4K rows;
-    // with several companies the highest price is used unless `pinned` names one
+    assert_eq!(endpoints_price("openai/gpt-image-2.6-flare", None), Price::PerToken);
+    assert_eq!(endpoints_price("google/gemini-nano-banana-2.1", None), Price::PerToken);   // both companies per token
+    let flux = endpoints_price("black-forest-labs/flux-3-image", None);
+    usd(estimate(&flux, &pics(1, "1K", 0)), 0.048);
+    usd(estimate(&flux, &pics(1, "1.5K", 0)), 0.07);
+    usd(estimate(&flux, &pics(1, "4K", 0)), 0.607);
+    let seedream = endpoints_price("bytedance-seed/seedream-5-5", None);       // "high_resolution" matches no value: the dearer row
+    usd(estimate(&seedream, &pics(1, "1K", 0)), 0.035);
+    usd(estimate(&seedream, &pics(1, "2K", 1)), 0.043);                       // + 0.008 per added picture
+}
+#[test] fn a_pinned_company_is_used_only_when_routing_cannot_fall_back() {
+    let answer = two_companies(("a", 0.04), ("b", 0.06));                     // synthetic, same shape as the recording
+    usd(estimate(&parse_image_endpoints(&answer, None), &pics(1, "1K", 0)), 0.06);
+    usd(estimate(&parse_image_endpoints(&answer, Some(&only("a"))), &pics(1, "1K", 0)), 0.04);
+    usd(estimate(&parse_image_endpoints(&answer, Some(&order("a", true))), &pics(1, "1K", 0)), 0.06);
+    usd(estimate(&parse_image_endpoints(&answer, Some(&order("a", false))), &pics(1, "1K", 0)), 0.04);
 }
 #[test] fn count_multiplies_and_pictures_in_add() {
-    // PerImage row 0.04, count 4, input_images 2 with per_input_image_usd 0.01 → 0.18
+    let p = Price::PerImage(Table { rows: vec![row(None, 0.04)], per_input_image_usd: Some(0.01), minimum_usd: None });
+    usd(estimate(&p, &pics(4, "1K", 2)), 0.18);
 }
 ```
 
@@ -422,6 +480,7 @@ Expected: FAIL to compile, `cannot find function 'parse_pricing_skus'`.
   2. then, whatever the sound: `{text_to_video|image_to_video}_duration_seconds_{res}` (image-to-video when a start frame is sent), `duration_seconds_{res}`, `duration_seconds`, `cents_per_video_output_second_{res}`, `cents_per_second_output_{res}`, `cents_per_second_output`;
   3. none found → `None` (unknown). `cents_per_image_input` adds per added picture; `minimum_cents_per_generation` is a floor. Keys containing `video_continuation` or `with_video_input` are ignored (features not in 0.1.0); any `video_tokens*` key makes the price `PerToken`; any other key makes the whole price `Unknown`, never a guess.
   - `choice_for`: count from `n` (1 when absent; always 1 for video), seconds from `duration`, resolution from `resolution` or from `size`'s shorter side (`1280x720` → `720p`), quality from `quality`, sound from `generate_audio` or its company default, `start_frame` when a StartFrame picture is sent, `input_images` = pictures sent.
+  - `parse_image_endpoints`: per company, `output_image` rows with unit `image` become `PerImage` rows keyed by `variant` (no variant = every resolution), matched case-insensitively to the resolution value (`1k` ↔ `1K`, `1.5k` ↔ `1.5K`); when any variant matches no offered resolution (Seedream's `high_resolution`), every choice uses that company's dearest `output_image` row, so the estimate is never too low; `input_image`/`input_reference` rows with unit `image` fill `per_input_image_usd`; any row with unit `token` makes the company `PerToken`, unit `megapixel` makes it `Unknown`. Then the dearest company, or the pinned one as the doc comment says (`PerToken`/`Unknown` for any allowed company wins over a number).
   - `parse_catalog` now sets `price` from `pricing_skus` (video) and from `image_prices[id]` when cached (pictures), else `Price::Unknown`.
 
 - [ ] **Step 4: Run to see them pass**
@@ -438,7 +497,7 @@ git commit -m "Studio: read OpenRouter prices and estimate a run, unknown when u
 
 **Files:**
 - Create: `src-tauri/src/studio/mod.rs` (`pub mod spend;`), `src-tauri/src/studio/spend.rs`
-- Modify: `src-tauri/src/lib.rs` (`#[allow(dead_code, reason = "wired up in Task A15")] mod studio;`; the attribute goes in Task A15)
+- Modify: `src-tauri/src/lib.rs` (`#[allow(dead_code, reason = "wired up in Task A16")] mod studio;`; the attribute goes in Task A16)
 - Test: inline in `spend.rs`
 
 **Interfaces:**
@@ -449,9 +508,13 @@ pub const CONFIRM_AT_USD: f64 = 1.0;
 pub const DEFAULT_DAILY_LIMIT_USD: f64 = 10.0;
 pub const UNKNOWN_PRICE_RESERVE_USD: f64 = 5.0;
 pub struct ConfirmRules { pub every_video: bool, pub at_usd: f64 }          // Default: true, CONFIRM_AT_USD
-pub enum ConfirmReason { Video, AtLeast(f64), UnknownPrice }               // serde: "video" | "atLeast" | "unknownPrice"
+#[serde(rename_all = "camelCase")]
+pub enum ConfirmReason { Video, AtLeast, UnknownPrice }                    // unit variants: "video" | "atLeast" | "unknownPrice";
+                                                                           // the threshold travels as EstimateDto.confirm_at_usd
 pub fn confirm_reasons(kind: MediaKind, estimate: Option<f64>, rules: &ConfirmRules) -> Vec<ConfirmReason>;
 pub enum Charge { Pending, Final, None, Maybe }
+pub enum RunState { Live, Done, Ended { charged: Option<bool> } }          // Ended: failed, blocked, cancelled, interrupted
+pub fn charge_of(state: RunState) -> Charge;  // Live → Pending; Done → Final; Ended: Some(true) → Final, Some(false) → None, None → Maybe
 pub struct SpendRow { pub created_at: i64, pub estimate_usd: Option<f64>, pub cost_usd: Option<f64>, pub charge: Charge }
 pub fn counted_usd(row: &SpendRow) -> f64;
 pub struct Spend { pub settled_usd: f64, pub pending_usd: f64 }
@@ -468,7 +531,18 @@ pub fn day_start_in<Tz: chrono::TimeZone>(tz: &Tz, at_ms: i64) -> i64;
 }
 #[test] fn a_dollar_or_more_asks() {
     assert!(confirm_reasons(MediaKind::Image, Some(0.99), &ConfirmRules::default()).is_empty());
-    assert_eq!(confirm_reasons(MediaKind::Image, Some(1.00), &ConfirmRules::default()), [ConfirmReason::AtLeast(1.0)]);
+    assert_eq!(confirm_reasons(MediaKind::Image, Some(1.00), &ConfirmRules::default()), [ConfirmReason::AtLeast]);
+}
+#[test] fn reasons_serialise_as_plain_names() {
+    assert_eq!(serde_json::to_value([ConfirmReason::Video, ConfirmReason::AtLeast, ConfirmReason::UnknownPrice]).unwrap(),
+        json!(["video", "atLeast", "unknownPrice"]));
+}
+#[test] fn what_a_run_is_charged_follows_what_the_company_said() {
+    assert_eq!(charge_of(RunState::Live), Charge::Pending);
+    assert_eq!(charge_of(RunState::Done), Charge::Final);
+    assert_eq!(charge_of(RunState::Ended { charged: Some(true) }), Charge::Final);
+    assert_eq!(charge_of(RunState::Ended { charged: Some(false) }), Charge::None);
+    assert_eq!(charge_of(RunState::Ended { charged: None }), Charge::Maybe);
 }
 #[test] fn an_unknown_price_always_asks() {
     let lax = ConfirmRules { every_video: false, at_usd: 100.0 };
@@ -477,7 +551,7 @@ pub fn day_start_in<Tz: chrono::TimeZone>(tz: &Tz, at_ms: i64) -> i64;
 #[test] fn dont_ask_again_for_videos_keeps_the_dollar_rule() {
     let r = ConfirmRules { every_video: false, at_usd: 1.0 };
     assert!(confirm_reasons(MediaKind::Video, Some(0.96), &r).is_empty());
-    assert_eq!(confirm_reasons(MediaKind::Video, Some(1.20), &r), [ConfirmReason::AtLeast(1.0)]);
+    assert_eq!(confirm_reasons(MediaKind::Video, Some(1.20), &r), [ConfirmReason::AtLeast]);
 }
 #[test] fn reaching_the_limit_exactly_is_allowed() {
     let s = Spend { settled_usd: 9.04, pending_usd: 0.0 };
@@ -532,7 +606,7 @@ git commit -m "Studio: confirmation rules and the daily limit, counted per local
 ### Task A4: A create request sent at most once, and OpenRouter pictures
 
 **Files:**
-- Modify: `crates/agent/src/client.rs` (make `same_origin_redirects`, `authorize`, `read_capped`, `network_error` `pub(crate)`; add `post_once`)
+- Modify: `crates/agent/src/client.rs` (make `same_origin_redirects`, `authorize`, `read_capped`, `network_error` `pub(crate)`; add `post_once` and `stream_body_to`), `crates/agent/src/cloud.rs` (`pub(crate) fn scrub_text(text: &str, key: Option<&str>) -> String` over the private `without_key`, for failure messages that are plain text)
 - Create: `crates/agent/src/media/openrouter.rs` (catalogues, prices, pictures, preview, failure mapping)
 - Modify: `crates/agent/src/media/mod.rs` (`media_provider`)
 - Test: `crates/agent/tests/media_endpoints.rs` (new, on `tests/common` `MockServer`)
@@ -549,6 +623,10 @@ impl OpenAiClient {
     /// A success body is streamed to a new file in `scratch` (at most `cap` bytes).
     pub(crate) async fn post_once(&self, url: Url, body: OnceBody, limit: Duration, cap: u64, scratch: &Path) -> Result<OnceReply, MediaError>;
 }
+/// The one writer for response bodies: chunks to `file`, at most `cap` bytes, `idle` at most between chunks.
+/// Over the cap → `TooLarge(cap)`; `ErrorKind::StorageFull` → `DiskFull`; other write errors → `Io`; a body that stops → Err(network).
+pub(crate) async fn stream_body_to(resp: reqwest::Response, file: &mut tokio::fs::File, cap: u64, idle: Option<Duration>)
+    -> Result<u64, BodyError>;                                  // BodyError { Local(LocalIo), Network(reqwest::Error) }
 // URLs are built with the existing `api_url()` (`.../api/v1` or `.../v1`) and `join`.
 // openrouter.rs
 pub struct OpenRouterMedia { /* client, limits */ }
@@ -557,6 +635,9 @@ impl MediaProvider for OpenRouterMedia { /* pictures in this task; check/downloa
 pub(crate) fn openrouter_failure(status: u16, headers: &HeaderMap, body: &[u8], key: Option<&str>) -> MediaFailure;
 // mod.rs
 pub fn media_provider(client: OpenAiClient) -> Option<Arc<dyn MediaProvider>>;   // OpenRouter here; OpenAI in Task A7
+// openrouter.rs: splits the user's extra settings into top-level keys and `provider.options` per company
+pub fn place_extra(model: &MediaModel, extra: Map<String, Value>, routing: Option<&Routing>)
+    -> (Map<String, Value>, BTreeMap<String, Map<String, Value>>);
 ```
 
 - [ ] **Step 1: Write the failing tests** (`crates/agent/tests/media_endpoints.rs`)
@@ -606,7 +687,23 @@ fn quick() -> MediaLimits { MediaLimits { picture_timeout: Duration::from_secs(1
     // 400 body echoing KEY → f.message contains "[API key]" and not KEY
 }
 #[tokio::test] async fn a_body_over_the_cap_is_refused_and_its_file_removed() {
-    // 200 with 100 KiB body, cap 64 KiB → Err(Unknown(Decode(..))); dir has no file left
+    // 200 with 100 KiB body, cap 64 KiB
+    assert!(matches!(media.start(&req(), dir.path()).await, Err(MediaError::Local(LocalIo::TooLarge(65_536)))));
+    assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 0);
+}
+#[tokio::test] async fn the_picture_body_matches_openrouters_documented_shape() {
+    // fixture openrouter-request-examples-2026-11-17.json: "image_references", "image_routing", "image_provider_options"
+    media.start(&req_with_ref_routing_and_extra(), dir.path()).await.unwrap();
+    let sent = server.requests()[0].json();
+    assert_same_shape(&sent["input_references"][0], &example("image_references")["input_references"][0]);
+    assert_eq!(sent["provider"]["only"], json!(["openai"]));            // `only: true` → a list of provider_tag values
+    assert_eq!(sent["provider"]["allow_fallbacks"], false);
+}
+#[tokio::test] async fn extra_settings_go_under_provider_options_for_each_company_that_lists_them() {
+    // flare with its recorded /endpoints answer (record "openai" lists moderation, complexity); extra {"moderation":"low"}
+    let sent = server.requests()[0].json();
+    assert_eq!(sent["provider"]["options"]["openai"], json!({"moderation": "low"}));
+    assert!(sent.get("moderation").is_none());
 }
 #[tokio::test] async fn the_preview_hides_pictures_and_the_key() {
     let p = media.preview(&req_with_ref());
@@ -621,8 +718,8 @@ Run: `cargo test -p agent --test media_endpoints`
 Expected: FAIL to compile, `cannot find type 'OpenRouterMedia' in module 'agent::media'`.
 
 - [ ] **Step 3: Implement.**
-  - `post_once`: build the request with `authorize`, `limit` as the whole-request timeout, no `retry_delay`. Error mapping: `reqwest::Error::is_connect()` → retry once after 1 s, then `NotSent`; timeout, a body read that fails, or any other send error → `Unknown`; a 429 with `cloud::parse_retry_after` ≤ 30 s → wait and send once more; any other non-2xx → `OnceReply::Error` (body read with `read_capped(.., MAX_ERROR_BODY, true)`); 2xx → stream chunks into `scratch/<uuid>.part`, removing the file and returning `Unknown(Decode)` past `cap`. Every error text goes through `cloud::scrub_key`.
-  - Picture body: `model`, `prompt`, every `params` entry, every `extra` entry at the top level, `input_references: [{"type":"image_url","image_url":{"url":"data:<mime>;base64,..."}}]`, and `provider: {order, only?, allow_fallbacks, zdr}` when `routing` is set. Response read with a typed struct (`data: Vec<{b64_json: String, media_type: Option<String>}>`, `usage.cost`), one picture decoded and written at a time to `scratch/<uuid>-<n>`; MIME from `media_type`, else from the bytes.
+  - `post_once`: build the request with `authorize`, `limit` as the whole-request timeout, no `retry_delay`. Error mapping: `reqwest::Error::is_connect()` → retry once after 1 s, then `NotSent`; timeout, a body read that fails, or any other send error → `Unknown`; a 429 with `cloud::parse_retry_after` ≤ 30 s → wait and send once more; any other non-2xx → `OnceReply::Error` (body read with `read_capped(.., MAX_ERROR_BODY, true)`); 2xx → `stream_body_to` into `scratch/<uuid>.part` (no idle limit; `limit` covers it), removing the file on any error and returning `MediaError::Local(..)` for local failures and `Unknown` for a body that stops. Error texts go through `cloud::scrub_key` (a `ProviderError`) or `cloud::scrub_text` (a message).
+  - Picture body: `model`, `prompt`, every `params` entry, extra keys that are catalogue fields at the top level, `input_references: [{"type":"image_url","image_url":{"url":"data:<mime>;base64,..."}}]`, and `provider`: `only: [tag]` when `routing.only`, else `order: [tags]`; `allow_fallbacks`; `zdr` when true; `options` = `req.provider_options` when not empty. `place_extra` fills those: a passthrough key goes to every company in `model.companies` whose record lists it (only the pinned one when `only`); any other key stays top-level (`validate` has already refused keys the model does not offer). `assert_same_shape` compares key paths and JSON types, not values. Response read with a typed struct (`data: Vec<{b64_json: String, media_type: Option<String>}>`, `usage.cost`), one picture decoded and written at a time to `scratch/<uuid>-<n>`; MIME from `media_type`, else from the bytes.
   - `fetch_catalog`: `GET {api}/images/models` and `{api}/videos/models` through the endpoint's client. `fetch_image_price`: `GET {api}/images/models/{id}/endpoints`.
   - `openrouter_failure`: 401 `Unauthorized`; 402 `NoCredit`; 403 with "moderation"/"flagged" or a `moderation` metadata object, or 400 with the same → `Blocked`, `charged: Some(false)`; 429 `RateLimited` with `retry_after`; 404 `NotFound`; 502 `Server` with `charged: Some(false)` ("failed, not charged"); other 5xx `Server`; `request_id` from the body's `id` or the `x-request-id` header; `message` cut by `error::bounded` and scrubbed.
 
@@ -648,9 +745,10 @@ git commit -m "Studio: OpenRouter pictures, with the create request sent at most
 ```rust
 impl OpenAiClient {
     pub(crate) async fn get_json_within(&self, url: Url, limit: Duration) -> Result<Value, ProviderError>;
-    /// Streams to `dest` (at most `cap` bytes). A 3xx whose Location is another origin comes back
+    /// Streams to `dest` through `stream_body_to` (at most `cap` bytes, at most `idle` between chunks; local
+    /// failures come back as `MediaError::Local`). A 3xx whose Location is another origin comes back
     /// as `Fetched::Elsewhere` and is never followed with the key.
-    pub(crate) async fn download_to_file(&self, url: Url, dest: &Path, cap: u64) -> Result<Fetched, MediaError>;
+    pub(crate) async fn download_to_file(&self, url: Url, dest: &Path, cap: u64, idle: Duration) -> Result<Fetched, MediaError>;
 }
 // OpenRouterMedia: start (video) → Started::Job; check; download
 ```
@@ -674,7 +772,22 @@ impl OpenAiClient {
     // 404 and 410 on /content → Err(Answered(f)) with f.kind == FailureKind::Expired
 }
 #[tokio::test] async fn a_download_over_the_cap_removes_the_partial_file() {
-    // video_cap 1 KiB, content 4 KiB → Err(Answered(f)) kind Other "larger than", dest does not exist
+    // video_cap 1 KiB, content 4 KiB
+    assert!(matches!(media.download("vid_1", &done, 0, &dest).await, Err(MediaError::Local(LocalIo::TooLarge(1024)))));
+    assert!(!dest.exists());
+}
+#[cfg(target_os = "linux")]
+#[tokio::test] async fn a_full_disk_while_downloading_is_named() {
+    // /dev/full accepts the open and refuses every write with ENOSPC
+    assert!(matches!(media.download("vid_1", &done, 0, Path::new("/dev/full")).await, Err(MediaError::Local(LocalIo::DiskFull))));
+}
+#[tokio::test] async fn a_stalled_download_stops_after_the_idle_limit() {
+    // download_idle 200 ms; Reply::Stream sends 1 KiB then waits 2 s → Err(MediaError::Unknown(_)) within 1 s
+}
+#[tokio::test] async fn the_video_body_matches_openrouters_documented_shape() {
+    // fixture "video_frame_images": sent["frame_images"][0] has the same shape; no "provider" key; extras are never sent for video
+    assert_same_shape(&sent["frame_images"][0], &example("video_frame_images")["frame_images"][0]);
+    assert!(sent.get("provider").is_none());
 }
 #[tokio::test] async fn a_link_to_another_host_is_handed_back_not_followed() {
     // /content → 302 Location: http://127.0.0.1:<other>/v.mp4 → Ok(Fetched::Elsewhere(url)); `other` saw no request
@@ -689,10 +802,10 @@ impl OpenAiClient {
 ```
 
 - [ ] **Step 2: Run to see them fail**
-Run: `cargo test -p agent --test media_endpoints video && cargo test -p agent --test media_redirects`
-Expected: FAIL (`start` for video returns an error / no such method).
+Run: `cargo test -p agent --test media_endpoints && cargo test -p agent --test media_redirects`
+Expected: FAIL (`start` for video returns an error; `download_to_file` does not exist).
 
-- [ ] **Step 3: Implement.** Before writing the body, read https://openrouter.ai/docs/guides/overview/multimodal/video-generation and pin the exact `frame_images` item and where passthrough fields go in the test's expected body (defaults used here: `{"type":"image_url","image_url":{"url":"data:…"},"frame_type":"first_frame"|"last_frame"}`; passthrough fields at the top level). Video body: `model`, `prompt`, `duration`, `resolution`, `aspect_ratio` or `size`, `generate_audio`, `seed`, `frame_images`, extra fields, `provider`. Status mapping: `pending` → `Pending`; `in_progress` → `Running{progress}` (a 0–1 number when present, a 0–100 number divided by 100); `completed` → `Done` (outputs = `max(len(unsigned_urls), len(urls), 1)`); `failed`, `cancelled`, `expired` → `Failed` (`expired` with kind `Expired`); 404 → `Gone`. Each check uses `get_json_within(limits.check_timeout)`. `download` prefers `GET {api}/videos/{id}/content?index=N` with the key; when only `signed` URLs exist it returns `Fetched::Elsewhere(signed[N].url)`; 404/410 on content → `Expired`.
+- [ ] **Step 3: Implement.** The shapes come from the examples recorded from https://openrouter.ai/docs/guides/overview/multimodal/video-generation on 2026-11-17 (`frame_images` items `{"type":"image_url","image_url":{"url":"data:…"},"frame_type":"first_frame"|"last_frame"}`; passthrough settings would go under `provider.options[<slug>]`, nested in `parameters` for Veo only, which is why 0.1.0 sends none for video). Video body: `model`, `prompt`, `duration`, `resolution`, `aspect_ratio` or `size`, `generate_audio`, `seed`, `frame_images`; no `provider`, no extra keys. Status mapping: `pending` → `Pending`; `in_progress` → `Running{progress}` (a 0–1 number when present, a 0–100 number divided by 100); `completed` → `Done` (outputs = `max(len(unsigned_urls), len(urls), 1)`); `failed`, `cancelled`, `expired` → `Failed` (`expired` with kind `Expired`); 404 → `Gone`. Each check uses `get_json_within(limits.check_timeout)`. `download` prefers `GET {api}/videos/{id}/content?index=N` with the key (`download_to_file(.., limits.video_cap, limits.download_idle)`; the docs say `unsigned_urls` keep working with the key for as long as the output is available); when only `signed` URLs exist it returns `Fetched::Elsewhere(signed[N].url)`; 404/410 on content → `Expired`.
 
 - [ ] **Step 4: Run to see them pass**
 Run: `cargo test -p agent --test media_endpoints && cargo test -p agent --test media_redirects`
@@ -719,7 +832,7 @@ impl Fetcher {
     /// The same address rules as `get`, binary, streamed to `dest`, at most `cap` bytes; never sends a key.
     pub async fn fetch_to_file(&self, url: &Url, cap: u64, dest: &Path) -> Result<FetchedFile, FetchError>;
 }
-// FetchError gains: NotMedia(String), TooLarge(u64), Disk(String)
+// FetchError gains: NotMedia(String), TooLarge(u64), DiskFull, Disk(String)   (DiskFull = ErrorKind::StorageFull)
 ```
 
 - [ ] **Step 1: Write the failing tests** (`crates/search/tests/fetch.rs`, with `with_test_loopback_ports`)
@@ -739,7 +852,7 @@ impl Fetcher {
 Run: `cargo test -p search --test fetch fetch_to_file`
 Expected: FAIL to compile, `no method named 'fetch_to_file'`.
 
-- [ ] **Step 3: Implement** by reusing `check`, `client_for` and `redirect_target` per hop, with `Accept: <MEDIA_TYPES joined>` and `Accept-Encoding: identity`; the media type must be in `MEDIA_TYPES`; chunks go to `dest.with_extension("part")`, renamed to `dest` at the end, removed on any error; `std::io::ErrorKind::StorageFull` → `Disk`. The caller sets the time limit with `with_timeout` (Studio uses 10 minutes).
+- [ ] **Step 3: Implement** by reusing `check`, `client_for` and `redirect_target` per hop, with `Accept: <MEDIA_TYPES joined>` and `Accept-Encoding: identity`; the media type must be in `MEDIA_TYPES`; chunks go to `dest.with_extension("part")`, renamed to `dest` at the end, removed on any error; `std::io::ErrorKind::StorageFull` → `DiskFull`, other write errors → `Disk`. The caller sets the time limit with `with_timeout` (Studio uses 10 minutes).
 
 - [ ] **Step 4: Run to see them pass**
 Run: `cargo test -p search --test fetch`
@@ -764,13 +877,13 @@ git commit -m "Studio: download a result from a company's file host through the 
 ```rust
 // cloud.rs: pub(crate) fn openai_media_kind(id: &str) -> Option<MediaKind>;
 pub struct OpenAiImages; impl OpenAiImages { pub fn new(client: OpenAiClient) -> Self; pub fn with_limits(self, l: MediaLimits) -> Self; }
-pub struct OpenAiRates { pub text_input: Option<f64>, pub image_input: f64, pub image_output: f64 }   // dollars per 1M tokens
-pub fn openai_cost(usage: &Value, rates: &OpenAiRates) -> Option<f64>;
+pub struct OpenAiRates { pub text_input: Option<f64>, pub image_input: f64, pub image_output: f64 }   // dollars per 1M tokens, per model entry
+pub fn openai_cost(usage: &Value, rates: &OpenAiRates) -> Option<f64>;   // None when usage is missing, or text was sent and no text rate is stated
 pub(crate) fn openai_failure(status: u16, headers: &HeaderMap, body: &[u8], key: Option<&str>) -> MediaFailure;
 pub fn check_size(size: &str, rules: &SizeRules) -> Result<(), SizeProblem>;   // SizeProblem: NotWxH, MultipleOf, Ratio, LongestSide, TooFewPixels, TooManyPixels
 // multipart.rs: pub(crate) fn form(fields: &[(&str, String)], files: &[FilePart]) -> (String, Vec<u8>);   // (boundary, body)
 ```
-`openai_images.json` shape: `{"checked":"2026-11-17","sources":[…],"rates_per_million":{"text_input":null,"image_input":8.0,"image_output":30.0},"models":[{"prefix","label","note","retires","maxN","maxRefs","qualities","formats","svg","gif","perImage":{"<quality>|<size>":usd}}]}`, led by `gpt-image-2.6-sunburst` and `gpt-image-2.6-flare`, then `gpt-image-2` (retires `2027-02-10`), `gpt-image-1.5`, `gpt-image-1-mini`, `chatgpt-image-latest` (retire `2026-12-01`). `perImage` holds only figures OpenAI's image guide and pricing page state on the day; anything missing stays unknown (asks first).
+`openai_images.json` shape: `{"checked":"2026-11-17","sources":[…],"models":[{"prefix","label","note","retires","maxN","maxRefs","qualities","formats","svg","gif","rates":{"textInput","imageInput","imageOutput"},"perImage":{"<quality>|<size>":usd}}]}`, led by `gpt-image-2.6-sunburst` and `gpt-image-2.6-flare`, then `gpt-image-2` (retires `2027-02-10`), `gpt-image-1.5`, `gpt-image-1-mini`, `chatgpt-image-latest` (retire `2026-12-01`). Rates as https://developers.openai.com/api/docs/pricing states them on 2026-11-17: both 2.6 models text input $5.00, image input $8.00, image output $30.00 per 1M tokens (standard); `textInput` is `null` where the page states none. `perImage` holds only per-picture figures OpenAI states (the image guide gives gpt-image-2 at 1024²: low $0.006, medium $0.053, high $0.211; none for 2.6), so a 2.6 run has no estimate, says "price unknown" and asks first, and its actual cost is worked out from `usage` afterwards.
 
 - [ ] **Step 1: Write the failing tests**
 ```rust
@@ -801,9 +914,13 @@ pub fn check_size(size: &str, rules: &SizeRules) -> Result<(), SizeProblem>;   /
 #[test] fn svg_is_one_picture_and_never_an_edit() { /* validate n=2 + svg → Err; svg + a reference → Err */ }
 #[test] fn a_multipart_body_has_each_part() { /* boundary not in any part; "Content-Disposition: form-data; name=\"image[]\"; filename=\"picture-1.png\"" */ }
 #[test] fn cost_from_usage() {
-    let u = json!({"input_tokens_details":{"text_tokens":0,"image_tokens":1000},"output_tokens":2000});
-    assert!((openai_cost(&u, &rates()).unwrap() - 0.068).abs() < 1e-9);       // 1000×8/1e6 + 2000×30/1e6
-    assert_eq!(openai_cost(&json!({"input_tokens_details":{"text_tokens":20},"output_tokens":1}), &rates()), None);  // no text rate
+    let flare = match_spec("gpt-image-2.6-flare").unwrap().rates.clone();
+    assert_eq!(flare, OpenAiRates { text_input: Some(5.0), image_input: 8.0, image_output: 30.0 });
+    let u = json!({"input_tokens": 1050, "input_tokens_details": {"text_tokens": 50, "image_tokens": 1000}, "output_tokens": 2000});
+    assert!((openai_cost(&u, &flare).unwrap() - 0.06825).abs() < 1e-9);       // 50×5 + 1000×8 + 2000×30, per 1e6
+    let no_text_rate = OpenAiRates { text_input: None, ..flare };
+    assert_eq!(openai_cost(&u, &no_text_rate), None);
+    assert_eq!(openai_cost(&json!({}), &flare), None);
 }
 // media_endpoints.rs
 #[tokio::test] async fn an_openai_generation_is_one_json_post() { /* POST /v1/images/generations; body model/prompt/n/size/quality; data[0].b64_json decoded */ }
@@ -820,7 +937,7 @@ pub fn check_size(size: &str, rules: &SizeRules) -> Result<(), SizeProblem>;   /
 Run: `cargo test -p agent --lib media && cargo test -p agent --lib cloud::tests::openai_media_kind && cargo test -p agent --test media_endpoints openai`
 Expected: FAIL to compile, `cannot find type 'OpenAiImages'`.
 
-- [ ] **Step 3: Implement.** `fetch_catalog` = `GET {api}/models` (key needed) as `RawCatalog{images: list, videos: None}`; `parse_catalog(OpenAi, …)` keeps ids with `openai_media_kind == Some(Image)` and builds params from the longest matching prefix: `size` (enum `auto`, `1024x1024`, `1536x1024`, `1024x1536`, plus Size rules in Advanced), `quality`, `n` (1–`maxN`, chips stop at 4), `output_format` (adds `svg`/`gif` when the entry says so), `output_compression` (requires jpeg/webp), `background`, `moderation` (Auto or Low; help "Low makes OpenAI's filter less strict; it still refuses what its rules forbid."), `frame_count`/`frame_duration_ms` (gif), `image[]` references up to `maxRefs`. A retiring model gets the note "OpenAI retires this model on <date>." Price: `PerImage` rows from `perImage`. With no references the run is `POST {api}/images/generations` (JSON); with references, `POST {api}/images/edits` (multipart, files as `image[]`). Actual cost: `openai_cost(usage, rates)`, `reported: false`. `openai_failure`: `moderation_blocked` → `Blocked` (stage from `moderation_details` when it says input or output, else none; `charged: None`); 403 whose message mentions organization verification → `OrgVerification`; 401/402/429/5xx as in Task A4; `request_id` from `x-request-id`.
+- [ ] **Step 3: Implement.** `fetch_catalog` = `GET {api}/models` (key needed) as `RawCatalog{images: list, videos: None}`; `parse_catalog(OpenAi, …)` keeps ids with `openai_media_kind == Some(Image)` and builds params from the longest matching prefix: `size` (enum `auto`, `1024x1024`, `1536x1024`, `1024x1536`, plus Size rules in Advanced), `quality`, `n` (1–`maxN`, chips stop at 4), `output_format` (adds `svg`/`gif` when the entry says so), `output_compression` (requires jpeg/webp), `background`, `moderation` (Auto or Low; help "Low makes OpenAI's filter less strict; it still refuses what its rules forbid."), `frame_count`/`frame_duration_ms` (gif), `image[]` references up to `maxRefs`. A retiring model gets the note "OpenAI retires this model on <date>." Price: `PerImage` rows from `perImage`, else `Unknown`. With no references the run is `POST {api}/images/generations` (JSON); with references, `POST {api}/images/edits` (multipart, files as `image[]`). Actual cost: `openai_cost(usage, entry.rates)`, `reported: false` (`None` leaves the run counted at its estimate, or $5 when it has none). `openai_failure`: `moderation_blocked` → `Blocked` (stage from `moderation_details` when it says input or output, else none; `charged: None`); 403 whose message mentions organization verification → `OrgVerification`; 401/402/429/5xx as in Task A4; `request_id` from `x-request-id`.
 
 - [ ] **Step 4: Run to see them pass**
 Run: `cargo test -p agent`
@@ -835,20 +952,37 @@ git commit -m "Studio: OpenAI pictures and edits from a dated settings file"
 ### Task A8: Storage (schema V3)
 
 **Files:**
-- Modify: `crates/store/src/schema.rs` (V3 exactly as in the design §5, appended), `crates/store/src/lib.rs`, `crates/store/src/error.rs` (`TooManyCreations`)
+- Modify: `crates/store/src/schema.rs` (V3 as in the design §5, appended, plus two columns on `creation_runs`: `upstream TEXT` (the company OpenRouter ran it at, when known) and `deleted_at INTEGER` (a spending stub, see below); nothing has shipped, so the design's table is amended here), `crates/store/src/ids.rs` (`update_columns_by_text`), `crates/store/src/lib.rs`, `crates/store/src/error.rs` (`TooManyCreations`)
 - Create: `crates/store/src/creations.rs`
 - Test: inline in `schema.rs` and `creations.rs`
 
 **Interfaces:**
 - Produces (`store`):
 ```rust
-sql_enum!(CreationKind { Image => "image", Video => "video" });
-sql_enum!(CreationStatus { Queued, Sending, Waiting, Downloading, Done, Failed, Blocked, Cancelled, Interrupted });  // lower-case names
-pub const MAX_CREATION_RUNS: usize = 20_000;
+sql_enum!(
+    /// What a Studio run makes.
+    CreationKind, "creation kind" {
+        /// A picture.
+        Image => "image",
+        /// A video.
+        Video => "video",
+    }
+);
+sql_enum!(
+    /// Where a Studio run is.
+    CreationStatus, "creation status" {   // each variant with its own `///` line, as above
+        Queued => "queued", Sending => "sending", Waiting => "waiting", Downloading => "downloading", Done => "done",
+        Failed => "failed", Blocked => "blocked", Cancelled => "cancelled", Interrupted => "interrupted",
+    }
+);
+// ids.rs: the same as update_columns, keyed by a TEXT id (creation ids are uuids)
+pub(crate) fn update_columns_by_text(conn: &rusqlite::Connection, table: &'static str, key: &'static str, id: &str,
+    sets: Vec<(&'static str, rusqlite::types::Value)>) -> Result<usize, StoreError>;
+pub const MAX_CREATION_RUNS: usize = 20_000;                    // counts runs that are not stubs
 pub struct NewCreationRun { pub id: String, pub kind: CreationKind, pub provider_id: Option<ProviderId>, pub provider_name: String,
     pub provider_host: String, pub model: String, pub model_label: String, pub prompt: String, pub params: Value, pub refs: Value, pub estimate_usd: Option<f64> }
 pub struct CreationPatch { pub status: Option<CreationStatus>, pub remote_id: Option<Option<String>>, pub progress: Option<Option<f64>>,
-    pub cost_usd: Option<Option<f64>>, pub error: Option<Option<Value>>, pub audit_id: Option<Option<AuditId>>,
+    pub cost_usd: Option<Option<f64>>, pub error: Option<Option<Value>>, pub audit_id: Option<Option<AuditId>>, pub upstream: Option<Option<String>>,
     pub started_at: Option<Option<i64>>, pub finished_at: Option<Option<i64>> }
 pub struct CreationOutput { pub id: String, pub run_id: String, pub idx: u32, pub path: String, pub thumb_path: Option<String>, pub mime: String,
     pub size_bytes: u64, pub width: Option<u32>, pub height: Option<u32>, pub duration_ms: Option<u64>, pub seed: Option<u64>, pub starred: bool, pub created_at: i64 }
@@ -863,17 +997,23 @@ impl Store {
     pub async fn get_creation_run(&self, id: &str) -> Result<Option<CreationRun>, StoreError>;
     pub async fn list_creation_runs(&self, q: CreationQuery) -> Result<Vec<CreationRun>, StoreError>;  // newest first
     pub async fn live_creation_runs(&self) -> Result<Vec<CreationRun>, StoreError>;           // queued, sending, waiting, downloading
-    pub async fn creation_runs_since(&self, since_ms: i64) -> Result<Vec<CreationRun>, StoreError>;
+    pub async fn creation_runs_since(&self, since_ms: i64) -> Result<Vec<CreationRun>, StoreError>;   // stubs included: spending reads this
     pub async fn insert_creation_output(&self, out: NewCreationOutput) -> Result<(), StoreError>;
     pub async fn get_creation_output(&self, id: &str) -> Result<Option<CreationOutput>, StoreError>;
     pub async fn set_creation_thumb(&self, id: &str, thumb_path: &str) -> Result<(), StoreError>;
     pub async fn set_creation_starred(&self, id: &str, starred: bool) -> Result<(), StoreError>;
-    pub async fn delete_creation_outputs(&self, ids: Vec<String>) -> Result<Vec<CreationOutput>, StoreError>;  // a finished run left with none goes too
-    pub async fn delete_creation_runs(&self, ids: Vec<String>) -> Result<Vec<CreationOutput>, StoreError>;
+    /// Deletes outputs; a finished run left with none is deleted too. A deleted run created at or after
+    /// `stub_since_ms` (the start of today) stays as a stub, everything else goes.
+    pub async fn delete_creation_outputs(&self, ids: Vec<String>, stub_since_ms: i64) -> Result<Deleted, StoreError>;
+    pub async fn delete_creation_runs(&self, ids: Vec<String>, stub_since_ms: i64) -> Result<Deleted, StoreError>;
+    pub async fn purge_creation_stubs(&self, before_ms: i64) -> Result<usize, StoreError>;      // at start-up: yesterday's stubs go
     pub async fn unfinished_creation_run_ids(&self) -> Result<Vec<String>, StoreError>;      // failed, blocked, cancelled, interrupted
+    pub async fn creation_ref_hashes(&self) -> Result<BTreeSet<String>, StoreError>;          // sha256 of refs used by runs that are not stubs
     pub async fn creation_usage(&self) -> Result<CreationUsage, StoreError>;
 }
+pub struct Deleted { pub outputs: Vec<CreationOutput>, pub runs: Vec<CreationRun> }  // for removing files, sidecars and refs
 ```
+A **stub** keeps `id`, `kind`, `provider_*`, `model`, `model_label`, `status`, `remote_id`, `estimate_usd`, `cost_usd`, `error_json` (so `charged` survives), `audit_id`, `created_at`, `finished_at`, and clears `prompt` (`''`), `params_json` (`'{}'`), `refs_json` (`'[]'`), `upstream`; `deleted_at` is set. Every read except `creation_runs_since` and `purge_creation_stubs` leaves stubs out.
 
 - [ ] **Step 1: Write the failing tests**
 ```rust
@@ -889,8 +1029,22 @@ impl Store {
 #[tokio::test] async fn runs_list_newest_first_with_filters() {
     // kind, starred (a run with a starred output), text (LIKE with % and _ escaped), model, before cursor, limit
 }
-#[tokio::test] async fn live_runs_are_the_four_working_states() {}
-#[tokio::test] async fn the_last_output_takes_its_finished_run_along() {}
+#[tokio::test] async fn live_runs_are_the_four_working_states() {
+    // one run per status → live_creation_runs() statuses == {queued, sending, waiting, downloading}
+}
+#[tokio::test] async fn the_last_output_takes_its_finished_run_along() {
+    // done run with 2 outputs: deleting 1 keeps the run; deleting the other → get_creation_run(id) == None
+}
+#[tokio::test] async fn deleting_todays_run_keeps_a_spending_stub_without_the_prompt() {
+    let d = store.delete_creation_runs(vec!["today".into(), "yesterday".into()], day_start).await.unwrap();
+    assert_eq!(d.runs.len(), 2);
+    let since = store.creation_runs_since(day_start).await.unwrap();
+    assert_eq!(since.len(), 1);
+    assert_eq!((since[0].prompt.as_str(), since[0].cost_usd), ("", Some(9.5)));
+    assert!(store.get_creation_run("today").await.unwrap().is_none());
+    assert!(store.list_creation_runs(CreationQuery::default()).await.unwrap().is_empty());
+    assert_eq!(store.purge_creation_stubs(day_start + DAY_MS).await.unwrap(), 1);
+}
 #[tokio::test] async fn the_cap_is_twenty_thousand_runs() {
     assert_eq!(MAX_CREATION_RUNS, 20_000);
     // 20,000 rows through one INSERT … SELECT over a recursive CTE, then insert_creation_run → Err(StoreError::TooManyCreations)
@@ -901,7 +1055,7 @@ impl Store {
 Run: `cargo test -p store creations && cargo test -p store schema`
 Expected: FAIL to compile, `no method named 'insert_creation_run'`.
 
-- [ ] **Step 3: Implement** with the existing helpers (`sql_enum!`, `JsonColumn`, `json_text`, `now_ms`, `like_contains`, `sql_limit`, `update_columns`). The insert checks the count inside the same transaction. JSON columns are written with `json_text` so `json_valid` holds.
+- [ ] **Step 3: Implement** with the existing helpers (`sql_enum!`, `JsonColumn`, `json_text`, `now_ms`, `like_contains`, `sql_limit`) and the new `update_columns_by_text` (the existing `update_columns` binds an `i64` key). The insert checks the count inside the same transaction. JSON columns are written with `json_text` so `json_valid` holds. A stub's outputs are deleted explicitly (the row stays, so the cascade does not fire).
 
 - [ ] **Step 4: Run to see them pass**
 Run: `cargo test -p store`
@@ -916,7 +1070,7 @@ git commit -m "Studio: schema V3 with runs and their outputs"
 ### Task A9: The gallery folder and added pictures
 
 **Files:**
-- Create: `src-tauri/src/studio/gallery.rs`
+- Create: `src-tauri/src/studio/gallery.rs`, `src-tauri/src/studio/test_support.rs` (`#[cfg(test)]`: `Scratch` (temp dir + uuid, removed on Drop, as in `downloads.rs`; the app crate has no `tempfile`), `png(w, h)`, `mp4()`)
 - Modify: `src-tauri/src/studio/mod.rs`, `src-tauri/src/attachments.rs` (`sniff`, `checked_picture`, `PictureWorker`, `ImageInput` become `pub(crate)`)
 - Test: inline in `gallery.rs`
 
@@ -936,7 +1090,9 @@ impl Gallery {
     pub fn write_sidecar(&self, run: &store::CreationRun) -> Result<(), GalleryError>;
     pub async fn add_ref(&self, worker: &PictureWorker, img: &ImageInput) -> AppResult<RefStored>;
     pub fn ref_file(&self, sha256: &str) -> Result<(PathBuf, String), GalleryError>;   // refuses a name that is not 64 hex characters
-    pub fn remove_files(&self, outputs: &[store::CreationOutput]);                // outputs, thumbs, and a sidecar left alone
+    pub fn remove_files(&self, deleted: &store::Deleted);                         // outputs, thumbs, and sidecars of deleted runs
+    pub fn remove_unused_refs(&self, candidates: &BTreeSet<String>, in_use: &BTreeSet<String>);  // refs of deleted runs no run still uses
+    pub fn refs_bytes(&self) -> u64;                                              // counted in Settings → Studio's usage line
 }
 pub struct RefStored { pub sha256: String, pub mime: String, pub size_bytes: u64 }
 pub fn sniff_media(bytes: &[u8]) -> Option<&'static str>;
@@ -967,9 +1123,12 @@ pub fn io_error(e: std::io::Error) -> GalleryError;                             
 }
 #[test] fn the_sidecar_is_the_run_record() { /* JSON has id, prompt, params, outputs; no "Authorization", no "api_key" */ }
 #[test] fn a_reference_name_that_is_not_a_hash_is_refused() {
-    assert!(matches!(Gallery::new(tmp()).ref_file("../../etc/passwd"), Err(GalleryError::BadName)));
+    assert!(matches!(Gallery::new(Scratch::new().path().into()).ref_file("../../etc/passwd"), Err(GalleryError::BadName)));
 }
 #[tokio::test] async fn references_are_kept_once_by_hash() { /* add_ref twice → same refs/<sha>.png, one file */ }
+#[test] fn a_reference_no_run_uses_any_more_is_removed() {
+    // refs a and b on disk; candidates {a, b}, in_use {b} → a removed, b kept; refs_bytes() == size of b
+}
 ```
 
 - [ ] **Step 2: Run to see them fail**
@@ -1013,14 +1172,17 @@ impl PictureWorker { pub(crate) fn thumbs() -> Self; pub(crate) async fn thumbna
     assert_eq!((w, h), (512, 341));
 }
 #[test] fn a_small_picture_is_not_enlarged() { /* 300x200 → 300x200 */ }
-#[tokio::test] async fn the_worker_makes_thumbnails() { /* test_worker("thumb").thumbnail(png) → JPEG */ }
+#[tokio::test] async fn the_worker_makes_thumbnails() {
+    let jpg = test_worker("thumb").thumbnail(&png(1536, 1024)).await.unwrap();
+    assert!(jpg.starts_with(&[0xFF, 0xD8, 0xFF]));
+}
 ```
 
 - [ ] **Step 2: Run to see them fail**
 Run: `cargo test -p app --lib attachments::tests::a_thumbnail`
 Expected: FAIL to compile, `cannot find function 'thumbnail'`.
 
-- [ ] **Step 3: Implement.** The worker keeps its 1 GiB memory cap and 60 s limit; in thumbnail mode it reads at most 50 MiB, decodes with the existing size checks (at most 8,192 px a side), resizes with `image::imageops::thumbnail`, and writes JPEG at quality 80 after `PICTURE_MARK`. `main.rs` passes `args.next().as_deref()`. GIF and SVG get no thumbnail (the grid shows the original).
+- [ ] **Step 3: Implement.** The worker keeps its 1 GiB memory cap and 60 s limit; in thumbnail mode it reads at most 50 MiB, decodes with the existing size checks (at most 8,192 px a side), resizes with `image::imageops::thumbnail`, and writes JPEG at quality 80 after `PICTURE_MARK`. `main.rs` passes `args.next().as_deref()`. GIF and SVG get no thumbnail (the grid shows the original). The test binary takes its mode from `HARNESS_TEST_PICTURE_WORKER`, not argv (libtest owns argv), so `picture_worker_process` gains `Ok("thumb") => picture_worker_main(Some(THUMB_MODE))` and its other arms become `picture_worker_main(None)`; `PictureWorker::thumbs()` adds `thumb` to argv only for the real binary.
 
 - [ ] **Step 4: Run to see them pass**
 Run: `cargo test -p app --lib attachments && bash scripts/check-spawn.sh`
@@ -1040,7 +1202,7 @@ git commit -m "Studio: 512 px thumbnails made in the picture worker"
 - Test: inline in `catalog.rs`
 
 **Interfaces:**
-- Consumes: `agent::media::{MediaProvider, RawCatalog, parse_catalog, media_company}`, `store::Store` settings.
+- Consumes: `agent::media::{MediaProvider, RawCatalog, parse_catalog, media_company}` (`media_company` re-exported from `agent::cloud` in Task A1), `store::Store` settings.
 - Produces:
 ```rust
 pub fn cache_key(id: store::ProviderId) -> String;                        // "providerMediaModels:<id>"
@@ -1050,10 +1212,11 @@ pub async fn refresh(store: &store::Store, id: store::ProviderId, media: &dyn Me
 pub async fn refresh_price(store: &store::Store, id: store::ProviderId, media: &dyn MediaProvider, model: &str, now: i64) -> Result<(), MediaError>;
 pub async fn forget(store: &store::Store, id: store::ProviderId);
 pub struct EndpointModels { pub provider: store::Provider, pub company: Company, pub host: String, pub cloud: bool,
-    pub has_key: bool, pub fetched_at: Option<i64>, pub models: Vec<MediaModel> }
+    pub has_key: bool, pub fetched_at: Option<i64>, pub models: Vec<PricedModel> }
+pub struct PricedModel { pub model: MediaModel, pub price_fetched_at: Option<i64>, pub endpoints: Option<Value> }  // the saved `/endpoints` answer
 /// From the saved lists only: never builds a client or touches the network.
 pub async fn models_for(store: &store::Store, providers: &[store::Provider], has_key: impl Fn(store::ProviderId) -> bool) -> Vec<EndpointModels>;
-pub async fn model(store: &store::Store, id: store::ProviderId, model: &str) -> Option<(EndpointModels, MediaModel)>;
+pub async fn model(store: &store::Store, id: store::ProviderId, model: &str) -> Option<(EndpointModels, PricedModel)>;
 ```
 
 - [ ] **Step 1: Write the failing tests**
@@ -1063,9 +1226,12 @@ pub async fn model(store: &store::Store, id: store::ProviderId, model: &str) -> 
 }
 #[tokio::test] async fn an_endpoint_without_a_list_offers_to_get_it() { /* fetched_at None, models empty */ }
 #[tokio::test] async fn only_openrouter_and_openai_endpoints_are_listed() { /* anthropic, generic, ollama left out */ }
-#[tokio::test] async fn a_saved_picture_price_is_used() { /* image_prices entry → model.price is PerImage */ }
+#[tokio::test] async fn a_saved_picture_price_is_used() { /* flux-3-image's recorded /endpoints answer saved → model.price is PerImage */ }
 #[tokio::test] async fn a_failed_refresh_keeps_the_old_list() { /* fake provider fails → Err, cache unchanged */ }
-#[tokio::test] async fn forget_removes_the_list() {}
+#[tokio::test] async fn forget_removes_the_list() { /* refresh, forget → get_setting(cache_key(id)) is None; models_for → fetched_at None */ }
+#[tokio::test] async fn a_picture_price_says_when_it_was_fetched() {
+    // refresh_price at 1000 → that model's price_fetched_at Some(1000); another picture model None; a video model = the list's fetched_at
+}
 ```
 
 - [ ] **Step 2: Run to see them fail**
@@ -1104,7 +1270,12 @@ pub struct StudioPrefs { pub last_model: BTreeMap<MediaKind, ModelChoice>, pub a
 pub struct ModelChoice { pub provider_id: i64, pub model: String }
 pub struct Setup { pub name: String, pub kind: MediaKind, pub provider_id: i64, pub model: String,
     pub params: Map<String, Value>, pub extra: Map<String, Value>, pub routing: Option<Routing> }
-impl StudioPrefs { pub fn confirm_rules(&self) -> ConfirmRules; pub fn validate(&self) -> Result<(), String>; }
+impl StudioPrefs { pub fn confirm_rules(&self) -> ConfirmRules; pub fn validate(&self) -> Result<(), String>;
+    pub fn apply(&self, patch: StudioPrefsPatch) -> Result<StudioPrefs, String>; }   // only the fields sent change; then validate
+#[serde(rename_all = "camelCase")]
+pub struct StudioPrefsPatch { pub last_model: Option<BTreeMap<MediaKind, ModelChoice>>, pub advanced_open: Option<bool>,
+    pub confirm_every_video: Option<bool>, pub confirm_at_usd: Option<f64>, pub daily_limit_usd: Option<Option<f64>>,
+    pub setups: Option<Vec<Setup>>, pub gallery_dir: Option<Option<String>> }   // Option<Option<_>>: absent = keep, null = clear
 pub async fn load(store: &store::Store) -> StudioPrefs;                  // a missing or unreadable value gives the defaults
 pub async fn save(store: &store::Store, prefs: &StudioPrefs) -> AppResult<()>;   // validates first
 ```
@@ -1121,7 +1292,16 @@ pub async fn save(store: &store::Store, prefs: &StudioPrefs) -> AppResult<()>;  
     for bad in [0.5, 1000.01, f64::NAN] { assert!(with_limit(Some(bad)).validate().is_err()); }
     for good in [Some(1.0), Some(1000.0), None] { assert!(with_limit(good).validate().is_ok()); }
 }
-#[test] fn setups_stop_at_50_and_need_a_name() {}
+#[test] fn setups_stop_at_50_and_need_a_name() {
+    assert_eq!(with_setups(51).validate(), Err("Keep at most 50 setups.".into()));
+    assert_eq!(with_setup_named("  ").validate(), Err("Give the setup a name.".into()));
+}
+#[test] fn a_patch_changes_only_the_fields_it_sends() {
+    let p = StudioPrefs { daily_limit_usd: Some(25.0), ..Default::default() };
+    let q = p.apply(patch(json!({"confirmEveryVideo": false}))).unwrap();
+    assert_eq!((q.confirm_every_video, q.daily_limit_usd), (false, Some(25.0)));
+    assert_eq!(p.apply(patch(json!({"dailyLimitUsd": null}))).unwrap().daily_limit_usd, None);
+}
 #[tokio::test] async fn prefs_saved_without_new_fields_read_with_defaults() {
     // store {"advancedOpen":true} → load: advanced_open true, daily_limit_usd Some(10.0)
 }
@@ -1148,7 +1328,8 @@ git commit -m "Studio: preferences with a \$10 daily limit and confirmation rule
 
 **Files:**
 - Create: `src-tauri/src/studio/deps.rs`, `src-tauri/src/studio/manager.rs`, `src-tauri/src/studio/manager_tests.rs`, `src-tauri/src/studio/errors.rs`
-- Test: `manager_tests.rs` (fakes: `FakeProvider` counting `start` calls with scripted answers, `FakeSink`, `FakeFetch`, `FixedClock`; `store::Store::open_in_memory()`; a temporary gallery)
+- Modify: `src-tauri/src/dto.rs` (the run DTOs below)
+- Test: `manager_tests.rs` (fakes: `FakeProvider` counting `start` calls with scripted answers, `FakeSink`, `FakeFetch`, `FixedClock`; `store::Store::open_in_memory()`; a `Scratch` gallery). The harness saves an OpenRouter catalogue from the fixtures plus flux-3-image's recorded `/endpoints` answer, so an OpenRouter picture run has a price and needs no confirmation under $1; `req_estimated(usd, token)` uses a test picture model whose saved `/endpoints` answer (same shape) prices one picture at `usd`; `openai_req()` uses an OpenAI catalogue whose 2.6 entry has no per-picture price.
 
 **Interfaces:**
 - Consumes: Tasks A1–A12, `store::{AuditEntry, AuditDecision}`.
@@ -1168,11 +1349,12 @@ pub struct AppSink(pub AppHandle); pub struct GuardedFetch(pub search::Fetcher);
 pub const PICTURES_AT_ONCE: usize = 2;
 pub const VIDEOS_AT_ONCE: usize = 2;
 pub struct StudioDeps { pub store: store::Store, pub providers: Arc<dyn ProviderSource>, pub sink: Arc<dyn StudioSink>,
-    pub fetch: Arc<dyn ForeignFetch>, pub clock: Arc<dyn Clock>, pub gallery: Arc<dyn Fn() -> Gallery + Send + Sync>,
-    pub thumbs: Option<PictureWorker>, pub poll: PollPlan, pub limits: MediaLimits }
-pub struct StudioManager { /* Arc<Inner>: running, queues, starting: tokio::sync::Mutex<()>, recent_tokens, live */ }
+    pub fetch: Arc<dyn ForeignFetch>, pub clock: Arc<dyn Clock>, pub default_gallery: PathBuf,
+    pub thumbs: Option<PictureWorker>, pub limits: MediaLimits }          // Task A14 adds `poll: PollPlan`
+pub struct StudioManager { /* Arc<Inner>: prefs: RwLock<StudioPrefs>, running, queues, starting: tokio::sync::Mutex<()>, recent_tokens, live */ }
 impl StudioManager {
-    pub fn new(deps: StudioDeps) -> Self;
+    pub fn new(deps: StudioDeps, prefs: StudioPrefs) -> Self;
+    pub fn gallery(&self) -> Gallery;                                     // prefs.gallery_dir, else default_gallery; read per run
     pub async fn estimate(&self, req: &StartRequest) -> AppResult<EstimateDto>;
     pub async fn preview(&self, req: &StartRequest) -> AppResult<RequestPreview>;
     pub async fn start(&self, req: StartRequest, confirmed: bool) -> AppResult<RunDto>;
@@ -1181,6 +1363,7 @@ impl StudioManager {
     pub async fn run_dto(&self, run: &store::CreationRun) -> RunDto;
     pub async fn usage(&self) -> AppResult<UsageDto>;
 }
+pub fn spend_row(run: &store::CreationRun) -> SpendRow;   // status + error_json.charged through spend::charge_of
 // errors.rs (each a four-part AppError; copy in plain English)
 pub fn needs_confirmation(reasons: &[ConfirmReason]) -> AppError;             // "studio_needs_confirmation"
 pub fn daily_limit(spent: f64, limit: f64) -> AppError;                       // "studio_daily_limit": "Daily limit reached: $9.50 of $10 spent today"
@@ -1188,10 +1371,33 @@ pub fn blocked(company: Company, stage: Option<Stage>, charged: Option<bool>, re
 pub fn org_verification() -> AppError; pub fn no_endpoint() -> AppError; pub fn no_key(name: &str) -> AppError;
 pub fn job_lost(company: Company) -> AppError; pub fn interrupted(company: Company) -> AppError; pub fn result_expired(company: Company) -> AppError;
 pub fn disk_full() -> AppError; pub fn too_large(cap: u64) -> AppError; pub fn gallery_full() -> AppError;
-pub fn not_answered(company: Company, charged: Option<bool>) -> AppError;      // "studio_not_answered": timeouts and cut connections, "may still charge"
+pub fn not_sent(company: Company) -> AppError;                                // "studio_not_sent": "Not sent. Nothing was charged."
+pub fn not_answered(company: Company, charged: Option<bool>) -> AppError;      // "studio_not_answered": timeouts and cut connections
+pub fn stopped(company: Company, kind: MediaKind, charged: Option<bool>) -> AppError;   // "studio_stopped": the Cancel / Stop watching copy
+pub fn download_failed(company: Company) -> AppError;                         // "studio_download_failed" (Task A14)
 pub fn from_failure(company: Company, f: &MediaFailure) -> AppError;
+pub fn from_local(e: &LocalIo, cap: u64) -> AppError;                         // DiskFull → disk_full, TooLarge → too_large
 ```
-`StartRequest`, `RunDto`, `EstimateDto`, `UsageDto` are defined in `src-tauri/src/dto.rs` in this task (shapes in Task A15).
+The run DTOs, in `src-tauri/src/dto.rs` (serde camelCase; Task B1 mirrors them in TS with the same names):
+```rust
+pub struct StartRequest { pub client_token: String, pub provider_id: i64, pub kind: MediaKind, pub model: String, pub prompt: String,
+    pub params: Map<String, Value>, pub extra: Map<String, Value>, pub refs: Vec<RefInput>, pub routing: Option<Routing> }
+pub struct RefInput { pub sha256: String, pub role: RefRole }
+pub struct RefDto { pub sha256: String, pub mime: String, pub size_bytes: u64, pub role: Option<RefRole> }
+pub struct RunErrorDto { pub code: String, pub message: String, pub next_step: String, pub details: String,
+    pub charged: Option<bool>, pub request_id: Option<String>, pub company: String, pub stage: Option<String> }
+pub struct OutputDto { pub id: String, pub run_id: String, pub idx: u32, pub mime: String, pub size_bytes: u64, pub width: Option<u32>,
+    pub height: Option<u32>, pub duration_ms: Option<u64>, pub seed: Option<u64>, pub starred: bool, pub has_thumb: bool, pub path: String }
+pub struct RunDto { pub id: String, pub kind: MediaKind, pub provider_id: Option<i64>, pub provider_name: String, pub provider_host: String,
+    pub upstream: Option<String>, pub model: String, pub model_label: String, pub prompt: String, pub params: Map<String, Value>,
+    pub extra: Map<String, Value>, pub routing: Option<Routing>, pub refs: Vec<RefDto>, pub status: String, pub watching: bool, pub stale: bool,
+    pub remote_id: Option<String>, pub progress: Option<f64>, pub estimate_usd: Option<f64>, pub cost_usd: Option<f64>, pub error: Option<RunErrorDto>,
+    pub created_at: i64, pub started_at: Option<i64>, pub finished_at: Option<i64>, pub outputs: Vec<OutputDto>, pub queue_position: Option<u32> }
+pub struct LimitDto { pub limit_usd: Option<f64>, pub spent_today_usd: f64, pub pending_usd: f64, pub would_pass: bool }
+pub struct EstimateDto { pub usd: Option<f64>, pub reasons: Vec<ConfirmReason>, pub confirm_at_usd: f64, pub limit: LimitDto, pub invalid: Vec<String> }
+pub struct UsageDto { pub spent_today_usd: f64, pub pending_usd: f64, pub limit_usd: Option<f64>, pub folder: String,
+    pub bytes: u64, pub pictures: u64, pub videos: u64 }
+```
 
 - [ ] **Step 1: Write the failing tests** (`manager_tests.rs`)
 ```rust
@@ -1209,6 +1415,13 @@ pub fn from_failure(company: Company, f: &MediaFailure) -> AppError;
     assert_eq!(err.code, "studio_needs_confirmation");
     assert_eq!(h.provider.starts(), 0); assert!(h.store_runs().await.is_empty());
 }
+#[tokio::test] async fn a_video_model_sent_as_a_picture_is_refused() {
+    for confirmed in [false, true] {
+        let err = h.manager.start(StartRequest { kind: MediaKind::Image, ..h.video_req() }, confirmed).await.unwrap_err();
+        assert_eq!(err.code, "bad_request");
+    }
+    assert_eq!(h.provider.starts(), 0);
+}
 #[tokio::test] async fn a_run_over_the_daily_limit_is_refused_whatever_the_webview_says() {
     h.seed_done_run_costing(9.50).await;
     let err = h.manager.start(h.video_req_estimated(0.96), true).await.unwrap_err();
@@ -1217,7 +1430,9 @@ pub fn from_failure(company: Company, f: &MediaFailure) -> AppError;
     assert_eq!(h.provider.starts(), 0);
 }
 #[tokio::test] async fn queued_and_running_estimates_count_against_the_limit() {
-    // two video jobs held in `waiting` at 4.50 each (confirmed) → a third at 1.50 is refused
+    // FakeProvider holds each start; two pictures at 4.50 each (confirmed) sit in `sending`
+    let err = h.manager.start(h.req_estimated(1.50, "t3"), true).await.unwrap_err();
+    assert_eq!(err.code, "studio_daily_limit"); assert_eq!(h.provider.starts(), 2);
 }
 #[tokio::test] async fn two_starts_at_once_cannot_both_pass_the_limit() {
     h.seed_done_run_costing(8.50).await;
@@ -1229,6 +1444,13 @@ pub fn from_failure(company: Company, f: &MediaFailure) -> AppError;
     let b = h.manager.start(h.req_token("press-1"), false).await.unwrap();
     assert_eq!(a.id, b.id); h.wait_status(&a.id, "done").await; assert_eq!(h.provider.starts(), 1);
 }
+#[tokio::test] async fn a_refused_unconfirmed_press_then_the_confirmed_one_makes_one_run() {
+    let req = || StartRequest { client_token: "press-2".into(), ..h.video_req() };
+    assert_eq!(h.manager.start(req(), false).await.unwrap_err().code, "studio_needs_confirmation");
+    let a = h.manager.start(req(), true).await.unwrap();
+    let b = h.manager.start(req(), true).await.unwrap();
+    assert_eq!(a.id, b.id); assert_eq!(h.store_runs().await.len(), 1);
+}
 #[tokio::test] async fn studio_picks_a_seed_when_the_model_takes_one() {
     // seedream-5-5 request without seed → stored params.params.seed in 0..=2_147_483_647; nano banana → no seed key
 }
@@ -1238,11 +1460,29 @@ pub fn from_failure(company: Company, f: &MediaFailure) -> AppError;
 #[tokio::test] async fn two_pictures_run_at_once_and_the_third_waits() {
     // provider holds each start until released; 3 starts on one endpoint → [sending, sending, queued], queue_position Some(1)
 }
-#[tokio::test] async fn cancel_while_sending_says_the_company_may_charge() {
-    // status cancelled; error.charged None; error.message contains "may still charge"
+#[tokio::test] async fn an_openai_picture_cancelled_while_sending_may_be_charged_and_counts() {
+    let run = h.manager.start(h.openai_req(), true).await.unwrap();      // held in `sending`, no estimate
+    let r = h.manager.cancel(&run.id).await.unwrap();
+    assert_eq!(r.status, "cancelled"); assert_eq!(r.error.as_ref().unwrap().charged, None);
+    assert_eq!(r.error.unwrap().message, "Stopped waiting. OpenAI may still charge for it.");
+    assert_eq!(h.manager.usage().await.unwrap().spent_today_usd, UNKNOWN_PRICE_RESERVE_USD);
+}
+#[tokio::test] async fn an_openrouter_picture_cancelled_while_sending_is_not_charged() {
+    // charged Some(false); message "Stopped. OpenRouter does not charge for a picture you did not receive."; spent_today 0
+}
+#[tokio::test] async fn a_run_that_was_not_sent_counts_nothing() {
+    // fake → Err(NotSent) → status failed, code "studio_not_sent", charged Some(false), message "Not sent. Nothing was charged."
+    assert_eq!(h.manager.usage().await.unwrap().spent_today_usd, 0.0);
+}
+#[tokio::test] async fn three_openai_runs_in_a_row_stay_within_the_limit() {
+    // unknown estimate, confirmed; fake answers Done with Cost { usd: 0.07, reported: false } each time
+    for t in ["o1", "o2", "o3"] { let r = h.manager.start(h.openai_req_token(t), true).await.unwrap(); h.wait_status(&r.id, "done").await; }
+    assert!(h.manager.start(h.openai_req_token("o4"), true).await.is_ok());   // held in `sending`
+    let u = h.manager.usage().await.unwrap();
+    assert!((u.spent_today_usd - 0.21).abs() < 1e-9); assert_eq!(u.pending_usd, UNKNOWN_PRICE_RESERVE_USD);
 }
 #[tokio::test] async fn a_timeout_fails_the_run_and_it_is_never_sent_again() {
-    // fake → Err(Unknown); status failed, code "studio_not_answered"; after 2 s of waiting starts() == 1
+    // fake → Err(Unknown) for an OpenAI picture; status failed, code "studio_not_answered", charged None; after 2 s starts() == 1
 }
 #[tokio::test] async fn a_blocked_run_is_never_sent_again() {
     // fake → Answered(Blocked, charged Some(false)); status blocked; error.message "OpenAI's safety filter refused the prompt."; starts() == 1
@@ -1258,7 +1498,7 @@ pub fn from_failure(company: Company, f: &MediaFailure) -> AppError;
     assert!(row.result_summary.unwrap().contains("$0.04"));
 }
 #[tokio::test] async fn extra_field_values_are_not_audited() {
-    // extra {"negativePrompt":"secret words"} → arguments["extra_fields"] == ["negativePrompt"]; no "secret words"
+    // flare with its saved answer, extra {"moderation":"low"} → arguments["extra_fields"] == ["moderation"]; no "low" value
 }
 #[tokio::test] async fn the_gallery_cap_is_said_plainly() { /* store at MAX_CREATION_RUNS → "studio_gallery_full" */ }
 ```
@@ -1267,7 +1507,11 @@ pub fn from_failure(company: Company, f: &MediaFailure) -> AppError;
 Run: `cargo test -p app --lib studio::manager`
 Expected: FAIL to compile, `cannot find type 'StudioManager'`.
 
-- [ ] **Step 3: Implement.** `start`, under the `starting` lock: a known `client_token` (last 64 kept in memory) returns its run; load the model from `catalog::model` (else `studio_no_endpoint`); add a random seed when the model has a Seed field and none is set; `spec::validate`; `price::estimate(choice_for(..))`; `spend::check_limit` with `spent_since(rows of creation_runs_since(day_start))` (refuse `studio_daily_limit`); `spend::confirm_reasons` with `prefs.confirm_rules()` (refuse `studio_needs_confirmation` when not empty and `!confirmed`); insert the run (`queued`, `params = {params, extra, routing}`, `refs = [{sha256, role, mime, sizeBytes}]`); append the audit row (arguments: `endpoint`, `host`, `model`, `changed` = typed settings with their values, `extra_fields` = names only, `pictures_sent`, `estimate_usd`, `confirmed`, `prompt_chars`; preview "Made a picture with <model> through <endpoint>" / "Started a video …"; risk `normal`) and store its id in `audit_id`; enqueue. A run task: status `sending` is written **before** `provider.start`; `Started::Done` → each output through `gallery.finalize` (cap 50 MiB) and `insert_creation_output`, a thumbnail when a worker is set, sidecar, `done` with cost; errors through `errors::from_failure` / `not_answered` into `error` JSON with `charged`, `request_id`, `company`, `stage`. A slot frees on every exit through a `TaskEnd` drop guard as in `DownloadManager`. Cancel cancels the token; the run's future is dropped (the connection closes). Every exit completes the audit row with the status and `cost $X.XX` or `cost not reported`.
+- [ ] **Step 3: Implement.** `start`, under the `starting` lock: a known `client_token` (last 64 kept in memory, recorded only after the run row is inserted, so a refused press leaves no trace) returns its run; load the model from `catalog::model` (else `studio_no_endpoint`); the kind is the model's, and `req.kind != model.kind` is `bad_request`; add a random seed when the model has a Seed field and none is set; `spec::validate`; `openrouter::place_extra`; `price::estimate(choice_for(..))` on the model's price, re-read for an OpenRouter picture as `parse_image_endpoints(saved answer, req.routing)` so a pinned company's price is used; `spend::check_limit` with `spent_since(creation_runs_since(day_start).map(spend_row))` (refuse `studio_daily_limit`); `spend::confirm_reasons` with the held prefs' `confirm_rules()` (refuse `studio_needs_confirmation` when not empty and `!confirmed`); insert the run (`queued`, `params = {params, extra, routing}`, `refs = [{sha256, role, mime, sizeBytes}]`, `upstream` when the routing pins one company or the saved answer lists only one); append the audit row (arguments: `endpoint`, `host`, `model`, `changed` = typed settings with their values, `extra_fields` = names only, `pictures_sent`, `estimate_usd`, `confirmed`, `prompt_chars`; preview "Made a picture with <model> through <endpoint>" / "Started a video …"; risk `normal`) and store its id in `audit_id`; enqueue. A run task: status `sending` and `started_at` are written **before** `provider.start`; `Started::Done` → each output through `gallery.finalize` (cap 50 MiB) and `insert_creation_output`, a thumbnail when a worker is set, sidecar, `done` with cost; errors into `error` JSON that always carries `charged`, plus `request_id`, `company`, `stage`:
+  - `NotSent` → `not_sent`, `Some(false)`; `Answered(f)` → `from_failure`, `f.charged`; `Local(e)` → `from_local`, `None`;
+  - `Unknown` (timeout, cut connection) and Cancel while `sending`: a picture on OpenRouter → `Some(false)` (OpenRouter bills only a picture it delivered: https://openrouter.ai/docs/guides/overview/multimodal/image-generation, "Billing and Cancellation"), anything else `None`;
+  - Cancel while `queued` → `Some(false)`.
+  A slot frees on every exit through a `TaskEnd` drop guard as in `DownloadManager`. Cancel cancels the token; the run's future is dropped (the connection closes). Every exit completes the audit row (once) with the status and `cost $X.XX` or `cost not reported`.
 
 - [ ] **Step 4: Run to see them pass**
 Run: `cargo test -p app --lib studio::manager`
@@ -1282,7 +1526,7 @@ git commit -m "Studio: start runs under the spending rules, queue them and make 
 ### Task A14: StudioManager: video jobs and restarts
 
 **Files:**
-- Modify: `src-tauri/src/studio/manager.rs`, `src-tauri/src/studio/manager_tests.rs`
+- Modify: `src-tauri/src/studio/manager.rs` (`StudioDeps` gains `pub poll: PollPlan`), `src-tauri/src/studio/manager_tests.rs`
 
 **Interfaces:**
 - Produces:
@@ -1292,9 +1536,12 @@ impl Default for PollPlan   // 5 s; 10 s from 60 s; 20 s from 300 s; watch_limit
 pub fn poll_delay(plan: &PollPlan, watched_for: Duration) -> Duration;
 pub const PROGRESS_EVERY: Duration = Duration::from_millis(250);
 impl StudioManager {
-    pub async fn resume_interrupted(&self);
+    pub async fn resume_interrupted(&self);                // also purges yesterday's spending stubs
     /// "Get it anyway" on a stopped video, and "Check again" on one still not ready: checks and downloads; never creates.
     pub async fn fetch_anyway(&self, run_id: &str) -> AppResult<RunDto>;
+    /// Stops every run task and waits for them, writing no status: what was `waiting` stays `waiting` for the
+    /// next start. Called when the app exits, and by the restart tests in place of `drop`.
+    pub async fn shutdown(&self);
 }
 ```
 
@@ -1309,11 +1556,14 @@ impl StudioManager {
 #[tokio::test] async fn the_remote_id_is_saved_before_the_first_check() { /* fake.check reads the row: remote_id == Some("vid_1") */ }
 #[tokio::test] async fn a_network_error_while_checking_keeps_waiting() { /* check Err(Unknown) twice then Done → done */ }
 #[tokio::test] async fn resume_after_restart_finishes_the_video_without_a_second_create() {
-    let first = h.manager(); first.start(h.video_req(), true).await.unwrap(); h.wait_status_any("waiting").await;
-    drop(first);
+    let first = h.manager(); let run = first.start(h.video_req(), true).await.unwrap(); h.wait_status(&run.id, "waiting").await;
+    first.shutdown().await;                                    // its tasks are gone, not merely dropped
+    assert_eq!(h.store_run(&run.id).await.status, CreationStatus::Waiting);
     let second = h.manager_with(fake_done_on_first_check()); second.resume_interrupted().await;
-    h.wait_status_any("done").await;
+    let done = h.wait_status(&run.id, "done").await;
     assert_eq!(h.provider.starts() + h.provider2.starts(), 1);
+    assert_eq!(done.outputs.len(), 1);
+    assert_eq!(h.provider.downloads() + h.provider2.downloads(), 1);
 }
 #[tokio::test] async fn a_run_left_sending_becomes_interrupted_and_is_never_sent_again() {
     // seeded row: status sending, no remote id → resume → interrupted, code "studio_interrupted",
@@ -1324,20 +1574,31 @@ impl StudioManager {
 }
 #[tokio::test] async fn a_download_left_half_done_starts_over_from_the_result() { /* downloading row → check → download; starts() == 0 */ }
 #[tokio::test] async fn stop_watching_keeps_the_remote_id_and_get_it_anyway_downloads() {
-    // cancel while waiting → cancelled, remote_id kept, error.message contains "OpenRouter may still finish and charge for this";
-    // fetch_anyway → done; starts() == 1
+    // cancel while waiting → cancelled, remote_id kept, error.charged None,
+    // error.message "OpenRouter may still finish and charge for this."; fetch_anyway → done; starts() == 1
+}
+#[tokio::test] async fn stop_watching_then_get_it_anyway_records_done_with_the_cost() {
+    // cancel while waiting, then fetch_anyway → done (job cost 0.36): no store error
+    let rows = h.audit_rows_for(&run.id).await;                // oldest first
+    assert_eq!(rows.len(), 2);
+    assert_eq!(rows[0].result_status.as_deref(), Some("cancelled"));
+    assert_eq!(rows[1].parent_audit_id, Some(rows[0].id));
+    assert_eq!(rows[1].result_status.as_deref(), Some("done"));
+    assert!(rows[1].result_summary.as_deref().unwrap().contains("$0.36"));
 }
 #[tokio::test] async fn after_30_minutes_it_says_still_not_ready() {
     // watch_limit 50 ms → status waiting, watching false, stale true; fetch_anyway resumes checking
 }
 #[tokio::test] async fn a_job_the_company_no_longer_has_says_so() { /* Gone → failed "studio_job_lost", remote_id kept */ }
 #[tokio::test] async fn an_expired_result_says_so_and_keeps_the_remote_id() {
-    // download → Answered(Expired) → failed "studio_result_expired"; remote_id kept; counted as maybe charged; starts() == 1
+    // download → Answered(Expired) → failed "studio_result_expired"; remote_id kept; counted at the job's cost (0.36); starts() == 1
 }
 #[tokio::test] async fn a_full_disk_keeps_the_remote_id_for_get_it_anyway() {
-    // finalize → DiskFull → failed "studio_disk_full"; .partial empty; fetch_anyway after space is back → done; starts() == 1
+    // provider.download → Err(Local(DiskFull)) once → failed "studio_disk_full", remote_id kept, cost_usd Some(0.36), charged Some(true);
+    // .partial empty; fetch_anyway → done; starts() == 1; the audit has a follow-up row "done"
 }
-#[tokio::test] async fn a_video_over_its_cap_is_refused() { /* video_cap 1 KiB → failed "studio_too_large", partial removed */ }
+#[tokio::test] async fn a_video_over_its_cap_is_refused() { /* provider.download → Err(Local(TooLarge(1024))) → failed "studio_too_large", partial removed */ }
+#[tokio::test] async fn a_download_that_stops_can_be_fetched_again() { /* download → Err(Unknown) → failed "studio_download_failed", charged Some(true); fetch_anyway → done */ }
 #[tokio::test] async fn a_foreign_result_link_goes_through_the_guarded_fetcher() {
     // provider.download → Elsewhere(url) → FakeFetch saw exactly that url; output saved (ForeignFetch has no key parameter)
 }
@@ -1346,13 +1607,14 @@ impl StudioManager {
 }
 #[tokio::test] async fn the_audit_row_is_completed_after_a_restart() { /* audit row of the resumed run gets "done" and the cost */ }
 #[tokio::test] async fn the_third_video_waits_for_a_slot() { /* VIDEOS_AT_ONCE = 2 per endpoint; a stale job frees its slot */ }
+#[tokio::test] async fn yesterdays_spending_stubs_go_at_start() { /* stub created yesterday, stub created today → resume → only today's stays */ }
 ```
 
 - [ ] **Step 2: Run to see them fail**
 Run: `cargo test -p app --lib studio::manager`
 Expected: FAIL (`resume_interrupted`, `fetch_anyway`, `poll_delay` missing).
 
-- [ ] **Step 3: Implement.** Video task: `sending` → `provider.start` → write `remote_id` and `waiting` → loop `check` with `poll_delay(watched_for)` until `Done`/`Failed`/`Gone` or `watch_limit` (then `watching = false`, row stays `waiting`); a check error keeps waiting. `Done` → `downloading` → `provider.download` into `.partial/<output id>`; `Elsewhere(url)` → `deps.fetch.fetch_to_file(url, video_cap, partial)`; `gallery.finalize`; output row; `done` with the job's cost. `resume_interrupted` at start: `sending` → `interrupted`; `queued` → `cancelled` (not sent); `waiting` with a remote id → watch again (counting `watched_for` from now); `downloading` → check and download again. Charge stored for `spend`: `done` → Final; `failed`/`blocked` → from `charged` (Some(false) → None, otherwise Maybe); `cancelled` with a remote id, `interrupted` → Maybe; `cancelled` before sending → None.
+- [ ] **Step 3: Implement.** Every run task selects on its own token and on a root token that only `shutdown` cancels (a root stop writes nothing); `shutdown` awaits the tasks (a `JoinSet` or the `ended` notifications, as in `DownloadManager`). Video task: `sending` → `provider.start` → write `remote_id` and `waiting` → loop `check` with `poll_delay(watched_for)` until `Done`/`Failed`/`Gone` or `watch_limit` (then `watching = false`, row stays `waiting`, its audit row stays open); a check error keeps waiting. `Done` → write the job's cost first, then `downloading` → `provider.download` into `.partial/<output id>`; `Elsewhere(url)` → `deps.fetch.fetch_to_file(url, video_cap, partial)`; `gallery.finalize`; output row; `done`. A failure after `Done` keeps the remote id and the cost and records `charged: Some(true)`: `Local(e)` → `from_local`, `Expired` → `result_expired`, anything else → `download_failed`. `resume_interrupted` at start: `purge_creation_stubs(today's start)`; `sending` → `interrupted` (`charged: None`); `queued` → `cancelled` (`charged: Some(false)`); `waiting` with a remote id → watch again (counting `watched_for` from now); `downloading` → check and download again. Stop watching (cancel while `waiting`) → `cancelled`, `charged: None`, remote id kept. `fetch_anyway` on a run whose audit row is already completed (cancelled or failed with a remote id) appends a follow-up audit row (`parent_audit_id` = the old `audit_id`, tool and arguments as the original's, preview "Got the stopped video …") and stores its id in `audit_id`; on a stale `waiting` run it only starts watching again, and the original row is completed when the run ends.
 
 - [ ] **Step 4: Run to see them pass**
 Run: `cargo test -p app --lib studio::manager`
@@ -1364,28 +1626,93 @@ git add src-tauri/src/studio
 git commit -m "Studio: follow video jobs across restarts without paying twice"
 ```
 
-### Task A15: Commands, DTOs, events and wiring
+### Task A15: Read commands and model DTOs
 
 **Files:**
 - Create: `src-tauri/src/studio/commands.rs`
-- Modify: `src-tauri/src/dto.rs`, `src-tauri/src/lib.rs` (remove the `dead_code` allow; register handlers; `manage(Arc<StudioManager>)`; spawn `resume_interrupted` next to the downloads resume), `src-tauri/commands.list`, `src-tauri/capabilities/main.json`, `src-tauri/src/artifacts.rs` (`export_target(path, ext, forbidden)`, `pub(crate)`)
-- Create (generated by a test): `src/components/studio/fixtures/models.json`
+- Modify: `src-tauri/src/dto.rs` (model DTOs)
 - Test: inline in `commands.rs`
 
 **Interfaces:**
-- Produces the commands (each `async`, first checks `only_main_window(window.label())`):
+- Produces the read commands (each `async`, first checks `only_main_window(window.label())`, then calls a plain function the tests call directly; none touches the network except `studio_refresh_models` and `studio_model_price`):
 ```text
 studio_models() -> StudioModelsDto                          // saved lists only
 studio_refresh_models(provider_id: i64) -> StudioModelsDto
 studio_model_price(provider_id: i64, model: String) -> MediaModelDto
 studio_estimate(req: StartRequest) -> EstimateDto            // no network
 studio_preview(req: StartRequest) -> RequestPreviewDto
+studio_runs(filter: RunsFilter, before: Option<i64>, limit: u32) -> RunsPage
+studio_live() -> Vec<RunDto>
+studio_output_bytes(output_id: String, thumb: bool) -> tauri::ipc::Response   // up to SHOW_CAP = 256 MiB
+studio_ref_bytes(sha256: String) -> tauri::ipc::Response
+studio_usage() -> UsageDto
+studio_get_prefs() -> StudioPrefs
+```
+Event `studio-progress` → `RunDto`. DTOs (serde camelCase; the run DTOs are Task A13's):
+```rust
+pub const SHOW_CAP: u64 = 256 * 1024 * 1024;
+pub struct PriceHintDto { pub unit: String /* image|second|token|unknown */, pub low: Option<f64>, pub high: Option<f64> }
+pub struct MediaModelDto { pub id: String, pub display_name: String, pub family: String, pub kind: MediaKind, pub accepts_images: bool,
+    pub params: Vec<ParamSpec>, pub price: PriceHintDto, pub price_known: bool, pub price_fetched_at: Option<i64>,
+    pub companies: Vec<EndpointCompany>, pub notes: Vec<String>, pub usable: Option<String>, pub created: Option<i64> }
+    // price_fetched_at None on an OpenRouter picture = "price shown when picked"; Some with price_known false = "price unknown"
+pub struct StudioEndpointDto { pub provider_id: i64, pub name: String, pub company: Company, pub host: String, pub cloud: bool,
+    pub has_key: bool, pub fetched_at: Option<i64>, pub models: Vec<MediaModelDto> }
+pub struct StudioModelsDto { pub endpoints: Vec<StudioEndpointDto> }
+pub struct RequestPreviewDto { pub method: String, pub url: String, pub host: String, pub body: Value }
+pub struct RunsFilter { pub kind: Option<MediaKind>, pub starred: bool, pub text: String, pub model: Option<String>,
+    pub since: Option<i64>, pub until: Option<i64> }
+pub struct RunsPage { pub runs: Vec<RunDto>, pub next: Option<i64> }
+```
+
+- [ ] **Step 1: Write the failing tests**
+```rust
+#[tokio::test] async fn studio_models_reads_only_the_saved_lists() {
+    // saved catalogue for one OpenRouter endpoint; a ProviderSource that counts media() calls
+    assert_eq!(models(&h).await.unwrap().endpoints[0].models.len(), 101);
+    assert_eq!(h.providers.calls(), 0);
+}
+#[tokio::test] async fn output_bytes_gives_the_thumbnail_when_asked_and_refuses_a_huge_video() {
+    // thumb=true → the .thumbs/<id>.jpg bytes; a recorded size over SHOW_CAP → code "studio_too_big_to_show"
+}
+#[tokio::test] async fn ref_bytes_refuses_a_name_that_is_not_a_hash() { /* "../x" → bad_request; a stored ref → its bytes */ }
+#[tokio::test] async fn runs_filter_by_date_text_and_kind() { /* since/until bound created_at; text and kind as in Task A8 */ }
+#[test] fn studio_errors_have_four_parts() { /* every errors.rs constructor: non-empty code, message, next_step */ }
+#[test] fn the_safety_message_names_the_company_and_the_charge() {
+    let e = errors::blocked(Company::OpenAi, Some(Stage::Prompt), Some(false), Some("req_8f2"));
+    assert_eq!(e.message, "OpenAI's safety filter refused the prompt.");
+    assert!(e.next_step.contains("Not charged") && e.details.contains("req_8f2"));
+}
+```
+
+- [ ] **Step 2: Run to see them fail**
+Run: `cargo test -p app --lib studio::commands`
+Expected: FAIL to compile, `cannot find function 'models'`.
+
+- [ ] **Step 3: Implement.** Wire each command to `StudioManager`, `catalog`, `prefs` and `Gallery`. `studio_output_bytes` reads the recorded file (or its thumbnail) into `tauri::ipc::Response::new(bytes)`, refusing a file over `SHOW_CAP` with `studio_too_big_to_show` ("This video is too big to play here." / "Use Show in folder to open it with your video player."), since a capped video would otherwise sit whole in Rust, the IPC copy, the ArrayBuffer and the Blob. `studio_model_price` calls `catalog::refresh_price` and returns the model with its price, companies and extra-setting names.
+
+- [ ] **Step 4: Run to see them pass**
+Run: `cargo test -p app --lib studio && cargo clippy --workspace --all-targets -- -D warnings`
+Expected: PASS, no warnings.
+
+- [ ] **Step 5: Commit**
+```bash
+git add src-tauri/src/studio src-tauri/src/dto.rs
+git commit -m "Studio: read commands and the model DTOs"
+```
+
+### Task A16: Changing commands, registration and start-up
+
+**Files:**
+- Modify: `src-tauri/src/studio/commands.rs`, `src-tauri/src/studio/manager.rs` (`delete_outputs`, `delete_unfinished`, `set_prefs`), `src-tauri/src/studio/manager_tests.rs`, `src-tauri/src/lib.rs` (remove the `dead_code` allow; register handlers; `manage(Arc<StudioManager>)`; spawn `resume_interrupted` next to the downloads resume; `shutdown()` on exit), `src-tauri/commands.list`, `src-tauri/capabilities/main.json`, `src-tauri/src/artifacts.rs` (`export_target(path, ext, forbidden)`, `pub(crate)`), `src-tauri/src/attachments.rs` (`ImageInput` also derives `Serialize`; it already renames to camelCase)
+- Test: inline in `commands.rs`, and `manager_tests.rs`
+
+**Interfaces:**
+- Produces the changing commands (same pattern as Task A15):
+```text
 studio_start(req: StartRequest, confirmed: bool) -> RunDto
 studio_cancel(run_id: String) -> RunDto
 studio_fetch_anyway(run_id: String) -> RunDto
-studio_runs(filter: RunsFilter, before: Option<i64>, limit: u32) -> RunsPage
-studio_live() -> Vec<RunDto>
-studio_output_bytes(output_id: String, thumb: bool) -> tauri::ipc::Response
 studio_save_thumb(output_id: String, jpeg_base64: String) -> OutputDto     // JPEG only, at most 1 MiB
 studio_star(output_id: String, starred: bool) -> OutputDto
 studio_delete(output_ids: Vec<String>) -> ()
@@ -1393,48 +1720,23 @@ studio_delete_unfinished() -> u32                            // "Delete stopped 
 studio_export(output_id: String, path: String, with_settings: bool) -> String
 studio_show_in_folder(output_id: String) -> ()
 studio_open_folder() -> ()
-studio_usage() -> UsageDto
 studio_add_ref(image: ImageInput) -> RefDto
 studio_ref_from_output(output_id: String) -> RefDto
-studio_ref_bytes(sha256: String) -> tauri::ipc::Response
 studio_output_for_chat(output_id: String) -> ImageInput      // pictures under 20 MB in PNG, JPEG, GIF or WebP
-studio_get_prefs() -> StudioPrefs
-studio_set_prefs(prefs: StudioPrefs) -> StudioPrefs
+studio_set_prefs(patch: StudioPrefsPatch) -> StudioPrefs
 ```
-Event `studio-progress` → `RunDto`. DTOs (serde camelCase; the TS mirrors in Task B1 use the same names):
 ```rust
-pub struct StartRequest { pub client_token: String, pub provider_id: i64, pub kind: MediaKind, pub model: String, pub prompt: String,
-    pub params: Map<String, Value>, pub extra: Map<String, Value>, pub refs: Vec<RefInput>, pub routing: Option<Routing> }
-pub struct RefInput { pub sha256: String, pub role: RefRole }
-pub struct RefDto { pub sha256: String, pub mime: String, pub size_bytes: u64, pub role: Option<RefRole> }
-pub struct PriceHintDto { pub unit: String /* image|second|token|unknown */, pub low: Option<f64>, pub high: Option<f64> }
-pub struct MediaModelDto { pub id: String, pub display_name: String, pub family: String, pub kind: MediaKind, pub accepts_images: bool,
-    pub params: Vec<ParamSpec>, pub price: PriceHintDto, pub price_known: bool, pub companies: Vec<String>, pub notes: Vec<String>,
-    pub usable: Option<String>, pub created: Option<i64> }
-pub struct StudioEndpointDto { pub provider_id: i64, pub name: String, pub company: Company, pub host: String, pub cloud: bool,
-    pub has_key: bool, pub fetched_at: Option<i64>, pub models: Vec<MediaModelDto> }
-pub struct StudioModelsDto { pub endpoints: Vec<StudioEndpointDto> }
-pub struct RunErrorDto { pub code: String, pub message: String, pub next_step: String, pub details: String,
-    pub charged: Option<bool>, pub request_id: Option<String>, pub company: String, pub stage: Option<String> }
-pub struct OutputDto { pub id: String, pub run_id: String, pub idx: u32, pub mime: String, pub size_bytes: u64, pub width: Option<u32>,
-    pub height: Option<u32>, pub duration_ms: Option<u64>, pub seed: Option<u64>, pub starred: bool, pub has_thumb: bool, pub path: String }
-pub struct RunDto { pub id: String, pub kind: MediaKind, pub provider_id: Option<i64>, pub provider_name: String, pub provider_host: String,
-    pub model: String, pub model_label: String, pub prompt: String, pub params: Map<String, Value>, pub extra: Map<String, Value>,
-    pub routing: Option<Routing>, pub refs: Vec<RefDto>, pub status: String, pub watching: bool, pub stale: bool, pub remote_id: Option<String>,
-    pub progress: Option<f64>, pub estimate_usd: Option<f64>, pub cost_usd: Option<f64>, pub error: Option<RunErrorDto>,
-    pub created_at: i64, pub started_at: Option<i64>, pub finished_at: Option<i64>, pub outputs: Vec<OutputDto>, pub queue_position: Option<u32> }
-pub struct LimitDto { pub limit_usd: Option<f64>, pub spent_today_usd: f64, pub pending_usd: f64, pub would_pass: bool }
-pub struct EstimateDto { pub usd: Option<f64>, pub reasons: Vec<ConfirmReason>, pub limit: LimitDto, pub invalid: Vec<String> }
-pub struct RequestPreviewDto { pub method: String, pub url: String, pub host: String, pub body: Value }
-pub struct RunsFilter { pub kind: Option<MediaKind>, pub starred: bool, pub text: String, pub model: Option<String> }
-pub struct RunsPage { pub runs: Vec<RunDto>, pub next: Option<i64> }
-pub struct UsageDto { pub spent_today_usd: f64, pub pending_usd: f64, pub limit_usd: Option<f64>, pub folder: String,
-    pub bytes: u64, pub pictures: u64, pub videos: u64 }
+impl StudioManager {
+    pub async fn delete_outputs(&self, ids: Vec<String>) -> AppResult<()>;   // stubs for today's runs; files, sidecars, unused refs removed
+    pub async fn delete_unfinished(&self) -> AppResult<u32>;
+    pub async fn set_prefs(&self, patch: StudioPrefsPatch) -> AppResult<StudioPrefs>;   // apply, save, then hold the new prefs
+}
+pub(crate) fn for_chat(output: &store::CreationOutput) -> AppResult<()>;
 ```
 
 - [ ] **Step 1: Write the failing tests**
 ```rust
-const STUDIO_COMMANDS: &[&str] = &["studio_models", /* … all 25 above … */ "studio_set_prefs"];
+const STUDIO_COMMANDS: &[&str] = &["studio_models", /* … the 11 of Task A15 and the 14 above … */ "studio_set_prefs"];
 #[test] fn every_studio_command_is_listed_granted_and_registered() {
     let list = include_str!("../../commands.list"); let main = include_str!("../../capabilities/main.json");
     let lib = include_str!("../lib.rs");
@@ -1444,29 +1746,41 @@ const STUDIO_COMMANDS: &[&str] = &["studio_models", /* … all 25 above … */ "
         assert!(lib.contains(&format!("studio::commands::{c},")), "{c}");
     }
 }
-#[test] fn studio_errors_have_four_parts() { /* every errors.rs constructor: non-empty code, message, next_step */ }
-#[test] fn the_safety_message_names_the_company_and_the_charge() {
-    let e = errors::blocked(Company::OpenAi, Some(Stage::Prompt), Some(false), Some("req_8f2"));
-    assert_eq!(e.message, "OpenAI's safety filter refused the prompt.");
-    assert!(e.next_step.contains("Not charged") && e.details.contains("req_8f2"));
+// manager_tests.rs
+#[tokio::test] async fn deleting_todays_results_does_not_lower_spent_today() {
+    let run = h.seed_done_run_costing(9.50).await;
+    h.manager.delete_outputs(run.output_ids()).await.unwrap();
+    assert!(!Path::new(&run.outputs[0].path).exists());
+    let err = h.manager.start(h.req_estimated(0.96, "after-delete"), true).await.unwrap_err();
+    assert_eq!(err.message, "Daily limit reached: $9.50 of $10 spent today");
 }
-#[test] fn the_stop_hotkey_never_reaches_studio() { assert!(!include_str!("../hotkey.rs").contains("studio")); }
-#[test] fn the_webview_fixture_is_current() {
-    // six models (gpt-image-2.6-flare, gemini-nano-banana-2.1, krea/k3-edit, veo-3.1, grok-imagine-video-1.5-lite,
-    // seedance-2.5-flash) as MediaModelDto from the catalogue fixtures, plus one RunDto, compared with
-    // src/components/studio/fixtures/models.json; with STUDIO_WRITE_FIXTURE=1 it writes the file instead
+#[tokio::test] async fn delete_unfinished_removes_stopped_and_failed_runs_only() {
+    // one each of done, waiting, failed, blocked, cancelled, interrupted → returns 4; done and waiting still listed
 }
+#[tokio::test] async fn a_reference_no_run_uses_any_more_is_removed_and_usage_counts_refs() {
+    // two runs share ref a, one uses ref b: delete the b run → refs/b gone, refs/a kept; usage().bytes includes refs/a
+}
+#[tokio::test] async fn a_new_gallery_folder_applies_to_the_next_run() {
+    h.manager.set_prefs(patch(json!({"galleryDir": other.path()}))).await.unwrap();
+    let r = h.manager.start(h.picture_req("x"), false).await.unwrap();
+    assert!(Path::new(&h.wait_status(&r.id, "done").await.outputs[0].path).starts_with(other.path()));
+}
+#[tokio::test] async fn set_prefs_changes_only_what_it_is_sent_and_checks_it() {
+    // {"confirmEveryVideo": false} keeps dailyLimitUsd; {"dailyLimitUsd": 0.5} → bad_request "Choose an amount from $1 to $1,000."
+}
+// commands.rs
+#[test] fn a_saved_poster_must_be_a_small_jpeg() { /* PNG bytes → bad_request; 1 MiB + 1 → bad_request; a JPEG → thumb written, hasThumb */ }
 #[test] fn a_video_or_a_big_picture_cannot_go_to_a_chat() {
-    // for_chat(&CreationOutput) -> AppResult<()>: "video/mp4", "image/svg+xml" and a 21 MiB PNG are refused; a 2 MiB PNG passes
+    // for_chat: "video/mp4", "image/svg+xml" and a 21 MiB PNG are refused ("This picture is over 20 MB, so it cannot go into a chat."); a 2 MiB PNG passes
 }
 #[test] fn export_keeps_the_original_extension_and_refuses_app_folders() { /* export_target(path, "mp4", forbidden) */ }
 ```
 
 - [ ] **Step 2: Run to see them fail**
-Run: `cargo test -p app --lib studio::commands && cargo test -p app --lib commands::tests::commands_list_matches_capabilities`
-Expected: FAIL (commands missing from the list and lib.rs).
+Run: `cargo test -p app --lib studio && cargo test -p app --lib commands::tests::commands_list_matches_capabilities`
+Expected: FAIL (commands missing from the list and lib.rs; `delete_outputs` missing).
 
-- [ ] **Step 3: Implement.** Wire each command to `StudioManager`, `catalog`, `prefs`, `Gallery`. `studio_output_bytes` reads the recorded file (or its thumbnail) up to 1 GiB into `tauri::ipc::Response::new(bytes)`. `studio_export` copies the original, and with `with_settings` writes `<name>.json` (the run record: prompt, model, settings, cost; never a key). `studio_show_in_folder` uses `tauri_plugin_opener::OpenerExt::opener().reveal_item_in_dir`. `studio_delete` removes rows, then files, thumbnails and an orphaned sidecar; the audit rows stay. In `lib.rs`: build `StudioManager::new(StudioDeps{ StoreProviders { store, secrets }, AppSink, GuardedFetch(search::Fetcher::new(user_agent).with_timeout(Duration::from_secs(600))), SystemClock, gallery from prefs or `Gallery::default_root(home, package name)`, thumbs: Some(PictureWorker::thumbs()), PollPlan::default(), MediaLimits::default() })`, `app.manage(studio.clone())`, then spawn `studio.resume_interrupted()` beside `downloads.resume_interrupted`. Then run `STUDIO_WRITE_FIXTURE=1 cargo test -p app --lib studio::commands::tests::the_webview_fixture_is_current` once to write the fixture.
+- [ ] **Step 3: Implement.** `studio_export` copies the original, and with `with_settings` writes `<name>.json` (the run record: prompt, model, settings, cost; never a key). `studio_show_in_folder` uses `tauri_plugin_opener::OpenerExt::opener().reveal_item_in_dir`. `delete_outputs` / `delete_unfinished` call the store with today's start as `stub_since_ms`, then `gallery.remove_files(&deleted)` and `remove_unused_refs(refs of the deleted runs, store.creation_ref_hashes())`; the audit rows stay. `usage` adds `gallery.refs_bytes()`. In `lib.rs`: `StudioManager::new(StudioDeps{ StoreProviders { store, secrets }, AppSink, GuardedFetch(search::Fetcher::new(user_agent).with_timeout(Duration::from_secs(600))), SystemClock, default_gallery: Gallery::default_root(home, package name), thumbs: Some(PictureWorker::thumbs()), PollPlan::default(), MediaLimits::default() }, prefs::load(&store).await)`, `app.manage(studio.clone())`, then spawn `studio.resume_interrupted()` beside `downloads.resume_interrupted`, and call `studio.shutdown()` from the exit handler.
 
 - [ ] **Step 4: Run to see them pass**
 Run: `cargo test -p app --lib && cargo clippy --workspace --all-targets -- -D warnings`
@@ -1474,34 +1788,40 @@ Expected: PASS, no warnings.
 
 - [ ] **Step 5: Commit**
 ```bash
-git add src-tauri src/components/studio/fixtures/models.json
-git commit -m "Studio: commands, progress events and start-up resume"
+git add src-tauri
+git commit -m "Studio: changing commands, registration, start-up resume and shutdown"
 ```
 
 ---
 
 ## Phase B: Webview
 
-All webview tests mock `src/components/studio/api.ts` with `vi.mock("./api")` (or the relative path) and build data from `src/components/studio/fixtures/models.json`, as `ChatView.cloud.test.tsx` and `settings/Endpoints.test.tsx` mock `lib/ipc`.
+All webview tests mock `src/components/studio/api.ts` with `vi.mock("./api")` (or the relative path) and build data from `MODELS` and `RUN` in `src/components/studio/fixtures/models.ts` (generated in Task B1), as `ChatView.cloud.test.tsx` and `settings/Endpoints.test.tsx` mock `lib/ipc`. A model the fixture lacks (for example a video model without a start frame) is made in the test by copying a fixture model and removing a field.
 
 ### Task B1: Studio store and navigation
 
 **Files:**
 - Create: `src/components/studio/types.ts`, `src/components/studio/api.ts`, `src/store/studio.ts`, `src/store/studio.test.ts`
-- Modify: `src/App.tsx`, `src/App.test.tsx`, `src/components/Sidebar.tsx`, `src/components/Sidebar.test.tsx`, `src/components/ShortcutsDialog.tsx`, `src/lib/words.ts`
+- Create (generated by the Rust test below): `src/components/studio/fixtures/models.ts`
+- Modify: `src-tauri/src/studio/commands.rs` (the fixture test), `src/App.tsx`, `src/App.test.tsx`, `src/components/Sidebar.tsx`, `src/components/Sidebar.test.tsx`, `src/components/ShortcutsDialog.tsx`, `src/lib/words.ts`
 
 **Interfaces:**
-- Consumes: Task A15 commands, event and DTOs.
+- Consumes: Tasks A13, A15 and A16 commands, event and DTOs.
 - Produces:
 ```ts
-// types.ts: TS mirrors with the DTO names, camelCase fields exactly as Task A15:
-// MediaKind, Company, Choice, SizeRules, ParamKind, Canonical, ParamSpec, RefRole, PriceHint, MediaModel, StudioEndpoint,
-// RunStatus, RunError, Output, RefItem, Run, Limit, ConfirmReason, Estimate, Routing, StartRequest, Setup, StudioPrefs,
-// Usage, RunsFilter, RunsPage, RequestPreview, ImageInput (from lib/types)
+// types.ts: TS mirrors with the DTO names, camelCase fields exactly as Tasks A13 and A15:
+// MediaKind, Company, Choice, SizeRules, ParamKind, Canonical, ParamSpec, RefRole, PriceHint, EndpointCompany, MediaModel,
+// StudioEndpoint, RunStatus, RunError, Output, RefItem, Run, Limit, ConfirmReason, Estimate, Routing, StartRequest, Setup,
+// StudioPrefs, StudioPrefsPatch (= Partial<StudioPrefs>), Usage, RunsFilter, RunsPage, RequestPreview, ImageInput (from lib/types)
+export type ConfirmReason = "video" | "atLeast" | "unknownPrice";
+export type ParamKind = { type: "enum"; values: Choice[] } | { type: "range"; min: number; max: number; step?: number | null; unit?: string | null }
+  | { type: "boolean" } | { type: "seed"; max: number } | { type: "images"; min: number; max: number; role: RefRole }
+  | { type: "size"; rules: SizeRules } | { type: "extra"; allowedKeys: string[] };
 // api.ts: one wrapper per command, e.g.
 export const studioModels = () => invoke<{ endpoints: StudioEndpoint[] }>("studio_models");
 export const studioStart = (req: StartRequest, confirmed: boolean) => invoke<Run>("studio_start", { req, confirmed });
 export const studioOutputBytes = (outputId: string, thumb: boolean) => invoke<ArrayBuffer>("studio_output_bytes", { outputId, thumb });
+export const studioSetPrefs = (patch: StudioPrefsPatch) => invoke<StudioPrefs>("studio_set_prefs", { patch });
 export function onStudioProgress(handler: (run: Run) => void): Promise<UnlistenFn>;     // "studio-progress"
 // store/studio.ts
 export type StudioTab = MediaKind;
@@ -1515,13 +1835,36 @@ export function followStudio(): () => void;                 // studio-progress t
 ```
 
 - [ ] **Step 1: Write the failing tests**
+```rust
+// src-tauri/src/studio/commands.rs
+#[test] fn the_webview_fixture_is_current() {
+    // six models (gpt-image-2.6-flare with its recorded /endpoints answer, gemini-nano-banana-2.1, krea/k3-edit, veo-3.1,
+    // grok-imagine-video-1.5-lite, seedance-2.5-flash) as MediaModelDto from the catalogue fixtures, plus one RunDto, rendered as
+    //   // Generated by studio::commands::tests::the_webview_fixture_is_current. Do not edit.
+    //   import type { MediaModel, Run } from "../types";
+    //   export const MODELS: MediaModel[] = <json>;
+    //   export const RUN: Run = <json>;
+    // and compared with src/components/studio/fixtures/models.ts; with STUDIO_WRITE_FIXTURE=1 it writes the file instead.
+    // Typed literals (not a .json import, whose strings widen) make `npm run typecheck` fail when serde and types.ts disagree.
+}
+```
 ```ts
 // App.test.tsx (StudioView mocked to a marker; studio api mocked)
 it("Ctrl+G opens Studio and Esc there stops nothing", async () => {
+  useApp.setState({ activeChatId: 1, generation: turn(1) });          // Esc would stop this reply in the chat view
   fireEvent.keyDown(window, { key: "g", ctrlKey: true });
   expect(useStudio.getState().view).toBe("studio");
   fireEvent.keyDown(window, { key: "Escape" });
   expect(ipcMock.stopGeneration).not.toHaveBeenCalled();
+  act(() => useStudio.getState().showChat());
+  fireEvent.keyDown(window, { key: "Escape" });
+  expect(ipcMock.stopGeneration).toHaveBeenCalledWith(1);            // the seed was live
+});
+it("the stop hotkey leaves Studio runs alone", () => {
+  useStudio.setState({ live: { r1: run({ status: "waiting", watching: true }) } });
+  listeners.emit("stop-requested");                                   // what hotkey::stop_now sends
+  expect(studioApi.studioCancel).not.toHaveBeenCalled();
+  expect(useStudio.getState().live.r1.status).toBe("waiting");
 });
 it("app:open-studio opens Studio on the tab it names", () => {
   window.dispatchEvent(new CustomEvent("app:open-studio", { detail: "video" }));
@@ -1541,22 +1884,26 @@ it("a video that finishes while the chat is shown raises the ready notice", () =
   useStudio.getState().applyProgress(run({ id: "v", kind: "video", status: "done" }));
   expect(useStudio.getState().readyNotice).toBe("v");
 });
-it("runningCount ignores stopped and stale runs", () => {});
+it("runningCount ignores stopped and stale runs", () => {
+  const live = { a: run({ status: "sending" }), b: run({ status: "waiting", watching: true }), c: run({ status: "waiting", watching: false, stale: true }),
+                 d: run({ status: "cancelled" }), e: run({ status: "done" }) };
+  expect(runningCount({ ...useStudio.getState(), live })).toBe(2);
+});
 ```
 
 - [ ] **Step 2: Run to see them fail**
-Run: `npx vitest run src/App.test.tsx src/components/Sidebar.test.tsx src/store/studio.test.ts`
-Expected: FAIL (`Failed to resolve import "./store/studio"`).
+Run: `cargo test -p app --lib studio::commands::tests::the_webview_fixture_is_current; npx vitest run src/App.test.tsx src/components/Sidebar.test.tsx src/store/studio.test.ts`
+Expected: FAIL (no fixture file yet; `Failed to resolve import "./store/studio"`).
 
-- [ ] **Step 3: Implement.** App keeps `<ChatView/>` and `<Workbench/>` mounted inside a wrapper with `hidden` while `view === "studio"` (the composer's draft survives, and `app:compose-images` reaches it), and mounts `<StudioView/>` on first open and keeps it. Key handler: `mod+g` → `showStudio()`; `Escape` returns early when `view === "studio"`; `mod+n`, `mod+l` call `showChat()` first. App's effect calls `followStudio()`. Sidebar: `Sparkles` icon button, `aria-label` "Studio" or "Studio (N working)", title "Studio (Ctrl+G)", with a small count badge; chat rows and New chat call `showChat()`. Shortcut row `[\`${MOD} G\`, "Studio"]`.
+- [ ] **Step 3: Implement.** App keeps `<ChatView/>` and `<Workbench/>` mounted inside a wrapper with `hidden` while `view === "studio"` (the composer's draft survives, and `app:compose-images` reaches it), and mounts `<StudioView/>` on first open and keeps it. Key handler: `mod+g` → `showStudio()`; `Escape` returns early when `view === "studio"`; `mod+n`, `mod+l` call `showChat()` first. App's effect calls `followStudio()`. Sidebar: `Sparkles` icon button, `aria-label` "Studio" or "Studio (N working)", title "Studio (Ctrl+G)", with a small count badge; chat rows and New chat call `showChat()`. Shortcut row `[\`${MOD} G\`, "Studio"]`. Write `types.ts`, then run `STUDIO_WRITE_FIXTURE=1 cargo test -p app --lib studio::commands::tests::the_webview_fixture_is_current` once.
 
 - [ ] **Step 4: Run to see them pass**
-Run: `npx vitest run src/App.test.tsx src/components/Sidebar.test.tsx src/store/studio.test.ts && npm run typecheck`
+Run: `cargo test -p app --lib studio::commands && npx vitest run src/App.test.tsx src/components/Sidebar.test.tsx src/store/studio.test.ts && npm run typecheck`
 Expected: PASS.
 
 - [ ] **Step 5: Commit**
 ```bash
-git add src/components/studio/types.ts src/components/studio/api.ts src/store/studio.ts src/store/studio.test.ts src/App.tsx src/App.test.tsx src/components/Sidebar.tsx src/components/Sidebar.test.tsx src/components/ShortcutsDialog.tsx src/lib/words.ts
+git add src/components/studio/types.ts src/components/studio/api.ts src/components/studio/fixtures/models.ts src-tauri/src/studio/commands.rs src/store/studio.ts src/store/studio.test.ts src/App.tsx src/App.test.tsx src/components/Sidebar.tsx src/components/Sidebar.test.tsx src/components/ShortcutsDialog.tsx src/lib/words.ts
 git commit -m "Studio: sidebar button, Ctrl+G, and a view that leaves the chat running"
 ```
 
@@ -1577,6 +1924,7 @@ filter: RunsFilter; prefs: StudioPrefs | null; usage: Usage | null; grid: boolea
 load(): Promise<void>;                        // studioModels, studioRuns, studioLive, studioGetPrefs, studioUsage; never a refresh
 refreshModels(providerId: number): Promise<void>;
 setTab(tab: StudioTab): void;
+selectInitialModel(tab: StudioTab): void;     // restores prefs.lastModel[tab] or the default; sets the draft only, never fetches
 export function StudioView(): JSX.Element;
 ```
 
@@ -1605,14 +1953,28 @@ it("the top bar shows Pictures and Video, the Cloud mark and spent today", async
   screen.getByRole("tab", { name: "Pictures" }); screen.getByRole("tab", { name: "Video" });
   screen.getByText("$0.84 today"); expect(document.querySelector("[data-cloud-mark]")).not.toBeNull();
 });
-it("each tab keeps its own draft", async () => {});
+it("each tab keeps its own draft", async () => {
+  await show(); typePrompt("lighthouse"); fireEvent.click(screen.getByRole("tab", { name: "Video" }));
+  expect(promptBox().value).toBe(""); typePrompt("waves");
+  fireEvent.click(screen.getByRole("tab", { name: "Pictures" })); expect(promptBox().value).toBe("lighthouse");
+});
+it("Update model lists refreshes every endpoint and says when", async () => {
+  await show({ endpoints: [endpoint({ fetchedAt: Date.UTC(2026, 10, 17, 9) })] });
+  fireEvent.click(screen.getByRole("button", { name: "Update model lists" }));
+  screen.getByText("OpenRouter's lists updated 17 Nov"); expect(api.studioRefreshModels).toHaveBeenCalledWith(1);
+});
+it("the Video tab says it needs OpenRouter when only OpenAI is set up", async () => {
+  await show({ endpoints: [endpoint({ company: "openai" })] });
+  fireEvent.click(screen.getByRole("tab", { name: "Video" }));
+  screen.getByText("Video needs an OpenRouter endpoint. Add one in Settings → Endpoints.");
+});
 ```
 
 - [ ] **Step 2: Run to see them fail**
 Run: `npx vitest run src/components/studio/StudioView.test.tsx`
 Expected: FAIL (`Failed to resolve import "./StudioView"`).
 
-- [ ] **Step 3: Implement** the layout of Wireframe 1: top bar (title, `[Pictures | Video]` Radix tabs, search, Starred, Grid toggle, `CloudMark`-style chip naming the chosen endpoint's host, "$X today"), the card stream in the middle, the right panel slot (Task B5), the prompt dock slot (Task B7). The first model of a tab is `prefs.lastModel[tab]`, else the first usable model of the first endpoint with a list (OpenAI's `gpt-image-2.6-flare` or OpenRouter's `openai/gpt-image-2.6-flare` for pictures, `google/veo-3.1-fast` for video, when present), never an "Auto" choice.
+- [ ] **Step 3: Implement** the layout of Wireframe 1: top bar (title, `[Pictures | Video]` Radix tabs, search, Starred, Grid toggle, `CloudMark`-style chip naming the chosen endpoint's host, "$X today"), the card stream in the middle, the right panel slot (Task B5), the prompt dock slot (Task B7). `selectInitialModel` picks `prefs.lastModel[tab]`, else the first usable model of the first endpoint with a list (OpenAI's `gpt-image-2.6-flare` or OpenRouter's `openai/gpt-image-2.6-flare` for pictures, `google/veo-3.1-fast` for video, when present), never an "Auto" choice; it writes the draft directly and never asks for a price (Task B3's `chooseModel` is for the user's own pick). The top bar's menu holds *Update model lists*, with each endpoint's "lists updated <date>".
 
 - [ ] **Step 4: Run to see them pass**
 Run: `npx vitest run src/components/studio`
@@ -1636,15 +1998,21 @@ git commit -m "Studio: the view's frame, empty states and the saved lists"
 export type PickerFilter = "edit" | "references" | "startFrame" | "endFrame" | "sound" | "transparent";
 export function pickerGroups(endpoints: StudioEndpoint[], kind: StudioTab, query: string, filters: PickerFilter[], recent: string[]):
   { endpoint: StudioEndpoint; family: string; models: MediaModel[] }[];
-export function priceHint(m: MediaModel): string;          // "from $0.04 a picture", "$0.10–$0.40 a second", "price shown when picked", "price unknown"
+export function priceHint(m: MediaModel, company: Company): string;  // "from $0.04 a picture", "$0.10–$0.40 a second",
+                                                           // "price shown when picked" (OpenRouter picture, priceFetchedAt null), "price unknown"
 export function ModelPicker(props: { tab: StudioTab }): JSX.Element;
-// store: chooseModel(tab, providerId, modelId): void      // applies canonical.carry (Task B4) and asks studioModelPrice once for an
-//                                                         // OpenRouter picture model without a saved price
+// store: chooseModel(tab, providerId, modelId): void      // the user's pick: applies canonical.carry (Task B4) and asks studioModelPrice
+//                                                         // once for an OpenRouter picture model whose priceFetchedAt is null
+// store: fetchPrice(tab): Promise<void>                   // the dock's "Get the price" button for a restored model
 ```
 
 - [ ] **Step 1: Write the failing tests**
 ```ts
-it("groups by endpoint and family, recent models first", () => {});
+it("groups by endpoint and family, recent models first", () => {
+  const g = pickerGroups([openrouter], "image", "", [], ["krea/k3-edit"]);
+  expect(g[0]).toMatchObject({ family: "Recent", models: [expect.objectContaining({ id: "krea/k3-edit" })] });
+  expect(g.slice(1).map((x) => x.family)).toEqual(["openai/gpt-image", "google/gemini-nano-banana", "krea/k3-edit"]);  // a recent model stays in its family too
+});
 it("names where the prompt goes", () => {
   render(<ModelPicker tab="image" />);
   screen.getByText("via OpenRouter"); expect(screen.getByTitle("Your prompt and added pictures go to openrouter.ai.")).toBeTruthy();
@@ -1652,8 +2020,24 @@ it("names where the prompt goes", () => {
 it("greys out an endpoint without a key", () => {
   // hasKey false → option disabled with "Add a key in Settings → Endpoints"
 });
-it("greys out a video model that needs a video, and says why", () => {});
-it("filters by Edit, References, Start frame, End frame, Sound and Transparent", () => {});
+it("greys out a video model that needs a video, and says why", () => {
+  // { ...veo, id: "x/needs-video", displayName: "Needs Video", usable: "Needs a video to start from, which Studio does not offer yet." }
+  expect(screen.getByRole("option", { name: /Needs Video/ })).toHaveAttribute("aria-disabled", "true");
+  screen.getByText("Needs a video to start from, which Studio does not offer yet.");
+});
+it("filters by Edit, References, Start frame, End frame, Sound and Transparent", () => {
+  const ids = (f: PickerFilter[], tab: StudioTab = "image") => pickerGroups([openrouter], tab, "", f, []).flatMap((g) => g.models.map((m) => m.id));
+  expect(ids(["transparent"])).toEqual(["openai/gpt-image-2.6-flare"]);
+  expect(ids(["endFrame"], "video")).toEqual(["google/veo-3.1", "bytedance/seedance-2.5-flash"]);
+  expect(ids(["sound"], "video")).toHaveLength(3);                     // every fixture video model makes sound
+  expect(ids(["edit"])).toHaveLength(3);
+});
+it("a restored model fetches no price when Studio opens", async () => {
+  // prefs.lastModel.image = OpenRouter "openai/gpt-image-2.6-flare" with priceFetchedAt null; mount StudioView
+  expect(api.studioModelPrice).not.toHaveBeenCalled(); expect(api.studioRefreshModels).not.toHaveBeenCalled();
+  screen.getByText("price shown when picked"); fireEvent.click(screen.getByRole("button", { name: "Get the price" }));
+  expect(api.studioModelPrice).toHaveBeenCalledTimes(1);
+});
 it("picking an OpenRouter picture model asks for its price once", async () => {
   // before: "price shown when picked"; pick → api.studioModelPrice(1, "openai/gpt-image-2.6-flare") once; pick again → still once
 });
@@ -1693,11 +2077,11 @@ export function closestModel(models: MediaModel[], retired: { id: string; family
 export function changedCount(model: MediaModel, values: Values, extra: Values): number;   // Advanced fields set, plus each extra key
 ```
 
-- [ ] **Step 1: Write the failing tests** (models from `fixtures/models.json`)
+- [ ] **Step 1: Write the failing tests** (models from `MODELS` in `fixtures/models.ts`)
 ```ts
 it("names what changed, in one note", () => {
-  const r = carry(flare, nanoBanana, { aspect_ratio: "21:9", seed: 81723 }, {}, []);
-  expect(r.values).toEqual({ aspect_ratio: "21:9" });
+  const r = carry(k3Edit, nanoBanana, { aspect_ratio: "16:9", seed: 81723 }, {}, []);   // K3 Edit takes a seed; Nano Banana does not
+  expect(r.values).toEqual({ aspect_ratio: "16:9" });
   expect(r.note).toBe("Nano Banana 2.1 has no seed setting, so the seed was removed.");
 });
 it("moves a shape to the nearest ratio", () => {
@@ -1715,8 +2099,15 @@ it("keeps added pictures up to the new limit", () => {
 });
 it("drops an extra field the new model does not accept", () => { /* "Veo 3.1 does not accept foo, so it was removed." */ });
 it("defaults give a cheap first video", () => { expect(defaultsFor(veo)).toEqual({ duration: 4, resolution: "720p" }); });
-it("counts Advanced changes", () => { expect(changedCount(flare, { seed: 1, background: "transparent", quality: "high" }, {})).toBe(2); });
-it("offers the newest model of the same family for a retired one", () => {});
+it("counts Advanced changes", () => {
+  expect(changedCount(flare, { output_format: "png", background: "transparent", quality: "high" }, {})).toBe(2);   // quality is simple
+  expect(changedCount(flare, {}, { moderation: "low" })).toBe(1);
+});
+it("offers the newest model of the same family for a retired one", () => {
+  const newer = { ...veo, id: "google/veo-3.2", created: veo.created! + 1 };
+  expect(closestModel([veo, newer, grokLite], { id: "google/veo-3.0", family: "google/veo" })?.id).toBe("google/veo-3.2");
+  expect(closestModel([grokLite], { id: "google/veo-3.0", family: "google/veo" })).toBeNull();
+});
 it("agrees with the Rust family rule", () => {
   expect(familyOf("google/veo-3.1-fast")).toBe("google/veo"); expect(familyOf("kwaivgi/kling-v3.0-pro")).toBe("kwaivgi/kling");
 });
@@ -1749,6 +2140,7 @@ git commit -m "Studio: carry settings to another model and say what changed"
 ```ts
 export type Widget = "segmented" | "select" | "slider" | "switch" | "seed" | "drop" | "size" | "json";
 export function widgetFor(spec: ParamSpec): Widget;     // enum ≤ 5 values: segmented; longer: select; range: slider + number box; …
+export function visibleFields(params: ParamSpec[], layer: "simple" | "advanced", values: Values): ParamSpec[];   // applies `requires`
 export function ParamField(props: { spec: ParamSpec; value: unknown; onChange(v: unknown): void; onReset(): void }): JSX.Element;
 export function SettingsPanel(props: { tab: StudioTab }): JSX.Element;
 export function RefTray(props: { tab: StudioTab }): JSX.Element;
@@ -1763,16 +2155,37 @@ it("draws each kind with its widget", () => {
   expect(widgetFor(spec({ kind: { type: "range", min: 0, max: 100 } }))).toBe("slider");
 });
 it("shows only the simple fields the model declares", () => { /* nano banana: no How many, no Quality; Resolution 1K 2K 4K */ });
-it("shows five shapes and the rest under +", () => {});
-it("How many offers 1, 2 and 4, and more under + up to the model's maximum", () => {});
+it("shows five shapes and the rest under +", () => {
+  renderPanel(flare);                                                  // 11 ratios
+  expect(within(field("Shape")).getAllByRole("radio")).toHaveLength(5);
+  fireEvent.click(within(field("Shape")).getByRole("button", { name: "More shapes" }));
+  expect(screen.getAllByRole("menuitemradio")).toHaveLength(6);
+});
+it("How many offers 1, 2 and 4, and more under + up to the model's maximum", () => {
+  renderPanel(flare);                                                  // n 1–10
+  expect(within(field("How many")).getAllByRole("radio").map((r) => r.textContent)).toEqual(["1", "2", "4"]);
+  fireEvent.click(within(field("How many")).getByRole("button", { name: "More" }));
+  expect(screen.getByRole("spinbutton", { name: "How many" })).toHaveAttribute("max", "10");
+});
 it("starts a video at the shortest length of at least 4 s and 720p", () => { /* veo: [4 s] pressed, [720p] pressed */ });
-it("hides compression unless the file type is JPEG or WebP", () => {});
+it("hides compression unless the file type is JPEG or WebP", () => {
+  renderFields(flare, "advanced", { output_format: "png" }); expect(screen.queryByText("Compression")).toBeNull();   // ParamFields through visibleFields()
+  setValue("output_format", "webp"); screen.getByText("Compression");
+});
 it("choosing a transparent background switches to PNG and says so", () => {
   // output_format "jpeg" → background "transparent" → output_format "png", note "Transparent needs PNG or WebP, so the file type is now PNG."
 });
 it("the tray refuses a picture past the model's limit", () => { /* max 1: second add → "This model takes 1 added picture." */ });
-it("a start frame drop zone appears only when the model takes one", () => {});
-it("an added picture goes to studioAddRef and shows a role chip", async () => {});
+it("a start frame drop zone appears only when the model takes one", () => {
+  renderPanel(veo); screen.getByText("Start frame");
+  renderPanel({ ...veo, params: veo.params.filter((p) => p.key !== "first_frame") }); expect(screen.queryByText("Start frame")).toBeNull();
+});
+it("an added picture goes to studioAddRef and shows a role chip", async () => {
+  api.studioAddRef.mockResolvedValue({ sha256: "a".repeat(64), mime: "image/png", sizeBytes: 1200, role: null });
+  dropFile(screen.getByText("+ Add picture"), pngFile());
+  await waitFor(() => expect(api.studioAddRef).toHaveBeenCalledTimes(1));
+  screen.getByRole("button", { name: "Reference" });                  // the role chip
+});
 ```
 
 - [ ] **Step 2: Run to see them fail**
@@ -1807,29 +2220,54 @@ export function AdvancedDrawer(props: { tab: StudioTab }): JSX.Element;
 
 - [ ] **Step 1: Write the failing tests**
 ```ts
-it("counts changed fields in the header", () => { screen.getByText("Advanced · 2 changed"); });
-it("each changed field shows as a chip that removes it", () => {});
-it("Reset all and each field's reset go back to Automatic", () => {});
+it("counts changed fields in the header", () => {
+  renderDrawer(flare, { output_format: "png", background: "transparent" }); screen.getByText("Advanced · 2 changed");
+});
+it("each changed field shows as a chip that removes it", () => {
+  expect(chipsFor(flare, { background: "transparent" }, { moderation: "low" })).toEqual(
+    [{ key: "background", text: "background: transparent" }, { key: "moderation", text: "moderation: low" }]);
+  fireEvent.click(screen.getByRole("button", { name: "Remove background: transparent" }));
+  expect(useStudio.getState().drafts.image.values.background).toBeUndefined();
+});
+it("Reset all and each field's reset go back to Automatic", () => {
+  fireEvent.click(screen.getByRole("button", { name: "Reset Background" })); screen.getByText("Automatic (company default)");
+  fireEvent.click(screen.getByRole("button", { name: "Reset all" })); screen.getByText("Advanced");   // no "changed" count left
+});
 it("Extra fields accept only the names the model lists", () => {
-  expect(parseExtra('{"negativePrompt":"rain"}', ["negativePrompt"], [])).toEqual({ ok: true, value: { negativePrompt: "rain" } });
-  expect(parseExtra('{"foo":1}', ["negativePrompt"], [])).toEqual({ ok: false, message: "This model does not accept foo." });
-  expect(parseExtra("{nope", ["negativePrompt"], [])).toEqual({ ok: false, message: "This is not valid JSON." });
+  expect(parseExtra('{"moderation":"low"}', ["moderation"], [])).toEqual({ ok: true, value: { moderation: "low" } });
+  expect(parseExtra('{"foo":1}', ["moderation"], [])).toEqual({ ok: false, message: "This model does not accept foo." });
+  expect(parseExtra("{nope", ["moderation"], [])).toEqual({ ok: false, message: "This is not valid JSON." });
   expect(parseExtra('{"duration":4}', ["duration"], ["duration"])).toEqual({ ok: false, message: "Set duration with its own field above." });
 });
-it("lists the accepted names as hints", () => { screen.getByText("This model accepts: negativePrompt, personGeneration, enhancePrompt"); });
+it("lists the accepted names as hints", () => {
+  renderDrawer(flare); screen.getByText("This model accepts: moderation, complexity");   // from flare's saved /endpoints answer
+  renderDrawer({ ...flare, params: flare.params.filter((p) => p.key !== "extra"), priceFetchedAt: null });
+  screen.getByText("Pick the model to see its extra settings.");
+});
 it("See the exact request shows where it goes, without the key", async () => {
   // api.studioPreview resolves {host:"openrouter.ai", body:{…}} → "goes to openrouter.ai" and "key removed"
 });
-it("the dice gives a new seed and Keep it locks it", () => {});
-it("a setup brings back the model and every setting", () => {});
-it("a routing choice is offered for OpenRouter pictures only", () => {});
+it("the dice gives a new seed and Keep it locks it", () => {
+  renderDrawer(k3Edit, { seed: 81723 }); fireEvent.click(screen.getByRole("button", { name: "New seed" }));
+  expect(draftSeed()).not.toBe(81723);
+  fireEvent.click(screen.getByRole("checkbox", { name: "Keep it" })); expect(useStudio.getState().drafts.image.seedLocked).toBe(true);
+});
+it("a setup brings back the model and every setting", () => {
+  useStudio.getState().applySetup({ name: "Product shot", kind: "image", providerId: 1, model: "openai/gpt-image-2.6-flare",
+    params: { quality: "high", background: "transparent" }, extra: {}, routing: null });
+  expect(useStudio.getState().drafts.image).toMatchObject({ model: "openai/gpt-image-2.6-flare", values: { quality: "high", background: "transparent" } });
+});
+it("a routing choice is offered for OpenRouter pictures only", () => {
+  renderDrawer(flare); screen.getByText("Company that runs it");
+  renderDrawer(veo); expect(screen.queryByText("Company that runs it")).toBeNull();
+});
 ```
 
 - [ ] **Step 2: Run to see them fail**
 Run: `npx vitest run src/components/studio/AdvancedDrawer.test.tsx`
 Expected: FAIL (module missing).
 
-- [ ] **Step 3: Implement** Wireframe 2: Advanced fields through `ParamField`, each with a reset; seed with Dice and Keep it and the help "A seed is not a saved copy; the same seed on another model or version gives a different picture."; the OpenRouter section (company that runs it from `MediaModelDto.companies`, *Allow another company if that one is busy*, *Only companies that keep no data*) for pictures; Extra fields (JSON) with hints; *See the exact request* (read-only JSON, "key removed · goes to <host>"). `prefs.advancedOpen` remembers the drawer. My setups: a select plus *Save as setup…* (name), at most 50.
+- [ ] **Step 3: Implement** Wireframe 2: Advanced fields through `ParamField`, each with a reset; seed with Dice and Keep it and the help "A seed is not a saved copy; the same seed on another model or version gives a different picture."; the OpenRouter section (company that runs it from `MediaModelDto.companies` by `name`, sent as its `tag`; *Allow another company if that one is busy*; *Only companies that keep no data*) for pictures; Extra fields (JSON) with hints; *See the exact request* (read-only JSON, "key removed · goes to <host>"). `prefs.advancedOpen` remembers the drawer. My setups: a select plus *Save as setup…* (name), at most 50.
 
 - [ ] **Step 4: Run to see them pass**
 Run: `npx vitest run src/components/studio`
@@ -1870,7 +2308,11 @@ it("formats and colours prices", () => {
 // PromptDock.test.tsx
 it("Create shows the price for the whole run", () => { screen.getByRole("button", { name: /Create/ }); screen.getByText("~ $0.16"); });
 it("names where the prompt goes", () => { screen.getByText("Cloud: your prompt and added pictures go to openrouter.ai"); });
-it("Enter creates and Shift+Enter adds a line", () => {});
+it("Enter creates and Shift+Enter adds a line", () => {
+  typePrompt("a"); fireEvent.keyDown(promptBox(), { key: "Enter", shiftKey: true });
+  expect(api.studioStart).not.toHaveBeenCalled();
+  fireEvent.keyDown(promptBox(), { key: "Enter" }); expect(api.studioStart).toHaveBeenCalledTimes(1);
+});
 it("Create is disabled while a start is on its way", async () => {
   // api.studioStart pending; click Create twice and press Enter → studioStart called once
 });
@@ -1889,7 +2331,7 @@ it("says a started video is charged even if you stop watching", () => {
   screen.getByText("OpenRouter charges for a video once it has started, even if you stop watching it.");
 });
 it("Don't ask again for videos under $1.00 saves the choice and starts", async () => {
-  // → api.studioSetPrefs({…, confirmEveryVideo: false}) then api.studioStart(req, true)
+  // → api.studioSetPrefs({ confirmEveryVideo: false }) (only that field) then api.studioStart(req, true)
 });
 it("Cancel sends nothing", () => { expect(api.studioStart).not.toHaveBeenCalled(); });
 ```
@@ -1898,7 +2340,7 @@ it("Cancel sends nothing", () => { expect(api.studioStart).not.toHaveBeenCalled(
 Run: `npx vitest run src/components/studio/cost.test.ts src/components/studio/PromptDock.test.tsx src/components/studio/ConfirmRun.test.tsx`
 Expected: FAIL (modules missing).
 
-- [ ] **Step 3: Implement.** The dock: *+ Add picture*, the prompt box, the chips row (Task B6), the Cloud line, the price in text with `costTone` colour as a second cue, and Create. The store's `start` makes one `clientToken` (`crypto.randomUUID()`) per press, sets `starting`, calls `studioStart(req, false)` unless `estimate.reasons` is not empty (then `ConfirmRun`), and on `studio_needs_confirmation` from the backend opens the dialog anyway. The dialog lists model, company, length, size, sound, count, the estimate with "(<company>'s price list, <date of fetchedAt>)", where the data goes, and for video the charge sentence; the checkbox appears only when the only reason is `video`.
+- [ ] **Step 3: Implement.** The dock: *+ Add picture*, the prompt box, the chips row (Task B6), the Cloud line, the price in text with `costTone` colour as a second cue, and Create. The store's `start` makes one `clientToken` (`crypto.randomUUID()`) per press, sets `starting`, calls `studioStart(req, false)` unless `estimate.reasons` is not empty (then `ConfirmRun`), and on `studio_needs_confirmation` from the backend opens the dialog anyway. The dialog lists model, company, length, size, sound, count, the estimate with "(<company>'s price list, <date of fetchedAt>)", where the data goes, and for video the charge sentence; the checkbox ("Don't ask again for videos under $<estimate.confirmAtUsd>") appears only when the only reason is `video`.
 
 - [ ] **Step 4: Run to see them pass**
 Run: `npx vitest run src/components/studio`
@@ -1928,7 +2370,11 @@ export function StudioNotice(): JSX.Element | null;
 - [ ] **Step 1: Write the failing tests**
 ```ts
 it("a picture card shows making it, a timer and Cancel", () => { screen.getByText(/Making it · 0:0\d/); screen.getByRole("button", { name: "Cancel" }); });
-it("a cancelled picture says the company may still charge", () => { screen.getByText("Stopped waiting. The company may still charge for it."); });
+it("a stopped picture shows the backend's charge line", () => {
+  // run({ status: "cancelled", error: err({ code: "studio_stopped", charged: null, message: "Stopped waiting. OpenAI may still charge for it." }) })
+  screen.getByText("Stopped waiting. OpenAI may still charge for it."); screen.getByText("May have been charged");
+  // the OpenRouter case: charged false, "Stopped. OpenRouter does not charge for a picture you did not receive." and "Not charged"
+});
 it("a video card shows time so far and the usual time", () => {
   screen.getByText("Making it · 1:12 so far · usually about 2 min");
   screen.getByText("You can keep working or close the app; it will appear here.");
@@ -1936,13 +2382,22 @@ it("a video card shows time so far and the usual time", () => {
 it("Stop watching keeps a way to get the video", async () => {
   // cancel → card "OpenRouter may still finish and charge for this." + "Get it anyway" → api.studioFetchAnyway(id)
 });
-it("a still-not-ready video offers Check again", () => {});
+it("a still-not-ready video offers Check again", () => {
+  render(<RunCard run={run({ kind: "video", status: "waiting", watching: false, stale: true })} />);
+  screen.getByText("Still not ready."); fireEvent.click(screen.getByRole("button", { name: "Check again" }));
+  expect(api.studioFetchAnyway).toHaveBeenCalledWith(RUN.id); expect(api.studioStart).not.toHaveBeenCalled();
+});
 it("a refused run explains it and offers no retry", () => {
   // error {code:"studio_blocked", message:"OpenAI's safety filter refused the prompt.", charged:false, requestId:"req_8f2"}
   screen.getByText("OpenAI's safety filter refused the prompt."); screen.getByText("Not charged · request req_8f2");
   screen.getByRole("button", { name: "Edit prompt" }); expect(screen.queryByRole("button", { name: /try again/i })).toBeNull();
 });
-it("an interrupted run says it may or may not have started", () => {});
+it("an interrupted run says it may or may not have started", () => {
+  render(<RunCard run={run({ status: "interrupted", error: err({ code: "studio_interrupted", charged: null,
+    message: "The app closed while sending; it may or may not have started." }) })} />);
+  screen.getByText("The app closed while sending; it may or may not have started."); screen.getByText("May have been charged");
+  screen.getByText("Check your activity page on openrouter.ai.");
+});
 it("progress events update the card", () => { /* applyProgress → progress bar 40% */ });
 it("the queue strip counts", () => { expect(queueSummary(runs)).toBe("1 making · 1 waiting · 3 done · 1 stopped"); });
 it("a video finished while in chat says so, with a way to open it", () => {
@@ -1971,7 +2426,7 @@ git commit -m "Studio: run cards with progress, honest charge lines and the read
 
 **Files:**
 - Create: `src/components/studio/Grid.tsx`, `Grid.test.tsx`, `Viewer.tsx`, `Viewer.test.tsx`
-- Modify: `src/components/studio/RunCard.tsx` (tiles, actions), `src/store/studio.ts` (`again`, `reuse`, `animate`, `editWithWords`, `useAsReference`, `star`, `remove`, `openViewer`, filters), `src/components/ShortcutsDialog.tsx` (viewer keys), `src/lib/words.ts`
+- Modify: `src/components/studio/RunCard.tsx` (tiles, actions), `src/store/studio.ts` (`again`, `reuse`, `animate`, `editWithWords`, `useAsReference`, `star`, `remove`, `saveSeveral`, `openViewer`, filters), `src/components/ShortcutsDialog.tsx` (viewer keys), `src/lib/words.ts`
 
 **Interfaces:**
 - Produces:
@@ -1983,6 +2438,7 @@ export function Viewer(props: { outputId: string; onClose(): void }): JSX.Elemen
 again(run: Run): Promise<void>;               // same settings, new seed unless locked; goes through start (confirm rules apply)
 reuse(run: Run, withSeed: boolean): void;     // fills the draft; never starts
 animate(output: Output): void; editWithWords(output: Output): void; useAsReference(output: Output): Promise<void>;
+saveSeveral(outputIds: string[]): Promise<void>;   // folder picker, then studioExport per output (original names, settings off)
 ```
 
 - [ ] **Step 1: Write the failing tests**
@@ -1993,26 +2449,57 @@ it("arrow keys move, F stars, R reuses all, Shift+R reuses without seed, Esc clo
   fireEvent.keyDown(window, { key: "R", shiftKey: true }); expect(useStudio.getState().drafts.image.values.seed).not.toBe(81723);
   fireEvent.keyDown(window, { key: "Escape" }); expect(onClose).toHaveBeenCalled(); expect(api.studioCancel).not.toHaveBeenCalled();
 });
-it("shows every setting, the cost, the time taken and the file", () => { screen.getByText("$0.04 · took 13.8 s"); });
+it("shows every setting, the cost, the time taken, the file and where it ran", () => {
+  screen.getByText("$0.04 · took 13.8 s");
+  screen.getByText("OpenRouter (runs at OpenAI)");                     // RUN.upstream "OpenAI"; plain "OpenRouter" when null
+});
 it("Delete says what the audit log keeps", async () => {
-  screen.getByText("The audit log keeps a line saying a run happened (model and cost), but not your prompt.");
+  screen.getByText("The audit log keeps a line saying a run happened (model and cost), but not your prompt. It still counts toward today's spending.");
 });
 it("Save as leaves the settings file off unless asked", async () => {
   // saveDialog mocked → path; api.studioExport("o1", path, false)
 });
-it("Reuse all fills the prompt and every setting and starts nothing", () => {});
+it("Reuse all fills the prompt and every setting and starts nothing", () => {
+  fireEvent.click(screen.getByRole("button", { name: "Reuse all" }));
+  expect(api.studioStart).not.toHaveBeenCalled();
+  expect(useStudio.getState().drafts.image).toMatchObject({ prompt: RUN.prompt, values: RUN.params, extra: RUN.extra });
+});
+it("Again pressed twice while starting starts once", async () => {
+  api.studioStart.mockReturnValue(new Promise(() => {}));           // still on its way
+  fireEvent.click(screen.getByRole("button", { name: "Again" })); fireEvent.click(screen.getByRole("button", { name: "Again" }));
+  expect(api.studioStart).toHaveBeenCalledTimes(1);
+});
 it("Reuse on a retired model picks the closest one and says what changed", () => {
   // none in the family → "OpenRouter no longer offers this model."
 });
 it("Animate switches to Video with the picture as the start frame", async () => {
-  // current video model without a start frame → "Veo 3.1 Lite takes no start frame. Use Veo 3.1 Fast instead?"
+  // video draft on noFrames = { ...veo, id: "test/no-frames", displayName: "No Frames", params without first_frame/last_frame };
+  // recently used: grok-imagine-video-1.5-lite → "No Frames takes no start frame. Use Grok Imagine Video 1.5 Lite instead?"
+  fireEvent.click(screen.getByRole("button", { name: "Use Grok Imagine Video 1.5 Lite" }));
+  expect(useStudio.getState()).toMatchObject({ tab: "video", drafts: { video: { model: "x-ai/grok-imagine-video-1.5-lite" } } });
+  expect(useStudio.getState().drafts.video.refs[0].role).toBe("startFrame");
 });
-it("Edit puts the picture in the tray and focuses the prompt", () => {});
+it("Edit puts the picture in the tray and focuses the prompt", () => {
+  fireEvent.click(screen.getByRole("button", { name: "Edit" }));
+  expect(useStudio.getState().drafts.image.refs.map((r) => r.role)).toEqual(["reference"]);
+  expect(document.activeElement).toBe(promptBox());
+});
 it("Copy falls back to Save as when the clipboard refuses", async () => {
   // navigator.clipboard.write rejects → "Copy is not available here. Use Save as… instead."
 });
-it("the grid filters by Pictures, Video, Starred and search", async () => { /* api.studioRuns called with the filter */ });
-it("several can be selected and deleted together", () => {});
+it("the grid filters by Pictures, Video, Starred, date and search", async () => {
+  fireEvent.click(screen.getByRole("button", { name: "Video" })); typeSearch("waves"); pickDate("Last 7 days");
+  expect(api.studioRuns).toHaveBeenLastCalledWith(expect.objectContaining({ kind: "video", text: "waves", since: expect.any(Number) }), null, 60);
+});
+it("several can be selected and deleted together", async () => {
+  selectTiles("o1", "o2"); fireEvent.click(screen.getByRole("button", { name: "Delete 2" })); confirmDialog();
+  expect(api.studioDelete).toHaveBeenCalledWith(["o1", "o2"]);
+});
+it("several can be saved together into one folder", async () => {
+  selectTiles("o1", "o2"); dialogOpen.mockResolvedValue("/tmp/out"); fireEvent.click(screen.getByRole("button", { name: "Save 2…" }));
+  await waitFor(() => expect(api.studioExport).toHaveBeenCalledTimes(2));
+  expect(api.studioExport).toHaveBeenCalledWith("o1", expect.stringMatching(/^\/tmp\/out\//), false);
+});
 it("an SVG result is shown with an img element only", () => { expect(container.querySelector("object, iframe, embed")).toBeNull(); });
 ```
 
@@ -2049,12 +2536,28 @@ it("says how much Studio holds and where", async () => {
 });
 it("opening the page sends nothing", async () => { expect(api.studioRefreshModels).not.toHaveBeenCalled(); });
 it("the daily limit is on at $10 and can be changed or turned off", async () => {
-  // input "20" → api.studioSetPrefs({…, dailyLimitUsd: 20}); untick → dailyLimitUsd: null; "0.5" → "Choose an amount from $1 to $1,000."
+  // input "20" → api.studioSetPrefs({ dailyLimitUsd: 20 }) (only that field); untick → { dailyLimitUsd: null };
+  // "0.5" → "Choose an amount from $1 to $1,000." and nothing sent
 });
-it("the confirmation choices can be changed", () => {});
-it("Delete stopped and failed runs asks first", async () => {});
-it("each model list says when it was updated, and Update now refreshes it", async () => {});
-it("changing the folder says existing results stay where they are", () => {});
+it("the confirmation choices can be changed", async () => {
+  fireEvent.click(screen.getByRole("checkbox", { name: "Ask before every video" }));
+  expect(api.studioSetPrefs).toHaveBeenLastCalledWith({ confirmEveryVideo: false });
+  setAmount("Ask before runs of", "2.5"); expect(api.studioSetPrefs).toHaveBeenLastCalledWith({ confirmAtUsd: 2.5 });
+});
+it("Delete stopped and failed runs asks first", async () => {
+  fireEvent.click(screen.getByRole("button", { name: "Delete stopped and failed runs" }));
+  expect(api.studioDeleteUnfinished).not.toHaveBeenCalled();
+  fireEvent.click(screen.getByRole("button", { name: "Delete" })); await waitFor(() => expect(api.studioDeleteUnfinished).toHaveBeenCalledTimes(1));
+});
+it("each model list says when it was updated, and Update now refreshes it", async () => {
+  screen.getByText("OpenRouter · updated 17 Nov 2026 09:00");
+  fireEvent.click(screen.getByRole("button", { name: "Update now" })); expect(api.studioRefreshModels).toHaveBeenCalledWith(1);
+});
+it("changing the folder says existing results stay where they are", async () => {
+  dialogOpen.mockResolvedValue("/data/studio"); fireEvent.click(screen.getByRole("button", { name: "Change…" }));
+  await waitFor(() => expect(api.studioSetPrefs).toHaveBeenCalledWith({ galleryDir: "/data/studio" }));
+  screen.getByText("New results go to the new folder; existing ones stay where they are.");
+});
 // Endpoints.test.tsx
 it("cards say what each company can do", () => {
   expect(abilitiesOf("openrouter")).toBe("Chat · Pictures · Video");
@@ -2095,10 +2598,20 @@ sendToChat(output: Output): Promise<void>;    // studioOutputForChat → showCha
 it("Send to chat puts the picture in the message box", async () => {
   // api.studioOutputForChat → {mime:"image/png", fileName:"lighthouse-1.png", data:"…"}; view becomes "chat"; event detail has it
 });
-it("Send to chat is hidden for videos", () => {});
-it("a picture over 20 MB cannot be sent and says why", async () => {});
+it("Send to chat is hidden for videos", () => {
+  render(<Viewer outputId="v1" onClose={vi.fn()} />);                  // a video/mp4 output
+  expect(screen.queryByRole("button", { name: "Send to chat" })).toBeNull();
+});
+it("a picture over 20 MB cannot be sent and says why", async () => {
+  api.studioOutputForChat.mockRejectedValue(appError("bad_request", "This picture is over 20 MB, so it cannot go into a chat."));
+  fireEvent.click(screen.getByRole("button", { name: "Send to chat" }));
+  await screen.findByText("This picture is over 20 MB, so it cannot go into a chat."); expect(useStudio.getState().view).toBe("studio");
+});
 // Composer.test.tsx
-it("app:compose-images adds pictures up to 8", () => {});
+it("app:compose-images adds pictures up to 8", () => {
+  // 6 already attached; event with 3 → 8 attached and the composer's own "8 pictures at most" notice
+  expect(screen.getAllByRole("img", { name: /attached picture/i })).toHaveLength(8);
+});
 // MessageItem.test.tsx
 it("Open in Studio puts an attached picture in the tray", async () => {
   // click → api.studioAddRef({mime, fileName, data}) → drafts.image.refs has it; view "studio"
@@ -2140,13 +2653,18 @@ git commit -m "Studio: send a picture to a chat, and open a chat picture in Stud
 ```ts
 it("a video plays from a blob: address", () => { expect(screen.getByTestId("studio-video").getAttribute("src")).toMatch(/^blob:/); });
 it("the first play saves a poster frame", async () => { /* canvas mocked → api.studioSaveThumb("o9", "…") once */ });
+it("a video too big to play here offers Show in folder", async () => {
+  api.studioOutputBytes.mockRejectedValue(appError("studio_too_big_to_show", "This video is too big to play here."));
+  await screen.findByText("This video is too big to play here.");
+  fireEvent.click(screen.getByRole("button", { name: "Show in folder" })); expect(api.studioShowInFolder).toHaveBeenCalledWith("o9");
+});
 ```
 
 - [ ] **Step 2: Run to see them fail**
 Run: `cargo test -p app --lib commands::tests::capabilities_are_listed_explicitly && npx vitest run src/components/studio/Viewer.test.tsx`
 Expected: FAIL (the policy string differs; no poster call).
 
-- [ ] **Step 3: Implement** the CSP change in `tauri.conf.json` and the poster capture (draw the current frame to a canvas scaled to 512 px, `toDataURL("image/jpeg", 0.8)`). A very large video stays on the blob route in 0.1.0; the main-window-only `studio:` scheme is left for later.
+- [ ] **Step 3: Implement** the CSP change in `tauri.conf.json` and the poster capture (draw the current frame to a canvas scaled to 512 px, `toDataURL("image/jpeg", 0.8)`). Only `media-src blob:` is needed: the bytes come through `studio_output_bytes` (`tauri::ipc::Response`), so there is no asset protocol, `protocol-asset` feature or `convertFileSrc`, and `img-src` already allows `blob:` for thumbnails. Videos over `SHOW_CAP` (256 MiB, Task A15) are not played in the app; the main-window-only `studio:` scheme is left for later.
 
 - [ ] **Step 4: Run to see them pass**
 Run: `cargo test -p app --lib commands && npx vitest run src/components/studio`
@@ -2165,7 +2683,7 @@ git commit -m "Studio: let videos play from blob: addresses, and save their post
 ### Task C1: Docs and their checks
 
 **Files:**
-- Modify: `README.md`, `ARCHITECTURE.md` (7.5 providers: `agent::media`; 12 storage: the gallery folder and V3; 13.6: a `| Studio |` row; 13.7: a *Studio (0.1.0)* bullet; 14 frontend: the Studio view; 17 testing: the new tests), `SECURITY.md` ("Secrets and privacy": prompts, added pictures, results, "OpenRouter passes it on", the key never goes to a file host; "The webview": `media-src blob:`; "Audit log": the Studio row keeps the prompt's length only), `docs/SPEC.md` (line 121), `docs/dev/0.1.0/README.md` (owner's words kept verbatim; links to this plan and the owner checklist), `scripts/docs_test.py`
+- Modify: `README.md`, `ARCHITECTURE.md` (7.5 providers: `agent::media`; 12 storage: the gallery folder, V3 and spending stubs; 13.2: the CSP string with `media-src blob:` (it already lacks `font-src 'self' data:`, so the whole string is copied from `tauri.conf.json`); 13.6: a `| Studio |` row; 13.7: a *Studio (0.1.0)* bullet; 14 frontend: the Studio view; 17 testing: the new tests), `SECURITY.md` ("Secrets and privacy": prompts, added pictures, results, "OpenRouter passes it on", the key never goes to a file host; "The webview": `media-src blob:`; "Audit log": the Studio row keeps the prompt's length only), `docs/SPEC.md` (line 121), `docs/dev/0.1.0/README.md` (owner's words kept verbatim; links to this plan and the owner checklist), `scripts/docs_test.py`
 - Test: `scripts/docs_test.py` (new class `StudioDocs`)
 
 **Interfaces:** none (docs).
@@ -2194,12 +2712,13 @@ class StudioDocs(unittest.TestCase):
         self.assertIn("not the prompt", bullet)
 
     def test_the_spec_says_the_scope_changed(self):
-        self.assertIn("(Changed in 0.1.0 at the owner's request: cloud image and video generation, see "
-                      "docs/dev/0.1.0/README.md)", read("docs/SPEC.md"))
+        self.assertIn("*(Changed in 0.1.0 at the owner's request: cloud image and video generation; see "
+                      "[docs/dev/0.1.0/README.md](dev/0.1.0/README.md).)*", read("docs/SPEC.md"))
 
     def test_the_csp_the_docs_describe_is_the_apps(self):
         csp = json.loads(read("src-tauri/tauri.conf.json"))["app"]["security"]["csp"]
         self.assertIn("media-src blob:", csp)
+        self.assertIn(f"**CSP:** `{csp}`", paragraph(section("### 13.2 Webview lockdown"), "- **CSP:**"))
         self.assertIn("media-src blob:", read("SECURITY.md"))
 
     def test_the_offline_test_visits_studio(self):
@@ -2211,7 +2730,7 @@ class StudioDocs(unittest.TestCase):
 Run: `python3 -I scripts/docs_test.py`
 Expected: FAIL (`expected one line starting with '| Studio |', found 0`, …).
 
-- [ ] **Step 3: Write the docs.** The 13.6 row: `| Studio | The user clicks Create, Get the list, Update model lists or Test, or picks an OpenRouter picture model (its price) | the chosen endpoint: \`openrouter.ai\` or \`api.openai.com\`; a result on the company's file host through the guarded fetcher, without the key |`. README: a short "Studio" section in plain words (what it does, the $10 daily limit, confirmation for every video and any run of $1 or more, where files go). The SPEC line gets the annotation in the test, the way 0.0.8 annotated the updater lines. ARCHITECTURE 17 names `crates/agent/tests/media_endpoints.rs`, `media_redirects.rs`, `src-tauri/src/studio/manager_tests.rs`, `wire_tests.rs` and `e2e/m12_studio.py` (by hand). **Separate website task (other repository):** add the Studio row (what goes to OpenRouter or OpenAI, results stay on the computer, no telemetry) to the harnessui.site privacy policy page added in 0.0.8.
+- [ ] **Step 3: Write the docs.** The 13.6 row: `| Studio | The user clicks Create, Get the list, Update model lists or Test, or picks an OpenRouter picture model (its price) | the chosen endpoint: \`openrouter.ai\` or \`api.openai.com\`; a result on the company's file host through the guarded fetcher, without the key |`. README: a short "Studio" section in plain words (what it does, the $10 daily limit, confirmation for every video and any run of $1 or more, where files go). The SPEC line gets the annotation in the test, in the same form as the 0.0.8 annotations (italic, a semicolon, a link). ARCHITECTURE 17 names `crates/agent/tests/media_endpoints.rs`, `media_redirects.rs`, `src-tauri/src/studio/manager_tests.rs`, `wire_tests.rs` and `e2e/m12_studio.py` (by hand). **Separate website task (other repository):** add the Studio row (what goes to OpenRouter or OpenAI, results stay on the computer, no telemetry) to the harnessui.site privacy policy page added in 0.0.8.
 
 - [ ] **Step 4: Run to see them pass**
 Run: `python3 -I scripts/docs_test.py`
@@ -2256,7 +2775,7 @@ def test_the_changelog_tells_users_what_0_1_0_does(self):
 Run: `cargo test -p app --lib commands::tests::the_version_is_the_same_everywhere; python3 -I scripts/docs_test.py`
 Expected: FAIL (`left: "0.0.8"`; the changelog's first entry is 0.0.8).
 
-- [ ] **Step 3: Write the entry and bump the version.** The entry opens with a paragraph for users that quotes the owner's request, then *Added* (Studio and how to open it, the companies, controls that follow the model with Advanced and chips, prices before you run, confirmation and the $10 daily limit, videos that keep going after you close the app, the gallery folder, Send to chat / Open in Studio, the audit row without the prompt), *Changed* (Test on an OpenRouter or OpenAI endpoint also fetches its picture and video lists; endpoint cards say "Chat · Pictures · Video"), *Known limits* (OpenAI publishes no per-picture price for some 2.6 settings, so those runs say "price unknown" and ask; how long OpenRouter keeps a finished video is not documented; going back to 0.0.8 after 0.1.0 has opened the database is refused, because 0.0.8 cannot read schema 3; built and tested on Linux, Windows and macOS from CI). Then:
+- [ ] **Step 3: Write the entry and bump the version.** The entry opens with a paragraph for users that quotes the owner's request, then *Added* (Studio and how to open it, the companies, controls that follow the model with Advanced and chips, prices before you run, confirmation and the $10 daily limit, videos that keep going after you close the app, the gallery folder, Send to chat / Open in Studio, the audit row without the prompt), *Changed* (Test on an OpenRouter or OpenAI endpoint also fetches its picture and video lists; endpoint cards say "Chat · Pictures · Video"), *Known limits* (OpenAI publishes no per-picture price for GPT Image 2.6, and on OpenRouter GPT Image and Nano Banana are priced per token, so those runs say "price unknown", ask every time and hold $5 of the daily limit until they finish, when the real cost replaces it; extra settings for video models are not sent yet; how long OpenRouter keeps a finished video is not documented; a video over 256 MiB opens from its folder instead of playing in the app; going back to 0.0.8 after 0.1.0 has opened the database is refused, because 0.0.8 cannot read schema 3; built and tested on Linux, Windows and macOS from CI). Then:
 ```bash
 sed -i 's/^version = "0.0.8"$/version = "0.1.0"/' Cargo.toml
 npm version 0.1.0 --no-git-tag-version
@@ -2285,7 +2804,7 @@ git commit -m "Release 0.1.0: Studio"
 
 **Interfaces:**
 - Consumes: the real `OpenRouterMedia`, `StudioManager`, `StoreProviders`, `Gallery`, `catalog`, `store::Store::open_in_memory()`, `store::MemorySecretStore`.
-- Produces (test-only): `struct MockOpenRouter { fn start() -> Self; fn url(&self) -> String; fn count(&self, method: &str, path: &str) -> usize; fn requests(&self) -> Vec<(String, String)> }` on a `tokio::net::TcpListener`, serving the catalogue fixtures, a recorded `/endpoints` answer, `POST /api/v1/images` (two PNGs, `usage.cost` 0.04), `POST /api/v1/videos` (202 `vid_1`), `GET /api/v1/videos/vid_1` (pending twice, then completed with `usage.cost` 0.36) and `GET /api/v1/videos/vid_1/content?index=0` (a small MP4 starting with an `ftyp` box).
+- Produces (test-only): `struct MockOpenRouter { fn start() -> Self; fn url(&self) -> String; fn count(&self, method: &str, path: &str) -> usize; fn requests(&self) -> Vec<(String, String)> }` on a `tokio::net::TcpListener`, serving the catalogue fixtures, flux-3-image's recorded `/endpoints` answer, `POST /api/v1/images` (one PNG, `usage.cost` 0.048), `POST /api/v1/videos` (202 `vid_1`), `GET /api/v1/videos/vid_1` (pending twice, then completed with `usage.cost` 0.36) and `GET /api/v1/videos/vid_1/content?index=0` (a small MP4 starting with an `ftyp` box).
 
 - [ ] **Step 1: Write the tests**
 ```rust
@@ -2294,29 +2813,34 @@ git commit -m "Release 0.1.0: Studio"
     let h = WireHarness::new(&mock).await;          // provider kind "openrouter" at mock.url() + "/api/v1", key in MemorySecretStore
     h.refresh_lists().await;
     assert_eq!(h.models().await.len(), 101);
-    let pic = h.manager.start(h.picture("openai/gpt-image-2.6-flare", json!({"n": 2})), true).await.unwrap();
+    h.refresh_price("black-forest-labs/flux-3-image").await;   // the pick that fetches a picture price
+    let pic = h.manager.start(h.picture("black-forest-labs/flux-3-image", json!({"resolution": "1K"})), false).await.unwrap();  // $0.048: no confirmation
     let pic = h.wait(&pic.id, "done").await;
-    assert_eq!(pic.outputs.len(), 2);
+    assert_eq!(pic.outputs.len(), 1);
     assert!(h.gallery_file_exists(&pic.outputs[0].path) && h.sidecar_exists(&pic));
     let vid = h.manager.start(h.video("x-ai/grok-imagine-video-1.5-lite", json!({"duration": 4, "resolution": "480p"})), true).await.unwrap();
     h.wait(&vid.id, "waiting").await;
-    let h = h.restart().await;                      // a new StudioManager on the same store and gallery
+    let h = h.restart().await;                      // first.shutdown(), then a new StudioManager on the same store and gallery
     h.manager.resume_interrupted().await;
     let vid = h.wait(&vid.id, "done").await;
+    assert_eq!(vid.outputs.len(), 1);
     assert_eq!(vid.outputs[0].mime, "video/mp4");
     assert_eq!(mock.count("POST", "/api/v1/images"), 1);
     assert_eq!(mock.count("POST", "/api/v1/videos"), 1);
-    assert!((h.manager.usage().await.unwrap().spent_today_usd - 0.40).abs() < 1e-9);
+    assert_eq!(mock.count("GET", "/api/v1/videos/vid_1/content"), 1);
+    assert!((h.manager.usage().await.unwrap().spent_today_usd - 0.408).abs() < 1e-9);
     assert!(h.audit_rows().await.iter().all(|r| !r.arguments.to_string().contains(&h.prompt)));
 }
 #[tokio::test] async fn opening_studio_makes_no_request() {
     // saved lists in the store; catalog::models_for, list runs, usage, prefs::load → mock.requests().is_empty()
 }
 #[tokio::test] async fn a_video_past_the_daily_limit_never_reaches_the_mock() {
-    // spent 9.95 today; a 4 s 480p Grok Imagine Video 1.5 Lite run (estimate $0.09) → "studio_daily_limit"; no POST /api/v1/videos
+    // spent 9.95 today; a 4 s 480p Grok Imagine Video 1.5 Lite run with no start frame (estimate $0.08) → "studio_daily_limit";
+    // no POST /api/v1/videos
 }
-#[tokio::test] async fn export_then_delete_leaves_the_audit_rows() {
-    // studio export path gets the file; delete removes files, rows and sidecar; the two audit rows stay
+#[tokio::test] async fn export_then_delete_leaves_the_audit_rows_and_the_spending() {
+    // after the picture run: studio export path gets the file; delete_outputs removes the file and sidecar and the run leaves the list;
+    // the audit row stays; usage().spent_today_usd is still 0.048
 }
 ```
 
@@ -2324,7 +2848,7 @@ git commit -m "Release 0.1.0: Studio"
 Run: `cargo test -p app --lib studio::wire_tests`
 Expected: PASS once Phases A–C are in. A failure names the owning task (A4/A5 adapter, A13/A14 manager, A9 gallery); fix it there, with a test in that task.
 
-- [ ] **Step 3: Implement** only the mock and the harness (no product code). The harness builds `StudioDeps` with `StoreProviders`, a recording `StudioSink`, `GuardedFetch` (unused here), `SystemClock`, a temporary gallery and `PollPlan { first: 20 ms, second: 20 ms, third: 20 ms, .. }`.
+- [ ] **Step 3: Implement** only the mock and the harness (no product code). The harness builds `StudioDeps` with `StoreProviders`, a recording `StudioSink`, `GuardedFetch` (unused here), `SystemClock`, a `Scratch` gallery and `PollPlan { first: 20 ms, second: 20 ms, third: 20 ms, .. }`; `restart()` calls `shutdown()` on the old manager before building the new one, so the old tasks cannot finish the video themselves.
 
 - [ ] **Step 4: Run the whole workspace**
 Run: `cargo test --workspace && cargo clippy --workspace --all-targets -- -D warnings && cargo fmt --all --check`
@@ -2342,15 +2866,15 @@ git commit -m "Studio: a whole picture and video run against a mock OpenRouter"
 - Create: `e2e/m12_studio.py`, `docs/dev/0.1.0/owner-checklist.md`
 - Modify: `e2e/m8_offline.py` (open Studio from the sidebar, both tabs, and Settings → Studio; still zero requests), `e2e/README.md`
 
-**Interfaces:** `e2e/m12_studio.py` reuses `e2e/webdriver.py` and a `ThreadingHTTPServer` mock with the same answers as Task D1, on `http://127.0.0.1:<port>/api/v1`.
+**Interfaces:** `e2e/m12_studio.py` reuses `e2e/webdriver.py` and a `ThreadingHTTPServer` mock with the same answers as Task D1, on `http://127.0.0.1:<port>/api/v1`, plus `GET /api/v1/models` with a small `data` list holding one text model (Test lists the chat models first and stops when that fails, before the Studio lists are fetched).
 
-- [ ] **Step 1: Write the scenario.** Checks, each PASS or FAIL like `scripted_agent.py`: add an OpenRouter-kind endpoint at the mock (Test fetches the lists) → open Studio with Ctrl+G → create a picture (no dialog under $1) → two tiles appear → start a 4 s video (dialog "Make this video?") → restart the app while it is waiting → the card finishes by itself and the mock saw one `POST /api/v1/videos` → Save as with settings off → Delete → the file is gone and Settings → Audit log still shows two Studio rows without the prompt → set the daily limit to $1 and see "Daily limit reached".
+- [ ] **Step 1: Write the scenario.** Checks, each PASS or FAIL like `scripted_agent.py`: add an OpenRouter-kind endpoint at the mock (Test fetches the lists) → open Studio with Ctrl+G → pick FLUX 3 Image (its price is fetched) → create a 1K picture (no dialog: $0.05) → one tile appears → start a 4 s video (dialog "Make this video?") → restart the app while it is waiting → the card finishes by itself and the mock saw one `POST /api/v1/videos` → Save as with settings off → Delete → the file is gone and Settings → Audit log still shows two Studio rows without the prompt → set the daily limit to $1, choose an 8 s 1080p video (~ $1.12) and see "Daily limit reached: $0.41 of $1 spent today" in place of Create (the deleted result still counts).
 
 - [ ] **Step 2: Run them**
 Run: `python3 -I e2e/m12_studio.py && python3 -I e2e/m8_offline.py`
 Expected: every check PASS; m8_offline sees no request while Studio and Settings → Studio are open. Both run by hand on Linux with tauri-driver, as the other e2e scripts do.
 
-- [ ] **Step 3: Write the owner checklist** (`docs/dev/0.1.0/owner-checklist.md`): one real run on each company, under $1 in total: a low-quality GPT Image 2.6 Flare picture on OpenAI; a picture and a 4 s 480p Grok Imagine Video 1.5 Lite video on OpenRouter (about $0.09); one safety refusal on each. Compare each shown cost with the company's activity page. Save the real answers (OpenAI generation, its `moderation_blocked` error, OpenRouter's video status and content answers, and any redirect the content endpoint gives) over the hand-written fixtures in `crates/agent/tests/fixtures/media/` and re-run the tests. Note how long OpenRouter keeps a finished video. Play a video on Windows and on a Mac (blob playback and seeking).
+- [ ] **Step 3: Write the owner checklist** (`docs/dev/0.1.0/owner-checklist.md`): one real run on each company, under $1 in total: a low-quality GPT Image 2.6 Flare picture on OpenAI; a picture and a 4 s 480p Grok Imagine Video 1.5 Lite video on OpenRouter (about $0.08 without a start frame); one safety refusal on each. Compare each shown cost with the company's activity page. Save the real answers (OpenAI generation, its `moderation_blocked` error, OpenRouter's picture answer, video status and content answers, and any redirect the content endpoint gives) and the request bodies the companies accepted (with a reference picture, a start frame and an extra setting) over the hand-written fixtures in `crates/agent/tests/fixtures/media/`, and re-run the tests, so the shapes Tasks A4 and A5 check come from real traffic. Note how long OpenRouter keeps a finished video. Play a video on Windows and on a Mac (blob playback and seeking).
 
 - [ ] **Step 4: Run the full check list**
 Run: `npm run lint && npm run typecheck && npx vitest run && cargo test --workspace && python3 -I scripts/docs_test.py`
@@ -2368,29 +2892,39 @@ git commit -m "Studio: app-level scenario against a mock, offline check, owner c
 
 | Design section | Tasks |
 |---|---|
-| §1 What and where (navigation, shortcut, event, badge, ready notice, name) | B1, B2, B8 |
-| §2 Companies, keys, endpoint badges, lists fetched only on request, greyed models | A1, A4, A7, A11, B3, B10 |
-| §3 Easy but not dumbed down (simple layer, Advanced, chips, Extra fields, request preview, seeds, setups, references, Animate, Edit, carrying values) | A1, B4, B5, B6, B9 |
-| §4 Jobs, cost, confirmation, daily limit, queue, never pay twice, resume, downloads, prices | A2, A3, A4, A5, A6, A13, A14, B7, B8 |
-| §5 Gallery, viewer, actions, Settings → Studio, files on disk, V3, showing media, export, folder | A8, A9, A10, A15, B9, B10, B12 |
-| §6 Send to chat, Open in Studio | A15, B11 |
-| §7 Privacy, Cloud mark, no automatic requests, safety messages, audit row, docs | A13, A15, B2, B3, B7, C1, D1, D2 |
+| §1 What and where (navigation, shortcut, event, badge, ready notice, name, the viewer of Wireframe 4 with "OpenRouter (runs at …)") | B1, B2, B8, B9 |
+| §2 Companies, keys, endpoint badges, lists fetched only on request (Test, Get the list, Update model lists with dates, a pick), greyed models, Video empty for OpenAI-only | A1, A2, A4, A7, A11, B2, B3, B10 |
+| §3 Easy but not dumbed down (simple layer, Advanced, chips, Extra fields, request preview, seeds, setups, references, Animate, Edit, carrying values) | A1, A4, B4, B5, B6, B9 |
+| §4 Jobs, cost, confirmation, daily limit, queue, never pay twice, resume, downloads, prices | A2, A3, A4, A5, A6, A7, A13, A14, B7, B8 |
+| §5 Gallery, viewer, actions (incl. select several to delete or save), filters by kind, star, model, date and text, Settings → Studio, files on disk, V3, showing media, export, folder | A8, A9, A10, A15, A16, B9, B10, B12 |
+| §6 Send to chat, Open in Studio | A16, B11 |
+| §7 Privacy, Cloud mark, the company that ran it, no automatic requests, safety messages, audit row, Esc and the stop hotkey, docs | A13, A14, A15, B1, B2, B3, B7, B9, C1, D1, D2 |
 | §8 Architecture mapped to files | File Structure, all tasks |
 | §9 Scope, risks, tests, owner checklist | Review Focus, D1, D2 |
 
 ## Decisions this plan makes where the design was open
 
 - **Raw lists are cached, not parsed models:** `providerMediaModels:<id>` keeps OpenRouter's (or OpenAI's) answers, and the controls are built when read, so a parser fix applies to lists saved earlier. The trait therefore has `fetch_catalog`/`fetch_image_price` instead of `list_models`/`model_price`, plus `preview` for *See the exact request*.
-- **`MediaError` says whether the company may have the request** (`NotSent`, `Answered`, `Unknown`), which drives both the never-retry rule and the charge line.
+- **`MediaError` says whether the company may have the request** (`NotSent`, `Answered`, `Unknown`) or the failure was writing bytes here (`Local`: disk full, over a cap), which drives the never-retry rule, the charge line and *Get it anyway*.
 - **`send_json` itself does not retry** (the 408/5xx/529 retries live in `send_stream_request`); `post_once` is still needed for the streamed body and to make "at most once" explicit and tested.
 - **Polling:** 5 s for the first minute, 10 s until 5 minutes, then 20 s; after 30 minutes the run stays `waiting`, unwatched, with *Check again*.
 - **A queued run is never sent after a restart**; it becomes "Not sent … Nothing was charged."
-- **Spending:** a run counts on the day it was created; queued and running runs count by their estimate; an unknown price reserves $5; cancelled-after-start and interrupted runs count as maybe charged; "not charged" failures count 0.
+- **Spending:** a run counts on the day it was created; queued and running runs count by their estimate; an unknown price reserves $5 until the real cost arrives; each ended run's `error.charged` decides the rest through `spend::charge_of` (yes: its cost; unknown: its estimate; no: 0). A video whose job reported done has its cost recorded before the download, so a failed download still counts it.
+- **Deleting keeps a spending stub:** a run deleted on the day it was made keeps a row with no prompt, settings or references (`deleted_at` set) so the daily limit cannot be undone from the gallery; yesterday's stubs are purged at start-up. Two columns (`deleted_at`, `upstream`) are added to the design's V3 table, which has not shipped.
+- **What OpenRouter bills for pictures:** its image docs say a picture that failed, was cancelled or was cut off is not billed, so a stopped or timed-out OpenRouter picture is recorded as not charged ("OpenRouter does not charge for a picture you did not receive."); an OpenAI picture stopped the same way "may still charge" and counts its estimate.
+- **Prices that are not per picture ask every time:** on 2026-11-17 GPT Image 2.6 and Nano Banana 2.1 on OpenRouter were priced per token, and OpenAI states no per-picture price for 2.6, so those runs have no estimate, confirm, and hold $5 of the limit while running; OpenAI's real cost comes from `usage` with the recorded text, image-input and image-output rates. A picture estimate uses the dearest allowed company unless routing pins one, and the dearest row when a price tier matches no offered resolution, so it is never too low.
+- **Extra settings follow OpenRouter's docs:** passthrough keys go under `provider.options[<provider_slug>]` per company that lists them (the names come from the saved `/endpoints` answer, fetched when a picture model is picked); video extras are not sent in 0.1.0 because the video catalogue does not name the company a job is routed to, and Veo nests them differently.
+- **Audit rows stay write-once:** *Get it anyway* on an ended run appends a follow-up row linked by `parent_audit_id` rather than changing the completed one; a stale (unwatched) `waiting` run keeps its row open.
+- **The manager holds the prefs:** Settings → Studio changes (limit, confirmations, folder) apply to the next run without a restart, and `studio_set_prefs` takes a patch so a stale copy in another view cannot overwrite them.
+- **Where it ran:** `upstream` is recorded when routing pins one company or the saved `/endpoints` answer lists only one; otherwise the viewer says "OpenRouter" (no extra request is made to find out).
+- **Opening Studio restores the last model without asking for its price;** the dock offers *Get the price*, and the picker fetches it on a pick.
+- **Large videos:** the viewer plays a video from a `blob:` up to 256 MiB; above that it offers *Show in folder*.
+- **The webview fixture is a generated, typed `.ts` file,** not `.json`, so a serde/TS mismatch fails `npm run typecheck`; `ConfirmReason` is a unit enum (the threshold travels as `confirm_at_usd`) and `ParamKind` renames its fields too.
 - **Duplicate presses:** a `clientToken` per Create press (kept in memory) plus a start lock, no schema change.
 - **At 20,000 runs Studio refuses new runs** (`studio_gallery_full`) instead of deleting old results.
 - **`studio_attach_to_chat` is replaced** by `studio_output_for_chat` plus the composer's `app:compose-images` event, so the picture goes through the normal send path (which already copies into `attachments/`); ChatView stays mounted, hidden, while Studio is shown, so drafts survive.
 - **Added commands the design implied:** `studio_preview`, `studio_live`, `studio_add_ref`, `studio_ref_from_output`, `studio_ref_bytes`, `studio_delete_unfinished`, `studio_open_folder`.
-- **Video models that need a video input** (4 on 2026-11-17) are listed greyed with the reason; `-1` (automatic length) is not offered; `size` on non-OpenAI picture models is an Extra-field hint.
+- **Video models that need a video input** (4 on 2026-11-17) are listed greyed with the reason; `-1` (automatic length) is not offered; `size` on non-OpenAI picture models is an Extra key.
 - **OpenAI edits use a hand-built multipart body** (no new dependency). OpenAI per-picture prices fill only what OpenAI states; the rest is "price unknown" and asks.
 - **Copy to clipboard uses the webview's clipboard API** (no new Tauri permission), with a Save as fallback.
 - **Changing the gallery folder affects new results only;** nothing is moved in 0.1.0.
