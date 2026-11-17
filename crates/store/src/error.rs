@@ -45,6 +45,14 @@ pub enum StoreError {
     #[error("audit row {0} already has a result; the audit log is append-only")]
     AuditAlreadyCompleted(AuditId),
 
+    /// Studio already keeps [`MAX_CREATION_RUNS`](crate::MAX_CREATION_RUNS) runs, so a new
+    /// one is not recorded (spending stubs do not count).
+    #[error(
+        "Studio already keeps {} runs, the most it can hold; delete some to make room",
+        crate::MAX_CREATION_RUNS
+    )]
+    TooManyCreations,
+
     /// A stored value does not have the shape this version of the app expects.
     #[error("stored data is invalid: {0}")]
     Corrupt(String),

@@ -1,9 +1,10 @@
 //! Local storage for the app (ARCHITECTURE.md section 12).
 //!
 //! - [`Store`]: the SQLite database (chats and the message tree, history search, tool calls,
-//!   compaction summaries, attachments, the append-only audit log, models, downloads and
-//!   configuration). One dedicated OS thread owns the connection; every method is async
-//!   and talks to that thread over a channel, so no async task blocks on disk.
+//!   compaction summaries, attachments, the append-only audit log, models, downloads,
+//!   configuration, and Studio's runs and their files). One dedicated OS thread owns the
+//!   connection; every method is async and talks to that thread over a channel, so no async
+//!   task blocks on disk.
 //! - [`secrets`]: OS keychain storage for API keys and tokens. SQLite holds only
 //!   [`SecretRef`]s.
 //!
@@ -16,6 +17,7 @@ mod artifacts;
 mod audit;
 mod chats;
 mod config;
+mod creations;
 mod error;
 mod ids;
 mod models;
@@ -44,6 +46,10 @@ pub use chats::{
 pub use config::{
     ApprovedFolder, McpServer, McpServerInput, McpToolPref, Provider, ProviderInput, Skill,
     SkillInput,
+};
+pub use creations::{
+    CreationKind, CreationOutput, CreationPatch, CreationQuery, CreationRun, CreationStatus,
+    CreationUsage, Deleted, MAX_CREATION_RUNS, NewCreationOutput, NewCreationRun, RunsOn,
 };
 pub use error::{ParseEnumError, StoreError};
 pub use ids::{

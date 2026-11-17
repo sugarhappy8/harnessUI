@@ -228,6 +228,34 @@ pub(crate) fn update_columns(
     id: i64,
     sets: Vec<(&'static str, rusqlite::types::Value)>,
 ) -> Result<usize, crate::StoreError> {
+    update_where_key(conn, table, key, rusqlite::types::Value::Integer(id), sets)
+}
+
+/// [`update_columns`] for a table keyed by a TEXT id (Studio's runs and outputs use uuids).
+pub(crate) fn update_columns_by_text(
+    conn: &rusqlite::Connection,
+    table: &'static str,
+    key: &'static str,
+    id: &str,
+    sets: Vec<(&'static str, rusqlite::types::Value)>,
+) -> Result<usize, crate::StoreError> {
+    update_where_key(
+        conn,
+        table,
+        key,
+        rusqlite::types::Value::Text(id.to_owned()),
+        sets,
+    )
+}
+
+/// The shared body of [`update_columns`] and [`update_columns_by_text`].
+fn update_where_key(
+    conn: &rusqlite::Connection,
+    table: &'static str,
+    key: &'static str,
+    id: rusqlite::types::Value,
+    sets: Vec<(&'static str, rusqlite::types::Value)>,
+) -> Result<usize, crate::StoreError> {
     let mut sql = format!("UPDATE {table} SET ");
     let mut values = Vec::with_capacity(sets.len() + 1);
     for (i, (column, value)) in sets.into_iter().enumerate() {
@@ -241,7 +269,7 @@ pub(crate) fn update_columns(
     sql.push_str(" WHERE ");
     sql.push_str(key);
     sql.push_str(" = ?");
-    values.push(rusqlite::types::Value::Integer(id));
+    values.push(id);
     Ok(conn.execute(&sql, rusqlite::params_from_iter(values))?)
 }
 

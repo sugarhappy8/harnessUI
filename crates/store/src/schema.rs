@@ -400,6 +400,102 @@ END;
 -- [/allow all]
 "#;
 
+/// Version 3 (app 0.1.0): Studio. The pictures and videos made in Studio, by a company's
+/// computers through an endpoint or by the Studio engine on this computer, the files they
+/// made, the picture and video models installed for the engine, and the model licences the
+/// user accepted. Not shipped until 0.1.0 is released.
+const V3: &str = r#"
+-- One press of Create. A run whose endpoint is deleted keeps the endpoint's name and host;
+-- a run on this computer has no endpoint (runs_on keeps the two apart). A run deleted on the
+-- day it was made stays as a spending stub (deleted_at set; prompt, settings and added
+-- pictures cleared) until the next day, so deleting a result never lowers today's spending.
+CREATE TABLE creation_runs (
+    id             TEXT    PRIMARY KEY,
+    kind           TEXT    NOT NULL CHECK (kind IN ('image', 'video')),
+    runs_on        TEXT    NOT NULL DEFAULT 'cloud' CHECK (runs_on IN ('cloud', 'local')),
+    provider_id    INTEGER REFERENCES providers(id) ON DELETE SET NULL,
+    provider_name  TEXT    NOT NULL,
+    provider_host  TEXT    NOT NULL,
+    model          TEXT    NOT NULL,
+    model_label    TEXT    NOT NULL,
+    prompt         TEXT    NOT NULL,
+    -- Exactly what was sent, never a key.
+    params_json    TEXT    NOT NULL CHECK (json_valid(params_json)),
+    -- The added pictures: sha256 and role of each.
+    refs_json      TEXT    NOT NULL DEFAULT '[]' CHECK (json_valid(refs_json)),
+    status         TEXT    NOT NULL CHECK (status IN
+                       ('queued', 'sending', 'waiting', 'running', 'downloading',
+                        'done', 'failed', 'blocked', 'cancelled', 'interrupted')),
+    remote_id      TEXT,
+    progress       REAL,
+    estimate_usd   REAL,
+    cost_usd       REAL,
+    -- The error and the company's code, and whether the run was charged.
+    error_json     TEXT    CHECK (error_json IS NULL OR json_valid(error_json)),
+    -- The run's audit row, completed when the run ends (also after a restart).
+    audit_id       INTEGER,
+    -- The company OpenRouter ran it at, when known.
+    upstream       TEXT,
+    -- A run on this computer: the installed model, the engine's build number, the device
+    -- it ran on and how long it took.
+    gen_model_id   TEXT,
+    engine_build   INTEGER,
+    device         TEXT,
+    elapsed_ms     INTEGER,
+    created_at     INTEGER NOT NULL,
+    started_at     INTEGER,
+    finished_at    INTEGER,
+    deleted_at     INTEGER
+);
+CREATE INDEX creation_runs_created ON creation_runs(created_at);
+CREATE INDEX creation_runs_live ON creation_runs(status)
+    WHERE status IN ('queued', 'sending', 'waiting', 'running', 'downloading');
+
+-- One file a run made, in the gallery folder.
+CREATE TABLE creation_outputs (
+    id           TEXT    PRIMARY KEY,
+    run_id       TEXT    NOT NULL REFERENCES creation_runs(id) ON DELETE CASCADE,
+    idx          INTEGER NOT NULL,
+    path         TEXT    NOT NULL,
+    thumb_path   TEXT,
+    mime         TEXT    NOT NULL,
+    size_bytes   INTEGER NOT NULL CHECK (size_bytes >= 0),
+    width        INTEGER,
+    height       INTEGER,
+    duration_ms  INTEGER,
+    seed         INTEGER,
+    starred      INTEGER NOT NULL DEFAULT 0 CHECK (starred IN (0, 1)),
+    created_at   INTEGER NOT NULL
+);
+CREATE INDEX creation_outputs_run ON creation_outputs(run_id, idx);
+
+-- Picture and video models installed for the Studio engine. Never in `models`, which feeds
+-- the chat picker.
+CREATE TABLE gen_models (
+    -- The catalog id, or "hf:<owner>/<repo>:<file>" for a searched model.
+    id          TEXT    PRIMARY KEY,
+    catalog_id  TEXT,
+    name        TEXT    NOT NULL,
+    kind        TEXT    NOT NULL CHECK (kind IN ('image', 'image-edit', 'video')),
+    family      TEXT    NOT NULL,
+    -- [{role, repo, revision, path, file, size, sha256, license}]
+    parts_json  TEXT    NOT NULL CHECK (json_valid(parts_json)),
+    size_bytes  INTEGER NOT NULL CHECK (size_bytes >= 0),
+    source      TEXT    NOT NULL CHECK (source IN ('catalog', 'search')),
+    added_at    INTEGER NOT NULL
+);
+
+-- Model licences the user accepted before a download: one row per licence text (its
+-- SHA-256). catalog_id records which model it was accepted for (NULL: a searched model or
+-- the engine).
+CREATE TABLE license_acceptances (
+    sha256       TEXT    PRIMARY KEY,
+    license_id   TEXT    NOT NULL,
+    catalog_id   TEXT,
+    accepted_at  INTEGER NOT NULL
+);
+"#;
+
 /// One schema step: the SQL that takes `user_version` from its index to index + 1.
 #[derive(Debug, Clone, Copy)]
 pub struct Migration {
@@ -411,7 +507,11 @@ pub struct Migration {
 pub struct Migrations(&'static [Migration]);
 
 /// All schema migrations.
-pub const MIGRATIONS: Migrations = Migrations(&[Migration { sql: V1 }, Migration { sql: V2 }]);
+pub const MIGRATIONS: Migrations = Migrations(&[
+    Migration { sql: V1 },
+    Migration { sql: V2 },
+    Migration { sql: V3 },
+]);
 
 /// Why bringing the schema up to date failed.
 #[derive(Debug, thiserror::Error)]
@@ -800,5 +900,160 @@ mod tests {
             )
             .expect("sql");
         assert!(!sql.contains("audit_log_v2"), "{sql}");
+    }
+
+    fn table_exists(conn: &rusqlite::Connection, name: &str) -> bool {
+        conn.query_row(
+            "SELECT count(*) FROM sqlite_master WHERE type = 'table' AND name = ?1",
+            [name],
+            |r| r.get::<_, i64>(0),
+        )
+        .expect("sqlite_master")
+            == 1
+    }
+
+    /// [studio] Version 3 adds Studio's tables to a database version 2 left, and leaves
+    /// the rows already there as they were.
+    #[test]
+    fn version_3_adds_the_studio_tables_to_a_version_2_database() {
+        let mut conn = rusqlite::Connection::open_in_memory().expect("open");
+        conn.pragma_update(None, "foreign_keys", "ON")
+            .expect("pragma");
+        Migrations(&[Migration { sql: V1 }, Migration { sql: V2 }])
+            .to_latest(&mut conn)
+            .expect("version 2");
+        conn.execute(
+            "INSERT INTO providers (name, kind, base_url, secret_ref, enabled, created_at) \
+             VALUES ('OpenRouter', 'openrouter', 'https://openrouter.ai/api/v1', \
+             'provider-api-key:1', 1, 5)",
+            [],
+        )
+        .expect("provider");
+        conn.execute(
+            "INSERT INTO chats (title, model_ref, created_at, updated_at) \
+             VALUES ('kept', 'local:a.gguf', 1, 2)",
+            [],
+        )
+        .expect("chat");
+        type Rows = (
+            (i64, String, String, String, Option<String>, i64, i64),
+            (i64, String, Option<String>, i64, i64),
+        );
+        let rows = |conn: &rusqlite::Connection| -> Rows {
+            let provider = conn
+                .query_row(
+                    "SELECT id, name, kind, base_url, secret_ref, enabled, created_at \
+                     FROM providers",
+                    [],
+                    |r| {
+                        Ok((
+                            r.get(0)?,
+                            r.get(1)?,
+                            r.get(2)?,
+                            r.get(3)?,
+                            r.get(4)?,
+                            r.get(5)?,
+                            r.get(6)?,
+                        ))
+                    },
+                )
+                .expect("provider row");
+            let chat = conn
+                .query_row(
+                    "SELECT id, title, model_ref, created_at, updated_at FROM chats",
+                    [],
+                    |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
+                )
+                .expect("chat row");
+            (provider, chat)
+        };
+        let before = rows(&conn);
+        assert!(!table_exists(&conn, "creation_runs"));
+
+        MIGRATIONS.to_latest(&mut conn).expect("version 3");
+
+        let version: i64 = conn
+            .pragma_query_value(None, "user_version", |r| r.get(0))
+            .expect("user_version");
+        assert_eq!(version, 3);
+        assert!(table_exists(&conn, "creation_runs"));
+        assert!(table_exists(&conn, "creation_outputs"));
+        assert_eq!(rows(&conn), before);
+    }
+
+    /// [studio] The local addendum's part of version 3: where a run ran, the engine facts,
+    /// installed picture and video models, and licence acceptances.
+    #[test]
+    fn version_3_has_the_local_columns_and_tables() {
+        let mut conn = rusqlite::Connection::open_in_memory().expect("open");
+        conn.pragma_update(None, "foreign_keys", "ON")
+            .expect("pragma");
+        MIGRATIONS.to_latest(&mut conn).expect("migrate");
+
+        conn.execute(
+            "INSERT INTO creation_runs (id, kind, provider_name, provider_host, model, \
+             model_label, prompt, params_json, status, created_at) \
+             VALUES ('r', 'image', 'OpenRouter', 'openrouter.ai', 'm', 'M', 'p', '{}', \
+             'queued', 0)",
+            [],
+        )
+        .expect("a run without runs_on");
+        let runs_on: String = conn
+            .query_row(
+                "SELECT runs_on FROM creation_runs WHERE id = 'r'",
+                [],
+                |r| r.get(0),
+            )
+            .expect("runs_on");
+        assert_eq!(runs_on, "cloud");
+        assert!(
+            conn.execute(
+                "UPDATE creation_runs SET runs_on = 'gpu' WHERE id = 'r'",
+                []
+            )
+            .is_err(),
+            "runs_on is cloud or local"
+        );
+        conn.execute(
+            "UPDATE creation_runs SET runs_on = 'local', status = 'running', \
+             gen_model_id = 'flux2-klein-4b-q4', engine_build = 1106, device = 'vulkan0', \
+             elapsed_ms = 228000, upstream = NULL, deleted_at = NULL WHERE id = 'r'",
+            [],
+        )
+        .expect("the local columns and the running status");
+
+        assert!(table_exists(&conn, "gen_models"));
+        assert!(table_exists(&conn, "license_acceptances"));
+        let gen_model = |kind: &str| {
+            conn.execute(
+                "INSERT INTO gen_models (id, catalog_id, name, kind, family, parts_json, \
+                 size_bytes, source, added_at) \
+                 VALUES (?1, 'flux2-klein-4b-q4', 'FLUX.2 klein', ?2, 'flux2-klein-4b', '[]', 0, \
+                 'catalog', 0)",
+                [format!("id-{kind}"), kind.to_owned()],
+            )
+        };
+        assert!(gen_model("audio").is_err(), "audio is not a kind");
+        gen_model("image").expect("a picture model");
+        gen_model("image-edit").expect("a picture-editing model");
+        gen_model("video").expect("a video model");
+
+        // One row per licence text, whichever model accepted it (and none for searched
+        // models, whose catalog id is NULL).
+        let accept = |catalog: Option<&str>| {
+            conn.execute(
+                "INSERT OR IGNORE INTO license_acceptances (sha256, license_id, catalog_id, \
+                 accepted_at) VALUES ('ab', 'apache-2.0', ?1, 1)",
+                [catalog],
+            )
+            .expect("accept")
+        };
+        assert_eq!(accept(None), 1);
+        assert_eq!(accept(None), 0, "accepted again: still one row");
+        assert_eq!(accept(Some("z-image-turbo")), 0);
+        let held: i64 = conn
+            .query_row("SELECT count(*) FROM license_acceptances", [], |r| r.get(0))
+            .expect("count");
+        assert_eq!(held, 1);
     }
 }
