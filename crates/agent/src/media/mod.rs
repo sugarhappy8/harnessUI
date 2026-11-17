@@ -3,7 +3,7 @@
 //!
 //! - [`spec`]: the controls each model offers ([`ParamSpec`]), read from the companies' own
 //!   catalogues, and [`validate`], which checks a request against them;
-//! - [`price`]: what a model costs ([`Price`]).
+//! - [`price`]: what a model costs ([`Price`]) and what a run would cost ([`estimate`]).
 //!
 //! The companies are OpenRouter (pictures and video), OpenAI (pictures) and this computer
 //! ([`Company::Local`]). A request goes only to the chosen endpoint's host; a run on this
@@ -24,7 +24,10 @@ pub mod price;
 pub mod spec;
 
 pub use crate::cloud::media_company;
-pub use price::{Mode, Price, PriceRow, Table};
+pub use price::{
+    Mode, Price, PriceChoice, PriceRow, Table, choice_for, estimate, parse_image_endpoints,
+    parse_pricing_skus,
+};
 pub use spec::{
     Canonical, Choice, EndpointCompany, Invalid, Layer, OPENAI_SIZE_RULES, ParamKind, ParamSpec,
     Requires, SEED_MAX, SizeProblem, SizeRules, check_size, endpoint_companies, family_of,

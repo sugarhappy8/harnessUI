@@ -21,6 +21,7 @@ use std::collections::BTreeMap;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
+use super::price::{parse_image_endpoints, parse_pricing_skus};
 use super::{Company, MediaKind, MediaModel, MediaRequest, Price, RawCatalog, RefRole, Routing};
 
 /// The largest seed: 2³¹ − 1, the largest signed 32-bit integer.
@@ -310,13 +311,16 @@ pub enum Invalid {
     NotUsable(String),
 }
 
-/// The models in a company's saved lists. `image_prices` holds the saved OpenRouter
-/// `/endpoints` answers by model id: they give the companies that run a picture model and
-/// the extra settings each takes (and, to the price, picture prices).
+/// The models in a company's saved lists, with their prices. `image_prices` holds the saved
+/// OpenRouter `/endpoints` answers by model id: they give the companies that run a picture
+/// model, the extra settings each takes and the picture's price ([`parse_image_endpoints`]).
+/// A video's price is its `pricing_skus` ([`parse_pricing_skus`]); a picture with no saved
+/// answer, or a video without one, has [`Price::Unknown`].
 ///
 /// OpenRouter gives its pictures, then its videos. OpenAI's list is read against a bundled
 /// settings file, so it gives no models here. For [`Company::Local`], `raw.images` is the
-/// JSON array of models the local provider built, read as it is; none when it cannot be read.
+/// JSON array of models the local provider built, read as it is (with the [`Price::Free`]
+/// it gave them); none when it cannot be read.
 pub fn parse_catalog(
     company: Company,
     raw: &RawCatalog,
@@ -527,12 +531,12 @@ pub fn check_size(size: &str, rules: &SizeRules) -> Result<(), SizeProblem> {
     Ok(())
 }
 
-/// Whether an OpenRouter request with this routing may reach `company`: with `only`, or
-/// with fallbacks off, only the companies in `order` run it.
-pub(crate) fn routing_allows(routing: Option<&Routing>, company: &EndpointCompany) -> bool {
+/// Whether an OpenRouter request with this routing may reach the company with this
+/// `provider_tag`: with `only`, or with fallbacks off, only the companies in `order` run it.
+pub(crate) fn routing_allows(routing: Option<&Routing>, tag: &str) -> bool {
     match routing {
         Some(r) if (r.only || !r.allow_fallbacks) && !r.order.is_empty() => {
-            r.order.contains(&company.tag)
+            r.order.iter().any(|t| t == tag)
         }
         _ => true,
     }
@@ -877,7 +881,7 @@ fn picture_model(id: &str, entry: &Value, answer: Option<&Value>) -> MediaModel 
         kind: MediaKind::Image,
         accepts_images: takes_pictures(&params),
         params,
-        price: Price::Unknown,
+        price: answer.map_or(Price::Unknown, |a| parse_image_endpoints(a, None)),
         notes,
         usable: None,
         created: entry.get("created").and_then(Value::as_i64),
@@ -1057,7 +1061,10 @@ fn video_model(id: &str, entry: &Value) -> MediaModel {
         kind: MediaKind::Video,
         accepts_images: takes_pictures(&params),
         params,
-        price: Price::Unknown,
+        price: entry
+            .get("pricing_skus")
+            .and_then(Value::as_object)
+            .map_or(Price::Unknown, parse_pricing_skus),
         notes,
         usable: (!has_lengths).then(|| NEEDS_A_VIDEO.to_owned()),
         created: entry.get("created").and_then(Value::as_i64),
@@ -1142,7 +1149,7 @@ fn reachable(model: &MediaModel, key: &str, routing: Option<&Routing>) -> bool {
         .iter()
         .filter(|c| c.passthrough.iter().any(|name| name == key))
         .peekable();
-    listing.peek().is_none() || listing.any(|c| routing_allows(routing, c))
+    listing.peek().is_none() || listing.any(|c| routing_allows(routing, &c.tag))
 }
 
 #[cfg(test)]
