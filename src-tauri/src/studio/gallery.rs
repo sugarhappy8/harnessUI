@@ -49,6 +49,14 @@ const SVG: &str = "image/svg+xml";
 const MP4: &str = "video/mp4";
 const WEBM: &str = "video/webm";
 
+/// The major brands (bytes 8..12, after `ftyp` at byte 4) of ISO media files that are not
+/// MP4 video: HEIF and AVIF still pictures and image sequences, and QuickTime movies. Every
+/// other brand is MP4.
+const NOT_MP4_BRANDS: [&[u8]; 11] = [
+    b"avif", b"avis", b"heic", b"heix", b"heim", b"heis", b"hevc", b"hevx", b"mif1", b"msf1",
+    b"qt  ",
+];
+
 /// How much of a file is read to tell its type: enough for an SVG's XML declaration,
 /// comments and document type before its first element.
 const SNIFF_BYTES: usize = 8 * 1024;
@@ -117,9 +125,11 @@ pub struct RefStored {
 
 /// The type a file is, read from its first bytes: one of the seven types the gallery keeps
 /// (PNG, JPEG, WebP, GIF, SVG, MP4 with `ftyp` at byte 4, WebM by its EBML header), or
-/// `None`. An SVG is text whose first element, after any XML declaration, comments and an
-/// `svg` document type, is `<svg` within the first 8 KiB (`SNIFF_BYTES`: only those are
-/// read, however many bytes are given).
+/// `None`. A file with `ftyp` at byte 4 whose major brand is a HEIF or AVIF picture's or a
+/// QuickTime movie's (`NOT_MP4_BRANDS`) is `None`; any other brand is MP4. An SVG is text
+/// whose first element, after any XML declaration, comments and an `svg` document type, is
+/// `<svg` within the first 8 KiB (`SNIFF_BYTES`: only those are read, however many bytes
+/// are given).
 pub fn sniff_media(bytes: &[u8]) -> Option<&'static str> {
     if bytes.starts_with(b"\x89PNG\r\n\x1a\n") {
         Some(PNG)
@@ -130,7 +140,10 @@ pub fn sniff_media(bytes: &[u8]) -> Option<&'static str> {
     } else if bytes.len() > 12 && &bytes[0..4] == b"RIFF" && &bytes[8..12] == b"WEBP" {
         Some(WEBP)
     } else if bytes.len() >= 8 && &bytes[4..8] == b"ftyp" {
-        Some(MP4)
+        match bytes.get(8..12) {
+            Some(brand) if NOT_MP4_BRANDS.contains(&brand) => None,
+            _ => Some(MP4),
+        }
     } else if bytes.starts_with(&[0x1A, 0x45, 0xDF, 0xA3]) {
         Some(WEBM)
     } else if svg_start(&bytes[..bytes.len().min(SNIFF_BYTES)]) == SvgStart::Svg {
@@ -540,6 +553,19 @@ mod tests {
     const WEBP: &[u8] = b"RIFF\x24\0\0\0WEBPVP8 ";
     const HTML: &[u8] = b"<!doctype html><p>";
 
+    /// The start of an ISO media file whose `ftyp` box has the major brand `brand`.
+    fn ftyp(brand: &[u8; 4]) -> Vec<u8> {
+        let mut out = Vec::new();
+        out.extend_from_slice(&20u32.to_be_bytes());
+        out.extend_from_slice(b"ftyp");
+        out.extend_from_slice(brand);
+        out.extend_from_slice(&0u32.to_be_bytes());
+        out.extend_from_slice(brand);
+        out.extend_from_slice(&8u32.to_be_bytes());
+        out.extend_from_slice(b"mdat");
+        out
+    }
+
     fn sha_of(bytes: &[u8]) -> String {
         use sha2::{Digest, Sha256};
         Sha256::digest(bytes)
@@ -685,6 +711,33 @@ mod tests {
     }
 
     #[test]
+    fn an_iso_media_file_is_mp4_only_for_a_video_brand() {
+        for brand in [
+            b"isom", b"mp42", b"mp41", b"iso2", b"avc1", b"dash", b"M4V ",
+        ] {
+            assert_eq!(
+                sniff_media(&ftyp(brand)),
+                Some("video/mp4"),
+                "{}",
+                String::from_utf8_lossy(brand)
+            );
+        }
+        // HEIF and AVIF still pictures and image sequences, and QuickTime movies, are none
+        // of the seven types.
+        for brand in [
+            b"avif", b"avis", b"heic", b"heix", b"heim", b"heis", b"hevc", b"hevx", b"mif1",
+            b"msf1", b"qt  ",
+        ] {
+            assert_eq!(
+                sniff_media(&ftyp(brand)),
+                None,
+                "{}",
+                String::from_utf8_lossy(brand)
+            );
+        }
+    }
+
+    #[test]
     fn an_svg_is_known_by_its_first_element() {
         for svg in [
             &b"<svg xmlns=\"http://www.w3.org/2000/svg\"/>"[..],
@@ -826,6 +879,48 @@ mod tests {
 
         // Nothing reached the month folder.
         assert!(!target.parent().unwrap().exists());
+    }
+
+    #[test]
+    fn an_avif_picture_or_a_quicktime_movie_is_not_kept_as_mp4() {
+        let scratch = Scratch::new();
+        let g = Gallery::new(scratch.path().into());
+        let target = g.output_stem(ms(2026, 11, 17), "r1", 0);
+
+        for (name, brand, claimed) in [
+            ("o1", b"avif", None),
+            ("o2", b"avif", Some("image/avif")),
+            ("o3", b"avif", Some("video/mp4")),
+            ("o4", b"qt  ", None),
+            ("o5", b"qt  ", Some("video/quicktime")),
+            ("o6", b"qt  ", Some("video/mp4")),
+        ] {
+            let partial = scratch.write(name, &ftyp(brand));
+            let refused = g.finalize(&partial, claimed, &target, 1 << 20);
+            assert_eq!(
+                refused,
+                Err(GalleryError::NotMedia),
+                "{} claimed {claimed:?}",
+                String::from_utf8_lossy(brand)
+            );
+            assert!(!partial.exists());
+        }
+        assert!(!target.parent().unwrap().exists());
+
+        // An `isom` or `mp42` file is still MP4 video.
+        for (idx, brand) in [b"isom", b"mp42"].into_iter().enumerate() {
+            let partial = scratch.write("o7", &ftyp(brand));
+            let target = g.output_stem(ms(2026, 11, 17), "r2", idx as u32);
+            let (path, mime) = g
+                .finalize(&partial, Some("video/mp4"), &target, 1 << 20)
+                .unwrap();
+            assert_eq!(mime, "video/mp4");
+            assert_eq!(
+                path,
+                g.output_path(ms(2026, 11, 17), "r2", idx as u32, "mp4")
+            );
+            assert!(!partial.exists());
+        }
     }
 
     #[test]
