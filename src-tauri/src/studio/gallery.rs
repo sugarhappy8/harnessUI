@@ -118,7 +118,8 @@ pub struct RefStored {
 /// The type a file is, read from its first bytes: one of the seven types the gallery keeps
 /// (PNG, JPEG, WebP, GIF, SVG, MP4 with `ftyp` at byte 4, WebM by its EBML header), or
 /// `None`. An SVG is text whose first element, after any XML declaration, comments and an
-/// `svg` document type, is `<svg`.
+/// `svg` document type, is `<svg` within the first 8 KiB (`SNIFF_BYTES`: only those are
+/// read, however many bytes are given).
 pub fn sniff_media(bytes: &[u8]) -> Option<&'static str> {
     if bytes.starts_with(b"\x89PNG\r\n\x1a\n") {
         Some(PNG)
@@ -132,7 +133,7 @@ pub fn sniff_media(bytes: &[u8]) -> Option<&'static str> {
         Some(MP4)
     } else if bytes.starts_with(&[0x1A, 0x45, 0xDF, 0xA3]) {
         Some(WEBM)
-    } else if svg_start(bytes) == SvgStart::Svg {
+    } else if svg_start(&bytes[..bytes.len().min(SNIFF_BYTES)]) == SvgStart::Svg {
         Some(SVG)
     } else {
         None
@@ -199,13 +200,14 @@ fn svg_doctype_len(body: &[u8]) -> Result<Option<usize>, ()> {
         Some(_) => return Err(()),
     }
     // An internal subset (`[…]`) holds `>` of its own: the document type then ends at the
-    // first `>` after the subset's `]`.
+    // first `>` after the subset's `]`. Only a `[` before the first `>` opens one, so the
+    // search stops there and each document type costs only its own length.
     let close = find(name, b">");
-    let end = match find(name, b"[") {
-        Some(open) if close.is_none_or(|close| open < close) => find(&name[open..], b"]")
+    let end = match find(&name[..close.unwrap_or(name.len())], b"[") {
+        Some(open) => find(&name[open..], b"]")
             .map(|at| open + at)
             .and_then(|shut| find(&name[shut..], b">").map(|at| shut + at)),
-        _ => close,
+        None => close,
     };
     Ok(end.map(|at| skipped + at + 1))
 }
@@ -713,6 +715,43 @@ mod tests {
                 String::from_utf8_lossy(not_svg)
             );
         }
+    }
+
+    #[test]
+    fn a_long_run_of_document_types_is_read_quickly() {
+        // About 1 MiB of `<!DOCTYPE svg>` over and over, as a picture labelled PNG would
+        // bring it: each document type costs only its own length, and only the first
+        // `SNIFF_BYTES` are read at all.
+        let doctypes = b"<!DOCTYPE svg>".repeat(75_000);
+        let quick = std::time::Duration::from_secs(2);
+
+        let started = std::time::Instant::now();
+        assert_eq!(svg_start(&doctypes), SvgStart::CannotTell);
+        assert!(
+            started.elapsed() < quick,
+            "svg_start: {:?}",
+            started.elapsed()
+        );
+
+        let started = std::time::Instant::now();
+        assert_eq!(sniff_media(&doctypes), None);
+        assert!(
+            started.elapsed() < quick,
+            "sniff_media: {:?}",
+            started.elapsed()
+        );
+
+        let started = std::time::Instant::now();
+        assert!(!crate::attachments::sniff("image/png", &doctypes));
+        assert!(started.elapsed() < quick, "sniff: {:?}", started.elapsed());
+
+        // An SVG whose first element comes after the first `SNIFF_BYTES` cannot be told
+        // from its start (`finalize` then goes by the company's word).
+        let mut late = b"<!--".to_vec();
+        late.extend(std::iter::repeat_n(b'x', SNIFF_BYTES));
+        late.extend_from_slice(b"--><svg/>");
+        assert_eq!(svg_start(&late), SvgStart::Svg);
+        assert_eq!(sniff_media(&late), None);
     }
 
     #[test]
