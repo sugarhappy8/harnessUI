@@ -13,6 +13,7 @@
 
 use std::collections::VecDeque;
 use std::fmt;
+use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll};
@@ -21,13 +22,16 @@ use std::time::Duration;
 use bytes::Bytes;
 use futures_util::stream::BoxStream;
 use futures_util::{Stream, StreamExt};
+use reqwest::header::HeaderMap;
 use serde_json::{Value, json};
+use tokio::io::AsyncWriteExt;
 use tokio_util::sync::CancellationToken;
 use url::Url;
 
 use crate::anthropic::{MessagesDecoder, ThinkingReplay};
 use crate::cloud;
 use crate::error::{ProviderError, as_u32, bounded, error_from_body};
+use crate::media::{LocalIo, MediaError};
 use crate::stream::{ChunkParser, StreamDecoder, StreamEvent};
 use crate::types::ChatRequest;
 
@@ -40,6 +44,9 @@ const MAX_ERROR_BODY: usize = 64 * 1024;
 const MAX_COMPLETION_BODY: usize = 32 * 1024 * 1024;
 /// Requests sent again for one chat request after a server refused a parameter (0.0.7).
 const MAX_FIX_ROUNDS: usize = 3;
+/// The wait before a request that creates a picture or a video is sent again because its
+/// connection did not open (0.1.0 Studio).
+const CONNECT_RETRY_WAIT: Duration = Duration::from_secs(1);
 
 /// Which kind of server an endpoint is. Decides where context length and token counts come
 /// from, which request fields the server accepts, and (0.0.7) the chat protocol: Chat
@@ -217,6 +224,44 @@ pub(crate) enum Sent {
     },
 }
 
+/// The body of a request that creates a picture or a video (0.1.0 Studio), sent with
+/// [`OpenAiClient::post_once`].
+pub(crate) enum OnceBody {
+    /// A JSON body.
+    Json(Value),
+}
+
+/// What the company answered to a request sent with [`OpenAiClient::post_once`].
+pub(crate) enum OnceReply {
+    /// It accepted the request; its answer is in a file in the scratch folder.
+    Success {
+        /// The file that holds the answer. The caller removes it.
+        path: PathBuf,
+        /// The answer's size in bytes.
+        len: u64,
+        /// The answer's headers.
+        headers: HeaderMap,
+    },
+    /// It refused the request with an error status.
+    Error {
+        /// The HTTP status.
+        status: u16,
+        /// The start of the error body.
+        body: Vec<u8>,
+        /// The answer's headers (`retry-after`, a request id).
+        headers: HeaderMap,
+    },
+}
+
+/// Why [`stream_body_to`] stopped before the end of a body.
+#[derive(Debug)]
+pub(crate) enum BodyError {
+    /// Writing on this computer failed, or the body was larger than the cap.
+    Local(LocalIo),
+    /// The body stopped coming: the connection failed, or no data came within the idle limit.
+    Network(ProviderError),
+}
+
 /// How a response's events are read: chat-completion chunks or Claude's event stream.
 pub(crate) enum WireDecoder {
     /// Chat Completions.
@@ -277,7 +322,7 @@ pub struct OpenAiClient {
 /// (reqwest drops `Authorization` on a redirect to another host, but not a key in a header of
 /// the API's own, such as Anthropic's `x-api-key`). A redirect elsewhere ends the request with
 /// the redirect's own status.
-fn same_origin_redirects() -> reqwest::redirect::Policy {
+pub(crate) fn same_origin_redirects() -> reqwest::redirect::Policy {
     reqwest::redirect::Policy::custom(|attempt| {
         let origin = |url: &reqwest::Url| {
             (
@@ -1014,7 +1059,7 @@ impl OpenAiClient {
         u32::try_from(count).map_err(|_| ProviderError::Decode("token count overflow".to_owned()))
     }
 
-    fn authorize(&self, request: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
+    pub(crate) fn authorize(&self, request: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
         let key = self.config.api_key.as_deref().filter(|key| !key.is_empty());
         if self.config.kind == ProviderKind::Anthropic {
             // Claude's API: the key in `x-api-key` (marked sensitive, so it never appears in
@@ -1069,6 +1114,154 @@ impl OpenAiClient {
         serde_json::from_slice(&body)
             .map_err(|err| ProviderError::Decode(format!("the response is not JSON ({err})")))
     }
+
+    /// Sends `body` once; one more try only on 429 with Retry-After <= 30 s, or a connect
+    /// failure. A success body is streamed to a new file in `scratch` (at most `cap` bytes).
+    ///
+    /// For the request that creates a picture or a video (0.1.0 Studio), which must never be
+    /// paid for twice: it is not sent again after a timeout, a server error or a connection
+    /// that broke once the request was out. `limit` covers the whole request, the answer's
+    /// body included. Error texts never carry the key.
+    ///
+    /// # Errors
+    /// [`MediaError::NotSent`] when the connection did not open; [`MediaError::Unknown`] when
+    /// the request went out and no whole answer came (a timeout, a connection that broke, an
+    /// error body that did not arrive); [`MediaError::Local`] when the answer could not be
+    /// written or was larger than `cap` (its file is removed).
+    pub(crate) async fn post_once(
+        &self,
+        url: Url,
+        body: OnceBody,
+        limit: Duration,
+        cap: u64,
+        scratch: &Path,
+    ) -> Result<OnceReply, MediaError> {
+        let key = self.config.api_key.as_deref();
+        let mut tried_again = false;
+        loop {
+            let request = self.authorize(self.http.post(url.clone())).timeout(limit);
+            let request = match &body {
+                OnceBody::Json(value) => request.json(value),
+            };
+            let response = match request.send().await {
+                Ok(response) => response,
+                // The connection did not open, so nothing went out: once more after a wait.
+                Err(err) if err.is_connect() && !tried_again => {
+                    tried_again = true;
+                    tokio::time::sleep(CONNECT_RETRY_WAIT).await;
+                    continue;
+                }
+                Err(err) if err.is_connect() => {
+                    return Err(MediaError::NotSent(cloud::scrub_key(
+                        network_error(err),
+                        key,
+                    )));
+                }
+                Err(err) => {
+                    return Err(MediaError::Unknown(cloud::scrub_key(
+                        network_error(err),
+                        key,
+                    )));
+                }
+            };
+            let status = response.status();
+            let headers = response.headers().clone();
+            if status.is_success() {
+                return match save_answer(response, cap, scratch).await {
+                    Ok((path, len)) => Ok(OnceReply::Success { path, len, headers }),
+                    Err(BodyError::Local(io)) => Err(MediaError::Local(io)),
+                    Err(BodyError::Network(err)) => {
+                        Err(MediaError::Unknown(cloud::scrub_key(err, key)))
+                    }
+                };
+            }
+            // A rate limit refused the request without running it: once more after a short
+            // wait the company asked for.
+            if status == reqwest::StatusCode::TOO_MANY_REQUESTS
+                && !tried_again
+                && let Some(wait) = headers
+                    .get(reqwest::header::RETRY_AFTER)
+                    .and_then(|value| value.to_str().ok())
+                    .and_then(cloud::parse_retry_after)
+                    .filter(|wait| *wait <= cloud::LONGEST_WAIT)
+            {
+                tried_again = true;
+                drop(response);
+                tokio::time::sleep(wait).await;
+                continue;
+            }
+            let body = read_capped(response, MAX_ERROR_BODY, true)
+                .await
+                .map_err(|err| MediaError::Unknown(cloud::scrub_key(err, key)))?;
+            return Ok(OnceReply::Error {
+                status: status.as_u16(),
+                body,
+                headers,
+            });
+        }
+    }
+}
+
+/// Streams an accepted answer into a new file in `scratch`: its path and size. The file is
+/// removed when that fails.
+async fn save_answer(
+    response: reqwest::Response,
+    cap: u64,
+    scratch: &Path,
+) -> Result<(PathBuf, u64), BodyError> {
+    let path = scratch.join(format!("{}.part", uuid::Uuid::new_v4()));
+    let mut file = tokio::fs::File::create(&path)
+        .await
+        .map_err(|err| BodyError::Local(LocalIo::from_io(&err)))?;
+    let written = stream_body_to(response, &mut file, cap, None).await;
+    // Closed only once its writes have finished, so it can be removed on every system.
+    drop(file.into_std().await);
+    if written.is_err() {
+        let _ = tokio::fs::remove_file(&path).await;
+    }
+    written.map(|len| (path, len))
+}
+
+/// The one writer for response bodies: chunks to `file`, at most `cap` bytes, `idle` at most
+/// between chunks. Over the cap → `TooLarge(cap)`; `ErrorKind::StorageFull` → `DiskFull`;
+/// other write errors → `Io`; a body that stops → [`BodyError::Network`].
+///
+/// A body whose stated length is over the cap is refused before anything is written. The
+/// file is flushed before the size is returned, so a full disk is found here.
+pub(crate) async fn stream_body_to(
+    mut resp: reqwest::Response,
+    file: &mut tokio::fs::File,
+    cap: u64,
+    idle: Option<Duration>,
+) -> Result<u64, BodyError> {
+    if resp.content_length().is_some_and(|len| len > cap) {
+        return Err(BodyError::Local(LocalIo::TooLarge(cap)));
+    }
+    let local = |err: std::io::Error| BodyError::Local(LocalIo::from_io(&err));
+    let mut written: u64 = 0;
+    loop {
+        let next = match idle {
+            Some(idle) => tokio::time::timeout(idle, resp.chunk())
+                .await
+                .map_err(|_| {
+                    BodyError::Network(ProviderError::Network(format!(
+                        "no data for {}",
+                        describe(idle)
+                    )))
+                })?,
+            None => resp.chunk().await,
+        };
+        let Some(chunk) = next.map_err(|err| BodyError::Network(network_error(err)))? else {
+            break;
+        };
+        written = written.saturating_add(chunk.len() as u64);
+        if written > cap {
+            return Err(BodyError::Local(LocalIo::TooLarge(cap)));
+        }
+        file.write_all(&chunk).await.map_err(local)?;
+    }
+    file.flush().await.map_err(local)?;
+    Ok(written)
 }
 
 /// Splits a user-typed base URL into the OpenAI API root (ending in a version segment) and
@@ -1235,7 +1428,7 @@ pub(crate) fn is_not_found(err: &ProviderError) -> bool {
 }
 
 /// The full error chain of a reqwest error with URLs removed (a URL can carry credentials).
-fn network_error(err: reqwest::Error) -> ProviderError {
+pub(crate) fn network_error(err: reqwest::Error) -> ProviderError {
     if err.is_timeout() {
         return ProviderError::Network("the request timed out".to_owned());
     }
@@ -1258,7 +1451,7 @@ fn error_chain(err: &dyn std::error::Error) -> String {
 
 /// Reads a response body up to `cap` bytes. With `truncate`, the rest is dropped (enough of
 /// an error body to classify it); otherwise a longer body is an error.
-async fn read_capped(
+pub(crate) async fn read_capped(
     mut response: reqwest::Response,
     cap: usize,
     truncate: bool,

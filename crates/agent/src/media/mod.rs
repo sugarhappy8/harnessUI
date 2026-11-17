@@ -3,7 +3,8 @@
 //!
 //! - [`spec`]: the controls each model offers ([`ParamSpec`]), read from the companies' own
 //!   catalogues, and [`validate`], which checks a request against them;
-//! - [`price`]: what a model costs ([`Price`]) and what a run would cost ([`estimate`]).
+//! - [`price`]: what a model costs ([`Price`]) and what a run would cost ([`estimate`]);
+//! - [`openrouter`]: OpenRouter's lists, prices and pictures ([`OpenRouterMedia`]).
 //!
 //! The companies are OpenRouter (pictures and video), OpenAI (pictures) and this computer
 //! ([`Company::Local`]). A request goes only to the chosen endpoint's host; a run on this
@@ -11,19 +12,25 @@
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
+use reqwest::header::HeaderMap;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 use url::Url;
 
-use crate::error::ProviderError;
+use crate::client::OpenAiClient;
+use crate::cloud::{parse_retry_after, scrub_text};
+use crate::error::{ProviderError, bounded};
 
+pub mod openrouter;
 pub mod price;
 pub mod spec;
 
 pub use crate::cloud::media_company;
+pub use openrouter::OpenRouterMedia;
 pub use price::{
     Mode, Price, PriceChoice, PriceRow, Table, choice_for, estimate, parse_image_endpoints,
     parse_pricing_skus,
@@ -349,6 +356,17 @@ pub enum LocalIo {
     Io(String),
 }
 
+impl LocalIo {
+    /// A failed write: a full disk by name, anything else with its text.
+    pub(crate) fn from_io(err: &std::io::Error) -> Self {
+        if err.kind() == std::io::ErrorKind::StorageFull {
+            Self::DiskFull
+        } else {
+            Self::Io(err.to_string())
+        }
+    }
+}
+
 /// Why a media request did not give a result.
 #[derive(Debug, Clone, PartialEq, thiserror::Error)]
 pub enum MediaError {
@@ -438,5 +456,93 @@ pub trait MediaProvider: Send + Sync {
     /// the local provider kills the engine.
     async fn cancel(&self, _remote_id: &str) -> Result<(), MediaError> {
         Ok(())
+    }
+}
+
+/// The media provider for an endpoint's client: OpenRouter's for an OpenRouter endpoint;
+/// none for any other kind.
+pub fn media_provider(client: OpenAiClient) -> Option<Arc<dyn MediaProvider>> {
+    match media_company(client.config().kind)? {
+        Company::OpenRouter => Some(Arc::new(OpenRouterMedia::new(client))),
+        Company::OpenAi | Company::Local => None,
+    }
+}
+
+/// What every cloud company's error answer says: 401 [`FailureKind::Unauthorized`], 402
+/// [`FailureKind::NoCredit`], 404 [`FailureKind::NotFound`], 429
+/// [`FailureKind::RateLimited`], 400, 413 and 422 [`FailureKind::BadRequest`], 5xx
+/// [`FailureKind::Server`], anything else [`FailureKind::Other`]. A 4xx refused the request,
+/// so it was not charged; for a 5xx the charge is unknown. The request id comes from the
+/// body's `id` or the `x-request-id` header, the wait from `retry-after`, and the message
+/// from the body; every text is cut to a bounded length and never carries the key. Each
+/// company adds its own codes on top.
+pub(crate) fn base_failure(
+    status: u16,
+    headers: &HeaderMap,
+    body: &[u8],
+    key: Option<&str>,
+) -> MediaFailure {
+    let value = serde_json::from_slice::<Value>(body).ok();
+    let kind = match status {
+        401 => FailureKind::Unauthorized,
+        402 => FailureKind::NoCredit,
+        404 => FailureKind::NotFound,
+        429 => FailureKind::RateLimited,
+        400 | 413 | 422 => FailureKind::BadRequest,
+        500..=599 => FailureKind::Server,
+        _ => FailureKind::Other,
+    };
+    let header = |name: &str| {
+        headers
+            .get(name)
+            .and_then(|value| value.to_str().ok())
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+    };
+    let clean = |text: &str| scrub_text(&bounded(text), key);
+    let request_id = value
+        .as_ref()
+        .and_then(|v| v.get("id"))
+        .and_then(Value::as_str)
+        .or_else(|| header("x-request-id"))
+        .map(clean);
+    let company_code = value
+        .as_ref()
+        .and_then(|v| v.pointer("/error/code"))
+        .and_then(Value::as_str)
+        .map(clean);
+    MediaFailure {
+        kind,
+        stage: None,
+        charged: (400..500).contains(&status).then_some(false),
+        company_code,
+        request_id,
+        status: Some(status),
+        message: clean(&failure_text(status, value.as_ref(), body)),
+        retry_after: header("retry-after").and_then(parse_retry_after),
+    }
+}
+
+/// The message in an error answer: the error object's `message` (or `detail`), a bare error
+/// string, else the body as text, else the status.
+fn failure_text(status: u16, value: Option<&Value>, body: &[u8]) -> String {
+    if let Some(value) = value {
+        let inner = value.get("error").filter(|e| !e.is_null()).unwrap_or(value);
+        let message = match inner {
+            Value::String(text) => Some(text.as_str()),
+            Value::Object(map) => ["message", "detail"]
+                .iter()
+                .find_map(|key| map.get(*key).and_then(Value::as_str)),
+            _ => None,
+        };
+        if let Some(message) = message.map(str::trim).filter(|m| !m.is_empty()) {
+            return message.to_owned();
+        }
+    }
+    let text = String::from_utf8_lossy(body);
+    if text.trim().is_empty() {
+        format!("HTTP {status}")
+    } else {
+        text.into_owned()
     }
 }

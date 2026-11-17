@@ -812,7 +812,7 @@ fn number_after(text: &str, marker: &str) -> Option<u32> {
 /// Retries of one request to a cloud company before its error is shown.
 const MAX_RETRIES: u32 = 2;
 /// The longest wait a server may ask for before the app gives up and says when to try again.
-const LONGEST_WAIT: Duration = Duration::from_secs(30);
+pub(crate) const LONGEST_WAIT: Duration = Duration::from_secs(30);
 
 /// How long to wait before trying a failed request to a cloud company again, or `None` to
 /// give up: the companies' documentation says to retry rate limits (with the `retry-after`
@@ -896,13 +896,17 @@ fn without_key(text: &str, key: &str) -> String {
     text
 }
 
+/// The key whose copies are removed from texts: trimmed, and only when it is at least
+/// [`SHORTEST_KEY`] characters long.
+fn secret_key(key: Option<&str>) -> Option<&str> {
+    key.map(str::trim)
+        .filter(|key| key.chars().count() >= SHORTEST_KEY)
+}
+
 /// Removes the API key from an error's text, in case a server or a proxy echoed it: every
 /// whole copy of a key of 4 characters or more, and a cut piece as [`without_key`] says.
 pub(crate) fn scrub_key(err: ProviderError, key: Option<&str>) -> ProviderError {
-    let Some(key) = key
-        .map(str::trim)
-        .filter(|key| key.chars().count() >= SHORTEST_KEY)
-    else {
+    let Some(key) = secret_key(key) else {
         return err;
     };
     let clean = |text: String| without_key(&text, key);
@@ -921,6 +925,15 @@ pub(crate) fn scrub_key(err: ProviderError, key: Option<&str>) -> ProviderError 
         other @ (ProviderError::ContextOverflow { .. }
         | ProviderError::Unauthorized
         | ProviderError::Cancelled) => other,
+    }
+}
+
+/// `text` without the API key, as [`scrub_key`] removes it from an error: for a failure
+/// message that is plain text (0.1.0 Studio).
+pub(crate) fn scrub_text(text: &str, key: Option<&str>) -> String {
+    match secret_key(key) {
+        Some(key) => without_key(text, key),
+        None => text.to_owned(),
     }
 }
 
@@ -1810,6 +1823,25 @@ mod tests {
             "11 characters are too few to be secret"
         );
         assert_eq!(without_key("nothing here", key), "nothing here");
+    }
+
+    #[test]
+    fn plain_text_is_scrubbed_like_an_error() {
+        let key = "sk-or-v1-secret-0123456789";
+        assert_eq!(
+            scrub_text(&format!("bad key {key} sent"), Some(key)),
+            "bad key [API key] sent"
+        );
+        assert_eq!(
+            scrub_text(
+                &format!("cut at {}…", &key[..16]),
+                Some(&format!(" {key} "))
+            ),
+            "cut at [API key]…"
+        );
+        // Shorter keys and missing ones change nothing.
+        assert_eq!(scrub_text("abc", Some("abc")), "abc");
+        assert_eq!(scrub_text("abc", None), "abc");
     }
 
     #[test]
