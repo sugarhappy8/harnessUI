@@ -277,12 +277,13 @@ fn update_where_key(
 /// unchanged), JSON `null` is `Some(None)` (clear) and a value is `Some(Some(v))`. Plain
 /// serde collapses `null` to `None`, so a client could never clear the field.
 ///
-/// Use with `#[serde(default, skip_serializing_if = "Option::is_none", with = "double_option")]`.
-pub(crate) mod double_option {
+/// Use with `#[serde(default, skip_serializing_if = "Option::is_none", with = "double_option")]`
+/// (`store::double_option` outside this crate).
+pub mod double_option {
     use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
     /// Writes `Some(None)` as `null` and `Some(Some(v))` as `v` (`None` is skipped).
-    pub(crate) fn serialize<T: Serialize, S: Serializer>(
+    pub fn serialize<T: Serialize, S: Serializer>(
         value: &Option<Option<T>>,
         serializer: S,
     ) -> Result<S::Ok, S::Error> {
@@ -293,7 +294,7 @@ pub(crate) mod double_option {
     }
 
     /// Reads a present field (including `null`) as `Some(..)`.
-    pub(crate) fn deserialize<'de, T: Deserialize<'de>, D: Deserializer<'de>>(
+    pub fn deserialize<'de, T: Deserialize<'de>, D: Deserializer<'de>>(
         deserializer: D,
     ) -> Result<Option<Option<T>>, D::Error> {
         Option::<T>::deserialize(deserializer).map(Some)

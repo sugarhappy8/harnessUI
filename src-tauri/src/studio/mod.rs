@@ -6,9 +6,13 @@
 //!   counted per local calendar day.
 //! - [`gallery`]: the gallery folder: where results, sidecars, thumbnails and added pictures
 //!   go, and the type check a file passes before it is kept.
+//! - [`prefs`]: Settings → Studio, kept as one setting, and the rules a change must pass.
+//! - [`errors`]: Studio's backend wording.
 
 pub mod catalog;
+pub mod errors;
 pub mod gallery;
+pub mod prefs;
 pub mod spend;
 #[cfg(test)]
 pub(crate) mod test_support;

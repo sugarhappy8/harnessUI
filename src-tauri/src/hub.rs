@@ -1463,11 +1463,18 @@ pub async fn disk_usage(app: AppHandle) -> AppResult<DiskUsageDto> {
 
 #[tauri::command]
 pub async fn set_models_dir(state: State<'_, AppState>, path: String) -> AppResult<()> {
-    let p = PathBuf::from(&path);
-    if !p.is_dir() {
+    check_writable_folder(Path::new(&path))?;
+    state.store.set_setting(SETTING_MODELS_DIR, &path).await?;
+    Ok(())
+}
+
+/// Checks a folder the user picked to keep files in (the models folder, Studio's gallery):
+/// it exists and the app can write a file in it (an empty `.write-test`, removed again).
+pub(crate) fn check_writable_folder(path: &Path) -> AppResult<()> {
+    if !path.is_dir() {
         return Err(AppError::bad_request("Pick an existing folder."));
     }
-    let probe = p.join(".write-test");
+    let probe = path.join(".write-test");
     std::fs::write(&probe, b"").map_err(|e| {
         AppError::new(
             "models_dir",
@@ -1477,7 +1484,6 @@ pub async fn set_models_dir(state: State<'_, AppState>, path: String) -> AppResu
         )
     })?;
     let _ = std::fs::remove_file(probe);
-    state.store.set_setting(SETTING_MODELS_DIR, &path).await?;
     Ok(())
 }
 

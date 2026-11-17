@@ -55,7 +55,7 @@ pub use creations::{
 pub use error::{ParseEnumError, StoreError};
 pub use ids::{
     AttachmentId, AuditId, ChatId, DownloadId, FolderId, McpServerId, MessageId, ModelId,
-    ProviderId, SkillId, SummaryId, ToolCallId,
+    ProviderId, SkillId, SummaryId, ToolCallId, double_option,
 };
 pub use models::{
     Download, DownloadPatch, DownloadStatus, ModelInput, ModelRecord, ModelSource, NewDownload,
