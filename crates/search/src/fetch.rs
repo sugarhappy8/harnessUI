@@ -19,12 +19,21 @@
 //! Besides that: a time limit for the whole fetch, a size limit for the body, only the
 //! content types asked for, no cookies, no referrer, and a `User-Agent` that names the app
 //! and its version and nothing else.
+//!
+//! [`Fetcher::fetch_to_file`] reads a result file (a picture or video Studio keeps, on a
+//! company's file host) under the same rules: binary, streamed to a file, at most a given
+//! size, only the [`MEDIA_TYPES`]. It never carries a key: a result link is an address
+//! someone else chose, too.
 
+use std::future::Future;
 use std::net::{IpAddr, SocketAddr};
+use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
 use reqwest::dns::{Addrs, Name, Resolve, Resolving};
+use reqwest::header::{CONTENT_ENCODING, CONTENT_TYPE, HeaderName, LOCATION};
+use tokio::io::AsyncWriteExt;
 use url::Url;
 
 use crate::netguard::{AddressClass, Guard};
@@ -58,6 +67,30 @@ pub struct Fetched {
     pub text: String,
     /// The body was longer than the limit; this is its start.
     pub truncated: bool,
+    /// How many redirects were followed.
+    pub redirects: usize,
+}
+
+/// The media types a result file may have: the pictures and videos Studio keeps.
+pub const MEDIA_TYPES: &[&str] = &[
+    "image/png",
+    "image/jpeg",
+    "image/webp",
+    "image/gif",
+    "image/svg+xml",
+    "video/mp4",
+    "video/webm",
+];
+
+/// A result file saved by [`Fetcher::fetch_to_file`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FetchedFile {
+    /// The address the file came from, after redirects.
+    pub url: Url,
+    /// The media type without parameters, lower case: one of [`MEDIA_TYPES`].
+    pub content_type: String,
+    /// How many bytes were saved.
+    pub len: u64,
     /// How many redirects were followed.
     pub redirects: usize,
 }
@@ -99,6 +132,14 @@ pub enum FetchError {
     Challenge,
     #[error("the page has no text to read (it may need scripts to show anything)")]
     NoText,
+    #[error("it is not a picture or a video ({0})")]
+    NotMedia(String),
+    #[error("the file is larger than {0} bytes")]
+    TooLarge(u64),
+    #[error("the disk is full")]
+    DiskFull,
+    #[error("the file could not be saved ({0})")]
+    Disk(String),
 }
 
 impl FetchError {
@@ -141,13 +182,43 @@ fn plain_host(domain: &str) -> String {
     domain.trim_end_matches('.').to_ascii_lowercase()
 }
 
-/// One answer of one hop.
-enum Hop {
-    Done(Fetched),
+/// One answer of one hop: what was asked for, or where to ask next.
+enum Hop<T> {
+    Done(T),
     Redirect(Url),
 }
 
-/// Reads pages under the address rules.
+/// A header of an answer as text, trimmed; empty when it is missing or not text.
+fn header(response: &reqwest::Response, name: HeaderName) -> String {
+    response
+        .headers()
+        .get(name)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("")
+        .trim()
+        .to_string()
+}
+
+/// The body of an answer is sent as it is (no `Content-Encoding`, or `identity`): nothing
+/// here unpacks one.
+fn unpacked(response: &reqwest::Response) -> Result<(), FetchError> {
+    let packed = header(response, CONTENT_ENCODING).to_ascii_lowercase();
+    if !packed.is_empty() && packed != "identity" {
+        return Err(FetchError::Encoding(packed));
+    }
+    Ok(())
+}
+
+/// A failed write of a result file: a full disk by name, anything else with its text.
+fn disk_error(error: std::io::Error) -> FetchError {
+    if error.kind() == std::io::ErrorKind::StorageFull {
+        FetchError::DiskFull
+    } else {
+        FetchError::Disk(error.to_string())
+    }
+}
+
+/// Reads pages and result files under the address rules.
 #[derive(Debug, Clone)]
 pub struct Fetcher {
     user_agent: String,
@@ -302,48 +373,51 @@ impl Fetcher {
             .map_err(|e| FetchError::Network(e.without_url().to_string()))
     }
 
-    /// One request: check, connect to what was checked, read the answer or the redirect.
-    async fn hop(&self, url: &Url, accept: Accept, redirects: usize) -> Result<Hop, FetchError> {
+    /// One request, asking for `wanted` (an `Accept` value): check, connect to what was
+    /// checked, and return the answer when it is a success, or where it redirects to.
+    async fn send(&self, url: &Url, wanted: &str) -> Result<Hop<reqwest::Response>, FetchError> {
         let checked = self.check(url).await?;
         let client = self.client_for(url, &checked)?;
-        let wanted = match accept {
-            Accept::Page => "text/html, text/plain;q=0.9",
-            Accept::Json => "application/json",
-        };
-        let failed = |error: reqwest::Error| self.failure(error);
-        let mut response = client
+        let response = client
             .get(url.clone())
             .header(reqwest::header::ACCEPT, wanted)
             // The body is read as it is sent; nothing here unpacks one.
             .header(reqwest::header::ACCEPT_ENCODING, "identity")
             .send()
             .await
-            .map_err(failed)?;
+            .map_err(|error| self.failure(error))?;
         let status = response.status().as_u16();
-        let header = |name: reqwest::header::HeaderName| {
-            response
-                .headers()
-                .get(name)
-                .and_then(|v| v.to_str().ok())
-                .unwrap_or("")
-                .trim()
-                .to_string()
-        };
         if matches!(status, 301 | 302 | 303 | 307 | 308) {
-            let location = header(reqwest::header::LOCATION);
+            let location = header(&response, LOCATION);
             return Ok(Hop::Redirect(redirect_target(url, &location)?));
         }
         if !(200..300).contains(&status) {
             return Err(FetchError::Status(status));
         }
-        let (media, charset) = media_type(&header(reqwest::header::CONTENT_TYPE));
+        Ok(Hop::Done(response))
+    }
+
+    /// One request for a page or JSON: the answer read as text, or the redirect.
+    async fn hop(
+        &self,
+        url: &Url,
+        accept: Accept,
+        redirects: usize,
+    ) -> Result<Hop<Fetched>, FetchError> {
+        let wanted = match accept {
+            Accept::Page => "text/html, text/plain;q=0.9",
+            Accept::Json => "application/json",
+        };
+        let mut response = match self.send(url, wanted).await? {
+            Hop::Done(response) => response,
+            Hop::Redirect(next) => return Ok(Hop::Redirect(next)),
+        };
+        let failed = |error: reqwest::Error| self.failure(error);
+        let (media, charset) = media_type(&header(&response, CONTENT_TYPE));
         if !accepts(accept, &media) {
             return Err(FetchError::ContentType(media));
         }
-        let packed = header(reqwest::header::CONTENT_ENCODING).to_ascii_lowercase();
-        if !packed.is_empty() && packed != "identity" {
-            return Err(FetchError::Encoding(packed));
-        }
+        unpacked(&response)?;
         let mut body: Vec<u8> = Vec::new();
         let mut truncated = false;
         while let Some(chunk) = response.chunk().await.map_err(failed)? {
@@ -373,12 +447,111 @@ impl Fetcher {
 
     /// Fetches `url`, following redirects by hand under the same rules.
     pub async fn get(&self, url: &Url, accept: Accept) -> Result<Fetched, FetchError> {
+        self.follow(url, |current, redirects| async move {
+            self.hop(&current, accept, redirects).await
+        })
+        .await
+    }
+
+    /// The same address rules as [`Fetcher::get`], binary, streamed to `dest`, at most
+    /// `cap` bytes; never sends a key.
+    ///
+    /// Only the [`MEDIA_TYPES`] are taken. The body is written to `dest` with the extension
+    /// `part`, which is renamed to `dest` once the whole body is there; on any failure,
+    /// running out of time included, the partial file is removed and `dest` is not
+    /// touched. The time limit is the fetcher's ([`Fetcher::with_timeout`]).
+    pub async fn fetch_to_file(
+        &self,
+        url: &Url,
+        cap: u64,
+        dest: &Path,
+    ) -> Result<FetchedFile, FetchError> {
+        let part = dest.with_extension("part");
+        let part_path = part.as_path();
+        let mut saved = self
+            .follow(url, |current, redirects| async move {
+                self.file_hop(&current, cap, part_path, redirects).await
+            })
+            .await;
+        if saved.is_ok()
+            && let Err(error) = tokio::fs::rename(&part, dest).await
+        {
+            saved = Err(disk_error(error));
+        }
+        if saved.is_err() {
+            // Not there at all when the fetch failed before the body.
+            let _ = tokio::fs::remove_file(&part).await;
+        }
+        saved
+    }
+
+    /// One request for a result file: its body streamed to `part`, or the redirect.
+    async fn file_hop(
+        &self,
+        url: &Url,
+        cap: u64,
+        part: &Path,
+        redirects: usize,
+    ) -> Result<Hop<FetchedFile>, FetchError> {
+        let response = match self.send(url, &MEDIA_TYPES.join(", ")).await? {
+            Hop::Done(response) => response,
+            Hop::Redirect(next) => return Ok(Hop::Redirect(next)),
+        };
+        let (media, _) = media_type(&header(&response, CONTENT_TYPE));
+        if !MEDIA_TYPES.contains(&media.as_str()) {
+            return Err(FetchError::NotMedia(media));
+        }
+        unpacked(&response)?;
+        // A file that says it is too large is not started.
+        if response.content_length().is_some_and(|len| len > cap) {
+            return Err(FetchError::TooLarge(cap));
+        }
+        let mut file = tokio::fs::File::create(part).await.map_err(disk_error)?;
+        let written = self.stream_to(response, &mut file, cap).await;
+        // Closed only once its writes have finished, so it can be renamed or removed on
+        // every system.
+        drop(file.into_std().await);
+        Ok(Hop::Done(FetchedFile {
+            url: url.clone(),
+            content_type: media,
+            len: written?,
+            redirects,
+        }))
+    }
+
+    /// Writes a body to `file` as it arrives, at most `cap` bytes: how many were written.
+    /// The file is flushed at the end, so a full disk is found here.
+    async fn stream_to(
+        &self,
+        mut response: reqwest::Response,
+        file: &mut tokio::fs::File,
+        cap: u64,
+    ) -> Result<u64, FetchError> {
+        let mut written: u64 = 0;
+        while let Some(chunk) = response.chunk().await.map_err(|e| self.failure(e))? {
+            written = written.saturating_add(chunk.len() as u64);
+            if written > cap {
+                return Err(FetchError::TooLarge(cap));
+            }
+            file.write_all(&chunk).await.map_err(disk_error)?;
+        }
+        file.flush().await.map_err(disk_error)?;
+        Ok(written)
+    }
+
+    /// Runs `hop` on `url`, then on each redirect target, at most [`MAX_REDIRECTS`] times,
+    /// all within the time limit.
+    async fn follow<T, H, F>(&self, url: &Url, mut hop: H) -> Result<T, FetchError>
+    where
+        H: FnMut(Url, usize) -> F,
+        F: Future<Output = Result<Hop<T>, FetchError>>,
+    {
         let all_hops = async {
             let mut current = url.clone();
             let mut redirects = 0;
             loop {
-                match self.hop(&current, accept, redirects).await? {
-                    Hop::Done(fetched) => return Ok(fetched),
+                match hop(current, redirects).await? {
+                    Hop::Done(done) => return Ok(done),
                     Hop::Redirect(_) if redirects == MAX_REDIRECTS => {
                         return Err(FetchError::TooManyRedirects);
                     }
@@ -405,8 +578,8 @@ impl Fetcher {
 
     /// What a failed request is reported as. A request that ran out of time is a timeout
     /// whichever of the two clocks noticed first (the HTTP client's, or the one around
-    /// the whole fetch in [`Fetcher::get`]), and it is recognised by the error's kind: its
-    /// words do not say "timed out" on every system.
+    /// the whole fetch in [`Fetcher::follow`]), and it is recognised by the error's kind:
+    /// its words do not say "timed out" on every system.
     fn failure(&self, error: reqwest::Error) -> FetchError {
         if error.is_timeout() {
             self.timed_out()
@@ -717,5 +890,29 @@ mod tests {
         assert!(!FetchError::Timeout(10).is_refusal());
         assert!(FetchError::Scheme("ftp".into()).is_refusal());
         assert!(FetchError::Credentials.is_refusal());
+    }
+
+    #[test]
+    fn a_full_disk_is_named_and_other_write_errors_keep_their_words() {
+        let full = std::io::Error::from(std::io::ErrorKind::StorageFull);
+        assert_eq!(disk_error(full), FetchError::DiskFull);
+        let denied = std::io::Error::new(std::io::ErrorKind::PermissionDenied, "access denied");
+        assert_eq!(disk_error(denied), FetchError::Disk("access denied".into()));
+        assert_eq!(FetchError::DiskFull.to_string(), "the disk is full");
+        assert!(
+            FetchError::Disk("access denied".into())
+                .to_string()
+                .contains("access denied")
+        );
+        assert!(
+            FetchError::TooLarge(1024)
+                .to_string()
+                .contains("1024 bytes")
+        );
+        assert!(
+            FetchError::NotMedia("text/html".into())
+                .to_string()
+                .contains("text/html")
+        );
     }
 }
