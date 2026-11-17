@@ -10,10 +10,10 @@
 //! - **Rules** ([`StudioPrefs::validate`]): the limit is off or within
 //!   [`DAILY_LIMIT_RANGE`], the confirmation amount within [`CONFIRM_AT_RANGE`], at most
 //!   [`MAX_SETUPS`] setups, each with a name. [`save`] checks them first and, when the gallery
-//!   folder changed, that the new folder exists, takes files and has no `%d`, `%3d` or `%03d`
-//!   in its path (the Studio engine would read it as a numbering template). A new gallery
-//!   folder applies to new results only: existing results keep their absolute paths and stay
-//!   where they are.
+//!   folder changed, that the new folder is a full path, exists, takes files and has no `%d`,
+//!   `%3d` or `%03d` in its path (the Studio engine would read it as a numbering template).
+//!   A new gallery folder applies to new results only: existing results keep their absolute
+//!   paths and stay where they are.
 //! - **Changes** ([`StudioPrefs::apply`]): only the fields a [`StudioPrefsPatch`] sends
 //!   change; `null` turns the limit off or puts the gallery back in its default place. No
 //!   patch sets when the note about local models was accepted (`studio_accept_local_notice`
@@ -274,9 +274,13 @@ pub async fn save(store: &store::Store, prefs: &StudioPrefs) -> AppResult<()> {
     Ok(())
 }
 
-/// A gallery folder the user picked: it exists and takes files (the models folder's check),
-/// and its path holds no numbering template the Studio engine would read in `-o`.
+/// A gallery folder the user picked: it is a full path (results keep absolute paths), it
+/// exists and takes files (the models folder's check), and its path holds no numbering
+/// template the Studio engine would read in `-o`.
 async fn check_gallery_dir(dir: PathBuf) -> AppResult<()> {
+    if !dir.is_absolute() {
+        return Err(errors::gallery_not_full_path());
+    }
     tokio::task::spawn_blocking(move || {
         check_writable_folder(&dir)?;
         if is_numbering_template(&dir.to_string_lossy()) {
@@ -677,11 +681,28 @@ mod tests {
         let err = save(&store, &with_gallery(&file)).await.unwrap_err();
         assert_eq!(err.message, "Pick an existing folder.");
 
-        // sd-cli reads `-o` as a numbering template when it holds %d, %3d or %03d.
+        // sd-cli reads `-o` as a numbering template when it holds %d, %3d or %03d. It sees the
+        // whole path, so a folder above the one picked counts too.
         let numbered = scratch.path().join("shots %03d");
-        std::fs::create_dir(&numbered).unwrap();
-        let err = save(&store, &with_gallery(&numbered)).await.unwrap_err();
-        assert_eq!(err.message, "Pick a folder whose name has no %d in it.");
+        let below = numbered.join("pictures");
+        std::fs::create_dir_all(&below).unwrap();
+        for dir in [&numbered, &below] {
+            let err = save(&store, &with_gallery(dir)).await.unwrap_err();
+            assert_eq!(
+                (
+                    err.code.as_str(),
+                    err.message.as_str(),
+                    err.next_step.as_str()
+                ),
+                (
+                    "bad_request",
+                    "Pick a folder whose name has no %d in it.",
+                    "Choose a folder with no %d in its name or in the names of the folders above it.",
+                ),
+                "{}",
+                dir.display()
+            );
+        }
         assert_eq!(load(&store).await.gallery_dir, None);
 
         let good = scratch.path().join("shots");
@@ -689,6 +710,33 @@ mod tests {
         save(&store, &with_gallery(&good)).await.unwrap();
         assert_eq!(load(&store).await, with_gallery(&good));
         assert!(!good.join(".write-test").exists());
+    }
+
+    #[tokio::test]
+    async fn a_gallery_folder_must_be_a_full_path() {
+        let store = store::Store::open_in_memory().unwrap();
+        // "." exists and takes files, but it means wherever the app was started.
+        for relative in [".", "shots"] {
+            let p = StudioPrefs {
+                gallery_dir: Some(relative.into()),
+                ..Default::default()
+            };
+            let err = save(&store, &p).await.unwrap_err();
+            assert_eq!(
+                (
+                    err.code.as_str(),
+                    err.message.as_str(),
+                    err.next_step.as_str()
+                ),
+                (
+                    "bad_request",
+                    "Pick an existing folder.",
+                    "Choose the folder again."
+                ),
+                "{relative}"
+            );
+        }
+        assert_eq!(load(&store).await.gallery_dir, None);
     }
 
     #[tokio::test]
