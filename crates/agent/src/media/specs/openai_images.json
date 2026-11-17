@@ -4,7 +4,13 @@
     "https://developers.openai.com/api/docs/pricing",
     "https://developers.openai.com/api/docs/guides/image-generation",
     "https://developers.openai.com/api/reference/resources/images/methods/generate",
+    "https://developers.openai.com/api/reference/resources/images/methods/edit",
+    "https://developers.openai.com/api/docs/guides/images-vision",
     "https://developers.openai.com/api/docs/deprecations"
+  ],
+  "notes": [
+    "gpt-image-2: perImage as shown on https://developers.openai.com/api/docs/guides/image-generation under Earlier GPT Image models > Older-model pricing examples > Historical output costs (the pricing page gives token rates only and points to that guide). Columns 1024 × 1024 / 1024 × 1536 / 1536 × 1024: Low $0.006 / $0.005 / $0.005, Medium $0.053 / $0.041 / $0.041, High $0.211 / $0.165 / $0.165. The line above the table reads: \"A larger non-square resolution can sometimes produce fewer output tokens than a smaller or square resolution at the same quality setting.\"",
+    "all models: perImage is the picture made only. Added pictures are charged as image input tokens, and OpenAI states their number for none of these models: https://developers.openai.com/api/docs/guides/images-vision gives a count for the shut-down gpt-image-1 alone and says its rules do not cover GPT Image editing costs. So an edit has no estimate."
   ],
   "models": [
     {

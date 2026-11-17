@@ -98,7 +98,8 @@ pub struct ParamSpec {
     pub initial: Option<Value>,
     /// Whether the price estimate can change with this field.
     pub affects_price: bool,
-    /// Values another field must have for this one to apply.
+    /// Values another field must have for this one to apply. A field sent with its company
+    /// default counts as not set, and needs nothing.
     pub requires: Option<Requires>,
 }
 
@@ -418,7 +419,8 @@ pub fn family_of(id: &str) -> String {
 /// with a value it takes; extra settings are ones it lists (a company setting also needs a
 /// company the routing allows that lists it), never a typed field's name, `model`, `prompt`
 /// or `provider`; the pictures of each role are within the model's limits; the prompt is
-/// 1 to 32,000 characters. A model that cannot be used is refused.
+/// 1 to 32,000 characters. A model that cannot be used is refused. A setting sent with its
+/// company default is the same as one left out, so what it requires is not checked.
 ///
 /// # Errors
 /// Every problem found, in the order: prompt, settings, extra settings, pictures.
@@ -444,7 +446,9 @@ pub fn validate(model: &MediaModel, req: &MediaRequest) -> Result<(), Vec<Invali
         };
         if !fits(&spec.kind, value) {
             problems.push(Invalid::BadValue(key.clone()));
-        } else if let Some(problem) = unmet(model, &req.params, spec) {
+        } else if !is_company_default(spec, value)
+            && let Some(problem) = unmet(model, &req.params, spec)
+        {
             problems.push(problem);
         }
     }
@@ -1127,9 +1131,20 @@ fn on_step(offset: f64, step: f64) -> bool {
     (steps - steps.round()).abs() <= 1e-9 * steps.abs().max(1.0)
 }
 
+/// Whether `value` is `spec`'s company default: sending it is the same as leaving it out.
+pub(super) fn is_company_default(spec: &ParamSpec, value: &Value) -> bool {
+    spec.company_default
+        .as_ref()
+        .is_some_and(|default| same_value(default, value))
+}
+
 /// The problem when `spec`'s requirement is not met. A field that is not set counts as its
 /// company default.
-fn unmet(model: &MediaModel, params: &Map<String, Value>, spec: &ParamSpec) -> Option<Invalid> {
+pub(super) fn unmet(
+    model: &MediaModel,
+    params: &Map<String, Value>,
+    spec: &ParamSpec,
+) -> Option<Invalid> {
     let requires = spec.requires.as_ref()?;
     let current = params.get(&requires.key).or_else(|| {
         model

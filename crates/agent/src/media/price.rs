@@ -6,8 +6,9 @@
 //! - **OpenRouter pictures** ([`parse_image_endpoints`]): the saved `/endpoints` answer, a
 //!   price per picture for each company that runs the model.
 //! - **OpenAI pictures**: the bundled settings file's prices per picture, where OpenAI states
-//!   them (built in [`super::openai`]), and what a finished run cost from the answer's token
-//!   counts ([`openai_cost`]).
+//!   them (built in [`super::openai`]; an edit has no estimate, as OpenAI states no price for
+//!   added pictures), and what a finished run cost from the answer's token counts
+//!   ([`openai_cost`]).
 //! - **An estimate** ([`estimate`]) for the settings of a request ([`choice_for`]): `None`
 //!   when the price is not known; a run on this computer costs nothing.
 
@@ -43,6 +44,10 @@ pub struct Table {
     pub rows: Vec<PriceRow>,
     /// What each added picture costs, in US dollars, when the company charges for them.
     pub per_input_image_usd: Option<f64>,
+    /// Whether added pictures are charged at a price the company does not state (OpenAI's
+    /// edits): a run that sends any has no estimate.
+    #[serde(default)]
+    pub input_images_unpriced: bool,
     /// The least a run costs, in US dollars, when the company states one.
     pub minimum_usd: Option<f64>,
 }
@@ -248,6 +253,7 @@ pub fn parse_pricing_skus(skus: &Map<String, Value>) -> Price {
     Price::PerSecond(Table {
         rows: kept,
         per_input_image_usd,
+        input_images_unpriced: false,
         minimum_usd,
     })
 }
@@ -302,7 +308,8 @@ pub fn parse_image_endpoints(answer: &Value, routing: Option<&Routing>) -> Price
 ///
 /// A picture costs its row's price times the count; a video, its row's price per second
 /// times the length. Each added picture adds its price, and the company's minimum is the
-/// least a run costs.
+/// least a run costs. A run that sends pictures charged at a price the company does not
+/// state has no estimate.
 pub fn estimate(price: &Price, choice: &PriceChoice) -> Option<f64> {
     let (table, each) = match price {
         Price::Free => return Some(0.0),
@@ -310,6 +317,9 @@ pub fn estimate(price: &Price, choice: &PriceChoice) -> Option<f64> {
         Price::PerImage(table) => (table, picture_price(table, choice)?),
         Price::PerSecond(table) => (table, second_price(table, choice)? * choice.seconds?),
     };
+    if table.input_images_unpriced && choice.input_images > 0 {
+        return None;
+    }
     let pictures = table.per_input_image_usd.unwrap_or(0.0) * f64::from(choice.input_images);
     let total = each * f64::from(choice.count) + pictures;
     Some(
@@ -543,6 +553,7 @@ fn company_price(record: &Value) -> Price {
     Price::PerImage(Table {
         rows,
         per_input_image_usd,
+        input_images_unpriced: false,
         minimum_usd: None,
     })
 }
@@ -1057,6 +1068,7 @@ mod tests {
         let p = Price::PerImage(Table {
             rows: vec![row(None, 0.04)],
             per_input_image_usd: Some(0.01),
+            input_images_unpriced: false,
             minimum_usd: None,
         });
         usd(estimate(&p, &pics(4, "1K", 2)), 0.18);

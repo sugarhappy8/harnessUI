@@ -33,7 +33,7 @@ use super::openrouter::{
     AnswerPicture, naming_the_answer, picture_label, unreadable, write_pictures,
 };
 use super::price::{OpenAiRates, PriceRow, Table, openai_cost};
-use super::spec::{choice_label, entries, field, gif_fields};
+use super::spec::{choice_label, entries, field, gif_fields, is_company_default, unmet};
 use super::{
     Canonical, Choice, Company, Cost, FailureKind, Fetched, JobDone, JobState, Layer, LocalIo,
     MediaError, MediaFailure, MediaKind, MediaLimits, MediaModel, MediaProvider, MediaRequest,
@@ -72,6 +72,27 @@ const BASIC_MAX_N: u32 = 10;
 /// The form field of an added picture.
 const REFERENCES: &str = "image[]";
 
+/// The settings an edit's form can carry besides `model`, `prompt` and the pictures: those
+/// OpenAI's `/images/edits` reference documents (checked on 2026-11-17). It also documents
+/// streaming (`stream`, `partial_images`), the other picture parts (`mask`, `markup`), the
+/// SVG author (`svg`) and end-user identifiers, none of which is a Studio setting.
+const EDIT_SETTINGS: [&str; 11] = [
+    "background",
+    "complexity",
+    "frame_count",
+    "frame_duration_ms",
+    "input_fidelity",
+    "moderation",
+    "n",
+    "output_compression",
+    "output_format",
+    "quality",
+    "size",
+];
+
+/// Added to the help of a setting the edit endpoint does not take.
+const NOT_IN_EDITS: &str = "Not sent when you add pictures.";
+
 /// The bundled settings file: OpenAI's picture models as checked on one date.
 #[derive(Debug, Clone, Default, PartialEq, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -80,6 +101,10 @@ pub(crate) struct OpenAiSpec {
     pub checked: String,
     /// The pages it was checked against.
     pub sources: Vec<String>,
+    /// Where a figure that may look wrong was read, and what the page shows: `<prefix>: …`
+    /// for one model, `all models: …` for every one.
+    #[serde(default)]
+    pub notes: Vec<String>,
     /// One entry per model, the newest first.
     pub models: Vec<OpenAiEntry>,
 }
@@ -110,7 +135,8 @@ pub(crate) struct OpenAiEntry {
     pub gif: bool,
     /// Its token prices.
     pub rates: OpenAiRates,
-    /// The prices per picture OpenAI states, by `<quality>|<size>`, in US dollars.
+    /// The prices per picture made that OpenAI states, by `<quality>|<size>`, in US dollars.
+    /// They leave out added pictures, which OpenAI charges for at a price it does not state.
     pub per_image: BTreeMap<String, f64>,
 }
 
@@ -480,6 +506,9 @@ pub(crate) fn model_for(id: &str) -> MediaModel {
     }
     params.push(background_field());
     params.push(moderation_field());
+    if entry.max_refs > 0 {
+        note_what_edits_leave_out(&mut params);
+    }
 
     let mut notes: Vec<String> = entry.note.iter().cloned().collect();
     if let Some(date) = &entry.retires {
@@ -587,7 +616,9 @@ fn in_words(date: &str) -> Option<String> {
 }
 
 /// The price per picture OpenAI states for an entry, one row per `<quality>|<size>`; unknown
-/// when it states none.
+/// when it states none. An edit has no estimate: OpenAI also charges for each added picture's
+/// tokens, and states their number for none of these models (its vision guide's count covers
+/// only the shut-down `gpt-image-1`), so a price from the picture made alone could be too low.
 fn entry_price(entry: &OpenAiEntry) -> Price {
     let rows: Vec<PriceRow> = entry
         .per_image
@@ -610,6 +641,7 @@ fn entry_price(entry: &OpenAiEntry) -> Price {
         Price::PerImage(Table {
             rows,
             per_input_image_usd: None,
+            input_images_unpriced: true,
             minimum_usd: None,
         })
     }
@@ -783,6 +815,20 @@ fn moderation_field() -> ParamSpec {
     }
 }
 
+/// Adds [`NOT_IN_EDITS`] to the help of each setting the edit endpoint does not take
+/// ([`EDIT_SETTINGS`]); an edit's form, and its preview, leave those out.
+fn note_what_edits_leave_out(params: &mut [ParamSpec]) {
+    let left_out = params
+        .iter_mut()
+        .filter(|spec| spec.key != REFERENCES && !EDIT_SETTINGS.contains(&spec.key.as_str()));
+    for spec in left_out {
+        spec.help = Some(match spec.help.take() {
+            Some(help) => format!("{help} {NOT_IN_EDITS}"),
+            None => NOT_IN_EDITS.to_owned(),
+        });
+    }
+}
+
 // ---- the request -----------------------------------------------------------------------------
 
 /// The added pictures a request sends: its references.
@@ -792,27 +838,45 @@ fn references(req: &MediaRequest) -> impl Iterator<Item = &RefImage> {
         .filter(|picture| picture.role == RefRole::Reference)
 }
 
-/// The JSON body of `/images/generations`: `model`, `prompt` and every typed setting (none
-/// replaces either). OpenAI's models take no extra settings.
+/// The typed settings `req` sends, in its order; `model` and `prompt` are never settings. A
+/// setting at its company default whose requirement is not met is left out: sending the
+/// default is the same as leaving it out, and OpenAI could refuse it (How many 1 with an
+/// SVG, compression 100 with a PNG).
+fn settings(req: &MediaRequest) -> Vec<(&str, &Value)> {
+    let model = model_for(&req.model);
+    let idle = |key: &str, value: &Value| {
+        model.params.iter().any(|spec| {
+            spec.key == key
+                && is_company_default(spec, value)
+                && unmet(&model, &req.params, spec).is_some()
+        })
+    };
+    req.params
+        .iter()
+        .map(|(key, value)| (key.as_str(), value))
+        .filter(|(key, value)| !matches!(*key, "model" | "prompt") && !idle(key, value))
+        .collect()
+}
+
+/// The JSON body of `/images/generations`: `model`, `prompt` and the typed settings
+/// ([`settings`]). OpenAI's models take no extra settings.
 fn json_body(req: &MediaRequest) -> Value {
     let mut body = Map::new();
     body.insert("model".to_owned(), Value::String(req.model.clone()));
     body.insert("prompt".to_owned(), Value::String(req.prompt.clone()));
-    for (key, value) in &req.params {
-        body.entry(key.clone()).or_insert_with(|| value.clone());
+    for (key, value) in settings(req) {
+        body.insert(key.to_owned(), value.clone());
     }
     Value::Object(body)
 }
 
-/// The text fields of an `/images/edits` form: `model`, `prompt`, then every typed setting by
-/// name (none replaces either), each as text.
+/// The text fields of an `/images/edits` form: `model`, `prompt`, then the typed settings
+/// ([`settings`]) the edit endpoint takes ([`EDIT_SETTINGS`]) by name, each as text.
 fn form_fields(req: &MediaRequest) -> Vec<(&str, String)> {
     let mut fields = vec![("model", req.model.clone()), ("prompt", req.prompt.clone())];
-    let mut settings: Vec<(&str, &Value)> = req
-        .params
-        .iter()
-        .map(|(key, value)| (key.as_str(), value))
-        .filter(|(key, _)| !matches!(*key, "model" | "prompt"))
+    let mut settings: Vec<(&str, &Value)> = settings(req)
+        .into_iter()
+        .filter(|(key, _)| EDIT_SETTINGS.contains(key))
         .collect();
     settings.sort_by_key(|(key, _)| *key);
     for (key, value) in settings {
@@ -925,6 +989,7 @@ mod tests {
     use serde_json::{Value, json};
 
     use super::*;
+    use crate::client::{ClientConfig, ProviderKind};
     use crate::media::{
         Invalid, OPENAI_SIZE_RULES, ParamKind, Price, RefImage, RefRole, SizeProblem, check_size,
         choice_for, estimate, validate,
@@ -967,16 +1032,26 @@ mod tests {
     }
 
     fn with_ref(req: MediaRequest) -> MediaRequest {
+        with_refs(req, 1)
+    }
+
+    fn with_refs(req: MediaRequest, count: usize) -> MediaRequest {
         MediaRequest {
-            refs: vec![RefImage {
-                role: RefRole::Reference,
-                mime: "image/png".to_owned(),
-                path: PathBuf::from("/gallery/refs/a.png"),
-                sha256: "0".repeat(64),
-                size_bytes: 1_200,
-            }],
+            refs: (0..count)
+                .map(|i| RefImage {
+                    role: RefRole::Reference,
+                    mime: "image/png".to_owned(),
+                    path: PathBuf::from(format!("/gallery/refs/{i}.png")),
+                    sha256: i.to_string().repeat(64),
+                    size_bytes: 1_200,
+                })
+                .collect(),
             ..req
         }
+    }
+
+    fn names<'a>(fields: &'a [(&'a str, String)]) -> Vec<&'a str> {
+        fields.iter().map(|(name, _)| *name).collect()
     }
 
     fn headers(pairs: &[(&'static str, &'static str)]) -> HeaderMap {
@@ -1235,13 +1310,203 @@ mod tests {
         assert_eq!(
             validate(
                 &m,
-                &request("gpt-image-2.6-flare", json!({"frame_count": 9}))
+                &request("gpt-image-2.6-flare", json!({"frame_count": 12}))
             ),
             Err(vec![Invalid::Requires {
                 key: "frame_count".into(),
                 needs: "output_format".into()
             }])
         );
+    }
+
+    #[test]
+    fn sending_a_default_is_the_same_as_leaving_it_out() {
+        let id = "gpt-image-2.6-flare";
+        let m = model_for(id);
+        // How many = 1 with an SVG: valid, and `n` is not sent.
+        let svg = request(id, json!({"output_format": "svg", "n": 1}));
+        assert_eq!(validate(&m, &svg), Ok(()));
+        let body = json_body(&svg);
+        assert_eq!(body.get("n"), None, "{body}");
+        assert_eq!(body["output_format"], "svg");
+        assert_eq!(
+            validate(&m, &request(id, json!({"output_format": "svg", "n": 2}))),
+            Err(vec![Invalid::Requires {
+                key: "n".into(),
+                needs: "output_format".into()
+            }])
+        );
+        // Compression 100 with a PNG: valid, and not sent.
+        let png = request(
+            id,
+            json!({"output_format": "png", "output_compression": 100}),
+        );
+        assert_eq!(validate(&m, &png), Ok(()));
+        let body = json_body(&png);
+        assert_eq!(body.get("output_compression"), None, "{body}");
+        assert_eq!(
+            validate(
+                &m,
+                &request(
+                    id,
+                    json!({"output_format": "png", "output_compression": 80})
+                )
+            ),
+            Err(vec![Invalid::Requires {
+                key: "output_compression".into(),
+                needs: "output_format".into()
+            }])
+        );
+        // Where the requirement is met, the default is sent as it was set.
+        let jpeg = request(
+            id,
+            json!({"output_format": "jpeg", "output_compression": 100, "n": 1}),
+        );
+        let body = json_body(&jpeg);
+        assert_eq!(
+            (&body["n"], &body["output_compression"]),
+            (&json!(1), &json!(100))
+        );
+        // An edit's form leaves it out the same way.
+        let edit = with_ref(request(
+            id,
+            json!({"output_format": "png", "output_compression": 100, "n": 1}),
+        ));
+        assert_eq!(validate(&m, &edit), Ok(()));
+        assert_eq!(
+            names(&form_fields(&edit)),
+            ["model", "prompt", "n", "output_format"]
+        );
+    }
+
+    #[test]
+    fn an_edit_is_never_estimated_from_the_picture_made_alone() {
+        // OpenAI charges for added pictures at a token count it states for none of these
+        // models, so an edit has no estimate and Studio asks first.
+        for id in ["gpt-image-2", "gpt-image-1.5", "gpt-image-1-mini"] {
+            let m = model_for(id);
+            let plain = request(id, json!({"size": "1024x1024", "quality": "high"}));
+            let price = |req: &MediaRequest| estimate(&m.price, &choice_for(&m, req));
+            assert!(price(&plain).is_some_and(|usd| usd > 0.0), "{id}");
+            assert_eq!(price(&with_refs(plain.clone(), 4)), None, "{id}");
+            assert_eq!(price(&with_refs(plain, 1)), None, "{id}");
+        }
+    }
+
+    #[test]
+    fn a_non_square_price_below_the_square_one_names_its_source() {
+        let spec = bundled();
+        let guide = "https://developers.openai.com/api/docs/guides/image-generation";
+        assert!(spec.sources.iter().any(|s| s == guide));
+        let below = |entry: &OpenAiEntry, quality: &str| {
+            let usd = |size: &str| entry.per_image.get(&format!("{quality}|{size}")).copied();
+            usd("1024x1024").is_some_and(|square| {
+                ["1024x1536", "1536x1024"]
+                    .iter()
+                    .any(|size| usd(size).is_some_and(|other| other < square))
+            })
+        };
+        for entry in &spec.models {
+            for quality in entry.qualities.iter().filter(|q| below(entry, q)) {
+                let noted = spec.notes.iter().any(|note| {
+                    note.starts_with(&format!("{}:", entry.prefix)) && note.contains(guide)
+                });
+                assert!(
+                    noted,
+                    "{} {quality}: no note says where it was read",
+                    entry.prefix
+                );
+            }
+        }
+        // gpt-image-2 is such a model; its figures are kept as OpenAI shows them.
+        let two = match_spec("gpt-image-2").unwrap();
+        assert!(below(two, "high"));
+        for (key, usd) in [
+            ("low|1024x1024", 0.006),
+            ("low|1536x1024", 0.005),
+            ("medium|1024x1536", 0.041),
+            ("high|1024x1024", 0.211),
+            ("high|1536x1024", 0.165),
+        ] {
+            assert!((two.per_image[key] - usd).abs() < 1e-12, "{key}");
+        }
+    }
+
+    #[test]
+    fn an_edit_sends_only_what_the_edit_endpoint_documents() {
+        // OpenAI's edits reference documents every typed setting, Safety level included, so
+        // none says it is not sent.
+        for entry in &bundled().models {
+            for spec in &model_for(&entry.prefix).params {
+                assert!(
+                    spec.key == REFERENCES || EDIT_SETTINGS.contains(&spec.key.as_str()),
+                    "{}: {}",
+                    entry.prefix,
+                    spec.key
+                );
+                let help = spec.help.as_deref().unwrap_or_default();
+                assert!(!help.contains(NOT_IN_EDITS), "{}", spec.key);
+            }
+        }
+        let id = "gpt-image-2.6-flare";
+        let edit = with_ref(request(
+            id,
+            json!({"moderation": "low", "output_format": "gif", "frame_count": 12}),
+        ));
+        assert_eq!(validate(&model_for(id), &edit), Ok(()));
+        assert_eq!(
+            form_fields(&edit),
+            [
+                ("model", id.to_owned()),
+                ("prompt", "a lighthouse at dusk".to_owned()),
+                ("frame_count", "12".to_owned()),
+                ("moderation", "low".to_owned()),
+                ("output_format", "gif".to_owned()),
+            ]
+        );
+
+        // A setting the reference does not document (`response_format`, which would change
+        // the answer) is left out of the form and of the request preview built from it...
+        let mut stray = edit;
+        stray.params.insert("response_format".into(), json!("url"));
+        assert!(!names(&form_fields(&stray)).contains(&"response_format"));
+        let client = OpenAiClient::new(ClientConfig::new(
+            "https://api.openai.com/v1",
+            ProviderKind::OpenAi,
+        ))
+        .unwrap();
+        let preview = OpenAiImages::new(client).preview(&stray);
+        assert!(preview.url.ends_with("/images/edits"), "{}", preview.url);
+        assert_eq!(preview.body["moderation"], "low");
+        assert_eq!(
+            preview.body.get("response_format"),
+            None,
+            "{}",
+            preview.body
+        );
+
+        // ...and a field of that name would say so in its help.
+        let mut params = vec![
+            ParamSpec {
+                help: Some("A link instead of the picture.".to_owned()),
+                ..field(
+                    "response_format",
+                    None,
+                    "Answer",
+                    Layer::Advanced,
+                    ParamKind::Enum {
+                        values: word_choices(&["url", "b64_json"]),
+                    },
+                )
+            },
+            moderation_field(),
+        ];
+        note_what_edits_leave_out(&mut params);
+        assert_eq!(
+            params[0].help.as_deref(),
+            Some("A link instead of the picture. Not sent when you add pictures.")
+        );
+        assert_eq!(params[1].help.as_deref(), Some(MODERATION_HELP));
     }
 
     #[test]
