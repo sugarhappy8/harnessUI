@@ -78,6 +78,17 @@ const PICTURE_ERROR_TAIL: usize = 4096;
 /// [`MAX_IMAGE_BYTES`].
 const PICTURE_TOO_LARGE_EXIT: i32 = 3;
 
+/// [0.1.0 Studio] Argument after [`PICTURE_WORKER_FLAG`] that makes the picture worker make
+/// a Studio thumbnail ([`thumbnail`]) instead of turning a WebP picture into JPEG or PNG.
+pub const THUMB_MODE: &str = "thumb";
+/// [0.1.0 Studio] Longest side of a Studio thumbnail, in pixels.
+pub const THUMB_SIDE: u32 = 512;
+/// [0.1.0 Studio] Largest picture the worker takes for a thumbnail, in bytes: Studio's cap
+/// for one picture.
+const MAX_THUMB_INPUT_BYTES: usize = 50 * 1024 * 1024;
+/// [0.1.0 Studio] JPEG quality of a thumbnail.
+const THUMB_JPEG_QUALITY: u8 = 80;
+
 /// [0.0.6] What the user is told when a WebP picture cannot be turned into JPEG or PNG
 /// (broken, larger than the limits, or too slow); what went wrong is in the details.
 fn unreadable_picture(details: impl Into<String>) -> AppError {
@@ -193,14 +204,20 @@ fn decode_webp(bytes: &[u8]) -> image::ImageResult<image::DynamicImage> {
             LimitErrorKind::DimensionError,
         )));
     }
+    let mut reader =
+        image::ImageReader::with_format(std::io::Cursor::new(bytes), image::ImageFormat::WebP);
+    reader.limits(picture_limits());
+    reader.decode()
+}
+
+/// [0.0.6] The decoder's limits for one picture: at most [`MAX_PICTURE_SIDE`] pixels a side
+/// and [`MAX_PICTURE_DECODE_BYTES`] for the pixels.
+fn picture_limits() -> image::Limits {
     let mut limits = image::Limits::default();
     limits.max_image_width = Some(MAX_PICTURE_SIDE);
     limits.max_image_height = Some(MAX_PICTURE_SIDE);
     limits.max_alloc = Some(MAX_PICTURE_DECODE_BYTES);
-    let mut reader =
-        image::ImageReader::with_format(std::io::Cursor::new(bytes), image::ImageFormat::WebP);
-    reader.limits(limits);
-    reader.decode()
+    limits
 }
 
 /// [0.0.6] A decoded picture as the model gets it, at most `cap` bytes: JPEG at quality
@@ -249,25 +266,126 @@ fn webp_for_model(bytes: &[u8]) -> Result<Vec<u8>, NotConverted> {
     encode_for_model(picture, MAX_IMAGE_BYTES)
 }
 
-/// [0.0.6] The picture worker's entry point (`main.rs`). It caps its own memory
-/// ([`PICTURE_WORKER_MEMORY`]) before anything else, reads one WebP picture from stdin (at
-/// most [`MAX_IMAGE_BYTES`]), and writes [`PICTURE_MARK`] and the picture as JPEG or PNG
-/// ([`webp_for_model`]) to stdout. Never returns. Exits with 0 on success,
-/// [`PICTURE_TOO_LARGE_EXIT`] when the picture would be too large, and 2 when it cannot be
-/// read, with the reason on stderr. A failed allocation aborts it.
-pub fn picture_worker_main() -> ! {
+/// [0.1.0 Studio] A PNG, JPEG or WebP picture decoded within the limits
+/// ([`picture_limits`]; a WebP picture through [`decode_webp`], with its frame checks), the
+/// first frame of an animation. Anything else, GIF and SVG included, is refused. Runs only
+/// in the picture worker.
+fn decode_for_thumbnail(bytes: &[u8]) -> Result<image::DynamicImage, NotConverted> {
+    let unreadable = |e: image::ImageError| NotConverted::Unreadable(e.to_string());
+    let format = match crate::studio::gallery::sniff_media(bytes) {
+        Some("image/png") => image::ImageFormat::Png,
+        Some("image/jpeg") => image::ImageFormat::Jpeg,
+        Some("image/webp") => return decode_webp(bytes).map_err(unreadable),
+        _ => {
+            return Err(NotConverted::Unreadable(
+                "only PNG, JPEG and WebP pictures get a thumbnail".into(),
+            ));
+        }
+    };
+    let mut reader = image::ImageReader::with_format(std::io::Cursor::new(bytes), format);
+    reader.limits(picture_limits());
+    reader.decode().map_err(unreadable)
+}
+
+/// [0.1.0 Studio] A thumbnail's size for a picture of `width` x `height` pixels: the longest
+/// side [`THUMB_SIDE`] and the shape kept, never larger than the picture, never under one
+/// pixel a side.
+fn thumb_sides(width: u32, height: u32) -> (u32, u32) {
+    let longest = width.max(height);
+    if longest <= THUMB_SIDE {
+        return (width, height);
+    }
+    let scale = |side: u32| {
+        let scaled =
+            (u64::from(side) * u64::from(THUMB_SIDE) + u64::from(longest) / 2) / u64::from(longest);
+        u32::try_from(scaled).unwrap_or(THUMB_SIDE).max(1)
+    };
+    (scale(width), scale(height))
+}
+
+/// [0.1.0 Studio] A decoded picture without see-through parts, as JPEG holds it: those parts
+/// are shown on white.
+fn on_white(picture: image::DynamicImage) -> image::RgbImage {
+    if !picture.color().has_alpha() {
+        return picture.into_rgb8();
+    }
+    let rgba = picture.into_rgba8();
+    image::RgbImage::from_fn(rgba.width(), rgba.height(), |x, y| {
+        let [r, g, b, a] = rgba.get_pixel(x, y).0;
+        let a = u16::from(a);
+        let blend = |c: u8| ((u16::from(c) * a + 255 * (255 - a) + 127) / 255) as u8;
+        image::Rgb([blend(r), blend(g), blend(b)])
+    })
+}
+
+/// [0.1.0 Studio] A Studio thumbnail: a PNG, JPEG or WebP picture
+/// ([`decode_for_thumbnail`]) made at most [`THUMB_SIDE`] pixels a side
+/// ([`thumb_sides`], `image::imageops::thumbnail`) and written as JPEG at quality
+/// [`THUMB_JPEG_QUALITY`]. GIF and SVG get none (the gallery shows the original). Runs only
+/// in the picture worker.
+pub(crate) fn thumbnail(bytes: &[u8]) -> Result<Vec<u8>, NotConverted> {
+    use image::ImageEncoder;
+    let picture = on_white(decode_for_thumbnail(bytes)?);
+    let (width, height) = thumb_sides(picture.width(), picture.height());
+    let small = if (width, height) == picture.dimensions() {
+        picture
+    } else {
+        image::imageops::thumbnail(&picture, width, height)
+    };
+    let mut out = Vec::new();
+    image::codecs::jpeg::JpegEncoder::new_with_quality(&mut out, THUMB_JPEG_QUALITY)
+        .write_image(
+            small.as_raw(),
+            width,
+            height,
+            image::ExtendedColorType::Rgb8,
+        )
+        .map_err(|e| NotConverted::Unreadable(e.to_string()))?;
+    Ok(out)
+}
+
+/// [0.0.6] The picture worker's entry point (`main.rs`), with the argument after
+/// [`PICTURE_WORKER_FLAG`] as `mode`. It caps its own memory ([`PICTURE_WORKER_MEMORY`])
+/// before anything else, then reads one picture from stdin and writes [`PICTURE_MARK`] and
+/// the result to stdout. Without a mode the picture is WebP (at most [`MAX_IMAGE_BYTES`])
+/// and the result JPEG or PNG ([`webp_for_model`]); with [`THUMB_MODE`] the picture is PNG,
+/// JPEG or WebP (at most [`MAX_THUMB_INPUT_BYTES`]) and the result its thumbnail
+/// ([`thumbnail`]). Never returns. Exits with 0 on success, [`PICTURE_TOO_LARGE_EXIT`] when
+/// the result would be too large, and 2 when the picture cannot be read or the mode is
+/// unknown, with the reason on stderr. A failed allocation aborts it.
+pub fn picture_worker_main(mode: Option<&str>) -> ! {
     use std::io::{Read, Write};
     tools::pdf::limit_own_memory(PICTURE_WORKER_MEMORY);
-    let mut webp = Vec::new();
+    let thumb = match mode {
+        None => false,
+        Some(THUMB_MODE) => true,
+        Some(_) => {
+            eprintln!("unknown picture worker mode");
+            std::process::exit(2);
+        }
+    };
+    let most = if thumb {
+        MAX_THUMB_INPUT_BYTES
+    } else {
+        MAX_IMAGE_BYTES
+    };
+    let mut input = Vec::new();
     let read = std::io::stdin()
         .lock()
-        .take(MAX_IMAGE_BYTES as u64 + 1)
-        .read_to_end(&mut webp);
-    if read.is_err() || webp.len() > MAX_IMAGE_BYTES {
+        .take(most as u64 + 1)
+        .read_to_end(&mut input);
+    if read.is_err() || input.len() > most {
         eprintln!("the picture could not be read whole");
         std::process::exit(2);
     }
-    match std::panic::catch_unwind(|| webp_for_model(&webp)) {
+    let work = || {
+        if thumb {
+            thumbnail(&input)
+        } else {
+            webp_for_model(&input)
+        }
+    };
+    match std::panic::catch_unwind(work) {
         Ok(Ok(picture)) => {
             let mut out = std::io::stdout().lock();
             let written = out
@@ -287,8 +405,9 @@ pub fn picture_worker_main() -> ! {
 }
 
 /// [0.0.6] How the app starts the picture worker: its own binary with
-/// [`PICTURE_WORKER_FLAG`] and no other argument, through the runtime spawn module; the
-/// picture goes in on stdin and comes back on stdout. Tests start their own binary instead.
+/// [`PICTURE_WORKER_FLAG`] and no other argument ([`THUMB_MODE`] after it for Studio's
+/// thumbnails), through the runtime spawn module; the picture goes in on stdin and comes
+/// back on stdout. Tests start their own binary instead.
 #[derive(Debug, Clone)]
 pub(crate) struct PictureWorker {
     program: PathBuf,
@@ -316,11 +435,56 @@ impl PictureWorker {
         }
     }
 
+    /// [0.1.0 Studio] The app's own binary as the worker in thumbnail mode
+    /// ([`THUMB_MODE`] after the flag).
+    #[allow(dead_code, reason = "used by Studio from Task A13/A16")]
+    pub(crate) fn thumbs() -> Self {
+        let mut worker = Self::app();
+        worker.args.push(THUMB_MODE.into());
+        worker
+    }
+
     /// `webp` as JPEG or PNG, with its MIME type, turned in a worker process
     /// ([`picture_worker_main`]), so a crafted file can cost the app neither its memory
     /// nor its life. A worker that fails, aborts or takes longer than its time is killed
     /// with its process tree, and the picture counts as unreadable.
     pub(crate) async fn convert(&self, webp: &[u8]) -> Result<(String, Vec<u8>), NotConverted> {
+        let picture = self
+            .run(webp, "turning the picture into JPEG or PNG took too long")
+            .await?;
+        let mime = if sniff("image/png", &picture) {
+            "image/png"
+        } else if sniff("image/jpeg", &picture) {
+            "image/jpeg"
+        } else {
+            return Err(NotConverted::Unreadable(
+                "the picture worker gave no picture".into(),
+            ));
+        };
+        Ok((mime.to_owned(), picture))
+    }
+
+    /// [0.1.0 Studio] A PNG, JPEG or WebP picture's thumbnail, a JPEG at most
+    /// [`THUMB_SIDE`] pixels a side, made in a worker process started by [`Self::thumbs`]
+    /// ([`thumbnail`]), as safely as [`Self::convert`]. GIF, SVG and a picture that cannot
+    /// be read get none.
+    #[allow(dead_code, reason = "used by Studio from Task A13/A16")]
+    pub(crate) async fn thumbnail(&self, bytes: &[u8]) -> Result<Vec<u8>, NotConverted> {
+        let jpeg = self
+            .run(bytes, "making the thumbnail took too long")
+            .await?;
+        if !sniff("image/jpeg", &jpeg) {
+            return Err(NotConverted::Unreadable(
+                "the picture worker gave no thumbnail".into(),
+            ));
+        }
+        Ok(jpeg)
+    }
+
+    /// Runs the worker on `input` and returns what it wrote after [`PICTURE_MARK`], at most
+    /// `max_output` bytes. A worker that fails, aborts or takes longer than its time
+    /// (`too_slow` is then the reason) is killed with its process tree.
+    async fn run(&self, input: &[u8], too_slow: &str) -> Result<Vec<u8>, NotConverted> {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
         let failed = NotConverted::Unreadable;
         let cwd = self
@@ -344,7 +508,7 @@ impl PictureWorker {
         let work = async {
             let write = async move {
                 // A worker that stops early closes its end; its exit code says why.
-                let _ = stdin.write_all(webp).await;
+                let _ = stdin.write_all(input).await;
             };
             // Reading stops after `most` bytes and closes the pipe, so a worker that writes
             // more fails instead of waiting.
@@ -366,7 +530,7 @@ impl PictureWorker {
         };
         let (mut out, err, status) = tokio::time::timeout(self.timeout, work)
             .await
-            .map_err(|_| failed("turning the picture into JPEG or PNG took too long".into()))?;
+            .map_err(|_| failed(too_slow.to_owned()))?;
         let status = status.map_err(|e| failed(format!("the picture worker was lost: {e}")))?;
         if out.len() >= most || status.code() == Some(PICTURE_TOO_LARGE_EXIT) {
             return Err(NotConverted::TooLarge);
@@ -388,14 +552,7 @@ impl PictureWorker {
         if picture.len() > self.max_output {
             return Err(NotConverted::TooLarge);
         }
-        let mime = if sniff("image/png", &picture) {
-            "image/png"
-        } else if sniff("image/jpeg", &picture) {
-            "image/jpeg"
-        } else {
-            return Err(failed("the picture worker gave no picture".into()));
-        };
-        Ok((mime.to_owned(), picture))
+        Ok(picture)
     }
 }
 
@@ -1167,6 +1324,7 @@ pub async fn get_attachment(state: State<'_, AppState>, id: i64) -> AppResult<St
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
+    use crate::studio::test_support::png;
 
     #[test]
     fn magic_numbers() {
@@ -1563,15 +1721,19 @@ pub(crate) mod tests {
     const TEST_WORKER_ENV: &str = "HARNESS_TEST_PICTURE_WORKER";
 
     /// The picture worker when this test binary is started as one ([`test_worker`]):
-    /// `convert` runs the real worker, `slow` runs it after 3 s, `hang` never answers. A
-    /// plain test run does nothing.
+    /// `convert` runs the real worker, `thumb` runs it in thumbnail mode, `other` runs it in
+    /// a mode it does not know, `slow` runs it after 3 s, `hang` never answers. The mode
+    /// comes from the environment, since libtest owns the command line. A plain test run
+    /// does nothing.
     #[test]
     fn picture_worker_process() {
         match std::env::var(TEST_WORKER_ENV).as_deref() {
-            Ok("convert") => picture_worker_main(),
+            Ok("convert") => picture_worker_main(None),
+            Ok("thumb") => picture_worker_main(Some(THUMB_MODE)),
+            Ok("other") => picture_worker_main(Some("other")),
             Ok("slow") => {
                 std::thread::sleep(Duration::from_secs(3));
-                picture_worker_main()
+                picture_worker_main(None)
             }
             Ok("hang") => {
                 std::thread::sleep(Duration::from_secs(600));
@@ -2366,5 +2528,202 @@ pub(crate) mod tests {
         assert_eq!(result.images[1].0, "image/png");
         assert_eq!(png_pixels(&unb64(&result.images[1].1)).dimensions(), (3, 2));
         assert_eq!(parts[2], Part::Text(PICTURE_UNKNOWN_LEFT_OUT.into()));
+    }
+
+    /// A JPEG picture of one colour, `w` x `h` pixels.
+    fn jpeg(w: u32, h: u32) -> Vec<u8> {
+        let picture = image::RgbImage::from_pixel(w, h, image::Rgb([40, 120, 200]));
+        let mut out = Vec::new();
+        picture
+            .write_to(
+                &mut std::io::Cursor::new(&mut out),
+                image::ImageFormat::Jpeg,
+            )
+            .unwrap();
+        out
+    }
+
+    /// A valid JPEG picture of 1024 x 768 pixels made at least `size` bytes long with
+    /// comment segments, which decoders skip.
+    fn jpeg_padded_to(size: usize) -> Vec<u8> {
+        let small = jpeg(1024, 768);
+        let mut out = small[..2].to_vec();
+        while out.len() + small.len() < size {
+            out.extend_from_slice(&[0xFF, 0xFE, 0xFF, 0xFF]);
+            out.extend(std::iter::repeat_n(b'x', 0xFFFF - 2));
+        }
+        out.extend_from_slice(&small[2..]);
+        out
+    }
+
+    /// Checks that each channel of the pixel at `(x, y)` is within 8 of `want` (JPEG is
+    /// lossy).
+    fn assert_near(px: &image::RgbImage, (x, y): (u32, u32), want: [u8; 3]) {
+        let got = px.get_pixel(x, y).0;
+        let near = got.iter().zip(want).all(|(&g, w)| g.abs_diff(w) <= 8);
+        assert!(near, "({x}, {y}) is {got:?}, not about {want:?}");
+    }
+
+    /// [0.1.0 Studio] A thumbnail is a JPEG whose longest side is 512 pixels, the picture's
+    /// shape kept.
+    #[test]
+    fn a_thumbnail_is_a_jpeg_at_most_512_px() {
+        use image::GenericImageView;
+        let jpg = thumbnail(&png(1536, 1024)).unwrap();
+        assert!(jpg.starts_with(&[0xFF, 0xD8, 0xFF]));
+        let (w, h) = image::load_from_memory(&jpg).unwrap().dimensions();
+        assert_eq!((w, h), (512, 341));
+    }
+
+    /// [0.1.0 Studio] A picture already within 512 pixels keeps its size and its colour.
+    #[test]
+    fn a_small_picture_is_not_enlarged() {
+        let px = jpeg_pixels(&thumbnail(&png(300, 200)).unwrap());
+        assert_eq!(px.dimensions(), (300, 200));
+        assert_near(&px, (150, 100), [200, 120, 40]);
+    }
+
+    /// [0.1.0 Studio] JPEG and WebP pictures get thumbnails too: a tall one becomes 512 pixels
+    /// tall, a wide one 512 wide, colours kept; the smaller side is never under one pixel.
+    #[test]
+    fn jpeg_and_webp_pictures_get_thumbnails_too() {
+        let px = jpeg_pixels(&thumbnail(&jpeg(600, 1200)).unwrap());
+        assert_eq!(px.dimensions(), (256, 512));
+        assert_near(&px, (128, 256), [40, 120, 200]);
+
+        let px = jpeg_pixels(&thumbnail(&plain_webp(2048, 1024)).unwrap());
+        assert_eq!(px.dimensions(), (512, 256));
+        assert_near(&px, (256, 128), [90, 90, 90]);
+
+        let px = jpeg_pixels(&thumbnail(&png(MAX_PICTURE_SIDE, 2)).unwrap());
+        assert_eq!(px.dimensions(), (512, 1));
+    }
+
+    /// [0.1.0 Studio] JPEG has no see-through parts, so a thumbnail shows them on white.
+    #[test]
+    fn see_through_parts_are_white_in_a_thumbnail() {
+        let picture = image::RgbaImage::from_fn(64, 32, |x, _| {
+            if x < 32 {
+                image::Rgba([0, 0, 0, 0])
+            } else {
+                image::Rgba([0, 0, 255, 255])
+            }
+        });
+        let mut bytes = Vec::new();
+        picture
+            .write_to(
+                &mut std::io::Cursor::new(&mut bytes),
+                image::ImageFormat::Png,
+            )
+            .unwrap();
+        let px = jpeg_pixels(&thumbnail(&bytes).unwrap());
+        assert_near(&px, (8, 16), [255, 255, 255]);
+        assert_near(&px, (56, 16), [0, 0, 255]);
+    }
+
+    /// [0.1.0 Studio] GIF and SVG get no thumbnail (the grid shows the original), nor does a
+    /// broken picture, one that is not a picture, or one wider or taller than 8,192 pixels.
+    #[test]
+    fn gif_svg_broken_and_oversized_pictures_get_no_thumbnail() {
+        let mut cut = png(64, 64);
+        cut.truncate(60);
+        let cases: Vec<(&str, Vec<u8>)> = vec![
+            ("gif", b"GIF89a\x01\x00\x01\x00\x00\x00\x00;".to_vec()),
+            (
+                "svg",
+                b"<svg xmlns=\"http://www.w3.org/2000/svg\"/>".to_vec(),
+            ),
+            ("cut short", cut),
+            ("not a picture", b"hello".to_vec()),
+            ("too wide", png(MAX_PICTURE_SIDE + 1, 2)),
+            ("too tall", jpeg(2, MAX_PICTURE_SIDE + 1)),
+            ("too wide WebP", plain_webp(10_000, 8)),
+        ];
+        for (what, bytes) in cases {
+            let got = thumbnail(&bytes);
+            assert!(
+                matches!(got, Err(NotConverted::Unreadable(_))),
+                "{what}: {got:?}"
+            );
+        }
+    }
+
+    /// [0.1.0 Studio] The thumbnail worker is the app's binary with the worker flag and then
+    /// `thumb`, under the same environment and time limit as the WebP worker.
+    #[test]
+    fn the_thumbnail_worker_is_the_app_with_the_thumb_argument() {
+        let worker = PictureWorker::thumbs();
+        assert_eq!(worker.program, std::env::current_exe().unwrap());
+        assert_eq!(
+            worker.args,
+            vec![
+                std::ffi::OsString::from("--internal-picture-worker"),
+                std::ffi::OsString::from("thumb")
+            ]
+        );
+        assert_eq!(worker.env, runtime::EnvSpec::minimal());
+        assert_eq!(worker.timeout, Duration::from_secs(60));
+        assert_eq!((THUMB_MODE, THUMB_SIDE), ("thumb", 512));
+    }
+
+    /// [0.1.0 Studio] Thumbnails are made in the picture worker, never in the app's own
+    /// process.
+    #[tokio::test]
+    async fn the_worker_makes_thumbnails() {
+        let jpg = test_worker("thumb")
+            .thumbnail(&png(1536, 1024))
+            .await
+            .unwrap();
+        assert!(jpg.starts_with(&[0xFF, 0xD8, 0xFF]));
+    }
+
+    /// [0.1.0 Studio] In thumbnail mode the worker takes pictures up to 50 MiB, more than
+    /// the 20 MB a chat picture may have, and refuses a larger one, or a GIF, as unreadable.
+    #[tokio::test]
+    async fn the_thumbnail_worker_takes_pictures_up_to_50_mib() {
+        let worker = test_worker("thumb");
+        let big = jpeg_padded_to(MAX_IMAGE_BYTES + 1024 * 1024);
+        assert!(big.len() > MAX_IMAGE_BYTES && big.len() < MAX_THUMB_INPUT_BYTES);
+        let jpg = worker.thumbnail(&big).await.unwrap();
+        assert_eq!(jpeg_pixels(&jpg).dimensions(), (512, 384));
+
+        let too_big = jpeg_padded_to(MAX_THUMB_INPUT_BYTES + 1);
+        let got = worker.thumbnail(&too_big).await;
+        let Err(NotConverted::Unreadable(why)) = &got else {
+            panic!("{got:?}")
+        };
+        assert!(why.contains("could not be read whole"), "{why}");
+
+        let got = worker
+            .thumbnail(b"GIF89a\x01\x00\x01\x00\x00\x00\x00;")
+            .await;
+        assert!(matches!(got, Err(NotConverted::Unreadable(_))), "{got:?}");
+    }
+
+    /// [0.1.0 Studio] A thumbnail worker that takes longer than its time is stopped, and the
+    /// picture gets no thumbnail.
+    #[tokio::test]
+    async fn a_thumbnail_that_takes_too_long_is_stopped() {
+        let worker = PictureWorker {
+            timeout: Duration::from_secs(2),
+            ..test_worker("hang")
+        };
+        assert_eq!(
+            worker.thumbnail(&png(8, 8)).await,
+            Err(NotConverted::Unreadable(
+                "making the thumbnail took too long".into()
+            ))
+        );
+    }
+
+    /// [0.1.0 Studio] A worker started in a mode it does not know does nothing with the
+    /// picture.
+    #[tokio::test]
+    async fn the_worker_refuses_a_mode_it_does_not_know() {
+        let got = test_worker("other").convert(LOSSY_WEBP).await;
+        let Err(NotConverted::Unreadable(why)) = &got else {
+            panic!("{got:?}")
+        };
+        assert!(why.contains("unknown picture worker mode"), "{why}");
     }
 }
