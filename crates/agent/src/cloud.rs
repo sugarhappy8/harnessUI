@@ -30,6 +30,7 @@ use url::Url;
 
 use crate::client::ProviderKind;
 use crate::error::ProviderError;
+use crate::media::Company;
 
 /// Where an endpoint's server is, as far as its address says.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -232,6 +233,22 @@ pub(crate) fn is_cloud_company(kind: ProviderKind) -> bool {
             | ProviderKind::OpenRouter
             | ProviderKind::Abliteration
     )
+}
+
+/// The company that makes pictures and video through an endpoint of this kind (0.1.0):
+/// OpenRouter (pictures and video) and OpenAI (pictures). Other kinds make none.
+pub fn media_company(kind: ProviderKind) -> Option<Company> {
+    match kind {
+        ProviderKind::OpenRouter => Some(Company::OpenRouter),
+        ProviderKind::OpenAi => Some(Company::OpenAi),
+        ProviderKind::LlamaServer
+        | ProviderKind::Ollama
+        | ProviderKind::LmStudio
+        | ProviderKind::Vllm
+        | ProviderKind::Generic
+        | ProviderKind::Anthropic
+        | ProviderKind::Abliteration => None,
+    }
 }
 
 // ---- request shaping (OpenAI-compatible servers) -------------------------------------------
