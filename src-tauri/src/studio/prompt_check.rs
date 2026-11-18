@@ -12,6 +12,18 @@
 //! is refused when a word of [`SEXUAL`] and a word of [`MINOR`] both occur, each as a whole
 //! word ("Essex" holds no sexual word). A few words name a sexualised child by themselves, so
 //! they are in both lists and refused alone.
+//!
+//! The lists trade misses against harmless prompts refused. Bare "baby" and "minor" are left
+//! out of [`MINOR`] because they refuse too much that is harmless ("a sexy baby-blue dress",
+//! "baby doll lingerie", "a sexy saxophone solo in A minor", "sexy dress, minor alterations"),
+//! so "a sexy baby" passes while "sexy babies", "infant" and "minors" are still caught. Harmless
+//! prompts known to be refused still, for whoever tunes the lists:
+//!
+//! - "a birthday card to the kids, love xxx" ("xxx" is kept for what it usually means);
+//! - "kids looking at the moon with the naked eye";
+//! - "nude-colour ballet shoes for kids";
+//! - "a sexy sports car poster in a teenager's bedroom";
+//! - "the naked emperor in a children's book".
 
 use std::collections::BTreeSet;
 
@@ -92,7 +104,6 @@ const MINOR: &[&str] = &[
     "kiddie",
     "kiddies",
     "kiddo",
-    "minor",
     "minors",
     "underage",
     "under age",
@@ -110,7 +121,6 @@ const MINOR: &[&str] = &[
     "toddlers",
     "infant",
     "infants",
-    "baby",
     "babies",
     "newborn",
     "newborns",
@@ -275,7 +285,7 @@ mod tests {
             "n.u.d.e child",
             "s e x y teen",
             "naked toddler",
-            "erotic photo of a minor",
+            "erotic photo of minors",
             "lewd loli",
             "hentai schoolgirl",
             "porn with children",
@@ -294,7 +304,7 @@ mod tests {
             "nsfw\t\n   teenager",
             "a sexy little girl",
             "under-age porno",
-            "a s e x y baby",
+            "a s e x y infant",
             "\u{24E2}\u{24D4}\u{24E7}\u{24E8} \u{24DA}\u{24D8}\u{24D3}",
             "SEXY SCHOOL-GIRL",
         ];
@@ -330,6 +340,10 @@ mod tests {
             "a sexy bottle of 12 year old whisky on a bar",
             "a sexy 2 year old sports car for sale",
             "a naked oak tree, 5 years old, in winter",
+            "a sexy baby-blue dress",
+            "baby doll lingerie",
+            "a sexy saxophone solo in A minor",
+            "sexy dress, minor alterations",
         ];
         assert!(refused.len() >= 20 && passed.len() >= 20);
         for prompt in refused {

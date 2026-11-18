@@ -14,9 +14,10 @@
 //!   lossless data says it has see-through pixels), an extended one has the flag set.
 //! - **WebM:** each Tags element of the Segment is overwritten by a Void of the same size,
 //!   zeroed, so nothing after it moves and the SeekHead and Cues still point at their
-//!   elements; one Tags element (`TITLE` the id, `COMMENT` "Made with harnessUI <version>,
-//!   <model> <revision>", `DATE_RECORDED` and `DIGITAL_SOURCE_TYPE`, for the whole file) is
-//!   appended at the Segment's end and the Segment's size rewritten in its existing width.
+//!   elements; one Tags element (`HARNESSUI_ID` the id, `COMMENT` "Made with harnessUI
+//!   <version>, <model> <revision>", `DATE_RECORDED` and `DIGITAL_SOURCE_TYPE`, for the whole
+//!   file) is appended at the Segment's end and the Segment's size rewritten in its existing
+//!   width. There is no `TITLE` tag, as players and file managers show it as the video's name.
 //!   The SeekHead gets an entry for the new Tags when it and the Void after it have room, so
 //!   a player that stops reading at the first Cluster still finds the label.
 //!
@@ -303,7 +304,7 @@ mod webp {
         if data.get(3..6)? != [0x9d, 0x01, 0x2a] {
             return None;
         }
-        let width = u32::from(u16::from_le_bytes(data[6..8].try_into().ok()?) & 0x3FFF);
+        let width = u32::from(u16::from_le_bytes(data.get(6..8)?.try_into().ok()?) & 0x3FFF);
         let height = u32::from(u16::from_le_bytes(data.get(8..10)?.try_into().ok()?) & 0x3FFF);
         (width > 0 && height > 0).then_some((width, height))
     }
@@ -379,9 +380,10 @@ mod webp {
 /// all ones meaning "unknown") and the data.
 ///
 /// The label's Tags element holds one Tag for the whole file (an empty Targets) with four
-/// SimpleTags: `TITLE` the id, `COMMENT` "Made with harnessUI <version>, <model>
+/// SimpleTags: `HARNESSUI_ID` the id, `COMMENT` "Made with harnessUI <version>, <model>
 /// <revision>", `DATE_RECORDED` the date it was made and `DIGITAL_SOURCE_TYPE`
-/// [`IPTC_TRAINED`](super::IPTC_TRAINED).
+/// [`IPTC_TRAINED`](super::IPTC_TRAINED). It has no `TITLE`, so no player shows the id as the
+/// video's name.
 mod webm {
     use super::{AiLabel, IPTC_TRAINED};
 
@@ -560,7 +562,7 @@ mod webm {
         };
         let tag = [
             el(TARGETS, &[]),
-            simple("TITLE", &label.id),
+            simple("HARNESSUI_ID", &label.id),
             simple("COMMENT", &label.description()),
             simple("DATE_RECORDED", &label.created),
             simple("DIGITAL_SOURCE_TYPE", IPTC_TRAINED),
@@ -854,6 +856,17 @@ mod tests {
             label_file(&cut, "image/png", &label()),
             Err(GalleryError::NotMedia)
         );
+        // A lossy WebP whose `VP8 ` chunk ends after its start code, before the picture's size.
+        for len in [6, 7] {
+            let short = riff(&[(*b"VP8 ", VP8_4X4[..len].to_vec())]);
+            let f = scratch.write(&format!("short-{len}.webp"), &short);
+            assert_eq!(
+                label_file(&f, "image/webp", &label()),
+                Err(GalleryError::NotMedia),
+                "{len}"
+            );
+            assert_eq!(std::fs::read(&f).unwrap(), short, "{len}");
+        }
         assert!(matches!(
             label_file(&scratch.path().join("gone.png"), "image/png", &label()),
             Err(GalleryError::Io(_))
@@ -1021,6 +1034,48 @@ mod tests {
         }
     }
 
+    /// An animated WebP of one 4 x 4 frame (the lossy picture above), the local video
+    /// fallback on a Mac: a `VP8X` with the animation flag, an `ANIM` and one `ANMF`.
+    fn animated() -> Vec<u8> {
+        let vp8x = vec![0x02, 0, 0, 0, 3, 0, 0, 3, 0, 0];
+        // The background colour, then a loop count of 0 (forever).
+        let anim = vec![0xff, 0xff, 0xff, 0xff, 0, 0];
+        // At 0, 0, a 4 x 4 frame shown for 100 ms, then its picture as a `VP8 ` chunk.
+        let mut frame = vec![0, 0, 0, 0, 0, 0, 3, 0, 0, 3, 0, 0, 100, 0, 0, 0];
+        frame.extend_from_slice(b"VP8 ");
+        frame.extend_from_slice(&(VP8_4X4.len() as u32).to_le_bytes());
+        frame.extend_from_slice(&VP8_4X4);
+        riff(&[(*b"VP8X", vp8x), (*b"ANIM", anim), (*b"ANMF", frame)])
+    }
+
+    /// How many frames an animated WebP decodes to.
+    fn frames(bytes: &[u8]) -> usize {
+        use image::AnimationDecoder;
+        let decoder = image::codecs::webp::WebPDecoder::new(std::io::Cursor::new(bytes)).unwrap();
+        assert!(decoder.has_animation());
+        decoder.into_frames().collect_frames().unwrap().len()
+    }
+
+    #[test]
+    fn an_animated_webp_keeps_its_frames_and_carries_the_label() {
+        let scratch = Scratch::new();
+        let before = animated();
+        assert_eq!(frames(&before), 1);
+        let f = scratch.write("a.webp", &before);
+        label_file(&f, "image/webp", &label()).unwrap();
+        let after = std::fs::read(&f).unwrap();
+        let (old, new) = (webp_chunks(&before), webp_chunks(&after));
+        let kinds: Vec<_> = new.iter().map(|(kind, _)| *kind).collect();
+        assert_eq!(kinds, [*b"VP8X", *b"ANIM", *b"ANMF", *b"XMP "]);
+        // The animation flag stays, the XMP flag is set, and the canvas is as it was.
+        assert_eq!(new[0].1[0], 0x02 | 0x04);
+        assert_eq!(new[0].1[1..], old[0].1[1..]);
+        // The ANIM chunk and the frame are kept byte for byte.
+        assert_eq!(new[1..3], old[1..3]);
+        assert_eq!(frames(&after), 1);
+        assert_eq!(read_label(&f, "image/webp").unwrap(), xmp(&label()));
+    }
+
     // ---- WebM ---------------------------------------------------------------------------------
 
     const EBML: u32 = 0x1A45_DFA3;
@@ -1184,7 +1239,7 @@ mod tests {
 
     fn the_label_tags() -> String {
         format!(
-            "TITLE=0e7c9d52-4a1b-4c8e-9f3a-6b2d1e0f7a95\n\
+            "HARNESSUI_ID=0e7c9d52-4a1b-4c8e-9f3a-6b2d1e0f7a95\n\
              COMMENT=Made with harnessUI 0.1.0, FLUX.2 klein 4B 5f1a2b3c4d5e6f708192a3b4c5d6e7f8091a2b3c\n\
              DATE_RECORDED=2026-11-18T09:30:00Z\n\
              DIGITAL_SOURCE_TYPE={IPTC_TRAINED}"

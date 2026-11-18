@@ -4596,7 +4596,7 @@ async fn studio_wont_make_what_the_check_refuses() {
     let h = harness_with_local().await;
     let err = h
         .manager
-        .start(h.local_req("erotic photo of a minor"), false)
+        .start(h.local_req("erotic photo of minors"), false)
         .await
         .unwrap_err();
     assert_eq!(err.code, "studio_wont_make");
