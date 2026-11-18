@@ -49,7 +49,7 @@ use super::prefs::{self, GpuPolicy, RunTarget, StudioPrefs, StudioPrefsPatch};
 use super::spend::{Charge, ConfirmReason, UNKNOWN_PRICE_RESERVE_USD, day_start_in};
 use super::test_support::{Scratch, mp4, png};
 use crate::attachments::PictureWorker;
-use crate::dto::{RefInput, RunDto, StartRequest};
+use crate::dto::{EstimateDto, RefInput, RunDto, StartRequest};
 use crate::error::{AppError, AppResult};
 use crate::gpu_lease::{Grant, LeaseWait, Refused, StudioNeed};
 use models::catalog::Catalog;
@@ -533,6 +533,7 @@ impl Drop for H {
         self.provider2.release_all();
         self.local.release_all();
         self.lease.release();
+        self.hardware.release();
         // Video jobs are checked until their watch limit: every task stops before the
         // gallery folder goes. The tasks run on the app's runtime, so this thread can wait.
         let managers = std::mem::take(&mut *self.managers.lock().unwrap());
@@ -3872,7 +3873,9 @@ enum LeaseStep {
     Refuse(Refused),
     /// Says the job waits for this, then grants once released (or ends when cancelled).
     WaitThen(LeaseWait, Grant),
-    /// Asks the person (`NeedsAnswer`) until an answer comes, then grants on a yes.
+    /// Asks the person (`NeedsAnswer`) until an answer comes, then grants on a yes; on a no,
+    /// as the lease decides it: the processor for a job that can run there (a picture),
+    /// else does not fit.
     AskThen(Grant),
 }
 
@@ -3988,6 +3991,7 @@ impl CardLease for FakeLease {
                     return Err(Refused::NeedsAnswer);
                 }
                 Some(true) => grant,
+                Some(false) if need.processor_ok => Grant::UseProcessor { unloaded: None },
                 Some(false) => return Err(Refused::DoesNotFit),
             },
         };
@@ -4004,10 +4008,16 @@ impl CardLease for FakeLease {
 }
 
 /// This computer as probed: a graphics card (or the processor only), the chat model's bytes
-/// on it, and 8 logical cores.
+/// on it, and 8 logical cores. Asking for the hardware can be held, as a probe of every
+/// backend holds it, until the test lets it go.
 struct FixedHardware {
     target: Mutex<(Target, String, Option<String>)>,
     chat: Mutex<Option<u64>>,
+    held: AtomicBool,
+    /// Lets held asks go on.
+    gate: tokio::sync::Semaphore,
+    /// Asks held now.
+    holding: AtomicUsize,
 }
 
 impl FixedHardware {
@@ -4016,9 +4026,27 @@ impl FixedHardware {
         let hardware = Self {
             target: Mutex::new((Target::Cpu { ram_free_bytes: 0 }, String::new(), None)),
             chat: Mutex::new(None),
+            held: AtomicBool::new(false),
+            gate: tokio::sync::Semaphore::new(0),
+            holding: AtomicUsize::new(0),
         };
         hardware.set_gpu(free_gb, ram_gb);
         hardware
+    }
+
+    /// From now on each ask for the hardware waits until [`Self::release`].
+    fn hold(&self) {
+        self.held.store(true, Ordering::SeqCst);
+    }
+
+    /// Lets every held ask go on, and asks no longer wait.
+    fn release(&self) {
+        self.held.store(false, Ordering::SeqCst);
+        self.gate.add_permits(64);
+    }
+
+    fn holding(&self) -> usize {
+        self.holding.load(Ordering::SeqCst)
     }
 
     fn set_gpu(&self, free_gb: u64, ram_gb: u64) {
@@ -4053,6 +4081,11 @@ impl FixedHardware {
 #[async_trait]
 impl LocalHardware for FixedHardware {
     async fn target(&self) -> (Target, String, Option<String>) {
+        if self.held.load(Ordering::SeqCst) {
+            self.holding.fetch_add(1, Ordering::SeqCst);
+            self.gate.acquire().await.unwrap().forget();
+            self.holding.fetch_sub(1, Ordering::SeqCst);
+        }
         self.target.lock().unwrap().clone()
     }
 
@@ -4926,4 +4959,254 @@ async fn quit_and_stop_stops_every_local_run_and_starts_none() {
     assert!(!h.manager.local_running());
     assert_eq!(h.local.starts(), 1);
     assert_eq!(h.local.cancels(), 1);
+}
+
+// ---- fix round 2 (rulings L15-starting-lock, L15-processor-eta, L15-tests) ------------------
+
+/// Ruling L15-starting-lock: a local start asks for the hardware (which can wait for a probe
+/// of every backend) before it takes the `starting` lock, so a cloud start goes ahead
+/// meanwhile.
+#[tokio::test]
+async fn a_cloud_start_is_not_held_while_a_local_start_asks_for_the_hardware() {
+    let h = harness_with_local().await;
+    h.hardware.hold();
+    let manager = h.manager.clone();
+    let req = h.local_req("x");
+    let local = tokio::spawn(async move { manager.start(req, false).await });
+    eventually("the local start asks for the hardware", || {
+        h.hardware.holding() == 1
+    })
+    .await;
+    let cloud = tokio::time::timeout(
+        Duration::from_secs(5),
+        h.manager.start(h.picture_req("x"), false),
+    )
+    .await
+    .expect("the cloud start waited for the local start's hardware")
+    .unwrap();
+    h.wait_status(&cloud.id, "done").await;
+    assert!(h.store_runs().await.iter().all(|r| r.id == cloud.id));
+    h.hardware.release();
+    let run = local.await.unwrap().unwrap();
+    h.wait_status(&run.id, "done").await;
+    assert_eq!(h.local.starts(), 1);
+}
+
+/// Ruling L15-processor-eta: a run the grant moves to the processor, away from the card its
+/// fit was judged for, shows the time measured on the processor, and none when there is
+/// none, never the card's.
+#[tokio::test]
+async fn a_run_the_grant_moves_to_the_processor_is_timed_there() {
+    // 20 s measured on the card, nothing on the processor.
+    let h = harness_with_local().await;
+    h.seed_measured_run(KLEIN, RX_7600_SHOWN, 20_000).await;
+    h.set_prefs(json!({"gpuPolicy": "processor"})).await;
+    h.lease
+        .then(LeaseStep::Grant(Grant::UseProcessor { unloaded: None }));
+    h.local.hold();
+    let run = h.manager.start(h.local_req("x"), false).await.unwrap();
+    // Queued, it is judged for the card it fits.
+    assert!(
+        run.eta.as_ref().is_some_and(|eta| eta.measured),
+        "{:?}",
+        run.eta
+    );
+    let running = h.wait_status(&run.id, "running").await;
+    assert!(running.local.as_ref().unwrap().on_processor);
+    assert_eq!(running.eta, None);
+    h.local.release_all();
+    let done = h.wait_status(&run.id, "done").await;
+    assert_eq!(done.local.unwrap().device.as_deref(), Some("Processor"));
+
+    // 12 minutes measured on the processor: that time.
+    let h = harness_with_local().await;
+    h.seed_measured_run(KLEIN, RX_7600_SHOWN, 20_000).await;
+    h.seed_measured_run(KLEIN, "Processor", 12 * 60_000).await;
+    h.lease
+        .then(LeaseStep::Grant(Grant::UseProcessor { unloaded: None }));
+    h.local.hold();
+    let run = h.manager.start(h.local_req("x"), false).await.unwrap();
+    let running = h.wait_status(&run.id, "running").await;
+    let eta = running.eta.expect("the processor's measured time");
+    assert!(eta.measured && eta.low_ms >= 10 * 60_000, "{eta:?}");
+    h.local.release_all();
+    h.wait_status(&run.id, "done").await;
+
+    // Granted beside the chat model, it keeps the card's time.
+    let h = harness_with_local().await;
+    h.seed_measured_run(KLEIN, RX_7600_SHOWN, 20_000).await;
+    h.local.hold();
+    let run = h.manager.start(h.local_req("x"), false).await.unwrap();
+    let running = h.wait_status(&run.id, "running").await;
+    let eta = running.eta.expect("the card's measured time");
+    assert!(eta.measured && eta.high_ms < 60_000, "{eta:?}");
+    h.local.release_all();
+    h.wait_status(&run.id, "done").await;
+}
+
+/// Ruling L15-processor-eta: under "Use the processor for local pictures" a picture that
+/// would need the chat model unloaded is estimated where the lease puts it, on the
+/// processor: nothing is unloaded, and its time is the processor's. A clip is still made
+/// after the unload.
+#[tokio::test]
+async fn under_the_processor_policy_a_picture_is_estimated_on_the_processor() {
+    let h = harness_with_local().await;
+    h.hardware.set_gpu(3, 32);
+    h.hardware.set_chat(Some(5));
+    h.seed_measured_run(KLEIN, RX_7600_SHOWN, 20_000).await;
+    let local_of = |e: &EstimateDto| {
+        let l = e.local.as_ref().unwrap();
+        (l.fit.clone(), l.unload_chat)
+    };
+    // Unload the chat model (the default): after the unload, the card's time.
+    let e = h.manager.estimate(&h.local_req("x")).await.unwrap();
+    assert_eq!(local_of(&e), ("afterUnload".to_owned(), true));
+    assert!(e.eta.is_some_and(|eta| eta.measured));
+    let clip_on_unload = h.manager.estimate(&h.local_video_req()).await.unwrap();
+    assert_eq!(local_of(&clip_on_unload), ("afterUnload".to_owned(), true));
+
+    h.set_prefs(json!({"gpuPolicy": "processor"})).await;
+    let e = h.manager.estimate(&h.local_req("x")).await.unwrap();
+    assert_eq!(local_of(&e), ("slow".to_owned(), false));
+    assert_eq!(e.eta, None, "no time measured on the processor");
+    // A time measured on the processor is the one shown.
+    h.seed_measured_run(KLEIN, "Processor", 12 * 60_000).await;
+    let e = h.manager.estimate(&h.local_req("x")).await.unwrap();
+    let eta = e.eta.expect("the processor's measured time");
+    assert!(eta.measured && eta.low_ms >= 10 * 60_000, "{eta:?}");
+    // A clip cannot run on the processor: the lease unloads the chat model for it.
+    let clip = h.manager.estimate(&h.local_video_req()).await.unwrap();
+    assert_eq!(local_of(&clip), local_of(&clip_on_unload));
+    // With no chat model loaded, nothing changes: the card's fit and time.
+    h.hardware.set_gpu(8, 32);
+    h.hardware.set_chat(None);
+    let e = h.manager.estimate(&h.local_req("x")).await.unwrap();
+    assert_eq!(local_of(&e), ("fits".to_owned(), false));
+    assert!(e.eta.is_some_and(|eta| eta.high_ms < 60_000));
+}
+
+/// Ruling L15-tests: Stop while the run waits for the graphics card: it never starts, holds
+/// nothing, and is not charged.
+#[tokio::test]
+async fn stop_while_the_run_waits_for_the_card_never_starts_it() {
+    let h = harness_with_local().await;
+    h.lease.then(LeaseStep::WaitThen(
+        LeaseWait::ReplyRunning,
+        Grant::Alongside,
+    ));
+    let run = h.manager.start(h.local_req("x"), false).await.unwrap();
+    h.wait_for(&run.id, "waiting for the reply", |r| {
+        r.local.as_ref().and_then(|l| l.waiting_for.as_deref()) == Some("reply")
+    })
+    .await;
+    let r = h.manager.cancel(&run.id).await.unwrap();
+    assert_eq!(r.status, "cancelled");
+    let error = r.error.unwrap();
+    assert_eq!(
+        error.message,
+        "Stopped. Your computer is no longer working on it. Nothing was charged."
+    );
+    assert_eq!(error.charged, Some(false));
+    assert_eq!(r.local.unwrap().waiting_for, None);
+    assert_eq!((h.local.starts(), h.local.cancels()), (0, 0));
+    assert!(h.lease.drops().is_empty(), "it was never granted the card");
+    assert_eq!(h.store_run(&run.id).await.started_at, None);
+    assert!(!h.manager.local_running());
+    assert!(h.statuses(&run.id).iter().all(|s| s != "running"));
+}
+
+/// Ruling L15-tests: the app closing while a local run is made stops the engine and records
+/// nothing (a restart finds the run and calls it interrupted).
+#[tokio::test]
+async fn shutdown_during_a_local_run_stops_the_engine_and_records_nothing() {
+    let h = harness_with_local().await;
+    h.local.hold();
+    let run = h.manager.start(h.local_req("x"), false).await.unwrap();
+    h.wait_status(&run.id, "running").await;
+    let events = h.events_for(&run.id).len();
+    h.manager.shutdown().await;
+    assert_eq!(h.local.cancels(), 1, "the engine was stopped");
+    assert_eq!(h.local.releases(), 0);
+    let row = h.store_run(&run.id).await;
+    assert_eq!(row.status, store::CreationStatus::Running);
+    assert_eq!((row.error, row.finished_at), (None, None));
+    assert!(row.outputs.is_empty());
+    assert_eq!(h.events_for(&run.id).len(), events, "nothing was sent");
+    assert_eq!(h.audit_rows_for(&run.id).await[0].result_status, None);
+    // The card was let go, with nothing made.
+    assert_eq!(h.lease.drops(), [false]);
+}
+
+/// Ruling L15-tests: "Unload the chat model?" answered no: a picture runs on the processor
+/// (the lease's rule) and the chat model stays; a clip, which cannot, does not fit, never
+/// starts and is not charged.
+#[tokio::test]
+async fn ask_answered_no_runs_a_picture_on_the_processor_and_refuses_a_clip() {
+    let h = harness_with_local().await;
+    h.set_prefs(json!({"gpuPolicy": "ask"})).await;
+    h.hardware.set_gpu(3, 32);
+    h.hardware.set_chat(Some(5));
+    let ask = || {
+        h.lease.then(LeaseStep::AskThen(Grant::AfterUnload {
+            unloaded: Some(CHAT.into()),
+        }))
+    };
+    async fn asking(h: &H, id: &str) {
+        h.wait_for(id, "asking", |r| {
+            r.local.as_ref().and_then(|l| l.waiting_for.as_deref()) == Some("answer")
+        })
+        .await;
+    }
+
+    ask();
+    let run = h.manager.start(h.local_req("x"), false).await.unwrap();
+    asking(&h, &run.id).await;
+    h.manager.answer_unload(&run.id, false).await.unwrap();
+    let done = h.wait_status(&run.id, "done").await;
+    assert_eq!(
+        h.lease.asked(),
+        [(GpuPolicy::Ask, None), (GpuPolicy::Ask, Some(false))]
+    );
+    assert!(h.lease.needs()[1].processor_ok);
+    assert!(h.local.last_options().processor_only);
+    let local = done.local.unwrap();
+    assert_eq!(local.device.as_deref(), Some("Processor"));
+    assert_eq!(local.unloaded_chat, None);
+
+    ask();
+    let clip = h.manager.start(h.local_video_req(), false).await.unwrap();
+    asking(&h, &clip.id).await;
+    h.manager.answer_unload(&clip.id, false).await.unwrap();
+    let failed = h.wait_status(&clip.id, "failed").await;
+    let error = failed.error.unwrap();
+    assert_eq!(
+        (error.code.as_str(), error.charged),
+        ("studio_does_not_fit", Some(false))
+    );
+    assert!(!h.lease.needs()[3].processor_ok);
+    assert_eq!(h.local.starts(), 1, "the clip never started");
+    assert_eq!(h.store_run(&clip.id).await.started_at, None);
+}
+
+/// Ruling L15-tests: a run whose unload never happened (the lease gave up without a Stop)
+/// is not started and not charged, and holds nothing.
+#[tokio::test]
+async fn a_run_whose_unload_never_happened_is_not_started() {
+    let h = harness_with_local().await;
+    h.lease.then(LeaseStep::Refuse(Refused::Cancelled));
+    let run = h.manager.start(h.local_req("x"), false).await.unwrap();
+    let failed = h.wait_status(&run.id, "failed").await;
+    let error = failed.error.unwrap();
+    assert_eq!(
+        (error.code.as_str(), error.message.as_str(), error.charged),
+        (
+            "studio_not_sent",
+            "Not started. Nothing was charged.",
+            Some(false)
+        )
+    );
+    assert_eq!(h.local.starts(), 0);
+    assert!(h.lease.drops().is_empty());
+    assert_eq!(h.store_run(&run.id).await.started_at, None);
+    assert!(!h.manager.local_running());
 }

@@ -75,7 +75,7 @@
 mod lane;
 mod video;
 
-pub(crate) use lane::{LocalVerdict, device_label, eta_dto, local_verdict, word_tag};
+pub(crate) use lane::{LocalVerdict, device_label, device_name, eta_dto, local_verdict, word_tag};
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 use std::future::Future;

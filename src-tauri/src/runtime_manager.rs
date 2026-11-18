@@ -213,15 +213,24 @@ impl RuntimeManager {
     /// 0.1.0 Studio: the free memory now on the graphics device that the last probe found
     /// `probed_free` bytes free on (of `total`, when known). The probe is cached and runs
     /// again only before a chat load, so the model loaded or unloaded since would otherwise
-    /// go uncounted ([`free_now`]). Like [`Self::device_bytes`], it takes the model to be on
-    /// that device.
-    pub fn device_free_now(&self, probed_free: u64, total: Option<u64>) -> u64 {
-        let at_probe = self
-            .probed_with
-            .lock()
-            .ok()
-            .and_then(|p| p.as_ref().map(|(_, _, bytes)| *bytes));
-        free_now(probed_free, total, at_probe, self.device_bytes())
+    /// go uncounted ([`free_now`]). The model is counted, at the probe and now, only when it
+    /// was or is on that device: `on_device` says whether a (backend, device name) is it
+    /// ([`free_on_device`]).
+    pub fn device_free_now(
+        &self,
+        probed_free: u64,
+        total: Option<u64>,
+        on_device: &dyn Fn(&str, &str) -> bool,
+    ) -> u64 {
+        let at_probe = self.probed_with.lock().ok().and_then(|p| p.clone());
+        let now = self.loaded_on_device();
+        free_on_device(
+            probed_free,
+            total,
+            at_probe.as_ref(),
+            now.as_ref(),
+            on_device,
+        )
     }
 
     /// 0.1.0: the loaded (or loading) model was started with "Keep in memory".
@@ -1433,8 +1442,6 @@ fn launch_device(kind: BackendKind, device: &Device) -> (String, Option<String>)
     (device.name.clone(), None)
 }
 
-/// The device as the probe and Settings name it: a ROCm launch masked to one card passes
-/// it as `ROCm0`, but the user picked it by its unmasked number.
 /// 0.1.0 Studio: the free memory on a graphics device now, from what its probe found:
 /// `probed_free` bytes free (of `total`, when known) while a model took `at_probe` bytes on
 /// it, and a model takes `now` bytes on it now. The model at the probe is counted back (its
@@ -1446,6 +1453,28 @@ fn free_now(probed_free: u64, total: Option<u64>, at_probe: Option<u64>, now: Op
     free.saturating_sub(now.unwrap_or(0))
 }
 
+/// 0.1.0 Studio: [`free_now`] for one graphics device, counting only a model that was, or
+/// is, on that device: `at_probe` and `now` are the model's (backend, device name, bytes)
+/// at the probe and now, and `on_device` says whether a (backend, device name) is the
+/// device the free memory is for. A model on another card neither took its memory nor
+/// takes it now.
+pub(crate) fn free_on_device(
+    probed_free: u64,
+    total: Option<u64>,
+    at_probe: Option<&(String, String, u64)>,
+    now: Option<&(String, String, u64)>,
+    on_device: &dyn Fn(&str, &str) -> bool,
+) -> u64 {
+    let bytes = |model: Option<&(String, String, u64)>| {
+        model
+            .filter(|(backend, device, _)| on_device(backend, device))
+            .map(|(_, _, bytes)| *bytes)
+    };
+    free_now(probed_free, total, bytes(at_probe), bytes(now))
+}
+
+/// The device as the probe and Settings name it: a ROCm launch masked to one card passes
+/// it as `ROCm0`, but the user picked it by its unmasked number.
 fn shown_device(device: Option<&str>, hip_visible_devices: Option<&str>) -> Option<String> {
     match (device, hip_visible_devices) {
         (Some("ROCm0"), Some(index)) => Some(format!("ROCm{index}")),
@@ -1603,6 +1632,44 @@ mod tests {
         assert_eq!(free_now(3 * GB, None, Some(5 * GB), None), 8 * GB);
         // Never below nothing.
         assert_eq!(free_now(GB, card, None, Some(5 * GB)), 0);
+    }
+
+    /// Ruling L15-chat-device: on a computer with two cards, the chat model counts only on
+    /// the card it is on. Card A (`Vulkan0`) is the one Studio judges; the chat model runs on
+    /// card B (`Vulkan1`), so card A's free memory is as probed.
+    #[test]
+    fn studio_counts_the_chat_model_only_on_its_own_card() {
+        const GB: u64 = 1_000_000_000;
+        let card_a = |backend: &str, device: &str| backend == "vulkan" && device == "Vulkan0";
+        let on = |device: &str| ("vulkan".to_owned(), device.to_owned(), 5 * GB);
+        let (a, b) = (on("Vulkan0"), on("Vulkan1"));
+        // On card B since the probe, or at the probe and not now: card A is as probed.
+        assert_eq!(
+            free_on_device(8 * GB, Some(8 * GB), None, Some(&b), &card_a),
+            8 * GB
+        );
+        assert_eq!(
+            free_on_device(8 * GB, Some(8 * GB), Some(&b), None, &card_a),
+            8 * GB
+        );
+        assert_eq!(
+            free_on_device(8 * GB, Some(8 * GB), Some(&b), Some(&b), &card_a),
+            8 * GB
+        );
+        // On card A: counted as before.
+        assert_eq!(
+            free_on_device(8 * GB, Some(8 * GB), None, Some(&a), &card_a),
+            3 * GB
+        );
+        assert_eq!(
+            free_on_device(3 * GB, Some(8 * GB), Some(&a), None, &card_a),
+            8 * GB
+        );
+        // Moved from card B at the probe to card A now: taken from A, never given back to it.
+        assert_eq!(
+            free_on_device(8 * GB, Some(8 * GB), Some(&b), Some(&a), &card_a),
+            3 * GB
+        );
     }
 
     /// 7.2: ROCm sees only the chosen card (HIP_VISIBLE_DEVICES), which is then ROCm0.

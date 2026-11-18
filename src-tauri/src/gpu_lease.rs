@@ -108,8 +108,10 @@ pub trait ChatSide: Send + Sync {
         on_wait: &(dyn Fn(bool) + Send + Sync),
         go_ahead: &(dyn Fn() -> bool + Send + Sync),
     ) -> AppResult<Option<String>>;
-    /// Loads the chat model at `path` again.
-    async fn reload(&self, path: &str);
+    /// Loads the chat model at `path` again, unless the person picked a model since: one
+    /// whose load waits at the gate or is in flight (`loads_in_flight` chat loads passed the
+    /// gate and have not started their server yet) is theirs, and goes ahead instead.
+    async fn reload(&self, path: &str, loads_in_flight: usize);
 }
 
 /// The app's chat side: the local llama-server and everything that uses it.
@@ -175,9 +177,9 @@ impl ChatSide for RuntimeChat {
         .map_err(stopped)
     }
 
-    async fn reload(&self, path: &str) {
+    async fn reload(&self, path: &str, loads_in_flight: usize) {
         use tauri::Manager;
-        if !reload_wanted(&self.runtime.status(), path) {
+        if !reload_wanted(&self.runtime.status(), loads_in_flight, path) {
             return;
         }
         let app = self.runtime.app().clone();
@@ -196,9 +198,14 @@ impl ChatSide for RuntimeChat {
 
 /// "Reload it after Studio" loads the chat model at `path` again only while the status still
 /// names it as unloaded to free memory: a model the person loaded (or unloaded) since then,
-/// or removed, stays as it is.
-fn reload_wanted(status: &RuntimeStatusDto, path: &str) -> bool {
+/// or removed, stays as it is. Nor while a chat load the person started waits for Studio
+/// (`waiting_for_studio`) or is in flight (`loads_in_flight` passed the gate and have not
+/// reached Starting, which is what clears `unloaded_path`): that load is the person's pick,
+/// and the reload would replace it.
+fn reload_wanted(status: &RuntimeStatusDto, loads_in_flight: usize, path: &str) -> bool {
     status.unloaded_path.as_deref() == Some(path)
+        && !status.waiting_for_studio
+        && loads_in_flight == 0
 }
 
 /// A local job's hold on the graphics card. Dropping it frees the card and wakes a chat load
@@ -317,9 +324,11 @@ impl GpuLease {
     }
 
     /// "Reload it after Studio": the manager calls this once, when the local queue is empty,
-    /// never per job.
+    /// never per job. The chat loads in flight now go with it, so a load the person started
+    /// meanwhile is never replaced ([`ChatSide::reload`]).
     pub async fn reload_chat(&self, path: &str) {
-        self.chat.reload(path).await;
+        let loads_in_flight = self.card.borrow().loads;
+        self.chat.reload(path, loads_in_flight).await;
     }
 
     /// The one place for a Studio job.
@@ -591,7 +600,8 @@ mod tests {
         unloads: AtomicUsize,
         /// Unloads that asked whether to go ahead (stopped or not).
         asked: AtomicUsize,
-        reloads: StdMutex<Vec<String>>,
+        /// Each reload asked for, with the chat loads in flight it was told about.
+        reloads: StdMutex<Vec<(String, usize)>>,
     }
 
     impl FakeChat {
@@ -651,7 +661,22 @@ mod tests {
         }
 
         fn reloads(&self) -> Vec<String> {
-            self.reloads.lock().unwrap().clone()
+            self.reloads
+                .lock()
+                .unwrap()
+                .iter()
+                .map(|(path, _)| path.clone())
+                .collect()
+        }
+
+        /// The chat loads in flight each reload was told about.
+        fn reload_loads(&self) -> Vec<usize> {
+            self.reloads
+                .lock()
+                .unwrap()
+                .iter()
+                .map(|(_, loads)| *loads)
+                .collect()
         }
     }
 
@@ -686,8 +711,11 @@ mod tests {
             Ok(unloaded)
         }
 
-        async fn reload(&self, path: &str) {
-            self.reloads.lock().unwrap().push(path.to_string());
+        async fn reload(&self, path: &str, loads_in_flight: usize) {
+            self.reloads
+                .lock()
+                .unwrap()
+                .push((path.to_string(), loads_in_flight));
         }
     }
 
@@ -1292,6 +1320,8 @@ mod tests {
     /// Review fix L12-reload-test: "Reload it after Studio" loads the chat model again only
     /// while the status still names it as unloaded to free memory. A model the person
     /// loaded since (that one or another), unloaded since, or removed is left as it is.
+    /// Ruling L12-reload-guard: so is one whose load the person started and that has not
+    /// reached Starting yet, waiting for Studio at the gate or in flight past it.
     #[test]
     fn reload_skips_a_model_the_person_changed_since() {
         use crate::dto::{RuntimeStateDto, RuntimeStatusDto};
@@ -1307,15 +1337,24 @@ mod tests {
         };
 
         // Studio unloaded it, and nothing changed since.
-        assert!(reload_wanted(&unloaded(Some(CHAT)), CHAT));
+        assert!(reload_wanted(&unloaded(Some(CHAT)), 0, CHAT));
         // The person loaded it again, or another model: a load clears "Unloaded to free
         // memory".
-        assert!(!reload_wanted(&loaded(CHAT), CHAT));
-        assert!(!reload_wanted(&loaded(OTHER), CHAT));
+        assert!(!reload_wanted(&loaded(CHAT), 0, CHAT));
+        assert!(!reload_wanted(&loaded(OTHER), 0, CHAT));
         // The person loaded another model and unloaded it.
-        assert!(!reload_wanted(&unloaded(Some(OTHER)), CHAT));
+        assert!(!reload_wanted(&unloaded(Some(OTHER)), 0, CHAT));
         // The model was removed from Installed (or nothing was unloaded).
-        assert!(!reload_wanted(&unloaded(None), CHAT));
+        assert!(!reload_wanted(&unloaded(None), 0, CHAT));
+        // The person pressed Load on another model during the job: its load still waits for
+        // Studio at the gate, or passed it and has not reached Starting (which clears
+        // `unloaded_path`). Their pick goes ahead.
+        let waiting = RuntimeStatusDto {
+            waiting_for_studio: true,
+            ..unloaded(Some(CHAT))
+        };
+        assert!(!reload_wanted(&waiting, 0, CHAT));
+        assert!(!reload_wanted(&unloaded(Some(CHAT)), 1, CHAT));
     }
 
     #[tokio::test]
@@ -1338,6 +1377,14 @@ mod tests {
 
         lease.reload_chat(CHAT).await;
         assert_eq!(chat.reloads(), [CHAT]);
+        assert_eq!(chat.reload_loads(), [0]);
+
+        // Ruling L12-reload-guard: a chat load in flight (past the gate, not started) goes
+        // with the reload, which then leaves it alone.
+        assert!(lease.begin_load());
+        lease.reload_chat(CHAT).await;
+        assert_eq!(chat.reload_loads(), [0, 1]);
+        lease.end_load();
     }
 
     #[tokio::test]

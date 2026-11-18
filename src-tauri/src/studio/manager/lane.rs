@@ -2,21 +2,24 @@
 //! a queue of their own beside the cloud queues. The rules it keeps are in the manager's
 //! documentation; in more detail:
 //!
-//! - **Starting** ([`StudioManager::start`] with `RunTarget::ThisComputer`), under the same
-//!   `starting` lock as a cloud start: the same press sent twice gives the run it made; the
-//!   prompt check (`studio_wont_make`), then the prompt's length (at most
+//! - **Starting** ([`StudioManager::start`] with `RunTarget::ThisComputer`): the same press
+//!   sent twice gives the run it made; the prompt check (`studio_wont_make`), then the
+//!   prompt's length (at most
 //!   `runtime::sd::args::PROMPT_MAX_CHARS`, `studio_prompt_too_long_here`); the model among
 //!   the installed ones (`parse_catalog` of the provider's list), its settings checked
 //!   (`spec::validate`) and a seed picked when none is set; the run's fit and time
 //!   ([`local_verdict`]). One that does not fit even with the chat model unloaded, and is not
 //!   a picture the processor can make, is refused (`studio_does_not_fit`). A local run is free
-//!   (`Price::Free`): it never asks and never meets the daily limit. Only then is it recorded
+//!   (`Price::Free`): it never asks and never meets the daily limit. Only then, under the
+//!   same `starting` lock as a cloud start (the hardware is asked before it, so a cloud
+//!   start never waits for a probe), is the press checked again and the run recorded
 //!   (`queued`, $0, "This computer", the installed model and the engine's build), with its
 //!   audit row (the prompt's length, never the prompt), and queued.
 //! - **Its task**, once it has the lane's one place: the fit again, on the hardware and the
 //!   chat model as they are now; the graphics card from the lease (`queued` meanwhile, with
 //!   what it waits for, and under Ask until [`StudioManager::answer_unload`]); `running`, with
-//!   the device it runs on, as shown, and how ([`job_options`]); one engine job, checked every
+//!   the device it runs on, as shown, and how ([`job_options`]), and its time judged again on
+//!   the processor when the grant puts it there; one engine job, checked every
 //!   [`LOCAL_CHECK_EVERY`] in memory (its progress written and sent at most every
 //!   [`PROGRESS_EVERY`]); each result moved to `.partial/<output id>`, labelled as AI-made
 //!   there (never with the prompt) and kept in the gallery as a cloud picture is; `done` at $0
@@ -64,6 +67,7 @@ use crate::studio::deps::{Endpoint, LocalHardware, LocalLane, with_device_free};
 use crate::studio::errors;
 use crate::studio::label::{AiLabel, label_file};
 use crate::studio::local::{LocalRunStatus, RunShape, run_shape, runs_on_processor};
+use crate::studio::prefs::GpuPolicy;
 use crate::studio::prompt_check;
 use crate::studio::spend;
 
@@ -260,6 +264,27 @@ async fn verdict(
     }
 }
 
+/// Whether the lease would run `verdict`'s run on the processor rather than unload the chat
+/// model, as `GpuLease::acquire_for_studio` decides it: under "Use the processor for local
+/// pictures" (`policy`), with a chat model on the device (`chat_loaded`), a run judged for
+/// the device that fits there only once the chat model is unloaded and can run on the
+/// processor (a picture). A clip is still made after the unload. ("Keep in memory" on a
+/// Mac's shared memory unloads the chat model whatever the policy; an estimate cannot see
+/// it.)
+fn processor_instead_of_unload(
+    verdict: &LocalVerdict,
+    policy: GpuPolicy,
+    chat_loaded: bool,
+) -> bool {
+    let need = &verdict.need;
+    policy == GpuPolicy::Processor
+        && chat_loaded
+        && !verdict.fit.processor_only
+        && !need.alongside
+        && need.after_unload
+        && need.processor_ok
+}
+
 /// Whole or one part at a time on the device: nothing of it on the processor.
 fn on_card(fit: GenFit) -> bool {
     matches!(fit, GenFit::Green | GenFit::OnePartAtATime)
@@ -312,7 +337,7 @@ pub(crate) fn device_label(description: Option<&str>, backend: &str) -> String {
 /// chip that the description may end with, set apart by a space and in brackets (Mesa's
 /// "AMD Radeon RX 7600 (RADV NAVI33)", Intel's "… Graphics (DG2)"), is left out. Brackets
 /// inside the name ("AMD Radeon(TM) Graphics") are its own.
-fn device_name(description: &str) -> &str {
+pub(crate) fn device_name(description: &str) -> &str {
     let name = description.trim();
     let Some(inner) = name.strip_suffix(')') else {
         return name;
@@ -569,7 +594,11 @@ impl StudioManager {
         }
     }
 
-    /// Records a run on this computer and queues it (see the module documentation).
+    /// Records a run on this computer and queues it (see the module documentation). Its
+    /// checks, the hardware and its fit are worked out before the `starting` lock (asking
+    /// the hardware can wait for a probe of every backend, and cloud starts and *Get it
+    /// anyway* must not wait behind it); only the same-press check and the insert run under
+    /// it.
     pub(super) async fn start_local(&self, req: StartRequest) -> AppResult<RunDto> {
         let inner = &self.inner;
         let lane = inner
@@ -577,7 +606,8 @@ impl StudioManager {
             .local
             .clone()
             .ok_or_else(errors::no_local_engine)?;
-        let _starting = inner.starting.lock().await;
+        // The same press sent again gives the run it made, whatever its checks say now
+        // (checked again under the lock, for a press whose first copy is being recorded).
         if let Some(run) = inner.known_press(&req.client_token).await? {
             return Ok(inner.dto_of(&run));
         }
@@ -602,6 +632,10 @@ impl StudioManager {
         if verdict.word == FitWord::NotHere {
             return Err(errors::does_not_fit(verdict.reason));
         }
+        let _starting = inner.starting.lock().await;
+        if let Some(run) = inner.known_press(&req.client_token).await? {
+            return Ok(inner.dto_of(&run));
+        }
         let job = inner
             .record_local(&req, prepared, shape, &verdict, &lane)
             .await?;
@@ -618,19 +652,37 @@ impl StudioManager {
             .local
             .clone()
             .ok_or_else(errors::no_local_engine)?;
-        let prepared = inner.prepare_local(req, &lane).await?;
+        let LocalPrepared {
+            model,
+            entry,
+            problems,
+            shape,
+            verdict,
+            ..
+        } = inner.prepare_local(req, &lane).await?;
         let prefs = inner.prefs();
+        // A run the lease would put on the processor instead of unloading the chat model is
+        // judged there: its word, its time, and no unload (ruling L15-processor-eta).
+        let chat_loaded = lane.hardware.chat_device_bytes().is_some();
+        let verdict = match (verdict, shape) {
+            (Some(v), Ok(shape))
+                if processor_instead_of_unload(&v, prefs.gpu_policy, chat_loaded) =>
+            {
+                Some(inner.on_processor(&entry, shape, &lane).await)
+            }
+            (verdict, _) => verdict,
+        };
         let spend = inner.spend_today().await?;
         // Free: it never asks and always passes the limit.
         let billing = spend::billing_of(&Price::Free, Some(0.0));
-        let mut invalid = errors::invalid_sentences(&prepared.problems, &prepared.model);
+        let mut invalid = errors::invalid_sentences(&problems, &model);
         if req.prompt.chars().count() > PROMPT_MAX_CHARS {
             invalid.push(errors::PROMPT_TOO_LONG_HERE.to_owned());
         }
-        let verdict = prepared.verdict.as_ref();
+        let verdict = verdict.as_ref();
         Ok(EstimateDto {
             usd: Some(0.0),
-            reasons: spend::confirm_reasons(prepared.model.kind, billing, &prefs.confirm_rules()),
+            reasons: spend::confirm_reasons(model.kind, billing, &prefs.confirm_rules()),
             confirm_at_usd: prefs.confirm_at_usd,
             limit: LimitDto {
                 limit_usd: prefs.daily_limit_usd,
@@ -758,6 +810,18 @@ impl Inner {
             shape,
             verdict,
         })
+    }
+
+    /// The run of `entry` at `shape` judged on the processor, as a run there records it
+    /// ("Processor"): for a run the lease puts there although its fit was judged for the
+    /// graphics device.
+    async fn on_processor(
+        &self,
+        entry: &GenEntry,
+        shape: RunShape,
+        lane: &LocalLane,
+    ) -> LocalVerdict {
+        verdict(entry, shape, true, lane.hardware.as_ref(), &self.deps.store).await
     }
 
     /// Records the local run (`queued`, $0) and its audit row, and gives its job.
@@ -956,6 +1020,13 @@ impl Inner {
         } else {
             verdict.card.clone()
         };
+        // A run the grant moved to the processor, away from the device its fit was judged
+        // for, is timed there: with no time measured on the processor, none is shown (ruling
+        // L15-processor-eta).
+        if opts.processor_only && !verdict.fit.processor_only {
+            let there = self.on_processor(&step.entry, step.shape, lane).await;
+            self.with_live(&job.run_id, |live| live.eta = there.eta);
+        }
         self.with_live(&job.run_id, |live| {
             live.unloaded_chat = unloaded;
             live.alongside = grant == Grant::Alongside && chat_loaded;

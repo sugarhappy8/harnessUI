@@ -24,6 +24,7 @@ use url::Url;
 
 use super::errors;
 use super::local::LocalProvider;
+use super::manager::device_name;
 use super::prefs::GpuPolicy;
 use super::spend::day_start_in;
 use crate::dto::RunDto;
@@ -31,7 +32,6 @@ use crate::error::AppResult;
 use crate::gpu_lease::{GpuLease, Grant, LeaseWait, Refused, StudioNeed};
 use crate::hub::HardwareDto;
 use crate::providers::{client_from, keychain_error, kind_of, secret_key};
-use crate::runtime_manager::RuntimeManager;
 use crate::state::AppState;
 
 /// The webview event that carries a run's new state.
@@ -163,8 +163,9 @@ impl CardLease for AppLease {
 }
 
 /// The app's hardware: the device the chat model's backends report (`hub::detect`), its free
-/// memory with the chat model loaded now (`RuntimeManager::device_free_now`), the loaded chat
-/// model's bytes on it, and the processor's cores.
+/// memory with the chat model loaded now when it is on that card
+/// (`RuntimeManager::device_free_now`, [`studio_target`]), the loaded chat model's bytes on a
+/// device, and the processor's cores.
 pub struct AppHardware(pub AppHandle);
 
 #[async_trait]
@@ -181,20 +182,13 @@ impl LocalHardware for AppHardware {
             );
         };
         let (target, hardware) = crate::hub::detect(&state).await;
-        // The probe behind it is cached and runs again only before a chat load: its free
-        // memory is corrected for the chat model loaded, or unloaded, since.
-        let total = device_total(&state.runtime, &hardware);
-        let target = with_device_free(target, |probed| {
-            state.runtime.device_free_now(probed, total)
-        });
-        // The Studio engine's own backend there: Metal on Apple silicon, Vulkan on a graphics
-        // card whatever llama.cpp uses (the pinned engine has no other).
-        let (backend, description) = match &target {
-            Target::Gpu { .. } => ("vulkan", hardware.gpu_name),
-            Target::AppleUnified { .. } => ("metal", hardware.gpu_name),
-            Target::Cpu { .. } => ("cpu", None),
-        };
-        (target, backend.to_owned(), description)
+        // The probe `hub::detect` read, for the device's name and total: cached, so nothing
+        // is probed here, and a probe running now is waited for rather than leaving the free
+        // memory without its cap (ruling L15-total-await).
+        let probes = state.runtime.backends(false).await;
+        studio_target(target, hardware, &probes, |probed, total, on_device| {
+            state.runtime.device_free_now(probed, total, on_device)
+        })
     }
 
     fn chat_device_bytes(&self) -> Option<u64> {
@@ -230,18 +224,86 @@ pub(crate) fn with_device_free(target: Target, free: impl FnOnce(u64) -> u64) ->
     }
 }
 
-/// The total memory of the graphics device `hub::detect` found (`hardware`), from the same
-/// cached probe and picked the same way: `None` when it is not known, or while a probe runs.
-fn device_total(manager: &RuntimeManager, hardware: &HardwareDto) -> Option<u64> {
+/// What a local run sees of `target`, the graphics device `hub::detect` found in `probes`
+/// (`hardware`): its free memory as `free_now` corrects it for the chat model loaded, or
+/// unloaded, since the probe (`RuntimeManager::device_free_now` in the app: the probe is
+/// cached and runs again only before a chat load), given the device's total and which
+/// (backend, device name) is that card ([`same_card`]; nothing is corrected when the device
+/// is not found in `probes`); the Studio engine's own backend there (Metal on Apple silicon,
+/// Vulkan on a graphics card whatever llama.cpp uses: the pinned engine has no other) and
+/// llama.cpp's description of the device.
+pub(crate) fn studio_target(
+    target: Target,
+    hardware: HardwareDto,
+    probes: &[(runtime::Backend, runtime::ProbeResult)],
+    free_now: impl FnOnce(u64, Option<u64>, &dyn Fn(&str, &str) -> bool) -> u64,
+) -> (Target, String, Option<String>) {
+    let picked = picked_device(probes, &hardware);
+    let total = picked
+        .filter(|(_, d)| d.total_mib > 0)
+        .map(|(_, d)| d.total_mib.saturating_mul(1024 * 1024));
+    let on_card = |backend: &str, name: &str| {
+        picked.is_some_and(|(kind, device)| same_card(probes, kind, device, backend, name))
+    };
+    let target = with_device_free(target, |probed| free_now(probed, total, &on_card));
+    let (backend, description) = match &target {
+        Target::Gpu { .. } => ("vulkan", hardware.gpu_name),
+        Target::AppleUnified { .. } => ("metal", hardware.gpu_name),
+        Target::Cpu { .. } => ("cpu", None),
+    };
+    (target, backend.to_owned(), description)
+}
+
+/// The graphics device `hub::detect` found (`hardware`), in `probes`: of the backend it
+/// reported, picked as it picks one (`runtime::pick_device`), and matched by description.
+fn picked_device<'a>(
+    probes: &'a [(runtime::Backend, runtime::ProbeResult)],
+    hardware: &HardwareDto,
+) -> Option<(runtime::BackendKind, &'a runtime::Device)> {
     let backend = hardware.backend.as_deref()?;
     let description = hardware.gpu_name.as_deref()?;
-    manager
-        .cached_backends()?
+    probes
         .iter()
         .filter(|(b, p)| b.kind.as_str() == backend && p.is_usable())
-        .find_map(|(_, p)| runtime::pick_device(&p.devices))
-        .filter(|d| d.description == description && d.total_mib > 0)
-        .map(|d| d.total_mib.saturating_mul(1024 * 1024))
+        .find_map(|(b, p)| runtime::pick_device(&p.devices).map(|d| (b.kind, d)))
+        .filter(|(_, d)| d.description == description)
+}
+
+/// Whether a model on `backend`'s device `name` is on the card `picked` (a device of
+/// `picked_kind`): the same backend and device name, as a load counts the memory it frees
+/// (`Machine::from_probes`); or, on another backend (llama.cpp's ROCm or CUDA beside the
+/// Vulkan device Studio judges), that device in `probes` names the same card: the same name
+/// without the driver's code for the chip ([`device_name`]), which no other device of
+/// `picked_kind` has (two cards of one model cannot be told apart that way).
+fn same_card(
+    probes: &[(runtime::Backend, runtime::ProbeResult)],
+    picked_kind: runtime::BackendKind,
+    picked: &runtime::Device,
+    backend: &str,
+    name: &str,
+) -> bool {
+    if backend == picked_kind.as_str() {
+        return name == picked.name;
+    }
+    fn devices<'a>(
+        probes: &'a [(runtime::Backend, runtime::ProbeResult)],
+        kind: &'a str,
+    ) -> impl Iterator<Item = &'a runtime::Device> {
+        probes
+            .iter()
+            .filter(move |(b, p)| b.kind.as_str() == kind && p.is_usable())
+            .flat_map(|(_, p)| p.devices.iter())
+    }
+    let card = device_name(&picked.description);
+    let Some(chat) = devices(probes, backend).find(|d| d.name == name) else {
+        return false;
+    };
+    !card.is_empty()
+        && device_name(&chat.description) == card
+        && devices(probes, picked_kind.as_str())
+            .filter(|d| device_name(&d.description) == card)
+            .count()
+            == 1
 }
 
 /// The endpoints in the store, with their keys from the keychain: the client is built as
@@ -457,6 +519,212 @@ mod tests {
             ram_free_bytes: 16 * GB,
         };
         assert_eq!(with_device_free(cpu.clone(), less), cpu);
+    }
+
+    const MIB: u64 = 1024 * 1024;
+
+    fn probed(
+        kind: runtime::BackendKind,
+        devices: &[(&str, &str, u64, u64)],
+    ) -> (runtime::Backend, runtime::ProbeResult) {
+        (
+            runtime::Backend {
+                kind,
+                dir: "/b".into(),
+                server: "/b/llama-server".into(),
+                fit_params: None,
+                build: "b1".into(),
+                source: runtime::BackendSource::Installed,
+            },
+            runtime::ProbeResult {
+                backend_kind: kind,
+                devices: devices
+                    .iter()
+                    .map(|(name, description, total_mib, free_mib)| runtime::Device {
+                        name: (*name).into(),
+                        description: (*description).into(),
+                        total_mib: *total_mib,
+                        free_mib: *free_mib,
+                    })
+                    .collect(),
+                error: None,
+                output: Vec::new(),
+            },
+        )
+    }
+
+    /// What `hub::detect` reports for the Vulkan device `description` with `free` bytes free.
+    fn detected(description: &str, free: u64) -> (Target, HardwareDto) {
+        (
+            Target::Gpu {
+                name: description.into(),
+                free_bytes: free,
+                ram_free_bytes: Some(32_000 * MIB),
+            },
+            HardwareDto {
+                target: "gpu".into(),
+                gpu_name: Some(description.into()),
+                gpu_free_bytes: Some(free),
+                ram_total_bytes: None,
+                ram_available_bytes: None,
+                usable_bytes: free,
+                backend: Some("vulkan".into()),
+                intel_mac: false,
+            },
+        )
+    }
+
+    /// The card's free memory as a local run sees it, with the chat model (5,000 MiB) on
+    /// `at_probe` when the backends were probed and on `now` now, each a (backend, device).
+    fn seen_free(
+        probes: &[(runtime::Backend, runtime::ProbeResult)],
+        detected: (Target, HardwareDto),
+        at_probe: Option<(&str, &str)>,
+        now: Option<(&str, &str)>,
+    ) -> u64 {
+        let chat = |on: Option<(&str, &str)>| {
+            on.map(|(backend, device)| (backend.to_owned(), device.to_owned(), 5_000 * MIB))
+        };
+        let (at_probe, now) = (chat(at_probe), chat(now));
+        let (target, _, _) =
+            studio_target(detected.0, detected.1, probes, |probed, total, on_card| {
+                crate::runtime_manager::free_on_device(
+                    probed,
+                    total,
+                    at_probe.as_ref(),
+                    now.as_ref(),
+                    on_card,
+                )
+            });
+        match target {
+            Target::Gpu { free_bytes, .. } => free_bytes,
+            other => panic!("not a card: {other:?}"),
+        }
+    }
+
+    /// Ruling L15-tests (AppHardware) and L15-chat-device: the card `hub::detect` found has
+    /// its free memory corrected for the chat model only when the chat model is on that card
+    /// (by the same backend and device name, or by ROCm's or CUDA's name for the same card),
+    /// and never past the card's total.
+    #[test]
+    fn a_local_run_counts_the_chat_model_only_on_the_card_it_judges() {
+        const A: &str = "AMD Radeon RX 7600 (RADV NAVI33)";
+        let probes = [
+            probed(
+                runtime::BackendKind::Vulkan,
+                &[
+                    ("Vulkan0", A, 8_192, 8_000),
+                    ("Vulkan1", "AMD Radeon RX 6600 (RADV NAVI23)", 4_096, 4_000),
+                ],
+            ),
+            probed(
+                runtime::BackendKind::Rocm,
+                &[
+                    ("ROCm0", "AMD Radeon RX 7600", 8_192, 8_000),
+                    ("ROCm1", "AMD Radeon RX 6600", 4_096, 4_000),
+                ],
+            ),
+        ];
+        let card_a = || detected(A, 8_000 * MIB);
+        // The chat model on card B, by either backend's name: card A is as probed.
+        assert_eq!(
+            seen_free(&probes, card_a(), None, Some(("vulkan", "Vulkan1"))),
+            8_000 * MIB
+        );
+        assert_eq!(
+            seen_free(&probes, card_a(), None, Some(("rocm", "ROCm1"))),
+            8_000 * MIB
+        );
+        // On card A: by Vulkan's name, and by ROCm's name for the same card.
+        assert_eq!(
+            seen_free(&probes, card_a(), None, Some(("vulkan", "Vulkan0"))),
+            3_000 * MIB
+        );
+        assert_eq!(
+            seen_free(&probes, card_a(), None, Some(("rocm", "ROCm0"))),
+            3_000 * MIB
+        );
+        // On card A at the probe and unloaded since: counted back, at most up to the card's
+        // total (8,192 MiB).
+        assert_eq!(
+            seen_free(
+                &probes,
+                detected(A, 3_000 * MIB),
+                Some(("vulkan", "Vulkan0")),
+                None
+            ),
+            8_000 * MIB
+        );
+        assert_eq!(
+            seen_free(
+                &probes,
+                detected(A, 7_000 * MIB),
+                Some(("rocm", "ROCm0")),
+                None
+            ),
+            8_192 * MIB
+        );
+        // A device the probes no longer have: nothing is corrected.
+        assert_eq!(
+            seen_free(
+                &probes,
+                detected("Another card", 8_000 * MIB),
+                None,
+                Some(("vulkan", "Vulkan0"))
+            ),
+            8_000 * MIB
+        );
+
+        // Two cards of one model: ROCm's name cannot say which one; Vulkan's can.
+        let twins = [
+            probed(
+                runtime::BackendKind::Vulkan,
+                &[("Vulkan0", A, 8_192, 8_000), ("Vulkan1", A, 8_192, 8_000)],
+            ),
+            probed(
+                runtime::BackendKind::Rocm,
+                &[
+                    ("ROCm0", "AMD Radeon RX 7600", 8_192, 8_000),
+                    ("ROCm1", "AMD Radeon RX 7600", 8_192, 8_000),
+                ],
+            ),
+        ];
+        assert_eq!(
+            seen_free(&twins, card_a(), None, Some(("rocm", "ROCm1"))),
+            8_000 * MIB
+        );
+        assert_eq!(
+            seen_free(&twins, card_a(), None, Some(("vulkan", "Vulkan1"))),
+            8_000 * MIB
+        );
+        assert_eq!(
+            seen_free(&twins, card_a(), None, Some(("vulkan", "Vulkan0"))),
+            3_000 * MIB
+        );
+    }
+
+    /// The Studio engine's backend and the device's description go with the target.
+    #[test]
+    fn a_local_run_names_the_engines_backend_and_the_device() {
+        const A: &str = "AMD Radeon RX 7600 (RADV NAVI33)";
+        let probes = [probed(
+            runtime::BackendKind::Vulkan,
+            &[("Vulkan0", A, 8_192, 8_000)],
+        )];
+        let (target, hardware) = detected(A, 8_000 * MIB);
+        let (_, backend, description) =
+            studio_target(target, hardware, &probes, |probed, _, _| probed);
+        assert_eq!(
+            (backend.as_str(), description.as_deref()),
+            ("vulkan", Some(A))
+        );
+        let (_, hardware) = detected(A, 0);
+        let cpu = Target::Cpu {
+            ram_free_bytes: 16_000 * MIB,
+        };
+        let (target, backend, description) =
+            studio_target(cpu.clone(), hardware, &probes, |_, _, _| 0);
+        assert_eq!((target, backend.as_str(), description), (cpu, "cpu", None));
     }
 
     #[test]
