@@ -1,0 +1,337 @@
+{
+  "_id": "6893ab4428f719381f665cee",
+  "id": "unsloth/Qwen3-4B-Instruct-2507-GGUF",
+  "gguf": {
+    "total": 4022468096,
+    "architecture": "qwen3",
+    "context_length": 262144,
+    "chat_template": "{%- if tools %}\n    {{- '<|im_start|>system\\n' }}\n    {%- if messages[0].role == 'system' %}\n        {{- messages[0].content + '\\n\\n' }}\n    {%- endif %}\n    {{- \"# Tools\\n\\nYou may call one or more functions to assist with the user query.\\n\\nYou are provided with function signatures within <tools></tools> XML tags:\\n<tools>\" }}\n    {%- for tool in tools %}\n        {{- \"\\n\" }}\n        {{- tool | tojson }}\n    {%- endfor %}\n    {{- \"\\n</tools>\\n\\nFor each function call, return a json object with function name and arguments within <tool_call></tool_call> XML tags:\\n<tool_call>\\n{\\\"name\\\": <function-name>, \\\"arguments\\\": <args-json-object>}\\n</tool_call><|im_end|>\\n\" }}\n{%- else %}\n    {%- if messages[0].role == 'system' %}\n        {{- '<|im_start|>system\\n' + messages[0].content + '<|im_end|>\\n' }}\n    {%- endif %}\n{%- endif %}\n{%- set ns = namespace(multi_step_tool=true, last_query_index=messages|length - 1) %}\n{%- for message in messages[::-1] %}\n    {%- set index = (messages|length - 1) - loop.index0 %}\n    {%- if ns.multi_step_tool and message.role == \"user\" and message.content is string and not(message.content.startswith('<tool_response>') and message.content.endswith('</tool_response>')) %}\n        {%- set ns.multi_step_tool = false %}\n        {%- set ns.last_query_index = index %}\n    {%- endif %}\n{%- endfor %}\n{%- for message in messages %}\n    {%- if message.content is string %}\n        {%- set content = message.content %}\n    {%- else %}\n        {%- set content = '' %}\n    {%- endif %}\n    {%- if (message.role == \"user\") or (message.role == \"system\" and not loop.first) %}\n        {{- '<|im_start|>' + message.role + '\\n' + content + '<|im_end|>' + '\\n' }}\n    {%- elif message.role == \"assistant\" %}\n        {%- set reasoning_content = '' %}\n        {%- if message.reasoning_content is string %}\n            {%- set reasoning_content = message.reasoning_content %}\n        {%- else %}\n            {%- if '</think>' in content %}\n                {%- set reasoning_content = ((content.split('</think>')|first).rstrip('\\n').split('<think>')|last).lstrip('\\n') %}\n                {%- set content = (content.split('</think>')|last).lstrip('\\n') %}\n            {%- endif %}\n        {%- endif %}\n        {%- if loop.index0 > ns.last_query_index %}\n            {%- if loop.last or (not loop.last and reasoning_content) %}\n                {{- '<|im_start|>' + message.role + '\\n<think>\\n' + reasoning_content.strip('\\n') + '\\n</think>\\n\\n' + content.lstrip('\\n') }}\n            {%- else %}\n                {{- '<|im_start|>' + message.role + '\\n' + content }}\n            {%- endif %}\n        {%- else %}\n            {{- '<|im_start|>' + message.role + '\\n' + content }}\n        {%- endif %}\n        {%- if message.tool_calls %}\n            {%- for tool_call in message.tool_calls %}\n                {%- if (loop.first and content) or (not loop.first) %}\n                    {{- '\\n' }}\n                {%- endif %}\n                {%- if tool_call.function %}\n                    {%- set tool_call = tool_call.function %}\n                {%- endif %}\n                {{- '<tool_call>\\n{\"name\": \"' }}\n                {{- tool_call.name }}\n                {{- '\", \"arguments\": ' }}\n                {%- if tool_call.arguments is string %}\n                    {{- tool_call.arguments }}\n                {%- else %}\n                    {{- tool_call.arguments | tojson }}\n                {%- endif %}\n                {{- '}\\n</tool_call>' }}\n            {%- endfor %}\n        {%- endif %}\n        {{- '<|im_end|>\\n' }}\n    {%- elif message.role == \"tool\" %}\n        {%- if loop.first or (messages[loop.index0 - 1].role != \"tool\") %}\n            {{- '<|im_start|>user' }}\n        {%- endif %}\n        {{- '\\n<tool_response>\\n' }}\n        {{- content }}\n        {{- '\\n</tool_response>' }}\n        {%- if loop.last or (messages[loop.index0 + 1].role != \"tool\") %}\n            {{- '<|im_end|>\\n' }}\n        {%- endif %}\n    {%- endif %}\n{%- endfor %}\n{%- if add_generation_prompt %}\n    {{- '<|im_start|>assistant\\n' }}\n{%- endif %}",
+    "eos_token": "<|im_end|>",
+    "totalFileSize": 8051285344
+  },
+  "sha": "a06e946bb6b655725eafa393f4a9745d460374c9",
+  "gated": false,
+  "tags": [
+    "transformers",
+    "gguf",
+    "qwen",
+    "qwen3",
+    "unsloth",
+    "arxiv:2505.09388",
+    "base_model:Qwen/Qwen3-4B-Instruct-2507",
+    "base_model:quantized:Qwen/Qwen3-4B-Instruct-2507",
+    "license:apache-2.0",
+    "endpoints_compatible",
+    "region:us",
+    "conversational"
+  ],
+  "cardData": {
+    "library_name": "transformers",
+    "license": "apache-2.0",
+    "license_link": "https://huggingface.co/Qwen/Qwen3-4B-Instruct-2507/blob/main/LICENSE",
+    "base_model": [
+      "Qwen/Qwen3-4B-Instruct-2507"
+    ],
+    "tags": [
+      "qwen",
+      "qwen3",
+      "unsloth"
+    ]
+  },
+  "author": "unsloth",
+  "downloads": 884252,
+  "likes": 227,
+  "lastModified": "2025-08-20T06:23:07.000Z",
+  "siblings": [
+    {
+      "rfilename": ".gitattributes",
+      "blobId": "6dd488ef1103a22b085658c4bcb90ac0980c8e70",
+      "size": 2795
+    },
+    {
+      "rfilename": "Qwen3-4B-Instruct-2507-F16.gguf",
+      "blobId": "6bd0c162dbd3da683ce4533fd0b3cb19af1672ca",
+      "size": 8051285344,
+      "lfs": {
+        "sha256": "336228a2810f17724ecd6e9e2e40e8381eee81e886316fee311ade2899c31030",
+        "size": 8051285344,
+        "pointerSize": 135
+      }
+    },
+    {
+      "rfilename": "Qwen3-4B-Instruct-2507-IQ4_NL.gguf",
+      "blobId": "054ad6569bcf9b42cb1f8669cc9faab4bfda639f",
+      "size": 2381343840,
+      "lfs": {
+        "sha256": "89bf2f9ba70b4a5ee8411244ae89dcd012ed59e386124bb096287feb09f4f25e",
+        "size": 2381343840,
+        "pointerSize": 135
+      }
+    },
+    {
+      "rfilename": "Qwen3-4B-Instruct-2507-IQ4_XS.gguf",
+      "blobId": "3760dace47d8a401d3500b04ee4e0fea0c853b5a",
+      "size": 2270751840,
+      "lfs": {
+        "sha256": "cfd15a69e4801abfa16f0263b77ffbf97cbb8af67782a70cc95cf627b3dfa27d",
+        "size": 2270751840,
+        "pointerSize": 135
+      }
+    },
+    {
+      "rfilename": "Qwen3-4B-Instruct-2507-Q2_K.gguf",
+      "blobId": "a9dd3ea6c65cd908be753429b0da9a5ab39e1fbe",
+      "size": 1669500000,
+      "lfs": {
+        "sha256": "f7ed2f57713ad29e1a4ec093be0cdf3d7fd31e137e8fd4fc3edcfd04a5267862",
+        "size": 1669500000,
+        "pointerSize": 135
+      }
+    },
+    {
+      "rfilename": "Qwen3-4B-Instruct-2507-Q2_K_L.gguf",
+      "blobId": "a9dd3ea6c65cd908be753429b0da9a5ab39e1fbe",
+      "size": 1669500000,
+      "lfs": {
+        "sha256": "f7ed2f57713ad29e1a4ec093be0cdf3d7fd31e137e8fd4fc3edcfd04a5267862",
+        "size": 1669500000,
+        "pointerSize": 135
+      }
+    },
+    {
+      "rfilename": "Qwen3-4B-Instruct-2507-Q3_K_M.gguf",
+      "blobId": "14cab3ec948c4449ab866635dd84e0fda7474998",
+      "size": 2075618400,
+      "lfs": {
+        "sha256": "9c6e0763577125a994a9bea0bbd7a737ac4498b8a6a4e0f788727553af1806c9",
+        "size": 2075618400,
+        "pointerSize": 135
+      }
+    },
+    {
+      "rfilename": "Qwen3-4B-Instruct-2507-Q3_K_S.gguf",
+      "blobId": "d509fe4b81163466bf89df3727f4b438ce39750a",
+      "size": 1886997600,
+      "lfs": {
+        "sha256": "0ce20058cc0ed6b6c9213bb383589327e458c12ffce0842fc96867042d669c75",
+        "size": 1886997600,
+        "pointerSize": 135
+      }
+    },
+    {
+      "rfilename": "Qwen3-4B-Instruct-2507-Q4_0.gguf",
+      "blobId": "ef627f3923a45fd0982ef8356ae75edbeb2cf5f6",
+      "size": 2375773280,
+      "lfs": {
+        "sha256": "e0ba675d86ab277c61701c6793659b2ae801d95e3be791464c321e6fbf613be2",
+        "size": 2375773280,
+        "pointerSize": 135
+      }
+    },
+    {
+      "rfilename": "Qwen3-4B-Instruct-2507-Q4_1.gguf",
+      "blobId": "c4081ec3df4eea5762aae1b0d89647e284acbd27",
+      "size": 2596629600,
+      "lfs": {
+        "sha256": "6e37bc9a4533bae81deefd9081fda514171e8485bbbef86d63ec7407e756eb3f",
+        "size": 2596629600,
+        "pointerSize": 135
+      }
+    },
+    {
+      "rfilename": "Qwen3-4B-Instruct-2507-Q4_K_M.gguf",
+      "blobId": "681d7d0d2c24530e22ca6c3f2ef14fbe254f17ae",
+      "size": 2497281120,
+      "lfs": {
+        "sha256": "3605803b982cb64aead44f6c1b2ae36e3acdb41d8e46c8a94c6533bc4c67e597",
+        "size": 2497281120,
+        "pointerSize": 135
+      }
+    },
+    {
+      "rfilename": "Qwen3-4B-Instruct-2507-Q4_K_S.gguf",
+      "blobId": "62a8b0d9dd76dcae2e24bb02ea9d9bb1ab888cc1",
+      "size": 2383309920,
+      "lfs": {
+        "sha256": "90bc7227557ed8a417696b6ed8a94b2c351ad1d94de39bf2889ad8778366c68a",
+        "size": 2383309920,
+        "pointerSize": 135
+      }
+    },
+    {
+      "rfilename": "Qwen3-4B-Instruct-2507-Q5_K_M.gguf",
+      "blobId": "4871019e743ef1a9a34c4e44a70c11dacd145fd9",
+      "size": 2889514080,
+      "lfs": {
+        "sha256": "5bde5e9d883622acb02bf77fe7dcbc56a8b9a9ad4be78a72ca23a532658b4ecb",
+        "size": 2889514080,
+        "pointerSize": 135
+      }
+    },
+    {
+      "rfilename": "Qwen3-4B-Instruct-2507-Q5_K_S.gguf",
+      "blobId": "2e20e8b3ecb05b132655520246e3de039b913f70",
+      "size": 2823711840,
+      "lfs": {
+        "sha256": "e252a2bb39e90c163ba83524ea833ee73d36f9c5e50d157651c82995e7e72e60",
+        "size": 2823711840,
+        "pointerSize": 135
+      }
+    },
+    {
+      "rfilename": "Qwen3-4B-Instruct-2507-Q6_K.gguf",
+      "blobId": "080a2b3eef6081f78bc7a7167e39088e2ba8b038",
+      "size": 3306261600,
+      "lfs": {
+        "sha256": "cd7b21b38b3e71400587c184b6a9b04d3beb4d13fdae6464d4075dee4f1bc5ad",
+        "size": 3306261600,
+        "pointerSize": 135
+      }
+    },
+    {
+      "rfilename": "Qwen3-4B-Instruct-2507-Q8_0.gguf",
+      "blobId": "d88b2a185add0ebcdee100a278fca9afa325d298",
+      "size": 4280405600,
+      "lfs": {
+        "sha256": "391c1e410fd9f4cf2de2b510273b56a84c19ce18f4fa3bfb3774031dac4ef068",
+        "size": 4280405600,
+        "pointerSize": 135
+      }
+    },
+    {
+      "rfilename": "Qwen3-4B-Instruct-2507-UD-IQ1_M.gguf",
+      "blobId": "97fd35755a3ac4ae00832d21eae0a1c4965ccf05",
+      "size": 1143484000,
+      "lfs": {
+        "sha256": "415ed538d93b9f00f7d2cacdf8cf427bc1b05f20ae30e5a3f015fd6b04ba09d1",
+        "size": 1143484000,
+        "pointerSize": 135
+      }
+    },
+    {
+      "rfilename": "Qwen3-4B-Instruct-2507-UD-IQ1_S.gguf",
+      "blobId": "fc3f2e6ce9ff7db2f1f4326ba6324559121381b8",
+      "size": 1083149920,
+      "lfs": {
+        "sha256": "48e00f29635f0eb1db72d3a3c65ff1a9552676dc15f810b7074be690fbcea59e",
+        "size": 1083149920,
+        "pointerSize": 135
+      }
+    },
+    {
+      "rfilename": "Qwen3-4B-Instruct-2507-UD-IQ2_M.gguf",
+      "blobId": "300e38b1721997e232342c1092f842859eadf040",
+      "size": 1530402400,
+      "lfs": {
+        "sha256": "6711372517e0e2d6dd1c008a22203299d1ba5d44f894a95fdc40a136815d4fe3",
+        "size": 1530402400,
+        "pointerSize": 135
+      }
+    },
+    {
+      "rfilename": "Qwen3-4B-Instruct-2507-UD-IQ2_XXS.gguf",
+      "blobId": "53345c6994a0e00f7b91adf72bf639fc8b29fb86",
+      "size": 1255345760,
+      "lfs": {
+        "sha256": "b4fb089163ef6c0e32f5edb3e6ef5ca860da23e8fc2c7b8fd53da5a3ce25a17d",
+        "size": 1255345760,
+        "pointerSize": 135
+      }
+    },
+    {
+      "rfilename": "Qwen3-4B-Instruct-2507-UD-IQ3_XXS.gguf",
+      "blobId": "e342c49e5cf2b1aa2121e60a781d58c0dc894ff1",
+      "size": 1674376800,
+      "lfs": {
+        "sha256": "c886effc2f09e63bbf9419a8136fab49dba22a578c24885f63c5f483de75ad3e",
+        "size": 1674376800,
+        "pointerSize": 135
+      }
+    },
+    {
+      "rfilename": "Qwen3-4B-Instruct-2507-UD-Q2_K_XL.gguf",
+      "blobId": "91c0eb11937c2bbf9af1a406cd74e46b3eb8ae93",
+      "size": 1695724640,
+      "lfs": {
+        "sha256": "b7675a5b61a3e7fec4c2f138ba50504ede76c737c478029ea30510e1ee09976c",
+        "size": 1695724640,
+        "pointerSize": 135
+      }
+    },
+    {
+      "rfilename": "Qwen3-4B-Instruct-2507-UD-Q3_K_XL.gguf",
+      "blobId": "13d6cd5921be347660a11dbe22016632737fd1fe",
+      "size": 2128385120,
+      "lfs": {
+        "sha256": "6aa5c26f5624cf8820f6f0207479445da5a33c4db73a2e097cf6f91f9ce0550e",
+        "size": 2128385120,
+        "pointerSize": 135
+      }
+    },
+    {
+      "rfilename": "Qwen3-4B-Instruct-2507-UD-Q4_K_XL.gguf",
+      "blobId": "9cbda64e51517b5e26698ac7358df1cf720f0bf1",
+      "size": 2546340960,
+      "lfs": {
+        "sha256": "4bbe1f2f8ebe69fad3be8e15d69f220b06448a9dd26f82d7d81cce88ebfc39fd",
+        "size": 2546340960,
+        "pointerSize": 135
+      }
+    },
+    {
+      "rfilename": "Qwen3-4B-Instruct-2507-UD-Q5_K_XL.gguf",
+      "blobId": "ee115008b9450fe8820550fd7930dea2d5e50a4e",
+      "size": 2899221600,
+      "lfs": {
+        "sha256": "7040e21aa2b43d56735b0e4f9c89210ad21b8282f668d6897f5d1dadf71aa9f2",
+        "size": 2899221600,
+        "pointerSize": 135
+      }
+    },
+    {
+      "rfilename": "Qwen3-4B-Instruct-2507-UD-Q6_K_XL.gguf",
+      "blobId": "4449b11fc4b047adc21695fad077f9716f1a76c4",
+      "size": 3658223200,
+      "lfs": {
+        "sha256": "8d5b9304db7e2c419d05f5f3cbb04890b8fa0dd434a72bc3ef448b564ba8b88e",
+        "size": 3658223200,
+        "pointerSize": 135
+      }
+    },
+    {
+      "rfilename": "Qwen3-4B-Instruct-2507-UD-Q8_K_XL.gguf",
+      "blobId": "84193f8156787a8b4b1de8e2f89aad73679247d8",
+      "size": 5056700000,
+      "lfs": {
+        "sha256": "0aae4ff27faba8903685f3e3aad97e2004ac6e21f15eeb806e20dec90bb480be",
+        "size": 5056700000,
+        "pointerSize": 135
+      }
+    },
+    {
+      "rfilename": "README.md",
+      "blobId": "d7b1bb2fe9f643f0c7e65bf0c8ccfc5ee4d84a37",
+      "size": 11207
+    },
+    {
+      "rfilename": "imatrix_unsloth.gguf_file",
+      "blobId": "b2ff519205645ffc0bc5d4e8a81b8fb6d0f4a5bf",
+      "size": 3872672,
+      "lfs": {
+        "sha256": "9908ff45cd363230b05588f22150f62f1091459aa67ab4bd1376d23ef2d4781f",
+        "size": 3872672,
+        "pointerSize": 132
+      }
+    },
+    {
+      "rfilename": "params",
+      "blobId": "a0e209876aecd6785194f4d10c84e25eb3e524ff",
+      "size": 178
+    },
+    {
+      "rfilename": "template",
+      "blobId": "0bc0cb1f2e3eae9c2d498239f6e76696576e5c05",
+      "size": 1492
+    }
+  ]
+}

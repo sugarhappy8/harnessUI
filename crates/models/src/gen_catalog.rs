@@ -190,7 +190,7 @@ impl GenLicence {
 
 /// How strict a licence is: by [`Commercial`], then a lower revenue limit is stricter
 /// (an unstated limit counts as the lowest).
-fn strictness(l: &GenLicence) -> (Commercial, Reverse<u64>) {
+pub(crate) fn strictness(l: &GenLicence) -> (Commercial, Reverse<u64>) {
     let limit = match l.commercial_outputs {
         Commercial::UnderRevenue => l.revenue_limit_usd.unwrap_or(0),
         _ => 0,
@@ -708,7 +708,10 @@ fn keyed(licenses: BTreeMap<String, GenLicence>) -> BTreeMap<String, GenLicence>
 }
 
 /// Every part is an allowed file, pinned, and names one of `licenses`.
-fn check_parts(parts: &[GenPart], licenses: &BTreeMap<String, GenLicence>) -> Result<(), String> {
+pub(crate) fn check_parts(
+    parts: &[GenPart],
+    licenses: &BTreeMap<String, GenLicence>,
+) -> Result<(), String> {
     for p in parts {
         if validate_repo_id(&p.repo).is_err() || validate_repo_path(&p.path).is_err() {
             return Err(NOT_PINNED.into());
@@ -731,7 +734,7 @@ fn check_parts(parts: &[GenPart], licenses: &BTreeMap<String, GenLicence>) -> Re
 }
 
 /// No licence is region-limited, and each one with a bundled text pins that text.
-fn check_licences(licenses: &BTreeMap<String, GenLicence>) -> Result<(), String> {
+pub(crate) fn check_licences(licenses: &BTreeMap<String, GenLicence>) -> Result<(), String> {
     for l in licenses.values() {
         if !l.excluded_regions.is_empty() {
             return Err(REGION_LIMITED.into());
@@ -748,7 +751,7 @@ fn check_licences(licenses: &BTreeMap<String, GenLicence>) -> Result<(), String>
     Ok(())
 }
 
-fn sha256_hex(bytes: &[u8]) -> String {
+pub(crate) fn sha256_hex(bytes: &[u8]) -> String {
     Sha256::digest(bytes)
         .iter()
         .map(|b| format!("{b:02x}"))

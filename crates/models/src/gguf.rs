@@ -242,6 +242,15 @@ pub struct TensorEntry {
     pub bytes: u64,
 }
 
+/// 0.1.0 Studio: one tensor's name and its element count per dimension, as written in the
+/// file (ggml's order: the fastest-changing dimension first). Picture and video files often
+/// carry no metadata, so these are what tell their families apart (`gen_search`).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TensorShape {
+    pub name: String,
+    pub dims: Vec<u64>,
+}
+
 /// A tensor table entry as written in the file, before sizes are known.
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct RawTensor {
@@ -249,8 +258,7 @@ struct RawTensor {
     /// ggml's type number (only the tests look at it, to check the sizes).
     #[cfg_attr(not(test), allow(dead_code))]
     ggml_type: u32,
-    /// The element count per dimension (only the tests look at it).
-    #[cfg_attr(not(test), allow(dead_code))]
+    /// The element count per dimension.
     dims: Vec<u64>,
     /// Offset from the start of the data section.
     offset: u64,
@@ -289,6 +297,35 @@ pub fn read_with_tensors<R: Read + Seek>(
     let raw = read_raw_tensors(&mut r, &header)?;
     let tensors = sizes_from_offsets(&raw, r.pos, len, alignment(&header)?)?;
     Ok((header, tensors))
+}
+
+/// Reads every tensor's name and dimensions from the GGUF file at `path`, as written. Refused
+/// exactly where [`read_tensor_table`] is (the offsets are checked the same way, so a table
+/// that would not load is never taken for a model's).
+pub fn read_tensor_shapes(path: &Path) -> Result<Vec<TensorShape>, GgufError> {
+    let file = File::open(path)?;
+    let len = file.metadata()?.len();
+    read_shapes(BufReader::with_capacity(256 * 1024, file), len)
+}
+
+/// [`read_tensor_shapes`] from `reader`, which holds `len` bytes in total.
+fn read_shapes<R: Read + Seek>(reader: R, len: u64) -> Result<Vec<TensorShape>, GgufError> {
+    let mut r = Reader {
+        inner: reader,
+        pos: 0,
+        len,
+        kept: 0,
+    };
+    let header = read_header(&mut r, false)?;
+    let raw = read_raw_tensors(&mut r, &header)?;
+    sizes_from_offsets(&raw, r.pos, len, alignment(&header)?)?;
+    Ok(raw
+        .into_iter()
+        .map(|t| TensorShape {
+            name: t.name,
+            dims: t.dims,
+        })
+        .collect())
 }
 
 /// The data alignment the file names (`general.alignment`, an unsigned integer that is a
@@ -573,15 +610,18 @@ fn fixed_size(ty: u32) -> Option<u64> {
 /// Builds GGUF headers for tests (here and in other crates' tests).
 #[doc(hidden)]
 pub mod testing {
-    /// A minimal GGUF v3 writer for metadata and, with [`Writer::tensor`], a tensor table
-    /// and its (zero-filled) data.
+    use super::TensorShape;
+
+    /// A minimal GGUF v3 writer for metadata and, with [`Writer::tensor`] or
+    /// [`Writer::shaped_tensor`], a tensor table and its (zero-filled) data.
     #[derive(Default)]
     pub struct Writer {
         kvs: Vec<u8>,
         count: u64,
         tensors: u64,
-        /// Tensors added with [`Writer::tensor`]: name and data size in bytes.
-        table: Vec<(String, u64)>,
+        /// Tensors added with [`Writer::tensor`] and [`Writer::shaped_tensor`]: name,
+        /// dimensions and data size in bytes.
+        table: Vec<(String, Vec<u64>, u64)>,
         /// The data alignment ([`Writer::alignment`]); 0 means the default of 32.
         align: u64,
     }
@@ -599,7 +639,14 @@ pub mod testing {
         /// With any tensor added, the header's tensor count is the number added and the
         /// file ends with the table, padding and the data, as llama.cpp writes it.
         pub fn tensor(mut self, name: &str, bytes: u64) -> Self {
-            self.table.push((name.to_string(), bytes));
+            self.table.push((name.to_string(), vec![bytes], bytes));
+            self
+        }
+        /// Adds a tensor with the dimensions `dims`, written as they are, and 32 bytes of
+        /// data whatever they say: sizes come from the offsets, so a whole model's table
+        /// makes a file of tens of kilobytes.
+        pub fn shaped_tensor(mut self, name: &str, dims: &[u64]) -> Self {
+            self.table.push((name.to_string(), dims.to_vec(), 32));
             self
         }
         /// Writes `general.alignment` and pads the data to it.
@@ -684,22 +731,97 @@ pub mod testing {
             let align = if self.align == 0 { 32 } else { self.align };
             let pad = |n: u64| n.div_ceil(align) * align;
             let mut offset = 0u64;
-            for (name, bytes) in &self.table {
+            for (name, dims, bytes) in &self.table {
                 out.extend((name.len() as u64).to_le_bytes());
                 out.extend(name.as_bytes());
-                out.extend(1u32.to_le_bytes());
-                out.extend(bytes.to_le_bytes());
+                out.extend((dims.len() as u32).to_le_bytes());
+                for d in dims {
+                    out.extend(d.to_le_bytes());
+                }
                 // GGML_TYPE_I8: one byte per element.
                 out.extend(24u32.to_le_bytes());
                 out.extend(offset.to_le_bytes());
                 offset += pad(*bytes);
             }
             out.resize(pad(out.len() as u64) as usize, 0);
-            for (_, bytes) in &self.table {
+            for (_, _, bytes) in &self.table {
                 out.resize(out.len() + pad(*bytes) as usize, 0);
             }
             out
         }
+    }
+
+    /// The recorded tensor tables (tests/fixtures/gguf/, README.md there): each tensor's
+    /// name and dimensions as the pinned files write them, one `name d0 d1 …` a line.
+    const TABLES: [(&str, &str); 6] = [
+        (
+            "klein4b-tensors.txt",
+            include_str!("../tests/fixtures/gguf/klein4b-tensors.txt"),
+        ),
+        (
+            "klein9b-tensors.txt",
+            include_str!("../tests/fixtures/gguf/klein9b-tensors.txt"),
+        ),
+        (
+            "zimage-tensors.txt",
+            include_str!("../tests/fixtures/gguf/zimage-tensors.txt"),
+        ),
+        (
+            "wan22-ti2v-5b-tensors.txt",
+            include_str!("../tests/fixtures/gguf/wan22-ti2v-5b-tensors.txt"),
+        ),
+        (
+            "wan21-t2v-1.3b-tensors.txt",
+            include_str!("../tests/fixtures/gguf/wan21-t2v-1.3b-tensors.txt"),
+        ),
+        (
+            "qwen3-4b-tensors.txt",
+            include_str!("../tests/fixtures/gguf/qwen3-4b-tensors.txt"),
+        ),
+    ];
+
+    /// The names [`shapes`] and [`diffusion_gguf`] take.
+    pub const TENSOR_FIXTURES: [&str; 6] = [
+        TABLES[0].0,
+        TABLES[1].0,
+        TABLES[2].0,
+        TABLES[3].0,
+        TABLES[4].0,
+        TABLES[5].0,
+    ];
+
+    /// The recorded table `fixture` names (`"klein4b-tensors.txt"`).
+    ///
+    /// # Panics
+    /// For a name that is not one of [`TENSOR_FIXTURES`], or a line that does not read.
+    pub fn shapes(fixture: &str) -> Vec<TensorShape> {
+        let (_, text) = TABLES
+            .iter()
+            .find(|(name, _)| *name == fixture)
+            .unwrap_or_else(|| panic!("no tensor fixture {fixture}"));
+        text.lines()
+            .filter(|l| !l.trim().is_empty())
+            .map(|line| {
+                let mut words = line.split_whitespace();
+                let name = words.next().unwrap_or_default().to_string();
+                let dims = words
+                    .map(|d| {
+                        d.parse()
+                            .unwrap_or_else(|_| panic!("{fixture}: bad dimension in {line:?}"))
+                    })
+                    .collect();
+                TensorShape { name, dims }
+            })
+            .collect()
+    }
+
+    /// The tiny model file Tasks L11, L14, D1 and D2 write: the table `fixture` names, 32
+    /// bytes of data a tensor and no metadata keys, as leejet's and Green-Sky's real files.
+    pub fn diffusion_gguf(fixture: &str) -> Vec<u8> {
+        shapes(fixture)
+            .iter()
+            .fold(Writer::new(), |w, t| w.shaped_tensor(&t.name, &t.dims))
+            .build()
     }
 }
 
@@ -997,6 +1119,93 @@ mod tests {
         b.extend((1u64 << 63).to_le_bytes());
         b.extend([0u8; 64]);
         assert!(corrupt(&b));
+    }
+
+    // ---- 0.1.0 Studio: tensor shapes ----------------------------------------------------
+
+    fn shapes_of(bytes: &[u8]) -> Result<Vec<TensorShape>, GgufError> {
+        read_shapes(Cursor::new(bytes), bytes.len() as u64)
+    }
+
+    fn shape(name: &str, dims: &[u64]) -> TensorShape {
+        TensorShape {
+            name: name.to_string(),
+            dims: dims.to_vec(),
+        }
+    }
+
+    #[test]
+    fn tensor_shapes_read_back_as_written() {
+        let bytes = Writer::new()
+            .shaped_tensor("img_in.weight", &[128, 3072])
+            .shaped_tensor("double_blocks.0.img_attn.norm.key_norm.scale", &[128])
+            .shaped_tensor("patch_embedding.weight", &[2, 2, 1, 147_456])
+            .build();
+        assert_eq!(
+            shapes_of(&bytes).unwrap(),
+            [
+                shape("img_in.weight", &[128, 3072]),
+                shape("double_blocks.0.img_attn.norm.key_norm.scale", &[128]),
+                shape("patch_embedding.weight", &[2, 2, 1, 147_456]),
+            ]
+        );
+        // From a file, and with sizes from the offsets: 32 bytes of data each.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("tiny.gguf");
+        std::fs::write(&path, &bytes).unwrap();
+        assert_eq!(read_tensor_shapes(&path).unwrap()[0].dims, [128, 3072]);
+        assert!(
+            read_tensor_table(&path)
+                .unwrap()
+                .iter()
+                .all(|t| t.bytes == 32)
+        );
+        // A sized tensor is one dimension of its byte count.
+        let sized = Writer::new().tensor("a", 100).build();
+        assert_eq!(shapes_of(&sized).unwrap(), [shape("a", &[100])]);
+    }
+
+    /// The shapes are refused exactly where the table is.
+    #[test]
+    fn tensor_shapes_have_the_tables_refusals() {
+        let corrupt = |bytes: &[u8]| matches!(shapes_of(bytes), Err(GgufError::Corrupt(_)));
+        assert!(corrupt(&hand_table(&[(b"a", 1, 64), (b"b", 1, 0)], 96)));
+        assert!(corrupt(&hand_table(&[(b"a", 1, 0), (b"b", 1, 97)], 96)));
+        assert!(corrupt(&hand_table(&[(b"a", 5, 0)], 96)));
+        assert!(corrupt(&hand_table(&[(&[0xff, 0xfe], 1, 0)], 96)));
+        assert!(corrupt(&Writer::new().tensors(u64::MAX).build()));
+        assert!(matches!(shapes_of(b"GGML"), Err(GgufError::NotGguf)));
+        assert_eq!(
+            shapes_of(&hand_table(&[(b"a", 1, 0), (b"b", 2, 64)], 96)).unwrap(),
+            [shape("a", &[1]), shape("b", &[1, 1])]
+        );
+    }
+
+    /// The tiny diffusion files later tasks write: the recorded table, no metadata key, 32
+    /// bytes of data a tensor.
+    #[test]
+    fn a_tiny_diffusion_file_holds_its_fixtures_table() {
+        for fixture in testing::TENSOR_FIXTURES {
+            let table = testing::shapes(fixture);
+            assert!(table.len() > 100, "{fixture}");
+            let bytes = testing::diffusion_gguf(fixture);
+            let header = parse(&bytes).unwrap();
+            assert!(header.metadata.is_empty(), "{fixture}");
+            assert_eq!(shapes_of(&bytes).unwrap(), table, "{fixture}");
+            assert_eq!(
+                table.iter().filter(|t| t.name == "img_in.weight").count(),
+                usize::from(fixture.starts_with("klein")),
+                "{fixture}"
+            );
+        }
+        let klein = testing::shapes("klein4b-tensors.txt");
+        assert!(klein.contains(&shape("img_in.weight", &[128, 3072])));
+    }
+
+    #[test]
+    #[should_panic(expected = "no tensor fixture")]
+    fn an_unknown_tensor_fixture_panics() {
+        testing::shapes("klein8b-tensors.txt");
     }
 
     /// Cut anywhere before the last tensor's data, the file is refused, never a panic.

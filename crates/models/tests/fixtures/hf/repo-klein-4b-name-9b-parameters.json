@@ -1,0 +1,46 @@
+{
+  "_id": "000000000000000000000000",
+  "id": "example-quants/FLUX.2-klein-4B-GGUF",
+  "gguf": {
+    "total": 9078581248,
+    "totalFileSize": 5616208032
+  },
+  "sha": "1111111111111111111111111111111111111111",
+  "gated": false,
+  "tags": [
+    "gguf",
+    "text-to-image",
+    "license:apache-2.0",
+    "region:us"
+  ],
+  "cardData": {
+    "license": "apache-2.0"
+  },
+  "author": "example-quants",
+  "downloads": 1200,
+  "likes": 3,
+  "lastModified": "2026-11-01T10:00:00.000Z",
+  "pipeline_tag": "text-to-image",
+  "siblings": [
+    {
+      "rfilename": ".gitattributes",
+      "blobId": "0000000000000000000000000000000000000000",
+      "size": 1643
+    },
+    {
+      "rfilename": "README.md",
+      "blobId": "0000000000000000000000000000000000000000",
+      "size": 470
+    },
+    {
+      "rfilename": "flux-2-klein-4b-Q4_0.gguf",
+      "blobId": "0000000000000000000000000000000000000000",
+      "size": 5616208032,
+      "lfs": {
+        "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "size": 5616208032,
+        "pointerSize": 135
+      }
+    }
+  ]
+}

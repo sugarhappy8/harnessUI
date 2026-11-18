@@ -1,0 +1,825 @@
+blocks.0.cross_attn.k.bias 3072
+blocks.0.cross_attn.k.weight 3072 3072
+blocks.0.cross_attn.norm_k.weight 3072
+blocks.0.cross_attn.norm_q.weight 3072
+blocks.0.cross_attn.o.bias 3072
+blocks.0.cross_attn.o.weight 3072 3072
+blocks.0.cross_attn.q.bias 3072
+blocks.0.cross_attn.q.weight 3072 3072
+blocks.0.cross_attn.v.bias 3072
+blocks.0.cross_attn.v.weight 3072 3072
+blocks.0.ffn.0.bias 14336
+blocks.0.ffn.0.weight 3072 14336
+blocks.0.ffn.2.bias 3072
+blocks.0.ffn.2.weight 14336 3072
+blocks.0.modulation 3072 6
+blocks.0.norm3.bias 3072
+blocks.0.norm3.weight 3072
+blocks.0.self_attn.k.bias 3072
+blocks.0.self_attn.k.weight 3072 3072
+blocks.0.self_attn.norm_k.weight 3072
+blocks.0.self_attn.norm_q.weight 3072
+blocks.0.self_attn.o.bias 3072
+blocks.0.self_attn.o.weight 3072 3072
+blocks.0.self_attn.q.bias 3072
+blocks.0.self_attn.q.weight 3072 3072
+blocks.0.self_attn.v.bias 3072
+blocks.0.self_attn.v.weight 3072 3072
+blocks.1.cross_attn.k.bias 3072
+blocks.1.cross_attn.k.weight 3072 3072
+blocks.1.cross_attn.norm_k.weight 3072
+blocks.1.cross_attn.norm_q.weight 3072
+blocks.1.cross_attn.o.bias 3072
+blocks.1.cross_attn.o.weight 3072 3072
+blocks.1.cross_attn.q.bias 3072
+blocks.1.cross_attn.q.weight 3072 3072
+blocks.1.cross_attn.v.bias 3072
+blocks.1.cross_attn.v.weight 3072 3072
+blocks.1.ffn.0.bias 14336
+blocks.1.ffn.0.weight 3072 14336
+blocks.1.ffn.2.bias 3072
+blocks.1.ffn.2.weight 14336 3072
+blocks.1.modulation 3072 6
+blocks.1.norm3.bias 3072
+blocks.1.norm3.weight 3072
+blocks.1.self_attn.k.bias 3072
+blocks.1.self_attn.k.weight 3072 3072
+blocks.1.self_attn.norm_k.weight 3072
+blocks.1.self_attn.norm_q.weight 3072
+blocks.1.self_attn.o.bias 3072
+blocks.1.self_attn.o.weight 3072 3072
+blocks.1.self_attn.q.bias 3072
+blocks.1.self_attn.q.weight 3072 3072
+blocks.1.self_attn.v.bias 3072
+blocks.1.self_attn.v.weight 3072 3072
+blocks.10.cross_attn.k.bias 3072
+blocks.10.cross_attn.k.weight 3072 3072
+blocks.10.cross_attn.norm_k.weight 3072
+blocks.10.cross_attn.norm_q.weight 3072
+blocks.10.cross_attn.o.bias 3072
+blocks.10.cross_attn.o.weight 3072 3072
+blocks.10.cross_attn.q.bias 3072
+blocks.10.cross_attn.q.weight 3072 3072
+blocks.10.cross_attn.v.bias 3072
+blocks.10.cross_attn.v.weight 3072 3072
+blocks.10.ffn.0.bias 14336
+blocks.10.ffn.0.weight 3072 14336
+blocks.10.ffn.2.bias 3072
+blocks.10.ffn.2.weight 14336 3072
+blocks.10.modulation 3072 6
+blocks.10.norm3.bias 3072
+blocks.10.norm3.weight 3072
+blocks.10.self_attn.k.bias 3072
+blocks.10.self_attn.k.weight 3072 3072
+blocks.10.self_attn.norm_k.weight 3072
+blocks.10.self_attn.norm_q.weight 3072
+blocks.10.self_attn.o.bias 3072
+blocks.10.self_attn.o.weight 3072 3072
+blocks.10.self_attn.q.bias 3072
+blocks.10.self_attn.q.weight 3072 3072
+blocks.10.self_attn.v.bias 3072
+blocks.10.self_attn.v.weight 3072 3072
+blocks.11.cross_attn.k.bias 3072
+blocks.11.cross_attn.k.weight 3072 3072
+blocks.11.cross_attn.norm_k.weight 3072
+blocks.11.cross_attn.norm_q.weight 3072
+blocks.11.cross_attn.o.bias 3072
+blocks.11.cross_attn.o.weight 3072 3072
+blocks.11.cross_attn.q.bias 3072
+blocks.11.cross_attn.q.weight 3072 3072
+blocks.11.cross_attn.v.bias 3072
+blocks.11.cross_attn.v.weight 3072 3072
+blocks.11.ffn.0.bias 14336
+blocks.11.ffn.0.weight 3072 14336
+blocks.11.ffn.2.bias 3072
+blocks.11.ffn.2.weight 14336 3072
+blocks.11.modulation 3072 6
+blocks.11.norm3.bias 3072
+blocks.11.norm3.weight 3072
+blocks.11.self_attn.k.bias 3072
+blocks.11.self_attn.k.weight 3072 3072
+blocks.11.self_attn.norm_k.weight 3072
+blocks.11.self_attn.norm_q.weight 3072
+blocks.11.self_attn.o.bias 3072
+blocks.11.self_attn.o.weight 3072 3072
+blocks.11.self_attn.q.bias 3072
+blocks.11.self_attn.q.weight 3072 3072
+blocks.11.self_attn.v.bias 3072
+blocks.11.self_attn.v.weight 3072 3072
+blocks.12.cross_attn.k.bias 3072
+blocks.12.cross_attn.k.weight 3072 3072
+blocks.12.cross_attn.norm_k.weight 3072
+blocks.12.cross_attn.norm_q.weight 3072
+blocks.12.cross_attn.o.bias 3072
+blocks.12.cross_attn.o.weight 3072 3072
+blocks.12.cross_attn.q.bias 3072
+blocks.12.cross_attn.q.weight 3072 3072
+blocks.12.cross_attn.v.bias 3072
+blocks.12.cross_attn.v.weight 3072 3072
+blocks.12.ffn.0.bias 14336
+blocks.12.ffn.0.weight 3072 14336
+blocks.12.ffn.2.bias 3072
+blocks.12.ffn.2.weight 14336 3072
+blocks.12.modulation 3072 6
+blocks.12.norm3.bias 3072
+blocks.12.norm3.weight 3072
+blocks.12.self_attn.k.bias 3072
+blocks.12.self_attn.k.weight 3072 3072
+blocks.12.self_attn.norm_k.weight 3072
+blocks.12.self_attn.norm_q.weight 3072
+blocks.12.self_attn.o.bias 3072
+blocks.12.self_attn.o.weight 3072 3072
+blocks.12.self_attn.q.bias 3072
+blocks.12.self_attn.q.weight 3072 3072
+blocks.12.self_attn.v.bias 3072
+blocks.12.self_attn.v.weight 3072 3072
+blocks.13.cross_attn.k.bias 3072
+blocks.13.cross_attn.k.weight 3072 3072
+blocks.13.cross_attn.norm_k.weight 3072
+blocks.13.cross_attn.norm_q.weight 3072
+blocks.13.cross_attn.o.bias 3072
+blocks.13.cross_attn.o.weight 3072 3072
+blocks.13.cross_attn.q.bias 3072
+blocks.13.cross_attn.q.weight 3072 3072
+blocks.13.cross_attn.v.bias 3072
+blocks.13.cross_attn.v.weight 3072 3072
+blocks.13.ffn.0.bias 14336
+blocks.13.ffn.0.weight 3072 14336
+blocks.13.ffn.2.bias 3072
+blocks.13.ffn.2.weight 14336 3072
+blocks.13.modulation 3072 6
+blocks.13.norm3.bias 3072
+blocks.13.norm3.weight 3072
+blocks.13.self_attn.k.bias 3072
+blocks.13.self_attn.k.weight 3072 3072
+blocks.13.self_attn.norm_k.weight 3072
+blocks.13.self_attn.norm_q.weight 3072
+blocks.13.self_attn.o.bias 3072
+blocks.13.self_attn.o.weight 3072 3072
+blocks.13.self_attn.q.bias 3072
+blocks.13.self_attn.q.weight 3072 3072
+blocks.13.self_attn.v.bias 3072
+blocks.13.self_attn.v.weight 3072 3072
+blocks.14.cross_attn.k.bias 3072
+blocks.14.cross_attn.k.weight 3072 3072
+blocks.14.cross_attn.norm_k.weight 3072
+blocks.14.cross_attn.norm_q.weight 3072
+blocks.14.cross_attn.o.bias 3072
+blocks.14.cross_attn.o.weight 3072 3072
+blocks.14.cross_attn.q.bias 3072
+blocks.14.cross_attn.q.weight 3072 3072
+blocks.14.cross_attn.v.bias 3072
+blocks.14.cross_attn.v.weight 3072 3072
+blocks.14.ffn.0.bias 14336
+blocks.14.ffn.0.weight 3072 14336
+blocks.14.ffn.2.bias 3072
+blocks.14.ffn.2.weight 14336 3072
+blocks.14.modulation 3072 6
+blocks.14.norm3.bias 3072
+blocks.14.norm3.weight 3072
+blocks.14.self_attn.k.bias 3072
+blocks.14.self_attn.k.weight 3072 3072
+blocks.14.self_attn.norm_k.weight 3072
+blocks.14.self_attn.norm_q.weight 3072
+blocks.14.self_attn.o.bias 3072
+blocks.14.self_attn.o.weight 3072 3072
+blocks.14.self_attn.q.bias 3072
+blocks.14.self_attn.q.weight 3072 3072
+blocks.14.self_attn.v.bias 3072
+blocks.14.self_attn.v.weight 3072 3072
+blocks.15.cross_attn.k.bias 3072
+blocks.15.cross_attn.k.weight 3072 3072
+blocks.15.cross_attn.norm_k.weight 3072
+blocks.15.cross_attn.norm_q.weight 3072
+blocks.15.cross_attn.o.bias 3072
+blocks.15.cross_attn.o.weight 3072 3072
+blocks.15.cross_attn.q.bias 3072
+blocks.15.cross_attn.q.weight 3072 3072
+blocks.15.cross_attn.v.bias 3072
+blocks.15.cross_attn.v.weight 3072 3072
+blocks.15.ffn.0.bias 14336
+blocks.15.ffn.0.weight 3072 14336
+blocks.15.ffn.2.bias 3072
+blocks.15.ffn.2.weight 14336 3072
+blocks.15.modulation 3072 6
+blocks.15.norm3.bias 3072
+blocks.15.norm3.weight 3072
+blocks.15.self_attn.k.bias 3072
+blocks.15.self_attn.k.weight 3072 3072
+blocks.15.self_attn.norm_k.weight 3072
+blocks.15.self_attn.norm_q.weight 3072
+blocks.15.self_attn.o.bias 3072
+blocks.15.self_attn.o.weight 3072 3072
+blocks.15.self_attn.q.bias 3072
+blocks.15.self_attn.q.weight 3072 3072
+blocks.15.self_attn.v.bias 3072
+blocks.15.self_attn.v.weight 3072 3072
+blocks.16.cross_attn.k.bias 3072
+blocks.16.cross_attn.k.weight 3072 3072
+blocks.16.cross_attn.norm_k.weight 3072
+blocks.16.cross_attn.norm_q.weight 3072
+blocks.16.cross_attn.o.bias 3072
+blocks.16.cross_attn.o.weight 3072 3072
+blocks.16.cross_attn.q.bias 3072
+blocks.16.cross_attn.q.weight 3072 3072
+blocks.16.cross_attn.v.bias 3072
+blocks.16.cross_attn.v.weight 3072 3072
+blocks.16.ffn.0.bias 14336
+blocks.16.ffn.0.weight 3072 14336
+blocks.16.ffn.2.bias 3072
+blocks.16.ffn.2.weight 14336 3072
+blocks.16.modulation 3072 6
+blocks.16.norm3.bias 3072
+blocks.16.norm3.weight 3072
+blocks.16.self_attn.k.bias 3072
+blocks.16.self_attn.k.weight 3072 3072
+blocks.16.self_attn.norm_k.weight 3072
+blocks.16.self_attn.norm_q.weight 3072
+blocks.16.self_attn.o.bias 3072
+blocks.16.self_attn.o.weight 3072 3072
+blocks.16.self_attn.q.bias 3072
+blocks.16.self_attn.q.weight 3072 3072
+blocks.16.self_attn.v.bias 3072
+blocks.16.self_attn.v.weight 3072 3072
+blocks.17.cross_attn.k.bias 3072
+blocks.17.cross_attn.k.weight 3072 3072
+blocks.17.cross_attn.norm_k.weight 3072
+blocks.17.cross_attn.norm_q.weight 3072
+blocks.17.cross_attn.o.bias 3072
+blocks.17.cross_attn.o.weight 3072 3072
+blocks.17.cross_attn.q.bias 3072
+blocks.17.cross_attn.q.weight 3072 3072
+blocks.17.cross_attn.v.bias 3072
+blocks.17.cross_attn.v.weight 3072 3072
+blocks.17.ffn.0.bias 14336
+blocks.17.ffn.0.weight 3072 14336
+blocks.17.ffn.2.bias 3072
+blocks.17.ffn.2.weight 14336 3072
+blocks.17.modulation 3072 6
+blocks.17.norm3.bias 3072
+blocks.17.norm3.weight 3072
+blocks.17.self_attn.k.bias 3072
+blocks.17.self_attn.k.weight 3072 3072
+blocks.17.self_attn.norm_k.weight 3072
+blocks.17.self_attn.norm_q.weight 3072
+blocks.17.self_attn.o.bias 3072
+blocks.17.self_attn.o.weight 3072 3072
+blocks.17.self_attn.q.bias 3072
+blocks.17.self_attn.q.weight 3072 3072
+blocks.17.self_attn.v.bias 3072
+blocks.17.self_attn.v.weight 3072 3072
+blocks.18.cross_attn.k.bias 3072
+blocks.18.cross_attn.k.weight 3072 3072
+blocks.18.cross_attn.norm_k.weight 3072
+blocks.18.cross_attn.norm_q.weight 3072
+blocks.18.cross_attn.o.bias 3072
+blocks.18.cross_attn.o.weight 3072 3072
+blocks.18.cross_attn.q.bias 3072
+blocks.18.cross_attn.q.weight 3072 3072
+blocks.18.cross_attn.v.bias 3072
+blocks.18.cross_attn.v.weight 3072 3072
+blocks.18.ffn.0.bias 14336
+blocks.18.ffn.0.weight 3072 14336
+blocks.18.ffn.2.bias 3072
+blocks.18.ffn.2.weight 14336 3072
+blocks.18.modulation 3072 6
+blocks.18.norm3.bias 3072
+blocks.18.norm3.weight 3072
+blocks.18.self_attn.k.bias 3072
+blocks.18.self_attn.k.weight 3072 3072
+blocks.18.self_attn.norm_k.weight 3072
+blocks.18.self_attn.norm_q.weight 3072
+blocks.18.self_attn.o.bias 3072
+blocks.18.self_attn.o.weight 3072 3072
+blocks.18.self_attn.q.bias 3072
+blocks.18.self_attn.q.weight 3072 3072
+blocks.18.self_attn.v.bias 3072
+blocks.18.self_attn.v.weight 3072 3072
+blocks.19.cross_attn.k.bias 3072
+blocks.19.cross_attn.k.weight 3072 3072
+blocks.19.cross_attn.norm_k.weight 3072
+blocks.19.cross_attn.norm_q.weight 3072
+blocks.19.cross_attn.o.bias 3072
+blocks.19.cross_attn.o.weight 3072 3072
+blocks.19.cross_attn.q.bias 3072
+blocks.19.cross_attn.q.weight 3072 3072
+blocks.19.cross_attn.v.bias 3072
+blocks.19.cross_attn.v.weight 3072 3072
+blocks.19.ffn.0.bias 14336
+blocks.19.ffn.0.weight 3072 14336
+blocks.19.ffn.2.bias 3072
+blocks.19.ffn.2.weight 14336 3072
+blocks.19.modulation 3072 6
+blocks.19.norm3.bias 3072
+blocks.19.norm3.weight 3072
+blocks.19.self_attn.k.bias 3072
+blocks.19.self_attn.k.weight 3072 3072
+blocks.19.self_attn.norm_k.weight 3072
+blocks.19.self_attn.norm_q.weight 3072
+blocks.19.self_attn.o.bias 3072
+blocks.19.self_attn.o.weight 3072 3072
+blocks.19.self_attn.q.bias 3072
+blocks.19.self_attn.q.weight 3072 3072
+blocks.19.self_attn.v.bias 3072
+blocks.19.self_attn.v.weight 3072 3072
+blocks.2.cross_attn.k.bias 3072
+blocks.2.cross_attn.k.weight 3072 3072
+blocks.2.cross_attn.norm_k.weight 3072
+blocks.2.cross_attn.norm_q.weight 3072
+blocks.2.cross_attn.o.bias 3072
+blocks.2.cross_attn.o.weight 3072 3072
+blocks.2.cross_attn.q.bias 3072
+blocks.2.cross_attn.q.weight 3072 3072
+blocks.2.cross_attn.v.bias 3072
+blocks.2.cross_attn.v.weight 3072 3072
+blocks.2.ffn.0.bias 14336
+blocks.2.ffn.0.weight 3072 14336
+blocks.2.ffn.2.bias 3072
+blocks.2.ffn.2.weight 14336 3072
+blocks.2.modulation 3072 6
+blocks.2.norm3.bias 3072
+blocks.2.norm3.weight 3072
+blocks.2.self_attn.k.bias 3072
+blocks.2.self_attn.k.weight 3072 3072
+blocks.2.self_attn.norm_k.weight 3072
+blocks.2.self_attn.norm_q.weight 3072
+blocks.2.self_attn.o.bias 3072
+blocks.2.self_attn.o.weight 3072 3072
+blocks.2.self_attn.q.bias 3072
+blocks.2.self_attn.q.weight 3072 3072
+blocks.2.self_attn.v.bias 3072
+blocks.2.self_attn.v.weight 3072 3072
+blocks.20.cross_attn.k.bias 3072
+blocks.20.cross_attn.k.weight 3072 3072
+blocks.20.cross_attn.norm_k.weight 3072
+blocks.20.cross_attn.norm_q.weight 3072
+blocks.20.cross_attn.o.bias 3072
+blocks.20.cross_attn.o.weight 3072 3072
+blocks.20.cross_attn.q.bias 3072
+blocks.20.cross_attn.q.weight 3072 3072
+blocks.20.cross_attn.v.bias 3072
+blocks.20.cross_attn.v.weight 3072 3072
+blocks.20.ffn.0.bias 14336
+blocks.20.ffn.0.weight 3072 14336
+blocks.20.ffn.2.bias 3072
+blocks.20.ffn.2.weight 14336 3072
+blocks.20.modulation 3072 6
+blocks.20.norm3.bias 3072
+blocks.20.norm3.weight 3072
+blocks.20.self_attn.k.bias 3072
+blocks.20.self_attn.k.weight 3072 3072
+blocks.20.self_attn.norm_k.weight 3072
+blocks.20.self_attn.norm_q.weight 3072
+blocks.20.self_attn.o.bias 3072
+blocks.20.self_attn.o.weight 3072 3072
+blocks.20.self_attn.q.bias 3072
+blocks.20.self_attn.q.weight 3072 3072
+blocks.20.self_attn.v.bias 3072
+blocks.20.self_attn.v.weight 3072 3072
+blocks.21.cross_attn.k.bias 3072
+blocks.21.cross_attn.k.weight 3072 3072
+blocks.21.cross_attn.norm_k.weight 3072
+blocks.21.cross_attn.norm_q.weight 3072
+blocks.21.cross_attn.o.bias 3072
+blocks.21.cross_attn.o.weight 3072 3072
+blocks.21.cross_attn.q.bias 3072
+blocks.21.cross_attn.q.weight 3072 3072
+blocks.21.cross_attn.v.bias 3072
+blocks.21.cross_attn.v.weight 3072 3072
+blocks.21.ffn.0.bias 14336
+blocks.21.ffn.0.weight 3072 14336
+blocks.21.ffn.2.bias 3072
+blocks.21.ffn.2.weight 14336 3072
+blocks.21.modulation 3072 6
+blocks.21.norm3.bias 3072
+blocks.21.norm3.weight 3072
+blocks.21.self_attn.k.bias 3072
+blocks.21.self_attn.k.weight 3072 3072
+blocks.21.self_attn.norm_k.weight 3072
+blocks.21.self_attn.norm_q.weight 3072
+blocks.21.self_attn.o.bias 3072
+blocks.21.self_attn.o.weight 3072 3072
+blocks.21.self_attn.q.bias 3072
+blocks.21.self_attn.q.weight 3072 3072
+blocks.21.self_attn.v.bias 3072
+blocks.21.self_attn.v.weight 3072 3072
+blocks.22.cross_attn.k.bias 3072
+blocks.22.cross_attn.k.weight 3072 3072
+blocks.22.cross_attn.norm_k.weight 3072
+blocks.22.cross_attn.norm_q.weight 3072
+blocks.22.cross_attn.o.bias 3072
+blocks.22.cross_attn.o.weight 3072 3072
+blocks.22.cross_attn.q.bias 3072
+blocks.22.cross_attn.q.weight 3072 3072
+blocks.22.cross_attn.v.bias 3072
+blocks.22.cross_attn.v.weight 3072 3072
+blocks.22.ffn.0.bias 14336
+blocks.22.ffn.0.weight 3072 14336
+blocks.22.ffn.2.bias 3072
+blocks.22.ffn.2.weight 14336 3072
+blocks.22.modulation 3072 6
+blocks.22.norm3.bias 3072
+blocks.22.norm3.weight 3072
+blocks.22.self_attn.k.bias 3072
+blocks.22.self_attn.k.weight 3072 3072
+blocks.22.self_attn.norm_k.weight 3072
+blocks.22.self_attn.norm_q.weight 3072
+blocks.22.self_attn.o.bias 3072
+blocks.22.self_attn.o.weight 3072 3072
+blocks.22.self_attn.q.bias 3072
+blocks.22.self_attn.q.weight 3072 3072
+blocks.22.self_attn.v.bias 3072
+blocks.22.self_attn.v.weight 3072 3072
+blocks.23.cross_attn.k.bias 3072
+blocks.23.cross_attn.k.weight 3072 3072
+blocks.23.cross_attn.norm_k.weight 3072
+blocks.23.cross_attn.norm_q.weight 3072
+blocks.23.cross_attn.o.bias 3072
+blocks.23.cross_attn.o.weight 3072 3072
+blocks.23.cross_attn.q.bias 3072
+blocks.23.cross_attn.q.weight 3072 3072
+blocks.23.cross_attn.v.bias 3072
+blocks.23.cross_attn.v.weight 3072 3072
+blocks.23.ffn.0.bias 14336
+blocks.23.ffn.0.weight 3072 14336
+blocks.23.ffn.2.bias 3072
+blocks.23.ffn.2.weight 14336 3072
+blocks.23.modulation 3072 6
+blocks.23.norm3.bias 3072
+blocks.23.norm3.weight 3072
+blocks.23.self_attn.k.bias 3072
+blocks.23.self_attn.k.weight 3072 3072
+blocks.23.self_attn.norm_k.weight 3072
+blocks.23.self_attn.norm_q.weight 3072
+blocks.23.self_attn.o.bias 3072
+blocks.23.self_attn.o.weight 3072 3072
+blocks.23.self_attn.q.bias 3072
+blocks.23.self_attn.q.weight 3072 3072
+blocks.23.self_attn.v.bias 3072
+blocks.23.self_attn.v.weight 3072 3072
+blocks.24.cross_attn.k.bias 3072
+blocks.24.cross_attn.k.weight 3072 3072
+blocks.24.cross_attn.norm_k.weight 3072
+blocks.24.cross_attn.norm_q.weight 3072
+blocks.24.cross_attn.o.bias 3072
+blocks.24.cross_attn.o.weight 3072 3072
+blocks.24.cross_attn.q.bias 3072
+blocks.24.cross_attn.q.weight 3072 3072
+blocks.24.cross_attn.v.bias 3072
+blocks.24.cross_attn.v.weight 3072 3072
+blocks.24.ffn.0.bias 14336
+blocks.24.ffn.0.weight 3072 14336
+blocks.24.ffn.2.bias 3072
+blocks.24.ffn.2.weight 14336 3072
+blocks.24.modulation 3072 6
+blocks.24.norm3.bias 3072
+blocks.24.norm3.weight 3072
+blocks.24.self_attn.k.bias 3072
+blocks.24.self_attn.k.weight 3072 3072
+blocks.24.self_attn.norm_k.weight 3072
+blocks.24.self_attn.norm_q.weight 3072
+blocks.24.self_attn.o.bias 3072
+blocks.24.self_attn.o.weight 3072 3072
+blocks.24.self_attn.q.bias 3072
+blocks.24.self_attn.q.weight 3072 3072
+blocks.24.self_attn.v.bias 3072
+blocks.24.self_attn.v.weight 3072 3072
+blocks.25.cross_attn.k.bias 3072
+blocks.25.cross_attn.k.weight 3072 3072
+blocks.25.cross_attn.norm_k.weight 3072
+blocks.25.cross_attn.norm_q.weight 3072
+blocks.25.cross_attn.o.bias 3072
+blocks.25.cross_attn.o.weight 3072 3072
+blocks.25.cross_attn.q.bias 3072
+blocks.25.cross_attn.q.weight 3072 3072
+blocks.25.cross_attn.v.bias 3072
+blocks.25.cross_attn.v.weight 3072 3072
+blocks.25.ffn.0.bias 14336
+blocks.25.ffn.0.weight 3072 14336
+blocks.25.ffn.2.bias 3072
+blocks.25.ffn.2.weight 14336 3072
+blocks.25.modulation 3072 6
+blocks.25.norm3.bias 3072
+blocks.25.norm3.weight 3072
+blocks.25.self_attn.k.bias 3072
+blocks.25.self_attn.k.weight 3072 3072
+blocks.25.self_attn.norm_k.weight 3072
+blocks.25.self_attn.norm_q.weight 3072
+blocks.25.self_attn.o.bias 3072
+blocks.25.self_attn.o.weight 3072 3072
+blocks.25.self_attn.q.bias 3072
+blocks.25.self_attn.q.weight 3072 3072
+blocks.25.self_attn.v.bias 3072
+blocks.25.self_attn.v.weight 3072 3072
+blocks.26.cross_attn.k.bias 3072
+blocks.26.cross_attn.k.weight 3072 3072
+blocks.26.cross_attn.norm_k.weight 3072
+blocks.26.cross_attn.norm_q.weight 3072
+blocks.26.cross_attn.o.bias 3072
+blocks.26.cross_attn.o.weight 3072 3072
+blocks.26.cross_attn.q.bias 3072
+blocks.26.cross_attn.q.weight 3072 3072
+blocks.26.cross_attn.v.bias 3072
+blocks.26.cross_attn.v.weight 3072 3072
+blocks.26.ffn.0.bias 14336
+blocks.26.ffn.0.weight 3072 14336
+blocks.26.ffn.2.bias 3072
+blocks.26.ffn.2.weight 14336 3072
+blocks.26.modulation 3072 6
+blocks.26.norm3.bias 3072
+blocks.26.norm3.weight 3072
+blocks.26.self_attn.k.bias 3072
+blocks.26.self_attn.k.weight 3072 3072
+blocks.26.self_attn.norm_k.weight 3072
+blocks.26.self_attn.norm_q.weight 3072
+blocks.26.self_attn.o.bias 3072
+blocks.26.self_attn.o.weight 3072 3072
+blocks.26.self_attn.q.bias 3072
+blocks.26.self_attn.q.weight 3072 3072
+blocks.26.self_attn.v.bias 3072
+blocks.26.self_attn.v.weight 3072 3072
+blocks.27.cross_attn.k.bias 3072
+blocks.27.cross_attn.k.weight 3072 3072
+blocks.27.cross_attn.norm_k.weight 3072
+blocks.27.cross_attn.norm_q.weight 3072
+blocks.27.cross_attn.o.bias 3072
+blocks.27.cross_attn.o.weight 3072 3072
+blocks.27.cross_attn.q.bias 3072
+blocks.27.cross_attn.q.weight 3072 3072
+blocks.27.cross_attn.v.bias 3072
+blocks.27.cross_attn.v.weight 3072 3072
+blocks.27.ffn.0.bias 14336
+blocks.27.ffn.0.weight 3072 14336
+blocks.27.ffn.2.bias 3072
+blocks.27.ffn.2.weight 14336 3072
+blocks.27.modulation 3072 6
+blocks.27.norm3.bias 3072
+blocks.27.norm3.weight 3072
+blocks.27.self_attn.k.bias 3072
+blocks.27.self_attn.k.weight 3072 3072
+blocks.27.self_attn.norm_k.weight 3072
+blocks.27.self_attn.norm_q.weight 3072
+blocks.27.self_attn.o.bias 3072
+blocks.27.self_attn.o.weight 3072 3072
+blocks.27.self_attn.q.bias 3072
+blocks.27.self_attn.q.weight 3072 3072
+blocks.27.self_attn.v.bias 3072
+blocks.27.self_attn.v.weight 3072 3072
+blocks.28.cross_attn.k.bias 3072
+blocks.28.cross_attn.k.weight 3072 3072
+blocks.28.cross_attn.norm_k.weight 3072
+blocks.28.cross_attn.norm_q.weight 3072
+blocks.28.cross_attn.o.bias 3072
+blocks.28.cross_attn.o.weight 3072 3072
+blocks.28.cross_attn.q.bias 3072
+blocks.28.cross_attn.q.weight 3072 3072
+blocks.28.cross_attn.v.bias 3072
+blocks.28.cross_attn.v.weight 3072 3072
+blocks.28.ffn.0.bias 14336
+blocks.28.ffn.0.weight 3072 14336
+blocks.28.ffn.2.bias 3072
+blocks.28.ffn.2.weight 14336 3072
+blocks.28.modulation 3072 6
+blocks.28.norm3.bias 3072
+blocks.28.norm3.weight 3072
+blocks.28.self_attn.k.bias 3072
+blocks.28.self_attn.k.weight 3072 3072
+blocks.28.self_attn.norm_k.weight 3072
+blocks.28.self_attn.norm_q.weight 3072
+blocks.28.self_attn.o.bias 3072
+blocks.28.self_attn.o.weight 3072 3072
+blocks.28.self_attn.q.bias 3072
+blocks.28.self_attn.q.weight 3072 3072
+blocks.28.self_attn.v.bias 3072
+blocks.28.self_attn.v.weight 3072 3072
+blocks.29.cross_attn.k.bias 3072
+blocks.29.cross_attn.k.weight 3072 3072
+blocks.29.cross_attn.norm_k.weight 3072
+blocks.29.cross_attn.norm_q.weight 3072
+blocks.29.cross_attn.o.bias 3072
+blocks.29.cross_attn.o.weight 3072 3072
+blocks.29.cross_attn.q.bias 3072
+blocks.29.cross_attn.q.weight 3072 3072
+blocks.29.cross_attn.v.bias 3072
+blocks.29.cross_attn.v.weight 3072 3072
+blocks.29.ffn.0.bias 14336
+blocks.29.ffn.0.weight 3072 14336
+blocks.29.ffn.2.bias 3072
+blocks.29.ffn.2.weight 14336 3072
+blocks.29.modulation 3072 6
+blocks.29.norm3.bias 3072
+blocks.29.norm3.weight 3072
+blocks.29.self_attn.k.bias 3072
+blocks.29.self_attn.k.weight 3072 3072
+blocks.29.self_attn.norm_k.weight 3072
+blocks.29.self_attn.norm_q.weight 3072
+blocks.29.self_attn.o.bias 3072
+blocks.29.self_attn.o.weight 3072 3072
+blocks.29.self_attn.q.bias 3072
+blocks.29.self_attn.q.weight 3072 3072
+blocks.29.self_attn.v.bias 3072
+blocks.29.self_attn.v.weight 3072 3072
+blocks.3.cross_attn.k.bias 3072
+blocks.3.cross_attn.k.weight 3072 3072
+blocks.3.cross_attn.norm_k.weight 3072
+blocks.3.cross_attn.norm_q.weight 3072
+blocks.3.cross_attn.o.bias 3072
+blocks.3.cross_attn.o.weight 3072 3072
+blocks.3.cross_attn.q.bias 3072
+blocks.3.cross_attn.q.weight 3072 3072
+blocks.3.cross_attn.v.bias 3072
+blocks.3.cross_attn.v.weight 3072 3072
+blocks.3.ffn.0.bias 14336
+blocks.3.ffn.0.weight 3072 14336
+blocks.3.ffn.2.bias 3072
+blocks.3.ffn.2.weight 14336 3072
+blocks.3.modulation 3072 6
+blocks.3.norm3.bias 3072
+blocks.3.norm3.weight 3072
+blocks.3.self_attn.k.bias 3072
+blocks.3.self_attn.k.weight 3072 3072
+blocks.3.self_attn.norm_k.weight 3072
+blocks.3.self_attn.norm_q.weight 3072
+blocks.3.self_attn.o.bias 3072
+blocks.3.self_attn.o.weight 3072 3072
+blocks.3.self_attn.q.bias 3072
+blocks.3.self_attn.q.weight 3072 3072
+blocks.3.self_attn.v.bias 3072
+blocks.3.self_attn.v.weight 3072 3072
+blocks.4.cross_attn.k.bias 3072
+blocks.4.cross_attn.k.weight 3072 3072
+blocks.4.cross_attn.norm_k.weight 3072
+blocks.4.cross_attn.norm_q.weight 3072
+blocks.4.cross_attn.o.bias 3072
+blocks.4.cross_attn.o.weight 3072 3072
+blocks.4.cross_attn.q.bias 3072
+blocks.4.cross_attn.q.weight 3072 3072
+blocks.4.cross_attn.v.bias 3072
+blocks.4.cross_attn.v.weight 3072 3072
+blocks.4.ffn.0.bias 14336
+blocks.4.ffn.0.weight 3072 14336
+blocks.4.ffn.2.bias 3072
+blocks.4.ffn.2.weight 14336 3072
+blocks.4.modulation 3072 6
+blocks.4.norm3.bias 3072
+blocks.4.norm3.weight 3072
+blocks.4.self_attn.k.bias 3072
+blocks.4.self_attn.k.weight 3072 3072
+blocks.4.self_attn.norm_k.weight 3072
+blocks.4.self_attn.norm_q.weight 3072
+blocks.4.self_attn.o.bias 3072
+blocks.4.self_attn.o.weight 3072 3072
+blocks.4.self_attn.q.bias 3072
+blocks.4.self_attn.q.weight 3072 3072
+blocks.4.self_attn.v.bias 3072
+blocks.4.self_attn.v.weight 3072 3072
+blocks.5.cross_attn.k.bias 3072
+blocks.5.cross_attn.k.weight 3072 3072
+blocks.5.cross_attn.norm_k.weight 3072
+blocks.5.cross_attn.norm_q.weight 3072
+blocks.5.cross_attn.o.bias 3072
+blocks.5.cross_attn.o.weight 3072 3072
+blocks.5.cross_attn.q.bias 3072
+blocks.5.cross_attn.q.weight 3072 3072
+blocks.5.cross_attn.v.bias 3072
+blocks.5.cross_attn.v.weight 3072 3072
+blocks.5.ffn.0.bias 14336
+blocks.5.ffn.0.weight 3072 14336
+blocks.5.ffn.2.bias 3072
+blocks.5.ffn.2.weight 14336 3072
+blocks.5.modulation 3072 6
+blocks.5.norm3.bias 3072
+blocks.5.norm3.weight 3072
+blocks.5.self_attn.k.bias 3072
+blocks.5.self_attn.k.weight 3072 3072
+blocks.5.self_attn.norm_k.weight 3072
+blocks.5.self_attn.norm_q.weight 3072
+blocks.5.self_attn.o.bias 3072
+blocks.5.self_attn.o.weight 3072 3072
+blocks.5.self_attn.q.bias 3072
+blocks.5.self_attn.q.weight 3072 3072
+blocks.5.self_attn.v.bias 3072
+blocks.5.self_attn.v.weight 3072 3072
+blocks.6.cross_attn.k.bias 3072
+blocks.6.cross_attn.k.weight 3072 3072
+blocks.6.cross_attn.norm_k.weight 3072
+blocks.6.cross_attn.norm_q.weight 3072
+blocks.6.cross_attn.o.bias 3072
+blocks.6.cross_attn.o.weight 3072 3072
+blocks.6.cross_attn.q.bias 3072
+blocks.6.cross_attn.q.weight 3072 3072
+blocks.6.cross_attn.v.bias 3072
+blocks.6.cross_attn.v.weight 3072 3072
+blocks.6.ffn.0.bias 14336
+blocks.6.ffn.0.weight 3072 14336
+blocks.6.ffn.2.bias 3072
+blocks.6.ffn.2.weight 14336 3072
+blocks.6.modulation 3072 6
+blocks.6.norm3.bias 3072
+blocks.6.norm3.weight 3072
+blocks.6.self_attn.k.bias 3072
+blocks.6.self_attn.k.weight 3072 3072
+blocks.6.self_attn.norm_k.weight 3072
+blocks.6.self_attn.norm_q.weight 3072
+blocks.6.self_attn.o.bias 3072
+blocks.6.self_attn.o.weight 3072 3072
+blocks.6.self_attn.q.bias 3072
+blocks.6.self_attn.q.weight 3072 3072
+blocks.6.self_attn.v.bias 3072
+blocks.6.self_attn.v.weight 3072 3072
+blocks.7.cross_attn.k.bias 3072
+blocks.7.cross_attn.k.weight 3072 3072
+blocks.7.cross_attn.norm_k.weight 3072
+blocks.7.cross_attn.norm_q.weight 3072
+blocks.7.cross_attn.o.bias 3072
+blocks.7.cross_attn.o.weight 3072 3072
+blocks.7.cross_attn.q.bias 3072
+blocks.7.cross_attn.q.weight 3072 3072
+blocks.7.cross_attn.v.bias 3072
+blocks.7.cross_attn.v.weight 3072 3072
+blocks.7.ffn.0.bias 14336
+blocks.7.ffn.0.weight 3072 14336
+blocks.7.ffn.2.bias 3072
+blocks.7.ffn.2.weight 14336 3072
+blocks.7.modulation 3072 6
+blocks.7.norm3.bias 3072
+blocks.7.norm3.weight 3072
+blocks.7.self_attn.k.bias 3072
+blocks.7.self_attn.k.weight 3072 3072
+blocks.7.self_attn.norm_k.weight 3072
+blocks.7.self_attn.norm_q.weight 3072
+blocks.7.self_attn.o.bias 3072
+blocks.7.self_attn.o.weight 3072 3072
+blocks.7.self_attn.q.bias 3072
+blocks.7.self_attn.q.weight 3072 3072
+blocks.7.self_attn.v.bias 3072
+blocks.7.self_attn.v.weight 3072 3072
+blocks.8.cross_attn.k.bias 3072
+blocks.8.cross_attn.k.weight 3072 3072
+blocks.8.cross_attn.norm_k.weight 3072
+blocks.8.cross_attn.norm_q.weight 3072
+blocks.8.cross_attn.o.bias 3072
+blocks.8.cross_attn.o.weight 3072 3072
+blocks.8.cross_attn.q.bias 3072
+blocks.8.cross_attn.q.weight 3072 3072
+blocks.8.cross_attn.v.bias 3072
+blocks.8.cross_attn.v.weight 3072 3072
+blocks.8.ffn.0.bias 14336
+blocks.8.ffn.0.weight 3072 14336
+blocks.8.ffn.2.bias 3072
+blocks.8.ffn.2.weight 14336 3072
+blocks.8.modulation 3072 6
+blocks.8.norm3.bias 3072
+blocks.8.norm3.weight 3072
+blocks.8.self_attn.k.bias 3072
+blocks.8.self_attn.k.weight 3072 3072
+blocks.8.self_attn.norm_k.weight 3072
+blocks.8.self_attn.norm_q.weight 3072
+blocks.8.self_attn.o.bias 3072
+blocks.8.self_attn.o.weight 3072 3072
+blocks.8.self_attn.q.bias 3072
+blocks.8.self_attn.q.weight 3072 3072
+blocks.8.self_attn.v.bias 3072
+blocks.8.self_attn.v.weight 3072 3072
+blocks.9.cross_attn.k.bias 3072
+blocks.9.cross_attn.k.weight 3072 3072
+blocks.9.cross_attn.norm_k.weight 3072
+blocks.9.cross_attn.norm_q.weight 3072
+blocks.9.cross_attn.o.bias 3072
+blocks.9.cross_attn.o.weight 3072 3072
+blocks.9.cross_attn.q.bias 3072
+blocks.9.cross_attn.q.weight 3072 3072
+blocks.9.cross_attn.v.bias 3072
+blocks.9.cross_attn.v.weight 3072 3072
+blocks.9.ffn.0.bias 14336
+blocks.9.ffn.0.weight 3072 14336
+blocks.9.ffn.2.bias 3072
+blocks.9.ffn.2.weight 14336 3072
+blocks.9.modulation 3072 6
+blocks.9.norm3.bias 3072
+blocks.9.norm3.weight 3072
+blocks.9.self_attn.k.bias 3072
+blocks.9.self_attn.k.weight 3072 3072
+blocks.9.self_attn.norm_k.weight 3072
+blocks.9.self_attn.norm_q.weight 3072
+blocks.9.self_attn.o.bias 3072
+blocks.9.self_attn.o.weight 3072 3072
+blocks.9.self_attn.q.bias 3072
+blocks.9.self_attn.q.weight 3072 3072
+blocks.9.self_attn.v.bias 3072
+blocks.9.self_attn.v.weight 3072 3072
+head.head.bias 192
+head.head.weight 3072 192
+head.modulation 3072 2
+patch_embedding.bias 3072
+patch_embedding.weight 2 2 1 147456
+text_embedding.0.bias 3072
+text_embedding.0.weight 4096 3072
+text_embedding.2.bias 3072
+text_embedding.2.weight 3072 3072
+time_embedding.0.bias 3072
+time_embedding.0.weight 256 3072
+time_embedding.2.bias 3072
+time_embedding.2.weight 3072 3072
+time_projection.1.bias 18432
+time_projection.1.weight 3072 18432

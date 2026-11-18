@@ -1,0 +1,131 @@
+[
+  {
+    "_id": "691a0e0919c6c652977aa6cb",
+    "id": "hum-ma/Wan2.2-TI2V-5B-Turbo-GGUF",
+    "gated": false,
+    "lastModified": "2025-12-19T10:07:39.000Z",
+    "likes": 67,
+    "downloads": 89721,
+    "tags": [
+      "gguf",
+      "ti2v",
+      "image-to-video",
+      "base_model:quanhaol/Wan2.2-TI2V-5B-Turbo",
+      "base_model:quantized:quanhaol/Wan2.2-TI2V-5B-Turbo",
+      "license:apache-2.0",
+      "region:us"
+    ],
+    "pipeline_tag": "image-to-video"
+  },
+  {
+    "_id": "68aba2c1bfb6854b4fb8bb0f",
+    "id": "QuantStack/Wan2.2-Fun-5B-Control-GGUF",
+    "gated": false,
+    "lastModified": "2025-08-25T01:21:06.000Z",
+    "likes": 6,
+    "downloads": 14008,
+    "tags": [
+      "gguf",
+      "image-to-video",
+      "en",
+      "zh",
+      "base_model:alibaba-pai/Wan2.2-Fun-5B-Control",
+      "base_model:quantized:alibaba-pai/Wan2.2-Fun-5B-Control",
+      "license:apache-2.0",
+      "region:us"
+    ],
+    "pipeline_tag": "image-to-video"
+  },
+  {
+    "_id": "68abcd5a0e1f746cac1704ca",
+    "id": "QuantStack/Wan2.2-Fun-5B-InP-GGUF",
+    "gated": false,
+    "lastModified": "2025-08-25T03:01:20.000Z",
+    "likes": 5,
+    "downloads": 7316,
+    "tags": [
+      "gguf",
+      "image-to-video",
+      "en",
+      "zh",
+      "base_model:alibaba-pai/Wan2.2-Fun-5B-InP",
+      "base_model:quantized:alibaba-pai/Wan2.2-Fun-5B-InP",
+      "license:apache-2.0",
+      "region:us"
+    ],
+    "pipeline_tag": "image-to-video"
+  },
+  {
+    "_id": "69ef4b1c90a13697778152db",
+    "id": "Kiijoku/Wan2.2-TI2V-5B-Turbo-GGUF",
+    "gated": false,
+    "lastModified": "2026-04-27T11:40:12.000Z",
+    "likes": 1,
+    "downloads": 3444,
+    "tags": [
+      "gguf",
+      "ti2v",
+      "image-to-video",
+      "base_model:quanhaol/Wan2.2-TI2V-5B-Turbo",
+      "base_model:quantized:quanhaol/Wan2.2-TI2V-5B-Turbo",
+      "license:apache-2.0",
+      "region:us"
+    ],
+    "pipeline_tag": "image-to-video"
+  },
+  {
+    "_id": "68abb9ba5372ae5a8e146a8c",
+    "id": "QuantStack/Wan2.2-Fun-5B-Control-Camera-GGUF",
+    "gated": false,
+    "lastModified": "2025-08-25T02:38:20.000Z",
+    "likes": 5,
+    "downloads": 1499,
+    "tags": [
+      "gguf",
+      "image-to-video",
+      "en",
+      "zh",
+      "base_model:alibaba-pai/Wan2.2-Fun-5B-Control-Camera",
+      "base_model:quantized:alibaba-pai/Wan2.2-Fun-5B-Control-Camera",
+      "license:apache-2.0",
+      "region:us"
+    ],
+    "pipeline_tag": "image-to-video"
+  },
+  {
+    "_id": "6ac35b3b6bffb219ff021a26",
+    "id": "liaqateagle/Wan2.2-TI2V-5B-Turbo-GGUF",
+    "gated": false,
+    "lastModified": "2026-10-05T08:09:34.000Z",
+    "likes": 0,
+    "downloads": 1160,
+    "tags": [
+      "gguf",
+      "ti2v",
+      "image-to-video",
+      "base_model:quanhaol/Wan2.2-TI2V-5B-Turbo",
+      "base_model:quantized:quanhaol/Wan2.2-TI2V-5B-Turbo",
+      "license:apache-2.0",
+      "region:us"
+    ],
+    "pipeline_tag": "image-to-video"
+  },
+  {
+    "_id": "6afc79d3eed34920b5d714c0",
+    "id": "TalasCloud/Wan2.2-TI2V-5B-Turbo-GSQ-RCO-GGUF",
+    "gated": false,
+    "lastModified": "2026-11-17T16:43:44.000Z",
+    "likes": 0,
+    "downloads": 0,
+    "tags": [
+      "gguf",
+      "koboldcpp",
+      "image-to-video",
+      "base_model:quanhaol/Wan2.2-TI2V-5B-Turbo",
+      "base_model:quantized:quanhaol/Wan2.2-TI2V-5B-Turbo",
+      "license:cc-by-nc-sa-4.0",
+      "region:us"
+    ],
+    "pipeline_tag": "image-to-video"
+  }
+]

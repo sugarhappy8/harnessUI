@@ -289,6 +289,17 @@ pub fn no_local_engine() -> AppError {
     )
 }
 
+/// Models → Import: the file is a picture or video model (its architecture or its tensor
+/// table says so), which Studio adds, never the chat list.
+pub fn picture_model() -> AppError {
+    AppError::new(
+        "picture_model",
+        "This is a picture or video model.",
+        "Add it in Studio → Get local models.",
+        String::new(),
+    )
+}
+
 /// The settings `spec::validate` refused (or an extra setting no routed company takes), each
 /// in a sentence that names the field by its label.
 pub fn invalid_settings(problems: &[Invalid], model: &MediaModel) -> AppError {
@@ -1165,6 +1176,7 @@ mod tests {
             wrong_kind(MediaKind::Video),
             gallery_full(),
             no_local_engine(),
+            picture_model(),
             invalid_settings(&[Invalid::EmptyPrompt], &model(Vec::new())),
             org_verification(),
             disk_full(),

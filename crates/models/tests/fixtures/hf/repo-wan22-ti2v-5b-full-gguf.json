@@ -1,0 +1,194 @@
+{
+  "_id": "68877a14410f24a8bd3c790b",
+  "id": "QuantStack/Wan2.2-TI2V-5B-GGUF",
+  "gguf": {
+    "total": 4999787712,
+    "architecture": "wan",
+    "totalFileSize": 1853862240
+  },
+  "sha": "57437632ddd08bdcbd1508c866aa22e126ed51d2",
+  "gated": false,
+  "tags": [
+    "gguf",
+    "ti2v",
+    "text-to-video",
+    "en",
+    "zh",
+    "base_model:Wan-AI/Wan2.2-TI2V-5B",
+    "base_model:quantized:Wan-AI/Wan2.2-TI2V-5B",
+    "license:apache-2.0",
+    "region:us"
+  ],
+  "cardData": {
+    "license": "apache-2.0",
+    "base_model": [
+      "Wan-AI/Wan2.2-TI2V-5B"
+    ],
+    "library_name": "gguf",
+    "pipeline_tag": "text-to-video",
+    "language": [
+      "en",
+      "zh"
+    ],
+    "tags": [
+      "ti2v"
+    ]
+  },
+  "author": "QuantStack",
+  "downloads": 511688,
+  "likes": 259,
+  "lastModified": "2025-07-31T14:34:56.000Z",
+  "pipeline_tag": "text-to-video",
+  "siblings": [
+    {
+      "rfilename": ".gitattributes",
+      "blobId": "69cba5597259565186f54290a51248be59a368d1",
+      "size": 2324
+    },
+    {
+      "rfilename": "README.md",
+      "blobId": "7b42baa0cc2a52d9f74675332cc879e1d8023d78",
+      "size": 626
+    },
+    {
+      "rfilename": "VAE/Wan2.2_VAE.safetensors",
+      "blobId": "9efdb01126eee327b80639b4d9e72d93e9695dac",
+      "size": 1409400960,
+      "lfs": {
+        "sha256": "e40321bd36b9709991dae2530eb4ac303dd168276980d3e9bc4b6e2b75fed156",
+        "size": 1409400960,
+        "pointerSize": 135
+      }
+    },
+    {
+      "rfilename": "Wan2.2-TI2V-5B-Q2_K.gguf",
+      "blobId": "3b077028e580e74ac5aad61189bf0f65d1626511",
+      "size": 1853862240,
+      "lfs": {
+        "sha256": "bebb995b18adf2357366e2a62ecc8a020f759418c0d62987df88bb58aed135e2",
+        "size": 1853862240,
+        "pointerSize": 135
+      }
+    },
+    {
+      "rfilename": "Wan2.2-TI2V-5B-Q3_K_M.gguf",
+      "blobId": "431ab62085ede176500ea6d96f84f8d553037904",
+      "size": 2547790176,
+      "lfs": {
+        "sha256": "93cab80a36db70e9f2152915870d6cb9bdc7fdbf61811153222b5251b92839e6",
+        "size": 2547790176,
+        "pointerSize": 135
+      }
+    },
+    {
+      "rfilename": "Wan2.2-TI2V-5B-Q3_K_S.gguf",
+      "blobId": "74357befbf5ddc939cb81cd0144f60ca2bb4f605",
+      "size": 2294755680,
+      "lfs": {
+        "sha256": "2cc11c77652b47de2c5e47a3631fa09963404772879fdc006903abf6b2460e21",
+        "size": 2294755680,
+        "pointerSize": 135
+      }
+    },
+    {
+      "rfilename": "Wan2.2-TI2V-5B-Q4_0.gguf",
+      "blobId": "2cbf29b09fe9a4f90954ccd4cd03f56bd308f266",
+      "size": 3029086560,
+      "lfs": {
+        "sha256": "fcf40dd62cb5e15556eef5f975700ab0b071aacd1939607689276e88f81ba463",
+        "size": 3029086560,
+        "pointerSize": 135
+      }
+    },
+    {
+      "rfilename": "Wan2.2-TI2V-5B-Q4_1.gguf",
+      "blobId": "3ee2513f4583d61ea981d268f96cdd9a6a9961fd",
+      "size": 3253219680,
+      "lfs": {
+        "sha256": "dac5c36bf2ae51d5423f6daf7067c185ffe72881f4c0615600b323746770df18",
+        "size": 3253219680,
+        "pointerSize": 135
+      }
+    },
+    {
+      "rfilename": "Wan2.2-TI2V-5B-Q4_K_M.gguf",
+      "blobId": "a8bf99c513fbb29fb6618c3242827e2bfca71761",
+      "size": 3433116000,
+      "lfs": {
+        "sha256": "95b19697b7f98e65b0a543640e9ca7b4dfec32e2a6e3731e8e10708be52655e2",
+        "size": 3433116000,
+        "pointerSize": 135
+      }
+    },
+    {
+      "rfilename": "Wan2.2-TI2V-5B-Q4_K_S.gguf",
+      "blobId": "b35522d3ae02c6e7b14f6ad79536745f99ef7c16",
+      "size": 3116380512,
+      "lfs": {
+        "sha256": "ab4195ecd022e57455672771d8ec14c2589efc9ddd6b96c3578fbb326797bdbb",
+        "size": 3116380512,
+        "pointerSize": 135
+      }
+    },
+    {
+      "rfilename": "Wan2.2-TI2V-5B-Q5_0.gguf",
+      "blobId": "33fa4cc9a6131b862aa4ec9adab85cbeef7de85a",
+      "size": 3642503520,
+      "lfs": {
+        "sha256": "ce3fe1bcc8e2298d68101a0278d268c0fb27c8a29e55d4caf58ff0e3d83223b9",
+        "size": 3642503520,
+        "pointerSize": 135
+      }
+    },
+    {
+      "rfilename": "Wan2.2-TI2V-5B-Q5_1.gguf",
+      "blobId": "9c0c8e81946e54d6a2a9446562ef64aa7766b656",
+      "size": 3866636640,
+      "lfs": {
+        "sha256": "5c92f4f14c537d8b5e228ed014e79a22d2e54d190c0f2c0b2a4ab9da148365b5",
+        "size": 3866636640,
+        "pointerSize": 135
+      }
+    },
+    {
+      "rfilename": "Wan2.2-TI2V-5B-Q5_K_M.gguf",
+      "blobId": "76d0d303b248823be14b93f1398a9e61bb66415f",
+      "size": 3810603360,
+      "lfs": {
+        "sha256": "4424633a876511b9be58a41119f7c9d762ea92b3cb74649cdb43cac850e42dba",
+        "size": 3810603360,
+        "pointerSize": 135
+      }
+    },
+    {
+      "rfilename": "Wan2.2-TI2V-5B-Q5_K_S.gguf",
+      "blobId": "26c629f2df7feeaf0dc1751769d5460853256942",
+      "size": 3559928160,
+      "lfs": {
+        "sha256": "47a4960ac7ed08b5cf4408e7e945ce64ce93019e152247f32205631c58085cf6",
+        "size": 3559928160,
+        "pointerSize": 135
+      }
+    },
+    {
+      "rfilename": "Wan2.2-TI2V-5B-Q6_K.gguf",
+      "blobId": "3fba7c777f02945fc3147b5ae0fa49113b35cde8",
+      "size": 4211683680,
+      "lfs": {
+        "sha256": "355f6bee35c4c6cbd0f275112619fe8ac6f7b9b067b885723667b3bde29497c3",
+        "size": 4211683680,
+        "pointerSize": 135
+      }
+    },
+    {
+      "rfilename": "Wan2.2-TI2V-5B-Q8_0.gguf",
+      "blobId": "a14ef142c45c9136b40fec4f2987bac6ba720f02",
+      "size": 5400179040,
+      "lfs": {
+        "sha256": "57bece983817ab2f957546683bb670f13be7d99022d45674840cd999a050ea8f",
+        "size": 5400179040,
+        "pointerSize": 135
+      }
+    }
+  ]
+}

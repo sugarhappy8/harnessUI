@@ -1041,6 +1041,31 @@ pub async fn list_installed_models(
     Ok(out)
 }
 
+/// 0.1.0 Studio: why a file cannot join the chat list as a model: it is a picture or video
+/// model, by its architecture (when it names one) or its own tensor table (most such files
+/// name none).
+pub(crate) fn diffusion_import_refusal(
+    arch: Option<&str>,
+    shapes: &[models::TensorShape],
+) -> Option<AppError> {
+    (arch.is_some_and(models::arch::is_diffusion)
+        || models::gen_search::looks_like_diffusion(shapes))
+    .then(crate::studio::errors::picture_model)
+}
+
+/// [`diffusion_import_refusal`] for the file at `path`. A file that does not read is left
+/// to the import's own check, which says what it is not.
+fn refuse_picture_model(path: &Path) -> AppResult<()> {
+    let arch = models::read_file(path)
+        .ok()
+        .and_then(|h| h.architecture().map(str::to_string));
+    let shapes = models::read_tensor_shapes(path).unwrap_or_default();
+    match diffusion_import_refusal(arch.as_deref(), &shapes) {
+        Some(e) => Err(e),
+        None => Ok(()),
+    }
+}
+
 #[tauri::command]
 pub async fn import_model(
     app: AppHandle,
@@ -1064,6 +1089,7 @@ pub async fn import_model(
             e.to_string(),
         )
     })?;
+    refuse_picture_model(&p)?;
     register_installed(
         &state,
         &p,
@@ -1789,6 +1815,64 @@ fn check_compare_items(items: &[crate::dto::CompareItem]) -> AppResult<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn table(fixture: &str) -> Vec<models::TensorShape> {
+        models::gguf::testing::shapes(fixture)
+    }
+
+    /// 0.1.0 Studio: a picture or video model never joins the chat list, whether its file
+    /// names an architecture or (leejet's files) has no metadata at all.
+    #[test]
+    fn importing_a_picture_model_says_add_it_in_studio() {
+        let e = diffusion_import_refusal(Some("flux"), &[]).unwrap();
+        assert_eq!(e.code, "picture_model");
+        assert_eq!(e.message, "This is a picture or video model.");
+        assert_eq!(e.next_step, "Add it in Studio → Get local models.");
+        assert!(diffusion_import_refusal(None, &table("klein4b-tensors.txt")).is_some());
+        assert!(diffusion_import_refusal(Some("qwen3"), &table("qwen3-4b-tensors.txt")).is_none());
+        assert!(diffusion_import_refusal(None, &[]).is_none());
+    }
+
+    /// The import reads the file's own architecture and tensor table.
+    #[test]
+    fn the_import_check_reads_the_file() {
+        let dir = scratch();
+        let picture = dir.0.join("flux-2-klein-4b-Q4_0.gguf");
+        std::fs::write(
+            &picture,
+            models::gguf::testing::diffusion_gguf("klein4b-tensors.txt"),
+        )
+        .unwrap();
+        assert_eq!(
+            refuse_picture_model(&picture).unwrap_err().code,
+            "picture_model"
+        );
+        let chat = dir.0.join("chat.gguf");
+        std::fs::write(
+            &chat,
+            models::gguf::testing::Writer::new()
+                .str("general.architecture", "qwen3")
+                .tensor("token_embd.weight", 64)
+                .tensor("blk.0.attn_q.weight", 64)
+                .build(),
+        )
+        .unwrap();
+        assert!(refuse_picture_model(&chat).is_ok());
+        let named = dir.0.join("named.gguf");
+        std::fs::write(
+            &named,
+            models::gguf::testing::Writer::new()
+                .str("general.architecture", "wan")
+                .tensor("blk.0.attn_q.weight", 64)
+                .build(),
+        )
+        .unwrap();
+        assert!(refuse_picture_model(&named).is_err());
+        // Not a GGUF: the import's own check says so.
+        let text = dir.0.join("notes.gguf");
+        std::fs::write(&text, "not a model").unwrap();
+        assert!(refuse_picture_model(&text).is_ok());
+    }
 
     /// More than four models is refused before anything is read.
     #[test]
