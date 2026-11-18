@@ -2,6 +2,7 @@
 //! downloads, installed models, hardware detection, the fit check, the catalog and
 //! first run.
 
+use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -31,7 +32,7 @@ const SETTING_CATALOG: &str = "catalog";
 /// Bytes read from the start of a GGUF to get its parameters before download.
 const HEAD_BYTES: u64 = 6 * 1024 * 1024;
 
-fn hf_error(e: HfError) -> AppError {
+pub(crate) fn hf_error(e: HfError) -> AppError {
     let (code, message, next) = match &e {
         HfError::NeedsToken => (
             "hf_needs_token",
@@ -123,7 +124,7 @@ pub struct HardwareDto {
     pub intel_mac: bool,
 }
 
-async fn detect(state: &AppState) -> (Target, HardwareDto) {
+pub(crate) async fn detect(state: &AppState) -> (Target, HardwareDto) {
     let ram = models::hardware::system_memory();
     let backends = state.runtime.backends(false).await;
     let mib = 1024 * 1024;
@@ -541,6 +542,7 @@ async fn start_group(
         hub: facts.map(|(h, _)| h),
         image_file_for: None,
         image_files,
+        generator: None,
     };
     let manager = app.state::<Arc<DownloadManager>>().inner().clone();
     manager.start(app, meta, files).await
@@ -975,8 +977,8 @@ pub struct InstalledModelDto {
     pub image_file_offer: Option<image_file::Offer>,
     /// 0.0.7 (P6b review): for a download, what Delete with files removes from disk: the
     /// bytes of its files and of the image file the app downloaded for it, inside the models
-    /// folder ([`removal_plan`]), and how many of its files stay because they are outside
-    /// it. Zero for an imported model (Delete only takes it off the list).
+    /// folder ([`removal_plan_with`]), and how many of its files stay because they are
+    /// outside it. Zero for an imported model (Delete only takes it off the list).
     pub delete_bytes: u64,
     pub kept_outside: usize,
     /// 0.0.7 (P6b round 2): the one file Delete leaves outside the models folder is the image
@@ -1000,14 +1002,15 @@ pub async fn list_installed_models(
     let all = state.store.list_models().await?;
     let models_dir = models_dir(&app).await;
     let in_use = InUse::of(&all);
+    let gen_files = state.store.gen_model_files().await?;
     let mut out = Vec::new();
     for m in all {
         let stored: StoredSummary =
             serde_json::from_value(m.gguf_summary.clone()).unwrap_or_default();
         let preview = match m.source {
-            ModelSource::Download => {
-                delete_preview(&m, &models_dir, |f| in_use.by_other_than(m.id, f))
-            }
+            ModelSource::Download => delete_preview(&m, &models_dir, |f| {
+                in_use.by_other_than(m.id, f) || used_elsewhere(&[], &gen_files, f)
+            }),
             ModelSource::Import => DeletePreview::default(),
         };
         let image = image_file::choice_of_row(&m.path, &stored);
@@ -1119,7 +1122,7 @@ pub async fn import_model(
 }
 
 /// Takes a model off the Installed list; for a download with `delete_files`, its files go
-/// too ([`removal_plan`]). Returns a note for the user when files were left in place.
+/// too ([`removal_plan_with`]). Returns a note for the user when files were left in place.
 ///
 /// 0.0.7 (P6): what goes from disk is worked out before anything is unloaded, and a model
 /// whose file is gone, or outside the models folder (a folder used before "Change folder"),
@@ -1198,8 +1201,10 @@ async fn delete_installed<F: std::future::Future<Output = ()>>(
 }
 
 /// What [`delete_model`] does with the row `rec` (0.0.7, P6): works out what goes from disk
-/// ([`removal_plan`], for a download with `delete_files`), then unloads the model (`unload`,
-/// when it is the one loaded), deletes those files and forgets the row. It never refuses.
+/// ([`removal_plan_with`], for a download with `delete_files`: never a file another chat model
+/// or an installed picture or video model uses, [`used_elsewhere`]), then unloads the model
+/// (`unload`, when it is the one loaded), deletes those files and forgets the row. It never
+/// refuses.
 async fn remove_installed(
     store: &store::Store,
     rec: &store::ModelRecord,
@@ -1214,7 +1219,8 @@ async fn remove_installed(
             .into_iter()
             .filter(|m| m.id != rec.id)
             .collect();
-        removal_plan(rec, models_dir, &others)
+        let gen_files = store.gen_model_files().await?;
+        removal_plan_with(rec, models_dir, |f| used_elsewhere(&others, &gen_files, f))
     } else {
         Removal::default()
     };
@@ -1255,7 +1261,7 @@ struct DeletePreview {
     in_use: usize,
 }
 
-/// What Delete with files would remove for the downloaded model `rec` ([`removal_plan`]),
+/// What Delete with files would remove for the downloaded model `rec` ([`removal_plan_with`]),
 /// for its question: the bytes, and how many files would stay because they are outside the
 /// models folder. `in_use` tells a file another installed model uses ([`InUse`]).
 fn delete_preview(
@@ -1345,12 +1351,9 @@ pub(crate) async fn note_downloaded_image(
     Ok(())
 }
 
-/// The files Delete removes for the downloaded model `rec`: every shard of a split model
-/// and the image file the app downloaded for it (P6b review m4: never one only found next
-/// to it, `StoredSummary::downloaded_projector`). Only files inside the models folder are
-/// deleted (the rest is left in place and said so), and none that another installed model
-/// uses (`others`: two models of one repository can share one image file). A file already
-/// gone is left out, so the model just leaves the list.
+/// [`removal_plan_with`] keeping the files the chat models in `others` use (two models of
+/// one repository can share one image file).
+#[cfg(test)]
 fn removal_plan(
     rec: &store::ModelRecord,
     models_dir: &Path,
@@ -1359,7 +1362,13 @@ fn removal_plan(
     removal_plan_with(rec, models_dir, |f| used_by_installed(others, f))
 }
 
-/// [`removal_plan`], with `in_use` telling a file another installed model uses.
+/// The files Delete removes for the downloaded model `rec`: every shard of a split model
+/// and the image file the app downloaded for it (P6b review m4: never one only found next
+/// to it, `StoredSummary::downloaded_projector`). Only files inside the models folder are
+/// deleted (the rest is left in place and said so), and none that something else uses
+/// (`in_use`: another installed chat model, as two models of one repository can share one
+/// image file, or a picture or video model, [`used_elsewhere`]). A file already gone is left
+/// out, so the model just leaves the list.
 fn removal_plan_with(
     rec: &store::ModelRecord,
     models_dir: &Path,
@@ -1413,6 +1422,23 @@ fn kept_note(removal: &Removal) -> Option<String> {
         }
     };
     Some(note.into())
+}
+
+/// What Delete with files may not remove from a chat model (0.1.0 Studio): a file another
+/// installed chat model uses ([`used_by_installed`], `others`), or any part file of an
+/// installed picture or video model (`gen_files`, as `Store::gen_model_files` gives them;
+/// FLUX.2 klein's text encoder is the same file as a common chat download). Paths are
+/// compared as [`crate::model_options::same_file`] does.
+pub(crate) fn used_elsewhere(
+    others: &[store::ModelRecord],
+    gen_files: &BTreeSet<String>,
+    file: &Path,
+) -> bool {
+    let spelled = file.display().to_string();
+    used_by_installed(others, file)
+        || gen_files
+            .iter()
+            .any(|g| crate::model_options::same_file(g, &spelled))
 }
 
 /// 0.0.7 (P6): whether `file` is a file of a model on the Installed list (any shard of it),
@@ -1524,7 +1550,7 @@ pub(crate) fn check_writable_folder(path: &Path) -> AppResult<()> {
 
 // ---- Catalog and first run ------------------------------------------------------
 
-async fn current_catalog(app: &AppHandle) -> Catalog {
+pub(crate) async fn current_catalog(app: &AppHandle) -> Catalog {
     let state = app.state::<AppState>();
     let bundled = Catalog::bundled();
     match state.store.get_setting::<String>(SETTING_CATALOG).await {
@@ -2348,6 +2374,80 @@ mod tests {
             "the image file recorded meanwhile goes too"
         );
         assert!(store.get_model(rec.id).await.unwrap().is_none());
+    }
+
+    /// 0.1.0 Studio: FLUX.2 klein's text encoder is the same file as a common chat download
+    /// (Qwen3-4B). Delete with files of that chat model keeps it while a picture or video model
+    /// uses it, and the question's count leaves it out; once none does, it goes.
+    #[tokio::test]
+    async fn deleting_a_chat_model_keeps_a_file_a_picture_model_uses() {
+        let gen_files =
+            BTreeSet::from(["/m/unsloth/Qwen3-4B-GGUF/Qwen3-4B-Q4_K_M.gguf".to_string()]);
+        assert!(used_elsewhere(
+            &[],
+            &gen_files,
+            Path::new("/m/unsloth/Qwen3-4B-GGUF/Qwen3-4B-Q4_K_M.gguf")
+        ));
+        assert!(!used_elsewhere(
+            &[],
+            &gen_files,
+            Path::new("/m/unsloth/Qwen3-4B-GGUF/Qwen3-4B-Q8_0.gguf")
+        ));
+
+        let root = scratch();
+        let models = root.0.join("models");
+        let repo = models.join("unsloth").join("Qwen3-4B-GGUF");
+        std::fs::create_dir_all(&repo).unwrap();
+        let encoder = repo.join("Qwen3-4B-Q4_K_M.gguf");
+        std::fs::write(&encoder, vec![0u8; 700]).unwrap();
+        let chat = downloaded(1, &encoder, None);
+        let gen_files = BTreeSet::from([encoder.display().to_string()]);
+        let plan = removal_plan_with(&chat, &models, |f| used_elsewhere(&[], &gen_files, f));
+        assert!(plan.delete.is_empty());
+        assert_eq!(plan.in_use, vec![encoder.clone()]);
+        assert_eq!(
+            delete_preview(&chat, &models, |f| used_elsewhere(&[], &gen_files, f)),
+            DeletePreview {
+                in_use: 1,
+                ..DeletePreview::default()
+            }
+        );
+        // Another chat model using it still counts.
+        let other = downloaded(2, &encoder, None);
+        assert!(used_elsewhere(
+            std::slice::from_ref(&other),
+            &BTreeSet::new(),
+            &encoder
+        ));
+
+        // Through Delete: FLUX.2 klein is installed, so the file stays.
+        let store = store::Store::open_in_memory().unwrap();
+        let klein = store::NewGenModel {
+            id: "flux2-klein-4b-q4".into(),
+            catalog_id: Some("flux2-klein-4b-q4".into()),
+            name: "FLUX.2 klein 4B".into(),
+            kind: "image".into(),
+            family: "flux2-klein-4b".into(),
+            parts: serde_json::json!([{"role": "llm", "file": encoder.display().to_string()}]),
+            size_bytes: 700,
+            source: store::GenSource::Catalog,
+        };
+        store.insert_gen_model(klein).await.unwrap();
+        let none = || None::<std::future::Ready<()>>;
+        let rec = on_the_list(&store, &chat).await;
+        remove_installed(&store, &rec, true, &models, none())
+            .await
+            .unwrap();
+        assert!(encoder.exists(), "klein still uses it");
+        assert!(store.get_model(rec.id).await.unwrap().is_none());
+
+        // Once no picture or video model uses it, it goes with the chat model.
+        store.delete_gen_model("flux2-klein-4b-q4").await.unwrap();
+        let rec = on_the_list(&store, &chat).await;
+        remove_installed(&store, &rec, true, &models, none())
+            .await
+            .unwrap();
+        assert!(!encoder.exists());
     }
 
     async fn on_the_list(store: &store::Store, rec: &store::ModelRecord) -> store::ModelRecord {

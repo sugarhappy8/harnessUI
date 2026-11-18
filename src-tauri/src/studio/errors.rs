@@ -7,6 +7,7 @@
 use agent::media::{
     Company, FailureKind, Invalid, LocalIo, MediaFailure, MediaKind, MediaModel, RefRole, Stage,
 };
+use models::gen_search::NotOffered;
 use runtime::packs::PackError;
 use search::FetchError;
 
@@ -927,6 +928,101 @@ pub fn engine_not_removed(details: impl Into<String>) -> AppError {
     )
 }
 
+// ---- local models ------------------------------------------------------------------------------
+
+/// The code of [`not_that_model`], which a download group shows as it is (its files are gone,
+/// so Resume would download them again).
+pub const NOT_THAT_MODEL: &str = "studio_not_that_model";
+
+/// Decimal gigabytes with one decimal, rounded up, as download sizes are shown: what a
+/// download needs is never understated.
+fn gb_up(bytes: u64) -> String {
+    let tenths = bytes.div_ceil(100_000_000);
+    format!("{}.{} GB", tenths / 10, tenths % 10)
+}
+
+/// A downloaded diffusion file whose own tensor table is not its family's (a FLUX.2 klein 9B
+/// named like the 4B, or a file whose name lies): it is not added, and its files go.
+pub fn not_that_model(details: impl Into<String>) -> AppError {
+    AppError::new(
+        NOT_THAT_MODEL,
+        "This file is not the model its name says, so it was not added.",
+        "Choose another file, or a model from the recommended list.",
+        details,
+    )
+}
+
+/// A local download before the note about local models was accepted.
+pub fn notice_needed() -> AppError {
+    AppError::new(
+        "studio_notice_needed",
+        "Read the note about local models first.",
+        "Open the note in Get local models.",
+        String::new(),
+    )
+}
+
+/// A local download with a licence of one of its parts not accepted.
+pub fn license_not_accepted() -> AppError {
+    AppError::new(
+        "studio_license_not_accepted",
+        "Accept the licences to download this model.",
+        "Tick each licence, then Download.",
+        String::new(),
+    )
+}
+
+/// A local download that needs more than the free space on the models folder's disk;
+/// `needed` is what it would fetch.
+pub fn disk_too_small(needed: u64) -> AppError {
+    AppError::new(
+        "studio_disk_too_small",
+        "There is not enough free space for this model.",
+        format!(
+            "It needs {}; free up space or choose another models folder.",
+            gb_up(needed)
+        ),
+        String::new(),
+    )
+}
+
+/// A model harnessUI cannot run: a searched repository of a family it does not recognise, or
+/// a catalog entry this build hides. `why` (the sentence search shows, or the catalog's
+/// reason) goes in the details.
+pub fn not_supported_yet(why: impl Into<String>) -> AppError {
+    AppError::new(
+        "studio_not_supported_yet",
+        "harnessUI cannot run this model yet.",
+        "Choose a model from the recommended list.",
+        why,
+    )
+}
+
+/// A repository harnessUI never offers, whatever it holds, with the reason.
+pub fn not_offered(why: NotOffered) -> AppError {
+    let reason = match why {
+        NotOffered::RegionLimited => "its licence excludes some regions",
+        NotOffered::Uncensored => "it was made without safety limits",
+        NotOffered::AdultContent => "it is marked as not for all audiences",
+    };
+    AppError::new(
+        "studio_not_offered",
+        format!("harnessUI does not offer this model: {reason}."),
+        "Choose another model.",
+        String::new(),
+    )
+}
+
+/// A picture or video model's download whose parts are not all downloaded and checked yet.
+pub fn model_incomplete() -> AppError {
+    AppError::new(
+        "studio_model_incomplete",
+        "A part of this model is not downloaded yet.",
+        "Resume the download in Models → Downloads to finish it.",
+        String::new(),
+    )
+}
+
 /// A company's failure as the details show it: its own message, code, HTTP status and
 /// request id, each when it gave one.
 fn failure_details(f: &MediaFailure) -> String {
@@ -1268,6 +1364,15 @@ mod tests {
             engine_licence_not_accepted(),
             engine_still_downloading(),
             engine_not_removed("denied"),
+            not_that_model("klein 9B"),
+            notice_needed(),
+            license_not_accepted(),
+            disk_too_small(5_000_000_000),
+            not_supported_yet("harnessUI does not know this kind of model yet."),
+            not_offered(NotOffered::RegionLimited),
+            not_offered(NotOffered::Uncensored),
+            not_offered(NotOffered::AdultContent),
+            model_incomplete(),
         ];
         all.extend(every_pack_error().iter().map(engine_not_installed));
         for to in [PictureUse::Chat, PictureUse::Prompt] {
@@ -1514,6 +1619,57 @@ mod tests {
             )
         );
         assert_eq!(poster_only_for_video().code, "bad_request");
+    }
+
+    /// A local download's refusals, in the words Get local models shows.
+    #[test]
+    fn a_local_download_says_why_it_was_refused() {
+        let words = |e: AppError| (e.code, e.message, e.next_step);
+        assert_eq!(
+            words(disk_too_small(5_040_000_000)),
+            (
+                "studio_disk_too_small".into(),
+                "There is not enough free space for this model.".into(),
+                "It needs 5.1 GB; free up space or choose another models folder.".into()
+            )
+        );
+        assert_eq!(
+            disk_too_small(5_000_000_000).next_step,
+            "It needs 5.0 GB; free up space or choose another models folder."
+        );
+        assert_eq!(
+            words(not_offered(NotOffered::RegionLimited)),
+            (
+                "studio_not_offered".into(),
+                "harnessUI does not offer this model: its licence excludes some regions.".into(),
+                "Choose another model.".into()
+            )
+        );
+        let e = not_supported_yet("This repository holds several kinds of model.");
+        assert_eq!(
+            (e.code.as_str(), e.message.as_str(), e.details.as_str()),
+            (
+                "studio_not_supported_yet",
+                "harnessUI cannot run this model yet.",
+                "This repository holds several kinds of model."
+            )
+        );
+        assert_eq!(
+            words(not_that_model("found klein 9B")),
+            (
+                "studio_not_that_model".into(),
+                "This file is not the model its name says, so it was not added.".into(),
+                "Choose another file, or a model from the recommended list.".into()
+            )
+        );
+        assert_eq!(
+            notice_needed().message,
+            "Read the note about local models first."
+        );
+        assert_eq!(
+            license_not_accepted().message,
+            "Accept the licences to download this model."
+        );
     }
 
     #[test]

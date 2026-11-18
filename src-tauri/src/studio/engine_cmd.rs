@@ -117,10 +117,6 @@ pub fn engine_layout(app: &AppHandle) -> EngineLayout {
 
 /// The engine on this computer now, or `None`: Windows before the pack is installed (or after
 /// antivirus quarantine took one of its files), Linux without a development folder.
-#[allow(
-    dead_code,
-    reason = "Task L14's local runs find the engine through it, again after a download"
-)]
 pub fn current_engine(app: &AppHandle) -> Option<Engine> {
     engine::discover(&engine_layout(app), sd_lock::embedded(), current_platform())
 }
