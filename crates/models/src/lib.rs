@@ -13,6 +13,8 @@ pub use summary::ModelSummary;
 pub mod arch;
 pub mod catalog;
 pub mod download;
+// 0.1.0 Studio: the signed catalog's picture and video entries.
+pub mod gen_catalog;
 pub mod hardware;
 pub mod hf;
 // 0.0.6 item 6 (WP10b): what each part of a model weighs and where it goes.
