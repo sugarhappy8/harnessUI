@@ -14,9 +14,10 @@
 //! The stages move forward only. This build reads each part's weights when it is first used,
 //! so "loading" lines and `#` bars come again while the prompt is read, while it draws and
 //! while it decodes; they never move the stage back. `sampling using …` is printed before the
-//! prompt is read (and before a picture added to the prompt is encoded), so it does not
-//! start the drawing; `get_learned_condition completed` does. A video prints `generate_video`
-//! only after its prompt was read, so it goes from loading straight to drawing.
+//! prompt is read (and before a picture added to the prompt is encoded), so it starts reading
+//! the prompt, not the drawing; `get_learned_condition completed` starts the drawing. A video
+//! prints `generate_video` only after its prompt was read, so `sampling using …` is what
+//! shows it reading the prompt.
 
 use std::borrow::Cow;
 
@@ -28,9 +29,9 @@ use serde::Serialize;
 pub enum LocalStage {
     /// Starting and reading the model's weights.
     Loading,
-    /// Turning the prompt into what the model reads, from `generate_image`. A video never
-    /// shows it: this build prints `generate_video` only after the prompt was read, when the
-    /// drawing has already begun.
+    /// Turning the prompt into what the model reads, from `generate_image` or `sampling
+    /// using …`, whichever comes first (a video prints `generate_video` only after the prompt
+    /// was read, when the drawing has already begun).
     ReadingPrompt,
     /// Drawing the picture or video, step by step.
     Drawing,
@@ -146,15 +147,19 @@ impl ProgressParser {
             // completed`): news only while the run is still loading.
             return self.last.stage == LocalStage::Loading;
         }
-        if message.starts_with("generate_image") || message.starts_with("generate_video") {
+        if message.starts_with("generate_image")
+            || message.starts_with("generate_video")
+            || message.starts_with("sampling using ")
+        {
             // `generate_video` comes after `get_learned_condition completed` in this build
-            // (video.cpp), so for a video it is a stage already passed.
+            // (video.cpp), so for a video it is a stage already passed. The sampling plan
+            // prints `sampling using …` (request.cpp) before the prompt is read, after
+            // `generate_image` for a picture: for a video it is the first sign of the prompt.
             return self.advance(LocalStage::ReadingPrompt);
         }
         if message.starts_with("get_learned_condition completed") {
-            // Not `sampling using …`: the sampling plan prints it (request.cpp) before the
-            // prompt is read and before an added picture is encoded, whose tile bars would
-            // then count as steps.
+            // Not `sampling using …`: it comes before the prompt is read and before an added
+            // picture is encoded, whose tile bars would then count as steps.
             return self.advance(LocalStage::Drawing);
         }
         if let Some(rest) = message.strip_prefix("generating image: ") {
@@ -517,15 +522,28 @@ mod tests {
     fn bars_before_the_prompt_is_read_are_not_steps() {
         // `sampling using …` comes before the prompt is read and before a picture added to
         // the prompt is encoded, which `--vae-tiling` also draws as "=" bars.
+        let tile_bar =
+            "  |===>                                              |  1/16 -   1.61it/s\x1b[K";
         let mut p = ProgressParser::new(1, 1);
         p.feed("[I] generate_image 1024x1024 --- image.cpp:954", 100);
-        p.feed("[I] sampling using euler method --- request.cpp:478", 110);
+        assert_eq!(
+            p.feed("[I] sampling using euler method --- request.cpp:478", 110),
+            None
+        );
+        let x = p.feed(tile_bar, 400).expect("an update");
+        assert_eq!(
+            (x.stage, x.step, x.steps),
+            (LocalStage::ReadingPrompt, 0, 0)
+        );
+
+        // A video prints no `generate_video` before its prompt: `sampling using …` starts
+        // reading the prompt (ruling L3-video-prompt-stage), and its bars are still not steps.
+        let mut p = ProgressParser::new(1, 1);
         let x = p
-            .feed(
-                "  |===>                                              |  1/16 -   1.61it/s\x1b[K",
-                400,
-            )
+            .feed("[I] sampling using euler method --- request.cpp:478", 110)
             .expect("an update");
+        assert_eq!(x.stage, LocalStage::ReadingPrompt);
+        let x = p.feed(tile_bar, 400).expect("an update");
         assert_eq!(
             (x.stage, x.step, x.steps),
             (LocalStage::ReadingPrompt, 0, 0)
@@ -626,12 +644,14 @@ mod tests {
             assert_eq!(fractions.first(), Some(&0.0), "{name}");
             assert_eq!(fractions.last(), Some(&0.99), "{name}");
         }
-        // A video reads its prompt while it loads: `generate_video` is printed after it.
+        // A video's prompt is read after `sampling using …`; `generate_video` is printed only
+        // once the drawing has begun.
         let wan = updates(&mut ProgressParser::new(1, 1), WAN22_TI2V);
         assert_eq!(
             stages(&wan),
             [
                 LocalStage::Loading,
+                LocalStage::ReadingPrompt,
                 LocalStage::Drawing,
                 LocalStage::Decoding,
                 LocalStage::Saving

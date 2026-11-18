@@ -49,36 +49,44 @@ pub enum SdFailure {
 ///   `library not loaded: <name>`, or Windows' `0xC0000135` exit code, which prints
 ///   nothing), first because the engine then never ran;
 /// - a bad model file (`invalid magic`, `failed to load model`, `unknown model`,
-///   `tensor '…' not found`), before memory, because a damaged file's sizes can make an
-///   allocation fail and memory saving would not help;
+///   `tensor '…' not found`, and this build's `unknown format`, `get sd version from file
+///   failed`, `not in model metadata`, `has wrong shape in model metadata`, `invalid model
+///   source`), before memory, because a damaged file's sizes can make an allocation fail and
+///   memory saving would not help;
 /// - a lost device (`errordevicelost`, `device lost`), before memory, because allocations
 ///   on a lost device fail too;
 /// - out of memory (`out of memory`, `erroroutofdevicememory`, `failed to allocate`,
 ///   `buffer failed`, `graph allocation failed`, `cannot make enough memory available`,
-///   `memory allocation of size`).
+///   `memory allocation of size`), only after the last tiling retry: the allocator's and
+///   the driver's words come before that retry, so a run that recovered by tiling and then
+///   stopped for another reason did not run out of memory.
 ///
 /// Anything else is [`SdFailure::Crashed`] with the exit code. (`--auto-fit`, on by default
 /// in this build, already spreads the weights over the card, memory and disk; Studio never
 /// passes `--params-backend`, which turns it off.)
 pub fn classify(tail: &[String], exit_code: Option<i32>) -> SdFailure {
-    let lines: Vec<Line<'_>> = tail
+    let all: Vec<Line<'_>> = tail.iter().map(|line| Line::new(line)).collect();
+    let after_last_retry = all
         .iter()
-        .map(|line| Line::new(line))
-        .filter(|line| !line.is_tiling_retry())
-        .collect();
-    if let Some(name) = lines.iter().find_map(Line::missing_library) {
+        .rposition(Line::is_tiling_retry)
+        .map_or(0, |at| at + 1);
+    let lines: Vec<&Line<'_>> = all.iter().filter(|line| !line.is_tiling_retry()).collect();
+    if let Some(name) = lines.iter().find_map(|line| line.missing_library()) {
         return SdFailure::MissingLibrary(name);
     }
     if exit_code == Some(STATUS_DLL_NOT_FOUND) {
         return SdFailure::MissingLibrary(String::new());
     }
-    if lines.iter().any(Line::is_bad_model) {
+    if lines.iter().any(|line| line.is_bad_model()) {
         return SdFailure::BadModel;
     }
     if lines.iter().any(|line| line.says_any(DEVICE_LOST)) {
         return SdFailure::DeviceLost;
     }
-    if lines.iter().any(|line| line.says_any(OUT_OF_MEMORY)) {
+    if all[after_last_retry..]
+        .iter()
+        .any(|line| line.says_any(OUT_OF_MEMORY))
+    {
         return SdFailure::OutOfMemory;
     }
     SdFailure::Crashed { code: exit_code }
@@ -96,7 +104,18 @@ const OUT_OF_MEMORY: &[&str] = &[
 
 const DEVICE_LOST: &[&str] = &["errordevicelost", "device lost"];
 
-const BAD_MODEL: &[&str] = &["invalid magic", "failed to load model", "unknown model"];
+const BAD_MODEL: &[&str] = &[
+    "invalid magic",
+    "failed to load model",
+    "unknown model",
+    // This build's own words (model_loader.cpp, diffusion_engine.cpp, model_manager.cpp,
+    // model_loader_files.cpp): a file of no format it reads, or not the model it should be.
+    "unknown format",
+    "get sd version from file failed",
+    "not in model metadata",
+    "has wrong shape in model metadata",
+    "invalid model source",
+];
 
 const MISSING_LIBRARY: &[&str] = &[
     "error while loading shared libraries:",
@@ -272,6 +291,40 @@ mod tests {
             ),
             SdFailure::OutOfMemory
         );
+        // The allocator's and Vulkan's words come before the retry line: a run that recovered
+        // by tiling and later crashed for another reason did not run out of memory (ruling
+        // L3-oom-after-retry).
+        assert_eq!(
+            classify(
+                &[
+                    "ggml_vulkan: Device memory allocation of size 1073741824 failed.".into(),
+                    "ggml_vulkan: vk::Device::allocateMemory: ErrorOutOfDeviceMemory".into(),
+                    "[E] ggml: ggml_gallocr_reserve_n_impl: failed to allocate Vulkan0 buffer of size 1073741824".into(),
+                    "[W] VAE decode ran out of memory; retrying with spatial tiling --- backend_fit.cpp:530".into(),
+                ],
+                Some(139)
+            ),
+            SdFailure::Crashed { code: Some(139) }
+        );
+    }
+
+    #[test]
+    fn this_builds_words_for_a_wrong_model_file_are_named() {
+        // What the pinned build prints for a file that is not a model it can read, or not the
+        // model it should be (ruling L3-bad-model-words); matched outside quotes.
+        for line in [
+            "[W] unknown format /m/leejet/FLUX.2-klein-4B-GGUF/flux-2-klein-4b-Q4_0.gguf --- model_loader.cpp:236",
+            "[E] get sd version from file failed: '' --- diffusion_engine.cpp:979",
+            "[E] Diffusion model tensor 'model.diffusion_model.img_in.weight' not in model metadata --- model_manager.cpp:780",
+            "[E] VAE tensor 'first_stage_model.decoder.conv_in.weight' has wrong shape in model metadata: got [3, 3, 32, 512], expected [3, 3, 16, 512] --- model_manager.cpp:810",
+            "[E] invalid model source '/m/Comfy-Org/flux2-klein-4B/split_files/vae/flux2-vae.safetensors': duplicate tensor in model source: decoder.conv_in.weight --- model_loader_files.cpp:108",
+        ] {
+            assert_eq!(
+                classify(&[line.into()], Some(1)),
+                SdFailure::BadModel,
+                "{line}"
+            );
+        }
     }
 
     #[test]
@@ -310,6 +363,7 @@ mod tests {
                 &[
                     "[I] loading diffusion model from '/Users/a/Out of memory/unknown model/m.gguf' --- diffusion_engine.cpp:697".into(),
                     "[I] unknown tensor 'device lost' in model file --- model_loader.cpp:1592".into(),
+                    "[I] loading vae from '/Users/a/unknown format/not in model metadata/vae.safetensors' --- diffusion_engine.cpp:768".into(),
                 ],
                 Some(1)
             ),
