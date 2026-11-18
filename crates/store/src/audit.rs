@@ -7,7 +7,7 @@
 //! the user allowed to run can still edit the database file (section 13.5).
 
 use rusqlite::types::Value as SqlValue;
-use rusqlite::{Connection, Row, params};
+use rusqlite::{Connection, OptionalExtension, Row, params};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -225,6 +225,11 @@ fn complete_audit(
     }
 }
 
+fn get_audit(conn: &Connection, id: AuditId) -> Result<Option<AuditRow>, StoreError> {
+    let sql = format!("SELECT {AUDIT_COLUMNS} FROM audit_log WHERE id = ?1");
+    Ok(conn.query_row(&sql, [id], audit_from_row).optional()?)
+}
+
 fn list_audit(conn: &Connection, q: &AuditQuery) -> Result<Vec<AuditRow>, StoreError> {
     let mut sql = format!("SELECT {AUDIT_COLUMNS} FROM audit_log WHERE 1 = 1");
     let mut values: Vec<SqlValue> = Vec::new();
@@ -386,6 +391,11 @@ impl Store {
             .await
     }
 
+    /// Audit row `id`, when there is one.
+    pub async fn get_audit(&self, id: AuditId) -> Result<Option<AuditRow>, StoreError> {
+        self.call(move |c| get_audit(c, id)).await
+    }
+
     /// Audit rows matching `query`, newest first.
     pub async fn list_audit(&self, query: AuditQuery) -> Result<Vec<AuditRow>, StoreError> {
         self.call(move |c| list_audit(c, &query)).await
@@ -453,6 +463,33 @@ mod tests {
             .await
             .expect_err("missing");
         assert!(matches!(err, StoreError::NotFound { .. }));
+    }
+
+    #[tokio::test]
+    async fn one_row_is_read_by_its_id() {
+        let store = Store::open_in_memory().expect("open");
+        let first = store
+            .append_audit(entry("read_file", AuditDecision::AllowOnce))
+            .await
+            .expect("append");
+        let second = store
+            .append_audit(entry("write_file", AuditDecision::AllowOnce))
+            .await
+            .expect("append");
+        store
+            .complete_audit(second, "ok".into(), Some("done".into()), Some(3))
+            .await
+            .expect("complete");
+        let row = store.get_audit(second).await.expect("get").expect("row");
+        assert_eq!(row.id, second);
+        assert_eq!(row.tool, "write_file");
+        assert_eq!(row.arguments, json!({ "path": "/home/me/a.txt" }));
+        assert_eq!(row.result_status.as_deref(), Some("ok"));
+        assert_eq!(
+            store.get_audit(first).await.expect("get").map(|r| r.tool),
+            Some("read_file".to_owned())
+        );
+        assert_eq!(store.get_audit(AuditId(999)).await.expect("get"), None);
     }
 
     #[tokio::test]

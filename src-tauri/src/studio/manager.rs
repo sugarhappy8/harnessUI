@@ -17,15 +17,21 @@
 //! - **Queues**: per endpoint, [`PICTURES_AT_ONCE`] picture runs and [`VIDEOS_AT_ONCE`] video
 //!   jobs at once; more wait in order. A video followed again (after a restart, *Get it anyway*
 //!   or *Check again*) takes a place like a new run. A run's task frees its place however it
-//!   ends, a panic included (`TaskEnd`), and starts the next one waiting.
+//!   ends, a panic included (`TaskEnd`), and starts the next one waiting; when a run leaves a
+//!   queue, each run behind it is sent with its new place. A task that broke off (a panic)
+//!   first has its run recorded as a restart would find it: `interrupted`, charged unknown,
+//!   its audit row completed.
 //! - **A run's task** writes `sending` and its start time before the request goes out, sends
-//!   it once (`MediaProvider::start`), and keeps the pictures that come back in the gallery
-//!   (type-checked, at most `MediaLimits::picture_cap` each), with a thumbnail when a picture
-//!   worker is set and the run's sidecar. Every failure is recorded with whether it was
-//!   charged: not sent, never; a timeout or a cut connection, and a Cancel while sending, not
+//!   it once (`MediaProvider::start`, never after a Cancel or a Shutdown already came: a run
+//!   stopped before it is sent is not charged), and keeps the pictures that come back in the
+//!   gallery (type-checked, at most `MediaLimits::picture_cap` each), with a thumbnail when a
+//!   picture worker is set and the run's sidecar. Every failure is recorded with whether it
+//!   was charged: not sent, never; a timeout or a cut connection, and a Cancel while sending, not
 //!   for an OpenRouter picture (OpenRouter bills only a picture it delivered:
 //!   <https://openrouter.ai/docs/guides/overview/multimodal/image-generation>, "Billing and
-//!   Cancellation") and unknown otherwise; a Cancel while queued, never.
+//!   Cancellation") and unknown otherwise (a video stopped while sending has no job id, so
+//!   nothing to get later); a Cancel while queued, never. An added picture no longer in the
+//!   gallery is refused before anything is recorded.
 //! - **A video job** is recorded as `waiting` with its remote id before it is first checked,
 //!   then checked ([`poll_delay`]) until it is done, fails or is gone. A check that fails keeps
 //!   it waiting. After [`PollPlan::watch_limit`] it is left `waiting`, "still not ready"
@@ -79,7 +85,7 @@ use tokio_util::sync::CancellationToken;
 use super::catalog;
 use super::deps::{Clock, Endpoint, ForeignFetch, ProviderSource, StudioSink};
 use super::errors;
-use super::gallery::{Gallery, io_error};
+use super::gallery::{Gallery, GalleryError, io_error};
 use super::prefs::{self, RunTarget, StudioPrefs, StudioPrefsPatch};
 use super::spend::{self, Billing, LimitRefusal, RunState, Spend, SpendRow};
 use crate::attachments::PictureWorker;
@@ -374,17 +380,28 @@ fn places(kind: MediaKind) -> usize {
 }
 
 /// Frees a run's place however its task ends, a panic included: the task leaves `running`,
-/// the next run waiting in its queue starts, and `ended` fires, so Cancel never waits for a
-/// task that is gone.
+/// the next run waiting in its queue starts (and those behind it are told their new places),
+/// and `ended` fires, so Cancel never waits for a task that is gone.
+///
+/// A task that broke off (a panic, so `finished` was never set) first has its run recorded as
+/// the next start would find it ([`Inner::record_broken`]); the place is freed once that is
+/// written. Nothing is recorded once the app is closing.
 struct TaskEnd {
     inner: Arc<Inner>,
     run_id: String,
     lane: LaneKey,
     ended: CancellationToken,
+    /// The run's company and audit row, to record it when its task broke off.
+    company: Company,
+    audit_id: Option<store::AuditId>,
+    /// Set once the run's task returned: it recorded how the run went, or left it for the
+    /// next start.
+    finished: bool,
 }
 
-impl Drop for TaskEnd {
-    fn drop(&mut self) {
+impl TaskEnd {
+    /// Frees the place: the task leaves `running`, the next run waiting starts, `ended` fires.
+    fn release(&self) {
         let next = {
             let mut lanes = self.inner.lanes();
             lanes.running.remove(&self.run_id);
@@ -398,7 +415,37 @@ impl Drop for TaskEnd {
         self.ended.cancel();
         if let Some(admitted) = next {
             spawn(&self.inner, admitted);
+            // The runs behind the one that started moved up.
+            let (inner, lane) = (Arc::clone(&self.inner), self.lane);
+            tauri::async_runtime::spawn(async move { inner.tell_queue(lane).await });
         }
+    }
+}
+
+impl Drop for TaskEnd {
+    fn drop(&mut self) {
+        if self.finished || self.inner.root.is_cancelled() {
+            self.release();
+            return;
+        }
+        // The task broke off before it recorded how the run went. The record is written on
+        // the runtime, never here (a drop must not block), then this guard's copy frees the
+        // place, even if writing the record breaks off too.
+        let end = TaskEnd {
+            inner: Arc::clone(&self.inner),
+            run_id: std::mem::take(&mut self.run_id),
+            lane: self.lane,
+            ended: self.ended.clone(),
+            company: self.company,
+            audit_id: self.audit_id,
+            finished: true,
+        };
+        tauri::async_runtime::spawn(async move {
+            end.inner
+                .record_broken(&end.run_id, end.company, end.audit_id)
+                .await;
+            drop(end);
+        });
     }
 }
 
@@ -406,13 +453,17 @@ impl Drop for TaskEnd {
 fn spawn(inner: &Arc<Inner>, (job, token, ended): Admitted) {
     let inner = Arc::clone(inner);
     tauri::async_runtime::spawn(async move {
-        let end = TaskEnd {
+        let mut end = TaskEnd {
             inner: Arc::clone(&inner),
             run_id: job.run_id.clone(),
             lane: job.lane,
             ended,
+            company: job.endpoint.company,
+            audit_id: job.audit_id,
+            finished: false,
         };
         inner.run_job(&job, &token).await;
+        end.finished = true;
         drop(end);
     });
 }
@@ -448,6 +499,19 @@ impl Ending {
                 errors::stopped(job.endpoint.company, job.kind, charged),
                 charged,
             )
+        }
+    }
+
+    /// The user stopped `job` while its request was out, before any answer: a picture is
+    /// charged as [`unanswered_charge`] says; a video has no job id yet, so there is nothing
+    /// to get later, and it may or may not have started (charged unknown).
+    fn stopped_sending(job: &Job) -> Self {
+        match job.kind {
+            MediaKind::Image => Self::stopped(job, unanswered_charge(job)),
+            MediaKind::Video => Self {
+                status: store::CreationStatus::Cancelled,
+                ..Self::failed(errors::stopped_while_sending(job.endpoint.company), None)
+            },
         }
     }
 }
@@ -607,11 +671,8 @@ impl StudioManager {
         }
         let prefs = self.inner.prefs();
         let spend = self.inner.spend_today().await?;
-        if let Err(LimitRefusal::Over { spent, limit }) =
-            spend::check_limit(prefs.daily_limit_usd, &spend, prepared.billing)
-        {
-            return Err(errors::daily_limit(spent, limit));
-        }
+        spend::check_limit(prefs.daily_limit_usd, &spend, prepared.billing)
+            .map_err(|LimitRefusal::Over { spent, limit }| errors::daily_limit(spent, limit))?;
         let reasons = spend::confirm_reasons(
             prepared.model.kind,
             prepared.billing,
@@ -653,6 +714,8 @@ impl StudioManager {
             Found::Queued(job) => {
                 let ending = Ending::stopped(&job, job.charge_if_stopped_waiting());
                 self.inner.end_run(&job, ending, job.started()).await;
+                // The runs behind it moved up.
+                self.inner.tell_queue(job.lane).await;
             }
             Found::Running(token, ended) => {
                 token.cancel();
@@ -1057,17 +1120,23 @@ impl Inner {
         })
     }
 
-    /// The added pictures of `req`, from the gallery's `refs/`.
+    /// The added pictures of `req`, from the gallery's `refs/`. One no longer there (it went
+    /// with the last run that used it, or was removed by hand) is refused by name.
     fn refs_of(&self, req: &StartRequest) -> AppResult<Vec<RefImage>> {
         let gallery = self.gallery();
         req.refs
             .iter()
             .map(|input| {
-                let (path, mime) = gallery
-                    .ref_file(&input.sha256)
-                    .map_err(|e| errors::from_gallery(&e))?;
+                let (path, mime) = gallery.ref_file(&input.sha256).map_err(|e| match e {
+                    // `ref_file` found no file of any picture type under that name.
+                    GalleryError::Io(_) => errors::added_picture_missing(),
+                    e => errors::from_gallery(&e),
+                })?;
                 let size_bytes = std::fs::metadata(&path)
-                    .map_err(|e| errors::from_gallery(&io_error(e)))?
+                    .map_err(|e| match e.kind() {
+                        std::io::ErrorKind::NotFound => errors::added_picture_missing(),
+                        _ => errors::from_gallery(&io_error(e)),
+                    })?
                     .len();
                 Ok(RefImage {
                     role: input.role,
@@ -1413,17 +1482,12 @@ impl Inner {
         Ok(job)
     }
 
-    /// Run `run`'s audit row as it is now, when it can be read.
+    /// Run `run`'s audit row as it is now (its first row, or its last follow-up), when it can
+    /// be read.
     async fn audit_row_of(&self, run: &store::CreationRun) -> Option<store::AuditRow> {
         let audit_id = run.audit_id?;
-        // A run's rows are never older than the run.
-        let query = store::AuditQuery {
-            server: Some("studio".to_owned()),
-            since: Some(run.created_at),
-            ..Default::default()
-        };
-        match self.deps.store.list_audit(query).await {
-            Ok(rows) => rows.into_iter().find(|row| row.id == audit_id),
+        match self.deps.store.get_audit(audit_id).await {
+            Ok(row) => row,
             Err(e) => {
                 tracing::warn!(run = %run.id, "a Studio run's audit row could not be read: {e}");
                 None
@@ -1512,6 +1576,18 @@ impl Inner {
                 .await;
             return;
         }
+        // A Cancel or a Shutdown may have come during the awaits above. The request's first
+        // poll may already hand it to an open connection, so it is never polled after either.
+        if self.root.is_cancelled() {
+            // The run stays `sending`, as a Shutdown leaves it.
+            return;
+        }
+        if t.token.is_cancelled() {
+            // Nothing was sent.
+            self.end_run(job, Ending::stopped(job, Some(false)), Some(started))
+                .await;
+            return;
+        }
         match self
             .until_stopped(t.token, job.provider.start(request, &t.scratch))
             .await
@@ -1519,8 +1595,8 @@ impl Inner {
             // The run stays `sending`: the next start says it may or may not have started.
             Waited::Shutdown => {}
             Waited::Stopped => {
-                let ending = Ending::stopped(job, unanswered_charge(job));
-                self.end_run(job, ending, Some(started)).await;
+                self.end_run(job, Ending::stopped_sending(job), Some(started))
+                    .await;
             }
             Waited::Got(Ok(Started::Done { outputs, cost })) => {
                 self.keep_pictures(job, &t.gallery, &outputs, cost.map(|c| c.usd), started)
@@ -2076,6 +2152,72 @@ impl Inner {
         }
     }
 
+    /// Records run `run_id` (made through `company`, with audit row `audit_id`) as the next
+    /// start would find it, after its task broke off (a panic) before recording how it went:
+    /// `interrupted`, charged unknown, its audit row completed, its scratch folder removed. A
+    /// run already recorded as ended keeps its record.
+    async fn record_broken(
+        &self,
+        run_id: &str,
+        company: Company,
+        audit_id: Option<store::AuditId>,
+    ) {
+        tracing::error!(run = %run_id, "a Studio run's task broke off");
+        let run = match self.deps.store.get_creation_run(run_id).await {
+            Ok(Some(run)) => run,
+            Ok(None) => return,
+            Err(e) => {
+                tracing::warn!(run = %run_id, "a Studio run could not be read: {e}");
+                return;
+            }
+        };
+        if !still_going(run.status) {
+            return;
+        }
+        let ending = Ending {
+            status: store::CreationStatus::Interrupted,
+            ..Ending::failed(errors::broke_off(company), None)
+        };
+        self.record_end(run_id, company, audit_id, ending, run.started_at)
+            .await;
+        let scratch = self.gallery().partial_dir().join(run_id);
+        match tokio::fs::remove_dir_all(&scratch).await {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => tracing::warn!(run = %run_id, "a Studio scratch folder stayed: {e}"),
+        }
+    }
+
+    /// Tells each run still waiting in `lane` its place, after one left the queue (it got a
+    /// place, or was cancelled) and those behind it moved up.
+    async fn tell_queue(&self, lane: LaneKey) {
+        let waiting: Vec<String> = self
+            .lanes()
+            .queues
+            .get(&lane)
+            .map(|queue| queue.iter().map(|job| job.run_id.clone()).collect())
+            .unwrap_or_default();
+        for run_id in waiting {
+            let run = match self.deps.store.get_creation_run(&run_id).await {
+                Ok(Some(run)) => run,
+                Ok(None) => continue,
+                Err(e) => {
+                    tracing::warn!(run = %run_id, "a Studio run could not be read: {e}");
+                    continue;
+                }
+            };
+            // Sent under the queues' lock, and only while the run still waits: once it has a
+            // place, its own task sends its state, and never before this. A run waiting is
+            // never still not ready (that one has no place to wait for).
+            let lanes = self.lanes();
+            if let Some(position) = lanes.position(&run_id) {
+                self.deps
+                    .sink
+                    .progress(&run_dto_of(&run, true, Some(position), false));
+            }
+        }
+    }
+
     /// Sends run `run_id`'s state to the sink.
     async fn emit(&self, run_id: &str) {
         match self.deps.store.get_creation_run(run_id).await {
@@ -2129,6 +2271,15 @@ pub(crate) fn place_extra_or_refuse(
     request.extra = placed.top;
     request.provider_options = placed.options;
     Ok(())
+}
+
+/// Whether a run with `status` is still going (not yet ended).
+fn still_going(status: store::CreationStatus) -> bool {
+    use store::CreationStatus as S;
+    match status {
+        S::Queued | S::Sending | S::Waiting | S::Running | S::Downloading => true,
+        S::Done | S::Failed | S::Blocked | S::Cancelled | S::Interrupted => false,
+    }
 }
 
 /// What a run counts toward today's spending: still going, finished, or ended with whether

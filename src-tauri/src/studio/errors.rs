@@ -57,7 +57,9 @@ fn name(company: Company) -> &'static str {
     }
 }
 
-/// Where the user can see what a company charged.
+/// Where the user can see what a company charged. Only for a cloud company: every
+/// constructor words [`Company::Local`] without a website (tested by
+/// `a_run_on_this_computer_never_points_to_a_website`).
 fn activity_page(company: Company) -> &'static str {
     match company {
         Company::OpenAi => "platform.openai.com",
@@ -107,6 +109,15 @@ fn size(bytes: u64) -> String {
         format!("{} bytes", grouped(bytes))
     }
 }
+
+/// A run on this computer whose Studio engine did not answer, in place of a company that did
+/// not.
+const ENGINE_DID_NOT_ANSWER: &str = "The Studio engine on this computer did not answer.";
+/// A run on this computer that failed in a way only a company reports (a key, credit, its
+/// server), in place of that company's words.
+const ENGINE_COULD_NOT: &str = "The Studio engine on this computer could not make it.";
+/// The next step after a run on this computer failed for no reason the user can change.
+const TRY_AGAIN_OR_RESTART: &str = "Try again; if it keeps happening, restart the app.";
 
 /// What a run was charged, as the start of a next step.
 fn charge_line(charged: Option<bool>) -> &'static str {
@@ -176,6 +187,14 @@ pub fn no_key(name: &str) -> AppError {
 /// never opened, timed out or was cut. Nothing is charged for either, and the lists saved
 /// before are kept.
 pub fn not_fetched(company: Company) -> AppError {
+    if company == Company::Local {
+        return AppError::new(
+            "studio_not_fetched",
+            ENGINE_DID_NOT_ANSWER,
+            TRY_AGAIN_OR_RESTART,
+            String::new(),
+        );
+    }
     AppError::new(
         "studio_not_fetched",
         format!(
@@ -331,6 +350,21 @@ pub fn blocked(
     charged: Option<bool>,
     request_id: Option<&str>,
 ) -> AppError {
+    let details = request_id.map_or_else(String::new, |id| format!("Request id: {id}"));
+    if company == Company::Local {
+        // A run on this computer costs nothing, whatever `charged` says.
+        let message = match stage {
+            Some(Stage::Prompt) => "Studio refused the prompt.",
+            Some(Stage::Output) => "Studio stopped the picture after it was made.",
+            None => "Studio refused this.",
+        };
+        return AppError::new(
+            "studio_blocked",
+            message,
+            "Nothing was charged. Change the prompt or the added pictures if you want to try again.",
+            details,
+        );
+    }
     let who = name(company);
     let message = match stage {
         Some(Stage::Prompt) => format!("{who}'s safety filter refused the prompt."),
@@ -346,7 +380,7 @@ pub fn blocked(
             "{} Change the prompt or the added pictures if you want to try again.",
             charge_line(charged)
         ),
-        request_id.map_or_else(String::new, |id| format!("Request id: {id}")),
+        details,
     )
 }
 
@@ -362,6 +396,14 @@ pub fn org_verification() -> AppError {
 
 /// The company no longer knows a job Studio was following.
 pub fn job_lost(company: Company) -> AppError {
+    if company == Company::Local {
+        return AppError::new(
+            "studio_job_lost",
+            "The Studio engine on this computer no longer has this job.",
+            "Make it again if you still want it.",
+            String::new(),
+        );
+    }
     AppError::new(
         "studio_job_lost",
         format!("{} no longer has this job.", name(company)),
@@ -375,6 +417,14 @@ pub fn job_lost(company: Company) -> AppError {
 
 /// The app closed while the run waited for its place in the queue: it was never sent.
 pub fn closed_before_its_turn(company: Company) -> AppError {
+    if company == Company::Local {
+        return AppError::new(
+            "studio_not_sent",
+            "Not made: the app closed before its turn. Nothing was charged.",
+            "Make it again with Again.",
+            String::new(),
+        );
+    }
     AppError::new(
         "studio_not_sent",
         "Not sent: the app closed before its turn. Nothing was charged.",
@@ -412,8 +462,38 @@ pub fn interrupted(company: Company) -> AppError {
     }
 }
 
+/// A run's task ended on an error inside the app (a bug) before it recorded how the run went.
+/// As after a restart ([`interrupted`]), Studio cannot know whether a cloud run started.
+pub fn broke_off(company: Company) -> AppError {
+    match company {
+        Company::Local => AppError::new(
+            "studio_interrupted",
+            "Studio stopped this after an error in the app.",
+            "Nothing was charged. Try again; if it keeps happening, restart the app.",
+            String::new(),
+        ),
+        _ => AppError::new(
+            "studio_interrupted",
+            "Studio stopped following this after an error in the app; it may or may not have started.",
+            format!(
+                "It may still be charged: check your activity page on {} before you make it again.",
+                activity_page(company)
+            ),
+            String::new(),
+        ),
+    }
+}
+
 /// The company no longer has the finished result.
 pub fn result_expired(company: Company) -> AppError {
+    if company == Company::Local {
+        return AppError::new(
+            "studio_result_expired",
+            "The result is no longer on this computer.",
+            "Make it again if you still want it.",
+            String::new(),
+        );
+    }
     AppError::new(
         "studio_result_expired",
         format!("{} no longer has the result.", name(company)),
@@ -447,6 +527,14 @@ pub fn too_large(cap: u64) -> AppError {
 
 /// The request never left this computer, or the connection never opened.
 pub fn not_sent(company: Company) -> AppError {
+    if company == Company::Local {
+        return AppError::new(
+            "studio_not_sent",
+            "Not started. Nothing was charged.",
+            TRY_AGAIN_OR_RESTART,
+            String::new(),
+        );
+    }
     AppError::new(
         "studio_not_sent",
         "Not sent. Nothing was charged.",
@@ -460,6 +548,14 @@ pub fn not_sent(company: Company) -> AppError {
 
 /// The request was sent but no answer came: a timeout or a cut connection.
 pub fn not_answered(company: Company, charged: Option<bool>) -> AppError {
+    if company == Company::Local {
+        return AppError::new(
+            "studio_not_answered",
+            ENGINE_DID_NOT_ANSWER,
+            TRY_AGAIN_OR_RESTART,
+            String::new(),
+        );
+    }
     let next = match (company, charged) {
         (Company::OpenRouter, Some(false)) => {
             "OpenRouter does not charge for a picture you did not receive. Try again.".to_owned()
@@ -515,8 +611,34 @@ pub fn stopped(company: Company, kind: MediaKind, charged: Option<bool>) -> AppE
     AppError::new("studio_stopped", message, next, String::new())
 }
 
+/// The user stopped a video while its request was out, before the company gave it a job id:
+/// there is no job to get later (so no *Get it anyway*), and Studio cannot know whether it
+/// started.
+pub fn stopped_while_sending(company: Company) -> AppError {
+    if company == Company::Local {
+        return stopped(company, MediaKind::Video, Some(false));
+    }
+    AppError::new(
+        "studio_stopped",
+        "Stopped while sending; it may or may not have started.",
+        format!(
+            "It may still be charged: check your activity page on {} before you make it again.",
+            activity_page(company)
+        ),
+        String::new(),
+    )
+}
+
 /// The finished result could not be downloaded.
 pub fn download_failed(company: Company) -> AppError {
+    if company == Company::Local {
+        return AppError::new(
+            "studio_download_failed",
+            "The Studio engine's result could not be read.",
+            TRY_AGAIN_OR_RESTART,
+            String::new(),
+        );
+    }
     AppError::new(
         "studio_download_failed",
         format!("The result could not be downloaded from {}.", name(company)),
@@ -544,6 +666,17 @@ pub fn bad_ref_name() -> AppError {
     AppError::new(
         "bad_request",
         "That is not the name of an added picture.",
+        "Add the picture again.",
+        String::new(),
+    )
+}
+
+/// An added picture the run would send is no longer in the gallery folder (it went with the
+/// last run that used it, or was removed by hand), so nothing is sent.
+pub fn added_picture_missing() -> AppError {
+    AppError::new(
+        "studio_ref_missing",
+        "One of the added pictures is no longer on this computer.",
         "Add the picture again.",
         String::new(),
     )
@@ -659,41 +792,52 @@ pub fn from_failure(company: Company, f: &MediaFailure) -> AppError {
     let simple = |code: &str, message: &str, next: &str| {
         with_details(code, message.to_owned(), next.to_owned())
     };
+    // What only a company reports (a key, credit, its server): a run on this computer gets
+    // the Studio engine's words instead, never a website or an account.
+    let company_says = |code: &str, message: String, next: String| match company {
+        Company::Local => simple(code, ENGINE_COULD_NOT, TRY_AGAIN_OR_RESTART),
+        Company::OpenRouter | Company::OpenAi => with_details(code, message, next),
+    };
     match f.kind {
         FailureKind::Blocked => blocked(company, f.stage, f.charged, f.request_id.as_deref()),
+        FailureKind::OrgVerification if company == Company::Local => simple(
+            "studio_org_verification",
+            ENGINE_COULD_NOT,
+            TRY_AGAIN_OR_RESTART,
+        ),
         FailureKind::OrgVerification => org_verification(),
         FailureKind::Expired => result_expired(company),
-        FailureKind::Unauthorized => with_details(
+        FailureKind::Unauthorized => company_says(
             "studio_unauthorized",
             format!("{who} refused the API key."),
             "Check the key in Settings → Endpoints.".to_owned(),
         ),
-        FailureKind::NoCredit => with_details(
+        FailureKind::NoCredit => company_says(
             "studio_no_credit",
             format!("Your {who} account has no credit left."),
             format!("Add credit on {}, then try again.", activity_page(company)),
         ),
-        FailureKind::RateLimited => with_details(
+        FailureKind::RateLimited => company_says(
             "studio_rate_limited",
             format!("{who} has had too many requests."),
             "Wait a minute, then try again.".to_owned(),
         ),
-        FailureKind::BadRequest => with_details(
+        FailureKind::BadRequest => company_says(
             "studio_refused",
             format!("{who} refused the request as it was."),
             "Change the settings and try again.".to_owned(),
         ),
-        FailureKind::NotFound => with_details(
+        FailureKind::NotFound => company_says(
             "studio_not_found",
             format!("{who} could not find this model."),
             "Get the model list again, then pick a model.".to_owned(),
         ),
-        FailureKind::Server => with_details(
+        FailureKind::Server => company_says(
             "studio_server_error",
             format!("{who}'s server failed."),
             format!("{} Try again in a few minutes.", charge_line(f.charged)),
         ),
-        FailureKind::Other => with_details(
+        FailureKind::Other => company_says(
             "studio_failed",
             format!("{who} could not make it."),
             "Try again. If it keeps happening, copy the details into a bug report.".to_owned(),
@@ -856,10 +1000,9 @@ mod tests {
         }
     }
 
-    /// Every constructor in this file, which `studio_errors_have_four_parts` checks. A new
-    /// constructor is added here too (Tasks L11, L13 and L15 append theirs).
-    fn every_constructor() -> Vec<AppError> {
-        let failure = |kind| MediaFailure {
+    /// A failure of `kind` with nothing else said.
+    fn failure(kind: FailureKind) -> MediaFailure {
+        MediaFailure {
             kind,
             stage: None,
             charged: None,
@@ -868,7 +1011,61 @@ mod tests {
             status: None,
             message: String::new(),
             retry_after: None,
-        };
+        }
+    }
+
+    const EVERY_FAILURE_KIND: [FailureKind; 15] = [
+        FailureKind::Blocked,
+        FailureKind::Unauthorized,
+        FailureKind::NoCredit,
+        FailureKind::OrgVerification,
+        FailureKind::RateLimited,
+        FailureKind::BadRequest,
+        FailureKind::NotFound,
+        FailureKind::Expired,
+        FailureKind::Server,
+        FailureKind::Other,
+        FailureKind::OutOfMemory,
+        FailureKind::EngineMissing,
+        FailureKind::EngineFailed,
+        FailureKind::ModelFileBad,
+        FailureKind::DeviceLost,
+    ];
+
+    /// Every constructor that takes a company, with `company`, in each case it words
+    /// differently.
+    fn with_company(company: Company) -> Vec<AppError> {
+        let mut all = vec![
+            not_fetched(company),
+            blocked(company, None, None, None),
+            blocked(company, Some(Stage::Prompt), Some(false), Some("req_1")),
+            blocked(company, Some(Stage::Output), Some(true), None),
+            job_lost(company),
+            closed_before_its_turn(company),
+            interrupted(company),
+            broke_off(company),
+            result_expired(company),
+            not_sent(company),
+            stopped_while_sending(company),
+            download_failed(company),
+        ];
+        for charged in [None, Some(false), Some(true)] {
+            all.push(not_answered(company, charged));
+            all.push(stopped(company, MediaKind::Image, charged));
+            all.push(stopped(company, MediaKind::Video, charged));
+        }
+        all.extend(every_fetch_error().iter().map(|e| from_fetch(company, e)));
+        all.extend(
+            EVERY_FAILURE_KIND
+                .iter()
+                .map(|kind| from_failure(company, &failure(*kind))),
+        );
+        all
+    }
+
+    /// Every constructor in this file, which `studio_errors_have_four_parts` checks. A new
+    /// constructor is added here too (Tasks L11, L13 and L15 append theirs).
+    fn every_constructor() -> Vec<AppError> {
         let mut all = vec![
             needs_confirmation(&[ConfirmReason::Video]),
             daily_limit(9.5, 10.0),
@@ -878,28 +1075,18 @@ mod tests {
             gallery_full(),
             no_local_engine(),
             invalid_settings(&[Invalid::EmptyPrompt], &model(Vec::new())),
-            blocked(Company::OpenAi, None, None, None),
             org_verification(),
-            job_lost(Company::OpenRouter),
-            interrupted(Company::OpenRouter),
-            interrupted(Company::Local),
-            result_expired(Company::OpenRouter),
             disk_full(),
             too_large(1024),
-            not_sent(Company::OpenAi),
-            not_answered(Company::OpenAi, None),
-            stopped(Company::OpenAi, MediaKind::Image, None),
-            download_failed(Company::OpenRouter),
             from_local(&LocalIo::Io("denied".into()), 1),
             from_gallery(&GalleryError::NotMedia),
             from_gallery(&GalleryError::Io("/a/path".into())),
             gallery_not_full_path(),
             numbered_folder(),
-            closed_before_its_turn(Company::OpenRouter),
             nothing_to_fetch(),
             too_big_to_show(),
-            not_fetched(Company::OpenRouter),
             bad_ref_name(),
+            added_picture_missing(),
             bad_poster(),
             export_onto_itself(),
             not_exported("denied"),
@@ -909,29 +1096,8 @@ mod tests {
             all.push(not_a_picture_for(to, true));
             all.push(not_a_picture_for(to, false));
         }
-        all.extend(
-            every_fetch_error()
-                .iter()
-                .map(|e| from_fetch(Company::OpenRouter, e)),
-        );
-        for kind in [
-            FailureKind::Blocked,
-            FailureKind::Unauthorized,
-            FailureKind::NoCredit,
-            FailureKind::OrgVerification,
-            FailureKind::RateLimited,
-            FailureKind::BadRequest,
-            FailureKind::NotFound,
-            FailureKind::Expired,
-            FailureKind::Server,
-            FailureKind::Other,
-            FailureKind::OutOfMemory,
-            FailureKind::EngineMissing,
-            FailureKind::EngineFailed,
-            FailureKind::ModelFileBad,
-            FailureKind::DeviceLost,
-        ] {
-            all.push(from_failure(Company::OpenRouter, &failure(kind)));
+        for company in [Company::OpenRouter, Company::OpenAi, Company::Local] {
+            all.extend(with_company(company));
         }
         all
     }
@@ -1029,6 +1195,110 @@ mod tests {
                 "{e:?}"
             );
         }
+    }
+
+    #[test]
+    fn a_run_on_this_computer_never_points_to_a_website() {
+        for e in with_company(Company::Local) {
+            for text in [&e.message, &e.next_step, &e.details] {
+                let lower = text.to_lowercase();
+                for cloud in [
+                    "openrouter",
+                    "openai",
+                    ".ai",
+                    ".com",
+                    "activity page",
+                    "internet",
+                    "account",
+                    "api key",
+                    "get it anyway",
+                    "may have been charged",
+                    "may still",
+                ] {
+                    assert!(!lower.contains(cloud), "{e:?} says {cloud:?}");
+                }
+                // The company's name for this computer is never a sentence's subject.
+                assert!(!text.contains("This computer"), "{e:?}");
+            }
+        }
+        let e = not_answered(Company::Local, None);
+        assert_eq!(
+            (e.code.as_str(), e.message.as_str(), e.next_step.as_str()),
+            (
+                "studio_not_answered",
+                "The Studio engine on this computer did not answer.",
+                "Try again; if it keeps happening, restart the app."
+            )
+        );
+        let e = job_lost(Company::Local);
+        assert_eq!(
+            e.message,
+            "The Studio engine on this computer no longer has this job."
+        );
+        assert_eq!(e.next_step, "Make it again if you still want it.");
+        let e = from_failure(Company::Local, &failure(FailureKind::NoCredit));
+        assert_eq!(e.code, "studio_no_credit");
+        assert_eq!(
+            e.message,
+            "The Studio engine on this computer could not make it."
+        );
+        assert_eq!(
+            from_failure(Company::Local, &failure(FailureKind::Server)).next_step,
+            "Try again; if it keeps happening, restart the app."
+        );
+        assert_eq!(
+            from_failure(Company::Local, &failure(FailureKind::OrgVerification)).code,
+            "studio_org_verification"
+        );
+        // The local kinds keep their own words.
+        assert_eq!(
+            from_failure(Company::Local, &failure(FailureKind::EngineFailed)).message,
+            "The Studio engine stopped."
+        );
+        // A cloud company still points to its page.
+        assert_eq!(
+            job_lost(Company::OpenRouter).next_step,
+            "Check your activity page on openrouter.ai, then make it again if you still want it."
+        );
+    }
+
+    #[test]
+    fn a_video_stopped_while_sending_has_no_get_it_anyway() {
+        let e = stopped_while_sending(Company::OpenRouter);
+        assert_eq!(e.code, "studio_stopped");
+        assert_eq!(
+            e.message,
+            "Stopped while sending; it may or may not have started."
+        );
+        assert_eq!(
+            e.next_step,
+            "It may still be charged: check your activity page on openrouter.ai before you make it again."
+        );
+        assert!(!e.next_step.contains("Get it anyway"));
+        assert_eq!(
+            stopped_while_sending(Company::Local).message,
+            "Stopped. Your computer is no longer working on it. Nothing was charged."
+        );
+    }
+
+    #[test]
+    fn a_task_that_broke_off_says_it_may_or_may_not_have_started() {
+        let e = broke_off(Company::OpenAi);
+        assert_eq!(e.code, "studio_interrupted");
+        assert_eq!(
+            e.message,
+            "Studio stopped following this after an error in the app; it may or may not have started."
+        );
+        assert!(e.next_step.contains("platform.openai.com"));
+        let e = added_picture_missing();
+        assert_eq!(
+            (e.code.as_str(), e.message.as_str(), e.next_step.as_str()),
+            (
+                "studio_ref_missing",
+                "One of the added pictures is no longer on this computer.",
+                "Add the picture again."
+            )
+        );
     }
 
     #[test]

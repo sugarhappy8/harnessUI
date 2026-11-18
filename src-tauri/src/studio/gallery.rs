@@ -477,7 +477,8 @@ impl Gallery {
     }
 
     /// The file of the added picture named `sha256`, and its type. A name that is not 64
-    /// lowercase hex characters is refused, so it can never reach outside `refs/`.
+    /// lowercase hex characters is refused, so it can never reach outside `refs/`; a name
+    /// with no file of any picture type is `GalleryError::Io` (the only `Io` it gives).
     pub fn ref_file(&self, sha256: &str) -> Result<(PathBuf, String), GalleryError> {
         if !is_sha256(sha256) {
             return Err(GalleryError::BadName);

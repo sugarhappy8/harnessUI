@@ -19,8 +19,8 @@ use std::time::{Duration, Instant};
 use agent::ProviderError;
 use agent::media::{
     Company, Cost, FailureKind, Fetched, JobDone, JobState, LocalIo, MediaError, MediaFailure,
-    MediaKind, MediaLimits, MediaProvider, MediaRequest, RawCatalog, RequestPreview, Routing,
-    SEED_MAX, Saved, Stage, Started,
+    MediaKind, MediaLimits, MediaProvider, MediaRequest, RawCatalog, RefRole, RequestPreview,
+    Routing, SEED_MAX, Saved, Stage, Started,
 };
 use async_trait::async_trait;
 use jiff::tz::TimeZone;
@@ -41,7 +41,7 @@ use super::prefs::{self, RunTarget, StudioPrefs, StudioPrefsPatch};
 use super::spend::{Charge, ConfirmReason, UNKNOWN_PRICE_RESERVE_USD, day_start_in};
 use super::test_support::{Scratch, mp4, png};
 use crate::attachments::PictureWorker;
-use crate::dto::{RunDto, StartRequest};
+use crate::dto::{RefInput, RunDto, StartRequest};
 use crate::error::{AppError, AppResult};
 
 const IMAGES: &str =
@@ -91,6 +91,8 @@ enum Answer {
     NotAPicture { cost: Option<Cost> },
     /// The request failed.
     Fail(MediaError),
+    /// The company's code panics (a bug in the app).
+    Panic,
 }
 
 /// What [`FakeProvider::download`] answers; by default it saves an MP4 file.
@@ -202,6 +204,11 @@ impl FakeProvider {
         self.gate.add_permits(64);
     }
 
+    /// Lets one held start go on.
+    fn release_one(&self) {
+        self.gate.add_permits(1);
+    }
+
     fn last_request(&self) -> MediaRequest {
         self.requests
             .lock()
@@ -308,6 +315,7 @@ impl MediaProvider for FakeProvider {
                 })
             }
             Answer::Fail(err) => Err(err),
+            Answer::Panic => panic!("the fake company's code broke"),
         }
     }
 
@@ -393,15 +401,48 @@ impl ProviderSource for FakeSource {
     }
 }
 
-/// Keeps every progress event.
+/// Keeps every progress event, and can hold the run task that sends the next `sending`
+/// event ([`Self::pause_at_sending`]).
 #[derive(Default)]
 struct FakeSink {
     events: Mutex<Vec<RunDto>>,
+    pause: Mutex<Option<Arc<Pause>>>,
+}
+
+/// Holds a run's task between recording `sending` and sending the request.
+#[derive(Default)]
+struct Pause {
+    /// The task is held.
+    reached: AtomicBool,
+    /// The task may go on.
+    go: AtomicBool,
+}
+
+impl FakeSink {
+    /// The next `sending` event holds its run's task until the pause's `go` is set.
+    fn pause_at_sending(&self) -> Arc<Pause> {
+        let pause = Arc::new(Pause::default());
+        *self.pause.lock().unwrap() = Some(Arc::clone(&pause));
+        pause
+    }
 }
 
 impl StudioSink for FakeSink {
     fn progress(&self, run: &RunDto) {
         self.events.lock().unwrap().push(run.clone());
+        if run.status != "sending" {
+            return;
+        }
+        let pause = self.pause.lock().unwrap().take();
+        let Some(pause) = pause else {
+            return;
+        };
+        pause.reached.store(true, Ordering::SeqCst);
+        // The run's task is on the app's runtime, not the test's: this thread can wait.
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while !pause.go.load(Ordering::SeqCst) && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(1));
+        }
     }
 }
 
@@ -1570,6 +1611,30 @@ async fn a_model_the_saved_lists_do_not_have_is_refused() {
     assert_eq!(h.provider.starts(), 0);
 }
 
+#[tokio::test]
+async fn an_added_picture_no_longer_on_this_computer_is_refused() {
+    let h = harness().await;
+    // A draft that still names a picture which went with the last run that used it.
+    let req = StartRequest {
+        refs: vec![RefInput {
+            sha256: "a".repeat(64),
+            role: RefRole::Reference,
+        }],
+        ..h.picture_req("x")
+    };
+    let err = h.manager.start(req, false).await.unwrap_err();
+    assert_eq!(err.code, "studio_ref_missing");
+    assert_eq!(
+        err.message,
+        "One of the added pictures is no longer on this computer."
+    );
+    assert_eq!(err.next_step, "Add the picture again.");
+    assert_eq!(h.provider.starts(), 0);
+    assert!(h.store_runs().await.is_empty());
+    assert!(h.audit_rows().await.is_empty());
+    assert_eq!(h.manager.usage().await.unwrap().spent_today_usd, 0.0);
+}
+
 // ---- the queue --------------------------------------------------------------------------------
 
 #[tokio::test]
@@ -1633,7 +1698,147 @@ async fn a_cancelled_queued_run_is_never_sent() {
     );
 }
 
+#[tokio::test]
+async fn the_runs_behind_one_that_leaves_the_queue_are_told_their_new_places() {
+    let h = harness().await;
+    h.provider.hold();
+    let mut ids = Vec::new();
+    for _ in 0..5 {
+        ids.push(h.manager.start(h.picture_req("x"), false).await.unwrap().id);
+    }
+    wait_until("two pictures are sent", || h.provider.starts() == 2).await;
+    let place = |id: &str| {
+        h.events_for(id)
+            .last()
+            .and_then(|event| event.queue_position)
+    };
+    assert_eq!(
+        [place(&ids[2]), place(&ids[3]), place(&ids[4])],
+        [Some(1), Some(2), Some(3)]
+    );
+
+    // The first one waiting is cancelled: the two behind it move up.
+    h.manager.cancel(&ids[2]).await.unwrap();
+    let last = |id: &str| h.events_for(id).last().cloned().unwrap();
+    for (id, now) in [(&ids[3], 1), (&ids[4], 2)] {
+        let event = last(id);
+        assert_eq!(event.status, "queued");
+        assert_eq!(event.queue_position, Some(now));
+        assert!(event.watching);
+    }
+
+    // One being sent finishes: the first one waiting starts, and the last moves up.
+    h.provider.release_one();
+    wait_until("the next one waiting is sent", || h.provider.starts() == 3).await;
+    wait_until("the last one is told its new place", || {
+        place(&ids[4]) == Some(1)
+    })
+    .await;
+    assert_eq!(last(&ids[4]).status, "queued");
+
+    h.provider.release_all();
+    for id in [&ids[0], &ids[1], &ids[3], &ids[4]] {
+        h.wait_status(id, "done").await;
+    }
+    // A run that got its place is never told a place in the queue after it.
+    for id in [&ids[3], &ids[4]] {
+        let events = h.events_for(id);
+        let sent = events.iter().position(|e| e.status == "sending").unwrap();
+        assert!(events[sent..].iter().all(|e| e.queue_position.is_none()));
+    }
+}
+
 // ---- cancel and failures ----------------------------------------------------------------------
+
+#[tokio::test]
+async fn a_cancel_that_comes_before_the_request_goes_out_sends_nothing() {
+    let h = harness().await;
+    let pause = h.sink.pause_at_sending();
+    let run = h.manager.start(h.openai_req(), true).await.unwrap();
+    wait_until("the run is recorded as sending", || {
+        pause.reached.load(Ordering::SeqCst)
+    })
+    .await;
+    // One poll of Cancel cancels the run's token while its task is still between recording
+    // `sending` and sending the request; Cancel then waits for the task.
+    let mut cancel = Box::pin(h.manager.cancel(&run.id));
+    tokio::select! {
+        biased;
+        _ = &mut cancel => panic!("Cancel waits for the run's task"),
+        () = std::future::ready(()) => {}
+    }
+    pause.go.store(true, Ordering::SeqCst);
+    let r = cancel.await.unwrap();
+    assert_eq!(r.status, "cancelled");
+    assert_eq!(h.provider.starts(), 0);
+    let error = r.error.unwrap();
+    assert_eq!(error.code, "studio_stopped");
+    assert_eq!(error.charged, Some(false));
+    assert_eq!(error.message, "Stopped. Nothing was charged.");
+    assert_eq!(h.manager.usage().await.unwrap().spent_today_usd, 0.0);
+    let row = h.audit_rows().await.pop().unwrap();
+    assert_eq!(row.result_status.as_deref(), Some("cancelled"));
+}
+
+#[tokio::test]
+async fn a_video_stopped_while_sending_has_no_job_to_get_later() {
+    let h = harness().await;
+    h.provider.hold();
+    let run = h.manager.start(h.video_req(), true).await.unwrap();
+    wait_until("the request is out", || h.provider.starts() == 1).await;
+    let r = h.manager.cancel(&run.id).await.unwrap();
+    assert_eq!(r.status, "cancelled");
+    assert_eq!(r.remote_id, None);
+    let error = r.error.unwrap();
+    assert_eq!(error.code, "studio_stopped");
+    assert_eq!(error.charged, None);
+    assert_eq!(
+        error.message,
+        "Stopped while sending; it may or may not have started."
+    );
+    assert!(
+        !error.next_step.contains("Get it anyway"),
+        "{}",
+        error.next_step
+    );
+    // There is no job to check, so Get it anyway is refused and nothing is sent again.
+    let refused = h.manager.fetch_anyway(&run.id).await.unwrap_err();
+    assert_eq!(refused.code, "bad_request");
+    h.provider.release_all();
+    assert_eq!(h.provider.starts(), 1);
+    assert_eq!(h.provider.checks(), 0);
+}
+
+#[tokio::test]
+async fn a_run_whose_task_breaks_off_is_recorded_as_interrupted_and_frees_its_place() {
+    let h = harness().await;
+    assert_eq!(PICTURES_AT_ONCE, 2);
+    let mut ids = Vec::new();
+    for _ in 0..PICTURES_AT_ONCE {
+        h.provider.answer(Answer::Panic);
+        ids.push(h.manager.start(h.picture_req("x"), false).await.unwrap().id);
+    }
+    for id in &ids {
+        let ended = h.wait_status(id, "interrupted").await;
+        let error = ended.error.unwrap();
+        assert_eq!(error.code, "studio_interrupted");
+        assert_eq!(error.charged, None);
+        assert!(ended.finished_at.is_some());
+        let rows = h.audit_rows_for(id).await;
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].result_status.as_deref(), Some("interrupted"));
+        assert!(h.scratch_is_gone(id));
+        assert_eq!(
+            h.statuses(id).last().map(String::as_str),
+            Some("interrupted")
+        );
+    }
+    assert!(h.manager.live().await.unwrap().is_empty());
+    // Both places are free again: the next run is sent and finishes.
+    let next = h.manager.start(h.picture_req("y"), false).await.unwrap();
+    h.wait_status(&next.id, "done").await;
+    assert_eq!(h.provider.starts(), 3);
+}
 
 #[tokio::test]
 async fn an_openai_picture_cancelled_while_sending_may_be_charged_and_counts() {
@@ -1641,6 +1846,7 @@ async fn an_openai_picture_cancelled_while_sending_may_be_charged_and_counts() {
     h.provider.hold();
     let run = h.manager.start(h.openai_req(), true).await.unwrap();
     h.wait_status(&run.id, "sending").await;
+    wait_until("the request is out", || h.provider.starts() == 1).await;
     let r = h.manager.cancel(&run.id).await.unwrap();
     assert_eq!(r.status, "cancelled");
     assert_eq!(r.error.as_ref().unwrap().charged, None);
@@ -1664,6 +1870,7 @@ async fn an_openrouter_picture_cancelled_while_sending_is_not_charged() {
     h.provider.hold();
     let run = h.manager.start(h.picture_req("x"), false).await.unwrap();
     h.wait_status(&run.id, "sending").await;
+    wait_until("the request is out", || h.provider.starts() == 1).await;
     let r = h.manager.cancel(&run.id).await.unwrap();
     assert_eq!(r.status, "cancelled");
     let error = r.error.unwrap();
@@ -2446,6 +2653,26 @@ async fn stop_watching_then_get_it_anyway_records_done_with_the_cost() {
 }
 
 #[tokio::test]
+async fn a_second_get_it_anyway_copies_the_first_rows_arguments() {
+    let h = harness().await;
+    let run = h.manager.start(h.video_req(), true).await.unwrap();
+    h.wait_status(&run.id, "waiting").await;
+    h.manager.cancel(&run.id).await.unwrap();
+    h.manager.fetch_anyway(&run.id).await.unwrap();
+    h.wait_for(&run.id, "watched again", |r| r.watching).await;
+    h.manager.cancel(&run.id).await.unwrap();
+    h.provider.check_from_now(Ok(done_job()));
+    h.manager.fetch_anyway(&run.id).await.unwrap();
+    h.wait_status(&run.id, "done").await;
+    let rows = h.audit_rows_for(&run.id).await; // oldest first
+    assert_eq!(rows.len(), 3);
+    assert_eq!(rows[2].parent_audit_id, Some(rows[1].id));
+    assert_eq!(rows[2].tool, "video");
+    assert_eq!(rows[2].arguments, rows[0].arguments);
+    assert_eq!(rows[2].result_status.as_deref(), Some("done"));
+}
+
+#[tokio::test]
 async fn after_30_minutes_it_says_still_not_ready() {
     let h = harness_polling(PollPlan {
         watch_limit: Duration::from_millis(50),
@@ -2999,6 +3226,7 @@ async fn shutdown_writes_nothing_and_leaves_waiting_runs_queued() {
     h.provider.hold();
     let sending = h.manager.start(h.picture_req("x"), false).await.unwrap();
     h.wait_status(&sending.id, "sending").await;
+    wait_until("the picture is out", || h.provider.starts() == 2).await;
     h.manager.shutdown().await;
     h.provider.release_all();
     tokio::time::sleep(Duration::from_millis(100)).await;
