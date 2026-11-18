@@ -725,6 +725,30 @@ impl H {
         manager
     }
 
+    /// The app as it starts again after a restart that finds no endpoint: no job can be
+    /// checked.
+    fn manager_without_endpoints(&self) -> StudioManager {
+        let manager = StudioManager::new(
+            StudioDeps {
+                store: self.store.clone(),
+                providers: Arc::new(FakeSource {
+                    provider: self.provider2.clone(),
+                    endpoints: HashMap::new(),
+                }),
+                sink: self.sink.clone(),
+                fetch: self.fetch.clone(),
+                clock: Arc::new(FixedClock(self.now)),
+                default_gallery: self.gallery_root.clone(),
+                thumbs: None,
+                limits: MediaLimits::default(),
+                poll: fast_poll(),
+            },
+            StudioPrefs::default(),
+        );
+        self.managers.lock().unwrap().push(manager.clone());
+        manager
+    }
+
     fn req(&self, target: i64, kind: MediaKind, model: &str, prompt: &str) -> StartRequest {
         StartRequest {
             client_token: uuid::Uuid::new_v4().to_string(),
@@ -2804,25 +2828,7 @@ async fn a_restart_with_the_key_gone_keeps_the_job_for_later() {
         .seed_video_run(store::CreationStatus::Waiting, Some("vid_3"))
         .await;
     // The endpoint is no longer offered: the job cannot be checked now.
-    let second = StudioManager::new(
-        StudioDeps {
-            store: h.store.clone(),
-            providers: Arc::new(FakeSource {
-                provider: h.provider2.clone(),
-                endpoints: HashMap::new(),
-            }),
-            sink: h.sink.clone(),
-            fetch: h.fetch.clone(),
-            clock: Arc::new(FixedClock(h.now)),
-            default_gallery: h.gallery_root.clone(),
-            thumbs: None,
-            limits: MediaLimits::default(),
-            poll: fast_poll(),
-        },
-        StudioPrefs::default(),
-    );
-    h.managers.lock().unwrap().push(second.clone());
-    second.resume_interrupted().await;
+    h.manager_without_endpoints().resume_interrupted().await;
     let run = h.run_dto(&id).await;
     assert_eq!(run.status, "failed");
     assert_eq!(run.remote_id.as_deref(), Some("vid_3"));
@@ -2830,6 +2836,154 @@ async fn a_restart_with_the_key_gone_keeps_the_job_for_later() {
     assert_eq!(error.code, "studio_no_endpoint");
     assert_eq!(error.charged, None);
     assert_eq!(h.provider2.checks(), 0);
+}
+
+// ---- a job known to have finished stays charged -----------------------------------------------
+
+/// What Stop says of a video whose job finished.
+const STOPPED_CHARGED: &str = "Stopped. OpenRouter finished this video, so it was charged.";
+
+#[tokio::test]
+async fn a_restart_mid_download_with_the_key_gone_says_it_was_charged() {
+    let h = harness().await;
+    let id = h
+        .seed_video_run(store::CreationStatus::Downloading, Some("vid_4"))
+        .await;
+    h.manager_without_endpoints().resume_interrupted().await;
+    let run = h.run_dto(&id).await;
+    assert_eq!(run.status, "failed");
+    assert_eq!(run.remote_id.as_deref(), Some("vid_4"));
+    let error = run.error.unwrap();
+    assert_eq!(error.code, "studio_no_endpoint");
+    assert_eq!(error.charged, Some(true));
+    assert_eq!(h.provider2.checks(), 0);
+}
+
+#[tokio::test]
+async fn a_restart_mid_download_then_stop_says_it_was_charged() {
+    let h = harness().await;
+    let id = h
+        .seed_video_run(store::CreationStatus::Downloading, Some("vid_7"))
+        .await;
+    // Its checks after the restart do not say done yet.
+    h.manager.resume_interrupted().await;
+    wait_until("the job is checked again", || h.provider.checks() >= 1).await;
+    let stopped = h.manager.cancel(&id).await.unwrap();
+    assert_eq!(stopped.status, "cancelled");
+    assert_eq!(stopped.remote_id.as_deref(), Some("vid_7"));
+    let error = stopped.error.unwrap();
+    assert_eq!(error.charged, Some(true));
+    assert_eq!(error.message, STOPPED_CHARGED);
+    assert_eq!(h.provider.starts(), 0);
+    assert_eq!(h.provider.downloads(), 0);
+}
+
+#[tokio::test]
+async fn a_resumed_download_stopped_in_its_queue_says_it_was_charged() {
+    let h = harness().await;
+    // Two videos fill the endpoint's places.
+    for _ in 0..VIDEOS_AT_ONCE {
+        let run = h.manager.start(h.video_req(), true).await.unwrap();
+        h.wait_status(&run.id, "waiting").await;
+    }
+    let id = h
+        .seed_video_run(store::CreationStatus::Downloading, Some("vid_5"))
+        .await;
+    h.manager.resume_interrupted().await;
+    assert_eq!(h.run_dto(&id).await.queue_position, Some(1));
+    let stopped = h.manager.cancel(&id).await.unwrap();
+    assert_eq!(stopped.status, "cancelled");
+    let error = stopped.error.unwrap();
+    assert_eq!(error.charged, Some(true));
+    assert_eq!(error.message, STOPPED_CHARGED);
+    let checked = h.provider.checked.lock().unwrap().clone();
+    assert!(checked.iter().all(|check| check.remote_id != "vid_5"));
+}
+
+#[tokio::test]
+async fn a_resumed_download_still_not_ready_then_stopped_says_it_was_charged() {
+    let h = harness_polling(PollPlan {
+        watch_limit: Duration::from_millis(50),
+        ..fast_poll()
+    })
+    .await;
+    let id = h
+        .seed_video_run(store::CreationStatus::Downloading, Some("vid_8"))
+        .await;
+    h.manager.resume_interrupted().await;
+    h.wait_for(&id, "still not ready", |r| r.stale).await;
+    let stopped = h.manager.cancel(&id).await.unwrap();
+    assert_eq!(stopped.status, "cancelled");
+    let error = stopped.error.unwrap();
+    assert_eq!(error.charged, Some(true));
+    assert_eq!(error.message, STOPPED_CHARGED);
+}
+
+#[tokio::test]
+async fn a_finished_job_the_company_no_longer_has_was_charged() {
+    let h = harness().await;
+    let id = h
+        .seed_video_run(store::CreationStatus::Downloading, Some("vid_6"))
+        .await;
+    h.provider.answer_check(Ok(JobState::Gone));
+    h.manager.resume_interrupted().await;
+    let failed = h.wait_status(&id, "failed").await;
+    let error = failed.error.unwrap();
+    assert_eq!(error.code, "studio_job_lost");
+    assert_eq!(error.charged, Some(true));
+}
+
+/// A video whose job finished ($0.36) but whose download hit a full disk, then *Get it
+/// anyway*: its checks from then on do not say done yet.
+async fn get_it_anyway_after_a_full_disk(h: &H) -> String {
+    h.provider.answer_check(Ok(done_job()));
+    h.provider
+        .answer_download(Download::Fail(MediaError::Local(LocalIo::DiskFull)));
+    let run = h.manager.start(h.video_req(), true).await.unwrap();
+    let failed = h.wait_status(&run.id, "failed").await;
+    assert_eq!(failed.error.unwrap().charged, Some(true));
+    let back = h.manager.fetch_anyway(&run.id).await.unwrap();
+    assert_eq!(back.status, "waiting");
+    run.id
+}
+
+#[tokio::test]
+async fn stopping_get_it_anyway_after_a_full_disk_keeps_it_charged() {
+    let h = harness().await;
+    let id = get_it_anyway_after_a_full_disk(&h).await;
+    wait_until("the job is checked again", || h.provider.checks() >= 2).await;
+    let stopped = h.manager.cancel(&id).await.unwrap();
+    assert_eq!(stopped.status, "cancelled");
+    assert_eq!(stopped.cost_usd, Some(0.36));
+    let error = stopped.error.unwrap();
+    assert_eq!(error.charged, Some(true));
+    assert_eq!(error.message, STOPPED_CHARGED);
+    let rows = h.audit_rows_for(&id).await;
+    assert_eq!(rows.len(), 2);
+    assert_eq!(rows[1].result_status.as_deref(), Some("cancelled"));
+    assert_eq!(h.provider.starts(), 1);
+}
+
+#[tokio::test]
+async fn a_restart_during_get_it_anyway_keeps_it_charged() {
+    let h = harness().await;
+    let id = get_it_anyway_after_a_full_disk(&h).await;
+    h.manager.shutdown().await;
+    // Back to `waiting` with no error: only its recorded cost says the job finished.
+    let left = h.store_run(&id).await;
+    assert_eq!(left.status, store::CreationStatus::Waiting);
+    assert!(left.error.is_none());
+    assert_eq!(left.cost_usd, Some(0.36));
+    let checks = h.provider.checks();
+    let second = h.manager_with(&h.provider);
+    second.resume_interrupted().await;
+    wait_until("the job is checked again", || h.provider.checks() > checks).await;
+    let stopped = second.cancel(&id).await.unwrap();
+    assert_eq!(stopped.status, "cancelled");
+    let error = stopped.error.unwrap();
+    assert_eq!(error.charged, Some(true));
+    assert_eq!(error.message, STOPPED_CHARGED);
+    assert_eq!(h.provider.starts(), 1);
 }
 
 #[tokio::test]

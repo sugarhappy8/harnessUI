@@ -228,10 +228,13 @@ enum Step {
     /// Send the run's request, once.
     Send(MediaRequest),
     /// Follow the started video job `remote_id`: check it, then download its result. `started`
-    /// is when its request was sent, or when *Get it anyway* started a follow-up.
+    /// is when its request was sent, or when *Get it anyway* started a follow-up. `finished`
+    /// is whether the job is known to have reported done, so it was charged (see
+    /// [`finished_job`]).
     Follow {
         remote_id: String,
         started: Option<i64>,
+        finished: bool,
     },
 }
 
@@ -245,12 +248,22 @@ impl Job {
     }
 
     /// What it is charged when it is stopped before its task does anything: nothing for a
-    /// request never sent; unknown for a video job that started.
+    /// request never sent; for a video job that started, as [`Self::job_charge`] says.
     fn charge_if_stopped_waiting(&self) -> Option<bool> {
-        matches!(self.step, Step::Send(_)).then_some(false)
+        match self.step {
+            Step::Send(_) => Some(false),
+            Step::Follow { .. } => self.job_charge(),
+        }
     }
 
-    /// The same run, to follow its started job `remote_id` (never to send it again).
+    /// What its started video job is charged when it ends before it reports done (again):
+    /// charged when it is known to have finished, else unknown.
+    fn job_charge(&self) -> Option<bool> {
+        matches!(self.step, Step::Follow { finished: true, .. }).then_some(true)
+    }
+
+    /// The same run, to follow its started job `remote_id` (never to send it again), keeping
+    /// whether that job is known to have finished.
     fn following(&self, remote_id: &str, started: Option<i64>) -> Self {
         Self {
             run_id: self.run_id.clone(),
@@ -264,6 +277,7 @@ impl Job {
             step: Step::Follow {
                 remote_id: remote_id.to_owned(),
                 started,
+                finished: self.job_charge() == Some(true),
             },
         }
     }
@@ -442,6 +456,20 @@ fn usable_cost(usd: Option<f64>) -> Option<f64> {
     usd.filter(|usd| usd.is_finite() && *usd >= 0.0)
 }
 
+/// Whether recorded run `run`'s video job is known to have reported done, so it was charged:
+/// its result was downloading, its cost is recorded (only a job that reported done has one),
+/// or how it ended said it was charged (a failure after done, or a Stop while downloading).
+fn finished_job(run: &store::CreationRun) -> bool {
+    run.status == store::CreationStatus::Downloading
+        || run.cost_usd.is_some()
+        || run
+            .error
+            .as_ref()
+            .and_then(|error| error.get("charged"))
+            .and_then(Value::as_bool)
+            == Some(true)
+}
+
 /// What one run's task works with.
 struct Task<'a> {
     job: &'a Job,
@@ -617,10 +645,11 @@ impl StudioManager {
             Found::Neither => {}
         }
         // A video still not ready has no task (or one just finishing): Stop watching ends it
-        // here. It started, so it may still be charged.
+        // here. It started, so it may still be charged (it was, when it is known to have
+        // finished).
         if let Some(job) = self.inner.take_stale(run_id) {
             self.inner
-                .end_run(&job, Ending::stopped(&job, None), job.started())
+                .end_run(&job, Ending::stopped(&job, job.job_charge()), job.started())
                 .await;
         }
         let run = self
@@ -700,8 +729,9 @@ impl StudioManager {
     /// (`cancelled`, not charged); one being sent may or may not have started
     /// (`interrupted`, charged unknown); a video job waiting or downloading is checked again,
     /// its watch limit counted from now, and downloaded, never sent again. A job that cannot
-    /// be checked now (its endpoint or key is gone) ends `failed` with why, keeping its remote
-    /// id for *Get it anyway*. Runs on this computer are left to the local lane.
+    /// be checked now (its endpoint or key is gone) ends `failed` with why (charged when it
+    /// had finished, else unknown), keeping its remote id for *Get it anyway*. Runs on this
+    /// computer are left to the local lane.
     pub async fn resume_interrupted(&self) {
         let inner = &self.inner;
         // Never beside a start: a run just recorded but not yet queued is not the app's leftover.
@@ -1153,7 +1183,8 @@ impl Inner {
                         }
                     }
                     Err(error) => {
-                        let ending = Ending::failed(error, None);
+                        // A job that finished was charged; any other may still be.
+                        let ending = Ending::failed(error, finished_job(&run).then_some(true));
                         self.record_end(&run.id, company, run.audit_id, ending, run.started_at)
                             .await;
                     }
@@ -1184,7 +1215,8 @@ impl Inner {
     }
 
     /// The job that follows recorded run `run`'s video job `remote_id`, with its endpoint and
-    /// key (refused as `ProviderSource::media` refuses).
+    /// key (refused as `ProviderSource::media` refuses), and whether the job is known to have
+    /// finished (read from `run` as it is before it is followed).
     async fn follow_job(
         &self,
         run: &store::CreationRun,
@@ -1203,7 +1235,11 @@ impl Inner {
             endpoint,
             seed: run.params.pointer("/params/seed").and_then(Value::as_u64),
             audit_id: run.audit_id,
-            step: Step::Follow { remote_id, started },
+            step: Step::Follow {
+                remote_id,
+                started,
+                finished: finished_job(run),
+            },
         })
     }
 
@@ -1324,7 +1360,9 @@ impl Inner {
         };
         match &job.step {
             Step::Send(request) => self.send(&task, request).await,
-            Step::Follow { remote_id, started } => self.follow(&task, remote_id, *started).await,
+            Step::Follow {
+                remote_id, started, ..
+            } => self.follow(&task, remote_id, *started).await,
         }
         match tokio::fs::remove_dir_all(&task.scratch).await {
             Ok(()) => {}
@@ -1438,7 +1476,8 @@ impl Inner {
                 }
                 Ok(JobState::Gone) => {
                     let lost = errors::job_lost(job.endpoint.company);
-                    return self.end_run(job, Ending::failed(lost, None), started).await;
+                    let ending = Ending::failed(lost, job.job_charge());
+                    return self.end_run(job, ending, started).await;
                 }
                 Ok(JobState::Running {
                     progress: Some(now),
@@ -1469,10 +1508,11 @@ impl Inner {
         }
     }
 
-    /// Stop watching a video job: it started, so it may still finish and be charged; its
-    /// remote id stays for *Get it anyway*.
+    /// Stop watching a video job: it started, so it may still finish and be charged (it was,
+    /// when it is known to have finished); its remote id stays for *Get it anyway*.
     async fn stop_watching(&self, job: &Job, started: Option<i64>) {
-        self.end_run(job, Ending::stopped(job, None), started).await;
+        self.end_run(job, Ending::stopped(job, job.job_charge()), started)
+            .await;
     }
 
     /// The watch limit passed: the run stays `waiting`, its audit row open, no longer
