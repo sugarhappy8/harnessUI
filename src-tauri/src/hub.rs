@@ -819,6 +819,16 @@ pub async fn register_installed(
     .await
 }
 
+/// A file the import cannot read as a GGUF model, and why (`detail`).
+fn not_gguf(detail: impl std::fmt::Display) -> AppError {
+    AppError::new(
+        "not_gguf",
+        "This file is not a GGUF model the app can read.",
+        "Pick a .gguf file.",
+        detail.to_string(),
+    )
+}
+
 /// [`register_installed`] on a store. Registering a file again without saved facts (an
 /// import of a downloaded file) keeps the facts saved before, as long as the file still
 /// has the same size.
@@ -833,14 +843,7 @@ async fn register_installed_in(
     source: ModelSource,
     saved: SavedFacts,
 ) -> AppResult<store::ModelId> {
-    let header = models::read_file(path).map_err(|e| {
-        AppError::new(
-            "not_gguf",
-            "This file is not a GGUF model the app can read.",
-            "Pick a .gguf file.",
-            e.to_string(),
-        )
-    })?;
+    let header = models::read_file(path).map_err(not_gguf)?;
     let s = ModelSummary::from_header(&header);
     if s.is_projector {
         return Err(AppError::bad_request(
@@ -1053,13 +1056,19 @@ pub(crate) fn diffusion_import_refusal(
     .then(crate::studio::errors::picture_model)
 }
 
-/// [`diffusion_import_refusal`] for the file at `path`. A file that does not read is left
-/// to the import's own check, which says what it is not.
+/// [`diffusion_import_refusal`] for the file at `path`. A file that names no architecture
+/// and whose tensor table does not read is refused as not a model the app can read: nothing
+/// says it is a chat model, and a picture model's table can hold what the reader refuses
+/// (a tensor of five dimensions).
 fn refuse_picture_model(path: &Path) -> AppResult<()> {
     let arch = models::read_file(path)
         .ok()
         .and_then(|h| h.architecture().map(str::to_string));
-    let shapes = models::read_tensor_shapes(path).unwrap_or_default();
+    let shapes = match models::read_tensor_shapes(path) {
+        Ok(shapes) => shapes,
+        Err(e) if arch.is_none() => return Err(not_gguf(e)),
+        Err(_) => Vec::new(),
+    };
     match diffusion_import_refusal(arch.as_deref(), &shapes) {
         Some(e) => Err(e),
         None => Ok(()),
@@ -1868,10 +1877,39 @@ mod tests {
         )
         .unwrap();
         assert!(refuse_picture_model(&named).is_err());
-        // Not a GGUF: the import's own check says so.
+        // Not a GGUF: refused in the import's own words.
         let text = dir.0.join("notes.gguf");
         std::fs::write(&text, "not a model").unwrap();
-        assert!(refuse_picture_model(&text).is_ok());
+        assert_eq!(refuse_picture_model(&text).unwrap_err().code, "not_gguf");
+    }
+
+    /// A file with no architecture whose tensor table the reader refuses (a picture model's
+    /// five-dimensional patch embedding) never joins the chat list; with an architecture,
+    /// the architecture decides.
+    #[test]
+    fn a_file_with_no_architecture_and_an_unreadable_table_is_refused() {
+        let dir = scratch();
+        let table = || {
+            models::gguf::testing::Writer::new()
+                .shaped_tensor("blk.0.attn_q.weight", &[64, 64])
+                .shaped_tensor("patch_embedding.weight", &[2, 2, 1, 48, 1536])
+        };
+        let bare = dir.0.join("model.gguf");
+        std::fs::write(&bare, table().build()).unwrap();
+        assert!(models::read_file(&bare).unwrap().architecture().is_none());
+        assert!(models::read_tensor_shapes(&bare).is_err());
+        let e = refuse_picture_model(&bare).unwrap_err();
+        assert_eq!(e.code, "not_gguf");
+        assert_eq!(e.message, "This file is not a GGUF model the app can read.");
+        let chat = dir.0.join("chat.gguf");
+        std::fs::write(&chat, table().str("general.architecture", "qwen3").build()).unwrap();
+        assert!(refuse_picture_model(&chat).is_ok());
+        let wan = dir.0.join("wan.gguf");
+        std::fs::write(&wan, table().str("general.architecture", "wan").build()).unwrap();
+        assert_eq!(
+            refuse_picture_model(&wan).unwrap_err().code,
+            "picture_model"
+        );
     }
 
     /// More than four models is refused before anything is read.

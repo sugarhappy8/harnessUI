@@ -23,9 +23,10 @@ network.
 Real answers from huggingface.co, recorded the day the catalog's picture and video parts
 were pinned (`catalog/models.json` takes every revision, size and SHA-256 from these, and
 `gen_search::tests::every_part_repo_is_its_listings_canonical_id` checks that it does).
-Only the whitespace was changed (indented). Each repository's `id` is the canonical one
-its listing gives: an old name (Comfy-Org's `flux2-klein-4B`, `z_image_turbo`,
-`Wan_2.1_ComfyUI_repackaged`) answers with a redirect.
+Only the whitespace was changed (indented), except where a table below says an item was
+removed. Each repository's `id` is the canonical one its listing gives: an old name
+(Comfy-Org's `flux2-klein-4B`, `z_image_turbo`, `Wan_2.1_ComfyUI_repackaged`) answers with
+a redirect.
 
 | File | Repository |
 |---|---|
@@ -48,4 +49,4 @@ The search answers are the three queries `HfClient::search_generators` sends
 |---|---|
 | `gen-search-text-to-image.json` | `pipeline_tag=text-to-image`, `search=klein` |
 | `gen-search-image-to-video.json` | `pipeline_tag=image-to-video`, `search=wan2.2 5b` (holds Turbo repositories) |
-| `gen-search-untagged.json` | no pipeline tag, `search=5b` (holds Green-Sky's FastWan, which has no pipeline tag, and chat models) |
+| `gen-search-untagged.json` | no pipeline tag, `search=5b` (holds Green-Sky's FastWan, which has no pipeline tag, and chat models; one unrelated chat repository was removed from the recorded answer, so it holds 29 items) |

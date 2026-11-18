@@ -287,6 +287,16 @@ pub fn read_with_tensors<R: Read + Seek>(
     reader: R,
     len: u64,
 ) -> Result<(GgufHeader, Vec<TensorEntry>), GgufError> {
+    read_checked_table(reader, len).map(|(header, _, tensors)| (header, tensors))
+}
+
+/// The header, the tensor table as written and each tensor's size, with every refusal of
+/// [`read_tensor_table`]: the one reader [`read_with_tensors`] and [`read_tensor_shapes`]
+/// share, so they refuse the same files.
+fn read_checked_table<R: Read + Seek>(
+    reader: R,
+    len: u64,
+) -> Result<(GgufHeader, Vec<RawTensor>, Vec<TensorEntry>), GgufError> {
     let mut r = Reader {
         inner: reader,
         pos: 0,
@@ -296,7 +306,7 @@ pub fn read_with_tensors<R: Read + Seek>(
     let header = read_header(&mut r, false)?;
     let raw = read_raw_tensors(&mut r, &header)?;
     let tensors = sizes_from_offsets(&raw, r.pos, len, alignment(&header)?)?;
-    Ok((header, tensors))
+    Ok((header, raw, tensors))
 }
 
 /// Reads every tensor's name and dimensions from the GGUF file at `path`, as written. Refused
@@ -310,15 +320,7 @@ pub fn read_tensor_shapes(path: &Path) -> Result<Vec<TensorShape>, GgufError> {
 
 /// [`read_tensor_shapes`] from `reader`, which holds `len` bytes in total.
 fn read_shapes<R: Read + Seek>(reader: R, len: u64) -> Result<Vec<TensorShape>, GgufError> {
-    let mut r = Reader {
-        inner: reader,
-        pos: 0,
-        len,
-        kept: 0,
-    };
-    let header = read_header(&mut r, false)?;
-    let raw = read_raw_tensors(&mut r, &header)?;
-    sizes_from_offsets(&raw, r.pos, len, alignment(&header)?)?;
+    let (_, raw, _) = read_checked_table(reader, len)?;
     Ok(raw
         .into_iter()
         .map(|t| TensorShape {

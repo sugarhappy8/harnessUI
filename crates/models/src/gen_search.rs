@@ -163,7 +163,8 @@ fn not_yet(why: &str) -> Recognition {
 /// offered; then it must name exactly one family harnessUI has a record of, of the size
 /// the record states (when the listing states one) and an architecture a picture or video
 /// model has (when it states one); then its diffusion files are the `.gguf` files that are
-/// not encoders, decoders or projectors and have a published SHA-256.
+/// not encoders, decoders or projectors, whose own name names no other model, and that
+/// have a published SHA-256.
 ///
 /// A name cannot prove a file's family: the downloaded file's tensor table is read before
 /// it is added and before every run.
@@ -216,10 +217,33 @@ pub fn recognise(detail: &RepoDetail, families: &BTreeMap<GenFamily, FamilyRecor
             return not_yet(UNKNOWN_KIND);
         }
     }
-    let files: Vec<RepoFile> = candidates
+    // One family token decides for the id and every file name together, so a file whose own
+    // name says it is another model (the full Wan 2.2 beside FastWan) is not offered under
+    // this family; nor, when the other files name the family, one that names none (a 9B
+    // klein beside the 4B).
+    let own: Vec<(&RepoFile, NameMatch)> = candidates
         .into_iter()
-        .filter(|f| f.sha256.is_some())
-        .cloned()
+        .map(|f| (f, family_of_name(&f.path)))
+        .collect();
+    let files_name_it = own.iter().any(|(_, m)| *m == NameMatch::Family(family));
+    let (named, other): (Vec<_>, Vec<_>) = own.into_iter().partition(|(_, m)| match m {
+        NameMatch::Family(f) => *f == family,
+        NameMatch::None => !files_name_it,
+        NameMatch::UncheckedWan22 | NameMatch::Several => false,
+    });
+    if named.is_empty() && !other.is_empty() {
+        return not_yet(
+            match family_of_names(other.iter().map(|(f, _)| f.path.as_str())) {
+                NameMatch::UncheckedWan22 => UNCHECKED_WAN22,
+                NameMatch::Family(_) | NameMatch::Several => SEVERAL_KINDS,
+                NameMatch::None => UNKNOWN_KIND,
+            },
+        );
+    }
+    let files: Vec<RepoFile> = named
+        .into_iter()
+        .filter(|(f, _)| f.sha256.is_some())
+        .map(|(f, _)| f.clone())
         .collect();
     if files.is_empty() {
         return not_yet(NO_CHECKSUM);
@@ -1031,7 +1055,7 @@ mod tests {
                 rec
             )
             .map(|e| e.licenses[&e.parts[0].license].sha256.clone())
-            .unwrap_or_default()
+            .unwrap()
         );
     }
 
@@ -1061,6 +1085,84 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    /// The listing `name` with its `.gguf` files replaced by `files`, each taken from the
+    /// recorded listing it is in (`(listing, file)`), kept as they are otherwise.
+    fn with_ggufs(name: &str, files: &[(&str, &str)]) -> RepoDetail {
+        let mut v = listing(name);
+        let siblings = v["siblings"].as_array_mut().unwrap();
+        siblings.retain(|s| !s["rfilename"].as_str().unwrap().ends_with(".gguf"));
+        for (from, file) in files {
+            let s = listing(from)["siblings"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|s| s["rfilename"] == *file)
+                .unwrap_or_else(|| panic!("{from} has no {file}"))
+                .clone();
+            siblings.push(s);
+        }
+        parse(&v)
+    }
+
+    fn offered(d: &RepoDetail) -> Vec<String> {
+        match recognise(d, &families()) {
+            Recognition::Supported { files, .. } => files.into_iter().map(|f| f.path).collect(),
+            other => panic!("{}: {other:?}", d.id),
+        }
+    }
+
+    /// One family token decides for a whole repository, but a file whose own name says it is
+    /// another model is not offered under that family.
+    #[test]
+    fn a_mixed_repo_offers_only_its_familys_files() {
+        const FAST: &str = "repo-fastwan22-ti2v-5b-gguf.json";
+        const FULL: &str = "repo-wan22-ti2v-5b-full-gguf.json";
+        // FastWan and the full Wan 2.2 in one repository: only the FastWan file.
+        let mixed = with_ggufs(
+            FAST,
+            &[
+                (FAST, "FastWan2.2-TI2V-5B-q6_k.gguf"),
+                (FULL, "Wan2.2-TI2V-5B-Q4_K_M.gguf"),
+            ],
+        );
+        assert_eq!(
+            family_of_name("Wan2.2-TI2V-5B-Q4_K_M.gguf"),
+            NameMatch::UncheckedWan22
+        );
+        assert_eq!(offered(&mixed), ["FastWan2.2-TI2V-5B-q6_k.gguf"]);
+        // Only the full Wan 2.2 under a FastWan name: nothing, and why.
+        assert!(matches!(
+            recognise(&with_ggufs(FAST, &[(FULL, "Wan2.2-TI2V-5B-Q4_K_M.gguf")]), &families()),
+            Recognition::NotSupportedYet(r) if r.contains("fast version")
+        ));
+        // A 9B klein beside the 4B files of a 4B repository (its name has no family token).
+        const KLEIN: &str = "repo-flux2-klein-4b-gguf.json";
+        let klein = with_ggufs(
+            KLEIN,
+            &[
+                (KLEIN, "flux-2-klein-4b-Q4_0.gguf"),
+                ("repo-flux2-klein-9b-gguf.json", "flux-2-klein-9b-Q4_0.gguf"),
+                (KLEIN, "flux-2-klein-4b-Q8_0.gguf"),
+            ],
+        );
+        assert_eq!(
+            offered(&klein),
+            ["flux-2-klein-4b-Q4_0.gguf", "flux-2-klein-4b-Q8_0.gguf"]
+        );
+        // Files that name no family are offered when the repository's name is the family's
+        // and no file names it.
+        let mut v = listing(KLEIN);
+        for s in v["siblings"].as_array_mut().unwrap() {
+            if let Some(n) = s["rfilename"]
+                .as_str()
+                .and_then(|n| n.strip_prefix("flux-2-klein-4b-"))
+            {
+                s["rfilename"] = format!("model-{n}").into();
+            }
+        }
+        assert_eq!(offered(&parse(&v)), ["model-Q4_0.gguf", "model-Q8_0.gguf"]);
     }
 
     #[test]

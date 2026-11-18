@@ -1732,50 +1732,26 @@ mod tests {
         );
     }
 
-    /// A one-request server: answers every request with `status`, `headers` and `body`,
-    /// and sends the request line it saw.
+    /// A one-request server: answers with `status`, `headers` and `body`, and sends the
+    /// request line it saw.
     async fn answer_once(
         status: &'static str,
         headers: &'static str,
         body: String,
-    ) -> (String, tokio::sync::oneshot::Receiver<String>) {
-        use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let addr = listener.local_addr().unwrap();
-        let (tx, rx) = tokio::sync::oneshot::channel();
-        tokio::spawn(async move {
-            let (sock, _) = listener.accept().await.unwrap();
-            let (r, mut w) = sock.into_split();
-            let mut r = BufReader::new(r);
-            let mut line = String::new();
-            r.read_line(&mut line).await.unwrap();
-            loop {
-                let mut h = String::new();
-                if r.read_line(&mut h).await.unwrap() == 0 || h == "\r\n" {
-                    break;
-                }
-            }
-            let _ = tx.send(line);
-            let resp = format!(
-                "HTTP/1.1 {status}\r\n{headers}content-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
-                body.len()
-            );
-            w.write_all(resp.as_bytes()).await.unwrap();
-            let _ = w.shutdown().await;
-        });
-        (format!("http://{addr}"), rx)
+    ) -> (String, tokio::sync::mpsc::UnboundedReceiver<String>) {
+        answer_each(1, status, headers, move |_| body.clone()).await
     }
 
     /// `repo` asks for the uploader's fields and reads them from the answer.
     #[tokio::test]
     async fn repo_asks_for_the_uploader_fields() {
-        let (url, seen) = answer_once("200 OK", "", FULL.to_string()).await;
+        let (url, mut seen) = answer_once("200 OK", "", FULL.to_string()).await;
         let d = HfClient::for_test(&url)
             .repo("example-quants/Sample-7B-GGUF", None)
             .await
             .unwrap();
         assert_eq!(d.info.downloads, Some(123_456));
-        let line = seen.await.unwrap();
+        let line = seen.recv().await.unwrap();
         assert!(
             line.starts_with("GET /api/models/example-quants/Sample-7B-GGUF?"),
             "{line}"
@@ -1828,7 +1804,8 @@ mod tests {
 
     /// Recorded on 2026-11-18 with the three queries `search_generators` sends (limit 30,
     /// most downloads first): text-to-image for "klein", image-to-video for "wan2.2 5b",
-    /// and no pipeline tag for "5b".
+    /// and no pipeline tag for "5b". Unrelated items were removed from the recorded
+    /// untagged answer (one chat repository no assertion uses), so it holds 29 items.
     const GEN_TEXT_TO_IMAGE: &str =
         include_str!("../tests/fixtures/hf/gen-search-text-to-image.json");
     const GEN_IMAGE_TO_VIDEO: &str =
@@ -1948,20 +1925,24 @@ mod tests {
         assert!(p.is_empty(), "{p:?}");
     }
 
-    /// A server answering `n` requests, each with the answer `respond` gives for its request
-    /// line, and sending the request lines it saw.
+    /// A server answering `n` requests, each with `status`, `headers` and the body `respond`
+    /// gives for its request line, and sending the request lines it saw.
     async fn answer_each(
         n: usize,
-        respond: fn(&str) -> String,
+        status: &'static str,
+        headers: &'static str,
+        respond: impl Fn(&str) -> String + Send + Sync + 'static,
     ) -> (String, tokio::sync::mpsc::UnboundedReceiver<String>) {
         use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        let respond = std::sync::Arc::new(respond);
         tokio::spawn(async move {
             for _ in 0..n {
                 let (sock, _) = listener.accept().await.unwrap();
                 let tx = tx.clone();
+                let respond = respond.clone();
                 tokio::spawn(async move {
                     let (r, mut w) = sock.into_split();
                     let mut r = BufReader::new(r);
@@ -1976,7 +1957,7 @@ mod tests {
                     let body = respond(&line);
                     let _ = tx.send(line);
                     let resp = format!(
-                        "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+                        "HTTP/1.1 {status}\r\n{headers}content-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
                         body.len()
                     );
                     w.write_all(resp.as_bytes()).await.unwrap();
@@ -1990,7 +1971,7 @@ mod tests {
     /// `search_generators` sends the three queries and gives one list.
     #[tokio::test]
     async fn generator_search_sends_three_queries_and_merges_them() {
-        let (url, mut seen) = answer_each(3, |line| {
+        let (url, mut seen) = answer_each(3, "200 OK", "", |line| {
             if line.contains("pipeline_tag=image-to-video") {
                 GEN_IMAGE_TO_VIDEO.to_string()
             } else if line.contains("pipeline_tag=") {

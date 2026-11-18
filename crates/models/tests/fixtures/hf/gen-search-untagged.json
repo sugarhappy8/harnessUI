@@ -206,32 +206,6 @@
     "pipeline_tag": "image-to-video"
   },
   {
-    "_id": "6ad4694d15f77609486c38b3",
-    "id": "mradermacher/Claude-Haiku-5.5-Qwen-5B-Thinking-Safetensors-GGUF",
-    "gated": false,
-    "lastModified": "2026-10-18T07:00:05.000Z",
-    "likes": 1,
-    "downloads": 1319,
-    "tags": [
-      "transformers",
-      "gguf",
-      "msh",
-      "claude",
-      "haiku5.5",
-      "think",
-      "vl",
-      "en",
-      "dataset:mondk/Claude-Haiku-5.5-High-Sft",
-      "dataset:mondk/Msh-Sft",
-      "base_model:mondk/Claude-Haiku-5.5-Qwen-5B-Thinking-Safetensors",
-      "base_model:quantized:mondk/Claude-Haiku-5.5-Qwen-5B-Thinking-Safetensors",
-      "license:apache-2.0",
-      "endpoints_compatible",
-      "region:us",
-      "conversational"
-    ]
-  },
-  {
     "_id": "6752449cca5a46ef8bfbb01d",
     "id": "mradermacher/HelpingAI2.5-5B-i1-GGUF",
     "gated": false,
