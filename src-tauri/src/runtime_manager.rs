@@ -67,6 +67,19 @@ struct Loaded {
 /// before the server stops anyway.
 const STOP_WAIT: Duration = Duration::from_secs(10);
 
+/// 0.1.0 Studio: the graphics card's other tenant, a local Studio job (`gpu_lease`), as the
+/// load path sees it.
+#[async_trait::async_trait]
+pub trait StudioGate: Send + Sync {
+    /// A Studio job holds the card: only from its grant to the drop of its hold, never
+    /// while a job still waits for the card.
+    fn holds_card(&self) -> bool;
+    /// Returns once no Studio job holds the card (at once when none does).
+    async fn wait_until_free(&self);
+    /// True once after a Studio job freed the card.
+    fn take_reprobe(&self) -> bool;
+}
+
 pub struct RuntimeManager {
     app: AppHandle,
     layout: RuntimeLayout,
@@ -91,6 +104,9 @@ pub struct RuntimeManager {
     /// each load, retry and unload), for "Where the model went" and for what a load that
     /// replaces it frees.
     report: StdMutex<Option<MemoryReport>>,
+    /// 0.1.0: the lease that lets a local Studio job hold the graphics card; a load waits
+    /// while it does ([`Self::set_studio_gate`]).
+    studio_gate: StdMutex<Option<Arc<dyn StudioGate>>>,
 }
 
 impl RuntimeManager {
@@ -109,7 +125,51 @@ impl RuntimeManager {
             probed_with: StdMutex::new(None),
             gate: Arc::new(ChangeGate::default()),
             report: StdMutex::new(None),
+            studio_gate: StdMutex::new(None),
         }
+    }
+
+    /// The app this runtime reports to.
+    #[allow(
+        dead_code,
+        reason = "Task L15's local lane asks the Studio lease, which reads it"
+    )]
+    pub fn app(&self) -> &AppHandle {
+        &self.app
+    }
+
+    /// 0.1.0: the Studio lease a load asks first (set once at startup).
+    pub fn set_studio_gate(&self, gate: Arc<dyn StudioGate>) {
+        if let Ok(mut slot) = self.studio_gate.lock() {
+            *slot = Some(gate);
+        }
+    }
+
+    /// 0.1.0: the loaded (or loading) model's bytes on a graphics device, when it runs on
+    /// one: what unloading it gives a Studio job.
+    #[allow(
+        dead_code,
+        reason = "Task L15's local lane asks the Studio lease, which reads it"
+    )]
+    pub fn device_bytes(&self) -> Option<u64> {
+        self.loaded_on_device().map(|(_, _, bytes)| bytes)
+    }
+
+    /// 0.1.0: the loaded (or loading) model was started with "Keep in memory".
+    #[allow(
+        dead_code,
+        reason = "Task L15's local lane asks the Studio lease, which reads it"
+    )]
+    pub fn keeps_in_memory(&self) -> bool {
+        let running = matches!(
+            self.status().state,
+            RuntimeStateDto::Ready | RuntimeStateDto::Starting
+        );
+        running
+            && self
+                .current
+                .lock()
+                .is_ok_and(|c| c.as_ref().is_some_and(|l| l.resolved.keep_in_memory))
     }
 
     pub fn status(&self) -> RuntimeStatusDto {
@@ -495,6 +555,27 @@ impl RuntimeManager {
         first_candidate(&found, settings)
     }
 
+    /// 0.1.0 Studio, before a load picks its backend: while a local Studio job holds the
+    /// graphics card, waits for it to end ("Studio is using the graphics card. The chat
+    /// model loads when it finishes", `waiting_for_studio`); after a job freed the card,
+    /// probes the backends again, since Vulkan drivers can free memory late.
+    async fn wait_for_studio(&self) {
+        let Some(gate) = self.studio_gate.lock().ok().and_then(|g| g.clone()) else {
+            return;
+        };
+        if gate.holds_card() {
+            self.update(|s| s.waiting_for_studio = true);
+            // Another job may take the card as this one frees it: then that one goes first.
+            while gate.holds_card() {
+                gate.wait_until_free().await;
+            }
+            self.update(|s| s.waiting_for_studio = false);
+        }
+        if gate.take_reprobe() {
+            self.backends(true).await;
+        }
+    }
+
     /// 0.0.7 (P6b review m6): whether a load with `settings` could start: the backend it
     /// would pick can run on this computer ([`Self::choose`]). A load checks this before it
     /// stops a reply or a model check (`models_cmd::after_backend_check`).
@@ -544,6 +625,10 @@ impl RuntimeManager {
             drop(setup);
             return self.wait_for_load(seq, &model).await;
         }
+        // 0.1.0: never on top of a local Studio job, and with the memory as it is after one.
+        // Waiting here, with the setup lock held, keeps the loads asked for meanwhile in
+        // their order.
+        self.wait_for_studio().await;
         // 0.0.7 (P6): the backend is picked before anything changes. One that cannot run
         // here (`backend_unavailable`) leaves the loaded model as it is, and its error goes
         // back to the caller; before, the loaded model was stopped first and the status
@@ -1964,5 +2049,29 @@ mod tests {
         };
         let err = first_candidate(&found, &settings).unwrap_err();
         assert_eq!(err.code, "backend_unavailable");
+    }
+
+    /// 0.1.0 Studio: a chat load waits while a local Studio job holds the graphics card, and
+    /// after a job freed it the backends are probed again before one is picked (Vulkan
+    /// drivers can free memory late), so both come before the backend is chosen and before
+    /// the loaded server stops.
+    #[test]
+    fn the_load_path_asks_the_studio_gate_first() {
+        // A checkout on Windows ends its lines in "\r\n".
+        let source = include_str!("runtime_manager.rs").replace("\r\n", "\n");
+        let start = source.find("    pub async fn load(\n").expect("load");
+        let body = &source[start..];
+        let body = &body[..body.find("\n    }\n").expect("the end of load")];
+        let gate = body
+            .find("self.wait_for_studio(")
+            .expect("load asks the Studio gate");
+        let choose = body
+            .find("self.choose(&settings)")
+            .expect("load picks a backend");
+        let stop = body
+            .find("self.stop_server().await")
+            .expect("load stops the old server");
+        assert!(gate < choose, "the gate comes before the backend is picked");
+        assert!(gate < stop, "the gate comes before the loaded server stops");
     }
 }

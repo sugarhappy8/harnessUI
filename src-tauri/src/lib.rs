@@ -19,6 +19,8 @@ mod error;
 mod evals;
 mod git_cmd;
 mod gpu;
+// 0.1.0: the graphics card, shared by the chat model and local Studio jobs.
+mod gpu_lease;
 mod hotkey;
 mod hub;
 mod load_settings;
@@ -396,6 +398,15 @@ pub fn run() {
                 handle.clone(),
                 runtime_manager::layout(&handle),
             ));
+            let model_busy: Arc<state::BusyCounter> = Default::default();
+            // 0.1.0: one graphics-card tenant at a time, the chat model or a local Studio
+            // job; a chat load waits while a job holds the card.
+            let lease = gpu_lease::GpuLease::new(Arc::new(gpu_lease::RuntimeChat {
+                runtime: runtime.clone(),
+                busy: model_busy.clone(),
+            }));
+            app.manage(lease.clone());
+            runtime.set_studio_gate(lease);
             let skills = Arc::new(tools::SkillsServer::new());
             let pass_through: Vec<String> =
                 tauri::async_runtime::block_on(store.get_setting(toolset::TERMINAL_PASS_THROUGH))
@@ -430,7 +441,7 @@ pub fn run() {
                 host: host.clone(),
                 skills,
                 grants: Default::default(),
-                model_busy: Default::default(),
+                model_busy,
                 offload: Default::default(),
                 usage: Default::default(),
             });

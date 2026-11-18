@@ -178,6 +178,10 @@ pub struct RuntimeStatusDto {
     /// Shown as "Restarts when the reply ends · Cancel"; `cancel_pending_reload` cancels
     /// it. The status still describes the model loaded now.
     pub reload_waiting: bool,
+    /// 0.1.0: a load waits while a local Studio job holds the graphics card ("Studio is
+    /// using the graphics card. The chat model loads when it finishes · Stop Studio job").
+    /// The status still describes the model loaded now (none, after Studio unloaded it).
+    pub waiting_for_studio: bool,
     /// 0.0.5: the model the user unloaded (`unload_model`), for "Unloaded to free memory ·
     /// Load". Cleared by the next load and by any other unload (removing the model or its
     /// backend). `None` until WP1b sets it.
@@ -213,6 +217,7 @@ impl Default for RuntimeStatusDto {
             ctx_source: None,
             settings_changed: false,
             reload_waiting: false,
+            waiting_for_studio: false,
             unloaded_path: None,
             placement: None,
         }
@@ -1332,6 +1337,7 @@ mod tests {
         assert_eq!(v["ctxSource"], json!(null));
         assert_eq!(v["settingsChanged"], json!(false));
         assert_eq!(v["reloadWaiting"], json!(false));
+        assert_eq!(v["waitingForStudio"], json!(false));
         assert_eq!(v["unloadedPath"], json!(null));
         assert_eq!(v["stage"], json!(null));
         assert_eq!(v["placement"], json!(null));

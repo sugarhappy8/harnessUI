@@ -1,0 +1,947 @@
+//! 0.1.0 Studio: the graphics card has one tenant at a time, the chat model or a local Studio
+//! job (studio-local-design.md, "The graphics-card lease").
+//!
+//! A job that fits beside the loaded chat model runs alongside it. One that does not waits
+//! for a reply being written and unloads the chat model, asks first, or runs on the
+//! processor, as Settings → Studio says ([`GpuPolicy`]); on a Mac's shared memory "Keep in
+//! memory" on the chat model always unloads it. A job holds the card only from its grant to
+//! the drop of its [`StudioHold`]: while it still waits (for a reply, a Model check or the
+//! person's answer) it holds nothing, so a chat load goes first and the unload waits for it.
+//! A chat load while a job holds the card waits for it to end (the [`StudioGate`] on
+//! `RuntimeManager::load`), and the next chat load after a job probes the backends again.
+//! A hold never loads the chat model again: "Reload it after Studio" is
+//! [`GpuLease::reload_chat`], called once when the local queue empties.
+
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+
+use async_trait::async_trait;
+use tokio::sync::{OwnedSemaphorePermit, Semaphore, TryAcquireError, watch};
+use tokio_util::sync::CancellationToken;
+
+use crate::error::{AppError, AppResult};
+use crate::runtime_manager::{RuntimeManager, StudioGate};
+use crate::state::{AppState, BusyCounter};
+use crate::studio::prefs::GpuPolicy;
+
+/// What a local job needs of the graphics card, from `gen_fit` with and without the chat
+/// model (Task L15).
+#[allow(dead_code, reason = "Task L15's local lane builds it for each job")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct StudioNeed {
+    /// Green, or one part at a time, with the memory free now (the chat model loaded).
+    pub alongside: bool,
+    /// Not red once the chat model is unloaded.
+    pub after_unload: bool,
+    /// A picture whose processor-only fit is not red.
+    pub processor_ok: bool,
+    /// Apple silicon: the processor and the graphics share one memory.
+    pub shared_memory: bool,
+}
+
+/// How a job may use the card.
+#[allow(dead_code, reason = "Task L15's local lane reads the grant")]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Grant {
+    /// Beside the chat model, or with none loaded ("Chat replies may be slower while this
+    /// runs" when one is).
+    Alongside,
+    /// The chat model was unloaded to make room: `unloaded` is its path, for "Load it
+    /// again" (`None` when it had gone by the time the unload ran).
+    AfterUnload { unloaded: Option<String> },
+    /// On the processor; the chat model keeps the card.
+    UseProcessor,
+}
+
+/// Why a job waits before its grant, shown on its card.
+#[allow(dead_code, reason = "Task L15's local lane shows the wait")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LeaseWait {
+    /// A reply (or a Model check) uses the chat model: "Starts when the reply ends".
+    ReplyRunning,
+    /// Another Studio job holds the card. Unreachable in 0.1.0: the one local queue never
+    /// lets two jobs ask at once.
+    AnotherStudioJob,
+    /// Under [`GpuPolicy::Ask`] the person has not answered "Unload the chat model?" yet.
+    NeedsAnswer,
+}
+
+/// Why a job got no grant. It holds nothing.
+#[allow(dead_code, reason = "Task L15's local lane reads the refusal")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Refused {
+    /// The job was stopped while it waited, or the unload it waited for was cancelled.
+    Cancelled,
+    /// It does not fit even with the chat model unloaded, and cannot run on the processor
+    /// (or the person said not to unload).
+    DoesNotFit,
+    /// Under [`GpuPolicy::Ask`]: ask the person, then ask the lease again with the answer.
+    NeedsAnswer,
+}
+
+/// The chat model's side of the card: what it takes, and its unload and reload.
+#[allow(
+    dead_code,
+    reason = "Task L15's local lane asks the lease, which asks it"
+)]
+#[async_trait]
+pub trait ChatSide: Send + Sync {
+    /// The loaded (or loading) chat model's bytes on a graphics device; `None` when none is
+    /// on one.
+    fn loaded_device_bytes(&self) -> Option<u64>;
+    /// The loaded chat model was started with "Keep in memory".
+    fn keeps_in_memory(&self) -> bool;
+    /// `before_change(when_idle = true)` then `unload_by_user()`; `on_wait(true)` while a
+    /// reply is being written, `on_wait(false)` when it ends. The unloaded path.
+    async fn unload_when_idle(
+        &self,
+        on_wait: &(dyn Fn(bool) + Send + Sync),
+    ) -> AppResult<Option<String>>;
+    /// Loads the chat model at `path` again.
+    async fn reload(&self, path: &str);
+}
+
+/// The app's chat side: the local llama-server and everything that uses it.
+#[allow(
+    dead_code,
+    reason = "Task L15's local lane asks the lease, which asks it"
+)]
+pub struct RuntimeChat {
+    pub runtime: Arc<RuntimeManager>,
+    pub busy: Arc<BusyCounter>,
+}
+
+#[async_trait]
+impl ChatSide for RuntimeChat {
+    fn loaded_device_bytes(&self) -> Option<u64> {
+        self.runtime.device_bytes()
+    }
+
+    fn keeps_in_memory(&self) -> bool {
+        self.runtime.keeps_in_memory()
+    }
+
+    async fn unload_when_idle(
+        &self,
+        on_wait: &(dyn Fn(bool) + Send + Sync),
+    ) -> AppResult<Option<String>> {
+        // The wait for a reply or a Model check is made here: when the job is stopped this
+        // future is dropped, which leaves nothing behind (a `before_change` dropped while it
+        // waits would leave its wait, and "Restarts when the reply ends", behind).
+        if self.busy.is_busy() {
+            on_wait(true);
+            self.busy.wait_idle().await;
+            on_wait(false);
+        }
+        let runtime = Arc::clone(&self.runtime);
+        let busy = Arc::clone(&self.busy);
+        // Nothing uses the model now, so `before_change` goes ahead at once. From here the
+        // unload runs to its end even if the job is stopped meanwhile: a server stopped
+        // halfway would leave the status at "Stopping".
+        tokio::spawn(async move {
+            runtime.before_change(&busy, true).await?;
+            let path = runtime.status().model_path;
+            runtime.unload_by_user().await;
+            Ok(path)
+        })
+        .await
+        .map_err(|e| AppError::internal(format!("the chat model's unload stopped: {e}")))?
+    }
+
+    async fn reload(&self, path: &str) {
+        use tauri::Manager;
+        // Only while the status still names it as unloaded to free memory: a model loaded
+        // since then (by the person) stays.
+        if self.runtime.status().unloaded_path.as_deref() != Some(path) {
+            return;
+        }
+        let app = self.runtime.app().clone();
+        let Some(state) = app.try_state::<AppState>() else {
+            return;
+        };
+        // With the model's saved settings, as "Unloaded to free memory · Load" does; a
+        // reply that uses the model meanwhile is waited for, never stopped.
+        if let Err(e) =
+            crate::models_cmd::load_local_model(state, path.to_string(), None, Some(true)).await
+        {
+            tracing::warn!(code = %e.code, "the chat model did not load again after Studio");
+        }
+    }
+}
+
+/// A local job's hold on the graphics card. Dropping it frees the card and wakes a chat load
+/// that waits; it never loads the chat model again.
+#[allow(dead_code, reason = "Task L15's local lane holds it for each job")]
+pub struct StudioHold {
+    lease: Arc<GpuLease>,
+    // Given back after `drop` has marked the card free, so a waiting job asks again only then.
+    _permit: OwnedSemaphorePermit,
+}
+
+impl std::fmt::Debug for StudioHold {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("StudioHold").finish_non_exhaustive()
+    }
+}
+
+impl Drop for StudioHold {
+    fn drop(&mut self) {
+        // Before the card is marked free, so the chat load it wakes probes again.
+        self.lease.reprobe.store(true, Ordering::Release);
+        self.lease.granted.send_replace(false);
+    }
+}
+
+/// One graphics-card tenant at a time: the chat model, or a local Studio job.
+#[allow(dead_code, reason = "Task L15's local lane asks it for each job")]
+pub struct GpuLease {
+    chat: Arc<dyn ChatSide>,
+    /// One Studio job asks, waits and runs at a time.
+    permits: Arc<Semaphore>,
+    /// A job holds the card: from its grant to the drop of its hold.
+    granted: watch::Sender<bool>,
+    /// A job freed the card since the last chat load asked.
+    reprobe: AtomicBool,
+}
+
+#[allow(dead_code, reason = "Task L15's local lane asks it for each job")]
+impl GpuLease {
+    pub fn new(chat: Arc<dyn ChatSide>) -> Arc<Self> {
+        Arc::new(Self {
+            chat,
+            permits: Arc::new(Semaphore::new(1)),
+            granted: watch::Sender::new(false),
+            reprobe: AtomicBool::new(false),
+        })
+    }
+
+    /// The card for one local job. In this order: the one place (`on_wait(AnotherStudioJob)`
+    /// while another job has it); no chat model on a device, or a job that fits beside it
+    /// (unless "Keep in memory" pins it in shared memory) → [`Grant::Alongside`]; a job that
+    /// does not fit even after an unload → [`Grant::UseProcessor`] when it can run there
+    /// (after an unload on shared memory, where the processor uses the same memory), else
+    /// [`Refused::DoesNotFit`]; "Keep in memory" on shared memory → an unload whatever the
+    /// policy; then as `policy` says. An unload waits for a reply being written
+    /// (`on_wait(ReplyRunning)`).
+    ///
+    /// `answered`: the person's answer to "Unload the chat model?" under [`GpuPolicy::Ask`]
+    /// (`None`: not asked yet, which ends with `on_wait(NeedsAnswer)` and
+    /// [`Refused::NeedsAnswer`]). Every wait ends with [`Refused::Cancelled`] when `cancel`
+    /// fires. The card counts as held only once the grant is returned: a chat load while
+    /// the job waits goes first.
+    pub async fn acquire_for_studio(
+        self: &Arc<Self>,
+        need: &StudioNeed,
+        policy: GpuPolicy,
+        answered: Option<bool>,
+        cancel: &CancellationToken,
+        on_wait: &(dyn Fn(LeaseWait) + Send + Sync),
+    ) -> Result<(Grant, StudioHold), Refused> {
+        let permit = self.take_place(cancel, on_wait).await?;
+        let grant = self.decide(need, policy, answered, cancel, on_wait).await?;
+        self.granted.send_replace(true);
+        Ok((
+            grant,
+            StudioHold {
+                lease: Arc::clone(self),
+                _permit: permit,
+            },
+        ))
+    }
+
+    /// "Reload it after Studio": the manager calls this once, when the local queue is empty
+    /// (Task L15), never per job.
+    pub async fn reload_chat(&self, path: &str) {
+        self.chat.reload(path).await;
+    }
+
+    /// The one place for a Studio job.
+    async fn take_place(
+        &self,
+        cancel: &CancellationToken,
+        on_wait: &(dyn Fn(LeaseWait) + Send + Sync),
+    ) -> Result<OwnedSemaphorePermit, Refused> {
+        if cancel.is_cancelled() {
+            return Err(Refused::Cancelled);
+        }
+        match Arc::clone(&self.permits).try_acquire_owned() {
+            Ok(permit) => return Ok(permit),
+            // The semaphore is never closed.
+            Err(TryAcquireError::Closed) => return Err(Refused::Cancelled),
+            Err(TryAcquireError::NoPermits) => {}
+        }
+        on_wait(LeaseWait::AnotherStudioJob);
+        tokio::select! {
+            biased;
+            _ = cancel.cancelled() => Err(Refused::Cancelled),
+            permit = Arc::clone(&self.permits).acquire_owned() => {
+                permit.map_err(|_| Refused::Cancelled)
+            }
+        }
+    }
+
+    /// The grant, in the order of [`Self::acquire_for_studio`].
+    async fn decide(
+        &self,
+        need: &StudioNeed,
+        policy: GpuPolicy,
+        answered: Option<bool>,
+        cancel: &CancellationToken,
+        on_wait: &(dyn Fn(LeaseWait) + Send + Sync),
+    ) -> Result<Grant, Refused> {
+        if self.chat.loaded_device_bytes().is_none() {
+            return Ok(Grant::Alongside);
+        }
+        // On shared memory the chat model's pinned memory is the job's memory too; on a
+        // graphics card "Keep in memory" pins system memory only.
+        let pinned = need.shared_memory && self.chat.keeps_in_memory();
+        if need.alongside && !pinned {
+            return Ok(Grant::Alongside);
+        }
+        if !need.after_unload {
+            if !need.processor_ok {
+                return Err(Refused::DoesNotFit);
+            }
+            if need.shared_memory {
+                self.unload(cancel, on_wait).await?;
+            }
+            return Ok(Grant::UseProcessor);
+        }
+        if pinned {
+            return self.after_unload(cancel, on_wait).await;
+        }
+        match (policy, answered) {
+            (GpuPolicy::Unload, _) | (GpuPolicy::Ask, Some(true)) => {
+                self.after_unload(cancel, on_wait).await
+            }
+            (GpuPolicy::Ask, None) => {
+                on_wait(LeaseWait::NeedsAnswer);
+                Err(Refused::NeedsAnswer)
+            }
+            (GpuPolicy::Ask, Some(false)) if need.processor_ok => Ok(Grant::UseProcessor),
+            (GpuPolicy::Ask, Some(false)) => Err(Refused::DoesNotFit),
+            (GpuPolicy::Processor, _) if need.processor_ok => Ok(Grant::UseProcessor),
+            (GpuPolicy::Processor, _) => self.after_unload(cancel, on_wait).await,
+        }
+    }
+
+    async fn after_unload(
+        &self,
+        cancel: &CancellationToken,
+        on_wait: &(dyn Fn(LeaseWait) + Send + Sync),
+    ) -> Result<Grant, Refused> {
+        let unloaded = self.unload(cancel, on_wait).await?;
+        Ok(Grant::AfterUnload { unloaded })
+    }
+
+    /// Unloads the chat model once nothing uses it. A failed unload (its wait cancelled by a
+    /// newer change of what is loaded) frees nothing, so the job gets no grant.
+    async fn unload(
+        &self,
+        cancel: &CancellationToken,
+        on_wait: &(dyn Fn(LeaseWait) + Send + Sync),
+    ) -> Result<Option<String>, Refused> {
+        let reply_running = |waiting: bool| {
+            if waiting {
+                on_wait(LeaseWait::ReplyRunning);
+            }
+        };
+        tokio::select! {
+            biased;
+            _ = cancel.cancelled() => Err(Refused::Cancelled),
+            unloaded = self.chat.unload_when_idle(&reply_running) => unloaded.map_err(|e| {
+                tracing::warn!(code = %e.code, "the chat model was not unloaded for Studio");
+                Refused::Cancelled
+            }),
+        }
+    }
+}
+
+#[async_trait]
+impl StudioGate for GpuLease {
+    fn holds_card(&self) -> bool {
+        *self.granted.borrow()
+    }
+
+    async fn wait_until_free(&self) {
+        let mut granted = self.granted.subscribe();
+        // The sender lives as long as `self`, so this cannot fail.
+        let _ = granted.wait_for(|held| !held).await;
+    }
+
+    fn take_reprobe(&self) -> bool {
+        self.reprobe.swap(false, Ordering::AcqRel)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Mutex as StdMutex;
+    use std::sync::atomic::AtomicUsize;
+    use std::time::Duration;
+
+    use super::*;
+    use crate::state::{BusyGuard, BusyKind};
+
+    const GB: u64 = 1_000_000_000;
+    const CHAT: &str = "/m/chat.gguf";
+
+    /// The chat model's side, in memory: a model on the card (or none), "Keep in memory",
+    /// the replies and Model checks that use it, and the unloads and reloads asked for.
+    struct FakeChat {
+        device_bytes: StdMutex<Option<u64>>,
+        keeps_in_memory: bool,
+        busy: Arc<BusyCounter>,
+        unloads: AtomicUsize,
+        reloads: StdMutex<Vec<String>>,
+    }
+
+    impl FakeChat {
+        fn with(device_bytes: Option<u64>, keeps_in_memory: bool) -> Arc<Self> {
+            Arc::new(Self {
+                device_bytes: StdMutex::new(device_bytes),
+                keeps_in_memory,
+                busy: Arc::new(BusyCounter::default()),
+                unloads: AtomicUsize::new(0),
+                reloads: StdMutex::new(Vec::new()),
+            })
+        }
+
+        /// The chat model loaded on the card, taking `bytes` there.
+        fn loaded(bytes: u64) -> Arc<Self> {
+            Self::with(Some(bytes), false)
+        }
+
+        /// Loaded with "Keep in memory".
+        fn keeping_in_memory(bytes: u64) -> Arc<Self> {
+            Self::with(Some(bytes), true)
+        }
+
+        /// No chat model on a device.
+        fn none() -> Arc<Self> {
+            Self::with(None, false)
+        }
+
+        /// A reply (or a Model check) uses the chat model until the guard is dropped.
+        fn use_model(&self, kind: BusyKind) -> BusyGuard {
+            self.busy.hold(kind)
+        }
+
+        fn unloads(&self) -> usize {
+            self.unloads.load(Ordering::SeqCst)
+        }
+
+        fn reloads(&self) -> Vec<String> {
+            self.reloads.lock().unwrap().clone()
+        }
+    }
+
+    #[async_trait]
+    impl ChatSide for FakeChat {
+        fn loaded_device_bytes(&self) -> Option<u64> {
+            *self.device_bytes.lock().unwrap()
+        }
+
+        fn keeps_in_memory(&self) -> bool {
+            self.keeps_in_memory
+        }
+
+        async fn unload_when_idle(
+            &self,
+            on_wait: &(dyn Fn(bool) + Send + Sync),
+        ) -> AppResult<Option<String>> {
+            if self.busy.is_busy() {
+                on_wait(true);
+                self.busy.wait_idle().await;
+                on_wait(false);
+            }
+            let was = self.device_bytes.lock().unwrap().take();
+            self.unloads.fetch_add(1, Ordering::SeqCst);
+            Ok(was.map(|_| CHAT.to_string()))
+        }
+
+        async fn reload(&self, path: &str) {
+            self.reloads.lock().unwrap().push(path.to_string());
+        }
+    }
+
+    fn need(alongside: bool, after_unload: bool, processor_ok: bool) -> StudioNeed {
+        StudioNeed {
+            alongside,
+            after_unload,
+            processor_ok,
+            shared_memory: false,
+        }
+    }
+
+    fn shared(need: StudioNeed) -> StudioNeed {
+        StudioNeed {
+            shared_memory: true,
+            ..need
+        }
+    }
+
+    fn tok() -> CancellationToken {
+        CancellationToken::new()
+    }
+
+    /// The waits a job was told about.
+    #[derive(Default, Clone)]
+    struct Waits(Arc<StdMutex<Vec<LeaseWait>>>);
+
+    impl Waits {
+        fn push(&self, wait: LeaseWait) {
+            self.0.lock().unwrap().push(wait);
+        }
+
+        fn seen(&self) -> Vec<LeaseWait> {
+            self.0.lock().unwrap().clone()
+        }
+
+        /// Returns once `wait` was seen.
+        async fn until(&self, wait: LeaseWait) {
+            within(async {
+                while !self.seen().contains(&wait) {
+                    tokio::time::sleep(Duration::from_millis(5)).await;
+                }
+            })
+            .await;
+        }
+    }
+
+    /// `future`'s output, with a bound far above what any of these waits takes.
+    async fn within<T>(future: impl std::future::Future<Output = T>) -> T {
+        tokio::time::timeout(Duration::from_secs(10), future)
+            .await
+            .expect("finished in time")
+    }
+
+    /// Asks `lease` in a task of its own, telling `waits` about each wait.
+    fn ask_in_task(
+        lease: &Arc<GpuLease>,
+        need: StudioNeed,
+        policy: GpuPolicy,
+        cancel: &CancellationToken,
+        waits: &Waits,
+    ) -> tokio::task::JoinHandle<Result<(Grant, StudioHold), Refused>> {
+        let (lease, cancel, waits) = (Arc::clone(lease), cancel.clone(), waits.clone());
+        tokio::spawn(async move {
+            lease
+                .acquire_for_studio(&need, policy, None, &cancel, &move |w| waits.push(w))
+                .await
+        })
+    }
+
+    #[tokio::test]
+    async fn a_job_that_fits_beside_the_chat_model_runs_alongside() {
+        let chat = FakeChat::loaded(5 * GB);
+        let lease = GpuLease::new(chat.clone());
+        let (g, hold) = lease
+            .acquire_for_studio(
+                &need(true, true, true),
+                GpuPolicy::Unload,
+                None,
+                &tok(),
+                &|_| {},
+            )
+            .await
+            .unwrap();
+        assert_eq!(g, Grant::Alongside);
+        assert_eq!(chat.unloads(), 0);
+        drop(hold);
+
+        // With no chat model on a device there is nothing to unload.
+        let chat = FakeChat::none();
+        let lease = GpuLease::new(chat.clone());
+        let (g, _hold) = lease
+            .acquire_for_studio(
+                &need(false, true, false),
+                GpuPolicy::Unload,
+                None,
+                &tok(),
+                &|_| {},
+            )
+            .await
+            .unwrap();
+        assert_eq!(g, Grant::Alongside);
+        assert_eq!(chat.unloads(), 0);
+    }
+
+    #[tokio::test]
+    async fn a_job_that_does_not_fit_even_after_an_unload_is_refused() {
+        let chat = FakeChat::loaded(5 * GB);
+        let lease = GpuLease::new(chat.clone());
+        let refused = lease
+            .acquire_for_studio(
+                &need(false, false, false),
+                GpuPolicy::Unload,
+                None,
+                &tok(),
+                &|_| {},
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(refused, Refused::DoesNotFit);
+        assert_eq!(chat.unloads(), 0);
+        assert!(!lease.holds_card());
+
+        // A picture that can run on the processor does, beside the chat model (and the
+        // refusal above gave its place back).
+        let (g, hold) = within(lease.acquire_for_studio(
+            &need(false, false, true),
+            GpuPolicy::Unload,
+            None,
+            &tok(),
+            &|_| {},
+        ))
+        .await
+        .unwrap();
+        assert_eq!(g, Grant::UseProcessor);
+        assert_eq!(chat.unloads(), 0);
+        drop(hold);
+
+        // On shared memory the processor uses the chat model's memory: it is unloaded first.
+        let (g, _hold) = lease
+            .acquire_for_studio(
+                &shared(need(false, false, true)),
+                GpuPolicy::Unload,
+                None,
+                &tok(),
+                &|_| {},
+            )
+            .await
+            .unwrap();
+        assert_eq!(g, Grant::UseProcessor);
+        assert_eq!(chat.unloads(), 1);
+    }
+
+    #[tokio::test]
+    async fn a_job_that_does_not_fit_waits_for_the_reply_then_unloads() {
+        let chat = FakeChat::loaded(5 * GB);
+        let reply = chat.use_model(BusyKind::ChatTurn);
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            drop(reply);
+        });
+        let lease = GpuLease::new(chat.clone());
+        let waits = Waits::default();
+        let (g, _hold) = within(lease.acquire_for_studio(
+            &need(false, true, false),
+            GpuPolicy::Unload,
+            None,
+            &tok(),
+            &|w| waits.push(w),
+        ))
+        .await
+        .unwrap();
+        assert_eq!(waits.seen(), [LeaseWait::ReplyRunning]);
+        assert_eq!(
+            g,
+            Grant::AfterUnload {
+                unloaded: Some(CHAT.to_string())
+            }
+        );
+        assert_eq!(chat.unloads(), 1);
+    }
+
+    #[tokio::test]
+    async fn ask_without_an_answer_asks_and_the_answer_decides() {
+        let ask = |chat: &Arc<FakeChat>, processor_ok: bool, answered: Option<bool>| {
+            let lease = GpuLease::new(chat.clone());
+            async move {
+                let waits = Waits::default();
+                let result = lease
+                    .acquire_for_studio(
+                        &need(false, true, processor_ok),
+                        GpuPolicy::Ask,
+                        answered,
+                        &tok(),
+                        &|w| waits.push(w),
+                    )
+                    .await
+                    .map(|(g, _hold)| g);
+                (result, waits.seen())
+            }
+        };
+
+        // Not asked yet: ask, and change nothing meanwhile.
+        let chat = FakeChat::loaded(5 * GB);
+        let (result, seen) = ask(&chat, true, None).await;
+        assert_eq!(result, Err(Refused::NeedsAnswer));
+        assert_eq!(seen, [LeaseWait::NeedsAnswer]);
+        assert_eq!(chat.unloads(), 0);
+
+        // Yes: unload.
+        let (result, _) = ask(&chat, true, Some(true)).await;
+        assert_eq!(
+            result,
+            Ok(Grant::AfterUnload {
+                unloaded: Some(CHAT.to_string())
+            })
+        );
+        assert_eq!(chat.unloads(), 1);
+
+        // No: the processor for a picture that can run there, else it does not fit.
+        let chat = FakeChat::loaded(5 * GB);
+        assert_eq!(
+            ask(&chat, true, Some(false)).await.0,
+            Ok(Grant::UseProcessor)
+        );
+        assert_eq!(
+            ask(&chat, false, Some(false)).await.0,
+            Err(Refused::DoesNotFit)
+        );
+        assert_eq!(chat.unloads(), 0);
+    }
+
+    #[tokio::test]
+    async fn the_processor_policy_never_unloads() {
+        let chat = FakeChat::loaded(5 * GB);
+        let lease = GpuLease::new(chat.clone());
+        let (g, _hold) = lease
+            .acquire_for_studio(
+                &need(false, true, true),
+                GpuPolicy::Processor,
+                None,
+                &tok(),
+                &|_| {},
+            )
+            .await
+            .unwrap();
+        assert_eq!(g, Grant::UseProcessor);
+        assert_eq!(chat.unloads(), 0);
+    }
+
+    #[tokio::test]
+    async fn keep_in_memory_always_unloads_on_shared_memory() {
+        // Whatever the policy: the processor uses the same memory, and nobody is asked.
+        for policy in [GpuPolicy::Unload, GpuPolicy::Processor, GpuPolicy::Ask] {
+            let chat = FakeChat::keeping_in_memory(5 * GB);
+            let lease = GpuLease::new(chat.clone());
+            let (g, _hold) = lease
+                .acquire_for_studio(
+                    &shared(need(true, true, true)),
+                    policy,
+                    None,
+                    &tok(),
+                    &|_| {},
+                )
+                .await
+                .unwrap();
+            assert_eq!(
+                g,
+                Grant::AfterUnload {
+                    unloaded: Some(CHAT.to_string())
+                },
+                "{policy:?}"
+            );
+            assert_eq!(chat.unloads(), 1, "{policy:?}");
+        }
+
+        // On a graphics card "Keep in memory" pins system memory only.
+        let chat = FakeChat::keeping_in_memory(5 * GB);
+        let lease = GpuLease::new(chat.clone());
+        let (g, _hold) = lease
+            .acquire_for_studio(
+                &need(true, true, true),
+                GpuPolicy::Unload,
+                None,
+                &tok(),
+                &|_| {},
+            )
+            .await
+            .unwrap();
+        assert_eq!(g, Grant::Alongside);
+        assert_eq!(chat.unloads(), 0);
+    }
+
+    #[tokio::test]
+    async fn one_studio_job_holds_the_card_at_a_time() {
+        let lease = GpuLease::new(FakeChat::none());
+        let (_, first) = lease
+            .acquire_for_studio(
+                &need(true, true, true),
+                GpuPolicy::Unload,
+                None,
+                &tok(),
+                &|_| {},
+            )
+            .await
+            .unwrap();
+        let waits = Waits::default();
+        let second = ask_in_task(
+            &lease,
+            need(true, true, true),
+            GpuPolicy::Unload,
+            &tok(),
+            &waits,
+        );
+        waits.until(LeaseWait::AnotherStudioJob).await;
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert!(!second.is_finished(), "two jobs held the card at once");
+        drop(first);
+        let (g, _hold) = within(second).await.unwrap().unwrap();
+        assert_eq!(g, Grant::Alongside);
+        assert_eq!(waits.seen(), [LeaseWait::AnotherStudioJob]);
+    }
+
+    #[tokio::test]
+    async fn a_chat_load_waits_while_studio_holds_the_card() {
+        let lease = GpuLease::new(FakeChat::none());
+        assert!(!lease.holds_card());
+        assert!(!lease.take_reprobe());
+        within(lease.wait_until_free()).await;
+
+        let (_, hold) = lease
+            .acquire_for_studio(
+                &need(true, true, true),
+                GpuPolicy::Unload,
+                None,
+                &tok(),
+                &|_| {},
+            )
+            .await
+            .unwrap();
+        assert!(lease.holds_card());
+        let load = {
+            let lease = Arc::clone(&lease);
+            tokio::spawn(async move { lease.wait_until_free().await })
+        };
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert!(
+            !load.is_finished(),
+            "the chat load went ahead during the job"
+        );
+        assert!(!lease.take_reprobe(), "nothing was freed yet");
+
+        drop(hold);
+        within(load).await.unwrap();
+        assert!(!lease.holds_card());
+        // The next chat load probes the backends again, once.
+        assert!(lease.take_reprobe());
+        assert!(!lease.take_reprobe());
+    }
+
+    #[tokio::test]
+    async fn a_chat_load_while_a_job_waits_for_the_card_goes_first() {
+        let chat = FakeChat::loaded(5 * GB);
+        // A Model check holds a use of the chat model.
+        let check = chat.use_model(BusyKind::ModelCheck);
+        let lease = GpuLease::new(chat.clone());
+        let waits = Waits::default();
+        let job = ask_in_task(
+            &lease,
+            need(false, true, false),
+            GpuPolicy::Unload,
+            &tok(),
+            &waits,
+        );
+        waits.until(LeaseWait::ReplyRunning).await;
+        // The job waits in the unload and holds nothing: the check's load is not held.
+        assert!(!lease.holds_card());
+        within(lease.wait_until_free()).await;
+        assert_eq!(chat.unloads(), 0);
+        assert!(!job.is_finished());
+
+        // When the check ends the job unloads and takes the card.
+        drop(check);
+        let (g, hold) = within(job).await.unwrap().unwrap();
+        assert_eq!(
+            g,
+            Grant::AfterUnload {
+                unloaded: Some(CHAT.to_string())
+            }
+        );
+        assert_eq!(chat.unloads(), 1);
+        assert!(lease.holds_card());
+        drop(hold);
+        assert!(!lease.holds_card());
+    }
+
+    #[tokio::test]
+    async fn reload_chat_loads_the_chat_model_once_and_a_hold_never_does() {
+        let chat = FakeChat::loaded(5 * GB);
+        let lease = GpuLease::new(chat.clone());
+        let (g, hold) = lease
+            .acquire_for_studio(
+                &need(false, true, false),
+                GpuPolicy::Unload,
+                None,
+                &tok(),
+                &|_| {},
+            )
+            .await
+            .unwrap();
+        assert!(matches!(g, Grant::AfterUnload { .. }));
+        drop(hold);
+        assert!(chat.reloads().is_empty(), "the hold loaded the chat model");
+
+        lease.reload_chat(CHAT).await;
+        assert_eq!(chat.reloads(), [CHAT]);
+    }
+
+    #[tokio::test]
+    async fn cancel_ends_any_wait() {
+        // A reply that never ends.
+        let chat = FakeChat::loaded(5 * GB);
+        let _reply = chat.use_model(BusyKind::ChatTurn);
+        let lease = GpuLease::new(chat.clone());
+        let cancel = tok();
+        let waits = Waits::default();
+        let job = ask_in_task(
+            &lease,
+            need(false, true, false),
+            GpuPolicy::Unload,
+            &cancel,
+            &waits,
+        );
+        waits.until(LeaseWait::ReplyRunning).await;
+        cancel.cancel();
+        assert_eq!(within(job).await.unwrap().unwrap_err(), Refused::Cancelled);
+        assert_eq!(chat.unloads(), 0);
+        assert!(!lease.holds_card());
+
+        // The wait for another job's place ends too (and the cancelled job gave it back).
+        let (_, first) = within(lease.acquire_for_studio(
+            &need(true, true, true),
+            GpuPolicy::Unload,
+            None,
+            &tok(),
+            &|_| {},
+        ))
+        .await
+        .unwrap();
+        let cancel = tok();
+        let waits = Waits::default();
+        let second = ask_in_task(
+            &lease,
+            need(true, true, true),
+            GpuPolicy::Unload,
+            &cancel,
+            &waits,
+        );
+        waits.until(LeaseWait::AnotherStudioJob).await;
+        cancel.cancel();
+        assert_eq!(
+            within(second).await.unwrap().unwrap_err(),
+            Refused::Cancelled
+        );
+        drop(first);
+
+        // A job stopped before it asks gets nothing.
+        let cancel = tok();
+        cancel.cancel();
+        let refused = lease
+            .acquire_for_studio(
+                &need(true, true, true),
+                GpuPolicy::Unload,
+                None,
+                &cancel,
+                &|_| {},
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(refused, Refused::Cancelled);
+        assert!(!lease.holds_card());
+    }
+}
