@@ -154,25 +154,22 @@ pub fn discover(layout: &EngineLayout, lock: &SdLock, platform: &str) -> Option<
 }
 
 /// The engine pack's state from what is on disk. `Installed` needs the `.complete` marker
-/// *and* the program and every DLL it needs: antivirus quarantine can remove one after the
-/// install, and Studio then offers the download again instead of failing every run with a
-/// missing library. Such a folder is `NotInstalled`, or `Partial` once a new download has
-/// begun.
+/// *and* the program and every DLL it needs, the Visual C++ runtime files included:
+/// antivirus quarantine can remove one after the install, and Studio then offers the
+/// download again instead of failing every run with a missing library. Such a folder is
+/// `NotInstalled`, or `Partial` once a new download has begun.
 pub fn pack_state(lock: &SdLock, engines_dir: &Path) -> PackState {
     if lock
         .packs
         .iter()
-        .any(|pack| is_complete(lock, &engines_dir.join(&pack.dir)))
+        .any(|pack| is_complete(lock, pack, &engines_dir.join(&pack.dir)))
     {
         return PackState::Installed;
     }
-    let downloads = packs::downloads_dir(engines_dir);
     let bytes: u64 = lock
         .packs
         .iter()
-        .flat_map(|pack| &pack.files)
-        .filter_map(|f| std::fs::metadata(downloads.join(packs::part_name(f))).ok())
-        .map(|m| m.len())
+        .map(|pack| packs::partial_bytes(&pack.files, engines_dir))
         .sum();
     if bytes > 0 {
         PackState::Partial { bytes }
@@ -184,7 +181,9 @@ pub fn pack_state(lock: &SdLock, engines_dir: &Path) -> PackState {
 /// Downloads and installs the engine pack (resuming a partial download) into
 /// `layout.engines_dir`, and returns the engine in it. Its Visual C++ runtime files are
 /// copied from llama.cpp's installed folder, `layout.llama_dir`; nothing is written there.
-/// [`PackError::WrongPlatform`] off Windows x86-64, the one platform with a pack.
+/// [`PackError::WrongPlatform`] off Windows x86-64, the one platform with a pack; an error
+/// before anything is downloaded when llama.cpp's folder is unknown or lacks a runtime file
+/// (see [`vc_runtime_dir`]).
 pub async fn install(
     lock: &SdLock,
     layout: &EngineLayout,
@@ -203,7 +202,7 @@ pub async fn install(
         keep: &lock.keep_files,
         keep_all: false,
         vc_runtime_files: &lock.vc_runtime_files,
-        vc_runtime_dir: layout.llama_dir.as_deref(),
+        vc_runtime_dir: vc_runtime_dir(lock, pack, layout)?,
     };
     packs::install_files(&spec, &layout.engines_dir, cancel, progress).await?;
     installed_pack(lock, pack, layout).ok_or_else(|| PackError::Archive {
@@ -230,7 +229,7 @@ fn pack_for<'a>(lock: &'a SdLock, platform: &str) -> Option<&'a PackSpec> {
 /// installed.
 fn installed_pack(lock: &SdLock, pack: &PackSpec, layout: &EngineLayout) -> Option<Engine> {
     let dir = layout.engines_dir.join(&pack.dir);
-    is_complete(lock, &dir).then(|| {
+    is_complete(lock, pack, &dir).then(|| {
         let fallback = vulkan_fallback(layout.llama_dir.as_deref(), &pack.platform);
         Engine::in_dir(&dir, lock, EngineSource::Pack, fallback)
     })
@@ -248,11 +247,45 @@ fn vulkan_fallback(llama_dir: Option<&Path>, platform: &str) -> Option<PathBuf> 
     folder.join(VULKAN_RUNTIME_FILE).is_file().then_some(folder)
 }
 
+/// The folder `install` copies `pack`'s Visual C++ runtime files from: llama.cpp's
+/// installed folder. For a Windows pack that folder must be known and hold every one of the
+/// lock's `vc_runtime_files`, or the engine would not start on a PC without the Visual C++
+/// redistributable (ruling L1-vcomp); the error comes before anything is downloaded. Off
+/// Windows there is no runtime to copy.
+fn vc_runtime_dir<'a>(
+    lock: &SdLock,
+    pack: &PackSpec,
+    layout: &'a EngineLayout,
+) -> Result<Option<&'a Path>, PackError> {
+    if !pack.platform.starts_with("windows") {
+        return Ok(None);
+    }
+    let dir = layout.llama_dir.as_deref().ok_or_else(|| {
+        PackError::Io(
+            "llama.cpp's folder is unknown, so the engine's Visual C++ runtime files cannot be \
+             copied from it"
+                .into(),
+        )
+    })?;
+    if let Some(missing) = lock
+        .vc_runtime_files
+        .iter()
+        .find(|name| !dir.join(name).is_file())
+    {
+        return Err(PackError::Io(format!(
+            "{missing} is not in llama.cpp's folder ({})",
+            dir.display()
+        )));
+    }
+    Ok(Some(dir))
+}
+
 /// Whether the pack folder `dir` holds its `.complete` marker, the program, and every DLL
 /// the lock's `windows_imports` names (a recorded file or one of its imports) that the pack
-/// keeps. The Visual C++ runtime files, copied from llama.cpp's folder, and system DLLs are
-/// not kept, so they are not checked.
-fn is_complete(lock: &SdLock, dir: &Path) -> bool {
+/// keeps. A Windows pack also needs every one of the lock's `vc_runtime_files`, copied from
+/// llama.cpp's folder: without them the engine does not start on a PC lacking the Visual
+/// C++ redistributable. System DLLs are not checked.
+fn is_complete(lock: &SdLock, pack: &PackSpec, dir: &Path) -> bool {
     let needed: BTreeSet<&str> = lock
         .windows_imports
         .iter()
@@ -260,9 +293,15 @@ fn is_complete(lock: &SdLock, dir: &Path) -> bool {
         .map(String::as_str)
         .filter(|name| name.to_ascii_lowercase().ends_with(".dll") && lock.keeps(name))
         .collect();
+    let vc_runtime: &[String] = if pack.platform.starts_with("windows") {
+        &lock.vc_runtime_files
+    } else {
+        &[]
+    };
     dir.join(PACK_COMPLETE_MARKER).is_file()
         && dir.join(program_file_name()).is_file()
         && needed.iter().all(|dll| dir.join(dll).is_file())
+        && vc_runtime.iter().all(|dll| dir.join(dll).is_file())
 }
 
 #[cfg(test)]
@@ -278,11 +317,15 @@ mod tests {
     }
 
     /// What an install leaves in `<engines>/sd-1106`: every file of the pinned zip the lock
-    /// keeps, this platform's program name (for tests off Windows) and the marker.
+    /// keeps, the Visual C++ runtime files copied from llama's folder, this platform's
+    /// program name (for tests off Windows) and the marker.
     fn fake_pack(engines_dir: &Path) -> PathBuf {
         let dir = engines_dir.join("sd-1106");
         let listing = include_str!("../../tests/fixtures/sd_win_pack_listing.txt");
         for name in listing.lines().filter(|n| embedded().keeps(n)) {
+            touch(&dir.join(name));
+        }
+        for name in &embedded().vc_runtime_files {
             touch(&dir.join(name));
         }
         touch(&dir.join(program_file_name()));
@@ -390,6 +433,89 @@ mod tests {
                 "{removed}"
             );
         }
+    }
+
+    /// The engine starts on a PC without the Visual C++ redistributable only with the
+    /// runtime files beside it (ruling L1-vcomp), so a Windows pack missing one is neither
+    /// complete nor found, and Studio offers the download again.
+    #[test]
+    fn a_windows_pack_missing_a_visual_cpp_runtime_file_is_not_complete() {
+        let lock = embedded();
+        let pack = &lock.packs[0];
+        assert!(pack.platform.starts_with("windows"));
+        let mut elsewhere = pack.clone();
+        elsewhere.platform = "linux-x86_64".into();
+        assert!(!lock.vc_runtime_files.is_empty());
+        for missing in &lock.vc_runtime_files {
+            let tmp = tempfile::tempdir().unwrap();
+            let layout = EngineLayout {
+                engines_dir: tmp.path().to_path_buf(),
+                ..EngineLayout::default()
+            };
+            let dir = fake_pack(tmp.path());
+            assert!(is_complete(lock, pack, &dir), "{missing}");
+            assert_eq!(pack_state(lock, tmp.path()), PackState::Installed);
+            assert!(discover(&layout, lock, &pack.platform).is_some());
+
+            std::fs::remove_file(dir.join(missing)).unwrap();
+            assert!(!is_complete(lock, pack, &dir), "{missing}");
+            assert_eq!(
+                pack_state(lock, tmp.path()),
+                PackState::NotInstalled,
+                "{missing}"
+            );
+            assert_eq!(discover(&layout, lock, &pack.platform), None, "{missing}");
+            // the Visual C++ runtime is Windows' own: a pack for another platform needs none
+            assert!(is_complete(lock, &elsewhere, &dir), "{missing}");
+        }
+    }
+
+    /// The Visual C++ runtime files come from llama's folder. For a Windows pack an unknown
+    /// folder, or one without a runtime file, is an error before anything is downloaded,
+    /// not an engine installed without it.
+    #[test]
+    fn a_windows_pack_takes_its_visual_cpp_runtime_from_llamas_folder() {
+        let lock = embedded();
+        let pack = &lock.packs[0];
+        let mut f = folders();
+        let llama = f.layout.llama_dir.clone().unwrap();
+        for name in &lock.vc_runtime_files {
+            touch(&llama.join(name));
+        }
+        assert_eq!(
+            vc_runtime_dir(lock, pack, &f.layout).unwrap(),
+            Some(llama.as_path())
+        );
+        for missing in &lock.vc_runtime_files {
+            std::fs::remove_file(llama.join(missing)).unwrap();
+            let err = vc_runtime_dir(lock, pack, &f.layout).unwrap_err();
+            assert!(err.to_string().contains(missing.as_str()), "{err}");
+            touch(&llama.join(missing));
+        }
+
+        f.layout.llama_dir = None;
+        let err = vc_runtime_dir(lock, pack, &f.layout).unwrap_err();
+        assert!(err.to_string().contains("llama.cpp"), "{err}");
+        // off Windows there is no runtime to copy, and no folder is needed
+        let mut elsewhere = pack.clone();
+        elsewhere.platform = "linux-x86_64".into();
+        assert_eq!(vc_runtime_dir(lock, &elsewhere, &f.layout).unwrap(), None);
+    }
+
+    /// On Windows itself, `install` refuses without llama's folder and downloads nothing.
+    #[tokio::test]
+    async fn on_windows_installing_without_llamas_folder_downloads_nothing() {
+        if !cfg!(windows) || current_platform() != "windows-x86_64" {
+            return;
+        }
+        let tmp = tempfile::tempdir().unwrap();
+        let layout = EngineLayout {
+            engines_dir: tmp.path().join("engines"),
+            ..EngineLayout::default()
+        };
+        let result = install(embedded(), &layout, &CancellationToken::new(), &|_| {}).await;
+        assert!(matches!(result, Err(PackError::Io(_))), "{result:?}");
+        assert!(!layout.engines_dir.exists());
     }
 
     #[test]

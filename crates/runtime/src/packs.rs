@@ -127,8 +127,19 @@ pub struct PackProgress {
 }
 
 /// Where downloads in progress are kept: `<packs>/.downloads`.
-pub(crate) fn downloads_dir(packs_dir: &Path) -> PathBuf {
+fn downloads_dir(packs_dir: &Path) -> PathBuf {
     packs_dir.join(".downloads")
+}
+
+/// Bytes of `files` already downloaded into `<root>/.downloads` (whole or in part) and not
+/// yet unpacked: what [`PackState::Partial`] reports.
+pub(crate) fn partial_bytes(files: &[PackFile], root: &Path) -> u64 {
+    let downloads = downloads_dir(root);
+    files
+        .iter()
+        .filter_map(|f| std::fs::metadata(downloads.join(part_name(f))).ok())
+        .map(|m| m.len())
+        .sum()
 }
 
 /// The pack's state from what is on disk.
@@ -140,12 +151,7 @@ pub fn state(pack: &PackSpec, packs_dir: &Path) -> PackState {
     {
         return PackState::Installed;
     }
-    let bytes: u64 = pack
-        .files
-        .iter()
-        .filter_map(|f| std::fs::metadata(downloads_dir(packs_dir).join(part_name(f))).ok())
-        .map(|m| m.len())
-        .sum();
+    let bytes = partial_bytes(&pack.files, packs_dir);
     if bytes > 0 {
         PackState::Partial { bytes }
     } else {
@@ -894,5 +900,29 @@ mod tests {
         std::fs::create_dir_all(dir.path().join(&pack.dir)).unwrap();
         std::fs::write(dir.path().join(&pack.dir).join(PACK_COMPLETE_MARKER), b"{}").unwrap();
         assert_eq!(state(pack, dir.path()), PackState::Installed);
+    }
+
+    #[test]
+    fn partial_bytes_adds_up_every_files_part() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = |name: &str, sha256: &str| PackFile {
+            name: name.into(),
+            url: format!("https://github.com/o/r/releases/download/t/{name}"),
+            size: 100,
+            sha256: sha256.into(),
+        };
+        let files = [
+            file("a.zip", &"a".repeat(64)),
+            file("b.zip", &"b".repeat(64)),
+        ];
+        assert_eq!(partial_bytes(&files, dir.path()), 0);
+        std::fs::create_dir_all(dir.path().join(".downloads")).unwrap();
+        let part = |f: &PackFile| dir.path().join(".downloads").join(part_name(f));
+        std::fs::write(part(&files[0]), b"12345").unwrap();
+        assert_eq!(partial_bytes(&files, dir.path()), 5);
+        std::fs::write(part(&files[1]), b"123").unwrap();
+        assert_eq!(partial_bytes(&files, dir.path()), 8);
+        // only the files asked about count
+        assert_eq!(partial_bytes(&files[1..], dir.path()), 3);
     }
 }
