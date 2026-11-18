@@ -177,6 +177,78 @@ class VulkanRuntime(unittest.TestCase):
             self.assertFalse((tmp / "main" / "vulkan" / "vulkan-1.dll").exists())
 
 
+class VcRuntime(unittest.TestCase):
+    """The Visual C++ runtime copied into resources/llama/main (llama.lock.json
+    "vc_runtime_files"). The redistributable keeps the C++ runtime in Microsoft.VC*.CRT and
+    the OpenMP runtime (vcomp140.dll, imported by the Studio engine's ggml DLLs) beside it in
+    Microsoft.VC*.OpenMP."""
+
+    @staticmethod
+    def redist(tmp: Path, openmp: bool = True) -> Path:
+        x64 = tmp / "VC" / "Redist" / "MSVC" / "14.44.35112" / "x64"
+        crt = x64 / "Microsoft.VC143.CRT"
+        omp = x64 / "Microsoft.VC143.OpenMP"
+        crt.mkdir(parents=True)
+        omp.mkdir()
+        for name in fetch_llama.LOCK["vc_runtime_files"]:
+            if name.startswith("vcomp"):
+                if openmp:
+                    (omp / name).write_bytes(b"openmp")
+            else:
+                (crt / name).write_bytes(b"crt")
+        return crt
+
+    def test_the_installer_ships_the_openmp_runtime(self):
+        self.assertIn("vcomp140.dll", fetch_llama.LOCK["vc_runtime_files"])
+
+    def test_each_file_is_found_in_its_redistributable_folder(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            crt = self.redist(Path(tmp))
+            for name in fetch_llama.LOCK["vc_runtime_files"]:
+                found = fetch_llama.vc_runtime_file(crt, name)
+                self.assertEqual(found.name, name)
+                self.assertTrue(found.is_file(), name)
+            self.assertEqual(
+                fetch_llama.vc_runtime_file(crt, "vcomp140.dll").parent.name, "Microsoft.VC143.OpenMP"
+            )
+            self.assertEqual(fetch_llama.vc_runtime_file(crt, "msvcp140.dll").parent, crt)
+
+    def test_a_missing_file_stops_the_build(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            crt = self.redist(Path(tmp), openmp=False)
+            with self.assertRaises(SystemExit) as stopped:
+                fetch_llama.vc_runtime_file(crt, "vcomp140.dll")
+            self.assertIn("vcomp140.dll", str(stopped.exception))
+
+    def test_windows_puts_every_file_into_llamas_folder(self):
+        import zipfile as zf
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp = Path(tmp)
+            crt = self.redist(tmp / "vs")
+            root = tmp / "repo"
+            (root / "third_party" / "licenses").mkdir(parents=True)
+            (root / "third_party" / "licenses" / "llama.cpp-LICENSE").write_text("MIT")
+            archive = tmp / "llama.zip"
+            with zf.ZipFile(archive, "w") as z:
+                for name in ("llama-server.exe", "llama-server-impl.dll", "ggml-vulkan.dll", "ggml-base.dll"):
+                    z.writestr("bin/" + name, b"program")
+            names = ("ROOT", "download", "install_vulkan_runtime", "find_vc_runtime")
+            saved = {name: getattr(fetch_llama, name) for name in names}
+            fetch_llama.ROOT = root
+            fetch_llama.download = lambda entry, **kw: archive
+            fetch_llama.install_vulkan_runtime = lambda target: None
+            fetch_llama.find_vc_runtime = lambda: crt
+            try:
+                fetch_llama.windows()
+            finally:
+                for name, value in saved.items():
+                    setattr(fetch_llama, name, value)
+            main = root / "src-tauri" / "resources" / "llama" / "main"
+            for name in fetch_llama.LOCK["vc_runtime_files"]:
+                self.assertTrue((main / name).is_file(), name)
+            self.assertEqual((main / "vcomp140.dll").read_bytes(), b"openmp")
+
+
 class Naming(unittest.TestCase):
     def test_sidecar_names_are_the_ones_tauri_looks_for(self):
         self.assertEqual(fetch_llama.sidecar_name("llama-server", "aarch64-apple-darwin"), "llama-server-aarch64-apple-darwin")

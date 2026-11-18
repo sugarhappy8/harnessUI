@@ -125,6 +125,16 @@ def find_vc_runtime() -> Path | None:
     return Path(matches[-1]).parent if matches else None
 
 
+def vc_runtime_file(vc: Path, name: str) -> Path:
+    """Where the redistributable keeps `name`: the C++ runtime folder `vc`
+    (Microsoft.VC*.CRT), or, for the OpenMP runtime vcomp140.dll that the Studio engine's
+    ggml DLLs import, the Microsoft.VC*.OpenMP folder beside it."""
+    for folder in [vc, *sorted(vc.parent.glob("Microsoft.VC*.OpenMP"))]:
+        if (folder / name).is_file():
+            return folder / name
+    raise SystemExit(f"{name} is not in {vc} or a Microsoft.VC*.OpenMP folder beside it (set VC_RUNTIME_DIR)")
+
+
 def install_vulkan_runtime(target: Path) -> Path:
     """Put the pinned Vulkan runtime (vulkan-1.dll) into <target>/vulkan/.
 
@@ -175,7 +185,7 @@ def windows() -> None:
         log("warning: not on Windows, skipping the Visual C++ runtime DLLs")
     else:
         for name in LOCK["vc_runtime_files"]:
-            shutil.copy2(vc / name, target / name)
+            shutil.copy2(vc_runtime_file(vc, name), target / name)
         log(f"copied Visual C++ runtime from {vc}")
     shutil.copy2(ROOT / "third_party" / "licenses" / "llama.cpp-LICENSE", target / "LICENSE-llama.cpp")
     (target / "BUILD").write_text(
