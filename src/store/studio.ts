@@ -6,10 +6,11 @@
 // page, preferences, today's spending), read when Studio opens and never fetched then (the
 // lists, local models, preferences and spending are read again each time Studio is shown and
 // when Settings closes); each tab's draft, which starts at the model used last or, local first,
-// a default.
+// a default. Task B3: the user's pick in the model picker, which carries the draft's settings
+// to the model picked and asks for an OpenRouter picture model's price once; the recent models.
 import { create, type StoreApi, type UseBoundStore } from "zustand";
 import * as api from "../components/studio/api";
-import { defaultsFor } from "../components/studio/canonical";
+import { carry, defaultsFor, type Values } from "../components/studio/canonical";
 import type {
   Company,
   InstalledLocal,
@@ -107,6 +108,16 @@ export interface StudioState {
   /** Sets `tab`'s draft to the model used last when it is still offered, else to
    *  `defaultModel`, at that model's starting values. Fetches nothing (not even a price). */
   selectInitialModel(tab: StudioTab): void;
+  /** The user's pick in the model picker: `tab`'s draft goes to model `modelId` at `target`,
+   *  its settings carried there (`carry`) with a note of what changed. An OpenRouter picture
+   *  model whose price was never fetched is asked for it, once; a local model never is. Its
+   *  Extra field comes with that answer, so the draft's extra settings are held aside until
+   *  then and carried to the model as it comes back (or as listed, dropped with the note, when
+   *  the request fails or another model is picked first). A model `tab` cannot use is ignored. */
+  chooseModel(tab: StudioTab, target: RunTarget, modelId: string): void;
+  /** *Get the price*: asks for the price of `tab`'s model (a model restored when Studio opened
+   *  is never asked by itself). */
+  fetchPrice(tab: StudioTab): Promise<void>;
   setPrompt(tab: StudioTab, text: string): void;
   /** Changes the gallery's filter and reads its first page again. */
   setFilter(patch: Partial<RunsFilter>): Promise<void>;
@@ -133,12 +144,64 @@ const RUNS_PAGE = 50;
 /** The read of what is saved while it is under way, so a second `load` waits for it. */
 let loading: Promise<void> | null = null;
 
+/** Extra settings a tab's draft holds aside while its model's price, and with it the model's
+ *  Extra field, is on its way: where the model runs, the model as listed when it was picked,
+ *  and the settings. */
+interface HeldExtra {
+  target: RunTarget;
+  model: MediaModel;
+  extra: Values;
+}
+
 export const useStudio: UseBoundStore<StoreApi<StudioState>> = create<StudioState>((set, get) => {
   /** Gives each tab still without a model its first one (a list or a model got later). */
   const fillEmptyDrafts = () => {
     for (const tab of ["image", "video"] as const) {
       if (get().drafts[tab].model === null) get().selectInitialModel(tab);
     }
+  };
+
+  /** The price requests on their way, by endpoint and model: a model is asked for once. */
+  const asking = new Map<string, Promise<MediaModel>>();
+  /** Each tab's extra settings held aside, while they are. */
+  const held: Partial<Record<StudioTab, HeldExtra>> = {};
+
+  /** Asks endpoint `providerId` for model `modelId`'s price (the same request while one is on
+   *  its way) and keeps the answer in place of the model as listed. */
+  const askPrice = (providerId: number, modelId: string): Promise<MediaModel> => {
+    const key = `${providerId} ${modelId}`;
+    const known = asking.get(key);
+    if (known) return known;
+    const asked = (async () => {
+      try {
+        const priced = await api.studioModelPrice(providerId, modelId);
+        set((s) => ({
+          endpoints: s.endpoints.map((e) =>
+            e.providerId === providerId ? { ...e, models: e.models.map((m) => (m.id === modelId ? priced : m)) } : e,
+          ),
+        }));
+        return priced;
+      } finally {
+        asking.delete(key);
+      }
+    })();
+    asking.set(key, asked);
+    return asked;
+  };
+
+  /** Carries `hold`'s extra settings to `model` (the model as it came back, or as listed) in
+   *  `tab`'s draft, adding the note for each one it does not take; nothing once the draft has
+   *  gone to another model. */
+  const settleHeld = (tab: StudioTab, hold: HeldExtra, model: MediaModel) => {
+    if (held[tab] !== hold) return;
+    delete held[tab];
+    const carried = carry(model, model, {}, hold.extra, []);
+    set((s) => {
+      const draft = s.drafts[tab];
+      if (draft.target === null || !sameTarget(draft.target, hold.target) || draft.model !== hold.model.id) return {};
+      const note = [draft.note, carried.note].filter((n) => n !== null).join(" ") || null;
+      return { drafts: { ...s.drafts, [tab]: { ...draft, extra: { ...draft.extra, ...carried.extra }, note } } };
+    });
   };
 
   return {
@@ -226,6 +289,56 @@ export const useStudio: UseBoundStore<StoreApi<StudioState>> = create<StudioStat
         };
         return { drafts: { ...s.drafts, [tab]: draft } };
       }),
+    chooseModel: (tab, target, modelId) => {
+      const s = get();
+      const to = offeredModel(tab, target, modelId, s.local, s.endpoints);
+      if (!to) return;
+      const endpoint = target === "thisComputer" ? null : s.endpoints.find((e) => e.providerId === target.endpoint);
+      const unpriced = endpoint?.company === "openrouter" && to.kind === "image" && to.priceFetchedAt === null;
+      const draft = s.drafts[tab];
+      if (draft.target !== null && sameTarget(draft.target, target) && draft.model === to.id) {
+        // Picked again: the draft stays as it is.
+        if (unpriced && endpoint) askPrice(endpoint.providerId, to.id).catch(() => undefined);
+        return;
+      }
+      // Extra settings held aside for the model picked before are carried to it as listed.
+      const waiting = held[tab];
+      const dropped = waiting ? carry(waiting.model, waiting.model, {}, waiting.extra, []) : null;
+      if (waiting) delete held[tab];
+      const extra = { ...draft.extra, ...dropped?.extra };
+      const from = draft.target && draft.model ? listedModel(draft.target, draft.model, s.local, s.endpoints) : null;
+      const hold = unpriced && !to.params.some((p) => p.kind.type === "extra") && Object.keys(extra).length > 0;
+      const carried = carry(from, to, draft.values, hold ? {} : extra, draft.refs);
+      const note = [dropped?.note ?? null, carried.note].filter((n) => n !== null).join(" ") || null;
+      set((st) => ({
+        drafts: {
+          ...st.drafts,
+          [tab]: {
+            ...draft,
+            target,
+            model: to.id,
+            values: carried.values,
+            extra: carried.extra,
+            refs: carried.refs,
+            // Which companies may run it belongs to the model it was set for.
+            routing: null,
+            note,
+          },
+        },
+      }));
+      if (!unpriced || !endpoint) return;
+      const mine: HeldExtra | null = hold ? { target, model: to, extra } : null;
+      if (mine) held[tab] = mine;
+      askPrice(endpoint.providerId, to.id).then(
+        (priced) => mine && settleHeld(tab, mine, priced),
+        () => mine && settleHeld(tab, mine, mine.model),
+      );
+    },
+    fetchPrice: async (tab) => {
+      const { target, model } = get().drafts[tab];
+      if (target === null || target === "thisComputer" || model === null) return;
+      await askPrice(target.endpoint, model);
+    },
     setPrompt: (tab, text) => set((s) => ({ drafts: { ...s.drafts, [tab]: { ...s.drafts[tab], prompt: text } } })),
     setFilter: async (patch) => {
       const filter = { ...get().filter, ...patch };
@@ -252,7 +365,7 @@ const MAKES: Record<Company, readonly MediaKind[]> = {
 };
 
 /** The fit words Studio counts as fitting: fits, and fits after the chat model is unloaded. */
-const FITTING: ReadonlySet<string> = new Set(["fits", "afterUnload"]);
+export const FITTING: ReadonlySet<string> = new Set(["fits", "afterUnload"]);
 
 /** The cloud models Studio picks first, when the endpoint offers them. */
 const PREFERRED: Record<MediaKind, readonly string[]> = {
@@ -272,9 +385,15 @@ function localModelsFor(tab: StudioTab, local: LocalModels | null): InstalledLoc
   return localFor(tab, local)?.installed.filter((m) => m.kind === tab && m.model.usable === null) ?? [];
 }
 
+/** An "Auto" model, which picks a model for you: Studio never offers one, as it would hide
+ *  where the prompt goes (`openrouter/auto`, or a model named "Auto"). */
+export function isAutoModel(model: MediaModel): boolean {
+  return /(^|\/)auto$/i.test(model.id) || /^auto( |$)/i.test(model.displayName);
+}
+
 /** The models of `endpoint`'s saved lists that `tab` can use. */
 function cloudModelsFor(endpoint: StudioEndpoint, tab: StudioTab): MediaModel[] {
-  return endpoint.models.filter((m) => m.kind === tab && m.usable === null);
+  return endpoint.models.filter((m) => m.kind === tab && m.usable === null && !isAutoModel(m));
 }
 
 /** The first recommended entry of `tab`'s kind that fits this computer. */
@@ -291,6 +410,22 @@ export function makesKind(endpoint: StudioEndpoint, tab: StudioTab): boolean {
  *  suggestion shows only then. */
 export function nothingInstalled(local: LocalModels | null): boolean {
   return !local?.installed.some((m) => m.model.usable === null);
+}
+
+/** Whether two targets are the same place: this computer, or one endpoint. */
+function sameTarget(a: RunTarget, b: RunTarget): boolean {
+  return a === "thisComputer" || b === "thisComputer" ? a === b : a.endpoint === b.endpoint;
+}
+
+/** The model `id` at `target` as listed, whether or not it can be used now. */
+function listedModel(
+  target: RunTarget,
+  id: string,
+  local: LocalModels | null,
+  endpoints: StudioEndpoint[],
+): MediaModel | null {
+  if (target === "thisComputer") return local?.installed.find((m) => m.model.id === id)?.model ?? null;
+  return endpoints.find((e) => e.providerId === target.endpoint)?.models.find((m) => m.id === id) ?? null;
 }
 
 /** The model `id` at `target`, when `tab` can still use it. */
@@ -341,6 +476,16 @@ export function emptyState(tab: StudioTab, local: LocalModels | null, endpoints:
   if (endpoints.length === 0) return "cloudBackup";
   if (!endpoints.some((e) => makesKind(e, tab))) return "addEndpoint";
   return null;
+}
+
+/** The models of the newest runs of `kind`, each once, newest first: at most `n`. */
+export function recentModels(runs: Run[], kind: StudioTab, n = 5): string[] {
+  const models: string[] = [];
+  for (const run of [...runs].sort((a, b) => b.createdAt - a.createdAt)) {
+    if (models.length === n) break;
+    if (run.kind === kind && !models.includes(run.model)) models.push(run.model);
+  }
+  return models;
 }
 
 /** The states in which a run works whether or not Studio watches it. */

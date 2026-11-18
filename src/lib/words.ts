@@ -2,7 +2,7 @@
 // a raw identifier such as "vulkan", "Vulkan0" or "text_model". Every phrase of the model
 // loading screens lives here, so the wording stays the same wherever it appears; the test
 // walks every value of the contract's enums.
-import type { Company, MediaKind, RefRole } from "../components/studio/types";
+import type { Company, LocalFit, MediaKind, RefRole } from "../components/studio/types";
 import { APP_NAME } from "./app";
 import type {
   BackendKind,
@@ -1060,3 +1060,81 @@ export function studioDay(at: number, now: number = Date.now()): string {
 export function listsUpdatedWords(name: string, fetchedAt: number | null, now: number = Date.now()): string {
   return fetchedAt === null ? `${name}'s lists: none saved yet` : `${name}'s lists updated ${studioDay(fetchedAt, now)}`;
 }
+
+/** A local model's fit word (Task B3): "Fits", "Slow here", "Fits after the chat model is
+ *  unloaded", or not for this computer at all. */
+export const LOCAL_FIT_WORDS: Record<LocalFit["word"], string> = {
+  fits: "Fits",
+  slow: "Slow here",
+  afterUnload: "Fits after the chat model is unloaded",
+  notHere: "Not for this computer",
+};
+
+/** How long a local run takes (Task B3; `eta.ts` works out the figure): "about 4 min a picture",
+ *  "(first guess)" until it was measured on this computer. */
+export const STUDIO_TIME = {
+  about: (time: string) => `about ${time}`,
+  seconds: (n: number) => `${n} s`,
+  minutes: (n: number) => `${n} min`,
+  hours: (n: number) => `${n} h`,
+  firstGuess: "(first guess)",
+  perPicture: "a picture",
+  /** After the time, with the clip's length as its Length field names it ("2 s"). */
+  perClip: (length: string) => `for a ${length} clip`,
+  aClip: "a clip",
+  /** Nothing measured here and no first guess. */
+  notYet: "time shown after your first run here",
+} as const;
+
+/** A cloud model's price as the picker hints it (Task B3); amounts are `formatUsd`'s. */
+export const STUDIO_PRICE = {
+  perPicture: (usd: string) => `${usd} a picture`,
+  fromPerPicture: (usd: string) => `from ${usd} a picture`,
+  perSecond: (usd: string) => `${usd} a second`,
+  rangePerSecond: (low: string, high: string) => `${low}–${high} a second`,
+  /** An OpenRouter picture model whose price was not asked for yet. */
+  whenPicked: "price shown when picked",
+  unknown: "price unknown",
+  free: "free",
+} as const;
+
+/** Studio's model picker (Task B3). */
+export const STUDIO_PICKER = {
+  label: "Model",
+  choose: "Choose a model",
+  search: "Search models",
+  searchPlaceholder: "Search models…",
+  filters: "Show only",
+  filter: {
+    edit: "Edit",
+    references: "References",
+    startFrame: "Start frame",
+    endFrame: "End frame",
+    sound: "Sound",
+    transparent: "Transparent",
+  },
+  /** What a model takes or makes, beside its name. */
+  badge: {
+    edit: "Edit",
+    refs: (n: number) => `Refs ${n}`,
+    startFrame: "Start frame",
+    endFrame: "End frame",
+    sound: "Sound",
+    transparent: "Transparent",
+    gif: "GIF",
+    svg: "SVG",
+  },
+  recent: "Recent",
+  localTag: "free · private · nothing is sent",
+  /** An endpoint's group: "via OpenRouter". */
+  via: (name: string) => `via ${name}`,
+  /** The Cloud mark's tooltip on an endpoint's group. */
+  goesTo: (host: string) => `Your prompt and added pictures go to ${host}.`,
+  noKey: "Add a key in Settings → Endpoints",
+  /** After "+ Get local models", how many recommended models that fit are not installed. */
+  moreFit: (n: number) => `(${n} more fit this computer)`,
+  noLocalYet: (name: string, bytes: number) => `No local models yet. ${fitsThisComputer(name, bytes)}`,
+  noLocalHere: "Local models need a graphics card or an Apple-silicon Mac; the cloud models below are the backup.",
+  nothingMatches: "No models match.",
+  getPrice: "Get the price",
+} as const;
