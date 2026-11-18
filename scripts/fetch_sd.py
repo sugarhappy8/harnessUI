@@ -34,17 +34,14 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from fetch_llama import (  # noqa: E402
-    MACOS_ARCHS,
-    MACOS_UNIVERSAL_TRIPLE,
-    check_macos_binary,
+    build_macos_sidecars,
+    checkout_commit,
     cmake_build_command,
     cmake_configure_command,
     download,
     keep,
-    lipo_create_command,
     macos_plan,
     run,
-    sidecar_name,
     verify_pack_files,
 )
 
@@ -68,15 +65,7 @@ def checkout(git: str, commit: str) -> Path:
     if commit != LOCK[PIN]["commit"]:
         raise SystemExit(f"the build commit {commit} is not the pinned stable-diffusion.cpp commit")
     src = CACHE / f"stable-diffusion.cpp-{commit[:12]}"
-    if not (src / ".git").exists():
-        src.mkdir(parents=True, exist_ok=True)
-        run(["git", "init", "-q"], cwd=src)
-        run(["git", "remote", "add", "origin", git], cwd=src)
-    run(["git", "fetch", "-q", "--depth", "1", "origin", commit], cwd=src)
-    run(["git", "checkout", "-q", "--force", commit], cwd=src)
-    head = subprocess.run(["git", "rev-parse", "HEAD"], cwd=src, capture_output=True, text=True, check=True).stdout.strip()
-    if head != commit:
-        raise SystemExit(f"checked out {head}, expected {commit}")
+    checkout_commit(src, git, commit)
     paths = list(LOCK["submodules"])
     run(["git", "submodule", "update", "--init", "--depth", "1", *paths], cwd=src)
     status = subprocess.run(
@@ -110,29 +99,8 @@ def check_submodules(status: str) -> None:
 def macos() -> None:
     plan = macos_plan(LOCK, pin_key=PIN)
     src = checkout(plan["git"], plan["commit"])
-    jobs = os.cpu_count() or 4
     out_dir = ROOT / "src-tauri" / "binaries"
-    out_dir.mkdir(parents=True, exist_ok=True)
-    parts: dict[str, list[Path]] = {name: [] for name in plan["targets"]}
-    for piece in plan["slices"]:
-        build = src / f"build-app-{piece['arch']}"
-        run(cmake_configure_command(src, build, piece["cmake_flags"]))
-        run(cmake_build_command(build, plan["targets"], jobs))
-        for name in plan["targets"]:
-            built = build / "bin" / name
-            if not built.exists():
-                raise SystemExit(f"build did not produce {built}")
-            dest = out_dir / sidecar_name(name, piece["triple"])
-            shutil.copy2(built, dest)
-            os.chmod(dest, 0o755)
-            check_macos_binary(dest, [piece["arch"]])
-            parts[name].append(dest)
-    for name, files in parts.items():
-        dest = out_dir / sidecar_name(name, MACOS_UNIVERSAL_TRIPLE)
-        dest.unlink(missing_ok=True)
-        run(lipo_create_command(files, dest))
-        os.chmod(dest, 0o755)
-        check_macos_binary(dest, MACOS_ARCHS)
+    build_macos_sidecars(plan, src, out_dir)
     log(f"Studio engine ready in {out_dir}")
 
 

@@ -356,20 +356,27 @@ def check_macos_binary(path: Path, archs: Sequence[str]) -> None:
             log(f"warning: the {arch} part of {path.name} did not run through Rosetta (exit {code})")
 
 
-def macos() -> None:
-    plan = macos_plan(LOCK)
-    src = CACHE / f"llama.cpp-{plan['commit'][:12]}"
+def checkout_commit(src: Path, git: str, commit: str) -> None:
+    """A shallow checkout of exactly `commit` from `git` in `src`, made on first use and
+    reused after. Stops unless HEAD is that commit."""
     if not (src / ".git").exists():
         src.mkdir(parents=True, exist_ok=True)
         run(["git", "init", "-q"], cwd=src)
-        run(["git", "remote", "add", "origin", plan["git"]], cwd=src)
-    run(["git", "fetch", "-q", "--depth", "1", "origin", plan["commit"]], cwd=src)
-    run(["git", "checkout", "-q", "--force", plan["commit"]], cwd=src)
+        run(["git", "remote", "add", "origin", git], cwd=src)
+    run(["git", "fetch", "-q", "--depth", "1", "origin", commit], cwd=src)
+    run(["git", "checkout", "-q", "--force", commit], cwd=src)
     head = subprocess.run(["git", "rev-parse", "HEAD"], cwd=src, capture_output=True, text=True, check=True).stdout.strip()
-    if head != plan["commit"]:
-        raise SystemExit(f"checked out {head}, expected {plan['commit']}")
+    if head != commit:
+        raise SystemExit(f"checked out {head}, expected {commit}")
+
+
+def build_macos_sidecars(plan: dict, src: Path, out_dir: Path) -> None:
+    """Build every target of a `macos_plan` from the checkout in `src` once per processor,
+    copy each part into `out_dir` under Tauri's sidecar name and check it, then join the
+    parts of each target into its universal file and check that. Both engines (llama.cpp
+    here, stable-diffusion.cpp in fetch_sd.py) build their Mac sidecars only through this,
+    so the rules check_macos_app enforces on the bundle are met the same way for both."""
     jobs = os.cpu_count() or 4
-    out_dir = ROOT / "src-tauri" / "binaries"
     out_dir.mkdir(parents=True, exist_ok=True)
     parts: dict[str, list[Path]] = {name: [] for name in plan["targets"]}
     for piece in plan["slices"]:
@@ -391,6 +398,14 @@ def macos() -> None:
         run(lipo_create_command(files, dest))
         os.chmod(dest, 0o755)
         check_macos_binary(dest, MACOS_ARCHS)
+
+
+def macos() -> None:
+    plan = macos_plan(LOCK)
+    src = CACHE / f"llama.cpp-{plan['commit'][:12]}"
+    checkout_commit(src, plan["git"], plan["commit"])
+    out_dir = ROOT / "src-tauri" / "binaries"
+    build_macos_sidecars(plan, src, out_dir)
     log(f"macOS runtime ready in {out_dir}")
 
 
