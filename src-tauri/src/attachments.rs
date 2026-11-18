@@ -28,14 +28,15 @@ pub struct ImageInput {
     pub data: String,
 }
 
+/// The picture types the composer takes: PNG, JPEG, GIF and WebP. A Studio picture goes to a
+/// chat or a prompt only as one of these (`studio::commands::for_chat`).
+pub(crate) const PICTURE_TYPES: [&str; 4] = ["image/png", "image/jpeg", "image/gif", "image/webp"];
+
 /// Checks the bytes really are the claimed image type (magic numbers), so a renamed
-/// file cannot be passed off as an image. Only PNG, JPEG, GIF and WebP count; the magic
-/// numbers are Studio's ([`crate::studio::gallery::sniff_media`]).
+/// file cannot be passed off as an image. Only [`PICTURE_TYPES`] count; the magic numbers
+/// are Studio's ([`crate::studio::gallery::sniff_media`]).
 pub(crate) fn sniff(mime: &str, bytes: &[u8]) -> bool {
-    matches!(
-        mime,
-        "image/png" | "image/jpeg" | "image/gif" | "image/webp"
-    ) && crate::studio::gallery::sniff_media(bytes) == Some(mime)
+    PICTURE_TYPES.contains(&mime) && crate::studio::gallery::sniff_media(bytes) == Some(mime)
 }
 
 fn extension(mime: &str) -> &'static str {

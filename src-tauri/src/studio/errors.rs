@@ -206,6 +206,51 @@ pub fn not_fetched(company: Company) -> AppError {
     )
 }
 
+/// A company answered a fetch of an endpoint's model lists or a picture's price with a
+/// failure instead of the list or price (one it could not find, or could not give). Nothing
+/// is charged for either, and the lists saved before are kept.
+pub fn not_given(company: Company) -> AppError {
+    if company == Company::Local {
+        return AppError::new(
+            "studio_not_fetched",
+            "The Studio engine on this computer could not give its model list.",
+            TRY_AGAIN_OR_RESTART,
+            String::new(),
+        );
+    }
+    AppError::new(
+        "studio_not_fetched",
+        format!("{} could not give the model list or price.", name(company)),
+        "Try again later. If it keeps happening, copy the details into a bug report.",
+        String::new(),
+    )
+}
+
+/// A company's answered failure on a fetch of an endpoint's model lists or a picture's price:
+/// a list or price it could not find or give is [`not_given`], never a run that could not be
+/// made; the key, credit, rate and server refusals are worded as [`from_failure`] words them.
+/// The company's own message, code and request id go in the details.
+pub fn from_read_failure(company: Company, f: &MediaFailure) -> AppError {
+    match f.kind {
+        FailureKind::NotFound | FailureKind::Other => AppError {
+            details: failure_details(f),
+            ..not_given(company)
+        },
+        _ => from_failure(company, f),
+    }
+}
+
+/// The model lists or a price that were fetched could not be saved on this computer; the
+/// lists saved before are kept.
+pub fn lists_not_saved(details: impl Into<String>) -> AppError {
+    AppError::new(
+        "studio_not_saved",
+        "The model list or price could not be saved on this computer.",
+        TRY_AGAIN_OR_RESTART,
+        details,
+    )
+}
+
 /// The request's kind is not the model's: a video model asked for pictures, or the other way.
 pub fn wrong_kind(model_kind: MediaKind) -> AppError {
     let message = match model_kind {
@@ -769,10 +814,43 @@ pub fn not_exported(details: impl Into<String>) -> AppError {
     )
 }
 
-/// What a company's (or the Studio engine's) failure says, in plain words, with the
-/// company's own message, code and request id in the details.
-pub fn from_failure(company: Company, f: &MediaFailure) -> AppError {
-    let who = name(company);
+/// An export with its settings would write `file_name` (`<name>.json`) beside the copy, and
+/// a file of that name is already there: the save dialog asked only about the copy, so it
+/// is not replaced, and nothing is copied.
+pub fn settings_file_exists(file_name: &str) -> AppError {
+    AppError::new(
+        "bad_request",
+        format!("A file named {file_name} is already there."),
+        "Choose another name.",
+        String::new(),
+    )
+}
+
+/// The file manager could not be asked to open `folder` (*Show in folder*, *Open folder*);
+/// the user is given the folder to open themselves.
+pub fn not_opened(folder: &std::path::Path, details: impl Into<String>) -> AppError {
+    AppError::new(
+        "studio_not_opened",
+        "The folder could not be opened.",
+        format!("Open it yourself: {}", folder.display()),
+        details,
+    )
+}
+
+/// A poster frame was sent for a result that is not a video: a picture's thumbnail is made
+/// from the picture itself.
+pub fn poster_only_for_video() -> AppError {
+    AppError::new(
+        "bad_request",
+        "Only a video can have a poster frame saved.",
+        "Play a video to save its poster frame.",
+        String::new(),
+    )
+}
+
+/// A company's failure as the details show it: its own message, code, HTTP status and
+/// request id, each when it gave one.
+fn failure_details(f: &MediaFailure) -> String {
     let mut details: Vec<String> = Vec::new();
     if !f.message.is_empty() {
         details.push(f.message.clone());
@@ -786,9 +864,16 @@ pub fn from_failure(company: Company, f: &MediaFailure) -> AppError {
     if let Some(id) = &f.request_id {
         details.push(format!("Request id: {id}"));
     }
-    let with_details = |code: &str, message: String, next: String| {
-        AppError::new(code, message, next, details.join("; "))
-    };
+    details.join("; ")
+}
+
+/// What a company's (or the Studio engine's) failure says, in plain words, with the
+/// company's own message, code and request id in the details.
+pub fn from_failure(company: Company, f: &MediaFailure) -> AppError {
+    let who = name(company);
+    let details = failure_details(f);
+    let with_details =
+        |code: &str, message: String, next: String| AppError::new(code, message, next, &details);
     let simple = |code: &str, message: &str, next: &str| {
         with_details(code, message.to_owned(), next.to_owned())
     };
@@ -1037,6 +1122,7 @@ mod tests {
     fn with_company(company: Company) -> Vec<AppError> {
         let mut all = vec![
             not_fetched(company),
+            not_given(company),
             blocked(company, None, None, None),
             blocked(company, Some(Stage::Prompt), Some(false), Some("req_1")),
             blocked(company, Some(Stage::Output), Some(true), None),
@@ -1059,6 +1145,11 @@ mod tests {
             EVERY_FAILURE_KIND
                 .iter()
                 .map(|kind| from_failure(company, &failure(*kind))),
+        );
+        all.extend(
+            EVERY_FAILURE_KIND
+                .iter()
+                .map(|kind| from_read_failure(company, &failure(*kind))),
         );
         all
     }
@@ -1090,6 +1181,10 @@ mod tests {
             bad_poster(),
             export_onto_itself(),
             not_exported("denied"),
+            settings_file_exists("kite.json"),
+            not_opened(std::path::Path::new("/home/u/harnessUI/studio"), "denied"),
+            poster_only_for_video(),
+            lists_not_saved("database is locked"),
         ];
         for to in [PictureUse::Chat, PictureUse::Prompt] {
             all.push(picture_too_big_for(to));
@@ -1185,6 +1280,67 @@ mod tests {
         let e = nothing_to_fetch();
         assert_eq!(e.code, "bad_request");
         assert_eq!(e.next_step, "Make it again with Again.");
+    }
+
+    #[test]
+    fn a_failed_read_of_a_list_or_price_is_not_worded_as_a_run() {
+        let answered = MediaFailure {
+            message: "No endpoints found".into(),
+            status: Some(404),
+            ..failure(FailureKind::NotFound)
+        };
+        let e = from_read_failure(Company::OpenRouter, &answered);
+        assert_eq!(
+            (e.code.as_str(), e.message.as_str(), e.next_step.as_str()),
+            (
+                "studio_not_fetched",
+                "OpenRouter could not give the model list or price.",
+                "Try again later. If it keeps happening, copy the details into a bug report."
+            )
+        );
+        assert_eq!(e.details, "No endpoints found; HTTP status: 404");
+        let e = from_read_failure(Company::OpenAi, &failure(FailureKind::Other));
+        assert_eq!(e.message, "OpenAI could not give the model list or price.");
+        // A refusal of the key, credit or rate keeps the words a run gets.
+        let e = from_read_failure(Company::OpenRouter, &failure(FailureKind::Unauthorized));
+        assert_eq!(e.code, "studio_unauthorized");
+        assert_eq!(e.message, "OpenRouter refused the API key.");
+        let e = lists_not_saved("database is locked");
+        assert_eq!(
+            (e.code.as_str(), e.message.as_str(), e.details.as_str()),
+            (
+                "studio_not_saved",
+                "The model list or price could not be saved on this computer.",
+                "database is locked"
+            )
+        );
+    }
+
+    #[test]
+    fn the_gallery_actions_say_what_to_do_instead() {
+        let e = not_opened(
+            std::path::Path::new("/home/u/harnessUI/studio"),
+            "no file manager",
+        );
+        assert_eq!(
+            (e.code.as_str(), e.message.as_str(), e.next_step.as_str()),
+            (
+                "studio_not_opened",
+                "The folder could not be opened.",
+                "Open it yourself: /home/u/harnessUI/studio"
+            )
+        );
+        assert_eq!(e.details, "no file manager");
+        let e = settings_file_exists("kite.json");
+        assert_eq!(
+            (e.code.as_str(), e.message.as_str(), e.next_step.as_str()),
+            (
+                "bad_request",
+                "A file named kite.json is already there.",
+                "Choose another name."
+            )
+        );
+        assert_eq!(poster_only_for_video().code, "bad_request");
     }
 
     #[test]

@@ -26,6 +26,7 @@ use base64::Engine;
 use serde_json::{Value, json};
 use tauri::{Manager, State};
 use tauri_plugin_opener::OpenerExt;
+use tokio::io::AsyncWriteExt;
 
 use super::catalog::{self, EndpointModels};
 use super::errors::{self, PictureUse};
@@ -33,7 +34,7 @@ use super::gallery::{GalleryError, RefStored, io_error, sniff_media};
 use super::manager::{StudioManager, creation_kind, output_dto};
 use super::prefs::{StudioPrefs, StudioPrefsPatch};
 use crate::artifacts::export_target;
-use crate::attachments::{ImageInput, MAX_IMAGE_BYTES, PictureWorker};
+use crate::attachments::{ImageInput, MAX_IMAGE_BYTES, PICTURE_TYPES, PictureWorker};
 use crate::commands::only_main_window;
 use crate::dto::{
     EstimateDto, MediaModelDto, OutputDto, RefDto, RunDto, RunsCursorDto, RunsFilter, RunsPage,
@@ -51,9 +52,6 @@ const RUNS_PAGE_MAX: u32 = 500;
 
 /// The largest poster frame of a video the webview may save as its thumbnail: 1 MiB.
 pub const POSTER_CAP: usize = 1024 * 1024;
-
-/// The picture types a chat takes, which added pictures share.
-const CHAT_PICTURES: [&str; 4] = ["image/png", "image/jpeg", "image/gif", "image/webp"];
 
 // ---- commands ---------------------------------------------------------------------------------
 
@@ -301,11 +299,12 @@ pub async fn studio_show_in_folder(
     tokio::fs::metadata(&path)
         .await
         .map_err(|e| errors::from_gallery(&io_error(e)))?;
+    let folder = path.parent().unwrap_or(&path).to_owned();
     window
         .app_handle()
         .opener()
         .reveal_item_in_dir(&path)
-        .map_err(|e| AppError::internal(e.to_string()))
+        .map_err(|e| errors::not_opened(&folder, e.to_string()))
 }
 
 /// *Open folder*: opens the gallery folder in the file manager, made first if it is not
@@ -324,7 +323,7 @@ pub async fn studio_open_folder(
         .app_handle()
         .opener()
         .open_path(root.display().to_string(), None::<&str>)
-        .map_err(|e| AppError::internal(e.to_string()))
+        .map_err(|e| errors::not_opened(&root, e.to_string()))
 }
 
 /// Keeps a picture the user added to the prompt in the gallery's `refs/`.
@@ -451,7 +450,7 @@ pub async fn runs(
     let query = store::CreationQuery {
         kind: filter.kind.map(creation_kind),
         starred: filter.starred,
-        text: Some(filter.text).filter(|text| !text.trim().is_empty()),
+        text: Some(filter.text.trim().to_owned()).filter(|text| !text.is_empty()),
         model: filter.model,
         since: filter.since,
         until: filter.until,
@@ -526,9 +525,10 @@ async fn output_of(studio: &StudioManager, output_id: &str) -> AppResult<store::
         .ok_or_else(|| AppError::not_found("result"))
 }
 
-/// Saves `jpeg_base64` (base64, no `data:` prefix) as output `output_id`'s thumbnail, in the
-/// gallery's `.thumbs/`, replacing any earlier one, and gives the output with it. Anything
-/// but a JPEG of at most [`POSTER_CAP`] bytes is refused before it is written.
+/// Saves `jpeg_base64` (base64, no `data:` prefix) as video output `output_id`'s thumbnail,
+/// in the gallery's `.thumbs/`, replacing any earlier one, and gives the output with it.
+/// Anything but a JPEG of at most [`POSTER_CAP`] bytes, or a poster for a result that is not
+/// a video, is refused before it is written.
 pub async fn save_thumb(
     studio: &StudioManager,
     output_id: &str,
@@ -545,6 +545,10 @@ pub async fn save_thumb(
         return Err(errors::bad_poster());
     }
     let mut output = output_of(studio, output_id).await?;
+    // A picture's thumbnail is made from the picture itself.
+    if !output.mime.starts_with("video/") {
+        return Err(errors::poster_only_for_video());
+    }
     let (gallery, id) = (studio.gallery(), output.id.clone());
     let path = tokio::task::spawn_blocking(move || gallery.write_thumb(&id, &jpeg))
         .await
@@ -586,6 +590,31 @@ pub async fn export(
     forbidden: &[PathBuf],
 ) -> AppResult<String> {
     let output = output_of(studio, output_id).await?;
+    export_output(studio, output, path, with_settings, forbidden).await
+}
+
+/// [`export`] of `output`, as it was looked up. Nothing is written until every check has
+/// passed. With `with_settings`, the run is read first, so a run deleted meanwhile leaves
+/// no copy without its settings; and a `<name>.json` already there is refused, never
+/// replaced, since the save dialog asked only about the copy.
+async fn export_output(
+    studio: &StudioManager,
+    output: store::CreationOutput,
+    path: &str,
+    with_settings: bool,
+    forbidden: &[PathBuf],
+) -> AppResult<String> {
+    let run = if with_settings {
+        let run = studio
+            .deps()
+            .store
+            .get_creation_run(&output.run_id)
+            .await?
+            .ok_or_else(|| AppError::not_found("run"))?;
+        Some(run)
+    } else {
+        None
+    };
     let source = PathBuf::from(&output.path);
     let ext = source
         .extension()
@@ -608,21 +637,35 @@ pub async fn export(
     {
         return Err(errors::export_onto_itself());
     }
+    let settings_at = target.with_extension("json");
+    // A link counts as a file there, even one that leads nowhere.
+    if run.is_some() && tokio::fs::symlink_metadata(&settings_at).await.is_ok() {
+        let name = settings_at
+            .file_name()
+            .unwrap_or_default()
+            .to_string_lossy();
+        return Err(errors::settings_file_exists(&name));
+    }
     tokio::fs::copy(&source, &target)
         .await
         .map_err(|e| errors::not_exported(e.to_string()))?;
-    if with_settings {
-        let run = studio
-            .deps()
-            .store
-            .get_creation_run(&output.run_id)
-            .await?
-            .ok_or_else(|| AppError::not_found("run"))?;
+    if let Some(run) = run {
         let json = serde_json::to_vec_pretty(&settings_record(&run, &output))
             .map_err(AppError::internal)?;
-        tokio::fs::write(target.with_extension("json"), json)
+        // Made new: a file that appeared there since the check is not replaced either.
+        let mut file = tokio::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&settings_at)
             .await
             .map_err(|e| errors::not_exported(e.to_string()))?;
+        // Flushed, so a failed write is seen here rather than lost when the file is closed.
+        async {
+            file.write_all(&json).await?;
+            file.flush().await
+        }
+        .await
+        .map_err(|e| errors::not_exported(e.to_string()))?;
     }
     Ok(target.display().to_string())
 }
@@ -670,7 +713,7 @@ pub(crate) fn for_chat(output: &store::CreationOutput) -> AppResult<()> {
 /// Whether result `output` may go to `to`: a chat and the prompt's added pictures take the
 /// same pictures.
 fn picture_check(output: &store::CreationOutput, to: PictureUse) -> AppResult<()> {
-    if !CHAT_PICTURES.contains(&output.mime.as_str()) {
+    if !PICTURE_TYPES.contains(&output.mime.as_str()) {
         return Err(errors::not_a_picture_for(
             to,
             output.mime.starts_with("video/"),
@@ -768,16 +811,16 @@ fn endpoint_dto(endpoint: &EndpointModels) -> StudioEndpointDto {
     }
 }
 
-/// A failed fetch of a model list or a price, in Studio's words.
+/// A failed fetch of a model list or a price, in Studio's words: a read's, never a run's.
 fn fetch_error(company: Company, e: MediaError) -> AppError {
     match e {
-        MediaError::Answered(failure) => errors::from_failure(company, &failure),
+        MediaError::Answered(failure) => errors::from_read_failure(company, &failure),
         MediaError::NotSent(e) | MediaError::Unknown(e) => AppError {
             details: e.to_string(),
             ..errors::not_fetched(company)
         },
         // Saving the lists failed.
-        MediaError::Local(e) => AppError::internal(e),
+        MediaError::Local(e) => errors::lists_not_saved(e.to_string()),
     }
 }
 
@@ -813,9 +856,9 @@ mod tests {
 
     use agent::ProviderError;
     use agent::media::{
-        Company, Fetched, JobDone, JobState, MediaError, MediaKind, MediaLimits, MediaModel,
-        MediaProvider, MediaRequest, ParamKind, Price, PriceRow, RawCatalog, RequestPreview,
-        Started, Table,
+        Company, FailureKind, Fetched, JobDone, JobState, LocalIo, MediaError, MediaFailure,
+        MediaKind, MediaLimits, MediaModel, MediaProvider, MediaRequest, ParamKind, Price,
+        PriceRow, RawCatalog, RequestPreview, Started, Table,
     };
     use async_trait::async_trait;
     use jiff::tz::TimeZone;
@@ -1412,6 +1455,73 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_list_or_price_the_company_does_not_give_is_worded_as_a_read() {
+        let h = harness().await;
+        let answered = |kind| {
+            MediaError::Answered(MediaFailure {
+                kind,
+                stage: None,
+                charged: None,
+                company_code: None,
+                request_id: None,
+                status: Some(404),
+                message: "No endpoints found".into(),
+                retry_after: None,
+            })
+        };
+        *h.company.fail.lock().unwrap() = Some(answered(FailureKind::Other));
+        let err = refresh_models(&h.manager, h.openrouter.0, |_| true)
+            .await
+            .unwrap_err();
+        assert_eq!(err.code, "studio_not_fetched");
+        assert_eq!(
+            err.message,
+            "OpenRouter could not give the model list or price."
+        );
+        assert!(err.details.contains("No endpoints found"), "{err:?}");
+
+        *h.company.fail.lock().unwrap() = Some(answered(FailureKind::NotFound));
+        let err = model_price(&h.manager, h.openrouter.0, FLUX)
+            .await
+            .unwrap_err();
+        assert_eq!(err.code, "studio_not_fetched");
+        assert_eq!(
+            err.message,
+            "OpenRouter could not give the model list or price."
+        );
+        assert!(err.details.contains("HTTP status: 404"), "{err:?}");
+
+        // The lists could not be kept on this computer.
+        *h.company.fail.lock().unwrap() =
+            Some(MediaError::Local(LocalIo::Io("database is locked".into())));
+        let err = refresh_models(&h.manager, h.openrouter.0, |_| true)
+            .await
+            .unwrap_err();
+        assert_eq!(err.code, "studio_not_saved");
+        assert_eq!(
+            err.message,
+            "The model list or price could not be saved on this computer."
+        );
+        // The lists saved before stay.
+        let listed = models(&h.manager, |_| true).await.unwrap();
+        assert_eq!(listed.endpoints[0].models.len(), 101);
+    }
+
+    #[tokio::test]
+    async fn search_text_is_matched_without_its_outer_spaces() {
+        let h = harness().await;
+        h.seed_run("a", MediaKind::Image, "a red kite", now() - 2)
+            .await;
+        h.seed_run("d", MediaKind::Image, "Red fox", now() - 1)
+            .await;
+        let padded = RunsFilter {
+            text: " red ".into(),
+            ..RunsFilter::default()
+        };
+        assert_eq!(h.run_ids(padded).await, ["d", "a"]);
+    }
+
+    #[tokio::test]
     async fn output_bytes_gives_the_thumbnail_when_asked_and_refuses_a_huge_video() {
         let h = harness().await;
         let picture = png(4, 4);
@@ -1663,6 +1773,25 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_poster_is_saved_for_a_video_only() {
+        let h = harness().await;
+        h.seed_run("p1", MediaKind::Image, "a red kite", now())
+            .await;
+        let picture = png(4, 4);
+        let out = h
+            .seed_output("p1", "image/png", &picture, picture.len() as u64)
+            .await;
+        let err = save_thumb(&h.manager, &out, &base64(&jpeg(1024)))
+            .await
+            .unwrap_err();
+        assert_eq!(err.code, "bad_request");
+        assert_eq!(err.message, "Only a video can have a poster frame saved.");
+        assert!(!h.manager.gallery().thumb_path(&out).exists());
+        let kept = h.store.get_creation_output(&out).await.unwrap().unwrap();
+        assert_eq!(kept.thumb_path, None);
+    }
+
+    #[tokio::test]
     async fn a_star_is_kept_on_the_result() {
         let h = harness().await;
         h.seed_run("p1", MediaKind::Image, "a red kite", now())
@@ -1843,6 +1972,62 @@ mod tests {
             err.message,
             "That folder belongs to the app. Choose another one."
         );
+    }
+
+    #[tokio::test]
+    async fn export_with_settings_replaces_no_file_and_leaves_no_copy_without_them() {
+        // Made first, so it goes after the harness.
+        let docs = Scratch::new();
+        let h = harness().await;
+        h.seed_run("p1", MediaKind::Image, "a red kite", now())
+            .await;
+        let picture = png(4, 4);
+        let out = h
+            .seed_output("p1", "image/png", &picture, picture.len() as u64)
+            .await;
+        let at = |name: &str| docs.path().join(name).display().to_string();
+
+        // A `<name>.json` already there: the save dialog asked only about the copy, so
+        // nothing is copied and the file is kept as it was.
+        std::fs::write(docs.path().join("kite.json"), b"my own notes").unwrap();
+        let err = export(&h.manager, &out, &at("kite.png"), true, &[])
+            .await
+            .unwrap_err();
+        assert_eq!(err.code, "bad_request");
+        assert_eq!(err.message, "A file named kite.json is already there.");
+        assert_eq!(err.next_step, "Choose another name.");
+        assert!(!docs.path().join("kite.png").exists());
+        assert_eq!(
+            std::fs::read(docs.path().join("kite.json")).unwrap(),
+            b"my own notes"
+        );
+        // Without its settings, the copy is made and the file is not touched.
+        export(&h.manager, &out, &at("kite.png"), false, &[])
+            .await
+            .unwrap();
+        assert_eq!(
+            std::fs::read(docs.path().join("kite.png")).unwrap(),
+            picture
+        );
+        assert_eq!(
+            std::fs::read(docs.path().join("kite.json")).unwrap(),
+            b"my own notes"
+        );
+
+        // The run is deleted once its result was looked up (its rows go before its files):
+        // no copy is left without its settings.
+        let output = h.store.get_creation_output(&out).await.unwrap().unwrap();
+        h.store
+            .delete_creation_runs(vec!["p1".into()], 0)
+            .await
+            .unwrap();
+        assert!(Path::new(&output.path).exists());
+        let err = export_output(&h.manager, output, &at("lonely.png"), true, &[])
+            .await
+            .unwrap_err();
+        assert_eq!(err.code, "not_found");
+        assert!(!docs.path().join("lonely.png").exists());
+        assert!(!docs.path().join("lonely.json").exists());
     }
 
     #[tokio::test]

@@ -598,7 +598,7 @@ impl StudioManager {
 
     /// What the manager works with: the store, the endpoints, the clock. The read commands
     /// use the same ones as the runs.
-    pub fn deps(&self) -> &StudioDeps {
+    pub(crate) fn deps(&self) -> &StudioDeps {
         &self.inner.deps
     }
 
