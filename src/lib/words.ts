@@ -2,7 +2,7 @@
 // a raw identifier such as "vulkan", "Vulkan0" or "text_model". Every phrase of the model
 // loading screens lives here, so the wording stays the same wherever it appears; the test
 // walks every value of the contract's enums.
-import type { RefRole } from "../components/studio/types";
+import type { Company, MediaKind, RefRole } from "../components/studio/types";
 import { APP_NAME } from "./app";
 import type {
   BackendKind,
@@ -961,3 +961,102 @@ export const CARRY_WORDS = {
     return fit === 1 ? `Only 1 ${one} fits, so ${was} left out.` : `Only ${fit} ${many} fit, so ${was} left out.`;
   },
 } as const;
+
+/** Studio's tabs. */
+export const STUDIO_TABS: Record<MediaKind, string> = { image: "Pictures", video: "Video" };
+
+/** Studio's top bar, its menu and the prompt box (Task B2). */
+export const STUDIO_BAR = {
+  tabs: "Pictures or video",
+  search: "Search",
+  searchPlaceholder: "Search…",
+  starred: "Starred",
+  grid: "Grid",
+  menu: "Studio menu",
+  updateLists: "Update model lists",
+  updatingLists: "Updating model lists…",
+  /** Cloud spending today, after the amount ("$0.84 today"). */
+  spentToday: (amount: string) => `${amount} today`,
+  spentTitle: "Spent on cloud models today. Runs on this computer are free.",
+  prompt: "Prompt",
+  promptPlaceholder: {
+    image: "Describe the picture you want…",
+    video: "Describe the video you want…",
+  } satisfies Record<MediaKind, string>,
+} as const;
+
+/** The mark for a model that runs on this computer. */
+export const LOCAL_MARK = {
+  name: "On this computer",
+  title: "Your prompt and pictures stay on this computer.",
+} as const;
+
+/** Where a cloud run's prompt goes ("Cloud: your prompt and added pictures go to openrouter.ai"). */
+export function cloudGoesTo(host: string): string {
+  return `Cloud: your prompt and added pictures go to ${host}`;
+}
+
+/** The chip for a cloud model, naming its endpoint's host when known: "Cloud · openrouter.ai". */
+export function cloudChipWords(host: string): string {
+  return host ? `Cloud · ${host}` : "Cloud";
+}
+
+/** Buttons that more than one Studio screen shows. */
+export const STUDIO_ACTIONS = {
+  getLocalModels: "Get local models",
+  openEndpoints: "Open Endpoints",
+  getTheList: "Get the list",
+  notNow: "Not now",
+} as const;
+
+/** A recommended local model that fits, and its whole download: "FLUX.2 klein 4B fits this
+ *  computer (5.3 GB)." */
+export function fitsThisComputer(name: string, bytes: number): string {
+  return `${name} fits this computer (${amountGb(bytes)}).`;
+}
+
+/** Studio's empty states (Task B2), local first; the backup and cloud lines name the companies
+ *  that make the tab's kind (OpenAI makes no video). */
+export const STUDIO_EMPTY = {
+  getLocal: "Make pictures and videos on this computer: free, and nothing is sent.",
+  /** The second, smaller line under `getLocal` when no saved endpoint makes the tab's kind. */
+  backup: {
+    image: "No good graphics card? Cloud models are the backup: OpenRouter or OpenAI.",
+    video: "Or make videos with OpenRouter: add it in Settings → Endpoints.",
+  } satisfies Record<MediaKind, string>,
+  /** No local model fits, and no saved endpoint makes the tab's kind. */
+  cloud: {
+    image:
+      "This computer cannot run local models well. Cloud models run on a company's computers instead: add OpenRouter or OpenAI.",
+    video:
+      "This computer cannot run local video models well. OpenRouter makes videos in the cloud: add it in Settings → Endpoints.",
+  } satisfies Record<MediaKind, string>,
+  /** The Video tab on a computer that cannot make video here. */
+  noVideoHere:
+    "Video on this computer needs a graphics card or an Apple-silicon Mac. OpenRouter makes videos in the cloud: add it in Settings → Endpoints.",
+} as const;
+
+/** The one-time suggestion while nothing is installed locally. */
+export const STUDIO_SUGGESTION = {
+  text: (name: string) => `Studio works on this computer. ${name} fits here: free and private.`,
+  size: (bytes: number) => `One download of ${amountGb(bytes)}.`,
+} as const;
+
+/** An endpoint whose lists are not saved yet ("Get OpenRouter's picture and video models"). */
+export function getListWords(name: string, company: Company): string {
+  return company === "openai" ? `Get ${name}'s picture models` : `Get ${name}'s picture and video models`;
+}
+
+const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+
+/** A day as Studio's menu names it: "17 Nov", with the year when it is not this year. */
+export function studioDay(at: number, now: number = Date.now()): string {
+  const day = new Date(at);
+  const short = `${day.getDate()} ${MONTHS[day.getMonth()]}`;
+  return day.getFullYear() === new Date(now).getFullYear() ? short : `${short} ${day.getFullYear()}`;
+}
+
+/** When an endpoint's model lists were saved: "OpenRouter's lists updated 17 Nov". */
+export function listsUpdatedWords(name: string, fetchedAt: number | null, now: number = Date.now()): string {
+  return fetchedAt === null ? `${name}'s lists: none saved yet` : `${name}'s lists updated ${studioDay(fetchedAt, now)}`;
+}

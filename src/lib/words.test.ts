@@ -31,6 +31,8 @@ import {
   waitingWords,
   wordsPerSecond,
   amountGb,
+  getListWords,
+  listsUpdatedWords,
   amountNumber,
   appleLimitWords,
   barLegend,
@@ -1005,5 +1007,20 @@ describe("compare-fit-words: \"Will it fit on this computer?\" in plain words", 
       plain(line);
       expect(line).not.toMatch(/Fits|GPU|CPU|context|layer|your /);
     }
+  });
+});
+
+describe("0.1.0 Studio: the saved lists in plain words", () => {
+  const now = new Date(2026, 10, 18, 12).getTime();
+
+  it("names the day a list was saved, with the year only when it is not this year", () => {
+    expect(listsUpdatedWords("OpenRouter", new Date(2026, 10, 17, 9).getTime(), now)).toBe("OpenRouter's lists updated 17 Nov");
+    expect(listsUpdatedWords("OpenAI", new Date(2025, 0, 3).getTime(), now)).toBe("OpenAI's lists updated 3 Jan 2025");
+    expect(listsUpdatedWords("OpenAI", null, now)).toBe("OpenAI's lists: none saved yet");
+  });
+
+  it("offers an endpoint's lists by what its company makes", () => {
+    expect(getListWords("OpenRouter", "openrouter")).toBe("Get OpenRouter's picture and video models");
+    expect(getListWords("Work key", "openai")).toBe("Get Work key's picture models");
   });
 });
