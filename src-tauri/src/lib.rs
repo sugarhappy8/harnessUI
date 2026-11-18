@@ -337,6 +337,8 @@ pub fn run() {
             studio::commands::studio_ref_from_output,
             studio::commands::studio_output_for_chat,
             studio::commands::studio_set_prefs,
+            studio::commands::studio_answer_unload,
+            studio::commands::studio_quit_now,
             studio::engine_cmd::studio_engine_status,
             studio::engine_cmd::studio_engine_download,
             studio::engine_cmd::studio_engine_cancel,
@@ -363,6 +365,19 @@ pub fn run() {
                 })?;
             let secrets: Arc<dyn store::secrets::SecretStore> =
                 Arc::from(store::secrets::platform_default(&app.config().identifier));
+            let runtime = Arc::new(runtime_manager::RuntimeManager::new(
+                handle.clone(),
+                runtime_manager::layout(&handle),
+            ));
+            let model_busy: Arc<state::BusyCounter> = Default::default();
+            // 0.1.0: one graphics-card tenant at a time, the chat model or a local Studio
+            // job; a chat load waits while a job holds the card.
+            let lease = gpu_lease::GpuLease::new(Arc::new(gpu_lease::RuntimeChat {
+                runtime: runtime.clone(),
+                busy: model_busy.clone(),
+            }));
+            app.manage(lease.clone());
+            runtime.set_studio_gate(lease.clone());
             // 0.1.0: Studio's runs, holding Settings → Studio as saved.
             let studio = Arc::new(studio::manager::StudioManager::new(
                 studio::manager::StudioDeps {
@@ -390,23 +405,25 @@ pub fn run() {
                     thumbs: Some(attachments::PictureWorker::thumbs()),
                     limits: agent::media::MediaLimits::default(),
                     poll: studio::manager::PollPlan::default(),
+                    // Runs on this computer: the installed models with the engine found now
+                    // (looked for again after a download), the one lease the chat loads ask
+                    // too, and this computer's hardware.
+                    local: Some(studio::deps::LocalLane {
+                        provider: Arc::new(studio::local::LocalMediaProvider::new(
+                            store.clone(),
+                            Arc::new(studio::local::AppGenCatalog(handle.clone())),
+                            {
+                                let handle = handle.clone();
+                                Arc::new(move || studio::engine_cmd::current_engine(&handle))
+                            },
+                        )),
+                        lease: Arc::new(studio::deps::AppLease(lease.clone())),
+                        hardware: Arc::new(studio::deps::AppHardware(handle.clone())),
+                    }),
                 },
                 tauri::async_runtime::block_on(studio::prefs::load(&store)),
             ));
             app.manage(studio.clone());
-            let runtime = Arc::new(runtime_manager::RuntimeManager::new(
-                handle.clone(),
-                runtime_manager::layout(&handle),
-            ));
-            let model_busy: Arc<state::BusyCounter> = Default::default();
-            // 0.1.0: one graphics-card tenant at a time, the chat model or a local Studio
-            // job; a chat load waits while a job holds the card.
-            let lease = gpu_lease::GpuLease::new(Arc::new(gpu_lease::RuntimeChat {
-                runtime: runtime.clone(),
-                busy: model_busy.clone(),
-            }));
-            app.manage(lease.clone());
-            runtime.set_studio_gate(lease);
             let skills = Arc::new(tools::SkillsServer::new());
             let pass_through: Vec<String> =
                 tauri::async_runtime::block_on(store.get_setting(toolset::TERMINAL_PASS_THROUGH))
@@ -509,6 +526,22 @@ pub fn run() {
         }
     };
     app.run(|handle, event| {
+        // 0.1.0: a local Studio job cannot outlive the app, so closing the main window, or
+        // quitting from the app menu or with ⌘Q, asks first while one works (*Quit and stop*
+        // exits with a code, which is not asked again).
+        match &event {
+            RunEvent::ExitRequested { code, api, .. } if studio::quit::hold_back(handle, *code) => {
+                api.prevent_exit();
+            }
+            RunEvent::WindowEvent {
+                label,
+                event: tauri::WindowEvent::CloseRequested { api, .. },
+                ..
+            } if label == MAIN_WINDOW && studio::quit::hold_back(handle, None) => {
+                api.prevent_close();
+            }
+            _ => {}
+        }
         // Closing the main window quits the app. Without this the process lived on,
         // invisibly: the hidden border and Stop bar of computer use are windows too, and
         // the app only ends by itself when its last window is gone. Starting the app again

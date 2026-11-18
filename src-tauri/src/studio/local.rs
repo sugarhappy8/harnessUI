@@ -23,13 +23,6 @@
 //! - **After**: [`MediaProvider::download`] moves each result out of the run's folder;
 //!   [`LocalProvider::release`] removes that folder, the prompt files with it, and forgets the
 //!   run; [`MediaProvider::cancel`] stops the engine's whole process tree first.
-#![cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "Task L15's local lane runs local jobs through this provider"
-    )
-)]
 
 use std::collections::HashMap;
 use std::io;
@@ -43,6 +36,7 @@ use agent::media::{
 };
 use async_trait::async_trait;
 use models::gen_catalog::{FrameRule, GenCatalog, GenEntry, GenInput, GenKind, GenRole, Quirk};
+use models::gen_fit::GenSize;
 use rand::Rng;
 use runtime::sd::args::{
     ArgsError, OutputFormat, PROMPT_MAX_CHARS, PartRole, Sampler, Scheduler, SdJob, build_args,
@@ -53,7 +47,7 @@ use runtime::sd::failure::SdFailure;
 use runtime::sd::progress::{LocalProgress, overall};
 use runtime::sd::{RunEvent as SdRunEvent, RunLimits, RunOutput, list_devices, run_job};
 use serde::Deserialize;
-use serde_json::{Value, json};
+use serde_json::{Map, Value, json};
 use tauri::AppHandle;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
@@ -152,7 +146,6 @@ pub trait GenCatalogSource: Send + Sync {
 /// The app's picture and video models: the current signed catalog (`hub::current_catalog`)
 /// read for the build in `runtime::sd::lock`, so a bump of the pin moves the entries' minimum
 /// engine build with it.
-#[expect(dead_code, reason = "Task L15 builds the local provider with it")]
 pub struct AppGenCatalog(pub AppHandle);
 
 #[async_trait]
@@ -166,7 +159,8 @@ impl GenCatalogSource for AppGenCatalog {
 /// `engine_cmd::current_engine`).
 pub type DiscoverEngine = Arc<dyn Fn() -> Option<Engine> + Send + Sync>;
 
-/// The `memory_saving` field. The manager resolves Automatic from the fit (Task L15).
+/// The `memory_saving` field. The manager resolves Automatic from the fit
+/// (`manager::job_options`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MemoryChoice {
     /// Memory saving when the run would not fit without it.
@@ -180,9 +174,9 @@ pub enum MemoryChoice {
 impl MemoryChoice {
     const ALL: [Self; 3] = [Self::Automatic, Self::Off, Self::On];
 
-    /// The choice `req` makes; Automatic when it sets none.
-    pub fn of(req: &MediaRequest) -> Self {
-        req.params
+    /// The choice a request's `params` make; Automatic when they set none.
+    pub fn of(params: &Map<String, Value>) -> Self {
+        params
             .get(key::MEMORY)
             .and_then(Value::as_str)
             .and_then(|word| Self::ALL.into_iter().find(|c| c.word() == word))
@@ -206,9 +200,9 @@ impl MemoryChoice {
     }
 }
 
-/// Whether `req` asks to run on the processor (the `run_on` field).
-pub fn runs_on_processor(req: &MediaRequest) -> bool {
-    req.params.get(key::RUN_ON).and_then(Value::as_str) == Some(ON_THE_PROCESSOR)
+/// Whether a request's `params` ask to run on the processor (the `run_on` field).
+pub fn runs_on_processor(params: &Map<String, Value>) -> bool {
+    params.get(key::RUN_ON).and_then(Value::as_str) == Some(ON_THE_PROCESSOR)
 }
 
 /// What the lane decided for one run, after the lease's grant and the fit: everything the
@@ -241,8 +235,8 @@ pub struct LocalRunStatus {
     pub failure: Option<SdFailure>,
 }
 
-/// What the manager's local lane needs beyond [`MediaProvider`] (Task L15 stands in for it
-/// in its tests).
+/// What the manager's local lane needs beyond [`MediaProvider`] (the manager's tests stand in
+/// for it).
 #[async_trait]
 pub trait LocalProvider: MediaProvider {
     /// [`MediaProvider::start`] with the lane's options. `scratch` is the run's own folder
@@ -388,7 +382,8 @@ impl LocalMediaProvider {
     }
 
     /// Sets the engine. A `None`, or an engine whose program is gone, is looked for again
-    /// at the next use.
+    /// at the next use. The app never sets one: it finds the engine (`discover`).
+    #[cfg(test)]
     pub fn set_engine(&self, engine: Option<Engine>) {
         *write(&self.engine) = engine;
     }
@@ -701,7 +696,7 @@ impl LocalMediaProvider {
                 errors::LOCAL_NEGATIVE_TOO_LONG,
             ));
         }
-        let (width, height) = size_of(entry, req)?;
+        let shape = run_shape(entry, req)?;
         let seed = match req.params.get(key::SEED) {
             Some(value) => value
                 .as_u64()
@@ -709,18 +704,11 @@ impl LocalMediaProvider {
                 .ok_or_else(|| bad_value(key::SEED))?,
             None => rand::rng().random_range(0..=SEED_MAX),
         };
-        let video = entry.kind == GenKind::Video;
-        let (batch, frames, fps) = if video {
-            let frames = match whole_param(req, key::LENGTH)? {
-                Some(seconds) => frames_for(entry, seconds),
-                None => entry
-                    .defaults
-                    .frames
-                    .unwrap_or_else(|| frames_for(entry, FIRST_SECONDS)),
-            };
-            (1, Some(frames), Some(fps_of(entry)))
+        let (width, height) = (shape.size.width, shape.size.height);
+        let (frames, fps) = if entry.kind == GenKind::Video {
+            (Some(shape.size.frames), Some(fps_of(entry)))
         } else {
-            (whole_param(req, key::COUNT)?.unwrap_or(1), None, None)
+            (None, None)
         };
         let added = |role: RefRole| {
             req.refs
@@ -744,7 +732,7 @@ impl LocalMediaProvider {
             negative,
             width,
             height,
-            steps: whole_param(req, key::STEPS)?.unwrap_or(entry.defaults.steps),
+            steps: shape.steps,
             cfg: number_param(req, key::GUIDANCE)?.map_or(entry.defaults.cfg, |x| x as f32),
             flow_shift: entry.defaults.flow_shift,
             sampler: word_param(req, key::SAMPLER, Sampler::from_cli)?.or_else(|| {
@@ -762,7 +750,7 @@ impl LocalMediaProvider {
                     .and_then(Scheduler::from_cli)
             }),
             seed,
-            batch,
+            batch: shape.pictures,
             frames,
             fps,
             init_image: takes(GenInput::StartFrame)
@@ -1117,6 +1105,47 @@ impl LocalProvider for LocalMediaProvider {
     fn engine_build(&self) -> Option<u32> {
         self.engine().map(|engine| engine.build)
     }
+}
+
+/// What a run's engine job makes: its size (frames 1 for a picture), its steps and how many
+/// pictures (1 for a clip). Its fit and its time are judged at it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RunShape {
+    /// Width and height, and a clip's frames.
+    pub size: GenSize,
+    /// Steps of each picture.
+    pub steps: u32,
+    /// The batch: How many for pictures, 1 for a clip.
+    pub pictures: u32,
+}
+
+/// The shape of a validated request's engine job, as [`LocalMediaProvider::job_for`] builds
+/// it: Shape (or an exact size) → width and height, Length → frames by the family's rule
+/// ([`frames_for`]), How many → the pictures, Steps; a setting left out is the entry's
+/// default. A value the job cannot take is `BadRequest`, never charged.
+pub fn run_shape(entry: &GenEntry, req: &MediaRequest) -> Result<RunShape, MediaError> {
+    let (width, height) = size_of(entry, req)?;
+    let (pictures, frames) = if entry.kind == GenKind::Video {
+        let frames = match whole_param(req, key::LENGTH)? {
+            Some(seconds) => frames_for(entry, seconds),
+            None => entry
+                .defaults
+                .frames
+                .unwrap_or_else(|| frames_for(entry, FIRST_SECONDS)),
+        };
+        (1, frames)
+    } else {
+        (whole_param(req, key::COUNT)?.unwrap_or(1), 1)
+    };
+    Ok(RunShape {
+        size: GenSize {
+            width,
+            height,
+            frames,
+        },
+        steps: whole_param(req, key::STEPS)?.unwrap_or(entry.defaults.steps),
+        pictures,
+    })
 }
 
 /// Frames for a clip of `seconds`: seconds × the entry's frames a second, made one more than a
@@ -2065,22 +2094,24 @@ mod tests {
             offered("run_on"),
             ["graphicsCard", "processor"].map(Value::from)
         );
-        assert_eq!(MemoryChoice::of(&req("x")), MemoryChoice::Automatic);
+        assert_eq!(MemoryChoice::of(&req("x").params), MemoryChoice::Automatic);
         for (word, choice) in [
             ("automatic", MemoryChoice::Automatic),
             ("off", MemoryChoice::Off),
             ("on", MemoryChoice::On),
         ] {
             assert_eq!(
-                MemoryChoice::of(&picture(json!({"memory_saving": word}))),
+                MemoryChoice::of(&picture(json!({"memory_saving": word})).params),
                 choice
             );
         }
-        assert!(!runs_on_processor(&req("x")));
-        assert!(!runs_on_processor(&picture(
-            json!({"run_on": "graphicsCard"})
-        )));
-        assert!(runs_on_processor(&picture(json!({"run_on": "processor"}))));
+        assert!(!runs_on_processor(&req("x").params));
+        assert!(!runs_on_processor(
+            &picture(json!({"run_on": "graphicsCard"})).params
+        ));
+        assert!(runs_on_processor(
+            &picture(json!({"run_on": "processor"})).params
+        ));
     }
 
     /// What the controls offer is what the engine job reads: a request using each of them

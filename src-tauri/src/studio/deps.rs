@@ -1,9 +1,13 @@
 //! What the Studio manager reaches the world through, each behind a trait so its tests can
 //! stand in for it: the endpoints and their keys ([`ProviderSource`]), the webview
-//! ([`StudioSink`]), a company's file host ([`ForeignFetch`]) and the clock ([`Clock`]).
-//! The app's own versions are [`StoreProviders`], [`AppSink`], [`GuardedFetch`] and
-//! [`SystemClock`].
+//! ([`StudioSink`]), a company's file host ([`ForeignFetch`]), the clock ([`Clock`]) and, for
+//! runs on this computer ([`LocalLane`]), the Studio engine (`LocalProvider`), the graphics
+//! card's lease ([`CardLease`]) and the hardware ([`LocalHardware`]). The app's own versions
+//! are [`StoreProviders`], [`AppSink`], [`GuardedFetch`], [`SystemClock`], [`AppLease`] and
+//! [`AppHardware`].
 
+use std::any::Any;
+use std::num::NonZero;
 use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
@@ -12,15 +16,21 @@ use agent::media::{Company, MediaProvider, media_company, media_provider};
 use async_trait::async_trait;
 use jiff::Timestamp;
 use jiff::tz::TimeZone;
+use models::fit::Target;
 use search::FetchError;
-use tauri::{AppHandle, Emitter};
+use tauri::{AppHandle, Emitter, Manager};
+use tokio_util::sync::CancellationToken;
 use url::Url;
 
 use super::errors;
+use super::local::LocalProvider;
+use super::prefs::GpuPolicy;
 use super::spend::day_start_in;
 use crate::dto::RunDto;
 use crate::error::AppResult;
+use crate::gpu_lease::{GpuLease, Grant, LeaseWait, Refused, StudioNeed};
 use crate::providers::{client_from, keychain_error, kind_of, secret_key};
+use crate::state::AppState;
 
 /// The webview event that carries a run's new state.
 pub const PROGRESS_EVENT: &str = "studio-progress";
@@ -75,6 +85,116 @@ pub trait Clock: Send + Sync {
     fn now_ms(&self) -> i64;
     /// The start of the local calendar day that holds `at_ms`, in Unix ms.
     fn day_start_ms(&self, at_ms: i64) -> i64;
+}
+
+/// The graphics card for a local job (the app's is [`GpuLease`]): one tenant at a time, the
+/// chat model or the job.
+#[async_trait]
+pub trait CardLease: Send + Sync {
+    /// The card for one job, as `GpuLease::acquire_for_studio` decides it, with the hold: the
+    /// job holds the card until the box is dropped. `on_wait` is told what the job waits for.
+    async fn acquire(
+        &self,
+        need: &StudioNeed,
+        policy: GpuPolicy,
+        answered: Option<bool>,
+        cancel: &CancellationToken,
+        on_wait: &(dyn Fn(LeaseWait) + Send + Sync),
+    ) -> Result<(Grant, Box<dyn Any + Send + Sync>), Refused>;
+
+    /// "Reload it after Studio": loads the chat model at `path` again (once, when the local
+    /// queue empties).
+    async fn reload_chat(&self, path: &str);
+}
+
+/// This computer as a local run sees it.
+#[async_trait]
+pub trait LocalHardware: Send + Sync {
+    /// Where models run, as probed now (with the chat model loaded, if one is), the Studio
+    /// engine's backend there (`vulkan`, `metal` or `cpu`) and llama.cpp's description of the
+    /// graphics device (`None` on the processor).
+    async fn target(&self) -> (Target, String, Option<String>);
+
+    /// The loaded (or loading) chat model's bytes on a graphics device; `None` when none is
+    /// on one.
+    fn chat_device_bytes(&self) -> Option<u64>;
+
+    /// The processor's logical cores.
+    fn logical_cores(&self) -> usize;
+}
+
+/// What runs on this computer go through: the Studio engine, the graphics card's lease and the
+/// hardware.
+#[derive(Clone)]
+pub struct LocalLane {
+    /// The installed models and one engine process per run.
+    pub provider: Arc<dyn LocalProvider>,
+    /// The graphics card, shared with the chat model.
+    pub lease: Arc<dyn CardLease>,
+    /// This computer.
+    pub hardware: Arc<dyn LocalHardware>,
+}
+
+/// The app's lease: the one `GpuLease` the chat loads' gate asks too (Task L12).
+pub struct AppLease(pub Arc<GpuLease>);
+
+#[async_trait]
+impl CardLease for AppLease {
+    async fn acquire(
+        &self,
+        need: &StudioNeed,
+        policy: GpuPolicy,
+        answered: Option<bool>,
+        cancel: &CancellationToken,
+        on_wait: &(dyn Fn(LeaseWait) + Send + Sync),
+    ) -> Result<(Grant, Box<dyn Any + Send + Sync>), Refused> {
+        let (grant, hold) = self
+            .0
+            .acquire_for_studio(need, policy, answered, cancel, on_wait)
+            .await?;
+        Ok((grant, Box::new(hold)))
+    }
+
+    async fn reload_chat(&self, path: &str) {
+        self.0.reload_chat(path).await;
+    }
+}
+
+/// The app's hardware: the device the chat model's backends report (`hub::detect`), the
+/// loaded chat model's bytes on it, and the processor's cores.
+pub struct AppHardware(pub AppHandle);
+
+#[async_trait]
+impl LocalHardware for AppHardware {
+    async fn target(&self) -> (Target, String, Option<String>) {
+        let Some(state) = self.0.try_state::<AppState>() else {
+            let ram = models::hardware::system_memory().map_or(0, |m| m.available_bytes);
+            return (
+                Target::Cpu {
+                    ram_free_bytes: ram,
+                },
+                "cpu".to_owned(),
+                None,
+            );
+        };
+        let (target, hardware) = crate::hub::detect(&state).await;
+        // The Studio engine's own backend there: Metal on Apple silicon, Vulkan on a graphics
+        // card whatever llama.cpp uses (the pinned engine has no other).
+        let (backend, description) = match &target {
+            Target::Gpu { .. } => ("vulkan", hardware.gpu_name),
+            Target::AppleUnified { .. } => ("metal", hardware.gpu_name),
+            Target::Cpu { .. } => ("cpu", None),
+        };
+        (target, backend.to_owned(), description)
+    }
+
+    fn chat_device_bytes(&self) -> Option<u64> {
+        self.0.try_state::<AppState>()?.runtime.device_bytes()
+    }
+
+    fn logical_cores(&self) -> usize {
+        std::thread::available_parallelism().map_or(1, NonZero::get)
+    }
 }
 
 /// The endpoints in the store, with their keys from the keychain: the client is built as

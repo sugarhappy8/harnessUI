@@ -7,6 +7,7 @@
 use agent::media::{
     Company, FailureKind, Invalid, LocalIo, MediaFailure, MediaKind, MediaModel, RefRole, Stage,
 };
+use models::gen_fit::NotFor;
 use models::gen_search::NotOffered;
 use runtime::packs::PackError;
 use runtime::sd::args::ArgsError;
@@ -1044,10 +1045,6 @@ pub fn model_incomplete() -> AppError {
 
 /// A local prompt the prompt check refuses ([`super::prompt_check::refuses`]): it pairs a
 /// sexual word with a word for children. It is never retried and there is no way round it.
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "Task L15's local start refuses with it")
-)]
 pub fn wont_make() -> AppError {
     AppError::new(
         "studio_wont_make",
@@ -1055,6 +1052,83 @@ pub fn wont_make() -> AppError {
         "Change the prompt.",
         String::new(),
     )
+}
+
+// ---- a run on this computer: refusals ------------------------------------------------------
+
+/// A local prompt over `runtime::sd::args::PROMPT_MAX_CHARS`, as the estimate lists it among
+/// the settings the run would refuse.
+pub const PROMPT_TOO_LONG_HERE: &str = "Keep the prompt under 4,000 characters for local models.";
+
+/// A local prompt over 4,000 characters, refused before anything is recorded.
+pub fn prompt_too_long_here() -> AppError {
+    AppError::new(
+        "studio_prompt_too_long_here",
+        PROMPT_TOO_LONG_HERE,
+        "Shorten it, or choose a cloud model.",
+        String::new(),
+    )
+}
+
+/// A local run that does not fit this computer even with the chat model unloaded (and is not
+/// a picture the processor can make), with why when it is known ([`not_here_reason`]).
+pub fn does_not_fit(reason: Option<String>) -> AppError {
+    AppError::new(
+        "studio_does_not_fit",
+        "This model does not fit this computer.",
+        "Choose a smaller size or a cloud model.",
+        reason.unwrap_or_default(),
+    )
+}
+
+/// *Restart and update* while a local job works: the restart would stop it without asking.
+pub fn busy_for_update() -> AppError {
+    AppError::new(
+        "studio_busy_for_update",
+        "A picture or video is being made on this computer.",
+        "Stop it in Studio, or install the update when it finishes.",
+        String::new(),
+    )
+}
+
+/// *Remove* on the Studio engine while a local job works with it.
+pub fn engine_in_use() -> AppError {
+    AppError::new(
+        "studio_engine_in_use",
+        "The Studio engine is making a picture or video now.",
+        "Stop it in Studio, or remove the engine when it finishes.",
+        String::new(),
+    )
+}
+
+/// A local run of a model that is not installed on this computer (any more).
+pub fn local_model_missing() -> AppError {
+    AppError::new(
+        "studio_local_model_missing",
+        LOCAL_NOT_INSTALLED,
+        "Choose another model, or get it again in Get local models.",
+        String::new(),
+    )
+}
+
+/// Why a model is not for this computer, judged with the chat model's memory counted back:
+/// "needs 6 GB of graphics memory" (the need rounded up to whole GB; "of free memory" on a
+/// computer that runs models on the processor, `processor_only`), "needs a Mac with 32 GB or
+/// more", "video needs a graphics card or an Apple-silicon Mac", "local video needs a graphics
+/// card on this computer".
+pub fn not_here_reason(not_for: NotFor, processor_only: bool) -> String {
+    let gb = |bytes: u64| bytes.div_ceil(1_000_000_000);
+    match not_for {
+        NotFor::GraphicsMemory { needs } if processor_only => {
+            format!("needs {} GB of free memory", gb(needs))
+        }
+        NotFor::GraphicsMemory { needs } => format!("needs {} GB of graphics memory", gb(needs)),
+        NotFor::MacMemory { needs } => format!("needs a Mac with {} GB or more", gb(needs)),
+        NotFor::VideoNeedsGpu => "video needs a graphics card or an Apple-silicon Mac".to_owned(),
+        NotFor::VideoNotOnThisMac => {
+            "local video needs a graphics card on this computer".to_owned()
+        }
+    }
 }
 
 // ---- a run on this computer: what its failure's details say -----------------------------------
@@ -1486,6 +1560,12 @@ mod tests {
             not_offered(NotOffered::AdultContent),
             model_incomplete(),
             wont_make(),
+            prompt_too_long_here(),
+            does_not_fit(None),
+            does_not_fit(Some("needs 6 GB of graphics memory".into())),
+            busy_for_update(),
+            engine_in_use(),
+            local_model_missing(),
         ];
         all.extend(every_pack_error().iter().map(engine_not_installed));
         for to in [PictureUse::Chat, PictureUse::Prompt] {
@@ -1790,6 +1870,96 @@ mod tests {
                 "The Studio engine is missing from this computer.".into(),
                 "Install harnessUI again to get it back.".into()
             )
+        );
+    }
+
+    /// A local run's refusals, in the words Studio shows (Task L15).
+    #[test]
+    fn a_local_run_says_why_it_was_refused() {
+        let words = |e: AppError| (e.code, e.message, e.next_step);
+        assert_eq!(
+            words(prompt_too_long_here()),
+            (
+                "studio_prompt_too_long_here".into(),
+                PROMPT_TOO_LONG_HERE.into(),
+                "Shorten it, or choose a cloud model.".into()
+            )
+        );
+        assert_eq!(
+            PROMPT_TOO_LONG_HERE,
+            "Keep the prompt under 4,000 characters for local models."
+        );
+        assert_eq!(
+            words(does_not_fit(Some("needs 6 GB of graphics memory".into()))),
+            (
+                "studio_does_not_fit".into(),
+                "This model does not fit this computer.".into(),
+                "Choose a smaller size or a cloud model.".into()
+            )
+        );
+        assert_eq!(
+            does_not_fit(Some("needs 6 GB of graphics memory".into())).details,
+            "needs 6 GB of graphics memory"
+        );
+        assert_eq!(
+            words(busy_for_update()),
+            (
+                "studio_busy_for_update".into(),
+                "A picture or video is being made on this computer.".into(),
+                "Stop it in Studio, or install the update when it finishes.".into()
+            )
+        );
+        assert_eq!(engine_in_use().code, "studio_engine_in_use");
+        assert_eq!(local_model_missing().code, "studio_local_model_missing");
+    }
+
+    /// Why a model is not offered here, as the estimate and Get local models say it.
+    #[test]
+    fn a_reason_names_what_this_computer_lacks() {
+        use models::gen_fit::NotFor;
+        assert_eq!(
+            not_here_reason(
+                NotFor::GraphicsMemory {
+                    needs: 5_770_000_000
+                },
+                false
+            ),
+            "needs 6 GB of graphics memory"
+        );
+        assert_eq!(
+            not_here_reason(
+                NotFor::GraphicsMemory {
+                    needs: 6_000_000_000
+                },
+                false
+            ),
+            "needs 6 GB of graphics memory"
+        );
+        assert_eq!(
+            not_here_reason(
+                NotFor::GraphicsMemory {
+                    needs: 20_100_000_000
+                },
+                true
+            ),
+            "needs 21 GB of free memory"
+        );
+        assert_eq!(
+            not_here_reason(
+                NotFor::MacMemory {
+                    needs: 31_000_000_000
+                },
+                false
+            ),
+            "needs a Mac with 31 GB or more"
+        );
+        assert_eq!(
+            not_here_reason(NotFor::VideoNeedsGpu, true),
+            "video needs a graphics card or an Apple-silicon Mac"
+        );
+        assert_eq!(
+            not_here_reason(NotFor::VideoNotOnThisMac, false),
+            "local video needs a graphics card on this computer"
         );
     }
 

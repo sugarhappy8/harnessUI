@@ -658,10 +658,23 @@ async fn start_again_after_failed_install(app: &AppHandle, state: &AppState) {
     crate::toolset::start_saved_servers(app).await;
 }
 
+/// 0.1.0: installing is refused while a local Studio job works (`studio`'s
+/// `local_running`): the restart would stop it without the question quitting asks.
+pub(crate) fn refuse_while_studio_works(
+    studio: Option<&crate::studio::manager::StudioManager>,
+) -> AppResult<()> {
+    if studio.is_some_and(|studio| studio.local_running()) {
+        return Err(crate::studio::errors::busy_for_update());
+    }
+    Ok(())
+}
+
 /// *Restart and update*: installs the downloaded update (or downloads it first when none
-/// waits), then restarts the app.
+/// waits), then restarts the app. Refused while a local Studio job works.
 #[tauri::command]
 pub async fn install_update(app: AppHandle, state: State<'_, AppState>) -> AppResult<()> {
+    let studio = app.try_state::<Arc<crate::studio::manager::StudioManager>>();
+    refuse_while_studio_works(studio.as_deref().map(Arc::as_ref))?;
     if !configured(app.config()) {
         return Err(not_configured());
     }

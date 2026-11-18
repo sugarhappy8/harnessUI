@@ -835,9 +835,9 @@ pub struct RunDto {
     pub outputs: Vec<OutputDto>,
     /// Its place in its endpoint's queue, from 1, while it waits for a free place.
     pub queue_position: Option<u32>,
-    /// How long a local run takes; `None` for a cloud run (Task L15 fills it).
+    /// How long a local run takes; `None` for a cloud run.
     pub eta: Option<EtaDto>,
-    /// A local run's stage and steps; `None` for a cloud run (Task L15 fills it).
+    /// A local run's stage and steps; `None` for a cloud run.
     pub local: Option<LocalRunDto>,
 }
 
@@ -874,11 +874,11 @@ pub struct LocalRunDto {
     pub pass: Option<u32>,
     /// The passes the run makes.
     pub passes: Option<u32>,
-    /// What a queued local run waits for: `reply` (a chat reply being written), `studioJob`
-    /// or `answer` (the user's answer about unloading the chat model). `studioJob` is a
-    /// defensive value, unreachable in 0.1.0: the single local queue never lets two Studio
-    /// jobs ask for the graphics card at once, so a run behind another shows
-    /// `queue_position` instead.
+    /// What a queued local run waits for: `reply` (a chat reply being written), `studioJob`,
+    /// `answer` (the user's answer about unloading the chat model) or `chatModelLoading` (a
+    /// chat model starting, which goes first). `studioJob` is a defensive value, unreachable in
+    /// 0.1.0: the single local queue never lets two Studio jobs ask for the graphics card at
+    /// once, so a run behind another shows `queue_position` instead.
     pub waiting_for: Option<String>,
     /// The path of the chat model unloaded to make room.
     pub unloaded_chat: Option<String>,
@@ -928,9 +928,9 @@ pub struct EstimateDto {
     pub limit: LimitDto,
     /// A plain sentence for each setting the model would refuse.
     pub invalid: Vec<String>,
-    /// How long a local run takes; `None` for a cloud run (Task L15 fills it).
+    /// How long a local run takes; `None` for a cloud run.
     pub eta: Option<EtaDto>,
-    /// Whether a local run fits this computer; `None` for a cloud run (Task L15 fills it).
+    /// Whether a local run fits this computer; `None` for a cloud run.
     pub local: Option<LocalEstimateDto>,
 }
 
@@ -946,6 +946,8 @@ pub struct LocalEstimateDto {
     pub very_slow: bool,
     /// The run would take longer than 15 minutes.
     pub over_15_min: bool,
+    /// Why it does not fit, when `fit` is `notHere` ("needs 6 GB of graphics memory").
+    pub reason: Option<String>,
 }
 
 /// Today's spending and the gallery's size, for Studio's top bar and Settings → Studio.

@@ -107,10 +107,6 @@ fn escape(text: &str) -> String {
 /// module's notes), replacing the file whole (through a temporary file beside it). A file of
 /// another type, or one whose structure does not hold together, is
 /// [`GalleryError::NotMedia`] and is left as it was.
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "Task L15's local lane labels each result")
-)]
 pub fn label_file(path: &Path, mime: &str, label: &AiLabel) -> Result<(), GalleryError> {
     let bytes = std::fs::read(path).map_err(io_error)?;
     let labelled = match mime {

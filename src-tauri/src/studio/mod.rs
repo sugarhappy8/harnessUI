@@ -8,9 +8,9 @@
 //!   go, and the type check a file passes before it is kept.
 //! - [`prefs`]: Settings → Studio, kept as one setting, and the rules a change must pass.
 //! - [`errors`]: Studio's backend wording.
-//! - [`manager`]: the runs: starting them under the spending rules, their queues, cancel,
-//!   their audit rows, deleting them and the preferences they read; [`deps`] holds what the
-//!   manager reaches the world through. The app makes one at start-up (`lib.rs`), which picks
+//! - [`manager`]: the runs: starting them under the spending rules, their queues (the cloud
+//!   ones, and the one local lane), cancel, their audit rows, deleting them and the
+//!   preferences they read; [`deps`] holds what the manager reaches the world through. The app makes one at start-up (`lib.rs`), which picks
 //!   up the runs the app left unfinished and stops every run task at exit.
 //! - [`commands`]: the read commands (the saved model lists, and fetching them or a picture's
 //!   price when asked; the estimate and the exact request; the runs; a result's bytes; today's
@@ -32,6 +32,8 @@
 //!   tags in WebM), never with the prompt.
 //! - [`prompt_check`]: the small, always-on check that refuses a local prompt pairing a sexual
 //!   word with a word for children.
+//! - [`quit`]: closing the main window, or quitting from the app menu, asks first while a
+//!   local job works.
 
 pub mod actions;
 pub mod catalog;
@@ -48,6 +50,7 @@ pub mod manager;
 mod manager_tests;
 pub mod prefs;
 pub mod prompt_check;
+pub mod quit;
 pub mod spend;
 #[cfg(test)]
 pub(crate) mod test_support;

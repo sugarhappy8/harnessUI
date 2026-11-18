@@ -193,13 +193,6 @@ impl RuntimeManager {
     }
 
     /// The app this runtime reports to.
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "Task L15's local lane asks the Studio lease, which reads it"
-        )
-    )]
     pub fn app(&self) -> &AppHandle {
         &self.app
     }
@@ -213,25 +206,11 @@ impl RuntimeManager {
 
     /// 0.1.0: the loaded (or loading) model's bytes on a graphics device, when it runs on
     /// one: what unloading it gives a Studio job.
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "Task L15's local lane asks the Studio lease, which reads it"
-        )
-    )]
     pub fn device_bytes(&self) -> Option<u64> {
         self.loaded_on_device().map(|(_, _, bytes)| bytes)
     }
 
     /// 0.1.0: the loaded (or loading) model was started with "Keep in memory".
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "Task L15's local lane asks the Studio lease, which reads it"
-        )
-    )]
     pub fn keeps_in_memory(&self) -> bool {
         let running = matches!(
             self.status().state,
@@ -499,13 +478,6 @@ impl RuntimeManager {
     /// starts unseen by the lease. Waiting for it changes nothing, so a job stopped
     /// meanwhile leaves nothing behind. Never awaited while a model use is waited for (a
     /// Model check's load would wait behind it).
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "Task L15's local lane asks the Studio lease, which unloads through it"
-        )
-    )]
     pub async fn between_loads(&self) -> OwnedMutexGuard<()> {
         Arc::clone(&self.load_setup).lock_owned().await
     }

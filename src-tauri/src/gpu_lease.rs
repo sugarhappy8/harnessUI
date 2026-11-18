@@ -32,11 +32,7 @@ use crate::state::{AppState, BusyCounter};
 use crate::studio::prefs::GpuPolicy;
 
 /// What a local job needs of the graphics card, from `gen_fit` with and without the chat
-/// model (Task L15).
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "Task L15's local lane builds it for each job")
-)]
+/// model (the manager's local lane works it out for each job).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct StudioNeed {
     /// Green, or one part at a time, with the memory free now (the chat model loaded).
@@ -50,10 +46,6 @@ pub struct StudioNeed {
 }
 
 /// How a job may use the card.
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "Task L15's local lane reads the grant")
-)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Grant {
     /// Beside the chat model, or with none loaded ("Chat replies may be slower while this
@@ -71,10 +63,6 @@ pub enum Grant {
 }
 
 /// Why a job waits before its grant, shown on its card.
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "Task L15's local lane shows the wait")
-)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LeaseWait {
     /// A reply (or a Model check) uses the chat model: "Starts when the reply ends".
@@ -90,10 +78,6 @@ pub enum LeaseWait {
 }
 
 /// Why a job got no grant. It holds nothing.
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "Task L15's local lane reads the refusal")
-)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Refused {
     /// The job was stopped while it waited, or the unload it waited for was cancelled.
@@ -106,13 +90,6 @@ pub enum Refused {
 }
 
 /// The chat model's side of the card: what it takes, and its unload and reload.
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "Task L15's local lane asks the lease, which asks it"
-    )
-)]
 #[async_trait]
 pub trait ChatSide: Send + Sync {
     /// The loaded (or loading) chat model's bytes on a graphics device; `None` when none is
@@ -136,13 +113,6 @@ pub trait ChatSide: Send + Sync {
 }
 
 /// The app's chat side: the local llama-server and everything that uses it.
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "Task L15's local lane asks the lease, which asks it"
-    )
-)]
 pub struct RuntimeChat {
     pub runtime: Arc<RuntimeManager>,
     pub busy: Arc<BusyCounter>,
@@ -233,10 +203,6 @@ fn reload_wanted(status: &RuntimeStatusDto, path: &str) -> bool {
 
 /// A local job's hold on the graphics card. Dropping it frees the card and wakes a chat load
 /// that waits; it never loads the chat model again.
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "Task L15's local lane holds it for each job")
-)]
 pub struct StudioHold {
     lease: Arc<GpuLease>,
     // Given back after `drop` has marked the card free, so a waiting job asks again only then.
@@ -293,10 +259,6 @@ enum Unloaded {
 }
 
 /// One graphics-card tenant at a time: the chat model, or a local Studio job.
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "Task L15's local lane asks it for each job")
-)]
 pub struct GpuLease {
     chat: Arc<dyn ChatSide>,
     /// One Studio job asks, waits and runs at a time.
@@ -307,10 +269,6 @@ pub struct GpuLease {
     reprobe: AtomicBool,
 }
 
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "Task L15's local lane asks it for each job")
-)]
 impl GpuLease {
     pub fn new(chat: Arc<dyn ChatSide>) -> Arc<Self> {
         Arc::new(Self {
@@ -358,8 +316,8 @@ impl GpuLease {
         ))
     }
 
-    /// "Reload it after Studio": the manager calls this once, when the local queue is empty
-    /// (Task L15), never per job.
+    /// "Reload it after Studio": the manager calls this once, when the local queue is empty,
+    /// never per job.
     pub async fn reload_chat(&self, path: &str) {
         self.chat.reload(path).await;
     }

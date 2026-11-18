@@ -177,10 +177,6 @@ const LOOK_ALIKES: [(&str, char); 25] = [
 ];
 
 /// Whether `prompt` pairs a sexual word with a word for children.
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "Task L15's local start checks each prompt")
-)]
 pub fn refuses(prompt: &str) -> bool {
     let tokens = tokens(&folded(prompt));
     let mut words: BTreeSet<String> = tokens.windows(2).map(|pair| pair.join(" ")).collect();

@@ -13,8 +13,8 @@ use agent::media::{
 use serde_json::{Value, json};
 
 use super::{
-    Ending, Inner, Job, PROGRESS_EVERY, Step, Task, Waited, media_kind, poll_delay, tool_of,
-    usable_cost,
+    Ending, Inner, Job, LaneKey, PROGRESS_EVERY, Step, Task, Waited, media_kind, poll_delay,
+    tool_of, usable_cost,
 };
 use crate::error::{AppError, AppResult};
 use crate::studio::errors;
@@ -95,7 +95,7 @@ impl Inner {
             run_id: run.id.clone(),
             created_at: run.created_at,
             kind,
-            lane: (id, kind),
+            lane: LaneKey::Endpoint(id, kind),
             provider,
             endpoint,
             seed: run.params.pointer("/params/seed").and_then(Value::as_u64),
@@ -400,7 +400,7 @@ impl Inner {
     }
 
     /// The cap on one result of `kind`.
-    fn cap_of(&self, kind: MediaKind) -> u64 {
+    pub(super) fn cap_of(&self, kind: MediaKind) -> u64 {
         match kind {
             MediaKind::Image => self.deps.limits.picture_cap,
             MediaKind::Video => self.deps.limits.video_cap,

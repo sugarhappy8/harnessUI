@@ -15,7 +15,8 @@
 //! - **The changing commands** start, stop and follow runs (the manager), save a video's
 //!   poster frame ([`POSTER_CAP`]), star, delete and export results, open the gallery folder,
 //!   add pictures to a prompt, give a picture to a chat ([`for_chat`]) and change the
-//!   preferences.
+//!   preferences; for runs on this computer, answer "Unload the chat model?" and *Quit and
+//!   stop*.
 //!
 //! What the gallery actions do (export, a video's poster frame, *Send to chat* and *Use in
 //! prompt*) is in [`super::actions`]; their commands here only call it.
@@ -372,6 +373,32 @@ pub async fn studio_set_prefs(
 ) -> AppResult<StudioPrefs> {
     only_main_window(window.label())?;
     studio.set_prefs(patch).await
+}
+
+/// "Unload the chat model?" under Settings → Studio's Ask: the answer for local run `run_id`.
+#[tauri::command]
+pub async fn studio_answer_unload(
+    window: tauri::WebviewWindow,
+    studio: State<'_, Arc<StudioManager>>,
+    run_id: String,
+    unload: bool,
+) -> AppResult<RunDto> {
+    only_main_window(window.label())?;
+    studio.answer_unload(&run_id, unload).await
+}
+
+/// *Quit and stop*, asked while a local job works: stops the local runs, then quits. The exit
+/// carries a code, so it is not asked again (`quit::ask_before_quit`).
+#[tauri::command]
+pub async fn studio_quit_now(
+    window: tauri::WebviewWindow,
+    app: tauri::AppHandle,
+    studio: State<'_, Arc<StudioManager>>,
+) -> AppResult<()> {
+    only_main_window(window.label())?;
+    studio.stop_local().await;
+    app.exit(0);
+    Ok(())
 }
 
 // ---- what the commands do ---------------------------------------------------------------------
@@ -835,6 +862,7 @@ pub(crate) mod tests {
                 thumbs: None,
                 limits: MediaLimits::default(),
                 poll: PollPlan::default(),
+                local: None,
             },
             StudioPrefs::default(),
         );
@@ -1437,13 +1465,14 @@ pub(crate) mod tests {
         "studio_ref_from_output",
         "studio_output_for_chat",
         "studio_set_prefs",
+        "studio_answer_unload",
+        "studio_quit_now",
         // The Studio engine (studio::engine_cmd).
         "studio_engine_status",
         "studio_engine_download",
         "studio_engine_cancel",
         "studio_engine_remove",
-        // Tasks L15 (studio::commands) and L16 (studio::local_cmd) append their commands
-        // here.
+        // Task L16 (studio::local_cmd) appends its commands here.
     ];
 
     /// The modules Studio's commands live in.

@@ -19,8 +19,8 @@
 //!   or *Check again*) takes a place like a new run. A run's task frees its place however it
 //!   ends, a panic included (`TaskEnd`), and starts the next one waiting; when a run leaves a
 //!   queue, each run behind it is sent with its new place. A task that broke off (a panic)
-//!   first has its run recorded as a restart would find it: `interrupted`, charged unknown,
-//!   its audit row completed.
+//!   first has its run recorded as a restart would find it: `interrupted`, charged unknown
+//!   (never charged on this computer), its audit row completed.
 //! - **A run's task** writes `sending` and its start time before the request goes out, sends
 //!   it once (`MediaProvider::start`, never after a Cancel or a Shutdown already came: a run
 //!   stopped before it is sent is not charged), and keeps the pictures that come back in the
@@ -63,9 +63,23 @@
 //!   added picture no run kept uses any more; the audit rows stay.
 //! - **Preferences** ([`StudioManager::set_prefs`]) are checked, saved, then held: the next
 //!   run reads them.
-//! - **Runs on this computer** are refused until the local lane exists (Task L15).
+//! - **Runs on this computer** (the local lane, [`lane`]): one at a time for the whole
+//!   computer, in a queue of their own beside the cloud queues; free, never asked about and
+//!   never refused for the daily limit. A run is recorded once the prompt check, the prompt's
+//!   length, the settings and the fit pass; its task waits for the graphics card (`queued`,
+//!   with what it waits for), runs one engine job checked every [`LOCAL_CHECK_EVERY`], labels
+//!   each result as AI-made and keeps it. Stop kills the engine; a run the app left is
+//!   `interrupted`, never charged. Without a local lane (`StudioDeps::local`), runs on this
+//!   computer are refused.
 
+mod lane;
 mod video;
+
+#[cfg_attr(
+    not(test),
+    expect(unused_imports, reason = "Task L16's fits read the verdict")
+)]
+pub(crate) use lane::{LocalVerdict, local_verdict};
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 use std::future::Future;
@@ -79,14 +93,17 @@ use agent::media::{
     MediaRequest, ParamKind, RefImage, RequestPreview, Routing, SEED_MAX, Saved, Stage, Started,
     choice_for, estimate as estimate_usd, parse_image_endpoints, validate,
 };
+use models::gen_fit::{self, GenFitResult};
 use rand::Rng;
+use runtime::sd::args::processor_threads;
 use serde_json::{Map, Value, json};
 use tokio_util::sync::CancellationToken;
 
 use super::catalog;
-use super::deps::{Clock, Endpoint, ForeignFetch, ProviderSource, StudioSink};
+use super::deps::{Clock, Endpoint, ForeignFetch, LocalLane, ProviderSource, StudioSink};
 use super::errors;
 use super::gallery::{Gallery, GalleryError, io_error};
+use super::local::{LocalJobOptions, MemoryChoice, runs_on_processor};
 use super::prefs::{self, RunTarget, StudioPrefs, StudioPrefsPatch};
 use super::spend::{self, Billing, LimitRefusal, RunState, Spend, SpendRow};
 use crate::attachments::PictureWorker;
@@ -94,6 +111,7 @@ use crate::dto::{
     EstimateDto, LimitDto, OutputDto, RefDto, RunDto, RunErrorDto, StartRequest, UsageDto,
 };
 use crate::error::{AppError, AppResult};
+use crate::gpu_lease::Grant;
 
 /// Picture runs one endpoint makes at once; more wait.
 pub const PICTURES_AT_ONCE: usize = 2;
@@ -109,6 +127,10 @@ const CANCEL_WAIT: Duration = Duration::from_secs(30);
 
 /// A run's progress is written and sent at most this often; a status change is sent at once.
 pub const PROGRESS_EVERY: Duration = Duration::from_millis(250);
+
+/// How often a run on this computer is checked: in memory, with no `PollPlan` and no watch
+/// limit.
+pub const LOCAL_CHECK_EVERY: Duration = Duration::from_millis(250);
 
 /// When a video job is checked, and for how long Studio keeps checking it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -173,6 +195,8 @@ pub struct StudioDeps {
     pub limits: MediaLimits,
     /// When video jobs are checked.
     pub poll: PollPlan,
+    /// Runs on this computer; `None` refuses them (`studio_no_local_engine`).
+    pub local: Option<LocalLane>,
 }
 
 /// Studio's runs. Cheap to clone: every clone is the same manager.
@@ -200,10 +224,18 @@ struct Inner {
     /// The videos still not ready after the watch limit, no longer checked, by run id, each
     /// with the job to follow it again (*Check again*) or to record a Stop watching.
     stale: Mutex<HashMap<String, Job>>,
+    /// What the card of each local run Studio follows shows beyond its row, by run id.
+    local_live: Mutex<HashMap<String, lane::LocalLive>>,
+    /// The chat model a local run's grant unloaded, kept while the local queue has work.
+    local_unloaded: Mutex<Option<String>>,
 }
 
-/// A queue: one endpoint's runs of one kind.
-type LaneKey = (store::ProviderId, MediaKind);
+/// A queue: one endpoint's runs of one kind, or the one queue of runs on this computer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+enum LaneKey {
+    Endpoint(store::ProviderId, MediaKind),
+    Local,
+}
 
 /// The runs being made and those waiting, under one lock so a place is never given twice.
 #[derive(Default)]
@@ -252,22 +284,25 @@ enum Step {
         started: Option<i64>,
         finished: bool,
     },
+    /// Make the run on this computer: the graphics card, then one engine job.
+    Local(Box<lane::LocalStep>),
 }
 
 impl Job {
     /// When its request was sent (or its follow-up started), for its audit row's duration.
     fn started(&self) -> Option<i64> {
         match &self.step {
-            Step::Send(_) => None,
+            Step::Send(_) | Step::Local(_) => None,
             Step::Follow { started, .. } => *started,
         }
     }
 
     /// What it is charged when it is stopped before its task does anything: nothing for a
-    /// request never sent; for a video job that started, as [`Self::job_charge`] says.
+    /// request never sent or a run on this computer; for a video job that started, as
+    /// [`Self::job_charge`] says.
     fn charge_if_stopped_waiting(&self) -> Option<bool> {
         match self.step {
-            Step::Send(_) => Some(false),
+            Step::Send(_) | Step::Local(_) => Some(false),
             Step::Follow { .. } => self.job_charge(),
         }
     }
@@ -328,7 +363,7 @@ impl Lanes {
     }
 
     fn has_room(&self, lane: LaneKey) -> bool {
-        self.active(lane) < places(lane.1)
+        self.active(lane) < places(lane)
     }
 
     /// Gives `job` a place: its task may start.
@@ -372,11 +407,12 @@ impl Lanes {
     }
 }
 
-/// How many runs of `kind` one endpoint makes at once.
-fn places(kind: MediaKind) -> usize {
-    match kind {
-        MediaKind::Image => PICTURES_AT_ONCE,
-        MediaKind::Video => VIDEOS_AT_ONCE,
+/// How many runs `lane` makes at once: of one kind at one endpoint, or on this computer.
+fn places(lane: LaneKey) -> usize {
+    match lane {
+        LaneKey::Endpoint(_, MediaKind::Image) => PICTURES_AT_ONCE,
+        LaneKey::Endpoint(_, MediaKind::Video) => VIDEOS_AT_ONCE,
+        LaneKey::Local => lane::LOCAL_AT_ONCE,
     }
 }
 
@@ -568,6 +604,8 @@ impl StudioManager {
                 recent_tokens: Mutex::new(VecDeque::new()),
                 root: CancellationToken::new(),
                 stale: Mutex::new(HashMap::new()),
+                local_live: Mutex::new(HashMap::new()),
+                local_unloaded: Mutex::new(None),
             }),
         }
     }
@@ -679,7 +717,8 @@ impl StudioManager {
 
     /// Stops run `run_id`: a run waiting for its place is never sent; a run being sent stops
     /// waiting for its answer (its connection is closed); a video being watched, or still not
-    /// ready, is no longer checked and keeps its remote id (Stop watching). Waits for the
+    /// ready, is no longer checked and keeps its remote id (Stop watching); a run on this
+    /// computer stops waiting for the graphics card, or its engine is killed. Waits for the
     /// run's task to record how it ended, then gives the run as it is.
     pub async fn cancel(&self, run_id: &str) -> AppResult<RunDto> {
         enum Found {
@@ -701,6 +740,7 @@ impl StudioManager {
             Found::Queued(job) => {
                 let ending = Ending::stopped(&job, job.charge_if_stopped_waiting());
                 self.inner.end_run(&job, ending, job.started()).await;
+                self.inner.forget_live(&job.run_id);
                 // The runs behind it moved up.
                 self.inner.tell_queue(job.lane).await;
             }
@@ -796,13 +836,14 @@ impl StudioManager {
     }
 
     /// At start: removes the spending stubs of runs made before today, then picks up every
-    /// cloud run the app left unfinished. A run waiting for its turn was never sent
+    /// run the app left unfinished. Runs on this computer first: a local job cannot outlive
+    /// the app, so each one queued or running is `interrupted`, not charged, and its
+    /// `.partial/<run>` goes. Then the cloud runs: a run waiting for its turn was never sent
     /// (`cancelled`, not charged); one being sent may or may not have started
     /// (`interrupted`, charged unknown); a video job waiting or downloading is checked again,
     /// its watch limit counted from now, and downloaded, never sent again. A job that cannot
     /// be checked now (its endpoint or key is gone) ends `failed` with why (charged when it
-    /// had finished, else unknown), keeping its remote id for *Get it anyway*. Runs on this
-    /// computer are left to the local lane.
+    /// had finished, else unknown), keeping its remote id for *Get it anyway*.
     pub async fn resume_interrupted(&self) {
         let inner = &self.inner;
         // Never beside a start: a run just recorded but not yet queued is not the app's leftover.
@@ -818,10 +859,14 @@ impl StudioManager {
                 return;
             }
         };
-        for run in runs {
-            if run.runs_on != store::RunsOn::Cloud || inner.is_followed(&run.id) {
-                continue;
-            }
+        let (local, cloud): (Vec<_>, Vec<_>) = runs
+            .into_iter()
+            .filter(|run| !inner.is_followed(&run.id))
+            .partition(|run| run.runs_on == store::RunsOn::Local);
+        for run in local {
+            inner.interrupt_local(&run).await;
+        }
+        for run in cloud {
             inner.resume(run).await;
         }
     }
@@ -935,21 +980,6 @@ impl StudioManager {
             .unwrap_or_else(PoisonError::into_inner) = next.clone();
         Ok(next)
     }
-
-    /// A run on this computer. Task L15 gives it the local lane.
-    async fn start_local(&self, _req: StartRequest) -> AppResult<RunDto> {
-        Err(errors::no_local_engine())
-    }
-
-    /// The estimate of a run on this computer. Task L15 gives it the local lane.
-    async fn estimate_local(&self, _req: &StartRequest) -> AppResult<EstimateDto> {
-        Err(errors::no_local_engine())
-    }
-
-    /// The preview of a run on this computer. Task L15 gives it the local lane.
-    async fn preview_local(&self, _req: &StartRequest) -> AppResult<RequestPreview> {
-        Err(errors::no_local_engine())
-    }
 }
 
 impl Inner {
@@ -1061,16 +1091,7 @@ impl Inner {
             return Err(errors::wrong_kind(model.kind));
         }
         let mut params = req.params.clone();
-        let seed_field = model.params.iter().find_map(|p| match p.kind {
-            ParamKind::Seed { max } => Some((p.key.as_str(), max.min(SEED_MAX))),
-            _ => None,
-        });
-        let seed = seed_field.and_then(|(key, max)| {
-            let value = params
-                .entry(key)
-                .or_insert_with(|| Value::from(rand::rng().random_range(0..=max)));
-            value.as_u64()
-        });
+        let seed = pick_seed(&model, &mut params);
         let mut request = MediaRequest {
             kind: model.kind,
             model: model.id.clone(),
@@ -1202,7 +1223,7 @@ impl Inner {
             run_id,
             created_at,
             kind: model.kind,
-            lane: (id, model.kind),
+            lane: LaneKey::Endpoint(id, model.kind),
             provider,
             endpoint,
             seed,
@@ -1360,6 +1381,7 @@ impl Inner {
             Step::Follow {
                 remote_id, started, ..
             } => self.follow(&task, remote_id, *started).await,
+            Step::Local(step) => self.run_local(&task, step).await,
         }
         match tokio::fs::remove_dir_all(&task.scratch).await {
             Ok(()) => {}
@@ -1759,8 +1781,8 @@ impl Inner {
 
     /// Records run `run_id` (made through `company`, with audit row `audit_id`) as the next
     /// start would find it, after its task broke off (a panic) before recording how it went:
-    /// `interrupted`, charged unknown, its audit row completed, its scratch folder removed. A
-    /// run already recorded as ended keeps its record.
+    /// `interrupted`, charged unknown (not charged for a run on this computer), its audit row
+    /// completed, its scratch folder removed. A run already recorded as ended keeps its record.
     async fn record_broken(
         &self,
         run_id: &str,
@@ -1779,9 +1801,11 @@ impl Inner {
         if !still_going(run.status) {
             return;
         }
+        // A run on this computer is never charged; a cloud run may have started.
+        let charged = (company == Company::Local).then_some(false);
         let ending = Ending {
             status: store::CreationStatus::Interrupted,
-            ..Ending::failed(errors::broke_off(company), None)
+            ..Ending::failed(errors::broke_off(company), charged)
         };
         self.record_end(run_id, company, audit_id, ending, run.started_at)
             .await;
@@ -1816,9 +1840,9 @@ impl Inner {
             // never still not ready (that one has no place to wait for).
             let lanes = self.lanes();
             if let Some(position) = lanes.position(&run_id) {
-                self.deps
-                    .sink
-                    .progress(&run_dto_of(&run, true, Some(position), false));
+                let mut dto = run_dto_of(&run, true, Some(position), false);
+                self.fill_local(&run, &mut dto);
+                self.deps.sink.progress(&dto);
             }
         }
     }
@@ -1844,8 +1868,58 @@ impl Inner {
             )
         };
         let stale = self.is_stale(&run.id);
-        run_dto_of(run, followed && !stale, queue_position, stale)
+        let mut dto = run_dto_of(run, followed && !stale, queue_position, stale);
+        self.fill_local(run, &mut dto);
+        dto
     }
+}
+
+/// What one run's engine job gets: the processor only from the grant (`UseProcessor`), the
+/// `run_on` field or a run whose fit is on the processor (a processor-only computer, or a
+/// picture the graphics device cannot take), with `processor_threads`; memory saving from the
+/// `memory_saving` field, `Automatic` → `gen_fit::needs_memory_saving` of the fit it will run
+/// with (`running_fit`, the after-unload one when the grant unloaded the chat model; never on
+/// the processor, where nothing takes turns); the device description from
+/// `LocalHardware::target`, for a run on the device.
+pub fn job_options(
+    grant: &Grant,
+    fit: &GenFitResult,
+    params: &Map<String, Value>,
+    device: Option<&str>,
+    logical_cores: usize,
+) -> LocalJobOptions {
+    let processor_only = matches!(grant, Grant::UseProcessor { .. })
+        || runs_on_processor(params)
+        || fit.processor_only;
+    let running = match grant {
+        Grant::AfterUnload { .. } => fit.after_unload.unwrap_or(fit.fit),
+        Grant::Alongside | Grant::UseProcessor { .. } => fit.fit,
+    };
+    let memory_saving = match MemoryChoice::of(params) {
+        MemoryChoice::On => true,
+        MemoryChoice::Off => false,
+        MemoryChoice::Automatic => !processor_only && gen_fit::needs_memory_saving(running),
+    };
+    LocalJobOptions {
+        processor_only,
+        memory_saving,
+        threads: processor_only
+            .then(|| processor_threads(logical_cores, cfg!(target_arch = "x86_64"))),
+        device_description: device.filter(|_| !processor_only).map(str::to_owned),
+    }
+}
+
+/// The seed a run of `model` sends: the one `params` set, else one Studio picks and adds to
+/// them; `None` when the model takes none.
+fn pick_seed(model: &MediaModel, params: &mut Map<String, Value>) -> Option<u64> {
+    let (key, max) = model.params.iter().find_map(|p| match p.kind {
+        ParamKind::Seed { max } => Some((p.key.as_str(), max.min(SEED_MAX))),
+        _ => None,
+    })?;
+    params
+        .entry(key)
+        .or_insert_with(|| Value::from(rand::rng().random_range(0..=max)))
+        .as_u64()
 }
 
 /// The audit row's tool for a run of `kind`.

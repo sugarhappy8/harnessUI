@@ -9,6 +9,10 @@
 //! [`FakeProvider`] that counts its starts, checks and downloads and answers as scripted; a
 //! second one stands in for the company after a restart. Video jobs are checked every few
 //! milliseconds ([`fast_poll`]).
+//!
+//! The local lane's tests (Task L15) add the installed models of the bundled catalog behind a
+//! [`FakeLocal`] engine that records each start's options, a [`FakeLease`] that grants the
+//! graphics card as scripted and records what it was asked, and [`FixedHardware`].
 
 use std::collections::{HashMap, VecDeque};
 use std::path::{Path, PathBuf};
@@ -19,8 +23,8 @@ use std::time::{Duration, Instant};
 use agent::ProviderError;
 use agent::media::{
     Company, Cost, FailureKind, Fetched, JobDone, JobState, LocalIo, MediaError, MediaFailure,
-    MediaKind, MediaLimits, MediaProvider, MediaRequest, RawCatalog, RefRole, RequestPreview,
-    Routing, SEED_MAX, Saved, Stage, Started,
+    MediaKind, MediaLimits, MediaModel, MediaProvider, MediaRequest, ParamKind, Price, RawCatalog,
+    RefRole, RequestPreview, Routing, SEED_MAX, Saved, Stage, Started,
 };
 use async_trait::async_trait;
 use jiff::tz::TimeZone;
@@ -32,17 +36,30 @@ use search::FetchError;
 use search::netguard::AddressClass;
 
 use super::catalog::{CachedCatalog, CachedPrice, cache_key};
-use super::deps::{Clock, Endpoint, ForeignFetch, ProviderSource, StudioSink};
-use super::manager::{
-    PICTURES_AT_ONCE, PollPlan, StudioDeps, StudioManager, VIDEOS_AT_ONCE, place_extra_or_refuse,
-    poll_delay, spend_row,
+use super::deps::{
+    CardLease, Clock, Endpoint, ForeignFetch, LocalHardware, LocalLane, ProviderSource, StudioSink,
 };
-use super::prefs::{self, RunTarget, StudioPrefs, StudioPrefsPatch};
+use super::label::read_label;
+use super::local::{LocalJobOptions, LocalMediaProvider, LocalProvider, LocalRunStatus};
+use super::manager::{
+    LOCAL_CHECK_EVERY, LocalVerdict, PICTURES_AT_ONCE, PollPlan, StudioDeps, StudioManager,
+    VIDEOS_AT_ONCE, local_verdict, place_extra_or_refuse, poll_delay, spend_row,
+};
+use super::prefs::{self, GpuPolicy, RunTarget, StudioPrefs, StudioPrefsPatch};
 use super::spend::{Charge, ConfirmReason, UNKNOWN_PRICE_RESERVE_USD, day_start_in};
 use super::test_support::{Scratch, mp4, png};
 use crate::attachments::PictureWorker;
 use crate::dto::{RefInput, RunDto, StartRequest};
 use crate::error::{AppError, AppResult};
+use crate::gpu_lease::{Grant, LeaseWait, Refused, StudioNeed};
+use models::catalog::Catalog;
+use models::fit::Target;
+use models::gen_catalog::{GenEntry, GenKind, gen_catalog};
+use models::gen_eta::FitWord;
+use models::gen_fit::GenSize;
+use runtime::sd::args::processor_threads;
+use runtime::sd::progress::{LocalProgress, LocalStage};
+use tokio_util::sync::CancellationToken;
 
 const IMAGES: &str =
     include_str!("../../../crates/agent/tests/fixtures/media/openrouter-images-2026-11-17.json");
@@ -500,6 +517,12 @@ struct H {
     poll: PollPlan,
     /// Every manager the test made, shut down when it ends.
     managers: Mutex<Vec<StudioManager>>,
+    /// The Studio engine on this computer, the graphics card's lease and the hardware; the
+    /// manager has them only when the harness was made with them ([`harness_with_local`]).
+    local: Arc<FakeLocal>,
+    lease: Arc<FakeLease>,
+    hardware: Arc<FixedHardware>,
+    lane: Option<LocalLane>,
     _scratch: Scratch,
 }
 
@@ -508,6 +531,8 @@ impl Drop for H {
         // Starts still held would wait for ever.
         self.provider.release_all();
         self.provider2.release_all();
+        self.local.release_all();
+        self.lease.release();
         // Video jobs are checked until their watch limit: every task stops before the
         // gallery folder goes. The tasks run on the app's runtime, so this thread can wait.
         let managers = std::mem::take(&mut *self.managers.lock().unwrap());
@@ -618,14 +643,20 @@ async fn harness() -> H {
 }
 
 async fn harness_with(thumbs: Option<PictureWorker>) -> H {
-    build_harness(thumbs, fast_poll()).await
+    build_harness(thumbs, fast_poll(), false).await
 }
 
 async fn harness_polling(poll: PollPlan) -> H {
-    build_harness(None, poll).await
+    build_harness(None, poll, false).await
 }
 
-async fn build_harness(thumbs: Option<PictureWorker>, poll: PollPlan) -> H {
+/// The harness with the local lane: the installed models of the bundled catalog, an 8 GB
+/// Vulkan card with no chat model loaded, and a lease that grants the card beside it.
+async fn harness_with_local() -> H {
+    build_harness(None, fast_poll(), true).await
+}
+
+async fn build_harness(thumbs: Option<PictureWorker>, poll: PollPlan, with_local: bool) -> H {
     let store = store::Store::open_in_memory().unwrap();
     let now = noon_2026_11_17();
     let openrouter = add_endpoint(
@@ -687,6 +718,14 @@ async fn build_harness(thumbs: Option<PictureWorker>, poll: PollPlan) -> H {
     let gallery_root = scratch.path().join("gallery");
     let sink = Arc::new(FakeSink::default());
     let fetch = Arc::new(FakeFetch::default());
+    let local = Arc::new(FakeLocal::new());
+    let lease = Arc::new(FakeLease::new(&sink));
+    let hardware = Arc::new(FixedHardware::gpu(8, 32));
+    let lane = with_local.then(|| LocalLane {
+        provider: local.clone(),
+        lease: lease.clone(),
+        hardware: hardware.clone(),
+    });
     let manager = make_manager(
         &store,
         &provider,
@@ -697,6 +736,7 @@ async fn build_harness(thumbs: Option<PictureWorker>, poll: PollPlan) -> H {
         &gallery_root,
         thumbs,
         poll,
+        lane.clone(),
     );
     H {
         managers: Mutex::new(vec![manager.clone()]),
@@ -712,6 +752,10 @@ async fn build_harness(thumbs: Option<PictureWorker>, poll: PollPlan) -> H {
         now,
         endpoints,
         poll,
+        local,
+        lease,
+        hardware,
+        lane,
         _scratch: scratch,
     }
 }
@@ -727,6 +771,7 @@ fn make_manager(
     gallery_root: &Path,
     thumbs: Option<PictureWorker>,
     poll: PollPlan,
+    local: Option<LocalLane>,
 ) -> StudioManager {
     StudioManager::new(
         StudioDeps {
@@ -742,6 +787,7 @@ fn make_manager(
             thumbs,
             limits: MediaLimits::default(),
             poll,
+            local,
         },
         StudioPrefs::default(),
     )
@@ -761,6 +807,7 @@ impl H {
             &self.gallery_root,
             None,
             self.poll,
+            self.lane.clone(),
         );
         self.managers.lock().unwrap().push(manager.clone());
         manager
@@ -783,6 +830,7 @@ impl H {
                 thumbs: None,
                 limits: MediaLimits::default(),
                 poll: fast_poll(),
+                local: None,
             },
             StudioPrefs::default(),
         );
@@ -3435,4 +3483,1358 @@ async fn set_prefs_changes_only_what_it_is_sent_and_checks_it() {
         .unwrap();
     assert_eq!(off.daily_limit_usd, None);
     assert!(!off.confirm_every_video);
+}
+
+// ---- the local lane (Task L15) ----------------------------------------------------------------
+
+const KLEIN: &str = "flux2-klein-4b-q4";
+const ZIMAGE: &str = "z-image-turbo-q4";
+const WAN: &str = "wan22-ti2v-5b-fast-q6";
+const GB: u64 = 1_000_000_000;
+const CHAT: &str = "/m/chat.gguf";
+/// llama.cpp's description of the test's graphics card.
+const RX_7600: &str = "AMD Radeon RX 7600 (RADV NAVI33)";
+/// The device a run on that card records, as shown.
+const RX_7600_SHOWN: &str = "AMD Radeon RX 7600 (RADV NAVI33) (Vulkan)";
+
+/// How a [`FakeLocal`] run goes once it started.
+#[derive(Debug, Clone, Copy)]
+enum Course {
+    /// Done at its first check.
+    Done,
+    /// Ran out of memory and runs again with memory saving for its first two checks, then
+    /// done.
+    RetryThenDone,
+    /// 100 steps over about a second, then done.
+    Steps,
+    /// Fails with this kind.
+    Fail(FailureKind),
+}
+
+/// One run [`FakeLocal`] started.
+struct FakeRun {
+    course: Course,
+    /// Its place among the starts, from 0.
+    nth: usize,
+    started: Instant,
+    checks: u32,
+    pictures: usize,
+}
+
+/// The Studio engine on this computer, in memory: the installed models are the bundled
+/// catalog's starters; each start's request, folder and options are recorded; a run goes as
+/// scripted ([`Course`], by default done at its first check, its results small PNG pictures)
+/// and can be held running until released.
+struct FakeLocal {
+    entries: Vec<(store::GenModel, GenEntry)>,
+    starts: Mutex<Vec<(MediaRequest, PathBuf, LocalJobOptions)>>,
+    courses: Mutex<VecDeque<Course>>,
+    held: AtomicBool,
+    /// How many runs, in start order, were let go while held.
+    let_go: AtomicUsize,
+    runs: Mutex<HashMap<String, FakeRun>>,
+    releases: AtomicUsize,
+    cancels: AtomicUsize,
+}
+
+/// An installed model's row for a catalog `entry`.
+fn installed_row(entry: &GenEntry) -> store::GenModel {
+    let kind = match entry.kind {
+        GenKind::Image => "image",
+        GenKind::ImageEdit => "image-edit",
+        GenKind::Video => "video",
+    };
+    store::GenModel {
+        id: entry.id.clone(),
+        catalog_id: Some(entry.id.clone()),
+        name: entry.name.clone(),
+        kind: kind.into(),
+        family: serde_json::to_value(entry.family)
+            .unwrap()
+            .as_str()
+            .unwrap()
+            .to_owned(),
+        parts: json!([]),
+        size_bytes: entry.total_bytes(),
+        source: store::GenSource::Catalog,
+        added_at: 1,
+    }
+}
+
+impl FakeLocal {
+    fn new() -> Self {
+        let catalog = gen_catalog(
+            &Catalog::bundled(),
+            runtime::sd::lock::embedded().sd_cpp.build,
+        );
+        let entries = [KLEIN, ZIMAGE, WAN]
+            .iter()
+            .map(|id| {
+                let entry = catalog.entries.get(*id).expect("a bundled starter").clone();
+                (installed_row(&entry), entry)
+            })
+            .collect();
+        Self {
+            entries,
+            starts: Mutex::new(Vec::new()),
+            courses: Mutex::new(VecDeque::new()),
+            held: AtomicBool::new(false),
+            let_go: AtomicUsize::new(0),
+            runs: Mutex::new(HashMap::new()),
+            releases: AtomicUsize::new(0),
+            cancels: AtomicUsize::new(0),
+        }
+    }
+
+    fn starts(&self) -> usize {
+        self.starts.lock().unwrap().len()
+    }
+
+    fn releases(&self) -> usize {
+        self.releases.load(Ordering::SeqCst)
+    }
+
+    fn cancels(&self) -> usize {
+        self.cancels.load(Ordering::SeqCst)
+    }
+
+    /// The options of the last start.
+    fn last_options(&self) -> LocalJobOptions {
+        self.starts
+            .lock()
+            .unwrap()
+            .last()
+            .expect("a local run started")
+            .2
+            .clone()
+    }
+
+    /// How the next run not yet scripted goes.
+    fn course(&self, course: Course) {
+        self.courses.lock().unwrap().push_back(course);
+    }
+
+    /// From now on each run stays running until it is let go.
+    fn hold(&self) {
+        self.held.store(true, Ordering::SeqCst);
+    }
+
+    /// Lets the oldest held run go on.
+    fn release_one(&self) {
+        self.let_go.fetch_add(1, Ordering::SeqCst);
+    }
+
+    fn release_all(&self) {
+        self.held.store(false, Ordering::SeqCst);
+    }
+
+    fn is_held(&self, nth: usize) -> bool {
+        self.held.load(Ordering::SeqCst) && nth >= self.let_go.load(Ordering::SeqCst)
+    }
+}
+
+#[async_trait]
+impl MediaProvider for FakeLocal {
+    fn company(&self) -> Company {
+        Company::Local
+    }
+
+    fn host(&self) -> String {
+        String::new()
+    }
+
+    async fn fetch_catalog(&self) -> Result<RawCatalog, MediaError> {
+        let models: Vec<MediaModel> = self
+            .entries
+            .iter()
+            .map(|(row, entry)| {
+                let params = LocalMediaProvider::params_for(entry);
+                MediaModel {
+                    id: row.id.clone(),
+                    display_name: entry.name.clone(),
+                    family: row.family.clone(),
+                    kind: if entry.kind == GenKind::Video {
+                        MediaKind::Video
+                    } else {
+                        MediaKind::Image
+                    },
+                    accepts_images: params
+                        .iter()
+                        .any(|p| matches!(p.kind, ParamKind::Images { max, .. } if max > 0)),
+                    params,
+                    price: Price::Free,
+                    notes: Vec::new(),
+                    usable: None,
+                    created: None,
+                    companies: Vec::new(),
+                }
+            })
+            .collect();
+        Ok(RawCatalog {
+            images: serde_json::to_value(models).unwrap(),
+            videos: None,
+        })
+    }
+
+    async fn fetch_image_price(&self, _model: &str) -> Result<Value, MediaError> {
+        Ok(Value::Null)
+    }
+
+    fn preview(&self, req: &MediaRequest) -> RequestPreview {
+        self.preview_local(req, &LocalJobOptions::default())
+    }
+
+    async fn start(&self, _req: &MediaRequest, _scratch: &Path) -> Result<Started, MediaError> {
+        unreachable!("the local lane starts a run with start_local")
+    }
+
+    async fn check(&self, remote_id: &str) -> Result<JobState, MediaError> {
+        let mut runs = self.runs.lock().unwrap();
+        let Some(run) = runs.get_mut(remote_id) else {
+            return Ok(JobState::Gone);
+        };
+        run.checks += 1;
+        if self.is_held(run.nth) {
+            return Ok(JobState::Running {
+                progress: Some(0.2),
+            });
+        }
+        let done = JobState::Done(JobDone {
+            outputs: run.pictures,
+            signed: Vec::new(),
+            cost: Some(Cost {
+                usd: 0.0,
+                reported: true,
+            }),
+        });
+        Ok(match run.course {
+            Course::Done => done,
+            Course::RetryThenDone if run.checks <= 2 => JobState::Running {
+                progress: Some(0.1),
+            },
+            Course::RetryThenDone => done,
+            Course::Steps if run.started.elapsed() < Duration::from_secs(1) => JobState::Running {
+                progress: Some(0.5),
+            },
+            Course::Steps => done,
+            Course::Fail(kind) => JobState::Failed(MediaFailure {
+                kind,
+                stage: None,
+                charged: Some(false),
+                company_code: None,
+                request_id: None,
+                status: None,
+                message: "The Studio engine ran out of memory.".into(),
+                retry_after: None,
+            }),
+        })
+    }
+
+    async fn download(
+        &self,
+        _remote_id: &str,
+        _job: &JobDone,
+        _index: usize,
+        dest: &Path,
+    ) -> Result<Fetched, MediaError> {
+        let bytes = png(4, 4);
+        std::fs::write(dest, &bytes).unwrap();
+        Ok(Fetched::Saved(Saved {
+            path: dest.to_owned(),
+            mime: "image/png".into(),
+            size_bytes: bytes.len() as u64,
+            width: Some(4),
+            height: Some(4),
+            duration_ms: None,
+        }))
+    }
+
+    async fn cancel(&self, remote_id: &str) -> Result<(), MediaError> {
+        self.cancels.fetch_add(1, Ordering::SeqCst);
+        self.runs.lock().unwrap().remove(remote_id);
+        Ok(())
+    }
+}
+
+#[async_trait]
+impl LocalProvider for FakeLocal {
+    async fn start_local(
+        &self,
+        req: &MediaRequest,
+        scratch: &Path,
+        opts: &LocalJobOptions,
+    ) -> Result<Started, MediaError> {
+        let nth = {
+            let mut starts = self.starts.lock().unwrap();
+            starts.push((req.clone(), scratch.to_owned(), opts.clone()));
+            starts.len() - 1
+        };
+        let pictures = match req.kind {
+            MediaKind::Image => req.params.get("n").and_then(Value::as_u64).unwrap_or(1) as usize,
+            MediaKind::Video => 1,
+        };
+        let course = self
+            .courses
+            .lock()
+            .unwrap()
+            .pop_front()
+            .unwrap_or(Course::Done);
+        let remote_id = format!("local:{}", scratch.file_name().unwrap().to_string_lossy());
+        self.runs.lock().unwrap().insert(
+            remote_id.clone(),
+            FakeRun {
+                course,
+                nth,
+                started: Instant::now(),
+                checks: 0,
+                pictures,
+            },
+        );
+        Ok(Started::Job { remote_id })
+    }
+
+    fn preview_local(&self, req: &MediaRequest, opts: &LocalJobOptions) -> RequestPreview {
+        RequestPreview {
+            method: "run".into(),
+            url: "sd-cli".into(),
+            host: String::new(),
+            body: json!({
+                "prompt": req.prompt,
+                "processorOnly": opts.processor_only,
+                "memorySaving": opts.memory_saving,
+                "device": opts.device_description,
+            }),
+        }
+    }
+
+    async fn release(&self, remote_id: &str) {
+        self.releases.fetch_add(1, Ordering::SeqCst);
+        self.runs.lock().unwrap().remove(remote_id);
+    }
+
+    fn status(&self, remote_id: &str) -> Option<LocalRunStatus> {
+        let runs = self.runs.lock().unwrap();
+        let run = runs.get(remote_id)?;
+        let elapsed = run.started.elapsed();
+        let progress = matches!(run.course, Course::Steps).then(|| LocalProgress {
+            stage: LocalStage::Drawing,
+            pass: 1,
+            passes: 1,
+            step: u32::try_from(elapsed.as_millis() / 10)
+                .unwrap_or(100)
+                .min(100),
+            steps: 100,
+            picture: 1,
+            pictures: 1,
+            elapsed_ms: u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX),
+            sec_per_step: Some(0.01),
+        });
+        Some(LocalRunStatus {
+            progress,
+            stalled: false,
+            retrying: matches!(run.course, Course::RetryThenDone) && run.checks <= 2,
+            outputs: 0,
+            failure: None,
+        })
+    }
+
+    async fn entry_of(&self, model_id: &str) -> Option<(store::GenModel, GenEntry)> {
+        self.entries
+            .iter()
+            .find(|(row, _)| row.id == model_id)
+            .cloned()
+    }
+
+    fn engine_build(&self) -> Option<u32> {
+        Some(1106)
+    }
+}
+
+/// What [`FakeLease`] does when it is asked next.
+#[derive(Debug, Clone)]
+enum LeaseStep {
+    Grant(Grant),
+    Refuse(Refused),
+    /// Says the job waits for this, then grants once released (or ends when cancelled).
+    WaitThen(LeaseWait, Grant),
+    /// Asks the person (`NeedsAnswer`) until an answer comes, then grants on a yes.
+    AskThen(Grant),
+}
+
+/// The graphics card's lease: grants as scripted (by default beside the chat model), and
+/// records each need and policy it was asked with, each hold dropped (with whether a run was
+/// done by then) and each reload.
+struct FakeLease {
+    script: Mutex<VecDeque<LeaseStep>>,
+    needs: Mutex<Vec<StudioNeed>>,
+    asked: Mutex<Vec<(GpuPolicy, Option<bool>)>>,
+    gate: tokio::sync::Semaphore,
+    drops: Arc<Mutex<Vec<bool>>>,
+    reloads: Mutex<Vec<String>>,
+    sink: Arc<FakeSink>,
+}
+
+/// A grant's hold: records its drop.
+struct FakeHold {
+    drops: Arc<Mutex<Vec<bool>>>,
+    sink: Arc<FakeSink>,
+}
+
+impl Drop for FakeHold {
+    fn drop(&mut self) {
+        let done = self
+            .sink
+            .events
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|event| event.status == "done");
+        self.drops.lock().unwrap().push(done);
+    }
+}
+
+impl FakeLease {
+    fn new(sink: &Arc<FakeSink>) -> Self {
+        Self {
+            script: Mutex::new(VecDeque::new()),
+            needs: Mutex::new(Vec::new()),
+            asked: Mutex::new(Vec::new()),
+            gate: tokio::sync::Semaphore::new(0),
+            drops: Arc::new(Mutex::new(Vec::new())),
+            reloads: Mutex::new(Vec::new()),
+            sink: Arc::clone(sink),
+        }
+    }
+
+    /// What the next ask not yet scripted gets.
+    fn then(&self, step: LeaseStep) {
+        self.script.lock().unwrap().push_back(step);
+    }
+
+    /// Lets every wait go on.
+    fn release(&self) {
+        self.gate.add_permits(64);
+    }
+
+    fn needs(&self) -> Vec<StudioNeed> {
+        self.needs.lock().unwrap().clone()
+    }
+
+    fn asked(&self) -> Vec<(GpuPolicy, Option<bool>)> {
+        self.asked.lock().unwrap().clone()
+    }
+
+    fn drops(&self) -> Vec<bool> {
+        self.drops.lock().unwrap().clone()
+    }
+
+    fn reloads(&self) -> Vec<String> {
+        self.reloads.lock().unwrap().clone()
+    }
+}
+
+#[async_trait]
+impl CardLease for FakeLease {
+    async fn acquire(
+        &self,
+        need: &StudioNeed,
+        policy: GpuPolicy,
+        answered: Option<bool>,
+        cancel: &CancellationToken,
+        on_wait: &(dyn Fn(LeaseWait) + Send + Sync),
+    ) -> Result<(Grant, Box<dyn std::any::Any + Send + Sync>), Refused> {
+        self.needs.lock().unwrap().push(*need);
+        self.asked.lock().unwrap().push((policy, answered));
+        let step = self
+            .script
+            .lock()
+            .unwrap()
+            .pop_front()
+            .unwrap_or(LeaseStep::Grant(Grant::Alongside));
+        let grant = match step {
+            LeaseStep::Grant(grant) => grant,
+            LeaseStep::Refuse(refused) => return Err(refused),
+            LeaseStep::WaitThen(wait, grant) => {
+                on_wait(wait);
+                tokio::select! {
+                    biased;
+                    () = cancel.cancelled() => return Err(Refused::Cancelled),
+                    permit = self.gate.acquire() => permit.unwrap().forget(),
+                }
+                grant
+            }
+            LeaseStep::AskThen(grant) => match answered {
+                None => {
+                    self.script
+                        .lock()
+                        .unwrap()
+                        .push_front(LeaseStep::AskThen(grant));
+                    on_wait(LeaseWait::NeedsAnswer);
+                    return Err(Refused::NeedsAnswer);
+                }
+                Some(true) => grant,
+                Some(false) => return Err(Refused::DoesNotFit),
+            },
+        };
+        let hold = FakeHold {
+            drops: Arc::clone(&self.drops),
+            sink: Arc::clone(&self.sink),
+        };
+        Ok((grant, Box::new(hold)))
+    }
+
+    async fn reload_chat(&self, path: &str) {
+        self.reloads.lock().unwrap().push(path.to_owned());
+    }
+}
+
+/// This computer as probed: a graphics card (or the processor only), the chat model's bytes
+/// on it, and 8 logical cores.
+struct FixedHardware {
+    target: Mutex<(Target, String, Option<String>)>,
+    chat: Mutex<Option<u64>>,
+}
+
+impl FixedHardware {
+    /// A Vulkan card with `free_gb` GB free, and `ram_gb` GB of free memory.
+    fn gpu(free_gb: u64, ram_gb: u64) -> Self {
+        let hardware = Self {
+            target: Mutex::new((Target::Cpu { ram_free_bytes: 0 }, String::new(), None)),
+            chat: Mutex::new(None),
+        };
+        hardware.set_gpu(free_gb, ram_gb);
+        hardware
+    }
+
+    fn set_gpu(&self, free_gb: u64, ram_gb: u64) {
+        *self.target.lock().unwrap() = (
+            Target::Gpu {
+                name: RX_7600.into(),
+                free_bytes: free_gb * GB,
+                ram_free_bytes: Some(ram_gb * GB),
+            },
+            "vulkan".into(),
+            Some(RX_7600.into()),
+        );
+    }
+
+    /// A computer that runs models on the processor, with `ram_gb` GB of free memory.
+    fn set_cpu(&self, ram_gb: u64) {
+        *self.target.lock().unwrap() = (
+            Target::Cpu {
+                ram_free_bytes: ram_gb * GB,
+            },
+            "cpu".into(),
+            None,
+        );
+    }
+
+    /// A chat model loaded taking `gb` GB on the card (`None`: none on it).
+    fn set_chat(&self, gb: Option<u64>) {
+        *self.chat.lock().unwrap() = gb.map(|gb| gb * GB);
+    }
+}
+
+#[async_trait]
+impl LocalHardware for FixedHardware {
+    async fn target(&self) -> (Target, String, Option<String>) {
+        self.target.lock().unwrap().clone()
+    }
+
+    fn chat_device_bytes(&self) -> Option<u64> {
+        *self.chat.lock().unwrap()
+    }
+
+    fn logical_cores(&self) -> usize {
+        8
+    }
+}
+
+impl H {
+    /// A run of installed model `model` on this computer.
+    fn local_req_for(&self, model: &str, prompt: &str) -> StartRequest {
+        StartRequest {
+            client_token: uuid::Uuid::new_v4().to_string(),
+            target: RunTarget::ThisComputer,
+            kind: if model == WAN {
+                MediaKind::Video
+            } else {
+                MediaKind::Image
+            },
+            model: model.into(),
+            prompt: prompt.into(),
+            params: Map::new(),
+            extra: Map::new(),
+            refs: Vec::new(),
+            routing: None,
+        }
+    }
+
+    /// A FLUX.2 klein 4B picture on this computer.
+    fn local_req(&self, prompt: &str) -> StartRequest {
+        self.local_req_for(KLEIN, prompt)
+    }
+
+    /// A Wan 2.2 clip on this computer.
+    fn local_video_req(&self) -> StartRequest {
+        self.local_req_for(WAN, "a wave breaking")
+    }
+
+    async fn set_prefs(&self, value: Value) {
+        self.manager.set_prefs(patch(value)).await.unwrap();
+    }
+
+    /// The local part of each `running` event of run `id`.
+    fn running_cards(&self, id: &str) -> Vec<crate::dto::LocalRunDto> {
+        self.events_for(id)
+            .into_iter()
+            .filter(|event| event.status == "running")
+            .filter_map(|event| event.local)
+            .collect()
+    }
+
+    /// A local run of `model` that finished earlier today on `device` in `elapsed_ms`, at the
+    /// model's default size and steps, one picture (or clip).
+    async fn seed_measured_run(&self, model: &str, device: &str, elapsed_ms: u64) {
+        let entry = self.local.entry_of(model).await.unwrap().1;
+        let id = uuid::Uuid::new_v4().to_string();
+        self.store
+            .insert_creation_run(store::NewCreationRun {
+                id: id.clone(),
+                kind: store::CreationKind::Image,
+                runs_on: store::RunsOn::Local,
+                provider_id: None,
+                provider_name: "This computer".into(),
+                provider_host: String::new(),
+                model: model.into(),
+                model_label: entry.name.clone(),
+                prompt: "an earlier picture".into(),
+                params: json!({
+                    "params": {}, "extra": {}, "routing": null,
+                    "job": {
+                        "width": entry.defaults.width,
+                        "height": entry.defaults.height,
+                        "frames": entry.defaults.frames.unwrap_or(1),
+                        "steps": entry.defaults.steps,
+                        "pictures": 1,
+                    },
+                }),
+                refs: json!([]),
+                estimate_usd: Some(0.0),
+                gen_model_id: Some(model.into()),
+                engine_build: Some(1106),
+                device: Some(device.into()),
+                created_at: self.now - 60_000,
+            })
+            .await
+            .unwrap();
+        self.store
+            .update_creation_run(
+                &id,
+                store::CreationPatch {
+                    status: Some(store::CreationStatus::Done),
+                    cost_usd: Some(Some(0.0)),
+                    elapsed_ms: Some(Some(elapsed_ms)),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+    }
+
+    /// A local run as the app left it when it closed: `status`, with its scratch folder.
+    async fn seed_local_run(&self, status: store::CreationStatus) -> String {
+        let id = uuid::Uuid::new_v4().to_string();
+        self.store
+            .insert_creation_run(store::NewCreationRun {
+                id: id.clone(),
+                kind: store::CreationKind::Image,
+                runs_on: store::RunsOn::Local,
+                provider_id: None,
+                provider_name: "This computer".into(),
+                provider_host: String::new(),
+                model: KLEIN.into(),
+                model_label: "FLUX.2 klein 4B".into(),
+                prompt: "a lighthouse".into(),
+                params: json!({"params": {}, "extra": {}, "routing": null}),
+                refs: json!([]),
+                estimate_usd: Some(0.0),
+                gen_model_id: Some(KLEIN.into()),
+                engine_build: Some(1106),
+                device: None,
+                created_at: self.now - 60_000,
+            })
+            .await
+            .unwrap();
+        self.store
+            .update_creation_run(
+                &id,
+                store::CreationPatch {
+                    status: Some(status),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        let scratch = self.gallery_root.join(".partial").join(&id);
+        std::fs::create_dir_all(&scratch).unwrap();
+        std::fs::write(scratch.join("prompt.txt"), "a lighthouse").unwrap();
+        id
+    }
+}
+
+/// Waits until `done` holds (at most 10 s).
+async fn eventually(what: &str, done: impl Fn() -> bool) {
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while !done() {
+        assert!(Instant::now() < deadline, "never: {what}");
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+}
+
+#[tokio::test]
+async fn a_local_picture_runs_without_confirmation_and_costs_nothing() {
+    let h = harness_with_local().await;
+    let run = h
+        .manager
+        .start(h.local_req("lighthouse"), false)
+        .await
+        .unwrap();
+    let done = h.wait_status(&run.id, "done").await;
+    assert_eq!(h.statuses(&run.id), ["queued", "running", "done"]);
+    assert_eq!(
+        (
+            done.runs_on.as_str(),
+            done.cost_usd,
+            done.provider_name.as_str()
+        ),
+        ("local", Some(0.0), "This computer")
+    );
+    assert_eq!(done.estimate_usd, Some(0.0));
+    assert_eq!(done.provider_id, None);
+    assert_eq!(done.provider_host, "");
+    let local = done.local.as_ref().unwrap();
+    assert!(local.labelled);
+    assert_eq!(local.device.as_deref(), Some(RX_7600_SHOWN));
+    assert_eq!(local.engine_build, Some(1106));
+    assert!(local.elapsed_ms.is_some());
+    assert_eq!(done.outputs.len(), 1);
+    let label = read_label(Path::new(&done.outputs[0].path), "image/png").unwrap();
+    assert!(label.contains("FLUX.2 klein 4B"), "{label}");
+    assert!(!label.contains("lighthouse"), "{label}");
+    assert_eq!(h.manager.usage().await.unwrap().spent_today_usd, 0.0);
+    // `.partial/<run>` and its prompt file go with the engine's run.
+    assert_eq!(h.local.releases(), 1);
+    assert!(h.scratch_is_gone(&run.id));
+    // The run recorded what it was made at, for this computer's measured times.
+    let row = h.store_run(&run.id).await;
+    assert_eq!(row.gen_model_id.as_deref(), Some(KLEIN));
+    assert_eq!(row.params["job"]["width"], 1024);
+    assert_eq!(row.params["job"]["pictures"], 1);
+    assert!(row.elapsed_ms.is_some());
+    // The seed Studio picked is sent and kept.
+    let sent = h.local.starts.lock().unwrap()[0].0.clone();
+    assert!(sent.params.get("seed").and_then(Value::as_u64).is_some());
+    assert_eq!(done.outputs[0].seed, sent.params["seed"].as_u64());
+}
+
+#[tokio::test]
+async fn a_local_video_never_asks_and_never_meets_the_daily_limit() {
+    let h = harness_with_local().await;
+    h.seed_done_run_costing(9.99).await;
+    let run = h.manager.start(h.local_video_req(), false).await.unwrap();
+    assert_eq!(run.kind, MediaKind::Video);
+    let estimate = h.manager.estimate(&h.local_video_req()).await.unwrap();
+    assert!(estimate.reasons.is_empty());
+    assert!(estimate.limit.would_pass);
+    assert_eq!(estimate.usd, Some(0.0));
+}
+
+#[tokio::test]
+async fn one_local_job_at_a_time_while_cloud_runs_go_on_beside_it() {
+    let h = harness_with_local().await;
+    h.local.hold();
+    let first = h.manager.start(h.local_req("one"), false).await.unwrap();
+    let second = h.manager.start(h.local_req("two"), false).await.unwrap();
+    h.wait_status(&first.id, "running").await;
+    let waiting = h.run_dto(&second.id).await;
+    assert_eq!(waiting.status, "queued");
+    assert_eq!(waiting.queue_position, Some(1));
+    assert_eq!(h.local.starts(), 1);
+    assert!(h.manager.local_running());
+
+    h.provider.hold();
+    let cloud = h.manager.start(h.picture_req("x"), false).await.unwrap();
+    h.wait_status(&cloud.id, "sending").await;
+    assert_eq!(h.run_dto(&second.id).await.status, "queued");
+    h.provider.release_all();
+    h.wait_status(&cloud.id, "done").await;
+
+    h.local.release_all();
+    h.wait_status(&first.id, "done").await;
+    h.wait_status(&second.id, "done").await;
+    assert_eq!(h.local.starts(), 2);
+    assert!(!h.manager.local_running());
+}
+
+#[tokio::test]
+async fn waiting_for_the_graphics_card_is_queued_with_its_reason() {
+    let h = harness_with_local().await;
+    h.lease.then(LeaseStep::WaitThen(
+        LeaseWait::ReplyRunning,
+        Grant::Alongside,
+    ));
+    let run = h.manager.start(h.local_req("x"), false).await.unwrap();
+    let waiting = h
+        .wait_for(&run.id, "waiting for the reply", |r| {
+            r.local.as_ref().and_then(|l| l.waiting_for.as_deref()) == Some("reply")
+        })
+        .await;
+    assert_eq!(waiting.status, "queued");
+    assert_eq!(waiting.queue_position, None);
+    assert!(waiting.watching);
+    assert_eq!(h.local.starts(), 0);
+    h.lease.release();
+    let done = h.wait_status(&run.id, "done").await;
+    assert_eq!(done.local.unwrap().waiting_for, None);
+}
+
+#[tokio::test]
+async fn the_unloaded_chat_model_is_named_on_the_card() {
+    let h = harness_with_local().await;
+    h.hardware.set_gpu(3, 32);
+    h.hardware.set_chat(Some(5));
+    h.lease.then(LeaseStep::Grant(Grant::AfterUnload {
+        unloaded: Some(CHAT.into()),
+    }));
+    h.local.hold();
+    let run = h
+        .manager
+        .start(h.local_req_for(ZIMAGE, "x"), false)
+        .await
+        .unwrap();
+    let running = h.wait_status(&run.id, "running").await;
+    let local = running.local.unwrap();
+    assert_eq!(local.unloaded_chat.as_deref(), Some(CHAT));
+    assert!(!local.alongside);
+    assert!(!local.on_processor);
+    let need = h.lease.needs()[0];
+    assert!(!need.alongside && need.after_unload, "{need:?}");
+    assert!(!need.shared_memory);
+    h.local.release_all();
+    h.wait_status(&run.id, "done").await;
+}
+
+#[tokio::test]
+async fn a_job_that_fits_after_an_unload_can_be_created() {
+    let h = harness_with_local().await;
+    // Partly on the processor beside the 5 GB chat model, one part at a time after it goes.
+    h.hardware.set_gpu(3, 32);
+    h.hardware.set_chat(Some(5));
+    let e = h
+        .manager
+        .estimate(&h.local_req_for(ZIMAGE, "x"))
+        .await
+        .unwrap();
+    assert_eq!(
+        e.local.as_ref().map(|l| (l.fit.as_str(), l.unload_chat)),
+        Some(("afterUnload", true))
+    );
+    assert!(e.invalid.is_empty());
+    assert_eq!(e.local.as_ref().unwrap().reason, None);
+    assert!(
+        h.manager
+            .start(h.local_req_for(ZIMAGE, "x"), false)
+            .await
+            .is_ok()
+    );
+}
+
+#[tokio::test]
+async fn the_grant_and_the_fit_reach_the_engine_job() {
+    let h = harness_with_local().await;
+
+    // The processor, granted by the lease: its threads, and no device.
+    h.set_prefs(json!({"gpuPolicy": "processor"})).await;
+    h.lease
+        .then(LeaseStep::Grant(Grant::UseProcessor { unloaded: None }));
+    let run = h.manager.start(h.local_req("x"), false).await.unwrap();
+    let done = h.wait_status(&run.id, "done").await;
+    let opts = h.local.last_options();
+    assert!(opts.processor_only);
+    assert_eq!(
+        opts.threads,
+        Some(processor_threads(8, cfg!(target_arch = "x86_64")))
+    );
+    assert_eq!(opts.device_description, None);
+    assert_eq!(h.lease.asked()[0].0, GpuPolicy::Processor);
+    assert!(h.running_cards(&run.id).iter().any(|l| l.on_processor));
+    assert_eq!(done.local.unwrap().device.as_deref(), Some("Processor"));
+
+    // One part at a time beside the chat model: memory saving (Automatic), the card's device.
+    h.set_prefs(json!({"gpuPolicy": "unload"})).await;
+    h.hardware.set_gpu(6, 32);
+    h.hardware.set_chat(Some(5));
+    let run = h
+        .manager
+        .start(h.local_req_for(ZIMAGE, "x"), false)
+        .await
+        .unwrap();
+    h.wait_status(&run.id, "done").await;
+    let opts = h.local.last_options();
+    assert!(opts.memory_saving);
+    assert!(!opts.processor_only);
+    assert_eq!(opts.threads, None);
+    assert_eq!(opts.device_description.as_deref(), Some(RX_7600));
+    let cards = h.running_cards(&run.id);
+    assert!(
+        cards.iter().any(|l| l.alongside && !l.on_processor),
+        "{cards:?}"
+    );
+
+    // Memory saving off in the request wins, whatever the fit.
+    let mut req = h.local_req_for(ZIMAGE, "x");
+    req.params.insert("memory_saving".into(), json!("off"));
+    let run = h.manager.start(req, false).await.unwrap();
+    h.wait_status(&run.id, "done").await;
+    assert!(!h.local.last_options().memory_saving);
+
+    // After an unload, the fit it runs with is the one after the unload (Green here).
+    h.lease.then(LeaseStep::Grant(Grant::AfterUnload {
+        unloaded: Some(CHAT.into()),
+    }));
+    h.hardware.set_gpu(3, 32);
+    let run = h
+        .manager
+        .start(h.local_req_for(KLEIN, "x"), false)
+        .await
+        .unwrap();
+    h.wait_status(&run.id, "done").await;
+    assert!(!h.local.last_options().memory_saving);
+}
+
+#[tokio::test]
+async fn a_picture_too_big_for_the_card_runs_on_the_processor() {
+    let h = harness_with_local().await;
+    h.hardware.set_gpu(1, 32);
+    let e = h.manager.estimate(&h.local_req("x")).await.unwrap();
+    assert_eq!(e.local.as_ref().unwrap().fit, "slow");
+    h.lease
+        .then(LeaseStep::Grant(Grant::UseProcessor { unloaded: None }));
+    let run = h.manager.start(h.local_req("x"), false).await.unwrap();
+    h.wait_status(&run.id, "done").await;
+    let need = h.lease.needs()[0];
+    assert!(
+        !need.alongside && !need.after_unload && need.processor_ok,
+        "{need:?}"
+    );
+    assert!(h.local.last_options().processor_only);
+}
+
+#[tokio::test]
+async fn the_card_stays_held_through_the_out_of_memory_retry() {
+    let h = harness_with_local().await;
+    h.hardware.set_gpu(3, 32);
+    h.hardware.set_chat(Some(5));
+    h.lease.then(LeaseStep::Grant(Grant::AfterUnload {
+        unloaded: Some(CHAT.into()),
+    }));
+    h.local.course(Course::RetryThenDone);
+    let run = h
+        .manager
+        .start(h.local_req_for(ZIMAGE, "x"), false)
+        .await
+        .unwrap();
+    h.wait_status(&run.id, "done").await;
+    assert!(h.running_cards(&run.id).iter().any(|l| l.retrying));
+    assert_eq!(h.local.starts(), 1);
+    // Dropped once, after the run was done.
+    assert_eq!(h.lease.drops(), [true]);
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert!(h.lease.reloads().is_empty());
+}
+
+#[tokio::test]
+async fn the_chat_model_reloads_once_when_the_queue_empties() {
+    let h = harness_with_local().await;
+    h.set_prefs(json!({"reloadChatAfter": true})).await;
+    h.lease.then(LeaseStep::Grant(Grant::AfterUnload {
+        unloaded: Some(CHAT.into()),
+    }));
+    h.lease.then(LeaseStep::Grant(Grant::Alongside));
+    h.local.hold();
+    let first = h.manager.start(h.local_req("one"), false).await.unwrap();
+    let second = h.manager.start(h.local_req("two"), false).await.unwrap();
+    h.wait_status(&first.id, "running").await;
+    h.local.release_one();
+    h.wait_status(&first.id, "done").await;
+    h.wait_status(&second.id, "running").await;
+    assert!(h.lease.reloads().is_empty(), "the queue still had work");
+    h.local.release_all();
+    h.wait_status(&second.id, "done").await;
+    eventually("the chat model reloads", || !h.lease.reloads().is_empty()).await;
+    assert_eq!(h.lease.reloads(), [CHAT]);
+
+    // Off: the chat model stays unloaded.
+    h.set_prefs(json!({"reloadChatAfter": false})).await;
+    h.lease.then(LeaseStep::Grant(Grant::AfterUnload {
+        unloaded: Some(CHAT.into()),
+    }));
+    let third = h.manager.start(h.local_req("three"), false).await.unwrap();
+    h.wait_status(&third.id, "done").await;
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert_eq!(h.lease.reloads(), [CHAT]);
+}
+
+#[tokio::test]
+async fn a_job_that_does_not_fit_even_after_an_unload_is_refused() {
+    let h = harness_with_local().await;
+    h.hardware.set_cpu(16);
+    let err = h
+        .manager
+        .start(h.local_video_req(), false)
+        .await
+        .unwrap_err();
+    assert_eq!(err.code, "studio_does_not_fit");
+    assert_eq!(err.message, "This model does not fit this computer.");
+    assert_eq!(err.next_step, "Choose a smaller size or a cloud model.");
+    assert!(h.store_runs().await.is_empty());
+    assert!(h.audit_rows().await.is_empty());
+    assert_eq!(h.local.starts(), 0);
+
+    // The lease's own refusal ends the run the same way, never charged.
+    h.hardware.set_gpu(8, 32);
+    h.lease.then(LeaseStep::Refuse(Refused::DoesNotFit));
+    let run = h.manager.start(h.local_req("x"), false).await.unwrap();
+    let failed = h.wait_status(&run.id, "failed").await;
+    let error = failed.error.unwrap();
+    assert_eq!(
+        (error.code.as_str(), error.charged),
+        ("studio_does_not_fit", Some(false))
+    );
+    assert_eq!(h.local.starts(), 0);
+}
+
+#[tokio::test]
+async fn ask_waits_for_the_answer() {
+    let h = harness_with_local().await;
+    h.set_prefs(json!({"gpuPolicy": "ask"})).await;
+    h.lease.then(LeaseStep::AskThen(Grant::AfterUnload {
+        unloaded: Some(CHAT.into()),
+    }));
+    h.local.hold();
+    let run = h.manager.start(h.local_req("x"), false).await.unwrap();
+    let asking = h
+        .wait_for(&run.id, "asking", |r| {
+            r.local.as_ref().and_then(|l| l.waiting_for.as_deref()) == Some("answer")
+        })
+        .await;
+    assert_eq!(asking.status, "queued");
+    assert_eq!(h.local.starts(), 0);
+    let answered = h.manager.answer_unload(&run.id, true).await.unwrap();
+    assert_eq!(answered.id, run.id);
+    let running = h.wait_status(&run.id, "running").await;
+    assert_eq!(running.local.unwrap().unloaded_chat.as_deref(), Some(CHAT));
+    assert_eq!(
+        h.lease.asked(),
+        [(GpuPolicy::Ask, None), (GpuPolicy::Ask, Some(true))]
+    );
+    h.local.release_all();
+    h.wait_status(&run.id, "done").await;
+}
+
+#[tokio::test]
+async fn stop_on_a_local_run_kills_it_and_says_nothing_was_charged() {
+    let h = harness_with_local().await;
+    h.local.hold();
+    let run = h.manager.start(h.local_req("x"), false).await.unwrap();
+    h.wait_status(&run.id, "running").await;
+    let r = h.manager.cancel(&run.id).await.unwrap();
+    assert_eq!(r.status, "cancelled");
+    assert_eq!(h.local.cancels(), 1);
+    let error = r.error.unwrap();
+    assert_eq!(
+        error.message,
+        "Stopped. Your computer is no longer working on it. Nothing was charged."
+    );
+    assert_eq!(error.charged, Some(false));
+    assert!(h.scratch_is_gone(&run.id));
+    assert!(!h.manager.local_running());
+    assert_eq!(h.lease.drops().len(), 1);
+
+    // A run still waiting for its turn is never started.
+    let first = h.manager.start(h.local_req("one"), false).await.unwrap();
+    let second = h.manager.start(h.local_req("two"), false).await.unwrap();
+    h.wait_status(&first.id, "running").await;
+    let r = h.manager.cancel(&second.id).await.unwrap();
+    assert_eq!(r.status, "cancelled");
+    assert_eq!(r.error.unwrap().charged, Some(false));
+    h.local.release_all();
+    h.wait_status(&first.id, "done").await;
+    assert_eq!(h.local.starts(), 2);
+}
+
+#[tokio::test]
+async fn a_local_run_left_running_becomes_interrupted_after_a_restart() {
+    let h = harness_with_local().await;
+    let running = h.seed_local_run(store::CreationStatus::Running).await;
+    let queued = h.seed_local_run(store::CreationStatus::Queued).await;
+    h.manager.resume_interrupted().await;
+    for id in [&running, &queued] {
+        let run = h.run_dto(id).await;
+        assert_eq!(run.status, "interrupted");
+        let error = run.error.unwrap();
+        assert_eq!(error.charged, Some(false));
+        assert_eq!(error.message, "The app closed while this was being made.");
+        assert!(h.scratch_is_gone(id));
+    }
+    assert_eq!(h.local.starts(), 0);
+}
+
+#[tokio::test]
+async fn studio_wont_make_what_the_check_refuses() {
+    let h = harness_with_local().await;
+    let err = h
+        .manager
+        .start(h.local_req("erotic photo of a minor"), false)
+        .await
+        .unwrap_err();
+    assert_eq!(err.code, "studio_wont_make");
+    assert!(h.store_runs().await.is_empty());
+    assert_eq!(h.local.starts(), 0);
+}
+
+#[tokio::test]
+async fn a_local_prompt_over_4000_characters_is_refused_before_anything_is_stored() {
+    let h = harness_with_local().await;
+    let long = "a".repeat(4_001);
+    let err = h
+        .manager
+        .start(h.local_req(&long), false)
+        .await
+        .unwrap_err();
+    assert_eq!(err.code, "studio_prompt_too_long_here");
+    assert_eq!(err.next_step, "Shorten it, or choose a cloud model.");
+    assert!(h.store_runs().await.is_empty());
+    assert!(
+        h.manager
+            .estimate(&h.local_req(&long))
+            .await
+            .unwrap()
+            .invalid
+            .contains(&"Keep the prompt under 4,000 characters for local models.".to_string())
+    );
+    assert!(
+        h.manager
+            .estimate(&h.local_req(&"a".repeat(4_000)))
+            .await
+            .unwrap()
+            .invalid
+            .is_empty()
+    );
+}
+
+#[tokio::test]
+async fn the_estimate_for_a_local_run_is_a_time_not_a_price() {
+    let h = harness_with_local().await;
+    h.seed_measured_run(KLEIN, RX_7600_SHOWN, 30_000).await;
+    let e = h.manager.estimate(&h.local_req("x")).await.unwrap();
+    assert_eq!(e.usd, Some(0.0));
+    assert!(e.reasons.is_empty());
+    let eta = e.eta.clone().expect("a time measured on this computer");
+    assert!(eta.measured);
+    assert!(eta.low_ms <= 30_000 && eta.high_ms >= 30_000, "{eta:?}");
+    let local = e.local.unwrap();
+    assert_eq!(
+        (
+            local.fit.as_str(),
+            local.unload_chat,
+            local.very_slow,
+            local.over_15_min
+        ),
+        ("fits", false, false, false)
+    );
+    assert_eq!(local.reason, None);
+
+    // 20 minutes measured: very slow, over 15 minutes.
+    h.seed_measured_run(ZIMAGE, RX_7600_SHOWN, 20 * 60_000)
+        .await;
+    let local = h
+        .manager
+        .estimate(&h.local_req_for(ZIMAGE, "x"))
+        .await
+        .unwrap()
+        .local
+        .unwrap();
+    assert!(local.very_slow && local.over_15_min, "{local:?}");
+
+    // Not here: very slow (Studio offers a cloud model), but no time, and why.
+    h.hardware.set_cpu(16);
+    let e = h.manager.estimate(&h.local_video_req()).await.unwrap();
+    let local = e.local.unwrap();
+    assert_eq!(local.fit, "notHere");
+    assert!(local.very_slow && !local.over_15_min);
+    assert_eq!(
+        local.reason.as_deref(),
+        Some("video needs a graphics card or an Apple-silicon Mac")
+    );
+    assert!(e.eta.is_none());
+}
+
+#[tokio::test]
+async fn local_progress_is_sent_at_most_four_times_a_second() {
+    let h = harness_with_local().await;
+    h.local.course(Course::Steps);
+    let run = h.manager.start(h.local_req("x"), false).await.unwrap();
+    h.wait_status(&run.id, "done").await;
+    let running = h.running_cards(&run.id);
+    // The first `running` event is the status change; the rest are progress only.
+    assert!(
+        running.len() - 1 <= 4,
+        "{} progress events",
+        running.len() - 1
+    );
+    assert!(LOCAL_CHECK_EVERY >= Duration::from_millis(250));
+    assert!(
+        running
+            .iter()
+            .any(|l| l.stage.as_deref() == Some("drawing") && l.steps == Some(100)),
+        "{running:?}"
+    );
+}
+
+#[tokio::test]
+async fn the_audit_row_says_this_computer_and_never_the_prompt() {
+    let h = harness_with_local().await;
+    let prompt = "a lighthouse at dusk over a stormy sea";
+    let run = h.manager.start(h.local_req(prompt), false).await.unwrap();
+    h.wait_status(&run.id, "done").await;
+    let rows = h.audit_rows().await;
+    assert_eq!(rows.len(), 1);
+    let row = &rows[0];
+    assert_eq!(row.tool, "picture");
+    assert_eq!(
+        row.preview,
+        "Made a picture on this computer with FLUX.2 klein 4B"
+    );
+    assert_eq!(row.arguments["runsOn"], "local");
+    assert_eq!(row.arguments["engine_build"], 1106);
+    assert_eq!(row.arguments["catalog_id"], KLEIN);
+    assert!(
+        row.arguments["revision"]
+            .as_str()
+            .is_some_and(|r| r.len() == 40)
+    );
+    assert_eq!(row.arguments["prompt_chars"], prompt.chars().count());
+    assert!(!row.arguments.to_string().contains("lighthouse"));
+    assert_eq!(row.result_status.as_deref(), Some("done"));
+    assert_eq!(row.result_summary.as_deref(), Some("cost $0.00"));
+}
+
+#[tokio::test]
+async fn quitting_is_asked_only_while_a_local_job_works() {
+    let h = harness_with_local().await;
+    assert!(!h.manager.local_running());
+    h.local.hold();
+    let run = h.manager.start(h.local_req("x"), false).await.unwrap();
+    h.wait_status(&run.id, "running").await;
+    assert!(h.manager.local_running());
+    assert!(super::quit::ask_before_quit(
+        h.manager.local_running(),
+        None
+    ));
+    h.local.release_all();
+    h.wait_status(&run.id, "done").await;
+    assert!(!h.manager.local_running());
+    assert!(!super::quit::ask_before_quit(
+        h.manager.local_running(),
+        None
+    ));
+}
+
+#[tokio::test]
+async fn an_update_waits_for_a_local_job() {
+    let h = harness_with_local().await;
+    h.local.hold();
+    let run = h.manager.start(h.local_req("x"), false).await.unwrap();
+    h.wait_status(&run.id, "running").await;
+    let err = crate::updates::refuse_while_studio_works(Some(&h.manager)).unwrap_err();
+    assert_eq!(err.code, "studio_busy_for_update");
+    assert_eq!(
+        err.next_step,
+        "Stop it in Studio, or install the update when it finishes."
+    );
+    h.local.release_all();
+    h.wait_status(&run.id, "done").await;
+    assert!(crate::updates::refuse_while_studio_works(Some(&h.manager)).is_ok());
+    assert!(crate::updates::refuse_while_studio_works(None).is_ok());
+}
+
+#[tokio::test]
+async fn every_local_fit_is_the_lanes_verdict() {
+    let h = harness_with_local().await;
+    h.hardware.set_gpu(3, 32);
+    h.hardware.set_chat(Some(5));
+    let entry = h.local.entry_of(ZIMAGE).await.unwrap().1;
+    let size = GenSize {
+        width: 1024,
+        height: 1024,
+        frames: 1,
+    };
+    let steps = entry.defaults.steps;
+    let verdict: LocalVerdict =
+        local_verdict(&entry, size, steps, 1, h.hardware.as_ref(), &h.store).await;
+    assert_eq!(verdict.word, FitWord::AfterUnload);
+    assert_eq!(verdict.card, RX_7600_SHOWN);
+    assert_eq!(verdict.description.as_deref(), Some(RX_7600));
+    assert!(verdict.reason.is_none() && verdict.eta.is_none());
+    // A time measured on this card is this computer's.
+    h.seed_measured_run(ZIMAGE, RX_7600_SHOWN, 40_000).await;
+    let verdict = local_verdict(&entry, size, steps, 1, h.hardware.as_ref(), &h.store).await;
+    assert!(verdict.eta.is_some_and(|eta| eta.measured));
+    // The estimate says the same.
+    let e = h
+        .manager
+        .estimate(&h.local_req_for(ZIMAGE, "x"))
+        .await
+        .unwrap();
+    assert_eq!(e.local.unwrap().fit, "afterUnload");
+    assert!(e.eta.is_some_and(|eta| eta.measured));
+}
+
+#[tokio::test]
+async fn a_local_run_that_fails_says_why_and_is_never_charged() {
+    let h = harness_with_local().await;
+    h.local.course(Course::Fail(FailureKind::OutOfMemory));
+    let run = h.manager.start(h.local_req("x"), false).await.unwrap();
+    let failed = h.wait_status(&run.id, "failed").await;
+    let error = failed.error.unwrap();
+    assert_eq!(
+        (error.code.as_str(), error.charged, error.company.as_str()),
+        ("studio_out_of_memory", Some(false), "local")
+    );
+    assert_eq!(error.next_step, "Try 480p or a shorter clip.");
+    assert_eq!(h.local.releases(), 1);
+    assert_eq!(h.lease.drops().len(), 1);
+    assert!(failed.outputs.is_empty());
+    assert!(!failed.local.unwrap().labelled);
+    assert_eq!(h.manager.usage().await.unwrap().spent_today_usd, 0.0);
+}
+
+#[tokio::test]
+async fn quit_and_stop_stops_every_local_run_and_starts_none() {
+    let h = harness_with_local().await;
+    h.local.hold();
+    let first = h.manager.start(h.local_req("one"), false).await.unwrap();
+    let second = h.manager.start(h.local_req("two"), false).await.unwrap();
+    h.wait_status(&first.id, "running").await;
+    h.manager.stop_local().await;
+    for id in [&first.id, &second.id] {
+        let run = h.run_dto(id).await;
+        assert_eq!(run.status, "cancelled");
+        assert_eq!(run.error.unwrap().charged, Some(false));
+    }
+    assert!(!h.manager.local_running());
+    assert_eq!(h.local.starts(), 1);
+    assert_eq!(h.local.cancels(), 1);
 }

@@ -25,6 +25,7 @@ use tauri::{AppHandle, Emitter, Manager};
 use tokio_util::sync::CancellationToken;
 
 use super::errors;
+use super::manager::StudioManager;
 use crate::commands::only_main_window;
 use crate::dto::{EngineProgressDto, EngineStatusDto};
 use crate::error::AppResult;
@@ -138,10 +139,6 @@ pub fn engine_layout(app: &AppHandle) -> EngineLayout {
 
 /// The engine on this computer now, or `None`: Windows before the pack is installed (or after
 /// antivirus quarantine took one of its files), Linux without a development folder.
-#[allow(
-    dead_code,
-    reason = "Task L15 gives it to the local provider, which looks again after a download"
-)]
 pub fn current_engine(app: &AppHandle) -> Option<Engine> {
     engine::discover(&engine_layout(app), sd_lock::embedded(), current_platform())
 }
@@ -359,14 +356,22 @@ where
 
 /// *Remove*: `delete` takes the installed pack, a half-unpacked one and any partial download
 /// (`engine::remove`; a bundled or development engine is left alone). Refused while the pack
-/// downloads, as its download is still writing there. The removal holds the download's slot
-/// until it ends, so no download (from its button, or with a first local model) starts
-/// writing into the folders it deletes.
-async fn remove<F, Fut>(downloads: &EngineDownloads, delete: F) -> AppResult<()>
+/// downloads, as its download is still writing there, and while a local job works
+/// (`local_running`), as the engine runs from it. The removal holds the download's slot until
+/// it ends, so no download (from its button, or with a first local model) starts writing into
+/// the folders it deletes.
+async fn remove<F, Fut>(
+    downloads: &EngineDownloads,
+    local_running: bool,
+    delete: F,
+) -> AppResult<()>
 where
     F: FnOnce() -> Fut,
     Fut: Future<Output = Result<(), PackError>>,
 {
+    if local_running {
+        return Err(errors::engine_in_use());
+    }
     let Some(_claim) = downloads.hold() else {
         return Err(errors::engine_still_downloading());
     };
@@ -414,7 +419,10 @@ pub async fn studio_engine_cancel(window: tauri::WebviewWindow, app: AppHandle) 
 pub async fn studio_engine_remove(window: tauri::WebviewWindow, app: AppHandle) -> AppResult<()> {
     only_main_window(window.label())?;
     let engines_dir = engine_layout(&app).engines_dir;
-    remove(&app.state::<EngineDownloads>(), || {
+    let local_running = app
+        .try_state::<std::sync::Arc<StudioManager>>()
+        .is_some_and(|studio| studio.local_running());
+    remove(&app.state::<EngineDownloads>(), local_running, || {
         engine::remove(sd_lock::embedded(), &engines_dir)
     })
     .await
@@ -809,7 +817,7 @@ mod tests {
     async fn a_removal_holds_the_slot_so_no_download_starts_meanwhile() {
         let downloads = EngineDownloads::default();
         let tried = std::sync::atomic::AtomicBool::new(false);
-        remove(&downloads, || async {
+        remove(&downloads, false, || async {
             // what start_engine_download asks before it starts: the slot is taken
             assert!(downloads.running());
             assert!(downloads.begin().is_none(), "no download starts");
@@ -823,7 +831,7 @@ mod tests {
         assert!(!downloads.running());
 
         // and when it fails
-        let err = remove(&downloads, || async {
+        let err = remove(&downloads, false, || async {
             assert!(downloads.begin().is_none(), "no download starts");
             Err(PackError::Cancelled)
         })
@@ -854,7 +862,7 @@ mod tests {
         // not while it downloads: the download is still writing there
         let downloads = EngineDownloads::default();
         let token = downloads.begin().unwrap();
-        let err = remove(&downloads, delete).await.unwrap_err();
+        let err = remove(&downloads, false, delete).await.unwrap_err();
         assert_eq!(err.message, "The Studio engine is still downloading.");
         assert!(engines_dir.join(&lock.packs[0].dir).is_dir());
         // the refusal leaves the download's claim alone
@@ -862,12 +870,22 @@ mod tests {
         assert!(!token.is_cancelled());
         downloads.end();
 
-        remove(&downloads, delete).await.unwrap();
+        // not while a local job runs: the engine is working from it
+        let err = remove(&downloads, true, delete).await.unwrap_err();
+        assert_eq!(err.code, "studio_engine_in_use");
+        assert_eq!(
+            err.next_step,
+            "Stop it in Studio, or remove the engine when it finishes."
+        );
+        assert!(engines_dir.join(&lock.packs[0].dir).is_dir());
+        assert!(!downloads.running(), "the refusal holds no slot");
+
+        remove(&downloads, false, delete).await.unwrap();
         assert!(!engines_dir.join(&lock.packs[0].dir).exists());
         let s = status_from(lock, &layout, "windows-x86_64", None);
         assert_eq!((s.state.as_str(), s.bytes_done), ("notInstalled", None));
         // nothing left to remove is not an error
-        remove(&downloads, delete).await.unwrap();
+        remove(&downloads, false, delete).await.unwrap();
         assert!(!downloads.running());
     }
 }
