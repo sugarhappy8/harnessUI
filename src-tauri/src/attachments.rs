@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use base64::Engine;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use tauri::{AppHandle, Manager, State};
 
@@ -18,8 +18,8 @@ pub const MAX_IMAGE_BYTES: usize = 20 * 1024 * 1024;
 /// Images per message.
 pub const MAX_IMAGES: usize = 8;
 
-/// An image sent from the composer.
-#[derive(Debug, Clone, Deserialize)]
+/// An image sent from the composer, or (0.1.0) a Studio picture on its way to it.
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ImageInput {
     pub mime: String,
@@ -437,7 +437,6 @@ impl PictureWorker {
 
     /// [0.1.0 Studio] The app's own binary as the worker in thumbnail mode
     /// ([`THUMB_MODE`] after the flag).
-    #[allow(dead_code, reason = "used by Studio from Task A13/A16")]
     pub(crate) fn thumbs() -> Self {
         let mut worker = Self::app();
         worker.args.push(THUMB_MODE.into());
@@ -468,7 +467,6 @@ impl PictureWorker {
     /// [`THUMB_SIDE`] pixels a side, made in a worker process started by [`Self::thumbs`]
     /// ([`thumbnail`]), as safely as [`Self::convert`]. GIF, SVG and a picture that cannot
     /// be read get none.
-    #[allow(dead_code, reason = "used by Studio from Task A13/A16")]
     pub(crate) async fn thumbnail(&self, bytes: &[u8]) -> Result<Vec<u8>, NotConverted> {
         let jpeg = self
             .run(bytes, "making the thumbnail took too long")

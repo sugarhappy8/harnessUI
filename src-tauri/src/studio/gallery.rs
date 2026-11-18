@@ -385,7 +385,9 @@ impl Gallery {
         self.month_dir(created_ms).join(format!("{run_id}-{idx}"))
     }
 
-    /// `<root>/YYYY-MM/<run_id>-<idx>.<ext>`.
+    /// `<root>/YYYY-MM/<run_id>-<idx>.<ext>`: where the tests put a result (the app keeps
+    /// one through [`Self::finalize`], which adds the extension its bytes call for).
+    #[cfg(test)]
     pub fn output_path(&self, created_ms: i64, run_id: &str, idx: u32, ext: &str) -> PathBuf {
         with_ext(&self.output_stem(created_ms, run_id, idx), ext)
     }

@@ -1,6 +1,6 @@
 //! The Studio manager's tests: starting runs under the spending rules, the queue, pictures,
 //! cancel and the audit row (Task A13); video jobs, restarts, *Get it anyway* and shutdown
-//! (Task A14).
+//! (Task A14); deleting results and changing the preferences (Task A16).
 //!
 //! The harness keeps an OpenRouter endpoint whose saved lists are the recorded fixtures (with
 //! every recorded `/endpoints` answer, so an OpenRouter picture has a price), plus test models
@@ -37,7 +37,7 @@ use super::manager::{
     PICTURES_AT_ONCE, PollPlan, StudioDeps, StudioManager, VIDEOS_AT_ONCE, place_extra_or_refuse,
     poll_delay, spend_row,
 };
-use super::prefs::{RunTarget, StudioPrefs};
+use super::prefs::{self, RunTarget, StudioPrefs, StudioPrefsPatch};
 use super::spend::{Charge, ConfirmReason, UNKNOWN_PRICE_RESERVE_USD, day_start_in};
 use super::test_support::{Scratch, mp4, png};
 use crate::attachments::PictureWorker;
@@ -62,7 +62,7 @@ const VEO: &str = "google/veo-3.1";
 const FLARE: &str = "gpt-image-2.6-flare";
 
 /// Test picture models, each priced at one picture for this many US dollars.
-const TEST_PICTURE_PRICES: [f64; 3] = [1.00, 1.50, 4.50];
+const TEST_PICTURE_PRICES: [f64; 4] = [0.96, 1.00, 1.50, 4.50];
 /// Test video models, each priced at a 4-second video for this many US dollars.
 const TEST_VIDEO_PRICES: [f64; 1] = [0.96];
 
@@ -887,6 +887,11 @@ impl H {
 
     /// A picture run made earlier today that finished costing `usd`, with one file.
     async fn seed_done_run_costing(&self, usd: f64) -> store::CreationRun {
+        self.seed_done_run(usd, json!([])).await
+    }
+
+    /// [`Self::seed_done_run_costing`], with the added pictures `refs` as recorded.
+    async fn seed_done_run(&self, usd: f64, refs: Value) -> store::CreationRun {
         let id = uuid::Uuid::new_v4().to_string();
         let created_at = self.now - 60_000;
         self.store
@@ -901,7 +906,7 @@ impl H {
                 model_label: "FLUX 3 Image".into(),
                 prompt: "an earlier picture".into(),
                 params: json!({"params": {}, "extra": {}, "routing": null}),
-                refs: json!([]),
+                refs,
                 estimate_usd: Some(usd),
                 gen_model_id: None,
                 engine_build: None,
@@ -3013,4 +3018,193 @@ async fn shutdown_writes_nothing_and_leaves_waiting_runs_queued() {
         store::CreationStatus::Queued
     );
     assert_eq!(h.provider.starts(), 2);
+}
+
+// ---- deleting results and changing the preferences --------------------------------------------
+
+fn output_ids(run: &store::CreationRun) -> Vec<String> {
+    run.outputs.iter().map(|out| out.id.clone()).collect()
+}
+
+fn patch(value: Value) -> StudioPrefsPatch {
+    serde_json::from_value(value).unwrap()
+}
+
+#[tokio::test]
+async fn deleting_todays_results_does_not_lower_spent_today() {
+    let h = harness().await;
+    let run = h.seed_done_run_costing(9.50).await;
+    h.manager.delete_outputs(output_ids(&run)).await.unwrap();
+    assert!(!Path::new(&run.outputs[0].path).exists());
+    // Gone from the gallery, kept as a spending stub.
+    assert!(h.store.get_creation_run(&run.id).await.unwrap().is_none());
+    assert_eq!(h.stub_ids().await, std::slice::from_ref(&run.id));
+    let err = h
+        .manager
+        .start(h.req_estimated(0.96, "after-delete"), true)
+        .await
+        .unwrap_err();
+    assert_eq!(err.message, "Daily limit reached: $9.50 of $10 spent today");
+    assert_eq!(h.provider.starts(), 0);
+}
+
+#[tokio::test]
+async fn deleting_a_finished_run_removes_its_files_and_keeps_its_audit_row() {
+    let h = harness_with(Some(crate::attachments::tests::test_worker("thumb"))).await;
+    let run = h.manager.start(h.picture_req("x"), false).await.unwrap();
+    let done = h.wait_status(&run.id, "done").await;
+    let sidecar = h
+        .gallery_root
+        .join("2026-11")
+        .join(format!("{}.json", run.id));
+    let thumb = |id: &str| h.gallery_root.join(".thumbs").join(format!("{id}.jpg"));
+    assert!(sidecar.exists() && thumb(&done.outputs[0].id).exists());
+
+    // One of its two pictures: the run keeps the other.
+    let first = &done.outputs[0];
+    h.manager
+        .delete_outputs(vec![first.id.clone()])
+        .await
+        .unwrap();
+    assert!(!Path::new(&first.path).exists());
+    assert!(!thumb(&first.id).exists());
+    assert_eq!(h.run_dto(&run.id).await.outputs.len(), 1);
+    assert!(sidecar.exists());
+
+    // The last one: the run goes, with its sidecar; its audit row stays.
+    let second = &done.outputs[1];
+    h.manager
+        .delete_outputs(vec![second.id.clone(), "no-such-output".into()])
+        .await
+        .unwrap();
+    assert!(!Path::new(&second.path).exists());
+    assert!(!thumb(&second.id).exists());
+    assert!(!sidecar.exists());
+    assert!(h.store.get_creation_run(&run.id).await.unwrap().is_none());
+    let rows = h.audit_rows().await;
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].result_status.as_deref(), Some("done"));
+}
+
+#[tokio::test]
+async fn delete_unfinished_removes_stopped_and_failed_runs_only() {
+    use store::CreationStatus as S;
+    let h = harness().await;
+    let done = h.seed_done_run_costing(0.5).await;
+    let waiting = h.seed_video_run(S::Waiting, Some("job-waiting")).await;
+    let mut ended = Vec::new();
+    for status in [S::Failed, S::Blocked, S::Cancelled, S::Interrupted] {
+        ended.push(h.seed_video_run(status, Some("job-ended")).await);
+    }
+    assert_eq!(h.manager.delete_unfinished().await.unwrap(), 4);
+    let mut kept: Vec<String> = h.store_runs().await.into_iter().map(|r| r.id).collect();
+    kept.sort();
+    let mut want = vec![done.id.clone(), waiting];
+    want.sort();
+    assert_eq!(kept, want);
+    // Made today, so each stays as a spending stub.
+    ended.sort();
+    assert_eq!(h.stub_ids().await, ended);
+    // The audit rows stay.
+    assert_eq!(h.audit_rows().await.len(), 5);
+    assert_eq!(h.manager.delete_unfinished().await.unwrap(), 0);
+}
+
+#[tokio::test]
+async fn a_reference_no_run_uses_any_more_is_removed_and_usage_counts_refs() {
+    let h = harness().await;
+    let refs = h.gallery_root.join("refs");
+    std::fs::create_dir_all(&refs).unwrap();
+    let picture = png(2, 2);
+    let (a, b) = ("a".repeat(64), "b".repeat(64));
+    let file = |sha: &str| refs.join(format!("{sha}.png"));
+    std::fs::write(file(&a), &picture).unwrap();
+    std::fs::write(file(&b), &picture).unwrap();
+    let uses = |hashes: &[&str]| -> Value {
+        hashes
+            .iter()
+            .map(|sha| json!({"sha256": sha, "mime": "image/png", "sizeBytes": picture.len()}))
+            .collect()
+    };
+    let uses_a = h.seed_done_run(0.5, uses(&[&a])).await;
+    let uses_both = h.seed_done_run(0.5, uses(&[&a, &b])).await;
+
+    h.manager
+        .delete_outputs(output_ids(&uses_both))
+        .await
+        .unwrap();
+    assert!(!file(&b).exists());
+    assert!(file(&a).exists());
+    // The output left (recorded as 10 bytes) and the added picture still kept.
+    let usage = h.manager.usage().await.unwrap();
+    assert_eq!(usage.bytes, 10 + picture.len() as u64);
+
+    // Its last user goes, and so does it.
+    h.manager.delete_outputs(output_ids(&uses_a)).await.unwrap();
+    assert!(!file(&a).exists());
+    assert_eq!(h.manager.usage().await.unwrap().bytes, 0);
+}
+
+#[tokio::test]
+async fn a_new_gallery_folder_applies_to_the_next_run() {
+    // Made first, so it goes after the harness has stopped every run.
+    let other = Scratch::new();
+    let h = harness().await;
+    let prefs = h
+        .manager
+        .set_prefs(patch(json!({"galleryDir": other.path()})))
+        .await
+        .unwrap();
+    let dir = other.path().display().to_string();
+    assert_eq!(prefs.gallery_dir.as_deref(), Some(dir.as_str()));
+    let r = h.manager.start(h.picture_req("x"), false).await.unwrap();
+    let done = h.wait_status(&r.id, "done").await;
+    assert!(Path::new(&done.outputs[0].path).starts_with(other.path()));
+    assert_eq!(h.manager.usage().await.unwrap().folder, dir);
+    // `null` puts the gallery back in its default place.
+    h.manager
+        .set_prefs(patch(json!({"galleryDir": null})))
+        .await
+        .unwrap();
+    assert_eq!(h.manager.gallery().root(), h.gallery_root.as_path());
+}
+
+#[tokio::test]
+async fn set_prefs_changes_only_what_it_is_sent_and_checks_it() {
+    let h = harness().await;
+    let video = h.video_req_estimated(0.96);
+    assert_eq!(
+        h.manager.estimate(&video).await.unwrap().reasons,
+        [ConfirmReason::Video]
+    );
+    let changed = h
+        .manager
+        .set_prefs(patch(json!({"confirmEveryVideo": false})))
+        .await
+        .unwrap();
+    assert!(!changed.confirm_every_video);
+    assert_eq!(changed.daily_limit_usd, Some(10.0));
+    // Held for the next run, and saved.
+    assert_eq!(h.manager.prefs(), changed);
+    assert_eq!(prefs::load(&h.store).await, changed);
+    assert!(h.manager.estimate(&video).await.unwrap().reasons.is_empty());
+
+    let err = h
+        .manager
+        .set_prefs(patch(json!({"dailyLimitUsd": 0.5})))
+        .await
+        .unwrap_err();
+    assert_eq!(err.code, "bad_request");
+    assert_eq!(err.message, "Choose an amount from $1 to $1,000.");
+    assert_eq!(h.manager.prefs(), changed);
+    assert_eq!(prefs::load(&h.store).await, changed);
+
+    // `null` turns the limit off.
+    let off = h
+        .manager
+        .set_prefs(patch(json!({"dailyLimitUsd": null})))
+        .await
+        .unwrap();
+    assert_eq!(off.daily_limit_usd, None);
+    assert!(!off.confirm_every_video);
 }

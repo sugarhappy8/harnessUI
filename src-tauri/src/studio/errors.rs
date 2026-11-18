@@ -549,6 +549,82 @@ pub fn bad_ref_name() -> AppError {
     )
 }
 
+// ---- what the gallery's actions refuse --------------------------------------------------------
+
+/// Where a Studio picture is going.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PictureUse {
+    /// Into a chat's message box (*Send to chat*).
+    Chat,
+    /// Into the prompt, as an added picture (*Use in prompt*).
+    Prompt,
+}
+
+/// A result that is not a PNG, JPEG, GIF or WebP picture (a video, or an SVG picture) cannot
+/// go where `to` says.
+pub fn not_a_picture_for(to: PictureUse, video: bool) -> AppError {
+    let (message, next) = match (to, video) {
+        (PictureUse::Chat, true) => (
+            "A video cannot go into a chat: chat models do not take video.",
+            "Send a picture instead.",
+        ),
+        (PictureUse::Chat, false) => (
+            "Only PNG, JPEG, GIF and WebP pictures can go into a chat.",
+            "Send a picture of one of those types instead.",
+        ),
+        (PictureUse::Prompt, true) => (
+            "A video cannot be added to a prompt as a picture.",
+            "Add a picture instead.",
+        ),
+        (PictureUse::Prompt, false) => (
+            "Only PNG, JPEG, GIF and WebP pictures can be added to a prompt.",
+            "Add a picture of one of those types instead.",
+        ),
+    };
+    AppError::new("bad_request", message, next, String::new())
+}
+
+/// A picture over the chat's limit ([`crate::attachments::MAX_IMAGE_BYTES`], which added
+/// pictures share) cannot go where `to` says.
+pub fn picture_too_big_for(to: PictureUse) -> AppError {
+    let cap = size(crate::attachments::MAX_IMAGE_BYTES as u64);
+    let (message, next) = match to {
+        PictureUse::Chat => (
+            format!("This picture is over {cap}, so it cannot go into a chat."),
+            "Make a smaller copy in another app, then attach that.",
+        ),
+        PictureUse::Prompt => (
+            format!("This picture is over {cap}, so it cannot be added to a prompt."),
+            "Make a smaller copy in another app, then add that.",
+        ),
+    };
+    AppError::new("bad_request", message, next, String::new())
+}
+
+/// A video's poster frame from the webview is not a JPEG picture of at most
+/// [`super::commands::POSTER_CAP`] bytes.
+pub fn bad_poster() -> AppError {
+    AppError::new(
+        "bad_request",
+        format!(
+            "The poster frame was not saved: it must be a JPEG picture of at most {}.",
+            size(super::commands::POSTER_CAP as u64)
+        ),
+        "Play the video again to make a new one.",
+        String::new(),
+    )
+}
+
+/// The exported copy, or its settings beside it, could not be written where the user chose.
+pub fn not_exported(details: impl Into<String>) -> AppError {
+    AppError::new(
+        "export_failed",
+        "The file could not be saved.",
+        "Choose another folder.",
+        details,
+    )
+}
+
 /// What a company's (or the Studio engine's) failure says, in plain words, with the
 /// company's own message, code and request id in the details.
 pub fn from_failure(company: Company, f: &MediaFailure) -> AppError {
@@ -813,7 +889,14 @@ mod tests {
             too_big_to_show(),
             not_fetched(Company::OpenRouter),
             bad_ref_name(),
+            bad_poster(),
+            not_exported("denied"),
         ];
+        for to in [PictureUse::Chat, PictureUse::Prompt] {
+            all.push(picture_too_big_for(to));
+            all.push(not_a_picture_for(to, true));
+            all.push(not_a_picture_for(to, false));
+        }
         all.extend(
             every_fetch_error()
                 .iter()

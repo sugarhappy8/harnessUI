@@ -200,6 +200,13 @@ pub fn key_may_stay(old_base_url: &str, new_base_url: &str) -> bool {
     )
 }
 
+/// [0.1.0] Whether editing endpoint `saved` to `kind` at `base_url` leaves its saved picture
+/// and video lists from another company or host: its kind changes, or the scheme, host or
+/// port of its address does (Studio would show them under the new one).
+fn media_lists_stale(saved: &store::Provider, kind: &str, base_url: &str) -> bool {
+    saved.kind != kind || !key_may_stay(&saved.base_url, base_url)
+}
+
 /// [0.0.7 P5] Whether a key may be saved for the endpoint: anything but "the keychain has
 /// none" (a keychain that cannot be read may still hold one), so no check passes by default.
 pub(crate) fn may_hold_key(
@@ -352,18 +359,21 @@ pub async fn save_provider(
     };
     // [0.0.7 P5] The key's checks, and its removal when it must go, before anything is
     // saved ([`prepare_key`]).
-    let saved_base_url = match provider.id {
-        Some(id) => state.store.get_provider(id).await?.map(|p| p.base_url),
+    let before = match provider.id {
+        Some(id) => state.store.get_provider(id).await?,
         None => None,
     };
     prepare_key(
         state.secrets.as_ref(),
         provider.id,
-        saved_base_url.as_deref(),
+        before.as_ref().map(|p| p.base_url.as_str()),
         &base_url,
         new_key,
         provider.clear_api_key,
     )?;
+    let lists_stale = before
+        .as_ref()
+        .is_some_and(|saved| media_lists_stale(saved, &provider.kind, &base_url));
     let id = state
         .store
         .upsert_provider(store::ProviderInput {
@@ -375,6 +385,11 @@ pub async fn save_provider(
             enabled: true,
         })
         .await?;
+    // [0.1.0] After the endpoint is saved, as `delete_provider` does: the lists come back on
+    // the next Test or *Get the list*.
+    if lists_stale {
+        catalog::forget(&state.store, id).await;
+    }
     let key = secret_key(id);
     if let Some(api_key) = provider.api_key.filter(|k| !k.trim().is_empty()) {
         state.secrets.set(&key, api_key.trim()).map_err(|e| {
@@ -516,6 +531,51 @@ mod tests {
         assert!(!key_may_stay("https://example.com", "http://example.com"));
         assert!(!key_may_stay("not a url", "not a url"));
         assert!(PASTE_THE_NEW_KEY.contains("Paste the API key for the new address"));
+    }
+
+    /// [0.1.0] An endpoint edited to another company, or to another scheme, host or port,
+    /// loses its saved picture and video lists; a change of name or path keeps them.
+    #[test]
+    fn the_saved_media_lists_go_with_the_company_or_the_address() {
+        let saved = store::Provider {
+            id: store::ProviderId(1),
+            name: "My OpenRouter".into(),
+            kind: "openrouter".into(),
+            base_url: "https://openrouter.ai/api/v1".into(),
+            secret_ref: None,
+            enabled: true,
+            created_at: 0,
+        };
+        assert!(!media_lists_stale(
+            &saved,
+            "openrouter",
+            "https://openrouter.ai/api/v1"
+        ));
+        assert!(!media_lists_stale(
+            &saved,
+            "openrouter",
+            "https://OpenRouter.ai:443/api/v2"
+        ));
+        assert!(media_lists_stale(
+            &saved,
+            "openai",
+            "https://openrouter.ai/api/v1"
+        ));
+        assert!(media_lists_stale(
+            &saved,
+            "openrouter",
+            "https://api.openai.com/v1"
+        ));
+        assert!(media_lists_stale(
+            &saved,
+            "openrouter",
+            "https://openrouter.ai:8443/api/v1"
+        ));
+        assert!(media_lists_stale(
+            &saved,
+            "openrouter",
+            "http://openrouter.ai/api/v1"
+        ));
     }
 
     /// A keychain double: what `get` answers, whether `delete` works, and what was deleted.

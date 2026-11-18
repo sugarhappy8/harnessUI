@@ -51,9 +51,15 @@
 //! - **The audit row** is completed once when the run ends, with its status and its cost
 //!   (after a restart too, through the run's `audit_id`). *Get it anyway* on a run whose row
 //!   is already complete appends a follow-up row and completes that one.
+//! - **Deleting** results ([`StudioManager::delete_outputs`]) or the runs that ended without
+//!   finishing ([`StudioManager::delete_unfinished`]) never lowers today's spending: a run made
+//!   today stays as a spending stub. The files, thumbnails and sidecars go, and so does each
+//!   added picture no run kept uses any more; the audit rows stay.
+//! - **Preferences** ([`StudioManager::set_prefs`]) are checked, saved, then held: the next
+//!   run reads them.
 //! - **Runs on this computer** are refused until the local lane exists (Task L15).
 
-use std::collections::{BTreeMap, HashMap, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError, RwLock};
@@ -74,7 +80,7 @@ use super::catalog;
 use super::deps::{Clock, Endpoint, ForeignFetch, ProviderSource, StudioSink};
 use super::errors;
 use super::gallery::{Gallery, io_error};
-use super::prefs::{RunTarget, StudioPrefs};
+use super::prefs::{self, RunTarget, StudioPrefs, StudioPrefsPatch};
 use super::spend::{self, Billing, LimitRefusal, RunState, Spend, SpendRow};
 use crate::attachments::PictureWorker;
 use crate::dto::{
@@ -174,8 +180,11 @@ struct Inner {
     prefs: RwLock<StudioPrefs>,
     /// The runs being made and the runs waiting for a place.
     lanes: Mutex<Lanes>,
-    /// Held while a start is checked and recorded.
+    /// Held while a start is checked and recorded, and while a delete decides what goes.
     starting: tokio::sync::Mutex<()>,
+    /// Held while a change to the preferences is checked, saved and held, so two changes
+    /// never undo each other.
+    prefs_writes: tokio::sync::Mutex<()>,
     /// The last client tokens and the runs they made, oldest first.
     recent_tokens: Mutex<VecDeque<(String, String)>>,
     /// Cancelled only by [`StudioManager::shutdown`]: every task stops where it is and records
@@ -504,6 +513,7 @@ impl StudioManager {
                 prefs: RwLock::new(prefs),
                 lanes: Mutex::new(Lanes::default()),
                 starting: tokio::sync::Mutex::new(()),
+                prefs_writes: tokio::sync::Mutex::new(()),
                 recent_tokens: Mutex::new(VecDeque::new()),
                 root: CancellationToken::new(),
                 stale: Mutex::new(HashMap::new()),
@@ -823,6 +833,59 @@ impl StudioManager {
         })
     }
 
+    /// Deletes outputs `ids` (ids that do not exist are skipped); a finished run left with
+    /// none goes too, as a spending stub when it was made today. Their files, thumbnails and
+    /// sidecars are removed, and each added picture no run kept uses any more. The audit
+    /// rows stay.
+    pub async fn delete_outputs(&self, ids: Vec<String>) -> AppResult<()> {
+        // Never beside a start: a run just recorded may use an added picture this removes.
+        let _no_start_now = self.inner.starting.lock().await;
+        let today = self.inner.today_starts_at();
+        let deleted = self
+            .inner
+            .deps
+            .store
+            .delete_creation_outputs(ids, today)
+            .await?;
+        self.inner.remove_deleted(deleted).await;
+        Ok(())
+    }
+
+    /// *Delete stopped and failed runs*: deletes every run that ended without finishing
+    /// (failed, blocked, cancelled or interrupted), as [`Self::delete_outputs`] deletes a
+    /// run, and gives how many went.
+    pub async fn delete_unfinished(&self) -> AppResult<u32> {
+        // Never beside *Get it anyway*, which takes such a run back to `waiting`.
+        let _no_start_now = self.inner.starting.lock().await;
+        let store = &self.inner.deps.store;
+        let ids = store.unfinished_creation_run_ids().await?;
+        let deleted = store
+            .delete_creation_runs(ids, self.inner.today_starts_at())
+            .await?;
+        let count = u32::try_from(deleted.runs.len()).unwrap_or(u32::MAX);
+        self.inner.remove_deleted(deleted).await;
+        Ok(count)
+    }
+
+    /// Applies `patch` to the preferences held (only the fields it sends change), saves the
+    /// result once it keeps the rules (refused as `bad_request`, see [`prefs::save`]), then
+    /// holds it, so the next run reads it.
+    pub async fn set_prefs(&self, patch: StudioPrefsPatch) -> AppResult<StudioPrefs> {
+        let _one_at_a_time = self.inner.prefs_writes.lock().await;
+        let next = self
+            .inner
+            .prefs()
+            .apply(patch)
+            .map_err(AppError::bad_request)?;
+        prefs::save(&self.inner.deps.store, &next).await?;
+        *self
+            .inner
+            .prefs
+            .write()
+            .unwrap_or_else(PoisonError::into_inner) = next.clone();
+        Ok(next)
+    }
+
     /// A run on this computer. Task L15 gives it the local lane.
     async fn start_local(&self, _req: StartRequest) -> AppResult<RunDto> {
         Err(errors::no_local_engine())
@@ -888,9 +951,43 @@ impl Inner {
         }
     }
 
+    /// When today started on this computer's clock, in Unix ms.
+    fn today_starts_at(&self) -> i64 {
+        self.deps.clock.day_start_ms(self.deps.clock.now_ms())
+    }
+
+    /// Removes what a delete left behind: the files, thumbnails and sidecars of `deleted`,
+    /// then each added picture its runs used that no run kept uses any more. A failure is
+    /// only logged: the records are already gone.
+    async fn remove_deleted(&self, deleted: store::Deleted) {
+        let candidates: BTreeSet<String> = deleted.runs.iter().flat_map(ref_hashes).collect();
+        let in_use = if candidates.is_empty() {
+            Some(BTreeSet::new())
+        } else {
+            match self.deps.store.creation_ref_hashes().await {
+                Ok(in_use) => Some(in_use),
+                Err(e) => {
+                    tracing::warn!("Studio's added pictures in use could not be read: {e}");
+                    None
+                }
+            }
+        };
+        let gallery = self.gallery();
+        let removed = tokio::task::spawn_blocking(move || {
+            gallery.remove_files(&deleted);
+            if let Some(in_use) = in_use {
+                gallery.remove_unused_refs(&candidates, &in_use);
+            }
+        })
+        .await;
+        if let Err(e) = removed {
+            tracing::warn!("the files of deleted Studio results were not all removed: {e}");
+        }
+    }
+
     /// Today's spending, from the runs made since the local day started.
     async fn spend_today(&self) -> AppResult<Spend> {
-        let start = self.deps.clock.day_start_ms(self.deps.clock.now_ms());
+        let start = self.today_starts_at();
         let rows: Vec<SpendRow> = self
             .deps
             .store
@@ -2182,7 +2279,8 @@ fn run_dto_of(
     }
 }
 
-fn output_dto(out: &store::CreationOutput) -> OutputDto {
+/// An output as the webview shows it.
+pub(crate) fn output_dto(out: &store::CreationOutput) -> OutputDto {
     OutputDto {
         id: out.id.clone(),
         run_id: out.run_id.clone(),
@@ -2197,6 +2295,18 @@ fn output_dto(out: &store::CreationOutput) -> OutputDto {
         has_thumb: out.thumb_path.is_some(),
         path: out.path.clone(),
     }
+}
+
+/// The SHA-256 of each added picture recorded run `run` uses.
+fn ref_hashes(run: &store::CreationRun) -> Vec<String> {
+    run.refs
+        .as_array()
+        .map(|refs| {
+            refs.iter()
+                .filter_map(|r| r.get("sha256")?.as_str().map(str::to_owned))
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 fn media_kind(kind: store::CreationKind) -> MediaKind {

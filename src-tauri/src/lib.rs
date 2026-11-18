@@ -46,7 +46,6 @@ mod settings;
 mod share;
 mod skills_cmd;
 mod state;
-#[allow(dead_code, reason = "wired up in Task A16")]
 mod studio;
 mod subagent;
 mod task;
@@ -58,6 +57,7 @@ mod updates;
 mod usage_cmd;
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use tauri::webview::NewWindowResponse;
 use tauri::{Manager, RunEvent, WebviewWindowBuilder};
@@ -309,6 +309,32 @@ pub fn run() {
             // 0.0.6 item 6 (WP10d): llama.cpp's measurement and the usage line.
             models_cmd::offload_measure,
             usage_cmd::usage_now,
+            // 0.1.0: Studio.
+            studio::commands::studio_models,
+            studio::commands::studio_refresh_models,
+            studio::commands::studio_model_price,
+            studio::commands::studio_estimate,
+            studio::commands::studio_preview,
+            studio::commands::studio_runs,
+            studio::commands::studio_live,
+            studio::commands::studio_output_bytes,
+            studio::commands::studio_ref_bytes,
+            studio::commands::studio_usage,
+            studio::commands::studio_get_prefs,
+            studio::commands::studio_start,
+            studio::commands::studio_cancel,
+            studio::commands::studio_fetch_anyway,
+            studio::commands::studio_save_thumb,
+            studio::commands::studio_star,
+            studio::commands::studio_delete,
+            studio::commands::studio_delete_unfinished,
+            studio::commands::studio_export,
+            studio::commands::studio_show_in_folder,
+            studio::commands::studio_open_folder,
+            studio::commands::studio_add_ref,
+            studio::commands::studio_ref_from_output,
+            studio::commands::studio_output_for_chat,
+            studio::commands::studio_set_prefs,
         ])
         .setup(|app| {
             let handle = app.handle().clone();
@@ -331,6 +357,37 @@ pub fn run() {
                 })?;
             let secrets: Arc<dyn store::secrets::SecretStore> =
                 Arc::from(store::secrets::platform_default(&app.config().identifier));
+            // 0.1.0: Studio's runs, holding Settings → Studio as saved.
+            let studio = Arc::new(studio::manager::StudioManager::new(
+                studio::manager::StudioDeps {
+                    store: store.clone(),
+                    providers: Arc::new(studio::deps::StoreProviders {
+                        store: store.clone(),
+                        secrets: secrets.clone(),
+                    }),
+                    sink: Arc::new(studio::deps::AppSink(handle.clone())),
+                    fetch: Arc::new(studio::deps::GuardedFetch(
+                        search::Fetcher::new(format!(
+                            "{}/{}",
+                            app.package_info().name,
+                            app.package_info().version
+                        ))
+                        .with_timeout(Duration::from_secs(600)),
+                    )),
+                    clock: Arc::new(studio::deps::SystemClock),
+                    default_gallery: studio::gallery::Gallery::default_root(
+                        &app.path()
+                            .home_dir()
+                            .unwrap_or_else(|_| std::path::PathBuf::from(".")),
+                        &app.package_info().name,
+                    ),
+                    thumbs: Some(attachments::PictureWorker::thumbs()),
+                    limits: agent::media::MediaLimits::default(),
+                    poll: studio::manager::PollPlan::default(),
+                },
+                tauri::async_runtime::block_on(studio::prefs::load(&store)),
+            ));
+            app.manage(studio.clone());
             let runtime = Arc::new(runtime_manager::RuntimeManager::new(
                 handle.clone(),
                 runtime_manager::layout(&handle),
@@ -415,6 +472,8 @@ pub fn run() {
                     async move { downloads.resume_interrupted(&handle).await },
                 );
             }
+            // 0.1.0: the Studio runs the app left unfinished, and yesterday's spending stubs.
+            tauri::async_runtime::spawn(async move { studio.resume_interrupted().await });
             create_windows(app)?;
             Ok(())
         });
@@ -454,12 +513,20 @@ pub fn run() {
                 let browser = handle
                     .try_state::<browser_cmd::BrowserHandle>()
                     .map(|b| b.0.clone());
+                let studio = handle
+                    .try_state::<Arc<studio::manager::StudioManager>>()
+                    .map(|s| s.inner().clone());
                 if let Some(c) = handle.try_state::<computer_cmd::ComputerHandle>()
                     && let Some(server) = c.0.clone()
                 {
                     server.shutdown();
                 }
                 tauri::async_runtime::block_on(async move {
+                    // 0.1.0: Studio's run tasks stop where they are and record nothing, so the
+                    // next start finds each run as it was.
+                    if let Some(studio) = studio {
+                        studio.shutdown().await;
+                    }
                     // 0.0.6 item 5: rea gets its grace to end Kuna or Java itself (WP9g).
                     if let Some(rea) = reverse::handle() {
                         rea.restart(reverse::RestartReason::Quit).await;

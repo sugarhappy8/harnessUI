@@ -1,33 +1,43 @@
-//! Studio's read commands (0.1.0).
+//! Studio's commands (0.1.0).
 //!
 //! Each command checks that the main window called it ([`only_main_window`]), then calls a
 //! plain function its tests call directly, or the [`StudioManager`] method of the same
-//! name. They read the store, the gallery folder and the manager's held preferences; only
-//! [`studio_refresh_models`] and [`studio_model_price`] ask the company, and only when the
-//! user pressed for it. A run's new state comes as the `studio-progress` event
-//! ([`super::deps::PROGRESS_EVENT`]); [`studio_runs`] and [`studio_live`] read it again, as
-//! events are not replayed.
+//! name.
 //!
-//! A result's bytes go to the webview whole ([`studio_output_bytes`]), at most
-//! [`SHOW_CAP`]: above that a video would sit in memory four times over (here, in the copy
-//! to the webview, in its buffer and in its blob), so it is opened from its folder instead.
+//! - **The read commands** read the store, the gallery folder and the manager's held
+//!   preferences; only [`studio_refresh_models`] and [`studio_model_price`] ask the company,
+//!   and only when the user pressed for it. A run's new state comes as the `studio-progress`
+//!   event ([`super::deps::PROGRESS_EVENT`]); [`studio_runs`] and [`studio_live`] read it
+//!   again, as events are not replayed. A result's bytes go to the webview whole
+//!   ([`studio_output_bytes`]), at most [`SHOW_CAP`]: above that a video would sit in memory
+//!   four times over (here, in the copy to the webview, in its buffer and in its blob), so it
+//!   is opened from its folder instead.
+//! - **The changing commands** start, stop and follow runs (the manager), save a video's
+//!   poster frame ([`POSTER_CAP`]), star, delete and export results, open the gallery folder,
+//!   add pictures to a prompt, give a picture to a chat ([`for_chat`]) and change the
+//!   preferences.
 
 use std::io::Read;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use agent::media::{Company, MediaError, MediaKind, RequestPreview};
-use tauri::State;
+use base64::Engine;
+use serde_json::{Value, json};
+use tauri::{Manager, State};
+use tauri_plugin_opener::OpenerExt;
 
 use super::catalog::{self, EndpointModels};
-use super::errors;
-use super::gallery::{GalleryError, io_error};
-use super::manager::{StudioManager, creation_kind};
-use super::prefs::StudioPrefs;
+use super::errors::{self, PictureUse};
+use super::gallery::{GalleryError, RefStored, io_error, sniff_media};
+use super::manager::{StudioManager, creation_kind, output_dto};
+use super::prefs::{StudioPrefs, StudioPrefsPatch};
+use crate::artifacts::export_target;
+use crate::attachments::{ImageInput, MAX_IMAGE_BYTES, PictureWorker};
 use crate::commands::only_main_window;
 use crate::dto::{
-    EstimateDto, MediaModelDto, RunDto, RunsCursorDto, RunsFilter, RunsPage, StartRequest,
-    StudioEndpointDto, StudioModelsDto, UsageDto, media_model_dto,
+    EstimateDto, MediaModelDto, OutputDto, RefDto, RunDto, RunsCursorDto, RunsFilter, RunsPage,
+    StartRequest, StudioEndpointDto, StudioModelsDto, UsageDto, media_model_dto,
 };
 use crate::error::{AppError, AppResult};
 use crate::providers::may_hold_key;
@@ -38,6 +48,12 @@ pub const SHOW_CAP: u64 = 256 * 1024 * 1024;
 
 /// The most runs one page of the gallery holds.
 const RUNS_PAGE_MAX: u32 = 500;
+
+/// The largest poster frame of a video the webview may save as its thumbnail: 1 MiB.
+pub const POSTER_CAP: usize = 1024 * 1024;
+
+/// The picture types a chat takes, which added pictures share.
+const CHAT_PICTURES: [&str; 4] = ["image/png", "image/jpeg", "image/gif", "image/webp"];
 
 // ---- commands ---------------------------------------------------------------------------------
 
@@ -172,6 +188,191 @@ pub async fn studio_get_prefs(
 ) -> AppResult<StudioPrefs> {
     only_main_window(window.label())?;
     Ok(studio.prefs())
+}
+
+/// Records a run of `req` and queues it once it passes every check; `confirmed` says the
+/// user confirmed it.
+#[tauri::command]
+pub async fn studio_start(
+    window: tauri::WebviewWindow,
+    studio: State<'_, Arc<StudioManager>>,
+    req: StartRequest,
+    confirmed: bool,
+) -> AppResult<RunDto> {
+    only_main_window(window.label())?;
+    studio.start(req, confirmed).await
+}
+
+/// Cancel, Stop watching: stops run `run_id`.
+#[tauri::command]
+pub async fn studio_cancel(
+    window: tauri::WebviewWindow,
+    studio: State<'_, Arc<StudioManager>>,
+    run_id: String,
+) -> AppResult<RunDto> {
+    only_main_window(window.label())?;
+    studio.cancel(&run_id).await
+}
+
+/// *Get it anyway* and *Check again*: checks a video job again and downloads its result;
+/// never creates.
+#[tauri::command]
+pub async fn studio_fetch_anyway(
+    window: tauri::WebviewWindow,
+    studio: State<'_, Arc<StudioManager>>,
+    run_id: String,
+) -> AppResult<RunDto> {
+    only_main_window(window.label())?;
+    studio.fetch_anyway(&run_id).await
+}
+
+/// Saves the poster frame the webview took of a video as output `output_id`'s thumbnail.
+#[tauri::command]
+pub async fn studio_save_thumb(
+    window: tauri::WebviewWindow,
+    studio: State<'_, Arc<StudioManager>>,
+    output_id: String,
+    jpeg_base64: String,
+) -> AppResult<OutputDto> {
+    only_main_window(window.label())?;
+    save_thumb(&studio, &output_id, &jpeg_base64).await
+}
+
+/// Stars or unstars output `output_id`.
+#[tauri::command]
+pub async fn studio_star(
+    window: tauri::WebviewWindow,
+    studio: State<'_, Arc<StudioManager>>,
+    output_id: String,
+    starred: bool,
+) -> AppResult<OutputDto> {
+    only_main_window(window.label())?;
+    star(&studio, &output_id, starred).await
+}
+
+/// Deletes results; today's spending stays as it is.
+#[tauri::command]
+pub async fn studio_delete(
+    window: tauri::WebviewWindow,
+    studio: State<'_, Arc<StudioManager>>,
+    output_ids: Vec<String>,
+) -> AppResult<()> {
+    only_main_window(window.label())?;
+    studio.delete_outputs(output_ids).await
+}
+
+/// *Delete stopped and failed runs*: gives how many went.
+#[tauri::command]
+pub async fn studio_delete_unfinished(
+    window: tauri::WebviewWindow,
+    studio: State<'_, Arc<StudioManager>>,
+) -> AppResult<u32> {
+    only_main_window(window.label())?;
+    studio.delete_unfinished().await
+}
+
+/// Copies output `output_id` to `path`, the file the user chose in the save dialog, with its
+/// settings beside it when `with_settings`; gives where it was written.
+#[tauri::command]
+pub async fn studio_export(
+    window: tauri::WebviewWindow,
+    studio: State<'_, Arc<StudioManager>>,
+    output_id: String,
+    path: String,
+    with_settings: bool,
+) -> AppResult<String> {
+    only_main_window(window.label())?;
+    let forbidden: Vec<PathBuf> = crate::permissions::forbidden_for_tools(window.app_handle())
+        .into_iter()
+        .map(PathBuf::from)
+        .collect();
+    export(&studio, &output_id, &path, with_settings, &forbidden).await
+}
+
+/// *Show in folder*: shows output `output_id`'s file in the file manager.
+#[tauri::command]
+pub async fn studio_show_in_folder(
+    window: tauri::WebviewWindow,
+    studio: State<'_, Arc<StudioManager>>,
+    output_id: String,
+) -> AppResult<()> {
+    only_main_window(window.label())?;
+    let path = PathBuf::from(output_of(&studio, &output_id).await?.path);
+    tokio::fs::metadata(&path)
+        .await
+        .map_err(|e| errors::from_gallery(&io_error(e)))?;
+    window
+        .app_handle()
+        .opener()
+        .reveal_item_in_dir(&path)
+        .map_err(|e| AppError::internal(e.to_string()))
+}
+
+/// *Open folder*: opens the gallery folder in the file manager, made first if it is not
+/// there yet.
+#[tauri::command]
+pub async fn studio_open_folder(
+    window: tauri::WebviewWindow,
+    studio: State<'_, Arc<StudioManager>>,
+) -> AppResult<()> {
+    only_main_window(window.label())?;
+    let root = studio.gallery().root().to_owned();
+    tokio::fs::create_dir_all(&root)
+        .await
+        .map_err(|e| errors::from_gallery(&io_error(e)))?;
+    window
+        .app_handle()
+        .opener()
+        .open_path(root.display().to_string(), None::<&str>)
+        .map_err(|e| AppError::internal(e.to_string()))
+}
+
+/// Keeps a picture the user added to the prompt in the gallery's `refs/`.
+#[tauri::command]
+pub async fn studio_add_ref(
+    window: tauri::WebviewWindow,
+    studio: State<'_, Arc<StudioManager>>,
+    image: ImageInput,
+) -> AppResult<RefDto> {
+    only_main_window(window.label())?;
+    let stored = studio
+        .gallery()
+        .add_ref(&PictureWorker::app(), &image)
+        .await?;
+    Ok(ref_dto(stored))
+}
+
+/// *Use in prompt*: adds picture output `output_id` to the prompt.
+#[tauri::command]
+pub async fn studio_ref_from_output(
+    window: tauri::WebviewWindow,
+    studio: State<'_, Arc<StudioManager>>,
+    output_id: String,
+) -> AppResult<RefDto> {
+    only_main_window(window.label())?;
+    ref_from_output(&studio, &PictureWorker::app(), &output_id).await
+}
+
+/// *Send to chat*: picture output `output_id` as the composer takes a picture.
+#[tauri::command]
+pub async fn studio_output_for_chat(
+    window: tauri::WebviewWindow,
+    studio: State<'_, Arc<StudioManager>>,
+    output_id: String,
+) -> AppResult<ImageInput> {
+    only_main_window(window.label())?;
+    output_for_chat(&studio, &output_id).await
+}
+
+/// Settings → Studio: changes the fields `patch` sends, and gives the preferences as held.
+#[tauri::command]
+pub async fn studio_set_prefs(
+    window: tauri::WebviewWindow,
+    studio: State<'_, Arc<StudioManager>>,
+    patch: StudioPrefsPatch,
+) -> AppResult<StudioPrefs> {
+    only_main_window(window.label())?;
+    studio.set_prefs(patch).await
 }
 
 // ---- what the commands do ---------------------------------------------------------------------
@@ -315,6 +516,227 @@ pub async fn ref_bytes(studio: &StudioManager, sha256: &str) -> AppResult<Vec<u8
     .map_err(AppError::internal)?
 }
 
+/// Output `output_id`, refused as `not_found` when it does not exist.
+async fn output_of(studio: &StudioManager, output_id: &str) -> AppResult<store::CreationOutput> {
+    studio
+        .deps()
+        .store
+        .get_creation_output(output_id)
+        .await?
+        .ok_or_else(|| AppError::not_found("result"))
+}
+
+/// Saves `jpeg_base64` (base64, no `data:` prefix) as output `output_id`'s thumbnail, in the
+/// gallery's `.thumbs/`, replacing any earlier one, and gives the output with it. Anything
+/// but a JPEG of at most [`POSTER_CAP`] bytes is refused before it is written.
+pub async fn save_thumb(
+    studio: &StudioManager,
+    output_id: &str,
+    jpeg_base64: &str,
+) -> AppResult<OutputDto> {
+    // Base64 of more than the cap is longer than this: it is not decoded at all.
+    if jpeg_base64.len() > POSTER_CAP.div_ceil(3) * 4 {
+        return Err(errors::bad_poster());
+    }
+    let jpeg = base64::engine::general_purpose::STANDARD
+        .decode(jpeg_base64)
+        .map_err(|_| errors::bad_poster())?;
+    if jpeg.len() > POSTER_CAP || sniff_media(&jpeg) != Some("image/jpeg") {
+        return Err(errors::bad_poster());
+    }
+    let mut output = output_of(studio, output_id).await?;
+    let (gallery, id) = (studio.gallery(), output.id.clone());
+    let path = tokio::task::spawn_blocking(move || gallery.write_thumb(&id, &jpeg))
+        .await
+        .map_err(AppError::internal)?
+        .map_err(|e| errors::from_gallery(&e))?;
+    let path = path.display().to_string();
+    studio
+        .deps()
+        .store
+        .set_creation_thumb(&output.id, &path)
+        .await?;
+    output.thumb_path = Some(path);
+    Ok(output_dto(&output))
+}
+
+/// Stars (or unstars) output `output_id` and gives it.
+pub async fn star(studio: &StudioManager, output_id: &str, starred: bool) -> AppResult<OutputDto> {
+    let mut output = output_of(studio, output_id).await?;
+    studio
+        .deps()
+        .store
+        .set_creation_starred(&output.id, starred)
+        .await?;
+    output.starred = starred;
+    Ok(output_dto(&output))
+}
+
+/// Copies output `output_id` to `path` and gives where it went. `path` must keep the
+/// result's own extension and stay out of the app's folders: `forbidden` and the gallery
+/// folder ([`export_target`]). With `with_settings`, the run's prompt, model, settings and
+/// cost go beside it as `<name>.json` ([`settings_record`]).
+pub async fn export(
+    studio: &StudioManager,
+    output_id: &str,
+    path: &str,
+    with_settings: bool,
+    forbidden: &[PathBuf],
+) -> AppResult<String> {
+    let output = output_of(studio, output_id).await?;
+    let source = PathBuf::from(&output.path);
+    let ext = source
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or_default();
+    let mut forbidden = forbidden.to_vec();
+    forbidden.push(studio.gallery().root().to_owned());
+    let target = export_target(path, ext, &forbidden).map_err(AppError::bad_request)?;
+    tokio::fs::metadata(&source)
+        .await
+        .map_err(|e| errors::from_gallery(&io_error(e)))?;
+    tokio::fs::copy(&source, &target)
+        .await
+        .map_err(|e| errors::not_exported(e.to_string()))?;
+    if with_settings {
+        let run = studio
+            .deps()
+            .store
+            .get_creation_run(&output.run_id)
+            .await?
+            .ok_or_else(|| AppError::not_found("run"))?;
+        let json = serde_json::to_vec_pretty(&settings_record(&run, &output))
+            .map_err(AppError::internal)?;
+        tokio::fs::write(target.with_extension("json"), json)
+            .await
+            .map_err(|e| errors::not_exported(e.to_string()))?;
+    }
+    Ok(target.display().to_string())
+}
+
+/// What an export writes beside a result: how it was made (the run's endpoint, model,
+/// prompt, settings, estimate and cost, and the result's seed). No path, and no key (a run
+/// holds none).
+fn settings_record(run: &store::CreationRun, output: &store::CreationOutput) -> Value {
+    let made = jiff::Timestamp::from_millisecond(run.created_at)
+        .map(|at| at.to_string())
+        .ok();
+    json!({
+        "kind": media_kind_name(run.kind),
+        "runsOn": run.runs_on.as_str(),
+        "endpoint": run.provider_name,
+        "host": run.provider_host,
+        "upstream": run.upstream,
+        "model": run.model,
+        "modelLabel": run.model_label,
+        "prompt": run.prompt,
+        "params": run.params.get("params"),
+        "extra": run.params.get("extra"),
+        "routing": run.params.get("routing"),
+        "seed": output.seed,
+        "estimateUsd": run.estimate_usd,
+        "costUsd": run.cost_usd,
+        "made": made,
+    })
+}
+
+/// A run's kind as an export names it.
+fn media_kind_name(kind: store::CreationKind) -> &'static str {
+    match kind {
+        store::CreationKind::Image => "picture",
+        store::CreationKind::Video => "video",
+    }
+}
+
+/// Whether result `output` may go into a chat's message box: a PNG, JPEG, GIF or WebP
+/// picture of at most 20 MB, the composer's own limits (a chat model takes no video).
+pub(crate) fn for_chat(output: &store::CreationOutput) -> AppResult<()> {
+    picture_check(output, PictureUse::Chat)
+}
+
+/// Whether result `output` may go to `to`: a chat and the prompt's added pictures take the
+/// same pictures.
+fn picture_check(output: &store::CreationOutput, to: PictureUse) -> AppResult<()> {
+    if !CHAT_PICTURES.contains(&output.mime.as_str()) {
+        return Err(errors::not_a_picture_for(
+            to,
+            output.mime.starts_with("video/"),
+        ));
+    }
+    if output.size_bytes > MAX_IMAGE_BYTES as u64 {
+        return Err(errors::picture_too_big_for(to));
+    }
+    Ok(())
+}
+
+/// The bytes of picture `output` (which passed [`picture_check`] for `to`); a file that has
+/// grown past the limit since it was recorded is refused the same way.
+async fn picture_bytes(output: &store::CreationOutput, to: PictureUse) -> AppResult<Vec<u8>> {
+    let path = PathBuf::from(&output.path);
+    let bytes = tokio::task::spawn_blocking(move || {
+        let unreachable = |e: std::io::Error| errors::from_gallery(&io_error(e));
+        let mut bytes = Vec::new();
+        std::fs::File::open(path)
+            .map_err(unreachable)?
+            .take(MAX_IMAGE_BYTES as u64 + 1)
+            .read_to_end(&mut bytes)
+            .map_err(unreachable)?;
+        Ok::<_, AppError>(bytes)
+    })
+    .await
+    .map_err(AppError::internal)??;
+    if bytes.len() > MAX_IMAGE_BYTES {
+        return Err(errors::picture_too_big_for(to));
+    }
+    Ok(bytes)
+}
+
+/// Picture output `output_id` as the composer takes a picture (refused as [`for_chat`]
+/// says), named for what it is rather than by its file's id.
+pub async fn output_for_chat(studio: &StudioManager, output_id: &str) -> AppResult<ImageInput> {
+    let output = output_of(studio, output_id).await?;
+    for_chat(&output)?;
+    let bytes = picture_bytes(&output, PictureUse::Chat).await?;
+    let ext = Path::new(&output.path)
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or("png");
+    Ok(ImageInput {
+        file_name: format!("Studio picture.{ext}"),
+        mime: output.mime,
+        data: base64::engine::general_purpose::STANDARD.encode(bytes),
+    })
+}
+
+/// Adds picture output `output_id` to the prompt: kept in the gallery's `refs/` as a picture
+/// the user added is (`Gallery::add_ref`, through `worker` for a WebP picture).
+pub async fn ref_from_output(
+    studio: &StudioManager,
+    worker: &PictureWorker,
+    output_id: &str,
+) -> AppResult<RefDto> {
+    let output = output_of(studio, output_id).await?;
+    picture_check(&output, PictureUse::Prompt)?;
+    let bytes = picture_bytes(&output, PictureUse::Prompt).await?;
+    let image = ImageInput {
+        mime: output.mime,
+        file_name: "This picture".to_owned(),
+        data: base64::engine::general_purpose::STANDARD.encode(bytes),
+    };
+    let stored = studio.gallery().add_ref(worker, &image).await?;
+    Ok(ref_dto(stored))
+}
+
+/// An added picture as kept, before any run records what it is for.
+fn ref_dto(stored: RefStored) -> RefDto {
+    RefDto {
+        sha256: stored.sha256,
+        mime: stored.mime,
+        size_bytes: stored.size_bytes,
+        role: None,
+    }
+}
+
 /// `endpoint` as the picker shows it.
 fn endpoint_dto(endpoint: &EndpointModels) -> StudioEndpointDto {
     StudioEndpointDto {
@@ -389,6 +811,8 @@ mod tests {
     use url::Url;
 
     use super::*;
+    use crate::artifacts::export_target;
+    use crate::attachments::PictureWorker;
     use crate::dto::{MediaModelDto, RunDto, RunsCursorDto, RunsFilter, StudioEndpointDto};
     use crate::studio::catalog::{CachedCatalog, cache_key};
     use crate::studio::deps::{Clock, Endpoint, ForeignFetch, ProviderSource, StudioSink};
@@ -1116,6 +1540,296 @@ mod tests {
         assert_eq!(h.run_ids(filter).await, ["a"]);
         let filter: RunsFilter = serde_json::from_value(json!({})).unwrap();
         assert_eq!(filter, RunsFilter::default());
+    }
+
+    // ---- the changing commands -------------------------------------------------------------
+
+    /// Every Studio command.
+    const STUDIO_COMMANDS: &[&str] = &[
+        // The read commands.
+        "studio_models",
+        "studio_refresh_models",
+        "studio_model_price",
+        "studio_estimate",
+        "studio_preview",
+        "studio_runs",
+        "studio_live",
+        "studio_output_bytes",
+        "studio_ref_bytes",
+        "studio_usage",
+        "studio_get_prefs",
+        // The changing commands.
+        "studio_start",
+        "studio_cancel",
+        "studio_fetch_anyway",
+        "studio_save_thumb",
+        "studio_star",
+        "studio_delete",
+        "studio_delete_unfinished",
+        "studio_export",
+        "studio_show_in_folder",
+        "studio_open_folder",
+        "studio_add_ref",
+        "studio_ref_from_output",
+        "studio_output_for_chat",
+        "studio_set_prefs",
+        // Tasks L10 (studio::engine_cmd), L15 (studio::commands) and L16 (studio::local_cmd)
+        // append their commands here.
+    ];
+
+    /// The modules Studio's commands live in.
+    const STUDIO_COMMAND_MODULES: &[&str] = &["commands", "engine_cmd", "local_cmd"];
+
+    #[test]
+    fn every_studio_command_is_listed_granted_and_registered() {
+        let list = include_str!("../../commands.list");
+        let main = include_str!("../../capabilities/main.json");
+        let lib = include_str!("../lib.rs");
+        for c in STUDIO_COMMANDS {
+            assert!(list.lines().any(|l| l.trim() == *c), "{c}");
+            assert!(
+                main.contains(&format!("\"allow-{}\"", c.replace('_', "-"))),
+                "{c}"
+            );
+            // A `#[tauri::command]` function is registered by its own module path (a
+            // re-export does not work in generate_handler!).
+            assert!(
+                STUDIO_COMMAND_MODULES
+                    .iter()
+                    .any(|m| lib.contains(&format!("studio::{m}::{c},"))),
+                "{c}"
+            );
+        }
+    }
+
+    fn base64(bytes: &[u8]) -> String {
+        use base64::Engine;
+        base64::engine::general_purpose::STANDARD.encode(bytes)
+    }
+
+    /// A JPEG's start, padded with zeros to `len` bytes.
+    fn jpeg(len: usize) -> Vec<u8> {
+        let mut bytes = b"\xFF\xD8\xFF\xE0 a poster frame".to_vec();
+        bytes.resize(len, 0);
+        bytes
+    }
+
+    #[tokio::test]
+    async fn a_saved_poster_must_be_a_small_jpeg() {
+        let h = harness().await;
+        h.seed_run("v1", MediaKind::Video, "a river", now()).await;
+        let video = h
+            .seed_output("v1", "video/mp4", &mp4(), mp4().len() as u64)
+            .await;
+        let thumb = h.manager.gallery().thumb_path(&video);
+        for refused in [
+            base64(&png(4, 4)),
+            base64(&jpeg(POSTER_CAP + 1)),
+            "not base64!".to_owned(),
+        ] {
+            let err = save_thumb(&h.manager, &video, &refused).await.unwrap_err();
+            assert_eq!(err.code, "bad_request");
+            assert!(!thumb.exists());
+        }
+
+        let poster = jpeg(POSTER_CAP);
+        let saved = save_thumb(&h.manager, &video, &base64(&poster))
+            .await
+            .unwrap();
+        assert!(saved.has_thumb);
+        assert_eq!(saved.id, video);
+        assert_eq!(std::fs::read(&thumb).unwrap(), poster);
+        assert_eq!(
+            output_bytes(&h.manager, &video, true).await.unwrap(),
+            poster
+        );
+        let err = save_thumb(&h.manager, "no-such-output", &base64(&poster))
+            .await
+            .unwrap_err();
+        assert_eq!(err.code, "not_found");
+    }
+
+    #[tokio::test]
+    async fn a_star_is_kept_on_the_result() {
+        let h = harness().await;
+        h.seed_run("p1", MediaKind::Image, "a red kite", now())
+            .await;
+        let picture = png(4, 4);
+        let out = h
+            .seed_output("p1", "image/png", &picture, picture.len() as u64)
+            .await;
+        assert!(star(&h.manager, &out, true).await.unwrap().starred);
+        let starred = RunsFilter {
+            starred: true,
+            ..RunsFilter::default()
+        };
+        assert_eq!(h.run_ids(starred.clone()).await, ["p1"]);
+        assert!(!star(&h.manager, &out, false).await.unwrap().starred);
+        assert!(h.run_ids(starred).await.is_empty());
+        let err = star(&h.manager, "no-such-output", true).await.unwrap_err();
+        assert_eq!(err.code, "not_found");
+    }
+
+    fn output_of_type(mime: &str, size_bytes: u64) -> store::CreationOutput {
+        store::CreationOutput {
+            id: "out".into(),
+            run_id: "run".into(),
+            idx: 0,
+            path: "unused".into(),
+            thumb_path: None,
+            mime: mime.into(),
+            size_bytes,
+            width: None,
+            height: None,
+            duration_ms: None,
+            seed: None,
+            starred: false,
+            created_at: now(),
+        }
+    }
+
+    #[test]
+    fn a_video_or_a_big_picture_cannot_go_to_a_chat() {
+        const MIB: u64 = 1024 * 1024;
+        for mime in ["video/mp4", "video/webm", "image/svg+xml"] {
+            let err = for_chat(&output_of_type(mime, 1_000)).unwrap_err();
+            assert_eq!(err.code, "bad_request", "{mime}");
+        }
+        let err = for_chat(&output_of_type("video/mp4", 1_000)).unwrap_err();
+        assert_eq!(
+            err.message,
+            "A video cannot go into a chat: chat models do not take video."
+        );
+        let err = for_chat(&output_of_type("image/png", 21 * MIB)).unwrap_err();
+        assert_eq!(err.code, "bad_request");
+        assert_eq!(
+            err.message,
+            "This picture is over 20 MB, so it cannot go into a chat."
+        );
+        assert!(for_chat(&output_of_type("image/png", 20 * MIB)).is_ok());
+        for mime in ["image/png", "image/jpeg", "image/gif", "image/webp"] {
+            assert!(for_chat(&output_of_type(mime, 2 * MIB)).is_ok(), "{mime}");
+        }
+    }
+
+    #[tokio::test]
+    async fn a_picture_goes_to_a_chat_or_back_to_a_prompt_as_it_is() {
+        let h = harness().await;
+        h.seed_run("p1", MediaKind::Image, "a red kite", now())
+            .await;
+        let picture = png(4, 4);
+        let out = h
+            .seed_output("p1", "image/png", &picture, picture.len() as u64)
+            .await;
+        let image = output_for_chat(&h.manager, &out).await.unwrap();
+        assert_eq!(image.mime, "image/png");
+        assert_eq!(image.file_name, "Studio picture.png");
+        assert_eq!(image.data, base64(&picture));
+        let v = serde_json::to_value(&image).unwrap();
+        assert_eq!(v["fileName"], json!("Studio picture.png"));
+
+        let added = ref_from_output(&h.manager, &PictureWorker::app(), &out)
+            .await
+            .unwrap();
+        let sha256: String = Sha256::digest(&picture)
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect();
+        assert_eq!(added.sha256, sha256);
+        assert_eq!(added.mime, "image/png");
+        assert_eq!(added.size_bytes, picture.len() as u64);
+        assert_eq!(ref_bytes(&h.manager, &sha256).await.unwrap(), picture);
+
+        // A video goes to neither.
+        h.seed_run("v1", MediaKind::Video, "a river", now()).await;
+        let video = h
+            .seed_output("v1", "video/mp4", &mp4(), mp4().len() as u64)
+            .await;
+        let err = output_for_chat(&h.manager, &video).await.unwrap_err();
+        assert_eq!(err.code, "bad_request");
+        let err = ref_from_output(&h.manager, &PictureWorker::app(), &video)
+            .await
+            .unwrap_err();
+        assert_eq!(err.code, "bad_request");
+        assert_eq!(
+            err.message,
+            "A video cannot be added to a prompt as a picture."
+        );
+    }
+
+    #[test]
+    fn export_keeps_the_original_extension_and_refuses_app_folders() {
+        let scratch = Scratch::new();
+        let docs = scratch.path().join("docs");
+        let own = scratch.path().join("app-data");
+        std::fs::create_dir_all(&docs).unwrap();
+        std::fs::create_dir_all(&own).unwrap();
+        let forbidden = vec![own.clone()];
+        let at = |p: &Path| p.display().to_string();
+        let target = |p: &Path, ext: &str| export_target(&at(p), ext, &forbidden);
+
+        let ok = target(&docs.join("wave.mp4"), "mp4").unwrap();
+        assert_eq!(ok, dunce::canonicalize(&docs).unwrap().join("wave.mp4"));
+        assert!(target(&docs.join("Wave.MP4"), "mp4").is_ok());
+        assert!(target(&docs.join("kite.png"), "png").is_ok());
+        for other in ["wave.webm", "wave", "wave.mp4.exe"] {
+            assert_eq!(
+                target(&docs.join(other), "mp4").unwrap_err(),
+                "Give the file a name that ends in .mp4.",
+                "{other}"
+            );
+        }
+        assert_eq!(
+            target(&own.join("wave.mp4"), "mp4").unwrap_err(),
+            "That folder belongs to the app. Choose another one."
+        );
+    }
+
+    #[tokio::test]
+    async fn export_copies_the_file_and_its_settings_beside_it() {
+        let h = harness().await;
+        let scratch = Scratch::new();
+        h.seed_run("p1", MediaKind::Image, "a red kite", now())
+            .await;
+        let picture = png(4, 4);
+        let out = h
+            .seed_output("p1", "image/png", &picture, picture.len() as u64)
+            .await;
+        let at = |name: &str| scratch.path().join(name).display().to_string();
+
+        let saved = export(&h.manager, &out, &at("kite.png"), false, &[])
+            .await
+            .unwrap();
+        assert_eq!(std::fs::read(&saved).unwrap(), picture);
+        assert!(!scratch.path().join("kite.json").exists());
+
+        let saved = export(&h.manager, &out, &at("again.png"), true, &[])
+            .await
+            .unwrap();
+        assert_eq!(std::fs::read(&saved).unwrap(), picture);
+        let record: Value =
+            serde_json::from_slice(&std::fs::read(scratch.path().join("again.json")).unwrap())
+                .unwrap();
+        assert_eq!(record["prompt"], json!("a red kite"));
+        assert_eq!(record["model"], json!(FLUX));
+        assert_eq!(record["endpoint"], json!("My OpenRouter"));
+        assert!(record.get("costUsd").is_some());
+        let text = record.to_string();
+        assert!(!text.contains(&h.manager.gallery().root().display().to_string()));
+
+        // The original's extension only; never into the gallery folder.
+        let err = export(&h.manager, &out, &at("kite.jpg"), false, &[])
+            .await
+            .unwrap_err();
+        assert_eq!(err.code, "bad_request");
+        let inside = h.manager.gallery().root().join("copy.png");
+        let err = export(&h.manager, &out, &inside.display().to_string(), false, &[])
+            .await
+            .unwrap_err();
+        assert_eq!(
+            err.message,
+            "That folder belongs to the app. Choose another one."
+        );
     }
 
     #[tokio::test]

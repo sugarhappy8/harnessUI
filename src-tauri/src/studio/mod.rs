@@ -9,10 +9,14 @@
 //! - [`prefs`]: Settings → Studio, kept as one setting, and the rules a change must pass.
 //! - [`errors`]: Studio's backend wording.
 //! - [`manager`]: the runs: starting them under the spending rules, their queues, cancel,
-//!   and their audit rows; [`deps`] holds what the manager reaches the world through.
-//! - [`commands`]: the read commands: the saved model lists (and fetching them, or a
-//!   picture's price, when asked), the estimate and the exact request, the runs, a result's
-//!   bytes, today's spending and the preferences.
+//!   their audit rows, deleting them and the preferences they read; [`deps`] holds what the
+//!   manager reaches the world through. The app makes one at start-up (`lib.rs`), which picks
+//!   up the runs the app left unfinished and stops every run task at exit.
+//! - [`commands`]: the read commands (the saved model lists, and fetching them or a picture's
+//!   price when asked; the estimate and the exact request; the runs; a result's bytes; today's
+//!   spending; the preferences) and the changing ones (start, cancel, *Get it anyway*; a
+//!   video's poster frame; star, delete, export, show in folder; added pictures; *Send to
+//!   chat*; the preferences).
 
 pub mod catalog;
 pub mod commands;

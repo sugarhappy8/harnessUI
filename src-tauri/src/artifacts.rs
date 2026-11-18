@@ -624,14 +624,18 @@ pub fn extension(kind: ArtifactKind) -> &'static str {
 }
 
 /// Where an export may be written: the file the user chose in the save dialog, if it has
-/// the kind's extension, its folder exists, and it is not one of the app's own folders.
-/// The content is the model's, so the name must not make it anything but a document.
-fn export_target(path: &str, kind: ArtifactKind, forbidden: &[PathBuf]) -> Result<PathBuf, String> {
+/// the extension `ext` (an artifact's kind's, or a Studio result's own), its folder exists,
+/// and it is not one of the app's own folders (`forbidden`). An artifact's content is the
+/// model's, so the name must not make it anything but a document.
+pub(crate) fn export_target(
+    path: &str,
+    ext: &str,
+    forbidden: &[PathBuf],
+) -> Result<PathBuf, String> {
     let chosen = Path::new(path);
     if !chosen.is_absolute() {
         return Err("Choose where to save the file.".into());
     }
-    let ext = extension(kind);
     let has_ext = chosen
         .extension()
         .and_then(|e| e.to_str())
@@ -687,7 +691,8 @@ pub async fn export_artifact(
         .into_iter()
         .map(PathBuf::from)
         .collect();
-    let target = export_target(&path, artifact.kind, &forbidden).map_err(AppError::bad_request)?;
+    let target = export_target(&path, extension(artifact.kind), &forbidden)
+        .map_err(AppError::bad_request)?;
     tokio::fs::write(&target, content).await.map_err(|e| {
         AppError::new(
             "export_failed",
@@ -789,7 +794,7 @@ mod tests {
         std::fs::create_dir_all(own.join("skills")).unwrap();
         let forbidden = vec![own.clone()];
         let at = |p: &Path| p.display().to_string();
-        let target = |path: &str, kind| export_target(path, kind, &forbidden);
+        let target = |path: &str, kind| export_target(path, extension(kind), &forbidden);
 
         let ok = target(&at(&docs.join("page.html")), ArtifactKind::Html).unwrap();
         assert_eq!(ok, dunce::canonicalize(&docs).unwrap().join("page.html"));
