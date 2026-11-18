@@ -7,25 +7,27 @@
 //!   prompt's length (at most `runtime::sd::args::PROMPT_MAX_CHARS`,
 //!   `studio_prompt_too_long_here`); the model among the installed ones (`parse_catalog` of
 //!   the provider's list), its settings checked (`spec::validate`) and a seed picked when
-//!   none is set; the run's fit and time ([`local_verdict`](super::local_verdict)). One that
-//!   does not fit even with the chat model unloaded, and is not a picture the processor can
-//!   make, is refused (`studio_does_not_fit`). A local run is free
+//!   none is set; the run's fit and time ([`local_verdict`](super::local_verdict)), the time
+//!   where the lease would run it (on the processor rather than after an unload, as Create
+//!   estimates it). One that does not fit even with the chat model unloaded, and is not a
+//!   picture the processor can make, is refused (`studio_does_not_fit`). A local run is free
 //!   (`Price::Free`): it never asks and never meets the daily limit. Only then, under the
 //!   same `starting` lock as a cloud start (the hardware is asked before it, so a cloud
-//!   start never waits for a probe), is the press checked again and the run recorded
-//!   (`queued`, $0, "This computer", the installed model and the engine's build), with its
-//!   audit row (the prompt's length, never the prompt), and queued.
+//!   start never waits for a probe), is the press checked again, each added picture found
+//!   still there (a delete may have removed it meanwhile: `studio_ref_missing`), and the run
+//!   recorded (`queued`, $0, "This computer", the installed model and the engine's build),
+//!   with its audit row (the prompt's length, never the prompt), and queued.
 //! - **Its task**, once it has the lane's one place: the fit again, on the hardware and the
-//!   chat model as they are now; the graphics card from the lease (`queued` meanwhile, with
-//!   what it waits for, and under Ask until [`StudioManager::answer_unload`]); `running`, with
-//!   the device it runs on, as shown, and how ([`job_options`]), and its time judged again on
-//!   the processor when the grant puts it there; one engine job, checked every
-//!   [`LOCAL_CHECK_EVERY`] in memory (its progress written and sent at most every
-//!   [`PROGRESS_EVERY`]); each result moved to `.partial/<output id>`, labelled as AI-made
-//!   there (never with the prompt) and kept in the gallery as a cloud picture is; `done` at $0
-//!   with the time it took. A failure is never charged. The card is held from the grant until
-//!   the task ends, an out-of-memory retry inside the engine job included, and freed however
-//!   it ends.
+//!   chat model as they are now, and its time where the lease would run it; the graphics
+//!   card from the lease (`queued` meanwhile, with what it waits for, and under Ask until
+//!   [`StudioManager::answer_unload`]); `running`, with the device it runs on, as shown, and
+//!   how ([`job_options`]), and its time judged again on the processor when the grant puts
+//!   it there; one engine job, checked every [`LOCAL_CHECK_EVERY`] in memory (its progress
+//!   written and sent at most every [`PROGRESS_EVERY`]); each result moved to
+//!   `.partial/<output id>`, labelled as AI-made there (never with the prompt) and kept in
+//!   the gallery as a cloud picture is; `done` at $0 with the time it took. A failure is
+//!   never charged. The card is held from the grant until the task ends, an out-of-memory
+//!   retry inside the engine job included, and freed however it ends.
 //! - **Stop** kills the engine's whole tree (`MediaProvider::cancel`); a run still waiting for
 //!   the card never starts.
 //! - **The chat model** a grant unloaded is kept while the local queue has work; when the
@@ -42,7 +44,7 @@ use std::time::Instant;
 
 use agent::media::{
     Company, Fetched, Invalid, JobDone, JobState, MediaError, MediaKind, MediaModel, MediaProvider,
-    MediaRequest, Price, RequestPreview, Saved, Started, parse_catalog, validate,
+    MediaRequest, Price, RefImage, RequestPreview, Saved, Started, parse_catalog, validate,
 };
 use jiff::Timestamp;
 use models::gen_catalog::GenEntry;
@@ -64,6 +66,7 @@ use crate::error::{AppError, AppResult};
 use crate::gpu_lease::{Grant, LeaseWait, Refused, StudioNeed};
 use crate::studio::deps::{Endpoint, LocalLane};
 use crate::studio::errors;
+use crate::studio::gallery::io_error;
 use crate::studio::label::{AiLabel, label_file};
 use crate::studio::local::{LocalRunStatus, RunShape, run_shape, runs_on_processor};
 use crate::studio::prompt_check;
@@ -219,6 +222,19 @@ async fn remove_file(path: &Path) {
     }
 }
 
+/// Each added picture of `refs`, found in the gallery's `refs/` before the `starting` lock,
+/// is still there: a delete (which takes that lock) removes an added picture with the last
+/// result that used it. One gone is refused by name, as at the checks
+/// (`studio_ref_missing`), rather than recorded for a run that would fail at the engine's
+/// start.
+fn refs_still_there(refs: &[RefImage]) -> AppResult<()> {
+    refs.iter().try_for_each(|r| match r.path.try_exists() {
+        Ok(true) => Ok(()),
+        Ok(false) => Err(errors::added_picture_missing()),
+        Err(e) => Err(errors::from_gallery(&io_error(e))),
+    })
+}
+
 /// The run's audit row: as a cloud run's (the model, the settings set, the prompt's length but
 /// never the prompt), on this computer, with the catalog id, the revision and the engine's
 /// build.
@@ -336,8 +352,8 @@ impl StudioManager {
     /// Records a run on this computer and queues it (see the module documentation). Its
     /// checks, the hardware and its fit are worked out before the `starting` lock (asking
     /// the hardware can wait for a probe of every backend, and cloud starts and *Get it
-    /// anyway* must not wait behind it); only the same-press check and the insert run under
-    /// it.
+    /// anyway* must not wait behind it); only the same-press check, the check that its added
+    /// pictures are still there (a delete takes that lock) and the insert run under it.
     pub(super) async fn start_local(&self, req: StartRequest) -> AppResult<RunDto> {
         let inner = &self.inner;
         let lane = inner
@@ -371,12 +387,19 @@ impl StudioManager {
         if verdict.word == FitWord::NotHere {
             return Err(errors::does_not_fit(verdict.reason));
         }
+        // The time its card shows until the grant: where the lease would run it.
+        let eta = inner
+            .processor_instead(&verdict, &prepared.entry, shape, &lane)
+            .await
+            .map_or(verdict.eta, |there| there.eta);
         let _starting = inner.starting.lock().await;
         if let Some(run) = inner.known_press(&req.client_token).await? {
             return Ok(inner.dto_of(&run));
         }
+        // Found before the lock: the last result using one may have been deleted since.
+        refs_still_there(&prepared.request.refs)?;
         let job = inner
-            .record_local(&req, prepared, shape, &verdict, &lane)
+            .record_local(&req, prepared, shape, eta, &lane)
             .await?;
         inner.remember_press(&req.client_token, &job.run_id);
         inner.enqueue(job).await
@@ -402,13 +425,13 @@ impl StudioManager {
         let prefs = inner.prefs();
         // A run the lease would put on the processor instead of unloading the chat model is
         // judged there: its word, its time, and no unload (ruling L15-processor-eta).
-        let chat_loaded = lane.hardware.chat_device_bytes().is_some();
         let verdict = match (verdict, shape) {
-            (Some(v), Ok(shape))
-                if processor_instead_of_unload(&v, prefs.gpu_policy, chat_loaded) =>
-            {
-                Some(inner.on_processor(&entry, shape, &lane).await)
-            }
+            (Some(v), Ok(shape)) => Some(
+                inner
+                    .processor_instead(&v, &entry, shape, &lane)
+                    .await
+                    .unwrap_or(v),
+            ),
             (verdict, _) => verdict,
         };
         let spend = inner.spend_today().await?;
@@ -565,13 +588,33 @@ impl Inner {
         verdict(entry, shape, true, lane.hardware.as_ref(), &self.deps.store).await
     }
 
-    /// Records the local run (`queued`, $0) and its audit row, and gives its job.
+    /// The run of `entry` at `shape` judged on the processor when the lease would put it
+    /// there rather than unload the chat model ([`processor_instead_of_unload`], with the
+    /// policy and the chat model as they are now); `None` when it stays where `verdict`
+    /// judged it. What Create estimates and the time a run's card shows before its grant,
+    /// so the two say the same (ruling L15-processor-eta).
+    async fn processor_instead(
+        &self,
+        verdict: &LocalVerdict,
+        entry: &GenEntry,
+        shape: RunShape,
+        lane: &LocalLane,
+    ) -> Option<LocalVerdict> {
+        let chat_loaded = lane.hardware.chat_device_bytes().is_some();
+        if !processor_instead_of_unload(verdict, self.prefs().gpu_policy, chat_loaded) {
+            return None;
+        }
+        Some(self.on_processor(entry, shape, lane).await)
+    }
+
+    /// Records the local run (`queued`, $0) and its audit row, and gives its job, its card
+    /// showing `eta` until the grant.
     async fn record_local(
         &self,
         req: &StartRequest,
         prepared: LocalPrepared,
         shape: RunShape,
-        verdict: &LocalVerdict,
+        eta: Option<Eta>,
         lane: &LocalLane,
     ) -> AppResult<Job> {
         let LocalPrepared {
@@ -640,7 +683,7 @@ impl Inner {
         let job = self
             .insert_and_audit(run, entry_row, job, store::CreationPatch::default())
             .await?;
-        self.with_live(&job.run_id, |live| live.eta = verdict.eta);
+        self.with_live(&job.run_id, |live| live.eta = eta);
         Ok(job)
     }
 
@@ -710,7 +753,12 @@ impl Inner {
             &self.deps.store,
         )
         .await;
-        self.with_live(&job.run_id, |live| live.eta = verdict.eta);
+        // Its time until the grant: where the lease would run it, as Create estimates it.
+        let eta = self
+            .processor_instead(&verdict, &step.entry, step.shape, lane)
+            .await
+            .map_or(verdict.eta, |there| there.eta);
+        self.with_live(&job.run_id, |live| live.eta = eta);
         if verdict.word == FitWord::NotHere {
             let ending = Ending::failed(errors::does_not_fit(verdict.reason), Some(false));
             self.end_run(job, ending, None).await;

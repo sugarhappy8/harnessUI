@@ -5065,31 +5065,121 @@ async fn a_cloud_start_is_not_held_while_a_local_start_asks_for_the_hardware() {
     assert_eq!(h.local.starts(), 1);
 }
 
+/// A local start finds its added pictures before the `starting` lock, and a delete (which
+/// takes it) can remove one meanwhile, with the last result that used it: once the start
+/// has the lock it finds the picture gone and is refused by name, recording nothing, never
+/// a run that fails at the engine's start.
+#[tokio::test]
+async fn an_added_picture_deleted_while_a_local_start_asks_for_the_hardware_is_refused() {
+    let h = harness_with_local().await;
+    let refs = h.gallery_root.join("refs");
+    std::fs::create_dir_all(&refs).unwrap();
+    let picture = png(2, 2);
+    let sha = "a".repeat(64);
+    let file = refs.join(format!("{sha}.png"));
+    std::fs::write(&file, &picture).unwrap();
+    let earlier = h
+        .seed_done_run(
+            0.5,
+            json!([{"sha256": sha, "mime": "image/png", "sizeBytes": picture.len()}]),
+        )
+        .await;
+    let with_picture = || StartRequest {
+        refs: vec![RefInput {
+            sha256: sha.clone(),
+            role: RefRole::Reference,
+        }],
+        ..h.local_req("x")
+    };
+    h.hardware.hold();
+    let manager = h.manager.clone();
+    let req = with_picture();
+    let start = tokio::spawn(async move { manager.start(req, false).await });
+    eventually("the local start asks for the hardware", || {
+        h.hardware.holding() == 1
+    })
+    .await;
+    // Not held behind the start: the picture goes with its last result.
+    tokio::time::timeout(
+        Duration::from_secs(5),
+        h.manager.delete_outputs(output_ids(&earlier)),
+    )
+    .await
+    .expect("the delete waited for the local start's hardware")
+    .unwrap();
+    assert!(!file.exists());
+    h.hardware.release();
+    let err = start.await.unwrap().unwrap_err();
+    assert_eq!(err.code, "studio_ref_missing");
+    assert_eq!(err.next_step, "Add the picture again.");
+    assert!(h.store_runs().await.is_empty(), "nothing was recorded");
+    assert_eq!(h.local.starts(), 0);
+    assert!(h.lease.needs().is_empty(), "the card was never asked for");
+    assert!(!h.manager.local_running());
+
+    // With the picture still there, the same start is recorded and made.
+    std::fs::write(&file, &picture).unwrap();
+    let run = h.manager.start(with_picture(), false).await.unwrap();
+    h.wait_status(&run.id, "done").await;
+    assert_eq!(h.local.starts(), 1);
+}
+
 /// Ruling L15-processor-eta: a run the grant moves to the processor, away from the card its
 /// fit was judged for, shows the time measured on the processor, and none when there is
-/// none, never the card's.
+/// none, never the card's; a run the lease will put there (a picture under "Use the
+/// processor for local pictures" with a chat model loaded) shows it from the start.
 #[tokio::test]
 async fn a_run_the_grant_moves_to_the_processor_is_timed_there() {
-    // 20 s measured on the card, nothing on the processor.
+    // 20 s measured on the card, nothing on the processor; klein fits the card only once the
+    // chat model is unloaded, so under the processor policy the lease puts it on the
+    // processor.
     let h = harness_with_local().await;
+    h.hardware.set_gpu(3, 32);
+    h.hardware.set_chat(Some(5));
     h.seed_measured_run(KLEIN, RX_7600_SHOWN, 20_000).await;
     h.set_prefs(json!({"gpuPolicy": "processor"})).await;
-    h.lease
-        .then(LeaseStep::Grant(Grant::UseProcessor { unloaded: None }));
+    h.lease.then(LeaseStep::WaitThen(
+        LeaseWait::ReplyRunning,
+        Grant::UseProcessor { unloaded: None },
+    ));
     h.local.hold();
     let run = h.manager.start(h.local_req("x"), false).await.unwrap();
-    // Queued, it is judged for the card it fits.
-    assert!(
-        run.eta.as_ref().is_some_and(|eta| eta.measured),
-        "{:?}",
-        run.eta
-    );
+    // Queued, and waiting for the card at the front of the lane, it shows what Create
+    // shows: the processor's time, none here, never the card's 20 s.
+    let estimate = h.manager.estimate(&h.local_req("x")).await.unwrap();
+    assert_eq!((&run.eta, &estimate.eta), (&None, &None));
+    let waiting = h
+        .wait_for(&run.id, "waiting for the reply", |r| {
+            r.local.as_ref().and_then(|l| l.waiting_for.as_deref()) == Some("reply")
+        })
+        .await;
+    assert_eq!(waiting.eta, None);
+    h.lease.release();
     let running = h.wait_status(&run.id, "running").await;
     assert!(running.local.as_ref().unwrap().on_processor);
     assert_eq!(running.eta, None);
     h.local.release_all();
     let done = h.wait_status(&run.id, "done").await;
     assert_eq!(done.local.unwrap().device.as_deref(), Some("Processor"));
+    assert!(
+        h.events_for(&run.id)
+            .iter()
+            .all(|event| event.eta.is_none()),
+        "the card's time was never shown"
+    );
+    // With 12 minutes measured on the processor (and the run just made there), the queued
+    // card shows the processor's measured time, the one Create shows.
+    h.seed_measured_run(KLEIN, "Processor", 12 * 60_000).await;
+    h.lease
+        .then(LeaseStep::Grant(Grant::UseProcessor { unloaded: None }));
+    h.local.hold();
+    let run = h.manager.start(h.local_req("x"), false).await.unwrap();
+    let estimate = h.manager.estimate(&h.local_req("x")).await.unwrap();
+    let eta = run.eta.expect("the processor's measured time");
+    assert_eq!(Some(&eta), estimate.eta.as_ref());
+    assert!(eta.measured && eta.low_ms >= 60_000, "{eta:?}");
+    h.local.release_all();
+    h.wait_status(&run.id, "done").await;
 
     // 12 minutes measured on the processor: that time.
     let h = harness_with_local().await;
