@@ -269,7 +269,9 @@ pub enum ArgsError {
     PercentInOutputPath,
     /// A number the engine cannot read, named by its [`SdJob`] field: an integer above
     /// `i32::MAX`, a seed above `i64::MAX`, or a guidance scale or flow shift that is not
-    /// finite. The engine aborts on an integer out of range.
+    /// finite, or is subnormal (not 0, and nearer 0 than `f32::MIN_POSITIVE`). The engine
+    /// aborts on an integer out of range and on a subnormal float (its `std::stof` reports
+    /// ERANGE); NaN and infinity it would read, but they mean nothing as either.
     #[error("the {0} is out of the engine's range")]
     NumberOutOfRange(&'static str),
     /// The output's name is not one plain file name: it is empty or absolute, or holds a
@@ -562,11 +564,17 @@ fn readable_numbers(job: &SdJob) -> Result<(), ArgsError> {
         return Err(ArgsError::NumberOutOfRange("seed"));
     }
     for (field, value) in [("cfg", Some(job.cfg)), ("flow_shift", job.flow_shift)] {
-        if value.is_some_and(|x| !x.is_finite()) {
+        if value.is_some_and(|x| !readable_float(x)) {
             return Err(ArgsError::NumberOutOfRange(field));
         }
     }
     Ok(())
+}
+
+/// A float option the engine reads back as given: finite, and 0 or normal (a subnormal one
+/// makes its `std::stof` throw, which the pinned CLI does not catch).
+fn readable_float(x: f32) -> bool {
+    x.is_finite() && (x == 0.0 || x.is_normal())
 }
 
 /// Whether `stem` is exactly one [`Component::Normal`], spelled as given (so a trailing
@@ -898,8 +906,17 @@ mod tests {
     }
 
     #[test]
-    fn a_guidance_or_flow_shift_that_is_not_finite_is_refused() {
-        for bad in [f32::NAN, f32::INFINITY, f32::NEG_INFINITY] {
+    fn a_guidance_or_flow_shift_that_is_not_finite_or_is_subnormal_is_refused() {
+        let subnormal = f32::MIN_POSITIVE / 2.0;
+        assert!(subnormal.is_finite() && subnormal != 0.0 && !subnormal.is_normal());
+        for bad in [
+            f32::NAN,
+            f32::INFINITY,
+            f32::NEG_INFINITY,
+            subnormal,
+            -subnormal,
+            f32::from_bits(1),
+        ] {
             assert_eq!(
                 build_args(&SdJob { cfg: bad, ..job() }),
                 Err(ArgsError::NumberOutOfRange("cfg")),
@@ -924,6 +941,19 @@ mod tests {
         );
         assert_eq!(after(&a, "--cfg-scale"), f32::MAX.to_string());
         assert_eq!(after(&a, "--flow-shift"), "-0.5");
+        // 0 (either sign) and the smallest normal number are read as given.
+        for good in [0.0, -0.0, f32::MIN_POSITIVE] {
+            let a = strings(
+                build_args(&SdJob {
+                    cfg: good,
+                    flow_shift: Some(good),
+                    ..video()
+                })
+                .unwrap(),
+            );
+            assert_eq!(after(&a, "--cfg-scale"), good.to_string());
+            assert_eq!(after(&a, "--flow-shift"), good.to_string());
+        }
     }
 
     #[test]

@@ -12,6 +12,11 @@
 //!   they wait their turn.
 //! - **Partly on the processor:** D + act_dit fits `room.partial`.
 //! - **Red** otherwise.
+//!
+//! On the processor ([`Target::Cpu`]) every part shares the one memory, so a run is Green
+//! or Red: nothing takes turns there. On Apple silicon the working set is a share of the
+//! computer's memory, so a verdict other than Red also needs every part and the working
+//! memory (the Green need without the spare) to fit the computer's memory less the reserve.
 
 use serde::Serialize;
 
@@ -116,6 +121,11 @@ pub fn needs_memory_saving(fit: GenFit) -> bool {
 
 /// The run's latent tokens: ⌈W/d⌉·⌈H/d⌉ with d the family's `token_div`, times a clip's
 /// latent frames, (F − 1)/`frame_div` + 1.
+///
+/// The catalog does not refuse a 0 in either, so neither is divided by: a `token_div` of 0
+/// counts as 1 (every pixel a token, so a broken entry is judged far too big rather than too
+/// small) and a `frame_div` of 0 as unset, which is the same as 1 (every frame its own
+/// latent frame).
 pub fn tokens(entry: &GenEntry, size: GenSize) -> u64 {
     let f = &entry.fallback;
     let d = f.token_div.max(1);
@@ -137,12 +147,16 @@ fn act_dit(entry: &GenEntry, size: GenSize) -> u64 {
 }
 
 /// The decoder's working memory: `vae_bytes_per_pixel_frame`·W·H·C, with C the frames it
-/// decodes at once (`vae_chunk_frames`, at most the clip's; all of them when unset); at most
+/// decodes at once (`vae_chunk_frames`, at most the clip's; all of them when unset, or 0,
+/// which the catalog does not refuse: the most memory, never a guess below it); at most
 /// `vae_tile_cap_bytes` with memory saving, which tiles the decoder.
 pub fn act_vae(entry: &GenEntry, size: GenSize, memory_saving: bool) -> u64 {
     let f = &entry.fallback;
     let frames = size.frames.max(1);
-    let chunk = f.vae_chunk_frames.map_or(frames, |c| c.min(frames).max(1));
+    let chunk = f
+        .vae_chunk_frames
+        .filter(|&c| c > 0)
+        .map_or(frames, |c| c.min(frames));
     let pixel_frames = u64::from(size.width) * u64::from(size.height) * u64::from(chunk);
     let bytes = f.vae_bytes_per_pixel_frame.saturating_mul(pixel_frames);
     if memory_saving {
@@ -194,9 +208,80 @@ impl Weights {
     }
 }
 
+/// Everything on the device at once by the family's fallback, without the spare: D + T + V +
+/// max(act_dit, act_vae).
+fn fallback_whole(entry: &GenEntry, size: GenSize) -> u64 {
+    Weights::of(entry)
+        .total()
+        .saturating_add(act_dit(entry, size).max(act_vae(entry, size, false)))
+}
+
+/// How the target's memory is shared between the device and the computer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Pool {
+    /// A graphics card with memory of its own.
+    Card,
+    /// The processor: every part and the working memory in the computer's memory at once.
+    Processor,
+    /// Apple silicon: the Metal working set is a share of the computer's memory.
+    Unified,
+}
+
+/// Where a run is judged.
+#[derive(Debug, Clone, Copy)]
+struct Place {
+    room: Room,
+    /// The computer's memory less the reserve; `None` when unknown: not checked.
+    computer: Option<u64>,
+    pool: Pool,
+}
+
+impl Place {
+    fn of(target: &Target) -> Self {
+        Place {
+            room: target.room(),
+            computer: target.computer(),
+            pool: match target {
+                Target::Gpu { .. } => Pool::Card,
+                Target::Cpu { .. } => Pool::Processor,
+                Target::AppleUnified { .. } => Pool::Unified,
+            },
+        }
+    }
+
+    /// With the chat model's `bytes` given back: on the device and, on Apple silicon, where
+    /// the device's memory is the computer's, in the computer's memory too.
+    fn unloaded(self, bytes: u64) -> Self {
+        Place {
+            room: Room {
+                whole: self.room.whole.saturating_add(bytes),
+                partial: self.room.partial.saturating_add(bytes),
+                ..self.room
+            },
+            computer: match self.pool {
+                Pool::Unified => self.computer.map(|c| c.saturating_add(bytes)),
+                Pool::Card | Pool::Processor => self.computer,
+            },
+            ..self
+        }
+    }
+}
+
+/// The engine's backend on `target`, as the catalog's memory points name their device:
+/// `vulkan` on a graphics card (the Studio engine's only graphics backend there in 0.1.0),
+/// `metal` on Apple silicon, `cpu` on the processor.
+fn backend(target: &Target) -> &'static str {
+    match target {
+        Target::Gpu { .. } => "vulkan",
+        Target::AppleUnified { .. } => "metal",
+        Target::Cpu { .. } => "cpu",
+    }
+}
+
 /// What a run at one size needs for each way of running it, without the spare.
 struct Need {
-    /// Everything on the device at once (Green).
+    /// Everything on the device at once (Green): every part's weights and the working
+    /// memory.
     whole: u64,
     /// The largest of the parts on the device one at a time with its working memory, the
     /// decoder tiled.
@@ -210,13 +295,12 @@ struct Need {
 }
 
 impl Need {
-    fn of(entry: &GenEntry, size: GenSize) -> Self {
+    /// At `size`, with the memory points measured on `backend` when the entry has any.
+    fn of(entry: &GenEntry, size: GenSize, backend: &str) -> Self {
         let w = Weights::of(entry);
         let act_dit = act_dit(entry, size);
-        let whole = measured_peak(entry, tokens(entry, size)).unwrap_or_else(|| {
-            w.total()
-                .saturating_add(act_dit.max(act_vae(entry, size, false)))
-        });
+        let whole =
+            measured_peak(entry, size, backend).unwrap_or_else(|| fallback_whole(entry, size));
         let diffusion = w.largest_diffusion.saturating_add(act_dit);
         let decoder = w.decoder.saturating_add(act_vae(entry, size, true));
         Need {
@@ -232,39 +316,59 @@ impl Need {
         self.one_part.saturating_add(SPARE_BYTES)
     }
 
-    /// The fit in `room`, with `computer` the computer's memory less the reserve (`None`
-    /// when unknown: not checked).
-    fn fit(&self, room: Room, computer: Option<u64>) -> GenFit {
-        if self.whole.saturating_add(SPARE_BYTES) <= room.whole {
+    /// The fit at `place`.
+    fn fit(&self, place: Place) -> GenFit {
+        let Place {
+            room,
+            computer,
+            pool,
+        } = place;
+        let fit = if self.whole.saturating_add(SPARE_BYTES) <= room.whole {
             GenFit::Green
+        } else if pool == Pool::Processor {
+            // Every part already shares the one memory: nothing can wait its turn elsewhere.
+            GenFit::Red
         } else if self.device_need() <= room.whole && computer.is_none_or(|c| self.weights <= c) {
             GenFit::OnePartAtATime
         } else if self.diffusion <= room.partial {
             GenFit::PartlyOnProcessor
         } else {
             GenFit::Red
-        }
+        };
+        // The working set is a share of the computer's memory, which holds every part and the
+        // working memory however the run goes.
+        let short_on_a_mac = pool == Pool::Unified && computer.is_some_and(|c| self.whole > c);
+        if short_on_a_mac { GenFit::Red } else { fit }
     }
 }
 
-/// The measured peak at `at` tokens from the entry's points of its newest engine build
-/// (several builds' points are never mixed): linear in tokens between the two nearest, the
-/// nearest one alone beyond them; `None` with no point.
-fn measured_peak(entry: &GenEntry, at: u64) -> Option<u64> {
+/// The measured peak at `size` from the entry's points of its newest engine build (several
+/// builds' points are never mixed), and of those only the ones measured on `backend` when
+/// there are any (all of the build's otherwise): linear in tokens between the two nearest;
+/// below the smallest, that one alone; above the largest, its peak plus what the fallback
+/// grows from its size to `size` (never less than its peak). `None` with no point.
+fn measured_peak(entry: &GenEntry, size: GenSize, backend: &str) -> Option<u64> {
     let build = entry.memory.iter().map(|m| m.build).max()?;
-    let mut points: Vec<(u64, u64)> = entry
-        .memory
+    let of_build: Vec<&MemoryPoint> = entry.memory.iter().filter(|m| m.build == build).collect();
+    let here = of_build
         .iter()
-        .filter(|m| m.build == build)
-        .map(|m| (tokens(entry, point_size(m)), m.peak_bytes))
+        .any(|m| m.device.eq_ignore_ascii_case(backend));
+    let mut points: Vec<(u64, u64, GenSize)> = of_build
+        .into_iter()
+        .filter(|m| !here || m.device.eq_ignore_ascii_case(backend))
+        .map(|m| {
+            let at = point_size(m);
+            (tokens(entry, at), m.peak_bytes, at)
+        })
         .collect();
     // By tokens; of points with the same tokens, the highest peak.
     points.sort_by(|a, b| a.0.cmp(&b.0).then(b.1.cmp(&a.1)));
     points.dedup_by_key(|p| p.0);
+    let at = tokens(entry, size);
     let below = points.iter().rev().find(|p| p.0 <= at);
     let above = points.iter().find(|p| p.0 >= at);
     match (below, above) {
-        (Some(&(t0, p0)), Some(&(t1, p1))) if t1 > t0 => {
+        (Some(&(t0, p0, _)), Some(&(t1, p1, _))) if t1 > t0 => {
             let part =
                 |rise: u64| (u128::from(rise) * u128::from(at - t0) / u128::from(t1 - t0)) as u64;
             Some(if p1 >= p0 {
@@ -273,7 +377,11 @@ fn measured_peak(entry: &GenEntry, at: u64) -> Option<u64> {
                 p0 - part(p0 - p1)
             })
         }
-        (Some(&(_, peak)), _) | (None, Some(&(_, peak))) => Some(peak),
+        (Some(&(_, peak, _)), Some(_)) | (None, Some(&(_, peak, _))) => Some(peak),
+        (Some(&(_, peak, largest)), None) => {
+            let growth = fallback_whole(entry, size).saturating_sub(fallback_whole(entry, largest));
+            Some(peak.saturating_add(growth))
+        }
         (None, None) => None,
     }
 }
@@ -289,9 +397,10 @@ fn point_size(m: &MemoryPoint) -> GenSize {
 /// Whether `entry` at `size` fits `target`. `target` as probed now (with the chat model
 /// loaded, if one is); `chat_device_bytes`: what unloading it would give back.
 ///
-/// On [`Target::Cpu`] the run is judged against the computer's memory and a video is red
-/// ([`NotFor::VideoNeedsGpu`]); on [`Target::AppleUnified`] a video model the catalog keeps
-/// off Apple silicon is red ([`NotFor::VideoNotOnThisMac`]).
+/// On [`Target::Cpu`] the run is judged against the computer's memory, Green or Red, and a
+/// video is red ([`NotFor::VideoNeedsGpu`]); on [`Target::AppleUnified`] a video model the
+/// catalog keeps off Apple silicon is red ([`NotFor::VideoNotOnThisMac`]), and any other run
+/// is red when the computer's memory less the reserve cannot hold all of it.
 pub fn gen_fit(
     entry: &GenEntry,
     size: GenSize,
@@ -306,19 +415,15 @@ pub fn gen_fit(
         }
         _ => None,
     };
-    let need = Need::of(entry, size);
-    let computer = target.computer();
-    let judge = |room: Room| match blocked {
+    let backend = backend(target);
+    let need = Need::of(entry, size, backend);
+    let judge = |place: Place| match blocked {
         Some(_) => GenFit::Red,
-        None => need.fit(room, computer),
+        None => need.fit(place),
     };
-    let room = target.room();
-    let fit = judge(room);
-    let unloaded = chat_device_bytes.map(|bytes| Room {
-        whole: room.whole.saturating_add(bytes),
-        partial: room.partial.saturating_add(bytes),
-        ..room
-    });
+    let place = Place::of(target);
+    let fit = judge(place);
+    let unloaded = chat_device_bytes.map(|bytes| place.unloaded(bytes));
     let after_unload = unloaded.filter(|_| fit != GenFit::Green).map(judge);
     let not_for = (after_unload.unwrap_or(fit) == GenFit::Red).then(|| {
         blocked.unwrap_or_else(|| {
@@ -331,7 +436,7 @@ pub fn gen_fit(
     });
     let suggestion = match blocked {
         Some(_) => None,
-        None => suggest(entry, size, unloaded.unwrap_or(room), computer),
+        None => suggest(entry, size, backend, unloaded.unwrap_or(place)),
     };
     GenFitResult {
         fit,
@@ -345,10 +450,10 @@ pub fn gen_fit(
     }
 }
 
-/// [`GenFitResult::suggestion`]: `None` when `size` itself runs on the device in `room`, or
+/// [`GenFitResult::suggestion`]: `None` when `size` itself runs on the device at `place`, or
 /// no preset does.
-fn suggest(entry: &GenEntry, size: GenSize, room: Room, computer: Option<u64>) -> Option<GenSize> {
-    let on_device = |s: GenSize| Need::of(entry, s).fit(room, computer).on_device();
+fn suggest(entry: &GenEntry, size: GenSize, backend: &str, place: Place) -> Option<GenSize> {
+    let on_device = |s: GenSize| Need::of(entry, s, backend).fit(place).on_device();
     if on_device(size) {
         return None;
     }
@@ -392,8 +497,9 @@ fn shape_of(size: GenSize) -> (u32, u32) {
 }
 
 /// The size with `side` as its shorter side at `shape`, each side rounded down to a
-/// multiple of `multiple_of` (480p at 16:9 is 832×480, 720p 1280×704); `None` when that
-/// leaves nothing.
+/// multiple of `multiple_of` (480p at 16:9 is 832×480, 720p 1280×704; a `multiple_of` of 0,
+/// which the catalog does not refuse, counts as 1: any side); `None` when that leaves
+/// nothing.
 fn at_shape(side: u32, (w, h): (u32, u32), multiple_of: u32) -> Option<(u32, u32)> {
     let m = u64::from(multiple_of.max(1));
     let down = |x: u64| u32::try_from(x / m * m).ok();
@@ -748,6 +854,111 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn on_the_processor_every_part_shares_one_memory() {
+        // 6 GB less the 2 GB reserve: 5.29 + 0.91 + 1 = 7.20 > 4. Red, never one part at a
+        // time (4.37) or partly on the processor (3.37), as nothing can wait elsewhere.
+        let r = gen_fit(&klein(), sq(1024), &cpu(6), None);
+        assert_eq!(
+            (r.fit, r.memory_saving, r.processor_only),
+            (GenFit::Red, false, true)
+        );
+        assert!(matches!(r.not_for, Some(NotFor::GraphicsMemory { .. })));
+        // 512² with 30 GB: 5.29 + 0.60 + 1 = 6.90. Green, and the word is still "Slow here".
+        let r = gen_fit(&klein(), sq(512), &cpu(32), None);
+        assert_eq!((r.fit, r.memory_saving), (GenFit::Green, false));
+        assert_eq!(
+            crate::gen_eta::fit_word(&klein(), &r, None),
+            crate::gen_eta::FitWord::Slow
+        );
+        // 7 GB left: 1024² (7.20) is red and 768² (7.02) too; 512² (6.90) is suggested.
+        let r = gen_fit(&klein(), sq(1024), &cpu(9), None);
+        assert_eq!((r.fit, r.suggestion), (GenFit::Red, Some(sq(512))));
+        // The chat model's memory given back counts there too: 4 + 4 = 8 >= 7.20.
+        let r = gen_fit(&klein(), sq(1024), &cpu(6), Some(4 * GB));
+        assert_eq!(
+            (r.fit, r.after_unload, r.not_for),
+            (GenFit::Red, Some(GenFit::Green), None)
+        );
+    }
+
+    #[test]
+    fn a_mac_must_hold_every_part_in_its_memory_too() {
+        // The 8 GB working set holds klein whole (7.20), but 6 GB free less the 2 GB reserve
+        // cannot hold its parts and working memory (6.20): red.
+        let r = gen_fit(&klein(), sq(1024), &apple(8, 6), None);
+        assert_eq!(r.fit, GenFit::Red);
+        assert!(matches!(r.not_for, Some(NotFor::MacMemory { .. })));
+        // 9 GB free (7 after the reserve) holds it.
+        assert_eq!(
+            gen_fit(&klein(), sq(1024), &apple(8, 9), None).fit,
+            GenFit::Green
+        );
+        // On a Mac the chat model's memory comes back to the computer as well: 4 + 3 >= 6.20.
+        let r = gen_fit(&klein(), sq(1024), &apple(8, 6), Some(3 * GB));
+        assert_eq!((r.after_unload, r.not_for), (Some(GenFit::Green), None));
+        // One part at a time on a 6 GB working set (5.77), the weights in 7 GB (6.70), but not
+        // every part with the working memory (7.61): red; with 8 GB left, one part at a time.
+        assert_eq!(
+            gen_fit(&zimage(), sq(1024), &apple(6, 9), None).fit,
+            GenFit::Red
+        );
+        assert_eq!(
+            gen_fit(&zimage(), sq(1024), &apple(6, 10), None).fit,
+            GenFit::OnePartAtATime
+        );
+    }
+
+    #[test]
+    fn a_card_whose_computer_did_not_say_is_judged_on_the_card() {
+        let card = |free_gb: u64| Target::Gpu {
+            name: "GPU".into(),
+            free_bytes: free_gb * GB,
+            ram_free_bytes: None,
+        };
+        // One part at a time (5.77 <= 6): the weights waiting in the computer's memory are
+        // not checked, as unknown is not 0.
+        assert_eq!(
+            gen_fit(&zimage(), sq(1024), &card(6), None).fit,
+            GenFit::OnePartAtATime
+        );
+        // Partly on the processor: the computer's side is unbounded.
+        assert_eq!(
+            gen_fit(&zimage(), sq(1024), &card(3), None).fit,
+            GenFit::PartlyOnProcessor
+        );
+    }
+
+    #[test]
+    fn zeros_in_the_catalog_are_never_divided_by() {
+        let mut e = wan22();
+        e.fallback.token_div = 0;
+        e.fallback.frame_div = Some(0);
+        e.fallback.vae_chunk_frames = Some(0);
+        // A token_div of 0 counts as 1 and a frame_div of 0 as unset: every pixel of every
+        // frame a token, so the entry is judged far too big, not too small.
+        assert_eq!(tokens(&e, clip(832, 480, 49)), 832 * 480 * 49);
+        // A vae_chunk_frames of 0 as unset: every frame at once.
+        assert_eq!(act_vae(&e, clip(832, 480, 49), false), 400 * 832 * 480 * 49);
+        let r = gen_fit(&e, clip(832, 480, 49), &gpu(24, 64), None);
+        assert_eq!((r.fit, r.suggestion), (GenFit::Red, None));
+        assert!(r.not_for.is_some());
+        // A multiple_of of 0 counts as 1: the 16:9 suggestion keeps 1365×768, unrounded.
+        let mut e = klein();
+        e.limits.multiple_of = 0;
+        let card = Target::Gpu {
+            name: "GPU".into(),
+            free_bytes: 4_500_000_000,
+            ram_free_bytes: Some(32 * GB),
+        };
+        let r = gen_fit(&e, clip(2048, 1152, 1), &card, None);
+        assert_eq!(r.suggestion, Some(clip(1365, 768, 1)));
+        assert_eq!(
+            gen_fit(&e, sq(2048), &gpu(5, 32), None).suggestion,
+            Some(sq(1024))
+        );
+    }
+
+    #[test]
     fn on_a_mac_the_reason_names_the_mac_and_a_video_model_may_be_kept_off_it() {
         let mut wan = wan22();
         wan.runs_on_apple = false;
@@ -823,16 +1034,20 @@ pub(crate) mod tests {
         );
     }
 
-    #[test]
-    fn measured_points_win_over_the_fallback() {
-        let point = |side: u32, peak_bytes: u64, build: u32| MemoryPoint {
+    fn memory_point(side: u32, peak_bytes: u64, device: &str, build: u32) -> MemoryPoint {
+        MemoryPoint {
             width: side,
             height: side,
             frames: 1,
             peak_bytes,
-            device: "vulkan".into(),
+            device: device.into(),
             build,
-        };
+        }
+    }
+
+    #[test]
+    fn measured_points_win_over_the_fallback() {
+        let point = |side, peak_bytes, build| memory_point(side, peak_bytes, "vulkan", build);
         let mut e = klein();
         e.memory = vec![
             point(1024, 5_000_000_000, 1106),
@@ -845,10 +1060,55 @@ pub(crate) mod tests {
         // 896²: 3136 tokens, 832 of the 1792 from 768² (2304) to 1024² (4096).
         assert_eq!(needed(896), 4_100_000_000 + 900_000_000 * 832 / 1792);
         assert!((4_100_000_000..5_000_000_000).contains(&needed(896)));
-        // Beyond them, the nearest one alone.
-        assert_eq!((needed(512), needed(1280)), (4_100_000_000, 5_000_000_000));
+        // Below the smallest, that one alone.
+        assert_eq!(needed(512), 4_100_000_000);
         // The measured 5.0 GB fits a 6 GB card whole, where the fallback said one part at a time.
         assert_eq!(gen_fit(&e, sq(1024), &gpu(6, 32), None).fit, GenFit::Green);
+    }
+
+    #[test]
+    fn above_the_largest_point_the_need_grows_as_the_fallback_does() {
+        let mut e = klein();
+        e.memory = vec![memory_point(1024, 5_000_000_000, "vulkan", 1106)];
+        let needed = |side| gen_fit(&e, sq(side), &gpu(8, 32), None).needed_bytes;
+        // 1280²: act_dit 1.14 GB against 0.91 at 1024², 0.23 GB more.
+        assert_eq!(needed(1280), 5_000_000_000 + 1_140_000_000 - 909_600_000);
+        // 2048²: act_dit 2.14 GB, 1.23 GB more, so a 6 GB card no longer runs it whole
+        // (6.23 + 1 > 6) but one part at a time (2.46 + 2.14 + 1 = 5.60).
+        assert_eq!(needed(2048), 5_000_000_000 + 2_138_400_000 - 909_600_000);
+        assert_eq!(
+            gen_fit(&e, sq(2048), &gpu(6, 32), None).fit,
+            GenFit::OnePartAtATime
+        );
+        // Never less than the point's own peak: with a decoder that dominates, 1025×1009 has
+        // more tokens than 1024² (4160) but fewer pixels, so the fallback shrinks there.
+        e.fallback.vae_bytes_per_pixel_frame = 10_000;
+        assert!(fallback_whole(&e, clip(1025, 1009, 1)) < fallback_whole(&e, sq(1024)));
+        assert_eq!(
+            gen_fit(&e, clip(1025, 1009, 1), &gpu(8, 32), None).needed_bytes,
+            5_000_000_000
+        );
+    }
+
+    #[test]
+    fn memory_points_of_this_computers_backend_are_used_when_there_are_any() {
+        let mut e = klein();
+        e.memory = vec![
+            memory_point(1024, 5_000_000_000, "vulkan", 1106),
+            memory_point(768, 4_100_000_000, "vulkan", 1106),
+            memory_point(1024, 6_500_000_000, "metal", 1106),
+            // Only the newest build's points are looked at, whatever their device.
+            memory_point(1024, 7_000_000_000, "cpu", 1105),
+        ];
+        let needed = |target: &Target, side| gen_fit(&e, sq(side), target, None).needed_bytes;
+        assert_eq!(needed(&gpu(8, 32), 1024), 5_000_000_000);
+        // A Mac uses the Metal point alone: below it, that one.
+        assert_eq!(needed(&apple(16, 32), 1024), 6_500_000_000);
+        assert_eq!(needed(&apple(16, 32), 768), 6_500_000_000);
+        // No point of the newest build on the processor: all of that build's points, the
+        // higher of two at one size.
+        assert_eq!(needed(&cpu(32), 1024), 6_500_000_000);
+        assert_eq!(needed(&cpu(32), 768), 4_100_000_000);
     }
 
     #[test]

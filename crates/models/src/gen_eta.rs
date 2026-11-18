@@ -102,7 +102,9 @@ pub fn device_class(target: &Target, backend: &str) -> DeviceClass {
 /// `class`.
 ///
 /// With `measured` runs (this model's on this device), their median scaled to these
-/// settings as a speed point scales, as [0.9×, 1.15×] and `measured`. Otherwise from the
+/// settings as a speed point scales, as [0.9×, 1.15×] and `measured`; the load is once a
+/// run whatever its size, so the point's load (at most the whole run) stays as it was and
+/// only the rest of each run is scaled. Otherwise from the
 /// speed point of the same backend nearest in memory: load + per picture (steps × seconds
 /// a step × (tokens / the point's tokens)^1.3 + decode × the pixel-frames ratio), as
 /// [0.75×, 1.5×]. Video on Apple silicon (`metal`) grows by [`APPLE_VIDEO_PAD`]. No point of
@@ -117,17 +119,20 @@ pub fn estimate(
 ) -> Option<Eta> {
     let point = nearest_point(entry, class);
     let scale = Scale { entry, point };
-    let here = scale.seconds(size, steps, pictures);
+    let (load, work) = scale.seconds(size, steps, pictures);
     let runs = measured
         .iter()
         .filter_map(|m| {
-            let then = scale.seconds(m.size, m.steps, m.pictures);
-            (then > 0.0 && m.elapsed_ms > 0).then(|| m.elapsed_ms as f64 * here / then)
+            let (then_load, then_work) = scale.seconds(m.size, m.steps, m.pictures);
+            let elapsed = m.elapsed_ms as f64;
+            let fixed = (then_load * 1000.0).min(elapsed);
+            (then_work > 0.0 && m.elapsed_ms > 0)
+                .then(|| fixed + (elapsed - fixed) * work / then_work)
         })
         .collect();
     let (ms, (low, high), measured) = match (median(runs), point) {
         (Some(ms), _) => (ms, MEASURED_RANGE, true),
-        (None, Some(_)) => (here * 1000.0, GUESS_RANGE, false),
+        (None, Some(_)) => ((load + work) * 1000.0, GUESS_RANGE, false),
         (None, None) => return None,
     };
     let pad = if class.backend == "metal" && entry.kind == GenKind::Video {
@@ -144,14 +149,16 @@ pub fn estimate(
 
 /// How a run's time grows with its settings: from a speed point, its load once plus, per
 /// picture, its steps scaled by tokens^1.3 and its decode by pixel-frames; with no point,
-/// in units of steps at a size alone, which only a run measured here turns into time.
+/// in units of steps at a size alone (and no load), which only a run measured here turns
+/// into time.
 struct Scale<'a> {
     entry: &'a GenEntry,
     point: Option<&'a SpeedPoint>,
 }
 
 impl Scale<'_> {
-    fn seconds(&self, size: GenSize, steps: u32, pictures: u32) -> f64 {
+    /// (the load, the pictures' steps and decoding), in seconds.
+    fn seconds(&self, size: GenSize, steps: u32, pictures: u32) -> (f64, f64) {
         let pictures = f64::from(pictures.max(1));
         let steps = f64::from(steps);
         let tokens_here = tokens(self.entry, size) as f64;
@@ -165,9 +172,12 @@ impl Scale<'_> {
                 let tokens_ratio = tokens_here / tokens(self.entry, at) as f64;
                 let pixel_ratio = size.pixel_frames() as f64 / at.pixel_frames() as f64;
                 let drawing = steps * p.seconds_per_step * tokens_ratio.powf(TOKEN_POWER);
-                p.load_seconds + pictures * (drawing + p.decode_seconds * pixel_ratio)
+                (
+                    p.load_seconds,
+                    pictures * (drawing + p.decode_seconds * pixel_ratio),
+                )
             }
-            None => pictures * steps * tokens_here.powf(TOKEN_POWER),
+            None => (0.0, pictures * steps * tokens_here.powf(TOKEN_POWER)),
         }
     }
 }
@@ -430,6 +440,33 @@ mod tests {
         assert_eq!(
             estimate(&e, sq(1024), 8, 1, &class("vulkan", 8), &[]),
             Some(eta(17_250, 34_500, false))
+        );
+    }
+
+    #[test]
+    fn the_load_is_never_scaled_down_with_the_size() {
+        // A 6 s load and a run of 30 s here at 1024²: 6 s of it is the load, and only the
+        // other 24 s scale down to 512².
+        let e = with_speed(klein(), "vulkan-8", 6.0, 2.0, 1.0);
+        let runs = [run(sq(1024), 4, 1, 30_000)];
+        let got = estimate(&e, sq(512), 4, 1, &class("vulkan", 8), &runs).unwrap();
+        assert!(got.low_ms >= 6_000, "{got:?}");
+        // 6 + 24 × (8 × 0.25^1.3 + 0.25) / 9 = 10.19 s.
+        let ms = (6.0 + 24.0 * (8.0 * 0.25f64.powf(1.3) + 0.25) / 9.0) * 1000.0;
+        assert_eq!(
+            got,
+            eta((ms * 0.9).round() as u64, (ms * 1.15).round() as u64, true)
+        );
+        // From a point far slower than this computer (170 s at 1024²), scaling the whole run
+        // would give 5.9 s, under the load alone.
+        let e = with_speed(klein(), "vulkan-8", 6.0, 40.0, 4.0);
+        let got = estimate(&e, sq(512), 4, 1, &class("vulkan", 8), &runs).unwrap();
+        assert!(got.low_ms >= 6_000, "{got:?}");
+        // A run shorter than the point's load is all load, at any size.
+        let quick = [run(sq(1024), 4, 1, 5_000)];
+        assert_eq!(
+            estimate(&e, sq(512), 4, 1, &class("vulkan", 8), &quick),
+            Some(eta(4_500, 5_750, true))
         );
     }
 
