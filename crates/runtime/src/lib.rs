@@ -12,6 +12,8 @@
 //! - [`llama`]: the pinned build ([`llama::lock`]), backend discovery and probing, launch
 //!   arguments, the managed-child protocol, failure classification, `/props`, and the
 //!   server lifecycle with its restart and step-down policy.
+//! - [`sd`]: the pinned stable-diffusion.cpp build that makes Studio's local pictures and
+//!   videos ([`sd::lock`]).
 //!
 //! The crate does not depend on Tauri, so all of this compiles and tests on any OS.
 
@@ -21,6 +23,7 @@ pub mod llama;
 pub mod packs;
 pub mod reaper;
 pub mod registry;
+pub mod sd;
 pub mod spawn;
 
 pub use llama::backend::{

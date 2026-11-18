@@ -376,8 +376,8 @@ async fn fetch(
     Ok(())
 }
 
-/// Simple `*` glob over file names (the lock's `keep_files`).
-fn glob_match(pattern: &str, name: &str) -> bool {
+/// Simple `*` glob over file names, ignoring case (the locks' `keep_files`).
+pub(crate) fn glob_match(pattern: &str, name: &str) -> bool {
     let p = pattern.to_ascii_lowercase();
     let n = name.to_ascii_lowercase();
     match p.split_once('*') {

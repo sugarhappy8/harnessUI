@@ -12,9 +12,12 @@ Usage:
                                                   # for Intel, and join them into universal files
                                                   # in src-tauri/binaries/
   python3 scripts/fetch_llama.py check-macos-app <App.app>
-                                                  # macOS: every program in a built app bundle has
-                                                  # both processor parts and links system libraries only
-  python3 scripts/fetch_llama.py verify-packs     # check every pack URL answers with the pinned size
+                                                  # macOS: every program in a built app bundle (with
+                                                  # llama.cpp's sidecars and the Studio engine's
+                                                  # sd-cli) has both processor parts and links
+                                                  # system libraries only
+  python3 scripts/fetch_llama.py verify-packs     # check every pack URL of llama.lock.json and
+                                                  # sd.lock.json answers with the pinned size
   python3 scripts/fetch_llama.py linux            # Linux (development only): unpack the CPU build
                                                   # into .cache/llama-linux/ and print the directory
 
@@ -39,6 +42,9 @@ from typing import Sequence
 
 ROOT = Path(__file__).resolve().parent.parent
 LOCK = json.loads((ROOT / "llama.lock.json").read_text(encoding="utf-8"))
+# The Studio engine's lock (scripts/fetch_sd.py builds and checks it). Read here too: its
+# sidecar belongs in the app bundle and its pack is verified with llama.cpp's.
+SD_LOCK = json.loads((ROOT / "sd.lock.json").read_text(encoding="utf-8"))
 CACHE = Path(os.environ.get("LLAMA_FETCH_CACHE", ROOT / ".cache" / "llama"))
 USER_AGENT = "app-build-script/1"
 
@@ -61,10 +67,12 @@ GITHUB = "https://github.com/"
 LUNARG = "https://sdk.lunarg.com/"
 
 
-def download(entry: dict, allowed: tuple[str, ...] = (GITHUB,)) -> Path:
-    """Download one lock-file entry into the cache and verify size and SHA-256."""
-    CACHE.mkdir(parents=True, exist_ok=True)
-    dest = CACHE / entry["name"]
+def download(entry: dict, allowed: tuple[str, ...] = (GITHUB,), cache: Path | None = None) -> Path:
+    """Download one lock-file entry into the cache (CACHE unless `cache` is given) and
+    verify size and SHA-256."""
+    cache = CACHE if cache is None else cache
+    cache.mkdir(parents=True, exist_ok=True)
+    dest = cache / entry["name"]
     if dest.exists() and dest.stat().st_size == entry["size"] and sha256_of(dest) == entry["sha256"]:
         log(f"cached: {entry['name']}")
         return dest
@@ -181,9 +189,9 @@ def windows() -> None:
     log(f"windows runtime ready: {target} ({len(list(target.iterdir()))} files, {total / 1e6:.1f} MB)")
 
 
-def run(cmd: list[str], cwd: Path | None = None) -> None:
+def run(cmd: list[str], cwd: Path | None = None, env: dict[str, str] | None = None) -> None:
     log("$ " + " ".join(cmd))
-    subprocess.run(cmd, cwd=cwd, check=True)
+    subprocess.run(cmd, cwd=cwd, env=env, check=True)
 
 
 # macOS: one build per processor, joined into universal files (ARCHITECTURE.md 7.1).
@@ -209,17 +217,18 @@ def sidecar_name(program: str, triple: str) -> str:
     return f"{program}-{triple}"
 
 
-def macos_plan(lock: dict) -> dict:
+def macos_plan(lock: dict, pin_key: str = "llama_cpp") -> dict:
     """What to build on macOS, from the lock file's two macOS entries.
 
-    Both must build the same programs from the pinned commit, as static binaries for
+    Both must build the same programs from the commit pinned in `lock[pin_key]`
+    (`llama_cpp` in llama.lock.json, `sd_cpp` in sd.lock.json), as static binaries for
     macOS 13.3, each for its own processor.
     """
     slices = []
     for platform_key, arch, triple in MACOS_SLICES:
         spec = (lock["installer"].get(platform_key) or {}).get("build_from_source")
         if not spec:
-            raise SystemExit(f"llama.lock.json has no build_from_source for {platform_key}")
+            raise SystemExit(f"the lock file has no build_from_source for {platform_key}")
         flags = list(spec["cmake_flags"])
         arch_flags = [f for f in flags if f.startswith("-DCMAKE_OSX_ARCHITECTURES=")]
         if arch_flags != [f"-DCMAKE_OSX_ARCHITECTURES={arch}"]:
@@ -236,8 +245,8 @@ def macos_plan(lock: dict) -> dict:
         for key in ("git", "commit", "targets"):
             if other[key] != first[key]:
                 raise SystemExit(f"{other['platform']} and {first['platform']} differ in {key}")
-    if first["commit"] != lock["llama_cpp"]["commit"]:
-        raise SystemExit("the macOS build commit is not the pinned llama.cpp commit")
+    if first["commit"] != lock[pin_key]["commit"]:
+        raise SystemExit(f"the macOS build commit is not the pinned {pin_key} commit")
     if not first["targets"]:
         raise SystemExit("the macOS build has no targets")
     return {"git": first["git"], "commit": first["commit"], "targets": first["targets"], "slices": slices}
@@ -386,15 +395,17 @@ def macos() -> None:
 
 
 def check_macos_app(app: Path) -> None:
-    """Every program in a built universal app bundle (the app itself and the llama.cpp
-    sidecars) must have both processor parts and link only system libraries: libgit2's
-    OpenSSL must be built in, never loaded from Homebrew (ARCHITECTURE.md 9.3)."""
+    """Every program in a built universal app bundle (the app itself, the llama.cpp
+    sidecars and the Studio engine's sd-cli) must have both processor parts and link only
+    system libraries: libgit2's OpenSSL must be built in, never loaded from Homebrew
+    (ARCHITECTURE.md 9.3)."""
     programs = sorted(p for p in (app / "Contents" / "MacOS").iterdir() if p.is_file())
     names = [p.name for p in programs]
-    for sidecar in LOCK["installer"][MACOS_SLICES[0][0]]["build_from_source"]["targets"]:
-        if sidecar not in names:
-            raise SystemExit(f"{app.name} does not contain {sidecar}")
-    if len(programs) < 3:
+    for lock in (LOCK, SD_LOCK):
+        for sidecar in lock["installer"][MACOS_SLICES[0][0]]["build_from_source"]["targets"]:
+            if sidecar not in names:
+                raise SystemExit(f"{app.name} does not contain {sidecar}")
+    if len(programs) < 4:
         raise SystemExit(f"{app.name} should contain the app and its sidecars, found {names}")
     for program in programs:
         minimum = check_macos_linkage(program, MACOS_ARCHS)
@@ -423,8 +434,9 @@ def linux() -> None:
     print(out)
 
 
-def verify_packs() -> None:
-    for pack in LOCK["packs"]:
+def verify_pack_files(lock: dict) -> None:
+    """Every file of every pack in `lock` answers a HEAD request with its pinned size."""
+    for pack in lock["packs"]:
         for entry in pack["files"]:
             req = urllib.request.Request(entry["url"], method="HEAD", headers={"User-Agent": USER_AGENT})
             with urllib.request.urlopen(req, timeout=60) as resp:
@@ -433,6 +445,11 @@ def verify_packs() -> None:
             log(f"{pack['id']}: {entry['name']}: {status}")
             if size != entry["size"]:
                 raise SystemExit(1)
+
+
+def verify_packs() -> None:
+    for lock in (LOCK, SD_LOCK):
+        verify_pack_files(lock)
 
 
 def main() -> None:

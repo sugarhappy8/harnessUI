@@ -65,6 +65,9 @@ jobs:
       - run: python3 scripts/notices.py --check
       # The macOS llama.cpp build needs a Mac; its plan, file names and checks do not.
       - run: python3 scripts/fetch_llama_test.py
+      # The same for the Studio engine (sd.lock.json): its Mac build, its Linux development
+      # build and the Windows pack check, with stand-ins for the tools.
+      - run: python3 scripts/fetch_sd_test.py
       # Reverse engineering: the pinned downloads (reverse.lock.json) and their fixtures,
       # offline. The real rea runs in reverse.yml.
       - run: python3 -I scripts/pin_reverse.py --check && python3 -I scripts/pin_reverse_test.py
@@ -77,17 +80,24 @@ jobs:
       # files they describe, and no TODO(lead) marker left in it.
       - run: python3 -I scripts/docs_test.py
       - run: cargo clippy --workspace --all-targets -- -D warnings
-      - name: Cache llama.cpp and the test model
+      - name: Cache llama.cpp, the Studio engine and the test model
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
             .cache/llama
             .cache/models
-          key: contract-linux-${{ hashFiles('llama.lock.json', 'scripts/fetch_test_model.py') }}
-      - name: Fetch the Linux llama-server and the test model
+            .cache/sd
+            .cache/sd-linux
+          key: contract-linux-${{ hashFiles('llama.lock.json', 'sd.lock.json', 'scripts/fetch_sd.py', 'scripts/fetch_test_model.py') }}
+      # The Studio engine's Linux sd-cli is built from the pinned commit, on the processor
+      # only (the upstream Linux build needs a newer glibc than the runner has); its build
+      # folder is cached above, so a cached run only checks it is up to date.
+      - name: Fetch the Linux llama-server, build the Linux sd-cli, fetch the test model
         run: |
           python3 scripts/fetch_llama.py linux
           echo "LLAMA_SERVER_BIN=$PWD/.cache/llama-linux/llama-server" >> "$GITHUB_ENV"
+          python3 scripts/fetch_sd.py linux
+          echo "SD_CLI_BIN=$PWD/.cache/sd-linux/sd-cli" >> "$GITHUB_ENV"
           echo "TEST_GGUF=$(python3 scripts/fetch_test_model.py .cache/models)" >> "$GITHUB_ENV"
       - name: Workspace tests (with llama-server contract tests)
         # Every crate's tests run even when one crate fails, so one run shows everything
@@ -172,10 +182,16 @@ jobs:
             .cache/llama
             .cache/models
             src-tauri/binaries
-          key: llama-${{ matrix.target }}-${{ hashFiles('llama.lock.json', 'scripts/fetch_llama.py', 'scripts/fetch_test_model.py') }}
+          key: llama-${{ matrix.target }}-${{ hashFiles('llama.lock.json', 'sd.lock.json', 'scripts/fetch_llama.py', 'scripts/fetch_sd.py', 'scripts/fetch_test_model.py') }}
       - name: llama.cpp runtime (Windows, pinned Vulkan + CPU build)
         if: runner.os == 'Windows'
         run: python scripts/fetch_llama.py windows
+      # The Studio engine is not in the installer: the app downloads it with the first local
+      # model. This unpacks the pinned pack as the app does, with the Visual C++ runtime from
+      # the llama.cpp folder just made, and runs sd-cli.exe with a bare PATH.
+      - name: Studio engine pack starts (Windows)
+        if: runner.os == 'Windows'
+        run: python scripts/fetch_sd.py windows-check
       # The reported bug: a PC whose graphics driver came without the Vulkan runtime
       # (vulkan-1.dll). llama.cpp's Vulkan library then cannot be loaded and no GPU is
       # listed, without any message. The app puts its own copy at the END of llama-server's
@@ -203,6 +219,9 @@ jobs:
       - name: llama.cpp runtime (macOS, built from the pinned commit for both processors)
         if: runner.os == 'macOS' && steps.llama-cache.outputs.cache-hit != 'true'
         run: python3 scripts/fetch_llama.py macos
+      - name: Studio engine (macOS, sd-cli built from the pinned commit for both processors)
+        if: runner.os == 'macOS' && steps.llama-cache.outputs.cache-hit != 'true'
+        run: python3 scripts/fetch_sd.py macos
       - name: Contract-test environment
         shell: bash
         run: |
@@ -227,10 +246,11 @@ jobs:
         run: cargo test --workspace --no-fail-fast --target ${{ matrix.test-target }}
       - name: Build the app
         run: npx tauri build ${{ matrix.args }}
-      # Every program in the bundle (the app and the two llama.cpp sidecars) must contain
-      # both processors, or the app would not start on one kind of Mac. libgit2's HTTPS
-      # links OpenSSL on macOS: it must be built in, never loaded from Homebrew or anywhere
-      # else outside the system, on either processor (ARCHITECTURE.md 9.3, build note).
+      # Every program in the bundle (the app, the two llama.cpp sidecars and the Studio
+      # engine's sd-cli) must contain both processors, or the app would not start on one
+      # kind of Mac. libgit2's HTTPS links OpenSSL on macOS: it must be built in, never
+      # loaded from Homebrew or anywhere else outside the system, on either processor
+      # (ARCHITECTURE.md 9.3, build note).
       - name: App bundle is universal and links system libraries only (macOS)
         if: runner.os == 'macOS'
         shell: bash
@@ -275,8 +295,8 @@ jobs:
 
   # The Apple silicon runner above cannot run the Intel half of the disk image. This job
   # opens the same disk image on a Mac with an Intel processor and runs it there: the
-  # app's own binary, the sidecars, and a short generation on the CPU, which is what Auto
-  # uses on these Macs (ARCHITECTURE.md 7.2).
+  # app's own binary, the sidecars (sd-cli included), and a short generation on the CPU,
+  # which is what Auto uses on these Macs (ARCHITECTURE.md 7.2).
   intel-mac:
     name: Intel Mac smoke test
     needs: build

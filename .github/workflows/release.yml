@@ -143,13 +143,18 @@ jobs:
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: .cache/llama
-          key: release-llama-${{ matrix.target }}-${{ hashFiles('llama.lock.json', 'scripts/fetch_llama.py') }}
+          key: release-llama-${{ matrix.target }}-${{ hashFiles('llama.lock.json', 'sd.lock.json', 'scripts/fetch_llama.py', 'scripts/fetch_sd.py') }}
       - name: llama.cpp runtime (Windows, pinned Vulkan + CPU build)
         if: runner.os == 'Windows'
         run: python scripts/fetch_llama.py windows
       - name: llama.cpp runtime (macOS, built from the pinned commit for both processors)
         if: runner.os == 'macOS'
         run: python3 scripts/fetch_llama.py macos
+      # The Studio engine's sd-cli (sd.lock.json), built the same way and bundled beside
+      # llama-server. On Windows the app downloads the engine with the first local model.
+      - name: Studio engine (macOS, sd-cli built from the pinned commit for both processors)
+        if: runner.os == 'macOS'
+        run: python3 scripts/fetch_sd.py macos
       # The updater key is always set (the keys job checked it). Apple's signing secrets
       # are placeholders until the owner adds them (README, "Signing"). An unset secret
       # arrives as an empty string, which the Tauri CLI would treat as "set" and then fail

@@ -5,7 +5,8 @@
 # This opens the disk image and checks, on real Intel hardware:
 #   1. every program in the app is universal;
 #   2. the app's own binary starts (as its PDF worker, which exits before any window);
-#   3. llama-server and llama-fit-params start, and llama-server lists its devices;
+#   3. llama-server, llama-fit-params and the Studio engine's sd-cli start, and
+#      llama-server and sd-cli list their devices;
 #   4. llama-server loads a small model on the CPU and generates a few tokens, the way
 #      Auto runs models on an Intel Mac (ARCHITECTURE.md 7.2).
 #
@@ -59,10 +60,12 @@ if [ "$code" -ne 2 ]; then
 fi
 echo "$main started and exited as expected."
 
-echo "== 3. The llama.cpp sidecars start"
+echo "== 3. The llama.cpp sidecars and the Studio engine start"
 "$programs/llama-server" --version
 "$programs/llama-fit-params" --version
 "$programs/llama-server" --list-devices
+"$programs/sd-cli" --version
+"$programs/sd-cli" --list-devices
 
 echo "== 4. A short generation on the CPU"
 port=18439
