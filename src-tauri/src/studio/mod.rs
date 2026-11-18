@@ -10,8 +10,12 @@
 //! - [`errors`]: Studio's backend wording.
 //! - [`manager`]: the runs: starting them under the spending rules, their queues, cancel,
 //!   and their audit rows; [`deps`] holds what the manager reaches the world through.
+//! - [`commands`]: the read commands: the saved model lists (and fetching them, or a
+//!   picture's price, when asked), the estimate and the exact request, the runs, a result's
+//!   bytes, today's spending and the preferences.
 
 pub mod catalog;
+pub mod commands;
 pub mod deps;
 pub mod errors;
 pub mod gallery;

@@ -517,6 +517,17 @@ impl StudioManager {
         self.inner.gallery()
     }
 
+    /// Settings → Studio as the manager holds them now (what new runs read).
+    pub fn prefs(&self) -> StudioPrefs {
+        self.inner.prefs()
+    }
+
+    /// What the manager works with: the store, the endpoints, the clock. The read commands
+    /// use the same ones as the runs.
+    pub fn deps(&self) -> &StudioDeps {
+        &self.inner.deps
+    }
+
     /// What a run of `req` would cost and meet (confirmation, the daily limit, settings the
     /// model refuses), without recording or sending anything.
     pub async fn estimate(&self, req: &StartRequest) -> AppResult<EstimateDto> {
@@ -2195,7 +2206,8 @@ fn media_kind(kind: store::CreationKind) -> MediaKind {
     }
 }
 
-fn creation_kind(kind: MediaKind) -> store::CreationKind {
+/// A media kind as the store names it.
+pub(crate) fn creation_kind(kind: MediaKind) -> store::CreationKind {
     match kind {
         MediaKind::Image => store::CreationKind::Image,
         MediaKind::Video => store::CreationKind::Video,

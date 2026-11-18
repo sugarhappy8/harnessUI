@@ -172,6 +172,21 @@ pub fn no_key(name: &str) -> AppError {
     )
 }
 
+/// Fetching an endpoint's model lists or a picture's price got no answer: the connection
+/// never opened, timed out or was cut. Nothing is charged for either, and the lists saved
+/// before are kept.
+pub fn not_fetched(company: Company) -> AppError {
+    AppError::new(
+        "studio_not_fetched",
+        format!(
+            "{} could not be reached, or did not answer in time.",
+            name(company)
+        ),
+        "Check your internet connection, then try again.",
+        String::new(),
+    )
+}
+
 /// The request's kind is not the model's: a video model asked for pictures, or the other way.
 pub fn wrong_kind(model_kind: MediaKind) -> AppError {
     let message = match model_kind {
@@ -510,6 +525,30 @@ pub fn download_failed(company: Company) -> AppError {
     )
 }
 
+// ---- showing results --------------------------------------------------------------------------
+
+/// A result over [`super::commands::SHOW_CAP`] is not played in the viewer: it would sit whole in
+/// memory four times over (in the app, the copy to the webview, its buffer and its blob).
+/// Only a video can be that large.
+pub fn too_big_to_show() -> AppError {
+    AppError::new(
+        "studio_too_big_to_show",
+        "This video is too big to play here.",
+        "Use Show in folder to open it with your video player.",
+        String::new(),
+    )
+}
+
+/// The name asked for is not an added picture's (a SHA-256), so nothing is looked up.
+pub fn bad_ref_name() -> AppError {
+    AppError::new(
+        "bad_request",
+        "That is not the name of an added picture.",
+        "Add the picture again.",
+        String::new(),
+    )
+}
+
 /// What a company's (or the Studio engine's) failure says, in plain words, with the
 /// company's own message, code and request id in the details.
 pub fn from_failure(company: Company, f: &MediaFailure) -> AppError {
@@ -769,6 +808,9 @@ mod tests {
             numbered_folder(),
             closed_before_its_turn(Company::OpenRouter),
             nothing_to_fetch(),
+            too_big_to_show(),
+            not_fetched(Company::OpenRouter),
+            bad_ref_name(),
         ];
         all.extend(
             every_fetch_error()
@@ -883,7 +925,7 @@ mod tests {
     }
 
     #[test]
-    fn every_studio_error_has_a_code_a_message_and_a_next_step() {
+    fn studio_errors_have_four_parts() {
         for e in every_constructor() {
             assert!(
                 !e.code.is_empty() && !e.message.is_empty() && !e.next_step.is_empty(),

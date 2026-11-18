@@ -1,6 +1,8 @@
 //! Data sent to the webview. Field names are camelCase and match src/lib/types.ts.
 
-use agent::media::{MediaKind, RefRole, Routing};
+use agent::media::{
+    Company, EndpointCompany, MediaKind, MediaModel, ParamSpec, Price, RefRole, Routing,
+};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
@@ -959,6 +961,163 @@ pub struct UsageDto {
     pub pictures: u64,
     /// The videos kept.
     pub videos: u64,
+}
+
+// ---- Studio models and the gallery's pages (0.1.0) --------------------------------------------
+
+/// A model's price as the picker hints it: per what, and the lowest and highest price of one.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PriceHintDto {
+    /// `image`, `second`, `token`, `unknown` or `free`.
+    pub unit: String,
+    /// The lowest price of one picture or one second, in US dollars, when there is a number.
+    pub low: Option<f64>,
+    /// The highest price of one picture or one second, in US dollars, when there is a number.
+    pub high: Option<f64>,
+}
+
+/// A picture or video model as Studio's picker shows it.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MediaModelDto {
+    /// The id sent to the company.
+    pub id: String,
+    /// The name shown.
+    pub display_name: String,
+    /// The maker and the model's name without its version.
+    pub family: String,
+    /// Pictures or video.
+    pub kind: MediaKind,
+    /// Whether the model takes added pictures.
+    pub accepts_images: bool,
+    /// The controls, simple ones first.
+    pub params: Vec<ParamSpec>,
+    /// Its price, as the picker hints it.
+    pub price: PriceHintDto,
+    /// Whether the price has a number (a run on this computer is free, which counts).
+    pub price_known: bool,
+    /// When the price was fetched. `None` on an OpenRouter picture means "price shown when
+    /// picked"; a time with `price_known` false means "price unknown".
+    pub price_fetched_at: Option<i64>,
+    /// The companies that run an OpenRouter picture model, once its price was fetched.
+    pub companies: Vec<EndpointCompany>,
+    /// Plain sentences shown with the model.
+    pub notes: Vec<String>,
+    /// Why Studio cannot use the model, when it cannot.
+    pub usable: Option<String>,
+    /// When the company added the model, in seconds since 1970.
+    pub created: Option<i64>,
+}
+
+/// An endpoint that makes pictures or video, with the models of its saved lists.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StudioEndpointDto {
+    /// The endpoint.
+    pub provider_id: i64,
+    /// Its name as shown.
+    pub name: String,
+    /// The company behind it.
+    pub company: Company,
+    /// The host its requests go to, for example `openrouter.ai`.
+    pub host: String,
+    /// Whether the endpoint is on the internet.
+    pub cloud: bool,
+    /// Whether it may have a key (its models are greyed out without one).
+    pub has_key: bool,
+    /// When its lists were fetched; `None` when none are saved ("Get the list").
+    pub fetched_at: Option<i64>,
+    /// The models of its saved lists: pictures, then videos.
+    pub models: Vec<MediaModelDto>,
+}
+
+/// Every endpoint that makes pictures or video, with its saved models (`studio_models`).
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StudioModelsDto {
+    /// The endpoints, in the order of Settings → Endpoints.
+    pub endpoints: Vec<StudioEndpointDto>,
+}
+
+/// `model` as the picker shows it, with when its price was fetched. A model on this
+/// computer (`Price::Free`) has the unit `free`, a range of 0 to 0 and a known price.
+pub fn media_model_dto(model: &MediaModel, price_fetched_at: Option<i64>) -> MediaModelDto {
+    let unit = match model.price {
+        Price::PerImage(_) => "image",
+        Price::PerSecond(_) => "second",
+        Price::PerToken => "token",
+        Price::Unknown => "unknown",
+        Price::Free => "free",
+    };
+    let range = model.price.range();
+    MediaModelDto {
+        id: model.id.clone(),
+        display_name: model.display_name.clone(),
+        family: model.family.clone(),
+        kind: model.kind,
+        accepts_images: model.accepts_images,
+        params: model.params.clone(),
+        price: PriceHintDto {
+            unit: unit.to_owned(),
+            low: range.map(|(low, _)| low),
+            high: range.map(|(_, high)| high),
+        },
+        price_known: range.is_some(),
+        price_fetched_at,
+        companies: model.companies.clone(),
+        notes: model.notes.clone(),
+        usable: model.usable.clone(),
+        created: model.created,
+    }
+}
+
+/// Which runs the gallery shows (`studio_runs`). Every field left out does not filter.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct RunsFilter {
+    /// Only pictures, or only videos.
+    pub kind: Option<MediaKind>,
+    /// Only runs with a starred result.
+    pub starred: bool,
+    /// Only runs whose prompt holds this text (any case); blank does not filter.
+    pub text: String,
+    /// Only runs of this model id.
+    pub model: Option<String>,
+    /// Only runs made at or after this Unix ms.
+    pub since: Option<i64>,
+    /// Only runs made before this Unix ms.
+    pub until: Option<i64>,
+}
+
+/// A place in the gallery's order (newest first, then by id): the last run of a page, so the
+/// next page starts just after it. Both are needed, as runs can share a creation time.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RunsCursorDto {
+    /// The run's `created_at`.
+    pub created_at: i64,
+    /// The run's id.
+    pub id: String,
+}
+
+impl From<RunsCursorDto> for store::RunCursor {
+    fn from(cursor: RunsCursorDto) -> Self {
+        Self {
+            created_at: cursor.created_at,
+            id: cursor.id,
+        }
+    }
+}
+
+/// One page of the gallery's runs.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RunsPage {
+    /// The runs, newest first.
+    pub runs: Vec<RunDto>,
+    /// Where the next page starts: the last run's place when the page is full, else `None`.
+    pub next: Option<RunsCursorDto>,
 }
 
 #[cfg(test)]
