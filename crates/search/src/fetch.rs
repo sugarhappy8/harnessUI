@@ -349,6 +349,13 @@ impl Fetcher {
             .collect())
     }
 
+    /// How long connecting may take: the time limit, but never more than
+    /// [`DEFAULT_TIMEOUT`], so a fetcher given minutes for a large file still gives up on a
+    /// host that does not answer after 10 s.
+    fn connect_limit(&self) -> Duration {
+        self.timeout.min(DEFAULT_TIMEOUT)
+    }
+
     /// The HTTP client of one hop: it can reach the checked addresses of this one host and
     /// nothing else, follows no redirect, uses no proxy and keeps nothing between requests.
     fn client_for(&self, url: &Url, checked: &[SocketAddr]) -> Result<reqwest::Client, FetchError> {
@@ -366,7 +373,7 @@ impl Fetcher {
                 addrs: checked.to_vec(),
             }))
             .referer(false)
-            .connect_timeout(self.timeout)
+            .connect_timeout(self.connect_limit())
             .timeout(self.timeout)
             .pool_max_idle_per_host(0)
             .build()
@@ -914,5 +921,15 @@ mod tests {
                 .to_string()
                 .contains("text/html")
         );
+    }
+
+    #[test]
+    fn a_long_time_limit_still_connects_within_10_seconds() {
+        // Studio fetches a result file for up to 10 minutes; connecting keeps its 10 s.
+        let long = Fetcher::new("test").with_timeout(Duration::from_secs(600));
+        assert_eq!(long.connect_limit(), DEFAULT_TIMEOUT);
+        assert_eq!(DEFAULT_TIMEOUT, Duration::from_secs(10));
+        let short = Fetcher::new("test").with_timeout(Duration::from_secs(3));
+        assert_eq!(short.connect_limit(), Duration::from_secs(3));
     }
 }

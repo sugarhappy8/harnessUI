@@ -1,11 +1,14 @@
-//! The Studio manager's tests (Task A13): starting runs under the spending rules, the queue,
-//! pictures, cancel and the audit row.
+//! The Studio manager's tests: starting runs under the spending rules, the queue, pictures,
+//! cancel and the audit row (Task A13); video jobs, restarts, *Get it anyway* and shutdown
+//! (Task A14).
 //!
 //! The harness keeps an OpenRouter endpoint whose saved lists are the recorded fixtures (with
 //! every recorded `/endpoints` answer, so an OpenRouter picture has a price), plus test models
 //! priced at fixed amounts ([`TEST_PICTURE_PRICES`], [`TEST_VIDEO_PRICES`]), and an OpenAI
 //! endpoint whose GPT Image 2.6 entry states no price per picture. Every request goes to a
-//! [`FakeProvider`] that counts its starts and answers as scripted.
+//! [`FakeProvider`] that counts its starts, checks and downloads and answers as scripted; a
+//! second one stands in for the company after a restart. Video jobs are checked every few
+//! milliseconds ([`fast_poll`]).
 
 use std::collections::{HashMap, VecDeque};
 use std::path::{Path, PathBuf};
@@ -25,15 +28,18 @@ use serde_json::{Map, Value, json};
 use store::AuditDecision;
 use url::Url;
 
+use search::FetchError;
+use search::netguard::AddressClass;
+
 use super::catalog::{CachedCatalog, CachedPrice, cache_key};
 use super::deps::{Clock, Endpoint, ForeignFetch, ProviderSource, StudioSink};
-use super::gallery::GalleryError;
 use super::manager::{
-    PICTURES_AT_ONCE, StudioDeps, StudioManager, place_extra_or_refuse, spend_row,
+    PICTURES_AT_ONCE, PollPlan, StudioDeps, StudioManager, VIDEOS_AT_ONCE, place_extra_or_refuse,
+    poll_delay, spend_row,
 };
 use super::prefs::{RunTarget, StudioPrefs};
 use super::spend::{Charge, ConfirmReason, UNKNOWN_PRICE_RESERVE_USD, day_start_in};
-use super::test_support::{Scratch, png};
+use super::test_support::{Scratch, mp4, png};
 use crate::attachments::PictureWorker;
 use crate::dto::{RunDto, StartRequest};
 use crate::error::{AppError, AppResult};
@@ -87,9 +93,31 @@ enum Answer {
     Fail(MediaError),
 }
 
-/// A media company that counts its starts, answers as scripted (by default two PNG pictures
-/// costing $0.04 for a picture, a job `vid_1` for a video) and can hold each start until
-/// released.
+/// What [`FakeProvider::download`] answers; by default it saves an MP4 file.
+enum Download {
+    /// The result is only at this link on the company's file host.
+    Elsewhere(Url),
+    /// The download failed.
+    Fail(MediaError),
+}
+
+/// What a check answers.
+type CheckAnswer = Result<JobState, MediaError>;
+
+/// One check the fake answered.
+#[derive(Debug, Clone)]
+struct Check {
+    /// The job it asked about.
+    remote_id: String,
+    at: Instant,
+    /// The status and remote id of the run that held that job when it was asked; `None` when
+    /// no run held it.
+    holder: Option<(String, Option<String>)>,
+}
+
+/// A media company that counts its starts, checks and downloads and answers as scripted (by
+/// default two PNG pictures costing $0.04 for a picture, a job `vid_1` for a video, `pending`
+/// to a check, an MP4 file to a download) and can hold each start until released.
 struct FakeProvider {
     starts: AtomicUsize,
     script: Mutex<VecDeque<Answer>>,
@@ -99,6 +127,12 @@ struct FakeProvider {
     /// The run's row as each start found it (status, started_at).
     seen: Mutex<Vec<(String, Option<i64>)>>,
     store: OnceLock<store::Store>,
+    /// The answers to the next checks, then `check_default` for every one after them.
+    checks: Mutex<VecDeque<CheckAnswer>>,
+    check_default: Mutex<CheckAnswer>,
+    checked: Mutex<Vec<Check>>,
+    downloads: Mutex<VecDeque<Download>>,
+    downloaded: AtomicUsize,
 }
 
 impl FakeProvider {
@@ -111,16 +145,51 @@ impl FakeProvider {
             requests: Mutex::new(Vec::new()),
             seen: Mutex::new(Vec::new()),
             store: OnceLock::new(),
+            checks: Mutex::new(VecDeque::new()),
+            check_default: Mutex::new(Ok(JobState::Pending)),
+            checked: Mutex::new(Vec::new()),
+            downloads: Mutex::new(VecDeque::new()),
+            downloaded: AtomicUsize::new(0),
         }
+    }
+
+    /// A company whose every check says the job is done ([`done_job`]).
+    fn done_on_first_check() -> Self {
+        let fake = Self::new();
+        fake.check_from_now(Ok(done_job()));
+        fake
     }
 
     fn starts(&self) -> usize {
         self.starts.load(Ordering::SeqCst)
     }
 
+    fn checks(&self) -> usize {
+        self.checked.lock().unwrap().len()
+    }
+
+    fn downloads(&self) -> usize {
+        self.downloaded.load(Ordering::SeqCst)
+    }
+
     /// The answer to the next start not yet scripted.
     fn answer(&self, answer: Answer) {
         self.script.lock().unwrap().push_back(answer);
+    }
+
+    /// The answer to the next check not yet scripted.
+    fn answer_check(&self, answer: CheckAnswer) {
+        self.checks.lock().unwrap().push_back(answer);
+    }
+
+    /// The answer to every check once the scripted ones are used.
+    fn check_from_now(&self, answer: CheckAnswer) {
+        *self.check_default.lock().unwrap() = answer;
+    }
+
+    /// The answer to the next download not yet scripted.
+    fn answer_download(&self, answer: Download) {
+        self.downloads.lock().unwrap().push_back(answer);
     }
 
     /// From now on each start waits for [`Self::release_all`].
@@ -242,8 +311,25 @@ impl MediaProvider for FakeProvider {
         }
     }
 
-    async fn check(&self, _remote_id: &str) -> Result<JobState, MediaError> {
-        unreachable!("video jobs are checked from Task A14")
+    async fn check(&self, remote_id: &str) -> Result<JobState, MediaError> {
+        let at = Instant::now();
+        let holder = match self.store.get() {
+            Some(store) => store
+                .live_creation_runs()
+                .await
+                .unwrap()
+                .into_iter()
+                .find(|run| run.remote_id.as_deref() == Some(remote_id))
+                .map(|run| (run.status.as_str().to_owned(), run.remote_id)),
+            None => None,
+        };
+        self.checked.lock().unwrap().push(Check {
+            remote_id: remote_id.to_owned(),
+            at,
+            holder,
+        });
+        let scripted = self.checks.lock().unwrap().pop_front();
+        scripted.unwrap_or_else(|| self.check_default.lock().unwrap().clone())
     }
 
     async fn download(
@@ -251,10 +337,38 @@ impl MediaProvider for FakeProvider {
         _remote_id: &str,
         _job: &JobDone,
         _index: usize,
-        _dest: &Path,
+        dest: &Path,
     ) -> Result<Fetched, MediaError> {
-        unreachable!("video jobs are downloaded from Task A14")
+        self.downloaded.fetch_add(1, Ordering::SeqCst);
+        match self.downloads.lock().unwrap().pop_front() {
+            Some(Download::Elsewhere(url)) => Ok(Fetched::Elsewhere(url)),
+            Some(Download::Fail(err)) => Err(err),
+            None => {
+                let bytes = mp4();
+                std::fs::write(dest, &bytes).unwrap();
+                Ok(Fetched::Saved(Saved {
+                    path: dest.to_owned(),
+                    mime: "video/mp4".into(),
+                    size_bytes: bytes.len() as u64,
+                    width: Some(1280),
+                    height: Some(720),
+                    duration_ms: Some(4_000),
+                }))
+            }
+        }
     }
+}
+
+/// A finished video job with one result, which cost $0.36.
+fn done_job() -> JobState {
+    JobState::Done(JobDone {
+        outputs: 1,
+        signed: Vec::new(),
+        cost: Some(Cost {
+            usd: 0.36,
+            reported: true,
+        }),
+    })
 }
 
 /// The endpoints the harness made, each run by the one [`FakeProvider`].
@@ -273,6 +387,10 @@ impl ProviderSource for FakeSource {
             .ok_or_else(super::errors::no_endpoint)?;
         Ok((self.provider.clone(), endpoint))
     }
+
+    async fn company(&self, id: store::ProviderId) -> Option<Company> {
+        self.endpoints.get(&id.0).map(|endpoint| endpoint.company)
+    }
 }
 
 /// Keeps every progress event.
@@ -287,18 +405,26 @@ impl StudioSink for FakeSink {
     }
 }
 
-/// No result in these tests comes from a company's file host.
-struct FakeFetch;
+/// A company's file host: it notes each link it is asked for (with the cap and where the file
+/// goes) and saves an MP4 file there, or fails as scripted.
+#[derive(Default)]
+struct FakeFetch {
+    seen: Mutex<Vec<(Url, u64, PathBuf)>>,
+    fail: Mutex<Option<FetchError>>,
+}
 
 #[async_trait]
 impl ForeignFetch for FakeFetch {
-    async fn fetch_to_file(
-        &self,
-        _url: &Url,
-        _cap: u64,
-        _dest: &Path,
-    ) -> Result<String, GalleryError> {
-        unreachable!("no result link in these tests")
+    async fn fetch_to_file(&self, url: &Url, cap: u64, dest: &Path) -> Result<String, FetchError> {
+        self.seen
+            .lock()
+            .unwrap()
+            .push((url.clone(), cap, dest.to_owned()));
+        if let Some(err) = self.fail.lock().unwrap().take() {
+            return Err(err);
+        }
+        std::fs::write(dest, mp4()).unwrap();
+        Ok("video/mp4".into())
     }
 }
 
@@ -320,12 +446,19 @@ impl Clock for FixedClock {
 struct H {
     manager: StudioManager,
     provider: Arc<FakeProvider>,
+    /// The company as the manager started after a restart finds it: every check says done.
+    provider2: Arc<FakeProvider>,
     sink: Arc<FakeSink>,
+    fetch: Arc<FakeFetch>,
     store: store::Store,
     gallery_root: PathBuf,
     openrouter: i64,
     openai: i64,
     now: i64,
+    endpoints: HashMap<i64, Endpoint>,
+    poll: PollPlan,
+    /// Every manager the test made, shut down when it ends.
+    managers: Mutex<Vec<StudioManager>>,
     _scratch: Scratch,
 }
 
@@ -333,6 +466,30 @@ impl Drop for H {
     fn drop(&mut self) {
         // Starts still held would wait for ever.
         self.provider.release_all();
+        self.provider2.release_all();
+        // Video jobs are checked until their watch limit: every task stops before the
+        // gallery folder goes. The tasks run on the app's runtime, so this thread can wait.
+        let managers = std::mem::take(&mut *self.managers.lock().unwrap());
+        let _ = std::thread::spawn(move || {
+            tauri::async_runtime::block_on(async move {
+                for manager in managers {
+                    manager.shutdown().await;
+                }
+            });
+        })
+        .join();
+    }
+}
+
+/// Video jobs checked every 5 ms, for at most a minute.
+fn fast_poll() -> PollPlan {
+    let every = Duration::from_millis(5);
+    PollPlan {
+        first: every,
+        second: every,
+        third: every,
+        watch_limit: Duration::from_secs(60),
+        ..PollPlan::default()
     }
 }
 
@@ -420,6 +577,14 @@ async fn harness() -> H {
 }
 
 async fn harness_with(thumbs: Option<PictureWorker>) -> H {
+    build_harness(thumbs, fast_poll()).await
+}
+
+async fn harness_polling(poll: PollPlan) -> H {
+    build_harness(None, poll).await
+}
+
+async fn build_harness(thumbs: Option<PictureWorker>, poll: PollPlan) -> H {
     let store = store::Store::open_in_memory().unwrap();
     let now = noon_2026_11_17();
     let openrouter = add_endpoint(
@@ -454,60 +619,112 @@ async fn harness_with(thumbs: Option<PictureWorker>) -> H {
 
     let provider = Arc::new(FakeProvider::new());
     let _ = provider.store.set(store.clone());
+    let provider2 = Arc::new(FakeProvider::done_on_first_check());
+    let _ = provider2.store.set(store.clone());
     let endpoint = |id: i64, name: &str, host: &str, company| Endpoint {
         id: Some(store::ProviderId(id)),
         name: name.into(),
         host: host.into(),
         company,
     };
-    let source = FakeSource {
-        provider: provider.clone(),
-        endpoints: HashMap::from([
-            (
+    let endpoints = HashMap::from([
+        (
+            openrouter,
+            endpoint(
                 openrouter,
-                endpoint(
-                    openrouter,
-                    "My OpenRouter",
-                    "openrouter.ai",
-                    Company::OpenRouter,
-                ),
+                "My OpenRouter",
+                "openrouter.ai",
+                Company::OpenRouter,
             ),
-            (
-                openai,
-                endpoint(openai, "My OpenAI", "api.openai.com", Company::OpenAi),
-            ),
-        ]),
-    };
+        ),
+        (
+            openai,
+            endpoint(openai, "My OpenAI", "api.openai.com", Company::OpenAi),
+        ),
+    ]);
     let scratch = Scratch::new();
     let gallery_root = scratch.path().join("gallery");
     let sink = Arc::new(FakeSink::default());
-    let manager = StudioManager::new(
-        StudioDeps {
-            store: store.clone(),
-            providers: Arc::new(source),
-            sink: sink.clone(),
-            fetch: Arc::new(FakeFetch),
-            clock: Arc::new(FixedClock(now)),
-            default_gallery: gallery_root.clone(),
-            thumbs,
-            limits: MediaLimits::default(),
-        },
-        StudioPrefs::default(),
+    let fetch = Arc::new(FakeFetch::default());
+    let manager = make_manager(
+        &store,
+        &provider,
+        &endpoints,
+        &sink,
+        &fetch,
+        now,
+        &gallery_root,
+        thumbs,
+        poll,
     );
     H {
+        managers: Mutex::new(vec![manager.clone()]),
         manager,
         provider,
+        provider2,
         sink,
+        fetch,
         store,
         gallery_root,
         openrouter,
         openai,
         now,
+        endpoints,
+        poll,
         _scratch: scratch,
     }
 }
 
+#[allow(clippy::too_many_arguments)]
+fn make_manager(
+    store: &store::Store,
+    provider: &Arc<FakeProvider>,
+    endpoints: &HashMap<i64, Endpoint>,
+    sink: &Arc<FakeSink>,
+    fetch: &Arc<FakeFetch>,
+    now: i64,
+    gallery_root: &Path,
+    thumbs: Option<PictureWorker>,
+    poll: PollPlan,
+) -> StudioManager {
+    StudioManager::new(
+        StudioDeps {
+            store: store.clone(),
+            providers: Arc::new(FakeSource {
+                provider: provider.clone(),
+                endpoints: endpoints.clone(),
+            }),
+            sink: sink.clone(),
+            fetch: fetch.clone(),
+            clock: Arc::new(FixedClock(now)),
+            default_gallery: gallery_root.to_owned(),
+            thumbs,
+            limits: MediaLimits::default(),
+            poll,
+        },
+        StudioPrefs::default(),
+    )
+}
+
 impl H {
+    /// Another manager on the same store, gallery and webview, whose requests go to
+    /// `provider`: the app as it starts again after a restart.
+    fn manager_with(&self, provider: &Arc<FakeProvider>) -> StudioManager {
+        let manager = make_manager(
+            &self.store,
+            provider,
+            &self.endpoints,
+            &self.sink,
+            &self.fetch,
+            self.now,
+            &self.gallery_root,
+            None,
+            self.poll,
+        );
+        self.managers.lock().unwrap().push(manager.clone());
+        manager
+    }
+
     fn req(&self, target: i64, kind: MediaKind, model: &str, prompt: &str) -> StartRequest {
         StartRequest {
             client_token: uuid::Uuid::new_v4().to_string(),
@@ -586,12 +803,24 @@ impl H {
         self.manager.run_dto(&run).await
     }
 
-    /// The run once its status is `status` (at most 10 s).
+    /// The run once its status is `status` (at most 10 s). For a status a run ends with, also
+    /// once its task is gone, so its last event, audit row, sidecar and scratch folder are
+    /// done.
     async fn wait_status(&self, id: &str, status: &str) -> RunDto {
+        self.wait_status_in(&self.manager, id, status).await
+    }
+
+    /// [`Self::wait_status`] as `manager`, the one following the run, sees it.
+    async fn wait_status_in(&self, manager: &StudioManager, id: &str, status: &str) -> RunDto {
+        let ends = matches!(
+            status,
+            "done" | "failed" | "blocked" | "cancelled" | "interrupted"
+        );
         let deadline = Instant::now() + Duration::from_secs(10);
         loop {
-            let run = self.run_dto(id).await;
-            if run.status == status {
+            let row = self.store.get_creation_run(id).await.unwrap().unwrap();
+            let run = manager.run_dto(&row).await;
+            if run.status == status && !(ends && run.watching) {
                 return run;
             }
             assert!(
@@ -694,6 +923,172 @@ impl H {
             .await
             .unwrap();
         self.store.get_creation_run(&id).await.unwrap().unwrap()
+    }
+
+    async fn store_run(&self, id: &str) -> store::CreationRun {
+        self.store.get_creation_run(id).await.unwrap().unwrap()
+    }
+
+    /// The run once `done` holds for it (at most 10 s).
+    async fn wait_for(&self, id: &str, what: &str, done: impl Fn(&RunDto) -> bool) -> RunDto {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            let run = self.run_dto(id).await;
+            if done(&run) {
+                return run;
+            }
+            assert!(Instant::now() < deadline, "run {id} is not {what}: {run:?}");
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    }
+
+    /// The progress events of run `id`, in order.
+    fn events_for(&self, id: &str) -> Vec<RunDto> {
+        self.sink
+            .events
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|event| event.id == id)
+            .cloned()
+            .collect()
+    }
+
+    /// Run `id`'s audit rows, oldest first: its first row, then each follow-up.
+    async fn audit_rows_for(&self, id: &str) -> Vec<store::AuditRow> {
+        let all = self.audit_rows().await;
+        let mut next = self.store_run(id).await.audit_id;
+        let mut chain = Vec::new();
+        while let Some(audit_id) = next {
+            let row = all
+                .iter()
+                .find(|row| row.id == audit_id)
+                .expect("the run's audit row")
+                .clone();
+            next = row.parent_audit_id;
+            chain.push(row);
+        }
+        chain.reverse();
+        chain
+    }
+
+    /// Whether the scratch folder of run `id` is gone (or empty).
+    fn scratch_is_gone(&self, id: &str) -> bool {
+        let dir = self.gallery_root.join(".partial").join(id);
+        std::fs::read_dir(&dir).map_or(true, |mut entries| entries.next().is_none())
+    }
+
+    /// A Veo video run as the app left it when it closed: `status`, with `remote_id`, sent a
+    /// minute ago, with its audit row still open.
+    async fn seed_video_run(
+        &self,
+        status: store::CreationStatus,
+        remote_id: Option<&str>,
+    ) -> String {
+        let id = uuid::Uuid::new_v4().to_string();
+        let created_at = self.now - 60_000;
+        self.store
+            .insert_creation_run(store::NewCreationRun {
+                id: id.clone(),
+                kind: store::CreationKind::Video,
+                runs_on: store::RunsOn::Cloud,
+                provider_id: Some(store::ProviderId(self.openrouter)),
+                provider_name: "My OpenRouter".into(),
+                provider_host: "openrouter.ai".into(),
+                model: VEO.into(),
+                model_label: "Veo 3.1".into(),
+                prompt: "a wave breaking".into(),
+                params: json!({"params": {"duration": 4, "seed": 7}, "extra": {}, "routing": null}),
+                refs: json!([]),
+                estimate_usd: Some(1.6),
+                gen_model_id: None,
+                engine_build: None,
+                device: None,
+                created_at,
+            })
+            .await
+            .unwrap();
+        let audit_id = self
+            .store
+            .append_audit(store::AuditEntry {
+                ts: Some(created_at),
+                chat_id: None,
+                server: "studio".into(),
+                tool: "video".into(),
+                arguments: json!({"model": VEO, "prompt_chars": 15}),
+                preview: "Started a video with Veo 3.1 through My OpenRouter".into(),
+                risk: "normal".into(),
+                decision: AuditDecision::AllowedWithoutPrompt,
+                decided_by: "user".into(),
+                note: None,
+                parent_audit_id: None,
+                result: None,
+            })
+            .await
+            .unwrap();
+        self.store
+            .update_creation_run(
+                &id,
+                store::CreationPatch {
+                    status: Some(status),
+                    remote_id: Some(remote_id.map(str::to_owned)),
+                    audit_id: Some(Some(audit_id)),
+                    started_at: Some(Some(created_at)),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        id
+    }
+
+    /// A spending stub: a picture run made at `created_at` and deleted that same day.
+    async fn seed_stub(&self, created_at: i64) -> String {
+        let id = uuid::Uuid::new_v4().to_string();
+        self.store
+            .insert_creation_run(store::NewCreationRun {
+                id: id.clone(),
+                kind: store::CreationKind::Image,
+                runs_on: store::RunsOn::Cloud,
+                provider_id: Some(store::ProviderId(self.openrouter)),
+                provider_name: "My OpenRouter".into(),
+                provider_host: "openrouter.ai".into(),
+                model: FLUX.into(),
+                model_label: "FLUX 3 Image".into(),
+                prompt: "deleted".into(),
+                params: json!({}),
+                refs: json!([]),
+                estimate_usd: Some(0.05),
+                gen_model_id: None,
+                engine_build: None,
+                device: None,
+                created_at,
+            })
+            .await
+            .unwrap();
+        self.store
+            .delete_creation_runs(
+                vec![id.clone()],
+                day_start_in(&TimeZone::system(), created_at),
+            )
+            .await
+            .unwrap();
+        id
+    }
+
+    /// The ids of the spending stubs kept, sorted.
+    async fn stub_ids(&self) -> Vec<String> {
+        let mut ids: Vec<String> = self
+            .store
+            .creation_runs_since(0)
+            .await
+            .unwrap()
+            .into_iter()
+            .filter(|run| run.deleted_at.is_some())
+            .map(|run| run.id)
+            .collect();
+        ids.sort();
+        ids
     }
 }
 
@@ -1735,4 +2130,733 @@ async fn refusals_have_four_parts() {
     for e in refusals {
         assert!(!e.code.is_empty() && !e.message.is_empty() && !e.next_step.is_empty());
     }
+}
+
+// ---- video jobs (Task A14) --------------------------------------------------------------------
+
+fn secs(n: u64) -> Duration {
+    Duration::from_secs(n)
+}
+
+/// A failure the company answered, of `kind`.
+fn answered(kind: FailureKind) -> MediaError {
+    MediaError::Answered(MediaFailure {
+        kind,
+        stage: None,
+        charged: None,
+        company_code: None,
+        request_id: None,
+        status: Some(404),
+        message: "Not found".into(),
+        retry_after: None,
+    })
+}
+
+#[test]
+fn checks_come_every_5_then_10_then_20_seconds() {
+    let p = PollPlan::default();
+    assert_eq!(poll_delay(&p, secs(0)), secs(5));
+    assert_eq!(poll_delay(&p, secs(59)), secs(5));
+    assert_eq!(poll_delay(&p, secs(60)), secs(10));
+    assert_eq!(poll_delay(&p, secs(299)), secs(10));
+    assert_eq!(poll_delay(&p, secs(300)), secs(20));
+    assert_eq!(poll_delay(&p, secs(3_600)), secs(20));
+    assert_eq!(p.watch_limit, secs(30 * 60));
+}
+
+#[tokio::test]
+async fn the_remote_id_is_saved_before_the_first_check() {
+    let h = harness().await;
+    h.provider.answer_check(Ok(done_job()));
+    let run = h.manager.start(h.video_req(), true).await.unwrap();
+    h.wait_status(&run.id, "done").await;
+    let checked = h.provider.checked.lock().unwrap().clone();
+    assert_eq!(checked[0].remote_id, "vid_1");
+    assert_eq!(
+        checked[0].holder,
+        Some(("waiting".to_owned(), Some("vid_1".to_owned())))
+    );
+}
+
+#[tokio::test]
+async fn a_finished_video_is_downloaded_into_the_gallery() {
+    let h = harness().await;
+    h.provider.answer_check(Ok(JobState::Pending));
+    h.provider.answer_check(Ok(done_job()));
+    let run = h.manager.start(h.video_req(), true).await.unwrap();
+    let done = h.wait_status(&run.id, "done").await;
+    assert_eq!(done.outputs.len(), 1);
+    let output = &done.outputs[0];
+    assert_eq!(output.mime, "video/mp4");
+    assert!(Path::new(&output.path).starts_with(h.gallery_root.join("2026-11")));
+    assert!(output.path.ends_with(".mp4"));
+    assert!(Path::new(&output.path).is_file());
+    assert_eq!(output.duration_ms, Some(4_000));
+    assert_eq!(output.seed, done.params.get("seed").and_then(Value::as_u64));
+    assert!(!output.has_thumb);
+    assert_eq!(done.cost_usd, Some(0.36));
+    assert_eq!(done.remote_id.as_deref(), Some("vid_1"));
+    assert!(done.error.is_none() && done.finished_at.is_some());
+    assert_eq!(
+        h.statuses(&run.id),
+        ["queued", "sending", "waiting", "downloading", "done"]
+    );
+    let row = h.audit_rows().await.pop().unwrap();
+    assert_eq!(row.result_status.as_deref(), Some("done"));
+    assert!(row.result_summary.unwrap().contains("$0.36"));
+    let spent = h.manager.usage().await.unwrap().spent_today_usd;
+    assert!((spent - 0.36).abs() < 1e-9, "{spent}");
+    wait_until("the scratch folder goes", || h.scratch_is_gone(&run.id)).await;
+}
+
+#[tokio::test]
+async fn a_network_error_while_checking_keeps_waiting() {
+    let h = harness().await;
+    h.provider
+        .answer_check(Err(MediaError::Unknown(network("timed out"))));
+    h.provider
+        .answer_check(Err(MediaError::Unknown(network("connection reset"))));
+    h.provider.answer_check(Ok(done_job()));
+    let run = h.manager.start(h.video_req(), true).await.unwrap();
+    let done = h.wait_status(&run.id, "done").await;
+    assert_eq!(done.outputs.len(), 1);
+    assert_eq!(h.provider.checks(), 3);
+    assert_eq!(h.provider.starts(), 1);
+    assert_eq!(
+        h.statuses(&run.id),
+        ["queued", "sending", "waiting", "downloading", "done"]
+    );
+}
+
+#[tokio::test]
+async fn resume_after_restart_finishes_the_video_without_a_second_create() {
+    let h = harness().await;
+    let first = &h.manager;
+    let run = first.start(h.video_req(), true).await.unwrap();
+    h.wait_status(&run.id, "waiting").await;
+    first.shutdown().await; // its tasks are gone, not merely dropped
+    assert_eq!(
+        h.store_run(&run.id).await.status,
+        store::CreationStatus::Waiting
+    );
+    let checks = h.provider.checks();
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    assert_eq!(
+        h.provider.checks(),
+        checks,
+        "the first manager still checks"
+    );
+
+    let second = h.manager_with(&h.provider2);
+    second.resume_interrupted().await;
+    let done = h.wait_status_in(&second, &run.id, "done").await;
+    assert_eq!(h.provider.starts() + h.provider2.starts(), 1);
+    assert_eq!(done.outputs.len(), 1);
+    assert_eq!(h.provider.downloads() + h.provider2.downloads(), 1);
+    assert_eq!(h.provider2.downloads(), 1);
+    assert_eq!(h.provider2.checked.lock().unwrap()[0].remote_id, "vid_1");
+}
+
+#[tokio::test]
+async fn a_run_left_sending_becomes_interrupted_and_is_never_sent_again() {
+    let h = harness().await;
+    let id = h.seed_video_run(store::CreationStatus::Sending, None).await;
+    h.manager.resume_interrupted().await;
+    let run = h.run_dto(&id).await;
+    assert_eq!(run.status, "interrupted");
+    let error = run.error.unwrap();
+    assert_eq!(error.code, "studio_interrupted");
+    assert!(error.message.contains("may or may not have started"));
+    assert_eq!(error.charged, None);
+    assert_eq!(error.company, "openrouter");
+    assert!(run.finished_at.is_some());
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert_eq!(h.provider.starts(), 0);
+    assert_eq!(h.provider.checks(), 0);
+    let rows = h.audit_rows_for(&id).await;
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].result_status.as_deref(), Some("interrupted"));
+    assert_eq!(
+        h.statuses(&id).last().map(String::as_str),
+        Some("interrupted")
+    );
+}
+
+#[tokio::test]
+async fn a_queued_run_is_not_sent_after_a_restart() {
+    let h = harness().await;
+    let id = h.seed_video_run(store::CreationStatus::Queued, None).await;
+    h.manager.resume_interrupted().await;
+    let run = h.run_dto(&id).await;
+    assert_eq!(run.status, "cancelled");
+    let error = run.error.unwrap();
+    assert_eq!(
+        error.message,
+        "Not sent: the app closed before its turn. Nothing was charged."
+    );
+    assert_eq!(error.charged, Some(false));
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert_eq!(h.provider.starts(), 0);
+    assert_eq!(h.manager.usage().await.unwrap().spent_today_usd, 0.0);
+    let rows = h.audit_rows_for(&id).await;
+    assert_eq!(rows[0].result_status.as_deref(), Some("cancelled"));
+}
+
+#[tokio::test]
+async fn a_download_left_half_done_starts_over_from_the_result() {
+    let h = harness().await;
+    let id = h
+        .seed_video_run(store::CreationStatus::Downloading, Some("vid_7"))
+        .await;
+    // What the closed app had written of the file is still there.
+    let left = h.gallery_root.join(".partial").join(&id);
+    std::fs::create_dir_all(&left).unwrap();
+    std::fs::write(left.join("half"), b"half a video").unwrap();
+    h.provider.answer_check(Ok(done_job()));
+    h.manager.resume_interrupted().await;
+    let done = h.wait_status(&id, "done").await;
+    assert_eq!(done.outputs.len(), 1);
+    assert_eq!(done.outputs[0].seed, Some(7));
+    assert_eq!(h.provider.starts(), 0);
+    assert_eq!(h.provider.checks(), 1);
+    assert_eq!(h.provider.checked.lock().unwrap()[0].remote_id, "vid_7");
+    assert_eq!(h.provider.downloads(), 1);
+    wait_until("the half-written file goes", || h.scratch_is_gone(&id)).await;
+}
+
+#[tokio::test]
+async fn a_result_kept_before_a_restart_is_not_downloaded_again() {
+    let h = harness().await;
+    let id = h
+        .seed_video_run(store::CreationStatus::Downloading, Some("vid_8"))
+        .await;
+    let created_at = h.store_run(&id).await.created_at;
+    let first = h.manager.gallery().output_path(created_at, &id, 0, "mp4");
+    std::fs::create_dir_all(first.parent().unwrap()).unwrap();
+    std::fs::write(&first, mp4()).unwrap();
+    h.store
+        .insert_creation_output(store::NewCreationOutput {
+            id: "kept-0".into(),
+            run_id: id.clone(),
+            idx: 0,
+            path: first.display().to_string(),
+            thumb_path: None,
+            mime: "video/mp4".into(),
+            size_bytes: mp4().len() as u64,
+            width: None,
+            height: None,
+            duration_ms: None,
+            seed: Some(7),
+            created_at,
+        })
+        .await
+        .unwrap();
+    h.provider.answer_check(Ok(JobState::Done(JobDone {
+        outputs: 2,
+        signed: Vec::new(),
+        cost: None,
+    })));
+    h.manager.resume_interrupted().await;
+    let done = h.wait_status(&id, "done").await;
+    assert_eq!(h.provider.downloads(), 1);
+    let numbers: Vec<u32> = done.outputs.iter().map(|out| out.idx).collect();
+    assert_eq!(numbers, [0, 1]);
+    assert_eq!(done.outputs[0].id, "kept-0");
+}
+
+#[tokio::test]
+async fn stop_watching_keeps_the_remote_id_and_get_it_anyway_downloads() {
+    let h = harness().await;
+    let run = h.manager.start(h.video_req(), true).await.unwrap();
+    h.wait_status(&run.id, "waiting").await;
+    let stopped = h.manager.cancel(&run.id).await.unwrap();
+    assert_eq!(stopped.status, "cancelled");
+    assert_eq!(stopped.remote_id.as_deref(), Some("vid_1"));
+    assert!(!stopped.watching);
+    let error = stopped.error.unwrap();
+    assert_eq!(error.code, "studio_stopped");
+    assert_eq!(error.charged, None);
+    assert_eq!(
+        error.message,
+        "OpenRouter may still finish and charge for this."
+    );
+
+    h.provider.check_from_now(Ok(done_job()));
+    let back = h.manager.fetch_anyway(&run.id).await.unwrap();
+    assert_eq!(back.status, "waiting");
+    assert!(back.watching && back.error.is_none() && back.finished_at.is_none());
+    let done = h.wait_status(&run.id, "done").await;
+    assert_eq!(done.outputs.len(), 1);
+    assert_eq!(done.remote_id.as_deref(), Some("vid_1"));
+    assert_eq!(h.provider.starts(), 1);
+}
+
+#[tokio::test]
+async fn stop_watching_then_get_it_anyway_records_done_with_the_cost() {
+    let h = harness().await;
+    let run = h.manager.start(h.video_req(), true).await.unwrap();
+    h.wait_status(&run.id, "waiting").await;
+    h.manager.cancel(&run.id).await.unwrap();
+    h.provider.check_from_now(Ok(done_job()));
+    h.manager.fetch_anyway(&run.id).await.unwrap();
+    let done = h.wait_status(&run.id, "done").await;
+    assert_eq!(done.cost_usd, Some(0.36));
+    let rows = h.audit_rows_for(&run.id).await; // oldest first
+    assert_eq!(rows.len(), 2);
+    assert_eq!(rows[0].result_status.as_deref(), Some("cancelled"));
+    assert_eq!(rows[1].parent_audit_id, Some(rows[0].id));
+    assert_eq!(rows[1].result_status.as_deref(), Some("done"));
+    assert!(rows[1].result_summary.as_deref().unwrap().contains("$0.36"));
+    assert_eq!(rows[1].tool, "video");
+    assert_eq!(rows[1].arguments, rows[0].arguments);
+    assert_eq!(
+        rows[1].preview,
+        "Got the stopped video with Veo 3.1 through My OpenRouter"
+    );
+    assert_eq!(rows[1].decision, AuditDecision::AllowedWithoutPrompt);
+}
+
+#[tokio::test]
+async fn after_30_minutes_it_says_still_not_ready() {
+    let h = harness_polling(PollPlan {
+        watch_limit: Duration::from_millis(50),
+        ..fast_poll()
+    })
+    .await;
+    let run = h.manager.start(h.video_req(), true).await.unwrap();
+    wait_until("a still-not-ready event", || {
+        h.events_for(&run.id)
+            .last()
+            .is_some_and(|event| event.stale)
+    })
+    .await;
+    let stale = h.run_dto(&run.id).await;
+    assert!(stale.stale);
+    assert_eq!(stale.status, "waiting");
+    assert!(!stale.watching);
+    assert_eq!(stale.remote_id.as_deref(), Some("vid_1"));
+    // It is no longer checked, and its audit row stays open.
+    let checks = h.provider.checks();
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert_eq!(h.provider.checks(), checks);
+    assert_eq!(h.audit_rows_for(&run.id).await[0].result_status, None);
+
+    // Check again.
+    h.provider.check_from_now(Ok(done_job()));
+    let again = h.manager.fetch_anyway(&run.id).await.unwrap();
+    assert!(again.watching && !again.stale);
+    h.wait_status(&run.id, "done").await;
+    let rows = h.audit_rows_for(&run.id).await;
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].result_status.as_deref(), Some("done"));
+    assert!(rows[0].result_summary.as_deref().unwrap().contains("$0.36"));
+    assert_eq!(h.provider.starts(), 1);
+}
+
+#[tokio::test]
+async fn a_video_still_not_ready_can_be_stopped() {
+    let h = harness_polling(PollPlan {
+        watch_limit: Duration::from_millis(50),
+        ..fast_poll()
+    })
+    .await;
+    let run = h.manager.start(h.video_req(), true).await.unwrap();
+    h.wait_for(&run.id, "still not ready", |r| r.stale).await;
+    let stopped = h.manager.cancel(&run.id).await.unwrap();
+    assert_eq!(stopped.status, "cancelled");
+    assert!(!stopped.stale && !stopped.watching);
+    assert_eq!(stopped.error.unwrap().charged, None);
+    assert_eq!(stopped.remote_id.as_deref(), Some("vid_1"));
+    let rows = h.audit_rows_for(&run.id).await;
+    assert_eq!(rows[0].result_status.as_deref(), Some("cancelled"));
+}
+
+#[tokio::test]
+async fn a_job_the_company_no_longer_has_says_so() {
+    let h = harness().await;
+    h.provider.answer_check(Ok(JobState::Gone));
+    let run = h.manager.start(h.video_req(), true).await.unwrap();
+    let failed = h.wait_status(&run.id, "failed").await;
+    let error = failed.error.unwrap();
+    assert_eq!(error.code, "studio_job_lost");
+    assert_eq!(error.message, "OpenRouter no longer has this job.");
+    assert_eq!(failed.remote_id.as_deref(), Some("vid_1"));
+    let row = h.audit_rows().await.pop().unwrap();
+    assert_eq!(row.result_status.as_deref(), Some("failed"));
+}
+
+#[tokio::test]
+async fn a_job_that_failed_at_the_company_says_why() {
+    let h = harness().await;
+    h.provider.answer_check(Ok(JobState::Failed(MediaFailure {
+        kind: FailureKind::Blocked,
+        stage: Some(Stage::Output),
+        charged: Some(false),
+        company_code: Some("content_policy".into()),
+        request_id: Some("gen-9".into()),
+        status: None,
+        message: "The output was flagged".into(),
+        retry_after: None,
+    })));
+    let run = h.manager.start(h.video_req(), true).await.unwrap();
+    let blocked = h.wait_status(&run.id, "blocked").await;
+    let error = blocked.error.unwrap();
+    assert_eq!(error.code, "studio_blocked");
+    assert_eq!(error.charged, Some(false));
+    assert_eq!(error.request_id.as_deref(), Some("gen-9"));
+    assert_eq!(error.stage.as_deref(), Some("output"));
+    assert_eq!(h.provider.downloads(), 0);
+}
+
+#[tokio::test]
+async fn an_expired_result_says_so_and_keeps_the_remote_id() {
+    let h = harness().await;
+    h.provider.answer_check(Ok(done_job()));
+    h.provider
+        .answer_download(Download::Fail(answered(FailureKind::Expired)));
+    let run = h.manager.start(h.video_req(), true).await.unwrap();
+    let failed = h.wait_status(&run.id, "failed").await;
+    let error = failed.error.unwrap();
+    assert_eq!(error.code, "studio_result_expired");
+    assert_eq!(error.charged, Some(true));
+    assert_eq!(failed.remote_id.as_deref(), Some("vid_1"));
+    assert_eq!(failed.cost_usd, Some(0.36));
+    // Counted at the job's cost, not at its $1.60 estimate.
+    let spent = h.manager.usage().await.unwrap().spent_today_usd;
+    assert!((spent - 0.36).abs() < 1e-9, "{spent}");
+    assert_eq!(h.provider.starts(), 1);
+}
+
+#[tokio::test]
+async fn a_full_disk_keeps_the_remote_id_for_get_it_anyway() {
+    let h = harness().await;
+    h.provider.check_from_now(Ok(done_job()));
+    h.provider
+        .answer_download(Download::Fail(MediaError::Local(LocalIo::DiskFull)));
+    let run = h.manager.start(h.video_req(), true).await.unwrap();
+    let failed = h.wait_status(&run.id, "failed").await;
+    let error = failed.error.unwrap();
+    assert_eq!(error.code, "studio_disk_full");
+    assert_eq!(error.charged, Some(true));
+    assert_eq!(failed.remote_id.as_deref(), Some("vid_1"));
+    assert_eq!(failed.cost_usd, Some(0.36));
+    wait_until(".partial is empty", || h.scratch_is_gone(&run.id)).await;
+
+    h.manager.fetch_anyway(&run.id).await.unwrap();
+    let done = h.wait_status(&run.id, "done").await;
+    assert_eq!(done.outputs.len(), 1);
+    assert_eq!(h.provider.starts(), 1);
+    assert_eq!(h.provider.downloads(), 2);
+    let rows = h.audit_rows_for(&run.id).await;
+    assert_eq!(rows.len(), 2);
+    assert_eq!(rows[0].result_status.as_deref(), Some("failed"));
+    assert_eq!(rows[1].parent_audit_id, Some(rows[0].id));
+    assert_eq!(rows[1].result_status.as_deref(), Some("done"));
+}
+
+#[tokio::test]
+async fn a_video_over_its_cap_is_refused() {
+    let h = harness().await;
+    h.provider.answer_check(Ok(done_job()));
+    h.provider
+        .answer_download(Download::Fail(MediaError::Local(LocalIo::TooLarge(1024))));
+    let run = h.manager.start(h.video_req(), true).await.unwrap();
+    let failed = h.wait_status(&run.id, "failed").await;
+    let error = failed.error.unwrap();
+    assert_eq!(error.code, "studio_too_large");
+    assert_eq!(
+        error.message,
+        "The result is larger than 1 GB, so it was not kept."
+    );
+    assert_eq!(error.charged, Some(true));
+    assert!(failed.outputs.is_empty());
+    wait_until("the partial file goes", || h.scratch_is_gone(&run.id)).await;
+}
+
+#[tokio::test]
+async fn a_download_that_stops_can_be_fetched_again() {
+    let h = harness().await;
+    h.provider.check_from_now(Ok(done_job()));
+    h.provider
+        .answer_download(Download::Fail(MediaError::Unknown(network(
+            "connection reset",
+        ))));
+    let run = h.manager.start(h.video_req(), true).await.unwrap();
+    let failed = h.wait_status(&run.id, "failed").await;
+    let error = failed.error.unwrap();
+    assert_eq!(error.code, "studio_download_failed");
+    assert_eq!(error.charged, Some(true));
+    assert_eq!(error.next_step, "Press Get it anyway to try again.");
+    h.manager.fetch_anyway(&run.id).await.unwrap();
+    let done = h.wait_status(&run.id, "done").await;
+    assert_eq!(done.outputs.len(), 1);
+    assert_eq!(h.provider.starts(), 1);
+}
+
+#[tokio::test]
+async fn a_foreign_result_link_goes_through_the_guarded_fetcher() {
+    let h = harness().await;
+    let link = Url::parse("https://files.example.com/v/1.mp4?sig=abc").unwrap();
+    h.provider.answer_check(Ok(done_job()));
+    h.provider
+        .answer_download(Download::Elsewhere(link.clone()));
+    let run = h.manager.start(h.video_req(), true).await.unwrap();
+    let done = h.wait_status(&run.id, "done").await;
+    let seen = h.fetch.seen.lock().unwrap().clone();
+    assert_eq!(seen.len(), 1);
+    let (url, cap, dest) = &seen[0];
+    assert_eq!(url, &link);
+    assert_eq!(*cap, MediaLimits::default().video_cap);
+    assert!(dest.starts_with(h.gallery_root.join(".partial").join(&run.id)));
+    assert_eq!(done.outputs.len(), 1);
+    assert_eq!(done.outputs[0].mime, "video/mp4");
+    assert!(Path::new(&done.outputs[0].path).is_file());
+}
+
+#[tokio::test]
+async fn a_refused_result_link_is_said_in_studios_words() {
+    let h = harness().await;
+    *h.fetch.fail.lock().unwrap() = Some(FetchError::Blocked {
+        host: "files.example.com".into(),
+        ip: "10.0.0.7".parse().unwrap(),
+        class: AddressClass::Private,
+    });
+    h.provider.check_from_now(Ok(done_job()));
+    h.provider.answer_download(Download::Elsewhere(
+        Url::parse("https://files.example.com/v/1.mp4").unwrap(),
+    ));
+    let run = h.manager.start(h.video_req(), true).await.unwrap();
+    let failed = h.wait_status(&run.id, "failed").await;
+    let error = failed.error.unwrap();
+    assert_eq!(error.code, "studio_download_failed");
+    assert_eq!(error.charged, Some(true));
+    for text in [&error.message, &error.next_step, &error.details] {
+        assert!(
+            !text.contains("10.0.0.7") && !text.contains("example.com") && !text.contains("page"),
+            "{text}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn progress_is_sent_at_most_four_times_a_second() {
+    let h = harness().await;
+    for i in 0..100u8 {
+        h.provider.answer_check(Ok(JobState::Running {
+            progress: Some(f32::from(i) / 100.0),
+        }));
+    }
+    h.provider.answer_check(Ok(done_job()));
+    let run = h.manager.start(h.video_req(), true).await.unwrap();
+    h.wait_status(&run.id, "done").await;
+    let times: Vec<Instant> = h
+        .provider
+        .checked
+        .lock()
+        .unwrap()
+        .iter()
+        .map(|check| check.at)
+        .collect();
+    assert_eq!(times.len(), 101);
+    let span = times[100].duration_since(times[0]);
+    let progress_only = h
+        .events_for(&run.id)
+        .iter()
+        .filter(|event| event.status == "waiting" && event.progress.is_some())
+        .count();
+    assert!(progress_only >= 1, "no progress was sent");
+    // At most one every 250 ms: four in any second.
+    let most = 1 + span.as_millis() / 250;
+    assert!(
+        progress_only as u128 <= most,
+        "{progress_only} progress events in {span:?}"
+    );
+    // Every status change is still sent.
+    assert_eq!(
+        h.statuses(&run.id),
+        ["queued", "sending", "waiting", "downloading", "done"]
+    );
+}
+
+#[tokio::test]
+async fn the_audit_row_is_completed_after_a_restart() {
+    let h = harness().await;
+    let run = h.manager.start(h.video_req(), true).await.unwrap();
+    h.wait_status(&run.id, "waiting").await;
+    h.manager.shutdown().await;
+    assert_eq!(h.audit_rows_for(&run.id).await[0].result_status, None);
+    let second = h.manager_with(&h.provider2);
+    second.resume_interrupted().await;
+    h.wait_status_in(&second, &run.id, "done").await;
+    let rows = h.audit_rows_for(&run.id).await;
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].result_status.as_deref(), Some("done"));
+    assert!(rows[0].result_summary.as_deref().unwrap().contains("$0.36"));
+}
+
+#[tokio::test]
+async fn the_third_video_waits_for_a_slot() {
+    assert_eq!(VIDEOS_AT_ONCE, 2);
+    let h = harness_polling(PollPlan {
+        watch_limit: secs(1),
+        ..fast_poll()
+    })
+    .await;
+    let mut ids = Vec::new();
+    for _ in 0..3 {
+        ids.push(h.manager.start(h.video_req(), true).await.unwrap().id);
+    }
+    for id in &ids[..2] {
+        h.wait_status(id, "waiting").await;
+    }
+    let third = h.run_dto(&ids[2]).await;
+    assert_eq!(third.status, "queued");
+    assert_eq!(third.queue_position, Some(1));
+    assert_eq!(h.provider.starts(), 2);
+    // A video still not ready after its watch limit frees its place.
+    wait_until("the third video is sent", || h.provider.starts() == 3).await;
+    assert!(h.run_dto(&ids[0]).await.stale || h.run_dto(&ids[1]).await.stale);
+    h.wait_status(&ids[2], "waiting").await;
+}
+
+#[tokio::test]
+async fn yesterdays_spending_stubs_go_at_start() {
+    let h = harness().await;
+    let yesterday = h.seed_stub(h.now - 86_400_000).await;
+    let today = h.seed_stub(h.now - 60_000).await;
+    let mut both = vec![yesterday, today.clone()];
+    both.sort();
+    assert_eq!(h.stub_ids().await, both);
+    h.manager.resume_interrupted().await;
+    assert_eq!(h.stub_ids().await, [today]);
+}
+
+#[tokio::test]
+async fn get_it_anyway_never_runs_a_run_on_this_computer_or_one_without_a_job() {
+    let h = harness().await;
+    // A picture has no job to check.
+    let picture = h.seed_done_run_costing(0.05).await;
+    h.store
+        .update_creation_run(
+            &picture.id,
+            store::CreationPatch {
+                status: Some(store::CreationStatus::Failed),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    let err = h.manager.fetch_anyway(&picture.id).await.unwrap_err();
+    assert_eq!(err.code, "bad_request");
+    assert_eq!(err.next_step, "Make it again with Again.");
+
+    // A local run is never checked with a company.
+    h.store
+        .insert_creation_run(store::NewCreationRun {
+            id: "local-run".into(),
+            kind: store::CreationKind::Video,
+            runs_on: store::RunsOn::Local,
+            provider_id: None,
+            provider_name: "This computer".into(),
+            provider_host: String::new(),
+            model: "wan".into(),
+            model_label: "Wan".into(),
+            prompt: "x".into(),
+            params: json!({}),
+            refs: json!([]),
+            estimate_usd: Some(0.0),
+            gen_model_id: None,
+            engine_build: None,
+            device: None,
+            created_at: h.now,
+        })
+        .await
+        .unwrap();
+    h.store
+        .update_creation_run(
+            "local-run",
+            store::CreationPatch {
+                status: Some(store::CreationStatus::Failed),
+                remote_id: Some(Some("local-1".into())),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    let err = h.manager.fetch_anyway("local-run").await.unwrap_err();
+    assert_eq!(err.code, "bad_request");
+    assert_eq!(err.next_step, "Make it again with Again.");
+    assert_eq!(h.provider.checks(), 0);
+    assert_eq!(
+        h.manager
+            .fetch_anyway("no-such-run")
+            .await
+            .unwrap_err()
+            .code,
+        "not_found"
+    );
+}
+
+#[tokio::test]
+async fn a_restart_with_the_key_gone_keeps_the_job_for_later() {
+    let h = harness().await;
+    let id = h
+        .seed_video_run(store::CreationStatus::Waiting, Some("vid_3"))
+        .await;
+    // The endpoint is no longer offered: the job cannot be checked now.
+    let second = StudioManager::new(
+        StudioDeps {
+            store: h.store.clone(),
+            providers: Arc::new(FakeSource {
+                provider: h.provider2.clone(),
+                endpoints: HashMap::new(),
+            }),
+            sink: h.sink.clone(),
+            fetch: h.fetch.clone(),
+            clock: Arc::new(FixedClock(h.now)),
+            default_gallery: h.gallery_root.clone(),
+            thumbs: None,
+            limits: MediaLimits::default(),
+            poll: fast_poll(),
+        },
+        StudioPrefs::default(),
+    );
+    h.managers.lock().unwrap().push(second.clone());
+    second.resume_interrupted().await;
+    let run = h.run_dto(&id).await;
+    assert_eq!(run.status, "failed");
+    assert_eq!(run.remote_id.as_deref(), Some("vid_3"));
+    let error = run.error.unwrap();
+    assert_eq!(error.code, "studio_no_endpoint");
+    assert_eq!(error.charged, None);
+    assert_eq!(h.provider2.checks(), 0);
+}
+
+#[tokio::test]
+async fn shutdown_writes_nothing_and_leaves_waiting_runs_queued() {
+    let h = harness().await;
+    let video = h.manager.start(h.video_req(), true).await.unwrap();
+    h.wait_status(&video.id, "waiting").await;
+    h.provider.hold();
+    let sending = h.manager.start(h.picture_req("x"), false).await.unwrap();
+    h.wait_status(&sending.id, "sending").await;
+    h.manager.shutdown().await;
+    h.provider.release_all();
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert_eq!(
+        h.store_run(&sending.id).await.status,
+        store::CreationStatus::Sending
+    );
+    assert_eq!(
+        h.store_run(&video.id).await.status,
+        store::CreationStatus::Waiting
+    );
+    // A run started after the app began to close waits for the next start.
+    let late = h.manager.start(h.picture_req("y"), false).await.unwrap();
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert_eq!(
+        h.store_run(&late.id).await.status,
+        store::CreationStatus::Queued
+    );
+    assert_eq!(h.provider.starts(), 2);
 }

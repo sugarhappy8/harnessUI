@@ -7,6 +7,7 @@
 use agent::media::{
     Company, FailureKind, Invalid, LocalIo, MediaFailure, MediaKind, MediaModel, RefRole, Stage,
 };
+use search::FetchError;
 
 use super::gallery::GalleryError;
 use super::spend::ConfirmReason;
@@ -357,6 +358,27 @@ pub fn job_lost(company: Company) -> AppError {
     )
 }
 
+/// The app closed while the run waited for its place in the queue: it was never sent.
+pub fn closed_before_its_turn(company: Company) -> AppError {
+    AppError::new(
+        "studio_not_sent",
+        "Not sent: the app closed before its turn. Nothing was charged.",
+        format!("Make it again with Again to send it to {}.", name(company)),
+        String::new(),
+    )
+}
+
+/// *Get it anyway* or *Check again* on a run with no company job to check: a run on this
+/// computer, a picture, or a run that never got a job id.
+pub fn nothing_to_fetch() -> AppError {
+    AppError::new(
+        "bad_request",
+        "There is no result to get for this run.",
+        "Make it again with Again.",
+        String::new(),
+    )
+}
+
 /// The app closed while the run was being sent (cloud) or made (this computer).
 pub fn interrupted(company: Company) -> AppError {
     match company {
@@ -464,6 +486,11 @@ pub fn stopped(company: Company, kind: MediaKind, charged: Option<bool>) -> AppE
         (_, MediaKind::Image, _) => (
             format!("Stopped waiting. {who} may still charge for it."),
             "Make it again if you still want it.",
+        ),
+        // Stopped while its result was downloading: the job had finished.
+        (_, MediaKind::Video, Some(true)) => (
+            format!("Stopped. {who} finished this video, so it was charged."),
+            "Press Get it anyway to download it.",
         ),
         (_, MediaKind::Video, _) => (
             format!("{who} may still finish and charge for this."),
@@ -594,18 +621,61 @@ pub fn from_gallery(e: &GalleryError) -> AppError {
         GalleryError::TooLarge(cap) => too_large(*cap),
         GalleryError::NotMedia | GalleryError::Mismatch { .. } => {
             tracing::warn!("a Studio result was not kept: {e}");
-            AppError::new(
-                "studio_not_media",
-                "The result is not a picture or video Studio can keep.",
-                "Try again, or pick another model.",
-                String::new(),
-            )
+            not_media()
         }
         GalleryError::BadName | GalleryError::Io(_) => {
             tracing::warn!("a Studio file could not be reached: {e}");
             files()
         }
     }
+}
+
+/// A failed download of a result from a company's file host (through the guarded fetcher,
+/// without the key), in Studio's words: the fetcher's own text speaks of web pages and names
+/// hosts and addresses, so it goes to the log only.
+pub fn from_fetch(company: Company, e: &FetchError) -> AppError {
+    tracing::warn!("a Studio result was not downloaded from the company's file host: {e}");
+    let details = match e {
+        FetchError::DiskFull => return disk_full(),
+        FetchError::TooLarge(cap) => return too_large(*cap),
+        FetchError::NotMedia(_) => return not_media(),
+        FetchError::Disk(_) => return files(),
+        FetchError::Scheme(_)
+        | FetchError::Credentials
+        | FetchError::NoHost
+        | FetchError::Blocked { .. }
+        | FetchError::LocalName(_)
+        | FetchError::BadRedirect(_) => {
+            "The result link points to an address Studio never downloads from.".to_owned()
+        }
+        FetchError::TooManyRedirects => "The file host redirected too many times.".to_owned(),
+        FetchError::Dns(_) => "The file host's address could not be found.".to_owned(),
+        FetchError::Timeout(secs) => {
+            format!("The file host did not send the whole file within {secs} seconds.")
+        }
+        FetchError::Status(status) => {
+            format!("The file host answered with HTTP status {status}.")
+        }
+        FetchError::ContentType(_)
+        | FetchError::Encoding(_)
+        | FetchError::Challenge
+        | FetchError::NoText => "The file host did not send the file as it is.".to_owned(),
+        FetchError::Network(_) => "The connection to the file host failed.".to_owned(),
+    };
+    AppError {
+        details,
+        ..download_failed(company)
+    }
+}
+
+/// A result that is none of the types Studio keeps.
+fn not_media() -> AppError {
+    AppError::new(
+        "studio_not_media",
+        "The result is not a picture or video Studio can keep.",
+        "Try again, or pick another model.",
+        String::new(),
+    )
 }
 
 /// A file in the gallery folder could not be read or written.
@@ -622,6 +692,7 @@ fn files() -> AppError {
 mod tests {
     use super::*;
     use agent::media::{Choice, Layer, ParamKind, ParamSpec, Price};
+    use search::netguard::AddressClass;
 
     fn model(params: Vec<ParamSpec>) -> MediaModel {
         MediaModel {
@@ -696,7 +767,14 @@ mod tests {
             from_gallery(&GalleryError::Io("/a/path".into())),
             gallery_not_full_path(),
             numbered_folder(),
+            closed_before_its_turn(Company::OpenRouter),
+            nothing_to_fetch(),
         ];
+        all.extend(
+            every_fetch_error()
+                .iter()
+                .map(|e| from_fetch(Company::OpenRouter, e)),
+        );
         for kind in [
             FailureKind::Blocked,
             FailureKind::Unauthorized,
@@ -717,6 +795,91 @@ mod tests {
             all.push(from_failure(Company::OpenRouter, &failure(kind)));
         }
         all
+    }
+
+    /// Every way the guarded fetcher can fail, with a host and an address in it where the
+    /// variant carries one.
+    fn every_fetch_error() -> Vec<FetchError> {
+        vec![
+            FetchError::Scheme("ftp".into()),
+            FetchError::Credentials,
+            FetchError::NoHost,
+            FetchError::Blocked {
+                host: "files.example.com".into(),
+                ip: "10.0.0.7".parse().unwrap(),
+                class: AddressClass::Private,
+            },
+            FetchError::LocalName("files.example.com".into()),
+            FetchError::Dns("files.example.com: no such host".into()),
+            FetchError::Timeout(600),
+            FetchError::TooManyRedirects,
+            FetchError::BadRedirect("http://10.0.0.7/x".into()),
+            FetchError::Status(403),
+            FetchError::ContentType("text/html".into()),
+            FetchError::Encoding("br".into()),
+            FetchError::Network("connection reset by files.example.com".into()),
+            FetchError::Challenge,
+            FetchError::NoText,
+            FetchError::NotMedia("text/html".into()),
+            FetchError::TooLarge(1024 * 1024 * 1024),
+            FetchError::DiskFull,
+            FetchError::Disk("/home/u/harnessUI/studio/.partial/x: denied".into()),
+        ]
+    }
+
+    #[test]
+    fn a_result_link_failure_is_said_in_studios_words() {
+        for e in every_fetch_error() {
+            let shown = from_fetch(Company::OpenRouter, &e);
+            for text in [&shown.message, &shown.next_step, &shown.details] {
+                assert!(
+                    !text.contains("example.com")
+                        && !text.contains("10.0.0.7")
+                        && !text.contains('/')
+                        && !text.contains("page"),
+                    "{e:?} shows {text:?}"
+                );
+            }
+        }
+        let code = |e: FetchError| from_fetch(Company::OpenRouter, &e).code;
+        assert_eq!(code(FetchError::DiskFull), "studio_disk_full");
+        assert_eq!(code(FetchError::TooLarge(1)), "studio_too_large");
+        assert_eq!(
+            code(FetchError::NotMedia("text/html".into())),
+            "studio_not_media"
+        );
+        assert_eq!(code(FetchError::Disk("denied".into())), "studio_files");
+        assert_eq!(code(FetchError::Status(403)), "studio_download_failed");
+        assert_eq!(code(FetchError::Credentials), "studio_download_failed");
+        let refused = from_fetch(
+            Company::OpenRouter,
+            &FetchError::LocalName("localhost".into()),
+        );
+        assert_eq!(
+            refused.message,
+            "The result could not be downloaded from OpenRouter."
+        );
+        assert_eq!(
+            refused.details,
+            "The result link points to an address Studio never downloads from."
+        );
+        assert_eq!(
+            from_fetch(Company::OpenRouter, &FetchError::Status(403)).details,
+            "The file host answered with HTTP status 403."
+        );
+    }
+
+    #[test]
+    fn a_run_that_never_had_its_turn_says_nothing_was_charged() {
+        let e = closed_before_its_turn(Company::OpenRouter);
+        assert_eq!(
+            e.message,
+            "Not sent: the app closed before its turn. Nothing was charged."
+        );
+        assert_eq!(e.code, "studio_not_sent");
+        let e = nothing_to_fetch();
+        assert_eq!(e.code, "bad_request");
+        assert_eq!(e.next_step, "Make it again with Again.");
     }
 
     #[test]
@@ -787,6 +950,13 @@ mod tests {
             msg(Company::OpenRouter, MediaKind::Video, None),
             "OpenRouter may still finish and charge for this."
         );
+        // Stopped while its result was downloading: it had finished.
+        let done = stopped(Company::OpenRouter, MediaKind::Video, Some(true));
+        assert_eq!(
+            done.message,
+            "Stopped. OpenRouter finished this video, so it was charged."
+        );
+        assert_eq!(done.next_step, "Press Get it anyway to download it.");
         assert_eq!(
             msg(Company::Local, MediaKind::Video, Some(false)),
             "Stopped. Your computer is no longer working on it. Nothing was charged."

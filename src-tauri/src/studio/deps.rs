@@ -6,16 +6,17 @@
 
 use std::path::Path;
 use std::sync::Arc;
+use std::time::Duration;
 
 use agent::media::{Company, MediaProvider, media_company, media_provider};
 use async_trait::async_trait;
 use jiff::Timestamp;
 use jiff::tz::TimeZone;
+use search::FetchError;
 use tauri::{AppHandle, Emitter};
 use url::Url;
 
 use super::errors;
-use super::gallery::GalleryError;
 use super::spend::day_start_in;
 use crate::dto::RunDto;
 use crate::error::AppResult;
@@ -24,6 +25,9 @@ use crate::providers::{client_from, keychain_error, kind_of, secret_key};
 /// The webview event that carries a run's new state.
 pub const PROGRESS_EVENT: &str = "studio-progress";
 
+/// The longest a download from a company's file host may take, start to end.
+pub const FILE_HOST_TIMEOUT: Duration = Duration::from_secs(10 * 60);
+
 /// The media company behind an endpoint, with its key.
 #[async_trait]
 pub trait ProviderSource: Send + Sync {
@@ -31,6 +35,11 @@ pub trait ProviderSource: Send + Sync {
     /// `studio_no_endpoint` when the endpoint is gone or makes no pictures or video, and with
     /// `studio_no_key` when it has no key. Reads the keychain; sends nothing.
     async fn media(&self, id: store::ProviderId) -> AppResult<(Arc<dyn MediaProvider>, Endpoint)>;
+
+    /// The company behind endpoint `id`, without its key: `None` when the endpoint is gone or
+    /// makes no pictures or video. Reads the store only (how a run that ended while the app
+    /// was closed is worded).
+    async fn company(&self, id: store::ProviderId) -> Option<Company>;
 }
 
 /// Where a run goes, as the run records it.
@@ -56,8 +65,8 @@ pub trait StudioSink: Send + Sync {
 #[async_trait]
 pub trait ForeignFetch: Send + Sync {
     /// Streams `url` to `dest`, at most `cap` bytes, and returns the media type it came as.
-    async fn fetch_to_file(&self, url: &Url, cap: u64, dest: &Path)
-    -> Result<String, GalleryError>;
+    /// The manager words a failure itself (`errors::from_fetch`).
+    async fn fetch_to_file(&self, url: &Url, cap: u64, dest: &Path) -> Result<String, FetchError>;
 }
 
 /// The time, and where a local calendar day starts.
@@ -101,6 +110,11 @@ impl ProviderSource for StoreProviders {
         };
         Ok((media, endpoint))
     }
+
+    async fn company(&self, id: store::ProviderId) -> Option<Company> {
+        let provider = self.store.get_provider(id).await.ok()??;
+        media_company(kind_of(&provider.kind))
+    }
 }
 
 /// The main window: `studio-progress` with the run.
@@ -115,25 +129,21 @@ impl StudioSink for AppSink {
 }
 
 /// The guarded fetcher (addresses checked and pinned, private and loopback addresses
-/// refused, redirects followed by hand), which never sends a key.
+/// refused, redirects followed by hand), which never sends a key. Each download may take
+/// [`FILE_HOST_TIMEOUT`], whatever the fetcher's own limit; connecting still takes at most
+/// 10 s.
 pub struct GuardedFetch(pub search::Fetcher);
 
 #[async_trait]
 impl ForeignFetch for GuardedFetch {
-    async fn fetch_to_file(
-        &self,
-        url: &Url,
-        cap: u64,
-        dest: &Path,
-    ) -> Result<String, GalleryError> {
-        use search::FetchError;
-        match self.0.fetch_to_file(url, cap, dest).await {
-            Ok(file) => Ok(file.content_type),
-            Err(FetchError::DiskFull) => Err(GalleryError::DiskFull),
-            Err(FetchError::TooLarge(cap)) => Err(GalleryError::TooLarge(cap)),
-            Err(FetchError::NotMedia(_)) => Err(GalleryError::NotMedia),
-            Err(other) => Err(GalleryError::Io(other.to_string())),
-        }
+    async fn fetch_to_file(&self, url: &Url, cap: u64, dest: &Path) -> Result<String, FetchError> {
+        let file = self
+            .0
+            .clone()
+            .with_timeout(FILE_HOST_TIMEOUT)
+            .fetch_to_file(url, cap, dest)
+            .await?;
+        Ok(file.content_type)
     }
 }
 
@@ -221,6 +231,30 @@ mod tests {
             .err()
             .unwrap();
         assert_eq!(err.code, "studio_no_endpoint");
+    }
+
+    #[tokio::test]
+    async fn an_endpoint_gives_its_company_without_its_key() {
+        let store = store::Store::open_in_memory().unwrap();
+        let openai = endpoint(&store, "openai", "https://api.openai.com/v1").await;
+        let ollama = endpoint(&store, "ollama", "http://127.0.0.1:11434/v1").await;
+        let source = source(&store, store::MemorySecretStore::new());
+        assert_eq!(source.company(openai).await, Some(Company::OpenAi));
+        assert_eq!(source.company(ollama).await, None);
+        assert_eq!(source.company(store::ProviderId(9_999)).await, None);
+    }
+
+    #[tokio::test]
+    async fn a_result_link_to_this_computer_is_refused_before_connecting() {
+        let fetch = GuardedFetch(search::Fetcher::new("test"));
+        let dir = std::env::temp_dir().join(format!("studio-fetch-{}", uuid::Uuid::new_v4()));
+        let url = Url::parse("http://127.0.0.1:9/result.mp4").unwrap();
+        let err = fetch
+            .fetch_to_file(&url, 1024, &dir.join("out"))
+            .await
+            .unwrap_err();
+        assert!(matches!(err, search::FetchError::Blocked { .. }), "{err:?}");
+        assert!(!dir.exists());
     }
 
     #[test]

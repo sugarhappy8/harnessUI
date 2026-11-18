@@ -1,5 +1,6 @@
 //! Studio's runs (0.1.0): starting them under the spending rules, their queues, cancel, the
-//! pictures they make and their audit rows. Modelled on `DownloadManager`.
+//! pictures they make, the video jobs they follow (across restarts too) and their audit rows.
+//! Modelled on `DownloadManager`.
 //!
 //! - **Starting** ([`StudioManager::start`]), one at a time (the `starting` lock), so two
 //!   presses at once cannot both pass the daily limit: the same press sent twice (its client
@@ -14,33 +15,56 @@
 //!   confirmation rules. Only then is the run recorded (`queued`), with its audit row (the
 //!   prompt's length, never the prompt), and queued. Nothing is sent before that.
 //! - **Queues**: per endpoint, [`PICTURES_AT_ONCE`] picture runs and [`VIDEOS_AT_ONCE`] video
-//!   jobs at once; more wait in order. A run's task frees its place however it ends, a panic
-//!   included (`TaskEnd`), and starts the next one waiting.
+//!   jobs at once; more wait in order. A video followed again (after a restart, *Get it anyway*
+//!   or *Check again*) takes a place like a new run. A run's task frees its place however it
+//!   ends, a panic included (`TaskEnd`), and starts the next one waiting.
 //! - **A run's task** writes `sending` and its start time before the request goes out, sends
 //!   it once (`MediaProvider::start`), and keeps the pictures that come back in the gallery
 //!   (type-checked, at most `MediaLimits::picture_cap` each), with a thumbnail when a picture
-//!   worker is set and the run's sidecar. A started video job is recorded as `waiting` with
-//!   its remote id (Task A14 follows it). Every failure is recorded with whether it was
+//!   worker is set and the run's sidecar. Every failure is recorded with whether it was
 //!   charged: not sent, never; a timeout or a cut connection, and a Cancel while sending, not
 //!   for an OpenRouter picture (OpenRouter bills only a picture it delivered:
 //!   <https://openrouter.ai/docs/guides/overview/multimodal/image-generation>, "Billing and
 //!   Cancellation") and unknown otherwise; a Cancel while queued, never.
+//! - **A video job** is recorded as `waiting` with its remote id before it is first checked,
+//!   then checked ([`poll_delay`]) until it is done, fails or is gone. A check that fails keeps
+//!   it waiting. After [`PollPlan::watch_limit`] it is left `waiting`, "still not ready"
+//!   (`stale`), its audit row open, and no longer checked. A done job's cost is recorded first,
+//!   then it is `downloading`: each result from the company, or from its file host through the
+//!   guarded fetcher (without the key) when the company points there, into
+//!   `.partial/<run>/<output id>`, then into the gallery (at most `MediaLimits::video_cap`).
+//!   It was charged, so a failure from there keeps the remote id and the cost and is recorded
+//!   as charged. Progress is written and sent at most every [`PROGRESS_EVERY`]; a status
+//!   change is sent at once.
 //! - **Cancel** cancels the run's token: its request's future is dropped, which closes the
 //!   connection (an answer already there when Cancel comes is kept: it was delivered, so it
-//!   was charged). Nothing is ever sent again on its own.
-//! - **The audit row** is completed once when the run ends, with its status and its cost.
+//!   was charged). A video being watched (Stop watching) ends `cancelled`, may still be
+//!   charged, and keeps its remote id. Nothing is ever sent again on its own.
+//! - **Get it anyway and Check again** ([`StudioManager::fetch_anyway`]) check a stopped,
+//!   failed or still-not-ready video job again and download its result; they never send a
+//!   create.
+//! - **Restarts**: at start, [`StudioManager::resume_interrupted`] removes yesterday's spending
+//!   stubs and picks up what the app left: a run waiting for its turn was never sent; one
+//!   being sent may or may not have started; a video job waiting or downloading is checked
+//!   again. At exit, [`StudioManager::shutdown`] stops every task without recording anything,
+//!   so the next start finds each run as it was.
+//! - **The audit row** is completed once when the run ends, with its status and its cost
+//!   (after a restart too, through the run's `audit_id`). *Get it anyway* on a run whose row
+//!   is already complete appends a follow-up row and completes that one.
 //! - **Runs on this computer** are refused until the local lane exists (Task L15).
 
 use std::collections::{BTreeMap, HashMap, VecDeque};
+use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError, RwLock};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use agent::media::openrouter::place_extra;
 use agent::media::{
-    Company, FailureKind, Invalid, MediaError, MediaKind, MediaLimits, MediaModel, MediaProvider,
-    MediaRequest, ParamKind, RefImage, RequestPreview, Routing, SEED_MAX, Saved, Stage, Started,
-    choice_for, estimate as estimate_usd, parse_image_endpoints, validate,
+    Company, FailureKind, Fetched, Invalid, JobDone, JobState, MediaError, MediaKind, MediaLimits,
+    MediaModel, MediaProvider, MediaRequest, ParamKind, RefImage, RequestPreview, Routing,
+    SEED_MAX, Saved, Stage, Started, choice_for, estimate as estimate_usd, parse_image_endpoints,
+    validate,
 };
 use rand::Rng;
 use serde_json::{Map, Value, json};
@@ -66,8 +90,55 @@ pub const VIDEOS_AT_ONCE: usize = 2;
 /// How many recent client tokens are kept, so a press sent twice makes one run.
 const RECENT_TOKENS: usize = 64;
 
-/// How long Cancel waits for a run's task to end and record it.
+/// How long Cancel waits for a run's task to end and record it, and Shutdown for every task
+/// to stop.
 const CANCEL_WAIT: Duration = Duration::from_secs(30);
+
+/// A run's progress is written and sent at most this often; a status change is sent at once.
+pub const PROGRESS_EVERY: Duration = Duration::from_millis(250);
+
+/// When a video job is checked, and for how long Studio keeps checking it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PollPlan {
+    /// The wait between checks at first.
+    pub first: Duration,
+    /// The wait between checks once the job has been watched for `second_from`.
+    pub second: Duration,
+    /// The wait between checks once the job has been watched for `third_from`.
+    pub third: Duration,
+    /// When checks move from `first` to `second`.
+    pub second_from: Duration,
+    /// When checks move from `second` to `third`.
+    pub third_from: Duration,
+    /// How long a job is watched before it is left "still not ready" and no longer checked.
+    pub watch_limit: Duration,
+}
+
+impl Default for PollPlan {
+    /// Every 5 s for the first minute, then every 10 s, then every 20 s from 5 minutes; 30
+    /// minutes in all.
+    fn default() -> Self {
+        Self {
+            first: Duration::from_secs(5),
+            second: Duration::from_secs(10),
+            third: Duration::from_secs(20),
+            second_from: Duration::from_secs(60),
+            third_from: Duration::from_secs(5 * 60),
+            watch_limit: Duration::from_secs(30 * 60),
+        }
+    }
+}
+
+/// The wait before the next check of a job watched for `watched_for`.
+pub fn poll_delay(plan: &PollPlan, watched_for: Duration) -> Duration {
+    if watched_for >= plan.third_from {
+        plan.third
+    } else if watched_for >= plan.second_from {
+        plan.second
+    } else {
+        plan.first
+    }
+}
 
 /// What the manager works with.
 pub struct StudioDeps {
@@ -87,6 +158,8 @@ pub struct StudioDeps {
     pub thumbs: Option<PictureWorker>,
     /// The caps on results.
     pub limits: MediaLimits,
+    /// When video jobs are checked.
+    pub poll: PollPlan,
 }
 
 /// Studio's runs. Cheap to clone: every clone is the same manager.
@@ -105,6 +178,12 @@ struct Inner {
     starting: tokio::sync::Mutex<()>,
     /// The last client tokens and the runs they made, oldest first.
     recent_tokens: Mutex<VecDeque<(String, String)>>,
+    /// Cancelled only by [`StudioManager::shutdown`]: every task stops where it is and records
+    /// nothing, and nothing starts after it.
+    root: CancellationToken,
+    /// The videos still not ready after the watch limit, no longer checked, by run id, each
+    /// with the job to follow it again (*Check again*) or to record a Stop watching.
+    stale: Mutex<HashMap<String, Job>>,
 }
 
 /// A queue: one endpoint's runs of one kind.
@@ -129,7 +208,8 @@ struct Running {
     lane: LaneKey,
 }
 
-/// A recorded run and what its task needs to send it.
+/// A recorded run and what its task needs to send it or follow its job. Never cloned: a copy
+/// of a job that sends would send again ([`Job::following`] makes one that only follows).
 struct Job {
     run_id: String,
     created_at: i64,
@@ -137,14 +217,80 @@ struct Job {
     lane: LaneKey,
     provider: Arc<dyn MediaProvider>,
     endpoint: Endpoint,
-    request: MediaRequest,
     /// The seed sent, kept with each output.
     seed: Option<u64>,
     audit_id: Option<store::AuditId>,
+    step: Step,
+}
+
+/// What a run's task does.
+enum Step {
+    /// Send the run's request, once.
+    Send(MediaRequest),
+    /// Follow the started video job `remote_id`: check it, then download its result. `started`
+    /// is when its request was sent, or when *Get it anyway* started a follow-up.
+    Follow {
+        remote_id: String,
+        started: Option<i64>,
+    },
+}
+
+impl Job {
+    /// When its request was sent (or its follow-up started), for its audit row's duration.
+    fn started(&self) -> Option<i64> {
+        match &self.step {
+            Step::Send(_) => None,
+            Step::Follow { started, .. } => *started,
+        }
+    }
+
+    /// What it is charged when it is stopped before its task does anything: nothing for a
+    /// request never sent; unknown for a video job that started.
+    fn charge_if_stopped_waiting(&self) -> Option<bool> {
+        matches!(self.step, Step::Send(_)).then_some(false)
+    }
+
+    /// The same run, to follow its started job `remote_id` (never to send it again).
+    fn following(&self, remote_id: &str, started: Option<i64>) -> Self {
+        Self {
+            run_id: self.run_id.clone(),
+            created_at: self.created_at,
+            kind: self.kind,
+            lane: self.lane,
+            provider: Arc::clone(&self.provider),
+            endpoint: self.endpoint.clone(),
+            seed: self.seed,
+            audit_id: self.audit_id,
+            step: Step::Follow {
+                remote_id: remote_id.to_owned(),
+                started,
+            },
+        }
+    }
 }
 
 /// A task that may start now: the job and its tokens.
 type Admitted = (Job, CancellationToken, CancellationToken);
+
+/// Whether Studio follows a run now.
+enum Followed {
+    /// Its task runs; `ended` fires when it is gone.
+    Running { ended: CancellationToken },
+    /// It waits for a place in its queue.
+    Queued,
+    /// Neither.
+    No,
+}
+
+/// What waiting for one step of a run's task gave.
+enum Waited<T> {
+    /// The step's own result.
+    Got(T),
+    /// The user stopped the run.
+    Stopped,
+    /// The app is closing: the task records nothing.
+    Shutdown,
+}
 
 impl Lanes {
     fn active(&self, lane: LaneKey) -> usize {
@@ -219,7 +365,12 @@ impl Drop for TaskEnd {
         let next = {
             let mut lanes = self.inner.lanes();
             lanes.running.remove(&self.run_id);
-            lanes.next_in(self.lane)
+            // Once the app is closing, nothing more starts.
+            if self.inner.root.is_cancelled() {
+                None
+            } else {
+                lanes.next_in(self.lane)
+            }
         };
         self.ended.cancel();
         if let Some(admitted) = next {
@@ -285,6 +436,23 @@ fn unanswered_charge(job: &Job) -> Option<bool> {
     (job.endpoint.company == Company::OpenRouter && job.kind == MediaKind::Image).then_some(false)
 }
 
+/// A cost a company reported, when it is one: a cost that is not a number, or is below zero,
+/// counts as not reported.
+fn usable_cost(usd: Option<f64>) -> Option<f64> {
+    usd.filter(|usd| usd.is_finite() && *usd >= 0.0)
+}
+
+/// What one run's task works with.
+struct Task<'a> {
+    job: &'a Job,
+    /// Cancelled by Cancel.
+    token: &'a CancellationToken,
+    gallery: Gallery,
+    /// `<gallery>/.partial/<run>`: answers and downloads in progress, removed when the task
+    /// ends.
+    scratch: PathBuf,
+}
+
 /// What a run's request, checked and priced, would send and cost.
 struct Prepared {
     model: MediaModel,
@@ -309,6 +477,8 @@ impl StudioManager {
                 lanes: Mutex::new(Lanes::default()),
                 starting: tokio::sync::Mutex::new(()),
                 recent_tokens: Mutex::new(VecDeque::new()),
+                root: CancellationToken::new(),
+                stale: Mutex::new(HashMap::new()),
             }),
         }
     }
@@ -411,8 +581,9 @@ impl StudioManager {
     }
 
     /// Stops run `run_id`: a run waiting for its place is never sent; a run being sent stops
-    /// waiting for its answer (its connection is closed). Waits for the run's task to record
-    /// how it ended, then gives the run as it is.
+    /// waiting for its answer (its connection is closed); a video being watched, or still not
+    /// ready, is no longer checked and keeps its remote id (Stop watching). Waits for the
+    /// run's task to record how it ended, then gives the run as it is.
     pub async fn cancel(&self, run_id: &str) -> AppResult<RunDto> {
         enum Found {
             Queued(Box<Job>),
@@ -431,9 +602,8 @@ impl StudioManager {
         };
         match found {
             Found::Queued(job) => {
-                self.inner
-                    .end_run(&job, Ending::stopped(&job, Some(false)), None)
-                    .await;
+                let ending = Ending::stopped(&job, job.charge_if_stopped_waiting());
+                self.inner.end_run(&job, ending, job.started()).await;
             }
             Found::Running(token, ended) => {
                 token.cancel();
@@ -446,6 +616,13 @@ impl StudioManager {
             }
             Found::Neither => {}
         }
+        // A video still not ready has no task (or one just finishing): Stop watching ends it
+        // here. It started, so it may still be charged.
+        if let Some(job) = self.inner.take_stale(run_id) {
+            self.inner
+                .end_run(&job, Ending::stopped(&job, None), job.started())
+                .await;
+        }
         let run = self
             .inner
             .deps
@@ -454,6 +631,123 @@ impl StudioManager {
             .await?
             .ok_or_else(|| AppError::not_found("run"))?;
         Ok(self.inner.dto_of(&run))
+    }
+
+    /// "Get it anyway" on a stopped video, and "Check again" on one still not ready: checks
+    /// and downloads; never creates.
+    ///
+    /// A video that was stopped, or failed after its job started (a full disk, a download
+    /// that broke, a job the company no longer had), goes back to `waiting` with a follow-up
+    /// audit row (the first row is complete and never changed); one still not ready is only
+    /// watched again, and its own row is completed when it ends. A run on this computer, a
+    /// picture, or a run without a job id is refused; a finished run, or one Studio follows
+    /// now, is given as it is.
+    pub async fn fetch_anyway(&self, run_id: &str) -> AppResult<RunDto> {
+        // One at a time, and never beside a start, so two presses follow a job once.
+        let _one_at_a_time = self.inner.starting.lock().await;
+        let run = self
+            .inner
+            .deps
+            .store
+            .get_creation_run(run_id)
+            .await?
+            .ok_or_else(|| AppError::not_found("run"))?;
+        let remote_id = match (&run.runs_on, &run.remote_id) {
+            (store::RunsOn::Cloud, Some(remote_id)) => remote_id.clone(),
+            _ => return Err(errors::nothing_to_fetch()),
+        };
+        use store::CreationStatus as S;
+        let follow_up = match run.status {
+            S::Done => return Ok(self.inner.dto_of(&run)),
+            S::Waiting | S::Running | S::Downloading => false,
+            S::Failed | S::Cancelled => true,
+            S::Queued | S::Sending | S::Blocked | S::Interrupted => {
+                return Err(errors::nothing_to_fetch());
+            }
+        };
+        match self.inner.followed(run_id) {
+            Followed::Queued => return Ok(self.inner.dto_of(&run)),
+            Followed::Running { ended } => {
+                if !follow_up && !self.inner.is_stale(run_id) {
+                    return Ok(self.inner.dto_of(&run));
+                }
+                // Its last task is just finishing (it went stale or ended): it goes first, so
+                // two tasks never share the run's scratch folder.
+                if tokio::time::timeout(CANCEL_WAIT, ended.cancelled())
+                    .await
+                    .is_err()
+                {
+                    tracing::warn!(run = %run_id, "a Studio run's last task did not end in time");
+                    return Ok(self.inner.dto_of(&run));
+                }
+            }
+            Followed::No => {}
+        }
+        let job = if follow_up {
+            self.inner.follow_up(&run, remote_id).await?
+        } else if let Some(job) = self.inner.take_stale(run_id) {
+            job
+        } else {
+            self.inner
+                .follow_job(&run, remote_id, run.started_at)
+                .await?
+        };
+        self.inner.watch(job).await
+    }
+
+    /// At start: removes the spending stubs of runs made before today, then picks up every
+    /// cloud run the app left unfinished. A run waiting for its turn was never sent
+    /// (`cancelled`, not charged); one being sent may or may not have started
+    /// (`interrupted`, charged unknown); a video job waiting or downloading is checked again,
+    /// its watch limit counted from now, and downloaded, never sent again. A job that cannot
+    /// be checked now (its endpoint or key is gone) ends `failed` with why, keeping its remote
+    /// id for *Get it anyway*. Runs on this computer are left to the local lane.
+    pub async fn resume_interrupted(&self) {
+        let inner = &self.inner;
+        // Never beside a start: a run just recorded but not yet queued is not the app's leftover.
+        let _no_start_now = inner.starting.lock().await;
+        let today = inner.deps.clock.day_start_ms(inner.deps.clock.now_ms());
+        if let Err(e) = inner.deps.store.purge_creation_stubs(today).await {
+            tracing::warn!("yesterday's Studio spending stubs were not removed: {e}");
+        }
+        let runs = match inner.deps.store.live_creation_runs().await {
+            Ok(runs) => runs,
+            Err(e) => {
+                tracing::warn!("Studio's unfinished runs could not be read: {e}");
+                return;
+            }
+        };
+        for run in runs {
+            if run.runs_on != store::RunsOn::Cloud || inner.is_followed(&run.id) {
+                continue;
+            }
+            inner.resume(run).await;
+        }
+    }
+
+    /// Stops every run task and waits for them, writing no status: what was `waiting` stays
+    /// `waiting` for the next start. Called when the app exits, and by the restart tests in
+    /// place of `drop`.
+    ///
+    /// Runs waiting for a place are left as they are recorded (`queued`, or a video job's
+    /// `waiting`), and nothing starts after this.
+    pub async fn shutdown(&self) {
+        let ended: Vec<CancellationToken> = {
+            let mut lanes = self.inner.lanes();
+            self.inner.root.cancel();
+            lanes.queues.clear();
+            lanes.running.values().map(|r| r.ended.clone()).collect()
+        };
+        let deadline = tokio::time::Instant::now() + CANCEL_WAIT;
+        for ended in ended {
+            if tokio::time::timeout_at(deadline, ended.cancelled())
+                .await
+                .is_err()
+            {
+                tracing::warn!("a Studio run did not stop before the app closed");
+                return;
+            }
+        }
     }
 
     /// The runs still working, oldest first.
@@ -708,6 +1002,8 @@ impl Inner {
                 store::StoreError::TooManyCreations => errors::gallery_full(),
                 other => other.into(),
             })?;
+        let entry = audit_entry(req, &model, &request, &endpoint, usd, confirmed, created_at);
+        let upstream = upstream_of(&model, request.routing.as_ref());
         let mut job = Job {
             run_id,
             created_at,
@@ -715,11 +1011,10 @@ impl Inner {
             lane: (id, model.kind),
             provider,
             endpoint,
-            request,
             seed,
             audit_id: None,
+            step: Step::Send(request),
         };
-        let entry = audit_entry(req, &model, &job, usd, confirmed, created_at);
         let audit_id = match self.deps.store.append_audit(entry).await {
             Ok(audit_id) => audit_id,
             Err(e) => return Err(self.abandon(&job, e.into()).await),
@@ -727,7 +1022,7 @@ impl Inner {
         job.audit_id = Some(audit_id);
         let patch = store::CreationPatch {
             audit_id: Some(Some(audit_id)),
-            upstream: Some(upstream_of(&model, job.request.routing.as_ref())),
+            upstream: Some(upstream),
             ..Default::default()
         };
         if let Err(e) = self
@@ -761,9 +1056,28 @@ impl Inner {
             Ok(None) => return Err(self.abandon(&job, AppError::not_found("run")).await),
             Err(e) => return Err(self.abandon(&job, e.into()).await),
         };
+        Ok(self.place_and_tell(job, &run))
+    }
+
+    /// Follows `job`'s video again: its task starts now when its queue has room, else it
+    /// waits. Gives the run as it is, after its event.
+    async fn watch(self: &Arc<Self>, job: Job) -> AppResult<RunDto> {
+        let run = self
+            .deps
+            .store
+            .get_creation_run(&job.run_id)
+            .await?
+            .ok_or_else(|| AppError::not_found("run"))?;
+        Ok(self.place_and_tell(job, &run))
+    }
+
+    /// Gives `job` a place (or a turn in its queue), sends `run` as it is now, then starts the
+    /// task when it has a place. Once the app is closing, nothing starts.
+    fn place_and_tell(self: &Arc<Self>, job: Job, run: &store::CreationRun) -> RunDto {
         let admitted = {
             let mut lanes = self.lanes();
-            if lanes.has_room(job.lane)
+            if !self.root.is_cancelled()
+                && lanes.has_room(job.lane)
                 && lanes.queues.get(&job.lane).is_none_or(VecDeque::is_empty)
             {
                 Some(lanes.admit(job))
@@ -772,21 +1086,257 @@ impl Inner {
                 None
             }
         };
-        let dto = self.dto_of(&run);
+        let dto = self.dto_of(run);
         self.deps.sink.progress(&dto);
         if let Some(admitted) = admitted {
             spawn(self, admitted);
         }
-        Ok(dto)
+        dto
     }
 
-    /// A run's task: sends the request once and records how it went.
+    /// Whether Studio follows run `run_id` now: its task runs, or it waits for a place.
+    fn followed(&self, run_id: &str) -> Followed {
+        let lanes = self.lanes();
+        if let Some(running) = lanes.running.get(run_id) {
+            Followed::Running {
+                ended: running.ended.clone(),
+            }
+        } else if lanes.position(run_id).is_some() {
+            Followed::Queued
+        } else {
+            Followed::No
+        }
+    }
+
+    /// Whether this manager already has run `run_id`: followed now, or still not ready.
+    fn is_followed(&self, run_id: &str) -> bool {
+        !matches!(self.followed(run_id), Followed::No) || self.is_stale(run_id)
+    }
+
+    fn stale(&self) -> MutexGuard<'_, HashMap<String, Job>> {
+        self.stale.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    fn is_stale(&self, run_id: &str) -> bool {
+        self.stale().contains_key(run_id)
+    }
+
+    /// The job of run `run_id` when it is still not ready, no longer kept as such.
+    fn take_stale(&self, run_id: &str) -> Option<Job> {
+        self.stale().remove(run_id)
+    }
+
+    /// Picks up one cloud run the app left unfinished (see
+    /// [`StudioManager::resume_interrupted`]).
+    async fn resume(self: &Arc<Self>, run: store::CreationRun) {
+        use store::CreationStatus as S;
+        let company = self.company_of(&run).await;
+        let end = |status, error, charged| Ending {
+            status,
+            ..Ending::failed(error, charged)
+        };
+        match (run.status, run.remote_id.clone()) {
+            (S::Queued, _) => {
+                let ending = end(
+                    S::Cancelled,
+                    errors::closed_before_its_turn(company),
+                    Some(false),
+                );
+                self.record_end(&run.id, company, run.audit_id, ending, None)
+                    .await;
+            }
+            (S::Waiting | S::Running | S::Downloading, Some(remote_id)) => {
+                match self.follow_job(&run, remote_id, run.started_at).await {
+                    Ok(job) => {
+                        if let Err(e) = self.watch(job).await {
+                            tracing::warn!(run = %run.id, "a Studio video was not followed: {e:?}");
+                        }
+                    }
+                    Err(error) => {
+                        let ending = Ending::failed(error, None);
+                        self.record_end(&run.id, company, run.audit_id, ending, run.started_at)
+                            .await;
+                    }
+                }
+            }
+            // Sent with no job to check: Studio cannot know whether it started.
+            _ => {
+                let ending = end(S::Interrupted, errors::interrupted(company), None);
+                self.record_end(&run.id, company, run.audit_id, ending, run.started_at)
+                    .await;
+            }
+        }
+    }
+
+    /// The company behind a recorded run: its endpoint's, else (the endpoint is gone) the one
+    /// its host belongs to.
+    async fn company_of(&self, run: &store::CreationRun) -> Company {
+        if let Some(id) = run.provider_id
+            && let Some(company) = self.deps.providers.company(id).await
+        {
+            return company;
+        }
+        if run.provider_host.ends_with("openai.com") {
+            Company::OpenAi
+        } else {
+            Company::OpenRouter
+        }
+    }
+
+    /// The job that follows recorded run `run`'s video job `remote_id`, with its endpoint and
+    /// key (refused as `ProviderSource::media` refuses).
+    async fn follow_job(
+        &self,
+        run: &store::CreationRun,
+        remote_id: String,
+        started: Option<i64>,
+    ) -> AppResult<Job> {
+        let id = run.provider_id.ok_or_else(errors::no_endpoint)?;
+        let (provider, endpoint) = self.deps.providers.media(id).await?;
+        let kind = media_kind(run.kind);
+        Ok(Job {
+            run_id: run.id.clone(),
+            created_at: run.created_at,
+            kind,
+            lane: (id, kind),
+            provider,
+            endpoint,
+            seed: run.params.pointer("/params/seed").and_then(Value::as_u64),
+            audit_id: run.audit_id,
+            step: Step::Follow { remote_id, started },
+        })
+    }
+
+    /// *Get it anyway* on an ended run whose audit row is complete: a follow-up row (the
+    /// first row's tool and arguments, `parent_audit_id` set to the run's row) and the run
+    /// back to `waiting` with that row, its error and its end cleared. The job to follow it.
+    async fn follow_up(&self, run: &store::CreationRun, remote_id: String) -> AppResult<Job> {
+        let now = self.deps.clock.now_ms();
+        let mut job = self.follow_job(run, remote_id, Some(now)).await?;
+        let (tool, arguments) = match self.audit_row_of(run).await {
+            Some(row) => (row.tool, row.arguments),
+            None => (
+                tool_of(job.kind).to_owned(),
+                json!({
+                    "endpoint": job.endpoint.name,
+                    "host": job.endpoint.host,
+                    "model": run.model,
+                }),
+            ),
+        };
+        let audit_id = self
+            .deps
+            .store
+            .append_audit(store::AuditEntry {
+                ts: Some(now),
+                chat_id: None,
+                server: "studio".to_owned(),
+                tool,
+                arguments,
+                preview: format!(
+                    "Got the stopped video with {} through {}",
+                    run.model_label, job.endpoint.name
+                ),
+                risk: "normal".to_owned(),
+                decision: store::AuditDecision::AllowedWithoutPrompt,
+                decided_by: "user".to_owned(),
+                note: None,
+                parent_audit_id: run.audit_id,
+                result: None,
+            })
+            .await?;
+        job.audit_id = Some(audit_id);
+        let back = store::CreationPatch {
+            status: Some(store::CreationStatus::Waiting),
+            error: Some(None),
+            finished_at: Some(None),
+            progress: Some(None),
+            audit_id: Some(Some(audit_id)),
+            ..Default::default()
+        };
+        if let Err(e) = self.deps.store.update_creation_run(&run.id, back).await {
+            // Nothing was followed: the follow-up row says so rather than stay open.
+            self.complete_audit(
+                &run.id,
+                Some(audit_id),
+                store::CreationStatus::Failed,
+                None,
+                None,
+            )
+            .await;
+            return Err(e.into());
+        }
+        Ok(job)
+    }
+
+    /// Run `run`'s audit row as it is now, when it can be read.
+    async fn audit_row_of(&self, run: &store::CreationRun) -> Option<store::AuditRow> {
+        let audit_id = run.audit_id?;
+        // A run's rows are never older than the run.
+        let query = store::AuditQuery {
+            server: Some("studio".to_owned()),
+            since: Some(run.created_at),
+            ..Default::default()
+        };
+        match self.deps.store.list_audit(query).await {
+            Ok(rows) => rows.into_iter().find(|row| row.id == audit_id),
+            Err(e) => {
+                tracing::warn!(run = %run.id, "a Studio run's audit row could not be read: {e}");
+                None
+            }
+        }
+    }
+
+    /// Waits for `step`, unless the user stops the run or the app closes first. An answer
+    /// that is already there wins: what was delivered is kept.
+    async fn until_stopped<T>(
+        &self,
+        token: &CancellationToken,
+        step: impl Future<Output = T>,
+    ) -> Waited<T> {
+        tokio::select! {
+            biased;
+            out = step => Waited::Got(out),
+            () = token.cancelled() => Waited::Stopped,
+            () = self.root.cancelled() => Waited::Shutdown,
+        }
+    }
+
+    /// A run's task: sends the request once, or follows the video job, and records how it
+    /// went; the run's scratch folder goes when it ends. Once the app is closing it does
+    /// nothing.
     async fn run_job(&self, job: &Job, token: &CancellationToken) {
-        if token.is_cancelled() {
-            self.end_run(job, Ending::stopped(job, Some(false)), None)
-                .await;
+        if self.root.is_cancelled() {
             return;
         }
+        if token.is_cancelled() {
+            let ending = Ending::stopped(job, job.charge_if_stopped_waiting());
+            self.end_run(job, ending, job.started()).await;
+            return;
+        }
+        let gallery = self.gallery();
+        let scratch = gallery.partial_dir().join(&job.run_id);
+        let task = Task {
+            job,
+            token,
+            gallery,
+            scratch,
+        };
+        match &job.step {
+            Step::Send(request) => self.send(&task, request).await,
+            Step::Follow { remote_id, started } => self.follow(&task, remote_id, *started).await,
+        }
+        match tokio::fs::remove_dir_all(&task.scratch).await {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => tracing::warn!(run = %job.run_id, "a Studio scratch folder stayed: {e}"),
+        }
+    }
+
+    /// Sends the run's request once: pictures are kept; a video job is recorded as `waiting`
+    /// with its remote id, then followed.
+    async fn send(&self, t: &Task<'_>, request: &MediaRequest) {
+        let job = t.job;
         let started = self.deps.clock.now_ms();
         let sending = store::CreationPatch {
             status: Some(store::CreationStatus::Sending),
@@ -810,35 +1360,31 @@ impl Inner {
             return;
         }
         self.emit(&job.run_id).await;
-        let gallery = self.gallery();
-        let scratch = gallery.partial_dir().join(&job.run_id);
-        if let Err(e) = tokio::fs::create_dir_all(&scratch).await {
+        if let Err(e) = tokio::fs::create_dir_all(&t.scratch).await {
             let error = errors::from_gallery(&io_error(e));
             self.end_run(job, Ending::failed(error, Some(false)), Some(started))
                 .await;
             return;
         }
-        // An answer that is already there wins over a Cancel pressed at the same moment: its
-        // pictures were delivered, so they were charged and are kept.
-        let answer = tokio::select! {
-            biased;
-            answer = job.provider.start(&job.request, &scratch) => Some(answer),
-            () = token.cancelled() => None,
-        };
-        match answer {
-            None => {
+        match self
+            .until_stopped(t.token, job.provider.start(request, &t.scratch))
+            .await
+        {
+            // The run stays `sending`: the next start says it may or may not have started.
+            Waited::Shutdown => {}
+            Waited::Stopped => {
                 let ending = Ending::stopped(job, unanswered_charge(job));
                 self.end_run(job, ending, Some(started)).await;
             }
-            Some(Ok(Started::Done { outputs, cost })) => {
-                self.keep_pictures(job, &gallery, &outputs, cost.map(|c| c.usd), started)
+            Waited::Got(Ok(Started::Done { outputs, cost })) => {
+                self.keep_pictures(job, &t.gallery, &outputs, cost.map(|c| c.usd), started)
                     .await;
             }
-            Some(Ok(Started::Job { remote_id })) => {
-                // Task A14 follows the job from here.
+            Waited::Got(Ok(Started::Job { remote_id })) => {
+                // Written before the first check, so a restart finds the job.
                 let waiting = store::CreationPatch {
                     status: Some(store::CreationStatus::Waiting),
-                    remote_id: Some(Some(remote_id)),
+                    remote_id: Some(Some(remote_id.clone())),
                     ..Default::default()
                 };
                 if let Err(e) = self
@@ -853,16 +1399,230 @@ impl Inner {
                     );
                 }
                 self.emit(&job.run_id).await;
+                self.follow(t, &remote_id, Some(started)).await;
             }
-            Some(Err(err)) => {
+            Waited::Got(Err(err)) => {
                 let ending = self.ending_of(job, err);
                 self.end_run(job, ending, Some(started)).await;
             }
         }
-        match tokio::fs::remove_dir_all(&scratch).await {
-            Ok(()) => {}
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-            Err(e) => tracing::warn!(run = %job.run_id, "a Studio scratch folder stayed: {e}"),
+    }
+
+    /// Checks video job `remote_id` until it is done (then downloads it), fails or is gone,
+    /// or until the watch limit (then it is left `waiting`, still not ready). A check that
+    /// fails keeps it waiting. Its progress is written and sent at most every
+    /// [`PROGRESS_EVERY`]. `started` is when its request was sent.
+    async fn follow(&self, t: &Task<'_>, remote_id: &str, started: Option<i64>) {
+        let job = t.job;
+        let plan = self.deps.poll;
+        let watching_since = Instant::now();
+        // Its `waiting` event was just sent.
+        let mut last_event = Instant::now();
+        let mut progress: Option<f64> = None;
+        loop {
+            let state = match self
+                .until_stopped(t.token, job.provider.check(remote_id))
+                .await
+            {
+                Waited::Got(state) => state,
+                Waited::Stopped => return self.stop_watching(job, started).await,
+                Waited::Shutdown => return,
+            };
+            match state {
+                Ok(JobState::Done(done)) => {
+                    return self.download(t, remote_id, &done, started).await;
+                }
+                Ok(JobState::Failed(failure)) => {
+                    let ending = self.ending_of(job, MediaError::Answered(failure));
+                    return self.end_run(job, ending, started).await;
+                }
+                Ok(JobState::Gone) => {
+                    let lost = errors::job_lost(job.endpoint.company);
+                    return self.end_run(job, Ending::failed(lost, None), started).await;
+                }
+                Ok(JobState::Running {
+                    progress: Some(now),
+                }) => {
+                    let now = f64::from(now);
+                    if progress != Some(now) && last_event.elapsed() >= PROGRESS_EVERY {
+                        progress = Some(now);
+                        last_event = Instant::now();
+                        self.write_progress(job, now).await;
+                    }
+                }
+                Ok(JobState::Pending | JobState::Running { progress: None }) => {}
+                // It keeps waiting.
+                Err(e) => tracing::debug!(run = %job.run_id, "a Studio video check failed: {e}"),
+            }
+            let watched = watching_since.elapsed();
+            if watched >= plan.watch_limit {
+                return self.leave_stale(job.following(remote_id, started)).await;
+            }
+            match self
+                .until_stopped(t.token, tokio::time::sleep(poll_delay(&plan, watched)))
+                .await
+            {
+                Waited::Got(()) => {}
+                Waited::Stopped => return self.stop_watching(job, started).await,
+                Waited::Shutdown => return,
+            }
+        }
+    }
+
+    /// Stop watching a video job: it started, so it may still finish and be charged; its
+    /// remote id stays for *Get it anyway*.
+    async fn stop_watching(&self, job: &Job, started: Option<i64>) {
+        self.end_run(job, Ending::stopped(job, None), started).await;
+    }
+
+    /// The watch limit passed: the run stays `waiting`, its audit row open, no longer
+    /// checked, until *Check again* or Stop watching. `job` follows its started job.
+    async fn leave_stale(&self, job: Job) {
+        let run_id = job.run_id.clone();
+        self.stale().insert(run_id.clone(), job);
+        self.emit(&run_id).await;
+    }
+
+    /// Records a job's progress and sends it.
+    async fn write_progress(&self, job: &Job, progress: f64) {
+        let patch = store::CreationPatch {
+            progress: Some(Some(progress)),
+            ..Default::default()
+        };
+        match self
+            .deps
+            .store
+            .update_creation_run(&job.run_id, patch)
+            .await
+        {
+            Ok(()) => self.emit(&job.run_id).await,
+            Err(e) => {
+                tracing::debug!(run = %job.run_id, "a Studio run's progress was not recorded: {e}")
+            }
+        }
+    }
+
+    /// Downloads a done job's results into the gallery, its cost recorded first. It was
+    /// charged, so a failure from here keeps the remote id and the cost and is recorded as
+    /// charged.
+    async fn download(&self, t: &Task<'_>, remote_id: &str, done: &JobDone, started: Option<i64>) {
+        let job = t.job;
+        let cost_usd = usable_cost(done.cost.map(|c| c.usd));
+        let downloading = store::CreationPatch {
+            status: Some(store::CreationStatus::Downloading),
+            cost_usd: cost_usd.map(Some),
+            progress: Some(None),
+            ..Default::default()
+        };
+        if let Err(e) = self
+            .deps
+            .store
+            .update_creation_run(&job.run_id, downloading)
+            .await
+        {
+            tracing::warn!(run = %job.run_id, "a done Studio video was not recorded: {e}");
+        }
+        // Results kept before (ahead of a restart, or of a download that broke) stay as they
+        // are.
+        let kept: Vec<u32> = match self.deps.store.get_creation_run(&job.run_id).await {
+            Ok(Some(run)) => {
+                self.deps.sink.progress(&self.dto_of(&run));
+                run.outputs.iter().map(|out| out.idx).collect()
+            }
+            Ok(None) => Vec::new(),
+            Err(e) => {
+                tracing::warn!(run = %job.run_id, "a Studio run could not be read: {e}");
+                Vec::new()
+            }
+        };
+        let charged = |error: AppError| Ending {
+            cost_usd,
+            ..Ending::failed(error, Some(true))
+        };
+        if let Err(e) = tokio::fs::create_dir_all(&t.scratch).await {
+            let error = errors::from_gallery(&io_error(e));
+            return self.end_run(job, charged(error), started).await;
+        }
+        let cap = self.cap_of(job.kind);
+        for idx in 0..done.outputs {
+            let number = u32::try_from(idx).unwrap_or(u32::MAX);
+            if kept.contains(&number) {
+                continue;
+            }
+            let output_id = uuid::Uuid::new_v4().to_string();
+            let partial = t.scratch.join(&output_id);
+            let fetched = self.fetch_result(job, remote_id, done, idx, &partial);
+            let saved = match self.until_stopped(t.token, fetched).await {
+                Waited::Got(Ok(saved)) => saved,
+                Waited::Got(Err(error)) => return self.end_run(job, charged(error), started).await,
+                Waited::Stopped => {
+                    let ending = Ending {
+                        cost_usd,
+                        ..Ending::stopped(job, Some(true))
+                    };
+                    return self.end_run(job, ending, started).await;
+                }
+                // The run stays `downloading`: the next start checks and downloads again.
+                Waited::Shutdown => return,
+            };
+            if let Err(error) = self
+                .keep_one(job, &t.gallery, output_id, number, &saved, cap)
+                .await
+            {
+                return self.end_run(job, charged(error), started).await;
+            }
+        }
+        self.finish(job, &t.gallery, cost_usd, started).await;
+    }
+
+    /// Result `idx` of done job `remote_id`, downloaded to `partial`: from the company with
+    /// the key, or from its file host through the guarded fetcher (without the key) when the
+    /// company points there. A failure in Studio's words.
+    async fn fetch_result(
+        &self,
+        job: &Job,
+        remote_id: &str,
+        done: &JobDone,
+        idx: usize,
+        partial: &Path,
+    ) -> AppResult<Saved> {
+        let company = job.endpoint.company;
+        let cap = self.cap_of(job.kind);
+        match job.provider.download(remote_id, done, idx, partial).await {
+            Ok(Fetched::Saved(saved)) => Ok(saved),
+            Ok(Fetched::Elsewhere(url)) => {
+                let mime = self
+                    .deps
+                    .fetch
+                    .fetch_to_file(&url, cap, partial)
+                    .await
+                    .map_err(|e| errors::from_fetch(company, &e))?;
+                let size_bytes = tokio::fs::metadata(partial).await.map_or(0, |m| m.len());
+                Ok(Saved {
+                    path: partial.to_owned(),
+                    mime,
+                    size_bytes,
+                    width: None,
+                    height: None,
+                    duration_ms: None,
+                })
+            }
+            Err(MediaError::Local(e)) => Err(errors::from_local(&e, cap)),
+            Err(MediaError::Answered(f)) if f.kind == FailureKind::Expired => {
+                Err(errors::result_expired(company))
+            }
+            Err(e) => Err(AppError {
+                details: e.to_string(),
+                ..errors::download_failed(company)
+            }),
+        }
+    }
+
+    /// The cap on one result of `kind`.
+    fn cap_of(&self, kind: MediaKind) -> u64 {
+        match kind {
+            MediaKind::Image => self.deps.limits.picture_cap,
+            MediaKind::Video => self.deps.limits.video_cap,
         }
     }
 
@@ -916,68 +1676,40 @@ impl Inner {
         cost_usd: Option<f64>,
         started: i64,
     ) {
-        // A cost that is not a number, or is below zero, counts as not reported.
-        let cost_usd = cost_usd.filter(|usd| usd.is_finite() && *usd >= 0.0);
+        let cost_usd = usable_cost(cost_usd);
         let charged = |error: AppError| Ending {
             cost_usd,
             ..Ending::failed(error, Some(true))
         };
+        let cap = self.deps.limits.picture_cap;
         for (idx, saved) in outputs.iter().enumerate() {
             let idx = u32::try_from(idx).unwrap_or(u32::MAX);
-            if let Err(error) = self.keep_one(job, gallery, idx, saved).await {
+            let output_id = uuid::Uuid::new_v4().to_string();
+            if let Err(error) = self
+                .keep_one(job, gallery, output_id, idx, saved, cap)
+                .await
+            {
                 self.end_run(job, charged(error), Some(started)).await;
                 return;
             }
         }
-        let now = self.deps.clock.now_ms();
-        let done = store::CreationPatch {
-            status: Some(store::CreationStatus::Done),
-            cost_usd: Some(cost_usd),
-            finished_at: Some(Some(now)),
-            progress: Some(None),
-            ..Default::default()
-        };
-        if let Err(e) = self.deps.store.update_creation_run(&job.run_id, done).await {
-            self.end_run(job, charged(e.into()), Some(started)).await;
-            return;
-        }
-        match self.deps.store.get_creation_run(&job.run_id).await {
-            Ok(Some(run)) => {
-                let gallery = gallery.clone();
-                let written = tokio::task::spawn_blocking(move || gallery.write_sidecar(&run))
-                    .await
-                    .map_err(|e| e.to_string())
-                    .and_then(|r| r.map_err(|e| e.to_string()));
-                if let Err(e) = written {
-                    tracing::warn!(
-                        run = %job.run_id,
-                        "a Studio run's sidecar was not written: {e}"
-                    );
-                }
-            }
-            Ok(None) => {}
-            Err(e) => tracing::warn!(run = %job.run_id, "a Studio run could not be read: {e}"),
-        }
-        self.complete_audit(job, store::CreationStatus::Done, cost_usd, Some(started))
-            .await;
-        self.emit(&job.run_id).await;
+        self.finish(job, gallery, cost_usd, Some(started)).await;
     }
 
-    /// Keeps one picture as output `idx`: moved into the gallery under the run's month once
-    /// its bytes pass the type check and the cap, with its thumbnail and its row.
+    /// Keeps one result as output `output_id` (number `idx`): moved into the gallery under
+    /// the run's month once its bytes pass the type check and `cap`, with its thumbnail (a
+    /// picture's) and its row.
     async fn keep_one(
         &self,
         job: &Job,
         gallery: &Gallery,
+        output_id: String,
         idx: u32,
         saved: &Saved,
+        cap: u64,
     ) -> AppResult<()> {
         let target = gallery.output_stem(job.created_at, &job.run_id, idx);
-        let (from, claimed, cap) = (
-            saved.path.clone(),
-            saved.mime.clone(),
-            self.deps.limits.picture_cap,
-        );
+        let (from, claimed) = (saved.path.clone(), saved.mime.clone());
         let kept = {
             let gallery = gallery.clone();
             tokio::task::spawn_blocking(move || {
@@ -990,7 +1722,6 @@ impl Inner {
         let size_bytes = tokio::fs::metadata(&path)
             .await
             .map_or(saved.size_bytes, |meta| meta.len());
-        let output_id = uuid::Uuid::new_v4().to_string();
         let thumb = self.thumbnail(gallery, &output_id, &path, &mime).await;
         self.deps
             .store
@@ -1050,10 +1781,91 @@ impl Inner {
         }
     }
 
-    /// Records how `job` ended without its results: its status, its error (always with
-    /// `charged`), its end time and its cost; completes its audit row; sends its new state.
-    /// `started` is when sending started, if it did.
+    /// Records `job` done with its files: `done` with its cost (`None` keeps the one already
+    /// recorded), its sidecar, its audit row with the cost recorded, its event. A failure to
+    /// record it leaves the run failed, charged.
+    async fn finish(
+        &self,
+        job: &Job,
+        gallery: &Gallery,
+        cost_usd: Option<f64>,
+        started: Option<i64>,
+    ) {
+        let done = store::CreationPatch {
+            status: Some(store::CreationStatus::Done),
+            cost_usd: cost_usd.map(Some),
+            finished_at: Some(Some(self.deps.clock.now_ms())),
+            progress: Some(None),
+            ..Default::default()
+        };
+        if let Err(e) = self.deps.store.update_creation_run(&job.run_id, done).await {
+            let ending = Ending {
+                cost_usd,
+                ..Ending::failed(e.into(), Some(true))
+            };
+            self.end_run(job, ending, started).await;
+            return;
+        }
+        let run = self.deps.store.get_creation_run(&job.run_id).await;
+        let recorded_cost = match &run {
+            Ok(Some(run)) => {
+                let (gallery, record) = (gallery.clone(), run.clone());
+                let written = tokio::task::spawn_blocking(move || gallery.write_sidecar(&record))
+                    .await
+                    .map_err(|e| e.to_string())
+                    .and_then(|r| r.map_err(|e| e.to_string()));
+                if let Err(e) = written {
+                    tracing::warn!(
+                        run = %job.run_id,
+                        "a Studio run's sidecar was not written: {e}"
+                    );
+                }
+                run.cost_usd.or(cost_usd)
+            }
+            Ok(None) => cost_usd,
+            Err(e) => {
+                tracing::warn!(run = %job.run_id, "a Studio run could not be read: {e}");
+                cost_usd
+            }
+        };
+        self.complete_audit(
+            &job.run_id,
+            job.audit_id,
+            store::CreationStatus::Done,
+            recorded_cost,
+            started,
+        )
+        .await;
+        if let Ok(Some(run)) = run {
+            self.deps.sink.progress(&self.dto_of(&run));
+        }
+    }
+
+    /// Records how `job` ended without its results (see [`Self::record_end`]).
     async fn end_run(&self, job: &Job, ending: Ending, started: Option<i64>) {
+        self.record_end(
+            &job.run_id,
+            job.endpoint.company,
+            job.audit_id,
+            ending,
+            started,
+        )
+        .await;
+    }
+
+    /// Records how run `run_id` (made through `company`) ended without its results: its
+    /// status, its error (always with `charged`), its end time and its cost (`None` keeps
+    /// the one recorded); completes its audit row `audit_id` with the cost recorded; sends
+    /// its new state. `started` is when sending started, if it did.
+    async fn record_end(
+        &self,
+        run_id: &str,
+        company: Company,
+        audit_id: Option<store::AuditId>,
+        ending: Ending,
+        started: Option<i64>,
+    ) {
+        self.stale().remove(run_id);
         let error = RunErrorDto {
             code: ending.error.code,
             message: ending.error.message,
@@ -1061,7 +1873,7 @@ impl Inner {
             details: ending.error.details,
             charged: ending.charged,
             request_id: ending.request_id,
-            company: company_tag(job.endpoint.company).to_owned(),
+            company: company_tag(company).to_owned(),
             stage: ending.stage.map(|stage| stage_tag(stage).to_owned()),
         };
         let patch = store::CreationPatch {
@@ -1072,28 +1884,33 @@ impl Inner {
             progress: Some(None),
             ..Default::default()
         };
-        if let Err(e) = self
-            .deps
-            .store
-            .update_creation_run(&job.run_id, patch)
-            .await
-        {
-            tracing::warn!(run = %job.run_id, "how a Studio run ended was not recorded: {e}");
+        if let Err(e) = self.deps.store.update_creation_run(run_id, patch).await {
+            tracing::warn!(run = %run_id, "how a Studio run ended was not recorded: {e}");
         }
-        self.complete_audit(job, ending.status, ending.cost_usd, started)
+        let run = self.deps.store.get_creation_run(run_id).await;
+        let recorded_cost = match &run {
+            Ok(Some(run)) => run.cost_usd.or(ending.cost_usd),
+            _ => ending.cost_usd,
+        };
+        self.complete_audit(run_id, audit_id, ending.status, recorded_cost, started)
             .await;
-        self.emit(&job.run_id).await;
+        match run {
+            Ok(Some(run)) => self.deps.sink.progress(&self.dto_of(&run)),
+            Ok(None) => {}
+            Err(e) => tracing::warn!(run = %run_id, "a Studio run could not be read: {e}"),
+        }
     }
 
-    /// Completes `job`'s audit row with `status` and its cost.
+    /// Completes run `run_id`'s audit row `audit_id` with `status` and its cost.
     async fn complete_audit(
         &self,
-        job: &Job,
+        run_id: &str,
+        audit_id: Option<store::AuditId>,
         status: store::CreationStatus,
         cost_usd: Option<f64>,
         started: Option<i64>,
     ) {
-        let Some(audit_id) = job.audit_id else {
+        let Some(audit_id) = audit_id else {
             return;
         };
         let summary = match cost_usd {
@@ -1107,7 +1924,7 @@ impl Inner {
             .complete_audit(audit_id, status.as_str().to_owned(), Some(summary), took)
             .await
         {
-            tracing::warn!(run = %job.run_id, "a Studio run's audit row was not completed: {e}");
+            tracing::warn!(run = %run_id, "a Studio run's audit row was not completed: {e}");
         }
     }
 
@@ -1120,9 +1937,10 @@ impl Inner {
         }
     }
 
-    /// `run` as the webview shows it, with whether Studio follows it and its queue place.
+    /// `run` as the webview shows it: whether Studio follows it, its queue place, and whether
+    /// it is still not ready (no longer followed).
     fn dto_of(&self, run: &store::CreationRun) -> RunDto {
-        let (watching, queue_position) = {
+        let (followed, queue_position) = {
             let lanes = self.lanes();
             let position = lanes.position(&run.id);
             (
@@ -1130,7 +1948,16 @@ impl Inner {
                 position,
             )
         };
-        run_dto_of(run, watching, queue_position)
+        let stale = self.is_stale(&run.id);
+        run_dto_of(run, followed && !stale, queue_position, stale)
+    }
+}
+
+/// The audit row's tool for a run of `kind`.
+fn tool_of(kind: MediaKind) -> &'static str {
+    match kind {
+        MediaKind::Image => "picture",
+        MediaKind::Video => "video",
     }
 }
 
@@ -1208,40 +2035,35 @@ fn upstream_of(model: &MediaModel, routing: Option<&Routing>) -> Option<String> 
 fn audit_entry(
     req: &StartRequest,
     model: &MediaModel,
-    job: &Job,
+    request: &MediaRequest,
+    endpoint: &Endpoint,
     usd: Option<f64>,
     confirmed: bool,
     at: i64,
 ) -> store::AuditEntry {
     let extra_fields: Vec<&String> = req.extra.keys().collect();
-    let (tool, preview) = match model.kind {
-        MediaKind::Image => (
-            "picture",
-            format!(
-                "Made a picture with {} through {}",
-                model.display_name, job.endpoint.name
-            ),
+    let preview = match model.kind {
+        MediaKind::Image => format!(
+            "Made a picture with {} through {}",
+            model.display_name, endpoint.name
         ),
-        MediaKind::Video => (
-            "video",
-            format!(
-                "Started a video with {} through {}",
-                model.display_name, job.endpoint.name
-            ),
+        MediaKind::Video => format!(
+            "Started a video with {} through {}",
+            model.display_name, endpoint.name
         ),
     };
     store::AuditEntry {
         ts: Some(at),
         chat_id: None,
         server: "studio".to_owned(),
-        tool: tool.to_owned(),
+        tool: tool_of(model.kind).to_owned(),
         arguments: json!({
-            "endpoint": job.endpoint.name,
-            "host": job.endpoint.host,
+            "endpoint": endpoint.name,
+            "host": endpoint.host,
             "model": model.id,
-            "changed": job.request.params,
+            "changed": request.params,
             "extra_fields": extra_fields,
-            "pictures_sent": job.request.refs.len(),
+            "pictures_sent": request.refs.len(),
             "estimate_usd": usd,
             "confirmed": confirmed,
             "prompt_chars": req.prompt.chars().count(),
@@ -1257,7 +2079,12 @@ fn audit_entry(
 }
 
 /// A run as the webview shows it.
-fn run_dto_of(run: &store::CreationRun, watching: bool, queue_position: Option<u32>) -> RunDto {
+fn run_dto_of(
+    run: &store::CreationRun,
+    watching: bool,
+    queue_position: Option<u32>,
+    stale: bool,
+) -> RunDto {
     let settings = |key: &str| -> Map<String, Value> {
         run.params
             .get(key)
@@ -1285,7 +2112,7 @@ fn run_dto_of(run: &store::CreationRun, watching: bool, queue_position: Option<u
         refs: serde_json::from_value::<Vec<RefDto>>(run.refs.clone()).unwrap_or_default(),
         status: run.status.as_str().to_owned(),
         watching,
-        stale: false,
+        stale,
         remote_id: run.remote_id.clone(),
         progress: run.progress,
         estimate_usd: run.estimate_usd,

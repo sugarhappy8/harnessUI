@@ -810,9 +810,9 @@ fn signed_url(item: &Value) -> Option<SignedUrl> {
 /// A job that ended without a result. The message is the answer's `error` (a text, or an
 /// object with `message` and `code`), else a plain sentence; one that speaks of moderation
 /// is [`FailureKind::Blocked`], and an expired job is [`FailureKind::Expired`]. OpenRouter
-/// does not bill a job that failed or was cancelled; an expired one had finished, so what it
-/// cost is unknown; a cost the answer reports decides over both. The request id is the
-/// answer's `generation_id`, else the job's id.
+/// does not bill a job that failed; a cancelled job had started, so it may be charged, and an
+/// expired one had finished, so what either cost is unknown; a cost the answer reports
+/// decides over all three. The request id is the answer's `generation_id`, else the job's id.
 fn job_failure(status: &str, answer: &Value, key: Option<&str>) -> MediaFailure {
     let clean = |text: &str| scrub_text(&bounded(text), key);
     let error = answer.get("error").filter(|error| !error.is_null());
@@ -845,7 +845,7 @@ fn job_failure(status: &str, answer: &Value, key: Option<&str>) -> MediaFailure 
     };
     let charged = match reported(answer.pointer("/usage/cost").and_then(Value::as_f64)) {
         Some(cost) => Some(cost.usd > 0.0),
-        None => (status != "expired").then_some(false),
+        None => (status == "failed").then_some(false),
     };
     MediaFailure {
         kind,
@@ -1130,9 +1130,11 @@ mod tests {
             Ok(JobState::Failed(f)) => f,
             other => panic!("expected a failed state, got {other:?}"),
         };
+        // A video that started may be charged, so a cancelled one is unknown unless the answer
+        // reports its cost.
         let f = failed(json!({"id": "vid_9", "status": "cancelled"}));
         assert_eq!(f.kind, FailureKind::Other);
-        assert_eq!(f.charged, Some(false));
+        assert_eq!(f.charged, None);
         assert_eq!(f.message, "The job was cancelled.");
         assert_eq!(f.request_id.as_deref(), Some("vid_9"));
         assert_eq!(f.status, None);
