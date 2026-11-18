@@ -131,9 +131,14 @@ export default function App() {
     return () => window.removeEventListener("keydown", onKey);
   }, [newChat, stop]);
 
+  const onSettingsOpenChange = (open: boolean) => {
+    setSettingsOpen(open);
+    // Studio reads again what Settings may have changed (an endpoint added, a preference).
+    if (!open) window.dispatchEvent(new Event("app:settings-closed"));
+  };
   const dialogs = (
     <>
-      <SettingsDialog open={settingsOpen} onOpenChange={setSettingsOpen} initialTab={settingsTab} />
+      <SettingsDialog open={settingsOpen} onOpenChange={onSettingsOpenChange} initialTab={settingsTab} />
       <ModelsDialog open={modelsOpen} onOpenChange={setModelsOpen} />
       <ShortcutsDialog open={shortcutsOpen} onOpenChange={setShortcutsOpen} />
     </>

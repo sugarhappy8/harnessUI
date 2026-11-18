@@ -78,7 +78,7 @@ async function flush() {
   });
 }
 
-/** Opens Studio with what the backend has saved. */
+/** Opens Studio with what the backend has saved: App mounts the view when it is first shown. */
 async function show(saved: { endpoints?: StudioEndpoint[]; local?: LocalModels; prefs?: StudioPrefs; usage?: Usage } = {}) {
   const endpoints = saved.endpoints ?? [openrouter];
   const p = saved.prefs ?? prefs();
@@ -90,6 +90,7 @@ async function show(saved: { endpoints?: StudioEndpoint[]; local?: LocalModels; 
   vi.mocked(api.studioGetPrefs).mockResolvedValue(p);
   vi.mocked(api.studioSetPrefs).mockImplementation(async (patch) => ({ ...p, ...patch }));
   vi.mocked(api.studioUsage).mockResolvedValue(saved.usage ?? usage());
+  useStudio.getState().showStudio();
   await act(async () => {
     render(<StudioView />);
   });
@@ -284,5 +285,64 @@ describe("StudioView", () => {
     screen.getByText(
       "Video on this computer needs a graphics card or an Apple-silicon Mac. OpenRouter makes videos in the cloud: add it in Settings → Endpoints.",
     );
+  });
+
+  describe("what is saved, read again", () => {
+    const nothingFits = { ...LOCAL, installed: [], recommended: [], notHere: LOCAL.recommended, videoPossible: false };
+    const cloudBackup =
+      "This computer cannot run local models well. Cloud models run on a company's computers instead: add OpenRouter or OpenAI.";
+    const SAVED_READS = [api.studioModels, api.studioLocalModels, api.studioGetPrefs, api.studioUsage];
+
+    it("each time Studio is shown again, without fetching anything", async () => {
+      await show({ endpoints: [], local: nothingFits });
+      screen.getByText(cloudBackup);
+      act(() => useStudio.getState().showChat());
+      await flush();
+      for (const read of SAVED_READS) expect(read).toHaveBeenCalledTimes(1); // not while hidden
+      vi.mocked(api.studioModels).mockResolvedValue({ endpoints: [openrouter] }); // added meanwhile
+      act(() => useStudio.getState().showStudio());
+      await flush();
+      expect(screen.queryByText(cloudBackup)).toBeNull();
+      expect(useStudio.getState().drafts.image).toMatchObject({ target: { endpoint: 1 }, model: "openai/gpt-image-2.6-flare" });
+      for (const read of SAVED_READS) expect(read).toHaveBeenCalledTimes(2);
+      expect(api.studioRuns).toHaveBeenCalledTimes(1); // the gallery's pages stay as read
+      expect(api.studioRefreshModels).not.toHaveBeenCalled();
+      expect(api.studioModelPrice).not.toHaveBeenCalled();
+      expect(api.studioLocalSearch).not.toHaveBeenCalled();
+    });
+
+    it("when Settings closes, so an endpoint added there shows at once", async () => {
+      await show({ endpoints: [], local: nothingFits });
+      await click(screen.getByRole("button", { name: "Open Endpoints" }));
+      expect(opened).toEqual(["endpoints"]);
+      vi.mocked(api.studioModels).mockResolvedValue({ endpoints: [openrouter] }); // added there
+      await act(async () => {
+        window.dispatchEvent(new Event("app:settings-closed"));
+      });
+      await flush();
+      expect(screen.queryByText(cloudBackup)).toBeNull();
+      await openMenu();
+      expect(screen.getByRole("menuitem", { name: "Update model lists" }).getAttribute("data-disabled")).toBeNull();
+      expect(api.studioRefreshModels).not.toHaveBeenCalled();
+      // While the chat is shown, Settings closing reads nothing: showing Studio will.
+      act(() => useStudio.getState().showChat());
+      await act(async () => {
+        window.dispatchEvent(new Event("app:settings-closed"));
+      });
+      await flush();
+      expect(api.studioModels).toHaveBeenCalledTimes(2);
+    });
+
+    it("a first read that failed is tried again when Studio is shown again", async () => {
+      vi.mocked(api.studioModels).mockRejectedValueOnce(new Error("database is locked"));
+      await show();
+      expect(useStudio.getState().loaded).toBe(false);
+      screen.getByText("Something went wrong.");
+      act(() => useStudio.getState().showChat());
+      act(() => useStudio.getState().showStudio());
+      await flush();
+      expect(useStudio.getState().loaded).toBe(true);
+      expect(api.studioRuns).toHaveBeenCalledTimes(2); // the whole first read again
+    });
   });
 });

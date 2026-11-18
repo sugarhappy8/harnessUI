@@ -3,8 +3,10 @@
 // runs as the backend reports them (`studio-progress`; `studio_live` once at start, as events
 // are not replayed). A video that finishes while the chat is shown raises a notice there.
 // Task B2: what Studio has saved (endpoints and their lists, local models, the gallery's first
-// page, preferences, today's spending), read once when Studio opens and never fetched then;
-// each tab's draft, which starts at the model used last or, local first, a default.
+// page, preferences, today's spending), read when Studio opens and never fetched then (the
+// lists, local models, preferences and spending are read again each time Studio is shown and
+// when Settings closes); each tab's draft, which starts at the model used last or, local first,
+// a default.
 import { create, type StoreApi, type UseBoundStore } from "zustand";
 import * as api from "../components/studio/api";
 import { defaultsFor } from "../components/studio/canonical";
@@ -91,6 +93,11 @@ export interface StudioState {
    *  working, preferences and today's spending. Never fetches a list or a price; asked again
    *  while reading, it gives the same read. Each tab without a model then gets its first. */
   load(): Promise<void>;
+  /** Reads again what may have changed while Studio was hidden or Settings was open: the
+   *  lists, local models, preferences and today's spending. Not the gallery's pages (the
+   *  pages read further on stay) nor the runs working (`studio-progress` follows them). Never
+   *  fetches; each tab without a model then gets its first, and a chosen model stays. */
+  reread(): Promise<void>;
   /** *Get the list*, *Update model lists*: fetches endpoint `providerId`'s lists. */
   refreshModels(providerId: number): Promise<void>;
   /** Reads the local models again (after a download or a delete). */
@@ -180,6 +187,16 @@ export const useStudio: UseBoundStore<StoreApi<StudioState>> = create<StudioStat
         }
       })();
       return loading;
+    },
+    reread: async () => {
+      const [models, local, prefs, usage] = await Promise.all([
+        api.studioModels(),
+        api.studioLocalModels(),
+        api.studioGetPrefs(),
+        api.studioUsage(),
+      ]);
+      set({ endpoints: models.endpoints, local, prefs, usage });
+      fillEmptyDrafts();
     },
     refreshModels: async (providerId) => {
       const { endpoints } = await api.studioRefreshModels(providerId);

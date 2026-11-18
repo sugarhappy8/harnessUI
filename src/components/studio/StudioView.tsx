@@ -33,10 +33,11 @@ import type { StudioEndpoint } from "./types";
 
 // Studio's view (0.1.0, design Wireframe 1): the top bar, the card stream in the middle with
 // the notices and empty states above it, local first, the right panel and the prompt dock.
-// Opening Studio reads what is saved and nothing else: lists are fetched only on *Get the
-// list* or *Update model lists*. Later tasks fill the slots: the run cards (B8), the right
-// panel (B5), the prompt dock (B7, which takes over the prompt box here) and Get local models
-// in place of the stream while `localView` is on (B13).
+// Opening Studio reads what is saved and nothing else (again each time it is shown, and when
+// Settings closes over it): lists are fetched only on *Get the list* or *Update model lists*.
+// Later tasks fill the slots: the run cards (B8), the right panel (B5), the prompt dock (B7,
+// which takes over the prompt box here) and Get local models in place of the stream while
+// `localView` is on (B13).
 
 const TABS: readonly StudioTab[] = ["image", "video"];
 
@@ -60,17 +61,25 @@ export function StudioView() {
   const tab = useStudio((s) => s.tab);
   const setTab = useStudio((s) => s.setTab);
   const loaded = useStudio((s) => s.loaded);
+  const shown = useStudio((s) => s.view === "studio");
   const [error, setError] = useState<ErrorInfo | null>(null);
   const fail = (e: unknown) => setError(toErrorInfo(e));
 
-  // What is saved, once (Studio stays mounted once opened); outside the app there is nothing.
+  // What is saved, each time Studio is shown (App keeps it mounted while the chat is shown)
+  // and when Settings closes over it: an endpoint or a preference may have changed there. The
+  // first read takes everything, and is done again until it works; later ones take the lists,
+  // local models, preferences and spending. All are reads of what is saved, never a fetch.
+  // Outside the app there is nothing to read.
   useEffect(() => {
-    if (!ipc.isTauri() || useStudio.getState().loaded) return;
-    useStudio
-      .getState()
-      .load()
-      .catch((e: unknown) => setError(toErrorInfo(e)));
-  }, []);
+    if (!ipc.isTauri() || !shown) return;
+    const read = () => {
+      const s = useStudio.getState();
+      (s.loaded ? s.reread() : s.load()).catch((e: unknown) => setError(toErrorInfo(e)));
+    };
+    read();
+    window.addEventListener("app:settings-closed", read);
+    return () => window.removeEventListener("app:settings-closed", read);
+  }, [shown]);
 
   return (
     <Tabs.Root

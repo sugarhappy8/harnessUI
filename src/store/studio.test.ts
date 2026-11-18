@@ -181,6 +181,31 @@ describe("what is saved", () => {
     expect(useStudio.getState().drafts.image).toMatchObject({ target: "thisComputer", model: "flux2-klein-4b-q4" });
   });
 
+  it("reading again takes the lists, local models, preferences and spending, not the gallery's pages", async () => {
+    saved({ ...LOCAL, installed: [] });
+    await useStudio.getState().load();
+    expect(useStudio.getState().drafts.image.model).toBeNull();
+    useStudio.setState({ runs: [RUN, LOCAL_RUN] }); // more pages read since
+    useStudio.getState().setPrompt("image", "lighthouse");
+    // OpenRouter was added in Settings, and something was spent in the meantime.
+    vi.mocked(api.studioModels).mockResolvedValue({ endpoints: [openrouter] });
+    vi.mocked(api.studioUsage).mockResolvedValue({ spentTodayUsd: 0.5, pendingUsd: 0, limitUsd: 10, folder: "", bytes: 0, pictures: 0, videos: 0 });
+    await useStudio.getState().reread();
+    for (const read of [api.studioModels, api.studioLocalModels, api.studioGetPrefs, api.studioUsage]) {
+      expect(read).toHaveBeenCalledTimes(2);
+    }
+    expect(api.studioRuns).toHaveBeenCalledTimes(1);
+    expect(api.studioLive).toHaveBeenCalledTimes(1);
+    expect(api.studioRefreshModels).not.toHaveBeenCalled();
+    expect(useStudio.getState()).toMatchObject({ endpoints: [openrouter], runs: [RUN, LOCAL_RUN], usage: { spentTodayUsd: 0.5 } });
+    expect(useStudio.getState().drafts.image).toMatchObject({ target: { endpoint: 1 }, model: "openai/gpt-image-2.6-flare", prompt: "lighthouse" });
+    // A model chosen stays when a local one turns up later.
+    vi.mocked(api.studioLocalModels).mockResolvedValue(LOCAL);
+    await useStudio.getState().reread();
+    expect(useStudio.getState().local).toEqual(LOCAL);
+    expect(useStudio.getState().drafts.image).toMatchObject({ target: { endpoint: 1 }, model: "openai/gpt-image-2.6-flare" });
+  });
+
   it("a search or Starred reads the gallery's first page again with the filter", async () => {
     saved();
     await useStudio.getState().load();

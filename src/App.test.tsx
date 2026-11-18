@@ -60,7 +60,15 @@ vi.mock("./components/Workbench", () => ({ Workbench: () => null }));
 vi.mock("./components/studio/StudioView", () => ({ StudioView: () => <div data-testid="studio-view" /> }));
 // Every Studio command and event wrapper, mocked as it is.
 vi.mock("./components/studio/api");
-vi.mock("./components/SettingsDialog", () => ({ SettingsDialog: () => null }));
+/** What App last gave the Settings dialog. */
+const settings = vi.hoisted(() => ({ open: false, onOpenChange: null as ((open: boolean) => void) | null }));
+vi.mock("./components/SettingsDialog", () => ({
+  SettingsDialog: (props: { open: boolean; onOpenChange: (open: boolean) => void }) => {
+    settings.open = props.open;
+    settings.onOpenChange = props.onOpenChange;
+    return null;
+  },
+}));
 vi.mock("./components/ModelsDialog", () => ({ ModelsDialog: () => null }));
 vi.mock("./components/FirstRun", () => ({ FirstRun: () => null }));
 vi.mock("./components/ShortcutsDialog", () => ({ ShortcutsDialog: () => null }));
@@ -314,6 +322,24 @@ describe("Studio", () => {
       expect(newChat).toHaveBeenCalledTimes(1);
     } finally {
       useApp.setState({ newChat: original });
+    }
+  });
+
+  it("closing Settings tells Studio to read what is saved again", async () => {
+    await renderApp();
+    const closed = vi.fn();
+    window.addEventListener("app:settings-closed", closed);
+    try {
+      act(() => {
+        window.dispatchEvent(new CustomEvent("app:open-settings", { detail: "endpoints" }));
+      });
+      expect(settings.open).toBe(true);
+      expect(closed).not.toHaveBeenCalled();
+      act(() => settings.onOpenChange!(false));
+      expect(settings.open).toBe(false);
+      expect(closed).toHaveBeenCalledTimes(1);
+    } finally {
+      window.removeEventListener("app:settings-closed", closed);
     }
   });
 
