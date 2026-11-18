@@ -37,8 +37,6 @@ impl<R: AsyncRead + Unpin> LineReader<R> {
 
     /// A reader that ends a line at `\r` as well as at `\n` (a `\r\n` is one end), for a
     /// child that redraws one line with `\r`: the Studio engine's progress bar.
-    // The Studio engine's runner (Task L5) reads both of `sd-cli`'s pipes with it.
-    #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) fn splitting_cr(inner: R) -> Self {
         Self {
             split_cr: true,

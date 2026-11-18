@@ -56,6 +56,12 @@ pub use llama::server::{
 pub use llama::stage::LoadStage;
 pub use reaper::{ReaperClient, reaper_main};
 pub use registry::{ChildRegistry, process_alive};
+// `RunEvent` stays at `sd::RunEvent`: the root name would read as Tauri's `RunEvent` in the app.
+pub use sd::args::SdJob;
+pub use sd::engine::Engine;
+pub use sd::failure::SdFailure;
+pub use sd::progress::LocalProgress;
+pub use sd::run::run_job;
 pub use spawn::{
     EnvSpec, ManagedChild, SpawnSpec, StdioMode, command_wrap, resolve_program, spawn,
 };
