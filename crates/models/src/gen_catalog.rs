@@ -9,7 +9,7 @@
 //! chat catalog never depends on any of it.
 
 use std::cmp::Reverse;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -420,7 +420,8 @@ pub struct GenTiers {
     pub video: BTreeMap<u64, Vec<String>>,
 }
 
-/// An entry (by id) or family record (`family:<key>`) left out, and why.
+/// An entry (by id), a family record (`family:<key>`) or an entry's place in a list of
+/// the other kind (`tier:<kind>:<id>`, the entry itself still usable) left out, and why.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Hidden {
     pub id: String,
@@ -458,6 +459,8 @@ const NO_MODEL_PART: &str = "no model part";
 const SEVERAL_MODEL_PARTS: &str = "more than one model part";
 const COMPANION_IS_MODEL: &str = "a companion is a model part";
 const NO_FAMILY_RECORD: &str = "its family record is missing";
+const VIDEO_AMONG_PICTURES: &str = "a video model listed among the picture models";
+const PICTURE_AMONG_VIDEOS: &str = "a picture model listed among the video models";
 
 /// An entry as the catalog writes it: the figures its family gives may be left out.
 #[derive(Deserialize)]
@@ -529,7 +532,8 @@ fn runs_on_apple_unless_said() -> bool {
 
 /// Reads the catalog's picture and video models for an engine of `engine_build` (the app
 /// passes `runtime::sd::lock::embedded().sd_cpp.build`). Never fails: what cannot be
-/// used is listed in `hidden`, a family record as `family:<key>`.
+/// used is listed in `hidden`, a family record as `family:<key>` and an entry recommended
+/// among models of the other kind as `tier:<kind>:<id>`.
 pub fn gen_catalog(catalog: &Catalog, engine_build: u32) -> GenCatalog {
     let mut hidden = Vec::new();
     // Every record that reads and passes its checks: entries take their figures from it
@@ -569,7 +573,7 @@ pub fn gen_catalog(catalog: &Catalog, engine_build: u32) -> GenCatalog {
             });
         }
     }
-    let tiers = read_tiers(&catalog.generator_tiers, &entries);
+    let tiers = read_tiers(&catalog.generator_tiers, &entries, &mut hidden);
     GenCatalog {
         entries,
         families,
@@ -759,13 +763,20 @@ pub(crate) fn sha256_hex(bytes: &[u8]) -> String {
 }
 
 /// `generatorTiers` as `{"image": {"<GB>": [ids]}, "video": {…}}`: keys that are not
-/// numbers, ids that are not usable entries and tiers left empty are dropped.
-fn read_tiers(raw: &Value, entries: &BTreeMap<String, GenEntry>) -> GenTiers {
-    let kind = |name: &str| -> BTreeMap<u64, Vec<String>> {
+/// numbers, ids that are not usable entries and tiers left empty are dropped. A video
+/// entry under `image`, or a picture entry under `video` (a catalog mistake), is dropped
+/// as well and listed in `hidden` as `tier:<kind>:<id>`, once per kind.
+fn read_tiers(
+    raw: &Value,
+    entries: &BTreeMap<String, GenEntry>,
+    hidden: &mut Vec<Hidden>,
+) -> GenTiers {
+    let mut kind = |name: &str, video: bool| -> BTreeMap<u64, Vec<String>> {
         let Some(tiers) = raw.get(name).and_then(Value::as_object) else {
             return BTreeMap::new();
         };
-        tiers
+        let mut misplaced = BTreeSet::new();
+        let read = tiers
             .iter()
             .filter_map(|(gb, ids)| {
                 let gb = gb.parse::<u64>().ok()?;
@@ -773,16 +784,33 @@ fn read_tiers(raw: &Value, entries: &BTreeMap<String, GenEntry>) -> GenTiers {
                     .as_array()?
                     .iter()
                     .filter_map(Value::as_str)
-                    .filter(|id| entries.contains_key(*id))
+                    .filter(|id| match entries.get(*id) {
+                        None => false,
+                        Some(e) if (e.kind == GenKind::Video) == video => true,
+                        Some(_) => {
+                            misplaced.insert(id.to_string());
+                            false
+                        }
+                    })
                     .map(str::to_string)
                     .collect();
                 (!ids.is_empty()).then_some((gb, ids))
             })
-            .collect()
+            .collect();
+        let reason = if video {
+            PICTURE_AMONG_VIDEOS
+        } else {
+            VIDEO_AMONG_PICTURES
+        };
+        hidden.extend(misplaced.into_iter().map(|id| Hidden {
+            id: format!("tier:{name}:{id}"),
+            reason: reason.into(),
+        }));
+        read
     };
     GenTiers {
-        image: kind("image"),
-        video: kind("video"),
+        image: kind("image", false),
+        video: kind("video", true),
     }
 }
 
@@ -1217,6 +1245,46 @@ mod tests {
         // A tier left with no entry is dropped.
         let g = gen_catalog(&Catalog::parse(GEN).unwrap(), 1105);
         assert!(g.tiers.image.is_empty(), "{:?}", g.tiers.image);
+    }
+
+    /// A video entry listed under `image` (or a picture entry under `video`) is never
+    /// recommended there; the mistake is listed once per kind and the entry stays usable.
+    #[test]
+    fn a_tier_keeps_only_entries_of_its_kind() {
+        let g = read_with(|v| {
+            v["generators"]["sample-image"]["kind"] = "image-edit".into();
+            v["generatorTiers"]["image"]["8"] = json!(["sample-video", "sample-image"]);
+            v["generatorTiers"]["image"]["12"] = json!(["sample-video"]);
+            v["generatorTiers"]["video"]["8"] = json!(["sample-image", "sample-video"]);
+        });
+        assert_eq!(
+            g.tiers.image[&8],
+            ["sample-image"],
+            "an edit model is a picture"
+        );
+        assert!(!g.tiers.image.contains_key(&12), "{:?}", g.tiers.image);
+        assert_eq!(g.tiers.video[&8], ["sample-video"]);
+        assert!(g.entries.contains_key("sample-image") && g.entries.contains_key("sample-video"));
+        let rows: Vec<_> = g
+            .hidden
+            .iter()
+            .filter(|h| h.id.starts_with("tier:"))
+            .map(|h| (h.id.as_str(), h.reason.as_str()))
+            .collect();
+        assert_eq!(
+            rows,
+            [
+                (
+                    "tier:image:sample-video",
+                    "a video model listed among the picture models"
+                ),
+                (
+                    "tier:video:sample-image",
+                    "a picture model listed among the video models"
+                ),
+            ]
+        );
+        assert_eq!(reason(&g, "sample-video"), None, "the entry is not hidden");
     }
 
     #[test]
