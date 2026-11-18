@@ -275,7 +275,7 @@ fn is_sha256(name: &str) -> bool {
 /// Writes `bytes` to `path` through a temporary file beside it and a rename, making its
 /// folder first, so a reader never sees half a file. The temporary file is removed when
 /// either step fails.
-fn write_whole(path: &Path, bytes: &[u8]) -> Result<(), GalleryError> {
+pub(super) fn write_whole(path: &Path, bytes: &[u8]) -> Result<(), GalleryError> {
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir).map_err(io_error)?;
     }

@@ -1040,6 +1040,21 @@ pub fn model_incomplete() -> AppError {
     )
 }
 
+/// A local prompt the prompt check refuses ([`super::prompt_check::refuses`]): it pairs a
+/// sexual word with a word for children. It is never retried and there is no way round it.
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "Task L15's local start refuses with it")
+)]
+pub fn wont_make() -> AppError {
+    AppError::new(
+        "studio_wont_make",
+        "Studio won't make this.",
+        "Change the prompt.",
+        String::new(),
+    )
+}
+
 /// A company's failure as the details show it: its own message, code, HTTP status and
 /// request id, each when it gave one.
 fn failure_details(f: &MediaFailure) -> String {
@@ -1391,6 +1406,7 @@ mod tests {
             not_offered(NotOffered::Uncensored),
             not_offered(NotOffered::AdultContent),
             model_incomplete(),
+            wont_make(),
         ];
         all.extend(every_pack_error().iter().map(engine_not_installed));
         for to in [PictureUse::Chat, PictureUse::Prompt] {

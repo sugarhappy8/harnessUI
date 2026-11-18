@@ -24,6 +24,10 @@
 //! - [`local_models`]: downloading a picture or video model to this computer, part by part,
 //!   once the note about local models and every licence of every part are accepted (with the
 //!   Windows engine pack on first use), and deleting one with the part files nothing else uses.
+//! - [`label`]: the AI label written into every local result (XMP in PNG and WebP, Matroska
+//!   tags in WebM), never with the prompt.
+//! - [`prompt_check`]: the small, always-on check that refuses a local prompt pairing a sexual
+//!   word with a word for children.
 
 pub mod actions;
 pub mod catalog;
@@ -32,11 +36,13 @@ pub mod deps;
 pub mod engine_cmd;
 pub mod errors;
 pub mod gallery;
+pub mod label;
 pub mod local_models;
 pub mod manager;
 #[cfg(test)]
 mod manager_tests;
 pub mod prefs;
+pub mod prompt_check;
 pub mod spend;
 #[cfg(test)]
 pub(crate) mod test_support;
