@@ -2,19 +2,26 @@
 //!
 //! A test binary started with [`FAKE_MODE_ENV`] set calls [`fake_main`] with the engine's
 //! arguments, and it behaves as `sd-cli` does: it refuses an argument the pinned build does
-//! not know, reads `--prompt-file`, prints the pinned build's output (the fixtures
+//! not know (`error: unknown argument: …` and exit 1, so a flag the real engine would refuse
+//! fails a test too), reads `--prompt-file`, prints the pinned build's output (the fixtures
 //! `tests/fixtures/sd_progress_*.txt` and `sd_stderr_*.txt`, with their `\r` redraws and
 //! `ESC[K`; the bars, INFO and WARN lines on stdout, the rest on stderr), writes tiny files
 //! where `sd-cli` writes its results, and exits as the mode says. `--list-devices` prints the
 //! Vulkan devices fixture in every mode.
 //!
-//! With [`FAKE_RECORD_ENV`] naming a folder, each start for a job (not `--list-devices`)
-//! records there, `<n>` counting the starts from 0:
+//! With [`FAKE_RECORD_ENV`] naming a folder, each start for a job records there, `<n>`
+//! counting the starts from 0:
 //! - `argv-<n>.json`: the arguments, a JSON array of strings;
 //! - `env-<n>.json`: the environment, a JSON object;
 //! - `prompt-<n>.txt`: the bytes of the `--prompt-file`;
-//! - `files-<n>.json`: the names in the output's folder when the start began, sorted;
-//! - `grandchild-<n>.txt`: the process id of mode `hang`'s grandchild.
+//! - `files-<n>.json`: the names in the output's folder when the start began, sorted, so a
+//!   test can see that the prompt files were there and that a retry starts without the first
+//!   start's half file;
+//! - `grandchild-<n>.txt`: the process id of mode `hang`'s grandchild, so a test can see that
+//!   Stop killed it too.
+//!
+//! A `--list-devices` start records nothing, so a runner that lists the devices before a job
+//! still finds that job's start at 0, and a test that only lists devices finds no start.
 
 use std::collections::BTreeMap;
 use std::io::Write;
@@ -45,7 +52,11 @@ pub const FAKE_MODE_ENV: &str = "RUNTIME_FAKE_SD";
 /// The variable naming the folder each start records into (see the module's header).
 pub const FAKE_RECORD_ENV: &str = "RUNTIME_FAKE_SD_RECORD";
 
-/// Mode `slow`'s silence after its first line.
+/// Mode `slow`'s silence after its first line: 1.2 s, so the stall check in `tests/sd_cli.rs`
+/// can take a third of it (400 ms) as its limit. With the 400 ms of silence and 200 ms limit
+/// first planned, an engine start slower than 200 ms (a loaded Windows or macOS runner)
+/// already sends a [`Stalled`](super::RunEvent::Stalled) before the first line, because the
+/// stall timer starts with the engine, and the check sees two.
 pub const SLOW_PAUSE: Duration = Duration::from_millis(1200);
 
 /// How long mode `hang` and its grandchild sleep before they give up.
@@ -460,7 +471,9 @@ const TINY_PNG: &[u8] = &[
     0x44, 0xae, 0x42, 0x60, 0x82,
 ];
 
-/// A 1×1 black lossless WebP, for a clip asked for as WebP.
+/// A 1×1 black lossless WebP, for a clip asked for as WebP (the fallback when WebM does not
+/// play), so the fake writes a file of the asked type for every output format. It is
+/// private: tests compare the bytes of [`tiny_png`] and [`tiny_webm`], never of a WebP.
 const TINY_WEBP: &[u8] = &[
     0x52, 0x49, 0x46, 0x46, 0x1a, 0x00, 0x00, 0x00, 0x57, 0x45, 0x42, 0x50, 0x56, 0x50, 0x38, 0x4c,
     0x0e, 0x00, 0x00, 0x00, 0x2f, 0x00, 0x00, 0x00, 0x00, 0x07, 0x10, 0x11, 0xfd, 0x0f, 0x44, 0x44,

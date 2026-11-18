@@ -534,7 +534,10 @@ fn a_crash_a_missing_library_and_a_bad_model_are_named() {
 fn no_progress_for_the_stall_limit_says_so_and_keeps_running() {
     // mode slow: one progress line, then SLOW_PAUSE (1.2 s) of silence, then the rest. A
     // third of it as the limit (400 ms) leaves room for the fake's start-up and its other
-    // gaps on a busy machine.
+    // gaps on a busy machine. (400 ms of silence and a 200 ms limit were first planned, but
+    // the stall timer starts with the engine, so a start-up slower than 200 ms sends a
+    // Stalled before the first line and this check would see two.) What it checks is the
+    // same: one Stalled after the first progress, more progress after it, then Ok.
     let f = folders();
     let limits = RunLimits {
         stall_after: SLOW_PAUSE / 3,
