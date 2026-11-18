@@ -936,18 +936,6 @@ pub fn engine_not_removed(details: impl Into<String>) -> AppError {
 /// it).
 pub const ENGINE_LICENCE_WORDS: &str = "Free for any use, including commercial.";
 
-/// What a local model's download says when no Studio engine is found and none can come with
-/// it: no pack for this computer (a Mac whose bundled engine is missing, Linux without a
-/// development folder).
-pub fn engine_missing_here() -> AppError {
-    AppError::new(
-        "studio_engine_not_here",
-        "The Studio engine is missing from this computer.",
-        "Install harnessUI again to get it back.",
-        String::new(),
-    )
-}
-
 // ---- local models ------------------------------------------------------------------------------
 
 /// The code of [`not_that_model`], which a download group shows as it is (its files are gone,
@@ -1120,14 +1108,36 @@ pub fn local_model_missing() -> AppError {
 
 // ---- Get local models ------------------------------------------------------------------------
 
+/// *Delete* on a local model while a run on this computer waits for it or uses it: deleting a
+/// file the Studio engine has open fails half-way on Windows.
+pub fn model_in_use() -> AppError {
+    AppError::new(
+        "studio_model_in_use",
+        "A run on this computer is using this model.",
+        "Stop the run, then delete it.",
+        String::new(),
+    )
+}
+
 /// Why a recognised family's model is not supported yet when this build has no record of the
 /// family (a catalog newer than the build, or one that hid the record).
 pub const FAMILY_RECORD_MISSING: &str = "its family record is missing";
+
+/// Why a recognised repository offers no file: each of its model files was refused when its
+/// entry or its download was worked out (a part not pinned, a licence not known).
+pub const NO_FILE_OFFERED: &str = "None of this repository's model files can be downloaded here.";
+
+/// Why an installed model that this build cannot read is not for this computer (its family
+/// record hidden by a newer signed catalog, a part's licence no longer known, a family this
+/// build does not know); it is still listed, so it can be deleted.
+pub const NOT_RUN_BY_THIS_VERSION: &str = "This version of harnessUI cannot run this model.";
 
 /// What the part that makes the picture (or the clip) is, in the download dialog.
 pub const PART_MAKES_THE_PICTURE: &str = "makes the picture";
 /// What a text encoder is, in the download dialog.
 pub const PART_READS_THE_PROMPT: &str = "reads your prompt";
+/// What a CLIP-vision encoder is, in the download dialog: it reads an added picture.
+pub const PART_READS_THE_PICTURE: &str = "reads the picture you add";
 /// What the decoder is, in the download dialog.
 pub const PART_PICTURE_DECODER: &str = "picture decoder";
 
@@ -1595,7 +1605,6 @@ mod tests {
             engine_licence_not_accepted(),
             engine_still_downloading(),
             engine_not_removed("denied"),
-            engine_missing_here(),
             not_that_model("klein 9B"),
             notice_needed(),
             license_not_accepted(),
@@ -1613,6 +1622,7 @@ mod tests {
             engine_in_use(),
             local_model_missing(),
             size_not_offered(),
+            model_in_use(),
         ];
         all.extend(every_pack_error().iter().map(engine_not_installed));
         for to in [PictureUse::Chat, PictureUse::Prompt] {
@@ -1910,14 +1920,6 @@ mod tests {
             license_not_accepted().message,
             "Accept the licences to download this model."
         );
-        assert_eq!(
-            words(engine_missing_here()),
-            (
-                "studio_engine_not_here".into(),
-                "The Studio engine is missing from this computer.".into(),
-                "Install harnessUI again to get it back.".into()
-            )
-        );
     }
 
     /// A local run's refusals, in the words Studio shows (Task L15).
@@ -1958,6 +1960,14 @@ mod tests {
         );
         assert_eq!(engine_in_use().code, "studio_engine_in_use");
         assert_eq!(local_model_missing().code, "studio_local_model_missing");
+        assert_eq!(
+            words(model_in_use()),
+            (
+                "studio_model_in_use".into(),
+                "A run on this computer is using this model.".into(),
+                "Stop the run, then delete it.".into()
+            )
+        );
     }
 
     /// Why a model is not offered here, as the estimate and Get local models say it.

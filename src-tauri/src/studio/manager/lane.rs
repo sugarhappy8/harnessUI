@@ -85,6 +85,13 @@ pub(super) struct LocalStep {
     revision: String,
 }
 
+impl LocalStep {
+    /// The installed model the run is made with.
+    pub(super) fn model(&self) -> &str {
+        &self.request.model
+    }
+}
+
 /// What a local run's card shows beyond its row while Studio follows it, and the answer to
 /// "Unload the chat model?" its task waits for.
 #[derive(Default)]
@@ -268,6 +275,22 @@ impl StudioManager {
                 .queues
                 .get(&LaneKey::Local)
                 .is_some_and(|queue| !queue.is_empty())
+    }
+
+    /// Whether a local run of the installed model `model` is queued or running: *Delete*
+    /// refuses the model while one is (`studio_model_in_use`).
+    pub fn local_uses_model(&self, model: &str) -> bool {
+        let lanes = self.inner.lanes();
+        lanes
+            .running
+            .values()
+            .any(|r| r.local_model.as_deref() == Some(model))
+            || lanes
+                .queues
+                .get(&LaneKey::Local)
+                .into_iter()
+                .flatten()
+                .any(|job| job.local_model() == Some(model))
     }
 
     /// The answer to "Unload the chat model?" for local run `run_id` under

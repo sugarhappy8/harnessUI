@@ -24,7 +24,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use agent::media::MediaKind;
+use agent::media::{MediaKind, MediaModel, Price};
 use models::fit::{RAM_RESERVE_BYTES, Target};
 use models::gen_catalog::{
     Commercial, GateMode, GenEntry, GenGate, GenKind, GenLicence, GenRole, GenTiers,
@@ -32,7 +32,7 @@ use models::gen_catalog::{
 use models::gen_eta::{self, FitWord};
 use models::gen_fit::{GenFit, GenSize};
 use models::gen_search::{Recognition, entry_for, recognise, searched_licence};
-use models::hf::{Gated, GenSearchKind, HfClient, RepoDetail, RepoSummary};
+use models::hf::{GenSearchKind, HfClient, RepoDetail, RepoSummary};
 use tauri::{AppHandle, Manager, State};
 
 use super::deps::{AppHardware, LocalHardware, with_device_free};
@@ -87,7 +87,8 @@ pub struct LocalCmdDeps {
 // ---- the list ---------------------------------------------------------------------------------
 
 /// Get local models: this computer, the engine, the installed models (newest first, each at
-/// its default size), and the recommended list at each entry's default size, split by its fit
+/// its default size; one this build cannot read is still listed, not for this computer, so it
+/// can be deleted), and the recommended list at each entry's default size, split by its fit
 /// word (`notHere` into `not_here`). Per kind, the first entry of the highest tier at or below
 /// this computer's usable memory whose word is `fits` is "Recommended for this computer".
 /// Sends nothing.
@@ -106,7 +107,12 @@ pub async fn local_models(deps: &LocalCmdDeps) -> AppResult<LocalModelsDto> {
         let entry = match entry_from_installed(row, &catalog) {
             Ok(entry) => entry,
             Err(e) => {
-                tracing::debug!(model = %row.id, "an installed model is not listed: {}", e.details);
+                tracing::warn!(
+                    model = %row.id,
+                    "an installed model cannot be run by this version: {}",
+                    e.details
+                );
+                installed.push(unreadable(row));
                 continue;
             }
         };
@@ -161,8 +167,9 @@ pub async fn local_models(deps: &LocalCmdDeps) -> AppResult<LocalModelsDto> {
             !e.installed && matches!(words.get(&e.id), Some(FitWord::Fits | FitWord::AfterUnload))
         })
         .count();
+    let total = deps.hardware.device_total_bytes().await;
     Ok(LocalModelsDto {
-        hardware: hardware_line(deps, &device, &backend, description.as_deref()),
+        hardware: hardware_line(deps, &device, total, &backend, description.as_deref()),
         engine: deps.engine.clone(),
         installed,
         recommended,
@@ -174,16 +181,19 @@ pub async fn local_models(deps: &LocalCmdDeps) -> AppResult<LocalModelsDto> {
     })
 }
 
-/// The header's line: the device by name, its memory for models (the chat model's share
-/// counted as free), the computer's memory and the models folder's free space.
+/// The header's line: the device by name, its memory (a card's total, `total`, as its probe
+/// says, or its free memory with the chat model's share counted as free when the probe does
+/// not say; Apple silicon's working set), the computer's memory and the models folder's free
+/// space.
 fn hardware_line(
     deps: &LocalCmdDeps,
     device: &Target,
+    total: Option<u64>,
     backend: &str,
     description: Option<&str>,
 ) -> HardwareLineDto {
     let (graphics_bytes, shared_memory) = match *device {
-        Target::Gpu { free_bytes, .. } => (Some(free_bytes), false),
+        Target::Gpu { free_bytes, .. } => (Some(total.unwrap_or(free_bytes)), false),
         Target::AppleUnified {
             working_set_bytes, ..
         } => (Some(working_set_bytes), true),
@@ -228,6 +238,60 @@ fn recommended_for(
                 .cloned()
         })
         .collect()
+}
+
+/// An installed model this build cannot read (`entry_from_installed` refuses it: its family
+/// record hidden by a newer signed catalog, a part's licence no longer known, a family this
+/// build does not know): its stored id, name and kind, its parts' sizes, and not for this
+/// computer, with why, so that *Delete* can still remove its files.
+fn unreadable(row: &store::GenModel) -> InstalledLocalDto {
+    let kind = serde_json::from_value::<GenKind>(row.kind.clone().into())
+        .map_or(MediaKind::Image, media_kind);
+    let reason = errors::NOT_RUN_BY_THIS_VERSION;
+    let model = MediaModel {
+        id: row.id.clone(),
+        display_name: row.name.clone(),
+        family: row.family.clone(),
+        kind,
+        accepts_images: false,
+        params: Vec::new(),
+        price: Price::Free,
+        notes: Vec::new(),
+        usable: Some(reason.to_owned()),
+        created: Some(row.added_at / 1000),
+        companies: Vec::new(),
+    };
+    InstalledLocalDto {
+        id: row.id.clone(),
+        name: row.name.clone(),
+        kind,
+        size_bytes: parts_bytes(row),
+        fit: LocalFitDto {
+            word: word_tag(FitWord::NotHere).to_owned(),
+            verdict: "red".to_owned(),
+            reason: Some(reason.to_owned()),
+            suggestion: None,
+            eta: None,
+            very_slow: gen_eta::very_slow(FitWord::NotHere, None),
+        },
+        model: media_model_dto(&model, None),
+    }
+}
+
+/// An installed model's parts' sizes added up; its recorded total when no part gives one.
+fn parts_bytes(row: &store::GenModel) -> u64 {
+    let sizes: Vec<u64> = row
+        .parts
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|part| part.get("size")?.as_u64())
+        .collect();
+    if sizes.is_empty() {
+        row.size_bytes
+    } else {
+        sizes.iter().sum()
+    }
 }
 
 /// The disk the installed picture and video models take: each part file once, however many
@@ -374,7 +438,7 @@ fn search_page(found: Vec<RepoSummary>) -> LocalSearchPage {
         items: found
             .into_iter()
             .map(|r| LocalSearchHitDto {
-                gated: word(&r.gated),
+                gated: word(&GateMode::from(r.gated)),
                 repo: r.id,
                 downloads: r.downloads,
                 likes: r.likes,
@@ -398,7 +462,8 @@ pub async fn local_repo(deps: &LocalCmdDeps, repo: &str) -> AppResult<LocalRepoD
 /// each of its diffusion files with a published SHA-256 as the entry it makes
 /// (`gen_search::entry_for`: its family's parts beside it, the stricter of the family's
 /// licence and the repository's label), what its download takes here and its fit at the
-/// family's default size; else why not, with no file.
+/// family's default size; else why not, with no file. A recognised repository none of whose
+/// files can be offered is not supported yet.
 async fn repo_dto(deps: &LocalCmdDeps, detail: &RepoDetail) -> LocalRepoDto {
     let catalog = deps.catalog.gen_catalog().await;
     let mut dto = LocalRepoDto {
@@ -412,11 +477,7 @@ async fn repo_dto(deps: &LocalCmdDeps, detail: &RepoDetail) -> LocalRepoDto {
         licences: Vec::new(),
         label_mismatch: None,
         gate: gate_dto(&GenGate {
-            mode: match detail.gated {
-                Gated::No => GateMode::None,
-                Gated::Auto => GateMode::Auto,
-                Gated::Manual => GateMode::Manual,
-            },
+            mode: GateMode::from(detail.gated),
             collects: Vec::new(),
         }),
     };
@@ -438,10 +499,7 @@ async fn repo_dto(deps: &LocalCmdDeps, detail: &RepoDetail) -> LocalRepoDto {
         dto.reason = Some(errors::FAMILY_RECORD_MISSING.to_owned());
         return dto;
     };
-    dto.status = "supported".into();
-    dto.family = Some(record.name.clone());
     let searched = searched_licence(detail, record);
-    dto.label_mismatch = searched.label_mismatch;
     // The badge's licence: the strictest of a file's parts, the same for every file (each is
     // under the searched licence beside the family's companions).
     let mut badge: Option<GenLicence> = None;
@@ -480,6 +538,14 @@ async fn repo_dto(deps: &LocalCmdDeps, detail: &RepoDetail) -> LocalRepoDto {
             low_disk: plan.low_disk(),
         });
     }
+    if dto.files.is_empty() {
+        dto.status = "notSupportedYet".into();
+        dto.reason = Some(errors::NO_FILE_OFFERED.to_owned());
+        return dto;
+    }
+    dto.status = "supported".into();
+    dto.family = Some(record.name.clone());
+    dto.label_mismatch = searched.label_mismatch;
     dto.licence = Some(licence_dto(&badge.unwrap_or(searched.licence)));
     dto
 }
@@ -518,9 +584,8 @@ fn part_label(role: GenRole) -> &'static str {
         GenRole::Diffusion | GenRole::HighNoiseDiffusion | GenRole::Model => {
             errors::PART_MAKES_THE_PICTURE
         }
-        GenRole::Llm | GenRole::T5xxl | GenRole::ClipL | GenRole::ClipVision => {
-            errors::PART_READS_THE_PROMPT
-        }
+        GenRole::Llm | GenRole::T5xxl | GenRole::ClipL => errors::PART_READS_THE_PROMPT,
+        GenRole::ClipVision => errors::PART_READS_THE_PICTURE,
         GenRole::Vae => errors::PART_PICTURE_DECODER,
     }
 }
@@ -700,7 +765,7 @@ mod tests {
     };
     use crate::studio::engine_cmd::EngineNeed;
     use crate::studio::local::{GenCatalogSource, run_shape};
-    use crate::studio::local_models::LocalSource;
+    use crate::studio::local_models::{LocalSource, delete_unless_in_use};
     use crate::studio::manager::{PollPlan, StudioDeps, StudioManager};
     use crate::studio::prefs::{self, StudioPrefs, StudioPrefsPatch};
     use crate::studio::spend::day_start_in;
@@ -917,9 +982,11 @@ mod tests {
         target: Target,
         backend: &'static str,
         chat: Option<u64>,
+        total: Option<u64>,
     }
 
-    /// A Vulkan card with `free_gb` GB free, and `ram_gb` GB of free memory.
+    /// A Vulkan card with `free_gb` GB free, and `ram_gb` GB of free memory; its probe gives
+    /// no total.
     fn gpu(free_gb: u64, ram_gb: u64) -> Fixed {
         Fixed {
             target: Target::Gpu {
@@ -929,6 +996,7 @@ mod tests {
             },
             backend: "vulkan",
             chat: None,
+            total: None,
         }
     }
 
@@ -940,6 +1008,7 @@ mod tests {
             },
             backend: "cpu",
             chat: None,
+            total: None,
         }
     }
 
@@ -949,6 +1018,12 @@ mod tests {
             self.chat = Some(gb * GB);
             self
         }
+
+        /// The card's total memory, as its probe says.
+        fn total(mut self, gb: u64) -> Self {
+            self.total = Some(gb * GB);
+            self
+        }
     }
 
     #[async_trait]
@@ -956,6 +1031,10 @@ mod tests {
         async fn target(&self) -> (Target, String, Option<String>) {
             let description = (self.backend != "cpu").then(|| CARD.to_owned());
             (self.target.clone(), self.backend.to_owned(), description)
+        }
+
+        async fn device_total_bytes(&self) -> Option<u64> {
+            self.total
         }
 
         fn chat_device_bytes(&self) -> Option<u64> {
@@ -1161,7 +1240,8 @@ mod tests {
     }
 
     /// The bundled catalog, whatever it lists: one picture and one video model recommended
-    /// on an 8 GB card, and every entry that fits counted as more.
+    /// on an 8 GB card, and each entry not installed whose word is "Fits" or "Fits after the
+    /// chat model is unloaded" counted as more (whatever its measured points make it).
     #[tokio::test]
     async fn the_bundled_starters_are_recommended_one_per_kind() {
         let scratch = Scratch::new();
@@ -1182,7 +1262,12 @@ mod tests {
                 .count();
             assert_eq!(marked, 1, "{kind:?}");
         }
-        assert_eq!(local.more_fit as usize, expected.len());
+        let fitting = local
+            .recommended
+            .iter()
+            .filter(|e| !e.installed && matches!(e.fit.word.as_str(), "fits" | "afterUnload"))
+            .count();
+        assert_eq!(local.more_fit as usize, fitting);
     }
 
     /// On a 2 GB card with 4 GB of memory, Z-Image Turbo is not for this computer, with its
@@ -1212,11 +1297,11 @@ mod tests {
 
     /// With a 5 GB chat model on an 8 GB card (3 GB free), Z-Image Turbo fits once the chat
     /// model is unloaded: it says so, it is not "not for this computer", and the header
-    /// counts the chat model's memory as the card's.
+    /// shows the card's 8 GB.
     #[tokio::test]
     async fn a_model_that_fits_after_the_chat_model_is_unloaded_says_so() {
         let scratch = Scratch::new();
-        let local = local_models(&deps(gpu(3, 32).chat(5), &scratch))
+        let local = local_models(&deps(gpu(3, 32).chat(5).total(8), &scratch))
             .await
             .unwrap();
         let z = find(&local.recommended, ZIMAGE);
@@ -1234,11 +1319,14 @@ mod tests {
         assert_eq!(local.more_fit, 3);
     }
 
-    /// What harnessUI detected, for the header.
+    /// What harnessUI detected, for the header: an 8 GB card reads 8 GB however much of it
+    /// is free ("Radeon RX 7600, 8 GB graphics memory").
     #[tokio::test]
     async fn the_header_says_what_this_computer_has() {
         let scratch = Scratch::new();
-        let local = local_models(&deps(gpu(8, 32), &scratch)).await.unwrap();
+        let local = local_models(&deps(gpu(7, 32).total(8), &scratch))
+            .await
+            .unwrap();
         assert_eq!(
             local.hardware,
             HardwareLineDto {
@@ -1251,6 +1339,11 @@ mod tests {
         );
         assert_eq!(local.engine, engine_built_in());
         assert!(!local.notice_accepted);
+        // A probe that gives no total: the free memory, the chat model's share counted back.
+        let local = local_models(&deps(gpu(6, 32).chat(1), &scratch))
+            .await
+            .unwrap();
+        assert_eq!(local.hardware.graphics_bytes, Some(7 * GB));
         let local = local_models(&deps(cpu(16), &scratch)).await.unwrap();
         assert_eq!(local.hardware.device, "Processor");
         assert_eq!(local.hardware.graphics_bytes, None);
@@ -1450,6 +1543,96 @@ mod tests {
         );
     }
 
+    /// An installed model this build cannot read (its catalog entry gone and its family
+    /// record hidden by a newer catalog, a part's licence no longer known, a family this build
+    /// does not know) is still listed with its stored name and its parts' sizes, not for this
+    /// computer, with why, and Delete removes it.
+    #[tokio::test]
+    async fn an_installed_model_this_build_cannot_read_is_listed_so_it_can_be_deleted() {
+        let scratch = Scratch::new();
+        let mut newer = catalog();
+        newer.entries.remove(KLEIN);
+        newer.families.remove(&GenFamily::Flux2Klein4b);
+        let deps = deps_with(newer, gpu(8, 32), &scratch, None);
+        // Installed from the recommended list before the catalog changed.
+        install_starter(&deps.store, &klein()).await;
+        let mut relicensed = zimage();
+        relicensed.parts[1].license = "an-old-licence".into();
+        install_starter(&deps.store, &relicensed).await;
+        let future_id = "hf:someone/Future-GGUF:future.gguf";
+        let future = GenPart {
+            role: GenRole::Diffusion,
+            repo: "someone/Future-GGUF".into(),
+            revision: "e".repeat(40),
+            path: "future.gguf".into(),
+            size: 1_234_567,
+            sha256: "f".repeat(64),
+            license: "apache-2.0".into(),
+        };
+        install(
+            &deps.store,
+            &deps.models_dir,
+            future_id,
+            None,
+            "A future model",
+            "a-future-family",
+            &[&future],
+        )
+        .await;
+
+        let local = local_models(&deps).await.unwrap();
+        assert_eq!(local.installed.len(), 3, "{:?}", local.installed);
+        for (id, name, size) in [
+            (KLEIN, KLEIN, klein().total_bytes()),
+            (ZIMAGE, ZIMAGE, zimage().total_bytes()),
+            (future_id, "A future model", 1_234_567),
+        ] {
+            let row = local
+                .installed
+                .iter()
+                .find(|m| m.id == id)
+                .unwrap_or_else(|| panic!("{id} is not listed"));
+            assert_eq!(row.name, name);
+            assert_eq!(row.kind, MediaKind::Image);
+            assert_eq!(row.size_bytes, size, "{id}");
+            assert_eq!(row.fit.word, "notHere", "{id}");
+            assert_eq!(row.fit.verdict, "red", "{id}");
+            assert_eq!(
+                row.fit.reason.as_deref(),
+                Some("This version of harnessUI cannot run this model.")
+            );
+            assert!(row.fit.very_slow);
+            assert_eq!(row.fit.suggestion, None);
+            assert_eq!(row.fit.eta, None);
+            // Never offered as a model to run.
+            assert_eq!(row.model.usable, row.fit.reason);
+            assert!(row.model.params.is_empty());
+            assert_eq!(row.model.price.unit, "free");
+        }
+        assert_eq!(
+            local.installed_bytes,
+            klein().total_bytes() + zimage().total_bytes() + 1_234_567
+        );
+
+        // Delete, as `studio_local_delete` does it: nothing runs it, so it goes.
+        let manager = idle_manager(&deps.store, &scratch);
+        for id in [KLEIN, future_id] {
+            delete_unless_in_use(&manager, &deps.store, &deps.models_dir, id, &|_| false)
+                .await
+                .unwrap();
+        }
+        let local = local_models(&deps).await.unwrap();
+        assert_eq!(
+            local
+                .installed
+                .iter()
+                .map(|m| m.id.as_str())
+                .collect::<Vec<_>>(),
+            [ZIMAGE]
+        );
+        assert_eq!(local.installed_bytes, zimage().total_bytes());
+    }
+
     /// An installed searched model's fit comes from its saved parts and its family: no
     /// request.
     #[tokio::test]
@@ -1607,6 +1790,56 @@ mod tests {
         assert!(repo.files.is_empty());
     }
 
+    /// A recognised repository none of whose files can be offered (here each file's entry is
+    /// refused: a part of its family is not pinned) is not supported yet, with why, and has
+    /// no file.
+    #[tokio::test]
+    async fn a_searched_repo_whose_every_file_is_refused_offers_no_download() {
+        let scratch = Scratch::new();
+        let hub = Hub::listing("repo-z-image-turbo-gguf.json").await;
+        let mut unpinned = catalog();
+        unpinned
+            .families
+            .get_mut(&GenFamily::ZImageTurbo)
+            .unwrap()
+            .companions[0]
+            .size = 0;
+        let deps = deps_with(unpinned, gpu(8, 32), &scratch, Some(hub.client()));
+        let repo = local_repo(&deps, "leejet/Z-Image-Turbo-GGUF")
+            .await
+            .unwrap();
+        assert_eq!(hub.requests().len(), 1);
+        assert_eq!(repo.status, "notSupportedYet");
+        assert_eq!(
+            repo.reason.as_deref(),
+            Some("None of this repository's model files can be downloaded here.")
+        );
+        assert!(repo.files.is_empty());
+        assert!(repo.licences.is_empty());
+        assert_eq!(
+            (repo.family, repo.licence, repo.label_mismatch),
+            (None, None, None)
+        );
+    }
+
+    /// What each part does, in the download dialog's words: a CLIP-vision encoder reads the
+    /// added picture, not the prompt.
+    #[test]
+    fn each_part_says_what_it_does() {
+        for (role, label) in [
+            (GenRole::Diffusion, "makes the picture"),
+            (GenRole::HighNoiseDiffusion, "makes the picture"),
+            (GenRole::Model, "makes the picture"),
+            (GenRole::Llm, "reads your prompt"),
+            (GenRole::T5xxl, "reads your prompt"),
+            (GenRole::ClipL, "reads your prompt"),
+            (GenRole::ClipVision, "reads the picture you add"),
+            (GenRole::Vae, "picture decoder"),
+        ] {
+            assert_eq!(part_label(role), label, "{role:?}");
+        }
+    }
+
     /// Each diffusion file of a recognised repository is offered with its family's parts; a
     /// part already in place (a shared text encoder) is checked, not fetched.
     #[tokio::test]
@@ -1663,9 +1896,9 @@ mod tests {
     // ---- the search -----------------------------------------------------------------------
 
     /// A search asks Hugging Face its three queries (the two picture pipeline tags, then none)
-    /// and gives one page, most downloads first: each hit says how popular the repository
-    /// is, how it is gated and its own licence label; an untagged hit stays only when its
-    /// name is a picture family's.
+    /// and gives one page, most downloads first (the untagged hit, asked last, comes first):
+    /// each hit says how popular the repository is, how it is gated in a gate's words and its
+    /// own licence label; an untagged hit stays only when its name is a picture family's.
     #[tokio::test]
     async fn a_search_hit_says_what_hugging_face_lists() {
         let hub = Hub::new(|line| {
@@ -1676,7 +1909,7 @@ mod tests {
                 json!([])
             } else {
                 json!([
-                    {"id": "someone/Z-Image-Turbo-Q8-GGUF", "downloads": 4, "likes": 1,
+                    {"id": "someone/Z-Image-Turbo-Q8-GGUF", "downloads": 40, "likes": 1,
                      "gated": false, "tags": ["gguf"]},
                     {"id": "someone/Qwen3-4B-GGUF", "downloads": 99, "likes": 7,
                      "gated": false, "tags": ["gguf", "license:apache-2.0"]}
@@ -1708,18 +1941,18 @@ mod tests {
             page.items,
             [
                 LocalSearchHitDto {
+                    repo: "someone/Z-Image-Turbo-Q8-GGUF".into(),
+                    downloads: 40,
+                    likes: 1,
+                    gated: "none".into(),
+                    license_label: None,
+                },
+                LocalSearchHitDto {
                     repo: "leejet/Z-Image-Turbo-GGUF".into(),
                     downloads: 9,
                     likes: 2,
                     gated: "manual".into(),
                     license_label: Some("apache-2.0".into()),
-                },
-                LocalSearchHitDto {
-                    repo: "someone/Z-Image-Turbo-Q8-GGUF".into(),
-                    downloads: 4,
-                    likes: 1,
-                    gated: "no".into(),
-                    license_label: None,
                 },
             ]
         );
@@ -1773,6 +2006,25 @@ mod tests {
         fn day_start_ms(&self, at_ms: i64) -> i64 {
             day_start_in(&TimeZone::system(), at_ms)
         }
+    }
+
+    /// A Studio manager on `store` with no local lane: nothing runs on this computer.
+    fn idle_manager(store: &store::Store, scratch: &Scratch) -> StudioManager {
+        StudioManager::new(
+            StudioDeps {
+                store: store.clone(),
+                providers: Arc::new(NoProviders),
+                sink: Arc::new(NoSink),
+                fetch: Arc::new(NoFetch),
+                clock: Arc::new(FixedClock(1000)),
+                default_gallery: scratch.path().join("gallery"),
+                thumbs: None,
+                limits: MediaLimits::default(),
+                poll: PollPlan::default(),
+                local: None,
+            },
+            StudioPrefs::default(),
+        )
     }
 
     /// The note about local models is recorded with the time it was accepted, saved, and held

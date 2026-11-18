@@ -253,6 +253,9 @@ struct Running {
     ended: CancellationToken,
     /// Its queue.
     lane: LaneKey,
+    /// The installed model a run on this computer makes it with (`None` for a cloud run):
+    /// *Delete* refuses that model while it runs.
+    local_model: Option<String>,
 }
 
 /// A recorded run and what its task needs to send it or follow its job. Never cloned: a copy
@@ -288,6 +291,14 @@ enum Step {
 }
 
 impl Job {
+    /// The installed model a run on this computer makes it with; `None` for a cloud run.
+    fn local_model(&self) -> Option<&str> {
+        match &self.step {
+            Step::Local(step) => Some(step.model()),
+            Step::Send(_) | Step::Follow { .. } => None,
+        }
+    }
+
     /// When its request was sent (or its follow-up started), for its audit row's duration.
     fn started(&self) -> Option<i64> {
         match &self.step {
@@ -375,6 +386,7 @@ impl Lanes {
                 token: token.clone(),
                 ended: ended.clone(),
                 lane: job.lane,
+                local_model: job.local_model().map(str::to_owned),
             },
         );
         (job, token, ended)

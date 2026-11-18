@@ -4089,6 +4089,11 @@ impl LocalHardware for FixedHardware {
         self.target.lock().unwrap().clone()
     }
 
+    /// Never read by the local lane (only Get local models' header shows it).
+    async fn device_total_bytes(&self) -> Option<u64> {
+        None
+    }
+
     fn chat_device_bytes(&self) -> Option<u64> {
         *self.chat.lock().unwrap()
     }
@@ -4890,6 +4895,74 @@ async fn an_update_waits_for_a_local_job() {
     h.wait_status(&run.id, "done").await;
     assert!(crate::updates::refuse_while_studio_works(Some(&h.manager)).is_ok());
     assert!(crate::updates::refuse_while_studio_works(None).is_ok());
+}
+
+/// Ruling L16-delete-in-use: *Delete* on a local model is refused while a run on this
+/// computer waits for it or uses it (a file the engine has open cannot be deleted on
+/// Windows), and deletes nothing; another model is deleted meanwhile, and once the runs end,
+/// the model goes.
+#[tokio::test]
+async fn a_model_a_local_run_waits_for_or_uses_is_not_deleted() {
+    let h = harness_with_local().await;
+    let dir = Scratch::new();
+    let models = dir.path().join("models");
+    let mut files = Vec::new();
+    for id in [KLEIN, ZIMAGE] {
+        let file = models.join("test").join(id).join("model.gguf");
+        std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+        std::fs::write(&file, b"gguf").unwrap();
+        let row = installed_row(&h.local.entry_of(id).await.unwrap().1);
+        h.store
+            .insert_gen_model(store::NewGenModel {
+                id: row.id,
+                catalog_id: row.catalog_id,
+                name: row.name,
+                kind: row.kind,
+                family: row.family,
+                parts: json!([{"role": "diffusion", "file": file.display().to_string(), "size": 4}]),
+                size_bytes: 4,
+                source: row.source,
+            })
+            .await
+            .unwrap();
+        files.push(file);
+    }
+    let not_busy = |_: &Path| false;
+    let delete = |id: &'static str| {
+        crate::studio::local_models::delete_unless_in_use(
+            &h.manager, &h.store, &models, id, &not_busy,
+        )
+    };
+
+    h.local.hold();
+    let first = h.manager.start(h.local_req("one"), false).await.unwrap();
+    let second = h.manager.start(h.local_req("two"), false).await.unwrap();
+    h.wait_status(&first.id, "running").await;
+    assert_eq!(h.run_dto(&second.id).await.status, "queued");
+    assert!(h.manager.local_uses_model(KLEIN));
+    assert!(!h.manager.local_uses_model(ZIMAGE));
+    let refused = delete(KLEIN).await.unwrap_err();
+    assert_eq!(
+        (refused.code.as_str(), refused.next_step.as_str()),
+        ("studio_model_in_use", "Stop the run, then delete it.")
+    );
+    assert!(h.store.get_gen_model(KLEIN).await.unwrap().is_some());
+    assert!(files[0].is_file());
+    // Another model goes meanwhile.
+    assert_eq!(delete(ZIMAGE).await.unwrap(), [files[1].clone()]);
+
+    // The first run ended, the second waits no more but runs: still refused.
+    h.local.release_one();
+    h.wait_status(&first.id, "done").await;
+    h.wait_status(&second.id, "running").await;
+    assert!(h.manager.local_uses_model(KLEIN));
+    assert_eq!(delete(KLEIN).await.unwrap_err().code, "studio_model_in_use");
+
+    h.local.release_all();
+    h.wait_status(&second.id, "done").await;
+    assert!(!h.manager.local_uses_model(KLEIN));
+    assert_eq!(delete(KLEIN).await.unwrap(), [files[0].clone()]);
+    assert!(h.store.get_gen_model(KLEIN).await.unwrap().is_none());
 }
 
 #[tokio::test]

@@ -16,7 +16,7 @@ use serde_json::Value;
 use sha2::{Digest, Sha256};
 
 use crate::catalog::{Catalog, is_hex};
-use crate::hf::{validate_repo_id, validate_repo_path};
+use crate::hf::{Gated, validate_repo_id, validate_repo_path};
 
 /// What a model makes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
@@ -139,6 +139,18 @@ pub enum GateMode {
     Auto,
     /// The publisher approves each request.
     Manual,
+}
+
+/// The gate a Hugging Face listing reports (`false`, `"auto"` or `"manual"`), in the words a
+/// catalog entry's gate uses.
+impl From<Gated> for GateMode {
+    fn from(gated: Gated) -> Self {
+        match gated {
+            Gated::No => Self::None,
+            Gated::Auto => Self::Auto,
+            Gated::Manual => Self::Manual,
+        }
+    }
 }
 
 /// Which frame counts a video model takes.
@@ -832,6 +844,19 @@ mod tests {
             v[k] = x.clone();
         }
         v.to_string()
+    }
+
+    /// A Hugging Face listing's gate reads as a catalog entry's, in the same words.
+    #[test]
+    fn a_listings_gate_is_a_gate_mode() {
+        for (gated, mode, word) in [
+            (Gated::No, GateMode::None, "none"),
+            (Gated::Auto, GateMode::Auto, "auto"),
+            (Gated::Manual, GateMode::Manual, "manual"),
+        ] {
+            assert_eq!(GateMode::from(gated), mode);
+            assert_eq!(serde_json::to_value(mode).unwrap(), json!(word));
+        }
     }
 
     /// The fixture read at build 1106 after `change` to its whole JSON.

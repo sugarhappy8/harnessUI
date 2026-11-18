@@ -117,6 +117,11 @@ pub trait LocalHardware: Send + Sync {
     /// graphics device (`None` on the processor).
     async fn target(&self) -> (Target, String, Option<String>);
 
+    /// The graphics device's total memory, as the probe [`target`](Self::target) reads says
+    /// (`None` on the processor, or when the probe does not say): what Get local models'
+    /// header shows for a graphics card.
+    async fn device_total_bytes(&self) -> Option<u64>;
+
     /// The loaded (or loading) chat model's bytes on a graphics device; `None` when none is
     /// on one.
     fn chat_device_bytes(&self) -> Option<u64>;
@@ -191,6 +196,14 @@ impl LocalHardware for AppHardware {
         })
     }
 
+    async fn device_total_bytes(&self) -> Option<u64> {
+        let state = self.0.try_state::<AppState>()?;
+        let (_, hardware) = crate::hub::detect(&state).await;
+        // The same cached probe `target` reads.
+        let probes = state.runtime.backends(false).await;
+        device_total(&probes, &hardware)
+    }
+
     fn chat_device_bytes(&self) -> Option<u64> {
         self.0.try_state::<AppState>()?.runtime.device_bytes()
     }
@@ -239,9 +252,7 @@ pub(crate) fn studio_target(
     free_now: impl FnOnce(u64, Option<u64>, &dyn Fn(&str, &str) -> bool) -> u64,
 ) -> (Target, String, Option<String>) {
     let picked = picked_device(probes, &hardware);
-    let total = picked
-        .filter(|(_, d)| d.total_mib > 0)
-        .map(|(_, d)| d.total_mib.saturating_mul(1024 * 1024));
+    let total = picked.and_then(|(_, d)| total_bytes(d));
     let on_card = |backend: &str, name: &str| {
         picked.is_some_and(|(kind, device)| same_card(probes, kind, device, backend, name))
     };
@@ -252,6 +263,21 @@ pub(crate) fn studio_target(
         Target::Cpu { .. } => ("cpu", None),
     };
     (target, backend.to_owned(), description)
+}
+
+/// The total memory of the graphics device `hub::detect` found (`hardware`), as its probe in
+/// `probes` says ([`picked_device`]); `None` when the device is not found there or its probe
+/// gives no total.
+pub(crate) fn device_total(
+    probes: &[(runtime::Backend, runtime::ProbeResult)],
+    hardware: &HardwareDto,
+) -> Option<u64> {
+    picked_device(probes, hardware).and_then(|(_, d)| total_bytes(d))
+}
+
+/// A probed device's total memory in bytes, when the probe gives one.
+fn total_bytes(device: &runtime::Device) -> Option<u64> {
+    (device.total_mib > 0).then(|| device.total_mib.saturating_mul(1024 * 1024))
 }
 
 /// The graphics device `hub::detect` found (`hardware`), in `probes`: of the backend it
@@ -701,6 +727,30 @@ mod tests {
             seen_free(&twins, card_a(), None, Some(("vulkan", "Vulkan0"))),
             3_000 * MIB
         );
+    }
+
+    /// Get local models' header: the card's total as its probe says, never its free memory;
+    /// nothing for a device the probes do not have or whose probe gives no total.
+    #[test]
+    fn the_cards_total_is_the_one_its_probe_gives() {
+        const A: &str = "AMD Radeon RX 7600 (RADV NAVI33)";
+        let probes = [probed(
+            runtime::BackendKind::Vulkan,
+            &[("Vulkan0", A, 8_192, 7_000)],
+        )];
+        assert_eq!(
+            device_total(&probes, &detected(A, 7_000 * MIB).1),
+            Some(8_192 * MIB)
+        );
+        assert_eq!(
+            device_total(&probes, &detected("Another card", 7_000 * MIB).1),
+            None
+        );
+        let silent = [probed(
+            runtime::BackendKind::Vulkan,
+            &[("Vulkan0", A, 0, 7_000)],
+        )];
+        assert_eq!(device_total(&silent, &detected(A, 7_000 * MIB).1), None);
     }
 
     /// The Studio engine's backend and the device's description go with the target.

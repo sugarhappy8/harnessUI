@@ -1168,8 +1168,9 @@ pub struct EngineProgressDto {
 pub struct HardwareLineDto {
     /// The graphics device's name, or "Processor" on a computer that runs models there.
     pub device: String,
-    /// The graphics memory free for a model, the chat model's share counted as free (on Apple
-    /// silicon, the share of memory Metal may use); `None` on the processor.
+    /// A graphics card's total memory, as its probe says (its free memory with the chat
+    /// model's share counted as free when the probe gives no total); on Apple silicon, the
+    /// share of memory Metal may use; `None` on the processor.
     pub graphics_bytes: Option<u64>,
     /// Apple silicon: the graphics device shares the computer's memory.
     pub shared_memory: bool,
@@ -1218,7 +1219,8 @@ pub struct GateDto {
 pub struct PartDto {
     /// `diffusion`, `llm`, `t5xxl`, `vae`, …
     pub role: String,
-    /// "makes the picture", "reads your prompt" or "picture decoder".
+    /// "makes the picture", "reads your prompt", "reads the picture you add" or "picture
+    /// decoder".
     pub label: String,
     /// `owner/name` on Hugging Face.
     pub repo: String,
@@ -1285,7 +1287,10 @@ pub struct LocalEntryDto {
     pub low_disk: bool,
 }
 
-/// An installed picture or video model.
+/// An installed picture or video model. One this build cannot read (its family record hidden
+/// by a newer signed catalog, a part's licence no longer known, a family this build does not
+/// know) is listed too, so it can be deleted: its fit `notHere` with why, and its `model`
+/// without controls, `usable` saying why.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct InstalledLocalDto {
@@ -1332,7 +1337,7 @@ pub struct LocalSearchHitDto {
     pub repo: String,
     pub downloads: u64,
     pub likes: u64,
-    /// `no`, `auto` or `manual`.
+    /// `none`, `auto` or `manual`, as [`GateDto::mode`] says it.
     pub gated: String,
     /// The repository's own licence label (`apache-2.0`), as it gives it.
     pub license_label: Option<String>,

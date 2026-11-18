@@ -16,10 +16,11 @@
 //!   at its own revision; once every part is checked, and the diffusion file's own tensor table
 //!   is its family's, it joins Studio's installed models (`downloads::register_gen_model`). The
 //!   Windows engine pack comes with the first model; where no engine is found and none can
-//!   come, the plan says so.
-//! - **Deleting** ([`delete_local_model`]): the row goes, then each part file nothing else
-//!   uses (a chat model, another picture or video model, a download not finished yet), then the
-//!   folders that leaves empty.
+//!   come, the model still downloads, and Get local models tells it from the engine's state.
+//! - **Deleting** ([`delete_local_model`]): refused while a run on this computer waits for the
+//!   model or uses it; else the row goes, then each part file nothing else uses (a chat model,
+//!   another picture or video model, a download not finished yet), then the folders that
+//!   leaves empty.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
@@ -80,14 +81,6 @@ pub struct DownloadPlan {
     /// The Studio engine is not on this computer and this platform has it as a pack (Windows):
     /// it downloads with the model, its licence among [`licences`](Self::licences).
     pub needs_engine: bool,
-    /// The Studio engine is not on this computer and cannot come with the model (no pack for
-    /// this platform): why, in Studio's words. The model still downloads.
-    #[allow(
-        dead_code,
-        reason = "read by the tests only: Get local models tells the same from the engine's state \
-                  (`unavailable`)"
-    )]
-    pub engine_missing: Option<AppError>,
     /// The free space on the models folder's disk, when the system says.
     pub free_bytes: Option<u64>,
 }
@@ -107,8 +100,9 @@ impl DownloadPlan {
 /// What downloading `entry` into `models_dir` takes: one pinned file per part (`commit` the
 /// part's revision), a part whose destination already has its pinned size counted as here,
 /// every licence to accept, and what the Studio engine needs (`engine`,
-/// `engine_cmd::engine_need`): its pack comes too, with its licence to accept, or the plan
-/// says it is missing. Refused with `studio_disk_too_small` when what it fetches is more than
+/// `engine_cmd::engine_need`): its pack comes too, with its licence to accept; an engine that
+/// is neither here nor a pack changes nothing here (Get local models tells it from the
+/// engine's state). Refused with `studio_disk_too_small` when what it fetches is more than
 /// `free_bytes` (when known).
 pub fn plan_download(
     entry: GenEntry,
@@ -148,15 +142,14 @@ pub fn plan_download(
             licences.push(licence.clone());
         }
     }
-    let (needs_engine, engine_missing) = match engine {
-        EngineNeed::Found => (false, None),
+    let needs_engine = match engine {
+        EngineNeed::Found | EngineNeed::Missing => false,
         EngineNeed::Pack(licence) => {
             if !licences.iter().any(|l| l.sha256 == licence.sha256) {
                 licences.push(licence.clone());
             }
-            (true, None)
+            true
         }
-        EngineNeed::Missing => (false, Some(errors::engine_missing_here())),
     };
     Ok(DownloadPlan {
         total_bytes: entry.total_bytes(),
@@ -166,7 +159,6 @@ pub fn plan_download(
         to_fetch_bytes,
         licences,
         needs_engine,
-        engine_missing,
         free_bytes,
     })
 }
@@ -542,14 +534,32 @@ where
 }
 
 /// Deletes the installed model `id`, and each of its part files that nothing else uses and no
-/// download not finished yet writes ([`delete_files_of`]).
+/// download not finished yet writes, unless a run on this computer waits for it or uses it
+/// ([`delete_unless_in_use`]).
 pub async fn delete_local_model(app: &AppHandle, id: &str) -> AppResult<()> {
     let state = app.state::<AppState>();
+    let studio = app.state::<Arc<StudioManager>>();
     let models_dir = crate::hub::models_dir(app).await;
     let writing = files_being_written(&state.store, None).await?;
     let busy = |p: &Path| writing.contains(&p.display().to_string());
-    delete_files_of(&state.store, &models_dir, id, &busy).await?;
+    delete_unless_in_use(&studio, &state.store, &models_dir, id, &busy).await?;
     Ok(())
+}
+
+/// [`delete_files_of`], refused with `studio_model_in_use` while `studio`'s local lane holds a
+/// run of model `id`, queued or running (deleting a file the Studio engine has open fails
+/// half-way on Windows); a refusal deletes nothing.
+pub(crate) async fn delete_unless_in_use(
+    studio: &StudioManager,
+    store: &store::Store,
+    models_dir: &Path,
+    id: &str,
+    busy: &(dyn Fn(&Path) -> bool + Sync),
+) -> AppResult<Vec<PathBuf>> {
+    if studio.local_uses_model(id) {
+        return Err(errors::model_in_use());
+    }
+    delete_files_of(store, models_dir, id, busy).await
 }
 
 /// Deletes the row `id`, then each part file no installed model (chat, picture or video) uses
@@ -890,7 +900,7 @@ mod tests {
 
     /// Where the Studio engine is a pack (Windows), the first model's download brings it, and
     /// its licence is accepted with the model's; where it is found, nothing comes; where it is
-    /// neither found nor a pack, the plan says it is missing and promises no download.
+    /// neither found nor a pack, the plan promises no engine download.
     #[test]
     fn the_engine_comes_with_the_first_model_where_it_is_a_pack() {
         let dir = Scratch::new();
@@ -907,7 +917,6 @@ mod tests {
         )
         .unwrap();
         assert!(plan.needs_engine);
-        assert!(plan.engine_missing.is_none());
         let mut with_engine = model_licences.clone();
         with_engine.push(engine.clone());
         assert_eq!(plan.licences, with_engine, "the model's, then the engine's");
@@ -925,16 +934,11 @@ mod tests {
 
         let found = plan_download(two_licences(), &dir.0, &EngineNeed::Found, None).unwrap();
         assert!(!found.needs_engine);
-        assert!(found.engine_missing.is_none());
         assert!(!found.licences.contains(&engine));
 
         let missing = plan_download(two_licences(), &dir.0, &EngineNeed::Missing, None).unwrap();
         assert!(!missing.needs_engine, "no engine download promised");
         assert_eq!(missing.licences, model_licences);
-        assert_eq!(
-            missing.engine_missing.map(|e| e.code).as_deref(),
-            Some("studio_engine_not_here")
-        );
     }
 
     /// What a download is given: the licences `sent`, after the note was accepted.

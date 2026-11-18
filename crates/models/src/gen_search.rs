@@ -21,7 +21,7 @@ use crate::gen_catalog::{
     GenLicence, GenPart, GenRole, check_licences, check_parts, sha256_hex, strictness,
 };
 use crate::gguf::TensorShape;
-use crate::hf::{Gated, GenSearchKind, OFFICIAL_ENDPOINT, RepoDetail, uploader_text};
+use crate::hf::{GenSearchKind, OFFICIAL_ENDPOINT, RepoDetail, uploader_text};
 
 /// Why a repository is never offered, whatever it holds.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -675,11 +675,7 @@ pub fn entry_for(
         parts,
         licenses,
         gate: GenGate {
-            mode: match detail.gated {
-                Gated::No => GateMode::None,
-                Gated::Auto => GateMode::Auto,
-                Gated::Manual => GateMode::Manual,
-            },
+            mode: GateMode::from(detail.gated),
             collects: Vec::new(),
         },
         defaults: record.defaults.clone(),
