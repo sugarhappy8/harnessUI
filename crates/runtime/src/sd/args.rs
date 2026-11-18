@@ -15,9 +15,9 @@
 //! help in `tests/fixtures/sd_help.txt`, the contract tests (`tests/sd_contract.rs`) on the
 //! engine itself.
 
-use std::ffi::OsString;
+use std::ffi::{OsStr, OsString};
 use std::ops::RangeInclusive;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 
 /// The longest local prompt, in characters: a sanity cap, as the prompt goes by file and
 /// never in argv.
@@ -34,6 +34,13 @@ const PROMPT_FILE: &str = "prompt.txt";
 
 /// The negative prompt's file name in the run's folder.
 const NEGATIVE_FILE: &str = "negative.txt";
+
+/// The largest number the engine reads for an int option (`std::stoi`, which throws on a
+/// larger one; the pinned CLI does not catch it and aborts).
+const INT_MAX: u32 = i32::MAX.unsigned_abs();
+
+/// The largest seed the engine reads (`std::stoll`, which throws on a larger one).
+const SEED_MAX: u64 = i64::MAX.unsigned_abs();
 
 /// What a model part is to the engine, from the catalog's part role.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -183,7 +190,8 @@ impl OutputFormat {
 }
 
 /// One local run, in typed fields only. The numbers come checked against the catalog's
-/// ranges (the engine reads them as 32-bit integers, the seed as a 64-bit one).
+/// ranges (the engine reads them as 32-bit integers, the seed as a 64-bit one);
+/// [`build_args`] still refuses one the engine cannot read.
 #[derive(Debug, Clone, PartialEq)]
 pub struct SdJob {
     /// The model's files, each with its role, in the catalog's order.
@@ -229,7 +237,8 @@ pub struct SdJob {
     pub threads: Option<u32>,
     /// The run's folder (`<gallery>/.partial/<run>`): the prompt files and the output go in it.
     pub out_dir: PathBuf,
-    /// The output's file name without its extension.
+    /// The output's file name without its extension: one plain name, so the output stays in
+    /// `out_dir`.
     pub out_stem: String,
     /// The output's format.
     pub format: OutputFormat,
@@ -258,6 +267,15 @@ pub enum ArgsError {
     /// The output path holds a numbering template ([`is_numbering_template`]).
     #[error("the output path holds a %d numbering template")]
     PercentInOutputPath,
+    /// A number the engine cannot read, named by its [`SdJob`] field: an integer above
+    /// `i32::MAX`, a seed above `i64::MAX`, or a guidance scale or flow shift that is not
+    /// finite. The engine aborts on an integer out of range.
+    #[error("the {0} is out of the engine's range")]
+    NumberOutOfRange(&'static str),
+    /// The output's name is not one plain file name: it is empty or absolute, or holds a
+    /// separator, `.` or `..`, so `-o` would leave the run's folder.
+    #[error("the output's name is not one plain file name")]
+    BadOutputStem,
 }
 
 /// Every flag [`build_args`] can emit, in its order. The contract tests check each against the
@@ -306,7 +324,9 @@ pub const FLAGS: &[&str] = &[
 /// engine's own record holds the prompt) and `--log-level info` (the progress reader reads
 /// the info lines).
 ///
-/// The prompt is trimmed only to check it is not empty, and never reaches argv.
+/// The prompt is trimmed only to check it is not empty, and never reaches argv. A number the
+/// engine cannot read ([`ArgsError::NumberOutOfRange`]) and an `out_stem` that is not one
+/// plain file name ([`ArgsError::BadOutputStem`]) are refused, whatever checked them before.
 pub fn build_args(job: &SdJob) -> Result<Vec<OsString>, ArgsError> {
     if job.prompt.trim().is_empty() {
         return Err(ArgsError::EmptyPrompt);
@@ -324,7 +344,11 @@ pub fn build_args(job: &SdJob) -> Result<Vec<OsString>, ArgsError> {
     if !(fits(job.width) && fits(job.height)) {
         return Err(ArgsError::BadSize);
     }
+    readable_numbers(job)?;
     unicode(&job.out_dir)?;
+    if !is_one_name(&job.out_stem) {
+        return Err(ArgsError::BadOutputStem);
+    }
     let output = job
         .out_dir
         .join(format!("{}.{}", job.out_stem, job.format.extension()));
@@ -518,6 +542,39 @@ fn help_options(help: &str) -> Vec<HelpOption<'_>> {
 
 fn fits(side: u32) -> bool {
     side.is_multiple_of(SIZE_MULTIPLE) && SIZE_RANGE.contains(&side)
+}
+
+/// Refuses the first number in `job` the engine cannot read, naming its field.
+fn readable_numbers(job: &SdJob) -> Result<(), ArgsError> {
+    let ints = [
+        ("steps", Some(job.steps)),
+        ("batch", Some(job.batch)),
+        ("frames", job.frames),
+        ("fps", job.fps),
+        ("threads", job.threads),
+    ];
+    for (field, value) in ints {
+        if value.is_some_and(|n| n > INT_MAX) {
+            return Err(ArgsError::NumberOutOfRange(field));
+        }
+    }
+    if job.seed > SEED_MAX {
+        return Err(ArgsError::NumberOutOfRange("seed"));
+    }
+    for (field, value) in [("cfg", Some(job.cfg)), ("flow_shift", job.flow_shift)] {
+        if value.is_some_and(|x| !x.is_finite()) {
+            return Err(ArgsError::NumberOutOfRange(field));
+        }
+    }
+    Ok(())
+}
+
+/// Whether `stem` is exactly one [`Component::Normal`], spelled as given (so a trailing
+/// separator or `.` is refused too): joined to `out_dir`, it names a file in that folder.
+fn is_one_name(stem: &str) -> bool {
+    let mut components = Path::new(stem).components();
+    matches!(components.next(), Some(Component::Normal(name)) if name == OsStr::new(stem))
+        && components.next().is_none()
 }
 
 fn unicode(path: &Path) -> Result<&str, ArgsError> {
@@ -744,6 +801,129 @@ mod tests {
             })
             .is_ok()
         );
+    }
+
+    /// The edges of the numbering-template check, which `build_args` and the gallery-folder
+    /// check in `prefs.rs` share.
+    #[test]
+    fn a_numbering_template_is_percent_up_to_three_digits_and_d() {
+        for template in ["%d", "%03d", "%%d", "/g/shots %d", "/g/%03d/x", "50%%d"] {
+            assert!(is_numbering_template(template), "{template:?}");
+        }
+        for plain in ["%1234d", "%", "/g/100%", "/g/%1234d", "100% real", "%x", ""] {
+            assert!(!is_numbering_template(plain), "{plain:?}");
+        }
+    }
+
+    #[test]
+    fn an_output_name_that_is_not_one_plain_name_is_refused() {
+        let mut stems = vec!["../x", "a/b", "/abs", "", "..", ".", "a/", "./a"];
+        if cfg!(windows) {
+            stems.extend([r"C:\abs", r"a\b", r"..\x", "C:x"]);
+        }
+        for stem in stems {
+            assert_eq!(
+                build_args(&SdJob {
+                    out_stem: stem.into(),
+                    ..job()
+                }),
+                Err(ArgsError::BadOutputStem),
+                "{stem:?}"
+            );
+        }
+        let a = strings(
+            build_args(&SdJob {
+                out_stem: "run-1".into(),
+                ..job()
+            })
+            .unwrap(),
+        );
+        assert_eq!(
+            after(&a, "-o"),
+            p("/g/.partial/r1").join("run-1.png").to_str().unwrap()
+        );
+    }
+
+    /// The engine reads its int options with `std::stoi` and the seed with `std::stoll`, and
+    /// aborts on a number out of their range, so `build_args` refuses one, naming its field.
+    #[test]
+    fn an_integer_the_engine_cannot_read_is_refused() {
+        let int_max = u32::try_from(i32::MAX).unwrap();
+        let over = int_max + 1;
+        /// A job with one integer field set to the number given.
+        type With = fn(u32) -> SdJob;
+        let jobs: [(&str, With); 5] = [
+            ("steps", |n| SdJob { steps: n, ..job() }),
+            ("batch", |n| SdJob { batch: n, ..job() }),
+            ("frames", |n| SdJob {
+                frames: Some(n),
+                ..video()
+            }),
+            ("fps", |n| SdJob {
+                fps: Some(n),
+                ..video()
+            }),
+            ("threads", |n| SdJob {
+                threads: Some(n),
+                ..job()
+            }),
+        ];
+        for (field, with) in jobs {
+            let a = strings(build_args(&with(int_max)).unwrap());
+            assert!(a.contains(&int_max.to_string()), "{field}: {a:?}");
+            for n in [over, u32::MAX] {
+                assert_eq!(
+                    build_args(&with(n)),
+                    Err(ArgsError::NumberOutOfRange(field)),
+                    "{field} = {n}"
+                );
+            }
+        }
+        let seed_max = u64::try_from(i64::MAX).unwrap();
+        let a = strings(
+            build_args(&SdJob {
+                seed: seed_max,
+                ..job()
+            })
+            .unwrap(),
+        );
+        assert_eq!(after(&a, "--seed"), seed_max.to_string());
+        for seed in [seed_max + 1, u64::MAX] {
+            assert_eq!(
+                build_args(&SdJob { seed, ..job() }),
+                Err(ArgsError::NumberOutOfRange("seed")),
+                "{seed}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_guidance_or_flow_shift_that_is_not_finite_is_refused() {
+        for bad in [f32::NAN, f32::INFINITY, f32::NEG_INFINITY] {
+            assert_eq!(
+                build_args(&SdJob { cfg: bad, ..job() }),
+                Err(ArgsError::NumberOutOfRange("cfg")),
+                "{bad}"
+            );
+            assert_eq!(
+                build_args(&SdJob {
+                    flow_shift: Some(bad),
+                    ..video()
+                }),
+                Err(ArgsError::NumberOutOfRange("flow_shift")),
+                "{bad}"
+            );
+        }
+        let a = strings(
+            build_args(&SdJob {
+                cfg: f32::MAX,
+                flow_shift: Some(-0.5),
+                ..video()
+            })
+            .unwrap(),
+        );
+        assert_eq!(after(&a, "--cfg-scale"), f32::MAX.to_string());
+        assert_eq!(after(&a, "--flow-shift"), "-0.5");
     }
 
     #[test]
