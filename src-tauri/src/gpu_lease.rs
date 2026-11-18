@@ -11,6 +11,9 @@
 //! `RuntimeManager::load`), and the next chat load after a job probes the backends again.
 //! A chat load that passed the gate counts as in flight until its server runs: a job's
 //! grant waits for it and reads the card again after it, so the two never land together.
+//! A job's unload stops the chat model only between two chat loads, never in the middle of
+//! one, and not at all when one passed the gate since the job read the card: that load went
+//! first, and the job decides again on the card as it is now.
 //! A hold never loads the chat model again: "Reload it after Studio" is
 //! [`GpuLease::reload_chat`], called once when the local queue empties.
 
@@ -95,9 +98,14 @@ pub trait ChatSide: Send + Sync {
     fn keeps_in_memory(&self) -> bool;
     /// `before_change(when_idle = true)` then `unload_by_user()`; `on_wait(true)` while a
     /// reply is being written, `on_wait(false)` when it ends. The unloaded path.
+    ///
+    /// The stop comes between two chat loads, never in the middle of one, and no chat load
+    /// starts until it ends. Right before it, `go_ahead` is asked: false (a chat load went
+    /// first since the lease read the card) stops nothing and returns `Ok(None)`.
     async fn unload_when_idle(
         &self,
         on_wait: &(dyn Fn(bool) + Send + Sync),
+        go_ahead: &(dyn Fn() -> bool + Send + Sync),
     ) -> AppResult<Option<String>>;
     /// Loads the chat model at `path` again.
     async fn reload(&self, path: &str);
@@ -126,6 +134,7 @@ impl ChatSide for RuntimeChat {
     async fn unload_when_idle(
         &self,
         on_wait: &(dyn Fn(bool) + Send + Sync),
+        go_ahead: &(dyn Fn() -> bool + Send + Sync),
     ) -> AppResult<Option<String>> {
         // The wait for a reply or a Model check is made here: when the job is stopped this
         // future is dropped, which leaves nothing behind (a `before_change` dropped while it
@@ -135,19 +144,38 @@ impl ChatSide for RuntimeChat {
             self.busy.wait_idle().await;
             on_wait(false);
         }
+        let stopped = |e: tokio::task::JoinError| {
+            AppError::internal(format!("the chat model's unload stopped: {e}"))
+        };
         let runtime = Arc::clone(&self.runtime);
         let busy = Arc::clone(&self.busy);
-        // Nothing uses the model now, so `before_change` goes ahead at once. From here the
-        // unload runs to its end even if the job is stopped meanwhile: a server stopped
-        // halfway would leave the status at "Stopping".
+        // Nothing uses the model now, so `before_change` goes ahead at once; it runs to its
+        // end even if the job is stopped meanwhile. It comes before the hold on the loads
+        // below: a use that began just now is waited for here, and a Model check's load
+        // must not wait behind that hold meanwhile.
+        tokio::spawn(async move { runtime.before_change(&busy, true).await })
+            .await
+            .map_err(stopped)??;
+        // A chat load that passed the gate meanwhile starts its server first; from here no
+        // chat load starts or passes the gate until the stop has ended. Waiting for it
+        // changes nothing, so a job stopped meanwhile leaves nothing behind.
+        let between = self.runtime.between_loads().await;
+        // A chat load went first since the lease read the card: it stays, and the lease
+        // reads the card again.
+        if !go_ahead() {
+            return Ok(None);
+        }
+        let runtime = Arc::clone(&self.runtime);
+        // From here the unload runs to its end even if the job is stopped meanwhile: a
+        // server stopped halfway would leave the status at "Stopping".
         tokio::spawn(async move {
-            runtime.before_change(&busy, true).await?;
+            let _between = between;
             let path = runtime.status().model_path;
             runtime.unload_by_user().await;
-            Ok(path)
+            path
         })
         .await
-        .map_err(|e| AppError::internal(format!("the chat model's unload stopped: {e}")))?
+        .map_err(stopped)
     }
 
     async fn reload(&self, path: &str) {
@@ -218,6 +246,15 @@ enum Step {
 enum AfterIt {
     AfterUnload,
     UseProcessor,
+}
+
+/// What a job's unload did.
+enum Unloaded {
+    /// It stopped the chat model: its path (`None` when none was loaded by then).
+    Stopped(Option<String>),
+    /// A chat load passed the gate since the card was read: it went first, and nothing was
+    /// stopped.
+    WentFirst,
 }
 
 /// One graphics-card tenant at a time: the chat model, or a local Studio job.
@@ -313,7 +350,8 @@ impl GpuLease {
     /// The grant, in the order of [`Self::acquire_for_studio`], with the card marked as
     /// held. Each round waits until no chat load is in flight, reads the card, and grants
     /// only if no chat load passed the gate since; else, and after an unload, it reads the
-    /// card again.
+    /// card again. An unload stops nothing when a chat load passed the gate since the card
+    /// was read: that load went first.
     async fn decide(
         &self,
         need: &StudioNeed,
@@ -340,7 +378,10 @@ impl GpuLease {
                     }
                 }
                 Step::Unload(after) => {
-                    let path = self.unload(cancel, on_wait).await?;
+                    let Unloaded::Stopped(path) = self.unload(seen, cancel, on_wait).await? else {
+                        // A chat load went first: the card is read again.
+                        continue;
+                    };
                     let earlier = match unloaded {
                         Some(Grant::AfterUnload { unloaded }) => unloaded,
                         _ => None,
@@ -434,26 +475,44 @@ impl GpuLease {
         })
     }
 
-    /// Unloads the chat model once nothing uses it. A failed unload (its wait cancelled by a
+    /// Unloads the chat model once nothing uses it, unless a chat load passed the gate since
+    /// the card was read (`seen`): that load went first and stays. This is asked where no
+    /// chat load can start, right before the stop. A failed unload (its wait cancelled by a
     /// newer change of what is loaded) frees nothing, so the job gets no grant.
     async fn unload(
         &self,
+        seen: u64,
         cancel: &CancellationToken,
         on_wait: &(dyn Fn(LeaseWait) + Send + Sync),
-    ) -> Result<Option<String>, Refused> {
+    ) -> Result<Unloaded, Refused> {
         let reply_running = |waiting: bool| {
             if waiting {
                 on_wait(LeaseWait::ReplyRunning);
             }
         };
-        tokio::select! {
+        let went_first = AtomicBool::new(false);
+        let go_ahead = || {
+            let card = *self.card.borrow();
+            let unchanged = card.loads == 0 && card.passed == seen;
+            if !unchanged {
+                went_first.store(true, Ordering::Release);
+            }
+            unchanged
+        };
+        let unloaded = tokio::select! {
             biased;
-            _ = cancel.cancelled() => Err(Refused::Cancelled),
-            unloaded = self.chat.unload_when_idle(&reply_running) => unloaded.map_err(|e| {
-                tracing::warn!(code = %e.code, "the chat model was not unloaded for Studio");
-                Refused::Cancelled
-            }),
+            _ = cancel.cancelled() => return Err(Refused::Cancelled),
+            unloaded = self.chat.unload_when_idle(&reply_running, &go_ahead) => {
+                unloaded.map_err(|e| {
+                    tracing::warn!(code = %e.code, "the chat model was not unloaded for Studio");
+                    Refused::Cancelled
+                })?
+            }
+        };
+        if went_first.load(Ordering::Acquire) {
+            return Ok(Unloaded::WentFirst);
         }
+        Ok(Unloaded::Stopped(unloaded))
     }
 }
 
@@ -509,6 +568,8 @@ mod tests {
         keeps_in_memory: bool,
         busy: Arc<BusyCounter>,
         unloads: AtomicUsize,
+        /// Unloads that asked whether to go ahead (stopped or not).
+        asked: AtomicUsize,
         reloads: StdMutex<Vec<String>>,
     }
 
@@ -519,6 +580,7 @@ mod tests {
                 keeps_in_memory,
                 busy: Arc::new(BusyCounter::default()),
                 unloads: AtomicUsize::new(0),
+                asked: AtomicUsize::new(0),
                 reloads: StdMutex::new(Vec::new()),
             })
         }
@@ -548,8 +610,23 @@ mod tests {
             *self.device_bytes.lock().unwrap() = Some(bytes);
         }
 
+        /// A chat load reached Starting on the processor: nothing of it is on the card.
+        fn set_on_processor(&self) {
+            *self.device_bytes.lock().unwrap() = None;
+        }
+
         fn unloads(&self) -> usize {
             self.unloads.load(Ordering::SeqCst)
+        }
+
+        /// Returns once `n` unloads asked whether to go ahead (and did what it said).
+        async fn until_asked(&self, n: usize) {
+            within(async {
+                while self.asked.load(Ordering::SeqCst) < n {
+                    tokio::time::sleep(Duration::from_millis(5)).await;
+                }
+            })
+            .await;
         }
 
         fn reloads(&self) -> Vec<String> {
@@ -570,15 +647,22 @@ mod tests {
         async fn unload_when_idle(
             &self,
             on_wait: &(dyn Fn(bool) + Send + Sync),
+            go_ahead: &(dyn Fn() -> bool + Send + Sync),
         ) -> AppResult<Option<String>> {
             if self.busy.is_busy() {
                 on_wait(true);
                 self.busy.wait_idle().await;
                 on_wait(false);
             }
-            let was = self.device_bytes.lock().unwrap().take();
-            self.unloads.fetch_add(1, Ordering::SeqCst);
-            Ok(was.map(|_| CHAT.to_string()))
+            let unloaded = if go_ahead() {
+                let was = self.device_bytes.lock().unwrap().take();
+                self.unloads.fetch_add(1, Ordering::SeqCst);
+                was.map(|_| CHAT.to_string())
+            } else {
+                None
+            };
+            self.asked.fetch_add(1, Ordering::SeqCst);
+            Ok(unloaded)
         }
 
         async fn reload(&self, path: &str) {
@@ -1048,9 +1132,11 @@ mod tests {
         assert!(!lease.begin_load(), "a chat load passed during job 2");
     }
 
-    /// Review fix L12-1: a plain chat load (no model use of its own) that passes the gate
-    /// while a job waits for a reply races the job's unload. The job reads the card again
-    /// once the load reached Starting, so the load never starts on top of the job.
+    /// Review fixes L12-1 and L12-3: a plain chat load (no model use of its own) that passes
+    /// the gate while a job waits for a reply goes first. The job's unload does not stop it
+    /// in flight; the job reads the card again once the load reached Starting, and unloads
+    /// it then only because it does not fit beside it. The load never starts on top of the
+    /// job.
     #[tokio::test]
     async fn a_chat_load_during_the_unload_is_seen_before_the_grant() {
         let chat = FakeChat::loaded(5 * GB);
@@ -1068,14 +1154,14 @@ mod tests {
         // The job holds nothing while it waits: a chat load passes the gate.
         assert!(lease.begin_load(), "the chat load was held");
 
-        // The reply ends and the job unloads the old model while the load is in flight.
+        // The reply ends while the load is in flight: the unload stops nothing.
         drop(reply);
-        within(async {
-            while chat.unloads() == 0 {
-                tokio::time::sleep(Duration::from_millis(5)).await;
-            }
-        })
-        .await;
+        chat.until_asked(1).await;
+        assert_eq!(
+            chat.unloads(),
+            0,
+            "the unload stopped a chat load in flight"
+        );
         tokio::time::sleep(Duration::from_millis(50)).await;
         assert!(
             !job.is_finished(),
@@ -1083,7 +1169,8 @@ mod tests {
         );
         assert!(!lease.holds_card());
 
-        // The load reaches Starting: the job sees it and unloads it too.
+        // The load reaches Starting on the card: the job sees it, and unloads it because
+        // the job does not fit beside it.
         chat.set_loaded(6 * GB);
         lease.end_load();
         let (g, _hold) = within(job).await.unwrap().unwrap();
@@ -1093,8 +1180,77 @@ mod tests {
                 unloaded: Some(CHAT.to_string())
             }
         );
-        assert_eq!(chat.unloads(), 2);
+        assert_eq!(chat.unloads(), 1);
         assert!(lease.holds_card());
+    }
+
+    /// Review fix L12-3: a chat load that passed the gate and started while a job waited for
+    /// a reply went first. The job's unload, decided on the card before it, does not stop
+    /// it; the job decides again on the card as it is now. This load started on the
+    /// processor, so the card is free and the job runs beside it.
+    #[tokio::test]
+    async fn a_chat_load_that_went_first_is_not_unloaded() {
+        let chat = FakeChat::loaded(5 * GB);
+        let reply = chat.use_model(BusyKind::ChatTurn);
+        let lease = GpuLease::new(chat.clone());
+        let waits = Waits::default();
+        let job = ask_in_task(
+            &lease,
+            need(false, true, false),
+            GpuPolicy::Unload,
+            &tok(),
+            &waits,
+        );
+        waits.until(LeaseWait::ReplyRunning).await;
+        // The person loads a model on the processor while the reply is written.
+        assert!(lease.begin_load(), "the chat load was held");
+        chat.set_on_processor();
+        lease.end_load();
+
+        // The reply ends: the job's unload stops nothing, and the job runs beside it.
+        drop(reply);
+        let (g, _hold) = within(job).await.unwrap().unwrap();
+        assert_eq!(g, Grant::Alongside);
+        assert_eq!(
+            chat.unloads(),
+            0,
+            "the unload stopped a chat load that went first"
+        );
+        assert!(lease.holds_card());
+    }
+
+    /// Review fix L12-3: the app's unload runs `before_change` first (it may wait for a
+    /// model use, and no chat load may wait behind that), then waits until no chat load is
+    /// replacing the server and keeps the next one from starting (`between_loads`), asks
+    /// `go_ahead` there, and only then stops the server, holding the loads off until the
+    /// stop ends. A stop in the middle of a load would reset the status of a server that
+    /// then starts unseen by the lease.
+    #[test]
+    fn the_unload_stops_the_server_only_between_loads() {
+        // A checkout on Windows ends its lines in "\r\n".
+        let source = include_str!("gpu_lease.rs").replace("\r\n", "\n");
+        let start = source
+            .find("impl ChatSide for RuntimeChat {")
+            .expect("the app's chat side");
+        let body = &source[start..];
+        let body = &body[body
+            .find("    async fn unload_when_idle(\n")
+            .expect("unload_when_idle")..];
+        let body = &body[..body.find("\n    }\n").expect("the end of unload_when_idle")];
+        let steps = [
+            "before_change(",
+            "between_loads().await",
+            "if !go_ahead()",
+            "let _between = between;",
+            "unload_by_user()",
+        ];
+        let mut from = 0;
+        for step in steps {
+            let found = body[from..]
+                .find(step)
+                .unwrap_or_else(|| panic!("the unload, in order: {step}"));
+            from += found + step.len();
+        }
     }
 
     #[tokio::test]

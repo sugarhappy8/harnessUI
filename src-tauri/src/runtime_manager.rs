@@ -14,7 +14,7 @@ use runtime::{
     ProbeResult, RuntimeLayout, ServerEvent, ServerState, StartSpec,
 };
 use tauri::{AppHandle, Emitter};
-use tokio::sync::{Mutex, oneshot};
+use tokio::sync::{Mutex, OwnedMutexGuard, oneshot};
 use tokio_util::sync::CancellationToken;
 
 use crate::dto::{BackendDto, DeviceDto, RuntimeStateDto, RuntimeStatusDto};
@@ -81,7 +81,9 @@ pub trait StudioGate: Send + Sync {
     /// A chat load passes the gate: when no Studio job holds the card, counts the load as
     /// in flight and returns true; false (nothing counted) while one does. Checked and
     /// counted at once, so no grant lands between the two. A job's grant waits while a
-    /// load is in flight, and reads the card again after one passed.
+    /// load is in flight, and reads the card again after one passed. A load calls it only
+    /// while it holds its setup lock, so none passes during
+    /// [`RuntimeManager::between_loads`].
     fn begin_load(&self) -> bool;
     /// The load counted by [`Self::begin_load`] has started its server (the status and the
     /// running session name it), or gave up before that.
@@ -110,8 +112,10 @@ pub struct RuntimeManager {
     tail: StdMutex<VecDeque<String>>,
     loads: LoadTracker,
     /// Held while a load replaces the previous server and starts its own, so that two
-    /// loads never do that at the same time. Not held while the model loads.
-    load_setup: Mutex<()>,
+    /// loads never do that at the same time. Not held while the model loads. 0.1.0: a load
+    /// passes the Studio gate only while it holds this, and a Studio job's unload stops the
+    /// server only while it holds this too ([`Self::between_loads`]).
+    load_setup: Arc<Mutex<()>>,
     /// The model being loaded or loaded, as resolved.
     current: StdMutex<Option<Loaded>>,
     /// The model on a graphics device while the backends were last probed: (backend,
@@ -140,7 +144,7 @@ impl RuntimeManager {
             session: Mutex::new(None),
             tail: StdMutex::new(VecDeque::new()),
             loads: LoadTracker::default(),
-            load_setup: Mutex::new(()),
+            load_setup: Arc::new(Mutex::new(())),
             current: StdMutex::new(None),
             probed_with: StdMutex::new(None),
             gate: Arc::new(ChangeGate::default()),
@@ -438,6 +442,21 @@ impl RuntimeManager {
             gate: Arc::clone(&self.gate),
             id,
         }
+    }
+
+    /// 0.1.0 Studio: waits until no load is replacing the server and starting its own, then
+    /// keeps the next one from doing so, and from passing the Studio gate, until the guard
+    /// is dropped. A local job's unload stops the server under it: between two loads, never
+    /// in the middle of one, where the stop would reset the status of a server that then
+    /// starts unseen by the lease. Waiting for it changes nothing, so a job stopped
+    /// meanwhile leaves nothing behind. Never awaited while a model use is waited for (a
+    /// Model check's load would wait behind it).
+    #[allow(
+        dead_code,
+        reason = "Task L15's local lane asks the Studio lease, which unloads through it"
+    )]
+    pub async fn between_loads(&self) -> OwnedMutexGuard<()> {
+        Arc::clone(&self.load_setup).lock_owned().await
     }
 
     /// "Unload to free memory": unloads, and remembers which model it was for
@@ -2119,6 +2138,56 @@ mod tests {
         assert!(
             pass < session && session < done,
             "the pass lasts until the session is installed"
+        );
+    }
+
+    /// Review fix L12-3: a load passes the Studio gate, and stays in flight for it, only
+    /// while it holds the setup lock. A Studio job's unload takes that lock
+    /// (`between_loads`), so it never stops the server in the middle of a load (resetting
+    /// the status of a server that then starts unseen by the lease), and no load passes the
+    /// gate while the unload decides and stops.
+    #[test]
+    fn a_load_is_in_flight_for_the_studio_gate_only_inside_its_setup() {
+        // A checkout on Windows ends its lines in "\r\n".
+        let source = include_str!("runtime_manager.rs").replace("\r\n", "\n");
+        let product = &source[..source.find("\n#[cfg(test)]\nmod tests").expect("tests")];
+        assert_eq!(
+            product.matches("self.wait_for_studio(").count(),
+            1,
+            "only load passes the gate"
+        );
+        let start = product.find("    pub async fn load(\n").expect("load");
+        let body = &product[start..];
+        let body = &body[..body.find("\n    }\n").expect("the end of load")];
+        let steps = [
+            "let setup = self.load_setup.lock().await;",
+            "let studio_pass = self.wait_for_studio().await;",
+            "drop(studio_pass);",
+            "drop(setup);",
+        ];
+        // Each step after the one before (the same-model join drops the lock earlier).
+        let mut at = Vec::new();
+        let mut from = 0;
+        for step in steps {
+            let found = body[from..]
+                .find(step)
+                .unwrap_or_else(|| panic!("load, in order: {step}"));
+            at.push(from + found);
+            from += found + step.len();
+        }
+        assert!(
+            !body[at[1]..at[2]].contains("drop(setup)"),
+            "the pass lies inside the setup lock"
+        );
+
+        let start = product
+            .find("    pub async fn between_loads(")
+            .expect("the Studio unload's hold on the loads");
+        let body = &product[start..];
+        let body = &body[..body.find("\n    }\n").expect("the end of between_loads")];
+        assert!(
+            body.contains("Arc::clone(&self.load_setup).lock_owned().await"),
+            "between_loads takes the setup lock"
         );
     }
 }
