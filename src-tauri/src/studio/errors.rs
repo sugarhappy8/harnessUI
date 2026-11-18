@@ -769,6 +769,8 @@ mod tests {
         }
     }
 
+    /// Every constructor in this file, which `studio_errors_have_four_parts` checks. A new
+    /// constructor is added here too (Tasks L11, L13 and L15 append theirs).
     fn every_constructor() -> Vec<AppError> {
         let failure = |kind| MediaFailure {
             kind,

@@ -367,6 +367,10 @@ fn read_shown(path: &Path) -> AppResult<Vec<u8>> {
 
 #[cfg(test)]
 mod tests {
+    //! The errors these commands give are checked beside their constructors, in `errors.rs`:
+    //! `studio_errors_have_four_parts` and
+    //! `the_safety_message_names_the_company_the_stage_and_the_charge`.
+
     use std::path::Path;
     use std::sync::Arc;
     use std::sync::Mutex;
