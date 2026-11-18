@@ -8,10 +8,16 @@
 //!   go, and the type check a file passes before it is kept.
 //! - [`prefs`]: Settings → Studio, kept as one setting, and the rules a change must pass.
 //! - [`errors`]: Studio's backend wording.
+//! - [`manager`]: the runs: starting them under the spending rules, their queues, cancel,
+//!   and their audit rows; [`deps`] holds what the manager reaches the world through.
 
 pub mod catalog;
+pub mod deps;
 pub mod errors;
 pub mod gallery;
+pub mod manager;
+#[cfg(test)]
+mod manager_tests;
 pub mod prefs;
 pub mod spend;
 #[cfg(test)]

@@ -1,11 +1,15 @@
 //! Data sent to the webview. Field names are camelCase and match src/lib/types.ts.
 
+use agent::media::{MediaKind, RefRole, Routing};
 use serde::{Deserialize, Serialize};
+use serde_json::{Map, Value};
 
 use store::{ChatId, MessageId, ProviderId};
 
 use crate::error::AppError;
 use crate::load_settings::{ContextSource, GpuUse, ThinkingLimit};
+use crate::studio::prefs::RunTarget;
+use crate::studio::spend::ConfirmReason;
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -659,6 +663,302 @@ pub struct Placement {
     pub layers_about: bool,
     /// Fine control chose the layers or expert parts.
     pub custom: bool,
+}
+
+// ---- Studio runs (0.1.0) ----------------------------------------------------------------------
+
+/// A press of Create, as the webview sends it to `studio_start` (and to the estimate and the
+/// preview, which send nothing anywhere).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StartRequest {
+    /// Made once per press, so the same press sent twice makes one run.
+    pub client_token: String,
+    /// An endpoint, or this computer.
+    pub target: RunTarget,
+    /// Pictures or video; it must be the model's kind.
+    pub kind: MediaKind,
+    /// The model's id at the target.
+    pub model: String,
+    /// The prompt, sent as written.
+    pub prompt: String,
+    /// The model's typed settings, by key; a setting left out is not sent.
+    pub params: Map<String, Value>,
+    /// Extra settings (JSON), by name.
+    pub extra: Map<String, Value>,
+    /// The added pictures, by their name in the gallery's `refs/`.
+    pub refs: Vec<RefInput>,
+    /// Which companies may run an OpenRouter request.
+    pub routing: Option<Routing>,
+}
+
+/// An added picture in a [`StartRequest`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RefInput {
+    /// Its SHA-256, the name it is kept under in the gallery's `refs/`.
+    pub sha256: String,
+    /// What it is for.
+    pub role: RefRole,
+}
+
+/// An added picture of a run, as recorded.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RefDto {
+    /// Its SHA-256.
+    pub sha256: String,
+    /// Its media type.
+    pub mime: String,
+    /// Its size.
+    pub size_bytes: u64,
+    /// What it was for, when recorded.
+    pub role: Option<RefRole>,
+}
+
+/// Why a run ended without its results: a four-part error plus what the company said. It is
+/// kept as the run's error JSON, so it always carries `charged`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RunErrorDto {
+    /// The error code, for example `studio_blocked`.
+    pub code: String,
+    /// What happened, in plain words.
+    pub message: String,
+    /// What the user can do.
+    pub next_step: String,
+    /// Details for a bug report.
+    pub details: String,
+    /// Whether the run was charged; `None` when that is not known.
+    pub charged: Option<bool>,
+    /// The company's request id, for an appeal.
+    pub request_id: Option<String>,
+    /// `openrouter`, `openai` or `local`.
+    pub company: String,
+    /// Where a safety filter stopped it (`prompt` or `output`), when the company said.
+    pub stage: Option<String>,
+}
+
+/// One file a run made.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OutputDto {
+    /// Its id.
+    pub id: String,
+    /// The run that made it.
+    pub run_id: String,
+    /// Its place among the run's files, from 0.
+    pub idx: u32,
+    /// Its media type, read from its bytes.
+    pub mime: String,
+    /// Its size.
+    pub size_bytes: u64,
+    /// Its width in pixels, when known.
+    pub width: Option<u32>,
+    /// Its height in pixels, when known.
+    pub height: Option<u32>,
+    /// A video's length, when known.
+    pub duration_ms: Option<u64>,
+    /// The seed it was made with, when known.
+    pub seed: Option<u64>,
+    /// Starred by the user.
+    pub starred: bool,
+    /// Whether its thumbnail was made.
+    pub has_thumb: bool,
+    /// Its absolute path in the gallery folder.
+    pub path: String,
+}
+
+/// A Studio run as the webview shows it (`studio-progress`, `studio_runs`, `studio_live`).
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RunDto {
+    /// Its id.
+    pub id: String,
+    /// Pictures or video.
+    pub kind: MediaKind,
+    /// `cloud` or `local`.
+    pub runs_on: String,
+    /// The endpoint; `None` for a run on this computer or once the endpoint is deleted.
+    pub provider_id: Option<i64>,
+    /// The endpoint's name when the run was made.
+    pub provider_name: String,
+    /// The endpoint's host when the run was made.
+    pub provider_host: String,
+    /// The company OpenRouter ran it at, by name, when known.
+    pub upstream: Option<String>,
+    /// The model's id.
+    pub model: String,
+    /// The model's name as shown.
+    pub model_label: String,
+    /// The prompt.
+    pub prompt: String,
+    /// The typed settings sent (with the seed Studio picked).
+    pub params: Map<String, Value>,
+    /// The extra settings, as the user set them.
+    pub extra: Map<String, Value>,
+    /// The routing sent.
+    pub routing: Option<Routing>,
+    /// The added pictures.
+    pub refs: Vec<RefDto>,
+    /// `queued`, `sending`, `waiting`, `running`, `downloading`, `done`, `failed`,
+    /// `blocked`, `cancelled` or `interrupted`.
+    pub status: String,
+    /// Whether Studio is following the run now (queued, or its task is running).
+    pub watching: bool,
+    /// A video still not ready after the watch limit, no longer checked (Task A14).
+    pub stale: bool,
+    /// The company's id for the request or job.
+    pub remote_id: Option<String>,
+    /// Progress from 0 to 1, when reported.
+    pub progress: Option<f64>,
+    /// The estimate in US dollars; `None` when the price was unknown.
+    pub estimate_usd: Option<f64>,
+    /// What the company charged, in US dollars, when known.
+    pub cost_usd: Option<f64>,
+    /// Why it ended without its results.
+    pub error: Option<RunErrorDto>,
+    /// Unix ms when it was made.
+    pub created_at: i64,
+    /// Unix ms when sending (or the engine) started.
+    pub started_at: Option<i64>,
+    /// Unix ms when it ended.
+    pub finished_at: Option<i64>,
+    /// Its files, in order.
+    pub outputs: Vec<OutputDto>,
+    /// Its place in its endpoint's queue, from 1, while it waits for a free place.
+    pub queue_position: Option<u32>,
+    /// How long a local run takes; `None` for a cloud run (Task L15 fills it).
+    pub eta: Option<EtaDto>,
+    /// A local run's stage and steps; `None` for a cloud run (Task L15 fills it).
+    pub local: Option<LocalRunDto>,
+}
+
+/// How long a local run takes. The backend always fills it through
+/// `gen_eta::round_for_display` (`left_ms` included), so every view shows the same time.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EtaDto {
+    /// The shortest time it should take, in ms.
+    pub low_ms: u64,
+    /// The longest time it should take, in ms.
+    pub high_ms: u64,
+    /// Measured on this computer (else the catalog's first guess).
+    pub measured: bool,
+    /// During a run: the time left, in ms.
+    pub left_ms: Option<u64>,
+}
+
+/// Where a run on this computer is.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LocalRunDto {
+    /// `loading`, `readingPrompt`, `drawing`, `decoding` or `saving`.
+    pub stage: Option<String>,
+    /// The step being drawn.
+    pub step: Option<u32>,
+    /// The steps of each picture.
+    pub steps: Option<u32>,
+    /// The picture being drawn.
+    pub picture: Option<u32>,
+    /// The pictures the run makes.
+    pub pictures: Option<u32>,
+    /// The pass being run.
+    pub pass: Option<u32>,
+    /// The passes the run makes.
+    pub passes: Option<u32>,
+    /// What a queued local run waits for: `reply` (a chat reply being written), `studioJob`
+    /// or `answer` (the user's answer about unloading the chat model). `studioJob` is a
+    /// defensive value, unreachable in 0.1.0: the single local queue never lets two Studio
+    /// jobs ask for the graphics card at once, so a run behind another shows
+    /// `queue_position` instead.
+    pub waiting_for: Option<String>,
+    /// The path of the chat model unloaded to make room.
+    pub unloaded_chat: Option<String>,
+    /// The engine is trying again with less memory.
+    pub retrying: bool,
+    /// No progress for 10 minutes.
+    pub stalled: bool,
+    /// The device it runs on, as shown.
+    pub device: Option<String>,
+    /// The Studio engine's build number.
+    pub engine_build: Option<u32>,
+    /// How long it has run, in ms.
+    pub elapsed_ms: Option<u64>,
+    /// Its files are labelled as AI-made.
+    pub labelled: bool,
+    /// It runs beside the loaded chat model.
+    pub alongside: bool,
+    /// It runs on the processor.
+    pub on_processor: bool,
+}
+
+/// The daily limit as it stands for a run.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LimitDto {
+    /// The limit in US dollars; `None` when it is off.
+    pub limit_usd: Option<f64>,
+    /// What ended and finished runs spent today, in US dollars.
+    pub spent_today_usd: f64,
+    /// What runs still going count, in US dollars.
+    pub pending_usd: f64,
+    /// Whether `spend::check_limit` would allow this run (`true`: it may be sent).
+    pub would_pass: bool,
+}
+
+/// What a run would cost and meet before it is sent, without sending anything.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EstimateDto {
+    /// The estimate in US dollars; `None` when the price is unknown.
+    pub usd: Option<f64>,
+    /// Why the run would ask before it is sent; empty when it would not.
+    pub reasons: Vec<ConfirmReason>,
+    /// The amount from which a cloud run asks, in US dollars.
+    pub confirm_at_usd: f64,
+    /// The daily limit as it stands for this run.
+    pub limit: LimitDto,
+    /// A plain sentence for each setting the model would refuse.
+    pub invalid: Vec<String>,
+    /// How long a local run takes; `None` for a cloud run (Task L15 fills it).
+    pub eta: Option<EtaDto>,
+    /// Whether a local run fits this computer; `None` for a cloud run (Task L15 fills it).
+    pub local: Option<LocalEstimateDto>,
+}
+
+/// Whether a local run fits this computer.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LocalEstimateDto {
+    /// `fits`, `slow`, `afterUnload` or `notHere`.
+    pub fit: String,
+    /// The chat model would be unloaded to make room.
+    pub unload_chat: bool,
+    /// The run would take longer than 15 minutes, or runs on the processor.
+    pub very_slow: bool,
+    /// The run would take longer than 15 minutes.
+    pub over_15_min: bool,
+}
+
+/// Today's spending and the gallery's size, for Studio's top bar and Settings → Studio.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UsageDto {
+    /// What ended and finished cloud runs spent today, in US dollars.
+    pub spent_today_usd: f64,
+    /// What cloud runs still going count, in US dollars.
+    pub pending_usd: f64,
+    /// The daily limit in US dollars; `None` when it is off.
+    pub limit_usd: Option<f64>,
+    /// The gallery folder.
+    pub folder: String,
+    /// The bytes of the results and added pictures kept.
+    pub bytes: u64,
+    /// The pictures kept.
+    pub pictures: u64,
+    /// The videos kept.
+    pub videos: u64,
 }
 
 #[cfg(test)]

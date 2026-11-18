@@ -119,14 +119,15 @@ fn req_with_ref_routing_and_extra(pictures: &Path) -> MediaRequest {
         allow_fallbacks: false,
         zdr: false,
     };
-    let (extra, provider_options) = place_extra(
+    let placed = place_extra(
         &flare(),
         object(json!({"complexity": "high"})),
         Some(&routing),
     );
+    assert!(placed.dropped.is_empty());
     MediaRequest {
-        extra,
-        provider_options,
+        extra: placed.top,
+        provider_options: placed.options,
         routing: Some(routing),
         ..req_with_ref(pictures)
     }
@@ -543,11 +544,10 @@ async fn extra_settings_go_under_provider_options_for_each_company_that_lists_th
     let server = MockServer::start(|_| pictures_answer()).await;
     let media = openrouter(&server);
     let dir = tempfile::tempdir().unwrap();
-    let (extra, provider_options) =
-        place_extra(&flare(), object(json!({"moderation": "low"})), None);
+    let placed = place_extra(&flare(), object(json!({"moderation": "low"})), None);
     let request = MediaRequest {
-        extra,
-        provider_options,
+        extra: placed.top,
+        provider_options: placed.options,
         ..req()
     };
     media.start(&request, dir.path()).await.unwrap();

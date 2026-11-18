@@ -25,7 +25,8 @@ pub(crate) fn kind_of(s: &str) -> ProviderKind {
     }
 }
 
-fn secret_key(provider_id: store::ProviderId) -> String {
+/// The keychain name of an endpoint's API key.
+pub(crate) fn secret_key(provider_id: store::ProviderId) -> String {
     format!("provider-api-key:{}", provider_id.0)
 }
 
@@ -289,16 +290,19 @@ pub async fn client_for(
         .get_provider(id)
         .await?
         .ok_or_else(|| AppError::not_found("endpoint"))?;
-    let api_key = state.secrets.get(&secret_key(id)).map_err(|e| {
-        AppError::new(
-            "keychain",
-            "The API key could not be read from the system keychain.",
-            "Unlock the keychain or re-enter the key in Settings → Endpoints.",
-            e.to_string(),
-        )
-    })?;
+    let api_key = state.secrets.get(&secret_key(id)).map_err(keychain_error)?;
     let client = client_from(&provider, api_key)?;
     Ok((client, provider))
+}
+
+/// An endpoint's key could not be read from the system keychain.
+pub(crate) fn keychain_error(e: store::secrets::SecretError) -> AppError {
+    AppError::new(
+        "keychain",
+        "The API key could not be read from the system keychain.",
+        "Unlock the keychain or re-enter the key in Settings → Endpoints.",
+        e.to_string(),
+    )
 }
 
 /// [0.1.0] The client of an endpoint, with `key` (its saved key, read by the caller): the

@@ -23,7 +23,7 @@ use jiff::tz::TimeZone;
 use sha2::{Digest, Sha256};
 
 use crate::attachments::{ImageInput, PictureWorker, checked_picture};
-use crate::error::{AppError, AppResult};
+use crate::error::AppResult;
 
 /// The types the gallery keeps, with the extension each is saved under: PNG, JPEG, WebP,
 /// GIF and SVG pictures, MP4 and WebM videos.
@@ -366,6 +366,11 @@ impl Gallery {
         home.join(app_name).join("studio")
     }
 
+    /// The gallery folder itself.
+    pub fn root(&self) -> &Path {
+        &self.root
+    }
+
     /// `<root>/.partial`, made if missing, for downloads and local runs in progress. A
     /// folder that cannot be made shows up as a failure to write into it.
     pub fn partial_dir(&self) -> PathBuf {
@@ -435,6 +440,14 @@ impl Gallery {
         Ok((target, mime.to_owned()))
     }
 
+    /// Writes output `output_id`'s thumbnail (JPEG bytes) to `<root>/.thumbs/<output_id>.jpg`,
+    /// replacing an earlier one, and returns its path.
+    pub fn write_thumb(&self, output_id: &str, jpeg: &[u8]) -> Result<PathBuf, GalleryError> {
+        let path = self.thumb_path(output_id);
+        write_whole(&path, jpeg)?;
+        Ok(path)
+    }
+
     /// Writes the run's record as its sidecar, replacing an earlier one.
     pub fn write_sidecar(&self, run: &store::CreationRun) -> Result<(), GalleryError> {
         let json = serde_json::to_vec_pretty(run).map_err(|e| GalleryError::Io(e.to_string()))?;
@@ -452,7 +465,7 @@ impl Gallery {
             .collect();
         let path = self.refs_dir().join(format!("{sha256}.{ext}"));
         if !path.exists() {
-            write_whole(&path, &bytes).map_err(AppError::internal)?;
+            write_whole(&path, &bytes).map_err(|e| super::errors::from_gallery(&e))?;
         }
         Ok(RefStored {
             sha256,
@@ -679,6 +692,20 @@ mod tests {
         assert_eq!(
             Gallery::default_root(Path::new("/home/u"), "harnessUI"),
             Path::new("/home/u/harnessUI/studio")
+        );
+    }
+
+    #[test]
+    fn a_thumbnail_is_written_under_thumbs() {
+        let scratch = Scratch::new();
+        let g = Gallery::new(scratch.path().join("gallery"));
+        assert_eq!(g.root(), scratch.path().join("gallery"));
+        let path = g.write_thumb("o1", b"\xFF\xD8\xFFthumb").unwrap();
+        assert_eq!(path, g.thumb_path("o1"));
+        assert_eq!(std::fs::read(&path).unwrap(), b"\xFF\xD8\xFFthumb");
+        assert_eq!(
+            files_in(&scratch.path().join("gallery").join(".thumbs")),
+            ["o1.jpg"]
         );
     }
 

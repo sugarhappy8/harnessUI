@@ -302,23 +302,38 @@ impl MediaProvider for OpenRouterMedia {
     }
 }
 
+/// Where [`place_extra`] put a request's extra settings.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct PlacedExtra {
+    /// The settings sent at the top level of the request ([`MediaRequest::extra`]).
+    pub top: Map<String, Value>,
+    /// The settings for each company, by its `provider_slug`
+    /// ([`MediaRequest::provider_options`]).
+    pub options: BTreeMap<String, Map<String, Value>>,
+    /// The names of the settings that went nowhere, because only companies outside an `only`
+    /// routing list them. The caller refuses those: such a setting would silently not be sent.
+    pub dropped: Vec<String>,
+}
+
 /// Splits the user's extra settings for a picture model. A setting that a company running the
 /// model lists (its `allowed_passthrough_parameters`) goes under `provider.options`, by
 /// `provider_slug`, for every company that lists it (with `only` routing, for the pinned
-/// companies alone); any other setting stays at the top level, as the catalogue names it.
-/// Returns the top-level settings and the settings per company. [`super::validate`] has
-/// already refused settings the model does not offer.
+/// companies alone); any other setting stays at the top level, as the catalogue names it. A
+/// setting only companies left out by the routing list goes nowhere, and is named in
+/// [`PlacedExtra::dropped`]. [`super::validate`] has already refused settings the model does
+/// not offer.
 pub fn place_extra(
     model: &MediaModel,
     extra: Map<String, Value>,
     routing: Option<&Routing>,
-) -> (Map<String, Value>, BTreeMap<String, Map<String, Value>>) {
+) -> PlacedExtra {
     let pinned = |tag: &str| match routing {
         Some(r) if r.only && !r.order.is_empty() => r.order.iter().any(|t| t == tag),
         _ => true,
     };
     let mut top = Map::new();
     let mut options: BTreeMap<String, Map<String, Value>> = BTreeMap::new();
+    let mut dropped = Vec::new();
     for (key, value) in extra {
         let mut listing = model
             .companies
@@ -329,14 +344,23 @@ pub fn place_extra(
             top.insert(key, value);
             continue;
         }
+        let mut placed = false;
         for company in listing.filter(|company| pinned(&company.tag)) {
             options
                 .entry(company.slug.clone())
                 .or_default()
                 .insert(key.clone(), value.clone());
+            placed = true;
+        }
+        if !placed {
+            dropped.push(key);
         }
     }
-    (top, options)
+    PlacedExtra {
+        top,
+        options,
+        dropped,
+    }
 }
 
 /// What an OpenRouter error answer says: [`base_failure`], plus a moderation refusal (a 400
@@ -895,13 +919,18 @@ mod tests {
             company("azure", &["moderation"]),
         ]);
         let extra = object(json!({"moderation": "low", "complexity": "high", "steps": 30}));
-        let (top, options) = place_extra(&m, extra.clone(), None);
+        let PlacedExtra {
+            top,
+            options,
+            dropped,
+        } = place_extra(&m, extra.clone(), None);
         assert_eq!(top, object(json!({"steps": 30})));
         assert_eq!(
             options["openai"],
             object(json!({"moderation": "low", "complexity": "high"}))
         );
         assert_eq!(options["azure"], object(json!({"moderation": "low"})));
+        assert!(dropped.is_empty());
 
         // Pinned with `only`: the pinned company alone.
         let only = Routing {
@@ -910,10 +939,16 @@ mod tests {
             allow_fallbacks: false,
             zdr: false,
         };
-        let (top, options) = place_extra(&m, extra.clone(), Some(&only));
+        let PlacedExtra {
+            top,
+            options,
+            dropped,
+        } = place_extra(&m, extra.clone(), Some(&only));
         assert_eq!(top, object(json!({"steps": 30})));
         assert_eq!(options.len(), 1);
         assert_eq!(options["azure"], object(json!({"moderation": "low"})));
+        // Only the company left out lists `complexity`: it goes nowhere, and says so.
+        assert_eq!(dropped, ["complexity"]);
 
         // An order without `only` may still reach every company.
         let order = Routing {
@@ -921,7 +956,7 @@ mod tests {
             allow_fallbacks: true,
             ..only
         };
-        assert_eq!(place_extra(&m, extra, Some(&order)).1.len(), 2);
+        assert_eq!(place_extra(&m, extra, Some(&order)).options.len(), 2);
     }
 
     #[test]
