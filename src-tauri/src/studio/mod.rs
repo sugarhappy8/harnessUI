@@ -19,11 +19,14 @@
 //!   chat*; the preferences).
 //! - [`actions`]: what the gallery actions behind those commands do: export (with the run's
 //!   settings beside the copy), a video's poster frame, *Send to chat* and *Use in prompt*.
+//! - [`engine_cmd`]: the Studio engine's state on this computer, and the Windows engine pack's
+//!   download (with the first local model, or from its own button), cancel and remove.
 
 pub mod actions;
 pub mod catalog;
 pub mod commands;
 pub mod deps;
+pub mod engine_cmd;
 pub mod errors;
 pub mod gallery;
 pub mod manager;

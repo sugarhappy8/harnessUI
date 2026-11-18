@@ -245,6 +245,10 @@
     "allow-studio-add-ref",
     "allow-studio-ref-from-output",
     "allow-studio-output-for-chat",
-    "allow-studio-set-prefs"
+    "allow-studio-set-prefs",
+    "allow-studio-engine-status",
+    "allow-studio-engine-download",
+    "allow-studio-engine-cancel",
+    "allow-studio-engine-remove"
   ]
 }

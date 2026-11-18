@@ -1437,8 +1437,13 @@ pub(crate) mod tests {
         "studio_ref_from_output",
         "studio_output_for_chat",
         "studio_set_prefs",
-        // Tasks L10 (studio::engine_cmd), L15 (studio::commands) and L16 (studio::local_cmd)
-        // append their commands here.
+        // The Studio engine (studio::engine_cmd).
+        "studio_engine_status",
+        "studio_engine_download",
+        "studio_engine_cancel",
+        "studio_engine_remove",
+        // Tasks L15 (studio::commands) and L16 (studio::local_cmd) append their commands
+        // here.
     ];
 
     /// The modules Studio's commands live in.

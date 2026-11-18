@@ -219,3 +219,7 @@ studio_add_ref
 studio_ref_from_output
 studio_output_for_chat
 studio_set_prefs
+studio_engine_status
+studio_engine_download
+studio_engine_cancel
+studio_engine_remove

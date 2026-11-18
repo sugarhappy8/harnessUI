@@ -7,6 +7,7 @@
 use agent::media::{
     Company, FailureKind, Invalid, LocalIo, MediaFailure, MediaKind, MediaModel, RefRole, Stage,
 };
+use runtime::packs::PackError;
 use search::FetchError;
 
 use super::gallery::GalleryError;
@@ -859,6 +860,73 @@ pub fn poster_only_for_video() -> AppError {
     )
 }
 
+// ---- the Studio engine ------------------------------------------------------------------------
+
+/// The Windows engine pack's download, asked for without its licence accepted.
+pub fn engine_licence_not_accepted() -> AppError {
+    AppError::new(
+        "bad_request",
+        "Accept the licence to download the Studio engine.",
+        "Read the licence shown with the download, then accept it.",
+        String::new(),
+    )
+}
+
+/// The Windows engine pack could not be downloaded or installed: a backend download's words
+/// (`packs_cmd`), with the Studio engine named where those name the backend. The codes are the
+/// same as a backend download's.
+pub fn engine_not_installed(e: &PackError) -> AppError {
+    let (code, message, next) = match e {
+        PackError::ChecksumMismatch { .. } | PackError::SizeMismatch { .. } => (
+            "checksum_mismatch",
+            "The downloaded Studio engine does not match its pinned checksum, so it was not \
+             installed.",
+            "Try again. If it keeps failing, report it: the published file may have changed.",
+        ),
+        PackError::Network { .. } => (
+            "network",
+            "The Studio engine download was interrupted.",
+            "Check your connection and try again; it continues where it stopped.",
+        ),
+        PackError::DiskFull => (
+            "disk_full",
+            "The disk is full.",
+            "Free some space and try again.",
+        ),
+        PackError::BlockedHost(_) => (
+            "blocked_host",
+            "The download was redirected to a host the app does not trust.",
+            "Report this; GitHub may have changed its download servers.",
+        ),
+        _ => (
+            "pack_failed",
+            "The Studio engine could not be installed.",
+            "Try again, or copy the details into a bug report.",
+        ),
+    };
+    AppError::new(code, message, next, e.to_string())
+}
+
+/// *Remove* while the Studio engine is still downloading into the folder it would empty.
+pub fn engine_still_downloading() -> AppError {
+    AppError::new(
+        "bad_request",
+        "The Studio engine is still downloading.",
+        "Cancel the download first, then remove it.",
+        String::new(),
+    )
+}
+
+/// The Studio engine's folder could not be emptied.
+pub fn engine_not_removed(details: impl Into<String>) -> AppError {
+    AppError::new(
+        "pack_failed",
+        "The Studio engine could not be removed.",
+        TRY_AGAIN_OR_RESTART,
+        details,
+    )
+}
+
 /// A company's failure as the details show it: its own message, code, HTTP status and
 /// request id, each when it gave one.
 fn failure_details(f: &MediaFailure) -> String {
@@ -1197,7 +1265,11 @@ mod tests {
             not_opened(std::path::Path::new("/home/u/harnessUI/studio"), "denied"),
             poster_only_for_video(),
             lists_not_saved("database is locked"),
+            engine_licence_not_accepted(),
+            engine_still_downloading(),
+            engine_not_removed("denied"),
         ];
+        all.extend(every_pack_error().iter().map(engine_not_installed));
         for to in [PictureUse::Chat, PictureUse::Prompt] {
             all.push(picture_too_big_for(to));
             all.push(not_a_picture_for(to, true));
@@ -1207,6 +1279,95 @@ mod tests {
             all.extend(with_company(company));
         }
         all
+    }
+
+    /// Every way downloading and installing the Studio engine pack can fail.
+    fn every_pack_error() -> Vec<PackError> {
+        vec![
+            PackError::WrongPlatform,
+            PackError::PathTooLong(300),
+            PackError::Cancelled,
+            PackError::BlockedHost("files.example.com".into()),
+            PackError::ChecksumMismatch {
+                file: "sd.zip".into(),
+            },
+            PackError::SizeMismatch {
+                file: "sd.zip".into(),
+                got: 1,
+                expected: 2,
+            },
+            PackError::Network {
+                file: "sd.zip".into(),
+                message: "connection reset".into(),
+            },
+            PackError::Archive {
+                file: "sd.zip".into(),
+                message: "damaged".into(),
+            },
+            PackError::DiskFull,
+            PackError::Io("vcomp140.dll is not in llama.cpp's folder".into()),
+        ]
+    }
+
+    /// The engine pack's failures read as a backend download's do, with the Studio engine
+    /// named where those name the backend.
+    #[test]
+    fn an_engine_download_failure_names_the_studio_engine() {
+        for e in every_pack_error() {
+            let shown = engine_not_installed(&e);
+            assert_eq!(shown.details, e.to_string(), "{e:?}");
+            for text in [&shown.message, &shown.next_step] {
+                assert!(
+                    !text.contains("backend") && !text.contains("ROCm"),
+                    "{e:?} says {text:?}"
+                );
+            }
+        }
+        let shown = |e: PackError| {
+            let e = engine_not_installed(&e);
+            (e.code, e.message, e.next_step)
+        };
+        assert_eq!(
+            shown(PackError::Network {
+                file: "sd.zip".into(),
+                message: "reset".into()
+            }),
+            (
+                "network".to_owned(),
+                "The Studio engine download was interrupted.".to_owned(),
+                "Check your connection and try again; it continues where it stopped.".to_owned()
+            )
+        );
+        assert_eq!(
+            shown(PackError::ChecksumMismatch {
+                file: "sd.zip".into()
+            })
+            .1,
+            "The downloaded Studio engine does not match its pinned checksum, so it was not \
+             installed."
+        );
+        assert_eq!(shown(PackError::DiskFull).0, "disk_full");
+        assert_eq!(
+            shown(PackError::BlockedHost("x.example.com".into())).0,
+            "blocked_host"
+        );
+        assert_eq!(
+            shown(PackError::Io("denied".into())).1,
+            "The Studio engine could not be installed."
+        );
+        let e = engine_licence_not_accepted();
+        assert_eq!(
+            (e.code.as_str(), e.message.as_str()),
+            (
+                "bad_request",
+                "Accept the licence to download the Studio engine."
+            )
+        );
+        let e = engine_not_removed("denied");
+        assert_eq!(
+            (e.message.as_str(), e.details.as_str()),
+            ("The Studio engine could not be removed.", "denied")
+        );
     }
 
     /// Every way the guarded fetcher can fail, with a host and an address in it where the

@@ -335,6 +335,10 @@ pub fn run() {
             studio::commands::studio_ref_from_output,
             studio::commands::studio_output_for_chat,
             studio::commands::studio_set_prefs,
+            studio::engine_cmd::studio_engine_status,
+            studio::engine_cmd::studio_engine_download,
+            studio::engine_cmd::studio_engine_cancel,
+            studio::engine_cmd::studio_engine_remove,
         ])
         .setup(|app| {
             let handle = app.handle().clone();
@@ -459,6 +463,8 @@ pub fn run() {
                 });
             }
             app.manage(packs_cmd::PackDownloads::default());
+            // 0.1.0: the Studio engine's Windows pack, one download at a time.
+            app.manage(studio::engine_cmd::EngineDownloads::default());
             app.manage(hotkey::Hotkey::default());
             {
                 let handle = handle.clone();

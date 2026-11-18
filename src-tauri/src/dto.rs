@@ -1120,6 +1120,38 @@ pub struct RunsPage {
     pub next: Option<RunsCursorDto>,
 }
 
+// ---- The Studio engine (0.1.0) ----------------------------------------------------------------
+
+/// The Studio engine on this computer (`studio_engine_status`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EngineStatusDto {
+    /// "builtIn" (macOS, or a development engine), "notInstalled", "partial", "downloading",
+    /// "installed" (the Windows pack) or "unavailable" (no engine for this computer).
+    pub state: String,
+    /// The pinned stable-diffusion.cpp build, as its release tag (`master-1106-532d2c1`).
+    pub build: String,
+    /// The Windows pack's download size; 0 when the engine is built in or unavailable.
+    pub download_bytes: u64,
+    pub license_name: String,
+    pub license_url: String,
+    /// Bytes downloaded so far, while the pack is `partial` or `downloading`.
+    pub bytes_done: Option<u64>,
+}
+
+/// The `studio-engine-progress` event: the Windows pack's download, at most every 300 ms,
+/// then once with `finished` set (and `error` when it failed; a cancelled download has none).
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EngineProgressDto {
+    pub done: u64,
+    pub total: u64,
+    /// The download is complete and the pack is being unpacked.
+    pub unpacking: bool,
+    pub finished: bool,
+    pub error: Option<AppError>,
+}
+
 #[cfg(test)]
 mod tests {
     use serde_json::json;
