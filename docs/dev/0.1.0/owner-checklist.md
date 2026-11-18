@@ -23,9 +23,8 @@ CHANGELOG or the website.
     [release page](https://github.com/leejet/stable-diffusion.cpp/releases/tag/master-1106-532d2c1),
     check that `certutil -hashfile sd-master-532d2c1-bin-win-vulkan-x64.zip SHA256` prints
     `3e66222c87ca27074e1fd8ce79706eef17a8aaf39949906aa1bee7e060f22ecc`, unzip it into a new
-    folder and copy `msvcp140.dll`, `msvcp140_codecvt_ids.dll`, `vcomp140.dll`,
-    `vcruntime140.dll` and `vcruntime140_1.dll` next to `sd-cli.exe` from harnessUI's
-    `resources\llama\main` folder.
+    folder and copy `msvcp140.dll`, `msvcp140_codecvt_ids.dll`, `vcruntime140.dll` and
+    `vcruntime140_1.dll` next to `sd-cli.exe` from harnessUI's `resources\llama\main` folder.
 - **The model files**, as the provisional starter entries pin them (plan, Task L7): each
   downloaded once into one folder, run from that folder.
   - FLUX.2 klein 4B: `flux-2-klein-4b-Q4_0.gguf` (`leejet/FLUX.2-klein-4B-GGUF`),
