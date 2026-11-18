@@ -3427,7 +3427,8 @@ pub struct LocalRunStatus { pub progress: Option<LocalProgress>, pub stalled: bo
     /// `MediaProvider::start` with the lane's options; `start` itself is `start_local(req, scratch, &LocalJobOptions::default())`.
     async fn start_local(&self, req: &MediaRequest, scratch: &Path, opts: &LocalJobOptions) -> Result<Started, MediaError>;
     /// Lists the engine's devices once per engine when a run with `opts` matches llama's card among them; the manager calls it before
-    /// `preview_local`, so a first preview carries the `--backend` the run would (ruling L14-preview-backend).
+    /// `preview_local`, so a first preview carries the `--backend` the run would (ruling L14-preview-backend). A failed listing is kept
+    /// per engine too (no `--backend`, as the run falls back), and it waits 5 s at most: a listing still going then goes on for the run.
     async fn list_devices_for(&self, opts: &LocalJobOptions);
     fn preview_local(&self, req: &MediaRequest, opts: &LocalJobOptions) -> RequestPreview;      // the command this run would use
     /// After the lane moved the outputs (or the run failed): removes `.partial/<run>` (the prompt files with it) and forgets the run.

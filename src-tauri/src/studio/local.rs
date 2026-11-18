@@ -10,7 +10,9 @@
 //! - **The exact command** ([`LocalProvider::preview_local`]): the engine's arguments as the
 //!   run would pass them, with the files' paths, and the prompt beside them (the engine reads
 //!   it from a file, never from its arguments); the graphics card is named among the engine's
-//!   devices, which [`LocalProvider::list_devices_for`] has it list first, as a run does.
+//!   devices, which [`LocalProvider::list_devices_for`] has it list first, as a run does
+//!   (waiting 5 s at most; the listing, kept once per engine even when it fails, goes on for
+//!   the run).
 //! - **Before the engine starts** ([`LocalProvider::start_local`]): an engine is found (looked
 //!   for again while none is known or the one known is gone, so one a download installs runs
 //!   the next job), every part file is there at the size it was downloaded at, a `.gguf`
@@ -29,6 +31,7 @@ use std::collections::HashMap;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError, RwLock, RwLockReadGuard, RwLockWriteGuard};
+use std::time::Duration;
 
 use agent::media::{
     Canonical, Choice, Company, Cost, FailureKind, Fetched, JobDone, JobState, Layer, LocalIo,
@@ -127,6 +130,19 @@ const ON_THE_PROCESSOR: &str = "processor";
 /// The gallery and run the exact command shows before a run has them.
 const PREVIEW_GALLERY: &str = "<gallery>";
 const PREVIEW_RUN: &str = "<run>";
+
+/// How long the exact command waits for the engine to list its devices (the listing itself
+/// may take `runtime::sd::run::LIST_DEVICES_TIMEOUT`, 30 s). A command made before the list
+/// comes leaves `--backend` out; the listing goes on, and the run uses what it finds.
+const PREVIEW_DEVICES_WAIT: Duration = Duration::from_secs(5);
+
+/// What the engine answered when asked for its devices: the devices, or `None` when it could
+/// not list them.
+type Listed = Option<Vec<SdDevice>>;
+
+/// The engine last asked for its devices and what it answered, shared with a listing still
+/// going ([`LocalMediaProvider::devices_of`]).
+type DeviceCache = Arc<tokio::sync::Mutex<Option<(Engine, Listed)>>>;
 
 /// The picture and video models of the signed catalog.
 #[async_trait]
@@ -247,9 +263,12 @@ pub trait LocalProvider: MediaProvider {
 
     /// Has the engine list its devices when a run with `opts` would match llama.cpp's
     /// graphics card among them (a run on the card with a device description), once per
-    /// engine, as [`Self::start_local`] does before it starts the engine; the list is kept for
-    /// the runs and the commands that follow. The manager calls it before
-    /// [`Self::preview_local`], so a first command names the device the run would.
+    /// engine, as [`Self::start_local`] does before it starts the engine; what it answers is
+    /// kept for the runs and the commands that follow, a failure too (then neither asks it
+    /// again, and both leave the card to the engine). The manager calls it before
+    /// [`Self::preview_local`], so a first command names the device the run would. It waits
+    /// 5 s at most: a listing still going then goes on for the run, and the command leaves
+    /// `--backend` out.
     async fn list_devices_for(&self, opts: &LocalJobOptions);
 
     /// The command this run would use: the engine's arguments, with the files' paths, and
@@ -285,8 +304,9 @@ pub struct LocalMediaProvider {
     /// The installed models as last read, which the exact command (that cannot wait for the
     /// store) is built from.
     installed: RwLock<Vec<(store::GenModel, GenEntry)>>,
-    /// The devices the engine last listed, and the engine that listed them.
-    devices: tokio::sync::Mutex<Option<(Engine, Vec<SdDevice>)>>,
+    /// The engine last asked for its devices, and the devices it listed (`None` when it
+    /// could not list them).
+    devices: DeviceCache,
     /// The runs not yet released, by remote id.
     runs: Mutex<HashMap<String, LocalRun>>,
 }
@@ -378,7 +398,7 @@ impl LocalMediaProvider {
             discover,
             engine: RwLock::new(None),
             installed: RwLock::new(Vec::new()),
-            devices: tokio::sync::Mutex::new(None),
+            devices: Arc::new(tokio::sync::Mutex::new(None)),
             runs: Mutex::new(HashMap::new()),
         }
     }
@@ -779,22 +799,30 @@ impl LocalMediaProvider {
     }
 
     /// The devices `engine` lists, listed once per engine and kept; `None` when it cannot
-    /// list them (it is asked again next time).
+    /// list them, which is kept too, so it is not asked again (the runs leave the card to
+    /// it). The listing runs in a task of its own that holds the list until it is kept, so a
+    /// caller that stops waiting ([`LocalProvider::list_devices_for`]) leaves it to finish
+    /// for the run, and no second listing starts meanwhile.
     async fn devices_of(&self, engine: &Engine) -> Option<Vec<SdDevice>> {
-        let mut listed = self.devices.lock().await;
-        if listed.as_ref().is_none_or(|(by, _)| by != engine) {
-            match list_devices(engine).await {
-                Ok(devices) => *listed = Some((engine.clone(), devices)),
-                Err(failure) => {
-                    tracing::warn!(
-                        ?failure,
-                        "the Studio engine did not list its devices; it picks its own"
-                    );
-                    return None;
-                }
+        let cache = Arc::clone(&self.devices);
+        let engine = engine.clone();
+        let listing = tokio::spawn(async move {
+            let mut listed = cache.lock_owned().await;
+            if listed.as_ref().is_none_or(|(by, _)| *by != engine) {
+                let devices = list_devices(&engine)
+                    .await
+                    .inspect_err(|failure| {
+                        tracing::warn!(
+                            ?failure,
+                            "the Studio engine did not list its devices; it picks its own"
+                        );
+                    })
+                    .ok();
+                *listed = Some((engine, devices));
             }
-        }
-        listed.as_ref().map(|(_, devices)| devices.clone())
+            listed.as_ref().and_then(|(_, devices)| devices.clone())
+        });
+        listing.await.ok().flatten()
     }
 
     /// The `--backend` word for llama.cpp's device described as `description`, among the
@@ -806,14 +834,16 @@ impl LocalMediaProvider {
             .and_then(|devices| backend_from(&devices, description))
     }
 
-    /// [`Self::backend_for`] from the devices the engine last listed, without listing them.
+    /// [`Self::backend_for`] from the devices the engine last listed, without listing them
+    /// or waiting for a listing still going.
     fn listed_backend(&self, description: &str) -> Option<String> {
         let engine = self.engine()?;
         let listed = self.devices.try_lock().ok()?;
         let (by, devices) = listed.as_ref()?;
-        (*by == engine)
-            .then(|| backend_from(devices, description))
-            .flatten()
+        if *by != engine {
+            return None;
+        }
+        backend_from(devices.as_deref()?, description)
     }
 
     /// The command `req` would run, from the installed models as last read: its arguments,
@@ -1064,8 +1094,15 @@ impl LocalProvider for LocalMediaProvider {
         if matched_device(opts).is_none() {
             return;
         }
-        if let Some(engine) = self.engine() {
-            self.devices_of(&engine).await;
+        let Some(engine) = self.engine() else {
+            return;
+        };
+        let listing = tokio::time::timeout(PREVIEW_DEVICES_WAIT, self.devices_of(&engine));
+        if listing.await.is_err() {
+            tracing::info!(
+                seconds = PREVIEW_DEVICES_WAIT.as_secs(),
+                "the Studio engine is still listing its devices; the command leaves the card to it"
+            );
         }
     }
 
@@ -1663,6 +1700,7 @@ mod tests {
     use runtime::sd::devices::parse_list_devices;
     use runtime::sd::engine::{Engine, EngineSource, program_file_name};
     use runtime::sd::failure::SdFailure;
+    use runtime::sd::run::LIST_DEVICES_TIMEOUT;
     use runtime::sd::testing::{FAKE_MODE_ENV, FAKE_RECORD_ENV, fake_main};
     use serde_json::{Map, Value, json};
 
@@ -2502,6 +2540,45 @@ mod tests {
         assert!(!argv(&w.rec(), 1).unwrap().contains(&"--backend".to_owned()));
     }
 
+    /// A run on llama.cpp's graphics card, the Vulkan fixture's `vulkan0`.
+    fn on_the_rx_7600() -> LocalJobOptions {
+        LocalJobOptions {
+            device_description: Some("AMD Radeon RX 7600 (RADV NAVI33)".into()),
+            ..Default::default()
+        }
+    }
+
+    /// The `--backend` an exact command passes, if any.
+    fn backend(p: &RequestPreview) -> Option<String> {
+        let argv: Vec<&str> = p.body["argv"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|a| a.as_str().unwrap())
+            .collect();
+        assert!(!argv.is_empty(), "{}", p.body);
+        argv.iter()
+            .position(|a| *a == "--backend")
+            .map(|at| argv[at + 1].to_owned())
+    }
+
+    /// The process id a fake engine writes to `path`, once it is there (within 10 s, real
+    /// time).
+    fn wait_for_pid(path: &Path) -> Option<u32> {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            if let Ok(text) = std::fs::read_to_string(path)
+                && let Ok(pid) = text.trim().parse()
+            {
+                return Some(pid);
+            }
+            if Instant::now() > deadline {
+                return None;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    }
+
     /// "See the exact command" before any run names the graphics card the run would: the
     /// manager has the engine list its devices first (ruling L14-preview-backend).
     #[tokio::test]
@@ -2509,22 +2586,7 @@ mod tests {
         let w = world("ok").await;
         // The manager reads the list before it asks for the command.
         w.provider.fetch_catalog().await.unwrap();
-        let opts = LocalJobOptions {
-            device_description: Some("AMD Radeon RX 7600 (RADV NAVI33)".into()),
-            ..Default::default()
-        };
-        let backend = |p: &RequestPreview| {
-            let argv: Vec<&str> = p.body["argv"]
-                .as_array()
-                .unwrap()
-                .iter()
-                .map(|a| a.as_str().unwrap())
-                .collect();
-            assert!(!argv.is_empty(), "{}", p.body);
-            argv.iter()
-                .position(|a| *a == "--backend")
-                .map(|at| argv[at + 1].to_owned())
-        };
+        let opts = on_the_rx_7600();
         // Before the engine listed its devices, the command could not name the card.
         assert_eq!(backend(&w.provider.preview_local(&req("x"), &opts)), None);
         // A run on the processor, or one without llama.cpp's device, needs no listing.
@@ -2552,6 +2614,126 @@ mod tests {
         poll_until_done(&w.provider, &remote_id).await;
         let run = argv(&w.rec(), 0).unwrap();
         assert_eq!(Some(after(&run, "--backend")), shown.as_deref());
+    }
+
+    /// An engine that cannot list its devices is asked once: the failure is kept for that
+    /// engine, so later commands and the run never start it again for the list, and a
+    /// command leaves `--backend` out, as the run does (it leaves the card to the engine).
+    #[tokio::test]
+    async fn a_device_listing_that_fails_is_kept_and_not_asked_again() {
+        let w = world("devices-fail").await;
+        w.provider.fetch_catalog().await.unwrap();
+        let opts = on_the_rx_7600();
+        let listings = || {
+            std::fs::read_to_string(w.rec().join("devices-fail.txt"))
+                .map_or(0, |text| text.lines().count())
+        };
+        w.provider.list_devices_for(&opts).await;
+        assert_eq!(listings(), 1);
+        let engine = w.provider.engine().unwrap();
+        assert!(matches!(
+            w.provider.devices.lock().await.as_ref(),
+            Some((by, None)) if *by == engine
+        ));
+        assert_eq!(backend(&w.provider.preview_local(&req("x"), &opts)), None);
+        // Each command after it finds the failure kept.
+        w.provider.list_devices_for(&opts).await;
+        w.provider.list_devices_for(&opts).await;
+        assert_eq!(backend(&w.provider.preview_local(&req("x"), &opts)), None);
+        assert_eq!(listings(), 1);
+        // So does the run, which passes no `--backend`, as the command showed.
+        let Started::Job { remote_id } = w
+            .provider
+            .start_local(&req("x"), &w.partial().join("r1"), &opts)
+            .await
+            .unwrap()
+        else {
+            panic!("not a job")
+        };
+        poll_until_done(&w.provider, &remote_id).await;
+        assert!(!argv(&w.rec(), 0).unwrap().contains(&"--backend".to_owned()));
+        assert_eq!(listings(), 1);
+        // Another engine (one a download installed) is asked again.
+        w.provider.set_engine(Some(fake_engine("ok", &w.rec())));
+        w.provider.list_devices_for(&opts).await;
+        let shown = backend(&w.provider.preview_local(&req("x"), &opts));
+        assert_eq!(shown.as_deref(), Some("vulkan0"));
+    }
+
+    /// An engine that never lists its devices holds "See the exact command" up 5 s at most:
+    /// the command then leaves `--backend` out. The one listing goes on for the run (a
+    /// second command starts no other) until its own 30 s limit stops the engine, and that
+    /// failure is kept: later commands come at once, and the run passes no `--backend`.
+    #[tokio::test]
+    async fn a_device_listing_that_hangs_holds_the_command_up_5_s_at_most() {
+        let w = world("devices-hang").await;
+        w.provider.fetch_catalog().await.unwrap();
+        let opts = on_the_rx_7600();
+        let pid_file = w.rec().join("devices-hang.txt");
+        let command = || async {
+            w.provider.list_devices_for(&opts).await;
+            backend(&w.provider.preview_local(&req("x"), &opts))
+        };
+        // A paused clock that the test moves on. Tokio moves a paused clock on by itself
+        // only while no blocking task runs, so a blocking task waiting for the engine's
+        // process id holds it still until the engine has started (as in the runtime's
+        // tests/sd_cli.rs); then it moves just past the command's wait.
+        tokio::time::pause();
+        let clock = tokio::time::Instant::now();
+        let (shown, pid) = tokio::join!(command(), async {
+            let file = pid_file.clone();
+            let pid = tokio::task::spawn_blocking(move || wait_for_pid(&file))
+                .await
+                .unwrap();
+            tokio::time::advance(PREVIEW_DEVICES_WAIT + Duration::from_millis(1)).await;
+            pid
+        });
+        assert_eq!(shown, None);
+        let waited = clock.elapsed();
+        assert!(
+            waited > PREVIEW_DEVICES_WAIT && waited < LIST_DEVICES_TIMEOUT,
+            "{waited:?}"
+        );
+        // The listing goes on for the run.
+        let pid = pid.expect("the engine's process id");
+        assert!(runtime::process_alive(pid), "{pid} was stopped");
+        // A second command waits for the same listing, 5 s at most again.
+        std::fs::remove_file(&pid_file).unwrap();
+        let (shown, ()) = tokio::join!(
+            command(),
+            tokio::time::advance(PREVIEW_DEVICES_WAIT + Duration::from_millis(1))
+        );
+        assert_eq!(shown, None);
+        assert!(runtime::process_alive(pid), "{pid} was stopped");
+        // At its own limit the listing stops the engine, and its failure is kept for it.
+        tokio::time::advance(LIST_DEVICES_TIMEOUT).await;
+        let engine = w.provider.engine().unwrap();
+        assert!(matches!(
+            w.provider.devices.lock().await.as_ref(),
+            Some((by, None)) if *by == engine
+        ));
+        assert!(!runtime::process_alive(pid), "{pid} still runs");
+        // A command from now on comes at once, and starts no engine.
+        let asked = tokio::time::Instant::now();
+        assert_eq!(command().await, None);
+        assert!(
+            asked.elapsed() < PREVIEW_DEVICES_WAIT,
+            "{:?}",
+            asked.elapsed()
+        );
+        // The run, on the real clock, asks nothing and passes no `--backend` either.
+        tokio::time::resume();
+        let Started::Job { remote_id } = w
+            .provider
+            .start_local(&req("x"), &w.partial().join("r1"), &opts)
+            .await
+            .unwrap()
+        else {
+            panic!("not a job")
+        };
+        poll_until_done(&w.provider, &remote_id).await;
+        assert!(!argv(&w.rec(), 0).unwrap().contains(&"--backend".to_owned()));
+        assert!(!pid_file.exists(), "the engine was asked again");
     }
 
     /// llama.cpp's own device listing ends a row with the card's memory, which the engine's

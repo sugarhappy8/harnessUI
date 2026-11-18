@@ -444,8 +444,9 @@ impl StudioManager {
     }
 
     /// The exact command a run on this computer would use, with the options it would get (a
-    /// grant beside the chat model, or after its unload when the run needs that). Starts
-    /// nothing.
+    /// grant beside the chat model, or after its unload when the run needs that). Starts no
+    /// run, but it may have the engine list its devices, once per engine (as a run would);
+    /// it waits 5 s at most for that.
     pub(super) async fn preview_local(&self, req: &StartRequest) -> AppResult<RequestPreview> {
         let inner = &self.inner;
         let lane = inner
@@ -477,7 +478,8 @@ impl StudioManager {
             lane.hardware.logical_cores(),
         );
         // The engine's devices first (once per engine, as a run lists them before it starts),
-        // so a first command names the graphics card the run would pass.
+        // so a first command names the graphics card the run would pass. A listing that takes
+        // longer than 5 s goes on for the run, and this command leaves the card out.
         lane.provider.list_devices_for(&opts).await;
         Ok(lane.provider.preview_local(&prepared.request, &opts))
     }

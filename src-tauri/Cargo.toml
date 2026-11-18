@@ -78,6 +78,9 @@ usage = { workspace = true }
 # Tests only: `HfClient::for_test`, so a Hub client can talk plain HTTP to a server on this
 # computer that serves recorded listings (studio/local_cmd.rs).
 models = { workspace = true, features = ["test-support"] }
+# Tests only: a paused clock the test moves itself (`tokio::time::pause` and `advance`), so
+# an engine that never answers is waited for without waiting (studio/local.rs).
+tokio = { workspace = true, features = ["test-util"] }
 
 [target.'cfg(windows)'.dependencies]
 # Reading the Windows build number (ROCm needs Windows 11 25H2); same major as Tauri.

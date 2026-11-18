@@ -23,8 +23,10 @@
 //!
 //! A `--list-devices` start records none of these, so a runner that lists the devices before
 //! a job still finds that job's start at 0, and a test that only lists devices finds no start.
-//! Only mode `devices-hang` writes a file then, `devices-hang.txt`: its own process id, so a
-//! test can see that the engine was stopped.
+//! Only the two modes made to fail it write a file then: `devices-fail` adds a line to
+//! `devices-fail.txt` at each listing, so a test can count how often the engine was asked,
+//! and `devices-hang` writes `devices-hang.txt`: its own process id, so a test can see that
+//! the engine was stopped.
 
 use std::collections::BTreeMap;
 use std::io::Write;
@@ -48,7 +50,8 @@ use crate::spawn::{self, EnvSpec, SpawnSpec, StdioMode};
 /// - `bad-model`: a damaged model file;
 /// - `slow`: one progress line, then [`SLOW_PAUSE`] of silence, then the rest as `ok`;
 /// - `no-output`: the progress of `ok` up to its saving lines, then exit 0 without a file;
-/// - `devices-fail`: `--list-devices` fails as `missing-dll` does; a job runs as `ok`;
+/// - `devices-fail`: `--list-devices` fails as `missing-dll` does (adding a line to
+///   `devices-fail.txt` in the record folder each time); a job runs as `ok`;
 /// - `devices-hang`: `--list-devices` records its process id and never answers (it sleeps); a
 ///   job runs as `ok`.
 ///
@@ -177,11 +180,15 @@ pub fn tiny_webm() -> Vec<u8> {
 }
 
 /// `--list-devices`: the Vulkan devices fixture, or in mode `devices-fail` the output and
-/// exit code of `missing-dll`, or in mode `devices-hang` nothing until it is stopped (after
-/// it records its process id in `record`, if given, as `devices-hang.txt`).
+/// exit code of `missing-dll` (after it adds a line to `devices-fail.txt` in `record`, if
+/// given), or in mode `devices-hang` nothing until it is stopped (after it records its
+/// process id in `record`, if given, as `devices-hang.txt`).
 fn list_devices(mode: &str, record: Option<&Path>) -> ! {
     match mode {
         "devices-fail" => {
+            if let Some(dir) = record {
+                append_line(&dir.join("devices-fail.txt"), "listed");
+            }
             emit(MISSING_DLL);
             std::process::exit(MISSING_DLL_CODE)
         }
@@ -485,6 +492,21 @@ fn write_or_exit(out: &mut impl Write, text: &str) {
 
 fn save(path: &Path, bytes: &[u8]) {
     if let Err(error) = std::fs::write(path, bytes) {
+        fail(&format!(
+            "[E] the fake engine could not write {}: {error}\n",
+            path.display()
+        ));
+    }
+}
+
+/// Adds `line` to the file at `path`, creating it.
+fn append_line(path: &Path, line: &str) {
+    let appended = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+        .and_then(|mut file| writeln!(file, "{line}"));
+    if let Err(error) = appended {
         fail(&format!(
             "[E] the fake engine could not write {}: {error}\n",
             path.display()
