@@ -2,11 +2,15 @@
 //! (docs/dev/0.1.0/studio-local-design.md, L2).
 //!
 //! The pinned build lives in [`lock`]; [`engine`] finds `sd-cli` on this computer and
-//! installs the Windows engine pack; [`progress`] reads its progress bar and stages from its
-//! output, and [`failure`] names why a run failed. Every assumption about `sd-cli` belongs in this
+//! installs the Windows engine pack; [`devices`] reads its devices and finds llama.cpp's
+//! graphics card among them; [`args`] builds its arguments from typed fields only;
+//! [`progress`] reads its progress bar and stages from its output, and [`failure`] names why
+//! a run failed. Every assumption about `sd-cli` belongs in this
 //! module, so a bump of the pin in `sd.lock.json` has one place to re-check, as for
 //! llama.cpp (ARCHITECTURE.md 7.1).
 
+pub mod args;
+pub mod devices;
 pub mod engine;
 pub mod failure;
 pub mod lock;

@@ -24,6 +24,7 @@ use std::ops::RangeInclusive;
 use std::path::PathBuf;
 
 use agent::media::{MediaKind, Routing};
+use runtime::sd::args::is_numbering_template;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
@@ -290,26 +291,6 @@ async fn check_gallery_dir(dir: PathBuf) -> AppResult<()> {
     })
     .await
     .map_err(AppError::internal)?
-}
-
-// TODO(L4): call `runtime::sd::args::is_numbering_template` instead once Task L4 adds it.
-/// Whether `path` holds `%` followed by up to three digits and `d` (`%d`, `%3d`, `%03d`):
-/// `sd-cli` reads an `-o` path holding one as a numbering template.
-fn is_numbering_template(path: &str) -> bool {
-    let bytes = path.as_bytes();
-    bytes
-        .iter()
-        .enumerate()
-        .filter(|&(_, &b)| b == b'%')
-        .any(|(i, _)| {
-            let rest = &bytes[i + 1..];
-            let digits = rest
-                .iter()
-                .take(3)
-                .take_while(|d| d.is_ascii_digit())
-                .count();
-            rest.get(digits) == Some(&b'd')
-        })
 }
 
 #[cfg(test)]
