@@ -921,3 +921,16 @@ export const USAGE_MENU = {
   title: "This computer right now",
   privacy: "Read on this computer only while you can see it. Nothing is sent anywhere.",
 } as const;
+
+// ---- Studio (0.1.0) -----------------------------------------------------------------------
+
+/** Studio's place in the app: the sidebar button and the shortcut sheet. */
+export const STUDIO_NAV = {
+  name: "Studio",
+  title: "Studio (Ctrl+G)",
+} as const;
+
+/** The sidebar button's name, with how many runs are working ("Studio (2 working)"). */
+export function studioButtonLabel(working: number): string {
+  return working > 0 ? `${STUDIO_NAV.name} (${working} working)` : STUDIO_NAV.name;
+}

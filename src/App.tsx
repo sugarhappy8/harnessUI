@@ -9,7 +9,9 @@ import { ShortcutsDialog } from "./components/ShortcutsDialog";
 import { AppNotices } from "./components/AppNotices";
 import type { UpdatePlacement } from "./components/UpdateBox";
 import { FullAccessStartCheck } from "./components/AllowAllButton";
+import { StudioView } from "./components/studio/StudioView";
 import { followApprovals, followRunningTurn, turnChatId, useApp, toErrorInfo } from "./store/app";
+import { followStudio, useStudio } from "./store/studio";
 import * as ipc from "./lib/ipc";
 import { listenInEffect } from "./lib/listen";
 
@@ -22,6 +24,11 @@ export default function App() {
   // null while loading; true once first run was completed or skipped.
   const [firstRunDone, setFirstRunDone] = useState<boolean | null>(ipc.isTauri() ? null : true);
   const { refreshChats, refreshModelOptions, setRuntime, newChat, stop, showError } = useApp();
+  // 0.1.0 Studio: shown in place of the chat, which stays mounted (hidden) so its reply keeps
+  // running and its draft stays. Studio is mounted when first opened, then kept.
+  const studioShown = useStudio((s) => s.view === "studio");
+  const [studioMounted, setStudioMounted] = useState(studioShown);
+  if (studioShown && !studioMounted) setStudioMounted(true);
 
   // Approval cards: Rust sends each request only to this window with a random id.
   // [0.0.7 P6] Each listener is stopped even when it starts after the cleanup ran, and the
@@ -36,6 +43,12 @@ export default function App() {
   useEffect(() => {
     if (!ipc.isTauri()) return;
     return followRunningTurn();
+  }, []);
+
+  // Studio's runs: their progress, also of runs that went on while this window reloaded.
+  useEffect(() => {
+    if (!ipc.isTauri()) return;
+    return followStudio();
   }, []);
 
   useEffect(() => {
@@ -59,11 +72,18 @@ export default function App() {
       setSettingsTab(typeof tab === "string" ? tab : undefined);
       setSettingsOpen(true);
     };
+    // Studio, on the tab the detail names ("image" or "video"), else on the one shown last.
+    const onOpenStudio = (event: Event) => {
+      const tab: unknown = (event as CustomEvent<unknown>).detail;
+      useStudio.getState().showStudio(tab === "image" || tab === "video" ? tab : undefined);
+    };
     window.addEventListener("app:open-models", onOpenModels);
     window.addEventListener("app:open-settings", onOpenSettings);
+    window.addEventListener("app:open-studio", onOpenStudio);
     return () => {
       window.removeEventListener("app:open-models", onOpenModels);
       window.removeEventListener("app:open-settings", onOpenSettings);
+      window.removeEventListener("app:open-studio", onOpenStudio);
     };
   }, []);
 
@@ -83,16 +103,24 @@ export default function App() {
       } else if (mod && event.key.toLowerCase() === "m") {
         event.preventDefault();
         setModelsOpen(true);
+      } else if (mod && event.key.toLowerCase() === "g") {
+        event.preventDefault();
+        useStudio.getState().showStudio();
       } else if (mod && event.key.toLowerCase() === "n") {
         event.preventDefault();
+        useStudio.getState().showChat();
         void newChat();
       } else if (mod && event.key.toLowerCase() === "k") {
         event.preventDefault();
         window.dispatchEvent(new Event("app:focus-search"));
       } else if (mod && event.key.toLowerCase() === "l") {
         event.preventDefault();
+        useStudio.getState().showChat();
         window.dispatchEvent(new Event("app:focus-input"));
       } else if (event.key === "Escape") {
+        // Esc never cancels a Studio job, nor the chat's reply while Studio is shown: there it
+        // only closes the viewer or a popup.
+        if (useStudio.getState().view === "studio") return;
         // [0.0.7 P6] The open chat's reply only: never one running in another chat.
         const s = useApp.getState();
         const turn = turnChatId(s);
@@ -159,8 +187,15 @@ export default function App() {
             onOpenModels={() => setModelsOpen(true)}
           />
         )}
-        <ChatView />
-        <Workbench />
+        <div className="flex min-w-0 flex-1" hidden={studioShown}>
+          <ChatView />
+          <Workbench />
+        </div>
+        {studioMounted && (
+          <div className="flex min-w-0 flex-1" hidden={!studioShown}>
+            <StudioView />
+          </div>
+        )}
       </div>
       {dialogs}
       {/* Only with the main window on screen, after first run: it asks about chats. */}

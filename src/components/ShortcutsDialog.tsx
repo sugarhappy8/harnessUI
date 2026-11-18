@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { Dialog } from "radix-ui";
 import { X } from "lucide-react";
 import * as ipc from "../lib/ipc";
+import { STUDIO_NAV } from "../lib/words";
 
 const isMac = typeof navigator !== "undefined" && /Mac/i.test(navigator.platform);
 const MOD = isMac ? "⌘" : "Ctrl";
@@ -11,6 +12,7 @@ const ROWS: [string, string][] = [
   [`${MOD} K`, "Search chats"],
   [`${MOD} L`, "Focus the message box"],
   [`${MOD} M`, "Models"],
+  [`${MOD} G`, STUDIO_NAV.name],
   [`${MOD} B`, "Show or hide the chat list"],
   [`${MOD} ,`, "Settings"],
   [`${MOD} /`, "This list"],
