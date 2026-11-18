@@ -39,7 +39,6 @@ from fetch_llama import (  # noqa: E402
     cmake_build_command,
     cmake_configure_command,
     download,
-    keep,
     macos_plan,
     run,
     verify_pack_files,
@@ -56,16 +55,21 @@ def log(msg: str) -> None:
 
 
 def checkout(git: str, commit: str) -> Path:
-    """The pinned commit with exactly the lock's submodules, each at the lock's SHA.
+    """The pinned commit with its release tag and exactly the lock's submodules, each at
+    the lock's SHA.
 
-    Only `ggml`, `thirdparty/libwebp` and `thirdparty/libwebm` are fetched: without them
-    CMake has no ggml and SD_WEBP=ON stops ("WebP support enabled but no source found");
-    cutlass and the server's web frontend are never needed.
+    The tag is fetched because upstream's CMake names the version with `git describe
+    --tags`; without it `sd-cli --version` says "version unknown". Only `ggml`,
+    `thirdparty/libwebp` and `thirdparty/libwebm` are fetched: without them CMake has no
+    ggml and SD_WEBP=ON stops ("WebP support enabled but no source found"); cutlass and the
+    server's web frontend are never needed.
     """
     if commit != LOCK[PIN]["commit"]:
         raise SystemExit(f"the build commit {commit} is not the pinned stable-diffusion.cpp commit")
     src = CACHE / f"stable-diffusion.cpp-{commit[:12]}"
     checkout_commit(src, git, commit)
+    tag = f"refs/tags/{LOCK[PIN]['tag']}"
+    run(["git", "fetch", "-q", "--depth", "1", "origin", f"{tag}:{tag}"], cwd=src)
     paths = list(LOCK["submodules"])
     run(["git", "submodule", "update", "--init", "--depth", "1", *paths], cwd=src)
     status = subprocess.run(
@@ -94,6 +98,24 @@ def check_submodules(status: str) -> None:
             raise SystemExit(f"submodule {path} is not checked out, expected {sha} (sd.lock.json)")
         if got != sha:
             raise SystemExit(f"submodule {path} is at {got}, expected {sha} (sd.lock.json)")
+
+
+ASCII_LOWER = str.maketrans("ABCDEFGHIJKLMNOPQRSTUVWXYZ", "abcdefghijklmnopqrstuvwxyz")
+
+
+def keeps(name: str, patterns: list[str]) -> bool:
+    """Whether the app keeps `name` when it unpacks the Windows pack: the rule of
+    runtime::packs::glob_match, so ASCII letters match ignoring case and the first `*` is
+    the only wildcard (`?`, `[...]` and a second `*` are plain characters)."""
+    base = name.rsplit("/", 1)[-1].translate(ASCII_LOWER)
+    for pattern in patterns:
+        head, star, tail = pattern.translate(ASCII_LOWER).partition("*")
+        if not star:
+            if head == base:
+                return True
+        elif len(base) >= len(head) + len(tail) and base.startswith(head) and base.endswith(tail):
+            return True
+    return False
 
 
 def macos() -> None:
@@ -139,7 +161,7 @@ def windows_check() -> None:
             with zipfile.ZipFile(archive) as z:
                 for info in z.infolist():
                     name = info.filename.rsplit("/", 1)[-1]
-                    if info.is_dir() or not keep(name, LOCK["keep_files"]):
+                    if info.is_dir() or not keeps(name, LOCK["keep_files"]):
                         continue
                     with z.open(info) as src, (folder / name).open("wb") as dst:
                         shutil.copyfileobj(src, dst)

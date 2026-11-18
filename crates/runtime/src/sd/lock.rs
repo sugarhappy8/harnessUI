@@ -142,7 +142,7 @@ pub fn embedded() -> &'static SdLock {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::llama::backend::BackendKind;
+    use crate::llama::backend::{BackendKind, VULKAN_FALLBACK_DIR, VULKAN_RUNTIME_FILE};
 
     #[test]
     fn the_embedded_lock_parses() {
@@ -192,6 +192,16 @@ mod tests {
     }
 
     #[test]
+    fn the_pack_is_offered_on_windows_x86_64_only() {
+        let pack = embedded().pack_for_current_platform();
+        if cfg!(all(target_os = "windows", target_arch = "x86_64")) {
+            assert_eq!(pack.map(|p| p.id.as_str()), Some("studio-vulkan"));
+        } else {
+            assert_eq!(pack, None);
+        }
+    }
+
+    #[test]
     fn the_engine_keeps_its_own_files_and_none_of_llamas() {
         let l = embedded();
         assert!(
@@ -208,11 +218,26 @@ mod tests {
     fn the_engine_keeps_every_dll_it_imports() {
         // every import of every program and DLL the pack keeps (ggml-base.dll and the
         // ggml-cpu-*.dll too, not only sd-cli.exe and stable-diffusion.dll) is a system DLL,
-        // a Visual C++ runtime file, the Vulkan loader, or a file of the pinned zip that is kept.
-        // Nothing is let through for being installed by the Visual C++ redistributable: the
-        // engine must start on a clean PC (plan acceptance criterion 11)
+        // a Visual C++ runtime file, the Vulkan runtime the app ships, or a file of the pinned
+        // zip that is kept. No DLL name is written here as an exception, and nothing is let
+        // through for being installed by the Visual C++ redistributable: the engine must
+        // start on a clean PC (plan acceptance criterion 11)
         let l = embedded();
         let listing = include_str!("../../tests/fixtures/sd_win_pack_listing.txt");
+        // llama's installer ships the Vulkan runtime (llama.lock.json "vulkan_runtime") in the
+        // folder the app puts at the end of the engine's PATH, where a copy that came with the
+        // graphics driver wins
+        let llama: serde_json::Value =
+            serde_json::from_str(include_str!("../../../../llama.lock.json")).unwrap();
+        let vulkan_runtime = &llama["vulkan_runtime"];
+        let shipped_vulkan = vulkan_runtime["member"]
+            .as_str()
+            .and_then(|member| member.rsplit('/').next())
+            .unwrap();
+        assert_eq!(
+            (vulkan_runtime["dir"].as_str(), shipped_vulkan),
+            (Some(VULKAN_FALLBACK_DIR), VULKAN_RUNTIME_FILE)
+        );
         let kept_programs: Vec<&str> = listing
             .lines()
             .filter(|f| {
@@ -237,12 +262,10 @@ mod tests {
                     .vc_runtime_files
                     .iter()
                     .any(|f| f.eq_ignore_ascii_case(dll));
-                // ggml-vulkan.dll's loader comes with the graphics driver, or from llama's
-                // bundled `vulkan` folder at the end of the engine's PATH
-                let vulkan_loader = dll.eq_ignore_ascii_case("vulkan-1.dll");
+                let vulkan = dll.eq_ignore_ascii_case(shipped_vulkan);
                 let shipped = listing.lines().any(|f| f.eq_ignore_ascii_case(dll)) && l.keeps(dll);
                 assert!(
-                    is_windows_system_dll(dll) || vc || vulkan_loader || shipped,
+                    is_windows_system_dll(dll) || vc || vulkan || shipped,
                     "{exe} imports {dll}, which the pack would not have"
                 );
             }

@@ -121,7 +121,7 @@ def render() -> str:
         text = (ROOT / "third_party" / "licenses" / f).read_text(encoding="utf-8").strip()
         lines += ["```text", text, "```", ""]
     lines += [
-        "### Microsoft Visual C++ runtime (Windows: msvcp140.dll, vcruntime140.dll, vcruntime140_1.dll)",
+        "### Microsoft Visual C++ runtime (Windows: msvcp140.dll, msvcp140_codecvt_ids.dll, vcomp140.dll, vcruntime140.dll, vcruntime140_1.dll)",
         "",
         "Redistributed under the Microsoft Visual Studio redistributable code terms",
         "(https://learn.microsoft.com/visualstudio/releases/2022/redistribution).",

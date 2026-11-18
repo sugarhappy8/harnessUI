@@ -181,6 +181,7 @@ jobs:
           path: |
             .cache/llama
             .cache/models
+            .cache/sd
             src-tauri/binaries
           key: llama-${{ matrix.target }}-${{ hashFiles('llama.lock.json', 'sd.lock.json', 'scripts/fetch_llama.py', 'scripts/fetch_sd.py', 'scripts/fetch_test_model.py') }}
       - name: llama.cpp runtime (Windows, pinned Vulkan + CPU build)

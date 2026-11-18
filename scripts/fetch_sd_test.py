@@ -131,6 +131,34 @@ class Plan(unittest.TestCase):
             self.assertRegex(sha, r"^[0-9a-f]{40}$")
 
 
+class Keep(unittest.TestCase):
+    """windows-check keeps the files the app keeps when it unpacks the pack
+    (runtime::packs::glob_match): names match ignoring case, and one `*` is the only
+    wildcard."""
+
+    def test_names_match_the_lock_ignoring_case(self):
+        patterns = fetch_sd.LOCK["keep_files"]
+        for name in ("sd-cli.exe", "SD-CLI.EXE", "Stable-Diffusion.DLL", "GGML-CPU-HASWELL.DLL", "ggml.dll",
+                     "LibWebPMux.dll", "LIBSHARPYUV.DLL", "Webm.dll", "GGML.TXT", "pack/stable-diffusion.cpp.txt"):
+            self.assertTrue(fetch_sd.keeps(name, patterns), name)
+        for name in ("sd-server.exe", "SD-SERVER.EXE", "start-server.bat", "start-server.sh", "llama-server.exe",
+                     "ggml.dll.bak", "my-ggml.dll"):
+            self.assertFalse(fetch_sd.keeps(name, patterns), name)
+
+    def test_star_is_the_only_wildcard(self):
+        self.assertTrue(fetch_sd.keeps("ggml.dll", ["ggml*.dll"]))
+        self.assertTrue(fetch_sd.keeps("ggml-cpu-x64.dll", ["ggml*.dll"]))
+        self.assertFalse(fetch_sd.keeps("ggml.dl", ["ggml*.dll"]))
+        # `?` and `[...]` are plain characters, as in the app
+        self.assertFalse(fetch_sd.keeps("ggml1.dll", ["ggml?.dll"]))
+        self.assertTrue(fetch_sd.keeps("GGML?.DLL", ["ggml?.dll"]))
+        self.assertFalse(fetch_sd.keeps("ggml1.dll", ["ggml[0-9].dll"]))
+        self.assertTrue(fetch_sd.keeps("ggml[0-9].dll", ["GGML[0-9].DLL"]))
+        # only the first `*` is a wildcard; a second one is a plain character
+        self.assertTrue(fetch_sd.keeps("axb*c", ["a*b*c"]))
+        self.assertFalse(fetch_sd.keeps("axbyc", ["a*b*c"]))
+
+
 @unittest.skipIf(os.name == "nt", "the stand-in tools are shell scripts")
 class DryRun(unittest.TestCase):
     """Runs the real `macos`, `linux` and `windows-check` code with stand-ins."""
@@ -221,6 +249,16 @@ class DryRun(unittest.TestCase):
             fetch_sd.linux()
         self.assertIn("submodule thirdparty/libwebm is not checked out", str(raised.exception))
 
+    def test_the_checkout_fetches_the_pinned_tag(self):
+        # upstream's CMake names the version with `git describe --tags`: without the tag in
+        # the shallow checkout the built sd-cli says "version unknown"
+        fetch_sd.linux()
+        commands = self.commands()
+        tag = fetch_sd.LOCK["sd_cpp"]["tag"]
+        fetch_tag = commands.index(f"git fetch -q --depth 1 origin refs/tags/{tag}:refs/tags/{tag}")
+        self.assertLess(commands.index(f"git checkout -q --force {fetch_sd.LOCK['sd_cpp']['commit']}"), fetch_tag)
+        self.assertLess(fetch_tag, next(i for i, c in enumerate(commands) if c.startswith("cmake -S")))
+
     def test_the_checkout_must_be_the_pinned_commit(self):
         os.environ["FAKE_COMMIT"] = "e" * 40
         with self.assertRaises(SystemExit) as raised:
@@ -240,18 +278,19 @@ class DryRun(unittest.TestCase):
         self.assertTrue([c for c in commands if c.startswith("cmake --build") and c.endswith("--target sd-cli")])
         self.assertIn("git submodule update --init --depth 1 ggml thirdparty/libwebp thirdparty/libwebm", commands)
 
-    def windows_pack(self):
-        """A stand-in for the pinned zip: the listing's 23 names, each holding its own name."""
+    def windows_pack(self, names=None):
+        """A stand-in for the pinned zip: the listing's 23 names (or `names`), each holding
+        its own name."""
         archive = self.root / "pack.zip"
-        names = LISTING.read_text(encoding="utf-8").split()
+        names = names or LISTING.read_text(encoding="utf-8").split()
         with zipfile.ZipFile(archive, "w") as z:
             for name in names:
                 z.writestr(name, name)
         return archive, names
 
-    def test_windows_check_runs_the_kept_files_with_a_bare_path(self):
-        archive, names = self.windows_pack()
-        self.assertEqual(len(names), 23)
+    def run_windows_check(self, archive):
+        """Runs the real windows_check on `archive` with llama's runtime folder in place;
+        returns each recorded run with the files beside the engine at that moment."""
         llama_main = self.root / "src-tauri" / "resources" / "llama" / "main"
         llama_main.mkdir(parents=True)
         for name in fetch_llama.LOCK["vc_runtime_files"]:
@@ -265,6 +304,12 @@ class DryRun(unittest.TestCase):
 
         fetch_sd.run = record
         fetch_sd.windows_check()
+        return runs
+
+    def test_windows_check_runs_the_kept_files_with_a_bare_path(self):
+        archive, names = self.windows_pack()
+        self.assertEqual(len(names), 23)
+        runs = self.run_windows_check(archive)
         self.assertEqual([r[0][1:] for r in runs], [["--version"], ["--list-devices"]])
         cmd, cwd, env, files = runs[0]
         folder = Path(cmd[0]).parent
@@ -272,12 +317,23 @@ class DryRun(unittest.TestCase):
         self.assertEqual(cwd, folder)
         self.assertEqual(env["PATH"], f"{folder};C:\\Windows\\System32")
         self.assertEqual(set(env), {"PATH", "SystemRoot"})
-        kept = sorted(n for n in names if fetch_llama.keep(n, fetch_sd.LOCK["keep_files"]))
+        kept = sorted(n for n in names if fetch_sd.keeps(n, fetch_sd.LOCK["keep_files"]))
         self.assertEqual(files, sorted(kept + fetch_sd.LOCK["vc_runtime_files"]))
         for dropped in ("sd-server.exe", "start-server.bat", "start-server.sh"):
             self.assertNotIn(dropped, files)
         self.assertEqual(len(kept), 20)
         self.assertFalse(folder.exists(), "the check works in a temporary folder")
+
+    def test_windows_check_keeps_a_file_whatever_its_case(self):
+        # the app keeps GGML-VULKAN.DLL for the pattern ggml*.dll, so the check must too
+        listing = LISTING.read_text(encoding="utf-8").split()
+        names = [n.upper() if n.endswith(".dll") else n for n in listing]
+        archive, _ = self.windows_pack(names)
+        files = self.run_windows_check(archive)[0][3]
+        for name in ("GGML-VULKAN.DLL", "GGML-BASE.DLL", "STABLE-DIFFUSION.DLL", "LIBSHARPYUV.DLL", "WEBM.DLL"):
+            self.assertIn(name, files)
+        self.assertNotIn("sd-server.exe", files)
+        self.assertEqual(len(files), 20 + len(fetch_sd.LOCK["vc_runtime_files"]))
 
     def test_windows_check_needs_llamas_runtime_folder(self):
         archive, _ = self.windows_pack()
