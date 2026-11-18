@@ -3495,7 +3495,7 @@ const CHAT: &str = "/m/chat.gguf";
 /// llama.cpp's description of the test's graphics card.
 const RX_7600: &str = "AMD Radeon RX 7600 (RADV NAVI33)";
 /// The device a run on that card records, as shown.
-const RX_7600_SHOWN: &str = "AMD Radeon RX 7600 (RADV NAVI33) (Vulkan)";
+const RX_7600_SHOWN: &str = "AMD Radeon RX 7600 (Vulkan)";
 
 /// How a [`FakeLocal`] run goes once it started.
 #[derive(Debug, Clone, Copy)]

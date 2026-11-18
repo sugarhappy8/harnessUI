@@ -210,6 +210,20 @@ impl RuntimeManager {
         self.loaded_on_device().map(|(_, _, bytes)| bytes)
     }
 
+    /// 0.1.0 Studio: the free memory now on the graphics device that the last probe found
+    /// `probed_free` bytes free on (of `total`, when known). The probe is cached and runs
+    /// again only before a chat load, so the model loaded or unloaded since would otherwise
+    /// go uncounted ([`free_now`]). Like [`Self::device_bytes`], it takes the model to be on
+    /// that device.
+    pub fn device_free_now(&self, probed_free: u64, total: Option<u64>) -> u64 {
+        let at_probe = self
+            .probed_with
+            .lock()
+            .ok()
+            .and_then(|p| p.as_ref().map(|(_, _, bytes)| *bytes));
+        free_now(probed_free, total, at_probe, self.device_bytes())
+    }
+
     /// 0.1.0: the loaded (or loading) model was started with "Keep in memory".
     pub fn keeps_in_memory(&self) -> bool {
         let running = matches!(
@@ -1421,6 +1435,17 @@ fn launch_device(kind: BackendKind, device: &Device) -> (String, Option<String>)
 
 /// The device as the probe and Settings name it: a ROCm launch masked to one card passes
 /// it as `ROCm0`, but the user picked it by its unmasked number.
+/// 0.1.0 Studio: the free memory on a graphics device now, from what its probe found:
+/// `probed_free` bytes free (of `total`, when known) while a model took `at_probe` bytes on
+/// it, and a model takes `now` bytes on it now. The model at the probe is counted back (its
+/// memory was not free then), at most up to the device's total (a probe that never saw the
+/// model, as on Metal, already counts that memory free), then the model now is taken away.
+fn free_now(probed_free: u64, total: Option<u64>, at_probe: Option<u64>, now: Option<u64>) -> u64 {
+    let free = probed_free.saturating_add(at_probe.unwrap_or(0));
+    let free = total.map_or(free, |total| free.min(total.max(probed_free)));
+    free.saturating_sub(now.unwrap_or(0))
+}
+
 fn shown_device(device: Option<&str>, hip_visible_devices: Option<&str>) -> Option<String> {
     match (device, hip_visible_devices) {
         (Some("ROCm0"), Some(index)) => Some(format!("ROCm{index}")),
@@ -1550,6 +1575,34 @@ mod tests {
                 output: Vec::new(),
             },
         )
+    }
+
+    /// L15 review fix: Studio judges a local job against the graphics memory free with the
+    /// chat model loaded now, not the one loaded (or not) when the backends were probed.
+    #[test]
+    fn studio_sees_the_free_memory_of_the_chat_model_loaded_now() {
+        const GB: u64 = 1_000_000_000;
+        let card = Some(8 * GB);
+        // Probed at startup with nothing loaded; a 5 GB chat model loaded since.
+        assert_eq!(free_now(8 * GB, card, None, Some(5 * GB)), 3 * GB);
+        // Probed with that chat model loaded; unloaded since (by a Studio grant).
+        assert_eq!(free_now(3 * GB, card, Some(5 * GB), None), 8 * GB);
+        // The same chat model then and now: as probed.
+        assert_eq!(free_now(3 * GB, card, Some(5 * GB), Some(5 * GB)), 3 * GB);
+        // Replaced by a 2 GB one.
+        assert_eq!(free_now(3 * GB, card, Some(5 * GB), Some(2 * GB)), 6 * GB);
+        // Nothing loaded then or now.
+        assert_eq!(free_now(8 * GB, card, None, None), 8 * GB);
+        // A probe that never saw the model (Metal's own process) is not counted past the
+        // device's total.
+        assert_eq!(
+            free_now(16 * GB, Some(16 * GB), Some(5 * GB), Some(5 * GB)),
+            11 * GB
+        );
+        // Without the total, counted back in full.
+        assert_eq!(free_now(3 * GB, None, Some(5 * GB), None), 8 * GB);
+        // Never below nothing.
+        assert_eq!(free_now(GB, card, None, Some(5 * GB)), 0);
     }
 
     /// 7.2: ROCm sees only the chosen card (HIP_VISIBLE_DEVICES), which is then ROCm0.

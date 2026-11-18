@@ -1176,50 +1176,31 @@ impl Inner {
         } = prepared;
         let run_id = uuid::Uuid::new_v4().to_string();
         let created_at = self.deps.clock.now_ms();
-        let refs: Vec<Value> = request
-            .refs
-            .iter()
-            .map(|r| {
-                json!({
-                    "sha256": r.sha256,
-                    "role": r.role,
-                    "mime": r.mime,
-                    "sizeBytes": r.size_bytes,
-                })
-            })
-            .collect();
-        self.deps
-            .store
-            .insert_creation_run(store::NewCreationRun {
-                id: run_id.clone(),
-                kind: creation_kind(model.kind),
-                runs_on: store::RunsOn::Cloud,
-                provider_id: Some(id),
-                provider_name: endpoint.name.clone(),
-                provider_host: endpoint.host.clone(),
-                model: model.id.clone(),
-                model_label: model.display_name.clone(),
-                prompt: req.prompt.clone(),
-                params: json!({
-                    "params": request.params,
-                    "extra": req.extra,
-                    "routing": req.routing,
-                }),
-                refs: Value::Array(refs),
-                estimate_usd: usd,
-                gen_model_id: None,
-                engine_build: None,
-                device: None,
-                created_at,
-            })
-            .await
-            .map_err(|e| match e {
-                store::StoreError::TooManyCreations => errors::gallery_full(),
-                other => other.into(),
-            })?;
+        let run = store::NewCreationRun {
+            id: run_id.clone(),
+            kind: creation_kind(model.kind),
+            runs_on: store::RunsOn::Cloud,
+            provider_id: Some(id),
+            provider_name: endpoint.name.clone(),
+            provider_host: endpoint.host.clone(),
+            model: model.id.clone(),
+            model_label: model.display_name.clone(),
+            prompt: req.prompt.clone(),
+            params: json!({
+                "params": request.params,
+                "extra": req.extra,
+                "routing": req.routing,
+            }),
+            refs: refs_json(&request.refs),
+            estimate_usd: usd,
+            gen_model_id: None,
+            engine_build: None,
+            device: None,
+            created_at,
+        };
         let entry = audit_entry(req, &model, &request, &endpoint, usd, confirmed, created_at);
         let upstream = upstream_of(&model, request.routing.as_ref());
-        let mut job = Job {
+        let job = Job {
             run_id,
             created_at,
             kind: model.kind,
@@ -1230,6 +1211,33 @@ impl Inner {
             audit_id: None,
             step: Step::Send(request),
         };
+        let patch = store::CreationPatch {
+            upstream: Some(upstream),
+            ..Default::default()
+        };
+        self.insert_and_audit(run, entry, job, patch).await
+    }
+
+    /// Records `job`'s run (`run`, `queued`), then its audit row (`entry`), linked to the run
+    /// with `patch`'s other fields; gives the job with its audit row. Past the most runs the
+    /// gallery keeps, refused with `studio_gallery_full`; a run recorded whose audit row
+    /// cannot be written or linked is ended as not sent ([`Self::abandon`]). Cloud and local
+    /// runs are recorded through here alike.
+    async fn insert_and_audit(
+        &self,
+        run: store::NewCreationRun,
+        entry: store::AuditEntry,
+        mut job: Job,
+        patch: store::CreationPatch,
+    ) -> AppResult<Job> {
+        self.deps
+            .store
+            .insert_creation_run(run)
+            .await
+            .map_err(|e| match e {
+                store::StoreError::TooManyCreations => errors::gallery_full(),
+                other => other.into(),
+            })?;
         let audit_id = match self.deps.store.append_audit(entry).await {
             Ok(audit_id) => audit_id,
             Err(e) => return Err(self.abandon(&job, e.into()).await),
@@ -1237,8 +1245,7 @@ impl Inner {
         job.audit_id = Some(audit_id);
         let patch = store::CreationPatch {
             audit_id: Some(Some(audit_id)),
-            upstream: Some(upstream),
-            ..Default::default()
+            ..patch
         };
         if let Err(e) = self
             .deps
@@ -1383,11 +1390,7 @@ impl Inner {
             } => self.follow(&task, remote_id, *started).await,
             Step::Local(step) => self.run_local(&task, step).await,
         }
-        match tokio::fs::remove_dir_all(&task.scratch).await {
-            Ok(()) => {}
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-            Err(e) => tracing::warn!(run = %job.run_id, "a Studio scratch folder stayed: {e}"),
-        }
+        remove_scratch(&task.gallery, &job.run_id).await;
     }
 
     /// Sends the run's request once: pictures are kept; a video job is recorded as `waiting`
@@ -1809,12 +1812,7 @@ impl Inner {
         };
         self.record_end(run_id, company, audit_id, ending, run.started_at)
             .await;
-        let scratch = self.gallery().partial_dir().join(run_id);
-        match tokio::fs::remove_dir_all(&scratch).await {
-            Ok(()) => {}
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-            Err(e) => tracing::warn!(run = %run_id, "a Studio scratch folder stayed: {e}"),
-        }
+        remove_scratch(&self.gallery(), run_id).await;
     }
 
     /// Tells each run still waiting in `lane` its place, after one left the queue (it got a
@@ -2124,6 +2122,34 @@ pub(crate) fn output_dto(out: &store::CreationOutput) -> OutputDto {
         starred: out.starred,
         has_thumb: out.thumb_path.is_some(),
         path: out.path.clone(),
+    }
+}
+
+/// The added pictures `refs` as a run records them, cloud or local: each by its SHA-256, role,
+/// type and size, never its path (read back by [`ref_hashes`]).
+fn refs_json(refs: &[RefImage]) -> Value {
+    Value::Array(
+        refs.iter()
+            .map(|r| {
+                json!({
+                    "sha256": r.sha256,
+                    "role": r.role,
+                    "mime": r.mime,
+                    "sizeBytes": r.size_bytes,
+                })
+            })
+            .collect(),
+    )
+}
+
+/// Removes run `run_id`'s scratch folder in `gallery` (`.partial/<run>`), with what it holds,
+/// if it is there.
+async fn remove_scratch(gallery: &Gallery, run_id: &str) {
+    let scratch = gallery.partial_dir().join(run_id);
+    match tokio::fs::remove_dir_all(&scratch).await {
+        Ok(()) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => tracing::warn!(run = %run_id, "a Studio scratch folder stayed: {e}"),
     }
 }
 

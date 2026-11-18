@@ -29,7 +29,9 @@ use super::spend::day_start_in;
 use crate::dto::RunDto;
 use crate::error::AppResult;
 use crate::gpu_lease::{GpuLease, Grant, LeaseWait, Refused, StudioNeed};
+use crate::hub::HardwareDto;
 use crate::providers::{client_from, keychain_error, kind_of, secret_key};
+use crate::runtime_manager::RuntimeManager;
 use crate::state::AppState;
 
 /// The webview event that carries a run's new state.
@@ -160,8 +162,9 @@ impl CardLease for AppLease {
     }
 }
 
-/// The app's hardware: the device the chat model's backends report (`hub::detect`), the
-/// loaded chat model's bytes on it, and the processor's cores.
+/// The app's hardware: the device the chat model's backends report (`hub::detect`), its free
+/// memory with the chat model loaded now (`RuntimeManager::device_free_now`), the loaded chat
+/// model's bytes on it, and the processor's cores.
 pub struct AppHardware(pub AppHandle);
 
 #[async_trait]
@@ -178,6 +181,12 @@ impl LocalHardware for AppHardware {
             );
         };
         let (target, hardware) = crate::hub::detect(&state).await;
+        // The probe behind it is cached and runs again only before a chat load: its free
+        // memory is corrected for the chat model loaded, or unloaded, since.
+        let total = device_total(&state.runtime, &hardware);
+        let target = with_device_free(target, |probed| {
+            state.runtime.device_free_now(probed, total)
+        });
         // The Studio engine's own backend there: Metal on Apple silicon, Vulkan on a graphics
         // card whatever llama.cpp uses (the pinned engine has no other).
         let (backend, description) = match &target {
@@ -195,6 +204,44 @@ impl LocalHardware for AppHardware {
     fn logical_cores(&self) -> usize {
         std::thread::available_parallelism().map_or(1, NonZero::get)
     }
+}
+
+/// `target` with its graphics device's free memory (a card's free bytes, Apple silicon's
+/// working set) changed by `free`; a processor's is left as it is.
+pub(crate) fn with_device_free(target: Target, free: impl FnOnce(u64) -> u64) -> Target {
+    match target {
+        Target::Gpu {
+            name,
+            free_bytes,
+            ram_free_bytes,
+        } => Target::Gpu {
+            name,
+            free_bytes: free(free_bytes),
+            ram_free_bytes,
+        },
+        Target::AppleUnified {
+            working_set_bytes,
+            ram_free_bytes,
+        } => Target::AppleUnified {
+            working_set_bytes: free(working_set_bytes),
+            ram_free_bytes,
+        },
+        cpu @ Target::Cpu { .. } => cpu,
+    }
+}
+
+/// The total memory of the graphics device `hub::detect` found (`hardware`), from the same
+/// cached probe and picked the same way: `None` when it is not known, or while a probe runs.
+fn device_total(manager: &RuntimeManager, hardware: &HardwareDto) -> Option<u64> {
+    let backend = hardware.backend.as_deref()?;
+    let description = hardware.gpu_name.as_deref()?;
+    manager
+        .cached_backends()?
+        .iter()
+        .filter(|(b, p)| b.kind.as_str() == backend && p.is_usable())
+        .find_map(|(_, p)| runtime::pick_device(&p.devices))
+        .filter(|d| d.description == description && d.total_mib > 0)
+        .map(|d| d.total_mib.saturating_mul(1024 * 1024))
 }
 
 /// The endpoints in the store, with their keys from the keychain: the client is built as
@@ -375,6 +422,41 @@ mod tests {
             .unwrap_err();
         assert!(matches!(err, search::FetchError::Blocked { .. }), "{err:?}");
         assert!(!dir.exists());
+    }
+
+    /// L15 review fix: the probed free memory is corrected on the graphics device only.
+    #[test]
+    fn the_free_memory_is_corrected_on_the_graphics_device_only() {
+        const GB: u64 = 1_000_000_000;
+        let less = |free: u64| free - 5 * GB;
+        let card = Target::Gpu {
+            name: "Card".into(),
+            free_bytes: 8 * GB,
+            ram_free_bytes: Some(32 * GB),
+        };
+        assert_eq!(
+            with_device_free(card, less),
+            Target::Gpu {
+                name: "Card".into(),
+                free_bytes: 3 * GB,
+                ram_free_bytes: Some(32 * GB),
+            }
+        );
+        let mac = Target::AppleUnified {
+            working_set_bytes: 16 * GB,
+            ram_free_bytes: None,
+        };
+        assert_eq!(
+            with_device_free(mac, less),
+            Target::AppleUnified {
+                working_set_bytes: 11 * GB,
+                ram_free_bytes: None,
+            }
+        );
+        let cpu = Target::Cpu {
+            ram_free_bytes: 16 * GB,
+        };
+        assert_eq!(with_device_free(cpu.clone(), less), cpu);
     }
 
     #[test]

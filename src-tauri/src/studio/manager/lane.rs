@@ -53,14 +53,14 @@ use tokio::sync::Notify;
 
 use super::{
     Ending, Inner, Job, LOCAL_CHECK_EVERY, LaneKey, PROGRESS_EVERY, Step, StudioManager, Task,
-    Waited, creation_kind, job_options, pick_seed, tool_of,
+    Waited, creation_kind, job_options, pick_seed, refs_json, remove_scratch, tool_of,
 };
 use crate::dto::{
     EstimateDto, EtaDto, LimitDto, LocalEstimateDto, LocalRunDto, RunDto, StartRequest,
 };
 use crate::error::{AppError, AppResult};
 use crate::gpu_lease::{Grant, LeaseWait, Refused, StudioNeed};
-use crate::studio::deps::{Endpoint, LocalHardware, LocalLane};
+use crate::studio::deps::{Endpoint, LocalHardware, LocalLane, with_device_free};
 use crate::studio::errors;
 use crate::studio::label::{AiLabel, label_file};
 use crate::studio::local::{LocalRunStatus, RunShape, run_shape, runs_on_processor};
@@ -269,25 +269,7 @@ fn on_card(fit: GenFit) -> bool {
 /// `target` with the chat model's `chat` bytes on the device counted back as free.
 fn chat_counted_back(target: &Target, chat: Option<u64>) -> Target {
     let back = chat.unwrap_or(0);
-    match target.clone() {
-        Target::Gpu {
-            name,
-            free_bytes,
-            ram_free_bytes,
-        } => Target::Gpu {
-            name,
-            free_bytes: free_bytes.saturating_add(back),
-            ram_free_bytes,
-        },
-        Target::AppleUnified {
-            working_set_bytes,
-            ram_free_bytes,
-        } => Target::AppleUnified {
-            working_set_bytes: working_set_bytes.saturating_add(back),
-            ram_free_bytes,
-        },
-        cpu @ Target::Cpu { .. } => cpu,
-    }
+    with_device_free(target.clone(), |free| free.saturating_add(back))
 }
 
 /// The computer's free memory where the processor runs a model: 0 when the system does not
@@ -301,8 +283,8 @@ fn free_memory(target: &Target) -> u64 {
     }
 }
 
-/// A graphics device as shown: its description with the engine's backend in brackets
-/// ("Radeon RX 7600 (Vulkan)", "Apple M5 (Metal)").
+/// A graphics device as shown: its name ([`device_name`]) with the engine's backend in
+/// brackets ("AMD Radeon RX 7600 (Vulkan)", "Apple M5 (Metal)").
 fn shown(description: Option<&str>, backend: &str) -> String {
     let backend = match backend {
         "cpu" => return PROCESSOR.to_owned(),
@@ -311,10 +293,39 @@ fn shown(description: Option<&str>, backend: &str) -> String {
         other => other,
     };
     let name = description
-        .map(str::trim)
+        .map(device_name)
         .filter(|name| !name.is_empty())
         .unwrap_or("Graphics card");
     format!("{name} ({backend})")
+}
+
+/// A graphics device's name from llama.cpp's description of it: the driver's code for the
+/// chip that the description may end with, set apart by a space and in brackets (Mesa's
+/// "AMD Radeon RX 7600 (RADV NAVI33)", Intel's "… Graphics (DG2)"), is left out. Brackets
+/// inside the name ("AMD Radeon(TM) Graphics") are its own.
+fn device_name(description: &str) -> &str {
+    let name = description.trim();
+    let Some(inner) = name.strip_suffix(')') else {
+        return name;
+    };
+    let mut depth = 0_usize;
+    for (at, c) in inner.char_indices().rev() {
+        match c {
+            ')' => depth += 1,
+            '(' if depth > 0 => depth -= 1,
+            '(' => {
+                let before = &name[..at];
+                let kept = before.trim_end();
+                return if before.len() > kept.len() && !kept.is_empty() {
+                    kept
+                } else {
+                    name
+                };
+            }
+            _ => {}
+        }
+    }
+    name
 }
 
 /// This computer's measured runs, from what each recorded run was made at (its `job`).
@@ -757,50 +768,31 @@ impl Inner {
         let created_at = self.deps.clock.now_ms();
         let engine_build = lane.provider.engine_build();
         let revision = entry.diffusion().revision.clone();
-        let refs: Vec<Value> = request
-            .refs
-            .iter()
-            .map(|r| {
-                json!({
-                    "sha256": r.sha256,
-                    "role": r.role,
-                    "mime": r.mime,
-                    "sizeBytes": r.size_bytes,
-                })
-            })
-            .collect();
         let endpoint = this_computer();
-        self.deps
-            .store
-            .insert_creation_run(store::NewCreationRun {
-                id: run_id.clone(),
-                kind: creation_kind(model.kind),
-                runs_on: store::RunsOn::Local,
-                provider_id: None,
-                provider_name: endpoint.name.clone(),
-                provider_host: endpoint.host.clone(),
-                model: model.id.clone(),
-                model_label: model.display_name.clone(),
-                prompt: req.prompt.clone(),
-                params: json!({
-                    "params": request.params,
-                    "extra": request.extra,
-                    "routing": Value::Null,
-                    "job": job_record(&shape),
-                }),
-                refs: Value::Array(refs),
-                estimate_usd: Some(0.0),
-                gen_model_id: Some(row.id.clone()),
-                engine_build,
-                // Written once the grant decides where it runs.
-                device: None,
-                created_at,
-            })
-            .await
-            .map_err(|e| match e {
-                store::StoreError::TooManyCreations => errors::gallery_full(),
-                other => other.into(),
-            })?;
+        let run = store::NewCreationRun {
+            id: run_id.clone(),
+            kind: creation_kind(model.kind),
+            runs_on: store::RunsOn::Local,
+            provider_id: None,
+            provider_name: endpoint.name.clone(),
+            provider_host: endpoint.host.clone(),
+            model: model.id.clone(),
+            model_label: model.display_name.clone(),
+            prompt: req.prompt.clone(),
+            params: json!({
+                "params": request.params,
+                "extra": request.extra,
+                "routing": Value::Null,
+                "job": job_record(&shape),
+            }),
+            refs: refs_json(&request.refs),
+            estimate_usd: Some(0.0),
+            gen_model_id: Some(row.id.clone()),
+            engine_build,
+            // Written once the grant decides where it runs.
+            device: None,
+            created_at,
+        };
         let entry_row = audit_entry(
             req,
             &model,
@@ -811,7 +803,7 @@ impl Inner {
             created_at,
         );
         let provider: Arc<dyn MediaProvider> = lane.provider.clone();
-        let mut job = Job {
+        let job = Job {
             run_id,
             created_at,
             kind: model.kind,
@@ -827,23 +819,9 @@ impl Inner {
                 revision,
             })),
         };
-        let audit_id = match self.deps.store.append_audit(entry_row).await {
-            Ok(audit_id) => audit_id,
-            Err(e) => return Err(self.abandon(&job, e.into()).await),
-        };
-        job.audit_id = Some(audit_id);
-        let patch = store::CreationPatch {
-            audit_id: Some(Some(audit_id)),
-            ..Default::default()
-        };
-        if let Err(e) = self
-            .deps
-            .store
-            .update_creation_run(&job.run_id, patch)
-            .await
-        {
-            return Err(self.abandon(&job, e.into()).await);
-        }
+        let job = self
+            .insert_and_audit(run, entry_row, job, store::CreationPatch::default())
+            .await?;
         self.with_live(&job.run_id, |live| live.eta = verdict.eta);
         Ok(job)
     }
@@ -1331,12 +1309,7 @@ impl Inner {
             run.started_at,
         )
         .await;
-        let scratch = self.gallery().partial_dir().join(&run.id);
-        match tokio::fs::remove_dir_all(&scratch).await {
-            Ok(()) => {}
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-            Err(e) => tracing::warn!(run = %run.id, "a Studio scratch folder stayed: {e}"),
-        }
+        remove_scratch(&self.gallery(), &run.id).await;
     }
 
     /// Changes run `run_id`'s live state (made when it is missing) and gives what `change`
@@ -1404,5 +1377,49 @@ impl Inner {
 async fn stop_engine(provider: &dyn crate::studio::local::LocalProvider, remote_id: &str) {
     if let Err(e) = provider.cancel(remote_id).await {
         tracing::warn!("a local Studio run's engine was not stopped: {e}");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Ruling L15-x-B9-device: a device is shown by its name with the backend in brackets,
+    /// never with the driver's code for its chip.
+    #[test]
+    fn a_device_is_shown_by_its_name_and_backend() {
+        let vulkan = |description: &str| shown(Some(description), "vulkan");
+        assert_eq!(
+            vulkan("AMD Radeon RX 7600 (RADV NAVI33)"),
+            "AMD Radeon RX 7600 (Vulkan)"
+        );
+        assert_eq!(
+            vulkan("Intel(R) Arc(tm) A770 Graphics (DG2)"),
+            "Intel(R) Arc(tm) A770 Graphics (Vulkan)"
+        );
+        assert_eq!(
+            vulkan("llvmpipe (LLVM 17.0.6, 256 bits)"),
+            "llvmpipe (Vulkan)"
+        );
+        assert_eq!(vulkan("Card (rev (a1))"), "Card (Vulkan)");
+        // Brackets that are part of the name stay.
+        assert_eq!(
+            vulkan("NVIDIA GeForce RTX 4070"),
+            "NVIDIA GeForce RTX 4070 (Vulkan)"
+        );
+        assert_eq!(
+            vulkan("AMD Radeon(TM) Graphics"),
+            "AMD Radeon(TM) Graphics (Vulkan)"
+        );
+        assert_eq!(vulkan("AMD Radeon(TM)"), "AMD Radeon(TM) (Vulkan)");
+        // A description that is nothing but brackets is all there is to name it by.
+        assert_eq!(vulkan("(RADV NAVI33)"), "(RADV NAVI33) (Vulkan)");
+        assert_eq!(shown(Some("Apple M5"), "metal"), "Apple M5 (Metal)");
+        assert_eq!(vulkan("  "), "Graphics card (Vulkan)");
+        assert_eq!(shown(None, "vulkan"), "Graphics card (Vulkan)");
+        assert_eq!(
+            shown(Some("AMD Radeon RX 7600 (RADV NAVI33)"), "cpu"),
+            PROCESSOR
+        );
     }
 }
