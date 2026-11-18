@@ -69,7 +69,7 @@ impl Target {
     }
     /// The free memory there as the system reports it, for [`FitResult::available_bytes`]:
     /// the processor's figure before [`RAM_RESERVE_BYTES`] is kept back.
-    fn free_bytes(&self) -> u64 {
+    pub(crate) fn free_bytes(&self) -> u64 {
         match *self {
             Target::Gpu { free_bytes, .. } => free_bytes,
             Target::AppleUnified {
@@ -81,8 +81,9 @@ impl Target {
     /// The memory as [`Room`] counts it: on a graphics card its free memory and, with part
     /// of the model on the processor, the computer's memory besides (unbounded when the
     /// computer's memory could not be read: not checked); on Apple silicon the working set
-    /// only (the part beyond it is not estimated here).
-    fn room(&self) -> Room {
+    /// only (the part beyond it is not estimated here). Studio's picture and video fit
+    /// (`gen_fit`) is judged against it too.
+    pub fn room(&self) -> Room {
         match *self {
             Target::Gpu {
                 free_bytes,
@@ -106,7 +107,7 @@ impl Target {
     }
     /// The computer's memory less the reserve, which the model's own part there and the
     /// saved copies of a long chat share; `None` when the system did not say.
-    fn computer(&self) -> Option<u64> {
+    pub(crate) fn computer(&self) -> Option<u64> {
         match *self {
             Target::Gpu { ram_free_bytes, .. } | Target::AppleUnified { ram_free_bytes, .. } => {
                 ram_free_bytes

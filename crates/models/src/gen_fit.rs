@@ -1,0 +1,872 @@
+//! Will a picture or video model fit this computer (studio-local-design.md L5, "Fit")? The
+//! model's parts (D: the diffusion part, or parts used one after the other; T: the text
+//! encoders; V: the decoder) and the working memory a run needs besides, from the entry's
+//! measured peaks or its family's fallback coefficients, compared with the [`Room`] the
+//! target gives: now, and with the chat model unloaded.
+//!
+//! - **Green:** D + T + V + max(act_dit, act_vae) + [`SPARE_BYTES`] fits on the device
+//!   (`room.whole`). A measured peak replaces D + T + V + max(act_dit, act_vae).
+//! - **One part at a time** (memory saving): max(T, D + act_dit, V + act_vae) + the spare
+//!   fits on the device, with the decoder tiled, and every part's weights fit the
+//!   computer's memory less [`RAM_RESERVE_BYTES`](crate::fit::RAM_RESERVE_BYTES), where
+//!   they wait their turn.
+//! - **Partly on the processor:** D + act_dit fits `room.partial`.
+//! - **Red** otherwise.
+
+use serde::Serialize;
+
+use crate::fit::{Room, SPARE_BYTES, Target};
+use crate::gen_catalog::{GenEntry, GenKind, GenRole, MemoryPoint};
+
+/// A picture's preset sides (its shorter side), for [`GenFitResult::suggestion`].
+pub const PICTURE_SIDES: [u32; 3] = [512, 768, 1024];
+/// A clip's preset lengths in frames (each one 4n + 1 and 8n + 1).
+pub const VIDEO_FRAMES: [u32; 5] = [17, 33, 49, 81, 121];
+/// A clip's preset shorter sides: 480p and 720p.
+const VIDEO_SIDES: [u32; 2] = [480, 720];
+/// The shapes Studio offers, width to height; a suggestion keeps the requested one.
+const SHAPES: [(u32, u32); 5] = [(1, 1), (4, 3), (3, 4), (16, 9), (9, 16)];
+
+/// The size of a run.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GenSize {
+    pub width: u32,
+    pub height: u32,
+    /// 1 for a picture.
+    pub frames: u32,
+}
+
+impl GenSize {
+    /// Pixels times frames: what the decoder turns out, and how presets are ranked.
+    pub(crate) fn pixel_frames(self) -> u64 {
+        u64::from(self.width) * u64::from(self.height) * u64::from(self.frames.max(1))
+    }
+}
+
+/// How a run would use this computer's memory.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum GenFit {
+    /// Every part and the run's working memory on the device at once.
+    Green,
+    /// One part at a time on the device while the others wait in the computer's memory,
+    /// the decoder tiled (memory saving).
+    OnePartAtATime,
+    /// Only with part of the diffusion model on the processor: slow.
+    PartlyOnProcessor,
+    /// Does not fit.
+    Red,
+}
+
+impl GenFit {
+    /// Whole or one part at a time on the device: nothing runs on the processor.
+    pub(crate) fn on_device(self) -> bool {
+        matches!(self, Self::Green | Self::OnePartAtATime)
+    }
+}
+
+/// Why a model is not offered here, judged with the chat model's memory counted back, so the
+/// reason never blames the chat model's share.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NotFor {
+    /// A graphics card with this much free memory would run it one part at a time. Also
+    /// the reason on a computer that runs models on the processor and has too little memory.
+    GraphicsMemory { needs: u64 },
+    /// What this Mac would have to give its graphics to run it one part at a time.
+    MacMemory { needs: u64 },
+    /// Video needs a graphics card or Apple silicon; this computer runs models on the
+    /// processor.
+    VideoNeedsGpu,
+    /// The catalog keeps this video model off Apple silicon (`runs_on_apple`).
+    VideoNotOnThisMac,
+}
+
+/// The fit of one model at one size on this computer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct GenFitResult {
+    /// With the memory free now (the chat model loaded, if one is).
+    pub fit: GenFit,
+    /// With the chat model unloaded: only when one is loaded and `fit` is not Green.
+    pub after_unload: Option<GenFit>,
+    /// Everything on the device at once, without the spare: D + T + V + the larger working
+    /// memory, or the measured peak.
+    pub needed_bytes: u64,
+    /// The free memory there as the system reports it: the graphics card's, the Metal
+    /// working set, or the computer's before the reserve is kept back.
+    pub available_bytes: u64,
+    /// `fit` runs with memory saving ([`needs_memory_saving`]).
+    pub memory_saving: bool,
+    /// The computer runs models on the processor ([`Target::Cpu`]).
+    pub processor_only: bool,
+    /// Why not, when the run is red even with the chat model unloaded.
+    pub not_for: Option<NotFor>,
+    /// When the requested size does not run on the device (whole or one part at a time),
+    /// the largest preset by pixel-frames that does: the preset sides at the requested shape
+    /// and, for a clip, the preset lengths, none above the requested size; judged in the
+    /// room after an unload when a chat model is loaded.
+    pub suggestion: Option<GenSize>,
+}
+
+/// One part at a time and partly on the processor both run with memory saving
+/// (`--vae-tiling --offload-to-cpu`).
+pub fn needs_memory_saving(fit: GenFit) -> bool {
+    matches!(fit, GenFit::OnePartAtATime | GenFit::PartlyOnProcessor)
+}
+
+/// The run's latent tokens: ⌈W/d⌉·⌈H/d⌉ with d the family's `token_div`, times a clip's
+/// latent frames, (F − 1)/`frame_div` + 1.
+pub fn tokens(entry: &GenEntry, size: GenSize) -> u64 {
+    let f = &entry.fallback;
+    let d = f.token_div.max(1);
+    let frames = size.frames.max(1);
+    let latent_frames = match f.frame_div {
+        Some(div) if div > 0 => (frames - 1) / div + 1,
+        _ => frames,
+    };
+    u64::from(size.width.div_ceil(d))
+        * u64::from(size.height.div_ceil(d))
+        * u64::from(latent_frames)
+}
+
+/// The diffusion model's working memory: `act_base_bytes + act_bytes_per_token·tokens`.
+fn act_dit(entry: &GenEntry, size: GenSize) -> u64 {
+    let f = &entry.fallback;
+    f.act_base_bytes
+        .saturating_add(f.act_bytes_per_token.saturating_mul(tokens(entry, size)))
+}
+
+/// The decoder's working memory: `vae_bytes_per_pixel_frame`·W·H·C, with C the frames it
+/// decodes at once (`vae_chunk_frames`, at most the clip's; all of them when unset); at most
+/// `vae_tile_cap_bytes` with memory saving, which tiles the decoder.
+pub fn act_vae(entry: &GenEntry, size: GenSize, memory_saving: bool) -> u64 {
+    let f = &entry.fallback;
+    let frames = size.frames.max(1);
+    let chunk = f.vae_chunk_frames.map_or(frames, |c| c.min(frames).max(1));
+    let pixel_frames = u64::from(size.width) * u64::from(size.height) * u64::from(chunk);
+    let bytes = f.vae_bytes_per_pixel_frame.saturating_mul(pixel_frames);
+    if memory_saving {
+        bytes.min(f.vae_tile_cap_bytes)
+    } else {
+        bytes
+    }
+}
+
+/// The parts' sizes, in bytes.
+struct Weights {
+    /// Every diffusion part (a second one, used after the first, included).
+    diffusion: u64,
+    /// The largest diffusion part: they take turns.
+    largest_diffusion: u64,
+    /// The text encoders, which work together.
+    encoders: u64,
+    /// The decoder.
+    decoder: u64,
+}
+
+impl Weights {
+    fn of(entry: &GenEntry) -> Self {
+        let mut w = Weights {
+            diffusion: 0,
+            largest_diffusion: 0,
+            encoders: 0,
+            decoder: 0,
+        };
+        for part in &entry.parts {
+            match part.role {
+                GenRole::Diffusion | GenRole::HighNoiseDiffusion | GenRole::Model => {
+                    w.diffusion = w.diffusion.saturating_add(part.size);
+                    w.largest_diffusion = w.largest_diffusion.max(part.size);
+                }
+                GenRole::Llm | GenRole::T5xxl | GenRole::ClipL | GenRole::ClipVision => {
+                    w.encoders = w.encoders.saturating_add(part.size);
+                }
+                GenRole::Vae => w.decoder = w.decoder.saturating_add(part.size),
+            }
+        }
+        w
+    }
+
+    fn total(&self) -> u64 {
+        self.diffusion
+            .saturating_add(self.encoders)
+            .saturating_add(self.decoder)
+    }
+}
+
+/// What a run at one size needs for each way of running it, without the spare.
+struct Need {
+    /// Everything on the device at once (Green).
+    whole: u64,
+    /// The largest of the parts on the device one at a time with its working memory, the
+    /// decoder tiled.
+    one_part: u64,
+    /// Every part's weights: one part at a time, they all wait in the computer's memory
+    /// (`--offload-to-cpu` keeps the engine's copy of each there).
+    weights: u64,
+    /// The diffusion part with its working memory: what a run partly on the processor
+    /// needs, between the device and the computer's memory.
+    diffusion: u64,
+}
+
+impl Need {
+    fn of(entry: &GenEntry, size: GenSize) -> Self {
+        let w = Weights::of(entry);
+        let act_dit = act_dit(entry, size);
+        let whole = measured_peak(entry, tokens(entry, size)).unwrap_or_else(|| {
+            w.total()
+                .saturating_add(act_dit.max(act_vae(entry, size, false)))
+        });
+        let diffusion = w.largest_diffusion.saturating_add(act_dit);
+        let decoder = w.decoder.saturating_add(act_vae(entry, size, true));
+        Need {
+            whole,
+            one_part: w.encoders.max(diffusion).max(decoder),
+            weights: w.total(),
+            diffusion,
+        }
+    }
+
+    /// One part at a time with the spare: what [`NotFor`] says is needed.
+    fn device_need(&self) -> u64 {
+        self.one_part.saturating_add(SPARE_BYTES)
+    }
+
+    /// The fit in `room`, with `computer` the computer's memory less the reserve (`None`
+    /// when unknown: not checked).
+    fn fit(&self, room: Room, computer: Option<u64>) -> GenFit {
+        if self.whole.saturating_add(SPARE_BYTES) <= room.whole {
+            GenFit::Green
+        } else if self.device_need() <= room.whole && computer.is_none_or(|c| self.weights <= c) {
+            GenFit::OnePartAtATime
+        } else if self.diffusion <= room.partial {
+            GenFit::PartlyOnProcessor
+        } else {
+            GenFit::Red
+        }
+    }
+}
+
+/// The measured peak at `at` tokens from the entry's points of its newest engine build
+/// (several builds' points are never mixed): linear in tokens between the two nearest, the
+/// nearest one alone beyond them; `None` with no point.
+fn measured_peak(entry: &GenEntry, at: u64) -> Option<u64> {
+    let build = entry.memory.iter().map(|m| m.build).max()?;
+    let mut points: Vec<(u64, u64)> = entry
+        .memory
+        .iter()
+        .filter(|m| m.build == build)
+        .map(|m| (tokens(entry, point_size(m)), m.peak_bytes))
+        .collect();
+    // By tokens; of points with the same tokens, the highest peak.
+    points.sort_by(|a, b| a.0.cmp(&b.0).then(b.1.cmp(&a.1)));
+    points.dedup_by_key(|p| p.0);
+    let below = points.iter().rev().find(|p| p.0 <= at);
+    let above = points.iter().find(|p| p.0 >= at);
+    match (below, above) {
+        (Some(&(t0, p0)), Some(&(t1, p1))) if t1 > t0 => {
+            let part =
+                |rise: u64| (u128::from(rise) * u128::from(at - t0) / u128::from(t1 - t0)) as u64;
+            Some(if p1 >= p0 {
+                p0 + part(p1 - p0)
+            } else {
+                p0 - part(p0 - p1)
+            })
+        }
+        (Some(&(_, peak)), _) | (None, Some(&(_, peak))) => Some(peak),
+        (None, None) => None,
+    }
+}
+
+fn point_size(m: &MemoryPoint) -> GenSize {
+    GenSize {
+        width: m.width,
+        height: m.height,
+        frames: m.frames.max(1),
+    }
+}
+
+/// Whether `entry` at `size` fits `target`. `target` as probed now (with the chat model
+/// loaded, if one is); `chat_device_bytes`: what unloading it would give back.
+///
+/// On [`Target::Cpu`] the run is judged against the computer's memory and a video is red
+/// ([`NotFor::VideoNeedsGpu`]); on [`Target::AppleUnified`] a video model the catalog keeps
+/// off Apple silicon is red ([`NotFor::VideoNotOnThisMac`]).
+pub fn gen_fit(
+    entry: &GenEntry,
+    size: GenSize,
+    target: &Target,
+    chat_device_bytes: Option<u64>,
+) -> GenFitResult {
+    let video = entry.kind == GenKind::Video;
+    let blocked = match target {
+        Target::Cpu { .. } if video => Some(NotFor::VideoNeedsGpu),
+        Target::AppleUnified { .. } if video && !entry.runs_on_apple => {
+            Some(NotFor::VideoNotOnThisMac)
+        }
+        _ => None,
+    };
+    let need = Need::of(entry, size);
+    let computer = target.computer();
+    let judge = |room: Room| match blocked {
+        Some(_) => GenFit::Red,
+        None => need.fit(room, computer),
+    };
+    let room = target.room();
+    let fit = judge(room);
+    let unloaded = chat_device_bytes.map(|bytes| Room {
+        whole: room.whole.saturating_add(bytes),
+        partial: room.partial.saturating_add(bytes),
+        ..room
+    });
+    let after_unload = unloaded.filter(|_| fit != GenFit::Green).map(judge);
+    let not_for = (after_unload.unwrap_or(fit) == GenFit::Red).then(|| {
+        blocked.unwrap_or_else(|| {
+            let needs = need.device_need();
+            match target {
+                Target::AppleUnified { .. } => NotFor::MacMemory { needs },
+                Target::Gpu { .. } | Target::Cpu { .. } => NotFor::GraphicsMemory { needs },
+            }
+        })
+    });
+    let suggestion = match blocked {
+        Some(_) => None,
+        None => suggest(entry, size, unloaded.unwrap_or(room), computer),
+    };
+    GenFitResult {
+        fit,
+        after_unload,
+        needed_bytes: need.whole,
+        available_bytes: target.free_bytes(),
+        memory_saving: needs_memory_saving(fit),
+        processor_only: matches!(target, Target::Cpu { .. }),
+        not_for,
+        suggestion,
+    }
+}
+
+/// [`GenFitResult::suggestion`]: `None` when `size` itself runs on the device in `room`, or
+/// no preset does.
+fn suggest(entry: &GenEntry, size: GenSize, room: Room, computer: Option<u64>) -> Option<GenSize> {
+    let on_device = |s: GenSize| Need::of(entry, s).fit(room, computer).on_device();
+    if on_device(size) {
+        return None;
+    }
+    let (sides, lengths, longest): (&[u32], &[u32], u32) = if entry.kind == GenKind::Video {
+        let most = entry.limits.max_frames.unwrap_or(u32::MAX);
+        (&VIDEO_SIDES, &VIDEO_FRAMES, size.frames.min(most))
+    } else {
+        (&PICTURE_SIDES, &[1], 1)
+    };
+    let shape = shape_of(size);
+    let max_side = entry.limits.max_side;
+    sides
+        .iter()
+        .filter_map(|&side| at_shape(side, shape, entry.limits.multiple_of))
+        .filter(|&(w, h)| w <= size.width && h <= size.height)
+        .filter(|&(w, h)| max_side == 0 || w.max(h) <= max_side)
+        .flat_map(|(width, height)| {
+            lengths
+                .iter()
+                .filter(move |&&frames| frames <= longest)
+                .map(move |&frames| GenSize {
+                    width,
+                    height,
+                    frames,
+                })
+        })
+        .filter(|&s| on_device(s))
+        .max_by_key(|s| s.pixel_frames())
+}
+
+/// The offered shape nearest the size's own (a size is rounded to the model's multiple, so
+/// 1280×704 is 16:9).
+fn shape_of(size: GenSize) -> (u32, u32) {
+    let log_ratio = |w: u32, h: u32| (f64::from(w.max(1)) / f64::from(h.max(1))).ln();
+    let own = log_ratio(size.width, size.height);
+    let distance = |&(w, h): &(u32, u32)| (log_ratio(w, h) - own).abs();
+    SHAPES
+        .into_iter()
+        .min_by(|a, b| distance(a).total_cmp(&distance(b)))
+        .unwrap_or((1, 1))
+}
+
+/// The size with `side` as its shorter side at `shape`, each side rounded down to a
+/// multiple of `multiple_of` (480p at 16:9 is 832×480, 720p 1280×704); `None` when that
+/// leaves nothing.
+fn at_shape(side: u32, (w, h): (u32, u32), multiple_of: u32) -> Option<(u32, u32)> {
+    let m = u64::from(multiple_of.max(1));
+    let down = |x: u64| u32::try_from(x / m * m).ok();
+    let long = u64::from(side) * u64::from(w.max(h)) / u64::from(w.min(h).max(1));
+    let (short, long) = (down(u64::from(side))?, down(long)?);
+    if short == 0 {
+        return None;
+    }
+    Some(if w >= h { (long, short) } else { (short, long) })
+}
+
+#[cfg(test)]
+pub(crate) mod tests {
+    //! Entries built here with the pinned files' sizes (Task L7), which round to the figures
+    //! in the comments (GB = 1e9), and the families' fallbacks written as literals (never read
+    //! from the bundled catalog), so each expectation follows from the formulas and a re-tuned
+    //! catalog never moves it.
+
+    use std::collections::BTreeMap;
+
+    use super::*;
+    use crate::gen_catalog::{
+        FitFallback, FrameRule, GateMode, GenDefaults, GenFamily, GenGate, GenLimits, GenPart,
+    };
+
+    pub(crate) const GB: u64 = 1_000_000_000;
+
+    /// FLUX.2 klein 4B's and Z-Image Turbo's fallback.
+    fn picture_fallback() -> FitFallback {
+        FitFallback {
+            act_base_bytes: 500_000_000,
+            act_bytes_per_token: 100_000,
+            vae_bytes_per_pixel_frame: 300,
+            vae_tile_cap_bytes: 500_000_000,
+            token_div: 16,
+            frame_div: None,
+            vae_chunk_frames: None,
+        }
+    }
+
+    fn wan22_fallback() -> FitFallback {
+        FitFallback {
+            act_base_bytes: 1_000_000_000,
+            act_bytes_per_token: 250_000,
+            vae_bytes_per_pixel_frame: 400,
+            vae_tile_cap_bytes: 2_500_000_000,
+            token_div: 32,
+            frame_div: Some(4),
+            vae_chunk_frames: Some(4),
+        }
+    }
+
+    fn wan21_fallback() -> FitFallback {
+        FitFallback {
+            act_base_bytes: 500_000_000,
+            act_bytes_per_token: 100_000,
+            vae_bytes_per_pixel_frame: 300,
+            vae_tile_cap_bytes: 1_500_000_000,
+            token_div: 16,
+            frame_div: Some(4),
+            vae_chunk_frames: Some(4),
+        }
+    }
+
+    fn picture_limits() -> GenLimits {
+        GenLimits {
+            multiple_of: 16,
+            max_side: 2048,
+            frame_rule: None,
+            max_frames: None,
+        }
+    }
+
+    fn video_limits(multiple_of: u32, max_frames: u32) -> GenLimits {
+        GenLimits {
+            multiple_of,
+            max_side: 1280,
+            frame_rule: Some(FrameRule::FourNPlusOne),
+            max_frames: Some(max_frames),
+        }
+    }
+
+    /// An entry with these parts, made at `default` by default.
+    fn entry(
+        id: &str,
+        kind: GenKind,
+        family: GenFamily,
+        parts: [(GenRole, u64); 3],
+        fallback: FitFallback,
+        limits: GenLimits,
+        default: GenSize,
+    ) -> GenEntry {
+        GenEntry {
+            id: id.into(),
+            name: id.into(),
+            summary: String::new(),
+            publisher: String::new(),
+            kind,
+            family,
+            inputs: Vec::new(),
+            parts: parts
+                .into_iter()
+                .map(|(role, size)| GenPart {
+                    role,
+                    repo: "test/model".into(),
+                    revision: "0".repeat(40),
+                    path: format!("{role:?}.gguf"),
+                    size,
+                    sha256: "ab".repeat(32),
+                    license: "apache-2.0".into(),
+                })
+                .collect(),
+            licenses: BTreeMap::new(),
+            gate: GenGate {
+                mode: GateMode::None,
+                collects: Vec::new(),
+            },
+            defaults: GenDefaults {
+                steps: 4,
+                cfg: 1.0,
+                flow_shift: None,
+                sampler: None,
+                scheduler: None,
+                width: default.width,
+                height: default.height,
+                frames: (kind == GenKind::Video).then_some(default.frames),
+                fps: (kind == GenKind::Video).then_some(24),
+            },
+            limits,
+            fallback,
+            memory: Vec::new(),
+            speed: Vec::new(),
+            quirks: Vec::new(),
+            min_build: 1106,
+            runs_on_apple: true,
+            tested: None,
+        }
+    }
+
+    /// FLUX.2 klein 4B: D 2.46, T 2.50, V 0.34.
+    pub(crate) fn klein() -> GenEntry {
+        entry(
+            "flux2-klein-4b-q4",
+            GenKind::Image,
+            GenFamily::Flux2Klein4b,
+            [
+                (GenRole::Diffusion, 2_460_378_560),
+                (GenRole::Llm, 2_497_281_312),
+                (GenRole::Vae, 336_211_292),
+            ],
+            picture_fallback(),
+            picture_limits(),
+            sq(1024),
+        )
+    }
+
+    /// Z-Image Turbo: D 3.86, T 2.50, V 0.34.
+    pub(crate) fn zimage() -> GenEntry {
+        entry(
+            "z-image-turbo-q4",
+            GenKind::Image,
+            GenFamily::ZImageTurbo,
+            [
+                (GenRole::Diffusion, 3_864_250_304),
+                (GenRole::Llm, 2_497_281_120),
+                (GenRole::Vae, 335_304_388),
+            ],
+            picture_fallback(),
+            picture_limits(),
+            sq(1024),
+        )
+    }
+
+    /// Wan 2.2 TI2V-5B fast: D 4.21, T 4.15, V 1.41.
+    pub(crate) fn wan22() -> GenEntry {
+        entry(
+            "wan22-ti2v-5b-fast-q6",
+            GenKind::Video,
+            GenFamily::Wan22Ti2v5bFast,
+            [
+                (GenRole::Diffusion, 4_210_247_200),
+                (GenRole::T5xxl, 4_145_878_880),
+                (GenRole::Vae, 1_409_400_960),
+            ],
+            wan22_fallback(),
+            video_limits(32, 121),
+            clip(832, 480, 49),
+        )
+    }
+
+    /// Wan 2.1 T2V 1.3B: D 2.84 (a size stated for the test: Task L17 pins its file), T 4.15,
+    /// V 0.25.
+    fn wan21() -> GenEntry {
+        entry(
+            "wan21-t2v-1.3b",
+            GenKind::Video,
+            GenFamily::Wan21T2v1_3b,
+            [
+                (GenRole::Diffusion, 2_840_000_000),
+                (GenRole::T5xxl, 4_145_878_880),
+                (GenRole::Vae, 253_815_318),
+            ],
+            wan21_fallback(),
+            video_limits(16, 81),
+            clip(832, 480, 33),
+        )
+    }
+
+    pub(crate) fn gpu(free_gb: u64, ram_gb: u64) -> Target {
+        Target::Gpu {
+            name: "GPU".into(),
+            free_bytes: free_gb * GB,
+            ram_free_bytes: Some(ram_gb * GB),
+        }
+    }
+
+    pub(crate) fn apple(ws_gb: u64, ram_gb: u64) -> Target {
+        Target::AppleUnified {
+            working_set_bytes: ws_gb * GB,
+            ram_free_bytes: Some(ram_gb * GB),
+        }
+    }
+
+    pub(crate) fn cpu(ram_gb: u64) -> Target {
+        Target::Cpu {
+            ram_free_bytes: ram_gb * GB,
+        }
+    }
+
+    pub(crate) fn sq(side: u32) -> GenSize {
+        GenSize {
+            width: side,
+            height: side,
+            frames: 1,
+        }
+    }
+
+    pub(crate) fn clip(width: u32, height: u32, frames: u32) -> GenSize {
+        GenSize {
+            width,
+            height,
+            frames,
+        }
+    }
+
+    #[test]
+    fn klein_at_1024_is_green_on_an_8_gb_card() {
+        // 5.30 + 0.91 + 1 spare = 7.21 <= 8
+        assert_eq!(
+            gen_fit(&klein(), sq(1024), &gpu(8, 32), None).fit,
+            GenFit::Green
+        );
+    }
+
+    #[test]
+    fn on_a_6_gb_card_it_runs_one_part_at_a_time_with_memory_saving() {
+        // green 8.61 > 6; one part 3.86 + 0.91 + 1 = 5.77 <= 6
+        let r = gen_fit(&zimage(), sq(1024), &gpu(6, 32), None);
+        assert_eq!((r.fit, r.memory_saving), (GenFit::OnePartAtATime, true));
+        assert!(needs_memory_saving(GenFit::PartlyOnProcessor));
+        assert!(!needs_memory_saving(GenFit::Green) && !needs_memory_saving(GenFit::Red));
+    }
+
+    #[test]
+    fn too_little_everywhere_is_red_with_a_reason() {
+        // partial room 2 + (4 − 2) = 4 < D + act_dit 4.77
+        let r = gen_fit(&zimage(), sq(1024), &gpu(2, 4), None);
+        assert_eq!(r.fit, GenFit::Red);
+        assert!(
+            matches!(r.not_for, Some(NotFor::GraphicsMemory { needs }) if needs >= 5_770_000_000)
+        );
+    }
+
+    #[test]
+    fn the_chat_models_memory_counts_after_an_unload() {
+        // 3 GB free: partly on the processor; 8 GB after the unload: one part at a time
+        let r = gen_fit(&zimage(), sq(1024), &gpu(3, 32), Some(5 * GB));
+        assert_eq!(
+            (r.fit, r.after_unload),
+            (GenFit::PartlyOnProcessor, Some(GenFit::OnePartAtATime))
+        );
+        // Green beside the chat model: nothing to unload, so no second verdict.
+        let r = gen_fit(&klein(), sq(1024), &gpu(8, 32), Some(5 * GB));
+        assert_eq!((r.fit, r.after_unload), (GenFit::Green, None));
+    }
+
+    #[test]
+    fn the_reason_never_blames_the_chat_models_share() {
+        // 1 GB free: red now; 4 GB and 5 GB with part on the processor after a 3 GB unload.
+        let r = gen_fit(&zimage(), sq(1024), &gpu(1, 3), Some(3 * GB));
+        assert_eq!(
+            (r.fit, r.after_unload, r.not_for),
+            (GenFit::Red, Some(GenFit::PartlyOnProcessor), None)
+        );
+        // Red even after a 1 GB unload: the need is the job's own, the same as with no chat.
+        let r = gen_fit(&zimage(), sq(1024), &gpu(1, 3), Some(GB));
+        assert_eq!(
+            (r.after_unload, r.not_for),
+            (
+                Some(GenFit::Red),
+                Some(NotFor::GraphicsMemory {
+                    needs: 5_773_850_304
+                })
+            )
+        );
+    }
+
+    #[test]
+    fn a_video_decoder_works_one_chunk_at_a_time() {
+        // 400 B × 832 × 480 × 4 frames, not × 49
+        assert_eq!(
+            act_vae(&wan22(), clip(832, 480, 49), false),
+            400 * 832 * 480 * 4
+        );
+    }
+
+    #[test]
+    fn the_working_memory_follows_the_formulas() {
+        // At 1024²: 4096 tokens, act_vae 0.31 GB (the whole picture at once).
+        assert_eq!(tokens(&klein(), sq(1024)), 4096);
+        assert_eq!(act_vae(&klein(), sq(1024), false), 314_572_800);
+        // Memory saving tiles the decoder: at most the tile cap.
+        assert_eq!(act_vae(&klein(), sq(2048), false), 300 * 2048 * 2048);
+        assert_eq!(act_vae(&klein(), sq(2048), true), 500_000_000);
+        // A clip shorter than a chunk decodes all its frames at once.
+        assert_eq!(act_vae(&wan22(), clip(832, 480, 1), false), 400 * 832 * 480);
+        // The need with everything on the card: D + T + V + the larger working memory.
+        assert_eq!(
+            gen_fit(&klein(), sq(1024), &gpu(8, 32), None).needed_bytes,
+            5_293_871_164 + 909_600_000
+        );
+    }
+
+    #[test]
+    fn video_on_the_processor_is_not_offered_and_pictures_say_processor() {
+        assert!(matches!(
+            gen_fit(&wan22(), clip(832, 480, 49), &cpu(32), None).not_for,
+            Some(NotFor::VideoNeedsGpu)
+        ));
+        assert!(gen_fit(&klein(), sq(512), &cpu(32), None).processor_only);
+        // A picture too big for the computer's memory: what a graphics card would need.
+        let r = gen_fit(&zimage(), sq(1024), &cpu(4), None);
+        assert_eq!(
+            (r.fit, r.not_for),
+            (
+                GenFit::Red,
+                Some(NotFor::GraphicsMemory {
+                    needs: 5_773_850_304
+                })
+            )
+        );
+    }
+
+    #[test]
+    fn on_a_mac_the_reason_names_the_mac_and_a_video_model_may_be_kept_off_it() {
+        let mut wan = wan22();
+        wan.runs_on_apple = false;
+        let r = gen_fit(&wan, clip(832, 480, 49), &apple(16, 24), None);
+        assert_eq!(
+            (r.fit, r.not_for, r.suggestion),
+            (GenFit::Red, Some(NotFor::VideoNotOnThisMac), None)
+        );
+        // 2.84 + 4.15 + 0.25 + 1.90 + 1 = 10.14 <= 16
+        let r = gen_fit(&wan21(), clip(832, 480, 33), &apple(16, 24), None);
+        assert_eq!((r.fit, r.not_for), (GenFit::Green, None));
+        let r = gen_fit(&zimage(), sq(1024), &apple(2, 4), None);
+        assert_eq!(
+            r.not_for,
+            Some(NotFor::MacMemory {
+                needs: 5_773_850_304
+            })
+        );
+    }
+
+    #[test]
+    fn a_clip_too_big_suggests_the_largest_preset_that_fits() {
+        // 1280×704×121 needs 13.0 GB one part at a time; 832×480×49 needs 7.48 (one part, fits 8), 832×480×81 8.26 (no),
+        // 1280×704×17 7.31 (fits, but fewer pixel-frames than 832×480×49)
+        let r = gen_fit(&wan22(), clip(1280, 704, 121), &gpu(8, 16), None);
+        assert_eq!(
+            (r.fit, r.suggestion),
+            (
+                GenFit::PartlyOnProcessor,
+                Some(GenSize {
+                    width: 832,
+                    height: 480,
+                    frames: 49
+                })
+            )
+        );
+    }
+
+    #[test]
+    fn with_a_chat_model_loaded_the_suggestion_is_for_the_room_after_the_unload() {
+        // 3 GB free beside a 5 GB chat model: nothing fits now, 832×480×49 after the unload.
+        let big = clip(1280, 704, 121);
+        assert_eq!(gen_fit(&wan22(), big, &gpu(3, 16), None).suggestion, None);
+        assert_eq!(
+            gen_fit(&wan22(), big, &gpu(3, 16), Some(5 * GB)).suggestion,
+            Some(clip(832, 480, 49))
+        );
+        // A size that fits gets no suggestion.
+        assert_eq!(
+            gen_fit(&wan22(), clip(832, 480, 49), &gpu(8, 16), None).suggestion,
+            None
+        );
+    }
+
+    #[test]
+    fn a_picture_too_big_suggests_the_largest_side_at_its_shape() {
+        // 2048²: 2.46 + 2.14 + 1 = 5.60 > 5 with part on the processor; 1024² one part: 4.37
+        let r = gen_fit(&klein(), sq(2048), &gpu(5, 32), None);
+        assert_eq!(
+            (r.fit, r.suggestion),
+            (GenFit::PartlyOnProcessor, Some(sq(1024)))
+        );
+        // 16:9 at 2048×1152 needs 4.88 one part at a time; 1808×1024 4.68, 1360×768 4.37
+        let card = Target::Gpu {
+            name: "GPU".into(),
+            free_bytes: 4_500_000_000,
+            ram_free_bytes: Some(32 * GB),
+        };
+        let r = gen_fit(&klein(), clip(2048, 1152, 1), &card, None);
+        assert_eq!(
+            (r.fit, r.suggestion),
+            (GenFit::PartlyOnProcessor, Some(clip(1360, 768, 1)))
+        );
+    }
+
+    #[test]
+    fn measured_points_win_over_the_fallback() {
+        let point = |side: u32, peak_bytes: u64, build: u32| MemoryPoint {
+            width: side,
+            height: side,
+            frames: 1,
+            peak_bytes,
+            device: "vulkan".into(),
+            build,
+        };
+        let mut e = klein();
+        e.memory = vec![
+            point(1024, 5_000_000_000, 1106),
+            point(768, 4_100_000_000, 1106),
+            // Another engine build's point is not mixed in.
+            point(896, 9_000_000_000, 1105),
+        ];
+        let needed = |side| gen_fit(&e, sq(side), &gpu(8, 32), None).needed_bytes;
+        assert_eq!(needed(1024), 5_000_000_000);
+        // 896²: 3136 tokens, 832 of the 1792 from 768² (2304) to 1024² (4096).
+        assert_eq!(needed(896), 4_100_000_000 + 900_000_000 * 832 / 1792);
+        assert!((4_100_000_000..5_000_000_000).contains(&needed(896)));
+        // Beyond them, the nearest one alone.
+        assert_eq!((needed(512), needed(1280)), (4_100_000_000, 5_000_000_000));
+        // The measured 5.0 GB fits a 6 GB card whole, where the fallback said one part at a time.
+        assert_eq!(gen_fit(&e, sq(1024), &gpu(6, 32), None).fit, GenFit::Green);
+    }
+
+    #[test]
+    fn wan_2_2_ti2v_counts_tokens_in_32_pixel_patches() {
+        assert_eq!(tokens(&wan22(), clip(832, 480, 49)), 26 * 15 * 13);
+        // Wan 2.1 in 16-pixel patches.
+        assert_eq!(tokens(&wan21(), clip(832, 480, 33)), 52 * 30 * 9);
+    }
+
+    #[test]
+    fn the_size_serializes_for_the_webview() {
+        assert_eq!(
+            serde_json::to_value(clip(832, 480, 49)).unwrap(),
+            serde_json::json!({"width": 832, "height": 480, "frames": 49})
+        );
+        assert_eq!(
+            serde_json::to_value(GenFit::OnePartAtATime).unwrap(),
+            serde_json::json!("onePartAtATime")
+        );
+    }
+}
