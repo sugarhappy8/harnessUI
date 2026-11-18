@@ -2,6 +2,7 @@
 // a raw identifier such as "vulkan", "Vulkan0" or "text_model". Every phrase of the model
 // loading screens lives here, so the wording stays the same wherever it appears; the test
 // walks every value of the contract's enums.
+import type { RefRole } from "../components/studio/types";
 import { APP_NAME } from "./app";
 import type {
   BackendKind,
@@ -934,3 +935,29 @@ export const STUDIO_NAV = {
 export function studioButtonLabel(working: number): string {
   return working > 0 ? `${STUDIO_NAV.name} (${working} working)` : STUDIO_NAV.name;
 }
+
+/** What an added picture is, as the note after a model switch names it: one, then several. */
+const PICTURE_NOUNS: Record<RefRole, readonly [string, string]> = {
+  reference: ["added picture", "added pictures"],
+  startFrame: ["start frame", "start frames"],
+  endFrame: ["end frame", "end frames"],
+};
+
+/**
+ * The note after switching models (Task B4): one sentence for each setting that did not carry
+ * over as it was. `name` is a field's name in the middle of a sentence ("seed", "how many"),
+ * `label` its name as the field shows it ("Shape"), and values are as their fields show them.
+ */
+export const CARRY_WORDS = {
+  became: (label: string, was: string, now: string) => `${label} ${was} became ${now}.`,
+  noSetting: (model: string, name: string) => `${model} has no ${name} setting, so it was removed.`,
+  notOffered: (model: string, name: string, value: string) => `${model} does not offer ${name} ${value}, so it was removed.`,
+  notAccepted: (model: string, key: string) => `${model} does not accept ${key}, so it was removed.`,
+  /** Added pictures past the new model's limit for their role (`fit` may be 0). */
+  leftOut(model: string, role: RefRole, fit: number, dropped: number): string {
+    const [one, many] = PICTURE_NOUNS[role];
+    const was = dropped === 1 ? "1 was" : `${dropped} were`;
+    if (fit === 0) return dropped === 1 ? `${model} takes no ${one}, so it was left out.` : `${model} takes no ${many}, so ${was} left out.`;
+    return fit === 1 ? `Only 1 ${one} fits, so ${was} left out.` : `Only ${fit} ${many} fit, so ${was} left out.`;
+  },
+} as const;
