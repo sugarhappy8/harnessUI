@@ -25,6 +25,7 @@
   "vc_runtime_files": [
     "msvcp140.dll",
     "msvcp140_codecvt_ids.dll",
+    "vcomp140.dll",
     "vcruntime140.dll",
     "vcruntime140_1.dll"
   ],

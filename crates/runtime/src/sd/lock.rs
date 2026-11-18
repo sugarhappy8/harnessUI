@@ -31,12 +31,13 @@ pub struct SdLock {
     #[serde(default)]
     pub keep_files: Vec<String>,
     /// Microsoft Visual C++ runtime DLLs copied into the Windows engine folder from
-    /// llama.cpp's installed folder.
+    /// llama.cpp's installed folder: the C++ runtime and the OpenMP runtime `vcomp140.dll`,
+    /// so the engine starts on a PC without the Visual C++ redistributable.
     #[serde(default)]
     pub vc_runtime_files: Vec<String>,
     /// The DLLs that each program and DLL the Windows pack keeps imports, as `objdump -p`
     /// printed them at pinning (`ggml-base.dll` and `ggml-cpu-*.dll` import `VCOMP140.DLL`,
-    /// which neither the pack nor the installer ships: the Visual C++ redistributable installs it).
+    /// which [`vc_runtime_files`](Self::vc_runtime_files) covers).
     #[serde(default)]
     pub windows_imports: BTreeMap<String, Vec<String>>,
     /// The engine downloaded with the first local model (Windows).
@@ -207,8 +208,9 @@ mod tests {
     fn the_engine_keeps_every_dll_it_imports() {
         // every import of every program and DLL the pack keeps (ggml-base.dll and the
         // ggml-cpu-*.dll too, not only sd-cli.exe and stable-diffusion.dll) is a system DLL,
-        // a Visual C++ runtime file, the Vulkan loader, the OpenMP runtime, or a file of the
-        // pinned zip that is kept
+        // a Visual C++ runtime file, the Vulkan loader, or a file of the pinned zip that is kept.
+        // Nothing is let through for being installed by the Visual C++ redistributable: the
+        // engine must start on a clean PC (plan acceptance criterion 11)
         let l = embedded();
         let listing = include_str!("../../tests/fixtures/sd_win_pack_listing.txt");
         let kept_programs: Vec<&str> = listing
@@ -238,17 +240,9 @@ mod tests {
                 // ggml-vulkan.dll's loader comes with the graphics driver, or from llama's
                 // bundled `vulkan` folder at the end of the engine's PATH
                 let vulkan_loader = dll.eq_ignore_ascii_case("vulkan-1.dll");
-                // vcomp140.dll, MSVC's OpenMP runtime, which ggml-base.dll and every
-                // ggml-cpu-*.dll import: installed by the Visual C++ redistributable, not
-                // shipped (the installer adds only msvcp140_codecvt_ids.dll to llama's runtime)
-                let installed_by_the_redistributable = dll.eq_ignore_ascii_case("vcomp140.dll");
                 let shipped = listing.lines().any(|f| f.eq_ignore_ascii_case(dll)) && l.keeps(dll);
                 assert!(
-                    is_windows_system_dll(dll)
-                        || vc
-                        || vulkan_loader
-                        || installed_by_the_redistributable
-                        || shipped,
+                    is_windows_system_dll(dll) || vc || vulkan_loader || shipped,
                     "{exe} imports {dll}, which the pack would not have"
                 );
             }
@@ -258,9 +252,10 @@ mod tests {
     #[test]
     fn the_vc_runtime_covers_every_msvc_import() {
         let l = embedded();
+        // vcomp140.dll is MSVC's OpenMP runtime, which ggml-base.dll and ggml-cpu-*.dll import
         for dll in l.windows_imports.values().flatten().filter(|d| {
-            d.to_ascii_lowercase().starts_with("msvcp")
-                || d.to_ascii_lowercase().starts_with("vcruntime")
+            let d = d.to_ascii_lowercase();
+            d.starts_with("msvcp") || d.starts_with("vcruntime") || d.starts_with("vcomp")
         }) {
             assert!(
                 l.vc_runtime_files
