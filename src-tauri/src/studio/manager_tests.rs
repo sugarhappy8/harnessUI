@@ -4900,7 +4900,7 @@ async fn an_update_waits_for_a_local_job() {
 /// Ruling L16-delete-in-use: *Delete* on a local model is refused while a run on this
 /// computer waits for it or uses it (a file the engine has open cannot be deleted on
 /// Windows), and deletes nothing; another model is deleted meanwhile, and once the runs end,
-/// the model goes.
+/// the model goes. A run that only waits (another model's run is the one running) is enough.
 #[tokio::test]
 async fn a_model_a_local_run_waits_for_or_uses_is_not_deleted() {
     let h = harness_with_local().await;
@@ -4935,8 +4935,30 @@ async fn a_model_a_local_run_waits_for_or_uses_is_not_deleted() {
     };
 
     h.local.hold();
+    // A Z-Image run holds the lane; the two klein runs only wait behind it.
+    let other = h
+        .manager
+        .start(h.local_req_for(ZIMAGE, "other"), false)
+        .await
+        .unwrap();
+    h.wait_status(&other.id, "running").await;
     let first = h.manager.start(h.local_req("one"), false).await.unwrap();
     let second = h.manager.start(h.local_req("two"), false).await.unwrap();
+    assert_eq!(h.run_dto(&first.id).await.status, "queued");
+    assert_eq!(h.run_dto(&second.id).await.status, "queued");
+    assert!(h.manager.local_uses_model(ZIMAGE));
+    assert!(h.manager.local_uses_model(KLEIN));
+    let refused = delete(KLEIN).await.unwrap_err();
+    assert_eq!(
+        (refused.code.as_str(), refused.next_step.as_str()),
+        ("studio_model_in_use", "Stop the run, then delete it.")
+    );
+    assert!(h.store.get_gen_model(KLEIN).await.unwrap().is_some());
+    assert!(files[0].is_file());
+
+    // The Z-Image run ended: klein's first run runs, the second waits.
+    h.local.release_one();
+    h.wait_status(&other.id, "done").await;
     h.wait_status(&first.id, "running").await;
     assert_eq!(h.run_dto(&second.id).await.status, "queued");
     assert!(h.manager.local_uses_model(KLEIN));
