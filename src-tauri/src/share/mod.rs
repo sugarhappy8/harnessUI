@@ -5,8 +5,9 @@
 //!   changes it; it is saved under [`SETTINGS_KEY`] with the kept port, and a saved "on"
 //!   starts the proxy again when the app starts.
 //! - **The port** is chosen at random from [`PORT_RANGE`] on the first switch-on and then
-//!   kept (D10). When it is taken the page says "Port N is used by another program. Choose
-//!   another port." and nothing listens until the user picks another one.
+//!   kept (D10). When it is taken (still, after a few tries a moment apart) the page says
+//!   "Port N is used by another program. Choose another port." and nothing listens until
+//!   the user picks another one.
 //! - **The sharing key** (`harnessui-share-` and 32 random hex digits) lives in the
 //!   keychain only, under [`KEY_SECRET`]; it is kept in memory for the proxy's checks,
 //!   shown only by `reveal_share_key` and replaced by `new_share_key` (the old one stops
@@ -24,8 +25,10 @@ pub mod setup_text;
 #[cfg(test)]
 mod tests;
 
+use std::io;
 use std::ops::RangeInclusive;
 use std::sync::{Arc, RwLock};
+use std::time::Duration;
 
 use rand::Rng;
 use serde::{Deserialize, Serialize};
@@ -48,6 +51,12 @@ pub const PORT_RANGE: RangeInclusive<u16> = 49152..=65535;
 const LOWEST_PORT: u16 = 1024;
 /// Random ports tried before giving up.
 const PORT_TRIES: usize = 40;
+/// Tries at the kept port while another program is still on it, [`KEPT_PORT_WAIT`] apart:
+/// a port let go a moment ago (sharing switched off and on again at once) may not be free
+/// yet.
+const KEPT_PORT_TRIES: usize = 5;
+/// The wait between two tries at the kept port.
+const KEPT_PORT_WAIT: Duration = Duration::from_millis(50);
 
 /// What is saved under [`SETTINGS_KEY`]: the switch and the kept port. Absent until
 /// sharing is first switched on. The sharing key itself lives in the keychain only.
@@ -425,9 +434,11 @@ impl Sharing {
         if let Some(stale) = inner.running.take() {
             stale.stop().await;
         }
+        // Switched on: the count starts anew, whether or not the port opens.
+        self.counters.reset_refused();
         let kept = saved.map(|s| s.port).filter(|p| *p >= LOWEST_PORT);
         let listener = match kept {
-            Some(port) => match proxy::bind(port).await {
+            Some(port) => match bind_retrying(|| proxy::bind(port)).await {
                 Ok(listener) => listener,
                 Err(e) => {
                     tracing::warn!(port, "the sharing port could not be opened: {e}");
@@ -454,7 +465,6 @@ impl Sharing {
         };
         let running = self.serve(env, listener)?;
         let port = running.port();
-        self.counters.reset_refused();
         inner.running = Some(running);
         inner.error = None;
         self.save(
@@ -584,6 +594,26 @@ async fn random_listener() -> Option<tokio::net::TcpListener> {
         }
     }
     None
+}
+
+/// Binds with `bind`, trying again [`KEPT_PORT_WAIT`] later while the port is in use, up to
+/// [`KEPT_PORT_TRIES`] tries in all. Any other error, or a port still in use at the last
+/// try, is returned as it is.
+async fn bind_retrying<F, Fut>(mut bind: F) -> io::Result<tokio::net::TcpListener>
+where
+    F: FnMut() -> Fut,
+    Fut: Future<Output = io::Result<tokio::net::TcpListener>>,
+{
+    let mut tries = 1;
+    loop {
+        match bind().await {
+            Err(e) if e.kind() == io::ErrorKind::AddrInUse && tries < KEPT_PORT_TRIES => {
+                tries += 1;
+                tokio::time::sleep(KEPT_PORT_WAIT).await;
+            }
+            done => return done,
+        }
+    }
 }
 
 /// Starts the proxy at launch when the user left sharing on.

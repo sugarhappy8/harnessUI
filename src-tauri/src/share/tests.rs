@@ -1916,6 +1916,116 @@ async fn a_new_key_replaces_the_old_one_at_once() {
     sharing.shutdown().await;
 }
 
+/// Switching on starts the refusal count anew even when the kept port cannot be opened;
+/// a kept port another program holds throughout still says so, and is used once it frees.
+#[tokio::test]
+async fn switching_on_starts_from_zero_even_when_the_kept_port_is_taken() {
+    let env = env_with(Upstream::NotLoaded);
+    let sharing = Sharing::default();
+    let port = sharing.set_enabled(&env, true).await.unwrap().port.unwrap();
+    let client = reqwest::Client::builder().no_proxy().build().unwrap();
+    let refused = client
+        .post(format!("http://127.0.0.1:{port}/v1/messages"))
+        .header("x-api-key", format!("{KEY_PREFIX}{}", "0".repeat(32)))
+        .body("{\"messages\":[]}")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(refused.status(), 401);
+    assert_eq!(sharing.status(&env).await.refused, 1);
+    sharing.set_enabled(&env, false).await.unwrap();
+
+    // Another program holds the kept port from before the switch-on until after it.
+    let taken = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let taken_port = taken.local_addr().unwrap().port();
+    env.store
+        .set_setting(
+            SETTINGS_KEY,
+            &ShareSettings {
+                enabled: false,
+                port: taken_port,
+            },
+        )
+        .await
+        .unwrap();
+    let status = sharing.set_enabled(&env, true).await.unwrap();
+    assert_eq!(
+        (
+            status.enabled,
+            status.listening,
+            status.error,
+            status.refused
+        ),
+        (true, false, Some(port_taken(taken_port)), 0)
+    );
+    assert_eq!(status.port, Some(taken_port));
+
+    // Once it lets go, switching on again listens there.
+    drop(taken);
+    let status = sharing.set_enabled(&env, true).await.unwrap();
+    assert_eq!(
+        (status.port, status.listening, status.error, status.refused),
+        (Some(taken_port), true, None, 0)
+    );
+    assert!(port_open(taken_port).await);
+    sharing.shutdown().await;
+}
+
+/// A kept port still held a moment after it was let go (sharing switched off and on at
+/// once) is tried again; the holder here lets go just before the last try.
+#[tokio::test]
+async fn a_kept_port_freed_within_the_tries_is_bound() {
+    let held = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = held.local_addr().unwrap().port();
+    let mut held = Some(held);
+    let mut tries = 0;
+    let listener = bind_retrying(|| {
+        tries += 1;
+        if tries == KEPT_PORT_TRIES {
+            drop(held.take());
+        }
+        proxy::bind(port)
+    })
+    .await
+    .unwrap();
+    assert_eq!(tries, KEPT_PORT_TRIES);
+    assert_eq!(listener.local_addr().unwrap().port(), port);
+}
+
+/// A kept port held throughout every try is reported as in use; any other error is
+/// reported at once, without trying again.
+#[tokio::test]
+async fn a_kept_port_held_throughout_gives_up_after_the_tries() {
+    assert_eq!(KEPT_PORT_TRIES, 5);
+    assert_eq!(KEPT_PORT_WAIT, Duration::from_millis(50));
+    let held = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = held.local_addr().unwrap().port();
+    let mut tries = 0;
+    let started = Instant::now();
+    let err = bind_retrying(|| {
+        tries += 1;
+        proxy::bind(port)
+    })
+    .await
+    .unwrap_err();
+    assert_eq!(err.kind(), std::io::ErrorKind::AddrInUse);
+    assert_eq!(tries, KEPT_PORT_TRIES);
+    // Four waits between five tries.
+    assert!(started.elapsed() >= KEPT_PORT_WAIT * 4);
+    assert!(port_open(port).await);
+    drop(held);
+
+    let mut tries = 0;
+    let err = bind_retrying(|| {
+        tries += 1;
+        async { Err(std::io::Error::from(std::io::ErrorKind::PermissionDenied)) }
+    })
+    .await
+    .unwrap_err();
+    assert_eq!(err.kind(), std::io::ErrorKind::PermissionDenied);
+    assert_eq!(tries, 1);
+}
+
 /// What the Coding apps see (WP6): the kept port and the switch always, the listening port
 /// and the sharing key the proxy checks only while sharing is on and listening.
 #[tokio::test]
