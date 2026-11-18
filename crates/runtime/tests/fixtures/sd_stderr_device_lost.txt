@@ -1,0 +1,10 @@
+[I] generate_image 1024x1024 --- image.cpp:954
+[I] sampling using euler method --- request.cpp:478
+[I] loading tensors completed, taking 6.12s (read: 5.80s, memcpy: 0.00s, convert: 0.00s, copy_to_backend: 0.31s) --- model_loader.cpp:1437
+[I] get_learned_condition completed, taking 7.03s --- image.cpp:664
+[I] generating image: 1/1 - seed 81723 --- image.cpp:1005
+[I] loading tensors completed, taking 2.31s (read: 2.02s, memcpy: 0.00s, convert: 0.00s, copy_to_backend: 0.28s) --- model_loader.cpp:1437
+[E] ggml: ggml_vulkan: device lost on Vulkan0
+[E] diffusion graph execution failed on Vulkan0: vk::Device::getFenceStatus: ErrorDeviceLost --- execution_engine.cpp:977
+[E] sampling for image 1/1 failed after 5.93s --- image.cpp:1043
+[E] generate failed --- main.cpp:1001

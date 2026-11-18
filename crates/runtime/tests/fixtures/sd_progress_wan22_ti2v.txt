@@ -1,0 +1,22 @@
+[I] loading diffusion model from '/m/QuantStack/Wan2.2-TI2V-5B-GGUF/Wan2.2-TI2V-5B-Q5_K_M.gguf' --- diffusion_engine.cpp:697
+[I] load /m/QuantStack/Wan2.2-TI2V-5B-GGUF/Wan2.2-TI2V-5B-Q5_K_M.gguf using gguf format --- model_loader.cpp:220
+[I] loading t5xxl from '/m/city96/umt5-xxl-encoder-gguf/umt5-xxl-encoder-Q5_K_M.gguf' --- diffusion_engine.cpp:739
+[I] load /m/city96/umt5-xxl-encoder-gguf/umt5-xxl-encoder-Q5_K_M.gguf using gguf format --- model_loader.cpp:220
+[I] loading vae from '/m/Comfy-Org/Wan_2.2_ComfyUI_Repackaged/split_files/vae/wan2.2_vae.safetensors' --- diffusion_engine.cpp:768
+[I] load /m/Comfy-Org/Wan_2.2_ComfyUI_Repackaged/split_files/vae/wan2.2_vae.safetensors using safetensors format --- model_loader.cpp:226
+[I] Version: Wan 2.2 TI2V  --- diffusion_engine.cpp:982
+[I] sampling using euler method --- request.cpp:478
+  |#############                                     |  60/242 - 395.80MB/s[K  |#############################                     | 140/242 - 395.80MB/s[K  |##############################################    | 219/242 - 395.80MB/s[K  |##################################################| 242/242 - 395.80MB/s[K
+[I] loading tensors completed, taking 9.84s (read: 9.40s, memcpy: 0.00s, convert: 0.00s, copy_to_backend: 0.42s) --- model_loader.cpp:1437
+[I] get_learned_condition completed, taking 11.20s --- video.cpp:1263
+[I] generate_video 832x480x49 --- video.cpp:1928
+  |###################                               | 310/825 -   1.18GB/s[K  |###########################################       | 702/825 -   1.18GB/s[K  |##################################################| 825/825 -   1.18GB/s[K
+[I] loading tensors completed, taking 3.95s (read: 3.51s, memcpy: 0.00s, convert: 0.00s, copy_to_backend: 0.40s) --- model_loader.cpp:1437
+  |============>                                     | 1/4 -  21.84s/it - ETA 01:05[K  |=========================>                        | 2/4 -  20.95s/it - ETA 00:42[K  |=====================================>            | 3/4 -  21.02s/it - ETA 00:21[K  |==================================================| 4/4 -  20.88s/it[K
+[I] sampling completed, taking 84.69s --- video.cpp:2028
+[I] generating latent video completed, taking 88.70s --- video.cpp:2195
+  |##################################################| 194/194 - 220.50MB/s[K
+[I] loading tensors completed, taking 0.71s (read: 0.60s, memcpy: 0.00s, convert: 0.00s, copy_to_backend: 0.10s) --- model_loader.cpp:1437
+[I] decode_first_stage completed, taking 14.30s --- video.cpp:1294
+[I] generate_video completed in 115.62s --- video.cpp:2283
+[I] save result video to '/g/.partial/r2/r2.webm' --- main.cpp:553

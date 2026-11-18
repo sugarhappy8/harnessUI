@@ -1,0 +1,26 @@
+[I] loading diffusion model from '/m/leejet/FLUX.2-klein-4B-GGUF/flux-2-klein-4b-Q4_0.gguf' --- diffusion_engine.cpp:697
+[I] load /m/leejet/FLUX.2-klein-4B-GGUF/flux-2-klein-4b-Q4_0.gguf using gguf format --- model_loader.cpp:220
+[I] loading llm from '/m/unsloth/Qwen3-4B-GGUF/Qwen3-4B-Q4_K_M.gguf' --- diffusion_engine.cpp:754
+[I] load /m/unsloth/Qwen3-4B-GGUF/Qwen3-4B-Q4_K_M.gguf using gguf format --- model_loader.cpp:220
+[I] loading vae from '/m/Comfy-Org/flux2-klein-4B/split_files/vae/flux2-vae.safetensors' --- diffusion_engine.cpp:768
+[I] load /m/Comfy-Org/flux2-klein-4B/split_files/vae/flux2-vae.safetensors using safetensors format --- model_loader.cpp:226
+[I] Version: Flux.2 klein  --- diffusion_engine.cpp:982
+[I] generate_image 1024x1024 --- image.cpp:954
+[I] sampling using euler method --- request.cpp:478
+  |################                                  | 120/398 - 410.20MB/s[K  |#####################################             | 290/398 - 410.20MB/s[K  |##################################################| 398/398 - 410.20MB/s[K
+[I] loading tensors completed, taking 6.12s (read: 5.80s, memcpy: 0.00s, convert: 0.00s, copy_to_backend: 0.31s) --- model_loader.cpp:1437
+[I] get_learned_condition completed, taking 7.03s --- image.cpp:664
+[I] generating image: 1/1 - seed 81723 --- image.cpp:1005
+  |###################                               | 200/541 -   1.08GB/s[K  |##################################################| 541/541 -   1.08GB/s[K
+[I] loading tensors completed, taking 2.31s (read: 2.02s, memcpy: 0.00s, convert: 0.00s, copy_to_backend: 0.28s) --- model_loader.cpp:1437
+  |============>                                     | 1/4 -   4.62s/it - ETA 00:13[K  |=========================>                        | 2/4 -   4.41s/it - ETA 00:09[K  |=====================================>            | 3/4 -   4.38s/it - ETA 00:04[K  |==================================================| 4/4 -   4.43s/it[K
+[I] sampling completed, taking 17.89s --- image.cpp:1038
+[I] generating 1 latent images completed, taking 20.24s --- image.cpp:1050
+[I] decoding 1 latents --- image.cpp:689
+  |##################################################| 244/244 - 160.40MB/s[K
+[I] loading tensors completed, taking 0.52s (read: 0.41s, memcpy: 0.00s, convert: 0.00s, copy_to_backend: 0.10s) --- model_loader.cpp:1437
+  |===>                                              |  1/16 -   1.61it/s[K  |======>                                           |  2/16 -   1.72it/s[K  |=========>                                        |  3/16 -   1.64it/s[K  |============>                                     |  4/16 -   1.67it/s[K  |===============>                                  |  5/16 -   1.69it/s[K  |==================>                               |  6/16 -   1.59it/s[K  |=====================>                            |  7/16 -   1.67it/s[K  |=========================>                        |  8/16 -   1.64it/s[K  |============================>                     |  9/16 -   1.72it/s[K  |===============================>                  | 10/16 -   1.61it/s[K  |==================================>               | 11/16 -   1.67it/s[K  |=====================================>            | 12/16 -   1.64it/s[K  |========================================>         | 13/16 -   1.69it/s[K  |===========================================>      | 14/16 -   1.67it/s[K  |==============================================>   | 15/16 -   1.61it/s[K  |==================================================| 16/16 -   1.04s/it[K
+[I] decode_first_stage completed, taking 10.32s --- image.cpp:759
+[I] generate_image completed in 37.61s --- image.cpp:1227
+[I] save result image 0 to '/g/.partial/r5/r5.png' (success) --- main.cpp:501
+[I] 1/1 images saved --- main.cpp:579

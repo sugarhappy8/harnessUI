@@ -16,4 +16,4 @@ pub mod protocol;
 pub mod server;
 pub mod stage;
 
-mod lines;
+pub(crate) mod lines;
