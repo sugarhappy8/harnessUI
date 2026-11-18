@@ -21,8 +21,10 @@
 //! - `grandchild-<n>.txt`: the process id of mode `hang`'s grandchild, so a test can see that
 //!   Stop killed it too.
 //!
-//! A `--list-devices` start records nothing, so a runner that lists the devices before a job
-//! still finds that job's start at 0, and a test that only lists devices finds no start.
+//! A `--list-devices` start records none of these, so a runner that lists the devices before
+//! a job still finds that job's start at 0, and a test that only lists devices finds no start.
+//! Only mode `devices-hang` writes a file then, `devices-hang.txt`: its own process id, so a
+//! test can see that the engine was stopped.
 
 use std::collections::BTreeMap;
 use std::io::Write;
@@ -47,7 +49,8 @@ use crate::spawn::{self, EnvSpec, SpawnSpec, StdioMode};
 /// - `slow`: one progress line, then [`SLOW_PAUSE`] of silence, then the rest as `ok`;
 /// - `no-output`: the progress of `ok` up to its saving lines, then exit 0 without a file;
 /// - `devices-fail`: `--list-devices` fails as `missing-dll` does; a job runs as `ok`;
-/// - `devices-hang`: `--list-devices` never answers (it sleeps); a job runs as `ok`.
+/// - `devices-hang`: `--list-devices` records its process id and never answers (it sleeps); a
+///   job runs as `ok`.
 ///
 /// `oom`, `oom-once`, `crash` and `bad-model` write half a file first, as an engine that
 /// fails while saving can.
@@ -112,12 +115,12 @@ pub fn fake_main(args: &[String]) -> ! {
         Ok(parsed) => parsed,
         Err(message) => fail(&format!("error: {message}\n")),
     };
-    if parsed.list_devices {
-        list_devices(&mode);
-    }
     let record = std::env::var_os(FAKE_RECORD_ENV)
         .filter(|dir| !dir.is_empty())
         .map(PathBuf::from);
+    if parsed.list_devices {
+        list_devices(&mode, record.as_deref());
+    }
     let start = record
         .as_deref()
         .map(|dir| (dir, record_start(dir, args, &parsed)));
@@ -174,14 +177,25 @@ pub fn tiny_webm() -> Vec<u8> {
 }
 
 /// `--list-devices`: the Vulkan devices fixture, or in mode `devices-fail` the output and
-/// exit code of `missing-dll`, or in mode `devices-hang` nothing until it is stopped.
-fn list_devices(mode: &str) -> ! {
+/// exit code of `missing-dll`, or in mode `devices-hang` nothing until it is stopped (after
+/// it records its process id in `record`, if given, as `devices-hang.txt`).
+fn list_devices(mode: &str, record: Option<&Path>) -> ! {
     match mode {
         "devices-fail" => {
             emit(MISSING_DLL);
             std::process::exit(MISSING_DLL_CODE)
         }
         "devices-hang" => {
+            if let Some(dir) = record {
+                // Written under another name and renamed, so a test never reads half of it.
+                let partial = dir.join("devices-hang.txt.partial");
+                save(&partial, std::process::id().to_string().as_bytes());
+                if let Err(error) = std::fs::rename(&partial, dir.join("devices-hang.txt")) {
+                    fail(&format!(
+                        "[E] the fake engine could not record its process id: {error}\n"
+                    ));
+                }
+            }
             std::thread::sleep(HANG_FOR);
             std::process::exit(1)
         }

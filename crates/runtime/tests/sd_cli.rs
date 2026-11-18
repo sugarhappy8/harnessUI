@@ -251,6 +251,20 @@ fn starts(rec: &Path) -> usize {
         .count()
 }
 
+/// The process id a fake engine writes to `path`, once it is there (within 5 s, real time).
+fn wait_for_pid(path: &Path) -> Option<u32> {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        if let Ok(pid) = std::fs::read_to_string(path) {
+            return pid.trim().parse().ok();
+        }
+        if Instant::now() >= deadline {
+            return None;
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+}
+
 fn a_picture_run_reports_its_stages_and_writes_its_file() {
     let f = folders();
     let job = picture_job(&f.gallery);
@@ -679,9 +693,14 @@ fn a_device_list_that_fails_or_never_comes_is_named() {
     );
     assert_eq!(starts(&f.rec), 0);
 
-    // mode devices-hang: the engine never answers. Tokio's paused clock moves on whenever the
-    // runner only waits, so the 30 s limit passes at once; the fake would sleep for minutes,
-    // so the call coming back soon means the engine was stopped.
+    // mode devices-hang: the engine never answers, and the call gives up after
+    // LIST_DEVICES_TIMEOUT. The check runs on a paused clock and moves it past the limit
+    // itself. Tokio moves a paused clock on by itself only while no blocking task runs, and
+    // on Windows it reads a child's pipes on its blocking pool, so there the clock would
+    // stand still until the fake ended its sleep. Waiting for the fake's process id on a
+    // blocking task holds the clock in the same way everywhere, so the limit cannot pass
+    // before the fake has started and recorded it; by then the call has set its limit, which
+    // it does in the same step as starting the engine.
     let f = folders();
     let started = Instant::now();
     let paused = tokio::runtime::Builder::new_current_thread()
@@ -689,11 +708,20 @@ fn a_device_list_that_fails_or_never_comes_is_named() {
         .start_paused(true)
         .build()
         .expect("a runtime");
-    let (result, waited) = paused.block_on(async {
+    let engine = fake("devices-hang", &f.rec);
+    let pid_file = f.rec.join("devices-hang.txt");
+    let (result, waited, pid) = paused.block_on(async {
         let clock = tokio::time::Instant::now();
-        let result = list_devices(&fake("devices-hang", &f.rec)).await;
-        (result, clock.elapsed())
+        let (result, pid) = tokio::join!(list_devices(&engine), async {
+            let pid = tokio::task::spawn_blocking(move || wait_for_pid(&pid_file))
+                .await
+                .expect("the wait for the fake's process id");
+            tokio::time::advance(LIST_DEVICES_TIMEOUT + Duration::from_millis(1)).await;
+            pid
+        });
+        (result, clock.elapsed(), pid)
     });
+    // the limit passing is named as a crash without an exit code
     assert_eq!(result, Err(SdFailure::Crashed { code: None }));
     assert!(waited >= LIST_DEVICES_TIMEOUT, "{waited:?}");
     assert!(
@@ -702,6 +730,9 @@ fn a_device_list_that_fails_or_never_comes_is_named() {
         started.elapsed()
     );
     assert_eq!(starts(&f.rec), 0);
+    // the fake would sleep for minutes; the call came back with it stopped
+    let pid = pid.expect("the fake's process id");
+    assert!(!runtime::process_alive(pid), "{pid} still runs");
 
     // in both modes a job still runs as in mode ok
     for mode in ["devices-fail", "devices-hang"] {
