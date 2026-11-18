@@ -145,7 +145,7 @@ Also covered where they belong: switching to a model with incompatible settings 
 | `src/studio/commands.rs` (new) | Tauri commands (thin: each calls a tested function) |
 | `src/studio/errors.rs` (new) | Studio `AppError`s and their copy |
 | `src/studio/wire_tests.rs` (new) | Phase D: a whole run against a local OpenRouter mock, and a local run against the fake engine |
-| `src/studio/engine_cmd.rs` (new) | The Studio engine's status, download, cancel and remove; `engine_layout`, `ensure_engine` |
+| `src/studio/engine_cmd.rs` (new) | The Studio engine's status, download, cancel and remove; `engine_layout`, `current_engine` |
 | `src/studio/local_models.rs` (new) | `LocalSource`, download plans, licence and notice checks, starting and deleting local model downloads |
 | `src/studio/label.rs`, `prompt_check.rs` (new) | The AI label written into local files; the always-on prompt check |
 | `src/studio/local.rs` (new) | `LocalMediaProvider` behind `MediaProvider` and `LocalProvider`: installed models as `MediaModel`s, the exact command, runs through `runtime::sd` with the lane's `LocalJobOptions` |

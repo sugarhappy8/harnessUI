@@ -24,6 +24,10 @@
 //! - [`local_models`]: downloading a picture or video model to this computer, part by part,
 //!   once the note about local models and every licence of every part are accepted (with the
 //!   Windows engine pack on first use), and deleting one with the part files nothing else uses.
+//! - [`local`]: the runs on this computer behind the same media provider as the cloud
+//!   companies: the installed models with their controls, free; the exact command; the checks
+//!   before the Studio engine starts; one engine process per run, its progress, Stop and its
+//!   results.
 //! - [`label`]: the AI label written into every local result (XMP in PNG and WebP, Matroska
 //!   tags in WebM), never with the prompt.
 //! - [`prompt_check`]: the small, always-on check that refuses a local prompt pairing a sexual
@@ -37,6 +41,7 @@ pub mod engine_cmd;
 pub mod errors;
 pub mod gallery;
 pub mod label;
+pub mod local;
 pub mod local_models;
 pub mod manager;
 #[cfg(test)]

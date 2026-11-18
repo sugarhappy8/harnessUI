@@ -187,7 +187,7 @@ pub fn check_acceptance(
 }
 
 /// The catalog's picture and video models as this build's Studio engine can run them.
-async fn current_gen_catalog(app: &AppHandle) -> GenCatalog {
+pub(crate) async fn current_gen_catalog(app: &AppHandle) -> GenCatalog {
     gen_catalog(
         &crate::hub::current_catalog(app).await,
         runtime::sd::lock::embedded().sd_cpp.build,

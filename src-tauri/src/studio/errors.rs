@@ -9,6 +9,8 @@ use agent::media::{
 };
 use models::gen_search::NotOffered;
 use runtime::packs::PackError;
+use runtime::sd::args::ArgsError;
+use runtime::sd::failure::SdFailure;
 use search::FetchError;
 
 use super::gallery::GalleryError;
@@ -1055,6 +1057,83 @@ pub fn wont_make() -> AppError {
     )
 }
 
+// ---- a run on this computer: what its failure's details say -----------------------------------
+//
+// A local run's failure carries one of these as its message (`MediaFailure::message`), which
+// [`from_failure`] puts in the details; the message and next step on screen come from the
+// failure's kind.
+
+/// No Studio engine is found on this computer (Windows before its pack is installed).
+pub const LOCAL_ENGINE_NOT_FOUND: &str = "The Studio engine is not on this computer.";
+/// The model asked for is not among the installed ones.
+pub const LOCAL_NOT_INSTALLED: &str = "This model is not installed on this computer.";
+/// A request for a picture from a video model, or the other way round.
+pub const LOCAL_WRONG_KIND: &str = "This model does not make what was asked for.";
+/// A part file of the model is gone.
+pub const LOCAL_PART_MISSING: &str = "A file of this model is missing.";
+/// A part file is not the size it was downloaded at.
+pub const LOCAL_PART_CHANGED: &str = "A file of this model is not the size it was downloaded at.";
+/// The diffusion file's own tensor table is not its family's; the check's details follow.
+pub const LOCAL_NOT_ITS_MODEL: &str = "The model file is not the model it was downloaded as";
+/// A prompt over `runtime::sd::args::PROMPT_MAX_CHARS`.
+pub const LOCAL_PROMPT_TOO_LONG: &str = "The prompt is longer than 4,000 characters.";
+/// A negative prompt over `runtime::sd::args::PROMPT_MAX_CHARS`.
+pub const LOCAL_NEGATIVE_TOO_LONG: &str = "The negative prompt is longer than 4,000 characters.";
+/// A run started again with the folder of one still running.
+pub const LOCAL_ALREADY_RUNNING: &str = "This run is already running.";
+/// A result asked for that the run did not make, or not yet.
+pub const LOCAL_NO_SUCH_RESULT: &str = "This run has no such result.";
+
+/// A setting whose value the engine job cannot take (the check before the run refuses it
+/// first); the setting's key is named.
+pub fn local_bad_value(key: &str) -> String {
+    format!("The value of {key} is not one this model takes.")
+}
+
+/// The engine's arguments refused the job: their own sentence (the prompt's length, a size,
+/// a `%d` in the gallery folder's path).
+pub fn local_args_refused(e: &ArgsError) -> String {
+    let text = e.to_string();
+    let mut chars = text.chars();
+    match chars.next() {
+        Some(first) => format!("{}{}.", first.to_uppercase(), chars.as_str()),
+        None => String::new(),
+    }
+}
+
+/// What the Studio engine did when a run of `kind` failed. An engine that exits 0 without a
+/// file finished without making it; it did not crash.
+pub fn engine_failure_details(f: &SdFailure, kind: MediaKind) -> String {
+    let result = match kind {
+        MediaKind::Image => "a picture",
+        MediaKind::Video => "a video",
+    };
+    match f {
+        SdFailure::OutOfMemory => "The Studio engine ran out of memory.".to_owned(),
+        SdFailure::DeviceLost => "The graphics driver stopped responding.".to_owned(),
+        SdFailure::MissingLibrary(name) if name.is_empty() => {
+            "The Studio engine could not load a library it needs.".to_owned()
+        }
+        SdFailure::MissingLibrary(name) => {
+            format!("The Studio engine could not load a library it needs: {name}.")
+        }
+        SdFailure::BadModel => "The Studio engine could not read a model file.".to_owned(),
+        SdFailure::EngineMissing => LOCAL_ENGINE_NOT_FOUND.to_owned(),
+        SdFailure::EngineBlocked(why) => {
+            format!("The system did not let the Studio engine start: {why}.")
+        }
+        SdFailure::Crashed { code: Some(0) } => {
+            format!("The Studio engine finished without making {result}.")
+        }
+        SdFailure::Crashed { code: Some(code) } => {
+            format!("The Studio engine stopped with exit code {code}.")
+        }
+        SdFailure::Crashed { code: None } => "The system stopped the Studio engine.".to_owned(),
+        SdFailure::Cancelled => "The run was stopped.".to_owned(),
+        SdFailure::Io(why) => format!("Studio could not use the run's folder: {why}."),
+    }
+}
+
 /// A company's failure as the details show it: its own message, code, HTTP status and
 /// request id, each when it gave one.
 fn failure_details(f: &MediaFailure) -> String {
@@ -2040,6 +2119,39 @@ mod tests {
                 "Ran out of graphics memory.",
                 "Try 480p or a shorter clip."
             )
+        );
+    }
+
+    /// A local run's failure says in its details what the engine did, in a sentence: an
+    /// engine that exits 0 without a file finished without making it, never "crashed".
+    #[test]
+    fn a_local_runs_details_say_what_the_engine_did() {
+        assert_eq!(
+            engine_failure_details(&SdFailure::Crashed { code: Some(0) }, MediaKind::Image),
+            "The Studio engine finished without making a picture."
+        );
+        assert_eq!(
+            engine_failure_details(&SdFailure::Crashed { code: Some(0) }, MediaKind::Video),
+            "The Studio engine finished without making a video."
+        );
+        assert_eq!(
+            engine_failure_details(&SdFailure::Crashed { code: Some(3) }, MediaKind::Image),
+            "The Studio engine stopped with exit code 3."
+        );
+        assert_eq!(
+            engine_failure_details(
+                &SdFailure::MissingLibrary("vulkan-1.dll".into()),
+                MediaKind::Image
+            ),
+            "The Studio engine could not load a library it needs: vulkan-1.dll."
+        );
+        assert_eq!(
+            local_args_refused(&ArgsError::BadSize),
+            "The size is not a multiple of 16 from 64 to 2048."
+        );
+        assert_eq!(
+            local_args_refused(&ArgsError::PercentInOutputPath),
+            "The output path holds a %d numbering template."
         );
     }
 }
