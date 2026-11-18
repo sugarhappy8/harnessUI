@@ -28,7 +28,9 @@ use serde::Serialize;
 pub enum LocalStage {
     /// Starting and reading the model's weights.
     Loading,
-    /// Turning the prompt into what the model reads (`generate_image`, `generate_video`).
+    /// Turning the prompt into what the model reads, from `generate_image`. A video never
+    /// shows it: this build prints `generate_video` only after the prompt was read, when the
+    /// drawing has already begun.
     ReadingPrompt,
     /// Drawing the picture or video, step by step.
     Drawing,
@@ -145,9 +147,14 @@ impl ProgressParser {
             return self.last.stage == LocalStage::Loading;
         }
         if message.starts_with("generate_image") || message.starts_with("generate_video") {
+            // `generate_video` comes after `get_learned_condition completed` in this build
+            // (video.cpp), so for a video it is a stage already passed.
             return self.advance(LocalStage::ReadingPrompt);
         }
         if message.starts_with("get_learned_condition completed") {
+            // Not `sampling using …`: the sampling plan prints it (request.cpp) before the
+            // prompt is read and before an added picture is encoded, whose tile bars would
+            // then count as steps.
             return self.advance(LocalStage::Drawing);
         }
         if let Some(rest) = message.strip_prefix("generating image: ") {
@@ -456,7 +463,9 @@ mod tests {
 
     #[test]
     fn loading_bars_and_tile_bars_are_not_steps() {
-        // Weights read before the prompt (`--eager-load`) draw "#" bars while loading.
+        // Weights read before the prompt (`--eager-load`) draw "#" bars while loading. Fed by
+        // hand: the fixtures use this build's default, lazy loading, which reads the weights
+        // only after `generate_image`.
         let mut p = ProgressParser::new(1, 1);
         for line in [
             "  |################                                  | 120/398 - 410.20MB/s\x1b[K",
