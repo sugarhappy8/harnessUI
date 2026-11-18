@@ -615,6 +615,17 @@ pub fn bad_poster() -> AppError {
     )
 }
 
+/// The file chosen for an export is the result's own file (reached through a link), which a
+/// copy would empty.
+pub fn export_onto_itself() -> AppError {
+    AppError::new(
+        "bad_request",
+        "That file is the result itself.",
+        "Choose another name or folder.",
+        String::new(),
+    )
+}
+
 /// The exported copy, or its settings beside it, could not be written where the user chose.
 pub fn not_exported(details: impl Into<String>) -> AppError {
     AppError::new(
@@ -890,6 +901,7 @@ mod tests {
             not_fetched(Company::OpenRouter),
             bad_ref_name(),
             bad_poster(),
+            export_onto_itself(),
             not_exported("denied"),
         ];
         for to in [PictureUse::Chat, PictureUse::Prompt] {

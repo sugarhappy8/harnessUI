@@ -573,9 +573,11 @@ pub async fn star(studio: &StudioManager, output_id: &str, starred: bool) -> App
 }
 
 /// Copies output `output_id` to `path` and gives where it went. `path` must keep the
-/// result's own extension and stay out of the app's folders: `forbidden` and the gallery
-/// folder ([`export_target`]). With `with_settings`, the run's prompt, model, settings and
-/// cost go beside it as `<name>.json` ([`settings_record`]).
+/// result's own extension and stay out of the app's folders: `forbidden`, the gallery
+/// folder, and the gallery folder the result was kept in when Settings → Studio has moved
+/// the gallery since ([`export_target`]); and it must not be the result's own file (through
+/// a link), which a copy would empty. With `with_settings`, the run's prompt, model,
+/// settings and cost go beside it as `<name>.json` ([`settings_record`]).
 pub async fn export(
     studio: &StudioManager,
     output_id: &str,
@@ -591,10 +593,21 @@ pub async fn export(
         .unwrap_or_default();
     let mut forbidden = forbidden.to_vec();
     forbidden.push(studio.gallery().root().to_owned());
+    // `<gallery>/YYYY-MM/<file>`: the result's own gallery folder, with its sidecars,
+    // `.thumbs/` and `refs/`, which stays where it was when the gallery moves.
+    if let Some(kept_in) = source.parent().and_then(Path::parent) {
+        forbidden.push(kept_in.to_owned());
+    }
     let target = export_target(path, ext, &forbidden).map_err(AppError::bad_request)?;
-    tokio::fs::metadata(&source)
+    let source_at = tokio::fs::canonicalize(&source)
         .await
         .map_err(|e| errors::from_gallery(&io_error(e)))?;
+    if tokio::fs::canonicalize(&target)
+        .await
+        .is_ok_and(|target_at| target_at == source_at)
+    {
+        return Err(errors::export_onto_itself());
+    }
     tokio::fs::copy(&source, &target)
         .await
         .map_err(|e| errors::not_exported(e.to_string()))?;
@@ -1830,6 +1843,82 @@ mod tests {
             err.message,
             "That folder belongs to the app. Choose another one."
         );
+    }
+
+    #[tokio::test]
+    async fn a_result_kept_in_an_earlier_gallery_folder_is_never_saved_over() {
+        // Made first, so they go after the harness.
+        let docs = Scratch::new();
+        let moved_to = Scratch::new();
+        let h = harness().await;
+        h.seed_run("p1", MediaKind::Image, "a red kite", now())
+            .await;
+        let picture = png(4, 4);
+        let out = h
+            .seed_output("p1", "image/png", &picture, picture.len() as u64)
+            .await;
+        let earlier = h.manager.gallery().root().to_owned();
+        let source = h.manager.gallery().output_path(now(), "p1", 0, "png");
+        let month = source.parent().unwrap().to_owned();
+        let sidecar = month.join("p1.json");
+        std::fs::write(&sidecar, b"the run's own sidecar").unwrap();
+        std::fs::create_dir_all(earlier.join(".thumbs")).unwrap();
+        // Settings -> Studio moves the gallery; the result stays where it was made.
+        h.manager
+            .set_prefs(serde_json::from_value(json!({"galleryDir": moved_to.path()})).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(h.manager.gallery().root(), moved_to.path());
+        let at = |p: &Path| p.display().to_string();
+
+        for (target, with_settings) in [
+            // The result's own file.
+            (source.clone(), false),
+            // A copy whose settings would replace the run's sidecar.
+            (month.join("p1.png"), true),
+            // The earlier gallery's other folders.
+            (earlier.join(".thumbs").join("kite.png"), false),
+            (earlier.join("kite.png"), false),
+        ] {
+            let err = export(&h.manager, &out, &at(&target), with_settings, &[])
+                .await
+                .unwrap_err();
+            assert_eq!(
+                err.message,
+                "That folder belongs to the app. Choose another one.",
+                "{}",
+                target.display()
+            );
+        }
+        assert!(!month.join("p1.png").exists());
+        assert!(!earlier.join(".thumbs").join("kite.png").exists());
+
+        // A link elsewhere that leads to the result itself.
+        #[cfg(unix)]
+        {
+            let link = docs.path().join("link.png");
+            std::os::unix::fs::symlink(&source, &link).unwrap();
+            let err = export(&h.manager, &out, &at(&link), false, &[])
+                .await
+                .unwrap_err();
+            assert_eq!(err.code, "bad_request");
+            assert_eq!(err.message, "That file is the result itself.");
+        }
+
+        assert_eq!(std::fs::read(&source).unwrap(), picture);
+        assert_eq!(std::fs::read(&sidecar).unwrap(), b"the run's own sidecar");
+        // Anywhere else, the copy is made as before.
+        let saved = export(
+            &h.manager,
+            &out,
+            &at(&docs.path().join("kite.png")),
+            true,
+            &[],
+        )
+        .await
+        .unwrap();
+        assert_eq!(std::fs::read(&saved).unwrap(), picture);
+        assert!(docs.path().join("kite.json").exists());
     }
 
     #[tokio::test]
