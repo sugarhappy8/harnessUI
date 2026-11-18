@@ -7,7 +7,8 @@
 //! `tests/fixtures/sd_progress_*.txt` and `sd_stderr_*.txt`, with their `\r` redraws and
 //! `ESC[K`; the bars, INFO and WARN lines on stdout, the rest on stderr), writes tiny files
 //! where `sd-cli` writes its results, and exits as the mode says. `--list-devices` prints the
-//! Vulkan devices fixture in every mode.
+//! Vulkan devices fixture in every mode but the two made to fail it (`devices-fail` and
+//! `devices-hang`).
 //!
 //! With [`FAKE_RECORD_ENV`] naming a folder, each start for a job records there, `<n>`
 //! counting the starts from 0:
@@ -43,7 +44,10 @@ use crate::spawn::{self, EnvSpec, SpawnSpec, StdioMode};
 /// - `missing-dll`: a library cannot be loaded (Windows' exit code 0xC0000135, 127
 ///   elsewhere);
 /// - `bad-model`: a damaged model file;
-/// - `slow`: one progress line, then [`SLOW_PAUSE`] of silence, then the rest as `ok`.
+/// - `slow`: one progress line, then [`SLOW_PAUSE`] of silence, then the rest as `ok`;
+/// - `no-output`: the progress of `ok` up to its saving lines, then exit 0 without a file;
+/// - `devices-fail`: `--list-devices` fails as `missing-dll` does; a job runs as `ok`;
+/// - `devices-hang`: `--list-devices` never answers (it sleeps); a job runs as `ok`.
 ///
 /// `oom`, `oom-once`, `crash` and `bad-model` write half a file first, as an engine that
 /// fails while saving can.
@@ -64,6 +68,13 @@ const HANG_FOR: Duration = Duration::from_secs(120);
 
 /// Mode `crash`'s exit code.
 const CRASH_CODE: i32 = 3;
+
+/// Mode `missing-dll`'s exit code: Windows' 0xC0000135, 127 elsewhere.
+const MISSING_DLL_CODE: i32 = if cfg!(windows) {
+    STATUS_DLL_NOT_FOUND
+} else {
+    127
+};
 
 /// The mode mode `hang` starts its grandchild in, and the line it says when it is ready.
 const GRANDCHILD: &str = "grandchild";
@@ -102,8 +113,7 @@ pub fn fake_main(args: &[String]) -> ! {
         Err(message) => fail(&format!("error: {message}\n")),
     };
     if parsed.list_devices {
-        write_or_exit(&mut std::io::stdout().lock(), DEVICES);
-        std::process::exit(0);
+        list_devices(&mode);
     }
     let record = std::env::var_os(FAKE_RECORD_ENV)
         .filter(|dir| !dir.is_empty())
@@ -124,8 +134,12 @@ pub fn fake_main(args: &[String]) -> ! {
         .as_deref()
         .is_some_and(|dir| dir.join(OOM_ONCE_MARKER).is_file());
     match mode.as_str() {
-        "ok" => succeed(&parsed, &outputs, None),
+        "ok" | "devices-fail" | "devices-hang" => succeed(&parsed, &outputs, None),
         "slow" => succeed(&parsed, &outputs, Some(SLOW_PAUSE)),
+        "no-output" => {
+            emit(until_line(parsed.progress(), "[I] save result").0);
+            std::process::exit(0)
+        }
         "oom-once" if ran_out_once => succeed(&parsed, &outputs, None),
         "oom-once" => {
             if let Some(dir) = &record {
@@ -142,11 +156,7 @@ pub fn fake_main(args: &[String]) -> ! {
         }
         "missing-dll" => {
             emit(MISSING_DLL);
-            std::process::exit(if cfg!(windows) {
-                STATUS_DLL_NOT_FOUND
-            } else {
-                127
-            })
+            std::process::exit(MISSING_DLL_CODE)
         }
         "hang" => hang(start),
         other => fail(&format!("[E] the fake engine has no mode {other:?}\n")),
@@ -161,6 +171,25 @@ pub fn tiny_png() -> Vec<u8> {
 /// A WebM (VP8) of one 16×16 frame, the file the fake writes for a clip.
 pub fn tiny_webm() -> Vec<u8> {
     TINY_WEBM.to_vec()
+}
+
+/// `--list-devices`: the Vulkan devices fixture, or in mode `devices-fail` the output and
+/// exit code of `missing-dll`, or in mode `devices-hang` nothing until it is stopped.
+fn list_devices(mode: &str) -> ! {
+    match mode {
+        "devices-fail" => {
+            emit(MISSING_DLL);
+            std::process::exit(MISSING_DLL_CODE)
+        }
+        "devices-hang" => {
+            std::thread::sleep(HANG_FOR);
+            std::process::exit(1)
+        }
+        _ => {
+            write_or_exit(&mut std::io::stdout().lock(), DEVICES);
+            std::process::exit(0)
+        }
+    }
 }
 
 /// The arguments the fake reads; the others it only checks are known.

@@ -20,7 +20,7 @@ use std::path::{Path, PathBuf};
 use tokio_util::sync::CancellationToken;
 
 use super::lock::SdLock;
-use crate::llama::backend::PACK_COMPLETE_MARKER;
+use crate::llama::backend::{PACK_COMPLETE_MARKER, VULKAN_FALLBACK_DIR, VULKAN_RUNTIME_FILE};
 use crate::llama::lock::{PackSpec, current_platform};
 use crate::packs::{self, InstallSpec, PackError, PackProgress, PackState};
 
@@ -67,11 +67,23 @@ pub struct Engine {
     /// Variables added to the engine's environment. Empty except for the fake engine in
     /// tests.
     pub extra_env: Vec<(String, String)>,
+    /// On Windows, llama.cpp's bundled Vulkan runtime folder (`<llama>/vulkan`, holding
+    /// `vulkan-1.dll`): the last entry of the engine's `PATH`, so a PC whose graphics driver
+    /// lacks the Vulkan runtime still finds it, both for a job and for `--list-devices`.
+    /// `None` elsewhere, and when llama's folder is unknown or holds no runtime. Set by
+    /// [`discover`] and [`install`] from [`EngineLayout::llama_dir`].
+    pub vulkan_fallback: Option<PathBuf>,
 }
 
 impl Engine {
-    /// The engine whose program is [`program_file_name`] in `dir`.
-    fn in_dir(dir: &Path, lock: &SdLock, source: EngineSource) -> Self {
+    /// The engine whose program is [`program_file_name`] in `dir`, with `vulkan_fallback`
+    /// at the end of its `PATH`.
+    fn in_dir(
+        dir: &Path,
+        lock: &SdLock,
+        source: EngineSource,
+        vulkan_fallback: Option<PathBuf>,
+    ) -> Self {
         Self {
             program: dir.join(program_file_name()),
             dir: dir.to_path_buf(),
@@ -79,6 +91,7 @@ impl Engine {
             source,
             leading_args: Vec::new(),
             extra_env: Vec::new(),
+            vulkan_fallback,
         }
     }
 }
@@ -92,7 +105,9 @@ pub struct EngineLayout {
     /// The folder the engine pack is installed into: `<local data>/engines`.
     pub engines_dir: PathBuf,
     /// llama.cpp's installed folder (`resources/llama/main` on Windows), which the pack's
-    /// Visual C++ runtime files are copied from. Never the engine's folder.
+    /// Visual C++ runtime files are copied from, and whose bundled Vulkan runtime folder ends
+    /// the engine's `PATH` on Windows ([`Engine::vulkan_fallback`]). Never the engine's
+    /// folder.
     pub llama_dir: Option<PathBuf>,
     /// A development folder, from [`SD_DEV_OVERRIDE_ENV`].
     pub dev_override: Option<PathBuf>,
@@ -120,7 +135,8 @@ impl EngineLayout {
 
 /// Finds the engine: the development folder, then the bundled program, then the engine
 /// pack installed for `platform`. `None` when no folder holds the program, or the pack's
-/// folder lacks a file it needs (see [`pack_state`]).
+/// folder lacks a file it needs (see [`pack_state`]). On Windows the engine found records
+/// llama.cpp's bundled Vulkan runtime folder ([`Engine::vulkan_fallback`]).
 pub fn discover(layout: &EngineLayout, lock: &SdLock, platform: &str) -> Option<Engine> {
     let folders = [
         (layout.dev_override.as_deref(), EngineSource::Dev),
@@ -130,10 +146,11 @@ pub fn discover(layout: &EngineLayout, lock: &SdLock, platform: &str) -> Option<
         if let Some(dir) = dir
             && dir.join(program_file_name()).is_file()
         {
-            return Some(Engine::in_dir(dir, lock, source));
+            let fallback = vulkan_fallback(layout.llama_dir.as_deref(), platform);
+            return Some(Engine::in_dir(dir, lock, source, fallback));
         }
     }
-    installed_pack(lock, pack_for(lock, platform)?, &layout.engines_dir)
+    installed_pack(lock, pack_for(lock, platform)?, layout)
 }
 
 /// The engine pack's state from what is on disk. `Installed` needs the `.complete` marker
@@ -175,7 +192,7 @@ pub async fn install(
     progress: &(dyn Fn(PackProgress) + Send + Sync),
 ) -> Result<Engine, PackError> {
     let pack = pack_for(lock, current_platform()).ok_or(PackError::WrongPlatform)?;
-    if let Some(engine) = installed_pack(lock, pack, &layout.engines_dir) {
+    if let Some(engine) = installed_pack(lock, pack, layout) {
         return Ok(engine);
     }
     let spec = InstallSpec {
@@ -189,7 +206,7 @@ pub async fn install(
         vc_runtime_dir: layout.llama_dir.as_deref(),
     };
     packs::install_files(&spec, &layout.engines_dir, cancel, progress).await?;
-    installed_pack(lock, pack, &layout.engines_dir).ok_or_else(|| PackError::Archive {
+    installed_pack(lock, pack, layout).ok_or_else(|| PackError::Archive {
         file: pack.id.clone(),
         message: "a file the engine needs is not in it".into(),
     })
@@ -209,10 +226,26 @@ fn pack_for<'a>(lock: &'a SdLock, platform: &str) -> Option<&'a PackSpec> {
     lock.packs.iter().find(|pack| pack.platform == platform)
 }
 
-/// The engine in `pack`'s folder, when that folder is completely installed.
-fn installed_pack(lock: &SdLock, pack: &PackSpec, engines_dir: &Path) -> Option<Engine> {
-    let dir = engines_dir.join(&pack.dir);
-    is_complete(lock, &dir).then(|| Engine::in_dir(&dir, lock, EngineSource::Pack))
+/// The engine in `pack`'s folder under `layout.engines_dir`, when that folder is completely
+/// installed.
+fn installed_pack(lock: &SdLock, pack: &PackSpec, layout: &EngineLayout) -> Option<Engine> {
+    let dir = layout.engines_dir.join(&pack.dir);
+    is_complete(lock, &dir).then(|| {
+        let fallback = vulkan_fallback(layout.llama_dir.as_deref(), &pack.platform);
+        Engine::in_dir(&dir, lock, EngineSource::Pack, fallback)
+    })
+}
+
+/// llama.cpp's bundled Vulkan runtime folder in `llama_dir` (`<llama>/vulkan`), when
+/// `platform` is Windows and the folder holds `vulkan-1.dll`. It is the last entry of the
+/// engine's `PATH`, as it is of llama-server's
+/// ([`path_with_vulkan_fallback`](crate::llama::backend::path_with_vulkan_fallback)).
+fn vulkan_fallback(llama_dir: Option<&Path>, platform: &str) -> Option<PathBuf> {
+    if !platform.starts_with("windows") {
+        return None;
+    }
+    let folder = llama_dir?.join(VULKAN_FALLBACK_DIR);
+    folder.join(VULKAN_RUNTIME_FILE).is_file().then_some(folder)
 }
 
 /// Whether the pack folder `dir` holds its `.complete` marker, the program, and every DLL
@@ -367,6 +400,51 @@ mod tests {
         let engine = discover(&f.layout, embedded(), "windows-x86_64").unwrap();
         assert_eq!(engine.dir, f.layout.engines_dir.join("sd-1106"));
         assert_ne!(Some(&engine.dir), f.layout.llama_dir.as_ref());
+    }
+
+    /// The engine carries llama's bundled Vulkan runtime folder, so its `PATH` ends with it
+    /// for a job and for `--list-devices` alike (`run::engine_env`).
+    #[test]
+    fn on_windows_the_engine_records_llamas_vulkan_runtime_folder() {
+        let mut f = folders();
+        let fallback = f
+            .layout
+            .llama_dir
+            .clone()
+            .unwrap()
+            .join(VULKAN_FALLBACK_DIR);
+        let found = |layout: &EngineLayout, platform| discover(layout, embedded(), platform);
+
+        // llama's folder holds no runtime: nothing to add
+        std::fs::create_dir_all(&fallback).unwrap();
+        let engine = found(&f.layout, "windows-x86_64").unwrap();
+        assert_eq!(engine.vulkan_fallback, None);
+
+        touch(&fallback.join(VULKAN_RUNTIME_FILE));
+        let engine = found(&f.layout, "windows-x86_64").unwrap();
+        assert_eq!(engine.source, EngineSource::Dev);
+        assert_eq!(engine.vulkan_fallback.as_ref(), Some(&fallback));
+        // never off Windows
+        assert_eq!(
+            found(&f.layout, "linux-x86_64").unwrap().vulkan_fallback,
+            None
+        );
+        f.layout.dev_override = None;
+        let engine = found(&f.layout, "macos-aarch64").unwrap();
+        assert_eq!(engine.source, EngineSource::Bundled);
+        assert_eq!(engine.vulkan_fallback, None);
+
+        // the pack, Windows' own engine
+        f.layout.bundled_dir = None;
+        let engine = found(&f.layout, "windows-x86_64").unwrap();
+        assert_eq!(engine.source, EngineSource::Pack);
+        assert_eq!(engine.vulkan_fallback.as_ref(), Some(&fallback));
+        // llama's folder unknown
+        f.layout.llama_dir = None;
+        assert_eq!(
+            found(&f.layout, "windows-x86_64").unwrap().vulkan_fallback,
+            None
+        );
     }
 
     #[tokio::test]

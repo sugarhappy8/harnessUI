@@ -128,9 +128,17 @@ pub fn path_with_vulkan_fallback(
     has_fallback: bool,
     separator: char,
 ) -> Option<std::ffi::OsString> {
-    if !has_fallback {
-        return None;
-    }
+    has_fallback.then(|| path_ending_with(parent, &dir.join(VULKAN_FALLBACK_DIR), separator))
+}
+
+/// `parent` (a `PATH` value) with `folder` as its last entry. A trailing separator in
+/// `parent` adds no empty entry (the current folder); no `parent`, or an empty one, gives
+/// `folder` alone. Also used for the Studio engine's `PATH` (`crate::sd::run`).
+pub(crate) fn path_ending_with(
+    parent: Option<&std::ffi::OsStr>,
+    folder: &Path,
+    separator: char,
+) -> std::ffi::OsString {
     let mut out = std::ffi::OsString::new();
     if let Some(parent) = parent {
         let text = parent.to_string_lossy();
@@ -145,8 +153,8 @@ pub fn path_with_vulkan_fallback(
             out.push(separator.to_string());
         }
     }
-    out.push(dir.join(VULKAN_FALLBACK_DIR));
-    Some(out)
+    out.push(folder);
+    out
 }
 
 impl Backend {

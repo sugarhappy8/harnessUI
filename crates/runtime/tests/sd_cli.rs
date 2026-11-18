@@ -18,6 +18,7 @@ use runtime::sd::devices::parse_list_devices;
 use runtime::sd::engine::{Engine, EngineSource};
 use runtime::sd::failure::SdFailure;
 use runtime::sd::progress::LocalStage;
+use runtime::sd::run::LIST_DEVICES_TIMEOUT;
 use runtime::sd::testing::{
     FAKE_MODE_ENV, FAKE_RECORD_ENV, SLOW_PAUSE, fake_main, tiny_png, tiny_webm,
 };
@@ -54,6 +55,9 @@ fn main() {
         no_progress_for_the_stall_limit_says_so_and_keeps_running,
         an_engine_that_cannot_start_is_named,
         the_devices_are_listed,
+        an_exit_0_without_a_file_is_a_failure,
+        a_stop_while_retrying_starts_nothing_more,
+        a_device_list_that_fails_or_never_comes_is_named,
     ];
     for (name, check) in checks {
         if filter.is_some_and(|word| !name.contains(word.as_str())) {
@@ -108,6 +112,7 @@ fn fake(mode: &str, rec: &Path) -> Engine {
                 rec.to_str().expect("a Unicode path").into(),
             ),
         ],
+        vulkan_fallback: None,
     }
 }
 
@@ -170,7 +175,6 @@ fn run(
     let result = rt().block_on(run_job(
         engine,
         job,
-        None,
         limits,
         CancellationToken::new(),
         &on_event,
@@ -330,6 +334,24 @@ fn the_engine_gets_exactly_the_flags_studio_built_and_the_prompt_by_file() {
         "blurry"
     );
     assert_eq!(starts(&f.rec), 1);
+
+    // a blank negative prompt leaves no file (the files are prompt_files', as build_args'),
+    // and the engine is given none
+    let f = folders();
+    let job = SdJob {
+        negative: Some(" \n".into()),
+        ..picture_job(&f.gallery)
+    };
+    run(&fake("ok", &f.rec), &job, RunLimits::default())
+        .0
+        .expect("the run succeeds");
+    assert_eq!(
+        (
+            recorded_listing(&f.rec, 0),
+            recorded_argv(&f.rec, 0).contains(&"--negative-prompt-file".to_owned())
+        ),
+        (vec!["prompt.txt".to_owned()], false)
+    );
 }
 
 fn the_environment_is_scrubbed() {
@@ -411,7 +433,6 @@ fn stop_kills_the_engine_and_its_child_within_a_second_and_removes_the_partial_f
     let result = rt().block_on(run_job(
         &fake("hang", &f.rec),
         &job,
-        None,
         RunLimits::default(),
         cancel.clone(),
         &on_event,
@@ -606,5 +627,89 @@ fn the_devices_are_listed() {
         assert_eq!(devices, expected, "{mode}");
         // listing the devices is not a start of a job
         assert_eq!(starts(&f.rec), 0, "{mode}");
+    }
+}
+
+fn an_exit_0_without_a_file_is_a_failure() {
+    // mode no-output: the whole progress up to the saving lines, then exit 0 and no file
+    let f = folders();
+    let job = picture_job(&f.gallery);
+    let (result, events) = run(&fake("no-output", &f.rec), &job, RunLimits::default());
+    // nothing in the output names a cause, so it is a crash with the code the engine gave
+    assert_eq!(result, Err(SdFailure::Crashed { code: Some(0) }));
+    assert!(!job.out_dir.exists());
+    assert!(stages(&events).contains(&LocalStage::Decoding));
+    assert_eq!((retries(&events), starts(&f.rec)), (vec![], 1));
+}
+
+fn a_stop_while_retrying_starts_nothing_more() {
+    // mode oom-once: the second start would succeed, so only the Stop can end the run
+    let f = folders();
+    let job = picture_job(&f.gallery);
+    let cancel = CancellationToken::new();
+    let events = Mutex::new(Vec::new());
+    let on_event = |event: RunEvent| {
+        if matches!(event, RunEvent::Retrying(_)) {
+            cancel.cancel();
+        }
+        events.lock().expect("events").push(event);
+    };
+    let result = rt().block_on(run_job(
+        &fake("oom-once", &f.rec),
+        &job,
+        RunLimits::default(),
+        cancel.clone(),
+        &on_event,
+    ));
+    assert_eq!(result, Err(SdFailure::Cancelled));
+    let events = events.into_inner().expect("events");
+    assert_eq!(retries(&events), [SdFailure::OutOfMemory]);
+    assert_eq!(starts(&f.rec), 1);
+    assert!(!job.out_dir.exists());
+    assert!(f.gallery.join(".partial").is_dir());
+}
+
+fn a_device_list_that_fails_or_never_comes_is_named() {
+    // mode devices-fail: a non-zero exit is named from the engine's output
+    let f = folders();
+    let result = rt().block_on(list_devices(&fake("devices-fail", &f.rec)));
+    assert!(
+        matches!(result, Err(SdFailure::MissingLibrary(_))),
+        "{result:?}"
+    );
+    assert_eq!(starts(&f.rec), 0);
+
+    // mode devices-hang: the engine never answers. Tokio's paused clock moves on whenever the
+    // runner only waits, so the 30 s limit passes at once; the fake would sleep for minutes,
+    // so the call coming back soon means the engine was stopped.
+    let f = folders();
+    let started = Instant::now();
+    let paused = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .start_paused(true)
+        .build()
+        .expect("a runtime");
+    let (result, waited) = paused.block_on(async {
+        let clock = tokio::time::Instant::now();
+        let result = list_devices(&fake("devices-hang", &f.rec)).await;
+        (result, clock.elapsed())
+    });
+    assert_eq!(result, Err(SdFailure::Crashed { code: None }));
+    assert!(waited >= LIST_DEVICES_TIMEOUT, "{waited:?}");
+    assert!(
+        started.elapsed() < Duration::from_secs(10),
+        "{:?}",
+        started.elapsed()
+    );
+    assert_eq!(starts(&f.rec), 0);
+
+    // in both modes a job still runs as in mode ok
+    for mode in ["devices-fail", "devices-hang"] {
+        let f = folders();
+        let job = picture_job(&f.gallery);
+        let out = run(&fake(mode, &f.rec), &job, RunLimits::default())
+            .0
+            .unwrap_or_else(|e| panic!("{mode}: {e:?}"));
+        assert_eq!(out.files, [job.out_dir.join("r1.png")], "{mode}");
     }
 }

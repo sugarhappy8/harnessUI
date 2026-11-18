@@ -8,7 +8,7 @@
 //! for [`RunLimits::stall_after`] is reported, never killed; every way a run ends without its
 //! files removes the run's folder. [`list_devices`] asks the engine for its devices.
 
-use std::ffi::OsString;
+use std::ffi::{OsStr, OsString};
 use std::io;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -23,7 +23,7 @@ use super::devices::{SdDevice, parse_list_devices};
 use super::engine::Engine;
 use super::failure::{SdFailure, classify};
 use super::progress::{LocalProgress, ProgressParser};
-use crate::llama::backend::{VULKAN_FALLBACK_DIR, VULKAN_RUNTIME_FILE, path_with_vulkan_fallback};
+use crate::llama::backend::path_ending_with;
 use crate::llama::launch::NO_BACKTRACE_ENV;
 use crate::llama::lines::{LineReader, Tail};
 use crate::spawn::{self, EnvSpec, ManagedChild, SpawnSpec, StdioMode};
@@ -42,6 +42,9 @@ const DEVICE_LINES: usize = 256;
 
 /// Lines waiting between the pipe readers and the runner.
 const LINE_QUEUE: usize = 256;
+
+/// `PATH`'s separator on this platform.
+const PATH_SEPARATOR: char = if cfg!(windows) { ';' } else { ':' };
 
 /// Tries at removing a run's folder, and the pause between them.
 const REMOVE_TRIES: u32 = 3;
@@ -97,12 +100,13 @@ pub struct RunOutput {
 /// `job.out_dir` (the prompt files with it). After a success the folder holds the prompt files
 /// and the outputs, and the caller removes it once it has moved the outputs.
 ///
-/// - The files of [`prompt_files`] are written into `job.out_dir` (created): the prompt and
-///   the negative prompt as given, UTF-8 with no newline added.
+/// - The files of [`prompt_files`] are written into `job.out_dir` (created), and no other:
+///   the prompt and the negative prompt as given, UTF-8 with no newline added. A blank
+///   negative prompt has no file, as [`build_args`] passes none.
 /// - The engine starts in `engine.dir` with `engine.leading_args` then [`build_args`]. Its
-///   environment is the platform allowlist with `GGML_NO_BACKTRACE=1`; on Windows `PATH`
-///   then ends with `llama_dir`'s Vulkan runtime folder when it holds `vulkan-1.dll`
-///   (llama.cpp's installed folder, so a PC whose driver lacks the Vulkan runtime still finds
+///   environment is the platform allowlist with `GGML_NO_BACKTRACE=1`; `PATH` then ends
+///   with [`Engine::vulkan_fallback`] when the engine has one (llama.cpp's bundled Vulkan
+///   runtime folder on Windows, so a PC whose driver lacks the Vulkan runtime still finds
 ///   it); then `job.env`, then `engine.extra_env`. Stdin is the null device.
 /// - Both pipes are read with `\r` ending a line too, into one [`ProgressParser`]; each update
 ///   is a [`RunEvent::Progress`]. The last 60 lines of both, in arrival order, name a
@@ -122,7 +126,6 @@ pub struct RunOutput {
 pub async fn run_job(
     engine: &Engine,
     job: &SdJob,
-    llama_dir: Option<&Path>,
     limits: RunLimits,
     cancel: CancellationToken,
     on_event: &(dyn Fn(RunEvent) + Send + Sync),
@@ -130,7 +133,7 @@ pub async fn run_job(
     let started = Instant::now();
     let run = Run {
         engine,
-        env: engine_env(engine, llama_dir, &job.env, cfg!(windows)),
+        env: engine_env(engine, &job.env, std::env::var_os("PATH").as_deref()),
         limits,
         cancel: &cancel,
         on_event,
@@ -152,12 +155,14 @@ pub async fn run_job(
 /// The devices the engine sees (`sd-cli --list-devices`), within [`LIST_DEVICES_TIMEOUT`].
 ///
 /// The command is built as [`run_job`] builds it: in `engine.dir`, with `engine.leading_args`
-/// then `--list-devices`, the platform allowlist with `GGML_NO_BACKTRACE=1` and then
-/// `engine.extra_env`. The engine's start fails as in [`run_job`]; a non-zero exit is named
-/// from its output ([`classify`]); an engine that does not answer in time is stopped and is
+/// then `--list-devices`, the platform allowlist with `GGML_NO_BACKTRACE=1`, `PATH` ending
+/// with [`Engine::vulkan_fallback`] when the engine has one (on a PC whose driver lacks the
+/// Vulkan runtime the card is listed only with it), and then `engine.extra_env`. The
+/// engine's start fails as in [`run_job`]; a non-zero exit is named from its output
+/// ([`classify`]); an engine that does not answer in time is stopped and is
 /// [`SdFailure::Crashed`] without a code.
 pub async fn list_devices(engine: &Engine) -> Result<Vec<SdDevice>, SdFailure> {
-    let env = engine_env(engine, None, &[], cfg!(windows));
+    let env = engine_env(engine, &[], std::env::var_os("PATH").as_deref());
     let spec = command(engine, [OsString::from("--list-devices")], env);
     let mut child = spawn::spawn(spec).map_err(not_started)?;
     let stdout = child.take_stdout();
@@ -310,26 +315,20 @@ fn command(engine: &Engine, args: impl IntoIterator<Item = OsString>, env: EnvSp
         .stderr(StdioMode::Piped)
 }
 
-/// The engine's environment: the platform allowlist and `GGML_NO_BACKTRACE=1`; on Windows
-/// (`windows`) `PATH` ending with `llama_dir`'s Vulkan runtime folder when it holds the
-/// runtime; then `job_env`, then `engine.extra_env`, a later name replacing an earlier one.
+/// The engine's environment, for a job (`job_env` its variables) and for `--list-devices`
+/// (none) alike: the platform allowlist and `GGML_NO_BACKTRACE=1`; `PATH`, the app's own
+/// (`parent_path`), with [`Engine::vulkan_fallback`] as its last entry when the engine has
+/// one, and inherited unchanged when it has none; then `job_env`, then `engine.extra_env`, a
+/// later name replacing an earlier one.
 fn engine_env(
     engine: &Engine,
-    llama_dir: Option<&Path>,
     job_env: &[(String, String)],
-    windows: bool,
+    parent_path: Option<&OsStr>,
 ) -> EnvSpec {
     let mut env = EnvSpec::minimal().set(NO_BACKTRACE_ENV, "1");
-    if windows && let Some(dir) = llama_dir {
-        let has_fallback = dir
-            .join(VULKAN_FALLBACK_DIR)
-            .join(VULKAN_RUNTIME_FILE)
-            .is_file();
-        if let Some(path) =
-            path_with_vulkan_fallback(dir, std::env::var_os("PATH").as_deref(), has_fallback, ';')
-        {
-            env = env.set("PATH", path.to_string_lossy().into_owned());
-        }
+    if let Some(folder) = &engine.vulkan_fallback {
+        let path = path_ending_with(parent_path, folder, PATH_SEPARATOR);
+        env = env.set("PATH", path.to_string_lossy().into_owned());
     }
     for (name, value) in job_env.iter().chain(&engine.extra_env) {
         env = env.set(name.clone(), value.clone());
@@ -418,7 +417,8 @@ async fn stop(child: &mut ManagedChild) {
     }
 }
 
-/// Writes the prompt files into the run's folder, creating it.
+/// Writes the prompt files into the run's folder, creating it: exactly the files of
+/// [`prompt_files`], the paths [`build_args`] passes, so a blank negative prompt has none.
 async fn write_prompt_files(job: &SdJob) -> Result<(), SdFailure> {
     let failed = |error: io::Error| SdFailure::Io(format!("writing the run's folder: {error}"));
     tokio::fs::create_dir_all(&job.out_dir)
@@ -484,12 +484,22 @@ fn is_prompt_file(job: &SdJob, path: &Path) -> bool {
     path == prompt || negative.as_deref() == Some(path)
 }
 
-/// Removes every file in the run's folder but the prompt files, before the second start.
+/// Removes every file in the run's folder but the prompt files, before the second start. A
+/// folder that cannot be read is logged; the second start then finds what is left.
 async fn remove_outputs(job: &SdJob) {
-    let Ok(mut entries) = tokio::fs::read_dir(&job.out_dir).await else {
-        return;
+    let unreadable = |error: io::Error| {
+        tracing::warn!(%error, dir = %job.out_dir.display(), "could not read a Studio run's folder to remove the files the engine left");
     };
-    while let Ok(Some(entry)) = entries.next_entry().await {
+    let mut entries = match tokio::fs::read_dir(&job.out_dir).await {
+        Ok(entries) => entries,
+        Err(error) => return unreadable(error),
+    };
+    loop {
+        let entry = match entries.next_entry().await {
+            Ok(Some(entry)) => entry,
+            Ok(None) => return,
+            Err(error) => return unreadable(error),
+        };
         let path = entry.path();
         if is_prompt_file(job, &path) {
             continue;
@@ -543,6 +553,7 @@ mod tests {
             source: EngineSource::Dev,
             leading_args: Vec::new(),
             extra_env: Vec::new(),
+            vulkan_fallback: None,
         }
     }
 
@@ -624,7 +635,7 @@ mod tests {
             ("SHARED".to_owned(), "job".to_owned()),
             ("GGML_METAL_TENSOR_DISABLE".to_owned(), "1".to_owned()),
         ];
-        let env = engine_env(&engine, None, &job_env, false);
+        let env = engine_env(&engine, &job_env, Some(OsStr::new("/bin")));
         let child = resolved(&env, &[("PATH", "/bin"), ("HF_TOKEN", "secret")]);
         assert_eq!(child.get(NO_BACKTRACE_ENV).map(String::as_str), Some("1"));
         assert_eq!(child.get("SHARED").map(String::as_str), Some("engine"));
@@ -635,39 +646,48 @@ mod tests {
         assert!(!child.contains_key("HF_TOKEN"));
     }
 
+    /// The engine's Vulkan fallback folder (recorded by discovery on Windows) ends `PATH` for
+    /// a job and for `--list-devices` alike; an engine without one leaves `PATH` as it is.
     #[test]
-    fn on_windows_path_ends_with_llamas_vulkan_runtime_folder() {
+    fn path_ends_with_the_engines_vulkan_folder_for_a_job_and_for_the_devices() {
         let tmp = tempfile::tempdir().unwrap();
-        let llama = tmp.path().join("llama").join("main");
-        std::fs::create_dir_all(llama.join(VULKAN_FALLBACK_DIR)).unwrap();
-        let engine = engine(tmp.path());
-        let path_of = |env: &EnvSpec| {
-            env.set
-                .iter()
-                .find(|(name, _)| name == "PATH")
-                .map(|(_, value)| value.clone())
+        let folder = tmp.path().join("llama").join("main").join("vulkan");
+        let with = Engine {
+            vulkan_fallback: Some(folder.clone()),
+            ..engine(tmp.path())
         };
-
-        // no runtime in the folder: PATH is inherited as it is
-        assert_eq!(path_of(&engine_env(&engine, Some(&llama), &[], true)), None);
-        std::fs::write(
-            llama.join(VULKAN_FALLBACK_DIR).join(VULKAN_RUNTIME_FILE),
-            b"x",
-        )
-        .unwrap();
-        let path = path_of(&engine_env(&engine, Some(&llama), &[], true)).expect("PATH");
-        let fallback = llama.join(VULKAN_FALLBACK_DIR);
-        assert!(
-            path.ends_with(fallback.to_str().unwrap()),
-            "{path} does not end with {}",
-            fallback.display()
-        );
-        // only on Windows, and only with llama's folder
+        let without = engine(tmp.path());
+        let parent_path = "/usr/bin";
+        let parent = [("PATH", parent_path), ("HF_TOKEN", "secret")];
+        let path_of = |engine: &Engine, job_env: &[(String, String)]| {
+            let env = engine_env(engine, job_env, Some(OsStr::new(parent_path)));
+            resolved(&env, &parent).remove("PATH")
+        };
+        let job_env = [("GGML_METAL_TENSOR_DISABLE".to_owned(), "1".to_owned())];
+        // run_job passes the job's variables; list_devices passes none
+        for job_env in [&job_env[..], &[]] {
+            let path = path_of(&with, job_env).expect("PATH");
+            assert!(
+                path.ends_with(folder.to_str().unwrap()),
+                "{path} does not end with {}",
+                folder.display()
+            );
+            assert_eq!(
+                path,
+                format!("{parent_path}{PATH_SEPARATOR}{}", folder.display())
+            );
+            assert_eq!(path_of(&without, job_env).as_deref(), Some(parent_path));
+        }
+        // no PATH in the app's environment: the folder alone
+        let env = engine_env(&with, &[], None);
         assert_eq!(
-            path_of(&engine_env(&engine, Some(&llama), &[], false)),
+            resolved(&env, &[]).remove("PATH"),
+            Some(folder.display().to_string())
+        );
+        assert_eq!(
+            resolved(&engine_env(&without, &[], None), &[]).get("PATH"),
             None
         );
-        assert_eq!(path_of(&engine_env(&engine, None, &[], true)), None);
     }
 
     #[test]
@@ -742,7 +762,6 @@ mod tests {
         let result = run_job(
             &engine(tmp.path()),
             &refused,
-            None,
             RunLimits::default(),
             CancellationToken::new(),
             &|_| {},
@@ -756,7 +775,6 @@ mod tests {
         let result = run_job(
             &engine(tmp.path()),
             &job(&out_dir),
-            None,
             RunLimits::default(),
             cancel,
             &|_| {},
@@ -781,7 +799,6 @@ mod tests {
         let run = run_job(
             &engine,
             &job,
-            None,
             RunLimits::default(),
             CancellationToken::new(),
             &on_event,
