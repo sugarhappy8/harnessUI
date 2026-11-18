@@ -102,6 +102,45 @@ impl Drop for StudioPass {
     }
 }
 
+/// Says that a chat load waits at the Studio gate while it lives (`set(true)`), and stops
+/// saying it when dropped (`set(false)`): when the load passes, and when the load is dropped
+/// mid-wait (one under a timeout), so the status never says Studio holds back a load that
+/// no longer waits.
+struct WaitingForStudio<F: Fn(bool)>(F);
+
+impl<F: Fn(bool)> WaitingForStudio<F> {
+    fn new(set: F) -> Self {
+        set(true);
+        Self(set)
+    }
+}
+
+impl<F: Fn(bool)> Drop for WaitingForStudio<F> {
+    fn drop(&mut self) {
+        (self.0)(false);
+    }
+}
+
+/// Passes the Studio gate ([`StudioGate::begin_load`]): at once when no Studio job holds the
+/// card; else waits until a job frees it, with `waiting(true)` meanwhile and `waiting(false)`
+/// once it passes, or once this future is dropped mid-wait.
+async fn pass_studio_gate(gate: Arc<dyn StudioGate>, waiting: impl Fn(bool) + Send) -> StudioPass {
+    // The check that no job holds the card and the count of this load are one step.
+    if !gate.begin_load() {
+        let _waiting = WaitingForStudio::new(waiting);
+        // Another job may take the card as this one frees it: then that one goes first.
+        loop {
+            while gate.holds_card() {
+                gate.wait_until_free().await;
+            }
+            if gate.begin_load() {
+                break;
+            }
+        }
+    }
+    StudioPass(Some(gate))
+}
+
 pub struct RuntimeManager {
     app: AppHandle,
     layout: RuntimeLayout,
@@ -154,9 +193,12 @@ impl RuntimeManager {
     }
 
     /// The app this runtime reports to.
-    #[allow(
-        dead_code,
-        reason = "Task L15's local lane asks the Studio lease, which reads it"
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "Task L15's local lane asks the Studio lease, which reads it"
+        )
     )]
     pub fn app(&self) -> &AppHandle {
         &self.app
@@ -171,18 +213,24 @@ impl RuntimeManager {
 
     /// 0.1.0: the loaded (or loading) model's bytes on a graphics device, when it runs on
     /// one: what unloading it gives a Studio job.
-    #[allow(
-        dead_code,
-        reason = "Task L15's local lane asks the Studio lease, which reads it"
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "Task L15's local lane asks the Studio lease, which reads it"
+        )
     )]
     pub fn device_bytes(&self) -> Option<u64> {
         self.loaded_on_device().map(|(_, _, bytes)| bytes)
     }
 
     /// 0.1.0: the loaded (or loading) model was started with "Keep in memory".
-    #[allow(
-        dead_code,
-        reason = "Task L15's local lane asks the Studio lease, which reads it"
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "Task L15's local lane asks the Studio lease, which reads it"
+        )
     )]
     pub fn keeps_in_memory(&self) -> bool {
         let running = matches!(
@@ -451,9 +499,12 @@ impl RuntimeManager {
     /// starts unseen by the lease. Waiting for it changes nothing, so a job stopped
     /// meanwhile leaves nothing behind. Never awaited while a model use is waited for (a
     /// Model check's load would wait behind it).
-    #[allow(
-        dead_code,
-        reason = "Task L15's local lane asks the Studio lease, which unloads through it"
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "Task L15's local lane asks the Studio lease, which unloads through it"
+        )
     )]
     pub async fn between_loads(&self) -> OwnedMutexGuard<()> {
         Arc::clone(&self.load_setup).lock_owned().await
@@ -604,21 +655,10 @@ impl RuntimeManager {
         let Some(gate) = self.studio_gate.lock().ok().and_then(|g| g.clone()) else {
             return StudioPass(None);
         };
-        // The check that no job holds the card and the count of this load are one step.
-        if !gate.begin_load() {
-            self.update(|s| s.waiting_for_studio = true);
-            // Another job may take the card as this one frees it: then that one goes first.
-            loop {
-                while gate.holds_card() {
-                    gate.wait_until_free().await;
-                }
-                if gate.begin_load() {
-                    break;
-                }
-            }
-            self.update(|s| s.waiting_for_studio = false);
-        }
-        let pass = StudioPass(Some(Arc::clone(&gate)));
+        let pass = pass_studio_gate(Arc::clone(&gate), |waiting| {
+            self.update(|s| s.waiting_for_studio = waiting);
+        })
+        .await;
         if gate.take_reprobe() {
             self.backends(true).await;
         }
@@ -2188,6 +2228,123 @@ mod tests {
         assert!(
             body.contains("Arc::clone(&self.load_setup).lock_owned().await"),
             "between_loads takes the setup lock"
+        );
+    }
+
+    /// A Studio gate a test drives: a job holds the card until [`HeldGate::free`].
+    struct HeldGate(tokio::sync::watch::Sender<bool>);
+
+    impl HeldGate {
+        fn new(held: bool) -> Arc<Self> {
+            Arc::new(Self(tokio::sync::watch::Sender::new(held)))
+        }
+
+        fn free(&self) {
+            self.0.send_replace(false);
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl StudioGate for HeldGate {
+        fn holds_card(&self) -> bool {
+            *self.0.borrow()
+        }
+
+        async fn wait_until_free(&self) {
+            let _ = self.0.subscribe().wait_for(|held| !held).await;
+        }
+
+        fn take_reprobe(&self) -> bool {
+            false
+        }
+
+        fn begin_load(&self) -> bool {
+            !*self.0.borrow()
+        }
+
+        fn end_load(&self) {}
+    }
+
+    /// Review fix L12-wait-guard: "Studio is using the graphics card" (`waiting_for_studio`)
+    /// is said only while a load waits at the Studio gate. It is cleared when the load
+    /// passes, and also when the load is dropped mid-wait: the backend check's restore load
+    /// runs under a 10-minute timeout, and a local job can hold the card longer.
+    #[tokio::test]
+    async fn waiting_for_studio_is_cleared_however_the_wait_ends() {
+        let bound = Duration::from_secs(10);
+        type Said = Arc<StdMutex<Vec<bool>>>;
+        let said = || -> Said { Arc::new(StdMutex::new(Vec::new())) };
+        let record = |said: &Said| {
+            let said = Arc::clone(said);
+            move |waiting: bool| said.lock().unwrap().push(waiting)
+        };
+        let seen = |said: &Said| said.lock().unwrap().clone();
+
+        // No job holds the card: the load passes at once, and nothing is said.
+        let flags = said();
+        let pass = pass_studio_gate(HeldGate::new(false), record(&flags)).await;
+        assert!(pass.0.is_some(), "the load passed the gate");
+        assert!(seen(&flags).is_empty());
+
+        // A job holds the card: said while the load waits, cleared when the job frees it.
+        let flags = said();
+        let gate = HeldGate::new(true);
+        let gate_dyn: Arc<dyn StudioGate> = gate.clone();
+        let load = tokio::spawn(pass_studio_gate(gate_dyn, record(&flags)));
+        tokio::time::timeout(bound, async {
+            while seen(&flags).is_empty() {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("the load waits");
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert!(
+            !load.is_finished(),
+            "the load passed while a job held the card"
+        );
+        assert_eq!(seen(&flags), [true]);
+        gate.free();
+        let pass = tokio::time::timeout(bound, load)
+            .await
+            .expect("the load passed in time")
+            .unwrap();
+        assert!(pass.0.is_some(), "the load passed the gate");
+        assert_eq!(seen(&flags), [true, false]);
+
+        // The load is dropped mid-wait (its timeout ends it): cleared all the same.
+        let flags = said();
+        let timed_out = tokio::time::timeout(
+            Duration::from_millis(50),
+            pass_studio_gate(HeldGate::new(true), record(&flags)),
+        )
+        .await;
+        assert!(
+            timed_out.is_err(),
+            "the load passed while a job held the card"
+        );
+        assert_eq!(
+            seen(&flags),
+            [true, false],
+            "a dropped load left \"Studio is using the graphics card\" behind"
+        );
+
+        // The load path says it only through this wait.
+        let source = include_str!("runtime_manager.rs").replace("\r\n", "\n");
+        let product = &source[..source.find("\n#[cfg(test)]\nmod tests").expect("tests")];
+        let start = product
+            .find("    async fn wait_for_studio(")
+            .expect("wait_for_studio");
+        let body = &product[start..];
+        let body = &body[..body.find("\n    }\n").expect("the end of wait_for_studio")];
+        assert!(
+            body.contains("pass_studio_gate("),
+            "the load waits through the guard"
+        );
+        assert_eq!(
+            product.matches("waiting_for_studio = true").count(),
+            0,
+            "the flag is set only through the guard"
         );
     }
 }

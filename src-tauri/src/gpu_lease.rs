@@ -10,7 +10,8 @@
 //! A chat load while a job holds the card waits for it to end (the [`StudioGate`] on
 //! `RuntimeManager::load`), and the next chat load after a job probes the backends again.
 //! A chat load that passed the gate counts as in flight until its server runs: a job's
-//! grant waits for it and reads the card again after it, so the two never land together.
+//! grant waits for it ([`LeaseWait::ChatModelLoading`]) and reads the card again after it,
+//! so the two never land together.
 //! A job's unload stops the chat model only between two chat loads, never in the middle of
 //! one, and not at all when one passed the gate since the job read the card: that load went
 //! first, and the job decides again on the card as it is now.
@@ -24,6 +25,7 @@ use async_trait::async_trait;
 use tokio::sync::{OwnedSemaphorePermit, Semaphore, TryAcquireError, watch};
 use tokio_util::sync::CancellationToken;
 
+use crate::dto::RuntimeStatusDto;
 use crate::error::{AppError, AppResult};
 use crate::runtime_manager::{RuntimeManager, StudioGate};
 use crate::state::{AppState, BusyCounter};
@@ -31,7 +33,10 @@ use crate::studio::prefs::GpuPolicy;
 
 /// What a local job needs of the graphics card, from `gen_fit` with and without the chat
 /// model (Task L15).
-#[allow(dead_code, reason = "Task L15's local lane builds it for each job")]
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "Task L15's local lane builds it for each job")
+)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct StudioNeed {
     /// Green, or one part at a time, with the memory free now (the chat model loaded).
@@ -45,7 +50,10 @@ pub struct StudioNeed {
 }
 
 /// How a job may use the card.
-#[allow(dead_code, reason = "Task L15's local lane reads the grant")]
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "Task L15's local lane reads the grant")
+)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Grant {
     /// Beside the chat model, or with none loaded ("Chat replies may be slower while this
@@ -54,12 +62,19 @@ pub enum Grant {
     /// The chat model was unloaded to make room: `unloaded` is its path, for "Load it
     /// again" (`None` when it had gone by the time the unload ran).
     AfterUnload { unloaded: Option<String> },
-    /// On the processor; the chat model keeps the card.
-    UseProcessor,
+    /// On the processor. `unloaded` as for [`Grant::AfterUnload`] when the chat model was
+    /// unloaded first (a job that does not fit even after an unload, on shared memory,
+    /// where the processor uses the same memory): "The chat model was unloaded to make
+    /// room", and "Reload it after Studio". `None` when nothing was unloaded: the chat model
+    /// stays loaded.
+    UseProcessor { unloaded: Option<String> },
 }
 
 /// Why a job waits before its grant, shown on its card.
-#[allow(dead_code, reason = "Task L15's local lane shows the wait")]
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "Task L15's local lane shows the wait")
+)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LeaseWait {
     /// A reply (or a Model check) uses the chat model: "Starts when the reply ends".
@@ -69,10 +84,16 @@ pub enum LeaseWait {
     AnotherStudioJob,
     /// Under [`GpuPolicy::Ask`] the person has not answered "Unload the chat model?" yet.
     NeedsAnswer,
+    /// A chat model is loading: it passed the chat load's gate and its server has not
+    /// started yet. The job reads the card once it has.
+    ChatModelLoading,
 }
 
 /// Why a job got no grant. It holds nothing.
-#[allow(dead_code, reason = "Task L15's local lane reads the refusal")]
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "Task L15's local lane reads the refusal")
+)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Refused {
     /// The job was stopped while it waited, or the unload it waited for was cancelled.
@@ -85,9 +106,12 @@ pub enum Refused {
 }
 
 /// The chat model's side of the card: what it takes, and its unload and reload.
-#[allow(
-    dead_code,
-    reason = "Task L15's local lane asks the lease, which asks it"
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "Task L15's local lane asks the lease, which asks it"
+    )
 )]
 #[async_trait]
 pub trait ChatSide: Send + Sync {
@@ -112,9 +136,12 @@ pub trait ChatSide: Send + Sync {
 }
 
 /// The app's chat side: the local llama-server and everything that uses it.
-#[allow(
-    dead_code,
-    reason = "Task L15's local lane asks the lease, which asks it"
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "Task L15's local lane asks the lease, which asks it"
+    )
 )]
 pub struct RuntimeChat {
     pub runtime: Arc<RuntimeManager>,
@@ -180,9 +207,7 @@ impl ChatSide for RuntimeChat {
 
     async fn reload(&self, path: &str) {
         use tauri::Manager;
-        // Only while the status still names it as unloaded to free memory: a model loaded
-        // since then (by the person) stays.
-        if self.runtime.status().unloaded_path.as_deref() != Some(path) {
+        if !reload_wanted(&self.runtime.status(), path) {
             return;
         }
         let app = self.runtime.app().clone();
@@ -199,9 +224,19 @@ impl ChatSide for RuntimeChat {
     }
 }
 
+/// "Reload it after Studio" loads the chat model at `path` again only while the status still
+/// names it as unloaded to free memory: a model the person loaded (or unloaded) since then,
+/// or removed, stays as it is.
+fn reload_wanted(status: &RuntimeStatusDto, path: &str) -> bool {
+    status.unloaded_path.as_deref() == Some(path)
+}
+
 /// A local job's hold on the graphics card. Dropping it frees the card and wakes a chat load
 /// that waits; it never loads the chat model again.
-#[allow(dead_code, reason = "Task L15's local lane holds it for each job")]
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "Task L15's local lane holds it for each job")
+)]
 pub struct StudioHold {
     lease: Arc<GpuLease>,
     // Given back after `drop` has marked the card free, so a waiting job asks again only then.
@@ -258,7 +293,10 @@ enum Unloaded {
 }
 
 /// One graphics-card tenant at a time: the chat model, or a local Studio job.
-#[allow(dead_code, reason = "Task L15's local lane asks it for each job")]
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "Task L15's local lane asks it for each job")
+)]
 pub struct GpuLease {
     chat: Arc<dyn ChatSide>,
     /// One Studio job asks, waits and runs at a time.
@@ -269,7 +307,10 @@ pub struct GpuLease {
     reprobe: AtomicBool,
 }
 
-#[allow(dead_code, reason = "Task L15's local lane asks it for each job")]
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "Task L15's local lane asks it for each job")
+)]
 impl GpuLease {
     pub fn new(chat: Arc<dyn ChatSide>) -> Arc<Self> {
         Arc::new(Self {
@@ -287,15 +328,16 @@ impl GpuLease {
     /// (after an unload on shared memory, where the processor uses the same memory), else
     /// [`Refused::DoesNotFit`]; "Keep in memory" on shared memory → an unload whatever the
     /// policy; then as `policy` says. An unload waits for a reply being written
-    /// (`on_wait(ReplyRunning)`).
+    /// (`on_wait(ReplyRunning)`). A grant after an unload names the unloaded chat model.
     ///
     /// `answered`: the person's answer to "Unload the chat model?" under [`GpuPolicy::Ask`]
     /// (`None`: not asked yet, which ends with `on_wait(NeedsAnswer)` and
     /// [`Refused::NeedsAnswer`]). Every wait ends with [`Refused::Cancelled`] when `cancel`
     /// fires. The card counts as held only once the grant is returned: a chat load while
     /// the job waits goes first. The card is read only while no chat load is in flight
-    /// (between the gate and its server starting), and read again when one passed the gate
-    /// before the grant, so a job never gets the card under a chat model about to start.
+    /// (between the gate and its server starting; `on_wait(ChatModelLoading)` while one
+    /// is), and read again when one passed the gate before the grant, so a job never gets
+    /// the card under a chat model about to start.
     pub async fn acquire_for_studio(
         self: &Arc<Self>,
         need: &StudioNeed,
@@ -363,7 +405,7 @@ impl GpuLease {
         // The grant this job's unload was for, once it has unloaded the chat model.
         let mut unloaded: Option<Grant> = None;
         loop {
-            let seen = self.no_load_in_flight(cancel).await?;
+            let seen = self.no_load_in_flight(cancel, on_wait).await?;
             let step = match &unloaded {
                 Some(grant) if self.chat.loaded_device_bytes().is_none() => {
                     Step::Grant(grant.clone())
@@ -383,14 +425,15 @@ impl GpuLease {
                         continue;
                     };
                     let earlier = match unloaded {
-                        Some(Grant::AfterUnload { unloaded }) => unloaded,
+                        Some(
+                            Grant::AfterUnload { unloaded } | Grant::UseProcessor { unloaded },
+                        ) => unloaded,
                         _ => None,
                     };
+                    let path = path.or(earlier);
                     unloaded = Some(match after {
-                        AfterIt::AfterUnload => Grant::AfterUnload {
-                            unloaded: path.or(earlier),
-                        },
-                        AfterIt::UseProcessor => Grant::UseProcessor,
+                        AfterIt::AfterUnload => Grant::AfterUnload { unloaded: path },
+                        AfterIt::UseProcessor => Grant::UseProcessor { unloaded: path },
                     });
                 }
             }
@@ -421,7 +464,7 @@ impl GpuLease {
             if need.shared_memory {
                 return Ok(Step::Unload(AfterIt::UseProcessor));
             }
-            return Ok(Step::Grant(Grant::UseProcessor));
+            return Ok(Step::Grant(Grant::UseProcessor { unloaded: None }));
         }
         if pinned {
             return Ok(Step::Unload(AfterIt::AfterUnload));
@@ -435,31 +478,51 @@ impl GpuLease {
                 Err(Refused::NeedsAnswer)
             }
             (GpuPolicy::Ask, Some(false)) if need.processor_ok => {
-                Ok(Step::Grant(Grant::UseProcessor))
+                Ok(Step::Grant(Grant::UseProcessor { unloaded: None }))
             }
             (GpuPolicy::Ask, Some(false)) => Err(Refused::DoesNotFit),
-            (GpuPolicy::Processor, _) if need.processor_ok => Ok(Step::Grant(Grant::UseProcessor)),
+            (GpuPolicy::Processor, _) if need.processor_ok => {
+                Ok(Step::Grant(Grant::UseProcessor { unloaded: None }))
+            }
             (GpuPolicy::Processor, _) => Ok(Step::Unload(AfterIt::AfterUnload)),
         }
     }
 
     /// Waits until no chat load is between the gate and its server starting (one that
-    /// passed is about to take the card, and the card does not show it yet). Returns how
-    /// many have passed the gate so far.
-    async fn no_load_in_flight(&self, cancel: &CancellationToken) -> Result<u64, Refused> {
-        tokio::select! {
-            biased;
-            _ = cancel.cancelled() => Err(Refused::Cancelled),
-            passed = self.loads_ended() => Ok(passed),
-        }
-    }
-
-    async fn loads_ended(&self) -> u64 {
+    /// passed is about to take the card, and the card does not show it yet), with
+    /// `on_wait(ChatModelLoading)` while one is. Returns how many have passed the gate so
+    /// far.
+    async fn no_load_in_flight(
+        &self,
+        cancel: &CancellationToken,
+        on_wait: &(dyn Fn(LeaseWait) + Send + Sync),
+    ) -> Result<u64, Refused> {
         let mut card = self.card.subscribe();
-        // The sender lives as long as `self`, so this cannot fail.
-        match card.wait_for(|card| card.loads == 0).await {
-            Ok(card) => card.passed,
-            Err(_) => 0,
+        let mut told = false;
+        loop {
+            if cancel.is_cancelled() {
+                return Err(Refused::Cancelled);
+            }
+            // Each change is read here, so a load that passes as the job begins to wait is
+            // told about too.
+            let now = *card.borrow_and_update();
+            if now.loads == 0 {
+                return Ok(now.passed);
+            }
+            if !told {
+                on_wait(LeaseWait::ChatModelLoading);
+                told = true;
+            }
+            tokio::select! {
+                biased;
+                _ = cancel.cancelled() => return Err(Refused::Cancelled),
+                changed = card.changed() => {
+                    // The sender lives as long as `self`, so this cannot fail.
+                    if changed.is_err() {
+                        return Err(Refused::Cancelled);
+                    }
+                }
+            }
         }
     }
 
@@ -801,11 +864,12 @@ mod tests {
         ))
         .await
         .unwrap();
-        assert_eq!(g, Grant::UseProcessor);
+        assert_eq!(g, Grant::UseProcessor { unloaded: None });
         assert_eq!(chat.unloads(), 0);
         drop(hold);
 
-        // On shared memory the processor uses the chat model's memory: it is unloaded first.
+        // On shared memory the processor uses the chat model's memory: it is unloaded first,
+        // and the grant names it, for "Load it again" (review fix L12-unloaded).
         let (g, _hold) = lease
             .acquire_for_studio(
                 &shared(need(false, false, true)),
@@ -816,7 +880,12 @@ mod tests {
             )
             .await
             .unwrap();
-        assert_eq!(g, Grant::UseProcessor);
+        assert_eq!(
+            g,
+            Grant::UseProcessor {
+                unloaded: Some(CHAT.to_string())
+            }
+        );
         assert_eq!(chat.unloads(), 1);
     }
 
@@ -890,7 +959,7 @@ mod tests {
         let chat = FakeChat::loaded(5 * GB);
         assert_eq!(
             ask(&chat, true, Some(false)).await.0,
-            Ok(Grant::UseProcessor)
+            Ok(Grant::UseProcessor { unloaded: None })
         );
         assert_eq!(
             ask(&chat, false, Some(false)).await.0,
@@ -913,7 +982,7 @@ mod tests {
             )
             .await
             .unwrap();
-        assert_eq!(g, Grant::UseProcessor);
+        assert_eq!(g, Grant::UseProcessor { unloaded: None });
         assert_eq!(chat.unloads(), 0);
     }
 
@@ -1109,6 +1178,8 @@ mod tests {
             &tok(),
             &waits,
         );
+        // Its card says why it waits (review fix L12-wait-reason).
+        waits.until(LeaseWait::ChatModelLoading).await;
         tokio::time::sleep(Duration::from_millis(50)).await;
         assert!(
             !second.is_finished(),
@@ -1130,6 +1201,7 @@ mod tests {
         assert_eq!(chat.unloads(), 1);
         assert!(lease.holds_card());
         assert!(!lease.begin_load(), "a chat load passed during job 2");
+        assert_eq!(waits.seen(), [LeaseWait::ChatModelLoading]);
     }
 
     /// Review fixes L12-1 and L12-3: a plain chat load (no model use of its own) that passes
@@ -1162,6 +1234,8 @@ mod tests {
             0,
             "the unload stopped a chat load in flight"
         );
+        // The job now waits for that load, and says so.
+        waits.until(LeaseWait::ChatModelLoading).await;
         tokio::time::sleep(Duration::from_millis(50)).await;
         assert!(
             !job.is_finished(),
@@ -1182,6 +1256,10 @@ mod tests {
         );
         assert_eq!(chat.unloads(), 1);
         assert!(lease.holds_card());
+        assert_eq!(
+            waits.seen(),
+            [LeaseWait::ReplyRunning, LeaseWait::ChatModelLoading]
+        );
     }
 
     /// Review fix L12-3: a chat load that passed the gate and started while a job waited for
@@ -1251,6 +1329,35 @@ mod tests {
                 .unwrap_or_else(|| panic!("the unload, in order: {step}"));
             from += found + step.len();
         }
+    }
+
+    /// Review fix L12-reload-test: "Reload it after Studio" loads the chat model again only
+    /// while the status still names it as unloaded to free memory. A model the person
+    /// loaded since (that one or another), unloaded since, or removed is left as it is.
+    #[test]
+    fn reload_skips_a_model_the_person_changed_since() {
+        use crate::dto::{RuntimeStateDto, RuntimeStatusDto};
+        const OTHER: &str = "/m/other.gguf";
+        let unloaded = |path: Option<&str>| RuntimeStatusDto {
+            unloaded_path: path.map(str::to_string),
+            ..RuntimeStatusDto::default()
+        };
+        let loaded = |path: &str| RuntimeStatusDto {
+            state: RuntimeStateDto::Ready,
+            model_path: Some(path.to_string()),
+            ..RuntimeStatusDto::default()
+        };
+
+        // Studio unloaded it, and nothing changed since.
+        assert!(reload_wanted(&unloaded(Some(CHAT)), CHAT));
+        // The person loaded it again, or another model: a load clears "Unloaded to free
+        // memory".
+        assert!(!reload_wanted(&loaded(CHAT), CHAT));
+        assert!(!reload_wanted(&loaded(OTHER), CHAT));
+        // The person loaded another model and unloaded it.
+        assert!(!reload_wanted(&unloaded(Some(OTHER)), CHAT));
+        // The model was removed from Installed (or nothing was unloaded).
+        assert!(!reload_wanted(&unloaded(None), CHAT));
     }
 
     #[tokio::test]
@@ -1326,13 +1433,15 @@ mod tests {
         // The wait for a chat load in flight ends too.
         assert!(lease.begin_load());
         let cancel = tok();
+        let waits = Waits::default();
         let job = ask_in_task(
             &lease,
             need(true, true, true),
             GpuPolicy::Unload,
             &cancel,
-            &Waits::default(),
+            &waits,
         );
+        waits.until(LeaseWait::ChatModelLoading).await;
         tokio::time::sleep(Duration::from_millis(50)).await;
         assert!(
             !job.is_finished(),
