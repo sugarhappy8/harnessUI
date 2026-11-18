@@ -192,9 +192,11 @@ pub(crate) fn check_diffusion_file(family: GenFamily, path: &Path) -> AppResult<
 
 /// 0.1.0 Studio: adds the picture or video model `group` downloaded ([`GroupMeta::generator`])
 /// to Studio's installed models: every part checked ([`gen_model_from`]), then the diffusion
-/// part's tensor table ([`check_diffusion_file`]). A diffusion file of another model is
-/// refused: nothing is added, and the group's files that no installed model uses and no other
-/// download writes are removed, with their emptied folders.
+/// part's tensor table ([`check_diffusion_file`], read off the async runtime). A diffusion file
+/// of another model is refused: nothing is added, and the diffusion file and the files the
+/// group wrote itself ([`written_by`], as Cancel deletes only those) are removed when no
+/// installed model uses them and no other download writes them, with their emptied folders.
+/// A part the download found already in place stays.
 pub(crate) async fn register_gen_model(
     store: &store::Store,
     models_dir: &Path,
@@ -212,9 +214,18 @@ pub(crate) async fn register_gen_model(
         .find(|p| matches!(p.role.as_str(), "diffusion" | "model"))
         .and_then(|p| row_of(&rows, p))
         .ok_or_else(|| AppError::internal("a picture or video model without its model part"))?;
-    if let Err(refused) = check_diffusion_file(family, Path::new(&diffusion.dest_path)) {
+    let path = PathBuf::from(&diffusion.dest_path);
+    let checked = tokio::task::spawn_blocking(move || check_diffusion_file(family, &path))
+        .await
+        .map_err(|e| AppError::internal(format!("the model file's check stopped: {e}")))?;
+    if let Err(refused) = checked {
         let writing = files_being_written(store, Some(group)).await?;
-        let files: Vec<PathBuf> = rows.iter().map(|r| PathBuf::from(&r.dest_path)).collect();
+        let written = written_by(store, group).await;
+        let files: Vec<PathBuf> = rows
+            .iter()
+            .filter(|r| r.dest_path == diffusion.dest_path || written.contains(&r.dest_path))
+            .map(|r| PathBuf::from(&r.dest_path))
+            .collect();
         let busy = |p: &Path| writing.contains(&p.display().to_string());
         crate::studio::local_models::remove_unused_files(store, models_dir, &files, &busy).await?;
         tracing::warn!(
@@ -963,16 +974,8 @@ async fn clean_up(
     models_dir: &Path,
     deleting_model: Option<&str>,
 ) -> AppResult<()> {
-    let (rows, others): (Vec<store::Download>, Vec<store::Download>) = store
-        .list_downloads(None)
-        .await?
-        .into_iter()
-        .partition(|r| r.group_id == group);
-    let elsewhere: Vec<String> = others
-        .into_iter()
-        .filter(|r| r.status != DownloadStatus::Completed)
-        .map(|r| r.dest_path)
-        .collect();
+    let rows = store.list_downloads(Some(group.to_string())).await?;
+    let elsewhere = files_being_written(store, Some(group)).await?;
     let meta: Option<GroupMeta> = store.get_setting(&meta_key(group)).await.ok().flatten();
     let written = written_by(store, group).await;
     for row in &rows {
@@ -3665,10 +3668,68 @@ mod tests {
         );
     }
 
+    /// No recommended model's download is refused as another model: each recommended entry
+    /// whose diffusion file had its tensor table recorded (the fixtures' README in
+    /// crates/models/tests/fixtures/gguf/ names each table's repository, revision and file) is
+    /// recognised as its own family, by the check `register_gen_model` makes. An entry whose
+    /// file was recorded at another revision fails: its table is recorded again.
+    #[test]
+    fn every_recommended_diffusion_file_is_its_own_family() {
+        use models::gguf::testing::{diffusion_gguf, shapes};
+        let readme = include_str!("../../crates/models/tests/fixtures/gguf/README.md");
+        // `| `<fixture>` | <repo> @ <revision>, `<file>` … |`
+        let recorded: Vec<(&str, &str, &str, &str)> = readme
+            .lines()
+            .filter_map(|line| {
+                let (fixture, rest) = line.strip_prefix("| `")?.split_once("` | ")?;
+                let (repo, rest) = rest.split_once(" @ ")?;
+                let (revision, rest) = rest.split_once(", `")?;
+                let (file, _) = rest.split_once('`')?;
+                Some((fixture, repo, revision, file))
+            })
+            .collect();
+        assert!(
+            recorded.len() >= 5,
+            "the README's table reads: {recorded:?}"
+        );
+        let catalog = models::gen_catalog::gen_catalog(
+            &models::catalog::Catalog::bundled(),
+            runtime::sd::lock::embedded().sd_cpp.build,
+        );
+        let dir = Scratch::new();
+        let mut checked = Vec::new();
+        for (id, entry) in &catalog.entries {
+            let part = entry.diffusion();
+            let Some(&(fixture, _, revision, _)) = recorded
+                .iter()
+                .find(|(_, repo, _, file)| *repo == part.repo && *file == part.path)
+            else {
+                continue;
+            };
+            assert_eq!(
+                revision, part.revision,
+                "{id}: its table was recorded at another revision; record it again"
+            );
+            assert_eq!(
+                models::gen_search::family_from_tensors(&shapes(fixture)),
+                Some(entry.family),
+                "{id}"
+            );
+            let file = dir.path().join(format!("{id}.gguf"));
+            std::fs::write(&file, diffusion_gguf(fixture)).unwrap();
+            check_diffusion_file(entry.family, &file).unwrap_or_else(|e| panic!("{id}: {e:?}"));
+            checked.push(id.as_str());
+        }
+        assert!(
+            !checked.is_empty(),
+            "no recommended entry's diffusion file has a recorded table"
+        );
+    }
+
     /// A downloaded diffusion file is checked by its own tensor table before it is added: a
-    /// FLUX.2 klein 9B named like the 4B is refused, nothing is added, and the group's files
-    /// go (no other model uses them). A `.safetensors` part was checked by size and SHA-256
-    /// only.
+    /// FLUX.2 klein 9B named like the 4B is refused, nothing is added, and the diffusion file
+    /// goes with the files the download wrote (no other model uses them), while a part it found
+    /// already in place stays. A `.safetensors` part was checked by size and SHA-256 only.
     #[tokio::test]
     async fn a_searched_file_that_is_another_model_is_not_added() {
         use models::gguf::testing::diffusion_gguf;
@@ -3767,15 +3828,23 @@ mod tests {
         }
         write(diffusion, &diffusion_gguf("klein9b-tensors.txt"));
         write(&dests[1], b"encoder");
+        // The download wrote the encoder; the decoder was already in place (written above),
+        // so the download only checked it.
+        note_written(&store, "g", &dests[1].display().to_string())
+            .await
+            .unwrap();
         let e = register_gen_model(&store, &models, "g", &meta)
             .await
             .unwrap_err();
         assert_eq!(e.code, "studio_not_that_model");
         assert!(store.list_gen_models().await.unwrap().is_empty());
-        for dest in &dests {
-            assert!(!dest.exists(), "{} is removed", dest.display());
-        }
-        assert!(!models.join("someone").exists(), "and its empty folders");
+        assert!(!diffusion.exists(), "the file that is another model goes");
+        assert!(!dests[1].exists(), "the file the download wrote goes");
+        assert!(dests[2].exists(), "the part found in place stays");
+        assert!(
+            !models.join("someone").exists() && !models.join("unsloth").exists(),
+            "and their empty folders"
+        );
         assert!(models.exists(), "never the models folder");
 
         // The 4B file is added, with every part.

@@ -15,10 +15,12 @@ use std::path::{Path, PathBuf};
 use std::sync::{Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, Instant};
 
-use runtime::llama::lock::current_platform;
+use models::gen_catalog::{Commercial, GenLicence};
+use runtime::llama::lock::{PackSpec, current_platform};
 use runtime::packs::{PackError, PackProgress, PackState};
 use runtime::sd::engine::{self, Engine, EngineLayout, EngineSource};
 use runtime::sd::lock::{self as sd_lock, SdLock};
+use sha2::{Digest, Sha256};
 use tauri::{AppHandle, Emitter, Manager};
 use tokio_util::sync::CancellationToken;
 
@@ -136,8 +138,73 @@ pub fn engine_layout(app: &AppHandle) -> EngineLayout {
 
 /// The engine on this computer now, or `None`: Windows before the pack is installed (or after
 /// antivirus quarantine took one of its files), Linux without a development folder.
+#[allow(
+    dead_code,
+    reason = "Task L14's local runs find the engine through it, again after a download"
+)]
 pub fn current_engine(app: &AppHandle) -> Option<Engine> {
     engine::discover(&engine_layout(app), sd_lock::embedded(), current_platform())
+}
+
+/// The id of the Studio engine's licence among a local model's licences.
+pub const ENGINE_LICENCE_ID: &str = "studio-engine";
+
+/// What a local model's download needs of the Studio engine.
+#[derive(Debug, Clone, PartialEq)]
+pub enum EngineNeed {
+    /// An engine is found: the app's own program, a development folder or the installed pack.
+    Found,
+    /// No engine yet, and this platform has a pack: it downloads with the model, under this
+    /// licence, accepted with the model's.
+    Pack(GenLicence),
+    /// No engine, and no pack for this platform: a Mac whose bundled program is missing, Linux
+    /// without a development folder.
+    Missing,
+}
+
+/// The Studio engine's licence as a local model's download lists it for acceptance: the
+/// pack's licence name and link from `sd.lock.json` (what [`status_from`] shows beside
+/// *Download the Studio engine*). The pack bundles no canonical text to hash, so its SHA-256 is
+/// that of `<pack id>@<build>:<licence name> <licence link>`, as a searched repository's own
+/// label is pinned to its revision (`gen_search`): an acceptance holds for this build and
+/// this licence, and a new build or licence asks again.
+pub fn engine_licence(pack: &PackSpec) -> GenLicence {
+    let pinned = format!(
+        "{}@{}:{} {}",
+        pack.id, pack.build, pack.license_name, pack.license_url
+    );
+    GenLicence {
+        id: ENGINE_LICENCE_ID.to_owned(),
+        name: pack.license_name.clone(),
+        url: pack.license_url.clone(),
+        sha256: Sha256::digest(pinned.as_bytes())
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect(),
+        commercial_outputs: Commercial::Yes,
+        revenue_limit_usd: None,
+        excluded_regions: Vec::new(),
+        obligations: Vec::new(),
+        plain_words: errors::ENGINE_LICENCE_WORDS.to_owned(),
+    }
+}
+
+/// What a local model's download on `platform` needs of the engine: nothing when one is found
+/// (built in, a development folder or the installed pack), else the pack where `platform` has
+/// one, else nothing it can download.
+pub fn engine_need_from(lock: &SdLock, layout: &EngineLayout, platform: &str) -> EngineNeed {
+    if engine::discover(layout, lock, platform).is_some() {
+        return EngineNeed::Found;
+    }
+    match lock.packs.iter().find(|p| p.platform == platform) {
+        Some(pack) => EngineNeed::Pack(engine_licence(pack)),
+        None => EngineNeed::Missing,
+    }
+}
+
+/// [`engine_need_from`] for this computer now.
+pub fn engine_need(app: &AppHandle) -> EngineNeed {
+    engine_need_from(sd_lock::embedded(), &engine_layout(app), current_platform())
 }
 
 /// The engine's state for `platform` from what is on disk; `downloading` holds the bytes done
@@ -203,8 +270,10 @@ pub fn engine_status(app: &AppHandle) -> EngineStatusDto {
 /// Whether `platform` needs the pack downloaded: it has one, and no engine is found yet (a
 /// development folder, the bundled program or the installed pack).
 fn needs_the_pack(lock: &SdLock, layout: &EngineLayout, platform: &str) -> bool {
-    lock.packs.iter().any(|p| p.platform == platform)
-        && engine::discover(layout, lock, platform).is_none()
+    matches!(
+        engine_need_from(lock, layout, platform),
+        EngineNeed::Pack(_)
+    )
 }
 
 /// Starts the pack download when this platform has a pack and has no engine yet; returns at
@@ -636,6 +705,104 @@ mod tests {
         // the pack installed
         install_pack(lock, &layout.engines_dir);
         assert!(!needs_the_pack(lock, &layout, "windows-x86_64"));
+    }
+
+    /// A local model's download brings the engine only where it is a pack and is not found;
+    /// with no engine and no pack it can only say the engine is missing.
+    #[test]
+    fn a_model_download_needs_the_engine_only_where_a_pack_can_bring_it() {
+        let lock = embedded();
+        let scratch = Scratch::new();
+        let layout = EngineLayout {
+            engines_dir: scratch.path().join("engines"),
+            ..EngineLayout::default()
+        };
+        let EngineNeed::Pack(licence) = engine_need_from(lock, &layout, "windows-x86_64") else {
+            panic!("Windows without the pack downloads it");
+        };
+        assert_eq!(licence, engine_licence(&lock.packs[0]));
+        // the licence status_from shows beside the engine's own download
+        let shown = status_from(lock, &layout, "windows-x86_64", None);
+        assert_eq!(
+            (licence.name.as_str(), licence.url.as_str()),
+            (shown.license_name.as_str(), shown.license_url.as_str())
+        );
+        assert_eq!(licence.id, ENGINE_LICENCE_ID);
+        assert_eq!(licence.commercial_outputs, Commercial::Yes);
+        assert_eq!(
+            licence.plain_words,
+            "Free for any use, including commercial."
+        );
+
+        // no pack for these platforms: a Mac without its bundled program, Linux without a
+        // development folder
+        for platform in ["linux-x86_64", "macos-aarch64", "macos-x86_64"] {
+            assert_eq!(
+                engine_need_from(lock, &layout, platform),
+                EngineNeed::Missing,
+                "{platform}"
+            );
+        }
+
+        // found: a Mac's bundled program, a development folder, the installed pack
+        let bundled = scratch.path().join("MacOS");
+        touch(&bundled.join(program_file_name()));
+        let mac = EngineLayout {
+            bundled_dir: Some(bundled),
+            ..layout.clone()
+        };
+        assert_eq!(
+            engine_need_from(lock, &mac, "macos-aarch64"),
+            EngineNeed::Found
+        );
+        let dev = scratch.path().join("sd");
+        touch(&dev.join(program_file_name()));
+        let with_dev = EngineLayout {
+            dev_override: Some(dev),
+            ..layout.clone()
+        };
+        for platform in ["linux-x86_64", "windows-x86_64"] {
+            assert_eq!(
+                engine_need_from(lock, &with_dev, platform),
+                EngineNeed::Found,
+                "{platform}"
+            );
+        }
+        install_pack(lock, &layout.engines_dir);
+        assert_eq!(
+            engine_need_from(lock, &layout, "windows-x86_64"),
+            EngineNeed::Found
+        );
+    }
+
+    /// The engine's licence is pinned to its build and its licence: either changing asks
+    /// for it again.
+    #[test]
+    fn the_engine_licence_is_pinned_to_its_build_and_licence() {
+        let pack = embedded().packs[0].clone();
+        let licence = engine_licence(&pack);
+        assert_eq!(licence.sha256.len(), 64);
+        assert!(licence.sha256.bytes().all(|b| b.is_ascii_hexdigit()));
+        assert_eq!(
+            engine_licence(&pack.clone()),
+            licence,
+            "the same every time"
+        );
+        let other_build = PackSpec {
+            build: "master-1107-0000000".into(),
+            ..pack.clone()
+        };
+        let other_licence = PackSpec {
+            license_name: format!("{}; another library MIT", pack.license_name),
+            ..pack.clone()
+        };
+        let other_link = PackSpec {
+            license_url: format!("{}#another", pack.license_url),
+            ..pack
+        };
+        for changed in [other_build, other_licence, other_link] {
+            assert_ne!(engine_licence(&changed).sha256, licence.sha256);
+        }
     }
 
     #[tokio::test]

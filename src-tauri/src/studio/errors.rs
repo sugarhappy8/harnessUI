@@ -928,6 +928,23 @@ pub fn engine_not_removed(details: impl Into<String>) -> AppError {
     )
 }
 
+/// What the Studio engine's licence allows, shown with a local model's licences when the
+/// engine downloads with it (its parts are MIT and BSD-3-Clause, which limit nothing made with
+/// it).
+pub const ENGINE_LICENCE_WORDS: &str = "Free for any use, including commercial.";
+
+/// What a local model's download says when no Studio engine is found and none can come with
+/// it: no pack for this computer (a Mac whose bundled engine is missing, Linux without a
+/// development folder).
+pub fn engine_missing_here() -> AppError {
+    AppError::new(
+        "studio_engine_not_here",
+        "The Studio engine is missing from this computer.",
+        "Install harnessUI again to get it back.",
+        String::new(),
+    )
+}
+
 // ---- local models ------------------------------------------------------------------------------
 
 /// The code of [`not_that_model`], which a download group shows as it is (its files are gone,
@@ -1364,6 +1381,7 @@ mod tests {
             engine_licence_not_accepted(),
             engine_still_downloading(),
             engine_not_removed("denied"),
+            engine_missing_here(),
             not_that_model("klein 9B"),
             notice_needed(),
             license_not_accepted(),
@@ -1669,6 +1687,14 @@ mod tests {
         assert_eq!(
             license_not_accepted().message,
             "Accept the licences to download this model."
+        );
+        assert_eq!(
+            words(engine_missing_here()),
+            (
+                "studio_engine_not_here".into(),
+                "The Studio engine is missing from this computer.".into(),
+                "Install harnessUI again to get it back.".into()
+            )
         );
     }
 
