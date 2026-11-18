@@ -780,13 +780,13 @@ pub fn picture_too_big_for(to: PictureUse) -> AppError {
 }
 
 /// A video's poster frame from the webview is not a JPEG picture of at most
-/// [`super::commands::POSTER_CAP`] bytes.
+/// [`super::actions::POSTER_CAP`] bytes.
 pub fn bad_poster() -> AppError {
     AppError::new(
         "bad_request",
         format!(
             "The poster frame was not saved: it must be a JPEG picture of at most {}.",
-            size(super::commands::POSTER_CAP as u64)
+            size(super::actions::POSTER_CAP as u64)
         ),
         "Play the video again to make a new one.",
         String::new(),

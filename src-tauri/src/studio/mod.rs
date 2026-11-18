@@ -17,7 +17,10 @@
 //!   spending; the preferences) and the changing ones (start, cancel, *Get it anyway*; a
 //!   video's poster frame; star, delete, export, show in folder; added pictures; *Send to
 //!   chat*; the preferences).
+//! - [`actions`]: what the gallery actions behind those commands do: export (with the run's
+//!   settings beside the copy), a video's poster frame, *Send to chat* and *Use in prompt*.
 
+pub mod actions;
 pub mod catalog;
 pub mod commands;
 pub mod deps;

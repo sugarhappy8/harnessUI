@@ -29,7 +29,7 @@ pub struct ImageInput {
 }
 
 /// The picture types the composer takes: PNG, JPEG, GIF and WebP. A Studio picture goes to a
-/// chat or a prompt only as one of these (`studio::commands::for_chat`).
+/// chat or a prompt only as one of these (`studio::actions::for_chat`).
 pub(crate) const PICTURE_TYPES: [&str; 4] = ["image/png", "image/jpeg", "image/gif", "image/webp"];
 
 /// Checks the bytes really are the claimed image type (magic numbers), so a renamed
