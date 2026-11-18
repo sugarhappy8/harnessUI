@@ -318,6 +318,18 @@ pub struct CreationUsage {
     pub bytes: u64,
 }
 
+/// One finished local run's measured time, from [`Store::local_run_times`], for estimating
+/// the next run's.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct LocalRunTime {
+    /// Exactly what the run was given (its size, steps, pictures or frames).
+    pub params: Value,
+    /// How long the engine took.
+    pub elapsed_ms: u64,
+    /// Unix ms when it was made.
+    pub created_at: i64,
+}
+
 /// What a delete removed, for removing files, sidecars and added pictures.
 ///
 /// Each row is as it was before the call stubbed or deleted it, prompt, added pictures and
@@ -929,6 +941,46 @@ impl Store {
     /// How many pictures and videos Studio keeps, and their bytes.
     pub async fn creation_usage(&self) -> Result<CreationUsage, StoreError> {
         self.call(|c| usage(c)).await
+    }
+
+    /// This model's finished local runs on `device` (the device as shown, the string a run
+    /// records), newest first, at most `limit` (0 means no limit): this computer's measured
+    /// times. Runs that did not finish, runs with no time taken recorded, cloud runs and
+    /// spending stubs are left out.
+    pub async fn local_run_times(
+        &self,
+        gen_model_id: &str,
+        device: &str,
+        limit: u32,
+    ) -> Result<Vec<LocalRunTime>, StoreError> {
+        let gen_model_id = gen_model_id.to_owned();
+        let device = device.to_owned();
+        self.call(move |c| {
+            let mut stmt = c.prepare_cached(
+                "SELECT params_json, elapsed_ms, created_at FROM creation_runs \
+                 WHERE runs_on = ?1 AND status = ?2 AND gen_model_id = ?3 AND device = ?4 \
+                 AND elapsed_ms IS NOT NULL AND deleted_at IS NULL \
+                 ORDER BY created_at DESC, id DESC LIMIT ?5",
+            )?;
+            let rows = stmt.query_map(
+                params![
+                    RunsOn::Local,
+                    CreationStatus::Done,
+                    gen_model_id,
+                    device,
+                    sql_limit(limit)
+                ],
+                |r| {
+                    Ok(LocalRunTime {
+                        params: r.get::<_, JsonColumn>(0)?.0,
+                        elapsed_ms: r.get(1)?,
+                        created_at: r.get(2)?,
+                    })
+                },
+            )?;
+            Ok(rows.collect::<Result<_, _>>()?)
+        })
+        .await
     }
 }
 

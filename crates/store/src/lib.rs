@@ -2,9 +2,10 @@
 //!
 //! - [`Store`]: the SQLite database (chats and the message tree, history search, tool calls,
 //!   compaction summaries, attachments, the append-only audit log, models, downloads,
-//!   configuration, and Studio's runs and their files). One dedicated OS thread owns the
-//!   connection; every method is async and talks to that thread over a channel, so no async
-//!   task blocks on disk.
+//!   configuration, and Studio's runs, their files, the installed picture and video models
+//!   and the accepted model licences). One dedicated OS thread owns the connection; every
+//!   method is async and talks to that thread over a channel, so no async task blocks on
+//!   disk.
 //! - [`secrets`]: OS keychain storage for API keys and tokens. SQLite holds only
 //!   [`SecretRef`]s.
 //!
@@ -19,6 +20,7 @@ mod chats;
 mod config;
 mod creations;
 mod error;
+mod gen_models;
 mod ids;
 mod models;
 mod outputs;
@@ -49,10 +51,11 @@ pub use config::{
 };
 pub use creations::{
     CreationKind, CreationOutput, CreationPatch, CreationQuery, CreationRun, CreationStatus,
-    CreationUsage, Deleted, MAX_CREATION_RUNS, NewCreationOutput, NewCreationRun, RunCursor,
-    RunsOn,
+    CreationUsage, Deleted, LocalRunTime, MAX_CREATION_RUNS, NewCreationOutput, NewCreationRun,
+    RunCursor, RunsOn,
 };
 pub use error::{ParseEnumError, StoreError};
+pub use gen_models::{GenModel, GenSource, LicenseAcceptance, NewGenModel};
 pub use ids::{
     AttachmentId, AuditId, ChatId, DownloadId, FolderId, McpServerId, MessageId, ModelId,
     ProviderId, SkillId, SummaryId, ToolCallId, double_option,
