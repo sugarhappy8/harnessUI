@@ -31,6 +31,11 @@ pub const VIDEO_FRAMES: [u32; 5] = [17, 33, 49, 81, 121];
 const VIDEO_SIDES: [u32; 2] = [480, 720];
 /// The shapes Studio offers, width to height; a suggestion keeps the requested one.
 const SHAPES: [(u32, u32); 5] = [(1, 1), (4, 3), (3, 4), (16, 9), (9, 16)];
+/// About how much of a Mac's memory macOS lets Metal use (its working set), as a fraction:
+/// two thirds. A Mac's memory is told from its working set by it
+/// ([`device_class`](crate::gen_eta::device_class)), and a working set a run needs is turned
+/// into the Mac's memory by it ([`NotFor::MacMemory`]).
+pub(crate) const MAC_WORKING_SET_SHARE: (u64, u64) = (2, 3);
 
 /// The size of a run.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -72,21 +77,22 @@ impl GenFit {
 }
 
 /// Why a model is not offered here, judged with the chat model's memory counted back, so the
-/// reason never blames the chat model's share. A `needs` figure is always more than the
-/// memory that falls short in that room.
+/// reason never blames the chat model's share. Each `needs` figure has one unit, is enough to
+/// run the job, and is always more than this computer has in that unit.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum NotFor {
-    /// A graphics card with this much free memory would run it one part at a time (the
-    /// largest part with its working memory, and the spare). Also the reason on a computer
-    /// that runs models on the processor and has too little memory, where nothing takes
-    /// turns: there `needs` is every part and the working memory with the spare, the
-    /// computer's memory less the reserve that would run it (and what a graphics card would
-    /// need to hold it all at once).
+    /// The free memory the system would have to report where this computer runs models (the
+    /// figure [`GenFitResult::available_bytes`] is) to run it. On a graphics card, the card's
+    /// free memory for one part at a time: the largest part with its working memory, and the
+    /// spare. On a computer that runs models on the processor, where nothing takes turns, the
+    /// computer's free memory for every part and the working memory at once, with the spare
+    /// and the reserve it keeps back for other programs.
     GraphicsMemory { needs: u64 },
-    /// What this Mac would have to give its graphics to run it one part at a time, when its
-    /// working set is what falls short. When the working set would do but the computer's
-    /// memory cannot hold every part and the working memory, the free memory the computer
-    /// would need for that instead, as the system reports it: that need and the reserve.
+    /// The memory a Mac would have to have to run it one part at a time: the larger of the
+    /// Mac whose working set (two thirds of its memory, [`MAC_WORKING_SET_SHARE`]) holds the
+    /// largest part with its working memory and the spare, and the Mac whose memory holds
+    /// every part and the working memory besides the reserve (its free memory counted as all
+    /// of it).
     MacMemory { needs: u64 },
     /// Video needs a graphics card or Apple silicon; this computer runs models on the
     /// processor.
@@ -325,24 +331,25 @@ impl Need {
         self.one_part.saturating_add(SPARE_BYTES)
     }
 
-    /// Why a run that is red at `place` does not fit there, with the memory that falls short
-    /// ([`NotFor`]): on a graphics card, the one-part-at-a-time need; on the processor, the
-    /// Green need, the only way a run goes there; on Apple silicon, the one-part-at-a-time
-    /// need when the working set is short of it, else (only the computer's memory is short)
-    /// every part and the working memory with the reserve.
+    /// Why a run that is red at `place` does not fit there ([`NotFor`]): on a graphics card,
+    /// the card's free memory one part at a time needs; on the processor, the computer's free
+    /// memory the Green need (the only way a run goes there) takes with the reserve; on Apple
+    /// silicon, the Mac's memory one part at a time needs, the larger of the working set's
+    /// need grown to a whole Mac and every part with the working memory and the reserve.
     fn not_for(&self, place: Place) -> NotFor {
         match place.pool {
             Pool::Card => NotFor::GraphicsMemory {
                 needs: self.device_need(),
             },
             Pool::Processor => NotFor::GraphicsMemory {
-                needs: self.whole.saturating_add(SPARE_BYTES),
-            },
-            Pool::Unified if self.device_need() > place.room.whole => NotFor::MacMemory {
-                needs: self.device_need(),
+                needs: self
+                    .whole
+                    .saturating_add(SPARE_BYTES)
+                    .saturating_add(RAM_RESERVE_BYTES),
             },
             Pool::Unified => NotFor::MacMemory {
-                needs: self.whole.saturating_add(RAM_RESERVE_BYTES),
+                needs: mac_with_working_set(self.device_need())
+                    .max(self.whole.saturating_add(RAM_RESERVE_BYTES)),
             },
         }
     }
@@ -423,6 +430,14 @@ fn point_size(m: &MemoryPoint) -> GenSize {
         height: m.height,
         frames: m.frames.max(1),
     }
+}
+
+/// The memory of a Mac whose working set ([`MAC_WORKING_SET_SHARE`] of it) is at least
+/// `working_set` bytes: rounded up, so the share of it never falls a byte short.
+fn mac_with_working_set(working_set: u64) -> u64 {
+    let (share, of) = MAC_WORKING_SET_SHARE;
+    let mac = (u128::from(working_set) * u128::from(of)).div_ceil(u128::from(share));
+    u64::try_from(mac).unwrap_or(u64::MAX)
 }
 
 /// Whether `entry` at `size` fits `target`. `target` as probed now (with the chat model
@@ -867,16 +882,16 @@ pub(crate) mod tests {
             Some(NotFor::VideoNeedsGpu)
         ));
         assert!(gen_fit(&klein(), sq(512), &cpu(32), None).processor_only);
-        // A picture too big for the computer's memory: the room it would need there, every
-        // part and the working memory with the spare (7.61 + 1 = 8.61 > 2), which a graphics
-        // card would need to hold it all at once, too.
+        // A picture too big for the computer's memory: the free memory the system would have
+        // to report, every part and the working memory with the spare and the 2 GB reserve
+        // (7.61 + 1 + 2 = 10.61 > 4).
         let r = gen_fit(&zimage(), sq(1024), &cpu(4), None);
         assert_eq!(
             (r.fit, r.not_for),
             (
                 GenFit::Red,
                 Some(NotFor::GraphicsMemory {
-                    needs: 8_606_435_812
+                    needs: 10_606_435_812
                 })
             )
         );
@@ -891,11 +906,12 @@ pub(crate) mod tests {
             (r.fit, r.memory_saving, r.processor_only),
             (GenFit::Red, false, true)
         );
-        // The reason gives the only way it runs there, 7.20, not one part at a time.
+        // The reason gives the free memory the only way it runs there needs, 7.20 with the
+        // 2 GB reserve: 9.20, more than the 6 GB free; not one part at a time.
         assert_eq!(
             r.not_for,
             Some(NotFor::GraphicsMemory {
-                needs: 7_203_471_164
+                needs: 9_203_471_164
             })
         );
         // 512² with 30 GB: 5.29 + 0.60 + 1 = 6.90. Green, and the word is still "Slow here".
@@ -906,8 +922,8 @@ pub(crate) mod tests {
             crate::gen_eta::FitWord::Slow
         );
         // 7 GB left: 1024² (7.20) is red and 768² (7.02) too; 512² (6.90) is suggested. The
-        // reason's 7.20 is more than the 7 GB room, never the 4.37 one part at a time would
-        // need on a graphics card.
+        // reason's 9.20 is more than the 9 GB the system reports free, never the 4.37 one
+        // part at a time would need on a graphics card.
         let r = gen_fit(&klein(), sq(1024), &cpu(9), None);
         assert_eq!(
             (r.fit, r.suggestion, r.not_for),
@@ -915,10 +931,11 @@ pub(crate) mod tests {
                 GenFit::Red,
                 Some(sq(512)),
                 Some(NotFor::GraphicsMemory {
-                    needs: 7_203_471_164
+                    needs: 9_203_471_164
                 })
             )
         );
+        assert!(9_203_471_164 > r.available_bytes);
         // The chat model's memory given back counts there too: 4 + 4 = 8 >= 7.20.
         let r = gen_fit(&klein(), sq(1024), &cpu(6), Some(4 * GB));
         assert_eq!(
@@ -933,8 +950,8 @@ pub(crate) mod tests {
         // cannot hold its parts and working memory (6.20): red.
         let r = gen_fit(&klein(), sq(1024), &apple(8, 6), None);
         assert_eq!(r.fit, GenFit::Red);
-        // The working set would do (4.37 one part at a time), so the reason gives the free
-        // memory the computer needs: 6.20 + the 2 GB reserve = 8.20, more than its 6.
+        // The Mac it needs: the larger of 4.37 ÷ 2/3 = 6.55 (a working set that holds one
+        // part at a time) and 6.20 + the 2 GB reserve = 8.20, more than its 6 GB free.
         assert_eq!(
             r.not_for,
             Some(NotFor::MacMemory {
@@ -961,8 +978,8 @@ pub(crate) mod tests {
         let r = gen_fit(&klein(), sq(1024), &apple(8, 6), Some(3 * GB));
         assert_eq!((r.after_unload, r.not_for), (Some(GenFit::Green), None));
         // One part at a time on a 6 GB working set (5.77), the weights in 7 GB (6.70), but not
-        // every part with the working memory (7.61): red, needing 7.61 + 2 = 9.61 free; with
-        // 8 GB left, one part at a time.
+        // every part with the working memory (7.61): red, needing a Mac of 7.61 + 2 = 9.61
+        // (more than 5.77 ÷ 2/3 = 8.66); with 8 GB left, one part at a time.
         let r = gen_fit(&zimage(), sq(1024), &apple(6, 9), None);
         assert_eq!(
             (r.fit, r.not_for),
@@ -979,12 +996,22 @@ pub(crate) mod tests {
         );
     }
 
+    /// A Mac with `memory`, two thirds of it its working set and all of it free.
+    fn mac(memory: u64) -> Target {
+        Target::AppleUnified {
+            working_set_bytes: memory * 2 / 3,
+            ram_free_bytes: Some(memory),
+        }
+    }
+
     #[test]
     fn a_reasons_figure_is_more_than_the_memory_that_falls_short() {
-        // Wherever a run is red with a figure, the figure is more than what was short in the
-        // room judged (the chat model's share counted back): the device's room (the card, the
-        // processor's memory less the reserve, the Mac's working set), or, on a Mac whose
-        // working set would do, the computer's free memory.
+        // Wherever a run is red with a figure, the figure is more than this computer has in
+        // the room judged (the chat model's share counted back), in the figure's own unit:
+        // the free memory the system reports where models run (the card's, or the computer's
+        // before the reserve on the processor), or the Mac's memory (the Mac its working set
+        // tells, or else its free memory). And it is enough: a computer that has it runs the
+        // job on the device.
         let runs = [
             (klein(), sq(512)),
             (klein(), sq(1024)),
@@ -1010,18 +1037,36 @@ pub(crate) mod tests {
         {
             let chat = chat_gb.map(|gb| gb * GB);
             let back = chat.unwrap_or(0);
-            let room = target.room().whole + back;
             let case = format!("{} {size:?} on {target:?} with {chat_gb:?} GB", entry.id);
+            let runs_on = |there: Target| gen_fit(entry, *size, &there, None).fit.on_device();
             match gen_fit(entry, *size, target, chat).not_for {
                 Some(NotFor::GraphicsMemory { needs }) => {
-                    assert!(needs > room, "{case}: needs {needs}, room {room}");
-                }
-                Some(NotFor::MacMemory { needs }) if needs <= room => {
-                    let free = ram_gb * GB + back;
+                    let free = target.free_bytes() + back;
                     assert!(needs > free, "{case}: needs {needs}, free {free}");
-                    mac_computer_short += 1;
+                    let enough = match target {
+                        Target::Cpu { .. } => Target::Cpu {
+                            ram_free_bytes: needs,
+                        },
+                        _ => Target::Gpu {
+                            name: "GPU".into(),
+                            free_bytes: needs,
+                            ram_free_bytes: Some(1_000 * GB),
+                        },
+                    };
+                    assert!(runs_on(enough), "{case}: {needs} free is not enough");
                 }
-                Some(NotFor::MacMemory { .. }) => {}
+                Some(NotFor::MacMemory { needs }) => {
+                    let working_set_tells = (target.room().whole + back) * 3 / 2;
+                    if needs <= working_set_tells {
+                        let free = ram_gb * GB + back;
+                        assert!(needs > free, "{case}: needs {needs}, free {free}");
+                        mac_computer_short += 1;
+                    }
+                    assert!(
+                        runs_on(mac(needs)),
+                        "{case}: a Mac of {needs} is not enough"
+                    );
+                }
                 Some(NotFor::VideoNeedsGpu | NotFor::VideoNotOnThisMac) | None => continue,
             }
             figures += 1;
@@ -1095,12 +1140,53 @@ pub(crate) mod tests {
         // 2.84 + 4.15 + 0.25 + 1.90 + 1 = 10.14 <= 16
         let r = gen_fit(&wan21(), clip(832, 480, 33), &apple(16, 24), None);
         assert_eq!((r.fit, r.not_for), (GenFit::Green, None));
+        // Both short: the Mac's memory one part at a time needs, the larger of 5.77 ÷ 2/3 =
+        // 8.66 and 7.61 + the 2 GB reserve = 9.61.
         let r = gen_fit(&zimage(), sq(1024), &apple(2, 4), None);
         assert_eq!(
             r.not_for,
             Some(NotFor::MacMemory {
-                needs: 5_773_850_304
+                needs: 9_606_435_812
             })
+        );
+    }
+
+    #[test]
+    fn a_macs_figure_is_the_memory_of_a_mac_that_runs_it() {
+        // 1280² × 121 frames: one part at a time needs 4.21 + 13.40 + 1 = 18.61 of working
+        // set, so a Mac of 18.61 ÷ 2/3 = 27.92, more than every part with the working memory
+        // and the reserve (23.17 + 2 = 25.17).
+        let big = clip(1280, 1280, 121);
+        let r = gen_fit(&wan22(), big, &apple(16, 32), None);
+        assert_eq!(
+            (r.fit, r.not_for),
+            (
+                GenFit::Red,
+                Some(NotFor::MacMemory {
+                    needs: 27_915_370_800
+                })
+            )
+        );
+        assert_eq!(
+            gen_fit(&wan22(), big, &mac(27_915_370_800), None).fit,
+            GenFit::OnePartAtATime
+        );
+        // An odd working-set need (18_610_247_201) rounds the Mac up, so that two thirds of it
+        // still hold one part at a time; one byte less and they do not.
+        let mut odd = wan22();
+        odd.parts[0].size += 1;
+        let needs = match gen_fit(&odd, big, &apple(16, 32), None).not_for {
+            Some(NotFor::MacMemory { needs }) => needs,
+            other => panic!("{other:?}"),
+        };
+        assert_eq!(needs, 27_915_370_802);
+        assert_eq!(
+            gen_fit(&odd, big, &mac(needs), None).fit,
+            GenFit::OnePartAtATime
+        );
+        assert_ne!(
+            gen_fit(&odd, big, &mac(needs - 1), None).fit,
+            GenFit::OnePartAtATime
         );
     }
 

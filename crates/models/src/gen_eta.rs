@@ -7,7 +7,7 @@ use serde::Serialize;
 
 use crate::fit::Target;
 use crate::gen_catalog::{GenEntry, GenKind, SpeedPoint};
-use crate::gen_fit::{GenFit, GenFitResult, GenSize, tokens};
+use crate::gen_fit::{self, GenFit, GenFitResult, GenSize, tokens};
 
 /// Video on Apple silicon takes this much longer than measured: a fanless Mac slows down
 /// as it warms, and one cannot be told apart reliably, so every Mac gets it.
@@ -26,8 +26,9 @@ const GUESS_RANGE: (f64, f64) = (0.75, 1.5);
 /// A time measured here spans 0.9× to 1.15×.
 const MEASURED_RANGE: (f64, f64) = (0.9, 1.15);
 /// About how much of a Mac's memory macOS lets Metal use, to tell its size from the
-/// working set.
-const MAC_WORKING_SET_SHARE: f64 = 2.0 / 3.0;
+/// working set: the share a Mac's reason in `gen_fit` uses too.
+const MAC_WORKING_SET_SHARE: f64 =
+    gen_fit::MAC_WORKING_SET_SHARE.0 as f64 / gen_fit::MAC_WORKING_SET_SHARE.1 as f64;
 
 /// How long a run takes, as a range in milliseconds.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -104,7 +105,8 @@ pub fn device_class(target: &Target, backend: &str) -> DeviceClass {
 /// With `measured` runs (this model's on this device), their median scaled to these
 /// settings as a speed point scales, as [0.9×, 1.15×] and `measured`; the load is once a
 /// run whatever its size, so the point's load (at most the whole run) stays as it was and
-/// only the rest of each run is scaled. Otherwise from the
+/// only the rest of each run is scaled (a run with no work to scale from, as a point with no
+/// step or decode time gives it, is kept as it was: a work ratio of 1). Otherwise from the
 /// speed point of the same backend nearest in memory: load + per picture (steps × seconds
 /// a step × (tokens / the point's tokens)^1.3 + decode × the pixel-frames ratio), as
 /// [0.75×, 1.5×]. Video on Apple silicon (`metal`) grows by [`APPLE_VIDEO_PAD`]. No point of
@@ -126,8 +128,13 @@ pub fn estimate(
             let (then_load, then_work) = scale.seconds(m.size, m.steps, m.pictures);
             let elapsed = m.elapsed_ms as f64;
             let fixed = (then_load * 1000.0).min(elapsed);
-            (then_work > 0.0 && m.elapsed_ms > 0)
-                .then(|| fixed + (elapsed - fixed) * work / then_work)
+            // A run the point gives no work to scale from is kept as it was.
+            let ratio = if then_work > 0.0 {
+                work / then_work
+            } else {
+                1.0
+            };
+            (m.elapsed_ms > 0).then_some(fixed + (elapsed - fixed) * ratio)
         })
         .collect();
     let (ms, (low, high), measured) = match (median(runs), point) {
@@ -467,6 +474,28 @@ mod tests {
         assert_eq!(
             estimate(&e, sq(512), 4, 1, &class("vulkan", 8), &quick),
             Some(eta(4_500, 5_750, true))
+        );
+    }
+
+    #[test]
+    fn a_run_the_point_gives_no_work_is_kept_as_measured() {
+        // A point with a load and no step or decode time gives every run 0 work to scale
+        // from: a run here is kept as it was (work ratio 1), not dropped for the guess's 6 s.
+        let e = with_speed(klein(), "vulkan-8", 6.0, 0.0, 0.0);
+        let runs = [run(sq(1024), 4, 1, 30_000)];
+        assert_eq!(
+            estimate(&e, sq(512), 4, 1, &class("vulkan", 8), &runs),
+            Some(eta(27_000, 34_500, true))
+        );
+        // Every such run counts towards the median, unscaled: 20, 30 and 90 s give 30 s.
+        let runs = [
+            run(sq(1024), 4, 1, 20_000),
+            run(sq(512), 8, 1, 90_000),
+            run(sq(768), 4, 2, 30_000),
+        ];
+        assert_eq!(
+            estimate(&e, sq(1024), 4, 1, &class("vulkan", 8), &runs),
+            Some(eta(27_000, 34_500, true))
         );
     }
 
