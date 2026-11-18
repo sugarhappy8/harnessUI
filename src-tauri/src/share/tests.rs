@@ -1948,7 +1948,11 @@ async fn switching_on_starts_from_zero_even_when_the_kept_port_is_taken() {
         )
         .await
         .unwrap();
+    let started = Instant::now();
     let status = sharing.set_enabled(&env, true).await.unwrap();
+    // The switch-on tried the kept port every time before giving up: at least the waits
+    // between the tries went by (a lower bound only, so a slow machine cannot fail it).
+    assert!(started.elapsed() >= KEPT_PORT_WAIT * (KEPT_PORT_TRIES as u32 - 1));
     assert_eq!(
         (
             status.enabled,
