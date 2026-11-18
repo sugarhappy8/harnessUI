@@ -681,10 +681,13 @@ impl StudioManager {
         let opts = job_options(
             &grant,
             &verdict.fit,
-            &prepared.request.params,
+            &prepared.request,
             verdict.description.as_deref(),
             lane.hardware.logical_cores(),
         );
+        // The engine's devices first (once per engine, as a run lists them before it starts),
+        // so a first command names the graphics card the run would pass.
+        lane.provider.list_devices_for(&opts).await;
         Ok(lane.provider.preview_local(&prepared.request, &opts))
     }
 }
@@ -737,7 +740,7 @@ impl Inner {
                 verdict(
                     &entry,
                     *shape,
-                    runs_on_processor(&request.params),
+                    runs_on_processor(&request),
                     lane.hardware.as_ref(),
                     &self.deps.store,
                 )
@@ -897,7 +900,7 @@ impl Inner {
         let verdict = verdict(
             &step.entry,
             step.shape,
-            runs_on_processor(&step.request.params),
+            runs_on_processor(&step.request),
             lane.hardware.as_ref(),
             &self.deps.store,
         )
@@ -944,7 +947,7 @@ impl Inner {
         let opts = job_options(
             &grant,
             &verdict.fit,
-            &step.request.params,
+            &step.request,
             verdict.description.as_deref(),
             lane.hardware.logical_cores(),
         );

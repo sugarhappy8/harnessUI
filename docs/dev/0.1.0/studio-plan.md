@@ -3426,6 +3426,9 @@ pub struct LocalRunStatus { pub progress: Option<LocalProgress>, pub stalled: bo
 #[async_trait] pub trait LocalProvider: MediaProvider {
     /// `MediaProvider::start` with the lane's options; `start` itself is `start_local(req, scratch, &LocalJobOptions::default())`.
     async fn start_local(&self, req: &MediaRequest, scratch: &Path, opts: &LocalJobOptions) -> Result<Started, MediaError>;
+    /// Lists the engine's devices once per engine when a run with `opts` matches llama's card among them; the manager calls it before
+    /// `preview_local`, so a first preview carries the `--backend` the run would (ruling L14-preview-backend).
+    async fn list_devices_for(&self, opts: &LocalJobOptions);
     fn preview_local(&self, req: &MediaRequest, opts: &LocalJobOptions) -> RequestPreview;      // the command this run would use
     /// After the lane moved the outputs (or the run failed): removes `.partial/<run>` (the prompt files with it) and forgets the run.
     async fn release(&self, remote_id: &str);
@@ -3461,7 +3464,7 @@ impl MediaProvider for LocalMediaProvider {
 impl LocalProvider for LocalMediaProvider { /* start_local, preview_local, release; status from the run's last RunEvents; entry_of from installed();
     engine_build from the engine */ }
 ```
-`params_for` (all `canonical` roles as the cloud ones, so `canonical.ts` carries values between local and cloud models): Simple: `aspect_ratio` (Shape: 1:1, 4:3, 3:4, 16:9, 9:16), `n` (Count, 1–4, pictures only), `resolution` (video: `480p` initial, `720p`), `duration` (video Length: whole seconds from 1 to the entry's `max_frames` at its fps, initial 2), `first_frame` (StartFrame, `Images{0,1}`, when the entry takes a start frame), `input_references` (References, `Images{0,4}`, when it takes references). Advanced: `seed` (`Seed{max: SEED_MAX}`), `steps` (range 1–50, initial the entry's), `cfg_scale` (range 1–20 step 0.5; hidden when the default is 1.0, as 4-step models need), `sampler` and `scheduler` (enums from the whitelists), `size` (Size, multiples of the entry's `multiple_of`), `negative_prompt` (an `Extra`-free text field shown only when the default cfg is above 1), `memory_saving` (enum Automatic | Off | On), `run_on` (enum Graphics card | Processor). No `extra` field.
+`params_for` (all `canonical` roles as the cloud ones, so `canonical.ts` carries values between local and cloud models): Simple: `aspect_ratio` (Shape: 1:1, 4:3, 3:4, 16:9, 9:16), `n` (Count, 1–4, pictures only), `resolution` (video: `480p` initial, `720p`), `duration` (video Length: whole seconds from 1 to the entry's `max_frames` at its fps, initial 2), `first_frame` (StartFrame, `Images{0,1}`, when the entry takes a start frame), `input_references` (References, `Images{0,4}`, when it takes references). Advanced: `seed` (`Seed{max: SEED_MAX}`), `steps` (range 1–50, initial the entry's), `cfg_scale` (range 1–20 step 0.5; hidden when the default is 1.0, as 4-step models need), `sampler` and `scheduler` (enums from the whitelists), `size` (Size, multiples of the entry's `multiple_of`), `negative_prompt` (an `Extra`-free text field shown only when the default cfg is above 1), `memory_saving` (enum Automatic | Off | On), `run_on` (enum Graphics card | Processor; pictures only, as local video runs on the graphics card only, and `runs_on_processor` ignores a processor sent with a video: ruling L14-video-processor). No `extra` field. Shapes and sizes use `gen_fit`'s own `SHAPES`, `shape_of` and `at_shape` (with the entry's longest side), so the fit and the job describe one size (ruling L14-shape-helpers).
 
 - [ ] **Step 1: Write the failing tests**
 ```rust
@@ -3561,10 +3564,10 @@ impl StudioManager {
     pub fn local_running(&self) -> bool;                       // a local run is queued or running
     pub async fn answer_unload(&self, run_id: &str, unload: bool) -> AppResult<RunDto>;   // the answer under GpuPolicy::Ask
 }
-/// What one run's engine job gets: processor only from the grant (`UseProcessor`), the `run_on` field or a processor-only computer, with
+/// What one run's engine job gets: processor only from the grant (`UseProcessor`), the `run_on` field (a picture's) or a processor-only computer, with
 /// `processor_threads`; memory saving from the `memory_saving` field, `Automatic` → `gen_fit::needs_memory_saving` of the fit it will run
 /// with (`running_fit`, the after-unload one when the grant unloaded the chat model); the device description from `LocalHardware::target`.
-pub fn job_options(grant: &Grant, fit: &GenFitResult, params: &Map<String, Value>, device: Option<&str>, logical_cores: usize) -> LocalJobOptions;
+pub fn job_options(grant: &Grant, fit: &GenFitResult, req: &MediaRequest, device: Option<&str>, logical_cores: usize) -> LocalJobOptions;
 // quit.rs
 /// Closing the main window (`exit_code` None) or an exit request without a code (the app menu's Quit, ⌘Q) asks while a local job works;
 /// `app.exit(0)` from `studio_quit_now` carries a code and is never asked again.

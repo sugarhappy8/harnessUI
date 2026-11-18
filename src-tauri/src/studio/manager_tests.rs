@@ -43,7 +43,7 @@ use super::label::read_label;
 use super::local::{LocalJobOptions, LocalMediaProvider, LocalProvider, LocalRunStatus};
 use super::manager::{
     LOCAL_CHECK_EVERY, LocalVerdict, PICTURES_AT_ONCE, PollPlan, StudioDeps, StudioManager,
-    VIDEOS_AT_ONCE, local_verdict, place_extra_or_refuse, poll_delay, spend_row,
+    VIDEOS_AT_ONCE, job_options, local_verdict, place_extra_or_refuse, poll_delay, spend_row,
 };
 use super::prefs::{self, GpuPolicy, RunTarget, StudioPrefs, StudioPrefsPatch};
 use super::spend::{Charge, ConfirmReason, UNKNOWN_PRICE_RESERVE_USD, day_start_in};
@@ -56,7 +56,7 @@ use models::catalog::Catalog;
 use models::fit::Target;
 use models::gen_catalog::{GenEntry, GenKind, gen_catalog};
 use models::gen_eta::FitWord;
-use models::gen_fit::GenSize;
+use models::gen_fit::{GenFit, GenFitResult, GenSize};
 use runtime::sd::args::processor_threads;
 use runtime::sd::progress::{LocalProgress, LocalStage};
 use tokio_util::sync::CancellationToken;
@@ -3535,6 +3535,8 @@ struct FakeLocal {
     runs: Mutex<HashMap<String, FakeRun>>,
     releases: AtomicUsize,
     cancels: AtomicUsize,
+    /// The options of each device listing asked for.
+    listings: Mutex<Vec<LocalJobOptions>>,
 }
 
 /// An installed model's row for a catalog `entry`.
@@ -3583,6 +3585,7 @@ impl FakeLocal {
             runs: Mutex::new(HashMap::new()),
             releases: AtomicUsize::new(0),
             cancels: AtomicUsize::new(0),
+            listings: Mutex::new(Vec::new()),
         }
     }
 
@@ -3793,7 +3796,18 @@ impl LocalProvider for FakeLocal {
         Ok(Started::Job { remote_id })
     }
 
+    async fn list_devices_for(&self, opts: &LocalJobOptions) {
+        self.listings.lock().unwrap().push(opts.clone());
+    }
+
     fn preview_local(&self, req: &MediaRequest, opts: &LocalJobOptions) -> RequestPreview {
+        // The device of the last listing, which came before this command when one did.
+        let listed_for = self
+            .listings
+            .lock()
+            .unwrap()
+            .last()
+            .map(|o| o.device_description.clone());
         RequestPreview {
             method: "run".into(),
             url: "sd-cli".into(),
@@ -3803,6 +3817,7 @@ impl LocalProvider for FakeLocal {
                 "processorOnly": opts.processor_only,
                 "memorySaving": opts.memory_saving,
                 "device": opts.device_description,
+                "listedFor": listed_for,
             }),
         }
     }
@@ -4411,6 +4426,80 @@ async fn the_grant_and_the_fit_reach_the_engine_job() {
         .unwrap();
     h.wait_status(&run.id, "done").await;
     assert!(!h.local.last_options().memory_saving);
+}
+
+/// "See the exact command" for a run on this computer has the engine list its devices first,
+/// with the options the run would get, so a first preview names the card the run would
+/// (ruling L14-preview-backend).
+#[tokio::test]
+async fn a_local_preview_lists_the_engines_devices_before_it_shows_the_command() {
+    let h = harness_with_local().await;
+    let preview = h
+        .manager
+        .preview(&h.local_req("a lighthouse"))
+        .await
+        .unwrap();
+    assert_eq!(preview.body["device"], json!(RX_7600));
+    // Listed before the command was built, for the device the command names.
+    assert_eq!(preview.body["listedFor"], json!(RX_7600));
+    let listings = h.local.listings.lock().unwrap().clone();
+    assert_eq!(
+        listings,
+        [LocalJobOptions {
+            processor_only: false,
+            memory_saving: preview.body["memorySaving"].as_bool().unwrap(),
+            threads: None,
+            device_description: Some(RX_7600.into()),
+        }]
+    );
+    assert_eq!(h.local.starts(), 0);
+}
+
+/// A clip runs on the graphics card only: a processor sent with one is ignored, while a
+/// picture's is the run's (ruling L14-video-processor).
+#[test]
+fn a_processor_sent_with_a_local_video_is_ignored() {
+    let fit = GenFitResult {
+        fit: GenFit::Green,
+        after_unload: None,
+        needed_bytes: 0,
+        available_bytes: 0,
+        memory_saving: false,
+        processor_only: false,
+        not_for: None,
+        suggestion: None,
+    };
+    let request = |kind| MediaRequest {
+        kind,
+        model: WAN.into(),
+        prompt: "x".into(),
+        params: object(json!({"run_on": "processor"})),
+        extra: Map::new(),
+        refs: Vec::new(),
+        routing: None,
+        provider_options: Default::default(),
+    };
+    let video = job_options(
+        &Grant::Alongside,
+        &fit,
+        &request(MediaKind::Video),
+        Some(RX_7600),
+        8,
+    );
+    assert!(!video.processor_only);
+    assert_eq!(
+        (video.threads, video.device_description.as_deref()),
+        (None, Some(RX_7600))
+    );
+    let picture = job_options(
+        &Grant::Alongside,
+        &fit,
+        &request(MediaKind::Image),
+        Some(RX_7600),
+        8,
+    );
+    assert!(picture.processor_only);
+    assert_eq!(picture.device_description, None);
 }
 
 #[tokio::test]

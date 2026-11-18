@@ -9,7 +9,8 @@
 //!   network.
 //! - **The exact command** ([`LocalProvider::preview_local`]): the engine's arguments as the
 //!   run would pass them, with the files' paths, and the prompt beside them (the engine reads
-//!   it from a file, never from its arguments).
+//!   it from a file, never from its arguments); the graphics card is named among the engine's
+//!   devices, which [`LocalProvider::list_devices_for`] has it list first, as a run does.
 //! - **Before the engine starts** ([`LocalProvider::start_local`]): an engine is found (looked
 //!   for again while none is known or the one known is gone, so one a download installs runs
 //!   the next job), every part file is there at the size it was downloaded at, a `.gguf`
@@ -36,7 +37,7 @@ use agent::media::{
 };
 use async_trait::async_trait;
 use models::gen_catalog::{FrameRule, GenCatalog, GenEntry, GenInput, GenKind, GenRole, Quirk};
-use models::gen_fit::GenSize;
+use models::gen_fit::{GenSize, SHAPES, at_shape, shape_of};
 use rand::Rng;
 use runtime::sd::args::{
     ArgsError, OutputFormat, PROMPT_MAX_CHARS, PartRole, Sampler, Scheduler, SdJob, build_args,
@@ -85,15 +86,6 @@ mod key {
     pub const MEMORY: &str = "memory_saving";
     pub const RUN_ON: &str = "run_on";
 }
-
-/// The shapes offered, width to height, as the cloud models write them.
-const SHAPES: [(&str, u32, u32); 5] = [
-    ("1:1", 1, 1),
-    ("4:3", 4, 3),
-    ("3:4", 3, 4),
-    ("16:9", 16, 9),
-    ("9:16", 9, 16),
-];
 
 /// A clip's resolutions, by their shorter side.
 const RESOLUTIONS: [(&str, u32); 2] = [("480p", 480), ("720p", 720)];
@@ -200,9 +192,12 @@ impl MemoryChoice {
     }
 }
 
-/// Whether a request's `params` ask to run on the processor (the `run_on` field).
-pub fn runs_on_processor(params: &Map<String, Value>) -> bool {
-    params.get(key::RUN_ON).and_then(Value::as_str) == Some(ON_THE_PROCESSOR)
+/// Whether a request asks to run on the processor (the `run_on` field). Never for a clip: a
+/// video model runs on the graphics card only and does not offer the field, so a processor
+/// sent with one anyway is ignored.
+pub fn runs_on_processor(req: &MediaRequest) -> bool {
+    req.kind != MediaKind::Video
+        && req.params.get(key::RUN_ON).and_then(Value::as_str) == Some(ON_THE_PROCESSOR)
 }
 
 /// What the lane decided for one run, after the lease's grant and the fit: everything the
@@ -250,10 +245,17 @@ pub trait LocalProvider: MediaProvider {
         opts: &LocalJobOptions,
     ) -> Result<Started, MediaError>;
 
+    /// Has the engine list its devices when a run with `opts` would match llama.cpp's
+    /// graphics card among them (a run on the card with a device description), once per
+    /// engine, as [`Self::start_local`] does before it starts the engine; the list is kept for
+    /// the runs and the commands that follow. The manager calls it before
+    /// [`Self::preview_local`], so a first command names the device the run would.
+    async fn list_devices_for(&self, opts: &LocalJobOptions);
+
     /// The command this run would use: the engine's arguments, with the files' paths, and
     /// the prompt and negative prompt beside them. The run's folder is shown as
     /// `<gallery>/.partial/<run>`; the device is matched among those the engine last listed
-    /// (none before its first listing, which a run makes first).
+    /// ([`Self::list_devices_for`] lists them first).
     fn preview_local(&self, req: &MediaRequest, opts: &LocalJobOptions) -> RequestPreview;
 
     /// After the lane moved the outputs (or the run failed): removes `.partial/<run>` (the
@@ -430,18 +432,19 @@ impl LocalMediaProvider {
     /// Length (video, from 480p and 2 s); the start frame and reference pictures when the
     /// entry takes them. Under Advanced: the seed, steps, guidance (only when the default is
     /// above 1, which 4-step models are not), the sampler and scheduler, an exact size, the
-    /// negative prompt (with guidance above 1), Memory saving and Run on. No Extra fields.
+    /// negative prompt (with guidance above 1), Memory saving and Run on (pictures: a clip
+    /// runs on the graphics card only). No Extra fields.
     pub fn params_for(entry: &GenEntry) -> Vec<ParamSpec> {
         let video = entry.kind == GenKind::Video;
-        let (width, height) = (entry.defaults.width, entry.defaults.height);
+        let shapes: Vec<String> = SHAPES.into_iter().map(shape_name).collect();
         let mut params = vec![ParamSpec {
-            company_default: Some(nearest_shape(width, height).0.into()),
+            company_default: Some(shape_name(default_shape(entry)).into()),
             ..field(
                 key::SHAPE,
                 Some(Canonical::Shape),
                 "Shape",
                 Layer::Simple,
-                words(SHAPES.iter().map(|&(shape, ..)| (shape, shape))),
+                words(shapes.iter().map(|shape| (shape.as_str(), shape.as_str()))),
             )
         }];
         if video {
@@ -637,23 +640,26 @@ impl LocalMediaProvider {
                 words(MemoryChoice::ALL.iter().map(|c| (c.word(), c.label()))),
             )
         });
-        params.push(ParamSpec {
-            company_default: Some(ON_THE_CARD.into()),
-            help: Some("The processor is much slower, and needs no graphics card.".to_owned()),
-            ..field(
-                key::RUN_ON,
-                None,
-                "Run on",
-                Layer::Advanced,
-                words(
-                    [
-                        (ON_THE_CARD, "Graphics card"),
-                        (ON_THE_PROCESSOR, "Processor"),
-                    ]
-                    .into_iter(),
-                ),
-            )
-        });
+        // A clip runs on the graphics card only.
+        if !video {
+            params.push(ParamSpec {
+                company_default: Some(ON_THE_CARD.into()),
+                help: Some("The processor is much slower, and needs no graphics card.".to_owned()),
+                ..field(
+                    key::RUN_ON,
+                    None,
+                    "Run on",
+                    Layer::Advanced,
+                    words(
+                        [
+                            (ON_THE_CARD, "Graphics card"),
+                            (ON_THE_PROCESSOR, "Processor"),
+                        ]
+                        .into_iter(),
+                    ),
+                )
+            });
+        }
         params
     }
 
@@ -772,10 +778,9 @@ impl LocalMediaProvider {
         })
     }
 
-    /// The `--backend` word for llama.cpp's device described as `description`, among the
-    /// devices `engine` lists (listed once per engine); `None` (the engine's own choice) when
-    /// none matches or the engine cannot list them.
-    async fn backend_for(&self, engine: &Engine, description: &str) -> Option<String> {
+    /// The devices `engine` lists, listed once per engine and kept; `None` when it cannot
+    /// list them (it is asked again next time).
+    async fn devices_of(&self, engine: &Engine) -> Option<Vec<SdDevice>> {
         let mut listed = self.devices.lock().await;
         if listed.as_ref().is_none_or(|(by, _)| by != engine) {
             match list_devices(engine).await {
@@ -789,9 +794,16 @@ impl LocalMediaProvider {
                 }
             }
         }
-        listed
-            .as_ref()
-            .and_then(|(_, devices)| backend_from(devices, description))
+        listed.as_ref().map(|(_, devices)| devices.clone())
+    }
+
+    /// The `--backend` word for llama.cpp's device described as `description`, among the
+    /// devices `engine` lists ([`Self::devices_of`]); `None` (the engine's own choice) when
+    /// none matches or the engine cannot list them.
+    async fn backend_for(&self, engine: &Engine, description: &str) -> Option<String> {
+        self.devices_of(engine)
+            .await
+            .and_then(|devices| backend_from(&devices, description))
     }
 
     /// [`Self::backend_for`] from the devices the engine last listed, without listing them.
@@ -817,10 +829,7 @@ impl LocalMediaProvider {
             .cloned();
         let (model, entry) =
             found.ok_or_else(|| refused(FailureKind::NotFound, errors::LOCAL_NOT_INSTALLED))?;
-        let backend = match (&opts.device_description, opts.processor_only) {
-            (Some(description), false) => self.listed_backend(description),
-            _ => None,
-        };
+        let backend = matched_device(opts).and_then(|d| self.listed_backend(d));
         let out_dir = Path::new(PREVIEW_GALLERY)
             .join(".partial")
             .join(PREVIEW_RUN);
@@ -1040,15 +1049,24 @@ impl LocalProvider for LocalMediaProvider {
             return Err(refused(FailureKind::BadRequest, errors::LOCAL_WRONG_KIND));
         }
         check_files(&entry, &model).await?;
-        let backend = match (&opts.device_description, opts.processor_only) {
-            (Some(description), false) => self.backend_for(&engine, description).await,
-            _ => None,
+        let backend = match matched_device(opts) {
+            Some(description) => self.backend_for(&engine, description).await,
+            None => None,
         };
         let job = self.job_for(&entry, &model, req, opts, backend, scratch, run_id)?;
         build_args(&job).map_err(|e| args_refused(&e))?;
         let remote_id = format!("{REMOTE_PREFIX}{run_id}");
         self.spawn_run(engine, job, &remote_id, req.kind)?;
         Ok(Started::Job { remote_id })
+    }
+
+    async fn list_devices_for(&self, opts: &LocalJobOptions) {
+        if matched_device(opts).is_none() {
+            return;
+        }
+        if let Some(engine) = self.engine() {
+            self.devices_of(&engine).await;
+        }
     }
 
     fn preview_local(&self, req: &MediaRequest, opts: &LocalJobOptions) -> RequestPreview {
@@ -1230,10 +1248,7 @@ fn size_of(entry: &GenEntry, req: &MediaRequest) -> Result<(u32, u32), MediaErro
     }
     let (width, height) = (entry.defaults.width, entry.defaults.height);
     let shape = word_param(req, key::SHAPE, |word| {
-        SHAPES
-            .iter()
-            .find(|(name, ..)| *name == word)
-            .map(|&(_, w, h)| (w, h))
+        SHAPES.into_iter().find(|&shape| shape_name(shape) == word)
     })?;
     let video = entry.kind == GenKind::Video;
     let lines = if video {
@@ -1249,7 +1264,7 @@ fn size_of(entry: &GenEntry, req: &MediaRequest) -> Result<(u32, u32), MediaErro
     if shape.is_none() && lines.is_none() {
         return Ok((width, height));
     }
-    let shape = shape.unwrap_or_else(|| nearest_shape(width, height).1);
+    let shape = shape.unwrap_or_else(|| default_shape(entry));
     let shorter = match lines {
         Some(lines) => lines,
         None if video => width.min(height),
@@ -1260,39 +1275,24 @@ fn size_of(entry: &GenEntry, req: &MediaRequest) -> Result<(u32, u32), MediaErro
             (pixels * f64::from(lo) / f64::from(hi)).sqrt() as u32
         }
     };
-    at_shape(shorter, shape, entry).ok_or_else(|| bad_value(key::SIZE))
+    // The longer side kept within the entry's longest, each side on its multiple (480p at
+    // 16:9 on a multiple of 32 is 832 × 480, 720p 1280 × 704): the fit's own helper.
+    let max_side = Some(size_rules(entry).max_side);
+    at_shape(shorter, shape, entry.limits.multiple_of, max_side).ok_or_else(|| bad_value(key::SIZE))
 }
 
-/// The size with `shorter` as its shorter side at `shape`, its longer side kept within the
-/// entry's longest, each side rounded down to the entry's multiple (480p at 16:9 on a
-/// multiple of 32 is 832 × 480, 720p 1280 × 704); `None` when that leaves nothing.
-fn at_shape(shorter: u32, (w, h): (u32, u32), entry: &GenEntry) -> Option<(u32, u32)> {
-    let multiple = u64::from(entry.limits.multiple_of.max(1));
-    let max_side = u64::from(size_rules(entry).max_side);
-    let (lo, hi) = (u64::from(w.min(h).max(1)), u64::from(w.max(h)));
-    let (mut short, mut long) = (u64::from(shorter), u64::from(shorter) * hi / lo);
-    if long > max_side {
-        long = max_side;
-        short = max_side * lo / hi;
-    }
-    let (short, long) = (short / multiple * multiple, long / multiple * multiple);
-    if short == 0 {
-        return None;
-    }
-    let (short, long) = (u32::try_from(short).ok()?, u32::try_from(long).ok()?);
-    Some(if w >= h { (long, short) } else { (short, long) })
+/// The offered shape nearest the entry's default size (`gen_fit::shape_of`).
+fn default_shape(entry: &GenEntry) -> (u32, u32) {
+    shape_of(GenSize {
+        width: entry.defaults.width,
+        height: entry.defaults.height,
+        frames: 1,
+    })
 }
 
-/// The offered shape nearest `width` × `height`: its name and its sides.
-fn nearest_shape(width: u32, height: u32) -> (&'static str, (u32, u32)) {
-    let log_ratio = |w: u32, h: u32| (f64::from(w.max(1)) / f64::from(h.max(1))).ln();
-    let own = log_ratio(width, height);
-    let distance = |&(_, w, h): &(&str, u32, u32)| (log_ratio(w, h) - own).abs();
-    let (name, w, h) = SHAPES
-        .into_iter()
-        .min_by(|a, b| distance(a).total_cmp(&distance(b)))
-        .unwrap_or(SHAPES[0]);
-    (name, (w, h))
+/// A shape's name, as the cloud models write it (`16:9`).
+fn shape_name((w, h): (u32, u32)) -> String {
+    format!("{w}:{h}")
 }
 
 /// A `WxH` size of two whole numbers above 0.
@@ -1459,6 +1459,14 @@ fn bare_description(description: &str) -> &str {
 /// `devices` (`devices::match_llama_device`, on the bare description).
 fn backend_from(devices: &[SdDevice], description: &str) -> Option<String> {
     match_llama_device(devices, bare_description(description))
+}
+
+/// llama.cpp's device a run with `opts` is matched to among the engine's devices: none for a
+/// run on the processor (`cpu`) or without a description (the engine's own choice).
+fn matched_device(opts: &LocalJobOptions) -> Option<&str> {
+    opts.device_description
+        .as_deref()
+        .filter(|_| !opts.processor_only)
 }
 
 /// A field with no help, default, starting value, price effect or requirement.
@@ -2059,6 +2067,9 @@ mod tests {
             values.iter().map(|c| c.value.clone()).collect::<Vec<_>>(),
             [1, 2, 3, 4, 5].map(Value::from)
         );
+        // A clip runs on the graphics card only: no Run on (ruling L14-video-processor).
+        let advanced = keys(wan, Layer::Advanced);
+        assert!(advanced.contains(&"memory_saving") && !advanced.contains(&"run_on"));
         let zimage = m.iter().find(|m| m.id == ZIMAGE).unwrap();
         assert_eq!(keys(zimage, Layer::Simple), ["aspect_ratio", "n"]);
         assert!(!zimage.accepts_images);
@@ -2117,13 +2128,16 @@ mod tests {
                 choice
             );
         }
-        assert!(!runs_on_processor(&req("x").params));
-        assert!(!runs_on_processor(
-            &picture(json!({"run_on": "graphicsCard"})).params
-        ));
-        assert!(runs_on_processor(
-            &picture(json!({"run_on": "processor"})).params
-        ));
+        assert!(!runs_on_processor(&req("x")));
+        assert!(!runs_on_processor(&picture(
+            json!({"run_on": "graphicsCard"})
+        )));
+        assert!(runs_on_processor(&picture(json!({"run_on": "processor"}))));
+        // A clip is never made on the processor: the field is not offered, and a processor
+        // sent anyway is ignored (ruling L14-video-processor).
+        let wan = LocalMediaProvider::params_for(&catalog().entries[WAN]);
+        assert!(wan.iter().all(|p| p.key != "run_on"));
+        assert!(!runs_on_processor(&clip(json!({"run_on": "processor"}))));
     }
 
     /// What the controls offer is what the engine job reads: a request using each of them
@@ -2488,6 +2502,58 @@ mod tests {
         assert!(!argv(&w.rec(), 1).unwrap().contains(&"--backend".to_owned()));
     }
 
+    /// "See the exact command" before any run names the graphics card the run would: the
+    /// manager has the engine list its devices first (ruling L14-preview-backend).
+    #[tokio::test]
+    async fn a_first_preview_names_the_device_the_run_would() {
+        let w = world("ok").await;
+        // The manager reads the list before it asks for the command.
+        w.provider.fetch_catalog().await.unwrap();
+        let opts = LocalJobOptions {
+            device_description: Some("AMD Radeon RX 7600 (RADV NAVI33)".into()),
+            ..Default::default()
+        };
+        let backend = |p: &RequestPreview| {
+            let argv: Vec<&str> = p.body["argv"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|a| a.as_str().unwrap())
+                .collect();
+            assert!(!argv.is_empty(), "{}", p.body);
+            argv.iter()
+                .position(|a| *a == "--backend")
+                .map(|at| argv[at + 1].to_owned())
+        };
+        // Before the engine listed its devices, the command could not name the card.
+        assert_eq!(backend(&w.provider.preview_local(&req("x"), &opts)), None);
+        // A run on the processor, or one without llama.cpp's device, needs no listing.
+        let processor = LocalJobOptions {
+            processor_only: true,
+            ..opts.clone()
+        };
+        w.provider.list_devices_for(&processor).await;
+        w.provider
+            .list_devices_for(&LocalJobOptions::default())
+            .await;
+        assert!(w.provider.devices.lock().await.is_none());
+        w.provider.list_devices_for(&opts).await;
+        let shown = backend(&w.provider.preview_local(&req("x"), &opts));
+        assert_eq!(shown.as_deref(), Some("vulkan0"));
+        // The run passes the same.
+        let Started::Job { remote_id } = w
+            .provider
+            .start_local(&req("x"), &w.partial().join("r1"), &opts)
+            .await
+            .unwrap()
+        else {
+            panic!("not a job")
+        };
+        poll_until_done(&w.provider, &remote_id).await;
+        let run = argv(&w.rec(), 0).unwrap();
+        assert_eq!(Some(after(&run, "--backend")), shown.as_deref());
+    }
+
     /// llama.cpp's own device listing ends a row with the card's memory, which the engine's
     /// does not print: the card is matched without it.
     #[test]
@@ -2847,5 +2913,52 @@ mod tests {
             .unwrap();
         assert_eq!(job.init_image, Some(dir.path().join("start.png")));
         assert!(strings(build_args(&job).unwrap()).contains(&"vid_gen".to_owned()));
+    }
+
+    /// A shape at a resolution keeps within the entry's longest side, the shorter side keeping
+    /// the shape: the size helpers are the fit's own (`gen_fit::at_shape`, ruling
+    /// L14-shape-helpers), so the fit, the estimate and the job describe one size.
+    #[test]
+    fn a_shape_keeps_within_the_entrys_longest_side() {
+        let dir = Scratch::new();
+        let (provider, mut wan, row) = offline(&dir, WAN);
+        wan.limits.max_side = 1024;
+        let r = clip(json!({"resolution": "720p"}));
+        let job = provider
+            .job_for(
+                &wan,
+                &row,
+                &r,
+                &LocalJobOptions::default(),
+                None,
+                &dir.path().join("r1"),
+                "r1",
+            )
+            .unwrap();
+        assert_eq!((job.width, job.height), (1024, 576));
+        let shape = run_shape(&wan, &r).unwrap();
+        assert_eq!((shape.size.width, shape.size.height), (1024, 576));
+        // The shape a model starts at is the nearest offered to its default size.
+        let klein = LocalMediaProvider::params_for(&catalog().entries[KLEIN]);
+        let wan = LocalMediaProvider::params_for(&wan);
+        let start = |params: &[ParamSpec]| {
+            params
+                .iter()
+                .find(|p| p.key == "aspect_ratio")
+                .unwrap()
+                .company_default
+                .clone()
+        };
+        assert_eq!(
+            (start(&klein), start(&wan)),
+            (Some(json!("1:1")), Some(json!("16:9")))
+        );
+        let ParamKind::Enum { values } = &klein[0].kind else {
+            panic!("the shape is a list")
+        };
+        assert_eq!(
+            values.iter().map(|c| c.value.clone()).collect::<Vec<_>>(),
+            ["1:1", "4:3", "3:4", "16:9", "9:16"].map(Value::from)
+        );
     }
 }

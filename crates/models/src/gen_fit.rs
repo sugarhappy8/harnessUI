@@ -29,8 +29,9 @@ pub const PICTURE_SIDES: [u32; 3] = [512, 768, 1024];
 pub const VIDEO_FRAMES: [u32; 5] = [17, 33, 49, 81, 121];
 /// A clip's preset shorter sides: 480p and 720p.
 const VIDEO_SIDES: [u32; 2] = [480, 720];
-/// The shapes Studio offers, width to height; a suggestion keeps the requested one.
-const SHAPES: [(u32, u32); 5] = [(1, 1), (4, 3), (3, 4), (16, 9), (9, 16)];
+/// The shapes Studio offers, width to height, in the order they are offered; a suggestion
+/// keeps the requested one.
+pub const SHAPES: [(u32, u32); 5] = [(1, 1), (4, 3), (3, 4), (16, 9), (9, 16)];
 /// About how much of a Mac's memory macOS lets Metal use (its working set), as a fraction:
 /// two thirds. A Mac's memory is told from its working set by it
 /// ([`device_class`](crate::gen_eta::device_class)), and a working set a run needs is turned
@@ -509,7 +510,7 @@ fn suggest(entry: &GenEntry, size: GenSize, backend: &str, place: Place) -> Opti
     let max_side = entry.limits.max_side;
     sides
         .iter()
-        .filter_map(|&side| at_shape(side, shape, entry.limits.multiple_of))
+        .filter_map(|&side| at_shape(side, shape, entry.limits.multiple_of, None))
         .filter(|&(w, h)| w <= size.width && h <= size.height)
         .filter(|&(w, h)| max_side == 0 || w.max(h) <= max_side)
         .flat_map(|(width, height)| {
@@ -526,9 +527,10 @@ fn suggest(entry: &GenEntry, size: GenSize, backend: &str, place: Place) -> Opti
         .max_by_key(|s| s.pixel_frames())
 }
 
-/// The offered shape nearest the size's own (a size is rounded to the model's multiple, so
-/// 1280×704 is 16:9).
-fn shape_of(size: GenSize) -> (u32, u32) {
+/// The offered shape ([`SHAPES`]) nearest the size's own (a size is rounded to the model's
+/// multiple, so 1280×704 is 16:9). Studio's local runs read a request's shape by it too, so
+/// the fit, the estimate and the job describe one size.
+pub fn shape_of(size: GenSize) -> (u32, u32) {
     let log_ratio = |w: u32, h: u32| (f64::from(w.max(1)) / f64::from(h.max(1))).ln();
     let own = log_ratio(size.width, size.height);
     let distance = |&(w, h): &(u32, u32)| (log_ratio(w, h) - own).abs();
@@ -541,12 +543,25 @@ fn shape_of(size: GenSize) -> (u32, u32) {
 /// The size with `side` as its shorter side at `shape`, each side rounded down to a
 /// multiple of `multiple_of` (480p at 16:9 is 832×480, 720p 1280×704; a `multiple_of` of 0,
 /// which the catalog does not refuse, counts as 1: any side); `None` when that leaves
-/// nothing.
-fn at_shape(side: u32, (w, h): (u32, u32), multiple_of: u32) -> Option<(u32, u32)> {
+/// nothing. With a `max_side`, a longer side beyond it is cut to it and the shorter side
+/// follows at the shape before both are rounded (1024 at 16:9 within 1536 is 1536×864): how
+/// Studio's local runs size a request, whose job keeps within the model's longest side. The
+/// suggestion passes none: it leaves out a preset beyond the longest side instead.
+pub fn at_shape(
+    side: u32,
+    (w, h): (u32, u32),
+    multiple_of: u32,
+    max_side: Option<u32>,
+) -> Option<(u32, u32)> {
     let m = u64::from(multiple_of.max(1));
     let down = |x: u64| u32::try_from(x / m * m).ok();
-    let long = u64::from(side) * u64::from(w.max(h)) / u64::from(w.min(h).max(1));
-    let (short, long) = (down(u64::from(side))?, down(long)?);
+    let (lo, hi) = (u64::from(w.min(h).max(1)), u64::from(w.max(h)));
+    let (mut short, mut long) = (u64::from(side), u64::from(side) * hi / lo);
+    if let Some(max) = max_side.map(u64::from).filter(|&max| long > max) {
+        long = max;
+        short = max * lo / hi;
+    }
+    let (short, long) = (down(short)?, down(long)?);
     if short == 0 {
         return None;
     }
@@ -1327,6 +1342,29 @@ pub(crate) mod tests {
         assert_eq!(tokens(&wan22(), clip(832, 480, 49)), 26 * 15 * 13);
         // Wan 2.1 in 16-pixel patches.
         assert_eq!(tokens(&wan21(), clip(832, 480, 33)), 52 * 30 * 9);
+    }
+
+    /// The shape and size helpers Studio's local runs share with the suggestion (ruling
+    /// L14-shape-helpers): the fit, the estimate and the job describe one size.
+    #[test]
+    fn a_size_at_a_shape_keeps_within_a_longest_side_when_given_one() {
+        // 480p and 720p at 16:9 on a multiple of 32, with no longest side.
+        assert_eq!(at_shape(480, (16, 9), 32, None), Some((832, 480)));
+        assert_eq!(at_shape(720, (16, 9), 32, None), Some((1280, 704)));
+        assert_eq!(at_shape(480, (9, 16), 32, None), Some((480, 832)));
+        // 1024 at 16:9 on 16: 1820 rounds down to 1808; within a longest side of 1536, the
+        // longer side is 1536 and the shorter one keeps the shape (864).
+        assert_eq!(at_shape(1024, (16, 9), 16, None), Some((1808, 1024)));
+        assert_eq!(at_shape(1024, (16, 9), 16, Some(1536)), Some((1536, 864)));
+        assert_eq!(at_shape(1024, (9, 16), 16, Some(1536)), Some((864, 1536)));
+        // A longest side the size keeps within anyway changes nothing.
+        assert_eq!(at_shape(720, (16, 9), 32, Some(2048)), Some((1280, 704)));
+        // Nothing left at the multiple: none.
+        assert_eq!(at_shape(10, (1, 1), 16, None), None);
+        // The nearest offered shape of a size rounded to a multiple.
+        assert_eq!(shape_of(clip(1280, 704, 1)), (16, 9));
+        assert_eq!(shape_of(clip(880, 1168, 1)), (3, 4));
+        assert_eq!(shape_of(sq(1024)), (1, 1));
     }
 
     #[test]

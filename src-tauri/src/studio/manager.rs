@@ -1884,22 +1884,23 @@ impl Inner {
 }
 
 /// What one run's engine job gets: the processor only from the grant (`UseProcessor`), the
-/// `run_on` field or a run whose fit is on the processor (a processor-only computer, or a
-/// picture the graphics device cannot take), with `processor_threads`; memory saving from the
-/// `memory_saving` field, `Automatic` → `gen_fit::needs_memory_saving` of the fit it will run
-/// with (`running_fit`, the after-unload one when the grant unloaded the chat model; never on
-/// the processor, where nothing takes turns); the device description from
-/// `LocalHardware::target`, for a run on the device.
+/// `run_on` field (a picture's: a clip runs on the graphics card only) or a run whose fit is
+/// on the processor (a processor-only computer, or a picture the graphics device cannot
+/// take), with `processor_threads`; memory saving from the `memory_saving` field,
+/// `Automatic` → `gen_fit::needs_memory_saving` of the fit it will run with (`running_fit`,
+/// the after-unload one when the grant unloaded the chat model; never on the processor, where
+/// nothing takes turns); the device description from `LocalHardware::target`, for a run on
+/// the device.
 pub fn job_options(
     grant: &Grant,
     fit: &GenFitResult,
-    params: &Map<String, Value>,
+    req: &MediaRequest,
     device: Option<&str>,
     logical_cores: usize,
 ) -> LocalJobOptions {
-    let processor_only = matches!(grant, Grant::UseProcessor { .. })
-        || runs_on_processor(params)
-        || fit.processor_only;
+    let params = &req.params;
+    let processor_only =
+        matches!(grant, Grant::UseProcessor { .. }) || runs_on_processor(req) || fit.processor_only;
     let running = match grant {
         Grant::AfterUnload { .. } => fit.after_unload.unwrap_or(fit.fit),
         Grant::Alongside | Grant::UseProcessor { .. } => fit.fit,
