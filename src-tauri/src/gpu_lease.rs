@@ -9,6 +9,8 @@
 //! person's answer) it holds nothing, so a chat load goes first and the unload waits for it.
 //! A chat load while a job holds the card waits for it to end (the [`StudioGate`] on
 //! `RuntimeManager::load`), and the next chat load after a job probes the backends again.
+//! A chat load that passed the gate counts as in flight until its server runs: a job's
+//! grant waits for it and reads the card again after it, so the two never land together.
 //! A hold never loads the chat model again: "Reload it after Studio" is
 //! [`GpuLease::reload_chat`], called once when the local queue empties.
 
@@ -188,8 +190,34 @@ impl Drop for StudioHold {
     fn drop(&mut self) {
         // Before the card is marked free, so the chat load it wakes probes again.
         self.lease.reprobe.store(true, Ordering::Release);
-        self.lease.granted.send_replace(false);
+        self.lease.card.send_modify(|card| card.granted = false);
     }
+}
+
+/// The card as the lease and the chat loads see it, changed only under the watch's lock so
+/// that a grant and a chat load's pass through the gate never both happen.
+#[derive(Debug, Clone, Copy, Default)]
+struct Card {
+    /// A job holds the card: from its grant to the drop of its hold.
+    granted: bool,
+    /// Chat loads that passed the gate and have not started their server yet.
+    loads: usize,
+    /// Chat loads that ever passed the gate: a card read before one passed is read again.
+    passed: u64,
+}
+
+/// What a job's grant needs next.
+enum Step {
+    Grant(Grant),
+    /// An unload first, then this grant (when no chat load took the card meanwhile).
+    Unload(AfterIt),
+}
+
+/// The grant an unload is for.
+#[derive(Clone, Copy)]
+enum AfterIt {
+    AfterUnload,
+    UseProcessor,
 }
 
 /// One graphics-card tenant at a time: the chat model, or a local Studio job.
@@ -198,8 +226,8 @@ pub struct GpuLease {
     chat: Arc<dyn ChatSide>,
     /// One Studio job asks, waits and runs at a time.
     permits: Arc<Semaphore>,
-    /// A job holds the card: from its grant to the drop of its hold.
-    granted: watch::Sender<bool>,
+    /// The grant and the chat loads in flight.
+    card: watch::Sender<Card>,
     /// A job freed the card since the last chat load asked.
     reprobe: AtomicBool,
 }
@@ -210,7 +238,7 @@ impl GpuLease {
         Arc::new(Self {
             chat,
             permits: Arc::new(Semaphore::new(1)),
-            granted: watch::Sender::new(false),
+            card: watch::Sender::new(Card::default()),
             reprobe: AtomicBool::new(false),
         })
     }
@@ -228,7 +256,9 @@ impl GpuLease {
     /// (`None`: not asked yet, which ends with `on_wait(NeedsAnswer)` and
     /// [`Refused::NeedsAnswer`]). Every wait ends with [`Refused::Cancelled`] when `cancel`
     /// fires. The card counts as held only once the grant is returned: a chat load while
-    /// the job waits goes first.
+    /// the job waits goes first. The card is read only while no chat load is in flight
+    /// (between the gate and its server starting), and read again when one passed the gate
+    /// before the grant, so a job never gets the card under a chat model about to start.
     pub async fn acquire_for_studio(
         self: &Arc<Self>,
         need: &StudioNeed,
@@ -238,8 +268,8 @@ impl GpuLease {
         on_wait: &(dyn Fn(LeaseWait) + Send + Sync),
     ) -> Result<(Grant, StudioHold), Refused> {
         let permit = self.take_place(cancel, on_wait).await?;
+        // Marks the card as held when it returns a grant.
         let grant = self.decide(need, policy, answered, cancel, on_wait).await?;
-        self.granted.send_replace(true);
         Ok((
             grant,
             StudioHold {
@@ -280,7 +310,10 @@ impl GpuLease {
         }
     }
 
-    /// The grant, in the order of [`Self::acquire_for_studio`].
+    /// The grant, in the order of [`Self::acquire_for_studio`], with the card marked as
+    /// held. Each round waits until no chat load is in flight, reads the card, and grants
+    /// only if no chat load passed the gate since; else, and after an unload, it reads the
+    /// card again.
     async fn decide(
         &self,
         need: &StudioNeed,
@@ -289,49 +322,116 @@ impl GpuLease {
         cancel: &CancellationToken,
         on_wait: &(dyn Fn(LeaseWait) + Send + Sync),
     ) -> Result<Grant, Refused> {
+        // The grant this job's unload was for, once it has unloaded the chat model.
+        let mut unloaded: Option<Grant> = None;
+        loop {
+            let seen = self.no_load_in_flight(cancel).await?;
+            let step = match &unloaded {
+                Some(grant) if self.chat.loaded_device_bytes().is_none() => {
+                    Step::Grant(grant.clone())
+                }
+                // A chat load took the card during the unload: as if asked now.
+                _ => self.step(need, policy, answered, on_wait)?,
+            };
+            match step {
+                Step::Grant(grant) => {
+                    if self.grant_if_unchanged(seen) {
+                        return Ok(grant);
+                    }
+                }
+                Step::Unload(after) => {
+                    let path = self.unload(cancel, on_wait).await?;
+                    let earlier = match unloaded {
+                        Some(Grant::AfterUnload { unloaded }) => unloaded,
+                        _ => None,
+                    };
+                    unloaded = Some(match after {
+                        AfterIt::AfterUnload => Grant::AfterUnload {
+                            unloaded: path.or(earlier),
+                        },
+                        AfterIt::UseProcessor => Grant::UseProcessor,
+                    });
+                }
+            }
+        }
+    }
+
+    /// The decision on the card as it is now.
+    fn step(
+        &self,
+        need: &StudioNeed,
+        policy: GpuPolicy,
+        answered: Option<bool>,
+        on_wait: &(dyn Fn(LeaseWait) + Send + Sync),
+    ) -> Result<Step, Refused> {
         if self.chat.loaded_device_bytes().is_none() {
-            return Ok(Grant::Alongside);
+            return Ok(Step::Grant(Grant::Alongside));
         }
         // On shared memory the chat model's pinned memory is the job's memory too; on a
         // graphics card "Keep in memory" pins system memory only.
         let pinned = need.shared_memory && self.chat.keeps_in_memory();
         if need.alongside && !pinned {
-            return Ok(Grant::Alongside);
+            return Ok(Step::Grant(Grant::Alongside));
         }
         if !need.after_unload {
             if !need.processor_ok {
                 return Err(Refused::DoesNotFit);
             }
             if need.shared_memory {
-                self.unload(cancel, on_wait).await?;
+                return Ok(Step::Unload(AfterIt::UseProcessor));
             }
-            return Ok(Grant::UseProcessor);
+            return Ok(Step::Grant(Grant::UseProcessor));
         }
         if pinned {
-            return self.after_unload(cancel, on_wait).await;
+            return Ok(Step::Unload(AfterIt::AfterUnload));
         }
         match (policy, answered) {
             (GpuPolicy::Unload, _) | (GpuPolicy::Ask, Some(true)) => {
-                self.after_unload(cancel, on_wait).await
+                Ok(Step::Unload(AfterIt::AfterUnload))
             }
             (GpuPolicy::Ask, None) => {
                 on_wait(LeaseWait::NeedsAnswer);
                 Err(Refused::NeedsAnswer)
             }
-            (GpuPolicy::Ask, Some(false)) if need.processor_ok => Ok(Grant::UseProcessor),
+            (GpuPolicy::Ask, Some(false)) if need.processor_ok => {
+                Ok(Step::Grant(Grant::UseProcessor))
+            }
             (GpuPolicy::Ask, Some(false)) => Err(Refused::DoesNotFit),
-            (GpuPolicy::Processor, _) if need.processor_ok => Ok(Grant::UseProcessor),
-            (GpuPolicy::Processor, _) => self.after_unload(cancel, on_wait).await,
+            (GpuPolicy::Processor, _) if need.processor_ok => Ok(Step::Grant(Grant::UseProcessor)),
+            (GpuPolicy::Processor, _) => Ok(Step::Unload(AfterIt::AfterUnload)),
         }
     }
 
-    async fn after_unload(
-        &self,
-        cancel: &CancellationToken,
-        on_wait: &(dyn Fn(LeaseWait) + Send + Sync),
-    ) -> Result<Grant, Refused> {
-        let unloaded = self.unload(cancel, on_wait).await?;
-        Ok(Grant::AfterUnload { unloaded })
+    /// Waits until no chat load is between the gate and its server starting (one that
+    /// passed is about to take the card, and the card does not show it yet). Returns how
+    /// many have passed the gate so far.
+    async fn no_load_in_flight(&self, cancel: &CancellationToken) -> Result<u64, Refused> {
+        tokio::select! {
+            biased;
+            _ = cancel.cancelled() => Err(Refused::Cancelled),
+            passed = self.loads_ended() => Ok(passed),
+        }
+    }
+
+    async fn loads_ended(&self) -> u64 {
+        let mut card = self.card.subscribe();
+        // The sender lives as long as `self`, so this cannot fail.
+        match card.wait_for(|card| card.loads == 0).await {
+            Ok(card) => card.passed,
+            Err(_) => 0,
+        }
+    }
+
+    /// Marks the card as held, unless a chat load passed the gate since the card was read
+    /// (`seen` passes then): checked and marked at once, as the gate counts a load.
+    fn grant_if_unchanged(&self, seen: u64) -> bool {
+        self.card.send_if_modified(|card| {
+            let unchanged = card.loads == 0 && card.passed == seen;
+            if unchanged {
+                card.granted = true;
+            }
+            unchanged
+        })
     }
 
     /// Unloads the chat model once nothing uses it. A failed unload (its wait cancelled by a
@@ -360,17 +460,33 @@ impl GpuLease {
 #[async_trait]
 impl StudioGate for GpuLease {
     fn holds_card(&self) -> bool {
-        *self.granted.borrow()
+        self.card.borrow().granted
     }
 
     async fn wait_until_free(&self) {
-        let mut granted = self.granted.subscribe();
+        let mut card = self.card.subscribe();
         // The sender lives as long as `self`, so this cannot fail.
-        let _ = granted.wait_for(|held| !held).await;
+        let _ = card.wait_for(|card| !card.granted).await;
     }
 
     fn take_reprobe(&self) -> bool {
         self.reprobe.swap(false, Ordering::AcqRel)
+    }
+
+    fn begin_load(&self) -> bool {
+        self.card.send_if_modified(|card| {
+            if card.granted {
+                return false;
+            }
+            card.loads += 1;
+            card.passed = card.passed.wrapping_add(1);
+            true
+        })
+    }
+
+    fn end_load(&self) {
+        self.card
+            .send_modify(|card| card.loads = card.loads.saturating_sub(1));
     }
 }
 
@@ -425,6 +541,11 @@ mod tests {
         /// A reply (or a Model check) uses the chat model until the guard is dropped.
         fn use_model(&self, kind: BusyKind) -> BusyGuard {
             self.busy.hold(kind)
+        }
+
+        /// A chat load reached Starting: its model now takes `bytes` on the card.
+        fn set_loaded(&self, bytes: u64) {
+            *self.device_bytes.lock().unwrap() = Some(bytes);
         }
 
         fn unloads(&self) -> usize {
@@ -858,6 +979,124 @@ mod tests {
         assert!(!lease.holds_card());
     }
 
+    /// A chat load as `RuntimeManager::load` makes it: through the gate, waiting while a
+    /// job holds the card. Returns once it passed (it is then in flight).
+    fn chat_load_in_task(lease: &Arc<GpuLease>) -> tokio::task::JoinHandle<()> {
+        let lease = Arc::clone(lease);
+        tokio::spawn(async move {
+            while !lease.begin_load() {
+                lease.wait_until_free().await;
+            }
+        })
+    }
+
+    /// Review fix L12-1: a chat load that waited for a job passes the gate when the job
+    /// ends, and is not on the card until it reaches Starting. The next job's grant waits
+    /// for it and reads the card after it, so it never gets "Alongside" while the chat
+    /// model is about to start.
+    #[tokio::test]
+    async fn a_job_waits_for_a_chat_load_that_passed_the_gate() {
+        // Job 1 unloaded the chat model and holds the card.
+        let chat = FakeChat::none();
+        let lease = GpuLease::new(chat.clone());
+        let (_, first) = lease
+            .acquire_for_studio(
+                &need(true, true, true),
+                GpuPolicy::Unload,
+                None,
+                &tok(),
+                &|_| {},
+            )
+            .await
+            .unwrap();
+        // "Load it again" waits at the gate.
+        let load = chat_load_in_task(&lease);
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert!(!load.is_finished(), "the chat load went ahead during job 1");
+
+        // Job 1 ends: the load passes the gate and probes the backends; job 2 asks.
+        drop(first);
+        within(load).await.unwrap();
+        let waits = Waits::default();
+        let second = ask_in_task(
+            &lease,
+            need(false, true, false),
+            GpuPolicy::Unload,
+            &tok(),
+            &waits,
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert!(
+            !second.is_finished(),
+            "job 2 got the card while a chat load was in flight"
+        );
+        assert!(!lease.holds_card(), "a job that waits holds nothing");
+        assert_eq!(chat.unloads(), 0);
+
+        // The load reaches Starting: job 2 sees the chat model and unloads it.
+        chat.set_loaded(5 * GB);
+        lease.end_load();
+        let (g, _hold) = within(second).await.unwrap().unwrap();
+        assert_eq!(
+            g,
+            Grant::AfterUnload {
+                unloaded: Some(CHAT.to_string())
+            }
+        );
+        assert_eq!(chat.unloads(), 1);
+        assert!(lease.holds_card());
+        assert!(!lease.begin_load(), "a chat load passed during job 2");
+    }
+
+    /// Review fix L12-1: a plain chat load (no model use of its own) that passes the gate
+    /// while a job waits for a reply races the job's unload. The job reads the card again
+    /// once the load reached Starting, so the load never starts on top of the job.
+    #[tokio::test]
+    async fn a_chat_load_during_the_unload_is_seen_before_the_grant() {
+        let chat = FakeChat::loaded(5 * GB);
+        let reply = chat.use_model(BusyKind::ChatTurn);
+        let lease = GpuLease::new(chat.clone());
+        let waits = Waits::default();
+        let job = ask_in_task(
+            &lease,
+            need(false, true, false),
+            GpuPolicy::Unload,
+            &tok(),
+            &waits,
+        );
+        waits.until(LeaseWait::ReplyRunning).await;
+        // The job holds nothing while it waits: a chat load passes the gate.
+        assert!(lease.begin_load(), "the chat load was held");
+
+        // The reply ends and the job unloads the old model while the load is in flight.
+        drop(reply);
+        within(async {
+            while chat.unloads() == 0 {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await;
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert!(
+            !job.is_finished(),
+            "the job got the card while a chat load was in flight"
+        );
+        assert!(!lease.holds_card());
+
+        // The load reaches Starting: the job sees it and unloads it too.
+        chat.set_loaded(6 * GB);
+        lease.end_load();
+        let (g, _hold) = within(job).await.unwrap().unwrap();
+        assert_eq!(
+            g,
+            Grant::AfterUnload {
+                unloaded: Some(CHAT.to_string())
+            }
+        );
+        assert_eq!(chat.unloads(), 2);
+        assert!(lease.holds_card());
+    }
+
     #[tokio::test]
     async fn reload_chat_loads_the_chat_model_once_and_a_hold_never_does() {
         let chat = FakeChat::loaded(5 * GB);
@@ -927,6 +1166,26 @@ mod tests {
             Refused::Cancelled
         );
         drop(first);
+
+        // The wait for a chat load in flight ends too.
+        assert!(lease.begin_load());
+        let cancel = tok();
+        let job = ask_in_task(
+            &lease,
+            need(true, true, true),
+            GpuPolicy::Unload,
+            &cancel,
+            &Waits::default(),
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert!(
+            !job.is_finished(),
+            "the job got the card during a chat load"
+        );
+        cancel.cancel();
+        assert_eq!(within(job).await.unwrap().unwrap_err(), Refused::Cancelled);
+        lease.end_load();
+        assert!(!lease.holds_card());
 
         // A job stopped before it asks gets nothing.
         let cancel = tok();

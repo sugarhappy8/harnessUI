@@ -78,6 +78,26 @@ pub trait StudioGate: Send + Sync {
     async fn wait_until_free(&self);
     /// True once after a Studio job freed the card.
     fn take_reprobe(&self) -> bool;
+    /// A chat load passes the gate: when no Studio job holds the card, counts the load as
+    /// in flight and returns true; false (nothing counted) while one does. Checked and
+    /// counted at once, so no grant lands between the two. A job's grant waits while a
+    /// load is in flight, and reads the card again after one passed.
+    fn begin_load(&self) -> bool;
+    /// The load counted by [`Self::begin_load`] has started its server (the status and the
+    /// running session name it), or gave up before that.
+    fn end_load(&self);
+}
+
+/// A chat load the Studio gate let through: in flight for the gate until it is dropped
+/// ([`StudioGate::end_load`]), on every way out of the load.
+struct StudioPass(Option<Arc<dyn StudioGate>>);
+
+impl Drop for StudioPass {
+    fn drop(&mut self) {
+        if let Some(gate) = &self.0 {
+            gate.end_load();
+        }
+    }
 }
 
 pub struct RuntimeManager {
@@ -558,22 +578,32 @@ impl RuntimeManager {
     /// 0.1.0 Studio, before a load picks its backend: while a local Studio job holds the
     /// graphics card, waits for it to end ("Studio is using the graphics card. The chat
     /// model loads when it finishes", `waiting_for_studio`); after a job freed the card,
-    /// probes the backends again, since Vulkan drivers can free memory late.
-    async fn wait_for_studio(&self) {
+    /// probes the backends again, since Vulkan drivers can free memory late. The pass it
+    /// returns keeps the load in flight for the gate (no Studio grant meanwhile) until the
+    /// load drops it, once its server runs.
+    async fn wait_for_studio(&self) -> StudioPass {
         let Some(gate) = self.studio_gate.lock().ok().and_then(|g| g.clone()) else {
-            return;
+            return StudioPass(None);
         };
-        if gate.holds_card() {
+        // The check that no job holds the card and the count of this load are one step.
+        if !gate.begin_load() {
             self.update(|s| s.waiting_for_studio = true);
             // Another job may take the card as this one frees it: then that one goes first.
-            while gate.holds_card() {
-                gate.wait_until_free().await;
+            loop {
+                while gate.holds_card() {
+                    gate.wait_until_free().await;
+                }
+                if gate.begin_load() {
+                    break;
+                }
             }
             self.update(|s| s.waiting_for_studio = false);
         }
+        let pass = StudioPass(Some(Arc::clone(&gate)));
         if gate.take_reprobe() {
             self.backends(true).await;
         }
+        pass
     }
 
     /// 0.0.7 (P6b review m6): whether a load with `settings` could start: the backend it
@@ -627,8 +657,8 @@ impl RuntimeManager {
         }
         // 0.1.0: never on top of a local Studio job, and with the memory as it is after one.
         // Waiting here, with the setup lock held, keeps the loads asked for meanwhile in
-        // their order.
-        self.wait_for_studio().await;
+        // their order. From here until its server runs, no Studio job gets the card.
+        let studio_pass = self.wait_for_studio().await;
         // 0.0.7 (P6): the backend is picked before anything changes. One that cannot run
         // here (`backend_unavailable`) leaves the loaded model as it is, and its error goes
         // back to the caller; before, the loaded model was stopped first and the status
@@ -805,6 +835,9 @@ impl RuntimeManager {
             exit
         });
         *self.session.lock().await = Some(Session { seq, cancel, task });
+        // The status and the session show this load now: a Studio job sees it (and an
+        // unload for one stops it).
+        drop(studio_pass);
         drop(setup);
 
         // Wait for the first ready server, or for the supervisor to give up.
@@ -2073,5 +2106,19 @@ mod tests {
             .expect("load stops the old server");
         assert!(gate < choose, "the gate comes before the backend is picked");
         assert!(gate < stop, "the gate comes before the loaded server stops");
+
+        // Review fix L12-1: the load counts as in flight from the gate until its server
+        // runs (the session an unload stops), so a Studio grant never lands in between.
+        let pass = body
+            .find("let studio_pass = self.wait_for_studio().await;")
+            .expect("load keeps the gate's pass");
+        let session = body
+            .find("*self.session.lock().await = Some(Session")
+            .expect("load installs its session");
+        let done = body.find("drop(studio_pass);").expect("load ends its pass");
+        assert!(
+            pass < session && session < done,
+            "the pass lasts until the session is installed"
+        );
     }
 }
