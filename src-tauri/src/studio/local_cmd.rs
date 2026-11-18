@@ -152,7 +152,15 @@ pub async fn local_models(deps: &LocalCmdDeps) -> AppResult<LocalModelsDto> {
             e
         })
         .partition(|e| words.get(&e.id) != Some(&FitWord::NotHere));
-    let more_fit = recommended.iter().filter(|e| !e.installed).count();
+    // "N more fit this computer": the recommended entries not installed whose word is "Fits"
+    // or "Fits after the chat model is unloaded" (the two words Studio's default local model
+    // may have); one that is only "Slow here" does not count.
+    let more_fit = recommended
+        .iter()
+        .filter(|e| {
+            !e.installed && matches!(words.get(&e.id), Some(FitWord::Fits | FitWord::AfterUnload))
+        })
+        .count();
     Ok(LocalModelsDto {
         hardware: hardware_line(deps, &device, &backend, description.as_deref()),
         engine: deps.engine.clone(),
@@ -665,8 +673,7 @@ pub async fn studio_accept_local_notice(
 mod tests {
     use std::collections::BTreeMap;
     use std::path::{Path, PathBuf};
-    use std::sync::Arc;
-    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::{Arc, Mutex};
 
     use agent::media::{Company, MediaKind, MediaLimits, MediaProvider, MediaRequest};
     use async_trait::async_trait;
@@ -680,8 +687,9 @@ mod tests {
         gen_catalog,
     };
     use models::gen_fit::GenSize;
-    use models::hf::{HfClient, HfConfig, OFFICIAL_ENDPOINT, RepoDetail, parse_repo_detail};
+    use models::hf::HfClient;
     use serde_json::{Map, Value, json};
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
     use url::Url;
 
     use super::*;
@@ -959,43 +967,101 @@ mod tests {
         }
     }
 
-    // ---- Hugging Face, watched ------------------------------------------------------------
+    // ---- Hugging Face, served here --------------------------------------------------------
 
-    /// A server on this computer that counts the connections made to it. The Hub client only
-    /// talks https, so a request through [`Watch::client`] is a connection here that goes no
-    /// further (the server closes it at once): enough to tell that one was made.
-    struct Watch {
+    /// A Hub on this computer, reached over plain HTTP by [`Hub::client`]
+    /// (`HfClient::for_test`): it answers each request with what `answer` gives for its
+    /// request line and keeps the lines, so a test sees what was asked, or that nothing was.
+    struct Hub {
         endpoint: String,
-        seen: Arc<AtomicUsize>,
+        seen: Arc<Mutex<Vec<String>>>,
     }
 
-    impl Watch {
-        async fn new() -> Self {
+    impl Hub {
+        async fn new(
+            answer: impl Fn(&str) -> (&'static str, String) + Send + Sync + 'static,
+        ) -> Self {
             let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-            let endpoint = format!("https://{}", listener.local_addr().unwrap());
-            let seen = Arc::new(AtomicUsize::new(0));
-            let count = seen.clone();
+            let endpoint = format!("http://{}", listener.local_addr().unwrap());
+            let seen = Arc::new(Mutex::new(Vec::new()));
+            let lines = seen.clone();
+            let answer = Arc::new(answer);
             tokio::spawn(async move {
                 while let Ok((socket, _)) = listener.accept().await {
-                    count.fetch_add(1, Ordering::SeqCst);
-                    drop(socket);
+                    let (lines, answer) = (lines.clone(), answer.clone());
+                    tokio::spawn(async move {
+                        let (read, mut write) = socket.into_split();
+                        let mut read = BufReader::new(read);
+                        let mut line = String::new();
+                        if read.read_line(&mut line).await.unwrap_or(0) == 0 {
+                            return;
+                        }
+                        // The rest of the head (a GET has no body).
+                        loop {
+                            let mut header = String::new();
+                            match read.read_line(&mut header).await {
+                                Ok(n) if n > 0 && !header.trim_end().is_empty() => {}
+                                _ => break,
+                            }
+                        }
+                        let line = line.trim_end().to_owned();
+                        let (status, body) = answer(&line);
+                        lines.lock().unwrap().push(line);
+                        let reply = format!(
+                            "HTTP/1.1 {status}\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+                            body.len()
+                        );
+                        let _ = write.write_all(reply.as_bytes()).await;
+                        let _ = write.shutdown().await;
+                    });
                 }
             });
             Self { endpoint, seen }
         }
 
-        /// A Hub client whose every request comes here.
-        fn client(&self) -> HfClient {
-            HfClient::new(HfConfig {
-                endpoint: self.endpoint.clone(),
-                token: None,
-                user_agent: "test/0".into(),
-            })
-            .unwrap()
+        /// A Hub that has nothing: for the tests that must ask it nothing.
+        async fn empty() -> Self {
+            Self::new(|_| ("404 Not Found", "{}".into())).await
         }
 
-        fn requests(&self) -> usize {
-            self.seen.load(Ordering::SeqCst)
+        /// A Hub that answers repository `fixture`'s listing (a file in
+        /// crates/models/tests/fixtures/hf/) and nothing else.
+        async fn listing(fixture: &str) -> Self {
+            let text = match fixture {
+                "repo-unknown-diffusion.json" => include_str!(
+                    "../../../crates/models/tests/fixtures/hf/repo-unknown-diffusion.json"
+                ),
+                "repo-z-image-turbo-gguf.json" => include_str!(
+                    "../../../crates/models/tests/fixtures/hf/repo-z-image-turbo-gguf.json"
+                ),
+                "repo-uncensored.json" => {
+                    include_str!("../../../crates/models/tests/fixtures/hf/repo-uncensored.json")
+                }
+                other => panic!("no listing fixture {other}"),
+            };
+            let repo = serde_json::from_str::<Value>(text).unwrap()["id"]
+                .as_str()
+                .unwrap()
+                .to_owned();
+            let asked = format!("GET /api/models/{repo}?");
+            Self::new(move |line| {
+                if line.starts_with(&asked) {
+                    ("200 OK", text.to_owned())
+                } else {
+                    ("404 Not Found", "{}".into())
+                }
+            })
+            .await
+        }
+
+        /// A Hub client whose every request comes here.
+        fn client(&self) -> HfClient {
+            HfClient::for_test(&self.endpoint)
+        }
+
+        /// The request lines, in the order they came.
+        fn requests(&self) -> Vec<String> {
+            self.seen.lock().unwrap().clone()
         }
     }
 
@@ -1049,47 +1115,19 @@ mod tests {
             .unwrap_or_else(|| panic!("{id} is not in {:?}", ids(entries)))
     }
 
-    /// A repository listing in crates/models/tests/fixtures/hf/, as `HfClient::repo` reads it.
-    fn listing(name: &str) -> RepoDetail {
-        let text = match name {
-            "repo-unknown-diffusion.json" => {
-                include_str!("../../../crates/models/tests/fixtures/hf/repo-unknown-diffusion.json")
-            }
-            "repo-z-image-turbo-gguf.json" => include_str!(
-                "../../../crates/models/tests/fixtures/hf/repo-z-image-turbo-gguf.json"
-            ),
-            "repo-uncensored.json" => {
-                include_str!("../../../crates/models/tests/fixtures/hf/repo-uncensored.json")
-            }
-            other => panic!("no listing fixture {other}"),
-        };
-        let v: Value = serde_json::from_str(text).unwrap();
-        let endpoint = Url::parse(OFFICIAL_ENDPOINT).unwrap();
-        parse_repo_detail(v["id"].as_str().unwrap(), &v, &endpoint).unwrap()
-    }
-
     // ---- Get local models -----------------------------------------------------------------
-
-    /// The watch sees a request made through its client, so the tests that find none prove
-    /// something.
-    #[tokio::test]
-    async fn the_watch_sees_a_request_through_its_client() {
-        let watch = Watch::new().await;
-        assert!(watch.client().repo("someone/model", None).await.is_err());
-        assert!(watch.requests() >= 1);
-    }
 
     /// Opening Get local models sends nothing: it reads the catalog, the store and this
     /// computer.
     #[tokio::test]
     async fn opening_get_local_models_makes_no_request() {
         let scratch = Scratch::new();
-        let watch = Watch::new().await;
-        let deps = deps_with(catalog(), gpu(8, 32), &scratch, Some(watch.client()));
+        let hub = Hub::empty().await;
+        let deps = deps_with(catalog(), gpu(8, 32), &scratch, Some(hub.client()));
         install_searched(&deps.store, &deps.models_dir).await;
         let local = local_models(&deps).await.unwrap();
         assert_eq!(local.installed.len(), 1);
-        assert_eq!(watch.requests(), 0);
+        assert!(hub.requests().is_empty(), "{:?}", hub.requests());
     }
 
     /// On an 8 GB card the three starters all fit: one picture model and one video model are
@@ -1166,9 +1204,10 @@ mod tests {
         assert_eq!(klein.fit.word, "slow");
         assert_eq!(klein.fit.verdict, "yellow");
         assert_eq!(klein.fit.reason, None);
-        // Nothing fits well enough to be recommended here.
+        // Nothing fits well enough to be recommended here, and a model that is only "Slow
+        // here" is not one more that fits.
         assert!(local.recommended.iter().all(|e| !e.recommended));
-        assert_eq!(local.more_fit, 1);
+        assert_eq!(local.more_fit, 0);
     }
 
     /// With a 5 GB chat model on an 8 GB card (3 GB free), Z-Image Turbo fits once the chat
@@ -1185,6 +1224,14 @@ mod tests {
         assert_eq!(z.fit.verdict, "yellow");
         assert!(!local.not_here.iter().any(|e| e.id == ZIMAGE));
         assert_eq!(local.hardware.graphics_bytes, Some(8 * GB));
+        // Each starter fits once the chat model is unloaded, so each is one more that fits.
+        assert!(
+            local
+                .recommended
+                .iter()
+                .all(|e| e.fit.word == "afterUnload")
+        );
+        assert_eq!(local.more_fit, 3);
     }
 
     /// What harnessUI detected, for the header.
@@ -1408,8 +1455,8 @@ mod tests {
     #[tokio::test]
     async fn an_installed_model_gets_its_fit_without_a_request() {
         let scratch = Scratch::new();
-        let watch = Watch::new().await;
-        let deps = deps_with(catalog(), gpu(8, 32), &scratch, Some(watch.client()));
+        let hub = Hub::empty().await;
+        let deps = deps_with(catalog(), gpu(8, 32), &scratch, Some(hub.client()));
         let id = install_searched(&deps.store, &deps.models_dir).await;
         let source: LocalSource =
             serde_json::from_value(json!({"installed": {"genModelId": id}})).unwrap();
@@ -1420,7 +1467,7 @@ mod tests {
         assert_eq!(fit.verdict, "green");
         assert_eq!(fit.reason, None);
         assert_eq!(fit.eta, None, "nothing measured, no first guess");
-        assert_eq!(watch.requests(), 0);
+        assert!(hub.requests().is_empty(), "{:?}", hub.requests());
         // A catalog entry's fit needs no request either.
         let source = LocalSource::Catalog {
             entry_id: KLEIN.into(),
@@ -1432,7 +1479,7 @@ mod tests {
                 .verdict,
             "green"
         );
-        assert_eq!(watch.requests(), 0);
+        assert!(hub.requests().is_empty(), "{:?}", hub.requests());
     }
 
     /// A clip's fit is asked in seconds and judged at the frames the run would make.
@@ -1509,8 +1556,9 @@ mod tests {
             wan.fit.reason.as_deref(),
             Some("video needs a graphics card or an Apple-silicon Mac")
         );
-        // Pictures run there, slowly.
+        // Pictures run there, slowly: listed, but none counted as more that fit.
         assert_eq!(find(&local.recommended, KLEIN).fit.word, "slow");
+        assert_eq!(local.more_fit, 0);
     }
 
     // ---- a searched repository ------------------------------------------------------------
@@ -1520,11 +1568,18 @@ mod tests {
     #[tokio::test]
     async fn a_searched_repo_of_an_unknown_family_offers_no_download() {
         let scratch = Scratch::new();
-        let repo = repo_dto(
-            &deps(gpu(8, 32), &scratch),
-            &listing("repo-unknown-diffusion.json"),
-        )
-        .await;
+        let hub = Hub::listing("repo-unknown-diffusion.json").await;
+        let deps = deps_with(catalog(), gpu(8, 32), &scratch, Some(hub.client()));
+        let repo = local_repo(&deps, "example-labs/Sample-Diffusion-2B-GGUF")
+            .await
+            .unwrap();
+        // One request: the listing at the latest commit (no revision in the address).
+        let asked = hub.requests();
+        assert_eq!(asked.len(), 1, "{asked:?}");
+        assert!(
+            asked[0].starts_with("GET /api/models/example-labs/Sample-Diffusion-2B-GGUF?"),
+            "{asked:?}"
+        );
         assert_eq!(repo.repo, "example-labs/Sample-Diffusion-2B-GGUF");
         assert_eq!(repo.commit, "2".repeat(40));
         assert_eq!(repo.status, "notSupportedYet");
@@ -1538,11 +1593,12 @@ mod tests {
     #[tokio::test]
     async fn a_searched_repo_never_offered_says_why() {
         let scratch = Scratch::new();
-        let repo = repo_dto(
-            &deps(gpu(8, 32), &scratch),
-            &listing("repo-uncensored.json"),
-        )
-        .await;
+        let hub = Hub::listing("repo-uncensored.json").await;
+        let deps = deps_with(catalog(), gpu(8, 32), &scratch, Some(hub.client()));
+        let repo = local_repo(&deps, "example-quants/Z-Image-Turbo-Uncensored-GGUF")
+            .await
+            .unwrap();
+        assert_eq!(hub.requests().len(), 1);
         assert_eq!(repo.status, "notOffered");
         assert_eq!(
             repo.reason.as_deref(),
@@ -1556,13 +1612,22 @@ mod tests {
     #[tokio::test]
     async fn a_searched_repo_lists_each_file_with_the_shared_parts_already_here() {
         let scratch = Scratch::new();
-        let deps = deps(gpu(8, 32), &scratch);
+        let hub = Hub::listing("repo-z-image-turbo-gguf.json").await;
+        let deps = deps_with(catalog(), gpu(8, 32), &scratch, Some(hub.client()));
         let encoder = &families()[&GenFamily::ZImageTurbo].companions[0];
         let file = destination(&deps.models_dir, &encoder.repo, &encoder.path).unwrap();
         std::fs::create_dir_all(file.parent().unwrap()).unwrap();
         std::fs::write(&file, vec![0u8; usize::try_from(encoder.size).unwrap()]).unwrap();
 
-        let repo = repo_dto(&deps, &listing("repo-z-image-turbo-gguf.json")).await;
+        let repo = local_repo(&deps, "leejet/Z-Image-Turbo-GGUF")
+            .await
+            .unwrap();
+        let asked = hub.requests();
+        assert_eq!(asked.len(), 1, "{asked:?}");
+        assert!(
+            asked[0].starts_with("GET /api/models/leejet/Z-Image-Turbo-GGUF?"),
+            "{asked:?}"
+        );
         assert_eq!(repo.status, "supported");
         assert_eq!(repo.reason, None);
         assert_eq!(repo.family.as_deref(), Some("Z-Image Turbo"));
@@ -1597,32 +1662,48 @@ mod tests {
 
     // ---- the search -----------------------------------------------------------------------
 
-    /// A hit says how popular the repository is, how it is gated and its own licence label.
-    #[test]
-    fn a_search_hit_says_what_hugging_face_lists() {
-        let found: Vec<models::hf::RepoSummary> = serde_json::from_value::<Vec<Value>>(json!([
-            {"id": "leejet/Z-Image-Turbo-GGUF", "downloads": 9, "likes": 2, "gated": "manual",
-             "license": "apache-2.0"},
-            {"id": "someone/Wan", "downloads": 4, "likes": 1, "gated": "no", "license": null}
-        ]))
-        .unwrap()
-        .into_iter()
-        .map(|v| models::hf::RepoSummary {
-            id: v["id"].as_str().unwrap().into(),
-            downloads: v["downloads"].as_u64().unwrap(),
-            likes: v["likes"].as_u64().unwrap(),
-            gated: if v["gated"] == "manual" {
-                models::hf::Gated::Manual
+    /// A search asks Hugging Face its three queries (the two picture pipeline tags, then none)
+    /// and gives one page, most downloads first: each hit says how popular the repository
+    /// is, how it is gated and its own licence label; an untagged hit stays only when its
+    /// name is a picture family's.
+    #[tokio::test]
+    async fn a_search_hit_says_what_hugging_face_lists() {
+        let hub = Hub::new(|line| {
+            let found = if line.contains("pipeline_tag=text-to-image") {
+                json!([{"id": "leejet/Z-Image-Turbo-GGUF", "downloads": 9, "likes": 2,
+                        "gated": "manual", "tags": ["gguf", "license:apache-2.0"]}])
+            } else if line.contains("pipeline_tag=") {
+                json!([])
             } else {
-                models::hf::Gated::No
-            },
-            license: v["license"].as_str().map(str::to_owned),
-            last_modified: None,
-            pipeline_tag: None,
-            not_for_all_audiences: false,
+                json!([
+                    {"id": "someone/Z-Image-Turbo-Q8-GGUF", "downloads": 4, "likes": 1,
+                     "gated": false, "tags": ["gguf"]},
+                    {"id": "someone/Qwen3-4B-GGUF", "downloads": 99, "likes": 7,
+                     "gated": false, "tags": ["gguf", "license:apache-2.0"]}
+                ])
+            };
+            ("200 OK", found.to_string())
         })
-        .collect();
-        let page = search_page(found);
+        .await;
+        let page = local_search(&hub.client(), "z-image", MediaKind::Image)
+            .await
+            .unwrap();
+        let asked = hub.requests();
+        assert_eq!(asked.len(), 3, "{asked:?}");
+        assert!(
+            asked
+                .iter()
+                .all(|l| l.starts_with("GET /api/models?") && l.contains("search=z-image")),
+            "{asked:?}"
+        );
+        for tag in ["text-to-image", "image-to-image"] {
+            assert!(
+                asked
+                    .iter()
+                    .any(|l| l.contains(&format!("pipeline_tag={tag}&"))),
+                "{tag}: {asked:?}"
+            );
+        }
         assert_eq!(
             page.items,
             [
@@ -1634,7 +1715,7 @@ mod tests {
                     license_label: Some("apache-2.0".into()),
                 },
                 LocalSearchHitDto {
-                    repo: "someone/Wan".into(),
+                    repo: "someone/Z-Image-Turbo-Q8-GGUF".into(),
                     downloads: 4,
                     likes: 1,
                     gated: "no".into(),

@@ -74,6 +74,11 @@ toml = { workspace = true, features = ["display"] }
 # 0.0.6 item 6: the usage line's readers (crates/usage, WP10c).
 usage = { workspace = true }
 
+[dev-dependencies]
+# Tests only: `HfClient::for_test`, so a Hub client can talk plain HTTP to a server on this
+# computer that serves recorded listings (studio/local_cmd.rs).
+models = { workspace = true, features = ["test-support"] }
+
 [target.'cfg(windows)'.dependencies]
 # Reading the Windows build number (ROCm needs Windows 11 25H2); same major as Tauri.
 # 0.0.6 Win32_Storage_FileSystem: a coding app's file identity (outside_agent/identity.rs).

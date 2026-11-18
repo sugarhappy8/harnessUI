@@ -1319,7 +1319,8 @@ pub struct LocalModelsDto {
     pub video_possible: bool,
     /// The disk the installed picture and video models take, a shared file counted once.
     pub installed_bytes: u64,
-    /// The entries of `recommended` not installed yet ("2 more fit this computer").
+    /// The entries of `recommended` not installed yet whose word is `fits` or `afterUnload`
+    /// ("2 more fit this computer"); one that is only `slow` is not counted.
     pub more_fit: u32,
 }
 

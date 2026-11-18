@@ -84,7 +84,7 @@ pub struct HfClient {
     endpoint: Url,
     token: Option<String>,
     official: bool,
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     allow_http_loopback: bool,
 }
 
@@ -725,14 +725,15 @@ impl HfClient {
                 None
             },
             official,
-            #[cfg(test)]
+            #[cfg(any(test, feature = "test-support"))]
             allow_http_loopback: false,
         })
     }
 
-    /// A client for tests that talks plain HTTP to a local server.
-    #[cfg(test)]
-    pub(crate) fn for_test(endpoint: &str) -> Self {
+    /// A client for tests that talks plain HTTP to a local server. Other crates' tests reach
+    /// it through the `test-support` feature, which only a dev-dependency turns on.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn for_test(endpoint: &str) -> Self {
         let api = reqwest::Client::builder()
             .redirect(reqwest::redirect::Policy::none())
             .no_proxy()
@@ -1084,7 +1085,7 @@ impl HfClient {
     }
 
     fn download_host_ok(&self, url: &Url, mirror: Option<&str>) -> bool {
-        #[cfg(test)]
+        #[cfg(any(test, feature = "test-support"))]
         if self.allow_http_loopback && url.host_str() == Some("127.0.0.1") {
             return true;
         }

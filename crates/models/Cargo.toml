@@ -36,6 +36,11 @@ libc = { workspace = true }
 # GlobalMemoryStatusEx for system memory; same major as the runtime crate and Tauri.
 windows = { version = "0.62", features = ["Win32_System_SystemInformation"] }
 
+[features]
+# `HfClient::for_test` (plain HTTP to a server on this computer) for other crates' tests:
+# src-tauri turns it on as a dev-dependency only, so no build of the app has it.
+test-support = []
+
 [dev-dependencies]
 tempfile = { workspace = true }
 
