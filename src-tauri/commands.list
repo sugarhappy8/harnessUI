@@ -225,3 +225,10 @@ studio_engine_status
 studio_engine_download
 studio_engine_cancel
 studio_engine_remove
+studio_local_models
+studio_local_search
+studio_local_repo
+studio_local_fit
+studio_local_download
+studio_local_delete
+studio_accept_local_notice

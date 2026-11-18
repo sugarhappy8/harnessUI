@@ -1472,7 +1472,14 @@ pub(crate) mod tests {
         "studio_engine_download",
         "studio_engine_cancel",
         "studio_engine_remove",
-        // Task L16 (studio::local_cmd) appends its commands here.
+        // Get local models (studio::local_cmd).
+        "studio_local_models",
+        "studio_local_search",
+        "studio_local_repo",
+        "studio_local_fit",
+        "studio_local_download",
+        "studio_local_delete",
+        "studio_accept_local_notice",
     ];
 
     /// The modules Studio's commands live in.

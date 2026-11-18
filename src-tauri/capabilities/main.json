@@ -251,6 +251,13 @@
     "allow-studio-engine-status",
     "allow-studio-engine-download",
     "allow-studio-engine-cancel",
-    "allow-studio-engine-remove"
+    "allow-studio-engine-remove",
+    "allow-studio-local-models",
+    "allow-studio-local-search",
+    "allow-studio-local-repo",
+    "allow-studio-local-fit",
+    "allow-studio-local-download",
+    "allow-studio-local-delete",
+    "allow-studio-accept-local-notice"
   ]
 }

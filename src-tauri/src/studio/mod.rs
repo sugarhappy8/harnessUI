@@ -21,6 +21,10 @@
 //!   settings beside the copy), a video's poster frame, *Send to chat* and *Use in prompt*.
 //! - [`engine_cmd`]: the Studio engine's state on this computer, and the Windows engine pack's
 //!   download (with the first local model, or from its own button), cancel and remove.
+//! - [`local_cmd`]: Get local models' commands: what this computer can run (the installed
+//!   models and the recommended list, each with its fit, licences and parts), Hugging Face
+//!   search and a repository's files, a fit at a size, download, delete and the note about
+//!   local models.
 //! - [`local_models`]: downloading a picture or video model to this computer, part by part,
 //!   once the note about local models and every licence of every part are accepted (with the
 //!   Windows engine pack on first use), and deleting one with the part files nothing else uses.
@@ -44,6 +48,7 @@ pub mod errors;
 pub mod gallery;
 pub mod label;
 pub mod local;
+pub mod local_cmd;
 pub mod local_models;
 pub mod manager;
 #[cfg(test)]

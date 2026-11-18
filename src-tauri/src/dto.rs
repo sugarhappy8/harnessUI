@@ -1159,6 +1159,240 @@ pub struct EngineProgressDto {
     pub error: Option<AppError>,
 }
 
+// ---- Get local models (0.1.0) -----------------------------------------------------------------
+
+/// What Get local models' header says about this computer: "This computer: Radeon RX 7600, 8
+/// GB graphics memory · 32 GB memory · 412 GB free".
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HardwareLineDto {
+    /// The graphics device's name, or "Processor" on a computer that runs models there.
+    pub device: String,
+    /// The graphics memory free for a model, the chat model's share counted as free (on Apple
+    /// silicon, the share of memory Metal may use); `None` on the processor.
+    pub graphics_bytes: Option<u64>,
+    /// Apple silicon: the graphics device shares the computer's memory.
+    pub shared_memory: bool,
+    /// The computer's memory, when the system says.
+    pub ram_bytes: Option<u64>,
+    /// The free space on the models folder's disk, when the system says.
+    pub free_disk_bytes: Option<u64>,
+}
+
+/// A model licence as Get local models and the download dialog show it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LicenceDto {
+    /// Its key among the model's licences, which parts name (`apache-2.0`).
+    pub id: String,
+    pub name: String,
+    /// The upstream page at a pinned revision.
+    pub url: String,
+    /// The SHA-256 its acceptance is recorded under (`studio_local_download` takes it).
+    pub sha256: String,
+    /// `green`, `amber` or `red`.
+    pub badge: String,
+    /// What it allows for what you make: `yes`, `underRevenue`, `registration`, `unclear` or
+    /// `no`.
+    pub commercial: String,
+    /// The yearly revenue under which commercial use is allowed, in US dollars, when
+    /// `commercial` is `underRevenue` and the licence states one.
+    pub revenue_limit_usd: Option<u64>,
+    pub plain_words: String,
+    pub obligations: Vec<String>,
+}
+
+/// How a model's Hugging Face repository is gated.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GateDto {
+    /// `none`, `auto` (access at once after accepting) or `manual` (the publisher approves).
+    pub mode: String,
+    /// What the publisher collects when access is asked for.
+    pub collects: Vec<String>,
+}
+
+/// One file of a model, as the download dialog lists it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PartDto {
+    /// `diffusion`, `llm`, `t5xxl`, `vae`, …
+    pub role: String,
+    /// "makes the picture", "reads your prompt" or "picture decoder".
+    pub label: String,
+    /// `owner/name` on Hugging Face.
+    pub repo: String,
+    /// Its path in the repository.
+    pub path: String,
+    pub size_bytes: u64,
+    /// The id of its licence among the model's licences.
+    pub licence_id: String,
+    /// Its file is already in place (another model's shared part): checked, not fetched.
+    pub already_here: bool,
+}
+
+/// Whether a model fits this computer at one size, and how long a run takes here.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LocalFitDto {
+    /// `fits`, `slow`, `afterUnload` or `notHere`.
+    pub word: String,
+    /// The colour of the fit it would run with: `green` (whole on the device), `yellow` (one
+    /// part at a time, or partly on the processor) or `red`.
+    pub verdict: String,
+    /// Why not, when `word` is `notHere` ("needs 6 GB of graphics memory").
+    pub reason: Option<String>,
+    /// The largest preset size that fits, when this size does not ("Fits at 832×480, 49
+    /// frames").
+    pub suggestion: Option<String>,
+    /// How long a run takes here, rounded as people read it; `None` before anything was
+    /// measured ("Time shown after your first run here").
+    pub eta: Option<EtaDto>,
+    /// Not here, or a run would take longer than 15 minutes: Studio offers a cloud model.
+    pub very_slow: bool,
+}
+
+/// A model of the recommended list.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LocalEntryDto {
+    /// Its catalog id (`studio_local_download`'s `{"catalog":{"entryId":…}}`).
+    pub id: String,
+    pub name: String,
+    /// One line about what it is good for.
+    pub summary: String,
+    pub publisher: String,
+    pub kind: MediaKind,
+    /// Every part's size: a download from nothing.
+    pub size_bytes: u64,
+    /// The strictest licence of its parts: it decides the badge.
+    pub licence: LicenceDto,
+    /// Every licence the download asks to accept, each once: its parts', then the Studio
+    /// engine's when the engine comes with it.
+    pub licences: Vec<LicenceDto>,
+    pub gate: GateDto,
+    /// At its default size.
+    pub fit: LocalFitDto,
+    /// "Recommended for this computer": one per kind at most.
+    pub recommended: bool,
+    pub installed: bool,
+    pub parts: Vec<PartDto>,
+    /// What the download fetches: the parts not already in place.
+    pub to_fetch_bytes: u64,
+    /// The Studio engine downloads with it (Windows, before the first model).
+    pub needs_engine: bool,
+    /// Less than 10 GB would be left on the disk after the download.
+    pub low_disk: bool,
+}
+
+/// An installed picture or video model.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct InstalledLocalDto {
+    /// Its installed id (`studio_local_delete`, `{"installed":{"genModelId":…}}`).
+    pub id: String,
+    pub name: String,
+    pub kind: MediaKind,
+    /// Its parts' total size.
+    pub size_bytes: u64,
+    /// At its default size.
+    pub fit: LocalFitDto,
+    /// As Studio's picker offers it: free, with its controls.
+    pub model: MediaModelDto,
+}
+
+/// Get local models (`studio_local_models`). Nothing in it comes from the network.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LocalModelsDto {
+    pub hardware: HardwareLineDto,
+    pub engine: EngineStatusDto,
+    /// Newest first.
+    pub installed: Vec<InstalledLocalDto>,
+    /// The recommended list's entries that run on this computer.
+    pub recommended: Vec<LocalEntryDto>,
+    /// "Not for this computer": the entries that do not, each with its reason.
+    pub not_here: Vec<LocalEntryDto>,
+    /// The note about local models was accepted.
+    pub notice_accepted: bool,
+    /// This computer has a graphics card or Apple silicon: video is offered.
+    pub video_possible: bool,
+    /// The disk the installed picture and video models take, a shared file counted once.
+    pub installed_bytes: u64,
+    /// The entries of `recommended` not installed yet ("2 more fit this computer").
+    pub more_fit: u32,
+}
+
+/// A picture or video repository Hugging Face found.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LocalSearchHitDto {
+    /// `owner/name`.
+    pub repo: String,
+    pub downloads: u64,
+    pub likes: u64,
+    /// `no`, `auto` or `manual`.
+    pub gated: String,
+    /// The repository's own licence label (`apache-2.0`), as it gives it.
+    pub license_label: Option<String>,
+}
+
+/// A Hugging Face search for picture or video models: one page, most downloads first.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LocalSearchPage {
+    pub items: Vec<LocalSearchHitDto>,
+}
+
+/// A diffusion file of a searched repository, with the parts it needs beside it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LocalFileChoiceDto {
+    /// Its path in the repository (`studio_local_download`'s `{"search":{…,"file":…}}`).
+    pub file: String,
+    /// Its quantisation (`Q4_K`), when its name says.
+    pub quant: String,
+    pub parts: Vec<PartDto>,
+    /// Every licence the download asks to accept, each once.
+    pub licences: Vec<LicenceDto>,
+    /// Every part's size.
+    pub total_bytes: u64,
+    /// The parts not already in place.
+    pub to_fetch_bytes: u64,
+    /// At the family's default size.
+    pub fit: LocalFitDto,
+    /// The Studio engine downloads with it.
+    pub needs_engine: bool,
+    /// Less than 10 GB would be left on the disk after the download.
+    pub low_disk: bool,
+}
+
+/// A searched repository at its latest commit, as Studio recognises it (`studio_local_repo`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LocalRepoDto {
+    pub repo: String,
+    /// The commit the listing describes; a download pins it.
+    pub commit: String,
+    /// `supported`, `notSupportedYet` (no download) or `notOffered` (never offered).
+    pub status: String,
+    /// Why not: a sentence for `notSupportedYet`, a plain clause for `notOffered` ("its licence
+    /// excludes some regions").
+    pub reason: Option<String>,
+    /// The family's name, when supported.
+    pub family: Option<String>,
+    /// Its diffusion files with a published SHA-256; empty unless supported.
+    pub files: Vec<LocalFileChoiceDto>,
+    /// The strictest licence of its files' parts, for the badge, when supported.
+    pub licence: Option<LicenceDto>,
+    /// Every licence its files' downloads ask to accept, each once.
+    pub licences: Vec<LicenceDto>,
+    /// "The repository says MIT; FLUX.2 klein 4B is Apache 2.0." when its label is not its
+    /// family's licence.
+    pub label_mismatch: Option<String>,
+    pub gate: GateDto,
+}
+
 #[cfg(test)]
 mod tests {
     use serde_json::json;

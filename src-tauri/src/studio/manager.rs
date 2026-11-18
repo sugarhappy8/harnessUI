@@ -75,11 +75,7 @@
 mod lane;
 mod video;
 
-#[cfg_attr(
-    not(test),
-    expect(unused_imports, reason = "Task L16's fits read the verdict")
-)]
-pub(crate) use lane::{LocalVerdict, local_verdict};
+pub(crate) use lane::{LocalVerdict, device_label, eta_dto, local_verdict, word_tag};
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 use std::future::Future;
@@ -972,6 +968,21 @@ impl StudioManager {
             .prefs()
             .apply(patch)
             .map_err(AppError::bad_request)?;
+        self.hold_prefs(next).await
+    }
+
+    /// Records that the note about local models was accepted, now (the clock's time): saved,
+    /// then held like any other preference, so the next local download sees it and a later
+    /// change in Settings keeps it. The only writer of `local_notice_accepted_at`.
+    pub async fn accept_local_notice(&self) -> AppResult<StudioPrefs> {
+        let _one_at_a_time = self.inner.prefs_writes.lock().await;
+        let mut next = self.inner.prefs();
+        next.local_notice_accepted_at = Some(self.inner.deps.clock.now_ms());
+        self.hold_prefs(next).await
+    }
+
+    /// Saves `next` and holds it. The caller holds `prefs_writes`.
+    async fn hold_prefs(&self, next: StudioPrefs) -> AppResult<StudioPrefs> {
         prefs::save(&self.inner.deps.store, &next).await?;
         *self
             .inner

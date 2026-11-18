@@ -31,7 +31,7 @@ use models::gen_catalog::{
     gen_catalog,
 };
 use models::gen_search::{Recognition, entry_for, recognise, searched_licence};
-use models::hf::{Gated, HubInfo, RepoDetail};
+use models::hf::{Gated, HfClient, HubInfo, RepoDetail};
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Manager};
 
@@ -69,10 +69,8 @@ pub struct DownloadPlan {
     /// checks that one against its SHA-256 instead of fetching it.
     pub files: Vec<(FileSpec, PathBuf)>,
     /// The parts whose file is already in place with its pinned size.
-    #[allow(dead_code, reason = "Task L16's commands mark the parts already here")]
     pub already_here: Vec<PathBuf>,
     /// Every part's size.
-    #[allow(dead_code, reason = "Task L16's commands show the model's size")]
     pub total_bytes: u64,
     /// The parts not in place yet: what is fetched.
     pub to_fetch_bytes: u64,
@@ -84,7 +82,11 @@ pub struct DownloadPlan {
     pub needs_engine: bool,
     /// The Studio engine is not on this computer and cannot come with the model (no pack for
     /// this platform): why, in Studio's words. The model still downloads.
-    #[allow(dead_code, reason = "Task L16's commands say the engine is missing")]
+    #[allow(
+        dead_code,
+        reason = "read by the tests only: Get local models tells the same from the engine's state \
+                  (`unavailable`)"
+    )]
     pub engine_missing: Option<AppError>,
     /// The free space on the models folder's disk, when the system says.
     pub free_bytes: Option<u64>,
@@ -96,7 +98,6 @@ pub const LOW_DISK_BYTES: u64 = 10_000_000_000;
 
 impl DownloadPlan {
     /// Less than [`LOW_DISK_BYTES`] would be left on the disk after the download.
-    #[allow(dead_code, reason = "Task L16's commands warn of a nearly full disk")]
     pub fn low_disk(&self) -> bool {
         self.free_bytes
             .is_some_and(|free| free.saturating_sub(self.to_fetch_bytes) < LOW_DISK_BYTES)
@@ -201,11 +202,31 @@ struct Resolved {
     source: store::GenSource,
 }
 
-/// [`entry_from_source`], with the catalog id and the origin its installed row records.
+/// [`resolve_with`] with this app's store and catalog, and its Hub client for a search source
+/// only.
 async fn resolve(app: &AppHandle, source: &LocalSource) -> AppResult<Resolved> {
+    let catalog = current_gen_catalog(app).await;
+    let hf = match source {
+        LocalSource::Search { .. } => Some(crate::hub::hf_client(app).await?),
+        LocalSource::Catalog { .. } | LocalSource::Installed { .. } => None,
+    };
+    let state = app.state::<AppState>();
+    resolve_with(&state.store, &catalog, hf.as_ref(), source).await
+}
+
+/// The entry `source` names, with the catalog id and the origin its installed row records:
+/// from `catalog` (an entry it hides is `studio_not_supported_yet`); for a search source from
+/// the repository's listing at that commit, asked of `hf` and recognised again here (the
+/// webview's word is never taken for it); for an installed model from its saved parts in
+/// `store` and its family record. Only a search source sends a request.
+async fn resolve_with(
+    store: &store::Store,
+    catalog: &GenCatalog,
+    hf: Option<&HfClient>,
+    source: &LocalSource,
+) -> AppResult<Resolved> {
     match source {
         LocalSource::Catalog { entry_id } => {
-            let catalog = current_gen_catalog(app).await;
             let entry = match catalog.entries.get(entry_id) {
                 Some(entry) => entry.clone(),
                 None => {
@@ -222,28 +243,25 @@ async fn resolve(app: &AppHandle, source: &LocalSource) -> AppResult<Resolved> {
             })
         }
         LocalSource::Search { repo, commit, file } => {
-            let client = crate::hub::hf_client(app).await?;
+            let client =
+                hf.ok_or_else(|| AppError::internal("a search source without a Hub client"))?;
             let detail = client
                 .repo(repo, Some(commit))
                 .await
                 .map_err(crate::hub::hf_error)?;
-            let families = current_gen_catalog(app).await.families;
             Ok(Resolved {
-                entry: entry_from_listing(&detail, file, &families)?,
+                entry: entry_from_listing(&detail, file, &catalog.families)?,
                 catalog_id: None,
                 source: store::GenSource::Search,
             })
         }
         LocalSource::Installed { gen_model_id } => {
-            let state = app.state::<AppState>();
-            let model = state
-                .store
+            let model = store
                 .get_gen_model(gen_model_id)
                 .await?
                 .ok_or_else(|| AppError::not_found("model"))?;
-            let catalog = current_gen_catalog(app).await;
             Ok(Resolved {
-                entry: entry_from_installed(&model, &catalog)?,
+                entry: entry_from_installed(&model, catalog)?,
                 catalog_id: model.catalog_id.clone(),
                 source: model.source,
             })
@@ -251,15 +269,15 @@ async fn resolve(app: &AppHandle, source: &LocalSource) -> AppResult<Resolved> {
     }
 }
 
-/// The entry a source names: from the current catalog; for a search source from the
-/// repository's listing at that commit, recognised again here (the webview's word is never
-/// taken for it); for an installed model from its saved parts and family record.
-#[allow(
-    dead_code,
-    reason = "Task L16's fit command reads the entry of the source it is given"
-)]
-pub async fn entry_from_source(app: &AppHandle, source: &LocalSource) -> AppResult<GenEntry> {
-    Ok(resolve(app, source).await?.entry)
+/// The entry `source` names ([`resolve_with`]): a request only for a search source's
+/// listing, asked of `hf`.
+pub(crate) async fn entry_with(
+    store: &store::Store,
+    catalog: &GenCatalog,
+    hf: Option<&HfClient>,
+    source: &LocalSource,
+) -> AppResult<GenEntry> {
+    Ok(resolve_with(store, catalog, hf, source).await?.entry)
 }
 
 /// The entry `file` of the listing `detail` makes, recognised from the listing
@@ -279,7 +297,7 @@ pub fn entry_from_listing(
                 .ok_or_else(|| AppError::not_found("model file"))?;
             let record = families
                 .get(&family)
-                .ok_or_else(|| errors::not_supported_yet("its family record is missing"))?;
+                .ok_or_else(|| errors::not_supported_yet(errors::FAMILY_RECORD_MISSING))?;
             entry_for(detail, found, record).map_err(errors::not_supported_yet)
         }
         Recognition::NotOffered(why) => Err(errors::not_offered(why)),
@@ -316,7 +334,7 @@ pub fn entry_from_installed(model: &store::GenModel, catalog: &GenCatalog) -> Ap
             let record = catalog
                 .families
                 .get(&family)
-                .ok_or_else(|| errors::not_supported_yet("its family record is missing"))?;
+                .ok_or_else(|| errors::not_supported_yet(errors::FAMILY_RECORD_MISSING))?;
             from_record(model, record, diffusion)
         }
     };
@@ -383,7 +401,7 @@ fn from_record(model: &store::GenModel, record: &FamilyRecord, diffusion: &GenPa
 
 /// A value's serde word (`GenRole::Llm` → `llm`, `GenFamily::Flux2Klein4b` →
 /// `flux2-klein-4b`).
-fn word<T: Serialize>(value: &T) -> String {
+pub(crate) fn word<T: Serialize>(value: &T) -> String {
     match serde_json::to_value(value) {
         Ok(serde_json::Value::String(word)) => word,
         _ => String::new(),
@@ -424,10 +442,6 @@ fn gen_group(entry: &GenEntry, catalog_id: Option<String>, source: store::GenSou
 ///
 /// An installed source with no new hashes is *Download again*: every part is checked, and
 /// what is missing or does not match its SHA-256 is fetched again.
-#[allow(
-    dead_code,
-    reason = "Task L16's studio_local_download command calls it"
-)]
 pub async fn start_local_download(
     app: &AppHandle,
     source: LocalSource,
@@ -529,7 +543,6 @@ where
 
 /// Deletes the installed model `id`, and each of its part files that nothing else uses and no
 /// download not finished yet writes ([`delete_files_of`]).
-#[allow(dead_code, reason = "Task L16's studio_local_delete command calls it")]
 pub async fn delete_local_model(app: &AppHandle, id: &str) -> AppResult<()> {
     let state = app.state::<AppState>();
     let models_dir = crate::hub::models_dir(app).await;

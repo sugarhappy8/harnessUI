@@ -1128,10 +1128,7 @@ pub fn run_shape(entry: &GenEntry, req: &MediaRequest) -> Result<RunShape, Media
     let (pictures, frames) = if entry.kind == GenKind::Video {
         let frames = match whole_param(req, key::LENGTH)? {
             Some(seconds) => frames_for(entry, seconds),
-            None => entry
-                .defaults
-                .frames
-                .unwrap_or_else(|| frames_for(entry, FIRST_SECONDS)),
+            None => default_frames(entry),
         };
         (1, frames)
     } else {
@@ -1146,6 +1143,15 @@ pub fn run_shape(entry: &GenEntry, req: &MediaRequest) -> Result<RunShape, Media
         steps: whole_param(req, key::STEPS)?.unwrap_or(entry.defaults.steps),
         pictures,
     })
+}
+
+/// The frames of a clip whose Length is left out: the entry's default, else 2 s by its
+/// family's rule.
+pub fn default_frames(entry: &GenEntry) -> u32 {
+    entry
+        .defaults
+        .frames
+        .unwrap_or_else(|| frames_for(entry, FIRST_SECONDS))
 }
 
 /// Frames for a clip of `seconds`: seconds × the entry's frames a second, made one more than a
@@ -1190,6 +1196,11 @@ fn longest_seconds(entry: &GenEntry) -> u32 {
         .max_frames
         .map_or(FIRST_SECONDS, |frames| frames / fps_of(entry))
         .max(1)
+}
+
+/// The longest side `entry` is made at here: its own longest, within the engine's.
+pub fn longest_side(entry: &GenEntry) -> u32 {
+    size_rules(entry).max_side
 }
 
 /// The rules of an exact size for `entry`: its multiple, its longest side (within the
@@ -1378,7 +1389,7 @@ async fn check_files(entry: &GenEntry, model: &store::GenModel) -> Result<(), Me
 }
 
 /// The installed model `row` with its `entry`, as Studio lists it: free, with local controls.
-fn media_model(row: &store::GenModel, entry: &GenEntry) -> MediaModel {
+pub(crate) fn media_model(row: &store::GenModel, entry: &GenEntry) -> MediaModel {
     let params = LocalMediaProvider::params_for(entry);
     MediaModel {
         id: row.id.clone(),
@@ -1397,7 +1408,8 @@ fn media_model(row: &store::GenModel, entry: &GenEntry) -> MediaModel {
     }
 }
 
-fn media_kind(kind: GenKind) -> MediaKind {
+/// What a model of `kind` makes, as a media request names it.
+pub(crate) fn media_kind(kind: GenKind) -> MediaKind {
     match kind {
         GenKind::Video => MediaKind::Video,
         GenKind::Image | GenKind::ImageEdit => MediaKind::Image,

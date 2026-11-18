@@ -7,7 +7,7 @@
 use agent::media::{
     Company, FailureKind, Invalid, LocalIo, MediaFailure, MediaKind, MediaModel, RefRole, Stage,
 };
-use models::gen_fit::NotFor;
+use models::gen_fit::{GenSize, NotFor};
 use models::gen_search::NotOffered;
 use runtime::packs::PackError;
 use runtime::sd::args::ArgsError;
@@ -1018,13 +1018,20 @@ pub fn not_supported_yet(why: impl Into<String>) -> AppError {
     )
 }
 
-/// A repository harnessUI never offers, whatever it holds, with the reason.
-pub fn not_offered(why: NotOffered) -> AppError {
-    let reason = match why {
+/// Why harnessUI never offers a repository, as a plain clause: what `studio_not_offered`
+/// says after "harnessUI does not offer this model:", and what Get local models shows after
+/// "Not offered in harnessUI:".
+pub fn not_offered_reason(why: NotOffered) -> &'static str {
+    match why {
         NotOffered::RegionLimited => "its licence excludes some regions",
         NotOffered::Uncensored => "it was made without safety limits",
         NotOffered::AdultContent => "it is marked as not for all audiences",
-    };
+    }
+}
+
+/// A repository harnessUI never offers, whatever it holds, with the reason.
+pub fn not_offered(why: NotOffered) -> AppError {
+    let reason = not_offered_reason(why);
     AppError::new(
         "studio_not_offered",
         format!("harnessUI does not offer this model: {reason}."),
@@ -1109,6 +1116,45 @@ pub fn local_model_missing() -> AppError {
         "Choose another model, or get it again in Get local models.",
         String::new(),
     )
+}
+
+// ---- Get local models ------------------------------------------------------------------------
+
+/// Why a recognised family's model is not supported yet when this build has no record of the
+/// family (a catalog newer than the build, or one that hid the record).
+pub const FAMILY_RECORD_MISSING: &str = "its family record is missing";
+
+/// What the part that makes the picture (or the clip) is, in the download dialog.
+pub const PART_MAKES_THE_PICTURE: &str = "makes the picture";
+/// What a text encoder is, in the download dialog.
+pub const PART_READS_THE_PROMPT: &str = "reads your prompt";
+/// What the decoder is, in the download dialog.
+pub const PART_PICTURE_DECODER: &str = "picture decoder";
+
+/// A fit asked at a size the model is never made at (a side of 0, or longer than its
+/// longest).
+pub fn size_not_offered() -> AppError {
+    AppError::new(
+        "bad_request",
+        "This model is not made at that size.",
+        "Choose one of the sizes offered.",
+        String::new(),
+    )
+}
+
+/// The largest preset size that fits when the size asked for does not: "Fits at 768×768", or
+/// for a clip "Fits at 832×480, 49 frames".
+pub fn fits_at(size: GenSize, clip: bool) -> String {
+    let GenSize {
+        width,
+        height,
+        frames,
+    } = size;
+    if clip {
+        format!("Fits at {width}×{height}, {frames} frames")
+    } else {
+        format!("Fits at {width}×{height}")
+    }
 }
 
 /// Why a model is not for this computer, judged with the chat model's memory counted back:
@@ -1566,6 +1612,7 @@ mod tests {
             busy_for_update(),
             engine_in_use(),
             local_model_missing(),
+            size_not_offered(),
         ];
         all.extend(every_pack_error().iter().map(engine_not_installed));
         for to in [PictureUse::Chat, PictureUse::Prompt] {
@@ -1961,6 +2008,35 @@ mod tests {
             not_here_reason(NotFor::VideoNotOnThisMac, false),
             "local video needs a graphics card on this computer"
         );
+    }
+
+    /// Get local models' words: a smaller size that fits, and why a repository is never
+    /// offered in the clause `studio_not_offered` uses.
+    #[test]
+    fn get_local_models_says_what_fits_and_what_is_never_offered() {
+        let size = |width, height, frames| GenSize {
+            width,
+            height,
+            frames,
+        };
+        assert_eq!(fits_at(size(768, 768, 1), false), "Fits at 768×768");
+        assert_eq!(
+            fits_at(size(832, 480, 49), true),
+            "Fits at 832×480, 49 frames"
+        );
+        for why in [
+            NotOffered::RegionLimited,
+            NotOffered::Uncensored,
+            NotOffered::AdultContent,
+        ] {
+            assert_eq!(
+                not_offered(why).message,
+                format!(
+                    "harnessUI does not offer this model: {}.",
+                    not_offered_reason(why)
+                )
+            );
+        }
     }
 
     #[test]

@@ -167,7 +167,6 @@ enum Card {
 /// run would go: [`LocalVerdict`]. Every fit Studio shows for a local model is this one, so
 /// Create and Get local models say the same. The measured times read are those of the device
 /// the run would use, as a run records it ("<device> (<backend>)", or "Processor").
-#[cfg_attr(not(test), expect(dead_code, reason = "Task L16's fits call it"))]
 pub(crate) async fn local_verdict(
     entry: &GenEntry,
     size: GenSize,
@@ -283,20 +282,30 @@ fn free_memory(target: &Target) -> u64 {
     }
 }
 
-/// A graphics device as shown: its name ([`device_name`]) with the engine's backend in
+/// A graphics device as shown: its name ([`device_label`]) with the engine's backend in
 /// brackets ("AMD Radeon RX 7600 (Vulkan)", "Apple M5 (Metal)").
 fn shown(description: Option<&str>, backend: &str) -> String {
+    let label = device_label(description, backend);
     let backend = match backend {
-        "cpu" => return PROCESSOR.to_owned(),
+        "cpu" => return label,
         "vulkan" => "Vulkan",
         "metal" => "Metal",
         other => other,
     };
-    let name = description
+    format!("{label} ({backend})")
+}
+
+/// Where models run, by name: the graphics device's ([`device_name`]; "Graphics card" when
+/// llama.cpp gives none), or "Processor" for the backend `cpu`.
+pub(crate) fn device_label(description: Option<&str>, backend: &str) -> String {
+    if backend == "cpu" {
+        return PROCESSOR.to_owned();
+    }
+    description
         .map(device_name)
         .filter(|name| !name.is_empty())
-        .unwrap_or("Graphics card");
-    format!("{name} ({backend})")
+        .unwrap_or("Graphics card")
+        .to_owned()
 }
 
 /// A graphics device's name from llama.cpp's description of it: the driver's code for the
@@ -366,7 +375,7 @@ fn job_record(shape: &RunShape) -> Value {
 
 /// A time as the webview shows it: rounded as people read it (`gen_eta::round_for_display`),
 /// with the time left during a run.
-fn eta_dto(eta: &Eta, left_ms: Option<u64>) -> EtaDto {
+pub(crate) fn eta_dto(eta: &Eta, left_ms: Option<u64>) -> EtaDto {
     EtaDto {
         low_ms: gen_eta::round_for_display(eta.low_ms),
         high_ms: gen_eta::round_for_display(eta.high_ms),
@@ -397,7 +406,8 @@ fn left_of(p: &LocalProgress) -> Option<u64> {
     ))
 }
 
-fn word_tag(word: FitWord) -> &'static str {
+/// A fit word as the webview names it: `fits`, `slow`, `afterUnload` or `notHere`.
+pub(crate) fn word_tag(word: FitWord) -> &'static str {
     match word {
         FitWord::Fits => "fits",
         FitWord::Slow => "slow",

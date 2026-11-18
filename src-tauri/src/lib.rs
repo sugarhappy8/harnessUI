@@ -343,6 +343,13 @@ pub fn run() {
             studio::engine_cmd::studio_engine_download,
             studio::engine_cmd::studio_engine_cancel,
             studio::engine_cmd::studio_engine_remove,
+            studio::local_cmd::studio_local_models,
+            studio::local_cmd::studio_local_search,
+            studio::local_cmd::studio_local_repo,
+            studio::local_cmd::studio_local_fit,
+            studio::local_cmd::studio_local_download,
+            studio::local_cmd::studio_local_delete,
+            studio::local_cmd::studio_accept_local_notice,
         ])
         .setup(|app| {
             let handle = app.handle().clone();
