@@ -201,6 +201,8 @@ export function createRun(
     start: async (tab, confirmed, from) => {
       const s = get();
       if (s.starting) return null;
+      // The draft's extra settings wait for its model's price (`holding`): Create waits too.
+      if (!from && s.holding[tab]) return null;
       const token = crypto.randomUUID();
       let req: StartRequest | null;
       if (from) {

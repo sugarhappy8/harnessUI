@@ -1419,6 +1419,12 @@ export const STUDIO_DOCK = {
   limitNeedsReserve: (reserve: string, left: string) =>
     `This model's price is unknown, so Studio needs ${reserve} of today's limit left (${left} left).`,
   raiseLimit: "Raise the limit",
+  /** Under the prompt while Create waits for an OpenRouter picture model's price, which says
+   *  which extra settings it takes; `failed` once that request failed. */
+  holdingExtra: (failed: boolean) =>
+    failed
+      ? "Your extra settings wait for this model's price, which could not be got. Press Get the price to ask again."
+      : "Your extra settings wait for this model's price, which says which ones it takes.",
 } as const;
 
 /** The confirmation before a cloud run (Task B7, design Wireframe 3). */

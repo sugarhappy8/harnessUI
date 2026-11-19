@@ -256,6 +256,22 @@ describe("PromptDock", () => {
       );
     });
 
+    it("Create waits while extra settings are held for the model's price, and says so", async () => {
+      await show({ prefs: prefs({ lastModel: CLOUD_LAST }) });
+      typePrompt("a fox");
+      await flush();
+      act(() => useStudio.setState({ holding: { image: true, video: false } }));
+      expect(createButton().disabled).toBe(true);
+      screen.getByText(STUDIO_DOCK.holdingExtra(false));
+      fireEvent.keyDown(promptBox(), { key: "Enter" });
+      await act(async () => {
+        await useStudio.getState().start("image", false);
+      });
+      expect(api.studioStart).not.toHaveBeenCalled();
+      act(() => useStudio.setState({ holding: { image: false, video: false } }));
+      expect(createButton().disabled).toBe(false);
+    });
+
     it("colours a price of $1 or more as a second cue", async () => {
       await show({ prefs: prefs({ lastModel: CLOUD_LAST }), estimate: est({ usd: 2.6 }) });
       expect(screen.getByText("~ $2.60").className).toContain("text-danger");

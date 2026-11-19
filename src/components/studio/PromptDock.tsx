@@ -56,6 +56,8 @@ export function PromptDock(props: { tab: StudioTab }) {
   const pending = useStudio((s) => s.pending);
   const pendingEstimate = useStudio((s) => s.pendingEstimate);
   const refusal = useStudio((s) => s.refusal[tab]);
+  const holding = useStudio((s) => s.holding[tab]);
+  const priceFailed = useStudio((s) => s.priceError[tab] !== null);
   const setPrompt = useStudio((s) => s.setPrompt);
   const estimate = useStudio((s) => s.estimate);
   const start = useStudio((s) => s.start);
@@ -99,7 +101,8 @@ export function PromptDock(props: { tab: StudioTab }) {
   const blocked = refused.length > 0 || notHere;
   // The daily limit has taken Create's place (Enter included).
   const overLimit = !here && known !== null && !known.limit.wouldPass;
-  const disabled = model === null || key === null || starting || blocked || overLimit;
+  // Extra settings held aside until the model's price says which it takes: Create waits for it.
+  const disabled = model === null || key === null || starting || blocked || overLimit || holding;
   const longRun = local?.over15Min ? etaText(known?.eta ?? null) : null;
   const backup = here ? cloudBackup(tab, known, endpoints) : null;
 
@@ -130,6 +133,7 @@ export function PromptDock(props: { tab: StudioTab }) {
           {sentence}
         </p>
       ))}
+      {holding && <p className="text-xs text-fg-muted">{STUDIO_DOCK.holdingExtra(priceFailed)}</p>}
       {shown?.error && (
         <p className="text-xs text-fg-muted">
           {shown.error.message} {shown.error.nextStep}

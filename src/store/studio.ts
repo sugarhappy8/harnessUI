@@ -222,17 +222,23 @@ export interface StudioState extends StudioRunState, StudioResultsState, StudioL
    *  its settings carried there (`carry`) with a note of what changed. An OpenRouter picture
    *  model whose price was never fetched is asked for it, once; a local model never is. Its
    *  Extra field comes with that answer, so the draft's extra settings are held aside until
-   *  then and carried to the model as it comes back (or as listed, dropped with the note, when
-   *  the request fails or another model is picked first). A model `tab` cannot use is ignored. */
+   *  then (`holding`) and carried to the model as it comes back (kept held when the request
+   *  fails, until *Get the price* brings the answer; as listed, dropped with the note, when
+   *  another model is picked first). A model `tab` cannot use is ignored. */
   chooseModel(tab: StudioTab, target: RunTarget, modelId: string): void;
   /** *Get the price*: asks for the price of `tab`'s model (a model restored when Studio opened
-   *  is never asked by itself). A failure goes to `priceError`, not to the caller. */
+   *  is never asked by itself); extra settings held for it are carried to it as it comes back.
+   *  A failure goes to `priceError`, not to the caller. */
   fetchPrice(tab: StudioTab): Promise<void>;
   /** Each tab's failed price request, while the tab stays on the model it asked for (shown
    *  under the Model field, where *Get the price* asks again); put away by the next request
    *  and by a change of model. */
   priceError: Record<StudioTab, ErrorInfo | null>;
   dismissPriceError(tab: StudioTab): void;
+  /** Each tab whose extra settings are held aside until its model's price answer brings the
+   *  model's Extra field (see `chooseModel`): Create waits while they are. A failed request
+   *  keeps them held, and *Get the price* asks again. */
+  holding: Record<StudioTab, boolean>;
   setPrompt(tab: StudioTab, text: string): void;
   /** Sets field `key` of `tab`'s draft. A transparent background moves a file type that cannot
    *  be transparent to PNG (else WebP) and says so in the note; then every value whose field
@@ -400,8 +406,14 @@ export const useStudio: UseBoundStore<StoreApi<StudioState>> = create<StudioStat
 
   /** The price requests on their way, by endpoint and model: a model is asked for once. */
   const asking = new Map<string, Promise<MediaModel>>();
-  /** Each tab's extra settings held aside, while they are. */
+  /** Each tab's extra settings held aside, while they are (`holding` says so in the state). */
   const held: Partial<Record<StudioTab, HeldExtra>> = {};
+  /** Holds `hold` aside for `tab`, or (`null`) nothing any more. */
+  const setHeld = (tab: StudioTab, hold: HeldExtra | null) => {
+    if (hold) held[tab] = hold;
+    else delete held[tab];
+    if (get().holding[tab] !== (hold !== null)) set((s) => ({ holding: { ...s.holding, [tab]: hold !== null } }));
+  };
 
   /** Asks endpoint `providerId` for model `modelId`'s price (the same request while one is on
    *  its way) and keeps the answer in place of the model as listed. */
@@ -444,7 +456,7 @@ export const useStudio: UseBoundStore<StoreApi<StudioState>> = create<StudioStat
    *  gone to another model. */
   const settleHeld = (tab: StudioTab, hold: HeldExtra, model: MediaModel) => {
     if (held[tab] !== hold) return;
-    delete held[tab];
+    setHeld(tab, null);
     const carried = carry(model, model, {}, hold.extra, []);
     set((s) => {
       const draft = s.drafts[tab];
@@ -458,8 +470,10 @@ export const useStudio: UseBoundStore<StoreApi<StudioState>> = create<StudioStat
 
   /** Asks for the price of `to`, which `tab`'s draft was just set to at `endpoint` (`target`),
    *  holding `extra` aside when given (the model as listed has no Extra field yet): they go to
-   *  the model as it comes back, or as listed when the request fails, each one it does not take
-   *  removed with the note (`settleHeld`). A failure is kept in `priceError` (`priceFor`). */
+   *  the model as it comes back, each one it does not take removed with the note
+   *  (`settleHeld`). When the request fails they stay held, never checked against the model as
+   *  listed (which has no Extra field, so would drop every one): *Get the price* asks again. A
+   *  failure is kept in `priceError` (`priceFor`). */
   const askPriceHolding = (
     tab: StudioTab,
     target: RunTarget,
@@ -468,10 +482,11 @@ export const useStudio: UseBoundStore<StoreApi<StudioState>> = create<StudioStat
     extra: Values | null,
   ) => {
     const mine: HeldExtra | null = extra ? { target, model: to, extra } : null;
-    if (mine) held[tab] = mine;
+    if (mine) setHeld(tab, mine);
     priceFor(tab, endpoint.providerId, to.id).then(
       (priced) => mine && settleHeld(tab, mine, priced),
-      () => mine && settleHeld(tab, mine, mine.model),
+      // Still held; the failure is in `priceError`.
+      () => undefined,
     );
   };
 
@@ -568,7 +583,7 @@ export const useStudio: UseBoundStore<StoreApi<StudioState>> = create<StudioStat
     const pictures = carry(model, model, {}, {}, refs);
     note = [note, pictures.note].filter((n) => n !== null).join(" ") || null;
     // The draft starts again: nothing is held aside for the model it had.
-    delete held[tab];
+    setHeld(tab, null);
     set((st) => ({
       drafts: {
         ...st.drafts,
@@ -735,7 +750,7 @@ export const useStudio: UseBoundStore<StoreApi<StudioState>> = create<StudioStat
     setTab: (tab) => set({ tab }),
     selectInitialModel: (tab) => {
       // The draft starts again: nothing is held aside for a model it no longer has.
-      delete held[tab];
+      setHeld(tab, null);
       set((s) => {
         const offered = (c: { target: RunTarget; model: string }) =>
           offeredModel(tab, c.target, c.model, s.local, s.endpoints);
@@ -771,7 +786,7 @@ export const useStudio: UseBoundStore<StoreApi<StudioState>> = create<StudioStat
       // Extra settings held aside for the model picked before are carried to it as listed.
       const waiting = held[tab];
       const dropped = waiting ? carry(waiting.model, waiting.model, {}, waiting.extra, []) : null;
-      if (waiting) delete held[tab];
+      if (waiting) setHeld(tab, null);
       const extra = { ...draft.extra, ...dropped?.extra };
       const from = draft.target && draft.model ? listedModel(draft.target, draft.model, s.local, s.endpoints) : null;
       const hold = mustHold(to, unpriced, extra);
@@ -801,10 +816,15 @@ export const useStudio: UseBoundStore<StoreApi<StudioState>> = create<StudioStat
     fetchPrice: async (tab) => {
       const { target, model } = get().drafts[tab];
       if (target === null || target === "thisComputer" || model === null) return;
-      // A failure is kept in `priceError` (`priceFor`).
-      await priceFor(tab, target.endpoint, model).catch(() => undefined);
+      // A failure is kept in `priceError` (`priceFor`); extra settings held stay held.
+      const priced = await priceFor(tab, target.endpoint, model).catch(() => null);
+      const waiting = held[tab];
+      if (priced && waiting && sameTarget(waiting.target, target) && waiting.model.id === model) {
+        settleHeld(tab, waiting, priced);
+      }
     },
     priceError: { image: null, video: null },
+    holding: { image: false, video: false },
     dismissPriceError: (tab) => set((s) => ({ priceError: { ...s.priceError, [tab]: null } })),
     setPrompt: (tab, text) => set((s) => ({ drafts: { ...s.drafts, [tab]: { ...s.drafts[tab], prompt: text } } })),
     setValue: (tab, key, value) =>
@@ -857,7 +877,9 @@ export const useStudio: UseBoundStore<StoreApi<StudioState>> = create<StudioStat
       return null;
     },
     dismissNote: (tab) => set((s) => ({ drafts: { ...s.drafts, [tab]: { ...s.drafts[tab], note: null } } })),
-    resetAdvanced: (tab) =>
+    resetAdvanced: (tab) => {
+      // No Extra fields: nothing is held aside for them either.
+      setHeld(tab, null);
       set((s) => {
         const draft = s.drafts[tab];
         const model = draftModel(s, tab);
@@ -865,7 +887,8 @@ export const useStudio: UseBoundStore<StoreApi<StudioState>> = create<StudioStat
         const kept = Object.fromEntries(Object.entries(draft.values).filter(([k]) => !advanced.has(k)));
         const values = model ? dropUnmet(model, kept) : kept;
         return { drafts: { ...s.drafts, [tab]: { ...draft, values, extra: {}, routing: null, seedLocked: false } } };
-      }),
+      });
+    },
     newSeed: (tab) => {
       const field = draftModel(get(), tab)?.params.find((p) => p.kind.type === "seed");
       if (!field || field.kind.type !== "seed") return;

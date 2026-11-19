@@ -635,15 +635,30 @@ describe("chooseModel", () => {
     expect(useStudio.getState().drafts.image.note).toBeNull();
   });
 
-  it("drops the held extra settings with the note when the price request fails", async () => {
+  it("keeps the extra settings held when the price request fails, and Get the price brings them in", async () => {
     await onFlareWithExtra();
     vi.mocked(api.studioModelPrice).mockRejectedValue({ code: "network", message: "", nextStep: "", details: "" });
     useStudio.getState().chooseModel("image", { endpoint: 1 }, nano.id);
+    expect(useStudio.getState().holding.image).toBe(true);
     await flush();
-    expect(useStudio.getState().drafts.image).toMatchObject({
-      extra: {},
-      note: "Nano Banana 2.1 does not accept moderation, so it was removed.",
+    // Never checked against the model as listed, which has no Extra field.
+    expect(useStudio.getState().drafts.image).toMatchObject({ extra: {}, note: null });
+    expect(useStudio.getState().holding.image).toBe(true);
+    vi.mocked(api.studioModelPrice).mockResolvedValue(nanoAnswered);
+    await act(async () => {
+      await useStudio.getState().fetchPrice("image");
     });
+    expect(useStudio.getState().drafts.image).toMatchObject({ extra: { moderation: "low" }, note: null });
+    expect(useStudio.getState().holding.image).toBe(false);
+  });
+
+  it("Reset all lets go of the extra settings held", async () => {
+    await onFlareWithExtra();
+    vi.mocked(api.studioModelPrice).mockReturnValue(new Promise(() => undefined));
+    useStudio.getState().chooseModel("image", { endpoint: 1 }, nano.id);
+    expect(useStudio.getState().holding.image).toBe(true);
+    useStudio.getState().resetAdvanced("image");
+    expect(useStudio.getState().holding.image).toBe(false);
   });
 
   it("a price request that fails after another model was picked leaves no error", async () => {
@@ -670,6 +685,7 @@ describe("chooseModel", () => {
       extra: {},
       note: "Nano Banana 2.1 does not accept moderation, so it was removed.",
     });
+    expect(useStudio.getState().holding.image).toBe(false);
     await act(async () => {
       answer(nanoAnswered);
     });
