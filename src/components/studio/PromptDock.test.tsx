@@ -396,10 +396,10 @@ describe("PromptDock", () => {
       expect(api.studioUsage).toHaveBeenCalledTimes(2);
       const run = accepted(started()[0]!);
       vi.mocked(api.studioUsage).mockResolvedValue(usage({ spentTodayUsd: 0.16 }));
-      act(() => useStudio.getState().applyProgress({ ...run, status: "running" }));
+      act(() => useStudio.getState().applyProgress({ ...run, status: "running", seq: run.seq + 1 }));
       await flush();
       expect(api.studioUsage).toHaveBeenCalledTimes(2);
-      act(() => useStudio.getState().applyProgress({ ...run, status: "done", costUsd: 0.16 }));
+      act(() => useStudio.getState().applyProgress({ ...run, status: "done", costUsd: 0.16, seq: run.seq + 2 }));
       await flush();
       expect(api.studioUsage).toHaveBeenCalledTimes(3);
       screen.getByText("$0.16 today");

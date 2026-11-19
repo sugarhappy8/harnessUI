@@ -24,7 +24,7 @@ afterEach(cleanup);
 
 describe("StudioNotice", () => {
   it("a video finished while in chat says so, with a way to open it", () => {
-    useStudio.getState().applyProgress({ ...VIDEO, status: "waiting", watching: true });
+    useStudio.getState().applyProgress({ ...VIDEO, status: "waiting", watching: true, seq: VIDEO.seq - 1 });
     useStudio.getState().applyProgress(VIDEO);
     expect(useStudio.getState().readyNotice).toBe("v");
     // Get local models was left open in Studio: Open still lands on the video's cards.

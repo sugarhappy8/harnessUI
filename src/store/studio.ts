@@ -148,7 +148,9 @@ export interface StudioState extends StudioRunState, StudioResultsState, StudioL
    *  takes no more: checked before the picture is kept), or `null`; rejects when it could not
    *  be kept. */
   openInStudio(image: ImageInput): Promise<string | null>;
-  /** A run's new state, from `studio-progress` or `studio_live`. */
+  /** A run's new state, from `studio-progress`, `studio_live` or a command's answer: kept only
+   *  when the backend numbered it higher (`seq`) than the copy held, so an answer read before
+   *  an event it arrives after never puts an older state back. */
   applyProgress(run: Run): void;
   /** Puts away the notice of a video that finished while the chat was shown (opening Studio
    *  puts it away too). */
@@ -611,6 +613,9 @@ export const useStudio: UseBoundStore<StoreApi<StudioState>> = create<StudioStat
     },
     applyProgress: (run) => {
       const before = get().live[run.id];
+      // Of two copies of a run (an event, a command's answer, the read at start), the one the
+      // backend numbered higher is newer: an older copy that comes later is dropped.
+      if (before && run.seq <= before.seq) return;
       set((s) => {
         const finished = run.kind === "video" && run.status === "done" && s.live[run.id]?.status !== "done";
         return {

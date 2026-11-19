@@ -59,12 +59,25 @@ describe("the view", () => {
 
 describe("progress", () => {
   it("keeps each run's newest state by its id", () => {
-    useStudio.getState().applyProgress(run({ id: "a", status: "sending" }));
-    useStudio.getState().applyProgress(run({ id: "b", status: "queued" }));
-    useStudio.getState().applyProgress(run({ id: "a", status: "done" }));
+    useStudio.getState().applyProgress(run({ id: "a", status: "sending", seq: 1 }));
+    useStudio.getState().applyProgress(run({ id: "b", status: "queued", seq: 2 }));
+    useStudio.getState().applyProgress(run({ id: "a", status: "done", seq: 3 }));
     const live = useStudio.getState().live;
     expect(Object.keys(live).sort()).toEqual(["a", "b"]);
     expect(live.a?.status).toBe("done");
+  });
+
+  it("an older copy of a run that comes later is dropped, wherever it comes from", () => {
+    useStudio.getState().applyProgress(run({ id: "a", status: "running", seq: 7 }));
+    // A command's answer read before the event was sent, arriving after it.
+    useStudio.getState().applyProgress(run({ id: "a", status: "queued", seq: 5 }));
+    expect(useStudio.getState().live.a?.status).toBe("running");
+    expect(useStudio.getState().recentRuns.find((r) => r.id === "a")?.status).toBe("running");
+    // The same copy twice changes nothing either.
+    useStudio.getState().applyProgress(run({ id: "a", status: "queued", seq: 7 }));
+    expect(useStudio.getState().live.a?.status).toBe("running");
+    useStudio.getState().applyProgress(run({ id: "a", status: "done", seq: 8 }));
+    expect(useStudio.getState().live.a?.status).toBe("done");
   });
 
   it("a video that finishes while the chat is shown raises the ready notice", () => {
@@ -118,12 +131,12 @@ describe("following the backend", () => {
 
   it("applies each studio-progress and reads the runs still working once", async () => {
     listen();
-    vi.mocked(api.studioLive).mockResolvedValue([run({ id: "a", status: "waiting", watching: true })]);
+    vi.mocked(api.studioLive).mockResolvedValue([run({ id: "a", status: "waiting", watching: true, seq: 1 })]);
     const stop = followStudio();
     await flush();
     expect(api.studioLive).toHaveBeenCalledTimes(1);
     expect(useStudio.getState().live.a?.status).toBe("waiting");
-    heard[0]!(run({ id: "a", status: "downloading" }));
+    heard[0]!(run({ id: "a", status: "downloading", seq: 2 }));
     expect(useStudio.getState().live.a?.status).toBe("downloading");
     stop();
     expect(unlisten).toHaveBeenCalledTimes(1);
@@ -151,12 +164,47 @@ describe("following the backend", () => {
     vi.mocked(api.studioLive).mockImplementation(() => new Promise((resolve) => (answer = resolve)));
     const stop = followStudio();
     await flush();
-    heard[0]!(run({ id: "a", status: "downloading" }));
-    answer([run({ id: "a", status: "sending" }), run({ id: "b", status: "queued" })]);
+    heard[0]!(run({ id: "a", status: "downloading", seq: 4 }));
+    answer([run({ id: "a", status: "sending", seq: 3 }), run({ id: "b", status: "queued", seq: 3 })]);
     await flush();
     expect(useStudio.getState().live.a?.status).toBe("downloading");
     expect(useStudio.getState().live.b?.status).toBe("queued");
     stop();
+  });
+});
+
+// A command's answer is read before the run's task goes on, so the task's own event can come
+// first: the copy the backend numbered higher stays, whichever comes last.
+describe("a command's answer and a newer event", () => {
+  /** A command whose answer (`answer`, numbered 5) waits until the event (numbered 6) is in. */
+  async function eventFirst(command: () => Promise<unknown>, mock: { mockImplementation(f: () => Promise<Run>): unknown }) {
+    let answer: (run: Run) => void = () => undefined;
+    mock.mockImplementation(() => new Promise<Run>((resolve) => (answer = resolve)));
+    const pressed = command();
+    await flush();
+    useStudio.getState().applyProgress(run({ id: "a", status: "running", seq: 6 }));
+    answer(run({ id: "a", status: "queued", seq: 5 }));
+    await pressed;
+    expect(useStudio.getState().live.a?.status).toBe("running");
+  }
+
+  it("Cancel", async () => {
+    await eventFirst(() => useStudio.getState().cancel("a"), vi.mocked(api.studioCancel));
+  });
+
+  it("Get it anyway", async () => {
+    await eventFirst(() => useStudio.getState().fetchAnyway("a"), vi.mocked(api.studioFetchAnyway));
+  });
+
+  it("the answer to Unload the chat model?", async () => {
+    await eventFirst(() => useStudio.getState().answerUnload("a", true), vi.mocked(api.studioAnswerUnload));
+  });
+
+  it("a press of Create, Again or Run again", async () => {
+    vi.mocked(api.studioUsage).mockResolvedValue({ spentTodayUsd: 0, pendingUsd: 0, limitUsd: 10, folder: "", bytes: 0, pictures: 0, videos: 0 });
+    vi.mocked(api.studioGetPrefs).mockResolvedValue({ lastModel: {} } as unknown as StudioPrefs);
+    vi.mocked(api.studioSetPrefs).mockResolvedValue({ lastModel: {} } as unknown as StudioPrefs);
+    await eventFirst(() => useStudio.getState().again(run({ id: "old", status: "done" })), vi.mocked(api.studioStart));
   });
 });
 
@@ -215,6 +263,20 @@ describe("what is saved", () => {
     saved();
     vi.mocked(api.studioLive).mockResolvedValue([run({ id: "a", status: "running" })]);
     await useStudio.getState().load();
+    expect(useStudio.getState().live.a?.status).toBe("running");
+  });
+
+  it("an event heard while the saved things are read is not overwritten by the older read of the runs working", async () => {
+    saved();
+    vi.mocked(api.studioLive).mockResolvedValue([run({ id: "a", status: "queued", seq: 4 })]);
+    // The local models take longer to read than the runs still working.
+    let localRead: (local: typeof LOCAL) => void = () => undefined;
+    vi.mocked(api.studioLocalModels).mockImplementation(() => new Promise((resolve) => (localRead = resolve)));
+    const loading = useStudio.getState().load();
+    await flush();
+    useStudio.getState().applyProgress(run({ id: "a", status: "running", seq: 6 }));
+    localRead(LOCAL);
+    await loading;
     expect(useStudio.getState().live.a?.status).toBe("running");
   });
 

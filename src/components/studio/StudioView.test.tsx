@@ -401,7 +401,7 @@ describe("StudioView", () => {
     const cards = () => [...document.querySelectorAll("[data-run-card]")].map((c) => c.getAttribute("data-run-card"));
     expect(cards()).toEqual(["making", RUN.id, "older"]);
     screen.getByText("1 making");
-    act(() => useStudio.getState().applyProgress({ ...making, status: "done", finishedAt: Date.now() }));
+    act(() => useStudio.getState().applyProgress({ ...making, status: "done", finishedAt: Date.now(), seq: making.seq + 1 }));
     screen.getByText("1 done");
     await click(screen.getByRole("tab", { name: "Video" }));
     expect(cards()).toEqual(["clip"]);

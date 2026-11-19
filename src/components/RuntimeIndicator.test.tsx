@@ -645,7 +645,7 @@ describe("RuntimeIndicator: a chat load waits while Studio uses the graphics car
   afterEach(cleanup);
 
   it("a chat load waiting for Studio says so and can stop the Studio job", async () => {
-    vi.mocked(studioApi.studioCancel).mockResolvedValue({ ...LOCAL_RUN, status: "cancelled" });
+    vi.mocked(studioApi.studioCancel).mockResolvedValue({ ...LOCAL_RUN, status: "cancelled", seq: LOCAL_RUN.seq + 1 });
     useStudio.setState({
       live: {
         done: { ...LOCAL_RUN, id: "done" },
