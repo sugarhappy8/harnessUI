@@ -33,6 +33,12 @@ const MAX_MISSING: usize = 150;
 /// Scripts whose start is read to recognise libraries.
 const MAX_SCRIPT_SAMPLES: usize = 200;
 const SCRIPT_SAMPLE_BYTES: usize = 64 * 1024;
+/// How long the report waits for the worker of a service worker registration that is still
+/// under way to start (and so be kept from running), at most.
+const SERVICE_WORKER_WAIT: Duration = Duration::from_secs(3);
+/// Whether the page's service worker registration (the one whose scope covers the page) is
+/// still under way: it has no active worker yet. Runs in an isolated world.
+const REGISTERING_JS: &str = "function () { const c = navigator.serviceWorker; return c ? c.getRegistration().then((r) => !!r && !r.active, () => false) : false; }";
 
 /// What the approved action asks for.
 #[derive(Debug, Clone)]
@@ -211,6 +217,23 @@ async fn call_fn(
         ));
     }
     Ok(r.pointer("/result/value").cloned().unwrap_or(Value::Null))
+}
+
+/// Whether the page's service worker registration is still under way (`false` when that
+/// cannot be read).
+async fn registering(b: &Browser, session: &str, world: i64) -> bool {
+    call_fn(
+        b,
+        session,
+        world,
+        REGISTERING_JS,
+        Value::Null,
+        Duration::from_secs(2),
+    )
+    .await
+    .ok()
+    .and_then(|v| v.as_bool())
+    .unwrap_or(false)
 }
 
 /// The screen height used with a width: a laptop, a tablet or a phone.
@@ -815,6 +838,16 @@ async fn work(
     }
 
     // ---- saving ------------------------------------------------------------------------
+    // The report's service-worker note follows the browser's targets now, not whether an
+    // attach event came in time. A worker gets its target only once the browser starts it,
+    // which a slow computer may not have done yet for a registration the page made: only
+    // then is it waited for, briefly.
+    if !b.note_service_workers().await && registering(b, session, world).await {
+        let end = Instant::now() + SERVICE_WORKER_WAIT;
+        while Instant::now() < end && !b.note_service_workers().await {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+    }
     // Everything kept was read by now: a connection the checks cannot see that started at
     // any point up to here means nothing is saved.
     connection_check(b)?;
@@ -847,7 +880,7 @@ async fn work(
     if service_worker_held {
         notes.push("A service worker was not let run during the capture (its requests cannot be checked one by one), so anything the page would have shown from one is missing.".into());
     }
-    let folder_name = names::capture_folder_name(&plan.url, chrono::Local::now());
+    let folder_name = names::capture_folder_name(&plan.url, jiff::Zoned::now().datetime());
     let mut w = Writer::create(&plan.folder, &folder_name)?;
     let mut budget = Budget::new(plan.caps);
     let mut skipped: Vec<(String, String)> = Vec::new();
@@ -1267,10 +1300,10 @@ async fn work(
     };
     let markers = page.get("markers").cloned().unwrap_or(Value::Null);
     let libraries = anim::detect_libraries(&globals, &markers, &script_refs, lottie_files, webgl);
-    let captured_at = chrono::Local::now();
+    let captured_at = jiff::Zoned::now();
     let doc = anim::document(
         &page_href,
-        &captured_at.to_rfc3339(),
+        &rfc3339_with_offset(&captured_at),
         &anims,
         &facts,
         &libraries,
@@ -1325,7 +1358,7 @@ async fn work(
     let host = policy::sanitize::display_host(&plan.url).unwrap_or_default();
     let folder_text = w.root().display().to_string();
     let skipped_lines: Vec<(String, String)> = skipped.clone();
-    let captured_text = captured_at.format("%Y-%m-%d %H:%M").to_string();
+    let captured_text = captured_at.strftime("%Y-%m-%d %H:%M").to_string();
     let title = page
         .get("title")
         .and_then(Value::as_str)
@@ -1714,6 +1747,31 @@ fn font_lines(
     lines
 }
 
+/// `at` in RFC 3339 the way animations.json has always written it: a numeric offset
+/// rounded to the minute (`+00:00`, never `Z`), no `[zone]` name, and the fraction left out
+/// when it is zero, else 3, 6 or 9 digits, whichever is the shortest exact one.
+fn rfc3339_with_offset(at: &jiff::Zoned) -> String {
+    let nanos = at.subsec_nanosecond();
+    let fraction = if nanos == 0 {
+        String::new()
+    } else if nanos % 1_000_000 == 0 {
+        format!(".{:03}", nanos / 1_000_000)
+    } else if nanos % 1_000 == 0 {
+        format!(".{:06}", nanos / 1_000)
+    } else {
+        format!(".{nanos:09}")
+    };
+    let offset = at.offset().seconds();
+    let sign = if offset < 0 { '-' } else { '+' };
+    let minutes = (offset.unsigned_abs() + 30) / 60;
+    format!(
+        "{}{fraction}{sign}{:02}:{:02}",
+        at.strftime("%Y-%m-%dT%H:%M:%S"),
+        minutes / 60,
+        minutes % 60
+    )
+}
+
 /// The result text: what was saved and the report, held to `budget` characters.
 pub(crate) fn result_text(c: &Captured, host: &str, budget: usize) -> String {
     let head = format!(
@@ -1730,6 +1788,42 @@ pub(crate) fn result_text(c: &Captured, host: &str, budget: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// animations.json's `captured_at`: a numeric offset (never `Z`), no zone name, and a
+    /// fraction of 0, 3, 6 or 9 digits.
+    #[test]
+    fn captured_at_is_rfc3339_with_a_numeric_offset() {
+        use jiff::tz::{Offset, TimeZone, offset};
+        let at = |nanos: i32, zone: TimeZone| {
+            jiff::civil::date(2026, 11, 17)
+                .at(12, 34, 56, nanos)
+                .to_zoned(zone)
+                .unwrap()
+        };
+        assert_eq!(
+            rfc3339_with_offset(&at(0, TimeZone::UTC)),
+            "2026-11-17T12:34:56+00:00"
+        );
+        assert_eq!(
+            rfc3339_with_offset(&at(789_000_000, TimeZone::fixed(offset(1)))),
+            "2026-11-17T12:34:56.789+01:00"
+        );
+        let minus_0330 = TimeZone::fixed(Offset::from_seconds(-(3 * 3600 + 30 * 60)).unwrap());
+        assert_eq!(
+            rfc3339_with_offset(&at(789_012_000, minus_0330.clone())),
+            "2026-11-17T12:34:56.789012-03:30"
+        );
+        assert_eq!(
+            rfc3339_with_offset(&at(789_012_345, minus_0330)),
+            "2026-11-17T12:34:56.789012345-03:30"
+        );
+        // An offset with seconds is rounded to the minute.
+        let odd = TimeZone::fixed(Offset::from_seconds(-(5 * 3600 + 29 * 60 + 31)).unwrap());
+        assert_eq!(
+            rfc3339_with_offset(&at(0, odd)),
+            "2026-11-17T12:34:56-05:30"
+        );
+    }
 
     #[test]
     fn screens_get_a_height_for_their_width() {

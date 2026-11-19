@@ -1,0 +1,50 @@
+{
+  "_id": "000000000000000000000000",
+  "id": "example-quants/Z-Image-Turbo-Uncensored-GGUF",
+  "gguf": {
+    "total": 6154908736,
+    "totalFileSize": 3864250304
+  },
+  "sha": "3333333333333333333333333333333333333333",
+  "gated": false,
+  "tags": [
+    "gguf",
+    "text-to-image",
+    "uncensored",
+    "license:apache-2.0",
+    "region:us"
+  ],
+  "cardData": {
+    "license": "apache-2.0",
+    "tags": [
+      "uncensored"
+    ]
+  },
+  "author": "example-quants",
+  "downloads": 1200,
+  "likes": 3,
+  "lastModified": "2026-11-01T10:00:00.000Z",
+  "pipeline_tag": "text-to-image",
+  "siblings": [
+    {
+      "rfilename": ".gitattributes",
+      "blobId": "0000000000000000000000000000000000000000",
+      "size": 1643
+    },
+    {
+      "rfilename": "README.md",
+      "blobId": "0000000000000000000000000000000000000000",
+      "size": 600
+    },
+    {
+      "rfilename": "z_image_turbo_uncensored-Q4_K.gguf",
+      "blobId": "0000000000000000000000000000000000000000",
+      "size": 3864250304,
+      "lfs": {
+        "sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+        "size": 3864250304,
+        "pointerSize": 135
+      }
+    }
+  ]
+}

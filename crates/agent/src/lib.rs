@@ -26,6 +26,11 @@
 //! - [`context`]: the context budget, compaction and truncation;
 //! - [`turn`]: [`run_turn`], one agent turn from the user's message to the final answer;
 //! - [`thinking`]: [`ThinkingLimit`], the per-request limit on thinking (0.0.6).
+//!
+//! And for Studio (0.1.0):
+//!
+//! - [`media`]: pictures and video: the shared types, the [`media::MediaProvider`] trait, and
+//!   the controls of each model, read from the companies' catalogues.
 
 #![warn(missing_docs)]
 
@@ -36,6 +41,7 @@ pub mod context;
 pub mod error;
 pub mod estimate;
 pub mod history;
+pub mod media;
 pub mod parse;
 pub mod prompt;
 pub mod sse;

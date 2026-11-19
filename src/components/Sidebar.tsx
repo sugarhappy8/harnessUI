@@ -1,10 +1,11 @@
 import { Fragment, useEffect, useRef, useState } from "react";
-import { Boxes, Hand, Plus, Search, Settings, Trash2, Pencil } from "lucide-react";
+import { Boxes, Hand, Plus, Search, Settings, Sparkles, Trash2, Pencil } from "lucide-react";
 import { AlertDialog } from "radix-ui";
 import { turnChatId, useApp } from "../store/app";
+import { runningCount, useStudio } from "../store/studio";
 import { APP_NAME } from "../lib/app";
 import { dayGroup } from "../lib/format";
-import { backendWords } from "../lib/words";
+import { STUDIO_NAV, backendWords, studioButtonLabel } from "../lib/words";
 import { BrandMark } from "./Brand";
 import { visiblePath } from "./FolderChip";
 import { UPDATE_BOX_SPACE } from "./UpdateBox";
@@ -86,6 +87,12 @@ export function Sidebar(props: {
   // drawn in their own chat only, so the list marks them.
   const turnChat = useApp(turnChatId);
   const waiting = useApp((s) => s.approvals);
+  // 0.1.0 Studio: a chat (or a new one) is shown in the chat view, so going to one leaves
+  // Studio; its button says how many runs are working.
+  const showChat = useStudio((s) => s.showChat);
+  const showStudio = useStudio((s) => s.showStudio);
+  const studioShown = useStudio((s) => s.view === "studio");
+  const working = useStudio(runningCount);
   const [editing, setEditing] = useState<number | null>(null);
   const [draft, setDraft] = useState("");
   const [confirmDelete, setConfirmDelete] = useState<number | null>(null);
@@ -121,6 +128,27 @@ export function Sidebar(props: {
           </button>
           <button
             type="button"
+            className={
+              "relative rounded-md p-1.5 hover:bg-bg-muted hover:text-fg " +
+              (studioShown ? "bg-bg-muted text-fg" : "text-fg-muted")
+            }
+            aria-label={studioButtonLabel(working)}
+            aria-current={studioShown ? "page" : undefined}
+            title={STUDIO_NAV.title}
+            onClick={() => showStudio()}
+          >
+            <Sparkles size={16} aria-hidden />
+            {working > 0 && (
+              <span
+                aria-hidden
+                className="absolute -top-0.5 -right-0.5 min-w-3.5 rounded-full bg-accent px-1 text-center text-[10px] leading-3.5 font-medium text-accent-fg"
+              >
+                {working}
+              </span>
+            )}
+          </button>
+          <button
+            type="button"
             className="rounded-md p-1.5 text-fg-muted hover:bg-bg-muted hover:text-fg"
             aria-label="Settings"
             title="Settings (Ctrl+,)"
@@ -133,7 +161,10 @@ export function Sidebar(props: {
       <div className="space-y-2 px-3">
         <button
           type="button"
-          onClick={() => void newChat()}
+          onClick={() => {
+            showChat();
+            void newChat();
+          }}
           className="btn-primary flex w-full items-center justify-center gap-1.5 rounded-lg px-3 py-2 text-sm font-medium"
           title="New chat (Ctrl+N)"
         >
@@ -166,6 +197,9 @@ export function Sidebar(props: {
         )}
         <ul className="space-y-0.5">
           {chats.map((c, index) => {
+            // The open chat is the current page only while the chat is shown: while Studio is,
+            // the Studio button is.
+            const current = c.id === activeChatId && !studioShown;
             // Headings by day, except in search results, which are ordered by match.
             const group = search ? null : dayGroup(c.updatedAt);
             const heading =
@@ -207,22 +241,23 @@ export function Sidebar(props: {
                     <div
                       className={
                         "relative flex items-center rounded-lg transition-colors duration-150 " +
-                        (c.id === activeChatId
+                        (current
                           ? "bg-bg-muted before:absolute before:top-2 before:bottom-2 before:left-0 before:w-[3px] before:rounded-full before:bg-accent"
                           : "hover:bg-bg-muted/70")
                       }
                     >
                       <button
                         type="button"
-                        onClick={() => void openChat(c.id)}
+                        onClick={() => {
+                          showChat();
+                          void openChat(c.id);
+                        }}
                         onDoubleClick={() => {
                           setEditing(c.id);
                           setDraft(c.title);
                         }}
                         className="min-w-0 flex-1 px-2.5 py-1.5 text-left"
-                        aria-current={
-                          c.id === activeChatId ? "page" : undefined
-                        }
+                        aria-current={current ? "page" : undefined}
                       >
                         <span className="flex items-center gap-1.5">
                           <span className="min-w-0 flex-1 truncate text-sm">

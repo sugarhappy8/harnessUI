@@ -1,0 +1,111 @@
+#!/usr/bin/env python3
+"""A stand-in for the Studio engine (stable-diffusion.cpp's sd-cli) in the end-to-end
+scenarios, which pass this folder as APP_DEV_SD_DIR. It behaves as the Rust tests' fake
+engine does in mode `ok` (crates/runtime/src/sd/testing.rs, `fake_main`), for pictures:
+
+- an argument the pinned build does not know is refused (`error: unknown argument: …`,
+  exit 1), as the pinned parser refuses it; every flag but the switches takes a value;
+- `--list-devices` prints the Vulkan devices fixture (`name<TAB>description` lines);
+- `--prompt-file` is read (a file that cannot be read fails as the engine does);
+- the pinned build's output is printed from its fixture, `\\r` redraws and all (FLUX.2
+  klein's for one picture, the batch's for `--batch-count` above 1), the bars and info lines
+  on stdout and the rest on stderr, and a tiny PNG is written where sd-cli writes each result
+  (the `-o` path, or `<stem>_<i>.png` for a batch) before the saving lines; exit 0.
+
+A video (`-M vid_gen`) is refused: the scenarios make pictures only. Standard library only;
+the fixtures are read from the checkout this file is in.
+"""
+
+import sys
+from pathlib import Path
+
+FIXTURES = Path(__file__).resolve().parent.parent.parent / "crates" / "runtime" / "tests" / "fixtures"
+
+# Every flag Studio can send (runtime::sd::args::FLAGS), and the four that take no value.
+FLAGS = {
+    "--diffusion-model", "--high-noise-diffusion-model", "--llm", "--t5xxl", "--clip_l",
+    "--clip_vision", "--vae", "-m", "-M", "--prompt-file", "--negative-prompt-file", "-W", "-H",
+    "--steps", "--cfg-scale", "--flow-shift", "--sampling-method", "--scheduler", "--seed",
+    "--batch-count", "--video-frames", "--fps", "-i", "-r", "--backend", "--threads",
+    "--vae-tiling", "--offload-to-cpu", "-o", "--disable-image-metadata", "--log-level",
+}
+SWITCHES = {"--vae-tiling", "--offload-to-cpu", "--disable-image-metadata", "--list-devices"}
+
+# A 1×1 red PNG (the Rust fake's `tiny_png`).
+TINY_PNG = bytes.fromhex(
+    "89504e470d0a1a0a0000000d4948445200000001000000010802000000907753"
+    "de0000000c49444154789c63f8cfc0000003010100c9fe92ef0000000049454e"
+    "44ae426082"
+)
+
+
+def fail(message: str):
+    sys.stderr.write(message)
+    sys.stderr.flush()
+    sys.exit(1)
+
+
+def emit(text: str):
+    """Prints `text` line by line as the pinned build splits it: `[E]` lines and lines
+    without a level on stderr, the rest (`[I]`, `[W]`, the bars, blank lines) on stdout."""
+    for segment in text.splitlines(keepends=True):
+        line = segment.lstrip("\r")
+        on_stderr = line.startswith("[E]") or not (line.startswith(("[", "  |")) or not line.strip())
+        out = sys.stderr if on_stderr else sys.stdout
+        out.write(segment)
+        out.flush()
+
+
+def fixture(name: str) -> str:
+    # newline="" keeps the `\r` redraws as they are.
+    with open(FIXTURES / name, encoding="utf-8", newline="") as f:
+        return f.read()
+
+
+def main(args: list[str]):
+    values: dict[str, str] = {}
+    list_devices = False
+    rest = iter(args)
+    for flag in rest:
+        if flag in SWITCHES:
+            list_devices |= flag == "--list-devices"
+            continue
+        if flag not in FLAGS:
+            fail(f"error: unknown argument: {flag}\n")
+        value = next(rest, None)
+        if value is None:
+            fail(f"error: missing argument for {flag}\n")
+        values[flag] = value
+    if list_devices:
+        sys.stdout.write(fixture("sd_list_devices_vulkan.txt"))
+        sys.exit(0)
+    if values.get("-M") == "vid_gen":
+        fail("[E] the end-to-end stand-in engine makes pictures only --- main.cpp:0\n")
+    if "--prompt-file" in values:
+        try:
+            Path(values["--prompt-file"]).read_bytes()
+        except OSError:
+            fail("[E] failed to read the prompt file --- main.cpp:0\n")
+    try:
+        batch = int(values.get("--batch-count", "1"))
+    except ValueError:
+        fail(f"error: invalid --batch-count: {values['--batch-count']}\n")
+    output = Path(values["-o"]) if "-o" in values else None
+    if output is None:
+        outputs = []
+    elif batch <= 1:
+        outputs = [output]
+    else:
+        outputs = [output.with_name(f"{output.stem}_{i}{output.suffix}") for i in range(batch)]
+    progress = fixture("sd_progress_batch_of_two.txt" if batch > 1 else "sd_progress_flux2_klein.txt")
+    marker = progress.find("\n[I] save result")
+    drawing, saving = (progress, "") if marker < 0 else (progress[: marker + 1], progress[marker + 1 :])
+    emit(drawing)
+    for path in outputs:
+        path.write_bytes(TINY_PNG)
+    emit(saving)
+    sys.exit(0)
+
+
+if __name__ == "__main__":
+    main(sys.argv[1:])

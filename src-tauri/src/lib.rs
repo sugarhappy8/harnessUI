@@ -19,6 +19,8 @@ mod error;
 mod evals;
 mod git_cmd;
 mod gpu;
+// 0.1.0: the graphics card, shared by the chat model and local Studio jobs.
+mod gpu_lease;
 mod hotkey;
 mod hub;
 mod load_settings;
@@ -46,6 +48,7 @@ mod settings;
 mod share;
 mod skills_cmd;
 mod state;
+mod studio;
 mod subagent;
 mod task;
 mod tool_catalog;
@@ -56,6 +59,7 @@ mod updates;
 mod usage_cmd;
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use tauri::webview::NewWindowResponse;
 use tauri::{Manager, RunEvent, WebviewWindowBuilder};
@@ -105,6 +109,9 @@ pub fn run() {
         .plugin(tauri_plugin_global_shortcut::Builder::new().build())
         // Artifact previews load from this scheme, into a sandboxed frame (artifacts.rs).
         .register_asynchronous_uri_scheme_protocol(artifacts::SCHEME, artifacts::serve)
+        // 0.1.0: the files of each native drop on the main window, which Studio's prompt can
+        // add as pictures (on Windows the webview's own drop carries none).
+        .on_webview_event(studio::dropped::on_webview_event)
         .invoke_handler(tauri::generate_handler![
             commands::app_info,
             chat::list_chats,
@@ -307,6 +314,46 @@ pub fn run() {
             // 0.0.6 item 6 (WP10d): llama.cpp's measurement and the usage line.
             models_cmd::offload_measure,
             usage_cmd::usage_now,
+            // 0.1.0: Studio.
+            studio::commands::studio_models,
+            studio::commands::studio_refresh_models,
+            studio::commands::studio_model_price,
+            studio::commands::studio_estimate,
+            studio::commands::studio_preview,
+            studio::commands::studio_runs,
+            studio::commands::studio_live,
+            studio::commands::studio_output_bytes,
+            studio::commands::studio_ref_bytes,
+            studio::commands::studio_usage,
+            studio::commands::studio_get_prefs,
+            studio::commands::studio_start,
+            studio::commands::studio_cancel,
+            studio::commands::studio_fetch_anyway,
+            studio::commands::studio_save_thumb,
+            studio::commands::studio_star,
+            studio::commands::studio_delete,
+            studio::commands::studio_delete_unfinished,
+            studio::commands::studio_export,
+            studio::commands::studio_show_in_folder,
+            studio::commands::studio_open_folder,
+            studio::commands::studio_add_ref,
+            studio::commands::studio_add_dropped,
+            studio::commands::studio_ref_from_output,
+            studio::commands::studio_output_for_chat,
+            studio::commands::studio_set_prefs,
+            studio::commands::studio_answer_unload,
+            studio::commands::studio_quit_now,
+            studio::engine_cmd::studio_engine_status,
+            studio::engine_cmd::studio_engine_download,
+            studio::engine_cmd::studio_engine_cancel,
+            studio::engine_cmd::studio_engine_remove,
+            studio::local_cmd::studio_local_models,
+            studio::local_cmd::studio_local_search,
+            studio::local_cmd::studio_local_repo,
+            studio::local_cmd::studio_local_fit,
+            studio::local_cmd::studio_local_download,
+            studio::local_cmd::studio_local_delete,
+            studio::local_cmd::studio_accept_local_notice,
         ])
         .setup(|app| {
             let handle = app.handle().clone();
@@ -333,6 +380,66 @@ pub fn run() {
                 handle.clone(),
                 runtime_manager::layout(&handle),
             ));
+            let model_busy: Arc<state::BusyCounter> = Default::default();
+            // 0.1.0: one graphics-card tenant at a time, the chat model or a local Studio
+            // job; a chat load waits while a job holds the card.
+            let lease = gpu_lease::GpuLease::new(Arc::new(gpu_lease::RuntimeChat {
+                runtime: runtime.clone(),
+                busy: model_busy.clone(),
+            }));
+            app.manage(lease.clone());
+            runtime.set_studio_gate(lease.clone());
+            // 0.1.0: the Studio engine's runs on this computer. The count of its processes
+            // is shared with the engine's download and Remove, which never replace or delete
+            // the folder a process runs from.
+            let local_provider = Arc::new(studio::local::LocalMediaProvider::new(
+                store.clone(),
+                Arc::new(studio::local::AppGenCatalog(handle.clone())),
+                {
+                    let handle = handle.clone();
+                    Arc::new(move || studio::engine_cmd::current_engine(&handle))
+                },
+            ));
+            app.manage(local_provider.engine_use());
+            // 0.1.0: Studio's runs, holding Settings → Studio as saved.
+            let studio = Arc::new(studio::manager::StudioManager::new(
+                studio::manager::StudioDeps {
+                    store: store.clone(),
+                    providers: Arc::new(studio::deps::StoreProviders {
+                        store: store.clone(),
+                        secrets: secrets.clone(),
+                    }),
+                    sink: Arc::new(studio::deps::AppSink(handle.clone())),
+                    fetch: Arc::new(studio::deps::GuardedFetch(
+                        search::Fetcher::new(format!(
+                            "{}/{}",
+                            app.package_info().name,
+                            app.package_info().version
+                        ))
+                        .with_timeout(Duration::from_secs(600)),
+                    )),
+                    clock: Arc::new(studio::deps::SystemClock),
+                    default_gallery: studio::gallery::Gallery::default_root(
+                        &app.path()
+                            .home_dir()
+                            .unwrap_or_else(|_| std::path::PathBuf::from(".")),
+                        &app.package_info().name,
+                    ),
+                    thumbs: Some(attachments::PictureWorker::thumbs()),
+                    limits: agent::media::MediaLimits::default(),
+                    poll: studio::manager::PollPlan::default(),
+                    // Runs on this computer: the installed models with the engine found now
+                    // (looked for again after a download), the one lease the chat loads ask
+                    // too, and this computer's hardware.
+                    local: Some(studio::deps::LocalLane {
+                        provider: local_provider,
+                        lease: Arc::new(studio::deps::AppLease(lease.clone())),
+                        hardware: Arc::new(studio::deps::AppHardware(handle.clone())),
+                    }),
+                },
+                tauri::async_runtime::block_on(studio::prefs::load(&store)),
+            ));
+            app.manage(studio.clone());
             let skills = Arc::new(tools::SkillsServer::new());
             let pass_through: Vec<String> =
                 tauri::async_runtime::block_on(store.get_setting(toolset::TERMINAL_PASS_THROUGH))
@@ -367,7 +474,7 @@ pub fn run() {
                 host: host.clone(),
                 skills,
                 grants: Default::default(),
-                model_busy: Default::default(),
+                model_busy,
                 offload: Default::default(),
                 usage: Default::default(),
             });
@@ -400,6 +507,9 @@ pub fn run() {
                 });
             }
             app.manage(packs_cmd::PackDownloads::default());
+            // 0.1.0: the Studio engine's Windows pack, one download at a time.
+            app.manage(studio::engine_cmd::EngineDownloads::default());
+            app.manage(studio::dropped::DroppedFiles::default());
             app.manage(hotkey::Hotkey::default());
             {
                 let handle = handle.clone();
@@ -413,6 +523,8 @@ pub fn run() {
                     async move { downloads.resume_interrupted(&handle).await },
                 );
             }
+            // 0.1.0: the Studio runs the app left unfinished, and yesterday's spending stubs.
+            tauri::async_runtime::spawn(async move { studio.resume_interrupted().await });
             create_windows(app)?;
             Ok(())
         });
@@ -431,6 +543,22 @@ pub fn run() {
         }
     };
     app.run(|handle, event| {
+        // 0.1.0: a local Studio job cannot outlive the app, so closing the main window, or
+        // quitting from the app menu or with ⌘Q, asks first while one works (*Quit and stop*
+        // exits with a code, which is not asked again).
+        match &event {
+            RunEvent::ExitRequested { code, api, .. } if studio::quit::hold_back(handle, *code) => {
+                api.prevent_exit();
+            }
+            RunEvent::WindowEvent {
+                label,
+                event: tauri::WindowEvent::CloseRequested { api, .. },
+                ..
+            } if label == MAIN_WINDOW && studio::quit::hold_back(handle, None) => {
+                api.prevent_close();
+            }
+            _ => {}
+        }
         // Closing the main window quits the app. Without this the process lived on,
         // invisibly: the hidden border and Stop bar of computer use are windows too, and
         // the app only ends by itself when its last window is gone. Starting the app again
@@ -452,12 +580,20 @@ pub fn run() {
                 let browser = handle
                     .try_state::<browser_cmd::BrowserHandle>()
                     .map(|b| b.0.clone());
+                let studio = handle
+                    .try_state::<Arc<studio::manager::StudioManager>>()
+                    .map(|s| s.inner().clone());
                 if let Some(c) = handle.try_state::<computer_cmd::ComputerHandle>()
                     && let Some(server) = c.0.clone()
                 {
                     server.shutdown();
                 }
                 tauri::async_runtime::block_on(async move {
+                    // 0.1.0: Studio's run tasks stop where they are and record nothing, so the
+                    // next start finds each run as it was.
+                    if let Some(studio) = studio {
+                        studio.shutdown().await;
+                    }
                     // 0.0.6 item 5: rea gets its grace to end Kuna or Java itself (WP9g).
                     if let Some(rea) = reverse::handle() {
                         rea.restart(reverse::RestartReason::Quit).await;

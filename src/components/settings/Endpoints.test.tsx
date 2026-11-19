@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { act, cleanup, fireEvent, render, screen, within } from "@testing-library/react";
-import type { Provider } from "../../lib/types";
+import type { Provider, ProviderKind } from "../../lib/types";
 
 // [0.0.7 P5] Settings → Endpoints: the ready-made choices for the cloud AI companies, the
 // "Cloud" mark, Edit and the context size of an endpoint.
@@ -32,7 +32,7 @@ vi.mock("@tauri-apps/plugin-opener", () => ({ openUrl }));
 vi.mock("@tauri-apps/plugin-clipboard-manager", () => ({ writeText: vi.fn() }));
 
 const { Endpoints } = await import("./Endpoints");
-const { switchChoice, hostOf, choiceFor } = await import("./endpointPresets");
+const { switchChoice, hostOf, choiceFor, abilitiesOf } = await import("./endpointPresets");
 
 function provider(over: Partial<Provider>): Provider {
   return {
@@ -103,6 +103,31 @@ describe("Settings → Endpoints", () => {
     expect(mark.textContent).toContain("Cloud");
     expect(rows[1]!.querySelector("[data-cloud-mark]")).toBeNull();
     expect(rows[0]!.textContent).toContain("API key saved");
+  });
+
+  it("cards say what each company can do", async () => {
+    // 0.1.0 Studio: OpenRouter makes pictures and video, OpenAI pictures only (its video API
+    // shut down in September 2026); the others chat only.
+    expect(abilitiesOf("openrouter")).toBe("Chat · Pictures · Video");
+    expect(abilitiesOf("openai")).toBe("Chat · Pictures");
+    expect(abilitiesOf("anthropic")).toBe("Chat");
+    expect(abilitiesOf("abliteration")).toBe("Chat");
+    expect(abilitiesOf("ollama")).toBe("Chat");
+    expect(abilitiesOf("generic")).toBe("Chat");
+    // A kind from a newer app counts as "Other server".
+    expect(abilitiesOf("someday" as ProviderKind)).toBe("Chat");
+    providers = [
+      provider({ id: 1, name: "OpenRouter", kind: "openrouter", baseUrl: "https://openrouter.ai/api/v1" }),
+      provider({ id: 2, name: "OpenAI", kind: "openai", baseUrl: "https://api.openai.com/v1" }),
+      provider({}),
+    ];
+    await show();
+    const rows = screen.getAllByRole("listitem");
+    expect(rows.map((r) => r.querySelector("[data-abilities]")?.textContent)).toEqual([
+      "Chat · Pictures · Video",
+      "Chat · Pictures",
+      "Chat",
+    ]);
   });
 
   it("fills in a company's name and address, asks for its key and says where chats go", async () => {

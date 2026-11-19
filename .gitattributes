@@ -5,3 +5,5 @@ crates/models/tests/fixtures/** -text
 crates/runtime/tests/fixtures/** -text
 crates/agent/tests/fixtures/** -text
 crates/usage/tests/fixtures/** -text
+# Canonical licence texts whose SHA-256 the signed catalog pins.
+third_party/licenses/models/** -text

@@ -9,11 +9,14 @@
 mod common;
 
 use std::net::IpAddr;
+use std::path::Path;
 use std::time::{Duration, Instant};
 
 use common::{Response, TestServer};
+use search::fetch::MEDIA_TYPES;
 use search::netguard::AddressClass;
 use search::{Accept, FetchError, Fetcher};
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use url::Url;
 
 const UA: &str = "harnessUI-test/0.0.4";
@@ -685,4 +688,419 @@ async fn a_closed_port_is_a_connection_failure() {
         .unwrap_err();
     assert!(matches!(err, FetchError::Network(_)), "{err:?}");
     assert!(!err.is_refusal());
+}
+
+// Result files (Studio): a picture or video from a company's file host, read in binary,
+// streamed to a file under the same address rules, and never with a key.
+
+/// A fetcher that reaches `servers` under the names `files.test` and `other.test`.
+fn file_fetcher(servers: &[&TestServer]) -> Fetcher {
+    let ports: Vec<u16> = servers.iter().map(|s| s.port).collect();
+    Fetcher::new(UA)
+        .with_test_loopback_ports(&ports)
+        .with_test_dns(&[
+            ("files.test", ip("127.0.0.1")),
+            ("other.test", ip("127.0.0.1")),
+        ])
+}
+
+/// Bytes that are not text.
+fn video_bytes(len: usize) -> Vec<u8> {
+    (0..len).map(|i| (i % 251) as u8).collect()
+}
+
+/// The file `fetch_to_file` writes while it reads.
+fn part_of(dest: &Path) -> std::path::PathBuf {
+    dest.with_extension("part")
+}
+
+/// Neither the result nor its partial file is on disk.
+fn nothing_saved(dest: &Path) -> bool {
+    !dest.exists() && !part_of(dest).exists()
+}
+
+/// A server for what `TestServer` cannot send: it reads the request, writes `answer` as
+/// it is (a head, then some body), then closes the connection (a body without a length
+/// ends there) or, with `hold`, keeps it open and sends nothing more.
+async fn raw_server(answer: Vec<u8>, hold: bool) -> u16 {
+    let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+        .await
+        .expect("bind");
+    let port = listener.local_addr().expect("address").port();
+    tokio::spawn(async move {
+        let mut held = Vec::new();
+        while let Ok((mut socket, _)) = listener.accept().await {
+            let mut request = Vec::new();
+            let mut chunk = [0_u8; 4096];
+            while !request.windows(4).any(|w| w == b"\r\n\r\n") {
+                match socket.read(&mut chunk).await {
+                    Ok(0) | Err(_) => break,
+                    Ok(n) => request.extend_from_slice(&chunk[..n]),
+                }
+            }
+            let _ = socket.write_all(&answer).await;
+            if hold {
+                held.push(socket);
+            } else {
+                let _ = socket.shutdown().await;
+            }
+        }
+    });
+    port
+}
+
+#[tokio::test]
+async fn fetch_to_file_saves_a_video() {
+    let body = video_bytes(300_000);
+    let sent = body.clone();
+    let server =
+        TestServer::start(move |_| Response::new(200, "Video/MP4; codecs=avc1", sent.clone()))
+            .await;
+    let dir = tempfile::tempdir().unwrap();
+    let dest = dir.path().join("result.mp4");
+    let address = server.url("files.test", "/v.mp4?sig=abc");
+    let saved = file_fetcher(&[&server])
+        .fetch_to_file(&address, 1 << 20, &dest)
+        .await
+        .unwrap();
+    assert_eq!(std::fs::read(&dest).unwrap(), body);
+    assert_eq!(saved.len, body.len() as u64);
+    assert_eq!(saved.content_type, "video/mp4");
+    assert_eq!(saved.url, address);
+    assert_eq!(saved.redirects, 0);
+    assert!(
+        !part_of(&dest).exists(),
+        "the partial file became the result"
+    );
+    assert_eq!(server.requests()[0].target, "/v.mp4?sig=abc");
+
+    // Every kind of picture and video Studio keeps, and an earlier file of the same name
+    // is replaced.
+    let server = TestServer::start(|request| {
+        let index: usize = request.path().trim_start_matches("/file/").parse().unwrap();
+        let kind = MEDIA_TYPES[index];
+        Response::new(200, kind, kind.as_bytes())
+    })
+    .await;
+    let fetcher = file_fetcher(&[&server]);
+    let dest = dir.path().join("each");
+    for (index, kind) in MEDIA_TYPES.iter().enumerate() {
+        let address = server.url("files.test", &format!("/file/{index}"));
+        let saved = fetcher.fetch_to_file(&address, 1024, &dest).await.unwrap();
+        assert_eq!(saved.content_type, *kind);
+        assert_eq!(std::fs::read(&dest).unwrap(), kind.as_bytes());
+        assert_eq!(saved.len, kind.len() as u64);
+    }
+}
+
+/// The request carries the app's name and what it accepts, and nothing that could be a
+/// key: no `Authorization`, no cookie, and an address with a user name or password is
+/// refused before anything is sent.
+#[tokio::test]
+async fn fetch_to_file_never_sends_authorization() {
+    let server = TestServer::start(|request| match request.path() {
+        "/start" => {
+            Response::redirect(302, "/v.webm").with_header("Set-Cookie", "sid=tracking; Path=/")
+        }
+        _ => Response::new(200, "video/webm", video_bytes(64)).with_header("Set-Cookie", "b=2"),
+    })
+    .await;
+    let fetcher = file_fetcher(&[&server]);
+    let dir = tempfile::tempdir().unwrap();
+    let dest = dir.path().join("v.webm");
+    for _ in 0..2 {
+        fetcher
+            .fetch_to_file(&server.url("files.test", "/start"), 1 << 20, &dest)
+            .await
+            .unwrap();
+    }
+    let requests = server.requests();
+    assert_eq!(requests.len(), 4);
+    let accept = MEDIA_TYPES.join(", ");
+    for request in &requests {
+        assert_eq!(request.header("authorization"), None);
+        assert_eq!(request.header("cookie"), None);
+        assert_eq!(request.header("user-agent"), Some(UA));
+        assert_eq!(request.header("accept"), Some(accept.as_str()));
+        assert_eq!(request.header("accept-encoding"), Some("identity"));
+        let mut names: Vec<&str> = request.headers.iter().map(|(n, _)| n.as_str()).collect();
+        names.sort_unstable();
+        assert_eq!(
+            names,
+            ["accept", "accept-encoding", "host", "user-agent"],
+            "{:?}",
+            request.headers
+        );
+    }
+    for address in [
+        format!("http://user:sk-secret@files.test:{}/v.webm", server.port),
+        format!("http://sk-secret@files.test:{}/v.webm", server.port),
+    ] {
+        let dest = dir.path().join("keyed.webm");
+        assert_eq!(
+            fetcher.fetch_to_file(&url(&address), 1 << 20, &dest).await,
+            Err(FetchError::Credentials)
+        );
+        assert!(nothing_saved(&dest));
+    }
+    assert_eq!(server.connections(), 4);
+}
+
+#[tokio::test]
+async fn fetch_to_file_refuses_a_private_address() {
+    let dir = tempfile::tempdir().unwrap();
+    let dest = dir.path().join("v.mp4");
+    let err = Fetcher::new("t")
+        .fetch_to_file(&url("http://127.0.0.1:9/v.mp4"), 1 << 20, &dest)
+        .await
+        .unwrap_err();
+    assert!(err.is_refusal());
+    assert!(!dest.exists());
+    assert!(nothing_saved(&dest));
+
+    // The app's fetcher, no hook: nothing on this computer or its network is reached.
+    let trap = trap().await;
+    let p = trap.port;
+    let fetcher = Fetcher::new(UA);
+    for address in [
+        format!("http://127.0.0.1:{p}/v.mp4"),
+        format!("http://[::1]:{p}/v.mp4"),
+        format!("http://localhost:{p}/v.mp4"),
+        "http://10.0.0.1/v.mp4".to_string(),
+        "http://169.254.169.254/latest/meta-data/".to_string(),
+        "file:///etc/passwd".to_string(),
+    ] {
+        let err = fetcher
+            .fetch_to_file(&url(&address), 1 << 20, &dest)
+            .await
+            .unwrap_err();
+        assert!(err.is_refusal(), "{address}: {err:?}");
+        assert!(nothing_saved(&dest), "{address}");
+    }
+    assert_eq!(trap.connections(), 0);
+}
+
+/// Object stores (S3, GCS, R2) send a file uploaded without a type as
+/// `application/octet-stream`, `binary/octet-stream` or with no type at all: it is saved
+/// with that type, and the caller checks its bytes.
+#[tokio::test]
+async fn fetch_to_file_takes_a_file_whose_type_names_nothing() {
+    let body = video_bytes(4096);
+    let sent = body.clone();
+    let server = TestServer::start(move |request| match request.path() {
+        "/octet" => Response::new(200, "application/octet-stream", sent.clone()),
+        "/binary" => Response::new(200, "Binary/Octet-Stream", sent.clone()),
+        _ => Response {
+            status: 200,
+            headers: Vec::new(),
+            body: sent.clone(),
+            delay: Duration::ZERO,
+        },
+    })
+    .await;
+    let fetcher = file_fetcher(&[&server]);
+    let dir = tempfile::tempdir().unwrap();
+    for (path, kind) in [
+        ("/octet", "application/octet-stream"),
+        ("/binary", "binary/octet-stream"),
+        ("/untyped", ""),
+    ] {
+        let dest = dir.path().join(path.trim_start_matches('/'));
+        let saved = fetcher
+            .fetch_to_file(&server.url("files.test", path), 1 << 20, &dest)
+            .await
+            .unwrap_or_else(|e| panic!("{path}: {e:?}"));
+        assert_eq!(saved.content_type, kind, "{path}");
+        assert_eq!(std::fs::read(&dest).unwrap(), body, "{path}");
+        assert!(!part_of(&dest).exists(), "{path}");
+    }
+}
+
+#[tokio::test]
+async fn fetch_to_file_refuses_a_page() {
+    let server = TestServer::start(|request| match request.path() {
+        "/page" => Response::html("<p>Sign in to see this file</p>"),
+        "/plain" => Response::new(200, "text/plain", "words"),
+        "/json" => Response::json("{\"error\": \"expired\"}"),
+        "/xhtml" => Response::new(200, "application/xhtml+xml", "<svg/>"),
+        "/gzip" => Response::new(200, "image/png", vec![0x1f, 0x8b, 8, 0])
+            .with_header("Content-Encoding", "gzip"),
+        "/gone" => Response::new(404, "text/html", "<h1>Not found</h1>"),
+        _ => Response::new(200, "image/png", video_bytes(16)),
+    })
+    .await;
+    let fetcher = file_fetcher(&[&server]);
+    let dir = tempfile::tempdir().unwrap();
+    let dest = dir.path().join("picture.png");
+    let fetch = |path: &'static str| {
+        let fetcher = fetcher.clone();
+        let address = server.url("files.test", path);
+        let dest = dest.clone();
+        async move { fetcher.fetch_to_file(&address, 1 << 20, &dest).await }
+    };
+    assert_eq!(
+        fetch("/page").await,
+        Err(FetchError::NotMedia("text/html".into()))
+    );
+    assert!(nothing_saved(&dest));
+    for (path, kind) in [
+        ("/plain", "text/plain"),
+        ("/json", "application/json"),
+        ("/xhtml", "application/xhtml+xml"),
+    ] {
+        assert_eq!(
+            fetch(path).await,
+            Err(FetchError::NotMedia(kind.into())),
+            "{path}"
+        );
+        assert!(nothing_saved(&dest), "{path}");
+    }
+    assert_eq!(
+        fetch("/gzip").await,
+        Err(FetchError::Encoding("gzip".into()))
+    );
+    assert_eq!(fetch("/gone").await, Err(FetchError::Status(404)));
+    assert!(nothing_saved(&dest));
+    for error in [
+        FetchError::NotMedia("text/html".into()),
+        FetchError::TooLarge(1024),
+        FetchError::DiskFull,
+        FetchError::Disk("denied".into()),
+    ] {
+        assert!(!error.is_refusal(), "{error:?}");
+    }
+    // Reading pages is unchanged: a picture is not a page.
+    assert_eq!(
+        fetcher
+            .get(&server.url("files.test", "/png"), Accept::Page)
+            .await,
+        Err(FetchError::ContentType("image/png".into()))
+    );
+}
+
+#[tokio::test]
+async fn fetch_to_file_stops_at_the_cap() {
+    let server = TestServer::start(|request| match request.path() {
+        "/big" => Response::new(200, "video/mp4", video_bytes(4096)),
+        _ => Response::new(200, "video/mp4", video_bytes(1024)),
+    })
+    .await;
+    let fetcher = file_fetcher(&[&server]);
+    let dir = tempfile::tempdir().unwrap();
+    let dest = dir.path().join("v.mp4");
+    assert_eq!(
+        fetcher
+            .fetch_to_file(&server.url("files.test", "/big"), 1024, &dest)
+            .await,
+        Err(FetchError::TooLarge(1024))
+    );
+    assert!(nothing_saved(&dest));
+    // Exactly the cap is allowed.
+    let saved = fetcher
+        .fetch_to_file(&server.url("files.test", "/exact"), 1024, &dest)
+        .await
+        .unwrap();
+    assert_eq!(saved.len, 1024);
+    assert_eq!(std::fs::read(&dest).unwrap(), video_bytes(1024));
+
+    // A body that does not say how long it is is counted as it arrives.
+    let mut answer =
+        b"HTTP/1.1 200 OK\r\nContent-Type: video/mp4\r\nConnection: close\r\n\r\n".to_vec();
+    answer.extend_from_slice(&video_bytes(4096));
+    let port = raw_server(answer, false).await;
+    let fetcher = Fetcher::new(UA)
+        .with_test_loopback_ports(&[port])
+        .with_test_dns(&[("files.test", ip("127.0.0.1"))]);
+    let address = url(&format!("http://files.test:{port}/v.mp4"));
+    let dest = dir.path().join("unsized.mp4");
+    assert_eq!(
+        fetcher.fetch_to_file(&address, 1024, &dest).await,
+        Err(FetchError::TooLarge(1024))
+    );
+    assert!(nothing_saved(&dest));
+    let saved = fetcher.fetch_to_file(&address, 4096, &dest).await.unwrap();
+    assert_eq!(saved.len, 4096);
+    assert_eq!(std::fs::read(&dest).unwrap(), video_bytes(4096));
+}
+
+#[tokio::test]
+async fn fetch_to_file_follows_redirects_by_hand() {
+    let other = TestServer::start(|_| Response::new(200, "image/webp", video_bytes(512))).await;
+    let other_port = other.port;
+    let files = TestServer::start(move |request| match request.path() {
+        "/to-other" => {
+            Response::redirect(302, &format!("http://other.test:{other_port}/result.webp"))
+        }
+        "/to-private" => Response::redirect(307, "http://10.0.0.1/result.webp"),
+        "/loop" => Response::redirect(302, "/loop"),
+        _ => Response::status(404),
+    })
+    .await;
+    let fetcher = file_fetcher(&[&files, &other]);
+    let dir = tempfile::tempdir().unwrap();
+    let dest = dir.path().join("result.webp");
+    let saved = fetcher
+        .fetch_to_file(&files.url("files.test", "/to-other"), 1 << 20, &dest)
+        .await
+        .unwrap();
+    assert_eq!(saved.redirects, 1);
+    assert_eq!(saved.url, other.url("other.test", "/result.webp"));
+    assert_eq!(saved.content_type, "image/webp");
+    assert_eq!(std::fs::read(&dest).unwrap(), video_bytes(512));
+    assert_eq!(
+        other.requests()[0].header("host"),
+        Some(format!("other.test:{other_port}").as_str())
+    );
+
+    let dest = dir.path().join("private.webp");
+    let err = fetcher
+        .fetch_to_file(&files.url("files.test", "/to-private"), 1 << 20, &dest)
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(
+            err,
+            FetchError::Blocked {
+                class: AddressClass::Private,
+                ..
+            }
+        ),
+        "{err:?}"
+    );
+    assert!(nothing_saved(&dest));
+    assert_eq!(
+        fetcher
+            .fetch_to_file(&files.url("files.test", "/loop"), 1 << 20, &dest)
+            .await,
+        Err(FetchError::TooManyRedirects)
+    );
+    assert!(nothing_saved(&dest));
+}
+
+/// A download that stops sending runs out of time, and what it wrote so far is removed.
+#[tokio::test]
+async fn fetch_to_file_gives_up_on_a_stalled_download_and_removes_the_partial_file() {
+    let mut answer =
+        b"HTTP/1.1 200 OK\r\nContent-Type: video/mp4\r\nContent-Length: 100000\r\n\r\n".to_vec();
+    answer.extend_from_slice(&video_bytes(2048));
+    let port = raw_server(answer, true).await;
+    let fetcher = Fetcher::new(UA)
+        .with_timeout(Duration::from_millis(500))
+        .with_test_loopback_ports(&[port])
+        .with_test_dns(&[("files.test", ip("127.0.0.1"))]);
+    let dir = tempfile::tempdir().unwrap();
+    let dest = dir.path().join("v.mp4");
+    let started = Instant::now();
+    let err = fetcher
+        .fetch_to_file(
+            &url(&format!("http://files.test:{port}/v.mp4")),
+            1 << 20,
+            &dest,
+        )
+        .await
+        .unwrap_err();
+    assert!(matches!(err, FetchError::Timeout(_)), "{err:?}");
+    assert!(started.elapsed() < Duration::from_secs(5));
+    assert!(nothing_saved(&dest));
+    assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 0);
 }

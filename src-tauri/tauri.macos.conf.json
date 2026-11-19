@@ -1,5 +1,5 @@
 {
   "bundle": {
-    "externalBin": ["binaries/llama-server", "binaries/llama-fit-params"]
+    "externalBin": ["binaries/llama-server", "binaries/llama-fit-params", "binaries/sd-cli"]
   }
 }

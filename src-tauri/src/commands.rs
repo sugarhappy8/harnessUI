@@ -206,14 +206,35 @@ mod tests {
         assert!(!csp.contains("127.0.0.1"));
         // The whole policy, word for word, so that loosening it is a deliberate change
         // here. `frame-src` names the one origin artifact previews load from, as the two
-        // kinds of webview spell it (artifacts/protocol.rs), and nothing else.
+        // kinds of webview spell it (artifacts/protocol.rs), and nothing else. `media-src`
+        // lets Studio's viewer play a video from the `blob:` it makes of the file's bytes
+        // (`studio_output_bytes`), and nothing else.
         assert_eq!(
             csp,
             "default-src 'self'; script-src 'self'; connect-src 'self' ipc: http://ipc.localhost; \
-             img-src 'self' data: blob:; style-src 'self' 'unsafe-inline'; font-src 'self' data:; \
-             object-src 'none'; frame-src artifact://sandbox.localhost http://artifact.sandbox.localhost; \
+             img-src 'self' data: blob:; media-src blob:; style-src 'self' 'unsafe-inline'; \
+             font-src 'self' data:; object-src 'none'; \
+             frame-src artifact://sandbox.localhost http://artifact.sandbox.localhost; \
              form-action 'none'; base-uri 'self'; require-trusted-types-for 'script'"
         );
         assert_eq!(conf["app"]["withGlobalTauri"], serde_json::json!(false));
+    }
+
+    /// One version number for the crates, the app's config (what the About box, the updater
+    /// and the release notes read) and the webview's package files, changed together.
+    #[test]
+    fn the_version_is_the_same_everywhere() {
+        let v = env!("CARGO_PKG_VERSION");
+        assert_eq!(v, "0.1.0");
+        let conf: serde_json::Value =
+            serde_json::from_str(include_str!("../tauri.conf.json")).unwrap();
+        let pkg: serde_json::Value =
+            serde_json::from_str(include_str!("../../package.json")).unwrap();
+        let lock: serde_json::Value =
+            serde_json::from_str(include_str!("../../package-lock.json")).unwrap();
+        assert_eq!(conf["version"], v);
+        assert_eq!(pkg["version"], v);
+        assert_eq!(lock["version"], v);
+        assert_eq!(lock["packages"][""]["version"], v);
     }
 }

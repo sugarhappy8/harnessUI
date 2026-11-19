@@ -68,6 +68,11 @@ pub struct CaptureLog {
     pub workers: Vec<String>,
     /// Service workers (target ids) kept waiting during the capture, to stop afterwards.
     pub held_workers: Vec<String>,
+    /// Service workers (target ids) that ran when the capture started and were stopped
+    /// then. The browser may still list one (one that was kept waiting in an earlier
+    /// capture does not finish stopping), so the report does not count it as held unless
+    /// it starts again during this capture (its attach event is then handled as any other).
+    pub ran_before: HashSet<String>,
     /// Connections that started although the request checks cannot see them, as
     /// "a WebSocket to <address>".
     pub sockets: Vec<String>,

@@ -1146,13 +1146,32 @@ async fn requests_outside(file: &Path, work: &Path) -> Vec<String> {
     cdp.call("Network.enable", json!({}), Some(&session), wait)
         .await
         .unwrap();
+    cdp.call("Page.enable", json!({}), Some(&session), wait)
+        .await
+        .unwrap();
     let url = url::Url::from_file_path(file).unwrap().to_string();
     cdp.call("Page.navigate", json!({"url": url}), Some(&session), wait)
         .await
         .unwrap();
+    // The recording runs until the page has loaded (a slow computer may take its time over
+    // the pictures and sheets a page names), then 2 s more for what the loaded page still
+    // asks for. A load that never comes ends the wait after 30 s, and what was seen by then
+    // is checked as it is.
     let mut seen: Vec<String> = Vec::new();
-    let until = tokio::time::Instant::now() + Duration::from_secs(4);
-    while let Ok(Some(event)) = tokio::time::timeout_at(until, events.recv()).await {
+    let mut loaded = false;
+    let mut until = tokio::time::Instant::now() + Duration::from_secs(30);
+    loop {
+        let event = match tokio::time::timeout_at(until, events.recv()).await {
+            Ok(Some(event)) => event,
+            Ok(None) => break,
+            Err(_) if loaded => break,
+            Err(_) => {
+                eprintln!("{url} did not finish loading in 30 s; recording 2 s more");
+                loaded = true;
+                until = tokio::time::Instant::now() + Duration::from_secs(2);
+                continue;
+            }
+        };
         if event.session_id.as_deref() != Some(session.as_str()) {
             continue;
         }
@@ -1167,6 +1186,11 @@ async fn requests_outside(file: &Path, work: &Path) -> Vec<String> {
         match event.method.as_str() {
             "Network.requestWillBeSent" => seen.push(text("/request/url")),
             "Network.webSocketCreated" => seen.push(format!("WebSocket {}", text("/url"))),
+            // Only the file's own load counts (not the blank page the tab opened with).
+            "Page.loadEventFired" if !loaded && seen.contains(&url) => {
+                loaded = true;
+                until = tokio::time::Instant::now() + Duration::from_secs(2);
+            }
             _ => {}
         }
     }

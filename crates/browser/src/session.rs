@@ -1061,6 +1061,13 @@ impl Browser {
         {
             let kind = t.get("type").and_then(Value::as_str).unwrap_or("");
             let url = t.get("url").and_then(Value::as_str).unwrap_or("");
+            if kind == "service_worker"
+                && web_worker(url)
+                && let Some(id) = t.get("targetId").and_then(Value::as_str)
+                && let Some(log) = self.lock().capture.as_mut()
+            {
+                log.ran_before.insert(id.to_string());
+            }
             if matches!(kind, "shared_worker" | "service_worker")
                 && web_worker(url)
                 && let Some(id) = t.get("targetId").and_then(Value::as_str)
@@ -1077,6 +1084,52 @@ impl Browser {
                 }
             }
         }
+    }
+
+    /// [0.0.7 P7] Whether a service worker was kept from running during the capture, read
+    /// from the browser's own list of targets when the report is written rather than only
+    /// from the attach events [`Self::watch_worker`] handled so far. A web service worker
+    /// listed now that [`Self::watch_capture`] did not find running at the start started
+    /// during the capture and is kept waiting (or will be, once its attach event is
+    /// handled), so it is marked held and is stopped when the capture ends
+    /// ([`Self::unwatch_capture`]); none is let run here.
+    pub(crate) async fn note_service_workers(&self) -> bool {
+        let listed = self
+            .cdp
+            .call("Target.getTargets", json!({}), None, CMD)
+            .await;
+        let running: Vec<String> = match listed {
+            Ok(targets) => targets
+                .get("targetInfos")
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+                .filter(|t| {
+                    t.get("type").and_then(Value::as_str) == Some("service_worker")
+                        && web_worker(t.get("url").and_then(Value::as_str).unwrap_or(""))
+                })
+                .filter_map(|t| t.get("targetId").and_then(Value::as_str))
+                .map(str::to_string)
+                .collect(),
+            Err(e) => {
+                tracing::debug!(error = %e, "the browser's service workers could not be listed");
+                Vec::new()
+            }
+        };
+        let mut s = self.lock();
+        let Some(log) = s.capture.as_mut() else {
+            return false;
+        };
+        for id in running {
+            if log.ran_before.contains(&id) {
+                continue;
+            }
+            log.service_worker_held = true;
+            if !log.held_workers.contains(&id) && log.held_workers.len() < 400 {
+                log.held_workers.push(id);
+            }
+        }
+        log.service_worker_held
     }
 
     /// [0.0.7 P7] Lets go of what [`Self::watch_capture`] and [`Self::watch_worker`] held.

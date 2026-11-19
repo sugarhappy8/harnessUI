@@ -9,6 +9,7 @@ use tauri::State;
 use crate::dto::{ModelOptionDto, ProviderDto, SaveProvider};
 use crate::error::{AppError, AppResult};
 use crate::state::AppState;
+use crate::studio::catalog;
 
 pub(crate) fn kind_of(s: &str) -> ProviderKind {
     match s {
@@ -24,7 +25,8 @@ pub(crate) fn kind_of(s: &str) -> ProviderKind {
     }
 }
 
-fn secret_key(provider_id: store::ProviderId) -> String {
+/// The keychain name of an endpoint's API key.
+pub(crate) fn secret_key(provider_id: store::ProviderId) -> String {
     format!("provider-api-key:{}", provider_id.0)
 }
 
@@ -198,9 +200,19 @@ pub fn key_may_stay(old_base_url: &str, new_base_url: &str) -> bool {
     )
 }
 
+/// [0.1.0] Whether editing endpoint `saved` to `kind` at `base_url` leaves its saved picture
+/// and video lists from another company or host: its kind changes, or the scheme, host or
+/// port of its address does (Studio would show them under the new one).
+fn media_lists_stale(saved: &store::Provider, kind: &str, base_url: &str) -> bool {
+    saved.kind != kind || !key_may_stay(&saved.base_url, base_url)
+}
+
 /// [0.0.7 P5] Whether a key may be saved for the endpoint: anything but "the keychain has
 /// none" (a keychain that cannot be read may still hold one), so no check passes by default.
-fn may_hold_key(secrets: &dyn store::secrets::SecretStore, id: store::ProviderId) -> bool {
+pub(crate) fn may_hold_key(
+    secrets: &dyn store::secrets::SecretStore,
+    id: store::ProviderId,
+) -> bool {
     !matches!(secrets.get(&secret_key(id)), Ok(None))
 }
 
@@ -285,18 +297,30 @@ pub async fn client_for(
         .get_provider(id)
         .await?
         .ok_or_else(|| AppError::not_found("endpoint"))?;
-    let api_key = state.secrets.get(&secret_key(id)).map_err(|e| {
-        AppError::new(
-            "keychain",
-            "The API key could not be read from the system keychain.",
-            "Unlock the keychain or re-enter the key in Settings → Endpoints.",
-            e.to_string(),
-        )
-    })?;
-    let mut config = ClientConfig::new(provider.base_url.clone(), kind_of(&provider.kind));
-    config.api_key = api_key;
-    let client = OpenAiClient::new(config).map_err(AppError::from)?;
+    let api_key = state.secrets.get(&secret_key(id)).map_err(keychain_error)?;
+    let client = client_from(&provider, api_key)?;
     Ok((client, provider))
+}
+
+/// An endpoint's key could not be read from the system keychain.
+pub(crate) fn keychain_error(e: store::secrets::SecretError) -> AppError {
+    AppError::new(
+        "keychain",
+        "The API key could not be read from the system keychain.",
+        "Unlock the keychain or re-enter the key in Settings → Endpoints.",
+        e.to_string(),
+    )
+}
+
+/// [0.1.0] The client of an endpoint, with `key` (its saved key, read by the caller): the
+/// same for chat and for Studio.
+pub(crate) fn client_from(
+    provider: &store::Provider,
+    key: Option<String>,
+) -> AppResult<OpenAiClient> {
+    let mut config = ClientConfig::new(provider.base_url.clone(), kind_of(&provider.kind));
+    config.api_key = key;
+    OpenAiClient::new(config).map_err(AppError::from)
 }
 
 #[tauri::command]
@@ -335,18 +359,21 @@ pub async fn save_provider(
     };
     // [0.0.7 P5] The key's checks, and its removal when it must go, before anything is
     // saved ([`prepare_key`]).
-    let saved_base_url = match provider.id {
-        Some(id) => state.store.get_provider(id).await?.map(|p| p.base_url),
+    let before = match provider.id {
+        Some(id) => state.store.get_provider(id).await?,
         None => None,
     };
     prepare_key(
         state.secrets.as_ref(),
         provider.id,
-        saved_base_url.as_deref(),
+        before.as_ref().map(|p| p.base_url.as_str()),
         &base_url,
         new_key,
         provider.clear_api_key,
     )?;
+    let lists_stale = before
+        .as_ref()
+        .is_some_and(|saved| media_lists_stale(saved, &provider.kind, &base_url));
     let id = state
         .store
         .upsert_provider(store::ProviderInput {
@@ -358,6 +385,11 @@ pub async fn save_provider(
             enabled: true,
         })
         .await?;
+    // [0.1.0] After the endpoint is saved, as `delete_provider` does: the lists come back on
+    // the next Test or *Get the list*.
+    if lists_stale {
+        catalog::forget(&state.store, id).await;
+    }
     let key = secret_key(id);
     if let Some(api_key) = provider.api_key.filter(|k| !k.trim().is_empty()) {
         state.secrets.set(&key, api_key.trim()).map_err(|e| {
@@ -390,6 +422,8 @@ pub async fn delete_provider(state: State<'_, AppState>, id: store::ProviderId) 
     let _ = state.secrets.delete(&secret_key(id));
     let _ = state.store.delete_setting(&context_key(id)).await;
     state.store.delete_provider(id).await?;
+    // [0.1.0] After the endpoint is gone, so lists still on their way are not saved.
+    catalog::forget(&state.store, id).await;
     let _ = state
         .store
         .set_setting::<Vec<ModelOptionDto>>(&crate::settings::provider_models_key(id), &Vec::new())
@@ -398,7 +432,8 @@ pub async fn delete_provider(state: State<'_, AppState>, id: store::ProviderId) 
 }
 
 /// Connects to the endpoint, lists its models and caches them for the model picker
-/// (so the picker works offline).
+/// (so the picker works offline). [0.1.0] For an endpoint that makes pictures or video, its
+/// picture and video lists are fetched and saved too ([`catalog::refresh`]).
 #[tauri::command]
 pub async fn test_provider(
     state: State<'_, AppState>,
@@ -425,6 +460,17 @@ pub async fn test_provider(
         .store
         .set_setting(&crate::settings::provider_models_key(id), &options)
         .await?;
+    // [0.1.0] A failure here is only logged: it never fails Test, and Studio offers to get
+    // the lists again.
+    if let Some(media) = agent::media::media_provider(client.clone()) {
+        let now = jiff::Timestamp::now().as_millisecond();
+        if let Err(err) = catalog::refresh(&state.store, id, &*media, now).await {
+            tracing::warn!(
+                "the picture and video lists of endpoint {} could not be fetched: {err}",
+                id.0
+            );
+        }
+    }
     Ok(options)
 }
 
@@ -485,6 +531,51 @@ mod tests {
         assert!(!key_may_stay("https://example.com", "http://example.com"));
         assert!(!key_may_stay("not a url", "not a url"));
         assert!(PASTE_THE_NEW_KEY.contains("Paste the API key for the new address"));
+    }
+
+    /// [0.1.0] An endpoint edited to another company, or to another scheme, host or port,
+    /// loses its saved picture and video lists; a change of name or path keeps them.
+    #[test]
+    fn the_saved_media_lists_go_with_the_company_or_the_address() {
+        let saved = store::Provider {
+            id: store::ProviderId(1),
+            name: "My OpenRouter".into(),
+            kind: "openrouter".into(),
+            base_url: "https://openrouter.ai/api/v1".into(),
+            secret_ref: None,
+            enabled: true,
+            created_at: 0,
+        };
+        assert!(!media_lists_stale(
+            &saved,
+            "openrouter",
+            "https://openrouter.ai/api/v1"
+        ));
+        assert!(!media_lists_stale(
+            &saved,
+            "openrouter",
+            "https://OpenRouter.ai:443/api/v2"
+        ));
+        assert!(media_lists_stale(
+            &saved,
+            "openai",
+            "https://openrouter.ai/api/v1"
+        ));
+        assert!(media_lists_stale(
+            &saved,
+            "openrouter",
+            "https://api.openai.com/v1"
+        ));
+        assert!(media_lists_stale(
+            &saved,
+            "openrouter",
+            "https://openrouter.ai:8443/api/v1"
+        ));
+        assert!(media_lists_stale(
+            &saved,
+            "openrouter",
+            "http://openrouter.ai/api/v1"
+        ));
     }
 
     /// A keychain double: what `get` answers, whether `delete` works, and what was deleted.
@@ -748,6 +839,32 @@ mod tests {
             plan_context(Generic, "m", Some(262_144), None, 16_384),
             262_144
         );
+    }
+
+    /// [0.1.0] Chat and Studio build an endpoint's client alike: its address, its kind and
+    /// the key given, under the key-transport rule.
+    #[test]
+    fn a_client_is_built_from_the_endpoint_and_its_key() {
+        let provider = |kind: &str, base_url: &str| store::Provider {
+            id: store::ProviderId(4),
+            name: "x".into(),
+            kind: kind.into(),
+            base_url: base_url.into(),
+            secret_ref: None,
+            enabled: true,
+            created_at: 0,
+        };
+        let openrouter = provider("openrouter", "https://openrouter.ai/api/v1");
+        let client = client_from(&openrouter, Some("sk-or-test".into())).unwrap();
+        assert_eq!(client.config().kind, ProviderKind::OpenRouter);
+        assert_eq!(client.config().base_url, "https://openrouter.ai/api/v1");
+        assert_eq!(client.config().api_key.as_deref(), Some("sk-or-test"));
+        let local = client_from(&provider("ollama", "http://127.0.0.1:11434"), None).unwrap();
+        assert_eq!(local.config().kind, ProviderKind::Ollama);
+        assert_eq!(local.config().api_key, None);
+        // A key never goes over plain http to the internet.
+        let plain = provider("generic", "http://api.example.com/v1");
+        assert!(client_from(&plain, Some("sk-test".into())).is_err());
     }
 
     /// [0.0.7 P5] The endpoint list says which endpoints are on the internet.

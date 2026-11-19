@@ -1,11 +1,15 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { cleanup, render, screen } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
 import type { RuntimeStatus } from "../lib/types";
+import type { Run } from "./studio/types";
+import { RUN } from "./studio/fixtures/models";
 
 vi.mock("../lib/ipc", () => ({ isTauri: () => false }));
+vi.mock("./studio/api");
 
 const { Sidebar } = await import("./Sidebar");
 const { useApp } = await import("../store/app");
+const { useStudio } = await import("../store/studio");
 
 function status(patch: Partial<RuntimeStatus>): RuntimeStatus {
   return {
@@ -164,5 +168,84 @@ describe("the chat list's marks for replies", () => {
     cleanup();
     show({});
     expect(document.querySelector("[data-chat-mark]")).toBeNull();
+  });
+});
+
+// 0.1.0 Studio: its button sits beside Models and Settings and says how many runs are
+// working; going to a chat (or starting one) leaves Studio.
+describe("the Studio button", () => {
+  afterEach(cleanup);
+
+  const chats = [{ id: 1, title: "Install the toolchain", updatedAt: 0, snippet: null }];
+
+  function run(patch: Partial<Run>): Run {
+    return { ...RUN, ...patch };
+  }
+
+  function show(patch: Partial<ReturnType<typeof useApp.getState>> = {}) {
+    useApp.setState({
+      runtime: null,
+      chats: chats as never,
+      activeChatId: null,
+      search: "",
+      approvals: [],
+      generation: null,
+      runningTurn: null,
+      ...patch,
+    });
+    render(<Sidebar onOpenSettings={() => undefined} onOpenModels={() => undefined} />);
+  }
+
+  it("the Studio button sits between Models and Settings and counts working runs", () => {
+    useStudio.setState({ view: "chat", live: { r1: run({ status: "waiting", watching: true }) } });
+    show();
+    const buttons = screen.getAllByRole("button").map((b) => b.getAttribute("aria-label")).filter(Boolean);
+    expect(buttons.slice(0, 3)).toEqual(["Models", "Studio (1 working)", "Settings"]);
+    const studio = screen.getByRole("button", { name: "Studio (1 working)" });
+    expect(studio.title).toBe("Studio (Ctrl+G)");
+    expect(studio.textContent).toBe("1");
+  });
+
+  it("says only its name when nothing works, and opens Studio", () => {
+    useStudio.setState({ view: "chat", live: { r1: run({ status: "done" }) } });
+    show();
+    const studio = screen.getByRole("button", { name: "Studio" });
+    expect(studio.textContent).toBe("");
+    fireEvent.click(studio);
+    expect(useStudio.getState().view).toBe("studio");
+  });
+
+  it("while Studio is shown, only the Studio button is current, not the open chat", () => {
+    useStudio.setState({ view: "studio", live: {} });
+    show({ activeChatId: 1 });
+    const chat = screen.getByRole("button", { name: "Install the toolchain" });
+    const row = chat.parentElement as HTMLElement;
+    expect(chat.getAttribute("aria-current")).toBeNull();
+    expect(row.className).not.toContain("before:bg-accent");
+    expect(screen.getByRole("button", { name: "Studio" }).getAttribute("aria-current")).toBe("page");
+    // Back in the chat, the open chat is current again, with its accent.
+    act(() => useStudio.getState().showChat());
+    expect(chat.getAttribute("aria-current")).toBe("page");
+    expect(row.className).toContain("before:bg-accent");
+    expect(screen.getByRole("button", { name: "Studio" }).getAttribute("aria-current")).toBeNull();
+  });
+
+  it("a chat click or New chat leaves Studio", () => {
+    const openChat = vi.fn(async () => undefined);
+    const newChat = vi.fn(async () => undefined);
+    const original = useApp.getState();
+    try {
+      useStudio.setState({ view: "studio", live: {} });
+      show({ openChat, newChat });
+      fireEvent.click(screen.getByText("Install the toolchain"));
+      expect(useStudio.getState().view).toBe("chat");
+      expect(openChat).toHaveBeenCalledWith(1);
+      useStudio.setState({ view: "studio" });
+      fireEvent.click(screen.getByRole("button", { name: "New chat" }));
+      expect(useStudio.getState().view).toBe("chat");
+      expect(newChat).toHaveBeenCalledTimes(1);
+    } finally {
+      useApp.setState({ openChat: original.openChat, newChat: original.newChat });
+    }
   });
 });

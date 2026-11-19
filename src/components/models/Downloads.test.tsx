@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { act, cleanup, render, screen } from "@testing-library/react";
+import { act, cleanup, render, screen, within } from "@testing-library/react";
 import type { DownloadGroup } from "../../lib/types";
 
 const ipcMock = vi.hoisted(() => ({
@@ -91,5 +91,35 @@ describe("Models → Downloads", () => {
     expect(screen.queryByRole("button", { name: "Resume" })).toBeNull();
     // A cancel that did not finish in time can be asked for again.
     expect(screen.getByRole("button", { name: "Cancel" })).toBeTruthy();
+  });
+
+  it("a picture or video model's download says so", async () => {
+    const group = (id: string, generatorKind: DownloadGroup["generatorKind"]): DownloadGroup => ({
+      id,
+      repo: "someone/sample-GGUF",
+      label: id,
+      fileCount: 3,
+      bytesDone: 0,
+      bytesTotal: 4_000_000_000,
+      status: "queued",
+      error: null,
+      bytesPerSecond: null,
+      unverified: false,
+      generatorKind,
+    });
+    ipcMock.listDownloads.mockResolvedValue([
+      group("clip", "video"),
+      group("still", "image"),
+      group("edit", "image-edit"),
+      group("chat", null),
+    ]);
+    await act(async () => {
+      render(<Downloads />);
+    });
+    const rowOf = (id: string) => screen.getByText(`someone/sample-GGUF · ${id}`).closest("li") as HTMLElement;
+    within(rowOf("clip")).getByText("Video model");
+    within(rowOf("still")).getByText("Picture model");
+    within(rowOf("edit")).getByText("Picture model");
+    expect(within(rowOf("chat")).queryByText(/model$/)).toBeNull();
   });
 });

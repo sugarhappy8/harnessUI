@@ -9,6 +9,7 @@
 //!
 //! The token is never sent to a mirror. Signed URLs are never logged.
 
+use std::collections::BTreeMap;
 use std::time::Duration;
 
 use reqwest::header::{HeaderMap, LOCATION};
@@ -16,6 +17,7 @@ use reqwest::{StatusCode, Url};
 use serde::{Deserialize, Serialize};
 
 use crate::files::RepoFile;
+use crate::gen_search;
 
 pub const OFFICIAL_ENDPOINT: &str = "https://huggingface.co";
 /// Model cards larger than this are cut.
@@ -82,7 +84,7 @@ pub struct HfClient {
     endpoint: Url,
     token: Option<String>,
     official: bool,
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     allow_http_loopback: bool,
 }
 
@@ -146,6 +148,8 @@ pub struct RepoSummary {
     pub license: Option<String>,
     pub last_modified: Option<String>,
     pub pipeline_tag: Option<String>,
+    /// 0.1.0 Studio: tagged `not-for-all-audiences`; a picture and video search hides it.
+    pub not_for_all_audiences: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -182,6 +186,26 @@ pub struct RepoDetail {
     pub template_thinking: bool,
     /// 0.0.6: what the uploader lists about the repository, made safe to show.
     pub info: HubInfo,
+    /// 0.1.0 Studio: tagged `not-for-all-audiences` (Studio never offers it).
+    pub not_for_all_audiences: bool,
+}
+
+/// What a picture and video search looks for (`HfClient::search_generators`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum GenSearchKind {
+    Pictures,
+    Video,
+}
+
+impl GenSearchKind {
+    /// The two pipeline tags a repository of this kind carries.
+    fn pipeline_tags(self) -> [&'static str; 2] {
+        match self {
+            Self::Pictures => ["text-to-image", "image-to-image"],
+            Self::Video => ["text-to-video", "image-to-video"],
+        }
+    }
 }
 
 // ---- What an uploader lists (0.0.6 item 4, D6 source 2) ------------------------------
@@ -650,6 +674,13 @@ fn error_for(status: StatusCode, headers: &HeaderMap, body: &str) -> HfError {
     }
 }
 
+/// Whether the raw `tags` hold `not-for-all-audiences` (any case).
+fn not_for_all_audiences(tags: Option<&serde_json::Value>) -> bool {
+    strings(tags)
+        .iter()
+        .any(|t| t.eq_ignore_ascii_case("not-for-all-audiences"))
+}
+
 fn license_from_tags(tags: &serde_json::Value) -> Option<String> {
     tags.as_array()?
         .iter()
@@ -694,14 +725,15 @@ impl HfClient {
                 None
             },
             official,
-            #[cfg(test)]
+            #[cfg(any(test, feature = "test-support"))]
             allow_http_loopback: false,
         })
     }
 
-    /// A client for tests that talks plain HTTP to a local server.
-    #[cfg(test)]
-    pub(crate) fn for_test(endpoint: &str) -> Self {
+    /// A client for tests that talks plain HTTP to a local server. Other crates' tests reach
+    /// it through the `test-support` feature, which only a dev-dependency turns on.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn for_test(endpoint: &str) -> Self {
         let api = reqwest::Client::builder()
             .redirect(reqwest::redirect::Policy::none())
             .no_proxy()
@@ -769,18 +801,61 @@ impl HfClient {
             }
             p.append_pair("sort", q.sort.as_str());
             p.append_pair("limit", "50");
-            for e in [
-                "downloads",
-                "likes",
-                "gated",
-                "tags",
-                "lastModified",
-                "pipeline_tag",
-            ] {
+            for e in SEARCH_EXPAND {
                 p.append_pair("expand[]", e);
             }
         }
         self.search_url(url).await
+    }
+
+    /// 0.1.0 Studio: picture or video GGUF repositories matching `text`, from three queries
+    /// (each `filter=gguf` with the text, most downloads first, 30 at most and the
+    /// `expand[]` of [`HfClient::search`]): one for each of the kind's two pipeline tags
+    /// (text-to-image and image-to-image, or text-to-video and image-to-video) and one
+    /// without a pipeline tag, which finds repositories that carry none. Merged by
+    /// [`merge_generator_searches`]; repositories not for all audiences are dropped.
+    pub async fn search_generators(
+        &self,
+        text: &str,
+        kind: GenSearchKind,
+    ) -> Result<Vec<RepoSummary>, HfError> {
+        let [first, second, untagged] = self.generator_search_urls(text, kind);
+        let (first, second, untagged) = futures_util::try_join!(
+            self.search_url(first),
+            self.search_url(second),
+            self.search_url(untagged)
+        )?;
+        Ok(merge_generator_searches(
+            vec![first.items, second.items],
+            untagged.items,
+            kind,
+        ))
+    }
+
+    /// The three addresses [`HfClient::search_generators`] asks: the two pipeline tags of
+    /// `kind`, then none.
+    fn generator_search_urls(&self, text: &str, kind: GenSearchKind) -> [Url; 3] {
+        let [first, second] = kind.pipeline_tags();
+        [Some(first), Some(second), None].map(|tag| {
+            let mut url = self.url("/api/models");
+            {
+                let mut p = url.query_pairs_mut();
+                p.append_pair("filter", "gguf");
+                if let Some(tag) = tag {
+                    p.append_pair("pipeline_tag", tag);
+                }
+                let text = text.trim();
+                if !text.is_empty() {
+                    p.append_pair("search", text);
+                }
+                p.append_pair("sort", Sort::Downloads.as_str());
+                p.append_pair("limit", "30");
+                for e in SEARCH_EXPAND {
+                    p.append_pair("expand[]", e);
+                }
+            }
+            url
+        })
     }
 
     /// The page after `next` (from a previous [`SearchPage`]). The URL must point at
@@ -798,28 +873,7 @@ impl HfClient {
         let arr = v
             .as_array()
             .ok_or_else(|| HfError::Parse("expected a list".into()))?;
-        let items = arr
-            .iter()
-            .filter_map(|m| {
-                let id = m.get("id")?.as_str()?.to_string();
-                validate_repo_id(&id).ok()?;
-                Some(RepoSummary {
-                    downloads: m.get("downloads").and_then(|d| d.as_u64()).unwrap_or(0),
-                    likes: m.get("likes").and_then(|d| d.as_u64()).unwrap_or(0),
-                    gated: gated_of(m.get("gated").unwrap_or(&serde_json::Value::Bool(false))),
-                    license: m.get("tags").and_then(license_from_tags),
-                    last_modified: m
-                        .get("lastModified")
-                        .and_then(|d| d.as_str())
-                        .map(str::to_string),
-                    pipeline_tag: m
-                        .get("pipeline_tag")
-                        .and_then(|d| d.as_str())
-                        .map(str::to_string),
-                    id,
-                })
-            })
-            .collect();
+        let items = parse_search_items(arr);
         let next = header_str(&headers, "link")
             .and_then(parse_next_link)
             .filter(|n| {
@@ -1031,7 +1085,7 @@ impl HfClient {
     }
 
     fn download_host_ok(&self, url: &Url, mirror: Option<&str>) -> bool {
-        #[cfg(test)]
+        #[cfg(any(test, feature = "test-support"))]
         if self.allow_http_loopback && url.host_str() == Some("127.0.0.1") {
             return true;
         }
@@ -1047,6 +1101,61 @@ impl HfClient {
             self.download.get(resolved.url.clone())
         }
     }
+}
+
+/// The search answer's items that are repositories (others are left out).
+fn parse_search_items(arr: &[serde_json::Value]) -> Vec<RepoSummary> {
+    arr.iter()
+        .filter_map(|m| {
+            let id = m.get("id")?.as_str()?.to_string();
+            validate_repo_id(&id).ok()?;
+            Some(RepoSummary {
+                downloads: m.get("downloads").and_then(|d| d.as_u64()).unwrap_or(0),
+                likes: m.get("likes").and_then(|d| d.as_u64()).unwrap_or(0),
+                gated: gated_of(m.get("gated").unwrap_or(&serde_json::Value::Bool(false))),
+                license: m.get("tags").and_then(license_from_tags),
+                last_modified: m
+                    .get("lastModified")
+                    .and_then(|d| d.as_str())
+                    .map(str::to_string),
+                pipeline_tag: m
+                    .get("pipeline_tag")
+                    .and_then(|d| d.as_str())
+                    .map(str::to_string),
+                not_for_all_audiences: not_for_all_audiences(m.get("tags")),
+                id,
+            })
+        })
+        .collect()
+}
+
+/// 0.1.0 Studio: one list by repository id, most downloads first. Every item of the tagged
+/// searches is kept; an item of the untagged search only when its name is a family of
+/// `kind` (`gen_search::family_of_name`), since it can be anything a text matches (chat
+/// models among them). Repositories not for all audiences are dropped.
+pub fn merge_generator_searches(
+    tagged: Vec<Vec<RepoSummary>>,
+    untagged: Vec<RepoSummary>,
+    kind: GenSearchKind,
+) -> Vec<RepoSummary> {
+    let of_kind = |item: &RepoSummary| match gen_search::family_of_name(&item.id) {
+        gen_search::NameMatch::Family(f) => gen_search::search_kind(f) == kind,
+        _ => false,
+    };
+    let mut by_id: BTreeMap<String, RepoSummary> = BTreeMap::new();
+    let all = tagged
+        .into_iter()
+        .flatten()
+        .chain(untagged.into_iter().filter(of_kind));
+    for item in all {
+        by_id.entry(item.id.clone()).or_insert(item);
+    }
+    let mut out: Vec<RepoSummary> = by_id
+        .into_values()
+        .filter(|i| !i.not_for_all_audiences)
+        .collect();
+    out.sort_by(|a, b| b.downloads.cmp(&a.downloads).then_with(|| a.id.cmp(&b.id)));
+    out
 }
 
 /// The `rel="next"` target of a `Link` header.
@@ -1068,6 +1177,16 @@ fn parse_next_link(link: &str) -> Option<String> {
         )
     })
 }
+
+/// The fields [`HfClient::search`] (and `search_generators`) ask for.
+const SEARCH_EXPAND: [&str; 6] = [
+    "downloads",
+    "likes",
+    "gated",
+    "tags",
+    "lastModified",
+    "pipeline_tag",
+];
 
 /// The fields [`HfClient::repo`] asks for besides `gguf` (expand[] limits the answer to
 /// the listed fields).
@@ -1153,11 +1272,14 @@ pub fn parse_repo_detail(
         gguf,
         template_tools,
         template_thinking,
+        not_for_all_audiences: not_for_all_audiences(v.get("tags")),
     })
 }
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeSet;
+
     use super::*;
 
     #[test]
@@ -1611,50 +1733,26 @@ mod tests {
         );
     }
 
-    /// A one-request server: answers every request with `status`, `headers` and `body`,
-    /// and sends the request line it saw.
+    /// A one-request server: answers with `status`, `headers` and `body`, and sends the
+    /// request line it saw.
     async fn answer_once(
         status: &'static str,
         headers: &'static str,
         body: String,
-    ) -> (String, tokio::sync::oneshot::Receiver<String>) {
-        use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let addr = listener.local_addr().unwrap();
-        let (tx, rx) = tokio::sync::oneshot::channel();
-        tokio::spawn(async move {
-            let (sock, _) = listener.accept().await.unwrap();
-            let (r, mut w) = sock.into_split();
-            let mut r = BufReader::new(r);
-            let mut line = String::new();
-            r.read_line(&mut line).await.unwrap();
-            loop {
-                let mut h = String::new();
-                if r.read_line(&mut h).await.unwrap() == 0 || h == "\r\n" {
-                    break;
-                }
-            }
-            let _ = tx.send(line);
-            let resp = format!(
-                "HTTP/1.1 {status}\r\n{headers}content-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
-                body.len()
-            );
-            w.write_all(resp.as_bytes()).await.unwrap();
-            let _ = w.shutdown().await;
-        });
-        (format!("http://{addr}"), rx)
+    ) -> (String, tokio::sync::mpsc::UnboundedReceiver<String>) {
+        answer_each(1, status, headers, move |_| body.clone()).await
     }
 
     /// `repo` asks for the uploader's fields and reads them from the answer.
     #[tokio::test]
     async fn repo_asks_for_the_uploader_fields() {
-        let (url, seen) = answer_once("200 OK", "", FULL.to_string()).await;
+        let (url, mut seen) = answer_once("200 OK", "", FULL.to_string()).await;
         let d = HfClient::for_test(&url)
             .repo("example-quants/Sample-7B-GGUF", None)
             .await
             .unwrap();
         assert_eq!(d.info.downloads, Some(123_456));
-        let line = seen.await.unwrap();
+        let line = seen.recv().await.unwrap();
         assert!(
             line.starts_with("GET /api/models/example-quants/Sample-7B-GGUF?"),
             "{line}"
@@ -1701,5 +1799,226 @@ mod tests {
             .await
             .unwrap_err();
         assert!(matches!(e, HfError::Network(_)), "{e:?}");
+    }
+
+    // ---- 0.1.0 Studio: searching for picture and video models ----------------------------
+
+    /// Recorded on 2026-11-18 with the three queries `search_generators` sends (limit 30,
+    /// most downloads first): text-to-image for "klein", image-to-video for "wan2.2 5b",
+    /// and no pipeline tag for "5b". Unrelated items were removed from the recorded
+    /// untagged answer (one chat repository no assertion uses), so it holds 29 items.
+    const GEN_TEXT_TO_IMAGE: &str =
+        include_str!("../tests/fixtures/hf/gen-search-text-to-image.json");
+    const GEN_IMAGE_TO_VIDEO: &str =
+        include_str!("../tests/fixtures/hf/gen-search-image-to-video.json");
+    const GEN_UNTAGGED: &str = include_str!("../tests/fixtures/hf/gen-search-untagged.json");
+
+    fn items(json: &str) -> Vec<RepoSummary> {
+        let v: serde_json::Value = serde_json::from_str(json).unwrap();
+        parse_search_items(v.as_array().unwrap())
+    }
+
+    #[test]
+    fn generator_search_drops_repos_not_for_all_audiences() {
+        let mut v: serde_json::Value = serde_json::from_str(GEN_TEXT_TO_IMAGE).unwrap();
+        v[3]["tags"]
+            .as_array_mut()
+            .unwrap()
+            .push("Not-For-All-Audiences".into());
+        let items = parse_search_items(v.as_array().unwrap());
+        assert_eq!(items.len(), 30);
+        // Read from the raw tags.
+        assert_eq!(
+            items
+                .iter()
+                .filter(|i| i.not_for_all_audiences)
+                .map(|i| i.id.as_str())
+                .collect::<Vec<_>>(),
+            [v[3]["id"].as_str().unwrap()]
+        );
+        let merged = merge_generator_searches(vec![items], vec![], GenSearchKind::Pictures);
+        assert_eq!(merged.len(), 29);
+        assert!(merged.iter().all(|i| !i.not_for_all_audiences));
+    }
+
+    fn query(url: &Url) -> Vec<(String, String)> {
+        url.query_pairs()
+            .map(|(k, v)| (k.into_owned(), v.into_owned()))
+            .collect()
+    }
+
+    #[test]
+    fn generator_search_asks_three_ways() {
+        let c = HfClient::new(HfConfig::default()).unwrap();
+        let tags = |kind| {
+            c.generator_search_urls(" wan2.2 5b ", kind)
+                .iter()
+                .map(|u| {
+                    let q = query(u);
+                    assert_eq!(u.path(), "/api/models");
+                    let filters: Vec<&str> = q
+                        .iter()
+                        .filter(|(k, _)| k == "filter")
+                        .map(|(_, v)| v.as_str())
+                        .collect();
+                    assert_eq!(filters, ["gguf"], "never conversational: {u}");
+                    for (k, v) in [
+                        ("search", "wan2.2 5b"),
+                        ("sort", "downloads"),
+                        ("limit", "30"),
+                    ] {
+                        assert!(q.contains(&(k.into(), v.into())), "{k}={v}: {u}");
+                    }
+                    let expand: Vec<&str> = q
+                        .iter()
+                        .filter(|(k, _)| k == "expand[]")
+                        .map(|(_, v)| v.as_str())
+                        .collect();
+                    assert_eq!(expand, SEARCH_EXPAND, "{u}");
+                    let tags: Vec<String> = q
+                        .iter()
+                        .filter(|(k, _)| k == "pipeline_tag")
+                        .map(|(_, v)| v.clone())
+                        .collect();
+                    assert!(tags.len() <= 1, "{u}");
+                    tags.into_iter().next()
+                })
+                .collect::<Vec<_>>()
+        };
+        let named = |list: &[Option<&str>]| -> Vec<Option<String>> {
+            list.iter().map(|t| t.map(str::to_string)).collect()
+        };
+        assert_eq!(
+            tags(GenSearchKind::Video),
+            named(&[Some("text-to-video"), Some("image-to-video"), None])
+        );
+        assert_eq!(
+            tags(GenSearchKind::Pictures),
+            named(&[Some("text-to-image"), Some("image-to-image"), None])
+        );
+    }
+
+    #[test]
+    fn video_search_finds_turbo_and_untagged_repos() {
+        let m = merge_generator_searches(
+            vec![items(GEN_IMAGE_TO_VIDEO)],
+            items(GEN_UNTAGGED),
+            GenSearchKind::Video,
+        );
+        // Shown, then "Not supported yet" when opened.
+        assert!(m.iter().any(|i| i.id.to_lowercase().contains("turbo")));
+        assert!(
+            m.iter()
+                .any(|i| i.id == "Green-Sky/FastWan2.2-TI2V-5B-FullAttn-GGUF")
+        );
+        // Untagged items need a family name of this kind: the recorded answer has Qwen3 and
+        // full Wan 2.2 repositories that are not shown from it.
+        assert!(items(GEN_UNTAGGED).iter().any(|i| i.id.contains("Qwen3")));
+        assert!(m.iter().all(|i| !i.id.contains("Qwen3")));
+        assert!(!m.iter().any(|i| i.id == "QuantStack/Wan2.2-TI2V-5B-GGUF"));
+        // Once each, most downloads first.
+        let ids: BTreeSet<&str> = m.iter().map(|i| i.id.as_str()).collect();
+        assert_eq!(ids.len(), m.len());
+        assert!(m.windows(2).all(|w| w[0].downloads >= w[1].downloads));
+        assert_eq!(m.len(), items(GEN_IMAGE_TO_VIDEO).len() + 1);
+        // A picture search keeps none of the video names.
+        let p = merge_generator_searches(vec![], items(GEN_UNTAGGED), GenSearchKind::Pictures);
+        assert!(p.is_empty(), "{p:?}");
+    }
+
+    /// A server answering `n` requests, each with `status`, `headers` and the body `respond`
+    /// gives for its request line, and sending the request lines it saw.
+    async fn answer_each(
+        n: usize,
+        status: &'static str,
+        headers: &'static str,
+        respond: impl Fn(&str) -> String + Send + Sync + 'static,
+    ) -> (String, tokio::sync::mpsc::UnboundedReceiver<String>) {
+        use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        let respond = std::sync::Arc::new(respond);
+        tokio::spawn(async move {
+            for _ in 0..n {
+                let (sock, _) = listener.accept().await.unwrap();
+                let tx = tx.clone();
+                let respond = respond.clone();
+                tokio::spawn(async move {
+                    let (r, mut w) = sock.into_split();
+                    let mut r = BufReader::new(r);
+                    let mut line = String::new();
+                    r.read_line(&mut line).await.unwrap();
+                    loop {
+                        let mut h = String::new();
+                        if r.read_line(&mut h).await.unwrap() == 0 || h == "\r\n" {
+                            break;
+                        }
+                    }
+                    let body = respond(&line);
+                    let _ = tx.send(line);
+                    let resp = format!(
+                        "HTTP/1.1 {status}\r\n{headers}content-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+                        body.len()
+                    );
+                    w.write_all(resp.as_bytes()).await.unwrap();
+                    let _ = w.shutdown().await;
+                });
+            }
+        });
+        (format!("http://{addr}"), rx)
+    }
+
+    /// `search_generators` sends the three queries and gives one list.
+    #[tokio::test]
+    async fn generator_search_sends_three_queries_and_merges_them() {
+        let (url, mut seen) = answer_each(3, "200 OK", "", |line| {
+            if line.contains("pipeline_tag=image-to-video") {
+                GEN_IMAGE_TO_VIDEO.to_string()
+            } else if line.contains("pipeline_tag=") {
+                "[]".to_string()
+            } else {
+                GEN_UNTAGGED.to_string()
+            }
+        })
+        .await;
+        let found = HfClient::for_test(&url)
+            .search_generators("5b", GenSearchKind::Video)
+            .await
+            .unwrap();
+        let mut lines = Vec::new();
+        for _ in 0..3 {
+            lines.push(seen.recv().await.unwrap());
+        }
+        assert!(lines.iter().all(|l| l.starts_with("GET /api/models?")));
+        assert_eq!(
+            lines.iter().filter(|l| l.contains("pipeline_tag=")).count(),
+            2
+        );
+        assert!(
+            found
+                .iter()
+                .any(|i| i.id == "Green-Sky/FastWan2.2-TI2V-5B-FullAttn-GGUF")
+        );
+        assert_eq!(found.len(), items(GEN_IMAGE_TO_VIDEO).len() + 1);
+    }
+
+    #[test]
+    fn a_listing_says_when_it_is_not_for_all_audiences() {
+        let mut v: serde_json::Value = serde_json::from_str(FULL).unwrap();
+        assert!(
+            !parse_repo_detail("a/b", &v, &official())
+                .unwrap()
+                .not_for_all_audiences
+        );
+        v["tags"]
+            .as_array_mut()
+            .unwrap()
+            .push("not-for-all-audiences".into());
+        assert!(
+            parse_repo_detail("a/b", &v, &official())
+                .unwrap()
+                .not_for_all_audiences
+        );
     }
 }

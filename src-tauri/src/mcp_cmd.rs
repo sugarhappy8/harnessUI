@@ -1114,7 +1114,7 @@ pub async fn add_mcp_servers(
         let shown = serde_json::to_value(&cfg).map_err(AppError::internal)?;
         let _ = state
             .store
-            .acknowledge_mcp_server(id, shown, chrono::Utc::now().timestamp_millis())
+            .acknowledge_mcp_server(id, shown, jiff::Timestamp::now().as_millisecond())
             .await;
         let host = state.host.clone();
         let name = e.name.clone();

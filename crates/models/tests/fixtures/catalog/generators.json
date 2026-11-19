@@ -1,0 +1,739 @@
+{
+  "schemaVersion": 1,
+  "sequence": 3,
+  "generated": "2026-11-18",
+  "note": "Test fixture for the Studio picture and video entries. Every name, repository, hash and number is made up, except each licence's sha256, which is that of third_party/licenses/models/apache-2.0.txt.",
+  "tiers": {
+    "8": {
+      "recommendedCtx": 16384,
+      "models": [
+        "sample-chat-q4km"
+      ]
+    }
+  },
+  "models": {
+    "sample-chat-q4km": {
+      "name": "Sample Chat 4B",
+      "repo": "example-quants/Sample-Chat-4B-GGUF",
+      "revision": "1111111111111111111111111111111111111111",
+      "files": [
+        {
+          "path": "Sample-Chat-4B-Q4_K_M.gguf",
+          "size": 2740937888,
+          "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        }
+      ],
+      "mmproj": null,
+      "quant": "Q4_K_M",
+      "capabilities": [
+        "tools",
+        "thinking"
+      ],
+      "license": {
+        "spdx": "apache-2.0"
+      },
+      "gated": false,
+      "sampling": {},
+      "minLlamaBuild": null,
+      "tested": null,
+      "memoryAtRecommendedCtx": null
+    }
+  },
+  "generators": {
+    "sample-image": {
+      "name": "Sample Picture 4B",
+      "summary": "Quick test pictures in 4 steps; can also change a picture you add.",
+      "publisher": "Example Labs",
+      "kind": "image",
+      "family": "flux2-klein-4b",
+      "inputs": [
+        "reference"
+      ],
+      "parts": [
+        {
+          "role": "diffusion",
+          "repo": "example-quants/Sample-Picture-4B-GGUF",
+          "revision": "2222222222222222222222222222222222222222",
+          "path": "sample-picture-4b-Q4_0.gguf",
+          "size": 2323402400,
+          "sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          "license": "apache-2.0"
+        },
+        {
+          "role": "llm",
+          "repo": "example-quants/Sample-Encoder-4B-GGUF",
+          "revision": "3333333333333333333333333333333333333333",
+          "path": "Sample-Encoder-4B-Q4_K_M.gguf",
+          "size": 2497280256,
+          "sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+          "license": "apache-2.0"
+        },
+        {
+          "role": "vae",
+          "repo": "example-labs/Sample-Picture-4B",
+          "revision": "4444444444444444444444444444444444444444",
+          "path": "split_files/vae/sample-vae.safetensors",
+          "size": 336211292,
+          "sha256": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+          "license": "apache-2.0"
+        }
+      ],
+      "licenses": {
+        "apache-2.0": {
+          "name": "Apache License 2.0",
+          "url": "https://huggingface.co/example-labs/Sample-Picture-4B/blob/4444444444444444444444444444444444444444/LICENSE",
+          "sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30",
+          "commercialOutputs": "yes",
+          "revenueLimitUsd": null,
+          "excludedRegions": [],
+          "obligations": [
+            "Keep the licence and copyright notices with the files."
+          ],
+          "plainWords": "Free for any use, including commercial."
+        }
+      },
+      "gate": {
+        "mode": "none",
+        "collects": []
+      },
+      "defaults": {
+        "steps": 4,
+        "cfg": 1.0,
+        "sampler": "euler",
+        "width": 1024,
+        "height": 1024
+      },
+      "limits": {
+        "multipleOf": 16,
+        "maxSide": 2048,
+        "frameRule": null
+      },
+      "memory": [
+        {
+          "width": 1024,
+          "height": 1024,
+          "frames": 1,
+          "peakBytes": 6200000000,
+          "device": "vulkan",
+          "build": 1106
+        }
+      ],
+      "quirks": [],
+      "minBuild": 1106,
+      "tested": null
+    },
+    "sample-video": {
+      "name": "Sample Clip 5B, fast",
+      "summary": "Short test clips from words, or from a start picture.",
+      "publisher": "Example Labs",
+      "kind": "video",
+      "family": "wan2.2-ti2v-5b-fast",
+      "inputs": [
+        "startFrame"
+      ],
+      "parts": [
+        {
+          "role": "diffusion",
+          "repo": "example-quants/Sample-Clip-5B-GGUF",
+          "revision": "5555555555555555555555555555555555555555",
+          "path": "Sample-Clip-5B-q6_k.gguf",
+          "size": 4212000000,
+          "sha256": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+          "license": "apache-2.0"
+        },
+        {
+          "role": "t5xxl",
+          "repo": "example-quants/sample-t5-encoder-gguf",
+          "revision": "6666666666666666666666666666666666666666",
+          "path": "sample-t5-encoder-Q5_K_M.gguf",
+          "size": 4148000000,
+          "sha256": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+          "license": "apache-2.0"
+        },
+        {
+          "role": "vae",
+          "repo": "example-quants/Sample-Clip-5B-GGUF",
+          "revision": "7777777777777777777777777777777777777777",
+          "path": "VAE/sample_clip_vae.safetensors",
+          "size": 1409400000,
+          "sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+          "license": "apache-2.0"
+        }
+      ],
+      "licenses": {
+        "apache-2.0": {
+          "name": "Apache License 2.0",
+          "url": "https://huggingface.co/example-labs/Sample-Clip-5B/blob/8888888888888888888888888888888888888888/LICENSE",
+          "sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30",
+          "commercialOutputs": "yes",
+          "revenueLimitUsd": null,
+          "excludedRegions": [],
+          "obligations": [
+            "Keep the licence and copyright notices with the files."
+          ],
+          "plainWords": "Free for any use, including commercial."
+        }
+      },
+      "gate": {
+        "mode": "none",
+        "collects": []
+      },
+      "defaults": {
+        "steps": 4,
+        "cfg": 1.0,
+        "flowShift": 3.0,
+        "width": 832,
+        "height": 480,
+        "frames": 49,
+        "fps": 24
+      },
+      "limits": {
+        "multipleOf": 32,
+        "maxSide": 1280,
+        "frameRule": "4n+1",
+        "maxFrames": 121
+      },
+      "fallback": {
+        "actBaseBytes": 1000000000,
+        "actBytesPerToken": 250000,
+        "vaeBytesPerPixelFrame": 400,
+        "vaeTileCapBytes": 2500000000,
+        "tokenDiv": 32,
+        "frameDiv": 4,
+        "vaeChunkFrames": 4
+      },
+      "memory": [],
+      "speed": [
+        {
+          "deviceClass": "vulkan-8",
+          "width": 832,
+          "height": 480,
+          "frames": 49,
+          "loadSeconds": 12.5,
+          "secondsPerStep": 9.0,
+          "decodeSeconds": 20.0,
+          "measuredOn": "an example 8 GB card (Vulkan), 2026-11-20"
+        }
+      ],
+      "quirks": [
+        "video-webp-on-mac"
+      ],
+      "minBuild": 1100,
+      "tested": "2026-11-20"
+    },
+    "bad-family": {
+      "name": "Sample Picture 4B",
+      "summary": "Quick test pictures in 4 steps; can also change a picture you add.",
+      "publisher": "Example Labs",
+      "kind": "image",
+      "family": "flux3-klein-9b",
+      "inputs": [
+        "reference"
+      ],
+      "parts": [
+        {
+          "role": "diffusion",
+          "repo": "example-quants/Sample-Picture-4B-GGUF",
+          "revision": "2222222222222222222222222222222222222222",
+          "path": "sample-picture-4b-Q4_0.gguf",
+          "size": 2323402400,
+          "sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          "license": "apache-2.0"
+        },
+        {
+          "role": "llm",
+          "repo": "example-quants/Sample-Encoder-4B-GGUF",
+          "revision": "3333333333333333333333333333333333333333",
+          "path": "Sample-Encoder-4B-Q4_K_M.gguf",
+          "size": 2497280256,
+          "sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+          "license": "apache-2.0"
+        },
+        {
+          "role": "vae",
+          "repo": "example-labs/Sample-Picture-4B",
+          "revision": "4444444444444444444444444444444444444444",
+          "path": "split_files/vae/sample-vae.safetensors",
+          "size": 336211292,
+          "sha256": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+          "license": "apache-2.0"
+        }
+      ],
+      "licenses": {
+        "apache-2.0": {
+          "name": "Apache License 2.0",
+          "url": "https://huggingface.co/example-labs/Sample-Picture-4B/blob/4444444444444444444444444444444444444444/LICENSE",
+          "sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30",
+          "commercialOutputs": "yes",
+          "revenueLimitUsd": null,
+          "excludedRegions": [],
+          "obligations": [
+            "Keep the licence and copyright notices with the files."
+          ],
+          "plainWords": "Free for any use, including commercial."
+        }
+      },
+      "gate": {
+        "mode": "none",
+        "collects": []
+      },
+      "defaults": {
+        "steps": 4,
+        "cfg": 1.0,
+        "sampler": "euler",
+        "width": 1024,
+        "height": 1024
+      },
+      "limits": {
+        "multipleOf": 16,
+        "maxSide": 2048,
+        "frameRule": null
+      },
+      "memory": [
+        {
+          "width": 1024,
+          "height": 1024,
+          "frames": 1,
+          "peakBytes": 6200000000,
+          "device": "vulkan",
+          "build": 1106
+        }
+      ],
+      "quirks": [],
+      "minBuild": 1106,
+      "tested": null
+    },
+    "bad-role": {
+      "name": "Sample Picture 4B",
+      "summary": "Quick test pictures in 4 steps; can also change a picture you add.",
+      "publisher": "Example Labs",
+      "kind": "image",
+      "family": "flux2-klein-4b",
+      "inputs": [
+        "reference"
+      ],
+      "parts": [
+        {
+          "role": "diffusion",
+          "repo": "example-quants/Sample-Picture-4B-GGUF",
+          "revision": "2222222222222222222222222222222222222222",
+          "path": "sample-picture-4b-Q4_0.gguf",
+          "size": 2323402400,
+          "sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          "license": "apache-2.0"
+        },
+        {
+          "role": "llm",
+          "repo": "example-quants/Sample-Encoder-4B-GGUF",
+          "revision": "3333333333333333333333333333333333333333",
+          "path": "Sample-Encoder-4B-Q4_K_M.gguf",
+          "size": 2497280256,
+          "sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+          "license": "apache-2.0"
+        },
+        {
+          "role": "upscaler",
+          "repo": "example-labs/Sample-Picture-4B",
+          "revision": "4444444444444444444444444444444444444444",
+          "path": "split_files/vae/sample-vae.safetensors",
+          "size": 336211292,
+          "sha256": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+          "license": "apache-2.0"
+        }
+      ],
+      "licenses": {
+        "apache-2.0": {
+          "name": "Apache License 2.0",
+          "url": "https://huggingface.co/example-labs/Sample-Picture-4B/blob/4444444444444444444444444444444444444444/LICENSE",
+          "sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30",
+          "commercialOutputs": "yes",
+          "revenueLimitUsd": null,
+          "excludedRegions": [],
+          "obligations": [
+            "Keep the licence and copyright notices with the files."
+          ],
+          "plainWords": "Free for any use, including commercial."
+        }
+      },
+      "gate": {
+        "mode": "none",
+        "collects": []
+      },
+      "defaults": {
+        "steps": 4,
+        "cfg": 1.0,
+        "sampler": "euler",
+        "width": 1024,
+        "height": 1024
+      },
+      "limits": {
+        "multipleOf": 16,
+        "maxSide": 2048,
+        "frameRule": null
+      },
+      "memory": [
+        {
+          "width": 1024,
+          "height": 1024,
+          "frames": 1,
+          "peakBytes": 6200000000,
+          "device": "vulkan",
+          "build": 1106
+        }
+      ],
+      "quirks": [],
+      "minBuild": 1106,
+      "tested": null
+    },
+    "bad-quirk": {
+      "name": "Sample Picture 4B",
+      "summary": "Quick test pictures in 4 steps; can also change a picture you add.",
+      "publisher": "Example Labs",
+      "kind": "image",
+      "family": "flux2-klein-4b",
+      "inputs": [
+        "reference"
+      ],
+      "parts": [
+        {
+          "role": "diffusion",
+          "repo": "example-quants/Sample-Picture-4B-GGUF",
+          "revision": "2222222222222222222222222222222222222222",
+          "path": "sample-picture-4b-Q4_0.gguf",
+          "size": 2323402400,
+          "sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          "license": "apache-2.0"
+        },
+        {
+          "role": "llm",
+          "repo": "example-quants/Sample-Encoder-4B-GGUF",
+          "revision": "3333333333333333333333333333333333333333",
+          "path": "Sample-Encoder-4B-Q4_K_M.gguf",
+          "size": 2497280256,
+          "sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+          "license": "apache-2.0"
+        },
+        {
+          "role": "vae",
+          "repo": "example-labs/Sample-Picture-4B",
+          "revision": "4444444444444444444444444444444444444444",
+          "path": "split_files/vae/sample-vae.safetensors",
+          "size": 336211292,
+          "sha256": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+          "license": "apache-2.0"
+        }
+      ],
+      "licenses": {
+        "apache-2.0": {
+          "name": "Apache License 2.0",
+          "url": "https://huggingface.co/example-labs/Sample-Picture-4B/blob/4444444444444444444444444444444444444444/LICENSE",
+          "sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30",
+          "commercialOutputs": "yes",
+          "revenueLimitUsd": null,
+          "excludedRegions": [],
+          "obligations": [
+            "Keep the licence and copyright notices with the files."
+          ],
+          "plainWords": "Free for any use, including commercial."
+        }
+      },
+      "gate": {
+        "mode": "none",
+        "collects": []
+      },
+      "defaults": {
+        "steps": 4,
+        "cfg": 1.0,
+        "sampler": "euler",
+        "width": 1024,
+        "height": 1024
+      },
+      "limits": {
+        "multipleOf": 16,
+        "maxSide": 2048,
+        "frameRule": null
+      },
+      "memory": [
+        {
+          "width": 1024,
+          "height": 1024,
+          "frames": 1,
+          "peakBytes": 6200000000,
+          "device": "vulkan",
+          "build": 1106
+        }
+      ],
+      "quirks": [
+        "turbo-mode"
+      ],
+      "minBuild": 1106,
+      "tested": null
+    }
+  },
+  "generatorTiers": {
+    "image": {
+      "0": [
+        "sample-image"
+      ],
+      "8": [
+        "sample-image",
+        "bad-family",
+        "no-such-entry"
+      ],
+      "lots": [
+        "sample-image"
+      ],
+      "16": "sample-image"
+    },
+    "video": {
+      "8": [
+        "sample-video",
+        42
+      ]
+    }
+  },
+  "generatorFamilies": {
+    "flux2-klein-4b": {
+      "name": "Sample Picture 4B",
+      "publisher": "Example Labs",
+      "kind": "image",
+      "inputs": [
+        "reference"
+      ],
+      "upstreamLicense": "apache-2.0",
+      "companions": [
+        {
+          "role": "llm",
+          "repo": "example-quants/Sample-Encoder-4B-GGUF",
+          "revision": "3333333333333333333333333333333333333333",
+          "path": "Sample-Encoder-4B-Q4_K_M.gguf",
+          "size": 2497280256,
+          "sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+          "license": "apache-2.0"
+        },
+        {
+          "role": "vae",
+          "repo": "example-labs/Sample-Picture-4B",
+          "revision": "4444444444444444444444444444444444444444",
+          "path": "split_files/vae/sample-vae.safetensors",
+          "size": 336211292,
+          "sha256": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+          "license": "apache-2.0"
+        }
+      ],
+      "licenses": {
+        "apache-2.0": {
+          "name": "Apache License 2.0",
+          "url": "https://huggingface.co/example-labs/Sample-Picture-4B/blob/4444444444444444444444444444444444444444/LICENSE",
+          "sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30",
+          "commercialOutputs": "yes",
+          "revenueLimitUsd": null,
+          "excludedRegions": [],
+          "obligations": [
+            "Keep the licence and copyright notices with the files."
+          ],
+          "plainWords": "Free for any use, including commercial."
+        }
+      },
+      "defaults": {
+        "steps": 4,
+        "cfg": 1.0,
+        "sampler": "euler",
+        "width": 1024,
+        "height": 1024
+      },
+      "limits": {
+        "multipleOf": 16,
+        "maxSide": 2048,
+        "frameRule": null
+      },
+      "fallback": {
+        "actBaseBytes": 500000000,
+        "actBytesPerToken": 100000,
+        "vaeBytesPerPixelFrame": 300,
+        "vaeTileCapBytes": 500000000,
+        "tokenDiv": 16
+      },
+      "memory": [],
+      "speed": [
+        {
+          "deviceClass": "metal-16",
+          "width": 1024,
+          "height": 1024,
+          "frames": 1,
+          "loadSeconds": 8.0,
+          "secondsPerStep": 14.0,
+          "decodeSeconds": 3.5,
+          "measuredOn": "an example 16 GB Mac, 2026-11-20"
+        }
+      ],
+      "quirks": [],
+      "minBuild": 1106,
+      "runsOnApple": true,
+      "parameters": [
+        3500000000,
+        4500000000
+      ]
+    },
+    "wan2.2-ti2v-5b-fast": {
+      "name": "Sample Clip 5B, fast",
+      "publisher": "Example Labs",
+      "kind": "video",
+      "inputs": [
+        "startFrame"
+      ],
+      "upstreamLicense": "apache-2.0",
+      "companions": [
+        {
+          "role": "t5xxl",
+          "repo": "example-quants/sample-t5-encoder-gguf",
+          "revision": "6666666666666666666666666666666666666666",
+          "path": "sample-t5-encoder-Q5_K_M.gguf",
+          "size": 4148000000,
+          "sha256": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+          "license": "apache-2.0"
+        },
+        {
+          "role": "vae",
+          "repo": "example-quants/Sample-Clip-5B-GGUF",
+          "revision": "7777777777777777777777777777777777777777",
+          "path": "VAE/sample_clip_vae.safetensors",
+          "size": 1409400000,
+          "sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+          "license": "apache-2.0"
+        }
+      ],
+      "licenses": {
+        "apache-2.0": {
+          "name": "Apache License 2.0",
+          "url": "https://huggingface.co/example-labs/Sample-Clip-5B/blob/8888888888888888888888888888888888888888/LICENSE",
+          "sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30",
+          "commercialOutputs": "yes",
+          "revenueLimitUsd": null,
+          "excludedRegions": [],
+          "obligations": [
+            "Keep the licence and copyright notices with the files."
+          ],
+          "plainWords": "Free for any use, including commercial."
+        }
+      },
+      "defaults": {
+        "steps": 4,
+        "cfg": 1.0,
+        "flowShift": 3.0,
+        "width": 832,
+        "height": 480,
+        "frames": 49,
+        "fps": 24
+      },
+      "limits": {
+        "multipleOf": 32,
+        "maxSide": 1280,
+        "frameRule": "4n+1",
+        "maxFrames": 121
+      },
+      "fallback": {
+        "actBaseBytes": 1200000000,
+        "actBytesPerToken": 250000,
+        "vaeBytesPerPixelFrame": 400,
+        "vaeTileCapBytes": 2500000000,
+        "tokenDiv": 32,
+        "frameDiv": 4,
+        "vaeChunkFrames": 4
+      },
+      "memory": [],
+      "speed": [],
+      "quirks": [
+        "video-webp-on-mac"
+      ],
+      "minBuild": 1100,
+      "runsOnApple": false,
+      "parameters": [
+        4500000000,
+        5500000000
+      ]
+    },
+    "sd3.5-medium": {
+      "name": "Sample Picture 4B",
+      "publisher": "Example Labs",
+      "kind": "image",
+      "inputs": [
+        "reference"
+      ],
+      "upstreamLicense": "apache-2.0",
+      "companions": [
+        {
+          "role": "llm",
+          "repo": "example-quants/Sample-Encoder-4B-GGUF",
+          "revision": "3333333333333333333333333333333333333333",
+          "path": "Sample-Encoder-4B-Q4_K_M.gguf",
+          "size": 2497280256,
+          "sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+          "license": "apache-2.0"
+        },
+        {
+          "role": "vae",
+          "repo": "example-labs/Sample-Picture-4B",
+          "revision": "4444444444444444444444444444444444444444",
+          "path": "split_files/vae/sample-vae.safetensors",
+          "size": 336211292,
+          "sha256": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+          "license": "apache-2.0"
+        }
+      ],
+      "licenses": {
+        "apache-2.0": {
+          "name": "Apache License 2.0",
+          "url": "https://huggingface.co/example-labs/Sample-Picture-4B/blob/4444444444444444444444444444444444444444/LICENSE",
+          "sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30",
+          "commercialOutputs": "yes",
+          "revenueLimitUsd": null,
+          "excludedRegions": [],
+          "obligations": [
+            "Keep the licence and copyright notices with the files."
+          ],
+          "plainWords": "Free for any use, including commercial."
+        }
+      },
+      "defaults": {
+        "steps": 4,
+        "cfg": 1.0,
+        "sampler": "euler",
+        "width": 1024,
+        "height": 1024
+      },
+      "limits": {
+        "multipleOf": 16,
+        "maxSide": 2048,
+        "frameRule": null
+      },
+      "fallback": {
+        "actBaseBytes": 500000000,
+        "actBytesPerToken": 100000,
+        "vaeBytesPerPixelFrame": 300,
+        "vaeTileCapBytes": 500000000,
+        "tokenDiv": 16
+      },
+      "memory": [],
+      "speed": [
+        {
+          "deviceClass": "metal-16",
+          "width": 1024,
+          "height": 1024,
+          "frames": 1,
+          "loadSeconds": 8.0,
+          "secondsPerStep": 14.0,
+          "decodeSeconds": 3.5,
+          "measuredOn": "an example 16 GB Mac, 2026-11-20"
+        }
+      ],
+      "quirks": [],
+      "minBuild": 1106,
+      "runsOnApple": true,
+      "parameters": [
+        3500000000,
+        4500000000
+      ]
+    }
+  }
+}

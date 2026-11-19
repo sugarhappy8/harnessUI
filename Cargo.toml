@@ -17,7 +17,7 @@ members = [
 ]
 
 [workspace.package]
-version = "0.0.8"
+version = "0.1.0"
 edition = "2024"
 rust-version = "1.95"
 license = "MIT"
@@ -100,7 +100,8 @@ pdf-extract = "0.12"
 tree-sitter = "0.27"
 tree-sitter-bash = "0.25"
 tree-sitter-powershell = "0.26"
-chrono = { version = "0.4", default-features = false, features = ["clock", "serde", "std"] }
+# Dates and times, UTC and the local zone (replaces chrono: RUSTSEC-2026-0543, unmaintained).
+jiff = "0.2.46"
 serde-saphyr = "2.1"
 zip = { version = "9.5", default-features = false, features = ["deflate"] }
 # Web search (crates/search). All four are in the lock already (Tauri and reqwest use

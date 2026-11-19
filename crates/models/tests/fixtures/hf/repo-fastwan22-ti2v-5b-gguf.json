@@ -1,0 +1,54 @@
+{
+  "_id": "6911edb11cff05bce241ad09",
+  "id": "Green-Sky/FastWan2.2-TI2V-5B-FullAttn-GGUF",
+  "gguf": {
+    "total": 4999787712,
+    "totalFileSize": 4210247200
+  },
+  "sha": "3e8fe5537b1200654868aa24ea8d0f4012fb3a1e",
+  "gated": false,
+  "tags": [
+    "gguf",
+    "license:apache-2.0",
+    "region:us"
+  ],
+  "cardData": {
+    "license": "apache-2.0"
+  },
+  "author": "Green-Sky",
+  "downloads": 6274,
+  "likes": 2,
+  "lastModified": "2025-11-11T20:11:08.000Z",
+  "siblings": [
+    {
+      "rfilename": ".gitattributes",
+      "blobId": "9ed5670925216508ba35e48649186108774325cd",
+      "size": 1868
+    },
+    {
+      "rfilename": "FastWan2.2-TI2V-5B-q6_k.gguf",
+      "blobId": "f6a64e56a3acc6e63cdf1205a5d175f2b4c7cf07",
+      "size": 4210247200,
+      "lfs": {
+        "sha256": "416a87e30f2328dbefd7666ac90b395ead74f443748ff31c83483ac4ac6121cc",
+        "size": 4210247200,
+        "pointerSize": 135
+      }
+    },
+    {
+      "rfilename": "FastWan2.2-TI2V-5B-q8_0.gguf",
+      "blobId": "5d1521755bed1ec50cf43256f7124456fd9afb81",
+      "size": 5412844128,
+      "lfs": {
+        "sha256": "b62f50ff87c4dfa2910c6883d45015e05b709366581698b302e259e7f25c9208",
+        "size": 5412844128,
+        "pointerSize": 135
+      }
+    },
+    {
+      "rfilename": "README.md",
+      "blobId": "7b95401dc46245ac339fc25059d4a56d90b4cde5",
+      "size": 31
+    }
+  ]
+}

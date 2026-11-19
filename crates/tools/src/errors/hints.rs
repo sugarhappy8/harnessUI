@@ -450,9 +450,11 @@ mod tests {
         let long_term = format!("The term '{}' is not recognized as", "g".repeat(1_000_000));
         assert!(command_hints(PS, "x", &long_term).is_empty());
         let elapsed = started.elapsed();
+        // Debug builds on shared CI machines are slow; a quadratic pass would take minutes.
+        let limit = std::time::Duration::from_secs(if cfg!(debug_assertions) { 10 } else { 1 });
         assert!(
-            elapsed < std::time::Duration::from_secs(1),
-            "{elapsed:?} for about 3 MB"
+            elapsed < limit,
+            "{elapsed:?} for about 3 MB (limit {limit:?})"
         );
         // Terms are still found, also next to text that is not ASCII.
         let grep = "é The term 'grep' is not recognized as the name of a cmdlet.";

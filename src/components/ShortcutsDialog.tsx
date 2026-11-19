@@ -1,7 +1,8 @@
-import { useEffect, useState } from "react";
+import { useEffect, useId, useState } from "react";
 import { Dialog } from "radix-ui";
 import { X } from "lucide-react";
 import * as ipc from "../lib/ipc";
+import { STUDIO_NAV, STUDIO_VIEWER_KEYS } from "../lib/words";
 
 const isMac = typeof navigator !== "undefined" && /Mac/i.test(navigator.platform);
 const MOD = isMac ? "⌘" : "Ctrl";
@@ -11,6 +12,7 @@ const ROWS: [string, string][] = [
   [`${MOD} K`, "Search chats"],
   [`${MOD} L`, "Focus the message box"],
   [`${MOD} M`, "Models"],
+  [`${MOD} G`, STUDIO_NAV.name],
   [`${MOD} B`, "Show or hide the chat list"],
   [`${MOD} ,`, "Settings"],
   [`${MOD} /`, "This list"],
@@ -21,6 +23,7 @@ const ROWS: [string, string][] = [
 /** The keyboard shortcut sheet. */
 export function ShortcutsDialog(props: { open: boolean; onOpenChange: (open: boolean) => void }) {
   const [hotkey, setHotkey] = useState<string | null>(null);
+  const viewerKeys = useId();
   useEffect(() => {
     if (props.open && ipc.isTauri())
       void ipc
@@ -54,6 +57,19 @@ export function ShortcutsDialog(props: { open: boolean; onOpenChange: (open: boo
                 </td>
                 <td className="py-1.5">Stop from anywhere, even when another app is in front (change it in Settings)</td>
               </tr>
+            </tbody>
+          </table>
+          <h3 id={viewerKeys} className="mt-4 mb-1 text-sm font-semibold">
+            {STUDIO_VIEWER_KEYS.title}
+          </h3>
+          <table aria-labelledby={viewerKeys} className="w-full text-sm">
+            <tbody>
+              {STUDIO_VIEWER_KEYS.rows.map(([k, what]) => (
+                <tr key={k} className="border-b border-border last:border-0">
+                  <td className="py-1.5 pr-4 font-mono text-xs whitespace-nowrap">{k}</td>
+                  <td className="py-1.5">{what}</td>
+                </tr>
+              ))}
             </tbody>
           </table>
         </Dialog.Content>

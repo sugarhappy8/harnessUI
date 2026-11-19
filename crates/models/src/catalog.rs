@@ -30,6 +30,65 @@ pub struct Catalog {
     /// Keyed by memory size in GB ("8", "12", …).
     pub tiers: BTreeMap<String, Tier>,
     pub models: BTreeMap<String, Entry>,
+
+    // ---- 0.1.0 Studio: picture and video models, read by `gen_catalog`. Kept as raw
+    // JSON so that one bad entry never fails the chat catalog (and older parsers, which
+    // ignore unknown keys, still read the file). A value that is not an object is left
+    // out when read, with a warning in the log; none of the three is written back when
+    // empty.
+    /// Picture and video entries by id.
+    #[serde(
+        default,
+        deserialize_with = "generators_or_empty",
+        skip_serializing_if = "BTreeMap::is_empty"
+    )]
+    pub generators: BTreeMap<String, serde_json::Value>,
+    /// Recommended entry ids per kind and memory size in GB, best first.
+    #[serde(default, skip_serializing_if = "serde_json::Value::is_null")]
+    pub generator_tiers: serde_json::Value,
+    /// The known-good record of each picture and video family, by family id.
+    #[serde(
+        default,
+        deserialize_with = "families_or_empty",
+        skip_serializing_if = "BTreeMap::is_empty"
+    )]
+    pub generator_families: BTreeMap<String, serde_json::Value>,
+}
+
+fn generators_or_empty<'de, D: serde::Deserializer<'de>>(
+    d: D,
+) -> Result<BTreeMap<String, serde_json::Value>, D::Error> {
+    object_or_empty(d, "generators")
+}
+
+fn families_or_empty<'de, D: serde::Deserializer<'de>>(
+    d: D,
+) -> Result<BTreeMap<String, serde_json::Value>, D::Error> {
+    object_or_empty(d, "generatorFamilies")
+}
+
+/// Reads the catalog's `key` as a map of raw values. Anything but an object (a malformed
+/// signed catalog) is an empty map, so the chat models still read, and a warning naming
+/// `key` is logged.
+fn object_or_empty<'de, D: serde::Deserializer<'de>>(
+    d: D,
+    key: &str,
+) -> Result<BTreeMap<String, serde_json::Value>, D::Error> {
+    use serde_json::Value;
+    let found = match Value::deserialize(d)? {
+        Value::Object(map) => return Ok(map.into_iter().collect()),
+        Value::Null => "null",
+        Value::Bool(_) => "a boolean",
+        Value::Number(_) => "a number",
+        Value::String(_) => "a string",
+        Value::Array(_) => "a list",
+    };
+    tracing::warn!(
+        key,
+        found,
+        "the catalog's {key} is not an object, so it is read as empty"
+    );
+    Ok(BTreeMap::new())
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -253,7 +312,8 @@ pub enum CatalogError {
     NoKey,
 }
 
-fn is_hex(s: &str, len: usize) -> bool {
+/// Whether `s` is exactly `len` lowercase hex digits.
+pub(crate) fn is_hex(s: &str, len: usize) -> bool {
     s.len() == len
         && s.bytes()
             .all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase())
@@ -729,6 +789,99 @@ mod tests {
         // And the bundled catalog, whatever it holds now.
         let bundled: v005::Catalog = serde_json::from_str(BUNDLED).unwrap();
         assert_eq!(bundled.models.len(), Catalog::bundled().models.len());
+    }
+
+    // ---- 0.1.0 Studio: picture and video entries ----------------------------------------
+
+    /// One chat model beside made-up picture and video entries, family records and tiers.
+    const GEN_CATALOG: &str = include_str!("../tests/fixtures/catalog/generators.json");
+
+    #[test]
+    fn an_older_parser_reads_a_catalog_with_generators() {
+        let old: v005::Catalog = serde_json::from_str(GEN_CATALOG).unwrap();
+        assert_eq!(old.models.len(), 1);
+        assert_eq!(old.tiers["8"].models, ["sample-chat-q4km"]);
+    }
+
+    #[test]
+    fn writing_a_catalog_keeps_its_generators_and_adds_none_to_others() {
+        let c = Catalog::parse(GEN_CATALOG).unwrap();
+        let written = serde_json::to_value(&c).unwrap();
+        assert!(written["generators"].as_object().unwrap().len() >= 2);
+        assert!(written["generatorTiers"]["image"].is_object());
+        assert!(written["generatorFamilies"]["flux2-klein-4b"].is_object());
+        assert_eq!(Catalog::parse(&written.to_string()).unwrap(), c);
+        let others = serde_json::to_value(Catalog::parse(TEST_CATALOG).unwrap()).unwrap();
+        for key in ["generators", "generatorTiers", "generatorFamilies"] {
+            assert!(others.get(key).is_none(), "{key}");
+        }
+    }
+
+    /// The three keys are read as they come; one that is not even an object is left out,
+    /// never a reason to refuse the chat models, and the log names the key so that a
+    /// malformed signed catalog shows. (The only test that reaches that warning: met first
+    /// on a thread with no capture, its callsite could be cached as never logging.)
+    #[test]
+    fn generators_of_the_wrong_shape_never_fail_the_catalog() {
+        let mut v: serde_json::Value = serde_json::from_str(GEN_CATALOG).unwrap();
+        v["generators"] = serde_json::json!([1, 2]);
+        v["generatorTiers"] = serde_json::json!("nope");
+        v["generatorFamilies"] = serde_json::json!(5);
+        let (c, log) = warnings(|| Catalog::parse(&v.to_string()).unwrap());
+        assert_eq!(c.models.len(), 1);
+        assert!(c.generators.is_empty() && c.generator_families.is_empty());
+        assert_eq!(c.generator_tiers, "nope");
+        assert_eq!(log.lines().count(), 2, "{log}");
+        assert!(log.contains(r#"key="generators" found="a list""#), "{log}");
+        assert!(
+            log.contains(r#"key="generatorFamilies" found="a number""#),
+            "{log}"
+        );
+        assert!(log.contains("generatorFamilies is not an object"), "{log}");
+        // Objects, or the keys left out, log nothing.
+        assert_eq!(warnings(|| Catalog::parse(GEN_CATALOG).unwrap()).1, "");
+        assert_eq!(warnings(|| Catalog::parse(TEST_CATALOG).unwrap()).1, "");
+    }
+
+    /// What `f` returns, and every warning logged on this thread while it runs, one
+    /// `WARN field=value …` line each.
+    fn warnings<T>(f: impl FnOnce() -> T) -> (T, String) {
+        use std::fmt::{Debug, Write};
+        use std::sync::{Arc, Mutex};
+        use tracing::field::{Field, Visit};
+        use tracing::span::{Attributes, Id, Record};
+
+        struct Line<'a>(&'a mut String);
+        impl Visit for Line<'_> {
+            fn record_debug(&mut self, field: &Field, value: &dyn Debug) {
+                let _ = write!(self.0, " {}={value:?}", field.name());
+            }
+        }
+        struct Capture(Arc<Mutex<String>>);
+        impl tracing::Subscriber for Capture {
+            fn enabled(&self, _: &tracing::Metadata<'_>) -> bool {
+                true
+            }
+            fn new_span(&self, _: &Attributes<'_>) -> Id {
+                Id::from_u64(1)
+            }
+            fn record(&self, _: &Id, _: &Record<'_>) {}
+            fn record_follows_from(&self, _: &Id, _: &Id) {}
+            fn event(&self, event: &tracing::Event<'_>) {
+                if *event.metadata().level() == tracing::Level::WARN {
+                    let mut out = self.0.lock().unwrap();
+                    out.push_str("WARN");
+                    event.record(&mut Line(&mut out));
+                    out.push('\n');
+                }
+            }
+            fn enter(&self, _: &Id) {}
+            fn exit(&self, _: &Id) {}
+        }
+        let out = Arc::new(Mutex::new(String::new()));
+        let value = tracing::subscriber::with_default(Capture(out.clone()), f);
+        let text = out.lock().unwrap().clone();
+        (value, text)
     }
 
     /// A catalog without the new fields (the signed 0.0.5 test catalog) reads with

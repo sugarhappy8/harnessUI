@@ -1,13 +1,19 @@
 //! Model downloads (ARCHITECTURE.md 11): one group per model (its shards and the
 //! projector), persisted in the `downloads` table so an interrupted download resumes
 //! after a restart. Pause, resume and cancel act on a whole group.
+//!
+//! 0.1.0 Studio: a picture or video model is one group too ([`GenGroup`]): its parts come
+//! from several repositories, each at its own revision ([`row_commit`]), and once every part
+//! is checked it joins Studio's installed models instead of the chat list
+//! ([`register_gen_model`]).
 
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex as StdMutex};
 use std::time::{Duration, Instant};
 
 use models::download::{FileSpec, Progress, download_file_checked, resumable_bytes};
+use models::gen_catalog::GenFamily;
 use serde::{Deserialize, Serialize};
 use store::{DownloadPatch, DownloadStatus, ModelSource, NewDownload};
 use tauri::{AppHandle, Emitter, Manager};
@@ -15,6 +21,44 @@ use tokio_util::sync::CancellationToken;
 
 use crate::error::{AppError, AppResult};
 use crate::state::AppState;
+use crate::studio::errors as studio_errors;
+
+/// 0.1.0 Studio: the picture or video model a group downloads (its saved metadata's
+/// [`GroupMeta::generator`]), as its installed row will be.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GenGroup {
+    /// The installed model's id: the catalog id, or `hf:<owner>/<repo>:<file>`.
+    pub gen_model_id: String,
+    /// The signed catalog's entry; `None` for a searched model.
+    pub catalog_id: Option<String>,
+    pub name: String,
+    /// `image`, `image-edit` or `video`.
+    pub kind: String,
+    /// Its family's key in the known-good family table (`flux2-klein-4b`).
+    pub family: String,
+    /// `catalog` or `search`.
+    pub source: String,
+    /// Every part, in the entry's order.
+    pub parts: Vec<GenGroupPart>,
+}
+
+/// One part of a [`GenGroup`], pinned as its catalog entry or search result gave it.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GenGroupPart {
+    /// Its role's key (`diffusion`, `llm`, `vae`…).
+    pub role: String,
+    pub repo: String,
+    /// The 40-hex commit it is downloaded at.
+    pub revision: String,
+    /// Its path inside the repository.
+    pub path: String,
+    pub size: u64,
+    pub sha256: String,
+    /// Its licence's id.
+    pub license: String,
+}
 
 /// What a group is for, kept beside its rows.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -51,6 +95,165 @@ pub struct GroupMeta {
     /// before, and in a group that is only an image file.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub image_files: Option<Vec<models::RepoFile>>,
+    /// 0.1.0 Studio: the picture or video model this group downloads (`model_files` is
+    /// empty, and `repo` and `commit` are its diffusion part's). When it is done it joins
+    /// Studio's installed models ([`register_gen_model`]). Absent in every other group.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub generator: Option<GenGroup>,
+}
+
+/// The commit `file` of `repo` is downloaded at. The `downloads` table has no commit column:
+/// a picture or video model's part downloads at its own revision (its parts come from
+/// several repositories), any other row at the group's.
+pub(crate) fn row_commit(meta: &GroupMeta, repo: &str, file: &str) -> String {
+    meta.generator
+        .as_ref()
+        .and_then(|g| g.parts.iter().find(|p| p.repo == repo && p.path == file))
+        .map_or_else(|| meta.commit.clone(), |p| p.revision.clone())
+}
+
+/// The installed row a picture or video model's group makes once every part completed with
+/// its pinned SHA-256 (its row checked, `Verifying`, or done), each part with its own file on
+/// disk. A row is its part's when it is of the part's repository and path: two repositories
+/// may hold files of the same name, and each part's file is the row's own destination. A
+/// part missing, unfinished or unchecked is `studio_model_incomplete` (Resume finishes it).
+pub(crate) fn gen_model_from(
+    meta: &GroupMeta,
+    rows: &[store::Download],
+) -> AppResult<store::NewGenModel> {
+    let Some(generator) = &meta.generator else {
+        return Err(AppError::internal(
+            "a download without a picture or video model",
+        ));
+    };
+    let mut parts = Vec::with_capacity(generator.parts.len());
+    for part in &generator.parts {
+        let row = row_of(rows, part)
+            .filter(|r| {
+                matches!(
+                    r.status,
+                    DownloadStatus::Verifying | DownloadStatus::Completed
+                )
+            })
+            .filter(|r| {
+                !r.sha256.is_empty()
+                    && r.sha256.eq_ignore_ascii_case(&part.sha256)
+                    && r.size_bytes == part.size
+            })
+            .ok_or_else(studio_errors::model_incomplete)?;
+        let mut saved = serde_json::to_value(part).map_err(AppError::internal)?;
+        saved["file"] = row.dest_path.clone().into();
+        parts.push(saved);
+    }
+    let source = generator
+        .source
+        .parse::<store::GenSource>()
+        .map_err(AppError::internal)?;
+    Ok(store::NewGenModel {
+        id: generator.gen_model_id.clone(),
+        catalog_id: generator.catalog_id.clone(),
+        name: generator.name.clone(),
+        kind: generator.kind.clone(),
+        family: generator.family.clone(),
+        parts: serde_json::Value::Array(parts),
+        size_bytes: generator.parts.iter().map(|p| p.size).sum(),
+        source,
+    })
+}
+
+/// The row of `part` among a group's `rows`: the one of its repository and path.
+fn row_of<'a>(rows: &'a [store::Download], part: &GenGroupPart) -> Option<&'a store::Download> {
+    rows.iter()
+        .find(|r| r.repo == part.repo && r.file == part.path)
+}
+
+/// Whether the downloaded diffusion part at `path` is a model of `family`, by its own tensor
+/// table (`gen_search::family_from_tensors`; most such files name no architecture), so a file
+/// whose name lies (a FLUX.2 klein 9B named like the 4B) is never added. A `.safetensors`
+/// part was checked by its size and SHA-256 only. Otherwise `studio_not_that_model`.
+pub(crate) fn check_diffusion_file(family: GenFamily, path: &Path) -> AppResult<()> {
+    let gguf = path
+        .extension()
+        .and_then(|e| e.to_str())
+        .is_some_and(|e| e.eq_ignore_ascii_case("gguf"));
+    if !gguf {
+        return Ok(());
+    }
+    let shapes = models::read_tensor_shapes(path)
+        .map_err(|e| studio_errors::not_that_model(format!("its tensor table: {e}")))?;
+    match models::gen_search::family_from_tensors(&shapes) {
+        Some(found) if found == family => Ok(()),
+        found => Err(studio_errors::not_that_model(format!(
+            "expected {family:?}, its tensor table is {}",
+            found.map_or_else(|| "no known family's".to_string(), |f| format!("{f:?}'s"))
+        ))),
+    }
+}
+
+/// 0.1.0 Studio: adds the picture or video model `group` downloaded ([`GroupMeta::generator`])
+/// to Studio's installed models: every part checked ([`gen_model_from`]), then the diffusion
+/// part's tensor table ([`check_diffusion_file`], read off the async runtime). A diffusion file
+/// of another model is refused: nothing is added, and the diffusion file and the files the
+/// group wrote itself ([`written_by`], as Cancel deletes only those) are removed when no
+/// installed model uses them and no other download writes them, with their emptied folders.
+/// A part the download found already in place stays.
+pub(crate) async fn register_gen_model(
+    store: &store::Store,
+    models_dir: &Path,
+    group: &str,
+    meta: &GroupMeta,
+) -> AppResult<()> {
+    let rows = store.list_downloads(Some(group.to_string())).await?;
+    let new = gen_model_from(meta, &rows)?;
+    let family: GenFamily = serde_json::from_value(new.family.clone().into())
+        .map_err(|e| studio_errors::not_supported_yet(e.to_string()))?;
+    let diffusion = meta
+        .generator
+        .iter()
+        .flat_map(|g| &g.parts)
+        .find(|p| matches!(p.role.as_str(), "diffusion" | "model"))
+        .and_then(|p| row_of(&rows, p))
+        .ok_or_else(|| AppError::internal("a picture or video model without its model part"))?;
+    let path = PathBuf::from(&diffusion.dest_path);
+    let checked = tokio::task::spawn_blocking(move || check_diffusion_file(family, &path))
+        .await
+        .map_err(|e| AppError::internal(format!("the model file's check stopped: {e}")))?;
+    if let Err(refused) = checked {
+        let writing = files_being_written(store, Some(group)).await?;
+        let written = written_by(store, group).await;
+        let files: Vec<PathBuf> = rows
+            .iter()
+            .filter(|r| r.dest_path == diffusion.dest_path || written.contains(&r.dest_path))
+            .map(|r| PathBuf::from(&r.dest_path))
+            .collect();
+        let busy = |p: &Path| writing.contains(&p.display().to_string());
+        crate::studio::local_models::remove_unused_files(store, models_dir, &files, &busy).await?;
+        tracing::warn!(
+            model = %new.id,
+            "a downloaded model file is another model: {}",
+            refused.details
+        );
+        return Err(refused);
+    }
+    let id = new.id.clone();
+    store.insert_gen_model(new).await?;
+    tracing::info!(model = %id, "picture or video model downloaded");
+    Ok(())
+}
+
+/// The files a download not finished yet writes (a paused, failed or cancelled one too: it
+/// can go on), other than group `except`'s: nothing deletes them meanwhile.
+pub(crate) async fn files_being_written(
+    store: &store::Store,
+    except: Option<&str>,
+) -> AppResult<BTreeSet<String>> {
+    Ok(store
+        .list_downloads(None)
+        .await?
+        .into_iter()
+        .filter(|r| r.status != DownloadStatus::Completed && Some(r.group_id.as_str()) != except)
+        .map(|r| r.dest_path)
+        .collect())
 }
 
 fn meta_key(group: &str) -> String {
@@ -92,6 +295,13 @@ pub struct DownloadGroupDto {
     /// 0.0.7 (P6b review m5): a file is being checked (its SHA-256 worked out), which takes
     /// minutes for a large one; the row says so instead of "downloading".
     pub checking: bool,
+    /// 0.1.0 Studio: what the picture or video model this group downloads makes (`image`,
+    /// `image-edit` or `video`), so Downloads labels it; `None` for a chat model's group.
+    pub generator_kind: Option<String>,
+    /// 0.1.0 Studio: the installed id of the picture or video model this group downloads
+    /// ([`GenGroup::gen_model_id`]), so Get local models shows its progress on that model's
+    /// row; `None` for a chat model's group.
+    pub gen_model_id: Option<String>,
 }
 
 #[derive(Default)]
@@ -476,7 +686,10 @@ fn plan_start(
     let group = first.group_id.as_str();
     let one_group = busy.iter().all(|r| r.group_id == group);
     let all_there = dests.iter().all(|d| busy.iter().any(|r| &r.dest_path == d));
-    let same_kind = meta_of(group).is_some_and(|m| m.image_file_for == new.image_file_for);
+    // 0.1.0 Studio: a chat download of FLUX.2 klein's text encoder never joins klein's.
+    let same_kind = meta_of(group).is_some_and(|m| {
+        m.image_file_for == new.image_file_for && generator_id(&m) == generator_id(new)
+    });
     if !(one_group && all_there && same_kind) {
         return Start::Busy {
             running: busy.iter().any(|r| running(&r.group_id)),
@@ -492,6 +705,11 @@ fn plan_start(
     } else {
         Start::Resume(group.to_string())
     }
+}
+
+/// The picture or video model a group downloads, if any.
+fn generator_id(meta: &GroupMeta) -> Option<&str> {
+    meta.generator.as_ref().map(|g| g.gen_model_id.as_str())
 }
 
 /// A new download refused because another download writes some of its files
@@ -603,12 +821,14 @@ async fn forget_group(
     Ok(written)
 }
 
-/// What a group says when its files are all there but its last step failed: adding the
-/// model to Installed, or recording the image file on its model. Resume tries that step
-/// again without downloading anything.
-fn last_step_error(image_file: bool, e: &AppError) -> AppError {
-    let what = if image_file {
+/// What the group `meta` says when its files are all there but its last step failed: adding
+/// the model to Installed (0.1.0: a picture or video model to Studio), or recording the image
+/// file on its model. Resume tries that step again without downloading anything.
+fn last_step_error(meta: &GroupMeta, e: &AppError) -> AppError {
+    let what = if meta.image_file_for.is_some() {
         "The image file was downloaded, but it could not be added to its model."
+    } else if meta.generator.is_some() {
+        "The model was downloaded, but it could not be added to Studio."
     } else {
         "The model was downloaded, but it could not be added to Installed."
     };
@@ -691,7 +911,8 @@ async fn note_written(store: &store::Store, group: &str, dest: &str) -> AppResul
 /// files the group wrote itself (`written`), still whole at their final name, inside `root`
 /// once links are followed (the models folder, or for an image file the model's own
 /// folder), and used by no installed model (`in_use`: its own file, or its image file,
-/// which two models can share). A file the download found in place (another app's copy, a
+/// which two models can share; 0.1.0: or a part of a picture or video model). A file the
+/// download found in place (another app's copy, a
 /// model taken off the list, a file copied in by hand) or one a failed fetch never replaced
 /// is not its own and stays. When unsure (no folder known, a path that cannot be followed),
 /// the file stays.
@@ -757,16 +978,8 @@ async fn clean_up(
     models_dir: &Path,
     deleting_model: Option<&str>,
 ) -> AppResult<()> {
-    let (rows, others): (Vec<store::Download>, Vec<store::Download>) = store
-        .list_downloads(None)
-        .await?
-        .into_iter()
-        .partition(|r| r.group_id == group);
-    let elsewhere: Vec<String> = others
-        .into_iter()
-        .filter(|r| r.status != DownloadStatus::Completed)
-        .map(|r| r.dest_path)
-        .collect();
+    let rows = store.list_downloads(Some(group.to_string())).await?;
+    let elsewhere = files_being_written(store, Some(group)).await?;
     let meta: Option<GroupMeta> = store.get_setting(&meta_key(group)).await.ok().flatten();
     let written = written_by(store, group).await;
     for row in &rows {
@@ -778,14 +991,16 @@ async fn clean_up(
         Some(model) => Path::new(model).parent().map(Path::to_path_buf),
         None => Some(models_dir.to_path_buf()),
     };
-    match store.list_models().await {
-        Ok(mut installed) => {
+    // 0.1.0 Studio: nor a part of an installed picture or video model (*Download again*
+    // fetches a damaged shared part again).
+    match (store.list_models().await, store.gen_model_files().await) {
+        (Ok(mut installed), Ok(gen_files)) => {
             if let Some(model) = deleting_model {
                 installed.retain(|m| !crate::model_options::same_file(&m.path, model));
             }
             let in_use = |p: &Path| {
                 elsewhere.iter().any(|d| Path::new(d) == p)
-                    || crate::hub::used_by_installed(&installed, p)
+                    || crate::hub::used_elsewhere(&installed, &gen_files, p)
             };
             for path in files_to_delete_on_cancel(&rows, &written, root.as_deref(), in_use) {
                 if let Err(e) = tokio::fs::remove_file(&path).await {
@@ -793,7 +1008,9 @@ async fn clean_up(
                 }
             }
         }
-        Err(e) => tracing::warn!("the finished files of a cancelled download stayed: {e}"),
+        (Err(e), _) | (_, Err(e)) => {
+            tracing::warn!("the finished files of a cancelled download stayed: {e}");
+        }
     }
     store.delete_download_group(group.to_string()).await?;
     let _ = store.delete_setting(&meta_key(group)).await;
@@ -893,6 +1110,14 @@ impl DownloadManager {
             bytes_per_second: live.and_then(|l| l.speed),
             unverified: rows.iter().any(|r| r.sha256.is_empty()),
             checking: live.is_some_and(|l| l.checking),
+            generator_kind: meta
+                .as_ref()
+                .and_then(|m| m.generator.as_ref())
+                .map(|g| g.kind.clone()),
+            gen_model_id: meta
+                .as_ref()
+                .and_then(|m| m.generator.as_ref())
+                .map(|g| g.gen_model_id.clone()),
         }))
     }
 
@@ -1111,7 +1336,7 @@ impl DownloadManager {
             }
             let spec = FileSpec {
                 repo: row.repo.clone(),
-                commit: meta.commit.clone(),
+                commit: row_commit(&meta, &row.repo, &row.file),
                 path: row.file.clone(),
                 size: row.size_bytes,
                 sha256: (!row.sha256.is_empty()).then(|| row.sha256.clone()),
@@ -1211,8 +1436,14 @@ impl DownloadManager {
         if let Err(e) = added {
             // 0.0.7 (P6): the group says why it stopped instead of staying "downloading"
             // (and starting again at every start of the app). Its files stay: Resume tries
-            // this step again without downloading them.
-            let err = last_step_error(meta.image_file_for.is_some(), &e);
+            // this step again without downloading them. 0.1.0 Studio: a picture or video
+            // model whose diffusion file is another model says so in its own words; its files
+            // are gone, so Resume would download them again.
+            let err = if e.code == studio_errors::NOT_THAT_MODEL {
+                e
+            } else {
+                last_step_error(&meta, &e)
+            };
             mark_failed(&state.store, group, &err).await?;
             return Err(err);
         }
@@ -1279,7 +1510,8 @@ impl DownloadManager {
         });
     }
 
-    /// Adds the finished model to the installed list.
+    /// Adds the finished model to the installed list; a picture or video model joins Studio's
+    /// instead ([`register_gen_model`]).
     async fn register_model(
         &self,
         app: &AppHandle,
@@ -1287,6 +1519,10 @@ impl DownloadManager {
         meta: &GroupMeta,
     ) -> AppResult<()> {
         let state = app.state::<AppState>();
+        if meta.generator.is_some() {
+            let models_dir = crate::hub::models_dir(app).await;
+            return register_gen_model(&state.store, &models_dir, group, meta).await;
+        }
         let rows = state.store.list_downloads(Some(group.to_string())).await?;
         let path_of = |file: &str| {
             rows.iter()
@@ -1899,7 +2135,7 @@ mod tests {
 
     /// `row` as `mark_failed` leaves it after the group's last step failed.
     fn last_step_failed(mut row: store::Download) -> store::Download {
-        let err = last_step_error(false, &AppError::internal("locked"));
+        let err = last_step_error(&group_meta(None), &AppError::internal("locked"));
         row.status = S::Failed;
         row.error = Some(serde_json::to_string(&err).unwrap());
         row
@@ -1922,7 +2158,7 @@ mod tests {
         let rows = store.list_downloads(Some("g".into())).await.unwrap();
         assert!(!file_done(&rows[0], true));
 
-        let checked = last_step_error(false, &AppError::internal("locked"));
+        let checked = last_step_error(&group_meta(None), &AppError::internal("locked"));
         mark_failed(&store, "g", &checked).await.unwrap();
         requeue(&store, "g").await.unwrap();
         assert_eq!(statuses(&store, "g").await, vec![S::Verifying]);
@@ -2079,6 +2315,7 @@ mod tests {
             parameters: None,
             image_file_for: image_file_for.map(|p| p.display().to_string()),
             image_files: None,
+            generator: None,
         }
     }
 
@@ -2612,6 +2849,45 @@ mod tests {
         assert!(written_by(&store, "g").await.is_empty());
     }
 
+    /// 0.1.0 Studio: *Download again* of a picture model fetches a damaged shared part again
+    /// (FLUX.2 klein's text encoder, which Z-Image could share); cancelled, it never deletes a
+    /// file an installed picture or video model uses.
+    #[tokio::test]
+    async fn a_cancelled_download_keeps_a_file_a_picture_model_uses() {
+        let dir = Scratch::new();
+        let models = dir.path().join("models");
+        let repo = models.join("unsloth").join("Qwen3-4B-GGUF");
+        std::fs::create_dir_all(&repo).unwrap();
+        let encoder = repo.join("Qwen3-4B-Q4_K_M.gguf");
+        let diffusion = repo.join("flux-2-klein-4b-Q4_0.gguf");
+        std::fs::write(&encoder, vec![1u8; 100]).unwrap();
+        std::fs::write(&diffusion, vec![2u8; 50]).unwrap();
+        let store = store::Store::open_in_memory().unwrap();
+        store
+            .insert_gen_model(store::NewGenModel {
+                id: "z-image-turbo-q4".into(),
+                catalog_id: Some("z-image-turbo-q4".into()),
+                name: "Z-Image Turbo".into(),
+                kind: "image".into(),
+                family: "z-image-turbo".into(),
+                parts: serde_json::json!([{"role": "llm", "file": encoder.display().to_string()}]),
+                size_bytes: 100,
+                source: store::GenSource::Catalog,
+            })
+            .await
+            .unwrap();
+        recorded(&store, "g", &encoder, 100, S::Verifying).await;
+        recorded(&store, "g", &diffusion, 50, S::Verifying).await;
+        for file in [&encoder, &diffusion] {
+            note_written(&store, "g", &file.display().to_string())
+                .await
+                .unwrap();
+        }
+        clean_up(&store, "g", &models, None).await.unwrap();
+        assert!(encoder.exists(), "Z-Image uses it");
+        assert!(!diffusion.exists(), "nothing else uses it");
+    }
+
     /// P6b review C1: a file the download wrote through a folder linked to somewhere outside
     /// the models folder (another drive) stays on Cancel.
     #[cfg(unix)]
@@ -2655,7 +2931,7 @@ mod tests {
             "Pick a .gguf file.",
             "bad magic",
         );
-        mark_failed(&store, "g", &last_step_error(false, &cause))
+        mark_failed(&store, "g", &last_step_error(&group_meta(None), &cause))
             .await
             .unwrap();
         let now = statuses(&store, "g").await;
@@ -2683,10 +2959,25 @@ mod tests {
         let rows = store.list_downloads(Some("g".into())).await.unwrap();
         assert!(rows.iter().all(|r| r.error.is_none()));
 
-        let image_step = last_step_error(true, &AppError::internal("locked"));
+        let image_step = last_step_error(
+            &group_meta(Some(Path::new("/models/m.gguf"))),
+            &AppError::internal("locked"),
+        );
         assert_eq!(
             image_step.message,
             "The image file was downloaded, but it could not be added to its model. Something went wrong inside the app."
+        );
+        // 0.1.0 Studio: a picture or video model is added to Studio, not to Installed.
+        let studio_step = last_step_error(
+            &GroupMeta {
+                generator: Some(klein()),
+                ..group_meta(None)
+            },
+            &AppError::internal("locked"),
+        );
+        assert_eq!(
+            studio_step.message,
+            "The model was downloaded, but it could not be added to Studio. Something went wrong inside the app."
         );
     }
 
@@ -3080,5 +3371,516 @@ mod tests {
             "/home/me/models",
             false
         ));
+    }
+
+    // ---- 0.1.0 Studio: picture and video models ---------------------------------------------
+
+    /// A model download's metadata.
+    fn meta() -> GroupMeta {
+        group_meta(None)
+    }
+
+    /// A picture model's group with a part per `(repo, path, revision)`: the first is the
+    /// diffusion model, then the text encoder, then the decoder.
+    fn group_with(parts: &[(&str, &str, String)]) -> GenGroup {
+        let roles = ["diffusion", "llm", "vae"];
+        GenGroup {
+            gen_model_id: "flux2-klein-4b-q4".into(),
+            catalog_id: Some("flux2-klein-4b-q4".into()),
+            name: "FLUX.2 klein 4B".into(),
+            kind: "image".into(),
+            family: "flux2-klein-4b".into(),
+            source: "catalog".into(),
+            parts: parts
+                .iter()
+                .zip(roles.iter().cycle())
+                .zip(1u64..)
+                .map(|(((repo, path, revision), role), n)| GenGroupPart {
+                    role: (*role).into(),
+                    repo: (*repo).into(),
+                    revision: revision.clone(),
+                    path: (*path).into(),
+                    size: 1_000 * n,
+                    sha256: format!("{n:x}").repeat(64),
+                    license: "apache-2.0".into(),
+                })
+                .collect(),
+        }
+    }
+
+    /// FLUX.2 klein's three parts, from three repositories at three revisions. The encoder and
+    /// the decoder have the same file name in their repositories, as two repositories may.
+    fn klein() -> GenGroup {
+        group_with(&[
+            (
+                "leejet/FLUX.2-klein-4B-GGUF",
+                "flux-2-klein-4b-Q4_0.gguf",
+                "a".repeat(40),
+            ),
+            ("unsloth/Qwen3-4B-GGUF", "model.gguf", "b".repeat(40)),
+            ("Comfy-Org/Flux-2-Klein-4B", "model.gguf", "d".repeat(40)),
+        ])
+    }
+
+    /// The group's row for `part`, written to its place in `models` with `status`.
+    fn part_row(models: &Path, part: &GenGroupPart, status: DownloadStatus) -> store::Download {
+        let dest = models::download::destination(models, &part.repo, &part.path).unwrap();
+        store::Download {
+            repo: part.repo.clone(),
+            file: part.path.clone(),
+            sha256: part.sha256.clone(),
+            ..row("g", &dest, part.size, status)
+        }
+    }
+
+    /// The downloads table has no commit column: each part of a picture or video model is
+    /// fetched at its own revision, and every other row at its group's.
+    #[test]
+    fn generator_parts_download_at_their_own_revisions() {
+        let meta = GroupMeta {
+            commit: "c".repeat(40),
+            generator: Some(group_with(&[(
+                "unsloth/Qwen3-4B-GGUF",
+                "q.gguf",
+                "a".repeat(40),
+            )])),
+            ..meta()
+        };
+        assert_eq!(
+            row_commit(&meta, "unsloth/Qwen3-4B-GGUF", "q.gguf"),
+            "a".repeat(40)
+        );
+        assert_eq!(
+            row_commit(
+                &GroupMeta {
+                    generator: None,
+                    ..meta.clone()
+                },
+                "unsloth/Qwen3-4B-GGUF",
+                "q.gguf"
+            ),
+            "c".repeat(40)
+        );
+        // A file of another repository with the same name is not that part.
+        assert_eq!(
+            row_commit(&meta, "someone/Qwen3-4B-GGUF", "q.gguf"),
+            "c".repeat(40)
+        );
+    }
+
+    /// A picture or video model joins Studio only when every part finished with its pinned
+    /// SHA-256; each part is recorded with its own file on disk, found by its repository and
+    /// path (two repositories may hold files of the same name).
+    #[test]
+    fn a_generator_group_registers_only_when_every_part_is_verified() {
+        let models = Path::new("/m");
+        let group = klein();
+        let meta = GroupMeta {
+            generator: Some(group.clone()),
+            ..meta()
+        };
+        let rows = |statuses: [DownloadStatus; 3]| -> Vec<store::Download> {
+            group
+                .parts
+                .iter()
+                .zip(statuses)
+                .map(|(p, s)| part_row(models, p, s))
+                .collect()
+        };
+        let incomplete = |rows: &[store::Download]| {
+            let e = gen_model_from(&meta, rows).unwrap_err();
+            assert_eq!(
+                (e.code.as_str(), e.message.as_str()),
+                (
+                    "studio_model_incomplete",
+                    "A part of this model is not downloaded yet."
+                )
+            );
+        };
+        incomplete(&rows([S::Verifying, S::Verifying, S::Downloading]));
+        incomplete(&rows([S::Verifying, S::Paused, S::Verifying]));
+        incomplete(&rows([S::Verifying, S::Verifying, S::Verifying])[..2]);
+        let mut unchecked = rows([S::Verifying, S::Verifying, S::Verifying]);
+        unchecked[1].sha256 = String::new();
+        incomplete(&unchecked);
+        let mut other = rows([S::Verifying, S::Verifying, S::Verifying]);
+        other[2].sha256 = "f".repeat(64);
+        incomplete(&other);
+
+        let new = gen_model_from(&meta, &rows([S::Verifying, S::Completed, S::Verifying])).unwrap();
+        let dest = |p: &GenGroupPart| {
+            models::download::destination(models, &p.repo, &p.path)
+                .unwrap()
+                .display()
+                .to_string()
+        };
+        assert_eq!(
+            (
+                new.id.as_str(),
+                new.catalog_id.as_deref(),
+                new.name.as_str(),
+                new.kind.as_str(),
+                new.family.as_str(),
+                new.size_bytes,
+                new.source,
+            ),
+            (
+                "flux2-klein-4b-q4",
+                Some("flux2-klein-4b-q4"),
+                "FLUX.2 klein 4B",
+                "image",
+                "flux2-klein-4b",
+                6_000,
+                store::GenSource::Catalog,
+            )
+        );
+        let parts = new.parts.as_array().unwrap();
+        assert_eq!(parts.len(), 3);
+        for (saved, part) in parts.iter().zip(&group.parts) {
+            assert_eq!(saved["file"], dest(part), "{part:?}");
+            assert_eq!(saved["revision"], part.revision.as_str());
+            assert_eq!(saved["sha256"], part.sha256.as_str());
+            assert_eq!(saved["role"], part.role.as_str());
+            assert_eq!(saved["license"], "apache-2.0");
+        }
+        assert_ne!(
+            parts[1]["file"], parts[2]["file"],
+            "same name, two repositories"
+        );
+
+        // A searched model has no catalog entry.
+        let searched = GroupMeta {
+            generator: Some(GenGroup {
+                catalog_id: None,
+                source: "search".into(),
+                ..group.clone()
+            }),
+            ..meta.clone()
+        };
+        let new = gen_model_from(&searched, &rows([S::Verifying; 3])).unwrap();
+        assert_eq!(
+            (new.catalog_id, new.source),
+            (None, store::GenSource::Search)
+        );
+        assert_eq!(
+            gen_model_from(&group_meta(None), &[]).unwrap_err().code,
+            "internal"
+        );
+    }
+
+    /// A group saved before 0.1.0 has no picture or video model, and a group without one
+    /// leaves the field out of its JSON.
+    #[test]
+    fn groups_saved_before_this_version_still_read() {
+        let old: GroupMeta = serde_json::from_value(serde_json::json!({
+            "repo": "example-quants/Sample-7B-GGUF",
+            "commit": "4444444444444444444444444444444444444444",
+            "label": "Q4_K_M",
+            "modelFiles": ["Sample-7B-Q4_K_M.gguf"],
+            "projector": null,
+            "catalogId": null
+        }))
+        .unwrap();
+        assert_eq!(old.generator, None);
+        assert!(
+            serde_json::to_value(&old)
+                .unwrap()
+                .get("generator")
+                .is_none()
+        );
+        let new = GroupMeta {
+            generator: Some(klein()),
+            ..old
+        };
+        let json = serde_json::to_value(&new).unwrap();
+        assert_eq!(json["generator"]["genModelId"], "flux2-klein-4b-q4");
+        assert_eq!(json["generator"]["parts"][1]["revision"], "b".repeat(40));
+        let back: GroupMeta = serde_json::from_value(json).unwrap();
+        assert_eq!(back.generator, Some(klein()));
+    }
+
+    /// The bug this prevents: a chat download of Qwen3-4B (FLUX.2 klein's text encoder) joined
+    /// a running klein download that writes the same file, and so never reached Installed. A
+    /// download joins only one of the same model.
+    #[test]
+    fn a_chat_download_never_joins_a_picture_model_download() {
+        let models = Path::new("/m");
+        let group = klein();
+        let klein_meta = GroupMeta {
+            generator: Some(group.clone()),
+            ..meta()
+        };
+        let rows: Vec<store::Download> = group
+            .parts
+            .iter()
+            .map(|p| store::Download {
+                group_id: "klein".into(),
+                ..part_row(models, p, S::Downloading)
+            })
+            .collect();
+        let dests: Vec<String> = rows.iter().map(|r| r.dest_path.clone()).collect();
+        let encoder = [dests[1].clone()];
+        let metas = [("klein", klein_meta.clone())];
+        assert_eq!(
+            plan(&meta(), &encoder, &rows, &metas, &["klein"]),
+            Start::Busy { running: true }
+        );
+        assert_eq!(
+            plan(&klein_meta, &dests, &rows, &metas, &["klein"]),
+            Start::Join("klein".into())
+        );
+    }
+
+    /// Downloads labels a picture or video model's group by what it makes, and the group says
+    /// which installed model it downloads (Get local models shows its progress on that row).
+    #[tokio::test]
+    async fn a_picture_or_video_models_download_says_what_it_makes() {
+        let dir = Scratch::new();
+        let store = store::Store::open_in_memory().unwrap();
+        let manager = DownloadManager::default();
+        recorded(
+            &store,
+            "chat",
+            &dir.path().join("m.gguf"),
+            100,
+            S::Downloading,
+        )
+        .await;
+        recorded(
+            &store,
+            "clip",
+            &dir.path().join("v.gguf"),
+            100,
+            S::Downloading,
+        )
+        .await;
+        store.set_setting(&meta_key("chat"), &meta()).await.unwrap();
+        let video = GroupMeta {
+            generator: Some(GenGroup {
+                kind: "video".into(),
+                ..klein()
+            }),
+            ..meta()
+        };
+        store.set_setting(&meta_key("clip"), &video).await.unwrap();
+        let chat = manager.group_dto(&store, "chat").await.unwrap().unwrap();
+        let clip = manager.group_dto(&store, "clip").await.unwrap().unwrap();
+        assert_eq!(chat.generator_kind, None);
+        assert_eq!(clip.generator_kind.as_deref(), Some("video"));
+        assert_eq!(
+            serde_json::to_value(&clip).unwrap()["generatorKind"],
+            "video"
+        );
+        assert_eq!(
+            serde_json::to_value(&chat).unwrap()["generatorKind"],
+            serde_json::Value::Null
+        );
+        assert_eq!(chat.gen_model_id, None);
+        assert_eq!(clip.gen_model_id.as_deref(), Some("flux2-klein-4b-q4"));
+        assert_eq!(
+            serde_json::to_value(&clip).unwrap()["genModelId"],
+            "flux2-klein-4b-q4"
+        );
+        assert_eq!(
+            serde_json::to_value(&chat).unwrap()["genModelId"],
+            serde_json::Value::Null
+        );
+    }
+
+    /// No recommended model's download is refused as another model: each recommended entry
+    /// whose diffusion file had its tensor table recorded (the fixtures' README in
+    /// crates/models/tests/fixtures/gguf/ names each table's repository, revision and file) is
+    /// recognised as its own family, by the check `register_gen_model` makes. An entry whose
+    /// file was recorded at another revision fails: its table is recorded again.
+    #[test]
+    fn every_recommended_diffusion_file_is_its_own_family() {
+        use models::gguf::testing::{diffusion_gguf, shapes};
+        let readme = include_str!("../../crates/models/tests/fixtures/gguf/README.md");
+        // `| `<fixture>` | <repo> @ <revision>, `<file>` … |`
+        let recorded: Vec<(&str, &str, &str, &str)> = readme
+            .lines()
+            .filter_map(|line| {
+                let (fixture, rest) = line.strip_prefix("| `")?.split_once("` | ")?;
+                let (repo, rest) = rest.split_once(" @ ")?;
+                let (revision, rest) = rest.split_once(", `")?;
+                let (file, _) = rest.split_once('`')?;
+                Some((fixture, repo, revision, file))
+            })
+            .collect();
+        assert!(
+            recorded.len() >= 5,
+            "the README's table reads: {recorded:?}"
+        );
+        let catalog = models::gen_catalog::gen_catalog(
+            &models::catalog::Catalog::bundled(),
+            runtime::sd::lock::embedded().sd_cpp.build,
+        );
+        let dir = Scratch::new();
+        let mut checked = Vec::new();
+        for (id, entry) in &catalog.entries {
+            let part = entry.diffusion();
+            let Some(&(fixture, _, revision, _)) = recorded
+                .iter()
+                .find(|(_, repo, _, file)| *repo == part.repo && *file == part.path)
+            else {
+                continue;
+            };
+            assert_eq!(
+                revision, part.revision,
+                "{id}: its table was recorded at another revision; record it again"
+            );
+            assert_eq!(
+                models::gen_search::family_from_tensors(&shapes(fixture)),
+                Some(entry.family),
+                "{id}"
+            );
+            let file = dir.path().join(format!("{id}.gguf"));
+            std::fs::write(&file, diffusion_gguf(fixture)).unwrap();
+            check_diffusion_file(entry.family, &file).unwrap_or_else(|e| panic!("{id}: {e:?}"));
+            checked.push(id.as_str());
+        }
+        assert!(
+            !checked.is_empty(),
+            "no recommended entry's diffusion file has a recorded table"
+        );
+    }
+
+    /// A downloaded diffusion file is checked by its own tensor table before it is added: a
+    /// FLUX.2 klein 9B named like the 4B is refused, nothing is added, and the diffusion file
+    /// goes with the files the download wrote (no other model uses them), while a part it found
+    /// already in place stays. A `.safetensors` part was checked by size and SHA-256 only.
+    #[tokio::test]
+    async fn a_searched_file_that_is_another_model_is_not_added() {
+        use models::gguf::testing::diffusion_gguf;
+        let dir = Scratch::new();
+        let models = dir.path().join("models");
+        let group = group_with(&[
+            (
+                "someone/FLUX.2-klein-4B-GGUF",
+                "flux-2-klein-4b-Q8_0.gguf",
+                "a".repeat(40),
+            ),
+            (
+                "unsloth/Qwen3-4B-GGUF",
+                "Qwen3-4B-Q4_K_M.gguf",
+                "b".repeat(40),
+            ),
+            (
+                "Comfy-Org/Flux-2-Klein-4B",
+                "split_files/vae/flux2-vae.safetensors",
+                "d".repeat(40),
+            ),
+        ]);
+        let group = GenGroup {
+            gen_model_id: "hf:someone/FLUX.2-klein-4B-GGUF:flux-2-klein-4b-Q8_0.gguf".into(),
+            catalog_id: None,
+            source: "search".into(),
+            ..group
+        };
+        let meta = GroupMeta {
+            generator: Some(group.clone()),
+            ..meta()
+        };
+        let dests: Vec<PathBuf> = group
+            .parts
+            .iter()
+            .map(|p| models::download::destination(&models, &p.repo, &p.path).unwrap())
+            .collect();
+        let write = |dest: &Path, bytes: &[u8]| {
+            std::fs::create_dir_all(dest.parent().unwrap()).unwrap();
+            std::fs::write(dest, bytes).unwrap();
+        };
+
+        let diffusion = &dests[0];
+        write(diffusion, &diffusion_gguf("klein9b-tensors.txt"));
+        assert_eq!(
+            check_diffusion_file(GenFamily::Flux2Klein4b, diffusion)
+                .unwrap_err()
+                .code,
+            "studio_not_that_model"
+        );
+        write(diffusion, b"not a model");
+        assert_eq!(
+            check_diffusion_file(GenFamily::Flux2Klein4b, diffusion)
+                .unwrap_err()
+                .code,
+            "studio_not_that_model",
+            "a table that does not read"
+        );
+        write(diffusion, &diffusion_gguf("klein4b-tensors.txt"));
+        check_diffusion_file(GenFamily::Flux2Klein4b, diffusion).unwrap();
+        assert_eq!(
+            check_diffusion_file(GenFamily::ZImageTurbo, diffusion)
+                .unwrap_err()
+                .code,
+            "studio_not_that_model",
+            "another family's"
+        );
+        write(&dests[2], b"safetensors bytes");
+        check_diffusion_file(GenFamily::Flux2Klein4b, &dests[2]).unwrap();
+
+        // Registering the download with the 9B file adds nothing and removes its files.
+        let store = store::Store::open_in_memory().unwrap();
+        for (part, dest) in group.parts.iter().zip(&dests) {
+            let id = store
+                .insert_download(NewDownload {
+                    group_id: "g".into(),
+                    repo: part.repo.clone(),
+                    file: part.path.clone(),
+                    url: String::new(),
+                    dest_path: dest.display().to_string(),
+                    size_bytes: part.size,
+                    sha256: part.sha256.clone(),
+                })
+                .await
+                .unwrap();
+            store
+                .update_download(
+                    id,
+                    DownloadPatch {
+                        status: Some(S::Verifying),
+                        ..Default::default()
+                    },
+                )
+                .await
+                .unwrap();
+        }
+        write(diffusion, &diffusion_gguf("klein9b-tensors.txt"));
+        write(&dests[1], b"encoder");
+        // The download wrote the encoder; the decoder was already in place (written above),
+        // so the download only checked it.
+        note_written(&store, "g", &dests[1].display().to_string())
+            .await
+            .unwrap();
+        let e = register_gen_model(&store, &models, "g", &meta)
+            .await
+            .unwrap_err();
+        assert_eq!(e.code, "studio_not_that_model");
+        assert!(store.list_gen_models().await.unwrap().is_empty());
+        assert!(!diffusion.exists(), "the file that is another model goes");
+        assert!(!dests[1].exists(), "the file the download wrote goes");
+        assert!(dests[2].exists(), "the part found in place stays");
+        assert!(
+            !models.join("someone").exists() && !models.join("unsloth").exists(),
+            "and their empty folders"
+        );
+        assert!(models.exists(), "never the models folder");
+
+        // The 4B file is added, with every part.
+        for (dest, bytes) in dests.iter().zip([
+            diffusion_gguf("klein4b-tensors.txt"),
+            b"encoder".to_vec(),
+            b"decoder".to_vec(),
+        ]) {
+            write(dest, &bytes);
+        }
+        register_gen_model(&store, &models, "g", &meta)
+            .await
+            .unwrap();
+        let added = store.list_gen_models().await.unwrap();
+        assert_eq!(added.len(), 1);
+        assert_eq!(added[0].id, group.gen_model_id);
+        assert_eq!(added[0].parts.as_array().unwrap().len(), 3);
+        assert!(dests.iter().all(|d| d.exists()));
     }
 }

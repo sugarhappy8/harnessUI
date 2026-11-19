@@ -139,6 +139,8 @@ pub async fn sha256_file(path: &Path) -> std::io::Result<String> {
 }
 
 /// [`sha256_file`], telling `checked` the bytes read so far after each MiB.
+/// It also yields after each MiB, so a caller's cancel is seen promptly even
+/// when the file reads never return Pending (a page-cached file).
 async fn sha256_file_with(
     path: &Path,
     checked: &(dyn Fn(u64) + Send + Sync),
@@ -155,6 +157,7 @@ async fn sha256_file_with(
         h.update(&buf[..n]);
         total += n as u64;
         checked(total);
+        tokio::task::yield_now().await;
     }
     Ok(hex(&h.finalize()))
 }
@@ -186,6 +189,7 @@ async fn finished_already(
     }
     let checked = |n: u64| progress(Progress::Checking(n));
     let actual = tokio::select! {
+        biased;
         _ = cancel.cancelled() => return Err(DownloadError::Cancelled),
         r = sha256_file_with(dest, &checked) => r?,
     };
@@ -286,6 +290,7 @@ pub async fn download_file_checked(
     // The check of a large file takes a while: reported as it goes, and stopped by `cancel`
     // (the whole partial file stays, so a resume only checks it again).
     let actual = tokio::select! {
+        biased;
         _ = cancel.cancelled() => return Err(DownloadError::Cancelled),
         r = sha256_file_with(&part, &checked) => r?,
     };

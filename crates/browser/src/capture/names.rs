@@ -185,8 +185,9 @@ pub fn safe_extension(ext: &str) -> String {
 }
 
 /// The name of the folder a capture goes into: the site's host (punycode, port after a
-/// dash) and the local time, `example.com-2026-11-16-1530`. Without a usable host, `site`.
-pub fn capture_folder_name(url: &Url, now: chrono::DateTime<chrono::Local>) -> String {
+/// dash) and `now`, the local wall-clock time, `example.com-2026-11-16-153012`. Without a
+/// usable host, `site`.
+pub fn capture_folder_name(url: &Url, now: jiff::civil::DateTime) -> String {
     let host = url.host_str().unwrap_or("");
     let mut host = host
         .trim_matches(|c| c == '[' || c == ']')
@@ -218,7 +219,7 @@ pub fn capture_folder_name(url: &Url, now: chrono::DateTime<chrono::Local>) -> S
     } else {
         host
     };
-    format!("{host}-{}", now.format("%Y-%m-%d-%H%M%S"))
+    format!("{host}-{}", now.strftime("%Y-%m-%d-%H%M%S"))
 }
 
 #[cfg(test)]
@@ -321,11 +322,7 @@ mod tests {
 
     #[test]
     fn folder_names_are_the_host_and_the_time() {
-        use chrono::TimeZone;
-        let now = chrono::Local
-            .with_ymd_and_hms(2026, 11, 16, 15, 30, 12)
-            .single()
-            .unwrap();
+        let now = jiff::civil::date(2026, 11, 16).at(15, 30, 12, 0);
         let name = |u: &str| capture_folder_name(&Url::parse(u).unwrap(), now);
         assert_eq!(
             name("https://www.example.com/a/b"),

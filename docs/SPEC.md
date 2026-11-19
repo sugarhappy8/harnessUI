@@ -118,7 +118,7 @@ Non-negotiable:
 - Include third-party license notices for llama.cpp and every other bundled binary.
 
 ## Out of scope for v1
-Linux, mobile, Intel Macs, accounts, cloud sync, voice, image generation, and running multiple local models at once.
+Linux, mobile, Intel Macs, accounts, cloud sync, voice, image generation, and running multiple local models at once. *(Changed in 0.1.0 at the owner's request: image and video generation on this computer, with cloud models as the backup; a picture or video model can run beside the chat model when both fit; see [docs/dev/0.1.0/README.md](dev/0.1.0/README.md).)*
 
 ## Milestones
 - M0: ARCHITECTURE.md approved. Repo scaffold. CI produces an installable empty app on both OSes.

@@ -16,4 +16,6 @@ pub mod protocol;
 pub mod server;
 pub mod stage;
 
-mod lines;
+/// Crate-visible, not private: the Studio engine's runner (`crate::sd`) reads `sd-cli` with
+/// `LineReader::splitting_cr`.
+pub(crate) mod lines;

@@ -1,0 +1,604 @@
+// Studio's view (0.1.0 Task B2): the frame (top bar, card stream, panel and dock slots), the
+// empty states and the default model, local first, and the saved lists, read without a fetch.
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { amountGb } from "../../lib/words";
+import { LOCAL, MODELS, RUN } from "./fixtures/models";
+import type { LocalModels, Run, StudioEndpoint, StudioPrefs, Usage } from "./types";
+
+// Radix positions menus with ResizeObserver, which jsdom does not have.
+globalThis.ResizeObserver ??= class {
+  observe() {}
+  unobserve() {}
+  disconnect() {}
+} as unknown as typeof ResizeObserver;
+
+vi.mock("../../lib/ipc", () => ({ isTauri: () => true }));
+vi.mock("./api");
+
+const api = await import("./api");
+const { StudioView } = await import("./StudioView");
+const { defaultModel, emptyState, useStudio } = await import("../../store/studio");
+
+const INITIAL = useStudio.getState();
+/** The first recommended entry: FLUX.2 klein 4B, about 5.3 GB. */
+const klein = LOCAL.recommended[0]!;
+
+/** An endpoint as `studio_models` gives it: OpenRouter with the fixture's models, or OpenAI
+ *  (pictures only) with its own name for GPT Image 2.6 Flare. */
+function endpoint(patch: Partial<StudioEndpoint> = {}): StudioEndpoint {
+  const openai = patch.company === "openai";
+  return {
+    providerId: 1,
+    name: openai ? "OpenAI" : "OpenRouter",
+    company: "openrouter",
+    host: openai ? "api.openai.com" : "openrouter.ai",
+    cloud: true,
+    hasKey: true,
+    fetchedAt: new Date(2026, 10, 17, 9).getTime(),
+    models: openai ? [{ ...MODELS[0]!, id: "gpt-image-2.6-flare" }] : MODELS,
+    ...patch,
+  };
+}
+const openrouter = endpoint();
+
+function prefs(patch: Partial<StudioPrefs> = {}): StudioPrefs {
+  return {
+    lastModel: {},
+    advancedOpen: false,
+    confirmEveryVideo: true,
+    confirmAtUsd: 1,
+    dailyLimitUsd: 10,
+    setups: [],
+    galleryDir: null,
+    gpuPolicy: "unload",
+    reloadChatAfter: false,
+    suggestionDismissed: true,
+    localNoticeAcceptedAt: null,
+    ...patch,
+  };
+}
+
+function usage(patch: Partial<Usage> = {}): Usage {
+  return {
+    spentTodayUsd: 0,
+    pendingUsd: 0,
+    limitUsd: 10,
+    folder: "/home/me/harnessUI/studio",
+    bytes: 0,
+    pictures: 0,
+    videos: 0,
+    ...patch,
+  };
+}
+
+async function flush() {
+  await act(async () => {
+    for (let i = 0; i < 10; i++) await Promise.resolve();
+  });
+}
+
+/** Opens Studio with what the backend has saved: App mounts the view when it is first shown. */
+async function show(
+  saved: {
+    endpoints?: StudioEndpoint[];
+    local?: LocalModels;
+    prefs?: StudioPrefs;
+    usage?: Usage;
+    runs?: Run[];
+    live?: Run[];
+  } = {},
+) {
+  const endpoints = saved.endpoints ?? [openrouter];
+  const p = saved.prefs ?? prefs();
+  vi.mocked(api.studioModels).mockResolvedValue({ endpoints });
+  vi.mocked(api.studioRefreshModels).mockResolvedValue({ endpoints });
+  vi.mocked(api.studioLocalModels).mockResolvedValue(saved.local ?? LOCAL);
+  vi.mocked(api.studioRuns).mockResolvedValue({ runs: saved.runs ?? [], next: null });
+  vi.mocked(api.studioLive).mockResolvedValue(saved.live ?? []);
+  vi.mocked(api.studioGetPrefs).mockResolvedValue(p);
+  vi.mocked(api.studioSetPrefs).mockImplementation(async (patch) => ({ ...p, ...patch }));
+  vi.mocked(api.studioUsage).mockResolvedValue(saved.usage ?? usage());
+  // Get local models' footer follows the engine's download (Task B13).
+  vi.mocked(api.onEngineProgress).mockResolvedValue(() => undefined);
+  // The prompt dock asks for the draft's estimate (Task B7).
+  vi.mocked(api.studioEstimate).mockResolvedValue({
+    usd: 0,
+    reasons: [],
+    confirmAtUsd: 1,
+    limit: { limitUsd: 10, spentTodayUsd: 0, pendingUsd: 0, wouldPass: true, refusal: null, reserveUsd: 5 },
+    invalid: [],
+    eta: null,
+    local: null,
+  });
+  useStudio.getState().showStudio();
+  await act(async () => {
+    render(<StudioView />);
+  });
+  await flush();
+}
+
+async function click(el: HTMLElement) {
+  await act(async () => {
+    fireEvent.click(el);
+  });
+  await flush();
+}
+
+async function openMenu() {
+  await act(async () => {
+    fireEvent.keyDown(screen.getByRole("button", { name: "Studio menu" }), { key: "Enter" });
+  });
+}
+
+function promptBox(): HTMLTextAreaElement {
+  return screen.getByRole("textbox", { name: "Prompt" }) as HTMLTextAreaElement;
+}
+
+function typePrompt(text: string) {
+  fireEvent.change(promptBox(), { target: { value: text } });
+}
+
+/** What each `app:open-settings` asked for (its detail). */
+let opened: unknown[] = [];
+const onOpenSettings = (e: Event) => opened.push((e as CustomEvent<unknown>).detail);
+
+beforeEach(() => {
+  vi.clearAllMocks();
+  useStudio.setState(INITIAL, true);
+  opened = [];
+  window.addEventListener("app:open-settings", onOpenSettings);
+});
+
+afterEach(() => {
+  cleanup();
+  window.removeEventListener("app:open-settings", onOpenSettings);
+  vi.useRealTimers();
+});
+
+describe("StudioView", () => {
+  it("opening Studio reads only what is saved", async () => {
+    await show();
+    expect(api.studioModels).toHaveBeenCalledTimes(1);
+    expect(api.studioLocalModels).toHaveBeenCalledTimes(1);
+    expect(api.studioRefreshModels).not.toHaveBeenCalled();
+    expect(api.studioModelPrice).not.toHaveBeenCalled();
+    expect(api.studioLocalSearch).not.toHaveBeenCalled();
+  });
+
+  it("with nothing set up, Studio leads with local models", async () => {
+    // getLocal
+    await show({ endpoints: [], local: { ...LOCAL, installed: [] } });
+    screen.getByText("Make pictures and videos on this computer: free, and nothing is sent.");
+    screen.getByText(`${klein.name} fits this computer (${amountGb(klein.sizeBytes)}).`);
+    screen.getByText("No good graphics card? Cloud models are the backup: OpenRouter or OpenAI."); // second, smaller
+    await click(screen.getByRole("button", { name: "Open Endpoints" }));
+    expect(opened).toEqual(["endpoints"]); // app:open-settings detail
+    // Get local models takes the empty state's place (Task B13).
+    await click(screen.getByRole("button", { name: "Get local models" }));
+    expect(useStudio.getState().localView).toBe(true);
+    expect(screen.queryByText("Make pictures and videos on this computer: free, and nothing is sent.")).toBeNull();
+  });
+
+  it("each empty state follows one ordered rule", () => {
+    const none = { ...LOCAL, installed: [] };
+    const nothingFits = { ...none, recommended: [], notHere: LOCAL.recommended, videoPossible: false };
+    expect(emptyState("image", LOCAL, [])).toBeNull(); // klein is installed
+    expect(emptyState("image", none, [])).toBe("getLocal");
+    expect(emptyState("image", nothingFits, [])).toBe("cloudBackup");
+    expect(emptyState("video", nothingFits, [endpoint({ company: "openai" })])).toBe("addEndpoint");
+    expect(emptyState("image", nothingFits, [openrouter])).toBeNull(); // a cloud model to use
+  });
+
+  it("when no local model fits this computer, Studio offers cloud as the backup", async () => {
+    // cloudBackup
+    await show({
+      endpoints: [],
+      local: { ...LOCAL, installed: [], recommended: [], notHere: LOCAL.recommended, videoPossible: false },
+    });
+    screen.getByText(
+      "This computer cannot run local models well. Cloud models run on a company's computers instead: add OpenRouter or OpenAI.",
+    );
+    screen.getByRole("button", { name: "Open Endpoints" });
+    expect(screen.queryByRole("button", { name: "Get local models" })).toBeNull();
+  });
+
+  it("the first-run suggestion leads with local models and can be put away", async () => {
+    await show({ local: { ...LOCAL, installed: [] }, prefs: prefs({ suggestionDismissed: false }) });
+    screen.getByText(`Studio works on this computer. ${klein.name} fits here: free and private.`);
+    await click(screen.getByRole("button", { name: "Not now" }));
+    expect(api.studioSetPrefs).toHaveBeenCalledWith({ suggestionDismissed: true });
+    expect(screen.queryByText(`Studio works on this computer. ${klein.name} fits here: free and private.`)).toBeNull();
+  });
+
+  it("the default model is an installed local model that fits", async () => {
+    await show({ prefs: prefs({ lastModel: {} }) });
+    expect(useStudio.getState().drafts.image).toMatchObject({ target: "thisComputer", model: "flux2-klein-4b-q4" });
+  });
+
+  it("the model you used last still wins, even a cloud one", async () => {
+    await show({
+      prefs: prefs({ lastModel: { image: { target: { endpoint: 1 }, model: "openai/gpt-image-2.6-flare" } } }),
+    });
+    expect(useStudio.getState().drafts.image).toMatchObject({ target: { endpoint: 1 }, model: "openai/gpt-image-2.6-flare" });
+  });
+
+  it("a slow local model is not picked by itself", () => {
+    const slow = {
+      ...LOCAL,
+      installed: [{ ...LOCAL.installed[0]!, fit: { ...LOCAL.installed[0]!.fit, word: "slow" as const } }],
+    };
+    expect(defaultModel("image", slow, [openrouter])).toEqual({ target: { endpoint: 1 }, model: "openai/gpt-image-2.6-flare" });
+  });
+
+  it("an installed model this version cannot read is not a model to use", async () => {
+    const row = LOCAL.installed[0]!;
+    const unreadable = {
+      ...LOCAL,
+      installed: [
+        {
+          ...row,
+          fit: { ...row.fit, word: "notHere" as const },
+          model: { ...row.model, usable: "This version of harnessUI cannot run this model." },
+        },
+      ],
+    };
+    expect(emptyState("image", unreadable, [])).toBe("getLocal"); // klein still fits, to download
+    expect(defaultModel("image", unreadable, [])).toBeNull();
+    await show({ local: unreadable, prefs: prefs({ lastModel: { image: { target: "thisComputer", model: row.model.id } } }) });
+    expect(useStudio.getState().drafts.image).toMatchObject({ target: { endpoint: 1 }, model: "openai/gpt-image-2.6-flare" });
+  });
+
+  it("an endpoint without a key offers no model to use", async () => {
+    const keyless = endpoint({ hasKey: false });
+    const none = { ...LOCAL, installed: [] };
+    const nothingFits = { ...none, recommended: [], notHere: LOCAL.recommended, videoPossible: false };
+    const openai = endpoint({ providerId: 2, company: "openai" });
+    expect(defaultModel("image", none, [keyless])).toBeNull();
+    expect(defaultModel("image", none, [keyless, openai])).toEqual({ target: { endpoint: 2 }, model: "gpt-image-2.6-flare" });
+    expect(emptyState("image", none, [keyless])).toBe("getLocal");
+    expect(emptyState("image", nothingFits, [keyless])).toBe("addEndpoint");
+    expect(emptyState("image", nothingFits, [keyless, openai])).toBeNull();
+    // Nor is the model used last, while its endpoint has no key.
+    await show({
+      endpoints: [keyless],
+      local: nothingFits,
+      prefs: prefs({ lastModel: { image: { target: { endpoint: 1 }, model: "openai/gpt-image-2.6-flare" } } }),
+    });
+    expect(useStudio.getState().drafts.image).toMatchObject({ target: null, model: null });
+    screen.getByText("OpenRouter has no key, so Studio cannot use its models. Add a key in Settings → Endpoints.");
+    await click(screen.getByRole("button", { name: "Open Endpoints" }));
+    expect(opened).toEqual(["endpoints"]);
+  });
+
+  it("a saved list without a model of the tab's kind is explained, not left blank", async () => {
+    const nothingFits = { ...LOCAL, installed: [], recommended: [], notHere: LOCAL.recommended };
+    const picturesOnly = endpoint({ models: MODELS.filter((m) => m.kind === "image") });
+    expect(emptyState("video", nothingFits, [picturesOnly])).toBe("addEndpoint");
+    // Only an endpoint without a saved list stands in: its *Get the list* says what is missing.
+    expect(emptyState("video", nothingFits, [endpoint({ fetchedAt: null, models: [] })])).toBeNull();
+    await show({ endpoints: [picturesOnly], local: nothingFits });
+    await click(screen.getByRole("tab", { name: "Video" }));
+    expect(useStudio.getState().drafts.video.model).toBeNull();
+    screen.getByText(
+      "OpenRouter's saved lists have no video model Studio can use. Update model lists from the menu, or add another endpoint in Settings → Endpoints.",
+    );
+    screen.getByRole("button", { name: "Open Endpoints" });
+  });
+
+  it("with a local model to get, the card's second line says why a saved endpoint is not used", async () => {
+    await show({ endpoints: [endpoint({ hasKey: false })], local: { ...LOCAL, installed: [] } });
+    screen.getByText(`${klein.name} fits this computer (${amountGb(klein.sizeBytes)}).`);
+    screen.getByText("OpenRouter has no key, so Studio cannot use its models. Add a key in Settings → Endpoints.");
+    expect(screen.queryByText("No good graphics card? Cloud models are the backup: OpenRouter or OpenAI.")).toBeNull();
+  });
+
+  it("an endpoint without a saved list offers to get it", async () => {
+    await show({ endpoints: [endpoint({ fetchedAt: null, models: [] })] });
+    screen.getByText("Get OpenRouter's picture and video models");
+    await click(screen.getByRole("button", { name: "Get the list" }));
+    expect(api.studioRefreshModels).toHaveBeenCalledWith(1);
+  });
+
+  it("the top bar shows Pictures and Video, where the chosen model runs, and cloud spending", async () => {
+    await show({ usage: usage({ spentTodayUsd: 0.84 }) }); // the default: a local model
+    screen.getByRole("tab", { name: "Pictures" });
+    screen.getByRole("tab", { name: "Video" });
+    screen.getByText("$0.84 today");
+    expect(document.querySelector("[data-local-mark]")).not.toBeNull();
+    expect(document.querySelector("[data-cloud-mark]")).toBeNull();
+    act(() =>
+      useStudio.setState((s) => ({
+        drafts: { ...s.drafts, image: { ...s.drafts.image, target: { endpoint: 1 }, model: "openai/gpt-image-2.6-flare" } },
+      })),
+    );
+    expect(document.querySelector("[data-cloud-mark]")).not.toBeNull();
+  });
+
+  it("each tab keeps its own draft", async () => {
+    await show();
+    typePrompt("lighthouse");
+    await click(screen.getByRole("tab", { name: "Video" }));
+    expect(promptBox().value).toBe("");
+    typePrompt("waves");
+    await click(screen.getByRole("tab", { name: "Pictures" }));
+    expect(promptBox().value).toBe("lighthouse");
+  });
+
+  it("Update model lists refreshes every endpoint and says when", async () => {
+    // The day names no year in the year it is.
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(new Date(2026, 10, 18, 12));
+    // OpenAI first: its failure does not stop OpenRouter's update.
+    const openai = endpoint({ providerId: 2, company: "openai", fetchedAt: new Date(2026, 10, 16, 9).getTime() });
+    const before = endpoint({ fetchedAt: new Date(2026, 10, 17, 9).getTime() });
+    await show({ endpoints: [openai, before] });
+    vi.mocked(api.studioRefreshModels).mockImplementation(async (id) => {
+      if (id === 2) {
+        throw { code: "network", message: "OpenAI could not be reached.", nextStep: "Check the connection.", details: "" };
+      }
+      return { endpoints: [openai, { ...before, fetchedAt: new Date(2026, 10, 18, 11).getTime() }] };
+    });
+    await openMenu();
+    screen.getByText("OpenRouter's lists updated 17 Nov");
+    await click(screen.getByRole("menuitem", { name: "Update model lists" }));
+    expect(api.studioRefreshModels).toHaveBeenNthCalledWith(1, 2);
+    expect(api.studioRefreshModels).toHaveBeenNthCalledWith(2, 1);
+    screen.getByText("OpenRouter's lists updated 18 Nov");
+    screen.getByText("OpenAI's lists updated 16 Nov");
+    expect(screen.queryByText("OpenRouter's lists updated 17 Nov")).toBeNull();
+    screen.getByText("OpenAI could not be reached."); // in the error banner
+  });
+
+  it("the search box asks for the gallery 250 ms after the last key", async () => {
+    await show();
+    vi.mocked(api.studioRuns).mockClear();
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    const search = screen.getByRole("searchbox", { name: "Search" }) as HTMLInputElement;
+    for (const text of ["f", "fo", "fox"]) {
+      fireEvent.change(search, { target: { value: text } });
+      act(() => vi.advanceTimersByTime(100));
+    }
+    expect(search.value).toBe("fox");
+    act(() => vi.advanceTimersByTime(149));
+    expect(api.studioRuns).not.toHaveBeenCalled();
+    await act(async () => {
+      vi.advanceTimersByTime(1);
+    });
+    expect(api.studioRuns).toHaveBeenCalledTimes(1);
+    expect(api.studioRuns).toHaveBeenCalledWith({ kind: "image", text: "fox" }, null, 60);
+    expect(search.value).toBe("fox");
+  });
+
+  it("Load more above the cards reads the gallery's next page, and what is shown stays where it was", async () => {
+    const next = { createdAt: RUN.createdAt, id: RUN.id };
+    vi.mocked(api.studioOutputBytes).mockReturnValue(new Promise(() => {}));
+    vi.mocked(api.studioRuns).mockResolvedValueOnce({ runs: [RUN], next });
+    // The stream's height as laid out: 1000 px, then 1600 px once the older page is in.
+    let height = 1000;
+    const main = Object.getOwnPropertyDescriptor(Element.prototype, "scrollHeight");
+    Object.defineProperty(HTMLElement.prototype, "scrollHeight", { configurable: true, get: () => height });
+    try {
+      await show({ runs: [RUN] });
+      const scroller = document.querySelector("main")!;
+      // It opened at its newest card.
+      expect(scroller.scrollTop).toBe(1000);
+      const more = screen.getByRole("button", { name: "Load more" });
+      // Above every card.
+      expect(more.compareDocumentPosition(document.querySelector("[data-run-card]")!) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+      scroller.scrollTop = 400; // 600 px from the bottom
+      const older: Run = { ...RUN, id: "older", createdAt: RUN.createdAt - 1000, prompt: "An older picture", outputs: [] };
+      vi.mocked(api.studioRuns).mockImplementationOnce(async () => {
+        height = 1600;
+        return { runs: [older], next: null };
+      });
+      await click(more);
+      expect(api.studioRuns).toHaveBeenLastCalledWith({ kind: "image" }, next, 60);
+      expect(document.querySelector('[data-run-card="older"]')).not.toBeNull();
+      expect(screen.queryByRole("button", { name: "Load more" })).toBeNull();
+      // Still 600 px from the bottom: the cards shown did not move.
+      expect(scroller.scrollTop).toBe(1000);
+    } finally {
+      if (main) Object.defineProperty(HTMLElement.prototype, "scrollHeight", main);
+      else delete (HTMLElement.prototype as { scrollHeight?: number }).scrollHeight;
+    }
+  });
+
+  it("a press accepted from Studio brings its new card into view", async () => {
+    const shownCards: Element[] = [];
+    Element.prototype.scrollIntoView = vi.fn(function (this: Element) {
+      shownCards.push(this);
+    });
+    try {
+      await show({ runs: [RUN] });
+      const made: Run = { ...RUN, id: "again", seq: 9, status: "queued", outputs: [], createdAt: RUN.createdAt + 1000 };
+      vi.mocked(api.studioStart).mockResolvedValue(made);
+      await act(async () => {
+        await useStudio.getState().again(RUN);
+      });
+      await flush();
+      expect(shownCards.map((c) => c.getAttribute("data-run-card"))).toEqual(["again"]);
+      // Only once: a later change of the same run leaves the scroll alone.
+      act(() => useStudio.getState().applyProgress({ ...made, seq: 10, status: "running" }));
+      await flush();
+      expect(shownCards).toHaveLength(1);
+    } finally {
+      delete (Element.prototype as { scrollIntoView?: unknown }).scrollIntoView;
+    }
+  });
+
+  it("at the window's smallest the middle column keeps room: a narrower panel, and a chat list toggle", async () => {
+    await show();
+    // jsdom lays nothing out: the classes are the layout (288 px from 1000 px, 240 px below).
+    const panel = (document.querySelector("[data-studio-panel]")?.getAttribute("class") ?? "").split(/\s+/);
+    expect(panel).toEqual(expect.arrayContaining(["w-60", "min-[1000px]:w-72"]));
+    expect(panel).not.toContain("w-72");
+    const toggled = vi.fn();
+    window.addEventListener("app:toggle-sidebar", toggled);
+    try {
+      await click(screen.getByRole("button", { name: "Show or hide the chat list" }));
+      expect(toggled).toHaveBeenCalledTimes(1);
+    } finally {
+      window.removeEventListener("app:toggle-sidebar", toggled);
+    }
+  });
+
+  it("outside the grid the gallery is read for the tab shown, and read again on another tab", async () => {
+    await show({ runs: [RUN] });
+    expect(api.studioRuns).toHaveBeenCalledWith({ kind: "image" }, null, 60);
+    vi.mocked(api.studioRuns).mockClear();
+    await click(screen.getByRole("tab", { name: "Video" }));
+    expect(api.studioRuns).toHaveBeenCalledTimes(1);
+    expect(api.studioRuns).toHaveBeenCalledWith({ kind: "video" }, null, 60);
+  });
+
+  it("the card stream shows the tab's runs, oldest first and newest above the dock, over the queue strip of this session's runs", async () => {
+    const older: Run = { ...RUN, id: "older", createdAt: RUN.createdAt - 1000, prompt: "An older picture" };
+    const making: Run = {
+      ...RUN,
+      id: "making",
+      createdAt: RUN.createdAt + 1000,
+      prompt: "A picture being made",
+      status: "running",
+      outputs: [],
+      costUsd: null,
+      startedAt: Date.now(),
+      finishedAt: null,
+    };
+    const clip: Run = { ...RUN, id: "clip", kind: "video", prompt: "A clip" };
+    await show({ runs: [RUN, older, clip], live: [making] });
+    const cards = () => [...document.querySelectorAll("[data-run-card]")].map((c) => c.getAttribute("data-run-card"));
+    expect(cards()).toEqual(["older", RUN.id, "making"]);
+    // The queue strip is under the newest card.
+    const strip = document.querySelector("[data-queue-strip]")!;
+    expect(document.querySelector('[data-run-card="making"]')!.compareDocumentPosition(strip) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    screen.getByText("1 making");
+    act(() => useStudio.getState().applyProgress({ ...making, status: "done", finishedAt: Date.now(), seq: making.seq + 1 }));
+    screen.getByText("1 done");
+    await click(screen.getByRole("tab", { name: "Video" }));
+    expect(cards()).toEqual(["clip"]);
+    expect(document.querySelector("[data-queue-strip]")).toBeNull();
+  });
+
+  it("the Video tab offers a local video model first, and OpenRouter as the backup", async () => {
+    // getLocal
+    await show({ endpoints: [endpoint({ company: "openai" })], local: { ...LOCAL, installed: [] } });
+    await click(screen.getByRole("tab", { name: "Video" }));
+    const video = LOCAL.recommended.find((e) => e.kind === "video")!; // "Wan 2.2 5B, fast" unless the benchmark chose Wan 2.1
+    screen.getByText(`${video.name} fits this computer (${amountGb(video.sizeBytes)}).`);
+    screen.getByText("Or make videos with OpenRouter: add it in Settings → Endpoints.");
+  });
+
+  it("on a computer without a usable graphics card, the Video tab is cloud only", async () => {
+    // addEndpoint
+    await show({ endpoints: [endpoint({ company: "openai" })], local: { ...LOCAL, videoPossible: false } });
+    await click(screen.getByRole("tab", { name: "Video" }));
+    screen.getByText(
+      "Video on this computer needs a graphics card or an Apple-silicon Mac. OpenRouter makes videos in the cloud: add it in Settings → Endpoints.",
+    );
+  });
+
+  describe("what is saved, read again", () => {
+    const nothingFits = { ...LOCAL, installed: [], recommended: [], notHere: LOCAL.recommended, videoPossible: false };
+    const cloudBackup =
+      "This computer cannot run local models well. Cloud models run on a company's computers instead: add OpenRouter or OpenAI.";
+    const SAVED_READS = [api.studioModels, api.studioLocalModels, api.studioGetPrefs, api.studioUsage];
+
+    it("each time Studio is shown again, without fetching anything", async () => {
+      await show({ endpoints: [], local: nothingFits });
+      screen.getByText(cloudBackup);
+      act(() => useStudio.getState().showChat());
+      await flush();
+      for (const read of SAVED_READS) expect(read).toHaveBeenCalledTimes(1); // not while hidden
+      vi.mocked(api.studioModels).mockResolvedValue({ endpoints: [openrouter] }); // added meanwhile
+      act(() => useStudio.getState().showStudio());
+      await flush();
+      expect(screen.queryByText(cloudBackup)).toBeNull();
+      expect(useStudio.getState().drafts.image).toMatchObject({ target: { endpoint: 1 }, model: "openai/gpt-image-2.6-flare" });
+      for (const read of SAVED_READS) expect(read).toHaveBeenCalledTimes(2);
+      // The gallery's pages stay as read: the tab's first page and the newest runs, once each.
+      expect(api.studioRuns).toHaveBeenCalledTimes(2);
+      expect(api.studioRefreshModels).not.toHaveBeenCalled();
+      expect(api.studioModelPrice).not.toHaveBeenCalled();
+      expect(api.studioLocalSearch).not.toHaveBeenCalled();
+    });
+
+    it("when Settings closes, so an endpoint added there shows at once", async () => {
+      await show({ endpoints: [], local: nothingFits });
+      await click(screen.getByRole("button", { name: "Open Endpoints" }));
+      expect(opened).toEqual(["endpoints"]);
+      vi.mocked(api.studioModels).mockResolvedValue({ endpoints: [openrouter] }); // added there
+      await act(async () => {
+        window.dispatchEvent(new Event("app:settings-closed"));
+      });
+      await flush();
+      expect(screen.queryByText(cloudBackup)).toBeNull();
+      await openMenu();
+      expect(screen.getByRole("menuitem", { name: "Update model lists" }).getAttribute("data-disabled")).toBeNull();
+      expect(api.studioRefreshModels).not.toHaveBeenCalled();
+      // While the chat is shown, Settings closing reads nothing: showing Studio will.
+      act(() => useStudio.getState().showChat());
+      await act(async () => {
+        window.dispatchEvent(new Event("app:settings-closed"));
+      });
+      await flush();
+      expect(api.studioModels).toHaveBeenCalledTimes(2);
+    });
+
+    it("a first read that failed is tried again when Studio is shown again", async () => {
+      vi.mocked(api.studioModels).mockRejectedValueOnce(new Error("database is locked"));
+      await show();
+      expect(useStudio.getState().loaded).toBe(false);
+      screen.getByText("Something went wrong.");
+      act(() => useStudio.getState().showChat());
+      act(() => useStudio.getState().showStudio());
+      await flush();
+      expect(useStudio.getState().loaded).toBe(true);
+      // The whole first read again (the tab's first page and the newest runs).
+      expect(api.studioRuns).toHaveBeenCalledTimes(4);
+      expect(screen.queryByText("Something went wrong.")).toBeNull(); // the read worked
+      expect(screen.queryByRole("alert")).toBeNull();
+    });
+
+    it("a failed read shows in the error banner", async () => {
+      vi.mocked(api.studioRuns).mockRejectedValueOnce({
+        code: "store",
+        message: "Studio's saved runs could not be read.",
+        nextStep: "Try again.",
+        details: "database is locked",
+      });
+      await show();
+      expect(screen.getByRole("alert").textContent).toContain("Studio's saved runs could not be read.");
+    });
+
+    it("a read again that works puts away a failed read's banner, not an action's", async () => {
+      await show({ endpoints: [endpoint({ fetchedAt: null, models: [] })] });
+      // A read again fails, then works.
+      vi.mocked(api.studioUsage).mockRejectedValueOnce(new Error("database is locked"));
+      await act(async () => {
+        window.dispatchEvent(new Event("app:settings-closed"));
+      });
+      await flush();
+      screen.getByText("Something went wrong.");
+      await act(async () => {
+        window.dispatchEvent(new Event("app:settings-closed"));
+      });
+      await flush();
+      expect(screen.queryByRole("alert")).toBeNull();
+      // *Get the list* fails: a read that works afterwards leaves that banner.
+      vi.mocked(api.studioRefreshModels).mockRejectedValueOnce({
+        code: "network",
+        message: "OpenRouter could not be reached.",
+        nextStep: "Check the connection.",
+        details: "",
+      });
+      await click(screen.getByRole("button", { name: "Get the list" }));
+      screen.getByText("OpenRouter could not be reached.");
+      await act(async () => {
+        window.dispatchEvent(new Event("app:settings-closed"));
+      });
+      await flush();
+      screen.getByText("OpenRouter could not be reached.");
+    });
+  });
+});

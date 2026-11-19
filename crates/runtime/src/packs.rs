@@ -6,6 +6,8 @@
 //! against its SHA-256 and size, unpacked into `<packs>/.tmp-<dir>/`, the VC++ runtime
 //! DLLs are copied in, a `.complete` marker is written, and only then is the folder
 //! renamed to `<packs>/<dir>`. Downloads come from GitHub release assets only.
+//! [`install_files`] does this for llama.cpp's packs ([`install`]) and for the Studio
+//! engine's Windows pack ([`crate::sd::engine::install`]).
 
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
@@ -124,8 +126,20 @@ pub struct PackProgress {
     pub unpacking: bool,
 }
 
+/// Where downloads in progress are kept: `<packs>/.downloads`.
 fn downloads_dir(packs_dir: &Path) -> PathBuf {
     packs_dir.join(".downloads")
+}
+
+/// Bytes of `files` already downloaded into `<root>/.downloads` (whole or in part) and not
+/// yet unpacked: what [`PackState::Partial`] reports.
+pub(crate) fn partial_bytes(files: &[PackFile], root: &Path) -> u64 {
+    let downloads = downloads_dir(root);
+    files
+        .iter()
+        .filter_map(|f| std::fs::metadata(downloads.join(part_name(f))).ok())
+        .map(|m| m.len())
+        .sum()
 }
 
 /// The pack's state from what is on disk.
@@ -137,12 +151,7 @@ pub fn state(pack: &PackSpec, packs_dir: &Path) -> PackState {
     {
         return PackState::Installed;
     }
-    let bytes: u64 = pack
-        .files
-        .iter()
-        .filter_map(|f| std::fs::metadata(downloads_dir(packs_dir).join(part_name(f))).ok())
-        .map(|m| m.len())
-        .sum();
+    let bytes = partial_bytes(&pack.files, packs_dir);
     if bytes > 0 {
         PackState::Partial { bytes }
     } else {
@@ -151,7 +160,7 @@ pub fn state(pack: &PackSpec, packs_dir: &Path) -> PackState {
 }
 
 /// Partial files are named after their hash so a changed pin never resumes stale bytes.
-fn part_name(f: &PackFile) -> String {
+pub(crate) fn part_name(f: &PackFile) -> String {
     format!("{}.{}.part", f.name, &f.sha256[..16.min(f.sha256.len())])
 }
 
@@ -376,8 +385,8 @@ async fn fetch(
     Ok(())
 }
 
-/// Simple `*` glob over file names (the lock's `keep_files`).
-fn glob_match(pattern: &str, name: &str) -> bool {
+/// Simple `*` glob over file names, ignoring case (the locks' `keep_files`).
+pub(crate) fn glob_match(pattern: &str, name: &str) -> bool {
     let p = pattern.to_ascii_lowercase();
     let n = name.to_ascii_lowercase();
     match p.split_once('*') {
@@ -462,6 +471,31 @@ pub fn unpack_zip(
     Ok(written)
 }
 
+/// What [`install_files`] downloads and unpacks: one pack's pinned archives, the names it
+/// keeps, and where the Visual C++ runtime files it needs come from.
+#[derive(Clone, Copy, Debug)]
+pub struct InstallSpec<'a> {
+    /// The pack's id, recorded in its `.complete` marker.
+    pub id: &'a str,
+    /// The build the pack comes from, recorded in its `.complete` marker.
+    pub build: &'a str,
+    /// The folder name under the root the pack is installed into.
+    pub dir: &'a str,
+    /// The archives to download, verify and unpack together.
+    pub files: &'a [PackFile],
+    /// File-name patterns kept when unpacking (`*` wildcards), unless
+    /// [`keep_all`](Self::keep_all).
+    pub keep: &'a [String],
+    /// Keep every unpacked file, with its folders, instead of filtering by
+    /// [`keep`](Self::keep).
+    pub keep_all: bool,
+    /// The Visual C++ runtime DLLs copied in from [`vc_runtime_dir`](Self::vc_runtime_dir).
+    pub vc_runtime_files: &'a [String],
+    /// The folder holding the Visual C++ runtime DLLs (llama.cpp's installed folder on
+    /// Windows); `None` copies nothing.
+    pub vc_runtime_dir: Option<&'a Path>,
+}
+
 /// Installs `pack` into `packs_dir`, copying the VC++ runtime DLLs from `vc_runtime_dir`
 /// (the installed runtime folder on Windows). Resumes a partial download.
 pub async fn install(
@@ -485,12 +519,38 @@ pub async fn install(
     if final_dir.join(PACK_COMPLETE_MARKER).is_file() {
         return Ok(final_dir);
     }
-    let downloads = downloads_dir(packs_dir);
+    let spec = InstallSpec {
+        id: &pack.id,
+        build: &pack.build,
+        dir: &pack.dir,
+        files: &pack.files,
+        keep: &lock.keep_files,
+        keep_all: pack.keep_all,
+        vc_runtime_files: &lock.vc_runtime_files,
+        vc_runtime_dir,
+    };
+    install_files(&spec, packs_dir, cancel, progress).await
+}
+
+/// Downloads (resuming) into `<root>/.downloads`, verifies size and SHA-256, unpacks into
+/// `<root>/.tmp-<dir>`, copies the VC++ files, writes `.complete`, renames to
+/// `<root>/<dir>`. No platform check: the caller makes it.
+///
+/// A folder already at `<root>/<dir>` is replaced only once the new one is complete, so
+/// whether to install at all is the caller's decision too.
+pub async fn install_files(
+    spec: &InstallSpec<'_>,
+    root: &Path,
+    cancel: &CancellationToken,
+    progress: &(dyn Fn(PackProgress) + Send + Sync),
+) -> Result<PathBuf, PackError> {
+    let final_dir = root.join(spec.dir);
+    let downloads = downloads_dir(root);
     tokio::fs::create_dir_all(&downloads).await?;
-    let total = pack.download_size();
+    let total: u64 = spec.files.iter().map(|f| f.size).sum();
     let client = client()?;
     let mut finished_before = 0u64;
-    for f in &pack.files {
+    for f in spec.files {
         let dest = downloads.join(part_name(f));
         let base = finished_before;
         fetch(&client, f, &dest, ALLOWED_HOSTS, cancel, &|n| {
@@ -509,12 +569,12 @@ pub async fn install(
         unpacking: true,
     });
 
-    let tmp = packs_dir.join(format!(".tmp-{}", pack.dir));
+    let tmp = root.join(format!(".tmp-{}", spec.dir));
     let _ = tokio::fs::remove_dir_all(&tmp).await;
     tokio::fs::create_dir_all(&tmp).await?;
-    let keep = lock.keep_files.clone();
-    let keep_all = pack.keep_all;
-    let archives: Vec<PathBuf> = pack
+    let keep = spec.keep.to_vec();
+    let keep_all = spec.keep_all;
+    let archives: Vec<PathBuf> = spec
         .files
         .iter()
         .map(|f| downloads.join(part_name(f)))
@@ -531,12 +591,12 @@ pub async fn install(
     .map_err(|e| PackError::Io(e.to_string()))??;
     if count == 0 {
         return Err(PackError::Archive {
-            file: pack.id.clone(),
+            file: spec.id.to_string(),
             message: "no files were kept".into(),
         });
     }
-    if let Some(vc) = vc_runtime_dir {
-        for name in &lock.vc_runtime_files {
+    if let Some(vc) = spec.vc_runtime_dir {
+        for name in spec.vc_runtime_files {
             let src = vc.join(name);
             if src.is_file() {
                 tokio::fs::copy(&src, tmp.join(name)).await?;
@@ -546,17 +606,17 @@ pub async fn install(
         }
     }
     let marker = serde_json::json!({
-        "pack": pack.id,
-        "build": pack.build,
-        "files": pack.files.iter().map(|f| &f.sha256).collect::<Vec<_>>(),
+        "pack": spec.id,
+        "build": spec.build,
+        "files": spec.files.iter().map(|f| &f.sha256).collect::<Vec<_>>(),
     });
     tokio::fs::write(tmp.join(PACK_COMPLETE_MARKER), marker.to_string()).await?;
     let _ = tokio::fs::remove_dir_all(&final_dir).await;
     tokio::fs::rename(&tmp, &final_dir).await?;
-    for f in &pack.files {
+    for f in spec.files {
         let _ = tokio::fs::remove_file(downloads.join(part_name(f))).await;
     }
-    tracing::info!(pack = %pack.id, "backend installed");
+    tracing::info!(pack = %spec.id, "pack installed");
     Ok(final_dir)
 }
 
@@ -722,6 +782,108 @@ mod tests {
         assert!(!dir.path().join("escape.dll").exists());
     }
 
+    /// The Windows Studio engine's archive, stand-in: one small file for each name of the
+    /// pinned zip, already downloaded, and llama's installed folder holding the Visual C++
+    /// runtime files.
+    struct SdPackFixture {
+        _tmp: tempfile::TempDir,
+        root: PathBuf,
+        vc: PathBuf,
+        files: Vec<PackFile>,
+    }
+
+    /// The fixture with the archive pinned at its true SHA-256, or at `pinned_sha256`.
+    fn sd_pack_fixture(pinned_sha256: Option<&str>) -> SdPackFixture {
+        let tmp = tempfile::tempdir().unwrap();
+        let listing = include_str!("../tests/fixtures/sd_win_pack_listing.txt");
+        let names: Vec<&str> = listing.lines().filter(|l| !l.is_empty()).collect();
+        assert_eq!(names.len(), 23, "the pinned zip holds 23 files");
+        let zip = tmp.path().join("pack.zip");
+        let entries: Vec<(&str, &[u8])> = names.iter().map(|n| (*n, n.as_bytes())).collect();
+        make_zip(&zip, &entries);
+        let bytes = std::fs::read(&zip).unwrap();
+        let pinned = &crate::sd::lock::embedded().packs[0].files[0];
+        let file = PackFile {
+            name: pinned.name.clone(),
+            url: pinned.url.clone(),
+            size: bytes.len() as u64,
+            sha256: pinned_sha256.map_or_else(|| hex(&Sha256::digest(&bytes)), str::to_string),
+        };
+        let root = tmp.path().join("engines");
+        std::fs::create_dir_all(downloads_dir(&root)).unwrap();
+        std::fs::write(downloads_dir(&root).join(part_name(&file)), &bytes).unwrap();
+        let vc = tmp.path().join("llama").join("main");
+        std::fs::create_dir_all(&vc).unwrap();
+        for name in &crate::sd::lock::embedded().vc_runtime_files {
+            std::fs::write(vc.join(name), name.as_bytes()).unwrap();
+        }
+        SdPackFixture {
+            _tmp: tmp,
+            root,
+            vc,
+            files: vec![file],
+        }
+    }
+
+    fn sd_spec(f: &SdPackFixture) -> InstallSpec<'_> {
+        let lock = crate::sd::lock::embedded();
+        InstallSpec {
+            id: "studio-vulkan",
+            build: "master-1106-532d2c1",
+            dir: "sd-1106",
+            files: &f.files,
+            keep: &lock.keep_files,
+            keep_all: false,
+            vc_runtime_files: &lock.vc_runtime_files,
+            vc_runtime_dir: Some(&f.vc),
+        }
+    }
+
+    #[tokio::test]
+    async fn install_files_keeps_what_the_pinned_zip_needs() {
+        let f = sd_pack_fixture(None);
+        let root = f.root.as_path();
+        let dir = install_files(&sd_spec(&f), root, &CancellationToken::new(), &|_| {})
+            .await
+            .unwrap();
+        assert_eq!(dir, root.join("sd-1106"));
+        for kept in [
+            "sd-cli.exe",
+            "stable-diffusion.dll",
+            "ggml-vulkan.dll",
+            "ggml-cpu-haswell.dll",
+            "libwebp.dll",
+            "libwebpmux.dll",
+            "libsharpyuv.dll",
+            "webm.dll",
+            "ggml.txt",
+            "stable-diffusion.cpp.txt",
+            "msvcp140_codecvt_ids.dll",
+            PACK_COMPLETE_MARKER,
+        ] {
+            assert!(dir.join(kept).is_file(), "{kept}");
+        }
+        for vc in &crate::sd::lock::embedded().vc_runtime_files {
+            assert!(dir.join(vc).is_file(), "{vc}");
+        }
+        for left in ["sd-server.exe", "start-server.bat", "start-server.sh"] {
+            assert!(!dir.join(left).exists(), "{left}");
+        }
+        assert!(!root.join(".tmp-sd-1106").exists());
+        assert!(!downloads_dir(root).join(part_name(&f.files[0])).exists());
+    }
+
+    #[tokio::test]
+    async fn a_changed_archive_installs_nothing() {
+        let f = sd_pack_fixture(Some(&"0".repeat(64)));
+        let root = f.root.as_path();
+        let err = install_files(&sd_spec(&f), root, &CancellationToken::new(), &|_| {})
+            .await
+            .unwrap_err();
+        assert!(matches!(err, PackError::ChecksumMismatch { .. }), "{err}");
+        assert!(!root.join("sd-1106").exists());
+    }
+
     #[test]
     fn state_from_disk() {
         let dir = tempfile::tempdir().unwrap();
@@ -738,5 +900,29 @@ mod tests {
         std::fs::create_dir_all(dir.path().join(&pack.dir)).unwrap();
         std::fs::write(dir.path().join(&pack.dir).join(PACK_COMPLETE_MARKER), b"{}").unwrap();
         assert_eq!(state(pack, dir.path()), PackState::Installed);
+    }
+
+    #[test]
+    fn partial_bytes_adds_up_every_files_part() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = |name: &str, sha256: &str| PackFile {
+            name: name.into(),
+            url: format!("https://github.com/o/r/releases/download/t/{name}"),
+            size: 100,
+            sha256: sha256.into(),
+        };
+        let files = [
+            file("a.zip", &"a".repeat(64)),
+            file("b.zip", &"b".repeat(64)),
+        ];
+        assert_eq!(partial_bytes(&files, dir.path()), 0);
+        std::fs::create_dir_all(dir.path().join(".downloads")).unwrap();
+        let part = |f: &PackFile| dir.path().join(".downloads").join(part_name(f));
+        std::fs::write(part(&files[0]), b"12345").unwrap();
+        assert_eq!(partial_bytes(&files, dir.path()), 5);
+        std::fs::write(part(&files[1]), b"123").unwrap();
+        assert_eq!(partial_bytes(&files, dir.path()), 8);
+        // only the files asked about count
+        assert_eq!(partial_bytes(&files[1..], dir.path()), 3);
     }
 }

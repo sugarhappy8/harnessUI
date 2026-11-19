@@ -51,5 +51,11 @@ name = "reaper_process"
 path = "tests/reaper_process.rs"
 harness = false
 
+# Doubles as the fake Studio engine when started with RUNTIME_FAKE_SD set (see the file header).
+[[test]]
+name = "sd_cli"
+path = "tests/sd_cli.rs"
+harness = false
+
 [lints]
 workspace = true

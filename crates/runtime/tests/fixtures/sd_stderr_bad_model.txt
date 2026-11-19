@@ -1,0 +1,11 @@
+[I] loading diffusion model from '/m/leejet/FLUX.2-klein-4B-GGUF/flux-2-klein-4b-Q4_0.gguf' --- diffusion_engine.cpp:697
+[I] load /m/leejet/FLUX.2-klein-4B-GGUF/flux-2-klein-4b-Q4_0.gguf using gguf format --- model_loader.cpp:220
+[E] ggml: gguf_init_from_file_impl: failed to load model: this GGUF file version 50331648 is extremely large, is there a mismatch between the host and model endianness?
+[E] failed to open '/m/leejet/FLUX.2-klein-4B-GGUF/flux-2-klein-4b-Q4_0.gguf' with GGUFReader --- model_loader.cpp:271
+[W] loading diffusion model from '/m/leejet/FLUX.2-klein-4B-GGUF/flux-2-klein-4b-Q4_0.gguf' failed --- diffusion_engine.cpp:699
+[I] loading llm from '/m/unsloth/Qwen3-4B-GGUF/Qwen3-4B-Q4_K_M.gguf' --- diffusion_engine.cpp:754
+[I] load /m/unsloth/Qwen3-4B-GGUF/Qwen3-4B-Q4_K_M.gguf using gguf format --- model_loader.cpp:220
+[I] loading vae from '/m/Comfy-Org/flux2-klein-4B/split_files/vae/flux2-vae.safetensors' --- diffusion_engine.cpp:768
+[I] load /m/Comfy-Org/flux2-klein-4B/split_files/vae/flux2-vae.safetensors using safetensors format --- model_loader.cpp:226
+[E] get sd version from file failed: '' --- diffusion_engine.cpp:979
+[I] sd_ctx_create failed --- main.cpp:960

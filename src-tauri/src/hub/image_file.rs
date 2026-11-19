@@ -743,6 +743,7 @@ pub async fn download_image_file(
         parameters: None,
         image_file_for: Some(rec.path.clone()),
         image_files: None,
+        generator: None,
     };
     manager
         .start(

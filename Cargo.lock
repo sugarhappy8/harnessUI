@@ -30,7 +30,7 @@ dependencies = [
 
 [[package]]
 name = "agent"
-version = "0.0.8"
+version = "0.1.0"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
@@ -140,14 +140,13 @@ checksum = "330a5ed07fa54e4702c9d6c4174f74427fc0ef6e214bbd677ae50a5099946470"
 
 [[package]]
 name = "app"
-version = "0.0.8"
+version = "0.1.0"
 dependencies = [
  "agent",
  "async-trait",
  "base64 0.22.1",
  "browser",
  "bytes",
- "chrono",
  "computer",
  "dunce",
  "futures-util",
@@ -156,6 +155,7 @@ dependencies = [
  "hyper",
  "hyper-util",
  "image",
+ "jiff",
  "mcp-host",
  "models",
  "objc2",
@@ -600,18 +600,18 @@ dependencies = [
 
 [[package]]
 name = "browser"
-version = "0.0.8"
+version = "0.1.0"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
  "browser",
- "chrono",
  "cssparser 0.37.0",
  "dom_query 0.28.0",
  "dunce",
  "futures-util",
  "html5ever 0.39.0",
  "image",
+ "jiff",
  "mcp-host",
  "policy",
  "quick-xml 0.42.0",
@@ -920,7 +920,7 @@ dependencies = [
 
 [[package]]
 name = "computer"
-version = "0.0.8"
+version = "0.1.0"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
@@ -2832,9 +2832,9 @@ dependencies = [
 
 [[package]]
 name = "jiff"
-version = "0.2.42"
+version = "0.2.46"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "fefca06093eeaed707a905795e68206da0edca4edef23d2a3997a3ddbee462aa"
+checksum = "175dc66334db3b9ab9985bf8b61cfed50dc16d20964bb47f9e479adcae984a7f"
 dependencies = [
  "jiff-core",
  "jiff-static",
@@ -2848,18 +2848,18 @@ dependencies = [
 
 [[package]]
 name = "jiff-core"
-version = "0.1.4"
+version = "0.1.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "77a24020db0ee88d1c681d677681bd31f9f4ea189a455425223d52ce4f1508aa"
+checksum = "e599b80292e597019b8b3e392de3f4bea2959ddfb8c7dff60e035e9e311a2c1b"
 dependencies = [
  "log",
 ]
 
 [[package]]
 name = "jiff-static"
-version = "0.2.42"
+version = "0.2.46"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "41d3213549742662eea1a18e6c5af9be5dfbabeb7611ab71356a54928ec398f0"
+checksum = "c7b1af7547d47354bc438d797e3854601bde8f8d185780c5ba4ab27afa54f1ba"
 dependencies = [
  "jiff-core",
  "proc-macro2",
@@ -3356,7 +3356,7 @@ dependencies = [
 
 [[package]]
 name = "mcp-host"
-version = "0.0.8"
+version = "0.1.0"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
@@ -3476,7 +3476,7 @@ dependencies = [
 
 [[package]]
 name = "models"
-version = "0.0.8"
+version = "0.1.0"
 dependencies = [
  "base64 0.22.1",
  "futures-util",
@@ -4422,7 +4422,7 @@ dependencies = [
 
 [[package]]
 name = "policy"
-version = "0.0.8"
+version = "0.1.0"
 dependencies = [
  "dunce",
  "libc",
@@ -4865,7 +4865,7 @@ dependencies = [
 
 [[package]]
 name = "reverse"
-version = "0.0.8"
+version = "0.1.0"
 dependencies = [
  "async-trait",
  "dunce",
@@ -4988,7 +4988,7 @@ dependencies = [
 
 [[package]]
 name = "runtime"
-version = "0.0.8"
+version = "0.1.0"
 dependencies = [
  "futures-util",
  "libc",
@@ -5258,7 +5258,7 @@ checksum = "94143f37725109f92c262ed2cf5e59bce7498c01bcc1502d7b9afe439a4e9f49"
 
 [[package]]
 name = "search"
-version = "0.0.8"
+version = "0.1.0"
 dependencies = [
  "async-trait",
  "dom_query 0.28.0",
@@ -5271,6 +5271,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2 0.11.1",
+ "tempfile",
  "thiserror 2.0.21",
  "tokio",
  "toml 1.2.1+spec-1.1.0",
@@ -5767,10 +5768,10 @@ checksum = "ff7589a1859b09232522bb9edf076ca7fcf14ded96685d3fa629db73023ffbb7"
 
 [[package]]
 name = "store"
-version = "0.0.8"
+version = "0.1.0"
 dependencies = [
  "apple-native-keyring-store",
- "chrono",
+ "jiff",
  "keyring-core",
  "rusqlite",
  "security-framework",
@@ -6759,7 +6760,7 @@ checksum = "009dbb7700f11c55ef83aebbe4c0e9cf1f1ac0844bd8d6f00dc38f302026e13a"
 
 [[package]]
 name = "tools"
-version = "0.0.8"
+version = "0.1.0"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
@@ -7127,7 +7128,7 @@ dependencies = [
 
 [[package]]
 name = "usage"
-version = "0.0.8"
+version = "0.1.0"
 dependencies = [
  "libc",
  "objc2-core-foundation",

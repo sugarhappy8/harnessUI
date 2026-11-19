@@ -415,7 +415,7 @@ pub async fn start_capability_check(
     let saved = Profile {
         version: profile::VERSION,
         label: label.clone(),
-        checked_at: chrono::Utc::now().timestamp_millis(),
+        checked_at: jiff::Timestamp::now().as_millisecond(),
         chosen: best.map(|b| b.label.clone()),
         defaults: best.map(|b| probes::defaults_of(b.settings)),
         results,
@@ -555,7 +555,7 @@ pub async fn start_benchmark(
     .await;
     let forbidden = crate::permissions::forbidden_for_tools(&app);
     let all = tasks::all();
-    let started_at = chrono::Utc::now().timestamp_millis();
+    let started_at = jiff::Timestamp::now().as_millisecond();
     let setup = bench::Setup {
         model: &model,
         settings,
@@ -572,7 +572,7 @@ pub async fn start_benchmark(
     let run = BenchRun {
         id: bench::new_id(),
         started_at,
-        finished_at: chrono::Utc::now().timestamp_millis(),
+        finished_at: jiff::Timestamp::now().as_millisecond(),
         model: label,
         model_ref,
         settings,

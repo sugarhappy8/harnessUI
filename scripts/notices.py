@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """Generates THIRD-PARTY-NOTICES.md: every Rust crate compiled into the release
 targets, every npm package shipped in the frontend bundle, and the bundled native
-components (llama.cpp, LLVM OpenMP, the Microsoft Visual C++ runtime).
+components (llama.cpp, stable-diffusion.cpp and what it builds in, LLVM OpenMP, the
+Microsoft Visual C++ runtime).
 
     python3 scripts/notices.py            # writes THIRD-PARTY-NOTICES.md
     python3 scripts/notices.py --check    # fails if the file is out of date
@@ -106,6 +107,28 @@ def render() -> str:
     ]
     for title, f, note in [
         ("llama.cpp (llama-server, llama-fit-params) — MIT", "llama.cpp-LICENSE", "Pinned build b12110; see llama.lock.json."),
+        ("stable-diffusion.cpp (the Studio engine, sd-cli) — MIT", "stable-diffusion.cpp-LICENSE",
+         "Pinned build master-1106-532d2c1; see sd.lock.json. On macOS sd-cli is built into the app from the pinned commit with "
+         "its ggml, libwebp and libwebm submodules. On Windows the Studio engine is the upstream Vulkan build of the same commit "
+         "(sd-cli.exe, stable-diffusion.dll, the ggml, libwebp, libsharpyuv and webm DLLs), downloaded with your first local "
+         "model; its zip carries only the ggml and stable-diffusion.cpp licence texts. Both builds include the components "
+         "in the entries that follow, whose texts are taken from the pinned commit's tree."),
+        ("ggml (built into the Studio engine) — MIT", "ggml-LICENSE", ""),
+        ("libwebp, with its sharpyuv library (built into the Studio engine) — BSD-3-Clause", "libwebp-COPYING", ""),
+        ("libwebm (built into the Studio engine) — BSD-3-Clause", "libwebm-LICENSE.TXT", ""),
+        ("Oniguruma (built into the Studio engine) — BSD-2-Clause", "oniguruma-COPYING", ""),
+        ("utf8proc (built into the Studio engine) — MIT, with the Unicode data licence", "utf8proc-LICENSE.md", ""),
+        ("nlohmann json 3.11.2 (built into the Studio engine) — MIT", "nlohmann-json-LICENSE.MIT",
+         "The vendored json.hpp names its licence in SPDX lines (2013-2022 Niels Lohmann, MIT); the standard MIT text follows."),
+        ("miniz 2.2.0 (built into the Studio engine) — Unlicense and MIT", "miniz-LICENSE",
+         "From the vendored miniz.h: its public-domain statement, then its MIT notice."),
+        ("The zip library (kuba--/zip, built into the Studio engine)", "zip-LICENSE",
+         "The vendored zip.h and zip.c carry only the disclaimer below. stable-diffusion.cpp's thirdparty/README.md points to "
+         "the project's LICENSE.txt (https://github.com/kuba--/zip/blob/master/LICENSE.txt)."),
+        ("darts-clone (built into the Studio engine) — BSD-3-Clause", "darts-clone-COPYING", ""),
+        ("stb_image, stb_image_write and stb_image_resize (built into the Studio engine) — public domain or MIT", "stb-LICENSE",
+         "From the vendored headers: stb_image.h and stb_image_write.h offer MIT or public domain; stb_image_resize.h v0.90 is "
+         "public domain."),
         ("LLVM OpenMP runtime (Windows, libomp.dll) — Apache-2.0 WITH LLVM-exception", "LLVM-OpenMP-LICENSE", ""),
         ("Vulkan runtime (Windows, vulkan-1.dll) — Apache-2.0 and MIT", "VulkanRT-License.txt",
          "The Khronos Group's Vulkan loader, version 1.4.363.0 from LunarG's runtime components, unchanged. Used only when the graphics driver did not install its own; see llama.lock.json."),
@@ -121,13 +144,15 @@ def render() -> str:
         text = (ROOT / "third_party" / "licenses" / f).read_text(encoding="utf-8").strip()
         lines += ["```text", text, "```", ""]
     lines += [
-        "### Microsoft Visual C++ runtime (Windows: msvcp140.dll, vcruntime140.dll, vcruntime140_1.dll)",
+        "### Microsoft Visual C++ runtime (Windows: msvcp140.dll, msvcp140_codecvt_ids.dll, vcomp140.dll, vcruntime140.dll, vcruntime140_1.dll)",
         "",
         "Redistributed under the Microsoft Visual Studio redistributable code terms",
         "(https://learn.microsoft.com/visualstudio/releases/2022/redistribution).",
         "",
         "Optional GPU backends (CUDA, ROCm) are not part of the installer. They are downloaded only when you",
         "click Download in Settings, after their licenses are shown.",
+        "",
+        "The Studio engine is not part of the Windows installer. It is downloaded with your first local model, after its licence is shown.",
         "",
         "Reverse engineering (rea, Node.js, Kuna, Ghidra and Eclipse Temurin) is not part of the installer.",
         "Each is downloaded from its publisher only when you click Download in Settings → Reverse engineering,",

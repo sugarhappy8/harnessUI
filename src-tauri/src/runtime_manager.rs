@@ -14,7 +14,7 @@ use runtime::{
     ProbeResult, RuntimeLayout, ServerEvent, ServerState, StartSpec,
 };
 use tauri::{AppHandle, Emitter};
-use tokio::sync::{Mutex, oneshot};
+use tokio::sync::{Mutex, OwnedMutexGuard, oneshot};
 use tokio_util::sync::CancellationToken;
 
 use crate::dto::{BackendDto, DeviceDto, RuntimeStateDto, RuntimeStatusDto};
@@ -67,6 +67,80 @@ struct Loaded {
 /// before the server stops anyway.
 const STOP_WAIT: Duration = Duration::from_secs(10);
 
+/// 0.1.0 Studio: the graphics card's other tenant, a local Studio job (`gpu_lease`), as the
+/// load path sees it.
+#[async_trait::async_trait]
+pub trait StudioGate: Send + Sync {
+    /// A Studio job holds the card: only from its grant to the drop of its hold, never
+    /// while a job still waits for the card.
+    fn holds_card(&self) -> bool;
+    /// Returns once no Studio job holds the card (at once when none does).
+    async fn wait_until_free(&self);
+    /// True once after a Studio job freed the card.
+    fn take_reprobe(&self) -> bool;
+    /// A chat load passes the gate: when no Studio job holds the card, counts the load as
+    /// in flight and returns true; false (nothing counted) while one does. Checked and
+    /// counted at once, so no grant lands between the two. A job's grant waits while a
+    /// load is in flight, and reads the card again after one passed. A load calls it only
+    /// while it holds its setup lock, so none passes during
+    /// [`RuntimeManager::between_loads`].
+    fn begin_load(&self) -> bool;
+    /// The load counted by [`Self::begin_load`] has started its server (the status and the
+    /// running session name it), or gave up before that.
+    fn end_load(&self);
+}
+
+/// A chat load the Studio gate let through: in flight for the gate until it is dropped
+/// ([`StudioGate::end_load`]), on every way out of the load.
+struct StudioPass(Option<Arc<dyn StudioGate>>);
+
+impl Drop for StudioPass {
+    fn drop(&mut self) {
+        if let Some(gate) = &self.0 {
+            gate.end_load();
+        }
+    }
+}
+
+/// Says that a chat load waits at the Studio gate while it lives (`set(true)`), and stops
+/// saying it when dropped (`set(false)`): when the load passes, and when the load is dropped
+/// mid-wait (one under a timeout), so the status never says Studio holds back a load that
+/// no longer waits.
+struct WaitingForStudio<F: Fn(bool)>(F);
+
+impl<F: Fn(bool)> WaitingForStudio<F> {
+    fn new(set: F) -> Self {
+        set(true);
+        Self(set)
+    }
+}
+
+impl<F: Fn(bool)> Drop for WaitingForStudio<F> {
+    fn drop(&mut self) {
+        (self.0)(false);
+    }
+}
+
+/// Passes the Studio gate ([`StudioGate::begin_load`]): at once when no Studio job holds the
+/// card; else waits until a job frees it, with `waiting(true)` meanwhile and `waiting(false)`
+/// once it passes, or once this future is dropped mid-wait.
+async fn pass_studio_gate(gate: Arc<dyn StudioGate>, waiting: impl Fn(bool) + Send) -> StudioPass {
+    // The check that no job holds the card and the count of this load are one step.
+    if !gate.begin_load() {
+        let _waiting = WaitingForStudio::new(waiting);
+        // Another job may take the card as this one frees it: then that one goes first.
+        loop {
+            while gate.holds_card() {
+                gate.wait_until_free().await;
+            }
+            if gate.begin_load() {
+                break;
+            }
+        }
+    }
+    StudioPass(Some(gate))
+}
+
 pub struct RuntimeManager {
     app: AppHandle,
     layout: RuntimeLayout,
@@ -77,8 +151,10 @@ pub struct RuntimeManager {
     tail: StdMutex<VecDeque<String>>,
     loads: LoadTracker,
     /// Held while a load replaces the previous server and starts its own, so that two
-    /// loads never do that at the same time. Not held while the model loads.
-    load_setup: Mutex<()>,
+    /// loads never do that at the same time. Not held while the model loads. 0.1.0: a load
+    /// passes the Studio gate only while it holds this, and a Studio job's unload stops the
+    /// server only while it holds this too ([`Self::between_loads`]).
+    load_setup: Arc<Mutex<()>>,
     /// The model being loaded or loaded, as resolved.
     current: StdMutex<Option<Loaded>>,
     /// The model on a graphics device while the backends were last probed: (backend,
@@ -91,6 +167,9 @@ pub struct RuntimeManager {
     /// each load, retry and unload), for "Where the model went" and for what a load that
     /// replaces it frees.
     report: StdMutex<Option<MemoryReport>>,
+    /// 0.1.0: the lease that lets a local Studio job hold the graphics card; a load waits
+    /// while it does ([`Self::set_studio_gate`]).
+    studio_gate: StdMutex<Option<Arc<dyn StudioGate>>>,
 }
 
 impl RuntimeManager {
@@ -104,12 +183,67 @@ impl RuntimeManager {
             session: Mutex::new(None),
             tail: StdMutex::new(VecDeque::new()),
             loads: LoadTracker::default(),
-            load_setup: Mutex::new(()),
+            load_setup: Arc::new(Mutex::new(())),
             current: StdMutex::new(None),
             probed_with: StdMutex::new(None),
             gate: Arc::new(ChangeGate::default()),
             report: StdMutex::new(None),
+            studio_gate: StdMutex::new(None),
         }
+    }
+
+    /// The app this runtime reports to.
+    pub fn app(&self) -> &AppHandle {
+        &self.app
+    }
+
+    /// 0.1.0: the Studio lease a load asks first (set once at startup).
+    pub fn set_studio_gate(&self, gate: Arc<dyn StudioGate>) {
+        if let Ok(mut slot) = self.studio_gate.lock() {
+            *slot = Some(gate);
+        }
+    }
+
+    /// 0.1.0: the loaded (or loading) model's bytes on a graphics device, when it runs on
+    /// one: what unloading it gives a Studio job.
+    pub fn device_bytes(&self) -> Option<u64> {
+        self.loaded_on_device().map(|(_, _, bytes)| bytes)
+    }
+
+    /// 0.1.0 Studio: the free memory now on the graphics device that the last probe found
+    /// `probed_free` bytes free on (of `total`, when known). The probe is cached and runs
+    /// again only before a chat load, so the model loaded or unloaded since would otherwise
+    /// go uncounted ([`free_now`]). The model is counted, at the probe and now, only when it
+    /// was or is on that device: `on_device` says whether a (backend, device name) is it
+    /// ([`free_on_device`]).
+    pub fn device_free_now(
+        &self,
+        probed_free: u64,
+        total: Option<u64>,
+        on_device: &dyn Fn(&str, &str) -> bool,
+    ) -> u64 {
+        let at_probe = self.probed_with.lock().ok().and_then(|p| p.clone());
+        let now = self.loaded_on_device();
+        free_on_device(
+            probed_free,
+            total,
+            at_probe.as_ref(),
+            now.as_ref(),
+            on_device,
+        )
+    }
+
+    /// 0.1.0: the loaded (or loading) model was started with "Keep in memory".
+    pub fn keeps_in_memory(&self) -> bool {
+        let running = matches!(
+            self.status().state,
+            RuntimeStateDto::Ready | RuntimeStateDto::Starting
+        );
+        running
+            && self
+                .current
+                .lock()
+                .is_ok_and(|c| c.as_ref().is_some_and(|l| l.resolved.keep_in_memory))
     }
 
     pub fn status(&self) -> RuntimeStatusDto {
@@ -360,6 +494,17 @@ impl RuntimeManager {
         }
     }
 
+    /// 0.1.0 Studio: waits until no load is replacing the server and starting its own, then
+    /// keeps the next one from doing so, and from passing the Studio gate, until the guard
+    /// is dropped. A local job's unload stops the server under it: between two loads, never
+    /// in the middle of one, where the stop would reset the status of a server that then
+    /// starts unseen by the lease. Waiting for it changes nothing, so a job stopped
+    /// meanwhile leaves nothing behind. Never awaited while a model use is waited for (a
+    /// Model check's load would wait behind it).
+    pub async fn between_loads(&self) -> OwnedMutexGuard<()> {
+        Arc::clone(&self.load_setup).lock_owned().await
+    }
+
     /// "Unload to free memory": unloads, and remembers which model it was for
     /// "Unloaded to free memory · Load". Called after [`Self::before_change`].
     pub async fn unload_by_user(&self) {
@@ -495,6 +640,26 @@ impl RuntimeManager {
         first_candidate(&found, settings)
     }
 
+    /// 0.1.0 Studio, before a load picks its backend: while a local Studio job holds the
+    /// graphics card, waits for it to end ("Studio is using the graphics card. The chat
+    /// model loads when it finishes", `waiting_for_studio`); after a job freed the card,
+    /// probes the backends again, since Vulkan drivers can free memory late. The pass it
+    /// returns keeps the load in flight for the gate (no Studio grant meanwhile) until the
+    /// load drops it, once its server runs.
+    async fn wait_for_studio(&self) -> StudioPass {
+        let Some(gate) = self.studio_gate.lock().ok().and_then(|g| g.clone()) else {
+            return StudioPass(None);
+        };
+        let pass = pass_studio_gate(Arc::clone(&gate), |waiting| {
+            self.update(|s| s.waiting_for_studio = waiting);
+        })
+        .await;
+        if gate.take_reprobe() {
+            self.backends(true).await;
+        }
+        pass
+    }
+
     /// 0.0.7 (P6b review m6): whether a load with `settings` could start: the backend it
     /// would pick can run on this computer ([`Self::choose`]). A load checks this before it
     /// stops a reply or a model check (`models_cmd::after_backend_check`).
@@ -544,6 +709,10 @@ impl RuntimeManager {
             drop(setup);
             return self.wait_for_load(seq, &model).await;
         }
+        // 0.1.0: never on top of a local Studio job, and with the memory as it is after one.
+        // Waiting here, with the setup lock held, keeps the loads asked for meanwhile in
+        // their order. From here until its server runs, no Studio job gets the card.
+        let studio_pass = self.wait_for_studio().await;
         // 0.0.7 (P6): the backend is picked before anything changes. One that cannot run
         // here (`backend_unavailable`) leaves the loaded model as it is, and its error goes
         // back to the caller; before, the loaded model was stopped first and the status
@@ -720,6 +889,9 @@ impl RuntimeManager {
             exit
         });
         *self.session.lock().await = Some(Session { seq, cancel, task });
+        // The status and the session show this load now: a Studio job sees it (and an
+        // unload for one stops it).
+        drop(studio_pass);
         drop(setup);
 
         // Wait for the first ready server, or for the supervisor to give up.
@@ -1270,6 +1442,37 @@ fn launch_device(kind: BackendKind, device: &Device) -> (String, Option<String>)
     (device.name.clone(), None)
 }
 
+/// 0.1.0 Studio: the free memory on a graphics device now, from what its probe found:
+/// `probed_free` bytes free (of `total`, when known) while a model took `at_probe` bytes on
+/// it, and a model takes `now` bytes on it now. The model at the probe is counted back (its
+/// memory was not free then), at most up to the device's total (a probe that never saw the
+/// model, as on Metal, already counts that memory free), then the model now is taken away.
+fn free_now(probed_free: u64, total: Option<u64>, at_probe: Option<u64>, now: Option<u64>) -> u64 {
+    let free = probed_free.saturating_add(at_probe.unwrap_or(0));
+    let free = total.map_or(free, |total| free.min(total.max(probed_free)));
+    free.saturating_sub(now.unwrap_or(0))
+}
+
+/// 0.1.0 Studio: [`free_now`] for one graphics device, counting only a model that was, or
+/// is, on that device: `at_probe` and `now` are the model's (backend, device name, bytes)
+/// at the probe and now, and `on_device` says whether a (backend, device name) is the
+/// device the free memory is for. A model on another card neither took its memory nor
+/// takes it now.
+pub(crate) fn free_on_device(
+    probed_free: u64,
+    total: Option<u64>,
+    at_probe: Option<&(String, String, u64)>,
+    now: Option<&(String, String, u64)>,
+    on_device: &dyn Fn(&str, &str) -> bool,
+) -> u64 {
+    let bytes = |model: Option<&(String, String, u64)>| {
+        model
+            .filter(|(backend, device, _)| on_device(backend, device))
+            .map(|(_, _, bytes)| *bytes)
+    };
+    free_now(probed_free, total, bytes(at_probe), bytes(now))
+}
+
 /// The device as the probe and Settings name it: a ROCm launch masked to one card passes
 /// it as `ROCm0`, but the user picked it by its unmasked number.
 fn shown_device(device: Option<&str>, hip_visible_devices: Option<&str>) -> Option<String> {
@@ -1401,6 +1604,72 @@ mod tests {
                 output: Vec::new(),
             },
         )
+    }
+
+    /// L15 review fix: Studio judges a local job against the graphics memory free with the
+    /// chat model loaded now, not the one loaded (or not) when the backends were probed.
+    #[test]
+    fn studio_sees_the_free_memory_of_the_chat_model_loaded_now() {
+        const GB: u64 = 1_000_000_000;
+        let card = Some(8 * GB);
+        // Probed at startup with nothing loaded; a 5 GB chat model loaded since.
+        assert_eq!(free_now(8 * GB, card, None, Some(5 * GB)), 3 * GB);
+        // Probed with that chat model loaded; unloaded since (by a Studio grant).
+        assert_eq!(free_now(3 * GB, card, Some(5 * GB), None), 8 * GB);
+        // The same chat model then and now: as probed.
+        assert_eq!(free_now(3 * GB, card, Some(5 * GB), Some(5 * GB)), 3 * GB);
+        // Replaced by a 2 GB one.
+        assert_eq!(free_now(3 * GB, card, Some(5 * GB), Some(2 * GB)), 6 * GB);
+        // Nothing loaded then or now.
+        assert_eq!(free_now(8 * GB, card, None, None), 8 * GB);
+        // A probe that never saw the model (Metal's own process) is not counted past the
+        // device's total.
+        assert_eq!(
+            free_now(16 * GB, Some(16 * GB), Some(5 * GB), Some(5 * GB)),
+            11 * GB
+        );
+        // Without the total, counted back in full.
+        assert_eq!(free_now(3 * GB, None, Some(5 * GB), None), 8 * GB);
+        // Never below nothing.
+        assert_eq!(free_now(GB, card, None, Some(5 * GB)), 0);
+    }
+
+    /// Ruling L15-chat-device: on a computer with two cards, the chat model counts only on
+    /// the card it is on. Card A (`Vulkan0`) is the one Studio judges; the chat model runs on
+    /// card B (`Vulkan1`), so card A's free memory is as probed.
+    #[test]
+    fn studio_counts_the_chat_model_only_on_its_own_card() {
+        const GB: u64 = 1_000_000_000;
+        let card_a = |backend: &str, device: &str| backend == "vulkan" && device == "Vulkan0";
+        let on = |device: &str| ("vulkan".to_owned(), device.to_owned(), 5 * GB);
+        let (a, b) = (on("Vulkan0"), on("Vulkan1"));
+        // On card B since the probe, or at the probe and not now: card A is as probed.
+        assert_eq!(
+            free_on_device(8 * GB, Some(8 * GB), None, Some(&b), &card_a),
+            8 * GB
+        );
+        assert_eq!(
+            free_on_device(8 * GB, Some(8 * GB), Some(&b), None, &card_a),
+            8 * GB
+        );
+        assert_eq!(
+            free_on_device(8 * GB, Some(8 * GB), Some(&b), Some(&b), &card_a),
+            8 * GB
+        );
+        // On card A: counted as before.
+        assert_eq!(
+            free_on_device(8 * GB, Some(8 * GB), None, Some(&a), &card_a),
+            3 * GB
+        );
+        assert_eq!(
+            free_on_device(3 * GB, Some(8 * GB), Some(&a), None, &card_a),
+            8 * GB
+        );
+        // Moved from card B at the probe to card A now: taken from A, never given back to it.
+        assert_eq!(
+            free_on_device(8 * GB, Some(8 * GB), Some(&b), Some(&a), &card_a),
+            3 * GB
+        );
     }
 
     /// 7.2: ROCm sees only the chosen card (HIP_VISIBLE_DEVICES), which is then ROCm0.
@@ -1964,5 +2233,210 @@ mod tests {
         };
         let err = first_candidate(&found, &settings).unwrap_err();
         assert_eq!(err.code, "backend_unavailable");
+    }
+
+    /// 0.1.0 Studio: a chat load waits while a local Studio job holds the graphics card, and
+    /// after a job freed it the backends are probed again before one is picked (Vulkan
+    /// drivers can free memory late), so both come before the backend is chosen and before
+    /// the loaded server stops.
+    #[test]
+    fn the_load_path_asks_the_studio_gate_first() {
+        // A checkout on Windows ends its lines in "\r\n".
+        let source = include_str!("runtime_manager.rs").replace("\r\n", "\n");
+        let start = source.find("    pub async fn load(\n").expect("load");
+        let body = &source[start..];
+        let body = &body[..body.find("\n    }\n").expect("the end of load")];
+        let gate = body
+            .find("self.wait_for_studio(")
+            .expect("load asks the Studio gate");
+        let choose = body
+            .find("self.choose(&settings)")
+            .expect("load picks a backend");
+        let stop = body
+            .find("self.stop_server().await")
+            .expect("load stops the old server");
+        assert!(gate < choose, "the gate comes before the backend is picked");
+        assert!(gate < stop, "the gate comes before the loaded server stops");
+
+        // Review fix L12-1: the load counts as in flight from the gate until its server
+        // runs (the session an unload stops), so a Studio grant never lands in between.
+        let pass = body
+            .find("let studio_pass = self.wait_for_studio().await;")
+            .expect("load keeps the gate's pass");
+        let session = body
+            .find("*self.session.lock().await = Some(Session")
+            .expect("load installs its session");
+        let done = body.find("drop(studio_pass);").expect("load ends its pass");
+        assert!(
+            pass < session && session < done,
+            "the pass lasts until the session is installed"
+        );
+    }
+
+    /// Review fix L12-3: a load passes the Studio gate, and stays in flight for it, only
+    /// while it holds the setup lock. A Studio job's unload takes that lock
+    /// (`between_loads`), so it never stops the server in the middle of a load (resetting
+    /// the status of a server that then starts unseen by the lease), and no load passes the
+    /// gate while the unload decides and stops.
+    #[test]
+    fn a_load_is_in_flight_for_the_studio_gate_only_inside_its_setup() {
+        // A checkout on Windows ends its lines in "\r\n".
+        let source = include_str!("runtime_manager.rs").replace("\r\n", "\n");
+        let product = &source[..source.find("\n#[cfg(test)]\nmod tests").expect("tests")];
+        assert_eq!(
+            product.matches("self.wait_for_studio(").count(),
+            1,
+            "only load passes the gate"
+        );
+        let start = product.find("    pub async fn load(\n").expect("load");
+        let body = &product[start..];
+        let body = &body[..body.find("\n    }\n").expect("the end of load")];
+        let steps = [
+            "let setup = self.load_setup.lock().await;",
+            "let studio_pass = self.wait_for_studio().await;",
+            "drop(studio_pass);",
+            "drop(setup);",
+        ];
+        // Each step after the one before (the same-model join drops the lock earlier).
+        let mut at = Vec::new();
+        let mut from = 0;
+        for step in steps {
+            let found = body[from..]
+                .find(step)
+                .unwrap_or_else(|| panic!("load, in order: {step}"));
+            at.push(from + found);
+            from += found + step.len();
+        }
+        assert!(
+            !body[at[1]..at[2]].contains("drop(setup)"),
+            "the pass lies inside the setup lock"
+        );
+
+        let start = product
+            .find("    pub async fn between_loads(")
+            .expect("the Studio unload's hold on the loads");
+        let body = &product[start..];
+        let body = &body[..body.find("\n    }\n").expect("the end of between_loads")];
+        assert!(
+            body.contains("Arc::clone(&self.load_setup).lock_owned().await"),
+            "between_loads takes the setup lock"
+        );
+    }
+
+    /// A Studio gate a test drives: a job holds the card until [`HeldGate::free`].
+    struct HeldGate(tokio::sync::watch::Sender<bool>);
+
+    impl HeldGate {
+        fn new(held: bool) -> Arc<Self> {
+            Arc::new(Self(tokio::sync::watch::Sender::new(held)))
+        }
+
+        fn free(&self) {
+            self.0.send_replace(false);
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl StudioGate for HeldGate {
+        fn holds_card(&self) -> bool {
+            *self.0.borrow()
+        }
+
+        async fn wait_until_free(&self) {
+            let _ = self.0.subscribe().wait_for(|held| !held).await;
+        }
+
+        fn take_reprobe(&self) -> bool {
+            false
+        }
+
+        fn begin_load(&self) -> bool {
+            !*self.0.borrow()
+        }
+
+        fn end_load(&self) {}
+    }
+
+    /// Review fix L12-wait-guard: "Studio is using the graphics card" (`waiting_for_studio`)
+    /// is said only while a load waits at the Studio gate. It is cleared when the load
+    /// passes, and also when the load is dropped mid-wait: the backend check's restore load
+    /// runs under a 10-minute timeout, and a local job can hold the card longer.
+    #[tokio::test]
+    async fn waiting_for_studio_is_cleared_however_the_wait_ends() {
+        let bound = Duration::from_secs(10);
+        type Said = Arc<StdMutex<Vec<bool>>>;
+        let said = || -> Said { Arc::new(StdMutex::new(Vec::new())) };
+        let record = |said: &Said| {
+            let said = Arc::clone(said);
+            move |waiting: bool| said.lock().unwrap().push(waiting)
+        };
+        let seen = |said: &Said| said.lock().unwrap().clone();
+
+        // No job holds the card: the load passes at once, and nothing is said.
+        let flags = said();
+        let pass = pass_studio_gate(HeldGate::new(false), record(&flags)).await;
+        assert!(pass.0.is_some(), "the load passed the gate");
+        assert!(seen(&flags).is_empty());
+
+        // A job holds the card: said while the load waits, cleared when the job frees it.
+        let flags = said();
+        let gate = HeldGate::new(true);
+        let gate_dyn: Arc<dyn StudioGate> = gate.clone();
+        let load = tokio::spawn(pass_studio_gate(gate_dyn, record(&flags)));
+        tokio::time::timeout(bound, async {
+            while seen(&flags).is_empty() {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("the load waits");
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert!(
+            !load.is_finished(),
+            "the load passed while a job held the card"
+        );
+        assert_eq!(seen(&flags), [true]);
+        gate.free();
+        let pass = tokio::time::timeout(bound, load)
+            .await
+            .expect("the load passed in time")
+            .unwrap();
+        assert!(pass.0.is_some(), "the load passed the gate");
+        assert_eq!(seen(&flags), [true, false]);
+
+        // The load is dropped mid-wait (its timeout ends it): cleared all the same.
+        let flags = said();
+        let timed_out = tokio::time::timeout(
+            Duration::from_millis(50),
+            pass_studio_gate(HeldGate::new(true), record(&flags)),
+        )
+        .await;
+        assert!(
+            timed_out.is_err(),
+            "the load passed while a job held the card"
+        );
+        assert_eq!(
+            seen(&flags),
+            [true, false],
+            "a dropped load left \"Studio is using the graphics card\" behind"
+        );
+
+        // The load path says it only through this wait.
+        let source = include_str!("runtime_manager.rs").replace("\r\n", "\n");
+        let product = &source[..source.find("\n#[cfg(test)]\nmod tests").expect("tests")];
+        let start = product
+            .find("    async fn wait_for_studio(")
+            .expect("wait_for_studio");
+        let body = &product[start..];
+        let body = &body[..body.find("\n    }\n").expect("the end of wait_for_studio")];
+        assert!(
+            body.contains("pass_studio_gate("),
+            "the load waits through the guard"
+        );
+        assert_eq!(
+            product.matches("waiting_for_studio = true").count(),
+            0,
+            "the flag is set only through the guard"
+        );
     }
 }

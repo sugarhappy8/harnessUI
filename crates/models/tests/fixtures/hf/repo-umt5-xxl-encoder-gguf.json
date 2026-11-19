@@ -1,0 +1,145 @@
+{
+  "_id": "67c64d5ae21d1584969b0d39",
+  "id": "city96/umt5-xxl-encoder-gguf",
+  "gguf": {
+    "total": 5680910336,
+    "architecture": "t5encoder",
+    "context_length": 512,
+    "eos_token": "</s>",
+    "totalFileSize": 11368687456
+  },
+  "sha": "b535255bee98c2b0a59ea7c0ae2dcd0c6657b3b7",
+  "gated": false,
+  "tags": [
+    "gguf",
+    "en",
+    "base_model:google/umt5-xxl",
+    "base_model:quantized:google/umt5-xxl",
+    "license:apache-2.0",
+    "endpoints_compatible",
+    "region:us"
+  ],
+  "cardData": {
+    "base_model": "google/umt5-xxl",
+    "library_name": "gguf",
+    "license": "apache-2.0",
+    "quantized_by": "city96",
+    "language": "en"
+  },
+  "author": "city96",
+  "downloads": 792079,
+  "likes": 194,
+  "lastModified": "2025-03-04T01:41:27.000Z",
+  "siblings": [
+    {
+      "rfilename": ".gitattributes",
+      "blobId": "2a576c265835b0dc8f6a1c869ba42f6883beb714",
+      "size": 2159
+    },
+    {
+      "rfilename": "README.md",
+      "blobId": "f58b8658f0832237917a2747753ea57c58b7ef89",
+      "size": 775
+    },
+    {
+      "rfilename": "umt5-xxl-encoder-F16.gguf",
+      "blobId": "a91fffd644177ebf941738bfc0ba71bc401c5681",
+      "size": 11368687456,
+      "lfs": {
+        "sha256": "fa1d36fd54f171ae60fea915c23bd77986b330bbed9729f0d2f8ecbe9168bc48",
+        "size": 11368687456,
+        "pointerSize": 136
+      }
+    },
+    {
+      "rfilename": "umt5-xxl-encoder-F32.gguf",
+      "blobId": "56f0e7ded1bd151999410b91182e7a2fb785e8a7",
+      "size": 22730008416,
+      "lfs": {
+        "sha256": "8bc12d80bc0413573fa58a93626117440b4528f640dd9cb310732e05fa9e6c3e",
+        "size": 22730008416,
+        "pointerSize": 136
+      }
+    },
+    {
+      "rfilename": "umt5-xxl-encoder-Q3_K_M.gguf",
+      "blobId": "53737c517833429bba0d97e479f08edf74737a10",
+      "size": 3055097696,
+      "lfs": {
+        "sha256": "b7e2ca4c493c9d51fa951005e8ceba2f4b6b6877cfb4c36a8955c6cd68a1dba7",
+        "size": 3055097696,
+        "pointerSize": 135
+      }
+    },
+    {
+      "rfilename": "umt5-xxl-encoder-Q3_K_S.gguf",
+      "blobId": "b107fcd9985d49e08dfa2c79dcd990b6caef7022",
+      "size": 2858489696,
+      "lfs": {
+        "sha256": "f64f8d6dc4d8a24276df69d0ccea789aae686f7417950a41e6568c30cb478a5c",
+        "size": 2858489696,
+        "pointerSize": 135
+      }
+    },
+    {
+      "rfilename": "umt5-xxl-encoder-Q4_K_M.gguf",
+      "blobId": "a13e755afc0f2aa0fc322481b0fbc4dc32177c98",
+      "size": 3655145312,
+      "lfs": {
+        "sha256": "17cf97a5bbbc60a646d6105b832b6f657ce904a8a1ad970e4b59df0c67584a40",
+        "size": 3655145312,
+        "pointerSize": 135
+      }
+    },
+    {
+      "rfilename": "umt5-xxl-encoder-Q4_K_S.gguf",
+      "blobId": "78f2d45f7daa6a518c1cac881c91ada145fb79f2",
+      "size": 3497596768,
+      "lfs": {
+        "sha256": "4a3176f32fd70c0a335b4419fcbf8c86cc875e23498c0fc06f5b4aa0930889e0",
+        "size": 3497596768,
+        "pointerSize": 135
+      }
+    },
+    {
+      "rfilename": "umt5-xxl-encoder-Q5_K_M.gguf",
+      "blobId": "db766cd2c30f32c91bf553e14ba77f6c8d09d3bb",
+      "size": 4145878880,
+      "lfs": {
+        "sha256": "eaea358bb438c5d211721a4feecc162000e3636e9cb96f51e216f1f44ebd12ce",
+        "size": 4145878880,
+        "pointerSize": 135
+      }
+    },
+    {
+      "rfilename": "umt5-xxl-encoder-Q5_K_S.gguf",
+      "blobId": "05309ed2fd3d3f4d434705ed6cd319d535bab521",
+      "size": 4052293472,
+      "lfs": {
+        "sha256": "adbc782b9145a27e15d63dfa25057efca0ac75e2db7d372c901ddaa130ca2def",
+        "size": 4052293472,
+        "pointerSize": 135
+      }
+    },
+    {
+      "rfilename": "umt5-xxl-encoder-Q6_K.gguf",
+      "blobId": "d40e570c805e95ff2b81cd0233de4d93cc833fd6",
+      "size": 4667283296,
+      "lfs": {
+        "sha256": "9209b4c77b34ad8cf3f06b04c6eaa27e7beeebb348a31f85e3b38a1d719b09ed",
+        "size": 4667283296,
+        "pointerSize": 135
+      }
+    },
+    {
+      "rfilename": "umt5-xxl-encoder-Q8_0.gguf",
+      "blobId": "3dcb1c22af1fb9fe82a24752ba8e6f20931d4b6e",
+      "size": 6043068256,
+      "lfs": {
+        "sha256": "2521d4de0bf9e1cc6549866463ceae85e4ec3239bc6063f7488810be39033bbc",
+        "size": 6043068256,
+        "pointerSize": 135
+      }
+    }
+  ]
+}

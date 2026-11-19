@@ -25,7 +25,7 @@ thiserror = { workspace = true }
 tracing = { workspace = true }
 url = { workspace = true }
 reqwest = { workspace = true }
-tokio = { workspace = true, features = ["rt", "net", "time", "macros", "sync"] }
+tokio = { workspace = true, features = ["rt", "net", "time", "macros", "sync", "fs", "io-util"] }
 futures-util = { workspace = true }
 # The content hash of a page's extracted text.
 sha2 = { workspace = true }
@@ -43,6 +43,8 @@ encoding_rs = { workspace = true }
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "net", "io-util", "time"] }
 # The integration tests need the test hooks of this very crate.
 search = { path = ".", features = ["test-hooks"] }
+# Folders for the files `Fetcher::fetch_to_file` saves.
+tempfile = { workspace = true }
 
 [lints]
 workspace = true

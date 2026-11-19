@@ -7,6 +7,7 @@ import * as ipc from "../lib/ipc";
 import type { AppInfo } from "../lib/ipc";
 import type { FirstRunInfo, UpdateStatus } from "../lib/types";
 import { APP_NAME } from "../lib/app";
+import { STUDIO_NAV } from "../lib/words";
 import { toErrorInfo, turnChatId, useApp } from "../store/app";
 import { listenInEffect } from "../lib/listen";
 import { askBeforeChange, backendWhenIdle, runChange } from "../store/modelChange";
@@ -26,6 +27,7 @@ import { OtherApps } from "./settings/OtherApps";
 import { Reverse } from "./settings/Reverse";
 import { Endpoints } from "./settings/Endpoints";
 import { SameCallLimit } from "./settings/SameCallLimit";
+import { StudioSettings } from "./settings/StudioSettings";
 import type { DiagnosticsReport, ErrorInfo } from "../lib/types";
 
 const THEMES: { value: ThemeChoice; label: string }[] = [
@@ -659,6 +661,15 @@ export function SettingsDialog(props: {
   onOpenChange: (open: boolean) => void;
   initialTab?: string;
 }) {
+  const { open, onOpenChange } = props;
+  // A page that opens Studio (Settings → Studio's Get local models) leaves Settings: Studio is
+  // shown under it.
+  useEffect(() => {
+    if (!open) return;
+    const close = () => onOpenChange(false);
+    window.addEventListener("app:open-studio", close);
+    return () => window.removeEventListener("app:open-studio", close);
+  }, [open, onOpenChange]);
   return (
     <Dialog.Root open={props.open} onOpenChange={props.onOpenChange}>
       <Dialog.Portal>
@@ -672,12 +683,13 @@ export function SettingsDialog(props: {
           </div>
           <Dialog.Description className="sr-only">App settings</Dialog.Description>
           <Tabs.Root key={props.initialTab ?? "general"} defaultValue={props.initialTab ?? "general"} orientation="vertical" className="flex min-h-0 flex-1">
-            <Tabs.List ref={showChosenSection} className="flex min-h-0 w-48 flex-col gap-1 overflow-y-auto border-r border-border p-3" aria-label="Settings sections">
+            <Tabs.List ref={showChosenSection} className="flex min-h-0 w-48 flex-col gap-0.5 overflow-y-auto border-r border-border p-3" aria-label="Settings sections">
               <Tabs.Trigger value="general" className={tabClass}>General</Tabs.Trigger>
               <Tabs.Trigger value="runtime" className={tabClass}>Local models</Tabs.Trigger>
               <Tabs.Trigger value="reverse" className={tabClass}>Reverse engineering</Tabs.Trigger>
               <Tabs.Trigger value="otherApps" className={tabClass}>Other apps</Tabs.Trigger>
               <Tabs.Trigger value="endpoints" className={tabClass}>Endpoints</Tabs.Trigger>
+              <Tabs.Trigger value="studio" className={tabClass}>{STUDIO_NAV.name}</Tabs.Trigger>
               <Tabs.Trigger value="huggingface" className={tabClass}>Hugging Face</Tabs.Trigger>
               <Tabs.Trigger value="mcp" className={tabClass}>MCP servers</Tabs.Trigger>
               <Tabs.Trigger value="skills" className={tabClass}>Skills</Tabs.Trigger>
@@ -695,6 +707,7 @@ export function SettingsDialog(props: {
               <Tabs.Content value="reverse"><Reverse /></Tabs.Content>
               <Tabs.Content value="otherApps"><OtherApps /></Tabs.Content>
               <Tabs.Content value="endpoints"><Endpoints /></Tabs.Content>
+              <Tabs.Content value="studio"><StudioSettings /></Tabs.Content>
               <Tabs.Content value="huggingface"><HuggingFace /></Tabs.Content>
               <Tabs.Content value="mcp"><McpSettings /></Tabs.Content>
               <Tabs.Content value="skills"><SkillsSettings /></Tabs.Content>

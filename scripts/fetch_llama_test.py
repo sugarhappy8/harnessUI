@@ -11,6 +11,7 @@ Standard library only.
 """
 
 import copy
+import json
 import os
 import stat
 import sys
@@ -20,6 +21,8 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import fetch_llama  # noqa: E402
+
+REPO = Path(__file__).resolve().parent.parent
 
 THIN = """/tmp/llama-server:
 \t/System/Library/Frameworks/Accelerate.framework/Versions/A/Accelerate (compatibility version 1.0.0, current version 4.0.0)
@@ -172,6 +175,78 @@ class VulkanRuntime(unittest.TestCase):
                 fetch_llama.download = original
             self.assertIn("expected " + self.spec["member_sha256"], str(stopped.exception))
             self.assertFalse((tmp / "main" / "vulkan" / "vulkan-1.dll").exists())
+
+
+class VcRuntime(unittest.TestCase):
+    """The Visual C++ runtime copied into resources/llama/main (llama.lock.json
+    "vc_runtime_files"). The redistributable keeps the C++ runtime in Microsoft.VC*.CRT and
+    the OpenMP runtime (vcomp140.dll, imported by the Studio engine's ggml DLLs) beside it in
+    Microsoft.VC*.OpenMP."""
+
+    @staticmethod
+    def redist(tmp: Path, openmp: bool = True) -> Path:
+        x64 = tmp / "VC" / "Redist" / "MSVC" / "14.44.35112" / "x64"
+        crt = x64 / "Microsoft.VC143.CRT"
+        omp = x64 / "Microsoft.VC143.OpenMP"
+        crt.mkdir(parents=True)
+        omp.mkdir()
+        for name in fetch_llama.LOCK["vc_runtime_files"]:
+            if name.startswith("vcomp"):
+                if openmp:
+                    (omp / name).write_bytes(b"openmp")
+            else:
+                (crt / name).write_bytes(b"crt")
+        return crt
+
+    def test_the_installer_ships_the_openmp_runtime(self):
+        self.assertIn("vcomp140.dll", fetch_llama.LOCK["vc_runtime_files"])
+
+    def test_each_file_is_found_in_its_redistributable_folder(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            crt = self.redist(Path(tmp))
+            for name in fetch_llama.LOCK["vc_runtime_files"]:
+                found = fetch_llama.vc_runtime_file(crt, name)
+                self.assertEqual(found.name, name)
+                self.assertTrue(found.is_file(), name)
+            self.assertEqual(
+                fetch_llama.vc_runtime_file(crt, "vcomp140.dll").parent.name, "Microsoft.VC143.OpenMP"
+            )
+            self.assertEqual(fetch_llama.vc_runtime_file(crt, "msvcp140.dll").parent, crt)
+
+    def test_a_missing_file_stops_the_build(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            crt = self.redist(Path(tmp), openmp=False)
+            with self.assertRaises(SystemExit) as stopped:
+                fetch_llama.vc_runtime_file(crt, "vcomp140.dll")
+            self.assertIn("vcomp140.dll", str(stopped.exception))
+
+    def test_windows_puts_every_file_into_llamas_folder(self):
+        import zipfile as zf
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp = Path(tmp)
+            crt = self.redist(tmp / "vs")
+            root = tmp / "repo"
+            (root / "third_party" / "licenses").mkdir(parents=True)
+            (root / "third_party" / "licenses" / "llama.cpp-LICENSE").write_text("MIT")
+            archive = tmp / "llama.zip"
+            with zf.ZipFile(archive, "w") as z:
+                for name in ("llama-server.exe", "llama-server-impl.dll", "ggml-vulkan.dll", "ggml-base.dll"):
+                    z.writestr("bin/" + name, b"program")
+            names = ("ROOT", "download", "install_vulkan_runtime", "find_vc_runtime")
+            saved = {name: getattr(fetch_llama, name) for name in names}
+            fetch_llama.ROOT = root
+            fetch_llama.download = lambda entry, **kw: archive
+            fetch_llama.install_vulkan_runtime = lambda target: None
+            fetch_llama.find_vc_runtime = lambda: crt
+            try:
+                fetch_llama.windows()
+            finally:
+                for name, value in saved.items():
+                    setattr(fetch_llama, name, value)
+            main = root / "src-tauri" / "resources" / "llama" / "main"
+            for name in fetch_llama.LOCK["vc_runtime_files"]:
+                self.assertTrue((main / name).is_file(), name)
+            self.assertEqual((main / "vcomp140.dll").read_bytes(), b"openmp")
 
 
 class Naming(unittest.TestCase):
@@ -400,19 +475,21 @@ class DryRun(unittest.TestCase):
 
     def test_app_check_passes_a_universal_bundle(self):
         both = "arm64 x86_64"
-        fetch_llama.check_macos_app(self.app({"Demo": both, "llama-server": both, "llama-fit-params": both}))
-        self.assertEqual(len([c for c in self.commands() if c.startswith("otool -arch") and " -L " in c]), 6)
+        fetch_llama.check_macos_app(self.app({"Demo": both, "llama-server": both, "llama-fit-params": both, "sd-cli": both}))
+        self.assertEqual(len([c for c in self.commands() if c.startswith("otool -arch") and " -L " in c]), 8)
 
     def test_app_check_fails_a_one_processor_program(self):
         both = "arm64 x86_64"
         with self.assertRaises(SystemExit) as raised:
-            fetch_llama.check_macos_app(self.app({"Demo": both, "llama-server": "arm64", "llama-fit-params": both}))
+            fetch_llama.check_macos_app(
+                self.app({"Demo": both, "llama-server": "arm64", "llama-fit-params": both, "sd-cli": both})
+            )
         self.assertIn("llama-server is built for ['arm64']", str(raised.exception))
 
     def test_app_check_fails_without_a_sidecar_or_with_a_foreign_library(self):
         both = "arm64 x86_64"
         with self.assertRaises(SystemExit) as raised:
-            fetch_llama.check_macos_app(self.app({"Demo": both, "llama-server": both}))
+            fetch_llama.check_macos_app(self.app({"Demo": both, "llama-server": both, "sd-cli": both}))
         self.assertIn("does not contain llama-fit-params", str(raised.exception))
         (self.root / "Demo.app" / "Contents" / "MacOS" / "llama-fit-params").write_text(
             f"#!/bin/sh\n# archs: {both}\n", encoding="utf-8"
@@ -422,6 +499,45 @@ class DryRun(unittest.TestCase):
         with self.assertRaises(SystemExit) as raised:
             fetch_llama.check_macos_app(self.root / "Demo.app")
         self.assertIn("(arm64) links a non-system library", str(raised.exception))
+
+    def test_the_app_check_needs_sd_cli(self):
+        # The Studio engine is a sidecar like llama.cpp's (sd.lock.json): an app without it
+        # would have no local pictures or video on a Mac.
+        both = "arm64 x86_64"
+        with self.assertRaises(SystemExit) as raised:
+            fetch_llama.check_macos_app(self.app({"Demo": both, "llama-server": both, "llama-fit-params": both}))
+        self.assertIn("does not contain sd-cli", str(raised.exception))
+        self.assertFalse(self.log.exists(), "no program is read before the check fails")
+
+    def test_verify_packs_checks_both_locks(self):
+        locks = [json.loads((REPO / name).read_text(encoding="utf-8")) for name in ("llama.lock.json", "sd.lock.json")]
+        sizes = {f["url"]: f["size"] for lock in locks for pack in lock["packs"] for f in pack["files"]}
+        studio = next(p for p in locks[1]["packs"] if p["id"] == "studio-vulkan")["files"][0]["url"]
+        asked = []
+
+        class Answer:
+            def __init__(self, size):
+                self.headers = {"Content-Length": str(size)}
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *exc):
+                return False
+
+        def urlopen(req, timeout):
+            asked.append((req.get_method(), req.full_url))
+            return Answer(sizes[req.full_url])
+
+        saved = fetch_llama.urllib.request.urlopen
+        fetch_llama.urllib.request.urlopen = urlopen
+        try:
+            fetch_llama.verify_packs()
+        finally:
+            fetch_llama.urllib.request.urlopen = saved
+        self.assertIn(("HEAD", studio), asked)
+        self.assertEqual(sorted(url for _, url in asked), sorted(sizes))
+        self.assertEqual({method for method, _ in asked}, {"HEAD"})
 
 
 if __name__ == "__main__":

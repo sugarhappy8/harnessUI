@@ -38,6 +38,16 @@ A local-first desktop app that gives AI models running on your own hardware the 
 - **Subagents.** Switch on *Subagents* under *Tools* in a chat and the model can hand a self-contained task (reading many files, checking several pages) to a helper that works in its own fresh context and returns only its answer, which keeps the main chat's context small. The helper has the same tools and asks for the same approvals; its cards start with "Subagent:". Off in new chats.
 - **Stop.** The Stop button, Esc, or the global hotkey (Ctrl+Alt+Backspace on Windows, Ctrl+Option+Delete on macOS) stops the reply and cancels any running tool.
 
+## Studio: pictures and short videos (0.1.0)
+
+Studio makes pictures and short videos on this computer, free and private, with cloud models (OpenRouter, OpenAI) as the backup for computers without a good graphics card. Open it with the sparkle button in the sidebar or Ctrl+G (⌘G on a Mac), type what you want to see and click *Create*.
+
+- **Getting local models.** *Get local models* in Studio lists the models recommended for this computer, under Pictures and Video: FLUX.2 klein 4B and Z-Image Turbo for pictures and a fast version of Wan 2.2 5B for video, all free for any use, including commercial. You can also search Hugging Face for other picture and video models: Studio offers the ones it knows how to run, adds the extra files they need, and says "Not supported yet" for the rest. On Windows the Studio engine (about 29 MB) downloads with your first model; on a Mac it is built in. Making a picture or video here sends nothing anywhere.
+- **What fits.** Each model says whether it fits this computer: *Fits*, *Fits after the chat model is unloaded*, *Slow here* or *Not for this computer*. When a picture or video model needs the graphics card the chat model is using, Studio unloads the chat model to make room and offers *Load it again*; *Settings → Studio* can make it ask first, or make pictures on the processor instead. Video needs a graphics card or a Mac with Apple silicon. How long a run takes is shown after your first run here. When nothing fits, or a run here would be very slow, Studio suggests a cloud model.
+- **Licences.** Before anything downloads, Studio shows every file with its size and its licence in plain words (green "Free for any use, including commercial", amber when commercial use has a condition such as a revenue limit, red "Non-commercial"), and once, a short note about what local models must not be used for. Nothing downloads until you accept. Non-commercial models stay hidden unless you tick *Show non-commercial models*.
+- **Cloud models.** With an OpenRouter or OpenAI key saved in *Settings → Endpoints*, Studio can also use their picture models and OpenRouter's video models. Your prompt and the pictures you add then go to that company, the line above *Create* says where, and *Create* shows the price. Studio asks before every cloud video and before any run of $1 or more or with an unknown price, and it stops at a daily limit of $10 of cloud spending, which is on by default and can be changed in *Settings → Studio*. Runs on this computer cost nothing and never count.
+- **Where files go.** What you make is saved in the `harnessUI/studio` folder in your home folder (*Settings → Studio* can change it), by month, with a small record of each run's settings beside the files. Pictures and videos made on this computer carry a label in the file saying they were made by AI, and never your prompt. *Send to chat* puts a picture into a chat, and a picture in a chat has *Open in Studio*. Esc and the stop hotkey never stop a Studio run; the buttons on its card do.
+
 ## Download
 
 Go to **[harnessui.site](https://harnessui.site)** and click **Download**. It offers the installer for your computer first, from the latest release. Or pick the link for your computer; both always give the newest version:
@@ -71,7 +81,7 @@ Prerequisites:
 
 - Rust stable (1.95 or newer) and Node.js 22.
 - **Windows:** Visual Studio Build Tools with the C++ workload. WebView2 is part of Windows 11 and of up-to-date Windows 10.
-- **macOS:** Xcode Command Line Tools and CMake (for the llama.cpp build below).
+- **macOS:** Xcode Command Line Tools and CMake (for the llama.cpp and Studio engine builds below).
 - **Linux (development only, not a release target):** `sudo apt-get install libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev libxdo-dev libssl-dev`.
 
 ```bash
@@ -86,7 +96,7 @@ npx tauri dev
 npx tauri build
 ```
 
-On a Mac, the installer build is universal (Apple silicon and Intel in one app). Add both Rust targets, build llama.cpp for both processors from the pinned commit (into `src-tauri/binaries/`), then build:
+On a Mac, the installer build is universal (Apple silicon and Intel in one app). Add both Rust targets, build llama.cpp and the Studio engine (`sd-cli`) for both processors from their pinned commits (into `src-tauri/binaries/`), then build:
 
 ```bash
 rustup target add aarch64-apple-darwin x86_64-apple-darwin
@@ -94,6 +104,10 @@ rustup target add aarch64-apple-darwin x86_64-apple-darwin
 
 ```bash
 python3 scripts/fetch_llama.py macos
+```
+
+```bash
+python3 scripts/fetch_sd.py macos
 ```
 
 ```bash
@@ -120,7 +134,17 @@ python3 scripts/fetch_llama.py linux
 APP_DEV_LLAMA_DIR="$PWD/.cache/llama-linux" npx tauri dev
 ```
 
-Contract tests against the real llama-server run when `LLAMA_SERVER_BIN` and `TEST_GGUF` are set (`python3 scripts/fetch_test_model.py` downloads the pinned test model). Tests against the real rea, Kuna and Ghidra run when `REVERSE_PACK_CACHE` names a folder filled by `python3 -I scripts/pin_reverse.py --download-to DIR`. End-to-end tests that drive the real app are described in [e2e/README.md](e2e/README.md).
+For Studio's local pictures and videos on Linux, build a processor-only Studio engine from the pinned commit (it goes to `.cache/sd-linux/`; this needs CMake and a C++ compiler) and point the app at it with `APP_DEV_SD_DIR` as well:
+
+```bash
+python3 scripts/fetch_sd.py linux
+```
+
+```bash
+APP_DEV_SD_DIR="$PWD/.cache/sd-linux" APP_DEV_LLAMA_DIR="$PWD/.cache/llama-linux" npx tauri dev
+```
+
+Contract tests against the real llama-server run when `LLAMA_SERVER_BIN` and `TEST_GGUF` are set (`python3 scripts/fetch_test_model.py` downloads the pinned test model), and against the Studio engine when `SD_CLI_BIN` names the `sd-cli` built above. Tests against the real rea, Kuna and Ghidra run when `REVERSE_PACK_CACHE` names a folder filled by `python3 -I scripts/pin_reverse.py --download-to DIR`. End-to-end tests that drive the real app are described in [e2e/README.md](e2e/README.md).
 
 ## Architecture in one paragraph
 
@@ -132,13 +156,13 @@ A Tauri 2 app: a Rust core and a React + TypeScript webview with no privileges. 
 | `src-tauri/` | Tauri app: windows, capabilities, commands |
 | `crates/policy` | Path sandbox, permission rules, command classifier |
 | `crates/store` | SQLite storage, audit log, keychain |
-| `crates/runtime` | Process spawning and llama-server lifecycle |
+| `crates/runtime` | Process spawning, llama-server lifecycle, and the Studio engine (`sd-cli`) |
 | `crates/models` | GGUF reader, hardware detection, Hugging Face downloads |
 | `crates/mcp-host` | MCP connections and tool registry |
 | `crates/tools` | Built-in tools (files, terminal, git, skills, PDF text extraction worker) |
 | `crates/browser` | Built-in browser tool: the agent's own Chrome or Edge over CDP, with request checks |
 | `crates/computer` | Built-in computer-use tool: screen capture, input injection and the input guard |
-| `crates/agent` | Providers, agent loop, tool-call parsing, context management |
+| `crates/agent` | Providers, agent loop, tool-call parsing, context management, and Studio's cloud picture and video companies |
 | `crates/reverse` | Reverse engineering: rea, Kuna and Ghidra downloads, the allow-listed `reverse` tools and their path checks |
 | `crates/usage` | How busy the graphics card and processor are, read on this computer |
 
@@ -146,7 +170,7 @@ The app's display name is `productName` in `src-tauri/tauri.conf.json`; everythi
 
 ## Signing
 
-Release builds (`.github/workflows/release.yml`, on `v*` tags) fetch the pinned llama.cpp runtime, build both installers into a draft GitHub release, and are prepared for code signing. The updater key is required for every release (see *In-app updates* below). Add the Apple secrets when you have them; until then builds are not code-signed.
+Release builds (`.github/workflows/release.yml`, on `v*` tags) fetch the pinned llama.cpp runtime, build the Studio engine for the Mac, build both installers into a draft GitHub release, and are prepared for code signing. The updater key is required for every release (see *In-app updates* below). Add the Apple secrets when you have them; until then builds are not code-signed.
 
 | Secret | For |
 |---|---|

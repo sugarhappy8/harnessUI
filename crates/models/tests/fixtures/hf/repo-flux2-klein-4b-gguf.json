@@ -1,0 +1,75 @@
+{
+  "_id": "696b253585619ece0dc94e6c",
+  "id": "leejet/FLUX.2-klein-4B-GGUF",
+  "gguf": {
+    "total": 3875544576,
+    "totalFileSize": 2460378560
+  },
+  "sha": "3b1f5a9dc3abb32238b053aeb3d823c30afdacbd",
+  "gated": false,
+  "tags": [
+    "gguf",
+    "text-to-image",
+    "image-generation",
+    "stable-diffusion.cpp",
+    "en",
+    "zh",
+    "base_model:black-forest-labs/FLUX.2-klein-4B",
+    "base_model:quantized:black-forest-labs/FLUX.2-klein-4B",
+    "license:apache-2.0",
+    "region:us"
+  ],
+  "cardData": {
+    "license": "apache-2.0",
+    "language": [
+      "en",
+      "zh"
+    ],
+    "base_model": [
+      "black-forest-labs/FLUX.2-klein-4B"
+    ],
+    "tags": [
+      "gguf",
+      "text-to-image",
+      "image-generation",
+      "stable-diffusion.cpp"
+    ]
+  },
+  "author": "leejet",
+  "downloads": 223141,
+  "likes": 18,
+  "lastModified": "2026-01-17T06:39:12.000Z",
+  "pipeline_tag": "text-to-image",
+  "siblings": [
+    {
+      "rfilename": ".gitattributes",
+      "blobId": "b1304d8e243d41922ce0a215a87a6421ca4fc882",
+      "size": 1643
+    },
+    {
+      "rfilename": "README.md",
+      "blobId": "858fc6c847abae6509b6e2ec0d28b642ab9b227b",
+      "size": 470
+    },
+    {
+      "rfilename": "flux-2-klein-4b-Q4_0.gguf",
+      "blobId": "05dbf6a73ef1d8cc596e584bc3061eb8d760ec3f",
+      "size": 2460378560,
+      "lfs": {
+        "sha256": "d1023499ef3f2f82ff7c50e6778495195c1b6cc34835741778868428111f9ff4",
+        "size": 2460378560,
+        "pointerSize": 135
+      }
+    },
+    {
+      "rfilename": "flux-2-klein-4b-Q8_0.gguf",
+      "blobId": "5ea6a43f710fe09d999e84623e92c85089637ef6",
+      "size": 4300629440,
+      "lfs": {
+        "sha256": "0bba6951258ec8f92d51114a8fa13e66828297bfff58a738f52729b3ef66fa28",
+        "size": 4300629440,
+        "pointerSize": 135
+      }
+    }
+  ]
+}

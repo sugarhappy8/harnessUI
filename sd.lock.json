@@ -1,0 +1,396 @@
+{
+  "schema": 1,
+  "comment": "Pinned stable-diffusion.cpp, the Studio engine. Compiled into the app (runtime::sd::lock) and read by scripts/fetch_sd.py. Change only together with a passing contract-test run and re-recorded engine fixtures (ARCHITECTURE.md 7.1, 7.9).",
+  "sd_cpp": {
+    "tag": "master-1106-532d2c1",
+    "build": 1106,
+    "commit": "532d2c15c430a785a712b2d94281f04e733008a4",
+    "repository": "https://github.com/leejet/stable-diffusion.cpp"
+  },
+  "submodules": {
+    "ggml": "eeda9ec48fc84a3df0bb9dcc19ae9053075a2539",
+    "thirdparty/libwebp": "0c9546f7efc61eac7f79ae115c3f99c91c21c443",
+    "thirdparty/libwebm": "5bf12267eea773a32fcf4949de52b0add158a8d5"
+  },
+  "keep_files": [
+    "sd-cli.exe",
+    "stable-diffusion.dll",
+    "ggml*.dll",
+    "libwebp*.dll",
+    "libsharpyuv.dll",
+    "webm.dll",
+    "ggml.txt",
+    "stable-diffusion.cpp.txt"
+  ],
+  "vc_runtime_files": [
+    "msvcp140.dll",
+    "msvcp140_codecvt_ids.dll",
+    "vcomp140.dll",
+    "vcruntime140.dll",
+    "vcruntime140_1.dll"
+  ],
+  "windows_imports": {
+    "ggml-base.dll": [
+      "KERNEL32.dll",
+      "VCOMP140.DLL",
+      "MSVCP140.dll",
+      "VCRUNTIME140.dll",
+      "VCRUNTIME140_1.dll",
+      "api-ms-win-crt-runtime-l1-1-0.dll",
+      "api-ms-win-crt-stdio-l1-1-0.dll",
+      "api-ms-win-crt-heap-l1-1-0.dll",
+      "api-ms-win-crt-time-l1-1-0.dll",
+      "api-ms-win-crt-math-l1-1-0.dll",
+      "api-ms-win-crt-string-l1-1-0.dll",
+      "api-ms-win-crt-environment-l1-1-0.dll",
+      "api-ms-win-crt-convert-l1-1-0.dll",
+      "api-ms-win-crt-utility-l1-1-0.dll"
+    ],
+    "ggml-cpu-alderlake.dll": [
+      "ggml-base.dll",
+      "KERNEL32.dll",
+      "ADVAPI32.dll",
+      "MSVCP140.dll",
+      "VCOMP140.DLL",
+      "VCRUNTIME140.dll",
+      "api-ms-win-crt-runtime-l1-1-0.dll",
+      "api-ms-win-crt-string-l1-1-0.dll",
+      "api-ms-win-crt-stdio-l1-1-0.dll",
+      "api-ms-win-crt-math-l1-1-0.dll",
+      "api-ms-win-crt-convert-l1-1-0.dll",
+      "api-ms-win-crt-environment-l1-1-0.dll",
+      "api-ms-win-crt-heap-l1-1-0.dll"
+    ],
+    "ggml-cpu-cannonlake.dll": [
+      "ggml-base.dll",
+      "KERNEL32.dll",
+      "ADVAPI32.dll",
+      "MSVCP140.dll",
+      "VCOMP140.DLL",
+      "VCRUNTIME140.dll",
+      "api-ms-win-crt-runtime-l1-1-0.dll",
+      "api-ms-win-crt-string-l1-1-0.dll",
+      "api-ms-win-crt-stdio-l1-1-0.dll",
+      "api-ms-win-crt-math-l1-1-0.dll",
+      "api-ms-win-crt-convert-l1-1-0.dll",
+      "api-ms-win-crt-environment-l1-1-0.dll",
+      "api-ms-win-crt-heap-l1-1-0.dll"
+    ],
+    "ggml-cpu-cascadelake.dll": [
+      "ggml-base.dll",
+      "KERNEL32.dll",
+      "ADVAPI32.dll",
+      "MSVCP140.dll",
+      "VCOMP140.DLL",
+      "VCRUNTIME140.dll",
+      "api-ms-win-crt-runtime-l1-1-0.dll",
+      "api-ms-win-crt-string-l1-1-0.dll",
+      "api-ms-win-crt-stdio-l1-1-0.dll",
+      "api-ms-win-crt-math-l1-1-0.dll",
+      "api-ms-win-crt-convert-l1-1-0.dll",
+      "api-ms-win-crt-environment-l1-1-0.dll",
+      "api-ms-win-crt-heap-l1-1-0.dll"
+    ],
+    "ggml-cpu-haswell.dll": [
+      "ggml-base.dll",
+      "KERNEL32.dll",
+      "ADVAPI32.dll",
+      "MSVCP140.dll",
+      "VCOMP140.DLL",
+      "VCRUNTIME140.dll",
+      "api-ms-win-crt-runtime-l1-1-0.dll",
+      "api-ms-win-crt-string-l1-1-0.dll",
+      "api-ms-win-crt-stdio-l1-1-0.dll",
+      "api-ms-win-crt-math-l1-1-0.dll",
+      "api-ms-win-crt-convert-l1-1-0.dll",
+      "api-ms-win-crt-environment-l1-1-0.dll",
+      "api-ms-win-crt-heap-l1-1-0.dll"
+    ],
+    "ggml-cpu-icelake.dll": [
+      "ggml-base.dll",
+      "KERNEL32.dll",
+      "ADVAPI32.dll",
+      "MSVCP140.dll",
+      "VCOMP140.DLL",
+      "VCRUNTIME140.dll",
+      "api-ms-win-crt-runtime-l1-1-0.dll",
+      "api-ms-win-crt-string-l1-1-0.dll",
+      "api-ms-win-crt-stdio-l1-1-0.dll",
+      "api-ms-win-crt-math-l1-1-0.dll",
+      "api-ms-win-crt-convert-l1-1-0.dll",
+      "api-ms-win-crt-environment-l1-1-0.dll",
+      "api-ms-win-crt-heap-l1-1-0.dll"
+    ],
+    "ggml-cpu-sandybridge.dll": [
+      "ggml-base.dll",
+      "KERNEL32.dll",
+      "ADVAPI32.dll",
+      "MSVCP140.dll",
+      "VCOMP140.DLL",
+      "VCRUNTIME140.dll",
+      "api-ms-win-crt-runtime-l1-1-0.dll",
+      "api-ms-win-crt-string-l1-1-0.dll",
+      "api-ms-win-crt-stdio-l1-1-0.dll",
+      "api-ms-win-crt-math-l1-1-0.dll",
+      "api-ms-win-crt-convert-l1-1-0.dll",
+      "api-ms-win-crt-environment-l1-1-0.dll",
+      "api-ms-win-crt-heap-l1-1-0.dll"
+    ],
+    "ggml-cpu-skylakex.dll": [
+      "ggml-base.dll",
+      "KERNEL32.dll",
+      "ADVAPI32.dll",
+      "MSVCP140.dll",
+      "VCOMP140.DLL",
+      "VCRUNTIME140.dll",
+      "api-ms-win-crt-runtime-l1-1-0.dll",
+      "api-ms-win-crt-string-l1-1-0.dll",
+      "api-ms-win-crt-stdio-l1-1-0.dll",
+      "api-ms-win-crt-math-l1-1-0.dll",
+      "api-ms-win-crt-convert-l1-1-0.dll",
+      "api-ms-win-crt-environment-l1-1-0.dll",
+      "api-ms-win-crt-heap-l1-1-0.dll"
+    ],
+    "ggml-cpu-sse42.dll": [
+      "ggml-base.dll",
+      "KERNEL32.dll",
+      "ADVAPI32.dll",
+      "MSVCP140.dll",
+      "VCOMP140.DLL",
+      "VCRUNTIME140.dll",
+      "api-ms-win-crt-runtime-l1-1-0.dll",
+      "api-ms-win-crt-string-l1-1-0.dll",
+      "api-ms-win-crt-stdio-l1-1-0.dll",
+      "api-ms-win-crt-math-l1-1-0.dll",
+      "api-ms-win-crt-convert-l1-1-0.dll",
+      "api-ms-win-crt-environment-l1-1-0.dll",
+      "api-ms-win-crt-heap-l1-1-0.dll"
+    ],
+    "ggml-cpu-x64.dll": [
+      "ggml-base.dll",
+      "KERNEL32.dll",
+      "ADVAPI32.dll",
+      "MSVCP140.dll",
+      "VCOMP140.DLL",
+      "VCRUNTIME140.dll",
+      "api-ms-win-crt-runtime-l1-1-0.dll",
+      "api-ms-win-crt-string-l1-1-0.dll",
+      "api-ms-win-crt-stdio-l1-1-0.dll",
+      "api-ms-win-crt-math-l1-1-0.dll",
+      "api-ms-win-crt-convert-l1-1-0.dll",
+      "api-ms-win-crt-environment-l1-1-0.dll",
+      "api-ms-win-crt-heap-l1-1-0.dll"
+    ],
+    "ggml-vulkan.dll": [
+      "ggml-base.dll",
+      "vulkan-1.dll",
+      "MSVCP140.dll",
+      "VCRUNTIME140.dll",
+      "VCRUNTIME140_1.dll",
+      "api-ms-win-crt-runtime-l1-1-0.dll",
+      "api-ms-win-crt-stdio-l1-1-0.dll",
+      "api-ms-win-crt-heap-l1-1-0.dll",
+      "api-ms-win-crt-convert-l1-1-0.dll",
+      "api-ms-win-crt-environment-l1-1-0.dll",
+      "api-ms-win-crt-math-l1-1-0.dll",
+      "api-ms-win-crt-string-l1-1-0.dll",
+      "KERNEL32.dll"
+    ],
+    "ggml.dll": [
+      "ggml-base.dll",
+      "KERNEL32.dll",
+      "MSVCP140.dll",
+      "VCRUNTIME140.dll",
+      "VCRUNTIME140_1.dll",
+      "api-ms-win-crt-runtime-l1-1-0.dll",
+      "api-ms-win-crt-heap-l1-1-0.dll",
+      "api-ms-win-crt-string-l1-1-0.dll",
+      "api-ms-win-crt-environment-l1-1-0.dll",
+      "api-ms-win-crt-locale-l1-1-0.dll"
+    ],
+    "libsharpyuv.dll": [
+      "VCRUNTIME140.dll",
+      "api-ms-win-crt-math-l1-1-0.dll",
+      "api-ms-win-crt-heap-l1-1-0.dll",
+      "api-ms-win-crt-runtime-l1-1-0.dll",
+      "KERNEL32.dll"
+    ],
+    "libwebp.dll": [
+      "libsharpyuv.dll",
+      "KERNEL32.dll",
+      "VCRUNTIME140.dll",
+      "api-ms-win-crt-math-l1-1-0.dll",
+      "api-ms-win-crt-utility-l1-1-0.dll",
+      "api-ms-win-crt-runtime-l1-1-0.dll",
+      "api-ms-win-crt-heap-l1-1-0.dll"
+    ],
+    "libwebpmux.dll": [
+      "libwebp.dll",
+      "VCRUNTIME140.dll",
+      "api-ms-win-crt-stdio-l1-1-0.dll",
+      "api-ms-win-crt-math-l1-1-0.dll",
+      "api-ms-win-crt-runtime-l1-1-0.dll",
+      "KERNEL32.dll"
+    ],
+    "sd-cli.exe": [
+      "stable-diffusion.dll",
+      "libwebpmux.dll",
+      "webm.dll",
+      "libwebp.dll",
+      "KERNEL32.dll",
+      "SHELL32.dll",
+      "MSVCP140.dll",
+      "MSVCP140_CODECVT_IDS.dll",
+      "VCRUNTIME140.dll",
+      "VCRUNTIME140_1.dll",
+      "api-ms-win-crt-runtime-l1-1-0.dll",
+      "api-ms-win-crt-filesystem-l1-1-0.dll",
+      "api-ms-win-crt-heap-l1-1-0.dll",
+      "api-ms-win-crt-string-l1-1-0.dll",
+      "api-ms-win-crt-stdio-l1-1-0.dll",
+      "api-ms-win-crt-math-l1-1-0.dll",
+      "api-ms-win-crt-convert-l1-1-0.dll",
+      "api-ms-win-crt-locale-l1-1-0.dll"
+    ],
+    "stable-diffusion.dll": [
+      "ggml.dll",
+      "ggml-base.dll",
+      "KERNEL32.dll",
+      "MSVCP140.dll",
+      "MSVCP140_CODECVT_IDS.dll",
+      "VCRUNTIME140.dll",
+      "VCRUNTIME140_1.dll",
+      "api-ms-win-crt-runtime-l1-1-0.dll",
+      "api-ms-win-crt-filesystem-l1-1-0.dll",
+      "api-ms-win-crt-time-l1-1-0.dll",
+      "api-ms-win-crt-heap-l1-1-0.dll",
+      "api-ms-win-crt-string-l1-1-0.dll",
+      "api-ms-win-crt-stdio-l1-1-0.dll",
+      "api-ms-win-crt-math-l1-1-0.dll",
+      "api-ms-win-crt-locale-l1-1-0.dll",
+      "api-ms-win-crt-convert-l1-1-0.dll",
+      "api-ms-win-crt-environment-l1-1-0.dll",
+      "api-ms-win-crt-utility-l1-1-0.dll"
+    ],
+    "webm.dll": [
+      "MSVCP140.dll",
+      "VCRUNTIME140.dll",
+      "VCRUNTIME140_1.dll",
+      "api-ms-win-crt-runtime-l1-1-0.dll",
+      "api-ms-win-crt-utility-l1-1-0.dll",
+      "api-ms-win-crt-stdio-l1-1-0.dll",
+      "api-ms-win-crt-time-l1-1-0.dll",
+      "api-ms-win-crt-string-l1-1-0.dll",
+      "api-ms-win-crt-math-l1-1-0.dll",
+      "api-ms-win-crt-filesystem-l1-1-0.dll",
+      "api-ms-win-crt-heap-l1-1-0.dll",
+      "KERNEL32.dll"
+    ]
+  },
+  "packs": [
+    {
+      "id": "studio-vulkan",
+      "backend": "vulkan",
+      "platform": "windows-x86_64",
+      "build": "master-1106-532d2c1",
+      "dir": "sd-1106",
+      "title": "Studio engine (graphics card and processor)",
+      "requirements": "Any graphics card with a Vulkan driver; otherwise the processor",
+      "license_name": "stable-diffusion.cpp MIT; ggml MIT; libwebp and libwebm BSD-3-Clause",
+      "license_url": "https://github.com/leejet/stable-diffusion.cpp/blob/532d2c15c430a785a712b2d94281f04e733008a4/LICENSE",
+      "files": [
+        {
+          "name": "sd-master-532d2c1-bin-win-vulkan-x64.zip",
+          "url": "https://github.com/leejet/stable-diffusion.cpp/releases/download/master-1106-532d2c1/sd-master-532d2c1-bin-win-vulkan-x64.zip",
+          "size": 30312081,
+          "sha256": "3e66222c87ca27074e1fd8ce79706eef17a8aaf39949906aa1bee7e060f22ecc"
+        }
+      ]
+    }
+  ],
+  "installer": {
+    "macos-aarch64": {
+      "dir": "main",
+      "backends": [
+        "metal",
+        "cpu"
+      ],
+      "build_from_source": {
+        "git": "https://github.com/leejet/stable-diffusion.cpp",
+        "commit": "532d2c15c430a785a712b2d94281f04e733008a4",
+        "targets": [
+          "sd-cli"
+        ],
+        "cmake_flags": [
+          "-DBUILD_SHARED_LIBS=OFF",
+          "-DSD_BUILD_SHARED_LIBS=OFF",
+          "-DGGML_NATIVE=OFF",
+          "-DSD_METAL=ON",
+          "-DGGML_METAL=ON",
+          "-DGGML_METAL_EMBED_LIBRARY=ON",
+          "-DSD_WEBP=ON",
+          "-DSD_WEBM=ON",
+          "-DSD_SERVER_BUILD_FRONTEND=OFF",
+          "-DCMAKE_OSX_DEPLOYMENT_TARGET=13.3",
+          "-DCMAKE_OSX_ARCHITECTURES=arm64",
+          "-DCMAKE_BUILD_TYPE=Release"
+        ]
+      }
+    },
+    "macos-x86_64": {
+      "comment": "Macs with an Intel processor, built next to macos-aarch64 and joined into one universal sd-cli. The same instruction sets as llama.cpp's Intel build (llama.lock.json), named one by one with processor detection off.",
+      "dir": "main",
+      "backends": [
+        "cpu",
+        "metal"
+      ],
+      "build_from_source": {
+        "git": "https://github.com/leejet/stable-diffusion.cpp",
+        "commit": "532d2c15c430a785a712b2d94281f04e733008a4",
+        "targets": [
+          "sd-cli"
+        ],
+        "cmake_flags": [
+          "-DBUILD_SHARED_LIBS=OFF",
+          "-DSD_BUILD_SHARED_LIBS=OFF",
+          "-DGGML_NATIVE=OFF",
+          "-DGGML_SSE42=ON",
+          "-DGGML_AVX=ON",
+          "-DGGML_AVX2=ON",
+          "-DGGML_FMA=ON",
+          "-DGGML_F16C=ON",
+          "-DGGML_BMI2=ON",
+          "-DGGML_AVX512=OFF",
+          "-DSD_METAL=ON",
+          "-DGGML_METAL=ON",
+          "-DGGML_METAL_EMBED_LIBRARY=ON",
+          "-DSD_WEBP=ON",
+          "-DSD_WEBM=ON",
+          "-DSD_SERVER_BUILD_FRONTEND=OFF",
+          "-DCMAKE_OSX_DEPLOYMENT_TARGET=13.3",
+          "-DCMAKE_OSX_ARCHITECTURES=x86_64",
+          "-DCMAKE_BUILD_TYPE=Release"
+        ]
+      }
+    }
+  },
+  "dev": {
+    "linux-x86_64": {
+      "comment": "Linux is a development platform only: CI's contract tests and local development run this CPU-only build (the upstream Linux zip needs glibc 2.43).",
+      "git": "https://github.com/leejet/stable-diffusion.cpp",
+      "commit": "532d2c15c430a785a712b2d94281f04e733008a4",
+      "targets": [
+        "sd-cli"
+      ],
+      "cmake_flags": [
+        "-DBUILD_SHARED_LIBS=OFF",
+        "-DSD_BUILD_SHARED_LIBS=OFF",
+        "-DGGML_NATIVE=OFF",
+        "-DSD_WEBP=ON",
+        "-DSD_WEBM=ON",
+        "-DSD_SERVER_BUILD_FRONTEND=OFF",
+        "-DCMAKE_BUILD_TYPE=Release"
+      ]
+    }
+  }
+}

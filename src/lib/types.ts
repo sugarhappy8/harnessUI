@@ -206,6 +206,12 @@ export interface RuntimeStatus {
    * still describe the model loaded now.
    */
   reloadWaiting: boolean;
+  /**
+   * 0.1.0: a load waits while a local Studio job holds the graphics card ("Studio is using the
+   * graphics card. The chat model loads when it finishes · Stop Studio job"). The other fields
+   * still describe the model loaded now. Left out, it is false.
+   */
+  waitingForStudio?: boolean;
   /** 0.0.5: the model the user unloaded ("Unloaded to free memory · Load"); null after any load. */
   unloadedPath: string | null;
   /** 0.0.6 item 6: where the loaded model went (the ready line's memory report); null until ready. */
@@ -444,6 +450,13 @@ export interface DownloadGroup {
   unverified: boolean;
   /** [0.0.7 P6b] A file is being checked (minutes for a large one): the row says so. */
   checking?: boolean;
+  /** 0.1.0 Studio: what the picture or video model this group downloads makes; `null` (or
+   *  left out) for a chat model's. */
+  generatorKind?: "image" | "image-edit" | "video" | null;
+  /** 0.1.0 Studio: the installed id of the picture or video model this group downloads (its
+   *  catalog id, or a searched file's `hf:<owner>/<repo>:<file>`); `null` (or left out) for a
+   *  chat model's. */
+  genModelId?: string | null;
 }
 
 export interface ModelSummaryView {

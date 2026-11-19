@@ -1,0 +1,3 @@
+Vulkan0	AMD Radeon RX 7600 (RADV NAVI33)
+Vulkan1	AMD Radeon Graphics (RADV RAPHAEL_MENDOCINO)
+CPU	AMD Ryzen 7 7700X 8-Core Processor

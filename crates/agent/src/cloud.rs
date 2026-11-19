@@ -30,6 +30,7 @@ use url::Url;
 
 use crate::client::ProviderKind;
 use crate::error::ProviderError;
+use crate::media::{Company, MediaKind};
 
 /// Where an endpoint's server is, as far as its address says.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -232,6 +233,22 @@ pub(crate) fn is_cloud_company(kind: ProviderKind) -> bool {
             | ProviderKind::OpenRouter
             | ProviderKind::Abliteration
     )
+}
+
+/// The company that makes pictures and video through an endpoint of this kind (0.1.0):
+/// OpenRouter (pictures and video) and OpenAI (pictures). Other kinds make none.
+pub fn media_company(kind: ProviderKind) -> Option<Company> {
+    match kind {
+        ProviderKind::OpenRouter => Some(Company::OpenRouter),
+        ProviderKind::OpenAi => Some(Company::OpenAi),
+        ProviderKind::LlamaServer
+        | ProviderKind::Ollama
+        | ProviderKind::LmStudio
+        | ProviderKind::Vllm
+        | ProviderKind::Generic
+        | ProviderKind::Anthropic
+        | ProviderKind::Abliteration => None,
+    }
 }
 
 // ---- request shaping (OpenAI-compatible servers) -------------------------------------------
@@ -795,7 +812,7 @@ fn number_after(text: &str, marker: &str) -> Option<u32> {
 /// Retries of one request to a cloud company before its error is shown.
 const MAX_RETRIES: u32 = 2;
 /// The longest wait a server may ask for before the app gives up and says when to try again.
-const LONGEST_WAIT: Duration = Duration::from_secs(30);
+pub(crate) const LONGEST_WAIT: Duration = Duration::from_secs(30);
 
 /// How long to wait before trying a failed request to a cloud company again, or `None` to
 /// give up: the companies' documentation says to retry rate limits (with the `retry-after`
@@ -879,13 +896,17 @@ fn without_key(text: &str, key: &str) -> String {
     text
 }
 
+/// The key whose copies are removed from texts: trimmed, and only when it is at least
+/// [`SHORTEST_KEY`] characters long.
+fn secret_key(key: Option<&str>) -> Option<&str> {
+    key.map(str::trim)
+        .filter(|key| key.chars().count() >= SHORTEST_KEY)
+}
+
 /// Removes the API key from an error's text, in case a server or a proxy echoed it: every
 /// whole copy of a key of 4 characters or more, and a cut piece as [`without_key`] says.
 pub(crate) fn scrub_key(err: ProviderError, key: Option<&str>) -> ProviderError {
-    let Some(key) = key
-        .map(str::trim)
-        .filter(|key| key.chars().count() >= SHORTEST_KEY)
-    else {
+    let Some(key) = secret_key(key) else {
         return err;
     };
     let clean = |text: String| without_key(&text, key);
@@ -904,6 +925,15 @@ pub(crate) fn scrub_key(err: ProviderError, key: Option<&str>) -> ProviderError 
         other @ (ProviderError::ContextOverflow { .. }
         | ProviderError::Unauthorized
         | ProviderError::Cancelled) => other,
+    }
+}
+
+/// `text` without the API key, as [`scrub_key`] removes it from an error: for a failure
+/// message that is plain text (0.1.0 Studio).
+pub(crate) fn scrub_text(text: &str, key: Option<&str>) -> String {
+    match secret_key(key) {
+        Some(key) => without_key(text, key),
+        None => text.to_owned(),
     }
 }
 
@@ -1012,6 +1042,14 @@ pub(crate) fn openai_can_chat(id: &str) -> bool {
     let id = id.to_ascii_lowercase();
     let pro = id.ends_with("-pro") || id.contains("-pro-");
     !pro && !NOT_CHAT.iter().any(|word| id.contains(word))
+}
+
+/// What an OpenAI model id makes in Studio (0.1.0): GPT Image models (`gpt-image-…` and
+/// `chatgpt-image-…`) make pictures. The reverse of [`openai_can_chat`] for those models;
+/// DALL·E and Sora, both shut down, make nothing here.
+pub(crate) fn openai_media_kind(id: &str) -> Option<MediaKind> {
+    let id = id.to_ascii_lowercase();
+    (id.starts_with("gpt-image") || id.starts_with("chatgpt-image")).then_some(MediaKind::Image)
 }
 
 #[cfg(test)]
@@ -1796,6 +1834,25 @@ mod tests {
     }
 
     #[test]
+    fn plain_text_is_scrubbed_like_an_error() {
+        let key = "sk-or-v1-secret-0123456789";
+        assert_eq!(
+            scrub_text(&format!("bad key {key} sent"), Some(key)),
+            "bad key [API key] sent"
+        );
+        assert_eq!(
+            scrub_text(
+                &format!("cut at {}…", &key[..16]),
+                Some(&format!(" {key} "))
+            ),
+            "cut at [API key]…"
+        );
+        // Shorter keys and missing ones change nothing.
+        assert_eq!(scrub_text("abc", Some("abc")), "abc");
+        assert_eq!(scrub_text("abc", None), "abc");
+    }
+
+    #[test]
     fn model_facts_are_kept_per_endpoint() {
         let facts = |n: u32| ModelFacts {
             context: Some(n),
@@ -1861,5 +1918,21 @@ mod tests {
         }
         // "pro" inside a word is not the `-pro` suffix.
         assert!(openai_can_chat("gpt-5-proto"));
+    }
+
+    #[test]
+    fn openai_media_kind_is_the_reverse_of_chat() {
+        for id in [
+            "gpt-image-2.6-flare",
+            "gpt-image-2.6-sunburst",
+            "gpt-image-1.5",
+            "chatgpt-image-latest",
+        ] {
+            assert_eq!(openai_media_kind(id), Some(MediaKind::Image), "{id}");
+            assert!(!openai_can_chat(id), "{id}");
+        }
+        for id in ["gpt-5.5", "dall-e-3", "sora-2"] {
+            assert_eq!(openai_media_kind(id), None, "{id}");
+        }
     }
 }

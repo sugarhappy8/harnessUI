@@ -228,6 +228,34 @@ pub(crate) fn update_columns(
     id: i64,
     sets: Vec<(&'static str, rusqlite::types::Value)>,
 ) -> Result<usize, crate::StoreError> {
+    update_where_key(conn, table, key, rusqlite::types::Value::Integer(id), sets)
+}
+
+/// [`update_columns`] for a table keyed by a TEXT id (Studio's runs and outputs use uuids).
+pub(crate) fn update_columns_by_text(
+    conn: &rusqlite::Connection,
+    table: &'static str,
+    key: &'static str,
+    id: &str,
+    sets: Vec<(&'static str, rusqlite::types::Value)>,
+) -> Result<usize, crate::StoreError> {
+    update_where_key(
+        conn,
+        table,
+        key,
+        rusqlite::types::Value::Text(id.to_owned()),
+        sets,
+    )
+}
+
+/// The shared body of [`update_columns`] and [`update_columns_by_text`].
+fn update_where_key(
+    conn: &rusqlite::Connection,
+    table: &'static str,
+    key: &'static str,
+    id: rusqlite::types::Value,
+    sets: Vec<(&'static str, rusqlite::types::Value)>,
+) -> Result<usize, crate::StoreError> {
     let mut sql = format!("UPDATE {table} SET ");
     let mut values = Vec::with_capacity(sets.len() + 1);
     for (i, (column, value)) in sets.into_iter().enumerate() {
@@ -241,7 +269,7 @@ pub(crate) fn update_columns(
     sql.push_str(" WHERE ");
     sql.push_str(key);
     sql.push_str(" = ?");
-    values.push(rusqlite::types::Value::Integer(id));
+    values.push(id);
     Ok(conn.execute(&sql, rusqlite::params_from_iter(values))?)
 }
 
@@ -249,12 +277,13 @@ pub(crate) fn update_columns(
 /// unchanged), JSON `null` is `Some(None)` (clear) and a value is `Some(Some(v))`. Plain
 /// serde collapses `null` to `None`, so a client could never clear the field.
 ///
-/// Use with `#[serde(default, skip_serializing_if = "Option::is_none", with = "double_option")]`.
-pub(crate) mod double_option {
+/// Use with `#[serde(default, skip_serializing_if = "Option::is_none", with = "double_option")]`
+/// (`store::double_option` outside this crate).
+pub mod double_option {
     use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
     /// Writes `Some(None)` as `null` and `Some(Some(v))` as `v` (`None` is skipped).
-    pub(crate) fn serialize<T: Serialize, S: Serializer>(
+    pub fn serialize<T: Serialize, S: Serializer>(
         value: &Option<Option<T>>,
         serializer: S,
     ) -> Result<S::Ok, S::Error> {
@@ -265,7 +294,7 @@ pub(crate) mod double_option {
     }
 
     /// Reads a present field (including `null`) as `Some(..)`.
-    pub(crate) fn deserialize<'de, T: Deserialize<'de>, D: Deserializer<'de>>(
+    pub fn deserialize<'de, T: Deserialize<'de>, D: Deserializer<'de>>(
         deserializer: D,
     ) -> Result<Option<Option<T>>, D::Error> {
         Option::<T>::deserialize(deserializer).map(Some)

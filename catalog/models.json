@@ -1,8 +1,8 @@
 {
   "schemaVersion": 1,
-  "sequence": 2,
-  "generated": "2026-11-10",
-  "note": "Pinned commits, sizes and SHA-256 were HEAD-verified on 2026-11-10 (docs/research/huggingface.md). 'tested' records a passing scripts/catalog_test.py run (template shapes and a real tool-call round trip) under the pinned llama.cpp.",
+  "sequence": 3,
+  "generated": "2026-11-18",
+  "note": "Pinned commits, sizes and SHA-256 were HEAD-verified on 2026-11-10 (docs/research/huggingface.md). 'tested' records a passing scripts/catalog_test.py run (template shapes and a real tool-call round trip) under the pinned llama.cpp. The picture and video parts (generators, generatorFamilies) were pinned from their Hugging Face listings on 2026-11-18 (recorded in crates/models/tests/fixtures/hf/); each licence's sha256 is that of its canonical text in third_party/licenses/models/.",
   "tiers": {
     "8": {
       "recommendedCtx": 16384,
@@ -692,6 +692,545 @@
       "parameters": 30700000000,
       "languages": [
         "multilingual"
+      ]
+    }
+  },
+  "generators": {
+    "flux2-klein-4b-q4": {
+      "name": "FLUX.2 klein 4B",
+      "summary": "Quick pictures in 4 steps; can also change a picture you add.",
+      "publisher": "Black Forest Labs",
+      "kind": "image",
+      "family": "flux2-klein-4b",
+      "inputs": [
+        "reference"
+      ],
+      "parts": [
+        {
+          "role": "diffusion",
+          "repo": "leejet/FLUX.2-klein-4B-GGUF",
+          "revision": "3b1f5a9dc3abb32238b053aeb3d823c30afdacbd",
+          "path": "flux-2-klein-4b-Q4_0.gguf",
+          "size": 2460378560,
+          "sha256": "d1023499ef3f2f82ff7c50e6778495195c1b6cc34835741778868428111f9ff4",
+          "license": "apache-2.0"
+        },
+        {
+          "role": "llm",
+          "repo": "unsloth/Qwen3-4B-GGUF",
+          "revision": "22c9fc8a8c7700b76a1789366280a6a5a1ad1120",
+          "path": "Qwen3-4B-Q4_K_M.gguf",
+          "size": 2497281312,
+          "sha256": "f6f851777709861056efcdad3af01da38b31223a3ba26e61a4f8bf3a2195813a",
+          "license": "apache-2.0"
+        },
+        {
+          "role": "vae",
+          "repo": "Comfy-Org/Flux-2-Klein-4B",
+          "revision": "5b3abca5c0dc1ecd4eaf3340868d09063fc1c965",
+          "path": "split_files/vae/flux2-vae.safetensors",
+          "size": 336211292,
+          "sha256": "868fe7b343cc8f3a19dbcfcafbc3d5f888802be3f89bd81b65b3621a066ce8f3",
+          "license": "apache-2.0"
+        }
+      ],
+      "licenses": {
+        "apache-2.0": {
+          "name": "Apache License 2.0",
+          "url": "https://huggingface.co/black-forest-labs/FLUX.2-klein-4B/blob/e7b7dc27f91deacad38e78976d1f2b499d76a294/LICENSE.md",
+          "sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30",
+          "commercialOutputs": "yes",
+          "revenueLimitUsd": null,
+          "excludedRegions": [],
+          "obligations": [
+            "Keep the licence and copyright notices with the files."
+          ],
+          "plainWords": "Free for any use, including commercial."
+        }
+      },
+      "gate": {
+        "mode": "none",
+        "collects": []
+      },
+      "defaults": {
+        "steps": 4,
+        "cfg": 1.0,
+        "sampler": "euler",
+        "width": 1024,
+        "height": 1024
+      },
+      "limits": {
+        "multipleOf": 16,
+        "maxSide": 2048,
+        "frameRule": null
+      },
+      "memory": [],
+      "speed": [],
+      "quirks": [],
+      "minBuild": 1106,
+      "runsOnApple": true,
+      "tested": null
+    },
+    "z-image-turbo-q4": {
+      "name": "Z-Image Turbo",
+      "summary": "Photo-real pictures in 8 steps.",
+      "publisher": "Tongyi (Alibaba)",
+      "kind": "image",
+      "family": "z-image-turbo",
+      "inputs": [],
+      "parts": [
+        {
+          "role": "diffusion",
+          "repo": "leejet/Z-Image-Turbo-GGUF",
+          "revision": "c61c0e422dc8b541b7548cf33a4ef8302b0f8085",
+          "path": "z_image_turbo-Q4_K.gguf",
+          "size": 3864250304,
+          "sha256": "14b375ab4f226bc5378f68f37e899ef3c2242b8541e61e2bc1aff40976086fbd",
+          "license": "apache-2.0"
+        },
+        {
+          "role": "llm",
+          "repo": "unsloth/Qwen3-4B-Instruct-2507-GGUF",
+          "revision": "a06e946bb6b655725eafa393f4a9745d460374c9",
+          "path": "Qwen3-4B-Instruct-2507-Q4_K_M.gguf",
+          "size": 2497281120,
+          "sha256": "3605803b982cb64aead44f6c1b2ae36e3acdb41d8e46c8a94c6533bc4c67e597",
+          "license": "apache-2.0"
+        },
+        {
+          "role": "vae",
+          "repo": "Comfy-Org/Z-Image-Turbo",
+          "revision": "6fc90a3b1b653e935a0d175e260736de25b84df5",
+          "path": "split_files/vae/ae.safetensors",
+          "size": 335304388,
+          "sha256": "afc8e28272cd15db3919bacdb6918ce9c1ed22e96cb12c4d5ed0fba823529e38",
+          "license": "apache-2.0"
+        }
+      ],
+      "licenses": {
+        "apache-2.0": {
+          "name": "Apache License 2.0",
+          "url": "https://huggingface.co/Tongyi-MAI/Z-Image-Turbo/blob/f332072aa78be7aecdf3ee76d5c247082da564a6/README.md",
+          "sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30",
+          "commercialOutputs": "yes",
+          "revenueLimitUsd": null,
+          "excludedRegions": [],
+          "obligations": [
+            "Keep the licence and copyright notices with the files."
+          ],
+          "plainWords": "Free for any use, including commercial."
+        }
+      },
+      "gate": {
+        "mode": "none",
+        "collects": []
+      },
+      "defaults": {
+        "steps": 8,
+        "cfg": 1.0,
+        "width": 1024,
+        "height": 1024
+      },
+      "limits": {
+        "multipleOf": 16,
+        "maxSide": 2048,
+        "frameRule": null
+      },
+      "memory": [],
+      "speed": [],
+      "quirks": [
+        "metal-tensor-off"
+      ],
+      "minBuild": 1106,
+      "runsOnApple": true,
+      "tested": null
+    },
+    "wan22-ti2v-5b-fast-q6": {
+      "name": "Wan 2.2 5B, fast",
+      "summary": "Short clips from words, or from a start picture.",
+      "publisher": "Wan (Alibaba)",
+      "kind": "video",
+      "family": "wan2.2-ti2v-5b-fast",
+      "inputs": [
+        "startFrame"
+      ],
+      "parts": [
+        {
+          "role": "diffusion",
+          "repo": "Green-Sky/FastWan2.2-TI2V-5B-FullAttn-GGUF",
+          "revision": "3e8fe5537b1200654868aa24ea8d0f4012fb3a1e",
+          "path": "FastWan2.2-TI2V-5B-q6_k.gguf",
+          "size": 4210247200,
+          "sha256": "416a87e30f2328dbefd7666ac90b395ead74f443748ff31c83483ac4ac6121cc",
+          "license": "apache-2.0"
+        },
+        {
+          "role": "t5xxl",
+          "repo": "city96/umt5-xxl-encoder-gguf",
+          "revision": "b535255bee98c2b0a59ea7c0ae2dcd0c6657b3b7",
+          "path": "umt5-xxl-encoder-Q5_K_M.gguf",
+          "size": 4145878880,
+          "sha256": "eaea358bb438c5d211721a4feecc162000e3636e9cb96f51e216f1f44ebd12ce",
+          "license": "apache-2.0"
+        },
+        {
+          "role": "vae",
+          "repo": "QuantStack/Wan2.2-TI2V-5B-GGUF",
+          "revision": "57437632ddd08bdcbd1508c866aa22e126ed51d2",
+          "path": "VAE/Wan2.2_VAE.safetensors",
+          "size": 1409400960,
+          "sha256": "e40321bd36b9709991dae2530eb4ac303dd168276980d3e9bc4b6e2b75fed156",
+          "license": "apache-2.0"
+        }
+      ],
+      "licenses": {
+        "apache-2.0": {
+          "name": "Apache License 2.0",
+          "url": "https://huggingface.co/FastVideo/FastWan2.2-TI2V-5B-FullAttn-Diffusers/blob/3e187042a324f6f5fb68fd22110a78725253de8f/README.md",
+          "sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30",
+          "commercialOutputs": "yes",
+          "revenueLimitUsd": null,
+          "excludedRegions": [],
+          "obligations": [
+            "Keep the licence and copyright notices with the files."
+          ],
+          "plainWords": "Free for any use, including commercial."
+        }
+      },
+      "gate": {
+        "mode": "none",
+        "collects": []
+      },
+      "defaults": {
+        "steps": 4,
+        "cfg": 1.0,
+        "flowShift": 3.0,
+        "width": 832,
+        "height": 480,
+        "frames": 49,
+        "fps": 24
+      },
+      "limits": {
+        "multipleOf": 32,
+        "maxSide": 1280,
+        "frameRule": "4n+1",
+        "maxFrames": 121
+      },
+      "memory": [],
+      "speed": [],
+      "quirks": [],
+      "minBuild": 1106,
+      "runsOnApple": true,
+      "tested": null
+    }
+  },
+  "generatorTiers": {
+    "image": {
+      "0": [
+        "flux2-klein-4b-q4"
+      ],
+      "8": [
+        "z-image-turbo-q4",
+        "flux2-klein-4b-q4"
+      ]
+    },
+    "video": {
+      "8": [
+        "wan22-ti2v-5b-fast-q6"
+      ]
+    }
+  },
+  "generatorFamilies": {
+    "flux2-klein-4b": {
+      "name": "FLUX.2 klein 4B",
+      "publisher": "Black Forest Labs",
+      "kind": "image",
+      "inputs": [
+        "reference"
+      ],
+      "upstreamLicense": "apache-2.0",
+      "companions": [
+        {
+          "role": "llm",
+          "repo": "unsloth/Qwen3-4B-GGUF",
+          "revision": "22c9fc8a8c7700b76a1789366280a6a5a1ad1120",
+          "path": "Qwen3-4B-Q4_K_M.gguf",
+          "size": 2497281312,
+          "sha256": "f6f851777709861056efcdad3af01da38b31223a3ba26e61a4f8bf3a2195813a",
+          "license": "apache-2.0"
+        },
+        {
+          "role": "vae",
+          "repo": "Comfy-Org/Flux-2-Klein-4B",
+          "revision": "5b3abca5c0dc1ecd4eaf3340868d09063fc1c965",
+          "path": "split_files/vae/flux2-vae.safetensors",
+          "size": 336211292,
+          "sha256": "868fe7b343cc8f3a19dbcfcafbc3d5f888802be3f89bd81b65b3621a066ce8f3",
+          "license": "apache-2.0"
+        }
+      ],
+      "licenses": {
+        "apache-2.0": {
+          "name": "Apache License 2.0",
+          "url": "https://huggingface.co/black-forest-labs/FLUX.2-klein-4B/blob/e7b7dc27f91deacad38e78976d1f2b499d76a294/LICENSE.md",
+          "sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30",
+          "commercialOutputs": "yes",
+          "revenueLimitUsd": null,
+          "excludedRegions": [],
+          "obligations": [
+            "Keep the licence and copyright notices with the files."
+          ],
+          "plainWords": "Free for any use, including commercial."
+        }
+      },
+      "defaults": {
+        "steps": 4,
+        "cfg": 1.0,
+        "sampler": "euler",
+        "width": 1024,
+        "height": 1024
+      },
+      "limits": {
+        "multipleOf": 16,
+        "maxSide": 2048,
+        "frameRule": null
+      },
+      "fallback": {
+        "actBaseBytes": 500000000,
+        "actBytesPerToken": 100000,
+        "vaeBytesPerPixelFrame": 300,
+        "vaeTileCapBytes": 500000000,
+        "tokenDiv": 16
+      },
+      "memory": [],
+      "speed": [],
+      "quirks": [],
+      "minBuild": 1106,
+      "runsOnApple": true,
+      "parameters": [
+        3500000000,
+        4500000000
+      ]
+    },
+    "z-image-turbo": {
+      "name": "Z-Image Turbo",
+      "publisher": "Tongyi (Alibaba)",
+      "kind": "image",
+      "inputs": [],
+      "upstreamLicense": "apache-2.0",
+      "companions": [
+        {
+          "role": "llm",
+          "repo": "unsloth/Qwen3-4B-Instruct-2507-GGUF",
+          "revision": "a06e946bb6b655725eafa393f4a9745d460374c9",
+          "path": "Qwen3-4B-Instruct-2507-Q4_K_M.gguf",
+          "size": 2497281120,
+          "sha256": "3605803b982cb64aead44f6c1b2ae36e3acdb41d8e46c8a94c6533bc4c67e597",
+          "license": "apache-2.0"
+        },
+        {
+          "role": "vae",
+          "repo": "Comfy-Org/Z-Image-Turbo",
+          "revision": "6fc90a3b1b653e935a0d175e260736de25b84df5",
+          "path": "split_files/vae/ae.safetensors",
+          "size": 335304388,
+          "sha256": "afc8e28272cd15db3919bacdb6918ce9c1ed22e96cb12c4d5ed0fba823529e38",
+          "license": "apache-2.0"
+        }
+      ],
+      "licenses": {
+        "apache-2.0": {
+          "name": "Apache License 2.0",
+          "url": "https://huggingface.co/Tongyi-MAI/Z-Image-Turbo/blob/f332072aa78be7aecdf3ee76d5c247082da564a6/README.md",
+          "sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30",
+          "commercialOutputs": "yes",
+          "revenueLimitUsd": null,
+          "excludedRegions": [],
+          "obligations": [
+            "Keep the licence and copyright notices with the files."
+          ],
+          "plainWords": "Free for any use, including commercial."
+        }
+      },
+      "defaults": {
+        "steps": 8,
+        "cfg": 1.0,
+        "width": 1024,
+        "height": 1024
+      },
+      "limits": {
+        "multipleOf": 16,
+        "maxSide": 2048,
+        "frameRule": null
+      },
+      "fallback": {
+        "actBaseBytes": 500000000,
+        "actBytesPerToken": 100000,
+        "vaeBytesPerPixelFrame": 300,
+        "vaeTileCapBytes": 500000000,
+        "tokenDiv": 16
+      },
+      "memory": [],
+      "speed": [],
+      "quirks": [
+        "metal-tensor-off"
+      ],
+      "minBuild": 1106,
+      "runsOnApple": true,
+      "parameters": [
+        5500000000,
+        6500000000
+      ]
+    },
+    "wan2.2-ti2v-5b-fast": {
+      "name": "Wan 2.2 5B, fast",
+      "publisher": "Wan (Alibaba)",
+      "kind": "video",
+      "inputs": [
+        "startFrame"
+      ],
+      "upstreamLicense": "apache-2.0",
+      "companions": [
+        {
+          "role": "t5xxl",
+          "repo": "city96/umt5-xxl-encoder-gguf",
+          "revision": "b535255bee98c2b0a59ea7c0ae2dcd0c6657b3b7",
+          "path": "umt5-xxl-encoder-Q5_K_M.gguf",
+          "size": 4145878880,
+          "sha256": "eaea358bb438c5d211721a4feecc162000e3636e9cb96f51e216f1f44ebd12ce",
+          "license": "apache-2.0"
+        },
+        {
+          "role": "vae",
+          "repo": "QuantStack/Wan2.2-TI2V-5B-GGUF",
+          "revision": "57437632ddd08bdcbd1508c866aa22e126ed51d2",
+          "path": "VAE/Wan2.2_VAE.safetensors",
+          "size": 1409400960,
+          "sha256": "e40321bd36b9709991dae2530eb4ac303dd168276980d3e9bc4b6e2b75fed156",
+          "license": "apache-2.0"
+        }
+      ],
+      "licenses": {
+        "apache-2.0": {
+          "name": "Apache License 2.0",
+          "url": "https://huggingface.co/FastVideo/FastWan2.2-TI2V-5B-FullAttn-Diffusers/blob/3e187042a324f6f5fb68fd22110a78725253de8f/README.md",
+          "sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30",
+          "commercialOutputs": "yes",
+          "revenueLimitUsd": null,
+          "excludedRegions": [],
+          "obligations": [
+            "Keep the licence and copyright notices with the files."
+          ],
+          "plainWords": "Free for any use, including commercial."
+        }
+      },
+      "defaults": {
+        "steps": 4,
+        "cfg": 1.0,
+        "flowShift": 3.0,
+        "width": 832,
+        "height": 480,
+        "frames": 49,
+        "fps": 24
+      },
+      "limits": {
+        "multipleOf": 32,
+        "maxSide": 1280,
+        "frameRule": "4n+1",
+        "maxFrames": 121
+      },
+      "fallback": {
+        "actBaseBytes": 1000000000,
+        "actBytesPerToken": 250000,
+        "vaeBytesPerPixelFrame": 400,
+        "vaeTileCapBytes": 2500000000,
+        "tokenDiv": 32,
+        "frameDiv": 4,
+        "vaeChunkFrames": 4
+      },
+      "memory": [],
+      "speed": [],
+      "quirks": [],
+      "minBuild": 1106,
+      "runsOnApple": true,
+      "parameters": [
+        4500000000,
+        5500000000
+      ]
+    },
+    "wan2.1-t2v-1.3b": {
+      "name": "Wan 2.1 1.3B",
+      "publisher": "Wan (Alibaba)",
+      "kind": "video",
+      "inputs": [],
+      "upstreamLicense": "apache-2.0",
+      "companions": [
+        {
+          "role": "t5xxl",
+          "repo": "city96/umt5-xxl-encoder-gguf",
+          "revision": "b535255bee98c2b0a59ea7c0ae2dcd0c6657b3b7",
+          "path": "umt5-xxl-encoder-Q5_K_M.gguf",
+          "size": 4145878880,
+          "sha256": "eaea358bb438c5d211721a4feecc162000e3636e9cb96f51e216f1f44ebd12ce",
+          "license": "apache-2.0"
+        },
+        {
+          "role": "vae",
+          "repo": "Comfy-Org/Wan-2.1",
+          "revision": "123acf1cc74bccbb9bfff8ac1ee72edc08c2341d",
+          "path": "split_files/vae/wan_2.1_vae.safetensors",
+          "size": 253815318,
+          "sha256": "2fc39d31359a4b0a64f55876d8ff7fa8d780956ae2cb13463b0223e15148976b",
+          "license": "apache-2.0"
+        }
+      ],
+      "licenses": {
+        "apache-2.0": {
+          "name": "Apache License 2.0",
+          "url": "https://huggingface.co/Wan-AI/Wan2.1-T2V-1.3B/blob/37ec512624d61f7aa208f7ea8140a131f93afc9a/LICENSE.txt",
+          "sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30",
+          "commercialOutputs": "yes",
+          "revenueLimitUsd": null,
+          "excludedRegions": [],
+          "obligations": [
+            "Keep the licence and copyright notices with the files."
+          ],
+          "plainWords": "Free for any use, including commercial."
+        }
+      },
+      "defaults": {
+        "steps": 20,
+        "cfg": 6.0,
+        "flowShift": 3.0,
+        "sampler": "euler",
+        "width": 832,
+        "height": 480,
+        "frames": 33,
+        "fps": 16
+      },
+      "limits": {
+        "multipleOf": 16,
+        "maxSide": 1280,
+        "frameRule": "4n+1",
+        "maxFrames": 81
+      },
+      "fallback": {
+        "actBaseBytes": 500000000,
+        "actBytesPerToken": 100000,
+        "vaeBytesPerPixelFrame": 300,
+        "vaeTileCapBytes": 1500000000,
+        "tokenDiv": 16,
+        "frameDiv": 4,
+        "vaeChunkFrames": 4
+      },
+      "memory": [],
+      "speed": [],
+      "quirks": [],
+      "minBuild": 1106,
+      "runsOnApple": true,
+      "parameters": [
+        1100000000,
+        1500000000
       ]
     }
   }

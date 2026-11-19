@@ -1,9 +1,11 @@
 // [0.0.7 P6] Edit and resend dropped the message's images, files and mentions without a word,
 // and a message with only an image could not be resent. The edit box shows them now, each
 // with a way to remove it, and the new message keeps the rest.
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
 import type { MentionRef, MessageDto } from "../lib/types";
+import { LOCAL, MODELS } from "./studio/fixtures/models";
+import type { MediaModel, RefItem } from "./studio/types";
 
 const ipcMock = vi.hoisted(() => ({
   isTauri: () => false,
@@ -12,8 +14,11 @@ const ipcMock = vi.hoisted(() => ({
 vi.mock("../lib/ipc", () => ipcMock);
 vi.mock("@tauri-apps/plugin-clipboard-manager", () => ({ writeText: vi.fn() }));
 vi.mock("./context/PinMessageButton", () => ({ PinMessageButton: () => null }));
+vi.mock("./studio/api");
 
 const { MessageItem } = await import("./MessageItem");
+const studioApi = await import("./studio/api");
+const { useStudio } = await import("../store/studio");
 
 const mention: MentionRef = {
   attachmentId: 7,
@@ -162,5 +167,216 @@ describe("the edit box while a reply is being written", () => {
     fireEvent.click(screen.getByRole("button", { name: "Send" }));
     expect(onEditResend).toHaveBeenCalledTimes(1);
     expect(onEditResend).toHaveBeenCalledWith(expect.objectContaining({ id: 12 }), "Look again", [5, 6, 7]);
+  });
+});
+
+// [0.1.0 B11] *Open in Studio* on a picture attached in a chat: the picture is kept as an added
+// picture (`studio_add_ref`, the same checks as a picture dropped on Studio's tray) and goes
+// into the Pictures tab's tray as a reference, and Studio is shown there.
+describe("Open in Studio", () => {
+  const INITIAL = useStudio.getState();
+  const KEPT: RefItem = { sha256: "d".repeat(64), mime: "image/png", sizeBytes: 1200, role: null };
+  /** The fixture's first picture model, which takes up to 16 references. */
+  const flare = MODELS[0]!;
+  /** A picture model that takes no pictures. */
+  const noRefs: MediaModel = {
+    ...flare,
+    id: "test/no-refs",
+    params: flare.params.filter((p) => p.kind.type !== "images"),
+  };
+
+  /** Studio read once, its Pictures tab on `model` at OpenRouter. */
+  function studioOn(model: MediaModel | null) {
+    const draft = useStudio.getState().drafts.image;
+    useStudio.setState({
+      loaded: true,
+      endpoints: [
+        {
+          providerId: 1,
+          name: "OpenRouter",
+          company: "openrouter",
+          host: "openrouter.ai",
+          cloud: true,
+          hasKey: true,
+          fetchedAt: 1,
+          models: model ? [model] : [],
+        },
+      ],
+      drafts: {
+        ...useStudio.getState().drafts,
+        image: { ...draft, target: model ? { endpoint: 1 } : null, model: model?.id ?? null },
+      },
+    });
+  }
+
+  async function shown(m: MessageDto) {
+    await act(async () => {
+      render(
+        <MessageItem
+          message={m}
+          isLastAssistant={false}
+          busy={false}
+          onRegenerate={() => undefined}
+          onEditResend={() => undefined}
+          onSwitchBranch={() => undefined}
+        />,
+      );
+    });
+  }
+
+  async function click(el: HTMLElement) {
+    await act(async () => {
+      fireEvent.click(el);
+    });
+    await act(async () => {
+      for (let i = 0; i < 10; i++) await Promise.resolve();
+    });
+  }
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    useStudio.setState(INITIAL, true);
+    vi.mocked(studioApi.studioAddRef).mockResolvedValue(KEPT);
+  });
+  afterEach(cleanup);
+
+  it("Open in Studio puts an attached picture in the tray", async () => {
+    studioOn(flare);
+    // Get local models was left open in Studio: the picture's tray is shown, not that view.
+    useStudio.setState({ localView: true });
+    ipcMock.getAttachment.mockResolvedValueOnce("data:image/webp;base64,UklGRg==");
+    await shown(user({ documents: [], mentions: [] }));
+    await click(screen.getByRole("button", { name: "Open in Studio" }));
+    expect(studioApi.studioAddRef).toHaveBeenCalledWith({
+      mime: "image/webp",
+      fileName: "This picture",
+      data: "UklGRg==",
+    });
+    expect(useStudio.getState().drafts.image.refs).toEqual([{ ...KEPT, role: "reference" }]);
+    expect(useStudio.getState()).toMatchObject({ view: "studio", tab: "image", localView: false });
+  });
+
+  it("Open in Studio puts the cursor in Studio's prompt (the button is hidden now)", async () => {
+    studioOn(flare);
+    await shown(user({ documents: [], mentions: [] }));
+    const frame = () => act(() => new Promise<void>((resolve) => requestAnimationFrame(() => resolve())));
+    await frame();
+    const focused = vi.fn();
+    window.addEventListener("app:focus-studio-prompt", focused);
+    try {
+      await click(screen.getByRole("button", { name: "Open in Studio" }));
+      await frame();
+      expect(focused).toHaveBeenCalledTimes(1);
+    } finally {
+      window.removeEventListener("app:focus-studio-prompt", focused);
+    }
+  });
+
+  it("with several pictures, each says which it is", async () => {
+    studioOn(flare);
+    await shown(user({ imageIds: [5, 8], documents: [], mentions: [] }));
+    await click(screen.getByRole("button", { name: "Open picture 2 in Studio" }));
+    expect(studioApi.studioAddRef).toHaveBeenCalledWith({ mime: "image/png", fileName: "This picture", data: "8" });
+    screen.getByRole("button", { name: "Open picture 1 in Studio" });
+  });
+
+  it("is not offered in the edit box", async () => {
+    await edit(user());
+    expect(screen.queryByRole("button", { name: /in Studio/ })).toBeNull();
+  });
+
+  it("a model that takes no pictures keeps it out, says why, and stays in the chat", async () => {
+    studioOn(noRefs);
+    await shown(user({ documents: [], mentions: [] }));
+    await click(screen.getByRole("button", { name: "Open in Studio" }));
+    screen.getByText("Not added to Studio. This model takes no added pictures.");
+    expect(studioApi.studioAddRef).not.toHaveBeenCalled();
+    expect(useStudio.getState().view).toBe("chat");
+    expect(useStudio.getState().drafts.image.refs).toEqual([]);
+  });
+
+  it("with no picture model in Studio yet, says so", async () => {
+    studioOn(null);
+    await shown(user({ documents: [], mentions: [] }));
+    await click(screen.getByRole("button", { name: "Open in Studio" }));
+    screen.getByText("Not added to Studio. There is no picture model yet: open Studio to get one.");
+    expect(useStudio.getState().view).toBe("chat");
+  });
+
+  it("a picture the backend refuses says why and stays in the chat", async () => {
+    studioOn(flare);
+    vi.mocked(studioApi.studioAddRef).mockRejectedValue({
+      code: "bad_request",
+      message: "This picture is larger than 20 MB.",
+      nextStep: "",
+      details: "",
+    });
+    await shown(user({ documents: [], mentions: [] }));
+    await click(screen.getByRole("button", { name: "Open in Studio" }));
+    screen.getByText("Not added to Studio. This picture is larger than 20 MB.");
+    expect(useStudio.getState().view).toBe("chat");
+  });
+
+  it("a refusal with a next step says what to do", async () => {
+    studioOn(flare);
+    vi.mocked(studioApi.studioAddRef).mockRejectedValue({
+      code: "studio_disk_full",
+      message: "The disk is full.",
+      nextStep: "Free up some space, then try again.",
+      details: "",
+    });
+    await shown(user({ documents: [], mentions: [] }));
+    await click(screen.getByRole("button", { name: "Open in Studio" }));
+    screen.getByText("Not added to Studio. The disk is full.");
+    screen.getByText("Free up some space, then try again.");
+  });
+
+  it("reads what Studio has saved first when Studio was never opened, and sends nothing", async () => {
+    vi.mocked(studioApi.studioModels).mockResolvedValue({
+      endpoints: [
+        {
+          providerId: 1,
+          name: "OpenRouter",
+          company: "openrouter",
+          host: "openrouter.ai",
+          cloud: true,
+          hasKey: true,
+          fetchedAt: 1,
+          models: [flare],
+        },
+      ],
+    });
+    vi.mocked(studioApi.studioLocalModels).mockResolvedValue({ ...LOCAL, installed: [] });
+    vi.mocked(studioApi.studioRuns).mockResolvedValue({ runs: [], next: null });
+    vi.mocked(studioApi.studioLive).mockResolvedValue([]);
+    vi.mocked(studioApi.studioGetPrefs).mockResolvedValue({
+      lastModel: { image: { target: { endpoint: 1 }, model: flare.id } },
+      advancedOpen: false,
+      confirmEveryVideo: true,
+      confirmAtUsd: 1,
+      dailyLimitUsd: 10,
+      setups: [],
+      galleryDir: null,
+      gpuPolicy: "unload",
+      reloadChatAfter: false,
+      suggestionDismissed: true,
+      localNoticeAcceptedAt: null,
+    });
+    vi.mocked(studioApi.studioUsage).mockResolvedValue({
+      spentTodayUsd: 0,
+      pendingUsd: 0,
+      limitUsd: 10,
+      folder: "/home/me/harnessUI/studio",
+      bytes: 0,
+      pictures: 0,
+      videos: 0,
+    });
+    await shown(user({ documents: [], mentions: [] }));
+    await click(screen.getByRole("button", { name: "Open in Studio" }));
+    expect(useStudio.getState().loaded).toBe(true);
+    expect(useStudio.getState().drafts.image).toMatchObject({ model: flare.id, refs: [{ ...KEPT, role: "reference" }] });
+    expect(useStudio.getState().view).toBe("studio");
+    expect(studioApi.studioRefreshModels).not.toHaveBeenCalled();
+    expect(studioApi.studioModelPrice).not.toHaveBeenCalled();
   });
 });

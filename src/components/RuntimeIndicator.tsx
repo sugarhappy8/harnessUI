@@ -10,12 +10,14 @@ import {
   readyLineParts,
   SLOW_WORDS,
   slowSpeedWords,
+  STUDIO_CHAT_WAIT,
   stepDownAction,
   waitingWords,
 } from "../lib/words";
 import { usePageVisible, usePoll } from "../lib/usePoll";
 import { toErrorInfo, useApp } from "../store/app";
 import { reloadModel, switchModel, unloadModel, useRestartNote, useWaiting } from "../store/modelChange";
+import { useStudio } from "../store/studio";
 import { visiblePath } from "./FolderChip";
 import { ModelSettingsHost, openModelSettings, QuestionHost } from "./ModelSettings";
 
@@ -142,6 +144,35 @@ export function RuntimeIndicator() {
   );
 }
 
+/**
+ * 0.1.0 Studio: a chat model's load waits while a local Studio job holds the graphics card
+ * (`waitingForStudio`), with *Stop Studio job* for the local run holding it when it is known.
+ */
+function StudioWait(props: { onError: (err: unknown) => void }) {
+  const holding = useStudio(
+    (s) => Object.values(s.live).find((r) => r.runsOn === "local" && r.status === "running")?.id ?? null,
+  );
+  return (
+    <div className="flex max-w-[34rem] min-w-0 items-center gap-1.5 text-[11px] text-warning" role="status">
+      <span className="line-clamp-2 min-w-0" title={STUDIO_CHAT_WAIT.waiting}>
+        {STUDIO_CHAT_WAIT.waiting}
+      </span>
+      {holding !== null && (
+        <>
+          <span aria-hidden>·</span>
+          <button
+            type="button"
+            onClick={() => void useStudio.getState().cancel(holding).catch(props.onError)}
+            className="shrink-0 underline hover:text-fg"
+          >
+            {STUDIO_CHAT_WAIT.stop}
+          </button>
+        </>
+      )}
+    </div>
+  );
+}
+
 function Status() {
   const runtime = useApp((s) => s.runtime);
   const detail = useApp((s) => s.detail);
@@ -172,6 +203,16 @@ function Status() {
   const reload = (force: boolean) => void reloadModel(useApp.getState().runtime, force).catch(fail);
   const settings = () => runtime.modelPath && openModelSettings(runtime.modelPath);
   const chatPath = modelRef ? modelRef.slice(6) : null;
+  // A load waits for a local Studio job: the line says so in place of the state of the model
+  // loaded now, except a ready model's line (it still writes replies), which it goes under.
+  const studioWait = runtime.waitingForStudio === true;
+  if (studioWait && runtime.state !== "ready") {
+    return (
+      <div data-header-state="waiting-for-studio" className="flex min-w-[12rem] flex-1 flex-col justify-center text-xs">
+        <StudioWait onError={fail} />
+      </div>
+    );
+  }
 
   if (runtime.state === "starting") {
     const pct = runtime.progress !== null ? Math.round(runtime.progress * 100) : null;
@@ -245,7 +286,7 @@ function Status() {
         data-header-state="ready"
         className={
           "@container/ready enter-fade flex flex-1 flex-col justify-center gap-0.5 text-xs leading-tight " +
-          (top || waitingLine ? "min-w-[12rem]" : "min-w-[6.25rem] @md:min-w-[9.5rem]")
+          (top || waitingLine || studioWait ? "min-w-[12rem]" : "min-w-[6.25rem] @md:min-w-[9.5rem]")
         }
       >
         <div
@@ -334,7 +375,9 @@ function Status() {
             </button>
           </span>
         </div>
-        {waitingLine ? (
+        {studioWait ? (
+          <StudioWait onError={fail} />
+        ) : waitingLine ? (
           <div className="flex max-w-[34rem] min-w-0 items-center gap-1.5 text-[11px] text-warning" role="status">
             <span className="truncate">{waitingWords(waiting ?? running ?? "reload", busy)}</span>
             <span aria-hidden>·</span>

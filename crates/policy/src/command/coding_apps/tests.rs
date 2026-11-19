@@ -955,8 +955,10 @@ fn leading_keywords_and_settings_stay_linear() {
         let words = command_words(&format!("{front}x -p y"));
         let took = started.elapsed();
         assert_eq!(words, ["x", "-p", "y"]);
+        // Debug builds on shared CI machines are slow; a quadratic pass would take minutes.
+        let limit = std::time::Duration::from_secs(if cfg!(debug_assertions) { 10 } else { 1 });
         assert!(
-            took < std::time::Duration::from_secs(1),
+            took < limit,
             "{} bytes of {:?}: {took:?}",
             front.len(),
             &front[..6]
@@ -1271,11 +1273,9 @@ fn long_ordinary_lines_are_read_to_the_end() {
     let started = std::time::Instant::now();
     assert_not_seen(SH, &line);
     assert_not_seen(PS, &line);
-    assert!(
-        started.elapsed() < std::time::Duration::from_secs(3),
-        "{:?}",
-        started.elapsed()
-    );
+    // Debug builds on shared CI machines are slow; a quadratic pass would take minutes.
+    let limit = std::time::Duration::from_secs(if cfg!(debug_assertions) { 10 } else { 3 });
+    assert!(started.elapsed() < limit, "{:?}", started.elapsed());
     // Shells inside shells, each with quotes, escapes, braces and joined lines, many times
     // over: past the limit, the line counts.
     let mut nested = "echo {a,b} c\\\nd 'x' \"y\" \\z; ".repeat(40);

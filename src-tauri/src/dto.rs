@@ -1,11 +1,17 @@
 //! Data sent to the webview. Field names are camelCase and match src/lib/types.ts.
 
+use agent::media::{
+    Company, EndpointCompany, MediaKind, MediaModel, ParamSpec, Price, RefRole, Routing,
+};
 use serde::{Deserialize, Serialize};
+use serde_json::{Map, Value};
 
 use store::{ChatId, MessageId, ProviderId};
 
 use crate::error::AppError;
 use crate::load_settings::{ContextSource, GpuUse, ThinkingLimit};
+use crate::studio::prefs::RunTarget;
+use crate::studio::spend::ConfirmReason;
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -172,6 +178,10 @@ pub struct RuntimeStatusDto {
     /// Shown as "Restarts when the reply ends · Cancel"; `cancel_pending_reload` cancels
     /// it. The status still describes the model loaded now.
     pub reload_waiting: bool,
+    /// 0.1.0: a load waits while a local Studio job holds the graphics card ("Studio is
+    /// using the graphics card. The chat model loads when it finishes · Stop Studio job").
+    /// The status still describes the model loaded now (none, after Studio unloaded it).
+    pub waiting_for_studio: bool,
     /// 0.0.5: the model the user unloaded (`unload_model`), for "Unloaded to free memory ·
     /// Load". Cleared by the next load and by any other unload (removing the model or its
     /// backend). `None` until WP1b sets it.
@@ -207,6 +217,7 @@ impl Default for RuntimeStatusDto {
             ctx_source: None,
             settings_changed: false,
             reload_waiting: false,
+            waiting_for_studio: false,
             unloaded_path: None,
             placement: None,
         }
@@ -661,6 +672,751 @@ pub struct Placement {
     pub custom: bool,
 }
 
+// ---- Studio runs (0.1.0) ----------------------------------------------------------------------
+
+/// A press of Create, as the webview sends it to `studio_start` (and to the estimate and the
+/// preview, which send nothing anywhere).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StartRequest {
+    /// Made once per press, so the same press sent twice makes one run.
+    pub client_token: String,
+    /// An endpoint, or this computer.
+    pub target: RunTarget,
+    /// Pictures or video; it must be the model's kind.
+    pub kind: MediaKind,
+    /// The model's id at the target.
+    pub model: String,
+    /// The prompt, sent as written.
+    pub prompt: String,
+    /// The model's typed settings, by key; a setting left out is not sent.
+    pub params: Map<String, Value>,
+    /// Extra settings (JSON), by name.
+    pub extra: Map<String, Value>,
+    /// The added pictures, by their name in the gallery's `refs/`.
+    pub refs: Vec<RefInput>,
+    /// Which companies may run an OpenRouter request.
+    pub routing: Option<Routing>,
+}
+
+/// An added picture in a [`StartRequest`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RefInput {
+    /// Its SHA-256, the name it is kept under in the gallery's `refs/`.
+    pub sha256: String,
+    /// What it is for.
+    pub role: RefRole,
+}
+
+/// An added picture of a run, as recorded.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RefDto {
+    /// Its SHA-256.
+    pub sha256: String,
+    /// Its media type.
+    pub mime: String,
+    /// Its size.
+    pub size_bytes: u64,
+    /// What it was for, when recorded.
+    pub role: Option<RefRole>,
+}
+
+/// Why a run ended without its results: a four-part error plus what the company said. It is
+/// kept as the run's error JSON, so it always carries `charged`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RunErrorDto {
+    /// The error code, for example `studio_blocked`.
+    pub code: String,
+    /// What happened, in plain words.
+    pub message: String,
+    /// What the user can do.
+    pub next_step: String,
+    /// Details for a bug report.
+    pub details: String,
+    /// Whether the run was charged; `None` when that is not known.
+    pub charged: Option<bool>,
+    /// The company's request id, for an appeal.
+    pub request_id: Option<String>,
+    /// `openrouter`, `openai` or `local`.
+    pub company: String,
+    /// Where a safety filter stopped it (`prompt` or `output`), when the company said.
+    pub stage: Option<String>,
+}
+
+/// One file a run made.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OutputDto {
+    /// Its id.
+    pub id: String,
+    /// The run that made it.
+    pub run_id: String,
+    /// Its place among the run's files, from 0.
+    pub idx: u32,
+    /// Its media type, read from its bytes.
+    pub mime: String,
+    /// Its size.
+    pub size_bytes: u64,
+    /// Its width in pixels, when known.
+    pub width: Option<u32>,
+    /// Its height in pixels, when known.
+    pub height: Option<u32>,
+    /// A video's length, when known.
+    pub duration_ms: Option<u64>,
+    /// The seed it was made with, when known.
+    pub seed: Option<u64>,
+    /// Starred by the user.
+    pub starred: bool,
+    /// Whether its thumbnail was made.
+    pub has_thumb: bool,
+    /// Its absolute path in the gallery folder.
+    pub path: String,
+}
+
+/// A Studio run as the webview shows it (`studio-progress`, `studio_runs`, `studio_live`).
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RunDto {
+    /// Its id.
+    pub id: String,
+    /// Which state of a run is newest: one count for every run, taken just before the row is
+    /// read, so of two copies of the same run (an event, a command's answer) the webview keeps
+    /// the one with the higher number.
+    pub seq: u64,
+    /// Pictures or video.
+    pub kind: MediaKind,
+    /// `cloud` or `local`.
+    pub runs_on: String,
+    /// The endpoint; `None` for a run on this computer or once the endpoint is deleted.
+    pub provider_id: Option<i64>,
+    /// The endpoint's name when the run was made.
+    pub provider_name: String,
+    /// The endpoint's host when the run was made.
+    pub provider_host: String,
+    /// The company OpenRouter ran it at, by name, when known.
+    pub upstream: Option<String>,
+    /// The model's id.
+    pub model: String,
+    /// The model's name as shown.
+    pub model_label: String,
+    /// The prompt.
+    pub prompt: String,
+    /// The typed settings sent (with the seed Studio picked).
+    pub params: Map<String, Value>,
+    /// The extra settings, as the user set them.
+    pub extra: Map<String, Value>,
+    /// The routing sent.
+    pub routing: Option<Routing>,
+    /// The added pictures.
+    pub refs: Vec<RefDto>,
+    /// `queued`, `sending`, `waiting`, `running`, `downloading`, `done`, `failed`,
+    /// `blocked`, `cancelled` or `interrupted`.
+    pub status: String,
+    /// Whether Studio is following the run now (queued, or its task is running).
+    pub watching: bool,
+    /// A video still not ready after the watch limit, no longer checked (Task A14).
+    pub stale: bool,
+    /// The company's id for the request or job.
+    pub remote_id: Option<String>,
+    /// Progress from 0 to 1, when reported.
+    pub progress: Option<f64>,
+    /// The estimate in US dollars; `None` when the price was unknown.
+    pub estimate_usd: Option<f64>,
+    /// What the company charged, in US dollars, when known.
+    pub cost_usd: Option<f64>,
+    /// Why it ended without its results.
+    pub error: Option<RunErrorDto>,
+    /// Unix ms when it was made.
+    pub created_at: i64,
+    /// Unix ms when sending (or the engine) started.
+    pub started_at: Option<i64>,
+    /// Unix ms when it ended.
+    pub finished_at: Option<i64>,
+    /// Its files, in order.
+    pub outputs: Vec<OutputDto>,
+    /// Its place in its endpoint's queue, from 1, while it waits for a free place.
+    pub queue_position: Option<u32>,
+    /// How long a local run takes; `None` for a cloud run.
+    pub eta: Option<EtaDto>,
+    /// A local run's stage and steps; `None` for a cloud run.
+    pub local: Option<LocalRunDto>,
+}
+
+/// How long a local run takes. The backend always fills it through
+/// `gen_eta::round_for_display` (`left_ms` included), so every view shows the same time.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EtaDto {
+    /// The shortest time it should take, in ms.
+    pub low_ms: u64,
+    /// The longest time it should take, in ms.
+    pub high_ms: u64,
+    /// Measured on this computer (else the catalog's first guess).
+    pub measured: bool,
+    /// During a run: the time left, in ms.
+    pub left_ms: Option<u64>,
+}
+
+/// Where a run on this computer is.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LocalRunDto {
+    /// `loading`, `readingPrompt`, `drawing`, `decoding` or `saving`.
+    pub stage: Option<String>,
+    /// The step being drawn.
+    pub step: Option<u32>,
+    /// The steps of each picture.
+    pub steps: Option<u32>,
+    /// The picture being drawn.
+    pub picture: Option<u32>,
+    /// The pictures the run makes.
+    pub pictures: Option<u32>,
+    /// The pass being run.
+    pub pass: Option<u32>,
+    /// The passes the run makes.
+    pub passes: Option<u32>,
+    /// What a queued local run waits for: `reply` (a chat reply being written), `studioJob`,
+    /// `answer` (the user's answer about unloading the chat model) or `chatModelLoading` (a
+    /// chat model starting, which goes first). `studioJob` is a defensive value, unreachable in
+    /// 0.1.0: the single local queue never lets two Studio jobs ask for the graphics card at
+    /// once, so a run behind another shows `queue_position` instead.
+    pub waiting_for: Option<String>,
+    /// The path of the chat model unloaded to make room.
+    pub unloaded_chat: Option<String>,
+    /// The engine is trying again with less memory.
+    pub retrying: bool,
+    /// No progress for 10 minutes.
+    pub stalled: bool,
+    /// The device it runs on, as shown.
+    pub device: Option<String>,
+    /// The Studio engine's build number.
+    pub engine_build: Option<u32>,
+    /// How long it has run, in ms.
+    pub elapsed_ms: Option<u64>,
+    /// Its files are labelled as AI-made.
+    pub labelled: bool,
+    /// It runs beside the loaded chat model.
+    pub alongside: bool,
+    /// It runs on the processor.
+    pub on_processor: bool,
+}
+
+/// The daily limit as it stands for a run.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LimitDto {
+    /// The limit in US dollars; `None` when it is off.
+    pub limit_usd: Option<f64>,
+    /// What ended and finished runs spent today, in US dollars.
+    pub spent_today_usd: f64,
+    /// What runs still going count, in US dollars.
+    pub pending_usd: f64,
+    /// Whether `spend::check_limit` would allow this run (`true`: it may be sent).
+    pub would_pass: bool,
+    /// Why it would not: `over` (it would take today's spending past the limit) or
+    /// `unknownNeedsReserve` (its price is unknown and less than `reserve_usd` of the limit is
+    /// left); `None` when it would pass.
+    pub refusal: Option<LimitRefusalDto>,
+    /// What a run whose price is unknown counts against the limit, in US dollars.
+    pub reserve_usd: f64,
+}
+
+/// Why the daily limit refuses a run (`LimitDto::refusal`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum LimitRefusalDto {
+    Over,
+    UnknownNeedsReserve,
+}
+
+/// What a run would cost and meet before it is sent, without sending anything.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EstimateDto {
+    /// The estimate in US dollars; `None` when the price is unknown.
+    pub usd: Option<f64>,
+    /// Why the run would ask before it is sent; empty when it would not.
+    pub reasons: Vec<ConfirmReason>,
+    /// The amount from which a cloud run asks, in US dollars.
+    pub confirm_at_usd: f64,
+    /// The daily limit as it stands for this run.
+    pub limit: LimitDto,
+    /// A plain sentence for each setting the model would refuse.
+    pub invalid: Vec<String>,
+    /// How long a local run takes; `None` for a cloud run.
+    pub eta: Option<EtaDto>,
+    /// Whether a local run fits this computer; `None` for a cloud run.
+    pub local: Option<LocalEstimateDto>,
+}
+
+/// Whether a local run fits this computer.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LocalEstimateDto {
+    /// `fits`, `slow`, `afterUnload` or `notHere`.
+    pub fit: String,
+    /// The chat model would be unloaded to make room.
+    pub unload_chat: bool,
+    /// The run would take longer than 15 minutes, or runs on the processor.
+    pub very_slow: bool,
+    /// The run would take longer than 15 minutes.
+    pub over_15_min: bool,
+    /// Why it does not fit, when `fit` is `notHere` ("needs 6 GB of graphics memory").
+    pub reason: Option<String>,
+}
+
+/// Today's spending and the gallery's size, for Studio's top bar and Settings → Studio.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UsageDto {
+    /// What ended and finished cloud runs spent today, in US dollars.
+    pub spent_today_usd: f64,
+    /// What cloud runs still going count, in US dollars.
+    pub pending_usd: f64,
+    /// The daily limit in US dollars; `None` when it is off.
+    pub limit_usd: Option<f64>,
+    /// The gallery folder.
+    pub folder: String,
+    /// The bytes of the results and added pictures kept.
+    pub bytes: u64,
+    /// The pictures kept.
+    pub pictures: u64,
+    /// The videos kept.
+    pub videos: u64,
+}
+
+// ---- Studio models and the gallery's pages (0.1.0) --------------------------------------------
+
+/// A model's price as the picker hints it: per what, and the lowest and highest price of one.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PriceHintDto {
+    /// `image`, `second`, `token`, `unknown` or `free`.
+    pub unit: String,
+    /// The lowest price of one picture or one second, in US dollars, when there is a number.
+    pub low: Option<f64>,
+    /// The highest price of one picture or one second, in US dollars, when there is a number.
+    pub high: Option<f64>,
+}
+
+/// A picture or video model as Studio's picker shows it.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MediaModelDto {
+    /// The id sent to the company.
+    pub id: String,
+    /// The name shown.
+    pub display_name: String,
+    /// The maker and the model's name without its version.
+    pub family: String,
+    /// Pictures or video.
+    pub kind: MediaKind,
+    /// Whether the model takes added pictures.
+    pub accepts_images: bool,
+    /// The controls, simple ones first.
+    pub params: Vec<ParamSpec>,
+    /// Its price, as the picker hints it.
+    pub price: PriceHintDto,
+    /// Whether the price has a number (a run on this computer is free, which counts).
+    pub price_known: bool,
+    /// When the price was fetched. `None` on an OpenRouter picture means "price shown when
+    /// picked"; a time with `price_known` false means "price unknown".
+    pub price_fetched_at: Option<i64>,
+    /// The companies that run an OpenRouter picture model, once its price was fetched.
+    pub companies: Vec<EndpointCompany>,
+    /// Plain sentences shown with the model.
+    pub notes: Vec<String>,
+    /// Why Studio cannot use the model, when it cannot.
+    pub usable: Option<String>,
+    /// When the company added the model, in seconds since 1970.
+    pub created: Option<i64>,
+}
+
+/// An endpoint that makes pictures or video, with the models of its saved lists.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StudioEndpointDto {
+    /// The endpoint.
+    pub provider_id: i64,
+    /// Its name as shown.
+    pub name: String,
+    /// The company behind it.
+    pub company: Company,
+    /// The host its requests go to, for example `openrouter.ai`.
+    pub host: String,
+    /// Whether the endpoint is on the internet.
+    pub cloud: bool,
+    /// Whether it may have a key (its models are greyed out without one).
+    pub has_key: bool,
+    /// When its lists were fetched; `None` when none are saved ("Get the list").
+    pub fetched_at: Option<i64>,
+    /// The models of its saved lists: pictures, then videos.
+    pub models: Vec<MediaModelDto>,
+}
+
+/// Every endpoint that makes pictures or video, with its saved models (`studio_models`).
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StudioModelsDto {
+    /// The endpoints, in the order of Settings → Endpoints.
+    pub endpoints: Vec<StudioEndpointDto>,
+}
+
+/// `model` as the picker shows it, with when its price was fetched. A model on this
+/// computer (`Price::Free`) has the unit `free`, a range of 0 to 0 and a known price.
+pub fn media_model_dto(model: &MediaModel, price_fetched_at: Option<i64>) -> MediaModelDto {
+    let unit = match model.price {
+        Price::PerImage(_) => "image",
+        Price::PerSecond(_) => "second",
+        Price::PerToken => "token",
+        Price::Unknown => "unknown",
+        Price::Free => "free",
+    };
+    let range = model.price.range();
+    MediaModelDto {
+        id: model.id.clone(),
+        display_name: model.display_name.clone(),
+        family: model.family.clone(),
+        kind: model.kind,
+        accepts_images: model.accepts_images,
+        params: model.params.clone(),
+        price: PriceHintDto {
+            unit: unit.to_owned(),
+            low: range.map(|(low, _)| low),
+            high: range.map(|(_, high)| high),
+        },
+        price_known: range.is_some(),
+        price_fetched_at,
+        companies: model.companies.clone(),
+        notes: model.notes.clone(),
+        usable: model.usable.clone(),
+        created: model.created,
+    }
+}
+
+/// Which runs the gallery shows (`studio_runs`). Every field left out does not filter.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct RunsFilter {
+    /// Only pictures, or only videos.
+    pub kind: Option<MediaKind>,
+    /// Only runs with a starred result.
+    pub starred: bool,
+    /// Only runs whose prompt holds this text (any case); blank does not filter.
+    pub text: String,
+    /// Only runs of this model id.
+    pub model: Option<String>,
+    /// Only runs made at or after this Unix ms.
+    pub since: Option<i64>,
+    /// Only runs made before this Unix ms.
+    pub until: Option<i64>,
+}
+
+/// A place in the gallery's order (newest first, then by id): the last run of a page, so the
+/// next page starts just after it. Both are needed, as runs can share a creation time.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RunsCursorDto {
+    /// The run's `created_at`.
+    pub created_at: i64,
+    /// The run's id.
+    pub id: String,
+}
+
+impl From<RunsCursorDto> for store::RunCursor {
+    fn from(cursor: RunsCursorDto) -> Self {
+        Self {
+            created_at: cursor.created_at,
+            id: cursor.id,
+        }
+    }
+}
+
+/// One page of the gallery's runs.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RunsPage {
+    /// The runs, newest first.
+    pub runs: Vec<RunDto>,
+    /// Where the next page starts: the last run's place when the page is full, else `None`.
+    pub next: Option<RunsCursorDto>,
+}
+
+// ---- The Studio engine (0.1.0) ----------------------------------------------------------------
+
+/// The Studio engine on this computer (`studio_engine_status`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EngineStatusDto {
+    /// "builtIn" (macOS, or a development engine), "notInstalled", "partial", "downloading",
+    /// "installed" (the Windows pack) or "unavailable" (no engine for this computer).
+    pub state: String,
+    /// The pinned stable-diffusion.cpp build, as its release tag (`master-1106-532d2c1`).
+    pub build: String,
+    /// The Windows pack's download size; 0 when the engine is built in or unavailable.
+    pub download_bytes: u64,
+    pub license_name: String,
+    pub license_url: String,
+    /// Bytes downloaded so far, while the pack is `partial` or `downloading`.
+    pub bytes_done: Option<u64>,
+}
+
+/// The `studio-engine-progress` event: the Windows pack's download, at most every 300 ms,
+/// then once with `finished` set (and `error` when it failed; a cancelled download has none).
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EngineProgressDto {
+    pub done: u64,
+    pub total: u64,
+    /// The download is complete and the pack is being unpacked.
+    pub unpacking: bool,
+    pub finished: bool,
+    pub error: Option<AppError>,
+}
+
+// ---- Get local models (0.1.0) -----------------------------------------------------------------
+
+/// What Get local models' header says about this computer: "This computer: Radeon RX 7600, 8
+/// GB graphics memory · 32 GB memory · 412 GB free".
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HardwareLineDto {
+    /// The graphics device's name, or "Processor" on a computer that runs models there.
+    pub device: String,
+    /// A graphics card's total memory, as its probe says (its free memory with the chat
+    /// model's share counted as free when the probe gives no total); on Apple silicon, the
+    /// share of memory Metal may use; `None` on the processor.
+    pub graphics_bytes: Option<u64>,
+    /// Apple silicon: the graphics device shares the computer's memory.
+    pub shared_memory: bool,
+    /// The computer's memory, when the system says.
+    pub ram_bytes: Option<u64>,
+    /// The free space on the models folder's disk, when the system says.
+    pub free_disk_bytes: Option<u64>,
+}
+
+/// A model licence as Get local models and the download dialog show it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LicenceDto {
+    /// Its key among the model's licences, which parts name (`apache-2.0`).
+    pub id: String,
+    pub name: String,
+    /// The upstream page at a pinned revision.
+    pub url: String,
+    /// The SHA-256 its acceptance is recorded under (`studio_local_download` takes it).
+    pub sha256: String,
+    /// `green`, `amber` or `red`.
+    pub badge: String,
+    /// What it allows for what you make: `yes`, `underRevenue`, `registration`, `unclear` or
+    /// `no`.
+    pub commercial: String,
+    /// The yearly revenue under which commercial use is allowed, in US dollars, when
+    /// `commercial` is `underRevenue` and the licence states one.
+    pub revenue_limit_usd: Option<u64>,
+    pub plain_words: String,
+    pub obligations: Vec<String>,
+}
+
+/// How a model's Hugging Face repository is gated.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GateDto {
+    /// `none`, `auto` (access at once after accepting) or `manual` (the publisher approves).
+    pub mode: String,
+    /// What the publisher collects when access is asked for.
+    pub collects: Vec<String>,
+}
+
+/// One file of a model, as the download dialog lists it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PartDto {
+    /// `diffusion`, `llm`, `t5xxl`, `vae`, …
+    pub role: String,
+    /// "makes the picture", "reads your prompt", "reads the picture you add" or "picture
+    /// decoder".
+    pub label: String,
+    /// `owner/name` on Hugging Face.
+    pub repo: String,
+    /// Its path in the repository.
+    pub path: String,
+    pub size_bytes: u64,
+    /// The id of its licence among the model's licences.
+    pub licence_id: String,
+    /// Its file is already in place (another model's shared part): checked, not fetched.
+    pub already_here: bool,
+}
+
+/// Whether a model fits this computer at one size, and how long a run takes here.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LocalFitDto {
+    /// `fits`, `slow`, `afterUnload` or `notHere`.
+    pub word: String,
+    /// The colour of the fit it would run with: `green` (whole on the device), `yellow` (one
+    /// part at a time, or partly on the processor) or `red`.
+    pub verdict: String,
+    /// Why not, when `word` is `notHere` ("needs 6 GB of graphics memory").
+    pub reason: Option<String>,
+    /// The largest preset size that fits, when this size does not ("Fits at 832×480, 49
+    /// frames").
+    pub suggestion: Option<String>,
+    /// How long a run takes here, rounded as people read it; `None` before anything was
+    /// measured ("Time shown after your first run here").
+    pub eta: Option<EtaDto>,
+    /// Not here, or a run would take longer than 15 minutes: Studio offers a cloud model.
+    pub very_slow: bool,
+}
+
+/// A model of the recommended list.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LocalEntryDto {
+    /// Its catalog id (`studio_local_download`'s `{"catalog":{"entryId":…}}`).
+    pub id: String,
+    pub name: String,
+    /// One line about what it is good for.
+    pub summary: String,
+    pub publisher: String,
+    pub kind: MediaKind,
+    /// Every part's size: a download from nothing.
+    pub size_bytes: u64,
+    /// The strictest licence of its parts: it decides the badge.
+    pub licence: LicenceDto,
+    /// Every licence the download asks to accept, each once: its parts', then the Studio
+    /// engine's when the engine comes with it.
+    pub licences: Vec<LicenceDto>,
+    pub gate: GateDto,
+    /// At its default size.
+    pub fit: LocalFitDto,
+    /// "Recommended for this computer": one per kind at most.
+    pub recommended: bool,
+    pub installed: bool,
+    pub parts: Vec<PartDto>,
+    /// What the download fetches: the parts not already in place.
+    pub to_fetch_bytes: u64,
+    /// The Studio engine downloads with it (Windows, before the first model).
+    pub needs_engine: bool,
+    /// Less than 10 GB would be left on the disk after the download.
+    pub low_disk: bool,
+}
+
+/// An installed picture or video model. One this build cannot read (its family record hidden
+/// by a newer signed catalog, a part's licence no longer known, a family this build does not
+/// know) is listed too, so it can be deleted: its fit `notHere` with why, and its `model`
+/// without controls, `usable` saying why.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct InstalledLocalDto {
+    /// Its installed id (`studio_local_delete`, `{"installed":{"genModelId":…}}`).
+    pub id: String,
+    pub name: String,
+    pub kind: MediaKind,
+    /// Its parts' total size.
+    pub size_bytes: u64,
+    /// At its default size.
+    pub fit: LocalFitDto,
+    /// As Studio's picker offers it: free, with its controls.
+    pub model: MediaModelDto,
+}
+
+/// Get local models (`studio_local_models`). Nothing in it comes from the network.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LocalModelsDto {
+    pub hardware: HardwareLineDto,
+    pub engine: EngineStatusDto,
+    /// Newest first.
+    pub installed: Vec<InstalledLocalDto>,
+    /// The recommended list's entries that run on this computer.
+    pub recommended: Vec<LocalEntryDto>,
+    /// "Not for this computer": the entries that do not, each with its reason.
+    pub not_here: Vec<LocalEntryDto>,
+    /// The note about local models was accepted.
+    pub notice_accepted: bool,
+    /// This computer has a graphics card or Apple silicon: video is offered.
+    pub video_possible: bool,
+    /// The disk the installed picture and video models take, a shared file counted once.
+    pub installed_bytes: u64,
+    /// The entries of `recommended` not installed yet whose word is `fits` or `afterUnload`
+    /// ("2 more fit this computer"); one that is only `slow` is not counted.
+    pub more_fit: u32,
+}
+
+/// A picture or video repository Hugging Face found.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LocalSearchHitDto {
+    /// `owner/name`.
+    pub repo: String,
+    pub downloads: u64,
+    pub likes: u64,
+    /// `none`, `auto` or `manual`, as [`GateDto::mode`] says it.
+    pub gated: String,
+    /// The repository's own licence label (`apache-2.0`), as it gives it.
+    pub license_label: Option<String>,
+}
+
+/// A Hugging Face search for picture or video models: one page, most downloads first.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LocalSearchPage {
+    pub items: Vec<LocalSearchHitDto>,
+}
+
+/// A diffusion file of a searched repository, with the parts it needs beside it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LocalFileChoiceDto {
+    /// Its path in the repository (`studio_local_download`'s `{"search":{…,"file":…}}`).
+    pub file: String,
+    /// Its quantisation (`Q4_K`), when its name says.
+    pub quant: String,
+    pub parts: Vec<PartDto>,
+    /// Every licence the download asks to accept, each once.
+    pub licences: Vec<LicenceDto>,
+    /// Every part's size.
+    pub total_bytes: u64,
+    /// The parts not already in place.
+    pub to_fetch_bytes: u64,
+    /// At the family's default size.
+    pub fit: LocalFitDto,
+    /// The Studio engine downloads with it.
+    pub needs_engine: bool,
+    /// Less than 10 GB would be left on the disk after the download.
+    pub low_disk: bool,
+}
+
+/// A searched repository at its latest commit, as Studio recognises it (`studio_local_repo`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LocalRepoDto {
+    pub repo: String,
+    /// The commit the listing describes; a download pins it.
+    pub commit: String,
+    /// `supported`, `notSupportedYet` (no download) or `notOffered` (never offered).
+    pub status: String,
+    /// Why not: a sentence for `notSupportedYet`, a plain clause for `notOffered` ("its licence
+    /// excludes some regions").
+    pub reason: Option<String>,
+    /// The family's name, when supported.
+    pub family: Option<String>,
+    /// Its diffusion files with a published SHA-256; empty unless supported.
+    pub files: Vec<LocalFileChoiceDto>,
+    /// The strictest licence of its files' parts, for the badge, when supported.
+    pub licence: Option<LicenceDto>,
+    /// Every licence its files' downloads ask to accept, each once.
+    pub licences: Vec<LicenceDto>,
+    /// "The repository says MIT; FLUX.2 klein 4B is Apache 2.0." when its label is not its
+    /// family's licence.
+    pub label_mismatch: Option<String>,
+    pub gate: GateDto,
+}
+
 #[cfg(test)]
 mod tests {
     use serde_json::json;
@@ -841,6 +1597,7 @@ mod tests {
         assert_eq!(v["ctxSource"], json!(null));
         assert_eq!(v["settingsChanged"], json!(false));
         assert_eq!(v["reloadWaiting"], json!(false));
+        assert_eq!(v["waitingForStudio"], json!(false));
         assert_eq!(v["unloadedPath"], json!(null));
         assert_eq!(v["stage"], json!(null));
         assert_eq!(v["placement"], json!(null));

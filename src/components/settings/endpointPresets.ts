@@ -1,4 +1,5 @@
 import type { ProviderKind } from "../../lib/types";
+import { abilitiesWords } from "../../lib/words";
 
 // [0.0.7 P5] The ready-made choices of Settings → Endpoints: the cloud AI companies, which
 // need an API key, and the servers people run themselves. Picking one fills in its name and
@@ -29,6 +30,8 @@ export interface EndpointChoice {
   /** The address filled in. */
   baseUrl: string;
   company?: Company;
+  /** What Studio makes with it (0.1.0): pictures, video. Left out: chat only. */
+  media?: { image: boolean; video: boolean };
 }
 
 export const COMPANY_CHOICES: EndpointChoice[] = [
@@ -56,6 +59,8 @@ export const COMPANY_CHOICES: EndpointChoice[] = [
       keyPage: "platform.openai.com",
       defaultContext: 128_000,
     },
+    // Its video API shut down on September 24, 2026.
+    media: { image: true, video: false },
   },
   {
     kind: "openrouter",
@@ -68,6 +73,7 @@ export const COMPANY_CHOICES: EndpointChoice[] = [
       keyPage: "openrouter.ai/keys",
       defaultContext: 128_000,
     },
+    media: { image: true, video: true },
   },
   {
     kind: "abliteration",
@@ -100,6 +106,11 @@ export const ENDPOINT_CHOICES: EndpointChoice[] = [...COMPANY_CHOICES, ...SERVER
 /** The choice for `kind`; an unknown kind (a newer app's) counts as "Other server". */
 export function choiceFor(kind: ProviderKind): EndpointChoice {
   return ENDPOINT_CHOICES.find((c) => c.kind === kind) ?? SERVER_CHOICES[SERVER_CHOICES.length - 1]!;
+}
+
+/** What an endpoint of `kind` can do, as its card says it: "Chat · Pictures · Video". */
+export function abilitiesOf(kind: ProviderKind): string {
+  return abilitiesWords(choiceFor(kind).media);
 }
 
 /** The context sizes an endpoint can be held to (Automatic is `null`). */

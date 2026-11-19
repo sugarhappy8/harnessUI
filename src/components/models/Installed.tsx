@@ -4,7 +4,7 @@ import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import * as ipc from "../../lib/ipc";
 import type { DiskUsage, ErrorInfo, InstalledModel, ModelLoadInfo, Verdict } from "../../lib/types";
 import { formatBytes } from "../../lib/format";
-import { FIT_WORDS, tokensWithWords } from "../../lib/words";
+import { FIT_WORDS, INSTALLED_STUDIO_LINE, tokensWithWords } from "../../lib/words";
 import { toErrorInfo, useApp } from "../../store/app";
 import { COMPARE_FULL, COMPARE_LIMIT, sameEntry, useAddToComparison, useCompare } from "../../store/compare";
 import { askTooLarge, isLoadedNow, unloadModel } from "../../store/modelChange";
@@ -13,6 +13,7 @@ import { visiblePath } from "../FolderChip";
 import { ModelSettings } from "../ModelSettings";
 import { Badge } from "./Badge";
 import { ImageFileLine, seesImages } from "./ImageFile";
+import * as studioApi from "../studio/api";
 
 const DOT: Record<Verdict, string> = { green: "bg-success", yellow: "bg-warning", red: "bg-danger" };
 
@@ -48,9 +49,14 @@ function deleteQuestion(m: InstalledModel, shown: string): string {
   return `Remove ${shown} from the list? Its file is no longer on disk.`;
 }
 
-/** Models → Installed: the models on this computer, with Use, their settings, Add to comparison and Delete. */
+/** Models → Installed: the models on this computer, with Use, their settings, Add to comparison and Delete.
+ *  0.1.0 Studio: picture and video models are not on this list (nothing here can Use them); one
+ *  line counts them and opens Studio's Get local models. */
 export function Installed(props: { onClose: () => void }) {
   const [models, setModels] = useState<InstalledModel[] | null>(null);
+  // How many picture and video models are installed, and the disk they take; `null` until read,
+  // or when Studio's list could not be read (the line is left out).
+  const [pictureModels, setPictureModels] = useState<{ count: number; bytes: number } | null>(null);
   const [usage, setUsage] = useState<DiskUsage | null>(null);
   const [error, setError] = useState<ErrorInfo | null>(null);
   // [0.0.7 P6] What the last Delete left in place (files outside the models folder).
@@ -119,6 +125,28 @@ export function Installed(props: { onClose: () => void }) {
       stop();
     };
   }, [readInfos]);
+
+  // Studio's installed models: a read of what is saved, nothing is fetched.
+  useEffect(() => {
+    let alive = true;
+    Promise.resolve()
+      .then(() => studioApi.studioLocalModels())
+      .then(
+        (local) => alive && setPictureModels({ count: local.installed.length, bytes: local.installedBytes }),
+        // Left out without a word: Studio's own read of its models reports the error, and this
+        // dialog has nowhere to put it.
+        () => undefined,
+      );
+    return () => {
+      alive = false;
+    };
+  }, []);
+
+  /** *Manage in Studio*: Studio opens on Get local models, and this dialog closes as Use closes it. */
+  function manageInStudio() {
+    window.dispatchEvent(new CustomEvent("app:open-studio", { detail: "local" }));
+    props.onClose();
+  }
 
   async function importFile() {
     const picked = await openDialog({
@@ -211,6 +239,15 @@ export function Installed(props: { onClose: () => void }) {
           </li>
         )}
       </ul>
+      {/* With none yet ("Picture and video models: none yet") it still leads to Get local models. */}
+      {pictureModels !== null && (
+        <p className="text-xs text-fg-muted">
+          {INSTALLED_STUDIO_LINE.lead(pictureModels.count, pictureModels.bytes)}
+          <button type="button" className="underline hover:text-fg" onClick={manageInStudio}>
+            {INSTALLED_STUDIO_LINE.manage}
+          </button>
+        </p>
+      )}
       {settingsFor && (
         <ModelSettings
           key={settingsFor}

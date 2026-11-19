@@ -2,6 +2,7 @@
 //! downloads, installed models, hardware detection, the fit check, the catalog and
 //! first run.
 
+use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -31,7 +32,7 @@ const SETTING_CATALOG: &str = "catalog";
 /// Bytes read from the start of a GGUF to get its parameters before download.
 const HEAD_BYTES: u64 = 6 * 1024 * 1024;
 
-fn hf_error(e: HfError) -> AppError {
+pub(crate) fn hf_error(e: HfError) -> AppError {
     let (code, message, next) = match &e {
         HfError::NeedsToken => (
             "hf_needs_token",
@@ -123,7 +124,7 @@ pub struct HardwareDto {
     pub intel_mac: bool,
 }
 
-async fn detect(state: &AppState) -> (Target, HardwareDto) {
+pub(crate) async fn detect(state: &AppState) -> (Target, HardwareDto) {
     let ram = models::hardware::system_memory();
     let backends = state.runtime.backends(false).await;
     let mib = 1024 * 1024;
@@ -525,9 +526,14 @@ async fn start_group(
             e.to_string(),
         )
     })?;
+    // 0.1.0: a file there that an installed picture or video model uses at another revision
+    // is never replaced: this file then goes to a place of its own.
+    let state = app.state::<AppState>();
+    let used = gen_files_used(&state.store.list_gen_models().await?, None);
     let mut files = Vec::new();
     for f in model_files.iter().chain(projector) {
-        let dest = models::download::destination(&dir, repo, &f.path).map_err(hf_error)?;
+        let dest = download_destination(&dir, repo, &f.path, commit, f.sha256.as_deref(), &used)
+            .map_err(hf_error)?;
         files.push((file_spec(repo, commit, f), dest));
     }
     let meta = GroupMeta {
@@ -541,6 +547,7 @@ async fn start_group(
         hub: facts.map(|(h, _)| h),
         image_file_for: None,
         image_files,
+        generator: None,
     };
     let manager = app.state::<Arc<DownloadManager>>().inner().clone();
     manager.start(app, meta, files).await
@@ -819,6 +826,16 @@ pub async fn register_installed(
     .await
 }
 
+/// A file the import cannot read as a GGUF model, and why (`detail`).
+fn not_gguf(detail: impl std::fmt::Display) -> AppError {
+    AppError::new(
+        "not_gguf",
+        "This file is not a GGUF model the app can read.",
+        "Pick a .gguf file.",
+        detail.to_string(),
+    )
+}
+
 /// [`register_installed`] on a store. Registering a file again without saved facts (an
 /// import of a downloaded file) keeps the facts saved before, as long as the file still
 /// has the same size.
@@ -833,14 +850,7 @@ async fn register_installed_in(
     source: ModelSource,
     saved: SavedFacts,
 ) -> AppResult<store::ModelId> {
-    let header = models::read_file(path).map_err(|e| {
-        AppError::new(
-            "not_gguf",
-            "This file is not a GGUF model the app can read.",
-            "Pick a .gguf file.",
-            e.to_string(),
-        )
-    })?;
+    let header = models::read_file(path).map_err(not_gguf)?;
     let s = ModelSummary::from_header(&header);
     if s.is_projector {
         return Err(AppError::bad_request(
@@ -972,8 +982,8 @@ pub struct InstalledModelDto {
     pub image_file_offer: Option<image_file::Offer>,
     /// 0.0.7 (P6b review): for a download, what Delete with files removes from disk: the
     /// bytes of its files and of the image file the app downloaded for it, inside the models
-    /// folder ([`removal_plan`]), and how many of its files stay because they are outside
-    /// it. Zero for an imported model (Delete only takes it off the list).
+    /// folder ([`removal_plan_with`]), and how many of its files stay because they are
+    /// outside it. Zero for an imported model (Delete only takes it off the list).
     pub delete_bytes: u64,
     pub kept_outside: usize,
     /// 0.0.7 (P6b round 2): the one file Delete leaves outside the models folder is the image
@@ -997,14 +1007,15 @@ pub async fn list_installed_models(
     let all = state.store.list_models().await?;
     let models_dir = models_dir(&app).await;
     let in_use = InUse::of(&all);
+    let gen_files = state.store.gen_model_files().await?;
     let mut out = Vec::new();
     for m in all {
         let stored: StoredSummary =
             serde_json::from_value(m.gguf_summary.clone()).unwrap_or_default();
         let preview = match m.source {
-            ModelSource::Download => {
-                delete_preview(&m, &models_dir, |f| in_use.by_other_than(m.id, f))
-            }
+            ModelSource::Download => delete_preview(&m, &models_dir, |f| {
+                in_use.by_other_than(m.id, f) || used_elsewhere(&[], &gen_files, f)
+            }),
             ModelSource::Import => DeletePreview::default(),
         };
         let image = image_file::choice_of_row(&m.path, &stored);
@@ -1041,6 +1052,37 @@ pub async fn list_installed_models(
     Ok(out)
 }
 
+/// 0.1.0 Studio: why a file cannot join the chat list as a model: it is a picture or video
+/// model, by its architecture (when it names one) or its own tensor table (most such files
+/// name none).
+pub(crate) fn diffusion_import_refusal(
+    arch: Option<&str>,
+    shapes: &[models::TensorShape],
+) -> Option<AppError> {
+    (arch.is_some_and(models::arch::is_diffusion)
+        || models::gen_search::looks_like_diffusion(shapes))
+    .then(crate::studio::errors::picture_model)
+}
+
+/// [`diffusion_import_refusal`] for the file at `path`. A file that names no architecture
+/// and whose tensor table does not read is refused as not a model the app can read: nothing
+/// says it is a chat model, and a picture model's table can hold what the reader refuses
+/// (a tensor of five dimensions).
+fn refuse_picture_model(path: &Path) -> AppResult<()> {
+    let arch = models::read_file(path)
+        .ok()
+        .and_then(|h| h.architecture().map(str::to_string));
+    let shapes = match models::read_tensor_shapes(path) {
+        Ok(shapes) => shapes,
+        Err(e) if arch.is_none() => return Err(not_gguf(e)),
+        Err(_) => Vec::new(),
+    };
+    match diffusion_import_refusal(arch.as_deref(), &shapes) {
+        Some(e) => Err(e),
+        None => Ok(()),
+    }
+}
+
 #[tauri::command]
 pub async fn import_model(
     app: AppHandle,
@@ -1064,6 +1106,7 @@ pub async fn import_model(
             e.to_string(),
         )
     })?;
+    refuse_picture_model(&p)?;
     register_installed(
         &state,
         &p,
@@ -1084,7 +1127,7 @@ pub async fn import_model(
 }
 
 /// Takes a model off the Installed list; for a download with `delete_files`, its files go
-/// too ([`removal_plan`]). Returns a note for the user when files were left in place.
+/// too ([`removal_plan_with`]). Returns a note for the user when files were left in place.
 ///
 /// 0.0.7 (P6): what goes from disk is worked out before anything is unloaded, and a model
 /// whose file is gone, or outside the models folder (a folder used before "Change folder"),
@@ -1163,8 +1206,10 @@ async fn delete_installed<F: std::future::Future<Output = ()>>(
 }
 
 /// What [`delete_model`] does with the row `rec` (0.0.7, P6): works out what goes from disk
-/// ([`removal_plan`], for a download with `delete_files`), then unloads the model (`unload`,
-/// when it is the one loaded), deletes those files and forgets the row. It never refuses.
+/// ([`removal_plan_with`], for a download with `delete_files`: never a file another chat model
+/// or an installed picture or video model uses, [`used_elsewhere`]), then unloads the model
+/// (`unload`, when it is the one loaded), deletes those files and forgets the row. It never
+/// refuses.
 async fn remove_installed(
     store: &store::Store,
     rec: &store::ModelRecord,
@@ -1179,7 +1224,8 @@ async fn remove_installed(
             .into_iter()
             .filter(|m| m.id != rec.id)
             .collect();
-        removal_plan(rec, models_dir, &others)
+        let gen_files = store.gen_model_files().await?;
+        removal_plan_with(rec, models_dir, |f| used_elsewhere(&others, &gen_files, f))
     } else {
         Removal::default()
     };
@@ -1220,7 +1266,7 @@ struct DeletePreview {
     in_use: usize,
 }
 
-/// What Delete with files would remove for the downloaded model `rec` ([`removal_plan`]),
+/// What Delete with files would remove for the downloaded model `rec` ([`removal_plan_with`]),
 /// for its question: the bytes, and how many files would stay because they are outside the
 /// models folder. `in_use` tells a file another installed model uses ([`InUse`]).
 fn delete_preview(
@@ -1310,12 +1356,9 @@ pub(crate) async fn note_downloaded_image(
     Ok(())
 }
 
-/// The files Delete removes for the downloaded model `rec`: every shard of a split model
-/// and the image file the app downloaded for it (P6b review m4: never one only found next
-/// to it, `StoredSummary::downloaded_projector`). Only files inside the models folder are
-/// deleted (the rest is left in place and said so), and none that another installed model
-/// uses (`others`: two models of one repository can share one image file). A file already
-/// gone is left out, so the model just leaves the list.
+/// [`removal_plan_with`] keeping the files the chat models in `others` use (two models of
+/// one repository can share one image file).
+#[cfg(test)]
 fn removal_plan(
     rec: &store::ModelRecord,
     models_dir: &Path,
@@ -1324,7 +1367,13 @@ fn removal_plan(
     removal_plan_with(rec, models_dir, |f| used_by_installed(others, f))
 }
 
-/// [`removal_plan`], with `in_use` telling a file another installed model uses.
+/// The files Delete removes for the downloaded model `rec`: every shard of a split model
+/// and the image file the app downloaded for it (P6b review m4: never one only found next
+/// to it, `StoredSummary::downloaded_projector`). Only files inside the models folder are
+/// deleted (the rest is left in place and said so), and none that something else uses
+/// (`in_use`: another installed chat model, as two models of one repository can share one
+/// image file, or a picture or video model, [`used_elsewhere`]). A file already gone is left
+/// out, so the model just leaves the list.
 fn removal_plan_with(
     rec: &store::ModelRecord,
     models_dir: &Path,
@@ -1378,6 +1427,107 @@ fn kept_note(removal: &Removal) -> Option<String> {
         }
     };
     Some(note.into())
+}
+
+/// What Delete with files may not remove from a chat model (0.1.0 Studio): a file another
+/// installed chat model uses ([`used_by_installed`], `others`), or any part file of an
+/// installed picture or video model (`gen_files`, as `Store::gen_model_files` gives them;
+/// FLUX.2 klein's text encoder is the same file as a common chat download). Paths are
+/// compared as [`crate::model_options::same_file`] does.
+pub(crate) fn used_elsewhere(
+    others: &[store::ModelRecord],
+    gen_files: &BTreeSet<String>,
+    file: &Path,
+) -> bool {
+    let spelled = file.display().to_string();
+    used_by_installed(others, file)
+        || gen_files
+            .iter()
+            .any(|g| crate::model_options::same_file(g, &spelled))
+}
+
+/// 0.1.0: a file an installed model uses, with the SHA-256 recorded for it (`None` when none
+/// is recorded).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct UsedFile {
+    pub path: String,
+    pub sha256: Option<String>,
+}
+
+/// 0.1.0: the files the installed chat models use ([`files_used`]): each model's file with
+/// the SHA-256 recorded on its row, and its other shards and image files with none.
+pub(crate) fn chat_files_used(models: &[store::ModelRecord]) -> Vec<UsedFile> {
+    models
+        .iter()
+        .flat_map(|m| {
+            files_used(m).into_iter().map(move |file| {
+                let path = file.display().to_string();
+                let sha256 = crate::model_options::same_file(&path, &m.path)
+                    .then(|| m.sha256.clone())
+                    .flatten();
+                UsedFile { path, sha256 }
+            })
+        })
+        .collect()
+}
+
+/// 0.1.0: the part files of the installed picture and video models, other than model
+/// `except` (the one being downloaded again), each with the SHA-256 its part records.
+pub(crate) fn gen_files_used(models: &[store::GenModel], except: Option<&str>) -> Vec<UsedFile> {
+    models
+        .iter()
+        .filter(|m| Some(m.id.as_str()) != except)
+        .flat_map(|m| m.parts.as_array().cloned().unwrap_or_default())
+        .filter_map(|part| {
+            Some(UsedFile {
+                path: part.get("file")?.as_str()?.to_owned(),
+                sha256: part
+                    .get("sha256")
+                    .and_then(serde_json::Value::as_str)
+                    .map(str::to_owned),
+            })
+        })
+        .collect()
+}
+
+/// 0.1.0: where a download of `repo`'s file `path` at revision `commit`, pinned to SHA-256
+/// `pinned`, goes: `<models>/<owner>/<repo>/<path>` ([`models::download::destination`]),
+/// unless a file is already there that an installed model in `used` uses with another
+/// SHA-256 (or with none recorded, or the download pins none, so they cannot be told the
+/// same): then `<models>/<owner>/<repo>/@<commit, 12 characters>/<path>`, a file of its own. A
+/// download renames its file over its destination once it is checked, so it never replaces a
+/// file another installed model uses; deletion and [`used_elsewhere`] treat that place as
+/// another file.
+pub(crate) fn download_destination(
+    models_dir: &Path,
+    repo: &str,
+    path: &str,
+    commit: &str,
+    pinned: Option<&str>,
+    used: &[UsedFile],
+) -> Result<PathBuf, HfError> {
+    let dest = models::download::destination(models_dir, repo, path)?;
+    let spelled = dest.display().to_string();
+    let another = used
+        .iter()
+        .filter(|u| crate::model_options::same_file(&u.path, &spelled))
+        .any(|u| match (pinned, u.sha256.as_deref()) {
+            (Some(pinned), Some(recorded)) => !pinned.eq_ignore_ascii_case(recorded),
+            _ => true,
+        });
+    if !another || !dest.is_file() {
+        return Ok(dest);
+    }
+    let tag: String = commit.chars().take(12).collect();
+    if tag.is_empty() || !tag.chars().all(|c| c.is_ascii_alphanumeric()) {
+        return Err(HfError::InvalidName(commit.to_owned()));
+    }
+    let (owner, name) = models::hf::validate_repo_id(repo)?;
+    let mut own = models_dir.join(owner).join(name).join(format!("@{tag}"));
+    for segment in models::hf::validate_repo_path(path)? {
+        own.push(segment);
+    }
+    Ok(own)
 }
 
 /// 0.0.7 (P6): whether `file` is a file of a model on the Installed list (any shard of it),
@@ -1463,11 +1613,18 @@ pub async fn disk_usage(app: AppHandle) -> AppResult<DiskUsageDto> {
 
 #[tauri::command]
 pub async fn set_models_dir(state: State<'_, AppState>, path: String) -> AppResult<()> {
-    let p = PathBuf::from(&path);
-    if !p.is_dir() {
+    check_writable_folder(Path::new(&path))?;
+    state.store.set_setting(SETTING_MODELS_DIR, &path).await?;
+    Ok(())
+}
+
+/// Checks a folder the user picked to keep files in (the models folder, Studio's gallery):
+/// it exists and the app can write a file in it (an empty `.write-test`, removed again).
+pub(crate) fn check_writable_folder(path: &Path) -> AppResult<()> {
+    if !path.is_dir() {
         return Err(AppError::bad_request("Pick an existing folder."));
     }
-    let probe = p.join(".write-test");
+    let probe = path.join(".write-test");
     std::fs::write(&probe, b"").map_err(|e| {
         AppError::new(
             "models_dir",
@@ -1477,13 +1634,12 @@ pub async fn set_models_dir(state: State<'_, AppState>, path: String) -> AppResu
         )
     })?;
     let _ = std::fs::remove_file(probe);
-    state.store.set_setting(SETTING_MODELS_DIR, &path).await?;
     Ok(())
 }
 
 // ---- Catalog and first run ------------------------------------------------------
 
-async fn current_catalog(app: &AppHandle) -> Catalog {
+pub(crate) async fn current_catalog(app: &AppHandle) -> Catalog {
     let state = app.state::<AppState>();
     let bundled = Catalog::bundled();
     match state.store.get_setting::<String>(SETTING_CATALOG).await {
@@ -1783,6 +1939,93 @@ fn check_compare_items(items: &[crate::dto::CompareItem]) -> AppResult<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn table(fixture: &str) -> Vec<models::TensorShape> {
+        models::gguf::testing::shapes(fixture)
+    }
+
+    /// 0.1.0 Studio: a picture or video model never joins the chat list, whether its file
+    /// names an architecture or (leejet's files) has no metadata at all.
+    #[test]
+    fn importing_a_picture_model_says_add_it_in_studio() {
+        let e = diffusion_import_refusal(Some("flux"), &[]).unwrap();
+        assert_eq!(e.code, "picture_model");
+        assert_eq!(e.message, "This is a picture or video model.");
+        assert_eq!(e.next_step, "Add it in Studio → Get local models.");
+        assert!(diffusion_import_refusal(None, &table("klein4b-tensors.txt")).is_some());
+        assert!(diffusion_import_refusal(Some("qwen3"), &table("qwen3-4b-tensors.txt")).is_none());
+        assert!(diffusion_import_refusal(None, &[]).is_none());
+    }
+
+    /// The import reads the file's own architecture and tensor table.
+    #[test]
+    fn the_import_check_reads_the_file() {
+        let dir = scratch();
+        let picture = dir.0.join("flux-2-klein-4b-Q4_0.gguf");
+        std::fs::write(
+            &picture,
+            models::gguf::testing::diffusion_gguf("klein4b-tensors.txt"),
+        )
+        .unwrap();
+        assert_eq!(
+            refuse_picture_model(&picture).unwrap_err().code,
+            "picture_model"
+        );
+        let chat = dir.0.join("chat.gguf");
+        std::fs::write(
+            &chat,
+            models::gguf::testing::Writer::new()
+                .str("general.architecture", "qwen3")
+                .tensor("token_embd.weight", 64)
+                .tensor("blk.0.attn_q.weight", 64)
+                .build(),
+        )
+        .unwrap();
+        assert!(refuse_picture_model(&chat).is_ok());
+        let named = dir.0.join("named.gguf");
+        std::fs::write(
+            &named,
+            models::gguf::testing::Writer::new()
+                .str("general.architecture", "wan")
+                .tensor("blk.0.attn_q.weight", 64)
+                .build(),
+        )
+        .unwrap();
+        assert!(refuse_picture_model(&named).is_err());
+        // Not a GGUF: refused in the import's own words.
+        let text = dir.0.join("notes.gguf");
+        std::fs::write(&text, "not a model").unwrap();
+        assert_eq!(refuse_picture_model(&text).unwrap_err().code, "not_gguf");
+    }
+
+    /// A file with no architecture whose tensor table the reader refuses (a picture model's
+    /// five-dimensional patch embedding) never joins the chat list; with an architecture,
+    /// the architecture decides.
+    #[test]
+    fn a_file_with_no_architecture_and_an_unreadable_table_is_refused() {
+        let dir = scratch();
+        let table = || {
+            models::gguf::testing::Writer::new()
+                .shaped_tensor("blk.0.attn_q.weight", &[64, 64])
+                .shaped_tensor("patch_embedding.weight", &[2, 2, 1, 48, 1536])
+        };
+        let bare = dir.0.join("model.gguf");
+        std::fs::write(&bare, table().build()).unwrap();
+        assert!(models::read_file(&bare).unwrap().architecture().is_none());
+        assert!(models::read_tensor_shapes(&bare).is_err());
+        let e = refuse_picture_model(&bare).unwrap_err();
+        assert_eq!(e.code, "not_gguf");
+        assert_eq!(e.message, "This file is not a GGUF model the app can read.");
+        let chat = dir.0.join("chat.gguf");
+        std::fs::write(&chat, table().str("general.architecture", "qwen3").build()).unwrap();
+        assert!(refuse_picture_model(&chat).is_ok());
+        let wan = dir.0.join("wan.gguf");
+        std::fs::write(&wan, table().str("general.architecture", "wan").build()).unwrap();
+        assert_eq!(
+            refuse_picture_model(&wan).unwrap_err().code,
+            "picture_model"
+        );
+    }
 
     /// More than four models is refused before anything is read.
     #[test]
@@ -2220,6 +2463,159 @@ mod tests {
             "the image file recorded meanwhile goes too"
         );
         assert!(store.get_model(rec.id).await.unwrap().is_none());
+    }
+
+    /// Finding local-shared-path-revision-overwrite: a chat download at another commit of a
+    /// file an installed picture model uses under another SHA-256 (FLUX.2 klein's text encoder)
+    /// goes to a place of its own, never renamed over the picture model's part; the same file
+    /// is shared. The chat models' files carry the SHA-256 their rows record.
+    #[test]
+    fn a_download_never_replaces_another_installed_models_file_of_another_revision() {
+        let root = scratch();
+        let models = root.0.join("models");
+        let repo = "unsloth/Qwen3-4B-GGUF";
+        let file = "Qwen3-4B-Q4_K_M.gguf";
+        let shared = models.join("unsloth").join("Qwen3-4B-GGUF").join(file);
+        std::fs::create_dir_all(shared.parent().unwrap()).unwrap();
+        std::fs::write(&shared, b"gguf").unwrap();
+        let (old, new) = ("a".repeat(64), "b".repeat(64));
+        let commit = "0123456789abcdef0123456789abcdef01234567";
+        let klein = store::GenModel {
+            id: "flux2-klein-4b-q4".into(),
+            catalog_id: Some("flux2-klein-4b-q4".into()),
+            name: "FLUX.2 klein 4B".into(),
+            kind: "image".into(),
+            family: "flux2-klein-4b".into(),
+            parts: serde_json::json!([
+                {"role": "llm", "file": shared.display().to_string(), "sha256": old}
+            ]),
+            size_bytes: 4,
+            source: store::GenSource::Catalog,
+            added_at: 1,
+        };
+        let used = gen_files_used(std::slice::from_ref(&klein), None);
+        assert_eq!(
+            used,
+            [UsedFile {
+                path: shared.display().to_string(),
+                sha256: Some(old.clone())
+            }]
+        );
+        let own = download_destination(&models, repo, file, commit, Some(&new), &used).unwrap();
+        assert_eq!(
+            own,
+            models
+                .join("unsloth")
+                .join("Qwen3-4B-GGUF")
+                .join("@0123456789ab")
+                .join(file)
+        );
+        assert!(!used_elsewhere(
+            &[],
+            &BTreeSet::from([shared.display().to_string()]),
+            &own
+        ));
+        // The same file, the model itself being downloaded again, or nothing using it: its
+        // usual place.
+        assert_eq!(
+            download_destination(&models, repo, file, commit, Some(&old), &used).unwrap(),
+            shared
+        );
+        assert!(gen_files_used(std::slice::from_ref(&klein), Some(&klein.id)).is_empty());
+        assert_eq!(
+            download_destination(&models, repo, file, commit, Some(&new), &[]).unwrap(),
+            shared
+        );
+        // A commit that cannot name a folder is refused rather than written anywhere.
+        assert!(download_destination(&models, repo, file, "../x", Some(&new), &used).is_err());
+
+        // A chat model's file with the SHA-256 its row records; its image file with none.
+        let image = shared.with_file_name("mmproj-F16.gguf");
+        let mut chat = downloaded(1, &shared, Some(&image));
+        chat.sha256 = Some(new.clone());
+        let files = chat_files_used(std::slice::from_ref(&chat));
+        assert!(files.contains(&UsedFile {
+            path: shared.display().to_string(),
+            sha256: Some(new.clone())
+        }));
+        assert!(files.contains(&UsedFile {
+            path: image.display().to_string(),
+            sha256: None
+        }));
+    }
+
+    /// 0.1.0 Studio: FLUX.2 klein's text encoder is the same file as a common chat download
+    /// (Qwen3-4B). Delete with files of that chat model keeps it while a picture or video model
+    /// uses it, and the question's count leaves it out; once none does, it goes.
+    #[tokio::test]
+    async fn deleting_a_chat_model_keeps_a_file_a_picture_model_uses() {
+        let gen_files =
+            BTreeSet::from(["/m/unsloth/Qwen3-4B-GGUF/Qwen3-4B-Q4_K_M.gguf".to_string()]);
+        assert!(used_elsewhere(
+            &[],
+            &gen_files,
+            Path::new("/m/unsloth/Qwen3-4B-GGUF/Qwen3-4B-Q4_K_M.gguf")
+        ));
+        assert!(!used_elsewhere(
+            &[],
+            &gen_files,
+            Path::new("/m/unsloth/Qwen3-4B-GGUF/Qwen3-4B-Q8_0.gguf")
+        ));
+
+        let root = scratch();
+        let models = root.0.join("models");
+        let repo = models.join("unsloth").join("Qwen3-4B-GGUF");
+        std::fs::create_dir_all(&repo).unwrap();
+        let encoder = repo.join("Qwen3-4B-Q4_K_M.gguf");
+        std::fs::write(&encoder, vec![0u8; 700]).unwrap();
+        let chat = downloaded(1, &encoder, None);
+        let gen_files = BTreeSet::from([encoder.display().to_string()]);
+        let plan = removal_plan_with(&chat, &models, |f| used_elsewhere(&[], &gen_files, f));
+        assert!(plan.delete.is_empty());
+        assert_eq!(plan.in_use, vec![encoder.clone()]);
+        assert_eq!(
+            delete_preview(&chat, &models, |f| used_elsewhere(&[], &gen_files, f)),
+            DeletePreview {
+                in_use: 1,
+                ..DeletePreview::default()
+            }
+        );
+        // Another chat model using it still counts.
+        let other = downloaded(2, &encoder, None);
+        assert!(used_elsewhere(
+            std::slice::from_ref(&other),
+            &BTreeSet::new(),
+            &encoder
+        ));
+
+        // Through Delete: FLUX.2 klein is installed, so the file stays.
+        let store = store::Store::open_in_memory().unwrap();
+        let klein = store::NewGenModel {
+            id: "flux2-klein-4b-q4".into(),
+            catalog_id: Some("flux2-klein-4b-q4".into()),
+            name: "FLUX.2 klein 4B".into(),
+            kind: "image".into(),
+            family: "flux2-klein-4b".into(),
+            parts: serde_json::json!([{"role": "llm", "file": encoder.display().to_string()}]),
+            size_bytes: 700,
+            source: store::GenSource::Catalog,
+        };
+        store.insert_gen_model(klein).await.unwrap();
+        let none = || None::<std::future::Ready<()>>;
+        let rec = on_the_list(&store, &chat).await;
+        remove_installed(&store, &rec, true, &models, none())
+            .await
+            .unwrap();
+        assert!(encoder.exists(), "klein still uses it");
+        assert!(store.get_model(rec.id).await.unwrap().is_none());
+
+        // Once no picture or video model uses it, it goes with the chat model.
+        store.delete_gen_model("flux2-klein-4b-q4").await.unwrap();
+        let rec = on_the_list(&store, &chat).await;
+        remove_installed(&store, &rec, true, &models, none())
+            .await
+            .unwrap();
+        assert!(!encoder.exists());
     }
 
     async fn on_the_list(store: &store::Store, rec: &store::ModelRecord) -> store::ModelRecord {
