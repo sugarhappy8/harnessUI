@@ -405,7 +405,7 @@ impl StudioManager {
         if let Some(run) = inner.known_press(&req.client_token).await? {
             return Ok(inner.dto_of(&run, seq));
         }
-        // Found before the lock: the last result using one may have been deleted since.
+        // Found before the lock: one may have gone since (removed outside Studio).
         refs_still_there(&prepared.request.refs)?;
         let job = inner
             .record_local(&req, prepared, shape, eta, &lane)

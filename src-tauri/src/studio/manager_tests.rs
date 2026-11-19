@@ -3366,6 +3366,20 @@ fn output_ids(run: &store::CreationRun) -> Vec<String> {
     run.outputs.iter().map(|out| out.id.clone()).collect()
 }
 
+fn output_ids_of(run: &RunDto) -> Vec<String> {
+    run.outputs.iter().map(|out| out.id.clone()).collect()
+}
+
+/// A PNG picture as the webview sends one the user added.
+fn png_input(bytes: &[u8]) -> crate::attachments::ImageInput {
+    use base64::Engine as _;
+    crate::attachments::ImageInput {
+        mime: "image/png".into(),
+        file_name: "lighthouse.png".into(),
+        data: base64::engine::general_purpose::STANDARD.encode(bytes),
+    }
+}
+
 fn patch(value: Value) -> StudioPrefsPatch {
     serde_json::from_value(value).unwrap()
 }
@@ -3451,7 +3465,7 @@ async fn delete_unfinished_removes_stopped_and_failed_runs_only() {
 }
 
 #[tokio::test]
-async fn a_reference_no_run_uses_any_more_is_removed_and_usage_counts_refs() {
+async fn a_reference_no_run_uses_any_more_is_removed_at_the_next_start_and_usage_counts_refs() {
     let h = harness().await;
     let refs = h.gallery_root.join("refs");
     std::fs::create_dir_all(&refs).unwrap();
@@ -3460,6 +3474,8 @@ async fn a_reference_no_run_uses_any_more_is_removed_and_usage_counts_refs() {
     let file = |sha: &str| refs.join(format!("{sha}.png"));
     std::fs::write(file(&a), &picture).unwrap();
     std::fs::write(file(&b), &picture).unwrap();
+    let not_studios = refs.join("notes.txt");
+    std::fs::write(&not_studios, b"not a picture Studio added").unwrap();
     let uses = |hashes: &[&str]| -> Value {
         hashes
             .iter()
@@ -3469,20 +3485,62 @@ async fn a_reference_no_run_uses_any_more_is_removed_and_usage_counts_refs() {
     let uses_a = h.seed_done_run(0.5, uses(&[&a])).await;
     let uses_both = h.seed_done_run(0.5, uses(&[&a, &b])).await;
 
+    // A delete never removes an added picture: the prompt tray may still hold it.
     h.manager
         .delete_outputs(output_ids(&uses_both))
         .await
         .unwrap();
+    assert!(file(&b).exists() && file(&a).exists());
+    // The output left (recorded as 10 bytes) and the added pictures still kept.
+    let usage = h.manager.usage().await.unwrap();
+    assert_eq!(usage.bytes, 10 + 2 * picture.len() as u64 + 26);
+
+    // At the next start no draft holds one: those no kept run uses go.
+    h.manager.resume_interrupted().await;
     assert!(!file(&b).exists());
     assert!(file(&a).exists());
-    // The output left (recorded as 10 bytes) and the added picture still kept.
-    let usage = h.manager.usage().await.unwrap();
-    assert_eq!(usage.bytes, 10 + picture.len() as u64);
-
-    // Its last user goes, and so does it.
+    assert!(not_studios.exists(), "only Studio's own pictures go");
     h.manager.delete_outputs(output_ids(&uses_a)).await.unwrap();
+    assert!(file(&a).exists());
+    h.manager.resume_interrupted().await;
     assert!(!file(&a).exists());
+    std::fs::remove_file(&not_studios).unwrap();
     assert_eq!(h.manager.usage().await.unwrap().bytes, 0);
+}
+
+/// Ruling: deleting results never removes an added picture. One added, used for a run,
+/// still in the prompt tray when its only run is deleted, is still there for the next
+/// Create.
+#[tokio::test]
+async fn a_picture_still_in_the_prompt_tray_survives_deleting_its_only_run() {
+    let h = harness().await;
+    let added = h
+        .manager
+        .add_ref(&PictureWorker::app(), &png_input(&png(8, 8)))
+        .await
+        .unwrap();
+    let with_picture = || StartRequest {
+        refs: vec![RefInput {
+            sha256: added.sha256.clone(),
+            role: RefRole::Reference,
+        }],
+        ..h.openai_req()
+    };
+    let first = h.manager.start(with_picture(), true).await.unwrap();
+    let done = h.wait_status(&first.id, "done").await;
+    h.manager
+        .delete_outputs(output_ids_of(&done))
+        .await
+        .unwrap();
+    assert!(h.store_runs().await.is_empty());
+    let kept = h
+        .gallery_root
+        .join("refs")
+        .join(format!("{}.png", added.sha256));
+    assert!(kept.exists(), "the tray's picture is still there");
+    // Create again with the same tray.
+    let again = h.manager.start(with_picture(), true).await.unwrap();
+    h.wait_status(&again.id, "done").await;
 }
 
 #[tokio::test]
@@ -5187,12 +5245,12 @@ async fn a_cloud_start_is_not_held_while_a_local_start_asks_for_the_hardware() {
     assert_eq!(h.local.starts(), 1);
 }
 
-/// A local start finds its added pictures before the `starting` lock, and a delete (which
-/// takes it) can remove one meanwhile, with the last result that used it: once the start
+/// A local start finds its added pictures before the `starting` lock, and one can go
+/// meanwhile (removed outside Studio; deleting results never removes one): once the start
 /// has the lock it finds the picture gone and is refused by name, recording nothing, never
 /// a run that fails at the engine's start.
 #[tokio::test]
-async fn an_added_picture_deleted_while_a_local_start_asks_for_the_hardware_is_refused() {
+async fn an_added_picture_gone_while_a_local_start_asks_for_the_hardware_is_refused() {
     let h = harness_with_local().await;
     let refs = h.gallery_root.join("refs");
     std::fs::create_dir_all(&refs).unwrap();
@@ -5221,7 +5279,7 @@ async fn an_added_picture_deleted_while_a_local_start_asks_for_the_hardware_is_r
         h.hardware.holding() == 1
     })
     .await;
-    // Not held behind the start: the picture goes with its last result.
+    // A delete is not held behind the start, and leaves the picture.
     tokio::time::timeout(
         Duration::from_secs(5),
         h.manager.delete_outputs(output_ids(&earlier)),
@@ -5229,7 +5287,11 @@ async fn an_added_picture_deleted_while_a_local_start_asks_for_the_hardware_is_r
     .await
     .expect("the delete waited for the local start's hardware")
     .unwrap();
-    assert!(!file.exists());
+    assert!(
+        file.exists(),
+        "deleting results never removes an added picture"
+    );
+    std::fs::remove_file(&file).unwrap();
     h.hardware.release();
     let err = start.await.unwrap().unwrap_err();
     assert_eq!(err.code, "studio_ref_missing");

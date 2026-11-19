@@ -275,7 +275,7 @@ pub async fn ref_from_output(
         file_name: "This picture".to_owned(),
         data: base64::engine::general_purpose::STANDARD.encode(bytes),
     };
-    let stored = studio.gallery().add_ref(worker, &image).await?;
+    let stored = studio.add_ref(worker, &image).await?;
     Ok(ref_dto(stored))
 }
 

@@ -335,10 +335,7 @@ pub async fn studio_add_ref(
     image: ImageInput,
 ) -> AppResult<RefDto> {
     only_main_window(window.label())?;
-    let stored = studio
-        .gallery()
-        .add_ref(&PictureWorker::app(), &image)
-        .await?;
+    let stored = studio.add_ref(&PictureWorker::app(), &image).await?;
     Ok(ref_dto(stored))
 }
 

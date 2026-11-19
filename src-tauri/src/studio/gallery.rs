@@ -517,13 +517,24 @@ impl Gallery {
         }
     }
 
-    /// Removes the added pictures among `candidates` (those of deleted runs) that are not
-    /// `in_use` by a run still kept. Names that are not a SHA-256 are skipped.
-    pub fn remove_unused_refs(&self, candidates: &BTreeSet<String>, in_use: &BTreeSet<String>) {
+    /// Removes each added picture in `refs/` (`<sha256>.<ext>` of a picture type) that is
+    /// not `in_use` by a run still kept. Any other file is left as it is.
+    pub fn remove_unused_refs(&self, in_use: &BTreeSet<String>) {
         let dir = self.refs_dir();
-        for sha256 in candidates.difference(in_use).filter(|name| is_sha256(name)) {
-            for (_, ext) in PICTURE_TYPES {
-                remove_quietly(&dir.join(format!("{sha256}.{ext}")));
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            return;
+        };
+        for entry in entries.flatten() {
+            if !entry.file_type().is_ok_and(|kind| kind.is_file()) {
+                continue;
+            }
+            let name = entry.file_name();
+            let Some((sha256, ext)) = name.to_str().and_then(|name| name.split_once('.')) else {
+                continue;
+            };
+            let a_picture = PICTURE_TYPES.iter().any(|(_, known)| *known == ext);
+            if a_picture && is_sha256(sha256) && !in_use.contains(sha256) {
+                remove_quietly(&dir.join(&name));
             }
         }
     }
@@ -1130,12 +1141,23 @@ mod tests {
         )
         .unwrap();
 
-        let candidates = BTreeSet::from([a.clone(), b.clone(), "../escape".to_owned()]);
-        let in_use = BTreeSet::from([b.clone()]);
-        g.remove_unused_refs(&candidates, &in_use);
+        // Not added pictures: another name, another type, a folder.
+        std::fs::write(refs.join("notes.txt"), b"mine").unwrap();
+        std::fs::write(refs.join(format!("{a}.txt")), b"mine").unwrap();
+        std::fs::create_dir_all(refs.join(format!("{}.png", "c".repeat(64)))).unwrap();
 
-        assert_eq!(files_in(&refs), [format!("{b}.jpg")]);
-        assert_eq!(g.refs_bytes(), 6);
+        let in_use = BTreeSet::from([b.clone()]);
+        g.remove_unused_refs(&in_use);
+
+        assert_eq!(
+            files_in(&refs),
+            [
+                format!("{a}.txt"),
+                format!("{b}.jpg"),
+                format!("{}.png", "c".repeat(64)),
+                "notes.txt".to_owned()
+            ]
+        );
     }
 
     #[test]

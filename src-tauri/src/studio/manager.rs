@@ -50,17 +50,18 @@
 //!   failed or still-not-ready video job again and download its result; they never send a
 //!   create.
 //! - **Restarts**: at start, [`StudioManager::resume_interrupted`] removes yesterday's spending
-//!   stubs and picks up what the app left: a run waiting for its turn was never sent; one
-//!   being sent may or may not have started; a video job waiting or downloading is checked
-//!   again. At exit, [`StudioManager::shutdown`] stops every task without recording anything,
+//!   stubs and the added pictures no kept run uses, and picks up what the app left: a run
+//!   waiting for its turn was never sent; one being sent may or may not have started; a video
+//!   job waiting or downloading is checked again. At exit, [`StudioManager::shutdown`] stops every task without recording anything,
 //!   so the next start finds each run as it was.
 //! - **The audit row** is completed once when the run ends, with its status and its cost
 //!   (after a restart too, through the run's `audit_id`). *Get it anyway* on a run whose row
 //!   is already complete appends a follow-up row and completes that one.
 //! - **Deleting** results ([`StudioManager::delete_outputs`]) or the runs that ended without
 //!   finishing ([`StudioManager::delete_unfinished`]) never lowers today's spending: a run made
-//!   today stays as a spending stub. The files, thumbnails and sidecars go, and so does each
-//!   added picture no run kept uses any more; the audit rows stay.
+//!   today stays as a spending stub. The files, thumbnails and sidecars go; the audit rows
+//!   stay. Added pictures stay too (the prompt tray may still hold one): each one no kept
+//!   run uses goes at the next start.
 //! - **Preferences** ([`StudioManager::set_prefs`]) are checked, saved, then held: the next
 //!   run reads them.
 //! - **Runs on this computer** (the local lane, [`lane`]): one at a time for the whole
@@ -80,7 +81,7 @@ pub(crate) use verdict::{
     LocalVerdict, device_label, device_name, eta_dto, local_verdict, word_tag,
 };
 
-use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
+use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -213,6 +214,9 @@ struct Inner {
     lanes: Mutex<Lanes>,
     /// Held while a start is checked and recorded, and while a delete decides what goes.
     starting: tokio::sync::Mutex<()>,
+    /// Held (shared) while an added picture is kept, and (alone) while the start-up sweep
+    /// removes those no kept run uses, so a picture just added is never swept.
+    refs_sweep: tokio::sync::RwLock<()>,
     /// Held while a change to the preferences is checked, saved and held, so two changes
     /// never undo each other.
     prefs_writes: tokio::sync::Mutex<()>,
@@ -615,6 +619,7 @@ impl StudioManager {
                 prefs: RwLock::new(prefs),
                 lanes: Mutex::new(Lanes::default()),
                 starting: tokio::sync::Mutex::new(()),
+                refs_sweep: tokio::sync::RwLock::new(()),
                 prefs_writes: tokio::sync::Mutex::new(()),
                 recent_tokens: Mutex::new(VecDeque::new()),
                 root: CancellationToken::new(),
@@ -854,8 +859,9 @@ impl StudioManager {
         self.inner.watch(job).await
     }
 
-    /// At start: removes the spending stubs of runs made before today, then picks up every
-    /// run the app left unfinished. Runs on this computer first: a local job cannot outlive
+    /// At start: removes the spending stubs of runs made before today and each added picture
+    /// no kept run uses (no prompt tray holds one yet: drafts are not kept), then picks up
+    /// every run the app left unfinished. Runs on this computer first: a local job cannot outlive
     /// the app, so each one queued or running is `interrupted`, not charged, and its
     /// `.partial/<run>` goes. Then the cloud runs: a run waiting for its turn was never sent
     /// (`cancelled`, not charged); one being sent may or may not have started
@@ -871,6 +877,7 @@ impl StudioManager {
         if let Err(e) = inner.deps.store.purge_creation_stubs(today).await {
             tracing::warn!("yesterday's Studio spending stubs were not removed: {e}");
         }
+        inner.sweep_refs().await;
         let runs = match inner.deps.store.live_creation_runs().await {
             Ok(runs) => runs,
             Err(e) => {
@@ -957,10 +964,11 @@ impl StudioManager {
 
     /// Deletes outputs `ids` (ids that do not exist are skipped); a finished run left with
     /// none goes too, as a spending stub when it was made today. Their files, thumbnails and
-    /// sidecars are removed, and each added picture no run kept uses any more. The audit
-    /// rows stay.
+    /// sidecars are removed. Added pictures stay (the prompt tray may still hold one, and
+    /// *Reuse* copies a run's into it): those no kept run uses go at the next start
+    /// ([`Self::resume_interrupted`]). The audit rows stay.
     pub async fn delete_outputs(&self, ids: Vec<String>) -> AppResult<()> {
-        // Never beside a start: a run just recorded may use an added picture this removes.
+        // Never beside a start or *Get it anyway*, which reads the run this may delete.
         let _no_start_now = self.inner.starting.lock().await;
         let today = self.inner.today_starts_at();
         let deleted = self
@@ -987,6 +995,17 @@ impl StudioManager {
         let count = u32::try_from(deleted.runs.len()).unwrap_or(u32::MAX);
         self.inner.remove_deleted(deleted).await;
         Ok(count)
+    }
+
+    /// Checks a picture the user added and keeps it in the gallery's `refs/`
+    /// ([`Gallery::add_ref`]), never beside the start-up sweep of unused ones.
+    pub async fn add_ref(
+        &self,
+        worker: &PictureWorker,
+        img: &crate::attachments::ImageInput,
+    ) -> AppResult<super::gallery::RefStored> {
+        let _not_swept_now = self.inner.refs_sweep.read().await;
+        self.gallery().add_ref(worker, img).await
     }
 
     /// Applies `patch` to the preferences held (only the fields it sends change), saves the
@@ -1078,32 +1097,33 @@ impl Inner {
         self.deps.clock.day_start_ms(self.deps.clock.now_ms())
     }
 
-    /// Removes what a delete left behind: the files, thumbnails and sidecars of `deleted`,
-    /// then each added picture its runs used that no run kept uses any more. A failure is
-    /// only logged: the records are already gone.
+    /// Removes what a delete left behind: the files, thumbnails and sidecars of `deleted`.
+    /// Added pictures stay for [`Self::sweep_refs`]. A failure is only logged: the records
+    /// are already gone.
     async fn remove_deleted(&self, deleted: store::Deleted) {
-        let candidates: BTreeSet<String> = deleted.runs.iter().flat_map(ref_hashes).collect();
-        let in_use = if candidates.is_empty() {
-            Some(BTreeSet::new())
-        } else {
-            match self.deps.store.creation_ref_hashes().await {
-                Ok(in_use) => Some(in_use),
-                Err(e) => {
-                    tracing::warn!("Studio's added pictures in use could not be read: {e}");
-                    None
-                }
+        let gallery = self.gallery();
+        let removed = tokio::task::spawn_blocking(move || gallery.remove_files(&deleted)).await;
+        if let Err(e) = removed {
+            tracing::warn!("the files of deleted Studio results were not all removed: {e}");
+        }
+    }
+
+    /// At start (under the `starting` lock): removes each added picture in `refs/` that no
+    /// kept run uses. No prompt tray holds one then (drafts are not kept), and a picture
+    /// added meanwhile waits for this. A failure is only logged.
+    async fn sweep_refs(&self) {
+        let _alone = self.refs_sweep.write().await;
+        let in_use = match self.deps.store.creation_ref_hashes().await {
+            Ok(in_use) => in_use,
+            Err(e) => {
+                tracing::warn!("Studio's added pictures in use could not be read: {e}");
+                return;
             }
         };
         let gallery = self.gallery();
-        let removed = tokio::task::spawn_blocking(move || {
-            gallery.remove_files(&deleted);
-            if let Some(in_use) = in_use {
-                gallery.remove_unused_refs(&candidates, &in_use);
-            }
-        })
-        .await;
-        if let Err(e) = removed {
-            tracing::warn!("the files of deleted Studio results were not all removed: {e}");
+        let swept = tokio::task::spawn_blocking(move || gallery.remove_unused_refs(&in_use)).await;
+        if let Err(e) = swept {
+            tracing::warn!("Studio's unused added pictures were not all removed: {e}");
         }
     }
 
@@ -2221,7 +2241,7 @@ pub(crate) fn output_dto(out: &store::CreationOutput) -> OutputDto {
 }
 
 /// The added pictures `refs` as a run records them, cloud or local: each by its SHA-256, role,
-/// type and size, never its path (read back by [`ref_hashes`]).
+/// type and size, never its path (read back by `Store::creation_ref_hashes`).
 fn refs_json(refs: &[RefImage]) -> Value {
     Value::Array(
         refs.iter()
@@ -2246,18 +2266,6 @@ async fn remove_scratch(gallery: &Gallery, run_id: &str) {
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
         Err(e) => tracing::warn!(run = %run_id, "a Studio scratch folder stayed: {e}"),
     }
-}
-
-/// The SHA-256 of each added picture recorded run `run` uses.
-fn ref_hashes(run: &store::CreationRun) -> Vec<String> {
-    run.refs
-        .as_array()
-        .map(|refs| {
-            refs.iter()
-                .filter_map(|r| r.get("sha256")?.as_str().map(str::to_owned))
-                .collect()
-        })
-        .unwrap_or_default()
 }
 
 fn media_kind(kind: store::CreationKind) -> MediaKind {
