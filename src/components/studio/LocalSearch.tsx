@@ -7,8 +7,9 @@ import { toErrorInfo } from "../../store/app";
 import { useStudio, type StudioTab } from "../../store/studio";
 import { ErrorBanner } from "../ErrorBanner";
 import { visiblePath } from "../FolderChip";
-import { FitLine, LicenceBadge, offerForFile, TimeLine } from "./LocalModelRow";
-import { CARD_BUTTON } from "./styles";
+import { FitLine, LicenceBadge, TimeLine } from "./LocalModelRow";
+import { offerForFile } from "./localOffers";
+import { CARD_BUTTON, PRIMARY_BUTTON } from "./styles";
 import type { LocalFileChoice, LocalModels, LocalRepo } from "./types";
 
 // Hugging Face search in Get local models (0.1.0 Task B13): Hugging Face is asked only on
@@ -196,11 +197,7 @@ function FileChoice(props: { repo: LocalRepo; file: LocalFileChoice; local: Loca
       <TimeLine fit={f.fit} kind={tab} />
       {f.fit.word !== "notHere" && (
         <div className="pt-1">
-          <button
-            type="button"
-            className="btn-primary rounded-lg px-3 py-1 text-sm font-medium"
-            onClick={() => setOffer(offerForFile(repo, f, local))}
-          >
+          <button type="button" className={PRIMARY_BUTTON} onClick={() => setOffer(offerForFile(repo, f, local))}>
             {LOCAL_MODELS.download}
           </button>
         </div>

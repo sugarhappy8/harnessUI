@@ -489,8 +489,25 @@ describe("Models → Installed", () => {
     }
   });
 
-  it("has no Studio line while no picture or video model is installed", async () => {
+  it("with no picture or video model installed, the Studio line says none yet and still opens Studio", async () => {
     studioApi.studioLocalModels.mockResolvedValue({ ...LOCAL, installed: [], installedBytes: 0 });
+    const opened: unknown[] = [];
+    const onOpen = (e: Event) => opened.push((e as CustomEvent<unknown>).detail);
+    window.addEventListener("app:open-studio", onOpen);
+    try {
+      const onClose = await show();
+      const line = screen.getByText(/^Picture and video models:/);
+      expect(line.textContent).toBe("Picture and video models: none yet · Manage in Studio");
+      await click(screen.getByRole("button", { name: "Manage in Studio" }));
+      expect(opened).toEqual(["local"]);
+      expect(onClose).toHaveBeenCalledTimes(1);
+    } finally {
+      window.removeEventListener("app:open-studio", onOpen);
+    }
+  });
+
+  it("has no Studio line when Studio's models could not be read (Studio says why)", async () => {
+    studioApi.studioLocalModels.mockRejectedValue({ code: "io", message: "x", nextStep: "", details: "" });
     await show();
     expect(screen.queryByText(/^Picture and video models:/)).toBeNull();
     expect(screen.queryByRole("button", { name: "Manage in Studio" })).toBeNull();

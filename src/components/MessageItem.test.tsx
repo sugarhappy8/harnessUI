@@ -242,6 +242,8 @@ describe("Open in Studio", () => {
 
   it("Open in Studio puts an attached picture in the tray", async () => {
     studioOn(flare);
+    // Get local models was left open in Studio: the picture's tray is shown, not that view.
+    useStudio.setState({ localView: true });
     ipcMock.getAttachment.mockResolvedValueOnce("data:image/webp;base64,UklGRg==");
     await shown(user({ documents: [], mentions: [] }));
     await click(screen.getByRole("button", { name: "Open in Studio" }));
@@ -251,7 +253,7 @@ describe("Open in Studio", () => {
       data: "UklGRg==",
     });
     expect(useStudio.getState().drafts.image.refs).toEqual([{ ...KEPT, role: "reference" }]);
-    expect(useStudio.getState()).toMatchObject({ view: "studio", tab: "image" });
+    expect(useStudio.getState()).toMatchObject({ view: "studio", tab: "image", localView: false });
   });
 
   it("with several pictures, each says which it is", async () => {

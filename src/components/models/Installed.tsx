@@ -133,6 +133,8 @@ export function Installed(props: { onClose: () => void }) {
       .then(() => studioApi.studioLocalModels())
       .then(
         (local) => alive && setPictureModels({ count: local.installed.length, bytes: local.installedBytes }),
+        // Left out without a word: Studio's own read of its models reports the error, and this
+        // dialog has nowhere to put it.
         () => undefined,
       );
     return () => {
@@ -237,7 +239,8 @@ export function Installed(props: { onClose: () => void }) {
           </li>
         )}
       </ul>
-      {pictureModels !== null && pictureModels.count > 0 && (
+      {/* With none yet ("Picture and video models: none yet") it still leads to Get local models. */}
+      {pictureModels !== null && (
         <p className="text-xs text-fg-muted">
           {INSTALLED_STUDIO_LINE.models(pictureModels.count, pictureModels.bytes)} ·{" "}
           <button type="button" className="underline hover:text-fg" onClick={manageInStudio}>

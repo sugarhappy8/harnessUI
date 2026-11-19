@@ -6,7 +6,8 @@ import { amountGb, DOWNLOAD_LOCAL, engineSizeWords, revenueLimit } from "../../l
 import { toErrorInfo } from "../../store/app";
 import { useStudio } from "../../store/studio";
 import { ErrorBanner } from "../ErrorBanner";
-import { ENGINE_LICENCE_ID, type DownloadOffer } from "./LocalModelRow";
+import { visiblePath } from "../FolderChip";
+import { ENGINE_LICENCE_ID, type DownloadOffer } from "./localOffers";
 import type { Licence, Part } from "./types";
 
 // The download confirmation of a local model (0.1.0 Task B14, local addendum Wireframe L3),
@@ -118,7 +119,8 @@ function Confirm(props: { offer: DownloadOffer }) {
   return (
     <AlertDialog.Content className="fixed top-1/2 left-1/2 flex max-h-[90vh] w-[32rem] max-w-[92vw] -translate-x-1/2 -translate-y-1/2 flex-col rounded-2xl border border-border bg-surface p-5 text-sm shadow-pop">
       <AlertDialog.Title className="text-base font-semibold">
-        <bdi dir="ltr">{DOWNLOAD_LOCAL.title(offer.name)}</bdi>
+        {/* A searched file's name can hold any character: shown with invisible ones as codes. */}
+        <bdi dir="ltr">{DOWNLOAD_LOCAL.title(visiblePath(offer.name))}</bdi>
       </AlertDialog.Title>
       <AlertDialog.Description asChild>
         <div className="mt-2 flex min-h-0 flex-col gap-2 overflow-y-auto">

@@ -33,7 +33,7 @@ vi.mock("./api");
 const api = await import("./api");
 const { StudioView } = await import("./StudioView");
 const { hardwareLine, visibleEntries } = await import("./LocalModels");
-const { licenceBadge, offerForEntry, offerForFile } = await import("./LocalModelRow");
+const { licenceBadge, offerForEntry, offerForFile } = await import("./localOffers");
 const { useStudio } = await import("../../store/studio");
 
 const INITIAL = useStudio.getState();
@@ -245,6 +245,12 @@ describe("licenceBadge", () => {
     expect(licenceBadge(nonCommercial)).toEqual({ tone: "red", text: "Non-commercial" });
     expect(licenceBadge(licence({ badge: "red", commercial: "unclear" }))).toEqual({ tone: "red", text: "Check the licence" });
   });
+
+  it("a kind of licence this version does not know reads Check the licence", () => {
+    // The backend sends `commercial` as a string: a newer one may send a word not known here.
+    const unknown = licence({ badge: "red", commercial: "somethingNew" as Licence["commercial"] });
+    expect(licenceBadge(unknown)).toEqual({ tone: "red", text: "Check the licence" });
+  });
 });
 
 describe("visibleEntries", () => {
@@ -332,6 +338,38 @@ describe("Get local models", () => {
     expect(within(row(/Z-Image Turbo/)).queryByRole("button", { name: "Download" })).toBeNull();
   });
 
+  it("with Only what fits off, a model that does not fit is listed with the rest, still without Download", async () => {
+    await showLocal({
+      ...LOCAL,
+      recommended: LOCAL.recommended.filter((e) => e.id !== zimage.id),
+      notHere: [{ ...zimage, fit: { ...zimage.fit, word: "notHere", verdict: "red", reason: "needs 8 GB of graphics memory" } }],
+    });
+    screen.getByRole("button", { name: "Not for this computer (1)" });
+    await click(screen.getByRole("checkbox", { name: "Only what fits" }));
+    const z = row(/Z-Image Turbo/);
+    within(z).getByText("needs 8 GB of graphics memory");
+    expect(within(z).queryByRole("button", { name: "Download" })).toBeNull();
+    expect(screen.queryByRole("button", { name: /^Not for this computer/ })).toBeNull();
+  });
+
+  it("the Not for this computer fold starts folded on each tab", async () => {
+    const tooBig = (e: LocalEntry): LocalEntry => ({
+      ...e,
+      fit: { ...e.fit, word: "notHere", verdict: "red", reason: "needs 8 GB of graphics memory" },
+    });
+    await showLocal({
+      ...LOCAL,
+      recommended: LOCAL.recommended.filter((e) => e.id !== zimage.id && e.id !== wan.id),
+      notHere: [tooBig(zimage), tooBig(wan)],
+    });
+    await click(screen.getByRole("button", { name: "Not for this computer (1)" }));
+    row(/Z-Image Turbo/);
+    await click(screen.getByRole("tab", { name: "Video" }));
+    const fold = screen.getByRole("button", { name: "Not for this computer (1)" });
+    expect(fold.getAttribute("aria-expanded")).toBe("false");
+    expect(screen.queryByRole("article", { name: /Wan 2.2/ })).toBeNull();
+  });
+
   it("an installed model that does not fit keeps Delete only, folded away", async () => {
     await showLocal({
       ...LOCAL,
@@ -368,6 +406,18 @@ describe("Get local models", () => {
       licences: [apache],
       toFetchBytes: repo.files[0]!.toFetchBytes,
     });
+  });
+
+  it("a searched file's name stays as it came in the offer, and shows with invisible characters as codes", async () => {
+    await showLocal();
+    const file = "z-image‮turbo.gguf";
+    const repo = supported({ files: supported().files.map((f) => ({ ...f, file })) });
+    const result = await openResult("someone/Z-Image-Turbo-GGUF", repo);
+    within(result).getByText("z-image\\u{202E}turbo.gguf");
+    await click(within(result).getByRole("button", { name: "Download" }));
+    expect(useStudio.getState().offer).toMatchObject({ name: file, source: { search: { file } } });
+    within(screen.getByRole("alertdialog")).getByText("Download z-image\\u{202E}turbo.gguf?");
+    expect(new XMLSerializer().serializeToString(document.body)).not.toContain("‮");
   });
 
   it("an unknown family says Not supported yet and offers no Download", async () => {

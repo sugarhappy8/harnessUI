@@ -27,12 +27,20 @@ describe("StudioNotice", () => {
     useStudio.getState().applyProgress({ ...VIDEO, status: "waiting", watching: true });
     useStudio.getState().applyProgress(VIDEO);
     expect(useStudio.getState().readyNotice).toBe("v");
+    // Get local models was left open in Studio: Open still lands on the video's cards.
+    useStudio.setState({ localView: true });
     render(<StudioNotice />);
     screen.getByText("Your video is ready");
     act(() => {
       fireEvent.click(screen.getByRole("button", { name: "Open" }));
     });
-    expect(useStudio.getState()).toMatchObject({ view: "studio", tab: "video", viewer: "o1", readyNotice: null });
+    expect(useStudio.getState()).toMatchObject({
+      view: "studio",
+      tab: "video",
+      viewer: "o1",
+      readyNotice: null,
+      localView: false,
+    });
     expect(screen.queryByText("Your video is ready")).toBeNull();
   });
 

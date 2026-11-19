@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { DropdownMenu, Tabs } from "radix-ui";
+import { DropdownMenu } from "radix-ui";
 import { Cloud, Ellipsis, LayoutGrid, Microchip, RefreshCw, Search, Star } from "lucide-react";
 import {
   cloudChipWords,
@@ -8,11 +8,11 @@ import {
   STUDIO_ACTIONS,
   STUDIO_BAR,
   STUDIO_NAV,
-  STUDIO_TABS,
 } from "../../lib/words";
-import { useStudio, type StudioTab } from "../../store/studio";
+import { useStudio } from "../../store/studio";
 import { PlaceMark } from "../PlaceMark";
 import { formatUsd } from "./cost";
+import { KindTabs } from "./KindTabs";
 import { LocalMark } from "./LocalMark";
 
 // Studio's top bar (0.1.0 Task B2, design Wireframe 1): the title, [Pictures | Video], the
@@ -22,13 +22,9 @@ import { LocalMark } from "./LocalMark";
 // While Get local models is shown, its own [Pictures | Video] stand in for these, and the
 // gallery's search, Starred and Grid, which act on the hidden cards, are hidden (Task B13).
 
-const TABS: readonly StudioTab[] = ["image", "video"];
-
 /** How long the search box waits after the last key before it asks for the gallery. */
 const SEARCH_DELAY_MS = 250;
 
-const tabClass =
-  "rounded-md px-3 py-1 text-sm data-[state=active]:bg-surface data-[state=active]:font-medium data-[state=active]:shadow-soft hover:text-fg";
 const MENU_ITEM =
   "flex cursor-default items-center gap-2 rounded-lg px-2.5 py-1.5 text-sm outline-none data-[disabled]:text-fg-muted data-[highlighted]:bg-bg-muted";
 const TOGGLE =
@@ -49,16 +45,7 @@ export function TopBar(props: { onError: (e: unknown) => void }) {
     <header className="glass z-10 flex flex-wrap items-center gap-x-2 gap-y-1 border-b border-border px-3 py-2">
       <h1 className="text-sm font-semibold">{STUDIO_NAV.name}</h1>
       {/* The grid's own kind toggles, or Get local models' own tabs, stand in for these. */}
-      {!grid && !localView && (
-        <Tabs.List aria-label={STUDIO_BAR.tabs} className="flex gap-0.5 rounded-lg bg-bg-muted p-0.5 text-fg-muted">
-          {TABS.map((t) => (
-            // A click selects too: assistive technology may send one without a mouse press.
-            <Tabs.Trigger key={t} value={t} className={tabClass} onClick={() => setTab(t)}>
-              {STUDIO_TABS[t]}
-            </Tabs.Trigger>
-          ))}
-        </Tabs.List>
-      )}
+      {!grid && !localView && <KindTabs onSelect={setTab} />}
       {!localView && (
         <>
           <SearchBox onError={props.onError} />

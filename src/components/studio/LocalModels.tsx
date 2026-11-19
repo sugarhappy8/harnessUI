@@ -1,13 +1,15 @@
 import { useId, useState } from "react";
 import { Tabs } from "radix-ui";
 import type { ErrorInfo } from "../../lib/types";
-import { amountGb, LOCAL_MODELS, STUDIO_BAR, STUDIO_TABS } from "../../lib/words";
+import { amountGb, LOCAL_MODELS } from "../../lib/words";
 import { toErrorInfo } from "../../store/app";
 import { useStudio, type StudioTab } from "../../store/studio";
 import { ErrorBanner } from "../ErrorBanner";
 import { DownloadLocalModel } from "./DownloadLocalModel";
 import { EngineLine } from "./EngineLine";
-import { EntryRow, InstalledRow, type DownloadOffer } from "./LocalModelRow";
+import { KindTabs } from "./KindTabs";
+import { EntryRow, InstalledRow } from "./LocalModelRow";
+import type { DownloadOffer } from "./localOffers";
 import { LocalNotice } from "./LocalNotice";
 import { LocalSearch } from "./LocalSearch";
 import { CARD_BUTTON } from "./styles";
@@ -15,19 +17,15 @@ import type { HardwareLine, LocalEntry, LocalModels as LocalModelsData } from ".
 
 // Get local models (0.1.0 Task B13, local addendum Wireframe L2): Studio's own view, in place of
 // the card stream while `localView` is on, with *Back*. The header says what this computer has,
-// so the estimates can be checked; its own [Pictures | Video] tabs (the top bar's give way to
-// them), *Only what fits* (on) and *Show non-commercial models* (off); the recommended models of
-// the tab, then the installed ones the list does not hold, then "Not for this computer (n)"
-// folded away; Hugging Face search (LocalSearch.tsx); and the footer with the Studio engine's
-// line (EngineLine.tsx) and the content notice. Opening it reads what is saved and sends
-// nothing. *Download* sets the store's `offer`, which shows the download confirmation
-// (DownloadLocalModel.tsx, Task B14), or the content notice first (LocalNotice.tsx) while it
-// was never accepted; *What that means* shows the notice again, read only.
-
-const TABS: readonly StudioTab[] = ["image", "video"];
-
-const tabClass =
-  "rounded-md px-3 py-1 text-sm data-[state=active]:bg-surface data-[state=active]:font-medium data-[state=active]:shadow-soft hover:text-fg";
+// so the estimates can be checked; its own [Pictures | Video] tabs (KindTabs.tsx, as the top
+// bar's, which give way to them), *Only what fits* (on) and *Show non-commercial models* (off);
+// the recommended models of the tab, then the installed ones the list does not hold, then "Not
+// for this computer (n)" folded away; Hugging Face search (LocalSearch.tsx); and the footer
+// with the Studio engine's line (EngineLine.tsx) and the content notice. Opening it reads what
+// is saved and sends nothing. *Download* sets the store's `offer` (localOffers.ts), which shows
+// the download confirmation (DownloadLocalModel.tsx, Task B14), or the content notice first
+// (LocalNotice.tsx) while it was never accepted; *What that means* shows the notice again, read
+// only.
 
 /** What this computer has, as the header says it: "This computer: Radeon RX 7600, 8 GB graphics
  *  memory · 32 GB memory · 412 GB free"; on shared memory the computer's memory only (never the
@@ -99,14 +97,7 @@ export function LocalModels() {
             className="flex flex-col gap-3"
           >
             <div className="flex flex-wrap items-center gap-x-4 gap-y-2">
-              <Tabs.List aria-label={STUDIO_BAR.tabs} className="flex gap-0.5 rounded-lg bg-bg-muted p-0.5 text-fg-muted">
-                {TABS.map((t) => (
-                  // A click selects too: assistive technology may send one without a mouse press.
-                  <Tabs.Trigger key={t} value={t} className={tabClass} onClick={() => setLocalTab(t)}>
-                    {STUDIO_TABS[t]}
-                  </Tabs.Trigger>
-                ))}
-              </Tabs.List>
+              <KindTabs onSelect={setLocalTab} />
               <label className="ml-auto flex items-center gap-1.5 text-sm">
                 <input type="checkbox" checked={onlyFits} onChange={(e) => setOnlyFits(e.target.checked)} />
                 {LOCAL_MODELS.onlyFits}
@@ -121,9 +112,12 @@ export function LocalModels() {
               </label>
             </div>
             <Tabs.Content value={localTab} className="flex flex-col gap-3 outline-none">
-              <TabModels local={local} tab={localTab} onlyFits={onlyFits} onError={fail} />
-              {/* Each tab searches for its own kind; its words and results stay with it. */}
-              <LocalSearch key={localTab} tab={localTab} />
+              {/* Keyed by tab: "Not for this computer" starts folded on each. */}
+              <TabModels key={`models-${localTab}`} local={local} tab={localTab} onlyFits={onlyFits} onError={fail} />
+              {/* Each tab searches for its own kind. The store keeps only the last search, so its
+                  words and results show on the tab it was for, and a search on the other tab
+                  takes their place. */}
+              <LocalSearch key={`search-${localTab}`} tab={localTab} />
             </Tabs.Content>
           </Tabs.Root>
           <footer className="flex flex-col gap-2 border-t border-border pt-3">

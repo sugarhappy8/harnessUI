@@ -25,7 +25,7 @@ vi.mock("@tauri-apps/plugin-opener", () => ({ openUrl }));
 const api = await import("./api");
 const { StudioView } = await import("./StudioView");
 const { DownloadLocalModel, verdict } = await import("./DownloadLocalModel");
-const { offerForEntry } = await import("./LocalModelRow");
+const { offerForEntry } = await import("./localOffers");
 const { useStudio } = await import("../../store/studio");
 
 type Offer = NonNullable<ReturnType<typeof useStudio.getState>["offer"]>;

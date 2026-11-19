@@ -36,6 +36,19 @@ describe("the view", () => {
     expect(useStudio.getState().view).toBe("chat");
   });
 
+  it("a tab asked for closes Get local models; opened without one, Studio keeps it", () => {
+    useStudio.getState().showStudio();
+    useStudio.getState().showLocalModels(true);
+    useStudio.getState().showChat();
+    // Ctrl/⌘ G, the sidebar: Studio as it was left.
+    useStudio.getState().showStudio();
+    expect(useStudio.getState()).toMatchObject({ view: "studio", localView: true });
+    useStudio.getState().showChat();
+    // Open in Studio, a finished video's Open: the tab's cards, not Get local models.
+    useStudio.getState().showStudio("video");
+    expect(useStudio.getState()).toMatchObject({ view: "studio", tab: "video", localView: false });
+  });
+
   it("showing the chat closes the viewer", () => {
     useStudio.getState().showStudio();
     useStudio.getState().openViewer("o1");
