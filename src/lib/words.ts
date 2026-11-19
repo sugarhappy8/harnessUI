@@ -1227,6 +1227,8 @@ export const STUDIO_ADVANCED = {
   company: "Company that runs it",
   /** The company list's first choice: no routing is sent. */
   openRouterChooses: "OpenRouter chooses",
+  /** A company saved in a setup that the model's answer no longer lists (its tag is still sent). */
+  unlistedCompany: "A company no longer listed",
   allowAnother: "Allow another company if that one is busy",
   zdr: "Only companies that keep no data",
   /** Extra fields (JSON) with nothing set. */

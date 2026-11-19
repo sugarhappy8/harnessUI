@@ -2,6 +2,7 @@ import { useId, useState, type ReactNode } from "react";
 import { DropdownMenu } from "radix-ui";
 import { Check, ChevronDown, CircleHelp, Dices, Plus, RotateCcw } from "lucide-react";
 import { STUDIO_FIELDS } from "../../lib/words";
+import { BOX } from "./styles";
 import type { Choice, ParamKind, ParamSpec, SizeRules } from "./types";
 
 // One of Studio's controls (0.1.0 Task B5; design 3, "Widgets"): every field is drawn from the
@@ -58,8 +59,6 @@ function isSet(value: unknown): boolean {
 
 const CHIP =
   "rounded-full border border-border px-2 py-0.5 text-xs whitespace-nowrap hover:border-border-strong aria-checked:border-accent aria-checked:text-accent aria-expanded:border-border-strong";
-const BOX =
-  "rounded-md border border-border bg-bg px-2 py-1 text-sm outline-none focus:border-border-strong disabled:opacity-60";
 
 /**
  * One field: its label (with its help as a tooltip), "Automatic" while it is unset or its reset

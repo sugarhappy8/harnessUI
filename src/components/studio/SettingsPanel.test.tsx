@@ -20,7 +20,8 @@ vi.mock("../../lib/ipc", () => ({ isTauri: () => true }));
 vi.mock("./api");
 
 const api = await import("./api");
-const { SettingsPanel, localClipSize } = await import("./SettingsPanel");
+const { SettingsPanel } = await import("./SettingsPanel");
+const { localClipSize } = await import("./SettingField");
 const { useStudio } = await import("../../store/studio");
 
 const INITIAL = useStudio.getState();

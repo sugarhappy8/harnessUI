@@ -180,8 +180,10 @@ export interface StudioState {
    *  settings, Extra fields and routing as saved (the prompt stays; added pictures stay up to
    *  the model's limit). When that model is no longer offered there, its family's newest takes
    *  its place, the settings carried to it (`carry`) with a note of what changed. An OpenRouter
-   *  picture model whose price was never asked is asked for it, as when picked. Returns why
-   *  the setup cannot be used (its model and family are gone), or `null`. */
+   *  picture model whose price was never asked is asked for it, as when picked, and the setup's
+   *  extra settings are held aside until the answer brings the model's Extra field (each one it
+   *  does not take is then removed with the note). Returns why the setup cannot be used (its
+   *  model and family are gone, or its endpoint or key), or `null`. */
   applySetup(setup: Setup): string | null;
   /** How long an installed model takes here, by `localFitKey`: asked once for each size and
    *  length, and asked again once the local models are read again (a run may have been
@@ -327,6 +329,25 @@ export const useStudio: UseBoundStore<StoreApi<StudioState>> = create<StudioStat
       const values = dropUnmet(model, draft.values);
       return { drafts: { ...s.drafts, [tab]: { ...draft, values, extra: { ...draft.extra, ...carried.extra }, note } } };
     });
+  };
+
+  /** Asks for the price of `to`, which `tab`'s draft was just set to at `endpoint` (`target`),
+   *  holding `extra` aside when given (the model as listed has no Extra field yet): they go to
+   *  the model as it comes back, or as listed when the request fails, each one it does not take
+   *  removed with the note (`settleHeld`). A failure is kept in `priceError` (`priceFor`). */
+  const askPriceHolding = (
+    tab: StudioTab,
+    target: RunTarget,
+    endpoint: StudioEndpoint,
+    to: MediaModel,
+    extra: Values | null,
+  ) => {
+    const mine: HeldExtra | null = extra ? { target, model: to, extra } : null;
+    if (mine) held[tab] = mine;
+    priceFor(tab, endpoint.providerId, to.id).then(
+      (priced) => mine && settleHeld(tab, mine, priced),
+      () => mine && settleHeld(tab, mine, mine.model),
+    );
   };
 
   /** The local fits asked for and not answered yet. A new set each time the answers are put
@@ -489,7 +510,7 @@ export const useStudio: UseBoundStore<StoreApi<StudioState>> = create<StudioStat
       if (waiting) delete held[tab];
       const extra = { ...draft.extra, ...dropped?.extra };
       const from = draft.target && draft.model ? listedModel(draft.target, draft.model, s.local, s.endpoints) : null;
-      const hold = unpriced && !to.params.some((p) => p.kind.type === "extra") && Object.keys(extra).length > 0;
+      const hold = mustHold(to, unpriced, extra);
       const carried = carry(from, to, draft.values, hold ? {} : extra, draft.refs);
       const note = [dropped?.note ?? null, carried.note].filter((n) => n !== null).join(" ") || null;
       set((st) => ({
@@ -510,14 +531,7 @@ export const useStudio: UseBoundStore<StoreApi<StudioState>> = create<StudioStat
         // A failed price request was for the model before.
         priceError: { ...st.priceError, [tab]: null },
       }));
-      if (!unpriced || !endpoint) return;
-      const mine: HeldExtra | null = hold ? { target, model: to, extra } : null;
-      if (mine) held[tab] = mine;
-      // A failure is kept in `priceError` (`priceFor`).
-      priceFor(tab, endpoint.providerId, to.id).then(
-        (priced) => mine && settleHeld(tab, mine, priced),
-        () => mine && settleHeld(tab, mine, mine.model),
-      );
+      if (unpriced && endpoint) askPriceHolding(tab, target, endpoint, to, hold ? extra : null);
     },
     fetchPrice: async (tab) => {
       const { target, model } = get().drafts[tab];
@@ -626,45 +640,57 @@ export const useStudio: UseBoundStore<StoreApi<StudioState>> = create<StudioStat
       const tab = setup.kind;
       const s = get();
       const { target } = setup;
-      const endpoint = target === "thisComputer" ? null : s.endpoints.find((e) => e.providerId === target.endpoint);
-      let model = offeredModel(tab, target, setup.model, s.local, s.endpoints);
-      let values: Values = setup.params;
-      let extra: Values = setup.extra;
-      let routing = setup.routing;
-      let note: string | null = null;
-      if (!model) {
+      const endpoint = endpointOf(target, s.endpoints);
+      const offered = offeredModel(tab, target, setup.model, s.local, s.endpoints);
+      let to = offered;
+      if (!to) {
         if (target === "thisComputer") return STUDIO_SETUPS.goneHere;
         if (!endpoint) return STUDIO_SETUPS.endpointGone;
         if (!endpoint.hasKey) return STUDIO_EMPTY.noKey(endpoint.name);
-        const closest = closestModel(cloudModelsFor(endpoint, tab), { id: setup.model, family: familyOf(setup.model) });
-        if (!closest) return STUDIO_SETUPS.gone(endpoint.name);
-        const carried = carry(null, closest, setup.params, setup.extra, []);
-        model = closest;
+        to = closestModel(cloudModelsFor(endpoint, tab), { id: setup.model, family: familyOf(setup.model) });
+        if (!to) return STUDIO_SETUPS.gone(endpoint.name);
+      }
+      // An OpenRouter picture model whose price was never asked has no Extra field yet: the
+      // setup's extra settings are held aside until its answer, as when the model is picked.
+      const unpriced = endpoint !== null && priceNotAsked(to, endpoint.company);
+      const hold = mustHold(to, unpriced, setup.extra);
+      let values: Values = setup.params;
+      let extra: Values = hold ? {} : setup.extra;
+      let routing = setup.routing;
+      let note: string | null = null;
+      if (!offered && endpoint) {
+        const carried = carry(null, to, values, extra, []);
         values = carried.values;
         extra = carried.extra;
         // Which companies may run it belongs to the model it was saved for.
         routing = null;
-        note = [STUDIO_SETUPS.replaced(endpoint.name, closest.displayName), carried.note].filter((n) => n !== null).join(" ");
+        note = [STUDIO_SETUPS.replaced(endpoint.name, to.displayName), carried.note].filter((n) => n !== null).join(" ");
       }
-      const to = model;
+      const model = to;
       const draft = s.drafts[tab];
       // The added pictures stay up to the model's limit for each role, with a note for the rest.
-      const pictures = carry(to, to, {}, {}, draft.refs);
+      const pictures = carry(model, model, {}, {}, draft.refs);
       note = [note, pictures.note].filter((n) => n !== null).join(" ") || null;
       // The draft starts again: nothing is held aside for the model it had.
       delete held[tab];
       set((st) => ({
         drafts: {
           ...st.drafts,
-          [tab]: { ...draft, target, model: to.id, values: dropUnmet(to, values), extra, refs: pictures.refs, routing, note },
+          [tab]: {
+            ...draft,
+            target,
+            model: model.id,
+            values: dropUnmet(model, values),
+            extra,
+            refs: pictures.refs,
+            routing,
+            note,
+          },
         },
         priceError: { ...st.priceError, [tab]: null },
       }));
-      // Picking a setup picks its model: an OpenRouter picture model is asked for its price once
-      // (a failure is kept in `priceError`).
-      if (endpoint && priceNotAsked(to, endpoint.company)) {
-        priceFor(tab, endpoint.providerId, to.id).catch(() => undefined);
-      }
+      // Picking a setup picks its model: an OpenRouter picture model is asked for its price once.
+      if (unpriced && endpoint) askPriceHolding(tab, target, endpoint, model, hold ? setup.extra : null);
       return null;
     },
     localFits: {},
@@ -745,6 +771,13 @@ export function priceNotAsked(model: MediaModel, company: Company): boolean {
   return company === "openrouter" && model.kind === "image" && model.priceFetchedAt === null;
 }
 
+/** Whether `extra` waits for model `to`'s price answer before it goes into a draft: the model's
+ *  price is about to be asked (`unpriced`), and as listed it has no Extra field to check the
+ *  names against (the answer brings it). */
+function mustHold(to: MediaModel, unpriced: boolean, extra: Values): boolean {
+  return unpriced && !to.params.some((p) => p.kind.type === "extra") && Object.keys(extra).length > 0;
+}
+
 /** The models of `endpoint`'s saved lists that `tab` can use: none while it has no key (the
  *  picker greys them out). */
 function cloudModelsFor(endpoint: StudioEndpoint, tab: StudioTab): MediaModel[] {
@@ -800,6 +833,13 @@ export function startRequestOf(tab: StudioTab, draft: Draft, clientToken: string
     refs: draft.refs.map((r) => ({ sha256: r.sha256, role: r.role ?? "reference" })),
     routing: draft.routing,
   };
+}
+
+/** The saved endpoint `target` names; `null` for this computer, without a target, or once the
+ *  endpoint was removed in Settings. */
+export function endpointOf(target: RunTarget | null, endpoints: StudioEndpoint[]): StudioEndpoint | null {
+  if (target === null || target === "thisComputer") return null;
+  return endpoints.find((e) => e.providerId === target.endpoint) ?? null;
 }
 
 /** The model of `tab`'s draft as listed, whether or not it can be used now; `null` without one. */

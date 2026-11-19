@@ -3,27 +3,24 @@ import { ChevronDown, ChevronRight, X } from "lucide-react";
 import type { ErrorInfo } from "../../lib/types";
 import { SETTING_WORDS, STUDIO_ADVANCED, STUDIO_FIELDS } from "../../lib/words";
 import { toErrorInfo } from "../../store/app";
-import { draftModel, priceNotAsked, startRequestOf, useStudio, type StudioTab } from "../../store/studio";
+import { draftModel, endpointOf, priceNotAsked, startRequestOf, useStudio, type StudioTab } from "../../store/studio";
 import { ErrorBanner } from "../ErrorBanner";
 import * as api from "./api";
 import { changedCount, changedKeys, nameOf, valueWords, visibleFields, type Values } from "./canonical";
-import { ParamField } from "./ParamField";
-import { FrameDrop } from "./RefTray";
-import type { EndpointCompany, MediaModel, ParamSpec, RequestPreview, Routing } from "./types";
+import { SettingField } from "./SettingField";
+import { BOX, SMALL_BUTTON } from "./styles";
+import type { EndpointCompany, MediaModel, ParamSpec, RequestPreview, Routing, StartRequest } from "./types";
 
 // Studio's Advanced drawer (0.1.0 Task B6; design Wireframe 2, opening inside the right panel):
 // its header counts the changes and offers *Reset all*; the model's Advanced fields follow in
-// its order, each through ParamField with its reset (the seed with its dice and *Keep it*);
+// its order, each drawn as the simple ones are (SettingField: its reset, the seed with its dice
+// and *Keep it*, a local clip's chips with their times);
 // then, for an OpenRouter picture, which company runs it; Extra fields (JSON), only the names
 // the model lists; and *See the exact request*, what Create would send and to which host, with
 // the key removed. For a model on this computer there is no routing and no Extra fields (they
 // would become the engine's arguments), and the button is *See the exact command*. Whether the
 // drawer is open is kept in the preferences. Each change also shows as a chip under the prompt
 // (`ChipsRow`, which the prompt dock mounts), and the chip removes it.
-
-const BOX =
-  "rounded-md border border-border bg-bg px-2 py-1 text-sm outline-none focus:border-border-strong disabled:opacity-60";
-const SMALL_BUTTON = "rounded-md px-1.5 py-0.5 text-xs text-fg-muted hover:bg-bg-muted hover:text-fg";
 
 // ---- the chips ----------------------------------------------------------------------------
 
@@ -143,6 +140,7 @@ function ExtraFields(props: { tab: StudioTab; spec: ParamSpec; allowed: string[]
   const { tab, spec, allowed, typed, extra } = props;
   const setExtra = useStudio((s) => s.setExtra);
   const labelId = useId();
+  const problemId = useId();
   // What is typed while editing (`null` while not), and why Save refused it.
   const [text, setText] = useState<string | null>(null);
   const [problem, setProblem] = useState<string | null>(null);
@@ -185,13 +183,18 @@ function ExtraFields(props: { tab: StudioTab; spec: ParamSpec; allowed: string[]
         <>
           <textarea
             aria-label={spec.label}
+            aria-describedby={problem ? problemId : undefined}
             value={text}
             rows={4}
             spellCheck={false}
             onChange={(e) => setText(e.target.value)}
             className={`${BOX} resize-y font-mono text-xs`}
           />
-          {problem && <p className="text-xs text-warning">{problem}</p>}
+          {problem && (
+            <p id={problemId} role="alert" className="text-xs text-warning">
+              {problem}
+            </p>
+          )}
           <div className="flex gap-1.5">
             <button
               type="button"
@@ -206,23 +209,24 @@ function ExtraFields(props: { tab: StudioTab; spec: ParamSpec; allowed: string[]
           </div>
         </>
       )}
-      <p className="text-xs text-fg-muted">{STUDIO_ADVANCED.accepts(allowed)}</p>
+      {allowed.length > 0 && <p className="text-xs text-fg-muted">{STUDIO_ADVANCED.accepts(allowed)}</p>}
     </div>
   );
 }
 
 // ---- routing (an OpenRouter picture) ------------------------------------------------------
 
-/** The routing for the company chosen (`null`: OpenRouter chooses), whether another may run it
- *  when that one is busy, and whether only companies that keep no data may; `null` when
- *  nothing is asked of OpenRouter. */
+/** The routing for the company chosen (`null`: OpenRouter chooses, and another may always run
+ *  it), whether another may run it when that one is busy, and whether only companies that keep
+ *  no data may; `null` when nothing is asked of OpenRouter. */
 function routingOf(tag: string | null, allowFallbacks: boolean, zdr: boolean): Routing | null {
   if (tag === null && !zdr) return null;
   return { order: tag === null ? [] : [tag], only: false, allowFallbacks: tag === null || allowFallbacks, zdr };
 }
 
 /** Which company runs an OpenRouter picture: one of those the model's price answer listed (by
- *  name, sent as its tag), or OpenRouter's choice. */
+ *  name, sent as its tag), or OpenRouter's choice. *Allow another company* comes back as last
+ *  chosen when a company is picked again after OpenRouter chose. */
 function RoutingFields(props: { tab: StudioTab; title: string; companies: EndpointCompany[]; routing: Routing | null }) {
   const { tab, companies, routing } = props;
   const setRouting = useStudio((s) => s.setRouting);
@@ -230,7 +234,13 @@ function RoutingFields(props: { tab: StudioTab; title: string; companies: Endpoi
   const tag = routing?.order[0] ?? null;
   const allow = routing?.allowFallbacks ?? true;
   const zdr = routing?.zdr ?? false;
-  // A company saved in a setup that the model's answer no longer lists keeps its tag.
+  // The last choice of *Allow another company*, kept while OpenRouter chooses (when another
+  // company may always run it) for the next company picked. It follows a company's routing set
+  // elsewhere, by a setup say.
+  const [chosenAllow, setChosenAllow] = useState(allow);
+  if (tag !== null && allow !== chosenAllow) setChosenAllow(allow);
+  // A company saved in a setup that the model's answer no longer lists keeps its tag, named in
+  // words.
   const unlisted = tag !== null && !companies.some((c) => c.tag === tag);
   return (
     <div className="flex flex-col gap-1.5">
@@ -241,7 +251,7 @@ function RoutingFields(props: { tab: StudioTab; title: string; companies: Endpoi
       <select
         id={selectId}
         value={tag ?? ""}
-        onChange={(e) => setRouting(tab, routingOf(e.target.value === "" ? null : e.target.value, allow, zdr))}
+        onChange={(e) => setRouting(tab, routingOf(e.target.value === "" ? null : e.target.value, chosenAllow, zdr))}
         className={BOX}
       >
         <option value="">{STUDIO_ADVANCED.openRouterChooses}</option>
@@ -250,7 +260,7 @@ function RoutingFields(props: { tab: StudioTab; title: string; companies: Endpoi
             {c.name}
           </option>
         ))}
-        {unlisted && <option value={tag}>{tag}</option>}
+        {unlisted && <option value={tag}>{STUDIO_ADVANCED.unlistedCompany}</option>}
       </select>
       <label className="flex items-center gap-1.5 text-xs has-disabled:opacity-60">
         <input
@@ -279,6 +289,10 @@ function RoutingFields(props: { tab: StudioTab; title: string; companies: Endpoi
 
 /** The press a preview is made for: `studio_preview` takes a whole request and sends nothing. */
 const PREVIEW_TOKEN = "preview";
+
+/** How long the draft stays unchanged before an open preview is asked again: not at every key
+ *  of the prompt (on this computer each ask also works out the engine's command and the fit). */
+const PREVIEW_DELAY_MS = 300;
 
 /** *See the exact request*: the host it goes to, the method and address, and the body as JSON,
  *  read-only, with the key removed (added pictures named, not sent). */
@@ -327,34 +341,43 @@ export function ExactCommand(props: { preview: RequestPreview }) {
 
 /** The button that shows what Create would send for `tab`'s draft (asked of the backend, which
  *  sends nothing), kept up to date while it is shown; a request the model would refuse shows
- *  why instead. */
+ *  why instead. Mounted afresh for each tab, so one tab's request never shows on another. */
 function RequestPreviewButton(props: { tab: StudioTab; here: boolean }) {
   const { tab } = props;
   const draft = useStudio((s) => s.drafts[tab]);
   const req = useMemo(() => startRequestOf(tab, draft, PREVIEW_TOKEN), [tab, draft]);
   const [open, setOpen] = useState(false);
+  // The request when it was opened, which is asked at once.
+  const [opened, setOpened] = useState<StartRequest | null>(null);
   const [answer, setAnswer] = useState<{ preview: RequestPreview } | { error: ErrorInfo } | null>(null);
 
-  // Asked when opened and again whenever the draft changes while open; an answer for a draft
-  // changed since is dropped.
+  // Asked at once when opened; while open, a changed draft is asked once it has stayed as it is
+  // for `PREVIEW_DELAY_MS`. An answer for a draft changed since is dropped.
   useEffect(() => {
     if (!open || req === null) return;
     let current = true;
-    api.studioPreview(req).then(
-      (preview) => {
-        if (current) setAnswer({ preview });
-      },
-      (e: unknown) => {
-        if (current) setAnswer({ error: toErrorInfo(e) });
-      },
-    );
+    const ask = () => {
+      api.studioPreview(req).then(
+        (preview) => {
+          if (current) setAnswer({ preview });
+        },
+        (e: unknown) => {
+          if (current) setAnswer({ error: toErrorInfo(e) });
+        },
+      );
+    };
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    if (req === opened) ask();
+    else timer = setTimeout(ask, PREVIEW_DELAY_MS);
     return () => {
       current = false;
+      clearTimeout(timer);
     };
-  }, [open, req]);
+  }, [open, req, opened]);
 
   const toggle = () => {
     if (open) setAnswer(null);
+    else setOpened(req);
     setOpen(!open);
   };
   return (
@@ -387,14 +410,12 @@ export function AdvancedDrawer(props: { tab: StudioTab }) {
   const { tab } = props;
   const draft = useStudio((s) => s.drafts[tab]);
   const model = useStudio((s) => draftModel(s, tab));
-  const endpoints = useStudio((s) => s.endpoints);
+  const endpoint = useStudio((s) => endpointOf(s.drafts[tab].target, s.endpoints));
   const savedOpen = useStudio((s) => s.prefs?.advancedOpen ?? false);
-  const setValue = useStudio((s) => s.setValue);
-  const resetValue = useStudio((s) => s.resetValue);
   const resetAdvanced = useStudio((s) => s.resetAdvanced);
-  const newSeed = useStudio((s) => s.newSeed);
-  const lockSeed = useStudio((s) => s.lockSeed);
   const setPrefs = useStudio((s) => s.setPrefs);
+  // Counts *Reset all*: the routing's remembered choices start again with it.
+  const [resets, setResets] = useState(0);
   // Whether it is open: what was saved, and the toggle's own choice even when saving it fails;
   // a choice saved elsewhere since is followed.
   const [open, setOpen] = useState(savedOpen);
@@ -406,9 +427,6 @@ export function AdvancedDrawer(props: { tab: StudioTab }) {
   if (!model) return null;
 
   const here = draft.target === "thisComputer";
-  const target = draft.target;
-  const endpoint =
-    target !== null && target !== "thisComputer" ? endpoints.find((e) => e.providerId === target.endpoint) : undefined;
   const openRouterPicture = endpoint?.company === "openrouter" && model.kind === "image";
   const extraSpec = model.params.find((p) => p.kind.type === "extra");
   const changed = changedCount(model, draft.values, draft.extra);
@@ -422,26 +440,9 @@ export function AdvancedDrawer(props: { tab: StudioTab }) {
     );
   };
 
-  const draw = (spec: ParamSpec) => {
-    if (spec.kind.type === "images") {
-      // Reference pictures are added in the tray beside the prompt.
-      return spec.kind.role === "reference" ? null : <FrameDrop key={spec.key} tab={tab} spec={spec} />;
-    }
-    return (
-      <ParamField
-        key={spec.key}
-        spec={spec}
-        value={draft.values[spec.key]}
-        onChange={(v) => setValue(tab, spec.key, v)}
-        onReset={() => resetValue(tab, spec.key)}
-        local={here}
-        seed={
-          spec.kind.type === "seed"
-            ? { locked: draft.seedLocked, onNew: () => newSeed(tab), onLock: (locked) => lockSeed(tab, locked) }
-            : undefined
-        }
-      />
-    );
+  const resetAll = () => {
+    resetAdvanced(tab);
+    setResets((n) => n + 1);
   };
 
   return (
@@ -457,16 +458,24 @@ export function AdvancedDrawer(props: { tab: StudioTab }) {
           {changed > 0 ? STUDIO_FIELDS.advancedChanged(changed) : STUDIO_FIELDS.advanced}
         </button>
         {open && (changed > 0 || draft.routing !== null) && (
-          <button type="button" onClick={() => resetAdvanced(tab)} className={`${SMALL_BUTTON} ml-auto`}>
+          <button type="button" onClick={resetAll} className={`${SMALL_BUTTON} ml-auto`}>
             {STUDIO_ADVANCED.resetAll}
           </button>
         )}
       </div>
       {open && (
         <>
-          {visibleFields(model.params, "advanced", draft.values).map(draw)}
+          {visibleFields(model.params, "advanced", draft.values).map((spec) => (
+            <SettingField key={spec.key} tab={tab} spec={spec} />
+          ))}
           {openRouterPicture && endpoint && (
-            <RoutingFields tab={tab} title={endpoint.name} companies={model.companies} routing={draft.routing} />
+            <RoutingFields
+              key={`${model.id} ${resets}`}
+              tab={tab}
+              title={endpoint.name}
+              companies={model.companies}
+              routing={draft.routing}
+            />
           )}
           {extraSpec?.kind.type === "extra" ? (
             <ExtraFields
@@ -482,7 +491,7 @@ export function AdvancedDrawer(props: { tab: StudioTab }) {
             endpoint &&
             priceNotAsked(model, endpoint.company) && <p className="text-xs text-fg-muted">{STUDIO_ADVANCED.pickToSee}</p>
           )}
-          <RequestPreviewButton tab={tab} here={here} />
+          <RequestPreviewButton key={tab} tab={tab} here={here} />
         </>
       )}
     </div>

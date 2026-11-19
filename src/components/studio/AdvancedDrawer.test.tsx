@@ -3,11 +3,21 @@
 // seed's dice and lock, an OpenRouter picture's routing, Extra fields (JSON) with the names the
 // model accepts, the exact request (on this computer, the exact command), and My setups.
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { act, cleanup, fireEvent, render, screen, within } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, within, type RenderResult } from "@testing-library/react";
 import type { StudioTab } from "../../store/studio";
 import type { Values } from "./canonical";
 import { LOCAL, MODELS } from "./fixtures/models";
-import type { LocalModels, MediaModel, RequestPreview, RunTarget, Setup, StudioEndpoint, StudioPrefs } from "./types";
+import type {
+  Eta,
+  LocalFit,
+  LocalModels,
+  MediaModel,
+  RequestPreview,
+  RunTarget,
+  Setup,
+  StudioEndpoint,
+  StudioPrefs,
+} from "./types";
 
 // Radix positions menus with ResizeObserver, which jsdom does not have.
 globalThis.ResizeObserver ??= class {
@@ -142,6 +152,23 @@ async function renderPanel(m: MediaModel, opts: { target?: RunTarget; prefs?: Pa
 function draftSeed(): unknown {
   return useStudio.getState().drafts.image.values.seed;
 }
+
+/** How long a clip takes here, by its length and the number of lines (measured): 2 s at 480p
+ *  about 3 min, 5 s about 9 min, 2 s at 720p about 10 min. */
+function localFit(seconds: number, height: number): LocalFit {
+  const minutes: Record<number, number> = { 1: 1.5, 2: 3, 3: 5, 4: 7, 5: 9 };
+  const middle = (height >= 704 ? 10 : (minutes[seconds] ?? 1)) * 60_000;
+  const eta: Eta = { lowMs: middle - 30_000, highMs: middle + 30_000, measured: true, leftMs: null };
+  return { word: "fits", verdict: "green", reason: null, suggestion: null, eta, verySlow: false };
+}
+
+/** The exact request of a GPT Image 2.6 Flare picture, as `studio_preview` gives it. */
+const FLARE_PREVIEW: RequestPreview = {
+  method: "POST",
+  url: "https://openrouter.ai/api/v1/images/generations",
+  host: "openrouter.ai",
+  body: { model: "openai/gpt-image-2.6-flare" },
+};
 
 const PRODUCT_SHOT: Setup = {
   name: "Product shot",
@@ -420,6 +447,176 @@ describe("AdvancedDrawer", () => {
     expect(screen.queryByText(/Prompt \(passed in/)).toBeNull();
   });
 
+  it("a local clip's field drawn under Advanced shows each chip's time here, as a simple one does", async () => {
+    const wanInstalled = LOCAL.installed[1]!;
+    const wan: MediaModel = {
+      ...wanInstalled.model,
+      params: wanInstalled.model.params.map((p) => (p.key === "resolution" ? { ...p, layer: "advanced" as const } : p)),
+    };
+    const local: LocalModels = {
+      ...LOCAL,
+      installed: LOCAL.installed.map((m) => (m === wanInstalled ? { ...m, model: wan } : m)),
+    };
+    vi.mocked(api.studioLocalFit).mockImplementation(async (_source, _w, h, seconds) => localFit(seconds, h));
+    await load({ local, prefs: prefs({ lastModel: { video: { target: "thisComputer", model: wan.id } } }) });
+    useStudio.getState().showStudio("video");
+    await act(async () => {
+      render(<SettingsPanel tab="video" />);
+    });
+    await flush();
+    const group = screen.getByRole("group", { name: "Resolution" });
+    expect(group.closest("[data-advanced]")).not.toBeNull(); // drawn in the Advanced drawer
+    within(group).getByRole("radio", { name: "480p · about 3 min" });
+    within(group).getByRole("radio", { name: "720p · about 10 min" });
+    within(screen.getByRole("group", { name: "Length" })).getByRole("radio", { name: "2 s · about 3 min" });
+  });
+
+  it("the exact request and a setup name being typed belong to their own tab", async () => {
+    vi.mocked(api.studioPreview).mockResolvedValue(FLARE_PREVIEW);
+    await show(flare);
+    let view: RenderResult | null = null;
+    await act(async () => {
+      view = render(<SettingsPanel tab="image" />);
+    });
+    const rerender = (tab: StudioTab) =>
+      act(async () => {
+        view!.rerender(<SettingsPanel tab={tab} />);
+      });
+    fireEvent.click(screen.getByRole("button", { name: "See the exact request" }));
+    await screen.findByText("key removed · goes to openrouter.ai");
+    fireEvent.click(screen.getByRole("button", { name: "Save as setup…" }));
+    fireEvent.change(screen.getByRole("textbox", { name: "Setup name" }), { target: { value: "Pictures only" } });
+
+    // The same panel shows the Video tab: neither the picture's request nor the name comes along.
+    await rerender("video");
+    await flush();
+    expect(screen.queryByText("key removed · goes to openrouter.ai")).toBeNull();
+    expect(screen.getByRole("button", { name: /^See the exact / }).getAttribute("aria-expanded")).toBe("false");
+    expect(screen.queryByRole("textbox", { name: "Setup name" })).toBeNull();
+    screen.getByRole("button", { name: "Save as setup…" });
+    expect(api.studioPreview).toHaveBeenCalledTimes(1);
+
+    await rerender("image");
+    expect(screen.getByRole("button", { name: "See the exact request" }).getAttribute("aria-expanded")).toBe("false");
+    expect(screen.queryByRole("textbox", { name: "Setup name" })).toBeNull();
+  });
+
+  it("while open, the exact request is asked at once, then again 300 ms after the last change", async () => {
+    vi.mocked(api.studioPreview).mockImplementation(async (req) => ({ ...FLARE_PREVIEW, body: { prompt: req.prompt } }));
+    await renderDrawer(flare);
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    try {
+      fireEvent.click(screen.getByRole("button", { name: "See the exact request" }));
+      await flush();
+      expect(api.studioPreview).toHaveBeenCalledTimes(1); // at once on the click
+      screen.getByText("key removed · goes to openrouter.ai");
+      // Each key of the prompt changes the draft: none is asked while typing goes on.
+      for (const text of ["a", "a li", "a lighthouse"]) {
+        act(() => useStudio.getState().setPrompt("image", text));
+        act(() => vi.advanceTimersByTime(100));
+      }
+      act(() => vi.advanceTimersByTime(199));
+      await flush();
+      expect(api.studioPreview).toHaveBeenCalledTimes(1);
+      act(() => vi.advanceTimersByTime(1));
+      await flush();
+      expect(api.studioPreview).toHaveBeenCalledTimes(2);
+      expect(api.studioPreview).toHaveBeenLastCalledWith(expect.objectContaining({ prompt: "a lighthouse" }));
+      screen.getByText(/"prompt": "a lighthouse"/);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("an answer for a draft changed since is dropped, even when it comes last", async () => {
+    const answers: ((preview: RequestPreview) => void)[] = [];
+    vi.mocked(api.studioPreview).mockImplementation(() => new Promise((resolve) => answers.push(resolve)));
+    const answered = (background: string): RequestPreview => ({ ...FLARE_PREVIEW, body: { background } });
+    await renderDrawer(flare);
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    try {
+      fireEvent.click(screen.getByRole("button", { name: "See the exact request" }));
+      act(() => useStudio.getState().setValue("image", "background", "opaque"));
+      act(() => vi.advanceTimersByTime(300));
+      expect(answers).toHaveLength(2);
+      await act(async () => answers[1]!(answered("opaque")));
+      await flush();
+      screen.getByText(/"background": "opaque"/);
+      // The answer for the draft before the change comes after it: it is not shown.
+      await act(async () => answers[0]!(answered("auto")));
+      await flush();
+      screen.getByText(/"background": "opaque"/);
+      expect(screen.queryByText(/"background": "auto"/)).toBeNull();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("a company saved in a setup that the model no longer lists is named in words, its tag kept", async () => {
+    await renderDrawer(flare);
+    act(() =>
+      useStudio.getState().setRouting("image", { order: ["acme-cloud"], only: false, allowFallbacks: true, zdr: false }),
+    );
+    const company = screen.getByRole("combobox", { name: "Company that runs it" }) as HTMLSelectElement;
+    expect(company.value).toBe("acme-cloud");
+    expect(within(company).getAllByRole("option").map((o) => o.textContent)).toEqual([
+      "OpenRouter chooses",
+      "OpenAI",
+      "A company no longer listed",
+    ]);
+    expect(company.selectedOptions[0]?.textContent).toBe("A company no longer listed");
+  });
+
+  it("Allow another company comes back as chosen when a company is picked again", async () => {
+    await renderDrawer(flare);
+    const routing = () => useStudio.getState().drafts.image.routing;
+    const company = () => screen.getByRole("combobox", { name: "Company that runs it" });
+    fireEvent.change(company(), { target: { value: "openai" } });
+    fireEvent.click(screen.getByRole("checkbox", { name: "Allow another company if that one is busy" }));
+    expect(routing()).toEqual({ order: ["openai"], only: false, allowFallbacks: false, zdr: false });
+    fireEvent.change(company(), { target: { value: "" } }); // OpenRouter chooses
+    expect(routing()).toBeNull();
+    fireEvent.change(company(), { target: { value: "openai" } });
+    expect(routing()).toEqual({ order: ["openai"], only: false, allowFallbacks: false, zdr: false });
+    // Reset all starts it again: another company may.
+    fireEvent.click(screen.getByRole("button", { name: "Reset all" }));
+    expect(routing()).toBeNull();
+    fireEvent.change(company(), { target: { value: "openai" } });
+    expect(routing()).toEqual({ order: ["openai"], only: false, allowFallbacks: true, zdr: false });
+  });
+
+  it("Extra fields that take no names give no hint, and Save's refusal is announced on the box", async () => {
+    const takesNone: MediaModel = {
+      ...flare,
+      params: flare.params.map((p) =>
+        p.kind.type === "extra" ? { ...p, kind: { type: "extra" as const, allowedKeys: [] } } : p,
+      ),
+    };
+    await renderDrawer(takesNone);
+    screen.getByText("Extra fields (JSON)");
+    expect(screen.queryByText(/This model accepts/)).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "Edit JSON" }));
+    const box = screen.getByRole("textbox", { name: "Extra fields (JSON)" });
+    expect(box.getAttribute("aria-describedby")).toBeNull();
+    fireEvent.change(box, { target: { value: "{nope" } });
+    fireEvent.click(screen.getByRole("button", { name: "Save" }));
+    const alert = screen.getByRole("alert");
+    expect(alert.textContent).toBe("This is not valid JSON.");
+    expect(box.getAttribute("aria-describedby")).toBe(alert.id);
+  });
+
+  it("a picture made through OpenAI itself offers no routing", async () => {
+    const openai: StudioEndpoint = { ...endpoint([flare]), name: "OpenAI", company: "openai", host: "api.openai.com" };
+    await load({ endpoints: [openai], prefs: prefs({ lastModel: { image: { target: { endpoint: 1 }, model: flare.id } } }) });
+    await act(async () => {
+      render(<AdvancedDrawer tab="image" />);
+    });
+    expect(useStudio.getState().drafts.image).toMatchObject({ target: { endpoint: 1 }, model: flare.id });
+    screen.getByText("Background"); // the drawer is open
+    expect(screen.queryByText("Company that runs it")).toBeNull();
+    expect(screen.queryByText("OpenRouter chooses")).toBeNull();
+  });
+
   it("stays closed as saved, and saves the choice when opened", async () => {
     cleanup();
     const tab = await show(flare, { background: "transparent" }, { prefs: { advancedOpen: false } });
@@ -507,6 +704,48 @@ describe("My setups", () => {
       "This setup's model is no longer on this computer.",
     );
     expect(useStudio.getState().drafts.image).toBe(before);
+  });
+
+  it("a setup's extra fields wait for the price of a model never asked, then go in or are removed with the note", async () => {
+    const unpriced: MediaModel = {
+      ...flare,
+      priceFetchedAt: null,
+      params: flare.params.filter((p) => p.kind.type !== "extra"),
+    };
+    await load({ endpoints: [endpoint([unpriced, ...MODELS.filter((m) => m.id !== flare.id)])] });
+    let answer: (m: MediaModel) => void = () => undefined;
+    vi.mocked(api.studioModelPrice).mockReturnValue(new Promise((resolve) => (answer = resolve)));
+    await act(async () => {
+      render(<ChipsRow tab="image" />);
+    });
+    let refused: string | null = "";
+    act(() => {
+      refused = useStudio.getState().applySetup({ ...PRODUCT_SHOT, params: {}, extra: { moderation: "low", foo: 1 } });
+    });
+    expect(refused).toBeNull();
+    expect(api.studioModelPrice).toHaveBeenCalledWith(1, flare.id);
+    // Held aside until the model's Extra field is known: no chip, and nothing in the request.
+    expect(useStudio.getState().drafts.image).toMatchObject({ model: flare.id, extra: {}, note: null });
+    expect(screen.queryByRole("button", { name: /^Remove / })).toBeNull();
+    await act(async () => {
+      answer(flare);
+    });
+    await flush();
+    expect(useStudio.getState().drafts.image).toMatchObject({
+      extra: { moderation: "low" },
+      note: "GPT Image 2.6 Flare does not accept foo, so it was removed.",
+    });
+    screen.getByRole("button", { name: "Remove moderation: low" });
+  });
+
+  it("a setup at an endpoint without a key says so and changes nothing", async () => {
+    await load({ endpoints: [{ ...endpoint(), hasKey: false }] });
+    const before = useStudio.getState().drafts.image;
+    expect(useStudio.getState().applySetup(PRODUCT_SHOT)).toBe(
+      "OpenRouter has no key, so Studio cannot use its models. Add a key in Settings → Endpoints.",
+    );
+    expect(useStudio.getState().drafts.image).toBe(before);
+    expect(api.studioModelPrice).not.toHaveBeenCalled();
   });
 
   it("Save as setup saves the model and every setting under a name, and the menu shows it", async () => {
