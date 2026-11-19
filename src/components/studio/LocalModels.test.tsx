@@ -668,15 +668,16 @@ describe("a model downloading", () => {
     await click(screen.getByRole("button", { name: "Accept and download" }));
     const z = row("Z-Image Turbo");
     expect(within(z).queryByRole("button", { name: "Download" })).toBeNull();
-    within(z).getByText("0 GB of 6 GB · queued");
+    // The same words and sizes as Models → Downloads (6 GiB is 6.4 GB there).
+    within(z).getByText("0 B of 6.4 GB · queued");
     const bar = within(z).getByRole("progressbar", { name: "Downloading Z-Image Turbo" });
     expect(bar.getAttribute("aria-valuenow")).toBe("0");
     // Its progress events move it on.
     act(() => progress(group({ bytesDone: 3 * GIB, bytesPerSecond: 64 * 1024 * 1024 })));
-    within(z).getByText("3 GB of 6 GB · downloading · 48 s left");
+    within(z).getByText("3.2 GB of 6.4 GB · downloading · 48 s left");
     expect(bar.getAttribute("aria-valuenow")).toBe("50");
     act(() => progress(group({ bytesDone: 3 * GIB, checking: true })));
-    within(z).getByText("3 GB of 6 GB · checking the file…");
+    within(z).getByText("3.2 GB of 6.4 GB · checking the file…");
     // Another model's row is as it was.
     within(row(/FLUX.2 klein/)).getByRole("button", { name: "Download again" });
   });
@@ -685,7 +686,7 @@ describe("a model downloading", () => {
     ipc.listDownloads.mockResolvedValue([group()]);
     await showLocal();
     const z = row("Z-Image Turbo");
-    within(z).getByText("2 GB of 6 GB · downloading");
+    within(z).getByText("2.1 GB of 6.4 GB · downloading");
     expect(within(z).queryByRole("button", { name: "Download" })).toBeNull();
     const installed: LocalModels = {
       ...LOCAL,
@@ -708,7 +709,7 @@ describe("a model downloading", () => {
     await showLocal();
     const k = row(/FLUX.2 klein/);
     within(k).getByText("Installed");
-    within(k).getByText("2 GB of 6 GB · paused");
+    within(k).getByText("2.1 GB of 6.4 GB · paused");
     expect(within(k).queryByRole("button", { name: "Download again" })).toBeNull();
     within(k).getByRole("button", { name: "Delete" });
   });
@@ -724,7 +725,7 @@ describe("a model downloading", () => {
     await showLocal();
     const result = await openResult("someone/Z-Image-Turbo-GGUF");
     expect(within(result).queryByRole("button", { name: "Download" })).toBeNull();
-    within(result).getByText("2 GB of 6 GB · error");
+    within(result).getByText("2.1 GB of 6.4 GB · error");
     within(result).getByText("The download stopped. Resume it in Models → Downloads.");
     within(result).getByRole("progressbar", { name: "Downloading z-image-turbo-Q5_K_M.gguf" });
   });

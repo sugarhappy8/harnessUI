@@ -1,4 +1,5 @@
 import { useState } from "react";
+import { formatBytes } from "../../lib/format";
 import type { DownloadGroup } from "../../lib/types";
 import {
   amountGb,
@@ -84,13 +85,14 @@ export function useModelDownload(genModelId: string): DownloadGroup | null {
 }
 
 /** A model's download while it runs (Pause and Cancel are in Models → Downloads): how far it
- *  got, in Models → Downloads' words with Studio's sizes, its bar, and why it stopped. */
+ *  got, in Models → Downloads' words and sizes (the same download reads the same in both), its
+ *  bar, and why it stopped. The offer's and the engine's sizes keep Studio's own. */
 export function DownloadProgress(props: { group: DownloadGroup; name: string }) {
   const { group: g } = props;
   const pct = g.bytesTotal > 0 ? Math.min(100, (g.bytesDone / g.bytesTotal) * 100) : 0;
   return (
     <div className="flex w-full flex-col gap-1">
-      <p className="text-xs text-fg-muted">{downloadProgressWords(g, amountGb)}</p>
+      <p className="text-xs text-fg-muted">{downloadProgressWords(g, formatBytes)}</p>
       <div
         className="h-1.5 overflow-hidden rounded bg-bg-muted"
         role="progressbar"
