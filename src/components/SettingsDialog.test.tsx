@@ -17,6 +17,7 @@ vi.mock("./evals/ModelCheck", () => ({ ModelCheck: () => <p>model check page</p>
 vi.mock("./settings/LocalModels", () => ({ LocalModels: () => <p>local models page</p> }));
 vi.mock("./settings/OtherApps", () => ({ OtherApps: () => <p>other apps page</p> }));
 vi.mock("./settings/Reverse", () => ({ Reverse: () => <p>reverse page</p> }));
+vi.mock("./settings/StudioSettings", () => ({ StudioSettings: () => <p>studio page</p> }));
 
 const { SettingsDialog } = await import("./SettingsDialog");
 
@@ -26,6 +27,7 @@ const SECTIONS = [
   "Reverse engineering",
   "Other apps",
   "Endpoints",
+  "Studio",
   "Hugging Face",
   "MCP servers",
   "Skills",
@@ -40,9 +42,9 @@ const SECTIONS = [
 
 const classes = (el: HTMLElement) => el.className.split(/\s+/);
 
-async function open(initialTab = "skills") {
+async function open(initialTab = "skills", onOpenChange: (open: boolean) => void = () => undefined) {
   await act(async () => {
-    render(<SettingsDialog open onOpenChange={() => undefined} initialTab={initialTab} />);
+    render(<SettingsDialog open onOpenChange={onOpenChange} initialTab={initialTab} />);
   });
   return screen.getByRole("dialog");
 }
@@ -68,12 +70,30 @@ describe("Settings: the section list stays inside the dialog and scrolls", () =>
     // The list may shrink below its content's height (min-h-0) and then scrolls.
     expect(classes(list)).toContain("min-h-0");
     expect(classes(list)).toContain("overflow-y-auto");
+    // Every row fits the dialog at the default window size: 16 rows of 32 px, 2 px apart,
+    // inside the 40rem dialog under its title row (they would not fit 4 px apart).
+    expect(classes(list)).toContain("gap-0.5");
     // Wide enough that "Reverse engineering" fits on one line in most fonts.
     expect(classes(list)).toContain("w-48");
     expect(classes(list)).not.toContain("w-44");
     // The list's row is the part of the dialog that shrinks.
     const row = list.parentElement as HTMLElement;
     expect(classes(row)).toEqual(expect.arrayContaining(["flex", "min-h-0", "flex-1"]));
+  });
+
+  it("opens on Studio's page, after Endpoints", async () => {
+    const dialog = await open("studio");
+    expect(within(dialog).getByRole("tab", { name: "Studio" }).getAttribute("aria-selected")).toBe("true");
+    expect(within(dialog).getByText("studio page")).toBeTruthy();
+  });
+
+  it("closes when a page opens Studio (Settings → Studio's Get local models)", async () => {
+    const onOpenChange = vi.fn();
+    await open("studio", onOpenChange);
+    await act(async () => {
+      window.dispatchEvent(new CustomEvent("app:open-studio", { detail: "local" }));
+    });
+    expect(onOpenChange).toHaveBeenCalledWith(false);
   });
 
   it("opens on the last section, which is reachable in the list", async () => {
@@ -85,11 +105,11 @@ describe("Settings: the section list stays inside the dialog and scrolls", () =>
 });
 
 // jsdom does no layout: a short window is drawn here by hand. The list sits 49 px down the
-// dialog and shows 200 px; each row is 32 px tall, 36 px apart, after the list's 12 px padding.
+// dialog and shows 200 px; each row is 32 px tall, 34 px apart, after the list's 12 px padding.
 const LIST_TOP = 49;
 const SHOWN = 200;
 const ROW = 32;
-const rowTop = (i: number) => 12 + i * 36;
+const rowTop = (i: number) => 12 + i * 34;
 
 function layout(el: HTMLElement) {
   const role = el.getAttribute("role");

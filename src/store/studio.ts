@@ -25,6 +25,8 @@
 // never start a run; Animate, Edit and Use as reference, which keep the picture as an added
 // picture; Star; Delete, after which a finished run left without results goes too; several saved
 // into one folder: in ./studioResults, composed in here), the grid's filters and Load more.
+// Task B10: the Studio engine's state read again (Settings → Studio's engine line), and Delete
+// stopped and failed runs (in ./studioResults).
 import { create, type StoreApi, type UseBoundStore } from "zustand";
 import * as api from "../components/studio/api";
 import { carry, closestModel, defaultsFor, dropUnmet, familyOf, type Values } from "../components/studio/canonical";
@@ -145,6 +147,10 @@ export interface StudioState extends StudioRunState, StudioResultsState {
    *  with the first model), then the engine's state read again; how the download goes comes as
    *  `studio-engine-progress`. Rejects when it could not start. */
   downloadEngine(): Promise<void>;
+  /** Reads the Studio engine's state again into the local models (after a removal, which
+   *  sends no `finished` event, a download that ended, or one that could not start). A failure
+   *  leaves the state as it was, and a trace; before the local models were read it does nothing. */
+  refreshEngine(): Promise<void>;
   /** *Download again*: installed model `genModelId`'s parts are checked and what is missing or
    *  damaged is fetched again. Rejects when it could not start (Task B14 asks for a licence the
    *  download needs accepted first). */
@@ -602,7 +608,10 @@ export const useStudio: UseBoundStore<StoreApi<StudioState>> = create<StudioStat
     downloadEngine: async () => {
       await api.studioEngineDownload(true);
       // The engine now reads as downloading. The download has started whether or not this read
-      // works; a failure leaves a trace.
+      // works.
+      await get().refreshEngine();
+    },
+    refreshEngine: async () => {
       try {
         const engine = await api.studioEngineStatus();
         set((s) => (s.local ? { local: { ...s.local, engine } } : {}));

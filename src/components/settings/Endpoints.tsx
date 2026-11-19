@@ -10,6 +10,7 @@ import {
   CONTEXT_CHOICES,
   ENDPOINT_CHOICES,
   SERVER_CHOICES,
+  abilitiesOf,
   choiceFor,
   hostOf,
   originOf,
@@ -21,6 +22,8 @@ import {
 // paste the key), a context size for each endpoint, Edit, and a "Cloud" mark on an endpoint
 // on the internet. The backend checks every value again when it is saved: it refuses an API
 // key over plain http:// to a server on the internet, and a saved key for a new address.
+// [0.1.0] Each card says what its endpoint can do ("Chat · Pictures · Video"): OpenRouter and
+// OpenAI also make pictures (and OpenRouter video) in Studio.
 
 interface Form {
   /** The endpoint being edited; `null` for a new one. */
@@ -189,6 +192,9 @@ export function Endpoints() {
                     <span className="sr-only">: {cloudTitle(p.baseUrl)}</span>
                   </span>
                 )}
+                <span data-abilities className="text-xs font-normal text-fg-muted">
+                  {abilitiesOf(p.kind)}
+                </span>
               </p>
               <p className="truncate text-xs text-fg-muted">
                 {p.baseUrl}

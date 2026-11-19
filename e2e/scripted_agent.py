@@ -482,7 +482,7 @@ def settings_section_list(s, notes):
                      f"{geo['dialogBottom']:.0f}, list {geo['listTop']:.0f}-{geo['listBottom']:.0f}, last tab ends at "
                      f"{geo['tabs'][-1]['bottom']:.0f}; on two lines: {wrapped}; outside: {outside}")
         s.screenshot(str(OUT / "settings-sections-1200x800.png"))
-        assert len(labels) == 15 and labels[-1] == "Diagnostics", labels
+        assert len(labels) == 16 and labels[-1] == "Diagnostics", labels
         assert geo["dialogTop"] >= 0 and geo["dialogBottom"] <= geo["inner"] + 0.5, geo
         assert geo["uncovered"], f"the dialog's title or Close button is covered at 1200x800: {geo['covered']}"
         assert not outside, f"sections drawn outside the dialog at 1200x800: {outside}"

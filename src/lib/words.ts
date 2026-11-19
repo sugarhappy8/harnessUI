@@ -2,7 +2,7 @@
 // a raw identifier such as "vulkan", "Vulkan0" or "text_model". Every phrase of the model
 // loading screens lives here, so the wording stays the same wherever it appears; the test
 // walks every value of the contract's enums.
-import type { Company, LocalFit, MediaKind, RefRole } from "../components/studio/types";
+import type { Company, GpuPolicy, LocalFit, MediaKind, RefRole } from "../components/studio/types";
 import { APP_NAME } from "./app";
 import type {
   BackendKind,
@@ -1049,11 +1049,40 @@ export const STUDIO_ACTIONS = {
   downloadAgain: "Download again",
 } as const;
 
+/** The Studio engine's download size and the short name of its licence: "29 MB, MIT". */
+export function engineSizeWords(bytes: number, licenseName: string): string {
+  return `${downloadAmount(bytes)}, ${licenceWord(licenseName)}`;
+}
+
 /** The Studio engine's download, where it is missing (Tasks B8, B10 and B13): its size and the
  *  short name of its licence, "Download the Studio engine (29 MB, MIT)". */
 export function engineDownloadWords(bytes: number, licenseName: string): string {
-  return `Download the Studio engine (${downloadAmount(bytes)}, ${licenceWord(licenseName)})`;
+  return `Download the Studio engine (${engineSizeWords(bytes, licenseName)})`;
 }
+
+/** The Studio engine's line (Settings → Studio and Get local models' footer, Tasks B10 and
+ *  B13): built in on a Mac; on Windows a pack that comes with the first model, is missing,
+ *  downloads or is installed. */
+export const ENGINE_LINE = {
+  builtIn: "Studio engine: built in",
+  /** No local model yet: the pack downloads with the first one ("29 MB, MIT"). */
+  withFirstModel: (size: string) => `Studio engine: comes with your first model (${size})`,
+  missing: "Studio engine: missing",
+  partial: "Studio engine: partly downloaded",
+  installed: (build: string) => `Studio engine: installed · build ${build}`,
+  /** How much of the pack is here; amounts are `downloadAmount`'s ("12 MB of 29 MB"). */
+  downloading: (done: string | null, total: string | null) =>
+    done !== null && total !== null ? `Studio engine: downloading · ${done} of ${total}` : "Studio engine: downloading…",
+  unpacking: "Studio engine: unpacking…",
+  /** Linux without a development engine. */
+  unavailable: "Studio engine: not available on this computer",
+  remove: "Remove",
+  removeTitle: "Remove the Studio engine?",
+  /** Under the question; `size` is its download ("29 MB"). */
+  removeBody: (size: string) =>
+    `Pictures and videos cannot be made on this computer until it is downloaded again (${size}). Your models and results stay.`,
+  cancel: "Cancel",
+} as const;
 
 /** A recommended local model that fits, and its whole download: "FLUX.2 klein 4B fits this
  *  computer (5.3 GB)." */
@@ -1105,6 +1134,13 @@ export function studioDay(at: number, now: number = Date.now()): string {
   const day = new Date(at);
   const short = `${day.getDate()} ${MONTHS[day.getMonth()]}`;
   return day.getFullYear() === new Date(now).getFullYear() ? short : `${short} ${day.getFullYear()}`;
+}
+
+/** A day and time as Settings → Studio names it, always with the year: "17 Nov 2026 09:00". */
+export function studioDateTime(at: number): string {
+  const day = new Date(at);
+  const two = (n: number) => String(n).padStart(2, "0");
+  return `${day.getDate()} ${MONTHS[day.getMonth()]} ${day.getFullYear()} ${two(day.getHours())}:${two(day.getMinutes())}`;
 }
 
 /** When an endpoint's model lists were saved: "OpenRouter's lists updated 17 Nov". */
@@ -1675,3 +1711,64 @@ export const STUDIO_VIEWER_KEYS = {
     ["Esc", "Close the viewer (never stops a Studio job)"],
   ] as const satisfies readonly (readonly [string, string])[],
 } as const;
+
+/** Settings → Studio (Task B10): the local block first, then the gallery, cloud spending and
+ *  the cloud model lists. */
+export const STUDIO_SETTINGS = {
+  local: LOCAL_MARK.name,
+  /** The picture and video models installed here and the disk they take ("14 GB"). */
+  models: (count: number, bytes: number) =>
+    count === 0 ? "Picture and video models: none yet" : `Picture and video models: ${count} (${amountGb(bytes)})`,
+  gpu: "When a local job needs the graphics card",
+  gpuHelp: "When a local job fits beside the chat model, both run. When it does not:",
+  gpuChoice: {
+    unload: "Unload the chat model",
+    ask: "Ask",
+    processor: "Use the processor for local pictures",
+  } satisfies Record<GpuPolicy, string>,
+  reloadAfter: "Reload it after Studio",
+  reloadHelp: "Loads the chat model again once, after the last local job.",
+  results: "Results",
+  /** What the gallery holds and where: "Studio uses 1.2 GB in ~/harnessUI/studio (312
+   *  pictures, 14 videos)". Sizes in the same binary units as `amountGb`. */
+  usage(bytes: number, folder: string, pictures: number, videos: number): string {
+    const size = bytes > 0 ? downloadAmount(bytes) : "0 MB";
+    const count = (n: number, one: string) => `${n} ${one}${n === 1 ? "" : "s"}`;
+    return `Studio uses ${size} in ${folder} (${count(pictures, "picture")}, ${count(videos, "video")})`;
+  },
+  openFolder: "Open folder",
+  changeFolder: "Change…",
+  folderChanged: "New results go to the new folder; existing ones stay where they are.",
+  deleteUnfinished: "Delete stopped and failed runs",
+  deleteTitle: "Delete stopped and failed runs?",
+  deleteBody:
+    "Every run that failed, was stopped or was refused goes from the gallery, with any files it kept. Cloud runs made today still count toward today's spending.",
+  /** How many runs *Delete stopped and failed runs* deleted. */
+  deleted: (n: number) =>
+    n === 0 ? "There were no stopped or failed runs." : n === 1 ? "1 run was deleted." : `${n} runs were deleted.`,
+  spending: "Cloud spending",
+  confirmVideo: "Ask before every video",
+  /** Before the amount box; "or more" follows it. */
+  confirmAt: "Ask before runs of",
+  orMore: "or more",
+  confirmAtRange: "Choose an amount from $0.25 to $100.",
+  limit: "Daily limit",
+  limitAmount: "Daily limit in US dollars",
+  limitHelp:
+    "A cloud run that would take today's spending past it is not sent. Runs on this computer are free and never count.",
+  limitRange: "Choose an amount from $1 to $1,000.",
+  lists: "Cloud model lists",
+  listUpdated: (name: string, at: number) => `${name} · updated ${studioDateTime(at)}`,
+  listNone: (name: string) => `${name} · no lists saved yet`,
+  updateNow: "Update now",
+  noEndpoint: "No endpoint makes pictures or video yet. Add OpenRouter or OpenAI in Endpoints.",
+} as const;
+
+/** What an endpoint card says it can do (Settings → Endpoints, 0.1.0): "Chat · Pictures ·
+ *  Video" for OpenRouter, "Chat · Pictures" for OpenAI, "Chat" for the others. */
+export function abilitiesWords(media: { image: boolean; video: boolean } | undefined): string {
+  const parts = ["Chat"];
+  if (media?.image) parts.push(STUDIO_TABS.image);
+  if (media?.video) parts.push(STUDIO_TABS.video);
+  return parts.join(" · ");
+}

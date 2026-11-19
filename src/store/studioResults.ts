@@ -3,11 +3,12 @@
 // Reuse without seed, which fill the prompt box and never start a run; Animate, Edit and Use as
 // reference, which keep the picture as an added picture (another model offered when the tab's
 // cannot take it, an installed local one first); Star; Delete, after which a finished run left
-// without results goes too; and several saved into one folder.
+// without results goes too; several saved into one folder; and Settings → Studio's Delete
+// stopped and failed runs (Task B10).
 import type { StoreApi } from "zustand";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import * as api from "../components/studio/api";
-import type { MediaModel, ModelChoice, Output, RefItem, RefRole, Run } from "../components/studio/types";
+import type { MediaModel, ModelChoice, Output, RefItem, RefRole, Run, RunStatus } from "../components/studio/types";
 import { STUDIO_OFFER, STUDIO_REUSE } from "../lib/words";
 import {
   cloudModelsFor,
@@ -36,6 +37,10 @@ export interface ModelOffer {
   /** The offered model's name, for its button; `null` with no choice. */
   name: string | null;
 }
+
+/** How a run ends without finishing: what *Delete stopped and failed runs* deletes (the
+ *  backend's `unfinished_creation_run_ids`). */
+const UNFINISHED: ReadonlySet<RunStatus> = new Set<RunStatus>(["failed", "blocked", "cancelled", "interrupted"]);
 
 /** The part of Studio's state this module keeps. */
 export interface StudioResultsState {
@@ -68,6 +73,10 @@ export interface StudioResultsState {
   /** Deletes results `outputIds`, their files and records (today's spending stays as it is):
    *  they leave the runs, and a finished run left without results goes with them. */
   remove(outputIds: string[]): Promise<void>;
+  /** *Delete stopped and failed runs*: every run that ended without finishing (failed, blocked,
+   *  cancelled or interrupted) is deleted with its files, as the backend counts them, and leaves
+   *  the runs. Resolves with how many went. */
+  removeUnfinished(): Promise<number>;
   /** Save several: the folder picker, then each result copied into that folder under its own
    *  file name, without its settings. Resolves with the folder, or `null` (nothing saved) when
    *  the picker is cancelled; a copy that fails does not stop the others, and the first failure
@@ -180,6 +189,21 @@ export function createResults(
       }));
       // What the gallery holds changed (today's spending does not).
       deps.rereadUsage();
+    },
+    removeUnfinished: async () => {
+      const count = await api.studioDeleteUnfinished();
+      set((s) => {
+        // Each run as it stands now: one reported since its page was read by that report.
+        const unfinished = (run: Run) => UNFINISHED.has((s.live[run.id] ?? run).status);
+        const kept = (runs: Run[]) => runs.filter((run) => !unfinished(run));
+        return {
+          runs: kept(s.runs),
+          recentRuns: kept(s.recentRuns),
+          live: Object.fromEntries(Object.entries(s.live).filter(([, run]) => !unfinished(run))),
+        };
+      });
+      deps.rereadUsage();
+      return count;
     },
     saveSeveral: async (outputIds) => {
       const folder = await openDialog({ directory: true, multiple: false });

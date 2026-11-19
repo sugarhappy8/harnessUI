@@ -170,6 +170,25 @@ describe("what is saved", () => {
     vi.mocked(api.studioUsage).mockResolvedValue({ spentTodayUsd: 0, pendingUsd: 0, limitUsd: 10, folder: "", bytes: 0, pictures: 0, videos: 0 });
   }
 
+  it("reads the Studio engine's state again into the local models, and a failed read leaves them", async () => {
+    useStudio.setState({ local: LOCAL });
+    const removed = { ...LOCAL.engine, state: "notInstalled" as const, downloadBytes: 30_303_000 };
+    vi.mocked(api.studioEngineStatus).mockResolvedValue(removed);
+    await useStudio.getState().refreshEngine();
+    expect(useStudio.getState().local).toEqual({ ...LOCAL, engine: removed });
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    vi.mocked(api.studioEngineStatus).mockRejectedValue(new Error("gone"));
+    await useStudio.getState().refreshEngine();
+    expect(useStudio.getState().local?.engine).toEqual(removed);
+    expect(warn).toHaveBeenCalled();
+    warn.mockRestore();
+    // Before the local models were read there is nothing to put it in.
+    useStudio.setState({ local: null });
+    vi.mocked(api.studioEngineStatus).mockResolvedValue(removed);
+    await useStudio.getState().refreshEngine();
+    expect(useStudio.getState().local).toBeNull();
+  });
+
   it("reads each saved thing once, even when asked twice at once", async () => {
     saved();
     await Promise.all([useStudio.getState().load(), useStudio.getState().load()]);
@@ -438,6 +457,57 @@ describe("the gallery's results (Task B9)", () => {
     await flush();
     // What the gallery holds is read again; today's spending stays as the backend says.
     expect(api.studioUsage).toHaveBeenCalled();
+  });
+
+  it("Delete stopped and failed runs takes every run that ended without finishing off the cards", async () => {
+    const ended = (id: string, status: Run["status"]) => run({ id, status, outputs: [] });
+    const failed = ended("failed", "failed");
+    const blocked = ended("blocked", "blocked");
+    const cancelled = ended("cancelled", "cancelled");
+    const interrupted = ended("interrupted", "interrupted");
+    const waiting = run({ id: "waiting", status: "waiting", outputs: [] });
+    // Each run is judged as it stands now: a video read waiting that has failed since goes, and
+    // one read failed that *Get it anyway* took back to waiting stays.
+    const failedSince = ended("failed-since", "waiting");
+    const takenBack = ended("taken-back", "failed");
+    useStudio.setState({
+      runs: [RUN, failed, blocked, failedSince, takenBack, LOCAL_RUN],
+      recentRuns: [RUN, cancelled],
+      live: {
+        [interrupted.id]: interrupted,
+        [waiting.id]: waiting,
+        [RUN.id]: RUN,
+        [failedSince.id]: { ...failedSince, status: "failed" },
+        [takenBack.id]: { ...takenBack, status: "waiting" },
+      },
+    });
+    vi.mocked(api.studioDeleteUnfinished).mockResolvedValue(4);
+    vi.mocked(api.studioUsage).mockResolvedValue({
+      spentTodayUsd: 0.04,
+      pendingUsd: 0,
+      limitUsd: 10,
+      folder: "/g",
+      bytes: 0,
+      pictures: 0,
+      videos: 0,
+    });
+    await expect(useStudio.getState().removeUnfinished()).resolves.toBe(4);
+    expect(api.studioDeleteUnfinished).toHaveBeenCalledTimes(1);
+    const s = useStudio.getState();
+    expect(s.runs.map((r) => r.id)).toEqual([RUN.id, "taken-back", LOCAL_RUN.id]);
+    expect(s.recentRuns.map((r) => r.id)).toEqual([RUN.id]);
+    expect(Object.keys(s.live).sort()).toEqual([RUN.id, "taken-back", "waiting"].sort());
+    await flush();
+    // What the gallery holds is read again.
+    expect(api.studioUsage).toHaveBeenCalled();
+  });
+
+  it("a Delete stopped and failed runs that fails keeps the cards", async () => {
+    const failed = run({ id: "failed", status: "failed", outputs: [] });
+    useStudio.setState({ runs: [failed] });
+    vi.mocked(api.studioDeleteUnfinished).mockRejectedValue({ code: "internal", message: "no", nextStep: "", details: "" });
+    await expect(useStudio.getState().removeUnfinished()).rejects.toMatchObject({ code: "internal" });
+    expect(useStudio.getState().runs).toEqual([failed]);
   });
 
   it("a delete that fails changes nothing", async () => {

@@ -41,6 +41,7 @@ SETTINGS_PAGES = [
     "Reverse engineering",
     "Other apps",
     "Endpoints",
+    "Studio",
     "Hugging Face",
     "MCP servers",
     "Skills",
@@ -141,7 +142,23 @@ def main() -> int:
         s.wait_for(lambda: "Look for an image file" not in s.page_text(), 10, "Models closed")
         s.click_button("Settings")
         for tab in SETTINGS_PAGES:
-            s.click_button(tab)
+            # The section's own tab, by its text, with a real pointer click: a button elsewhere
+            # can carry the same name (the sidebar's Studio button comes first in the page and
+            # sits under the dialog's overlay, where `click_button` would fall back to a DOM
+            # click on it).
+            def find(tab=tab):
+                el = s.execute(
+                    """
+                    return [...document.querySelectorAll(
+                      '[role=dialog] [role=tablist][aria-label="Settings sections"] [role=tab]')]
+                      .find(t => t.innerText.trim() === arguments[0]) || null;
+                    """,
+                    tab,
+                )
+                return el or False
+
+            el = s.wait_for(find, 10, f"settings tab {tab!r}")
+            s._pointer_click(find, el)
             # The page must really open, or the gate would pass without loading it.
             s.wait_for(
                 lambda tab=tab: s.execute(
