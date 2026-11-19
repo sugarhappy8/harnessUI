@@ -219,4 +219,22 @@ mod tests {
         );
         assert_eq!(conf["app"]["withGlobalTauri"], serde_json::json!(false));
     }
+
+    /// One version number for the crates, the app's config (what the About box, the updater
+    /// and the release notes read) and the webview's package files, changed together.
+    #[test]
+    fn the_version_is_the_same_everywhere() {
+        let v = env!("CARGO_PKG_VERSION");
+        assert_eq!(v, "0.1.0");
+        let conf: serde_json::Value =
+            serde_json::from_str(include_str!("../tauri.conf.json")).unwrap();
+        let pkg: serde_json::Value =
+            serde_json::from_str(include_str!("../../package.json")).unwrap();
+        let lock: serde_json::Value =
+            serde_json::from_str(include_str!("../../package-lock.json")).unwrap();
+        assert_eq!(conf["version"], v);
+        assert_eq!(pkg["version"], v);
+        assert_eq!(lock["version"], v);
+        assert_eq!(lock["packages"][""]["version"], v);
+    }
 }

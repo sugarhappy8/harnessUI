@@ -8,7 +8,8 @@ and docs/dev/0.0.6/item5-spec.md may claim no more of those checks than ARCHITEC
 does. ARCHITECTURE.md and docs/dev/0.0.6/item6-spec.md state the `llama-fit-params` time
 limit the code sets. What the docs say about Studio (0.1.0: hosts, money rules, audit row,
 CSP, the engine pin, the local rules and the scope note) is checked against the code that
-keeps it. A failure names the sentence to correct.
+keeps it, and CHANGELOG.md's 0.1.0 entry must say what Studio adds, local first. A failure
+names the sentence to correct.
 
     python3 -I scripts/docs_test.py
 
@@ -302,7 +303,8 @@ class FitParamsLimitAsTheCodeSetsIt(unittest.TestCase):
 
 
 class StudioDocs(unittest.TestCase):
-    """What the docs say about Studio matches the code: hosts, money rules, audit row, CSP, scope note."""
+    """What the docs say about Studio matches the code: hosts, money rules, audit row, CSP, scope note,
+    and the 0.1.0 changelog entry."""
 
     def test_13_6_has_a_studio_row_with_its_hosts(self):
         row = paragraph(section("### 13.6 Network use"), "| Studio |")
@@ -373,6 +375,13 @@ class StudioDocs(unittest.TestCase):
             self.skipTest("the catalog has measured speed points: time figures may be written")
         for doc in ("README.md", "CHANGELOG.md"):
             self.assertNotRegex(read(doc), r"\b(s|seconds?|min|minutes?) (a|per|for a) (picture|clip)", doc)
+
+    def test_the_changelog_tells_users_what_0_1_0_does(self):
+        entry = read("CHANGELOG.md").split("\n## ")[1]
+        self.assertTrue(entry.startswith("0.1.0 ("))
+        for words in ("Studio", "On this computer", "stable-diffusion.cpp", "Hugging Face", "$10", "$1 or more", "### Added", "### Known limits"):
+            self.assertIn(words, entry)
+        self.assertLess(entry.index("On this computer"), entry.index("OpenRouter"))
 
 
 if __name__ == "__main__":
