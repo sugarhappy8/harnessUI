@@ -1,7 +1,6 @@
 import { useId, useRef, useState, type KeyboardEvent, type ReactNode } from "react";
 import { Popover } from "radix-ui";
 import { Check, ChevronDown, Cloud, Search } from "lucide-react";
-import type { ErrorInfo } from "../../lib/types";
 import {
   cloudChipWords,
   LOCAL_FIT_WORDS,
@@ -11,20 +10,38 @@ import {
   STUDIO_PRICE,
   STUDIO_TIME,
 } from "../../lib/words";
-import { toErrorInfo } from "../../store/app";
-import { FITTING, fittingEntry, isAutoModel, recentModels, useStudio, type Draft, type StudioTab } from "../../store/studio";
+import {
+  FITTING,
+  fittingEntry,
+  isAutoModel,
+  priceNotAsked,
+  recentChoices,
+  useStudio,
+  type Draft,
+  type StudioTab,
+} from "../../store/studio";
 import { ErrorBanner } from "../ErrorBanner";
 import { FitDot } from "../FitBadge";
 import { PlaceMark } from "../PlaceMark";
 import { formatUsd } from "./cost";
 import { etaText } from "./eta";
 import { LocalMark } from "./LocalMark";
-import type { Canonical, Company, InstalledLocal, LocalModels, MediaModel, RunTarget, StudioEndpoint } from "./types";
+import type {
+  Canonical,
+  Company,
+  InstalledLocal,
+  LocalModels,
+  MediaModel,
+  ModelChoice,
+  RunTarget,
+  StudioEndpoint,
+} from "./types";
 
 // Studio's model picker (0.1.0 Task B3; design 2 and local addendum Wireframe L1): a popover
 // with a search box and filter chips, then the models in groups, local first: "On this
 // computer" (installed models of the tab's kind, with their fit and time here, free and
-// private), then the recent cloud models, then each endpoint, by family, with the Cloud mark,
+// private), then the recent cloud models (from the newest runs whatever the gallery's filter,
+// each at the endpoint it ran at), then each endpoint, by family, with the Cloud mark,
 // where the prompt goes and each model's price hint. A model Studio cannot use, or one of an
 // endpoint without a key, is greyed out with the reason. Never an "Auto" model, which would
 // hide where the prompt goes. Picking an OpenRouter picture model asks for its price once
@@ -42,6 +59,8 @@ export interface PickerGroup {
   /** The family (`openai/gpt-image`), or the group's own name: "On this computer", "Recent". */
   family: string;
   models: MediaModel[];
+  /** Recent only: the endpoint each of `models` ran at, in the same order. */
+  via?: StudioEndpoint[];
 }
 
 const FILTER_WORDS: Record<PickerFilter, string> = STUDIO_PICKER.filter;
@@ -119,10 +138,10 @@ function installedHere(local: LocalModels, kind: StudioTab): InstalledLocal[] {
 /**
  * The picker's groups for `kind`, each model passing the search and every filter: "On this
  * computer" first whenever local models are read (the installed models of the kind, possibly
- * none), then "Recent" (the cloud models of `recent`, in its order, when any), then each
- * endpoint's models by family, in the order of the endpoints and of their lists. A recent model
- * stays in its family too. Models Studio cannot use are listed (the picker greys them out);
- * "Auto" models never are.
+ * none), then "Recent" (the cloud models of `recent`, in its order, each at the endpoint it
+ * names, when any are still listed there), then each endpoint's models by family, in the order
+ * of the endpoints and of their lists. A recent model stays in its family too. Models Studio
+ * cannot use are listed (the picker greys them out); "Auto" models never are.
  */
 export function pickerGroups(
   local: LocalModels | null,
@@ -130,7 +149,7 @@ export function pickerGroups(
   kind: StudioTab,
   query: string,
   filters: PickerFilter[],
-  recent: string[],
+  recent: ModelChoice[],
 ): PickerGroup[] {
   const wanted = (m: MediaModel) =>
     m.kind === kind && !isAutoModel(m) && matches(m, query) && filters.every((f) => hasFeature(m, f));
@@ -139,10 +158,20 @@ export function pickerGroups(
     const models = installedHere(local, kind).map((m) => m.model).filter(wanted);
     groups.push({ place: "local", endpoint: null, family: LOCAL_MARK.name, models });
   }
-  const cloud = endpoints.flatMap((e) => e.models.filter(wanted));
-  const recentModels = recent.flatMap((id) => cloud.find((m) => m.id === id) ?? []);
-  if (recentModels.length > 0) {
-    groups.push({ place: "cloud", endpoint: null, family: STUDIO_PICKER.recent, models: recentModels });
+  const recentRows = recent.flatMap(({ target, model: id }) => {
+    if (target === "thisComputer") return [];
+    const endpoint = endpoints.find((e) => e.providerId === target.endpoint);
+    const model = endpoint?.models.find((m) => m.id === id && wanted(m));
+    return endpoint && model ? [{ endpoint, model }] : [];
+  });
+  if (recentRows.length > 0) {
+    groups.push({
+      place: "cloud",
+      endpoint: null,
+      family: STUDIO_PICKER.recent,
+      models: recentRows.map((r) => r.model),
+      via: recentRows.map((r) => r.endpoint),
+    });
   }
   for (const endpoint of endpoints) {
     const families = new Map<string, MediaModel[]>();
@@ -154,15 +183,10 @@ export function pickerGroups(
 
 // ---- hints ----------------------------------------------------------------------------------
 
-/** An OpenRouter picture model whose price was not asked for yet. */
-function priceWhenPicked(model: MediaModel, company: Company): boolean {
-  return company === "openrouter" && model.kind === "image" && model.priceFetchedAt === null;
-}
-
 /** A cloud model's price in words: "from $0.04 a picture", "$0.10–$0.40 a second", "price shown
  *  when picked" (an OpenRouter picture not asked for yet), or "price unknown". */
 export function priceHint(model: MediaModel, company: Company): string {
-  if (priceWhenPicked(model, company)) return STUDIO_PRICE.whenPicked;
+  if (priceNotAsked(model, company)) return STUDIO_PRICE.whenPicked;
   const { unit, low, high } = model.price;
   if (unit === "free") return STUDIO_PRICE.free;
   if (low === null || high === null) return STUDIO_PRICE.unknown;
@@ -218,6 +242,12 @@ function targetKey(target: RunTarget): string {
   return target === "thisComputer" ? "here" : `endpoint ${target.endpoint}`;
 }
 
+/** Where the chosen model runs and which it is, as one key. */
+function chosenKey(chosen: Chosen | null): string {
+  if (!chosen) return "none";
+  return `${targetKey(chosen.endpoint ? { endpoint: chosen.endpoint.providerId } : "thisComputer")} ${chosen.model.id}`;
+}
+
 const CHIP =
   "rounded-full border border-border px-2 py-0.5 text-xs hover:border-border-strong aria-pressed:border-accent aria-pressed:text-accent";
 const LINK_BUTTON = "rounded-lg px-2.5 py-1.5 text-left text-sm text-accent hover:bg-bg-muted";
@@ -228,8 +258,7 @@ export function ModelPicker(props: { tab: StudioTab }) {
   const draft = useStudio((s) => s.drafts[tab]);
   const endpoints = useStudio((s) => s.endpoints);
   const local = useStudio((s) => s.local);
-  const runs = useStudio((s) => s.runs);
-  const live = useStudio((s) => s.live);
+  const recentRuns = useStudio((s) => s.recentRuns);
   const chooseModel = useStudio((s) => s.chooseModel);
   const showLocalModels = useStudio((s) => s.showLocalModels);
   const [open, setOpen] = useState(false);
@@ -241,8 +270,8 @@ export function ModelPicker(props: { tab: StudioTab }) {
 
   const chips = CHIPS[tab];
   const active = filters.filter((f) => chips.includes(f));
-  const cloudRuns = [...Object.values(live), ...runs].filter((r) => r.runsOn === "cloud");
-  const groups = pickerGroups(local, endpoints, tab, query, active, recentModels(cloudRuns, tab));
+  const cloudRuns = recentRuns.filter((r) => r.runsOn === "cloud");
+  const groups = pickerGroups(local, endpoints, tab, query, active, recentChoices(cloudRuns, tab));
   const chosen = chosenOf(draft, local, endpoints);
   const localGroup = groups.find((g) => g.place === "local");
   const recentGroup = groups.find((g) => g.place === "cloud" && g.endpoint === null);
@@ -346,14 +375,14 @@ export function ModelPicker(props: { tab: StudioTab }) {
                 <section className="pt-2">
                   <h3 className="px-2 pb-1 text-xs font-semibold text-fg-muted">{STUDIO_PICKER.recent}</h3>
                   <div role="listbox" aria-label={STUDIO_PICKER.recent}>
-                    {recentGroup.models.map((model) => {
-                      const endpoint = endpoints.find((e) => e.models.includes(model));
+                    {recentGroup.models.map((model, i) => {
+                      const endpoint = recentGroup.via?.[i];
                       return endpoint ? (
                         <CloudRow
                           key={`${endpoint.providerId} ${model.id}`}
                           endpoint={endpoint}
                           model={model}
-                          keyReasonShown
+                          inRecent
                           selected={isSelected({ endpoint: endpoint.providerId }, model)}
                           onChoose={() => choose({ endpoint: endpoint.providerId }, model)}
                         />
@@ -379,7 +408,8 @@ export function ModelPicker(props: { tab: StudioTab }) {
           </Popover.Content>
         </Popover.Portal>
       </Popover.Root>
-      <ChosenLine tab={tab} chosen={chosen} />
+      {/* Its state (a request on its way) belongs to the model it was for. */}
+      <ChosenLine key={chosenKey(chosen)} tab={tab} chosen={chosen} />
     </div>
   );
 }
@@ -401,12 +431,22 @@ function LocalSection(props: {
   if (group.models.length === 0 && usable.length > 0) return null;
   const entry = fittingEntry(tab, local);
   const fitsHere = entry !== null || usable.some((m) => FITTING.has(m.fit.word));
+  // Nothing at all fits this computer (no recommended model left to get, none installed), or
+  // the Video tab where it cannot make video: local needs other hardware. Otherwise only this
+  // kind has none that fits.
+  const nothingFits =
+    (tab === "video" && !local.videoPossible) ||
+    (local.moreFit === 0 && !local.installed.some((m) => m.model.usable === null && FITTING.has(m.fit.word)));
 
-  let after: ReactNode = <p className="px-2.5 py-1.5 text-xs text-fg-muted">{STUDIO_PICKER.noLocalHere}</p>;
+  let after: ReactNode = (
+    <p className="px-2.5 py-1.5 text-xs text-fg-muted">
+      {nothingFits ? STUDIO_PICKER.noLocalHere : STUDIO_PICKER.noKindHere[tab]}
+    </p>
+  );
   if (usable.length > 0 && local.moreFit > 0) {
     after = (
       <button type="button" className={LINK_BUTTON} onClick={props.onGetLocal}>
-        + {STUDIO_ACTIONS.getLocalModels} <span className="text-fg-muted">{STUDIO_PICKER.moreFit(local.moreFit)}</span>
+        {STUDIO_PICKER.getMoreLocal(local.moreFit)}
       </button>
     );
   } else if (usable.length > 0 && fitsHere) {
@@ -488,7 +528,7 @@ function EndpointSection(props: {
                 key={model.id}
                 endpoint={endpoint}
                 model={model}
-                keyReasonShown={false}
+                inRecent={false}
                 selected={props.isSelected(target, model)}
                 onChoose={() => props.onChoose(target, model)}
               />
@@ -501,17 +541,18 @@ function EndpointSection(props: {
 }
 
 /** A cloud model's row with its price hint; greyed out when Studio cannot use it or its
- *  endpoint has no key (said in the row when `keyReasonShown`, else by the endpoint's group). */
+ *  endpoint has no key. In Recent (`inRecent`) the row names its endpoint ("via OpenRouter")
+ *  and says when it has no key, which an endpoint's group says once otherwise. */
 function CloudRow(props: {
   endpoint: StudioEndpoint;
   model: MediaModel;
-  keyReasonShown: boolean;
+  inRecent: boolean;
   selected: boolean;
   onChoose: () => void;
 }) {
   const { endpoint, model } = props;
   const noKey = !endpoint.hasKey;
-  const reason = model.usable ?? (noKey && props.keyReasonShown ? STUDIO_PICKER.noKey : null);
+  const reason = model.usable ?? (noKey && props.inRecent ? STUDIO_PICKER.noKey : null);
   return (
     <OptionRow
       model={model}
@@ -521,6 +562,7 @@ function CloudRow(props: {
       tip={noKey ? [STUDIO_PICKER.noKey, ...model.notes] : model.notes}
       onChoose={props.onChoose}
     >
+      {props.inRecent && <span>{STUDIO_PICKER.via(endpoint.name)}</span>}
       <span>{priceHint(model, endpoint.company)}</span>
     </OptionRow>
   );
@@ -577,11 +619,13 @@ function OptionRow(props: {
 }
 
 /** Under the Model field: the chosen model's price hint, with *Get the price* while an
- *  OpenRouter picture's price was never asked for, or a local model's time here. */
+ *  OpenRouter picture's price was never asked for (and why the last request failed, kept by
+ *  the store for the tab's model), or a local model's time here. */
 function ChosenLine(props: { tab: StudioTab; chosen: Chosen | null }) {
   const fetchPrice = useStudio((s) => s.fetchPrice);
+  const error = useStudio((s) => s.priceError[props.tab]);
+  const dismissPriceError = useStudio((s) => s.dismissPriceError);
   const [busy, setBusy] = useState(false);
-  const [error, setError] = useState<ErrorInfo | null>(null);
   const { chosen } = props;
   if (!chosen) return null;
   if (chosen.installed) return <p className="text-xs text-fg-muted">{localHint(chosen.installed, props.tab)}</p>;
@@ -589,17 +633,15 @@ function ChosenLine(props: { tab: StudioTab; chosen: Chosen | null }) {
 
   const getPrice = () => {
     setBusy(true);
-    setError(null);
-    fetchPrice(props.tab)
-      .catch((e: unknown) => setError(toErrorInfo(e)))
-      .finally(() => setBusy(false));
+    // A failure goes to the store's `priceError`.
+    void fetchPrice(props.tab).finally(() => setBusy(false));
   };
 
   return (
     <>
       <p className="flex flex-wrap items-center gap-x-2 gap-y-1 text-xs text-fg-muted">
         <span>{priceHint(model, endpoint.company)}</span>
-        {priceWhenPicked(model, endpoint.company) && (
+        {priceNotAsked(model, endpoint.company) && (
           <button
             type="button"
             disabled={busy}
@@ -610,7 +652,7 @@ function ChosenLine(props: { tab: StudioTab; chosen: Chosen | null }) {
           </button>
         )}
       </p>
-      {error && <ErrorBanner error={error} onDismiss={() => setError(null)} />}
+      {error && <ErrorBanner error={error} onDismiss={() => dismissPriceError(props.tab)} />}
     </>
   );
 }

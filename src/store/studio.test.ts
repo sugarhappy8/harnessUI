@@ -258,6 +258,28 @@ describe("what is saved", () => {
     expect(useStudio.getState()).toMatchObject({ loaded: true, filter: { text: "fox" } });
   });
 
+  it("the newest runs are kept whatever the gallery's filter, with the runs heard of since", async () => {
+    saved();
+    vi.mocked(api.studioRuns).mockImplementation(async (filter) => ({ runs: filter.kind ? [] : [RUN], next: null }));
+    // Opened on an unfiltered gallery, its first page is the newest runs: one read.
+    await useStudio.getState().load();
+    expect(api.studioRuns).toHaveBeenCalledTimes(1);
+    expect(useStudio.getState().recentRuns).toEqual([RUN]);
+    // A filter changes the gallery, not the newest runs; a run heard of comes first.
+    await useStudio.getState().setFilter({ kind: "video" });
+    useStudio.getState().applyProgress(LOCAL_RUN);
+    expect(useStudio.getState().runs).toEqual([]);
+    expect(useStudio.getState().recentRuns).toEqual([LOCAL_RUN, RUN]);
+    // Read again on a filtered gallery: the newest runs are read without the filter.
+    useStudio.setState({ recentRuns: [] });
+    vi.mocked(api.studioRuns).mockClear();
+    await useStudio.getState().load();
+    expect(api.studioRuns).toHaveBeenCalledTimes(2);
+    expect(api.studioRuns).toHaveBeenCalledWith({ kind: "video" }, null, 50);
+    expect(api.studioRuns).toHaveBeenCalledWith({}, null, 50);
+    expect(useStudio.getState()).toMatchObject({ runs: [], recentRuns: [RUN] });
+  });
+
   it("changing the preferences sends only what changed", async () => {
     saved();
     vi.mocked(api.studioSetPrefs).mockResolvedValue({ ...prefs, suggestionDismissed: true });

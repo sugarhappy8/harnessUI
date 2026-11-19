@@ -1001,6 +1001,12 @@ export function cloudChipWords(host: string): string {
   return host ? `Cloud · ${host}` : "Cloud";
 }
 
+/** What a screen reader hears after a place chip's words (`PlaceMark`): its tooltip, so the
+ *  chip reads "Cloud: Your prompt and added pictures go to openrouter.ai.". */
+export function placeMarkSpoken(title: string): string {
+  return `: ${title}`;
+}
+
 /** Buttons that more than one Studio screen shows. */
 export const STUDIO_ACTIONS = {
   getLocalModels: "Get local models",
@@ -1136,10 +1142,16 @@ export const STUDIO_PICKER = {
   /** The Cloud mark's tooltip on an endpoint's group. */
   goesTo: (host: string) => `Your prompt and added pictures go to ${host}.`,
   noKey: "Add a key in Settings → Endpoints",
-  /** After "+ Get local models", how many recommended models that fit are not installed. */
-  moreFit: (n: number) => `(${n} more fit this computer)`,
+  /** The local group's last line while more recommended models that fit are not installed. */
+  getMoreLocal: (n: number) => `+ ${STUDIO_ACTIONS.getLocalModels} (${n} more fit this computer)`,
   noLocalYet: (name: string, bytes: number) => `No local models yet. ${fitsThisComputer(name, bytes)}`,
+  /** No local model of either kind fits this computer, or the Video tab where it cannot make video. */
   noLocalHere: "Local models need a graphics card or an Apple-silicon Mac; the cloud models below are the backup.",
+  /** No local model of the tab's kind fits this computer, though one of the other kind does. */
+  noKindHere: {
+    image: "No picture model fits this computer yet; the cloud models below are the backup.",
+    video: "No video model fits this computer yet; the cloud models below are the backup.",
+  } satisfies Record<MediaKind, string>,
   nothingMatches: "No models match.",
   getPrice: "Get the price",
 } as const;

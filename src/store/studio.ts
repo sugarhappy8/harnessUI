@@ -8,7 +8,8 @@
 // when Settings closes; lists fetched meanwhile are kept); each tab's draft, which starts at
 // the model used last or, local first, a default, and starts again when its endpoint is
 // removed. Task B3: the user's pick in the model picker, which carries the draft's settings
-// to the model picked and asks for an OpenRouter picture model's price once; the recent models.
+// to the model picked and asks for an OpenRouter picture model's price once (a failure kept
+// per tab); the newest runs whatever the gallery's filter, and the recent models.
 import { create, type StoreApi, type UseBoundStore } from "zustand";
 import * as api from "../components/studio/api";
 import { carry, defaultsFor, type Values } from "../components/studio/canonical";
@@ -19,6 +20,7 @@ import type {
   LocalModels,
   MediaKind,
   MediaModel,
+  ModelChoice,
   RefItem,
   Routing,
   Run,
@@ -33,6 +35,8 @@ import type {
 } from "../components/studio/types";
 import * as ipc from "../lib/ipc";
 import { listenInEffect } from "../lib/listen";
+import type { ErrorInfo } from "../lib/types";
+import { toErrorInfo } from "./app";
 
 /** Studio's tabs: Pictures and Video. */
 export type StudioTab = MediaKind;
@@ -82,6 +86,10 @@ export interface StudioState {
   drafts: Record<StudioTab, Draft>;
   /** The gallery's runs read so far, newest first. */
   runs: Run[];
+  /** The newest runs whatever the gallery's filter, newest first, at most `RECENT_RUNS`: read
+   *  when Studio opens and kept up by `applyProgress`. The picker's Recent group comes from
+   *  them, each run with where it ran. */
+  recentRuns: Run[];
   /** Where the next page of runs starts; `null` after the last page. */
   next: RunsCursor | null;
   filter: RunsFilter;
@@ -118,8 +126,13 @@ export interface StudioState {
    *  the request fails or another model is picked first). A model `tab` cannot use is ignored. */
   chooseModel(tab: StudioTab, target: RunTarget, modelId: string): void;
   /** *Get the price*: asks for the price of `tab`'s model (a model restored when Studio opened
-   *  is never asked by itself). */
+   *  is never asked by itself). A failure goes to `priceError`, not to the caller. */
   fetchPrice(tab: StudioTab): Promise<void>;
+  /** Each tab's failed price request, while the tab stays on the model it asked for (shown
+   *  under the Model field, where *Get the price* asks again); put away by the next request
+   *  and by a change of model. */
+  priceError: Record<StudioTab, ErrorInfo | null>;
+  dismissPriceError(tab: StudioTab): void;
   setPrompt(tab: StudioTab, text: string): void;
   /** Changes the gallery's filter and reads its first page again. */
   setFilter(patch: Partial<RunsFilter>): Promise<void>;
@@ -142,6 +155,29 @@ const EMPTY_DRAFT: Draft = {
 
 /** How many runs one page of the gallery holds. */
 const RUNS_PAGE = 50;
+
+/** How many of the newest runs `recentRuns` keeps. */
+const RECENT_RUNS = 50;
+
+/** Whether `filter` lets every run through, as the backend reads it (a blank text does not
+ *  filter, nor does Starred off). */
+function unfiltered(filter: RunsFilter): boolean {
+  return (
+    !filter.kind &&
+    !filter.starred &&
+    !filter.text?.trim() &&
+    !filter.model &&
+    (filter.since ?? null) === null &&
+    (filter.until ?? null) === null
+  );
+}
+
+/** `runs` each once (the first of an id wins), newest first, at most `RECENT_RUNS`. */
+function newestRuns(runs: Run[]): Run[] {
+  const byId = new Map<string, Run>();
+  for (const run of runs) if (!byId.has(run.id)) byId.set(run.id, run);
+  return [...byId.values()].sort((a, b) => b.createdAt - a.createdAt).slice(0, RECENT_RUNS);
+}
 
 /** The read of what is saved while it is under way, so a second `load` waits for it. */
 let loading: Promise<void> | null = null;
@@ -197,6 +233,19 @@ export const useStudio: UseBoundStore<StoreApi<StudioState>> = create<StudioStat
     return asked;
   };
 
+  /** Asks for the price of model `modelId` at endpoint `providerId` for `tab`, putting away the
+   *  tab's last failure; a failure is kept for the tab while it stays on that model. */
+  const priceFor = (tab: StudioTab, providerId: number, modelId: string): Promise<MediaModel> => {
+    set((s) => ({ priceError: { ...s.priceError, [tab]: null } }));
+    const asked = askPrice(providerId, modelId);
+    asked.catch((e: unknown) => {
+      const { target, model } = get().drafts[tab];
+      if (target === null || target === "thisComputer" || target.endpoint !== providerId || model !== modelId) return;
+      set((s) => ({ priceError: { ...s.priceError, [tab]: toErrorInfo(e) } }));
+    });
+    return asked;
+  };
+
   /** Carries `hold`'s extra settings to `model` (the model as it came back, or as listed) in
    *  `tab`'s draft, adding the note for each one it does not take; nothing once the draft has
    *  gone to another model. */
@@ -243,6 +292,7 @@ export const useStudio: UseBoundStore<StoreApi<StudioState>> = create<StudioStat
         const finished = run.kind === "video" && run.status === "done" && s.live[run.id]?.status !== "done";
         return {
           live: { ...s.live, [run.id]: run },
+          recentRuns: newestRuns([run, ...s.recentRuns]),
           readyNotice: finished && s.view === "chat" ? run.id : s.readyNotice,
         };
       }),
@@ -252,6 +302,7 @@ export const useStudio: UseBoundStore<StoreApi<StudioState>> = create<StudioStat
     loaded: false,
     drafts: { image: EMPTY_DRAFT, video: EMPTY_DRAFT },
     runs: [],
+    recentRuns: [],
     next: null,
     filter: {},
     prefs: null,
@@ -263,15 +314,26 @@ export const useStudio: UseBoundStore<StoreApi<StudioState>> = create<StudioStat
         try {
           const since = ++listsTick;
           const filter = get().filter;
-          const [models, local, page, live, prefs, usage] = await Promise.all([
+          // The newest runs whatever the filter: the gallery's first page when it has none.
+          const all = unfiltered(filter);
+          const [models, local, page, newest, live, prefs, usage] = await Promise.all([
             api.studioModels(),
             api.studioLocalModels(),
             api.studioRuns(filter, null, RUNS_PAGE),
+            all ? null : api.studioRuns({}, null, RECENT_RUNS),
             api.studioLive(),
             api.studioGetPrefs(),
             api.studioUsage(),
           ]);
-          set({ endpoints: newestLists(models.endpoints, since), local, prefs, usage, loaded: true });
+          set((s) => ({
+            endpoints: newestLists(models.endpoints, since),
+            local,
+            prefs,
+            usage,
+            loaded: true,
+            // Runs heard of while reading stay.
+            recentRuns: newestRuns([...(newest ?? page).runs, ...s.recentRuns]),
+          }));
           // A page for a filter changed since is old (`setFilter` read the new one).
           if (get().filter === filter) set({ runs: page.runs, next: page.next });
           for (const run of live) get().applyProgress(run);
@@ -323,7 +385,7 @@ export const useStudio: UseBoundStore<StoreApi<StudioState>> = create<StudioStat
           model: choice?.model ?? null,
           values: model ? defaultsFor(model) : {},
         };
-        return { drafts: { ...s.drafts, [tab]: draft } };
+        return { drafts: { ...s.drafts, [tab]: draft }, priceError: { ...s.priceError, [tab]: null } };
       });
     },
     chooseModel: (tab, target, modelId) => {
@@ -331,11 +393,11 @@ export const useStudio: UseBoundStore<StoreApi<StudioState>> = create<StudioStat
       const to = offeredModel(tab, target, modelId, s.local, s.endpoints);
       if (!to) return;
       const endpoint = target === "thisComputer" ? null : s.endpoints.find((e) => e.providerId === target.endpoint);
-      const unpriced = endpoint?.company === "openrouter" && to.kind === "image" && to.priceFetchedAt === null;
+      const unpriced = endpoint ? priceNotAsked(to, endpoint.company) : false;
       const draft = s.drafts[tab];
       if (draft.target !== null && sameTarget(draft.target, target) && draft.model === to.id) {
-        // Picked again: the draft stays as it is.
-        if (unpriced && endpoint) askPrice(endpoint.providerId, to.id).catch(() => undefined);
+        // Picked again: the draft stays as it is (a failure is kept in `priceError`).
+        if (unpriced && endpoint) priceFor(tab, endpoint.providerId, to.id).catch(() => undefined);
         return;
       }
       // Extra settings held aside for the model picked before are carried to it as listed.
@@ -362,11 +424,14 @@ export const useStudio: UseBoundStore<StoreApi<StudioState>> = create<StudioStat
             note,
           },
         },
+        // A failed price request was for the model before.
+        priceError: { ...st.priceError, [tab]: null },
       }));
       if (!unpriced || !endpoint) return;
       const mine: HeldExtra | null = hold ? { target, model: to, extra } : null;
       if (mine) held[tab] = mine;
-      askPrice(endpoint.providerId, to.id).then(
+      // A failure is kept in `priceError` (`priceFor`).
+      priceFor(tab, endpoint.providerId, to.id).then(
         (priced) => mine && settleHeld(tab, mine, priced),
         () => mine && settleHeld(tab, mine, mine.model),
       );
@@ -374,8 +439,11 @@ export const useStudio: UseBoundStore<StoreApi<StudioState>> = create<StudioStat
     fetchPrice: async (tab) => {
       const { target, model } = get().drafts[tab];
       if (target === null || target === "thisComputer" || model === null) return;
-      await askPrice(target.endpoint, model);
+      // A failure is kept in `priceError` (`priceFor`).
+      await priceFor(tab, target.endpoint, model).catch(() => undefined);
     },
+    priceError: { image: null, video: null },
+    dismissPriceError: (tab) => set((s) => ({ priceError: { ...s.priceError, [tab]: null } })),
     setPrompt: (tab, text) => set((s) => ({ drafts: { ...s.drafts, [tab]: { ...s.drafts[tab], prompt: text } } })),
     setFilter: async (patch) => {
       const filter = { ...get().filter, ...patch };
@@ -426,6 +494,12 @@ function localModelsFor(tab: StudioTab, local: LocalModels | null): InstalledLoc
  *  where the prompt goes (`openrouter/auto`, or a model named "Auto"). */
 export function isAutoModel(model: MediaModel): boolean {
   return /(^|\/)auto$/i.test(model.id) || /^auto( |$)/i.test(model.displayName);
+}
+
+/** An OpenRouter picture model whose price was not asked for yet: it is asked when the model is
+ *  picked, or on *Get the price* (its lists give no price for pictures). */
+export function priceNotAsked(model: MediaModel, company: Company): boolean {
+  return company === "openrouter" && model.kind === "image" && model.priceFetchedAt === null;
 }
 
 /** The models of `endpoint`'s saved lists that `tab` can use: none while it has no key (the
@@ -526,6 +600,20 @@ export function recentModels(runs: Run[], kind: StudioTab, n = 5): string[] {
     if (run.kind === kind && !models.includes(run.model)) models.push(run.model);
   }
   return models;
+}
+
+/** The models of the newest runs of `kind`, each with where it ran (this computer, or the
+ *  endpoint it was sent to), once per place and model, newest first: at most `n`. */
+export function recentChoices(runs: Run[], kind: StudioTab, n = 5): ModelChoice[] {
+  const choices: ModelChoice[] = [];
+  for (const run of [...runs].sort((a, b) => b.createdAt - a.createdAt)) {
+    if (choices.length === n) break;
+    const target: RunTarget | null =
+      run.runsOn === "local" ? "thisComputer" : run.providerId === null ? null : { endpoint: run.providerId };
+    if (run.kind !== kind || target === null) continue;
+    if (!choices.some((c) => c.model === run.model && sameTarget(c.target, target))) choices.push({ target, model: run.model });
+  }
+  return choices;
 }
 
 /** The states in which a run works whether or not Studio watches it. */

@@ -1,4 +1,5 @@
 import type { LucideIcon } from "lucide-react";
+import { placeMarkSpoken } from "../lib/words";
 
 // The chip that says where a chat or a Studio run goes: the chat header's Cloud mark
 // (CloudMark), Studio's mark for a model on this computer (LocalMark) and its chip for a
@@ -26,7 +27,7 @@ export function PlaceMark(props: {
     >
       <Icon size={12} aria-hidden />
       {props.label}
-      {props.title && <span className="sr-only">: {props.title}</span>}
+      {props.title && <span className="sr-only">{placeMarkSpoken(props.title)}</span>}
     </span>
   );
 }
