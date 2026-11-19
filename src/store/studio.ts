@@ -585,6 +585,9 @@ export const useStudio: UseBoundStore<StoreApi<StudioState>> = create<StudioStat
         },
       },
       priceError: { ...st.priceError, [tab]: null },
+      // A refusal was for the model or place the draft had (the daily limit, a model that cannot
+      // be used): the next press says again if it still applies.
+      refusal: { ...st.refusal, [tab]: null },
     }));
     // Using it picks its model: an OpenRouter picture model is asked for its price once.
     if (unpriced && endpoint) askPriceHolding(tab, target, endpoint, model, hold ? saved.extra : null);
@@ -746,7 +749,11 @@ export const useStudio: UseBoundStore<StoreApi<StudioState>> = create<StudioStat
           model: choice?.model ?? null,
           values: model ? defaultsFor(model) : {},
         };
-        return { drafts: { ...s.drafts, [tab]: draft }, priceError: { ...s.priceError, [tab]: null } };
+        return {
+          drafts: { ...s.drafts, [tab]: draft },
+          priceError: { ...s.priceError, [tab]: null },
+          refusal: { ...s.refusal, [tab]: null },
+        };
       });
     },
     chooseModel: (tab, target, modelId) => {
@@ -785,8 +792,9 @@ export const useStudio: UseBoundStore<StoreApi<StudioState>> = create<StudioStat
             note,
           },
         },
-        // A failed price request was for the model before.
+        // A failed price request, or a refused press, was for the model before.
         priceError: { ...st.priceError, [tab]: null },
+        refusal: { ...st.refusal, [tab]: null },
       }));
       if (unpriced && endpoint) askPriceHolding(tab, target, endpoint, to, hold ? extra : null);
     },

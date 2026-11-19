@@ -190,6 +190,46 @@ describe("an installed local model deleted", () => {
   });
 });
 
+describe("why a press was refused, and the model it was for", () => {
+  const endpoint: StudioEndpoint = {
+    providerId: 1,
+    name: "OpenRouter",
+    company: "openrouter",
+    host: "openrouter.ai",
+    cloud: true,
+    hasKey: true,
+    fetchedAt: 1794900000000,
+    models: MODELS,
+  };
+  const limit = { code: "studio_daily_limit", message: "Today's limit is reached.", nextStep: "Raise it.", details: "" };
+  const refused = () => useStudio.getState().refusal.image;
+
+  beforeEach(() => {
+    vi.mocked(api.studioModelPrice).mockImplementation(async (_, id) => MODELS.find((m) => m.id === id)!);
+    useStudio.setState({ local: LOCAL, endpoints: [endpoint] });
+    useStudio.getState().chooseModel("image", { endpoint: 1 }, "openai/gpt-image-2.6-flare");
+    useStudio.setState({ refusal: { image: limit, video: null } });
+  });
+
+  it("goes when another model is picked (a local one included)", () => {
+    useStudio.getState().chooseModel("image", "thisComputer", LOCAL.installed[0]!.model.id);
+    expect(refused()).toBeNull();
+  });
+
+  it("goes when a run is reused, or the tab starts again on its first model", () => {
+    expect(useStudio.getState().reuse(RUN, true)).toBeNull();
+    expect(refused()).toBeNull();
+    useStudio.setState({ refusal: { image: limit, video: null } });
+    useStudio.getState().selectInitialModel("image");
+    expect(refused()).toBeNull();
+  });
+
+  it("stays while the same model is picked again", () => {
+    useStudio.getState().chooseModel("image", { endpoint: 1 }, "openai/gpt-image-2.6-flare");
+    expect(refused()).toEqual(limit);
+  });
+});
+
 // A command's answer is read before the run's task goes on, so the task's own event can come
 // first: the copy the backend numbered higher stays, whichever comes last.
 describe("a command's answer and a newer event", () => {
