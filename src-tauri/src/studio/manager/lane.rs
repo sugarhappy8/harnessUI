@@ -142,6 +142,9 @@ struct LocalPrepared {
 enum Card {
     Granted(Grant, Box<dyn Any + Send + Sync>),
     DoesNotFit,
+    /// Asked "Unload the chat model?", the person answered "Keep the chat model", and the run
+    /// cannot use the processor instead.
+    KeptChat,
     /// The unload it waited for did not happen.
     NotStarted,
     Stopped,
@@ -801,6 +804,11 @@ impl Inner {
                     self.end_run(job, ending, None).await;
                     return;
                 }
+                Card::KeptChat => {
+                    let ending = Ending::failed(errors::chat_model_kept(), Some(false));
+                    self.end_run(job, ending, None).await;
+                    return;
+                }
                 Card::NotStarted => {
                     let ending = Ending::failed(errors::not_sent(Company::Local), Some(false));
                     self.end_run(job, ending, None).await;
@@ -951,6 +959,9 @@ impl Inner {
             };
             match asked {
                 Ok((grant, hold)) => return Card::Granted(grant, hold),
+                // Kept, for a run that cannot use the processor (any video): it does not fit
+                // because the person chose so, not because of this computer.
+                Err(Refused::DoesNotFit) if answered == Some(false) => return Card::KeptChat,
                 Err(Refused::DoesNotFit) => return Card::DoesNotFit,
                 Err(Refused::JudgeAgain) => return Card::JudgeAgain,
                 Err(Refused::Cancelled) if self.root.is_cancelled() => return Card::Shutdown,

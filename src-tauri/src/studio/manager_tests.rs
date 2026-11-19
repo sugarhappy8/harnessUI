@@ -5871,8 +5871,9 @@ async fn shutdown_during_a_local_run_stops_the_engine_and_records_nothing() {
 }
 
 /// Ruling L15-tests: "Unload the chat model?" answered no: a picture runs on the processor
-/// (the lease's rule) and the chat model stays; a clip, which cannot, does not fit, never
-/// starts and is not charged.
+/// (the lease's rule) and the chat model stays; a clip, which cannot, never starts and is
+/// not charged, and says the chat model was kept (finding mgr-keep-chat-wording), never that
+/// the model does not fit this computer.
 #[tokio::test]
 async fn ask_answered_no_runs_a_picture_on_the_processor_and_refuses_a_clip() {
     let h = harness_with_local().await;
@@ -5913,8 +5914,18 @@ async fn ask_answered_no_runs_a_picture_on_the_processor_and_refuses_a_clip() {
     let failed = h.wait_status(&clip.id, "failed").await;
     let error = failed.error.unwrap();
     assert_eq!(
-        (error.code.as_str(), error.charged),
-        ("studio_does_not_fit", Some(false))
+        (
+            error.code.as_str(),
+            error.message.as_str(),
+            error.next_step.as_str(),
+            error.charged
+        ),
+        (
+            "studio_chat_model_kept",
+            "Not started: the chat model stays loaded.",
+            "Press Again and choose Unload, or choose a cloud model.",
+            Some(false)
+        )
     );
     assert!(!h.lease.needs()[3].processor_ok);
     assert_eq!(h.local.starts(), 1, "the clip never started");

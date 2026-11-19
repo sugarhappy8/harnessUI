@@ -1108,6 +1108,17 @@ pub fn does_not_fit(reason: Option<String>) -> AppError {
     )
 }
 
+/// "Keep the chat model", answered for a run that cannot use the processor (any video): it
+/// does not fit beside the chat model, so it is not started.
+pub fn chat_model_kept() -> AppError {
+    AppError::new(
+        "studio_chat_model_kept",
+        "Not started: the chat model stays loaded.",
+        "Press Again and choose Unload, or choose a cloud model.",
+        String::new(),
+    )
+}
+
 /// *Restart and update* while a local job works: the restart would stop it without asking.
 pub fn busy_for_update() -> AppError {
     AppError::new(
