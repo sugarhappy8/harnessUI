@@ -526,7 +526,9 @@ export function Viewer(props: { outputId: string; onClose(): void }) {
             e.preventDefault();
             window.dispatchEvent(new Event("app:focus-studio-prompt"));
           }}
-          className="fixed inset-4 flex flex-col overflow-hidden rounded-2xl border border-border bg-surface shadow-pop md:flex-row"
+          // Side by side from 700 px (the window is never narrower than 720 px); stacked below
+          // that, the details take at most half the height and scroll, so the result keeps the rest.
+          className="fixed inset-4 flex flex-col overflow-hidden rounded-2xl border border-border bg-surface shadow-pop min-[700px]:flex-row"
         >
           <Dialog.Title className="sr-only">{STUDIO_VIEWER.title(run?.kind ?? "image")}</Dialog.Title>
           <section className="flex min-h-0 min-w-0 flex-1 flex-col">
@@ -592,7 +594,10 @@ export function Viewer(props: { outputId: string; onClose(): void }) {
               </div>
             )}
           </section>
-          <aside className="flex w-full shrink-0 flex-col gap-3 overflow-y-auto border-t border-border p-4 text-sm md:w-80 md:border-t-0 md:border-l">
+          <aside
+            data-viewer-details
+            className="flex max-h-[50%] min-h-0 w-full flex-col gap-3 overflow-y-auto border-t border-border p-4 text-sm min-[700px]:max-h-none min-[700px]:w-72 min-[700px]:shrink-0 min-[700px]:border-t-0 min-[700px]:border-l md:w-80"
+          >
             <div className="flex justify-end">
               <Dialog.Close aria-label={STUDIO_VIEWER.close} className="rounded-md p-1 text-fg-muted hover:bg-bg-muted hover:text-fg">
                 <X size={16} aria-hidden />

@@ -285,6 +285,19 @@ describe("Viewer", () => {
     screen.getByText("1 / 4");
   });
 
+  it("the details never take the result's room: side by side from 700 px, else at most half the height", async () => {
+    // jsdom lays nothing out: the classes are what the layout is (checked by eye at 720×480 and
+    // 740×650, the window's smallest sizes).
+    setStore();
+    await open("o1");
+    const classes = (el: Element | null) => (el?.getAttribute("class") ?? "").split(/\s+/);
+    expect(classes(document.querySelector("[data-studio-viewer]"))).toContain("min-[700px]:flex-row");
+    const details = classes(document.querySelector("[data-viewer-details]"));
+    expect(details).toEqual(expect.arrayContaining(["max-h-[50%]", "min-h-0", "overflow-y-auto", "min-[700px]:max-h-none"]));
+    // Never its full height whatever the room (an unprefixed shrink-0 would keep it).
+    expect(details).not.toContain("shrink-0");
+  });
+
   it("Esc that the viewer's own dialog takes closes it once", async () => {
     setStore();
     const onClose = await open("o1");
