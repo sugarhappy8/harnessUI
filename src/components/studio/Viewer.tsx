@@ -148,8 +148,9 @@ async function pngOf(output: Output): Promise<Blob> {
 async function copyPicture(output: Output): Promise<void> {
   if (!navigator.clipboard?.write || typeof ClipboardItem === "undefined") throw new Error("no clipboard");
   const png = pngOf(output);
-  // Whoever reads it hears of a failure; this keeps it from being reported as unhandled.
-  png.catch(() => undefined);
+  // Whoever reads it hears of a failure; this keeps it from being reported as unhandled, and
+  // leaves its cause in the log (the clipboard's own refusal may not name it).
+  png.catch((e: unknown) => console.warn("Studio: the picture could not be made a PNG for the clipboard", e));
   await navigator.clipboard.write([new ClipboardItem({ "image/png": png })]);
 }
 
@@ -210,8 +211,12 @@ function Media(props: { run: Run; output: Output; videoRef: RefObject<HTMLVideoE
     const poster = capturePoster(video);
     if (poster === null) return;
     posterSent.current = true;
-    // A poster that is not kept costs nothing: the tile keeps showing the start frame.
-    useStudio.getState().savePoster(output.id, poster).catch(() => undefined);
+    // A poster that is not kept costs nothing: the tile keeps showing the start frame. Nothing
+    // is said on screen; the refusal leaves a trace.
+    useStudio
+      .getState()
+      .savePoster(output.id, poster)
+      .catch((e: unknown) => console.warn("Studio: a video's poster frame could not be kept", e));
   };
   if (error) return <ErrorBanner error={error} tone={error.code === "studio_too_big_to_show" ? "notice" : "error"} />;
   if (!url) return null;
@@ -432,8 +437,8 @@ export function Viewer(props: { outputId: string; onClose(): void }) {
   const playPause = () => {
     const v = video.current;
     if (!v) return;
-    // A refused play (no sound allowed yet, say) leaves the video as it was.
-    if (v.paused) v.play().catch(() => undefined);
+    // A refused play (no sound allowed yet, say) leaves the video as it was, and a trace.
+    if (v.paused) v.play().catch((e: unknown) => console.warn("Studio: the video could not be played", e));
     else v.pause();
   };
 

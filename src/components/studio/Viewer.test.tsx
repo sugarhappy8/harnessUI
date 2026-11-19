@@ -6,7 +6,7 @@
 // Copy (Save as when the clipboard refuses), Show in folder and Delete (with what the audit
 // log keeps), and Send to chat for a picture (Task B11). Esc closes the viewer and never
 // cancels a run.
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, onTestFinished, vi } from "vitest";
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { alertDialogsAnimate, endAnimation } from "./fixtures/dialogs";
 import { COMPOSE_IMAGES_EVENT } from "../../lib/composeImages";
@@ -623,6 +623,24 @@ describe("Viewer", () => {
     screen.getByText("Copy is not available here. Use Save as… instead.");
   });
 
+  it("Copy that cannot make the PNG falls back to Save as, and leaves the cause in the log", async () => {
+    setStore();
+    // The clipboard reads the PNG it was handed, and refuses when it cannot be made.
+    const write = vi.fn(async (items: ClipboardItem[]) => {
+      await (items[0] as unknown as { items: Record<string, Promise<Blob>> }).items["image/png"];
+    });
+    Object.defineProperty(navigator, "clipboard", { value: { write }, configurable: true });
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    onTestFinished(() => warn.mockRestore());
+    await open("o1");
+    const refusal = appError("not_found", "That result is no longer in the gallery.");
+    vi.mocked(api.studioOutputBytes).mockRejectedValueOnce(refusal);
+    await click(button("Copy"));
+    expect(write).toHaveBeenCalledTimes(1);
+    screen.getByText("Copy is not available here. Use Save as… instead.");
+    expect(warn).toHaveBeenCalledExactlyOnceWith("Studio: the picture could not be made a PNG for the clipboard", refusal);
+  });
+
   it("Copy writes a PNG result to the clipboard", async () => {
     setStore();
     const write = vi.fn().mockResolvedValue(undefined);
@@ -798,6 +816,9 @@ describe("Video playback and poster frames", () => {
   }
 
   beforeEach(() => {
+    // A test's own answer (a save left pending, or refused) is not carried into the next one.
+    vi.mocked(api.studioSaveThumb).mockReset();
+    vi.mocked(api.studioSaveThumb).mockResolvedValue({ ...nine().outputs[0]!, hasThumb: true });
     drawImage = vi.fn();
     toDataURL = vi.fn((): string => "data:image/jpeg;base64,AAAA");
     vi.spyOn(HTMLCanvasElement.prototype, "getContext").mockImplementation(
@@ -858,14 +879,30 @@ describe("Video playback and poster frames", () => {
     expect(drawImage).toHaveBeenCalledWith(video, 0, 0, 288, 512);
   });
 
-  it("a poster that cannot be saved leaves the viewer as it was", async () => {
+  it("a poster that cannot be saved leaves the viewer as it was, and a trace in the log", async () => {
     setStore({ runs: [nine()] });
-    vi.mocked(api.studioSaveThumb).mockRejectedValue(appError("bad_request", "That poster frame is not a small JPEG."));
+    const refusal = appError("bad_request", "That poster frame is not a small JPEG.");
+    vi.mocked(api.studioSaveThumb).mockRejectedValue(refusal);
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
     await open("o9");
     await playing(sized(screen.getByTestId("studio-video") as HTMLVideoElement, 1280, 720));
     expect(api.studioSaveThumb).toHaveBeenCalledTimes(1);
     expect(screen.queryByRole("alert")).toBeNull();
     expect(useStudio.getState().runs[0]!.outputs[0]!.hasThumb).toBe(false);
+    expect(warn).toHaveBeenCalledExactlyOnceWith("Studio: a video's poster frame could not be kept", refusal);
+  });
+
+  it("a play the webview refuses leaves the video as it was, and a trace in the log", async () => {
+    setStore({ runs: [nine()] });
+    const refusal = new DOMException("play() needs a user gesture", "NotAllowedError");
+    vi.spyOn(HTMLMediaElement.prototype, "paused", "get").mockReturnValue(true);
+    const play = vi.spyOn(HTMLMediaElement.prototype, "play").mockRejectedValue(refusal);
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    await open("o9");
+    await key({ key: " " });
+    expect(play).toHaveBeenCalledTimes(1);
+    expect(screen.queryByRole("alert")).toBeNull();
+    expect(warn).toHaveBeenCalledExactlyOnceWith("Studio: the video could not be played", refusal);
   });
 
   it("capturePoster gives the frame as base64 JPEG, at most 512 px on its longest side", () => {
