@@ -6,7 +6,7 @@
 // Copy (Save as when the clipboard refuses), Show in folder and Delete (with what the audit
 // log keeps). Esc closes the viewer and never cancels a run.
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { LOCAL, LOCAL_RUN, MODELS, RUN } from "./fixtures/models";
 import type { MediaModel, Output, RefItem, Run, StudioEndpoint, StudioPrefs, Usage } from "./types";
 
@@ -139,6 +139,20 @@ function setStore(patch: Partial<ReturnType<typeof useStudio.getState>> = {}) {
   });
 }
 
+/** `run` as if made now, today on this computer's clock (its cost still counts toward today's
+ *  spending once deleted). */
+function madeToday(run: Run): Run {
+  return { ...run, createdAt: Date.now() };
+}
+
+/** The local day `days` days before today, at noon, in Unix ms. */
+function daysAgo(days: number): number {
+  const day = new Date();
+  day.setHours(12, 0, 0, 0);
+  day.setDate(day.getDate() - days);
+  return day.getTime();
+}
+
 async function flush() {
   await act(async () => {
     for (let i = 0; i < 10; i++) await Promise.resolve();
@@ -236,6 +250,47 @@ describe("Viewer", () => {
     await open("o1");
     await key({ key: "f", ctrlKey: true });
     expect(api.studioStar).not.toHaveBeenCalled();
+    // A key typed into a text box goes to the box, wherever the box is.
+    const box = document.createElement("input");
+    box.type = "text";
+    document.body.append(box);
+    try {
+      box.focus();
+      await act(async () => {
+        fireEvent.keyDown(box, { key: "f" });
+        fireEvent.keyDown(box, { key: "ArrowRight" });
+      });
+      await flush();
+      expect(api.studioStar).not.toHaveBeenCalled();
+      screen.getByText("1 / 4");
+    } finally {
+      box.remove();
+    }
+  });
+
+  it("while the delete question is open, its keys are its own", async () => {
+    setStore();
+    await open("o1");
+    await click(button("Delete"));
+    screen.getByRole("alertdialog");
+    await key({ key: "f" });
+    await key({ key: "ArrowRight" });
+    expect(api.studioStar).not.toHaveBeenCalled();
+    expect(screen.getByRole("alertdialog")).toBeTruthy();
+    await click(button("Cancel"));
+    screen.getByText("1 / 4");
+  });
+
+  it("Esc that the viewer's own dialog takes closes it once", async () => {
+    setStore();
+    const onClose = await open("o1");
+    const content = document.querySelector<HTMLElement>("[data-studio-viewer]")!;
+    await act(async () => {
+      fireEvent.keyDown(content, { key: "Escape" });
+    });
+    await flush();
+    // The dialog closes on it and marks it taken; the viewer's own keys leave it alone.
+    expect(onClose).toHaveBeenCalledTimes(1);
   });
 
   it("shows every setting, the cost, the time taken, the file and where it ran", async () => {
@@ -295,7 +350,7 @@ describe("Viewer", () => {
   });
 
   it("Delete says what the audit log keeps", async () => {
-    setStore();
+    setStore({ runs: [madeToday(RUN), LOCAL_RUN] });
     vi.mocked(api.studioDelete).mockResolvedValue(undefined);
     await open("o1");
     await click(button("Delete"));
@@ -307,6 +362,14 @@ describe("Viewer", () => {
     // The next result of the run takes its place.
     screen.getByText("1 / 3");
     expect(useStudio.getState().runs[0]!.outputs.map((o) => o.id)).toEqual(["o2", "o3", "o4"]);
+  });
+
+  it("deleting a cloud result made on an earlier day says only what the audit log keeps", async () => {
+    setStore({ runs: [{ ...RUN, createdAt: daysAgo(1) }] });
+    await open("o1");
+    await click(button("Delete"));
+    screen.getByText("The audit log keeps a line saying a run happened (model and cost), but not your prompt.");
+    expect(screen.queryByText(/today's spending/)).toBeNull();
   });
 
   it("deleting a local result says only what the audit log keeps", async () => {
@@ -330,6 +393,35 @@ describe("Viewer", () => {
     expect(onClose).toHaveBeenCalledTimes(1);
     // A finished run left without results goes too.
     expect(useStudio.getState().runs).toEqual([]);
+  });
+
+  it("a result that leaves its run while shown gives way to the nearest one left", async () => {
+    setStore();
+    let deleted: () => void = () => undefined;
+    vi.mocked(api.studioDelete).mockReturnValue(new Promise((resolve) => (deleted = () => resolve(undefined))));
+    await open("o2");
+    await click(button("Delete"));
+    await click(within(screen.getByRole("alertdialog")).getByRole("button", { name: "Delete" }));
+    // The next result shows while the delete is on its way; ← goes back to the one going.
+    screen.getByText("3 / 4");
+    await key({ key: "ArrowLeft" });
+    screen.getByText("2 / 4");
+    await act(async () => deleted());
+    await flush();
+    // It has gone: the result nearest its place shows.
+    screen.getByText("2 / 3");
+    screen.getByText(RUN.outputs[2]!.path);
+  });
+
+  it("the viewer closes once its run has no result left", async () => {
+    setStore({ runs: [{ ...RUN, outputs: [RUN.outputs[0]!] }] });
+    const onClose = await open("o1");
+    expect(onClose).not.toHaveBeenCalled();
+    await act(async () => {
+      useStudio.setState({ runs: [] });
+    });
+    await flush();
+    expect(onClose).toHaveBeenCalledTimes(1);
   });
 
   it("Save as leaves the settings file off unless asked", async () => {
@@ -542,29 +634,23 @@ describe("Viewer", () => {
     expect(URL.revokeObjectURL).toHaveBeenCalledWith("blob:result");
   });
 
-  it("Edit puts the picture in the tray and focuses the prompt", async () => {
-    vi.mocked(api.studioModels).mockResolvedValue({ endpoints: [endpoint()] });
-    vi.mocked(api.studioLocalModels).mockResolvedValue(LOCAL);
-    vi.mocked(api.studioRuns).mockResolvedValue({ runs: [RUN], next: null });
-    vi.mocked(api.studioLive).mockResolvedValue([]);
-    vi.mocked(api.studioGetPrefs).mockResolvedValue(
-      prefs({ lastModel: { image: { target: { endpoint: 1 }, model: RUN.model } } }),
-    );
-    vi.mocked(api.studioEstimate).mockResolvedValue({
-      usd: 0.04,
-      reasons: [],
-      confirmAtUsd: 1,
-      limit: { limitUsd: 10, spentTodayUsd: 0, pendingUsd: 0, wouldPass: true },
-      invalid: [],
-      eta: null,
-      local: null,
-    });
-    vi.mocked(api.studioRefFromOutput).mockResolvedValue(KEPT);
-    useStudio.getState().showStudio();
+  it("showing the chat closes the viewer, so it never stays over the chat", async () => {
+    await showStudio();
     await act(async () => {
-      render(<StudioView />);
+      useStudio.getState().openViewer("o1");
     });
     await flush();
+    expect(document.querySelector("[data-studio-viewer]")).not.toBeNull();
+    await act(async () => {
+      useStudio.getState().showChat();
+    });
+    await flush();
+    expect(useStudio.getState().viewer).toBeNull();
+    expect(document.querySelector("[data-studio-viewer]")).toBeNull();
+  });
+
+  it("Edit puts the picture in the tray and focuses the prompt", async () => {
+    await showStudio();
     await act(async () => {
       useStudio.getState().openViewer("o1");
     });
@@ -576,3 +662,30 @@ describe("Viewer", () => {
     await waitFor(() => expect(document.activeElement).toBe(promptBox));
   });
 });
+
+/** Studio shown, its saved things read: the OpenRouter endpoint with the cloud run, on the
+ *  Pictures tab at the run's model. */
+async function showStudio() {
+  vi.mocked(api.studioModels).mockResolvedValue({ endpoints: [endpoint()] });
+  vi.mocked(api.studioLocalModels).mockResolvedValue(LOCAL);
+  vi.mocked(api.studioRuns).mockResolvedValue({ runs: [RUN], next: null });
+  vi.mocked(api.studioLive).mockResolvedValue([]);
+  vi.mocked(api.studioGetPrefs).mockResolvedValue(
+    prefs({ lastModel: { image: { target: { endpoint: 1 }, model: RUN.model } } }),
+  );
+  vi.mocked(api.studioEstimate).mockResolvedValue({
+    usd: 0.04,
+    reasons: [],
+    confirmAtUsd: 1,
+    limit: { limitUsd: 10, spentTodayUsd: 0, pendingUsd: 0, wouldPass: true },
+    invalid: [],
+    eta: null,
+    local: null,
+  });
+  vi.mocked(api.studioRefFromOutput).mockResolvedValue(KEPT);
+  useStudio.getState().showStudio();
+  await act(async () => {
+    render(<StudioView />);
+  });
+  await flush();
+}

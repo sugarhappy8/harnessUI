@@ -35,6 +35,13 @@ describe("the view", () => {
     useStudio.getState().showChat();
     expect(useStudio.getState().view).toBe("chat");
   });
+
+  it("showing the chat closes the viewer", () => {
+    useStudio.getState().showStudio();
+    useStudio.getState().openViewer("o1");
+    useStudio.getState().showChat();
+    expect(useStudio.getState()).toMatchObject({ view: "chat", viewer: null });
+  });
 });
 
 describe("progress", () => {
@@ -452,6 +459,18 @@ describe("the gallery's results (Task B9)", () => {
     expect(api.studioRuns).toHaveBeenCalledTimes(1);
     expect(api.studioRuns).toHaveBeenCalledWith({ starred: true }, next, 60);
     // A run already read is not shown twice.
+    expect(useStudio.getState()).toMatchObject({ runs: [RUN, LOCAL_RUN], next: null });
+  });
+
+  it("Load more after the last page reads nothing, and reads again once there is a next page", async () => {
+    useStudio.setState({ runs: [RUN], next: null, filter: {} });
+    await useStudio.getState().loadMore();
+    expect(api.studioRuns).not.toHaveBeenCalled();
+    const next = { createdAt: RUN.createdAt, id: RUN.id };
+    useStudio.setState({ next });
+    vi.mocked(api.studioRuns).mockResolvedValue({ runs: [LOCAL_RUN], next: null });
+    await useStudio.getState().loadMore();
+    expect(api.studioRuns).toHaveBeenCalledWith({}, next, 60);
     expect(useStudio.getState()).toMatchObject({ runs: [RUN, LOCAL_RUN], next: null });
   });
 

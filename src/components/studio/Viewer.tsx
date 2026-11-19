@@ -29,6 +29,7 @@ import {
   targetOf,
   useStudio,
   type ModelOffer,
+  type StudioState,
 } from "../../store/studio";
 import { ErrorBanner } from "../ErrorBanner";
 import { PlaceMark } from "../PlaceMark";
@@ -37,7 +38,7 @@ import * as api from "./api";
 import { valueWords } from "./canonical";
 import { COST_TONE_CLASS, costTone, formatUsd } from "./cost";
 import { tookWords } from "./eta";
-import { ConfirmDelete, resultsOf, useOutputUrl } from "./Grid";
+import { ConfirmDelete, resultsOf, useOutputUrl } from "./results";
 import { LocalMark } from "./LocalMark";
 import { CARD_BUTTON } from "./styles";
 import type { Company, MediaModel, ModelChoice, Output, RequestPreview, Run, StudioEndpoint } from "./types";
@@ -148,6 +149,12 @@ async function copyPicture(output: Output): Promise<void> {
   await navigator.clipboard.write([new ClipboardItem({ "image/png": png })]);
 }
 
+/** Run `runId` at its newest state (the live runs first, then the gallery's and the newest
+ *  runs); `null` when the store holds it no more. */
+function runById(s: Pick<StudioState, "live" | "runs" | "recentRuns">, runId: string): Run | null {
+  return s.live[runId] ?? s.runs.find((r) => r.id === runId) ?? s.recentRuns.find((r) => r.id === runId) ?? null;
+}
+
 /** Whether a key goes to what has the focus: text being typed, or a list being chosen from. */
 function typing(target: EventTarget | null): boolean {
   if (!(target instanceof HTMLElement)) return false;
@@ -215,6 +222,25 @@ export function Viewer(props: { outputId: string; onClose(): void }) {
   const output = outputs[index] ?? null;
   const picture = run?.kind === "image";
   const local = run?.runsOn === "local";
+
+  // Where the result shown sits, its run and its place there: when it leaves the run (deleted
+  // meanwhile, say after ← went back to it during a Delete), the result nearest its place takes
+  // its place, and the viewer closes once the run has none left.
+  const [place, setPlace] = useState<{ runId: string; index: number } | null>(null);
+  if (run && output && (place?.runId !== run.id || place.index !== index)) setPlace({ runId: run.id, index });
+  const left = useStudio((s) => (run === null && place !== null ? runById(s, place.runId) : null));
+  const remaining = left ? resultsOf(left) : [];
+  const nearest = place ? remaining[Math.min(place.index, remaining.length - 1)] : undefined;
+  if (!run && nearest) {
+    setShownId(nearest.id);
+    setSaid(null);
+    setOffer(null);
+  }
+  const gone = !run && !nearest;
+  const closeGone = useEffectEvent(() => onClose());
+  useEffect(() => {
+    if (gone) closeGone();
+  }, [gone]);
 
   const store = useStudio.getState;
   const show = (id: string) => {
@@ -316,19 +342,18 @@ export function Viewer(props: { outputId: string; onClose(): void }) {
   const remove = () => {
     if (!output) return;
     setAsking(false);
-    const gone = output;
+    const deleted = output;
     // The next result of the run takes its place at once (else the one before); the last one
-    // deleted closes the viewer.
+    // deleted closes the viewer, once it has left the run.
     const neighbor = outputs[index + 1] ?? outputs[index - 1] ?? null;
     if (neighbor) show(neighbor.id);
     perform(async () => {
       try {
-        await store().remove([gone.id]);
+        await store().remove([deleted.id]);
       } catch (e) {
-        if (neighbor) show(gone.id);
+        if (neighbor) show(deleted.id);
         throw e;
       }
-      if (!neighbor) onClose();
     });
   };
   const seeRequest = () => {

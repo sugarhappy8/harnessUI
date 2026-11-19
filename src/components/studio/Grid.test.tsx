@@ -98,6 +98,52 @@ const VIDEO: Run = {
   outputs: [output("video-run", { id: "v1", mime: "video/mp4", hasThumb: false, durationMs: 8000 })],
 };
 
+/** `run` as if made now, today on this computer's clock (its cost still counts toward today's
+ *  spending once deleted). */
+function madeToday(run: Run): Run {
+  return { ...run, createdAt: Date.now() };
+}
+
+/** The local day `days` days before today, at noon, in Unix ms. */
+function daysAgo(days: number): number {
+  const day = new Date();
+  day.setHours(12, 0, 0, 0);
+  day.setDate(day.getDate() - days);
+  return day.getTime();
+}
+
+/** IntersectionObserver as the tests drive it: each one made, with what it watches. */
+class FakeObserver {
+  static made: FakeObserver[] = [];
+  targets: Element[] = [];
+  constructor(public callback: IntersectionObserverCallback) {
+    FakeObserver.made.push(this);
+  }
+  observe(el: Element) {
+    this.targets.push(el);
+  }
+  unobserve() {}
+  disconnect() {
+    this.targets = [];
+  }
+  takeRecords() {
+    return [];
+  }
+}
+
+/** Brings what the observers watch inside `container` near the screen. */
+async function comeNear(container: Element) {
+  await act(async () => {
+    for (const observer of [...FakeObserver.made]) {
+      const near = observer.targets.filter((t) => container.contains(t));
+      if (near.length === 0) continue;
+      const entries = near.map((target) => ({ target, isIntersecting: true }) as unknown as IntersectionObserverEntry);
+      observer.callback(entries, observer as unknown as IntersectionObserver);
+    }
+  });
+  await flush();
+}
+
 async function flush() {
   await act(async () => {
     for (let i = 0; i < 10; i++) await Promise.resolve();
@@ -174,6 +220,8 @@ beforeEach(() => {
 
 afterEach(() => {
   cleanup();
+  vi.unstubAllGlobals();
+  FakeObserver.made = [];
   URL.createObjectURL = original.create;
   URL.revokeObjectURL = original.revoke;
 });
@@ -261,7 +309,7 @@ describe("Grid", () => {
   });
 
   it("several can be selected and deleted together", async () => {
-    await showGrid();
+    await showGrid([madeToday(RUN), LOCAL_RUN, GIF, VIDEO]);
     vi.mocked(api.studioDelete).mockResolvedValue(undefined);
     await selectTiles("o1", "o2");
     await click(screen.getByRole("button", { name: "Delete 2" }));
@@ -274,6 +322,14 @@ describe("Grid", () => {
     expect(document.querySelector('[data-output-tile="o2"]')).toBeNull();
     tile("o3");
     expect(screen.queryByRole("button", { name: /^Delete \d/ })).toBeNull();
+  });
+
+  it("deleting cloud results made on an earlier day says only what the audit log keeps", async () => {
+    await showGrid([{ ...RUN, createdAt: daysAgo(1) }, LOCAL_RUN]);
+    await selectTiles("o1", "o2", "l1");
+    await click(screen.getByRole("button", { name: "Delete 3" }));
+    screen.getByText("The audit log keeps a line saying a run happened (model and cost), but not your prompt.");
+    expect(screen.queryByText(/today's spending/)).toBeNull();
   });
 
   it("deleting only local results says only what the audit log keeps", async () => {
@@ -295,14 +351,68 @@ describe("Grid", () => {
     expect(api.studioExport).toHaveBeenCalledWith("o1", expect.stringMatching(/^\/tmp\/out\//), false);
     expect(api.studioExport).toHaveBeenCalledWith("o1", "/tmp/out/cloud-run-0.png", false);
     expect(api.studioExport).toHaveBeenCalledWith("o2", "/tmp/out/cloud-run-1.png", false);
+    // Saved: it says where, and the selection is put away.
+    await screen.findByText("Saved to /tmp/out");
+    expect(screen.queryByRole("button", { name: /^Save \d/ })).toBeNull();
+    expect((within(tile("o1")).getByRole("checkbox") as HTMLInputElement).checked).toBe(false);
   });
 
-  it("a folder picker that is cancelled saves nothing", async () => {
+  it("a folder picker that is cancelled saves nothing and keeps the selection", async () => {
     await showGrid();
     await selectTiles("o1");
     vi.mocked(dialog.open).mockResolvedValue(null);
     await click(screen.getByRole("button", { name: "Save 1…" }));
     expect(api.studioExport).not.toHaveBeenCalled();
+    screen.getByRole("button", { name: "Save 1…" });
+    expect((within(tile("o1")).getByRole("checkbox") as HTMLInputElement).checked).toBe(true);
+    expect(screen.queryByText(/^Saved to/)).toBeNull();
+  });
+
+  it("the date choice shows the gallery's date filter as it stands", async () => {
+    await showGrid();
+    const when = () => screen.getByRole("combobox", { name: "When" }) as HTMLSelectElement;
+    expect(when().selectedOptions[0]!.text).toBe("Any time");
+    // A read that fails keeps the filter chosen, and the choice says so.
+    vi.mocked(api.studioRuns).mockRejectedValueOnce({ code: "internal", message: "No", nextStep: "", details: "" });
+    pickDate("Last 7 days");
+    await flush();
+    screen.getByText("No");
+    expect(useStudio.getState().filter.since).toEqual(expect.any(Number));
+    expect(when().selectedOptions[0]!.text).toBe("Last 7 days");
+    // The filter changed elsewhere: the choice follows it.
+    await act(async () => {
+      await useStudio.getState().setFilter({ since: null });
+    });
+    expect(when().selectedOptions[0]!.text).toBe("Any time");
+    const today = new Date();
+    today.setHours(0, 0, 0, 0);
+    await act(async () => {
+      await useStudio.getState().setFilter({ since: today.getTime() });
+    });
+    expect(when().selectedOptions[0]!.text).toBe("Today");
+  });
+
+  it("a tile reads its picture only once it comes near the screen", async () => {
+    vi.stubGlobal("IntersectionObserver", FakeObserver);
+    await showGrid([RUN]);
+    expect(api.studioOutputBytes).not.toHaveBeenCalled();
+    expect(tile("o2").querySelector("img")).toBeNull();
+    await comeNear(tile("o2"));
+    expect(api.studioOutputBytes).toHaveBeenCalledTimes(1);
+    expect(api.studioOutputBytes).toHaveBeenCalledWith("o2", true);
+    expect(tile("o2").querySelector("img")).not.toBeNull();
+    expect(tile("o1").querySelector("img")).toBeNull();
+  });
+
+  it("while the grid is open, its own kinds stand in for the top bar's Pictures and Video", async () => {
+    await showGrid();
+    expect(screen.queryByRole("tablist", { name: "Pictures or video" })).toBeNull();
+    expect(screen.queryByRole("tab", { name: "Pictures" })).toBeNull();
+    screen.getByRole("group", { name: "Show" });
+    await click(screen.getByRole("button", { name: "Grid" }));
+    screen.getByRole("tablist", { name: "Pictures or video" });
+    screen.getByRole("tab", { name: "Pictures" });
+    screen.getByRole("tab", { name: "Video" });
   });
 
   it("an SVG tile is an img element only", async () => {

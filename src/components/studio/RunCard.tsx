@@ -12,7 +12,7 @@ import { toErrorInfo, useApp } from "../../store/app";
 import { listedModel, useStudio, type StudioState } from "../../store/studio";
 import { COST_TONE_CLASS, costTone, formatUsd } from "./cost";
 import { etaText, timeWords } from "./eta";
-import { ResultTile, resultsOf } from "./Grid";
+import { ResultTile, resultsOf } from "./results";
 import { settingsParts } from "./settingsLine";
 import { CARD_BUTTON } from "./styles";
 import type { Run } from "./types";

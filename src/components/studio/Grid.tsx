@@ -1,222 +1,19 @@
-import { useEffect, useMemo, useState } from "react";
-import { AlertDialog } from "radix-ui";
-import { Film, ImageIcon, Star } from "lucide-react";
+import { useMemo, useState } from "react";
 import type { ErrorInfo } from "../../lib/types";
-import { STUDIO_DELETE, STUDIO_GRID, STUDIO_TABS, STUDIO_TILE } from "../../lib/words";
+import { STUDIO_GRID, STUDIO_TABS, STUDIO_VIEWER } from "../../lib/words";
 import { toErrorInfo } from "../../store/app";
 import { useStudio } from "../../store/studio";
 import { ErrorBanner } from "../ErrorBanner";
-import * as api from "./api";
-import { RefThumb } from "./RefTray";
+import { ConfirmDelete, localDayStart, ResultTile, resultsOf, type Result } from "./results";
 import { CARD_BUTTON } from "./styles";
-import type { MediaKind, Output, Run, RunsFilter } from "./types";
-import { clock } from "./Working";
+import type { Run, RunsFilter } from "./types";
 
-// Studio's gallery grid (0.1.0 Task B9; studio-design 5): every result of every kind as a tile,
-// newest run first, in place of the card stream while Grid is on. Beside the top bar's search
-// and Starred, the grid filters by kind (All, Pictures, Video) and date; *Load more* reads the
-// next page. Several results can be selected and deleted (after the question that says what
-// the audit log keeps) or saved into one folder together. A tile shows the thumbnail when
-// there is one; else the file itself (a GIF, an SVG, a picture the worker could not shrink),
-// always through an `img` element, where an SVG's scripts never run; else, for a video, its
-// length and its start frame. Also here, shared with the run cards and the viewer: a result's
-// `blob:` URL (`useOutputUrl`), its tile, and the question before a delete.
-
-/** A result and the run that made it. */
-export interface Result {
-  run: Run;
-  output: Output;
-}
-
-/**
- * Result `outputId`'s bytes, or its thumbnail's (`thumb`), as a `blob:` URL of type `mime`
- * (a thumbnail is always a JPEG), let go when the component unmounts or the result changes;
- * `null` until read. `error` says why the bytes could not be read, such as a video too big to
- * play here (`studio_too_big_to_show`).
- */
-export function useOutputUrl(
-  outputId: string,
-  thumb: boolean,
-  mime?: string,
-): { url: string | null; error: ErrorInfo | null } {
-  const type = thumb ? "image/jpeg" : (mime ?? "");
-  const key = `${outputId}|${thumb}|${type}`;
-  const [shown, setShown] = useState<{ key: string; url: string | null; error: ErrorInfo | null } | null>(null);
-  useEffect(() => {
-    let alive = true;
-    let url: string | null = null;
-    Promise.resolve()
-      .then(() => api.studioOutputBytes(outputId, thumb))
-      .then((bytes) => {
-        if (!alive) return;
-        url = URL.createObjectURL(new Blob([bytes], { type }));
-        setShown({ key, url, error: null });
-      })
-      .catch((e: unknown) => {
-        if (alive) setShown({ key, url: null, error: toErrorInfo(e) });
-      });
-    return () => {
-      alive = false;
-      if (url) URL.revokeObjectURL(url);
-    };
-  }, [key, outputId, thumb, type]);
-  return shown?.key === key ? { url: shown.url, error: shown.error } : { url: null, error: null };
-}
-
-/** A tile's stand-in while its picture is read, or when it has none to show. */
-function Placeholder(props: { kind: MediaKind }) {
-  const Icon = props.kind === "video" ? Film : ImageIcon;
-  return (
-    <span className="flex size-full items-center justify-center text-fg-muted">
-      <Icon size={18} aria-hidden />
-    </span>
-  );
-}
-
-/** A tile's picture: the thumbnail, else the file itself, always in an `img` element. */
-function TilePicture(props: { output: Output; kind: MediaKind }) {
-  const { output } = props;
-  const { url } = useOutputUrl(output.id, output.hasThumb, output.mime);
-  return url ? <img src={url} alt="" className="size-full object-cover" /> : <Placeholder kind={props.kind} />;
-}
-
-/** The results of `run` in their order. */
-export function resultsOf(run: Run): Output[] {
-  return [...run.outputs].sort((a, b) => a.idx - b.idx);
-}
-
-/** One result's tile: it opens the viewer. In the grid it has a box to select it with others;
- *  on a card, a star; elsewhere a starred result shows its star. */
-export function ResultTile(props: {
-  run: Run;
-  output: Output;
-  onOpen(outputId: string): void;
-  /** The grid's box, and whether the result is selected. */
-  select?: { selected: boolean; onChange(selected: boolean): void };
-  /** The card's star, pressed while the result is starred. */
-  onStar?: () => void;
-  className: string;
-}) {
-  const { run, output } = props;
-  const all = resultsOf(run);
-  const n = all.findIndex((o) => o.id === output.id) + 1;
-  const of = all.length;
-  const startFrame = run.refs.find((r) => r.role === "startFrame") ?? null;
-  const media =
-    run.kind === "image" || output.hasThumb ? (
-      <TilePicture output={output} kind={run.kind} />
-    ) : startFrame ? (
-      // A video whose poster frame is not saved yet: its start frame, when it had one.
-      <RefThumb sha256={startFrame.sha256} mime={startFrame.mime} alt="" className="size-full" />
-    ) : (
-      <Placeholder kind="video" />
-    );
-  return (
-    <div
-      data-output-tile={output.id}
-      className={`relative overflow-hidden rounded-lg border border-border bg-bg-muted ${props.className}`}
-    >
-      <button
-        type="button"
-        aria-label={STUDIO_TILE.open(run.kind, n, of, run.prompt)}
-        onClick={() => props.onOpen(output.id)}
-        className="block size-full"
-      >
-        {media}
-      </button>
-      {run.kind === "video" && output.durationMs !== null && (
-        <span className="pointer-events-none absolute right-1 bottom-1 rounded bg-black/60 px-1 text-xs text-white tabular-nums">
-          {clock(output.durationMs)}
-        </span>
-      )}
-      {props.select && (
-        <input
-          type="checkbox"
-          aria-label={STUDIO_TILE.select(run.kind, n, of, run.prompt)}
-          checked={props.select.selected}
-          onChange={(e) => props.select?.onChange(e.target.checked)}
-          className="absolute top-1.5 left-1.5 size-4"
-        />
-      )}
-      {props.onStar ? (
-        <button
-          type="button"
-          aria-label={STUDIO_TILE.star(run.kind, n, of)}
-          aria-pressed={output.starred}
-          onClick={props.onStar}
-          className="absolute top-1 right-1 rounded-md bg-black/50 p-1 text-white hover:bg-black/70"
-        >
-          <Star size={12} aria-hidden fill={output.starred ? "currentColor" : "none"} />
-        </button>
-      ) : (
-        output.starred && (
-          <Star
-            size={14}
-            aria-hidden
-            fill="currentColor"
-            className="pointer-events-none absolute top-1.5 right-1.5 text-white drop-shadow"
-          />
-        )
-      )}
-    </div>
-  );
-}
-
-/** The question before results are deleted: what goes, what the audit log keeps and, when a
- *  cloud run's result is among them, that it still counts toward today's spending. */
-export function ConfirmDelete(props: {
-  /** The results to delete; `null` while the question is not asked. */
-  results: Result[] | null;
-  onConfirm(): void;
-  onCancel(): void;
-}) {
-  const { results } = props;
-  const cloud = results?.some((r) => r.run.runsOn === "cloud") ?? false;
-  return (
-    <AlertDialog.Root
-      open={results !== null}
-      onOpenChange={(open) => {
-        if (!open) props.onCancel();
-      }}
-    >
-      <AlertDialog.Portal>
-        <AlertDialog.Overlay className="dialog-overlay fixed inset-0" />
-        <AlertDialog.Content className="fixed top-1/2 left-1/2 w-[26rem] max-w-[92vw] -translate-x-1/2 -translate-y-1/2 rounded-2xl border border-border bg-surface p-5 text-sm shadow-pop">
-          {results && (
-            <>
-              <AlertDialog.Title className="text-base font-semibold">
-                {STUDIO_DELETE.title(
-                  results.length,
-                  results.map((r) => r.run.kind),
-                )}
-              </AlertDialog.Title>
-              <AlertDialog.Description asChild>
-                <div className="mt-2 flex flex-col gap-1.5">
-                  <p>{STUDIO_DELETE.removes(results.length)}</p>
-                  <p className="text-fg-muted">
-                    {STUDIO_DELETE.audit}
-                    {cloud ? ` ${STUDIO_DELETE.spending}` : ""}
-                  </p>
-                </div>
-              </AlertDialog.Description>
-              <div className="mt-4 flex justify-end gap-2">
-                <AlertDialog.Cancel className="rounded-md border border-border px-3 py-1.5 hover:bg-bg-muted">
-                  {STUDIO_DELETE.cancel}
-                </AlertDialog.Cancel>
-                <AlertDialog.Action
-                  onClick={props.onConfirm}
-                  className="rounded-md bg-danger px-3 py-1.5 font-medium text-white hover:opacity-90"
-                >
-                  {STUDIO_DELETE.delete}
-                </AlertDialog.Action>
-              </div>
-            </>
-          )}
-        </AlertDialog.Content>
-      </AlertDialog.Portal>
-    </AlertDialog.Root>
-  );
-}
+// Studio's gallery grid (0.1.0 Task B9; studio-design 5): every result of every kind as a tile
+// (./results), newest run first, in place of the card stream while Grid is on. Beside the top
+// bar's search and Starred, the grid filters by kind (All, Pictures, Video; the top bar's
+// Pictures and Video are hidden meanwhile) and date; *Load more* reads the next page. Several
+// results can be selected and deleted (after the question that says what the audit log keeps)
+// or saved into one folder together, which says where.
 
 /** The date filter's choices: from the start of the local day `DAYS` days back, today counted. */
 type When = "any" | "today" | "week" | "month";
@@ -225,11 +22,15 @@ const DAYS: Record<Exclude<When, "any">, number> = { today: 1, week: 7, month: 3
 
 /** The first moment `when` covers: the start of the local day `DAYS[when] - 1` days before today. */
 function sinceOf(when: When): number | null {
-  if (when === "any") return null;
-  const day = new Date();
-  day.setHours(0, 0, 0, 0);
-  day.setDate(day.getDate() - (DAYS[when] - 1));
-  return day.getTime();
+  return when === "any" ? null : localDayStart(DAYS[when] - 1);
+}
+
+/** The date choice the gallery's filter has (`since`): the one whose first moment it is, or
+ *  the nearest once a day has passed since it was chosen; Any time without one. */
+function whenOf(since: number | null | undefined): When {
+  if (since == null) return "any";
+  const gap = (when: When) => Math.abs((sinceOf(when) ?? Number.NEGATIVE_INFINITY) - since);
+  return WHEN.reduce<When>((nearest, when) => (gap(when) < gap(nearest) ? when : nearest), "today");
 }
 
 /** Whether a run reported since the gallery was read belongs in it: of the kind shown, made
@@ -271,11 +72,13 @@ export function Grid(props: { onOpen(outputId: string): void }) {
   const filter = useStudio((s) => s.filter);
   const next = useStudio((s) => s.next);
   const results = useMemo(() => galleryResults(runs, live, filter), [runs, live, filter]);
-  const [when, setWhen] = useState<When>("any");
+  const when = whenOf(filter.since);
   const [selected, setSelected] = useState<ReadonlySet<string>>(() => new Set());
   const [asking, setAsking] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<ErrorInfo | null>(null);
+  // Where several results were saved, until the next action.
+  const [saved, setSaved] = useState<string | null>(null);
   // A result selected and since gone (deleted, or filtered out) does not count.
   const chosen = results.filter((r) => selected.has(r.output.id));
   const ids = chosen.map((r) => r.output.id);
@@ -283,6 +86,7 @@ export function Grid(props: { onOpen(outputId: string): void }) {
   const perform = (action: () => Promise<void>, after?: () => void) => {
     setBusy(true);
     setError(null);
+    setSaved(null);
     action().then(
       () => {
         setBusy(false);
@@ -325,11 +129,7 @@ export function Grid(props: { onOpen(outputId: string): void }) {
         <select
           aria-label={STUDIO_GRID.when}
           value={when}
-          onChange={(e) => {
-            const chosenWhen = e.target.value as When;
-            setWhen(chosenWhen);
-            perform(() => store().setFilter({ since: sinceOf(chosenWhen) }));
-          }}
+          onChange={(e) => perform(() => store().setFilter({ since: sinceOf(e.target.value as When) }))}
           className="rounded-lg border border-border bg-bg px-2 py-1 text-sm"
         >
           {WHEN.map((w) => (
@@ -348,7 +148,15 @@ export function Grid(props: { onOpen(outputId: string): void }) {
               type="button"
               className={CARD_BUTTON}
               disabled={busy}
-              onClick={() => perform(() => store().saveSeveral(ids), clear)}
+              onClick={() =>
+                perform(async () => {
+                  const folder = await store().saveSeveral(ids);
+                  // A cancelled folder picker leaves the selection as it was.
+                  if (folder === null) return;
+                  clear();
+                  setSaved(STUDIO_VIEWER.savedTo(folder));
+                })
+              }
             >
               {STUDIO_GRID.saveSome(chosen.length)}
             </button>
@@ -359,6 +167,11 @@ export function Grid(props: { onOpen(outputId: string): void }) {
         )}
       </div>
       {error && <ErrorBanner error={error} onDismiss={() => setError(null)} />}
+      {saved && (
+        <p role="status" className="text-sm text-fg-muted">
+          {saved}
+        </p>
+      )}
       {results.length === 0 ? (
         <p className="py-8 text-center text-sm text-fg-muted">{filtered ? STUDIO_GRID.nothingMatches : STUDIO_GRID.empty}</p>
       ) : (

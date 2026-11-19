@@ -1562,7 +1562,8 @@ export const STUDIO_GRID = {
 } as const;
 
 /** Deleting results, in the viewer or several from the grid (Task B9): the file and its record
- *  go; the audit log keeps its line, and a cloud run still counts toward today's spending. */
+ *  go; the audit log keeps its line, and a cloud run made today still counts toward today's
+ *  spending. */
 export const STUDIO_DELETE = {
   title(count: number, kinds: readonly MediaKind[]): string {
     const pictures = kinds.every((k) => k === "image");
@@ -1573,7 +1574,8 @@ export const STUDIO_DELETE = {
   removes: (count: number) =>
     count === 1 ? "The file and its record are removed from the gallery." : "The files and their records are removed from the gallery.",
   audit: "The audit log keeps a line saying a run happened (model and cost), but not your prompt.",
-  /** Added after `audit` when a cloud run's result is among those deleted. */
+  /** Added after `audit` when a result of a cloud run made today (the local day the daily
+   *  limit counts by) is among those deleted. */
   spending: "It still counts toward today's spending.",
   delete: "Delete",
   cancel: "Cancel",

@@ -17,7 +17,8 @@ import { LocalMark } from "./LocalMark";
 
 // Studio's top bar (0.1.0 Task B2, design Wireframe 1): the title, [Pictures | Video], the
 // gallery's search, Starred and Grid, where the chosen model runs, cloud spending today, and
-// the menu with *Update model lists* and *Get local models*.
+// the menu with *Update model lists* and *Get local models*. While the grid is open, its own
+// All, Pictures and Video choose what it shows, and [Pictures | Video] is hidden (Task B9).
 
 const TABS: readonly StudioTab[] = ["image", "video"];
 
@@ -31,8 +32,8 @@ const MENU_ITEM =
 const TOGGLE =
   "flex shrink-0 items-center gap-1.5 rounded-lg px-2 py-1.5 text-sm whitespace-nowrap hover:bg-bg-muted aria-pressed:text-accent";
 
-/** Title, [Pictures | Video], search, Starred, Grid, where the chosen model runs, cloud
- *  spending today, and the menu. */
+/** Title, [Pictures | Video] (not while the grid is open), search, Starred, Grid, where the
+ *  chosen model runs, cloud spending today, and the menu. */
 export function TopBar(props: { onError: (e: unknown) => void }) {
   const setTab = useStudio((s) => s.setTab);
   const starred = useStudio((s) => s.filter.starred ?? false);
@@ -43,14 +44,17 @@ export function TopBar(props: { onError: (e: unknown) => void }) {
   return (
     <header className="glass z-10 flex flex-wrap items-center gap-x-2 gap-y-1 border-b border-border px-3 py-2">
       <h1 className="text-sm font-semibold">{STUDIO_NAV.name}</h1>
-      <Tabs.List aria-label={STUDIO_BAR.tabs} className="flex gap-0.5 rounded-lg bg-bg-muted p-0.5 text-fg-muted">
-        {TABS.map((t) => (
-          // A click selects too: assistive technology may send one without a mouse press.
-          <Tabs.Trigger key={t} value={t} className={tabClass} onClick={() => setTab(t)}>
-            {STUDIO_TABS[t]}
-          </Tabs.Trigger>
-        ))}
-      </Tabs.List>
+      {/* The grid's own kind toggles stand in for these while it is open. */}
+      {!grid && (
+        <Tabs.List aria-label={STUDIO_BAR.tabs} className="flex gap-0.5 rounded-lg bg-bg-muted p-0.5 text-fg-muted">
+          {TABS.map((t) => (
+            // A click selects too: assistive technology may send one without a mouse press.
+            <Tabs.Trigger key={t} value={t} className={tabClass} onClick={() => setTab(t)}>
+              {STUDIO_TABS[t]}
+            </Tabs.Trigger>
+          ))}
+        </Tabs.List>
+      )}
       <SearchBox onError={props.onError} />
       <button
         type="button"
