@@ -76,8 +76,9 @@ pub async fn save_thumb(
 /// result's own extension and stay out of the app's folders: `forbidden`, the gallery
 /// folder, and the gallery folder the result was kept in when Settings → Studio has moved
 /// the gallery since ([`export_target`]); and it must not be the result's own file (through
-/// a link), which a copy would empty. With `with_settings`, the run's prompt, model,
-/// settings and cost go beside it as `<name>.json` ([`settings_record`]).
+/// a link). The copy replaces whatever is at `path`, a link included, never writing through it
+/// ([`copy_then_rename`]). With `with_settings`, the run's prompt, model, settings and cost go
+/// beside it as `<name>.json` ([`settings_record`]).
 pub async fn export(
     studio: &StudioManager,
     output_id: &str,
@@ -142,7 +143,7 @@ async fn export_output(
             .to_string_lossy();
         return Err(errors::settings_file_exists(&name));
     }
-    tokio::fs::copy(&source, &target)
+    copy_then_rename(&source, &target)
         .await
         .map_err(|e| errors::not_exported(e.to_string()))?;
     if let Some(run) = run {
@@ -164,6 +165,24 @@ async fn export_output(
         .map_err(|e| errors::not_exported(e.to_string()))?;
     }
     Ok(target.display().to_string())
+}
+
+/// Copies `source` to a new file beside `target`, then renames it over `target`: a name that
+/// is a link (dangling or not, perhaps into one of the app's folders) is replaced by the copy,
+/// never written through, and a hard link to `source` itself gets a file of its own rather
+/// than the shared file being emptied before it is read. A failed copy leaves nothing behind.
+async fn copy_then_rename(source: &Path, target: &Path) -> std::io::Result<()> {
+    let name = target.file_name().unwrap_or_default().to_string_lossy();
+    let partial = target.with_file_name(format!(".{name}.{}.part", uuid::Uuid::new_v4()));
+    let copied = async {
+        tokio::fs::copy(source, &partial).await?;
+        tokio::fs::rename(&partial, target).await
+    }
+    .await;
+    if copied.is_err() {
+        let _ = tokio::fs::remove_file(&partial).await;
+    }
+    copied
 }
 
 /// What an export writes beside a result: how it was made (the run's endpoint, model,
@@ -353,5 +372,80 @@ mod tests {
         assert_eq!(err.code, "not_found");
         assert!(!docs.path().join("lonely.png").exists());
         assert!(!docs.path().join("lonely.json").exists());
+    }
+
+    /// Finding sec-export-link-edges (a): a name chosen that is a hard link to the result's
+    /// own file (another path, the same file) gets a copy of its own: the result is never
+    /// emptied, as a copy written into the shared file would.
+    #[tokio::test]
+    async fn export_onto_a_hard_link_to_the_result_leaves_the_result_whole() {
+        let docs = Scratch::new();
+        let h = harness().await;
+        h.seed_run("p1", MediaKind::Image, "a red kite", now())
+            .await;
+        let picture = png(4, 4);
+        let out = h
+            .seed_output("p1", "image/png", &picture, picture.len() as u64)
+            .await;
+        let source = h
+            .store
+            .get_creation_output(&out)
+            .await
+            .unwrap()
+            .unwrap()
+            .path;
+        let link = docs.path().join("kite.png");
+        std::fs::hard_link(&source, &link).unwrap();
+        let saved = export(&h.manager, &out, &link.display().to_string(), false, &[])
+            .await
+            .unwrap();
+        assert_eq!(std::fs::read(&source).unwrap(), picture, "the result");
+        assert_eq!(std::fs::read(&saved).unwrap(), picture, "the copy");
+        // No temporary file is left beside it.
+        let names: Vec<_> = std::fs::read_dir(docs.path())
+            .unwrap()
+            .map(|e| e.unwrap().file_name())
+            .collect();
+        assert_eq!(names, ["kite.png"]);
+    }
+
+    /// Finding sec-export-link-edges (b): a name chosen that is a link (dangling or not) into
+    /// one of the app's folders is replaced by the copy, never written through: nothing lands
+    /// in the app's folder.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn export_onto_a_link_into_an_app_folder_replaces_the_link() {
+        let docs = Scratch::new();
+        let app_data = Scratch::new();
+        let h = harness().await;
+        h.seed_run("p1", MediaKind::Image, "a red kite", now())
+            .await;
+        let picture = png(4, 4);
+        let out = h
+            .seed_output("p1", "image/png", &picture, picture.len() as u64)
+            .await;
+        let forbidden = [app_data.path().to_owned()];
+        let kept = app_data.path().join("settings.db");
+        std::fs::write(&kept, b"the app's own file").unwrap();
+        let dangling = app_data.path().join("new.db");
+        for (name, into) in [("kite.png", &kept), ("dangling.png", &dangling)] {
+            let link = docs.path().join(name);
+            std::os::unix::fs::symlink(into, &link).unwrap();
+            let saved = export(
+                &h.manager,
+                &out,
+                &link.display().to_string(),
+                false,
+                &forbidden,
+            )
+            .await
+            .unwrap();
+            assert_eq!(Path::new(&saved), link);
+            let meta = std::fs::symlink_metadata(&link).unwrap();
+            assert!(meta.is_file(), "{name}: the link was replaced by the copy");
+            assert_eq!(std::fs::read(&link).unwrap(), picture);
+        }
+        assert_eq!(std::fs::read(&kept).unwrap(), b"the app's own file");
+        assert!(!dangling.exists());
     }
 }
