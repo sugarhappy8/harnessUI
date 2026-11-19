@@ -346,6 +346,21 @@ describe("what is saved", () => {
     expect(useStudio.getState().runs).toEqual([LOCAL_RUN]);
   });
 
+  it("a filter whose first page could not be read is put back, so the runs and the filter shown agree", async () => {
+    saved();
+    vi.mocked(api.studioRuns).mockResolvedValue({ runs: [RUN], next: { createdAt: 1, id: "x" } });
+    await useStudio.getState().load();
+    const before = useStudio.getState().filter;
+    vi.mocked(api.studioRuns).mockRejectedValueOnce(new Error("database is locked"));
+    await expect(useStudio.getState().setFilter({ starred: true })).rejects.toThrow("database is locked");
+    expect(useStudio.getState().filter).toBe(before);
+    expect(useStudio.getState().runs).toEqual([RUN]);
+    // Load more then reads the next page of the filter the runs belong to.
+    vi.mocked(api.studioRuns).mockResolvedValueOnce({ runs: [], next: null });
+    await useStudio.getState().loadMore();
+    expect(api.studioRuns).toHaveBeenLastCalledWith(before, { createdAt: 1, id: "x" }, 60);
+  });
+
   it("the first page read when Studio opens does not replace a newer filter's runs", async () => {
     saved();
     let answerLoad: (page: { runs: Run[]; next: null }) => void = () => undefined;

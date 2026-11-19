@@ -284,7 +284,8 @@ export interface StudioState extends StudioRunState, StudioResultsState, StudioL
    *  (one that could not be worked out is not asked again until the local models are read
    *  again). Worked out on this computer: nothing is sent anywhere. */
   askLocalFit(modelId: string, width: number, height: number, seconds: number): void;
-  /** Changes the gallery's filter and reads its first page again. */
+  /** Changes the gallery's filter and reads its first page again; when that read fails, the
+   *  filter goes back to what it was (the runs held are its) and the failure rejects. */
   setFilter(patch: Partial<RunsFilter>): Promise<void>;
   /** *Load more*: the gallery's next page, after the last one read, for the same filter (one
    *  at a time; a page for a filter changed since is dropped). */
@@ -919,9 +920,17 @@ export const useStudio: UseBoundStore<StoreApi<StudioState>> = create<StudioStat
         .finally(() => mine.delete(key));
     },
     setFilter: async (patch) => {
-      const filter = { ...get().filter, ...patch };
+      const before = get().filter;
+      const filter = { ...before, ...patch };
       set({ filter });
-      const page = await api.studioRuns(filter, null, RUNS_PAGE);
+      let page: Awaited<ReturnType<typeof api.studioRuns>>;
+      try {
+        page = await api.studioRuns(filter, null, RUNS_PAGE);
+      } catch (e) {
+        // The runs held are still the filter before's: so are the controls, and Load more.
+        if (get().filter === filter) set({ filter: before });
+        throw e;
+      }
       // An answer for a filter changed since is old.
       if (get().filter === filter) set({ runs: page.runs, next: page.next });
     },

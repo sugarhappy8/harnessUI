@@ -395,13 +395,13 @@ describe("Grid", () => {
     await showGrid();
     const when = () => screen.getByRole("combobox", { name: "When" }) as HTMLSelectElement;
     expect(when().selectedOptions[0]!.text).toBe("Any time");
-    // A read that fails keeps the filter chosen, and the choice says so.
+    // A read that fails puts the filter back (the runs shown are still its), and the choice says so.
     vi.mocked(api.studioRuns).mockRejectedValueOnce({ code: "internal", message: "No", nextStep: "", details: "" });
     pickDate("Last 7 days");
     await flush();
     screen.getByText("No");
-    expect(useStudio.getState().filter.since).toEqual(expect.any(Number));
-    expect(when().selectedOptions[0]!.text).toBe("Last 7 days");
+    expect(useStudio.getState().filter.since ?? null).toBeNull();
+    expect(when().selectedOptions[0]!.text).toBe("Any time");
     // The filter changed elsewhere: the choice follows it.
     await act(async () => {
       await useStudio.getState().setFilter({ since: null });
