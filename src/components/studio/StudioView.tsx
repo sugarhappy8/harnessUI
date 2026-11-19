@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { Tabs } from "radix-ui";
 import * as ipc from "../../lib/ipc";
 import type { ErrorInfo } from "../../lib/types";
@@ -7,8 +7,10 @@ import { useStudio, type StudioTab } from "../../store/studio";
 import { ErrorBanner } from "../ErrorBanner";
 import { Notices } from "./EmptyStates";
 import { PromptDock } from "./PromptDock";
+import { queueSummary, RunCard } from "./RunCard";
 import { SettingsPanel } from "./SettingsPanel";
 import { TopBar } from "./TopBar";
+import type { Run } from "./types";
 
 // Studio's view (0.1.0, design Wireframe 1): the top bar (TopBar.tsx), the card stream in the
 // middle with the notices and empty states above it, local first (EmptyStates.tsx), the right
@@ -16,14 +18,29 @@ import { TopBar } from "./TopBar";
 // time it is shown, and when Settings closes over it): lists are fetched only on *Get the
 // list* or *Update model lists*. The right panel holds the model and its settings (B5), and the
 // prompt dock the added pictures, the prompt, the changed settings and Create (B7,
-// PromptDock.tsx). Later tasks fill the other slots: the run cards (B8) and Get local models in
-// place of the stream while `localView` is on (B13).
+// PromptDock.tsx). The card stream holds the tab's runs, newest first, as RunCards (B8): the
+// gallery's runs read so far with each run's newest state, and the runs started or heard of
+// since; above them, the queue strip counts this session's runs of the tab by state. Later
+// tasks fill the other slots: the gallery's grid (B9) and Get local models in place of the
+// stream while `localView` is on (B13).
+
+/** The card stream of `tab`: the gallery's runs with each run's newest state, and the runs
+ *  reported since (`live`) that it has not read, newest first. */
+function streamOf(runs: Run[], live: Record<string, Run>, tab: StudioTab): Run[] {
+  const byId = new Map<string, Run>();
+  for (const run of [...Object.values(live), ...runs]) if (run.kind === tab && !byId.has(run.id)) byId.set(run.id, run);
+  return [...byId.values()].sort((a, b) => b.createdAt - a.createdAt);
+}
 
 export function StudioView() {
   const tab = useStudio((s) => s.tab);
   const setTab = useStudio((s) => s.setTab);
   const loaded = useStudio((s) => s.loaded);
   const shown = useStudio((s) => s.view === "studio");
+  const runs = useStudio((s) => s.runs);
+  const live = useStudio((s) => s.live);
+  const stream = useMemo(() => streamOf(runs, live, tab), [runs, live, tab]);
+  const queue = useMemo(() => queueSummary(Object.values(live).filter((r) => r.kind === tab)), [live, tab]);
   // The banner's error, and whether a read of what is saved gave it: a read that works puts
   // that one away, but not an action's (a failed *Get the list* stays until dismissed).
   const [error, setError] = useState<{ info: ErrorInfo; read: boolean } | null>(null);
@@ -62,8 +79,17 @@ export function StudioView() {
             <div className="mx-auto flex max-w-3xl flex-col gap-3 px-4 py-4">
               {error && <ErrorBanner error={error.info} onDismiss={() => setError(null)} />}
               {loaded && <Notices tab={tab} onError={fail} />}
-              {/* The run cards (Task B8), or the gallery's grid (Task B9). */}
-              <div data-card-stream />
+              {/* The run cards, or the gallery's grid (Task B9). */}
+              <div data-card-stream className="flex flex-col gap-3">
+                {queue && (
+                  <p data-queue-strip className="text-xs text-fg-muted" aria-live="polite">
+                    {queue}
+                  </p>
+                )}
+                {stream.map((run) => (
+                  <RunCard key={run.id} run={run} />
+                ))}
+              </div>
             </div>
           </main>
           {/* The right panel: the model and its settings. */}

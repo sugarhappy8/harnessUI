@@ -10,6 +10,8 @@ import { AppNotices } from "./components/AppNotices";
 import type { UpdatePlacement } from "./components/UpdateBox";
 import { FullAccessStartCheck } from "./components/AllowAllButton";
 import { StudioView } from "./components/studio/StudioView";
+import { StudioNotice } from "./components/studio/StudioNotice";
+import { QuitWhileMaking } from "./components/studio/QuitWhileMaking";
 import { followApprovals, followRunningTurn, turnChatId, useApp, toErrorInfo } from "./store/app";
 import { followStudio, useStudio } from "./store/studio";
 import * as ipc from "./lib/ipc";
@@ -141,6 +143,8 @@ export default function App() {
       <SettingsDialog open={settingsOpen} onOpenChange={onSettingsOpenChange} initialTab={settingsTab} />
       <ModelsDialog open={modelsOpen} onOpenChange={setModelsOpen} />
       <ShortcutsDialog open={shortcutsOpen} onOpenChange={setShortcutsOpen} />
+      {/* Asked when the window is closed, or the app quit, while a local Studio job works. */}
+      <QuitWhileMaking />
     </>
   );
   // The update box floats where it covers neither the message box nor the header's controls
@@ -192,9 +196,11 @@ export default function App() {
             onOpenModels={() => setModelsOpen(true)}
           />
         )}
-        <div className="flex min-w-0 flex-1" hidden={studioShown}>
+        <div className="relative flex min-w-0 flex-1" hidden={studioShown}>
           <ChatView />
           <Workbench />
+          {/* A video that finished while the chat was shown. */}
+          <StudioNotice />
         </div>
         {studioMounted && (
           <div className="flex min-w-0 flex-1" hidden={!studioShown}>

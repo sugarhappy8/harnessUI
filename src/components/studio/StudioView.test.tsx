@@ -3,8 +3,8 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { amountGb } from "../../lib/words";
-import { LOCAL, MODELS } from "./fixtures/models";
-import type { LocalModels, StudioEndpoint, StudioPrefs, Usage } from "./types";
+import { LOCAL, MODELS, RUN } from "./fixtures/models";
+import type { LocalModels, Run, StudioEndpoint, StudioPrefs, Usage } from "./types";
 
 // Radix positions menus with ResizeObserver, which jsdom does not have.
 globalThis.ResizeObserver ??= class {
@@ -79,14 +79,23 @@ async function flush() {
 }
 
 /** Opens Studio with what the backend has saved: App mounts the view when it is first shown. */
-async function show(saved: { endpoints?: StudioEndpoint[]; local?: LocalModels; prefs?: StudioPrefs; usage?: Usage } = {}) {
+async function show(
+  saved: {
+    endpoints?: StudioEndpoint[];
+    local?: LocalModels;
+    prefs?: StudioPrefs;
+    usage?: Usage;
+    runs?: Run[];
+    live?: Run[];
+  } = {},
+) {
   const endpoints = saved.endpoints ?? [openrouter];
   const p = saved.prefs ?? prefs();
   vi.mocked(api.studioModels).mockResolvedValue({ endpoints });
   vi.mocked(api.studioRefreshModels).mockResolvedValue({ endpoints });
   vi.mocked(api.studioLocalModels).mockResolvedValue(saved.local ?? LOCAL);
-  vi.mocked(api.studioRuns).mockResolvedValue({ runs: [], next: null });
-  vi.mocked(api.studioLive).mockResolvedValue([]);
+  vi.mocked(api.studioRuns).mockResolvedValue({ runs: saved.runs ?? [], next: null });
+  vi.mocked(api.studioLive).mockResolvedValue(saved.live ?? []);
   vi.mocked(api.studioGetPrefs).mockResolvedValue(p);
   vi.mocked(api.studioSetPrefs).mockImplementation(async (patch) => ({ ...p, ...patch }));
   vi.mocked(api.studioUsage).mockResolvedValue(saved.usage ?? usage());
@@ -355,6 +364,31 @@ describe("StudioView", () => {
     expect(api.studioRuns).toHaveBeenCalledTimes(1);
     expect(api.studioRuns).toHaveBeenCalledWith({ text: "fox" }, null, 50);
     expect(search.value).toBe("fox");
+  });
+
+  it("the card stream shows the tab's runs, newest first, under the queue strip of this session's runs", async () => {
+    const older: Run = { ...RUN, id: "older", createdAt: RUN.createdAt - 1000, prompt: "An older picture" };
+    const making: Run = {
+      ...RUN,
+      id: "making",
+      createdAt: RUN.createdAt + 1000,
+      prompt: "A picture being made",
+      status: "running",
+      outputs: [],
+      costUsd: null,
+      startedAt: Date.now(),
+      finishedAt: null,
+    };
+    const clip: Run = { ...RUN, id: "clip", kind: "video", prompt: "A clip" };
+    await show({ runs: [RUN, older, clip], live: [making] });
+    const cards = () => [...document.querySelectorAll("[data-run-card]")].map((c) => c.getAttribute("data-run-card"));
+    expect(cards()).toEqual(["making", RUN.id, "older"]);
+    screen.getByText("1 making");
+    act(() => useStudio.getState().applyProgress({ ...making, status: "done", finishedAt: Date.now() }));
+    screen.getByText("1 done");
+    await click(screen.getByRole("tab", { name: "Video" }));
+    expect(cards()).toEqual(["clip"]);
+    expect(document.querySelector("[data-queue-strip]")).toBeNull();
   });
 
   it("the Video tab offers a local video model first, and OpenRouter as the backup", async () => {

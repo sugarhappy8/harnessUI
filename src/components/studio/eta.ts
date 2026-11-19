@@ -11,8 +11,9 @@ function roundForDisplay(ms: number): number {
   return Math.max(5_000, Math.floor((ms + step / 2) / step) * step);
 }
 
-/** A rounded time in words: "25 s", "4 min", "1 min 30 s", "1 h 5 min". */
-function timeWords(ms: number): string {
+/** A time in words, to the second: "25 s", "4 min", "1 min 30 s", "1 h 5 min" (a run card's
+ *  "took 3 min 48 s"). */
+export function timeWords(ms: number): string {
   const seconds = Math.round(ms / 1000);
   if (seconds < 60) return STUDIO_TIME.seconds(seconds);
   const minutes = Math.floor(seconds / 60);

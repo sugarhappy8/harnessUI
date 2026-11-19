@@ -13,7 +13,7 @@ import {
 import { ErrorBanner } from "../ErrorBanner";
 import { ChipsRow } from "./AdvancedDrawer";
 import { ConfirmRun } from "./ConfirmRun";
-import { cloudBackup, costTone, createLabel, limitLine, placeLine } from "./cost";
+import { cloudBackup, COST_TONE_CLASS, costTone, createLabel, limitLine, placeLine } from "./cost";
 import { etaText } from "./eta";
 import { RefTray } from "./RefTray";
 
@@ -29,13 +29,6 @@ import { RefTray } from "./RefTray";
 // 15 minutes says so in amber, and cloud is offered as the backup when it does not fit or is
 // very slow (Studio never moves the draft by itself). Other screens put the cursor in the
 // prompt with the window event `app:focus-studio-prompt`.
-
-const TONE: Record<ReturnType<typeof costTone>, string> = {
-  plain: "text-fg",
-  amber: "text-warning",
-  red: "text-danger",
-  unknown: "text-fg-muted",
-};
 
 const SECONDARY =
   "rounded-lg border border-border bg-bg px-2.5 py-1 text-sm hover:border-border-strong hover:bg-bg-muted";
@@ -156,7 +149,7 @@ export function PromptDock(props: { tab: StudioTab }) {
               {known && !notHere && (
                 <span
                   id={aboutId}
-                  className={`text-sm tabular-nums ${here ? "text-fg-muted" : TONE[costTone(known.usd)]}`}
+                  className={`text-sm tabular-nums ${here ? "text-fg-muted" : COST_TONE_CLASS[costTone(known.usd)]}`}
                 >
                   {createLabel(known)}
                 </span>

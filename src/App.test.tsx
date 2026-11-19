@@ -98,6 +98,8 @@ beforeEach(() => {
   useStudio.setState({ view: "chat", tab: "image", live: {}, readyNotice: null });
   // The automock answers undefined, which is no list of runs.
   vi.mocked(studioApi.studioLive).mockResolvedValue([]);
+  // App listens for the quit question while a local job works (QuitWhileMaking).
+  vi.mocked(studioApi.onQuitRequested).mockResolvedValue(() => {});
 });
 afterEach(cleanup);
 
@@ -355,6 +357,32 @@ describe("Studio", () => {
     } finally {
       window.removeEventListener("app:settings-closed", closed);
     }
+  });
+
+  it("a video finished while the chat is shown is said in the chat, and Open goes to it", async () => {
+    await renderApp();
+    expect(screen.queryByText("Your video is ready")).toBeNull();
+    act(() => useStudio.getState().applyProgress(run({ id: "v", kind: "video", status: "done" })));
+    const notice = screen.getByText("Your video is ready");
+    expect(notice.closest("[hidden]")).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "Open" }));
+    expect(useStudio.getState()).toMatchObject({ view: "studio", tab: "video", viewer: RUN.outputs[0]!.id });
+    expect(screen.queryByText("Your video is ready")).toBeNull();
+  });
+
+  it("asks before quitting while a local job works", async () => {
+    let asked: (() => void) | null = null;
+    vi.mocked(studioApi.onQuitRequested).mockImplementation(async (handler) => {
+      asked = handler;
+      return () => {};
+    });
+    await renderApp();
+    useStudio.setState({ live: { l: run({ id: "l", runsOn: "local", kind: "video", status: "running" }) } });
+    act(() => asked!());
+    screen.getByText("A video is being made on this computer. Quitting stops it.");
+    act(() => useStudio.getState().showStudio());
+    // Shown over Studio too.
+    screen.getByText("A video is being made on this computer. Quitting stops it.");
   });
 
   it("Ctrl+L goes back to the chat and focuses the message box", async () => {

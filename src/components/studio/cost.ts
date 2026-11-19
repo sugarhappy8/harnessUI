@@ -41,6 +41,15 @@ export function costTone(usd: number | null): "plain" | "amber" | "red" | "unkno
   return usd <= 2.5 ? "amber" : "red";
 }
 
+/** The text colour of each `costTone`: the price's text is always there, the colour is a
+ *  second cue. */
+export const COST_TONE_CLASS: Record<ReturnType<typeof costTone>, string> = {
+  plain: "text-fg",
+  amber: "text-warning",
+  red: "text-danger",
+  unknown: "text-fg-muted",
+};
+
 /** The label beside Create: a local run's time here ("about 4 min", "(first guess)" until it
  *  was measured), else "free" for a run that costs nothing; a cloud run's price for the whole
  *  run ("~ $0.16") or "price unknown". Nothing before there is an estimate. */

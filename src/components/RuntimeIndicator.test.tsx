@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
 import type { ChatDetail, LoadFailure, ModelBusy, RuntimeStatus, ShareStatus } from "../lib/types";
 import { placement } from "./fine.fixtures";
+import { LOCAL_RUN } from "./studio/fixtures/models";
 
 // Radix positions menus with ResizeObserver, which jsdom does not have.
 globalThis.ResizeObserver ??= class {
@@ -35,11 +36,15 @@ const ipcMock = vi.hoisted(() => ({
   listModelOptions: vi.fn(async () => []),
 }));
 vi.mock("../lib/ipc", () => ipcMock);
+// 0.1.0 Studio: Stop Studio job stops the local run holding the graphics card.
+vi.mock("./studio/api");
 
 const { RuntimeIndicator, runtimeNotes, partOnProcessor } = await import("./RuntimeIndicator");
 const { useApp } = await import("../store/app");
 const { useRestartNote, useWaiting } = await import("../store/modelChange");
 const { useApprovalMode } = await import("../lib/approvalMode");
+const studioApi = await import("./studio/api");
+const { useStudio } = await import("../store/studio");
 
 function status(patch: Partial<RuntimeStatus> = {}): RuntimeStatus {
   return {
@@ -624,5 +629,48 @@ describe("RuntimeIndicator: where the model went (0.0.6 item 6)", () => {
     expect(after.map((n) => [n.text, n.action])).toEqual([
       ["Fast attention doesn't work with this graphics card, so it was turned off for this load.", "settings"],
     ]);
+  });
+});
+
+describe("RuntimeIndicator: a chat load waits while Studio uses the graphics card (0.1.0)", () => {
+  const WAITING = "Studio is using the graphics card. The chat model loads when it finishes.";
+  beforeEach(() => {
+    vi.clearAllMocks();
+    ipcMock.modelBusy.mockResolvedValue(IDLE);
+    ipcMock.shareStatus.mockResolvedValue(SHARE_OFF);
+    useWaiting.setState({ change: null, kind: null });
+    useRestartNote.setState({ shown: false });
+    useStudio.setState({ live: {} });
+  });
+  afterEach(cleanup);
+
+  it("a chat load waiting for Studio says so and can stop the Studio job", async () => {
+    vi.mocked(studioApi.studioCancel).mockResolvedValue({ ...LOCAL_RUN, status: "cancelled" });
+    useStudio.setState({
+      live: {
+        done: { ...LOCAL_RUN, id: "done" },
+        "local-run": { ...LOCAL_RUN, status: "running", outputs: [] },
+      },
+    });
+    // Studio unloaded the chat model to make room; loading it again waits.
+    await show(status({ state: "stopped", unloadedPath: "/models/a.gguf", waitingForStudio: true }));
+    screen.getByText(WAITING);
+    expect(screen.queryByRole("button", { name: "Load" })).toBeNull();
+    await click(screen.getByRole("button", { name: "Stop Studio job" }));
+    expect(studioApi.studioCancel).toHaveBeenCalledWith("local-run");
+    expect(useStudio.getState().live["local-run"]?.status).toBe("cancelled");
+  });
+
+  it("under the ready line of the model loaded now, and without a job to stop when none is known", async () => {
+    await show(status({ waitingForStudio: true }));
+    expect(document.querySelector("[data-ready-line]")).not.toBeNull();
+    screen.getByText(WAITING);
+    expect(screen.queryByRole("button", { name: "Stop Studio job" })).toBeNull();
+  });
+
+  it("says nothing of Studio while no load waits for it", async () => {
+    useStudio.setState({ live: { "local-run": { ...LOCAL_RUN, status: "running" } } });
+    await show(status());
+    expect(screen.queryByText(WAITING)).toBeNull();
   });
 });

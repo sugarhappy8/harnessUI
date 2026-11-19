@@ -357,6 +357,22 @@ export function amountGb(bytes: number): string {
   return `${amountNumber(bytes)} GB`;
 }
 
+const MIB = 1024 * 1024;
+
+/** A download's size in the same binary units (0.1.0 Studio): whole megabytes, rounded up as
+ *  the backend counts the Studio engine's pack, under 1 GB ("29 MB"), else `amountGb`. */
+export function downloadAmount(bytes: number): string {
+  return Number.isFinite(bytes) && bytes > 0 && bytes < GIB ? `${Math.ceil(bytes / MIB)} MB` : amountGb(bytes);
+}
+
+/** A licence line's short name (0.1.0 Studio): the last word of its first part, so
+ *  "stable-diffusion.cpp MIT; ggml MIT; libwebp and libwebm BSD-3-Clause" reads "MIT". The
+ *  whole line goes in the tooltip. */
+export function licenceWord(licenseName: string): string {
+  const first = licenseName.split("; ", 1)[0] ?? "";
+  return first.trim().split(/\s+/).pop() ?? "";
+}
+
 /** Where a fit estimate's free memory is, after "Needs about 4.1 GB; ". */
 const FIT_HAS: Record<FitDevice, (free: string) => string> = {
   graphicsCard: (free) => `this computer has ${free} free on the graphics card.`,
@@ -1029,7 +1045,15 @@ export const STUDIO_ACTIONS = {
   openEndpoints: "Open Endpoints",
   getTheList: "Get the list",
   notNow: "Not now",
+  /** A local model's parts checked, and what is missing or damaged fetched again. */
+  downloadAgain: "Download again",
 } as const;
+
+/** The Studio engine's download, where it is missing (Tasks B8, B10 and B13): its size and the
+ *  short name of its licence, "Download the Studio engine (29 MB, MIT)". */
+export function engineDownloadWords(bytes: number, licenseName: string): string {
+  return `Download the Studio engine (${downloadAmount(bytes)}, ${licenceWord(licenseName)})`;
+}
 
 /** A recommended local model that fits, and its whole download: "FLUX.2 klein 4B fits this
  *  computer (5.3 GB)." */
@@ -1369,4 +1393,119 @@ export const STUDIO_CONFIRM = {
   dontAskVideos: (usd: string) => `Don't ask again for videos under ${usd}`,
   cancel: "Cancel",
   makeVideo: "Make video",
+} as const;
+
+/** A run's card (Task B8, design Wireframe 3 and local addendum Wireframe L4): the settings
+ *  line, the status line, what a local run waits for or how it runs, the charge line and the
+ *  card's buttons. Clocks are "m:ss" ("1:12"); times in words come from `eta.ts`. */
+export const STUDIO_CARD = {
+  /** The run's prompt, quoted. */
+  prompt: (text: string) => `"${text}"`,
+  /** Joins the parts of the settings and status lines. */
+  joiner: " · ",
+  /** Where a local run ran, in the settings line. */
+  here: "on this computer",
+  count: (n: number) => `×${n}`,
+  seed: (seed: string) => `seed ${seed}`,
+  size: (width: string, height: string) => `${width}×${height}`,
+  addedPictures: (n: number) => (n === 1 ? "1 added picture" : `${n} added pictures`),
+  startFrame: "start frame",
+  endFrame: "end frame",
+  /** How long a finished local run took ("took 3 min 48 s"). */
+  took: (time: string) => `took ${time}`,
+  /** A run waiting for its place in the queue (from 1). */
+  queued: (place: number | null) => (place === null ? "Waiting" : `Waiting · number ${place} in the queue`),
+  making: "Making it",
+  soFar: (clock: string) => `${clock} so far`,
+  /** How long this model's videos usually take ("usually about 2 min"). */
+  usually: (time: string) => `usually ${time}`,
+  keepWorking: "You can keep working or close the app; it will appear here.",
+  stillNotReady: "Still not ready.",
+  progress: "Progress",
+  cancel: "Cancel",
+  stop: "Stop",
+  stopWatching: "Stop watching",
+  getAnyway: "Get it anyway",
+  checkAgain: "Check again",
+  again: "Again",
+  runAgain: "Run again",
+  editPrompt: "Edit prompt",
+  details: "Details",
+  /** Whether an ended cloud run was charged, as the backend recorded it. */
+  notCharged: "Not charged",
+  mayBeCharged: "May have been charged",
+  charged: (usd: string | null) => (usd === null ? "Charged" : `Charged ${usd}`),
+  /** After the charge line: the company's id for the request. */
+  request: (id: string) => `request ${id}`,
+  /** A local run's status line: "Picture 1 of 2 · step 3 of 4 · 0:21 so far · about 0:30 left". */
+  picture: (n: number, of: number) => `Picture ${n} of ${of}`,
+  pass: (n: number, of: number) => `pass ${n} of ${of}`,
+  step: (n: number, of: number) => `step ${n} of ${of}`,
+  stage: {
+    loading: "Loading the model",
+    readingPrompt: "Reading the prompt",
+    drawing: "Drawing",
+    decoding: "Decoding",
+    saving: "Saving",
+  },
+  /** Before the engine says which stage it is at. */
+  starting: "Starting",
+  left: (clock: string) => `about ${clock} left`,
+  /** What a queued local run waits for. */
+  waitingFor: {
+    reply: "Waiting for the graphics card: a chat reply is being written. Starts when the reply ends.",
+    studioJob: "Waiting for the graphics card: another Studio job is using it. Starts when that one ends.",
+    chatModelLoading: "Waiting for the chat model to finish loading.",
+  },
+  /** Settings → Studio's Ask, when the run does not fit beside the chat model. */
+  askUnload: "This needs the graphics card's memory. Unload the chat model?",
+  unload: "Unload",
+  keepChat: "Keep the chat model",
+  unloaded: "The chat model was unloaded to make room.",
+  loadAgain: "Load it again",
+  alongside: "Chat replies may be slower while this runs",
+  onProcessor: "Running on the processor: slower, and chat will be slow while this runs.",
+  retrying: "Ran out of graphics memory, trying again with memory saving (slower)",
+  stalled: "No progress for 10 minutes",
+  keepWaiting: "Keep waiting",
+  /** After the engine's or a damaged part's download started from the card. */
+  engineDownloading: "The Studio engine is downloading. Press Run again when it is done.",
+  repairing: "The model's damaged parts are downloading again. Press Run again when it is done.",
+} as const;
+
+/** The strip above the card stream: this session's runs of the tab, by state ("1 making ·
+ *  1 waiting · 3 done · 1 stopped"); a state with none is left out. */
+export const STUDIO_QUEUE = {
+  making: (n: number) => `${n} making`,
+  waiting: (n: number) => `${n} waiting`,
+  done: (n: number) => `${n} done`,
+  stopped: (n: number) => `${n} stopped`,
+  failed: (n: number) => `${n} failed`,
+} as const;
+
+/** The notice in the chat for a video that finished while the chat was shown. */
+export const STUDIO_NOTICE = {
+  ready: "Your video is ready",
+  open: "Open",
+  putAway: "Put the notice away",
+} as const;
+
+/** The question before quitting while a local job works (`studio-quit-requested`). */
+export const STUDIO_QUIT = {
+  title: "Quit while Studio is working?",
+  /** `null` when the job is not known (the window reloaded and heard nothing of it). */
+  making: (kind: MediaKind | null) =>
+    kind === "video"
+      ? "A video is being made on this computer. Quitting stops it."
+      : kind === "image"
+        ? "A picture is being made on this computer. Quitting stops it."
+        : "Studio is making something on this computer. Quitting stops it.",
+  keepWorking: "Keep working",
+  quitAndStop: "Quit and stop",
+} as const;
+
+/** The chat header while a chat model's load waits for a local Studio job. */
+export const STUDIO_CHAT_WAIT = {
+  waiting: "Studio is using the graphics card. The chat model loads when it finishes.",
+  stop: "Stop Studio job",
 } as const;

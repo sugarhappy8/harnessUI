@@ -19,7 +19,11 @@
 // with its own client token at a time (from the draft, or from a run's own settings), the
 // confirmation a cloud run may need (asked by the draft's estimate or by the backend), why a
 // press was refused, the model used last saved as a run starts, today's spending read again as
-// a cloud run starts and ends, and the picker opened on its cloud models from the dock.
+// a cloud run starts and ends, and the picker opened on its cloud models from the dock. Task B8:
+// a run stopped (Cancel, Stop, Stop watching), a video's job checked again (*Get it anyway*,
+// *Check again*), the answer to "Unload the chat model?", the Studio engine's download and a
+// damaged local model's download again, a run made again from its own settings, and the result
+// open in the viewer (Task B9 draws it).
 import { create, type StoreApi, type UseBoundStore } from "zustand";
 import * as api from "../components/studio/api";
 import { carry, closestModel, defaultsFor, dropUnmet, familyOf, type Values } from "../components/studio/canonical";
@@ -92,6 +96,33 @@ export interface StudioState {
   showChat(): void;
   /** A run's new state, from `studio-progress` or `studio_live`. */
   applyProgress(run: Run): void;
+  /** Puts away the notice of a video that finished while the chat was shown (opening Studio
+   *  puts it away too). */
+  dismissReadyNotice(): void;
+  /** The result open in the viewer (Task B9 draws it); `null` while it is closed. */
+  viewer: string | null;
+  /** Opens result `outputId` in the viewer; `null` closes it. */
+  openViewer(outputId: string | null): void;
+  /** Cancel, Stop, Stop watching: stops run `runId`, and its new state joins the runs. Rejects
+   *  when it could not be stopped. Never a create. */
+  cancel(runId: string): Promise<void>;
+  /** *Get it anyway*, *Check again*: asks the company about a video's job again, and the run's
+   *  new state joins the runs. Never a create, so never a second charge. */
+  fetchAnyway(runId: string): Promise<void>;
+  /** The answer to "Unload the chat model?" (Settings → Studio's Ask) for local run `runId`:
+   *  unload it, or not (a picture then runs on the processor). */
+  answerUnload(runId: string, unload: boolean): Promise<void>;
+  /** The Studio engine's download where it is missing or partly there (its licence was shown
+   *  with the first model), then the engine's state read again; how the download goes comes as
+   *  `studio-engine-progress`. Rejects when it could not start. */
+  downloadEngine(): Promise<void>;
+  /** *Download again*: installed model `genModelId`'s parts are checked and what is missing or
+   *  damaged is fetched again. Rejects when it could not start (Task B14 asks for a licence the
+   *  download needs accepted first). */
+  repairLocal(genModelId: string): Promise<void>;
+  /** Again, Run again: `run` once more, with its own settings where it ran (`start` from it, so
+   *  a cloud run that needs confirming asks first, and a second press meanwhile does nothing). */
+  again(run: Run): Promise<void>;
 
   /** The endpoints that make pictures or video, with their saved lists. */
   endpoints: StudioEndpoint[];
@@ -536,7 +567,8 @@ export const useStudio: UseBoundStore<StoreApi<StudioState>> = create<StudioStat
     tab: "image",
     live: {},
     readyNotice: null,
-    showStudio: (tab) => set((s) => ({ view: "studio", tab: tab ?? s.tab })),
+    // The finished video is on its card in Studio now.
+    showStudio: (tab) => set((s) => ({ view: "studio", tab: tab ?? s.tab, readyNotice: null })),
     showChat: () => set({ view: "chat" }),
     applyProgress: (run) => {
       const before = get().live[run.id];
@@ -550,6 +582,35 @@ export const useStudio: UseBoundStore<StoreApi<StudioState>> = create<StudioStat
       });
       // A cloud run that just ended has settled what it cost.
       if (run.runsOn === "cloud" && ENDED.has(run.status) && !(before && ENDED.has(before.status))) rereadUsage();
+    },
+    dismissReadyNotice: () => set({ readyNotice: null }),
+    viewer: null,
+    openViewer: (outputId) => set({ viewer: outputId }),
+    cancel: async (runId) => {
+      get().applyProgress(await api.studioCancel(runId));
+    },
+    fetchAnyway: async (runId) => {
+      get().applyProgress(await api.studioFetchAnyway(runId));
+    },
+    answerUnload: async (runId, unload) => {
+      get().applyProgress(await api.studioAnswerUnload(runId, unload));
+    },
+    downloadEngine: async () => {
+      await api.studioEngineDownload(true);
+      // The engine now reads as downloading. The download has started whether or not this read
+      // works; a failure leaves a trace.
+      try {
+        const engine = await api.studioEngineStatus();
+        set((s) => (s.local ? { local: { ...s.local, engine } } : {}));
+      } catch (e) {
+        console.warn("Studio: the engine's state could not be read", e);
+      }
+    },
+    repairLocal: async (genModelId) => {
+      await api.studioLocalDownload({ installed: { genModelId } }, []);
+    },
+    again: async (run) => {
+      await get().start(run.kind, false, run);
     },
 
     endpoints: [],

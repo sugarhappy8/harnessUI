@@ -206,6 +206,12 @@ export interface RuntimeStatus {
    * still describe the model loaded now.
    */
   reloadWaiting: boolean;
+  /**
+   * 0.1.0: a load waits while a local Studio job holds the graphics card ("Studio is using the
+   * graphics card. The chat model loads when it finishes · Stop Studio job"). The other fields
+   * still describe the model loaded now. Left out, it is false.
+   */
+  waitingForStudio?: boolean;
   /** 0.0.5: the model the user unloaded ("Unloaded to free memory · Load"); null after any load. */
   unloadedPath: string | null;
   /** 0.0.6 item 6: where the loaded model went (the ready line's memory report); null until ready. */
