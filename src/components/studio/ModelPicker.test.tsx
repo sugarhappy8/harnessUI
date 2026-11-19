@@ -654,10 +654,19 @@ describe("chooseModel", () => {
 
   it("Reset all lets go of the extra settings held", async () => {
     await onFlareWithExtra();
-    vi.mocked(api.studioModelPrice).mockReturnValue(new Promise(() => undefined));
+    let answer: (m: MediaModel) => void = () => undefined;
+    vi.mocked(api.studioModelPrice).mockReturnValue(new Promise((resolve) => (answer = resolve)));
     useStudio.getState().chooseModel("image", { endpoint: 1 }, nano.id);
     expect(useStudio.getState().holding.image).toBe(true);
     useStudio.getState().resetAdvanced("image");
+    expect(useStudio.getState().holding.image).toBe(false);
+    // The answer that comes after brings nothing back. It also settles the request, which the
+    // store would otherwise keep as on its way, and hand to the tests after this one.
+    await act(async () => {
+      answer(nanoAnswered);
+    });
+    await flush();
+    expect(useStudio.getState().drafts.image.extra).toEqual({});
     expect(useStudio.getState().holding.image).toBe(false);
   });
 
