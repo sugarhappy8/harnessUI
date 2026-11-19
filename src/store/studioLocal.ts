@@ -44,8 +44,9 @@ export interface StudioLocalState {
    *  as Studio recognises it. */
   openRepo(repo: string): Promise<LocalRepo>;
   /** Delete on an installed picture or video model: its files go (not a part another model
-   *  uses), then the local models are read again. Rejects when it was refused (while a run on
-   *  this computer uses the model, `studio_model_in_use`). */
+   *  uses), its row leaves the list, then the local models are read again (a read that fails
+   *  only leaves a trace: the files are gone all the same). Rejects when it was refused (while
+   *  a run on this computer uses the model, `studio_model_in_use`). */
   deleteLocal(genModelId: string): Promise<void>;
   /** *Download again*: installed model `genModelId`'s parts are checked and what is missing or
    *  damaged is fetched again; resolves `true` once that started. When the backend refuses it
@@ -100,7 +101,13 @@ export function createLocal(
     openRepo: (repo) => api.studioLocalRepo(repo),
     deleteLocal: async (genModelId) => {
       await api.studioLocalDelete(genModelId);
-      await get().refreshLocal();
+      // Its files are gone: its row goes now, whether or not the read after it works.
+      set((s) =>
+        s.local ? { local: { ...s.local, installed: s.local.installed.filter((m) => m.id !== genModelId) } } : {},
+      );
+      await get()
+        .refreshLocal()
+        .catch((e: unknown) => console.warn("Studio: the local models could not be read again", e));
     },
     repairLocal: async (genModelId) => {
       const source: LocalSource = { installed: { genModelId } };

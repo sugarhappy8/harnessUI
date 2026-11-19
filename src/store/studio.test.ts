@@ -173,6 +173,23 @@ describe("following the backend", () => {
   });
 });
 
+describe("an installed local model deleted", () => {
+  it("is off the list at once, and a failed read afterwards only leaves a trace (the files are gone)", async () => {
+    const id = LOCAL.installed[0]!.id;
+    useStudio.setState({ local: LOCAL });
+    vi.mocked(api.studioLocalDelete).mockResolvedValue(undefined);
+    vi.mocked(api.studioLocalModels).mockRejectedValue(new Error("database is locked"));
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    try {
+      await expect(useStudio.getState().deleteLocal(id)).resolves.toBeUndefined();
+      expect(useStudio.getState().local?.installed.map((m) => m.id)).not.toContain(id);
+      expect(warn).toHaveBeenCalledWith(expect.stringContaining("Studio"), expect.any(Error));
+    } finally {
+      warn.mockRestore();
+    }
+  });
+});
+
 // A command's answer is read before the run's task goes on, so the task's own event can come
 // first: the copy the backend numbered higher stays, whichever comes last.
 describe("a command's answer and a newer event", () => {
