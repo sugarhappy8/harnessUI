@@ -2,11 +2,12 @@
 //!
 //! - **Settings and prices** come from a bundled, dated file (`specs/openai_images.json`),
 //!   checked against OpenAI's pricing page, image guide, API reference and deprecations page
-//!   on the date it names. An id gets the entry whose prefix is the longest one that ends
-//!   where the id ends or starts a new part (`-`): a dated snapshot (`gpt-image-2-2026-04-21`)
-//!   is its model, while a newer version (`gpt-image-2.5-flare`) never gets an older model's
-//!   settings or prices. An id with no entry gets the basic fields (size, quality, how many)
-//!   and a note that the settings may not match it.
+//!   on the date it names. An id gets the entry whose prefix is the longest one that is the
+//!   whole id or is followed only by a snapshot's name: a dated snapshot
+//!   (`gpt-image-2-2026-04-21`, or `-latest`) is its model, while a newer version
+//!   (`gpt-image-2.5-flare`) or another model with the same start (`gpt-image-2-pro`) never
+//!   gets an older model's settings or prices. An id with no entry gets the basic fields
+//!   (size, quality, how many) and a note that the settings may not match it.
 //! - **Lists**: `GET {api}/models` with the key; [`openai_image_models`] keeps the GPT Image
 //!   models.
 //! - **Pictures**: with no added pictures, `POST {api}/images/generations` with a JSON body;
