@@ -151,6 +151,9 @@ pub struct CreationPatch {
     pub elapsed_ms: Option<Option<u64>>,
     /// A local run: the device it ran on, as shown.
     pub device: Option<Option<String>>,
+    /// What the run was given, as [`NewCreationRun::params`], written again: a local run adds
+    /// what it learns while it runs (its engine's load time).
+    pub params: Option<Value>,
 }
 
 /// A row of `creation_outputs`: one file a run made.
@@ -512,6 +515,7 @@ fn update_run(conn: &Connection, id: &str, mut patch: CreationPatch) -> Result<(
         patch.upstream = None;
         patch.device = None;
         patch.elapsed_ms = None;
+        patch.params = None;
     }
     let mut sets: Vec<(&'static str, SqlValue)> = Vec::new();
     if let Some(v) = patch.status {
@@ -547,6 +551,9 @@ fn update_run(conn: &Connection, id: &str, mut patch: CreationPatch) -> Result<(
     }
     if let Some(v) = patch.device {
         sets.push(("device", sql_opt_text(v)));
+    }
+    if let Some(v) = patch.params {
+        sets.push(("params_json", SqlValue::Text(json_text(&v)?)));
     }
     if !sets.is_empty() && update_columns_by_text(conn, "creation_runs", "id", id, sets)? == 0 {
         return Err(no_run(id));
@@ -1902,6 +1909,7 @@ mod tests {
                     upstream: Some(Some("Other Cloud".into())),
                     device: Some(Some("Radeon RX 7600 (Vulkan)".into())),
                     elapsed_ms: Some(Some(228_000)),
+                    params: Some(json!({"job": {"load_ms": 20_000}})),
                     ..CreationPatch::default()
                 },
             )
@@ -1925,6 +1933,7 @@ mod tests {
             (None, None, None),
             "a stub keeps these cleared"
         );
+        assert_eq!(stub.params, json!({}), "a stub keeps its settings cleared");
 
         // A patch of only those fields is accepted and changes nothing.
         store
@@ -1944,6 +1953,38 @@ mod tests {
             .pop()
             .expect("stub");
         assert_eq!(stub.upstream, None);
+    }
+
+    #[tokio::test]
+    async fn a_patch_rewrites_what_a_run_was_given() {
+        let store = Store::open_in_memory().expect("open");
+        store
+            .insert_creation_run(NewCreationRun {
+                params: json!({"params": {"n": 2}, "job": {"steps": 4}}),
+                ..run("r1")
+            })
+            .await
+            .expect("insert");
+        let params = json!({"params": {"n": 2}, "job": {"steps": 4, "load_ms": 20_000}});
+        store
+            .update_creation_run(
+                "r1",
+                CreationPatch {
+                    params: Some(params.clone()),
+                    ..CreationPatch::default()
+                },
+            )
+            .await
+            .expect("update");
+        let got = store
+            .get_creation_run("r1")
+            .await
+            .expect("get")
+            .expect("r1");
+        assert_eq!(got.params, params);
+        // Anything else is left as it was.
+        assert_eq!(got.prompt, run("r1").prompt);
+        assert_eq!(got.status, CreationStatus::Queued);
     }
 
     #[tokio::test]
