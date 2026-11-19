@@ -330,6 +330,7 @@ impl EngineUse {
     }
 
     /// Whether an engine process runs now.
+    #[cfg(test)]
     pub fn in_use(&self) -> bool {
         lock(&self.0).processes > 0
     }

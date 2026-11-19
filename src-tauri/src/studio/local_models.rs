@@ -28,7 +28,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use models::download::{FileSpec, destination};
+use models::download::FileSpec;
 
 use crate::hub::{UsedFile, chat_files_used, download_destination, gen_files_used};
 use models::gen_catalog::{
@@ -688,6 +688,7 @@ fn remove_empty_folders(file: &Path, root: &Path) {
 #[cfg(test)]
 mod tests {
     use models::catalog::Catalog;
+    use models::download::destination;
     use models::gen_catalog::{Badge, Commercial};
     use models::hf::{OFFICIAL_ENDPOINT, parse_repo_detail};
     use serde_json::{Value, json};
