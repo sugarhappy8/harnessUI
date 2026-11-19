@@ -331,6 +331,9 @@ impl MediaProvider for OpenAiImages {
 ///   otherwise). Whether it was charged is not known.
 /// - A 403 whose message asks for the organization to be verified is
 ///   [`FailureKind::OrgVerification`].
+/// - An account with no credit left (`insufficient_quota`, which OpenAI sends as a 429, or
+///   `billing_hard_limit_reached`) is [`FailureKind::NoCredit`], not charged, with no wait:
+///   waiting does not bring credit back.
 ///
 /// Every 5xx leaves the charge unknown.
 pub(crate) fn openai_failure(
@@ -363,8 +366,25 @@ pub(crate) fn openai_failure(
         };
     } else if status == 403 && asks_for_verification(&failure.message) {
         failure.kind = FailureKind::OrgVerification;
+    } else if says_no_credit(failure.company_code.as_deref(), body) {
+        failure.kind = FailureKind::NoCredit;
+        failure.charged = Some(false);
+        failure.retry_after = None;
     }
     failure
+}
+
+/// Whether an error answer says the account has no credit left: its code is
+/// `insufficient_quota` or `billing_hard_limit_reached`, or its type is `insufficient_quota`.
+fn says_no_credit(code: Option<&str>, body: &[u8]) -> bool {
+    const NO_CREDIT: [&str; 2] = ["insufficient_quota", "billing_hard_limit_reached"];
+    code.is_some_and(|code| NO_CREDIT.contains(&code))
+        || serde_json::from_slice::<Value>(body)
+            .ok()
+            .as_ref()
+            .and_then(|v| v.pointer("/error/type"))
+            .and_then(Value::as_str)
+            == Some("insufficient_quota")
 }
 
 /// Whether an error message asks for the organization to be verified.
@@ -1567,6 +1587,28 @@ mod tests {
         assert_eq!(kind(401), FailureKind::Unauthorized);
         assert_eq!(kind(402), FailureKind::NoCredit);
         assert_eq!(kind(429), FailureKind::RateLimited);
+        // An account with no credit left, whatever the status says.
+        for (status, body) in [
+            (
+                429,
+                &br#"{"error": {"code": "insufficient_quota", "type": "insufficient_quota", "message": "You exceeded your current quota"}}"#[..],
+            ),
+            (
+                400,
+                &br#"{"error": {"code": "billing_hard_limit_reached", "message": "Billing hard limit has been reached"}}"#[..],
+            ),
+            (
+                429,
+                &br#"{"error": {"code": null, "type": "insufficient_quota", "message": "You exceeded your current quota"}}"#[..],
+            ),
+        ] {
+            let f = openai_failure(status, &headers(&[("retry-after", "20")]), body, None);
+            assert_eq!(
+                (f.kind, f.charged, f.retry_after),
+                (FailureKind::NoCredit, Some(false), None),
+                "{status}"
+            );
+        }
         // A 403 about something else is not about verification.
         let other = br#"{"error": {"message": "Project does not have access to this model"}}"#;
         assert_eq!(

@@ -1116,6 +1116,7 @@ const OPENAI_MODELS: &str = include_str!("fixtures/media/openai-models.json");
 const OPENAI_ANSWER: &str = include_str!("fixtures/media/openai-images-answer.json");
 const OPENAI_BLOCKED: &str = include_str!("fixtures/media/openai-moderation-blocked.json");
 const OPENAI_UNVERIFIED: &str = include_str!("fixtures/media/openai-org-verification.json");
+const OPENAI_NO_QUOTA: &str = include_str!("fixtures/media/openai-insufficient-quota.json");
 
 fn openai(server: &MockServer) -> OpenAiImages {
     let mut config = ClientConfig::new(format!("{}/v1", server.url()), ProviderKind::OpenAi);
@@ -1305,6 +1306,20 @@ async fn organization_verification_is_named() {
     assert_eq!(f.charged, Some(false));
     assert_eq!(f.request_id.as_deref(), Some("req_8f2"));
     assert_eq!(server.requests().len(), 1);
+}
+
+#[tokio::test]
+async fn an_account_without_credit_is_no_credit_not_a_rate_limit() {
+    // OpenAI answers an account with no credit left with a 429, but waiting does not help.
+    let server = MockServer::start(|_| openai_error(429, OPENAI_NO_QUOTA)).await;
+    let dir = tempfile::tempdir().unwrap();
+    let f = answered(openai(&server).start(&openai_req(), dir.path()).await);
+    assert_eq!(f.kind, FailureKind::NoCredit);
+    assert_eq!(f.charged, Some(false));
+    assert_eq!(f.retry_after, None, "waiting does not bring credit");
+    assert_eq!(f.request_id.as_deref(), Some("req_8f2"));
+    assert_eq!(f.company_code.as_deref(), Some("insufficient_quota"));
+    assert_eq!(server.requests().len(), 1, "never sent again");
 }
 
 #[tokio::test]
