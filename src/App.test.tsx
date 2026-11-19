@@ -306,6 +306,28 @@ describe("Studio", () => {
     expect(ipcMock.stopGeneration).toHaveBeenCalledWith(1); // the seed was live
   });
 
+  it("opening Studio by its key or from elsewhere puts the cursor in its prompt", async () => {
+    await renderApp();
+    const frame = () => act(() => new Promise<void>((resolve) => requestAnimationFrame(() => resolve())));
+    // A frame asked for by a test before has run.
+    await frame();
+    const focused = vi.fn();
+    window.addEventListener("app:focus-studio-prompt", focused);
+    try {
+      fireEvent.keyDown(window, { key: "g", ctrlKey: true });
+      await frame();
+      expect(focused).toHaveBeenCalledTimes(1);
+      act(() => useStudio.getState().showChat());
+      act(() => {
+        window.dispatchEvent(new CustomEvent("app:open-studio", { detail: "video" }));
+      });
+      await frame();
+      expect(focused).toHaveBeenCalledTimes(2);
+    } finally {
+      window.removeEventListener("app:focus-studio-prompt", focused);
+    }
+  });
+
   it("the stop hotkey leaves Studio runs alone", async () => {
     await renderApp();
     useStudio.setState({ live: { r1: run({ status: "waiting", watching: true }) } });

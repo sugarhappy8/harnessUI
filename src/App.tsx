@@ -17,6 +17,12 @@ import { followStudio, useStudio } from "./store/studio";
 import * as ipc from "./lib/ipc";
 import { listenInEffect } from "./lib/listen";
 
+
+/** Puts the cursor in Studio's prompt once Studio is shown (the next frame): the chat's message
+ *  box it may have been in is hidden now, and the focus would fall to the page. */
+function focusStudioPrompt() {
+  requestAnimationFrame(() => window.dispatchEvent(new Event("app:focus-studio-prompt")));
+}
 export default function App() {
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [settingsTab, setSettingsTab] = useState<string | undefined>(undefined);
@@ -81,6 +87,7 @@ export default function App() {
       const studio = useStudio.getState();
       studio.showStudio(tab === "image" || tab === "video" ? tab : undefined);
       if (tab === "local") studio.showLocalModels(true);
+      focusStudioPrompt();
     };
     window.addEventListener("app:open-models", onOpenModels);
     window.addEventListener("app:open-settings", onOpenSettings);
@@ -114,6 +121,7 @@ export default function App() {
       } else if (mod && event.key.toLowerCase() === "g") {
         event.preventDefault();
         useStudio.getState().showStudio();
+        focusStudioPrompt();
       } else if (mod && event.key.toLowerCase() === "n") {
         event.preventDefault();
         useStudio.getState().showChat();

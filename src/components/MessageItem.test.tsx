@@ -256,6 +256,22 @@ describe("Open in Studio", () => {
     expect(useStudio.getState()).toMatchObject({ view: "studio", tab: "image", localView: false });
   });
 
+  it("Open in Studio puts the cursor in Studio's prompt (the button is hidden now)", async () => {
+    studioOn(flare);
+    await shown(user({ documents: [], mentions: [] }));
+    const frame = () => act(() => new Promise<void>((resolve) => requestAnimationFrame(() => resolve())));
+    await frame();
+    const focused = vi.fn();
+    window.addEventListener("app:focus-studio-prompt", focused);
+    try {
+      await click(screen.getByRole("button", { name: "Open in Studio" }));
+      await frame();
+      expect(focused).toHaveBeenCalledTimes(1);
+    } finally {
+      window.removeEventListener("app:focus-studio-prompt", focused);
+    }
+  });
+
   it("with several pictures, each says which it is", async () => {
     studioOn(flare);
     await shown(user({ imageIds: [5, 8], documents: [], mentions: [] }));

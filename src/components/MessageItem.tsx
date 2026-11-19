@@ -134,6 +134,8 @@ export const MessageItem = memo(function MessageItem(props: Props) {
     try {
       const why = await useStudio.getState().openInStudio(picture);
       if (why) setNotInStudio({ why: STUDIO_CHAT_LINK.notAdded(why), nextStep: "" });
+      // Studio is shown now, and this button hidden: the cursor goes to Studio's prompt.
+      else requestAnimationFrame(() => window.dispatchEvent(new Event("app:focus-studio-prompt")));
     } catch (e) {
       const error = toErrorInfo(e);
       setNotInStudio({ why: STUDIO_CHAT_LINK.notAdded(error.message), nextStep: error.nextStep });
