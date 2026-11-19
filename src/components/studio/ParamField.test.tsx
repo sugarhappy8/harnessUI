@@ -365,6 +365,35 @@ describe("ParamField", () => {
     screen.getByText("The shape must be between 1:4 and 4:1.");
   });
 
+  it("a size typed that does not fit is told, so Create waits while the boxes show it", () => {
+    const size = spec({
+      key: "size",
+      canonical: "size",
+      label: "Exact size",
+      layer: "advanced",
+      kind: {
+        type: "size",
+        rules: { multipleOf: 16, minRatio: 0.25, maxRatio: 4, maxSide: 2048, minPixels: 16384, maxPixels: 4194304 },
+        values: [],
+      },
+    });
+    const onInvalid = vi.fn();
+    const { unmount } = render(
+      <ParamField spec={size} value="1024x512" onChange={vi.fn()} onReset={vi.fn()} onInvalid={onInvalid} />,
+    );
+    expect(onInvalid).toHaveBeenLastCalledWith(null);
+    fireEvent.change(screen.getByRole("spinbutton", { name: "Width" }), { target: { value: "1000" } });
+    // The draft keeps 1024 × 512 while the boxes show 1000 × 512.
+    expect(onInvalid).toHaveBeenLastCalledWith("Both sides must be multiples of 16.");
+    fireEvent.change(screen.getByRole("spinbutton", { name: "Width" }), { target: { value: "1008" } });
+    expect(onInvalid).toHaveBeenLastCalledWith(null);
+    fireEvent.change(screen.getByRole("spinbutton", { name: "Width" }), { target: { value: "1" } });
+    expect(onInvalid).not.toHaveBeenLastCalledWith(null);
+    // Gone, it holds nothing back.
+    unmount();
+    expect(onInvalid).toHaveBeenLastCalledWith(null);
+  });
+
   /** How many, over `kind`'s range. */
   function count(kind: Extract<ParamKind, { type: "range" }>): ParamSpec {
     return spec({ key: "n", canonical: "count", label: "How many", kind });

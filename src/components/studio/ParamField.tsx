@@ -1,4 +1,4 @@
-import { useId, useState, type ReactNode } from "react";
+import { useEffect, useEffectEvent, useId, useState, type ReactNode } from "react";
 import { DropdownMenu } from "radix-ui";
 import { Check, ChevronDown, CircleHelp, Dices, Plus, RotateCcw } from "lucide-react";
 import { STUDIO_FIELDS } from "../../lib/words";
@@ -75,6 +75,9 @@ export function ParamField(props: {
   local?: boolean;
   timeOf?: (value: unknown) => string | null;
   seed?: SeedControls;
+  /** What the field holds that cannot be sent (a custom size that does not fit), or `null`:
+   *  told as it changes, and `null` once the field is gone. */
+  onInvalid?: (problem: string | null) => void;
 }) {
   const { spec, value, onChange, onReset } = props;
   const labelId = useId();
@@ -131,6 +134,7 @@ export function ParamField(props: {
         onReset={onReset}
         timeOf={props.timeOf}
         seed={props.seed}
+        onInvalid={props.onInvalid}
       />
     </div>
   );
@@ -156,6 +160,7 @@ function Control(props: {
   onReset(): void;
   timeOf?: (value: unknown) => string | null;
   seed?: SeedControls;
+  onInvalid?: (problem: string | null) => void;
 }) {
   const { spec, widget, labelId, value, onChange, onReset } = props;
   const kind = spec.kind;
@@ -246,6 +251,7 @@ function Control(props: {
         automatic={props.automatic}
         onChange={onChange}
         onReset={onReset}
+        onInvalid={props.onInvalid}
       />
     );
   }
@@ -595,6 +601,7 @@ function SizeField(props: {
   automatic: string;
   onChange(v: unknown): void;
   onReset(): void;
+  onInvalid?: (problem: string | null) => void;
 }) {
   const { listed, value } = props;
   const index = listed.findIndex((c) => c.value === value);
@@ -642,6 +649,7 @@ function SizeField(props: {
           rules={props.rules}
           value={value}
           onChange={props.onChange}
+          onInvalid={props.onInvalid}
           onReset={() => {
             // Boxes emptied to type another size stay open.
             setChosen(true);
@@ -654,8 +662,15 @@ function SizeField(props: {
 }
 
 /** Width and height, checked as they are typed: a size that fits is sent, emptied boxes unset
- *  the field, and anything else says what to change. */
-function SizeBoxes(props: { rules: SizeRules; value: string | null; onChange(v: unknown): void; onReset(): void }) {
+ *  the field, and anything else says what to change, and is told (`onInvalid`) so Create waits
+ *  while the boxes show a size other than the one that would be sent. */
+function SizeBoxes(props: {
+  rules: SizeRules;
+  value: string | null;
+  onChange(v: unknown): void;
+  onReset(): void;
+  onInvalid?: (problem: string | null) => void;
+}) {
   const { value } = props;
   const [sides, setSides] = useState(sidesOf(value));
   const [shown, setShown] = useState(value);
@@ -668,6 +683,12 @@ function SizeBoxes(props: { rules: SizeRules; value: string | null; onChange(v: 
   const [width, height] = sides;
   const empty = width.trim() === "" && height.trim() === "";
   const problem = empty ? null : sizeProblem(width, height, props.rules);
+  const onInvalid = useEffectEvent((p: string | null) => props.onInvalid?.(p));
+  useEffect(() => {
+    onInvalid(problem);
+  }, [problem]);
+  // Gone (a listed size picked, another model): nothing it held holds Create back.
+  useEffect(() => () => onInvalid(null), []);
 
   const change = (w: string, h: string) => {
     setSides([w, h]);

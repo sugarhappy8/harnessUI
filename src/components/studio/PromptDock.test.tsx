@@ -272,6 +272,19 @@ describe("PromptDock", () => {
       expect(createButton().disabled).toBe(false);
     });
 
+    it("Create waits while a field shows a size that cannot be sent, and says why", async () => {
+      await show({ prefs: prefs({ lastModel: CLOUD_LAST }) });
+      typePrompt("a fox");
+      await flush();
+      expect(createButton().disabled).toBe(false);
+      act(() => useStudio.getState().setInvalid("image", "size", "Both sides must be multiples of 16."));
+      expect(createButton().disabled).toBe(true);
+      expect(screen.getByText("Both sides must be multiples of 16.").className).toContain("text-danger");
+      act(() => useStudio.getState().setInvalid("image", "size", null));
+      expect(createButton().disabled).toBe(false);
+      expect(screen.queryByText("Both sides must be multiples of 16.")).toBeNull();
+    });
+
     it("colours a price of $1 or more as a second cue", async () => {
       await show({ prefs: prefs({ lastModel: CLOUD_LAST }), estimate: est({ usd: 2.6 }) });
       expect(screen.getByText("~ $2.60").className).toContain("text-danger");

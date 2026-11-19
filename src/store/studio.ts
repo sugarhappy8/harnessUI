@@ -257,6 +257,11 @@ export interface StudioState extends StudioRunState, StudioResultsState, StudioL
   setRefRole(tab: StudioTab, index: number, role: RefRole): string | null;
   /** Puts away the note of what changed. */
   dismissNote(tab: StudioTab): void;
+  /** What each tab's fields hold that cannot be sent, by field key (a custom size typed that
+   *  does not fit, while the draft keeps the size before it): Create waits, and says why. */
+  invalid: Record<StudioTab, Record<string, string>>;
+  /** Field `key` of `tab` holds `problem`, or (`null`) nothing that cannot be sent. */
+  setInvalid(tab: StudioTab, key: string, problem: string | null): void;
   /** *Reset all*: every Advanced field back to Automatic, no Extra fields and no routing (and
    *  the seed no longer kept); then every value whose field no longer applies leaves the draft. */
   resetAdvanced(tab: StudioTab): void;
@@ -880,6 +885,14 @@ export const useStudio: UseBoundStore<StoreApi<StudioState>> = create<StudioStat
       return null;
     },
     dismissNote: (tab) => set((s) => ({ drafts: { ...s.drafts, [tab]: { ...s.drafts[tab], note: null } } })),
+    invalid: { image: {}, video: {} },
+    setInvalid: (tab, key, problem) =>
+      set((s) => {
+        const now = s.invalid[tab];
+        if ((now[key] ?? null) === problem) return {};
+        const next = Object.fromEntries(Object.entries(now).filter(([k]) => k !== key));
+        return { invalid: { ...s.invalid, [tab]: problem === null ? next : { ...next, [key]: problem } } };
+      }),
     resetAdvanced: (tab) => {
       // No Extra fields: nothing is held aside for them either.
       setHeld(tab, null);

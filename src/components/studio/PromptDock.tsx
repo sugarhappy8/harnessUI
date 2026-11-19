@@ -57,6 +57,8 @@ export function PromptDock(props: { tab: StudioTab }) {
   const pendingEstimate = useStudio((s) => s.pendingEstimate);
   const refusal = useStudio((s) => s.refusal[tab]);
   const holding = useStudio((s) => s.holding[tab]);
+  // A field holding what cannot be sent (a custom size that does not fit): Create waits.
+  const invalidFields = useStudio((s) => s.invalid[tab]);
   const priceFailed = useStudio((s) => s.priceError[tab] !== null);
   const setPrompt = useStudio((s) => s.setPrompt);
   const estimate = useStudio((s) => s.estimate);
@@ -103,7 +105,8 @@ export function PromptDock(props: { tab: StudioTab }) {
   // this model and place (typing does not change it). A failed answer, or one still on its way,
   // holds nothing back once the prompt as it is passes; the backend checks every start.
   const promptRefused = target !== null && key !== null ? promptProblems(draft.prompt, target) : [];
-  const settingsRefused = target !== null && key !== null ? settingsProblems(known) : [];
+  const settingsRefused =
+    target !== null && key !== null ? [...new Set([...Object.values(invalidFields), ...settingsProblems(known)])] : [];
   const blocked = promptRefused.length > 0 || settingsRefused.length > 0 || notHere;
   const promptFault = typed || refusedPresses > 0;
   // The daily limit has taken Create's place (Enter included).

@@ -134,6 +134,7 @@ export function SettingField(props: { tab: StudioTab; spec: ParamSpec }) {
   const resetValue = useStudio((s) => s.resetValue);
   const newSeed = useStudio((s) => s.newSeed);
   const lockSeed = useStudio((s) => s.lockSeed);
+  const setInvalid = useStudio((s) => s.setInvalid);
   if (spec.kind.type === "images") {
     // Reference pictures are added in the tray beside the prompt.
     return spec.kind.role === "reference" ? null : <FrameDrop tab={tab} spec={spec} />;
@@ -146,6 +147,7 @@ export function SettingField(props: { tab: StudioTab; spec: ParamSpec }) {
       value={draft.values[spec.key]}
       onChange={(v) => setValue(tab, spec.key, v)}
       onReset={() => resetValue(tab, spec.key)}
+      onInvalid={(problem) => setInvalid(tab, spec.key, problem)}
       local={here}
       timeOf={localClip && model ? clipTimeOf(model, draft.values, localFits, spec) : undefined}
       seed={
