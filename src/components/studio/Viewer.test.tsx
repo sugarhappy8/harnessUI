@@ -29,7 +29,7 @@ vi.mock("@tauri-apps/plugin-clipboard-manager", () => ({ writeText: vi.fn() }));
 
 const api = await import("./api");
 const dialog = await import("@tauri-apps/plugin-dialog");
-const { Viewer } = await import("./Viewer");
+const { Viewer, capturePoster } = await import("./Viewer");
 const { StudioView } = await import("./StudioView");
 const { useStudio } = await import("../../store/studio");
 const { useApp } = await import("../../store/app");
@@ -743,6 +743,158 @@ describe("Send to chat", () => {
     expect(composed).toEqual([]);
   });
 });
+
+// [0.1.0 B12] A video plays from a `blob:` made of its bytes (`studio_output_bytes`; the CSP's
+// `media-src blob:`). The first time a video without a thumbnail plays, the frame shown is drawn
+// on a canvas at most 512 px on its longest side and saved as its thumbnail
+// (`studio_save_thumb`), which its tile shows from then on. A video over 256 MiB is not played
+// here: the viewer says so, as a limit and not a fault, and Show in folder opens it elsewhere.
+describe("Video playback and poster frames", () => {
+  /** The video `o9`, its poster frame not saved yet. */
+  const nine = (output: Partial<Output> = {}) => videoRun({}, { id: "o9", ...output });
+  let drawImage = vi.fn();
+  let toDataURL = vi.fn((): string => "data:image/jpeg;base64,AAAA");
+
+  /** A video element whose frame is `width` × `height` (0 × 0: no frame yet). */
+  function sized(video: HTMLVideoElement, width: number, height: number): HTMLVideoElement {
+    Object.defineProperty(video, "videoWidth", { value: width, configurable: true });
+    Object.defineProperty(video, "videoHeight", { value: height, configurable: true });
+    return video;
+  }
+
+  async function playing(video: HTMLElement) {
+    await act(async () => {
+      fireEvent.playing(video);
+    });
+    await flush();
+  }
+
+  beforeEach(() => {
+    drawImage = vi.fn();
+    toDataURL = vi.fn((): string => "data:image/jpeg;base64,AAAA");
+    vi.spyOn(HTMLCanvasElement.prototype, "getContext").mockImplementation(
+      () => ({ drawImage }) as unknown as CanvasRenderingContext2D,
+    );
+    vi.spyOn(HTMLCanvasElement.prototype, "toDataURL").mockImplementation(toDataURL);
+  });
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it("a video plays from a blob: address", async () => {
+    setStore({ runs: [nine()] });
+    await open("o9");
+    expect(screen.getByTestId("studio-video").getAttribute("src")).toMatch(/^blob:/);
+    expect(api.studioOutputBytes).toHaveBeenCalledWith("o9", false);
+    const made = vi.mocked(URL.createObjectURL).mock.calls[0]![0] as Blob;
+    expect(made.type).toBe("video/mp4");
+  });
+
+  it("the first play saves a poster frame", async () => {
+    setStore({ runs: [nine()] });
+    let saved: (output: Output) => void = () => undefined;
+    vi.mocked(api.studioSaveThumb).mockImplementation(() => new Promise((resolve) => (saved = resolve)));
+    await open("o9");
+    const video = sized(screen.getByTestId("studio-video") as HTMLVideoElement, 1280, 720);
+    await playing(video);
+    // Played again before the save has answered: the poster is not taken twice.
+    await playing(video);
+    expect(api.studioSaveThumb).toHaveBeenCalledTimes(1);
+    expect(api.studioSaveThumb).toHaveBeenCalledWith("o9", "AAAA");
+    expect(drawImage).toHaveBeenCalledWith(video, 0, 0, 512, 288);
+    expect(toDataURL).toHaveBeenCalledWith("image/jpeg", 0.8);
+    await act(async () => saved({ ...nine().outputs[0]!, hasThumb: true }));
+    await flush();
+    // Its tile shows the poster from now on.
+    expect(useStudio.getState().runs[0]!.outputs[0]!.hasThumb).toBe(true);
+    await playing(video);
+    expect(api.studioSaveThumb).toHaveBeenCalledTimes(1);
+  });
+
+  it("a video that has its thumbnail saves no poster", async () => {
+    setStore({ runs: [nine({ hasThumb: true })] });
+    await open("o9");
+    await playing(sized(screen.getByTestId("studio-video") as HTMLVideoElement, 1280, 720));
+    expect(api.studioSaveThumb).not.toHaveBeenCalled();
+  });
+
+  it("a play before the first frame has its size takes the poster at the next play", async () => {
+    setStore({ runs: [nine()] });
+    vi.mocked(api.studioSaveThumb).mockResolvedValue({ ...nine().outputs[0]!, hasThumb: true });
+    await open("o9");
+    const video = sized(screen.getByTestId("studio-video") as HTMLVideoElement, 0, 0);
+    await playing(video);
+    expect(api.studioSaveThumb).not.toHaveBeenCalled();
+    await playing(sized(video, 720, 1280));
+    expect(api.studioSaveThumb).toHaveBeenCalledExactlyOnceWith("o9", "AAAA");
+    expect(drawImage).toHaveBeenCalledWith(video, 0, 0, 288, 512);
+  });
+
+  it("a poster that cannot be saved leaves the viewer as it was", async () => {
+    setStore({ runs: [nine()] });
+    vi.mocked(api.studioSaveThumb).mockRejectedValue(appError("bad_request", "That poster frame is not a small JPEG."));
+    await open("o9");
+    await playing(sized(screen.getByTestId("studio-video") as HTMLVideoElement, 1280, 720));
+    expect(api.studioSaveThumb).toHaveBeenCalledTimes(1);
+    expect(screen.queryByRole("alert")).toBeNull();
+    expect(useStudio.getState().runs[0]!.outputs[0]!.hasThumb).toBe(false);
+  });
+
+  it("capturePoster gives the frame as base64 JPEG, at most 512 px on its longest side", () => {
+    const video = sized(document.createElement("video"), 1920, 1080);
+    expect(capturePoster(video)).toBe("AAAA");
+    expect(drawImage).toHaveBeenLastCalledWith(video, 0, 0, 512, 288);
+    // A small video is not enlarged.
+    capturePoster(sized(video, 320, 240));
+    expect(drawImage).toHaveBeenLastCalledWith(video, 0, 0, 320, 240);
+    // A very thin one keeps at least one pixel on its short side.
+    capturePoster(sized(video, 4096, 2));
+    expect(drawImage).toHaveBeenLastCalledWith(video, 0, 0, 512, 1);
+  });
+
+  it("capturePoster gives nothing without a frame, a canvas or a JPEG", () => {
+    const video = sized(document.createElement("video"), 0, 480);
+    expect(capturePoster(video)).toBeNull();
+    expect(capturePoster(sized(video, 640, 0))).toBeNull();
+    sized(video, 640, 480);
+    toDataURL.mockReturnValueOnce("data:image/png;base64,BBBB");
+    expect(capturePoster(video)).toBeNull();
+    toDataURL.mockReturnValueOnce("data:,");
+    expect(capturePoster(video)).toBeNull();
+    toDataURL.mockImplementationOnce(() => {
+      throw new DOMException("The canvas has been tainted", "SecurityError");
+    });
+    expect(capturePoster(video)).toBeNull();
+    vi.mocked(HTMLCanvasElement.prototype.getContext).mockReturnValueOnce(null);
+    expect(capturePoster(video)).toBeNull();
+    expect(capturePoster(video)).toBe("AAAA");
+  });
+
+  it("a video too big to play here offers Show in folder", async () => {
+    setStore({ runs: [nine({ sizeBytes: 300 * 1024 * 1024 })] });
+    vi.mocked(api.studioOutputBytes).mockRejectedValue(
+      appError(
+        "studio_too_big_to_show",
+        "This video is too big to play here.",
+        "Use Show in folder to open it with your video player.",
+      ),
+    );
+    vi.mocked(api.studioShowInFolder).mockResolvedValue(undefined);
+    await open("o9");
+    await screen.findByText("This video is too big to play here.");
+    screen.getByText("Use Show in folder to open it with your video player.");
+    // A limit, not a fault: said as a notice.
+    expect(screen.queryByRole("alert")).toBeNull();
+    expect(screen.queryByTestId("studio-video")).toBeNull();
+    await click(screen.getByRole("button", { name: "Show in folder" }));
+    expect(api.studioShowInFolder).toHaveBeenCalledWith("o9");
+  });
+});
+
+/** An error as the backend sends one. */
+function appError(code: string, message: string, nextStep = "") {
+  return { code, message, nextStep, details: "" };
+}
 
 /** Studio shown, its saved things read: the OpenRouter endpoint with the cloud run, on the
  *  Pictures tab at the run's model. */

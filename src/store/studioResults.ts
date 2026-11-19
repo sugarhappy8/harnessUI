@@ -4,8 +4,8 @@
 // reference, which keep the picture as an added picture (another model offered when the tab's
 // cannot take it, an installed local one first); Star; Delete, after which a finished run left
 // without results goes too; several saved into one folder; Settings → Studio's Delete stopped
-// and failed runs (Task B10); and Send to chat, which puts a picture in the chat's message box
-// (Task B11).
+// and failed runs (Task B10); Send to chat, which puts a picture in the chat's message box
+// (Task B11); and a video's poster frame kept as its thumbnail (Task B12).
 import type { StoreApi } from "zustand";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import * as api from "../components/studio/api";
@@ -81,6 +81,10 @@ export interface StudioResultsState {
   useAsReference(output: Output): Promise<string | null>;
   /** Stars or unstars result `outputId`; its new state joins the runs. */
   star(outputId: string, starred: boolean): Promise<void>;
+  /** Keeps `jpegBase64`, the poster frame the viewer took of video result `outputId`
+   *  (`capturePoster`), as its thumbnail (`studio_save_thumb`); the result, thumbnail and all,
+   *  joins the runs, so its tile shows the poster from then on. Rejects when it was refused. */
+  savePoster(outputId: string, jpegBase64: string): Promise<void>;
   /** Deletes results `outputIds`, their files and records (today's spending stays as it is):
    *  they leave the runs, and a finished run left without results goes with them. */
   remove(outputIds: string[]): Promise<void>;
@@ -149,6 +153,17 @@ export function createResults(
     return null;
   };
 
+  /** `output` at its new state, in place of the old one in every run that holds it. */
+  const putOutput = (output: Output) => {
+    const change = (run: Run): Run =>
+      run.id === output.runId ? { ...run, outputs: run.outputs.map((o) => (o.id === output.id ? output : o)) } : run;
+    set((s) => ({
+      runs: s.runs.map(change),
+      recentRuns: s.recentRuns.map(change),
+      live: Object.fromEntries(Object.entries(s.live).map(([id, run]) => [id, change(run)])),
+    }));
+  };
+
   return {
     reuse: (run, withSeed) => {
       const target = targetOf(run);
@@ -174,16 +189,8 @@ export function createResults(
       const kept = await api.studioRefFromOutput(output.id);
       return get().addRef(get().tab, { ...kept, role: null });
     },
-    star: async (outputId, starred) => {
-      const output = await api.studioStar(outputId, starred);
-      const change = (run: Run): Run =>
-        run.id === output.runId ? { ...run, outputs: run.outputs.map((o) => (o.id === output.id ? output : o)) } : run;
-      set((s) => ({
-        runs: s.runs.map(change),
-        recentRuns: s.recentRuns.map(change),
-        live: Object.fromEntries(Object.entries(s.live).map(([id, run]) => [id, change(run)])),
-      }));
-    },
+    star: async (outputId, starred) => putOutput(await api.studioStar(outputId, starred)),
+    savePoster: async (outputId, jpegBase64) => putOutput(await api.studioSaveThumb(outputId, jpegBase64)),
     remove: async (outputIds) => {
       await api.studioDelete(outputIds);
       const gone = new Set(outputIds);

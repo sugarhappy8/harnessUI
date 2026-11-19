@@ -57,7 +57,9 @@ import type { Company, MediaModel, ModelChoice, Output, RequestPreview, Run, Stu
 // chat (a picture, into the chat's message box: Task B11) and the exact request or command.
 // Keys: ←/→, F, R, Shift R, A, S, C, Del, Space and Esc, which closes the viewer and never
 // cancels a run. A picture is shown with an `img` element only, so an SVG's scripts never run;
-// a video plays from a `blob:` URL.
+// a video plays from a `blob:` URL (the CSP's `media-src blob:`; Task B12), and the first time
+// one without a thumbnail plays, the frame shown is kept as its poster (`capturePoster`). A
+// video over 256 MiB is not played here: the viewer says so, and Show in folder opens it.
 
 /** Why an action said something: what it did, or why it could not. */
 type Said = { text: string; warn: boolean } | { error: ErrorInfo };
@@ -164,15 +166,64 @@ function typing(target: EventTarget | null): boolean {
   return target instanceof HTMLInputElement && !["checkbox", "radio", "button"].includes(target.type);
 }
 
-/** The result itself: a picture in an `img` element, a video from its `blob:` URL; why it
- *  cannot be shown when its bytes cannot be read. */
+/** The longest side of a video's poster frame: a picture's thumbnail's (`THUMB_SIDE`). */
+const POSTER_SIDE = 512;
+/** How `toDataURL` starts a JPEG. */
+const JPEG_DATA = "data:image/jpeg;base64,";
+
+/**
+ * The poster frame of `video`: the frame it shows now, drawn on a canvas at most 512 px on its
+ * longest side (never enlarged), as base64 JPEG without its `data:` prefix. `null` while the
+ * video has no frame size yet, or when the canvas gives no JPEG.
+ */
+export function capturePoster(video: HTMLVideoElement): string | null {
+  const { videoWidth, videoHeight } = video;
+  if (videoWidth === 0 || videoHeight === 0) return null;
+  const scale = Math.min(1, POSTER_SIDE / Math.max(videoWidth, videoHeight));
+  const canvas = document.createElement("canvas");
+  canvas.width = Math.max(1, Math.round(videoWidth * scale));
+  canvas.height = Math.max(1, Math.round(videoHeight * scale));
+  const context = canvas.getContext("2d");
+  if (!context) return null;
+  context.drawImage(video, 0, 0, canvas.width, canvas.height);
+  let data: string;
+  try {
+    data = canvas.toDataURL("image/jpeg", 0.8);
+  } catch {
+    // A canvas the webview will not read back.
+    return null;
+  }
+  return data.startsWith(JPEG_DATA) ? data.slice(data.indexOf(",") + 1) : null;
+}
+
+/** The result itself: a picture in an `img` element, a video from its `blob:` URL, whose poster
+ *  frame is kept as its thumbnail the first time it plays when it has none; why it cannot be
+ *  shown when its bytes cannot be read (a video too big to play here, as a notice: Show in
+ *  folder, among the actions, opens it). */
 function Media(props: { run: Run; output: Output; videoRef: RefObject<HTMLVideoElement | null> }) {
   const { run, output, videoRef } = props;
   const { url, error } = useOutputUrl(output.id, false, output.mime);
-  if (error) return <ErrorBanner error={error} />;
+  // Whether its poster frame has been sent to be kept, while this result is shown.
+  const posterSent = useRef(false);
+  const keepPoster = (video: HTMLVideoElement) => {
+    if (output.hasThumb || posterSent.current) return;
+    const poster = capturePoster(video);
+    if (poster === null) return;
+    posterSent.current = true;
+    // A poster that is not kept costs nothing: the tile keeps showing the start frame.
+    useStudio.getState().savePoster(output.id, poster).catch(() => undefined);
+  };
+  if (error) return <ErrorBanner error={error} tone={error.code === "studio_too_big_to_show" ? "notice" : "error"} />;
   if (!url) return null;
   return run.kind === "video" ? (
-    <video data-testid="studio-video" ref={videoRef} src={url} controls className="max-h-full max-w-full" />
+    <video
+      data-testid="studio-video"
+      ref={videoRef}
+      src={url}
+      controls
+      onPlaying={(e) => keepPoster(e.currentTarget)}
+      className="max-h-full max-w-full"
+    />
   ) : (
     <img src={url} alt={run.prompt} className="max-h-full max-w-full object-contain" />
   );
