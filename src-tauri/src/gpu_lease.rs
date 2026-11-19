@@ -15,6 +15,11 @@
 //! A job's unload stops the chat model only between two chat loads, never in the middle of
 //! one, and not at all when one passed the gate since the job read the card: that load went
 //! first, and the job decides again on the card as it is now.
+//! A job's need is judged with the chat model as it was then ([`StudioNeed::judged_with`]):
+//! when a chat model on the card is not the one it was judged with (one started, or another
+//! took its place, while the job waited), the lease grants nothing and the job is judged
+//! again ([`Refused::JudgeAgain`]), so it never runs alongside a chat model it was not
+//! judged beside.
 //! A hold never loads the chat model again: "Reload it after Studio" is
 //! [`GpuLease::reload_chat`], called once when the local queue empties.
 
@@ -43,6 +48,10 @@ pub struct StudioNeed {
     pub processor_ok: bool,
     /// Apple silicon: the processor and the graphics share one memory.
     pub shared_memory: bool,
+    /// The chat model's bytes on the graphics device this need was judged with (`None`: no
+    /// chat model was on one). A chat model on the card now that differs from it makes the
+    /// lease ask for the job to be judged again ([`Refused::JudgeAgain`]).
+    pub judged_with: Option<u64>,
 }
 
 /// How a job may use the card.
@@ -87,6 +96,10 @@ pub enum Refused {
     DoesNotFit,
     /// Under [`GpuPolicy::Ask`]: ask the person, then ask the lease again with the answer.
     NeedsAnswer,
+    /// The chat model on the card is not the one the job's need was judged with
+    /// ([`StudioNeed::judged_with`]): one started, or another took its place, while the job
+    /// waited. Judge the job again with the card as it is now, then ask again.
+    JudgeAgain,
 }
 
 /// The chat model's side of the card: what it takes, and its unload and reload.
@@ -407,7 +420,8 @@ impl GpuLease {
         }
     }
 
-    /// The decision on the card as it is now.
+    /// The decision on the card as it is now. A chat model on the card that `need` was not
+    /// judged with gives no decision: [`Refused::JudgeAgain`].
     fn step(
         &self,
         need: &StudioNeed,
@@ -415,8 +429,11 @@ impl GpuLease {
         answered: Option<bool>,
         on_wait: &(dyn Fn(LeaseWait) + Send + Sync),
     ) -> Result<Step, Refused> {
-        if self.chat.loaded_device_bytes().is_none() {
+        let Some(chat) = self.chat.loaded_device_bytes() else {
             return Ok(Step::Grant(Grant::Alongside));
+        };
+        if need.judged_with != Some(chat) {
+            return Err(Refused::JudgeAgain);
         }
         // On shared memory the chat model's pinned memory is the job's memory too; on a
         // graphics card "Keep in memory" pins system memory only.
@@ -719,12 +736,14 @@ pub(crate) mod tests {
         }
     }
 
+    /// A need judged with the tests' usual chat model (5 GB on the card).
     fn need(alongside: bool, after_unload: bool, processor_ok: bool) -> StudioNeed {
         StudioNeed {
             alongside,
             after_unload,
             processor_ok,
             shared_memory: false,
+            judged_with: Some(5 * GB),
         }
     }
 
@@ -1229,9 +1248,9 @@ pub(crate) mod tests {
         );
         assert!(!lease.holds_card());
 
-        // The load reaches Starting on the card: the job sees it, and unloads it because
-        // the job does not fit beside it.
-        chat.set_loaded(6 * GB);
+        // The load reaches Starting on the card (the same model again): the job sees it, and
+        // unloads it because the job does not fit beside it.
+        chat.set_loaded(5 * GB);
         lease.end_load();
         let (g, _hold) = within(job).await.unwrap().unwrap();
         assert_eq!(
@@ -1246,6 +1265,66 @@ pub(crate) mod tests {
             waits.seen(),
             [LeaseWait::ReplyRunning, LeaseWait::ChatModelLoading]
         );
+    }
+
+    /// Review finding mgr-stale-need-alongside: run 1 unloaded the chat model and the person
+    /// pressed "Load it again" while run 2 waited. Run 2's need was judged before that load
+    /// reached Starting (no chat model on the card, so it fits "beside" it). Once the load
+    /// starts, the lease never grants that stale need Alongside: it asks for the job to be
+    /// judged again, and the job judged with the chat model gets the card after an unload.
+    #[tokio::test]
+    async fn a_job_judged_before_a_chat_load_started_is_judged_again() {
+        let chat = FakeChat::none();
+        let lease = GpuLease::new(chat.clone());
+        assert!(lease.begin_load(), "Load it again passes the gate");
+        let judged_without_chat = StudioNeed {
+            judged_with: None,
+            ..need(true, true, false)
+        };
+        let waits = Waits::default();
+        let job = ask_in_task(
+            &lease,
+            judged_without_chat,
+            GpuPolicy::Unload,
+            &tok(),
+            &waits,
+        );
+        waits.until(LeaseWait::ChatModelLoading).await;
+        chat.set_loaded(5 * GB);
+        lease.end_load();
+        assert_eq!(within(job).await.unwrap().unwrap_err(), Refused::JudgeAgain);
+        assert!(!lease.holds_card());
+        assert_eq!(chat.unloads(), 0);
+
+        // Judged again with the chat model: it does not fit beside it.
+        let (g, _hold) = within(lease.acquire_for_studio(
+            &need(false, true, false),
+            GpuPolicy::Unload,
+            None,
+            &tok(),
+            &|_| {},
+        ))
+        .await
+        .unwrap();
+        assert_eq!(
+            g,
+            Grant::AfterUnload {
+                unloaded: Some(CHAT.to_string())
+            }
+        );
+        // Another chat model in its place (6 GB) is not the one judged with either.
+        drop(_hold);
+        chat.set_loaded(6 * GB);
+        let refused = within(lease.acquire_for_studio(
+            &need(true, true, false),
+            GpuPolicy::Unload,
+            None,
+            &tok(),
+            &|_| {},
+        ))
+        .await
+        .unwrap_err();
+        assert_eq!(refused, Refused::JudgeAgain);
     }
 
     /// Review fix L12-3: a chat load that passed the gate and started while a job waited for

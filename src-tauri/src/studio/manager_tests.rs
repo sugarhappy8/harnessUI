@@ -4010,6 +4010,9 @@ enum LeaseStep {
     /// as the lease decides it: the processor for a job that can run there (a picture),
     /// else does not fit.
     AskThen(Grant),
+    /// Says a chat model is loading, then, once released, that the chat model changed since
+    /// the job was judged (`JudgeAgain`).
+    JudgeAgainOnRelease,
 }
 
 /// The graphics card's lease: grants as scripted (by default beside the chat model), and
@@ -4113,6 +4116,15 @@ impl CardLease for FakeLease {
                     permit = self.gate.acquire() => permit.unwrap().forget(),
                 }
                 grant
+            }
+            LeaseStep::JudgeAgainOnRelease => {
+                on_wait(LeaseWait::ChatModelLoading);
+                tokio::select! {
+                    biased;
+                    () = cancel.cancelled() => return Err(Refused::Cancelled),
+                    permit = self.gate.acquire() => permit.unwrap().forget(),
+                }
+                return Err(Refused::JudgeAgain);
             }
             LeaseStep::AskThen(grant) => match answered {
                 None => {
@@ -4801,6 +4813,34 @@ async fn ask_waits_for_the_answer() {
     );
     h.local.release_all();
     h.wait_status(&run.id, "done").await;
+}
+
+/// Review finding mgr-stale-need-alongside: a chat model that started while the job waited
+/// for the card (the lease says so: `JudgeAgain`) has the job judged again, with the card as
+/// it is now, and the lease asked again with that need, never the stale one.
+#[tokio::test]
+async fn a_local_run_is_judged_again_when_the_chat_model_changed_while_it_waited() {
+    let h = harness_with_local().await;
+    h.lease.then(LeaseStep::JudgeAgainOnRelease);
+    let run = h.manager.start(h.local_req("x"), false).await.unwrap();
+    eventually("the run asks for the card", || h.lease.needs().len() == 1).await;
+    // "Load it again" reaches Starting: 5 GB of the card are the chat model's now.
+    h.hardware.set_gpu(3, 32);
+    h.hardware.set_chat(Some(5));
+    h.lease.release();
+    h.wait_status(&run.id, "done").await;
+    let needs = h.lease.needs();
+    assert_eq!(needs.len(), 2);
+    assert_eq!(needs[0].judged_with, None);
+    assert!(
+        needs[0].alongside,
+        "with no chat model it fitted beside nothing"
+    );
+    assert_eq!(needs[1].judged_with, Some(5 * GB));
+    assert!(
+        !needs[1].alongside,
+        "judged beside the chat model now on the card"
+    );
 }
 
 #[tokio::test]

@@ -144,6 +144,8 @@ enum Card {
     NotStarted,
     Stopped,
     Shutdown,
+    /// The chat model on the card is not the one the job was judged with: judge it again.
+    JudgeAgain,
 }
 
 /// The time left in a run that is drawing, from its live seconds a step (the passes of a
@@ -753,47 +755,53 @@ impl Inner {
                 return;
             }
         };
-        // Read again now: the chat model, or what is free, may have changed while it waited.
-        let verdict = verdict(
-            &step.entry,
-            step.shape,
-            runs_on_processor(&step.request),
-            lane.hardware.as_ref(),
-            &self.deps.store,
-        )
-        .await;
-        // Its time until the grant: where the lease would run it, as Create estimates it.
-        let eta = self
-            .processor_instead(&verdict, &step.entry, step.shape, lane)
-            .await
-            .map_or(verdict.eta, |there| there.eta);
-        self.with_live(&job.run_id, |live| live.eta = eta);
-        if verdict.word == FitWord::NotHere {
-            let ending = Ending::failed(errors::does_not_fit(verdict.reason), Some(false));
-            self.end_run(job, ending, None).await;
-            return;
-        }
-        let card = self.take_card(t, lane, &verdict.need, &row).await;
-        // It no longer waits for anything, however that ended.
-        self.with_live(&job.run_id, |live| live.waiting_for = None);
-        let (grant, _hold) = match card {
-            Card::Granted(grant, hold) => (grant, hold),
-            Card::DoesNotFit => {
+        let (verdict, grant, _hold) = loop {
+            // Read again now: the chat model, or what is free, may have changed while it
+            // waited.
+            let verdict = verdict(
+                &step.entry,
+                step.shape,
+                runs_on_processor(&step.request),
+                lane.hardware.as_ref(),
+                &self.deps.store,
+            )
+            .await;
+            // Its time until the grant: where the lease would run it, as Create estimates it.
+            let eta = self
+                .processor_instead(&verdict, &step.entry, step.shape, lane)
+                .await
+                .map_or(verdict.eta, |there| there.eta);
+            self.with_live(&job.run_id, |live| live.eta = eta);
+            if verdict.word == FitWord::NotHere {
                 let ending = Ending::failed(errors::does_not_fit(verdict.reason), Some(false));
                 self.end_run(job, ending, None).await;
                 return;
             }
-            Card::NotStarted => {
-                let ending = Ending::failed(errors::not_sent(Company::Local), Some(false));
-                self.end_run(job, ending, None).await;
-                return;
+            let card = self.take_card(t, lane, &verdict.need, &row).await;
+            // It no longer waits for anything, however that ended.
+            self.with_live(&job.run_id, |live| live.waiting_for = None);
+            match card {
+                Card::Granted(grant, hold) => break (verdict, grant, hold),
+                // The chat model on the card changed while it waited: judged again, on the
+                // card as it is now, and asked again.
+                Card::JudgeAgain => {}
+                Card::DoesNotFit => {
+                    let ending = Ending::failed(errors::does_not_fit(verdict.reason), Some(false));
+                    self.end_run(job, ending, None).await;
+                    return;
+                }
+                Card::NotStarted => {
+                    let ending = Ending::failed(errors::not_sent(Company::Local), Some(false));
+                    self.end_run(job, ending, None).await;
+                    return;
+                }
+                Card::Stopped => {
+                    self.end_run(job, Ending::stopped(job, Some(false)), None)
+                        .await;
+                    return;
+                }
+                Card::Shutdown => return,
             }
-            Card::Stopped => {
-                self.end_run(job, Ending::stopped(job, Some(false)), None)
-                    .await;
-                return;
-            }
-            Card::Shutdown => return,
         };
         let chat_loaded = lane.hardware.chat_device_bytes().is_some();
         let unloaded = match &grant {
@@ -933,6 +941,7 @@ impl Inner {
             match asked {
                 Ok((grant, hold)) => return Card::Granted(grant, hold),
                 Err(Refused::DoesNotFit) => return Card::DoesNotFit,
+                Err(Refused::JudgeAgain) => return Card::JudgeAgain,
                 Err(Refused::Cancelled) if self.root.is_cancelled() => return Card::Shutdown,
                 Err(Refused::Cancelled) if t.token.is_cancelled() => return Card::Stopped,
                 Err(Refused::Cancelled) => return Card::NotStarted,

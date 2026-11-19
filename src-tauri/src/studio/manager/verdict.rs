@@ -129,6 +129,7 @@ pub(super) async fn verdict(
         .filter(|_| word == FitWord::NotHere)
         .map(|not_for| errors::not_here_reason(not_for, fit.processor_only));
     let need = StudioNeed {
+        judged_with: chat,
         alongside: on_card(on_device.fit) || (by_choice && !shared_memory),
         after_unload: on_device.after_unload.is_some_and(|f| f != GenFit::Red),
         processor_ok,
