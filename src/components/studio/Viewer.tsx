@@ -333,7 +333,9 @@ export function Viewer(props: { outputId: string; onClose(): void }) {
   const again = () => {
     if (!run) return;
     // Started from the run's own settings (a second press meanwhile does nothing); its card,
-    // or why it was refused, shows once the viewer is closed.
+    // or why it was refused (under the prompt of its tab), shows once the viewer is closed:
+    // Studio goes to the run's tab first, as it may have been opened from the grid's All.
+    store().setTab(run.kind);
     void store().again(run);
     closeTo(false);
   };

@@ -697,6 +697,26 @@ describe("Viewer", () => {
     expect(document.querySelector("[data-studio-viewer]")).toBeNull();
   });
 
+  it("Again on a result of the other kind, opened from the grid's All, shows why it was refused", async () => {
+    await showStudio();
+    const video = videoRun();
+    // The grid on All: both kinds, while the tab is Pictures.
+    act(() => useStudio.setState({ runs: [RUN, video], grid: true }));
+    expect(useStudio.getState().tab).toBe("image");
+    vi.mocked(api.studioStart).mockRejectedValue(
+      appError("studio_daily_limit", "Today's limit of $10.00 is reached.", "Raise the limit in Settings → Studio."),
+    );
+    await act(async () => {
+      useStudio.getState().openViewer("v1");
+    });
+    await flush();
+    await click(button("Again"));
+    expect(useStudio.getState().viewer).toBeNull();
+    expect(useStudio.getState().tab).toBe("video");
+    await screen.findByText("Today's limit of $10.00 is reached.");
+    screen.getByText("Raise the limit in Settings → Studio.");
+  });
+
   it("Edit puts the picture in the tray and focuses the prompt", async () => {
     await showStudio();
     await act(async () => {
