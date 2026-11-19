@@ -23,7 +23,8 @@
 //!   [`StudioManager::answer_unload`]); `running`, with the device it runs on, as shown, and
 //!   how ([`job_options`]), and its time judged again on the processor when the grant puts
 //!   it there; one engine job, checked every [`LOCAL_CHECK_EVERY`] in memory (its progress
-//!   written and sent at most every [`PROGRESS_EVERY`]); each result moved to
+//!   written and sent at most every [`PROGRESS_EVERY`]; its engine's load, the time until it
+//!   first tells it is drawing, recorded with what it was made at); each result moved to
 //!   `.partial/<output id>`, labelled as AI-made there (never with the prompt) and kept in
 //!   the gallery as a cloud picture is; `done` at $0 with the time it took. A failure is
 //!   never charged. The card is held from the grant until the task ends, an out-of-memory
@@ -187,6 +188,17 @@ fn wait_tag(wait: LeaseWait) -> &'static str {
         LeaseWait::NeedsAnswer => "answer",
         LeaseWait::ChatModelLoading => "chatModelLoading",
     }
+}
+
+/// What a local run records it was given: `request`'s settings, and the engine job's
+/// `shape` with its engine's `load_ms` once known ([`job_record`]).
+fn local_params(request: &MediaRequest, shape: &RunShape, load_ms: Option<u64>) -> Value {
+    json!({
+        "params": request.params,
+        "extra": request.extra,
+        "routing": Value::Null,
+        "job": job_record(shape, load_ms),
+    })
 }
 
 /// Where a run on this computer goes, as the run records it.
@@ -646,12 +658,7 @@ impl Inner {
             model: model.id.clone(),
             model_label: model.display_name.clone(),
             prompt: req.prompt.clone(),
-            params: json!({
-                "params": request.params,
-                "extra": request.extra,
-                "routing": Value::Null,
-                "job": job_record(&shape, None),
-            }),
+            params: local_params(&request, &shape, None),
             refs: refs_json(&request.refs),
             estimate_usd: Some(0.0),
             gen_model_id: Some(row.id.clone()),
@@ -1004,6 +1011,8 @@ impl Inner {
         let cap = self.cap_of(job.kind);
         // Its `running` event was just sent.
         let mut last_event = Instant::now();
+        // The engine's load (the time until it first tells it is drawing) is recorded once.
+        let mut load_recorded = false;
         loop {
             match self
                 .until_stopped(t.token, tokio::time::sleep(LOCAL_CHECK_EVERY))
@@ -1023,6 +1032,15 @@ impl Inner {
             }
             let state = provider.check(remote_id).await;
             let status = provider.status(remote_id);
+            let drawing = status
+                .as_ref()
+                .and_then(|s| s.progress.as_ref())
+                .is_some_and(|p| p.stage == LocalStage::Drawing);
+            if drawing && !load_recorded {
+                load_recorded = true;
+                let load_ms = u64::try_from(clock.elapsed().as_millis()).unwrap_or(u64::MAX);
+                self.record_load(job, step, load_ms).await;
+            }
             let progress = match state {
                 Ok(JobState::Pending) => None,
                 Ok(JobState::Running { progress }) => progress.map(f64::from),
@@ -1083,6 +1101,23 @@ impl Inner {
                 self.emit(&job.run_id).await;
                 last_event = Instant::now();
             }
+        }
+    }
+
+    /// Records with run `job` how long its engine took to load (`load_ms`, until it first
+    /// told it was drawing), in what it was made at, for this computer's measured times.
+    async fn record_load(&self, job: &Job, step: &LocalStep, load_ms: u64) {
+        let patch = store::CreationPatch {
+            params: Some(local_params(&step.request, &step.shape, Some(load_ms))),
+            ..Default::default()
+        };
+        if let Err(e) = self
+            .deps
+            .store
+            .update_creation_run(&job.run_id, patch)
+            .await
+        {
+            tracing::warn!(run = %job.run_id, "a local Studio run's load time was not recorded: {e}");
         }
     }
 

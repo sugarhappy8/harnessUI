@@ -3865,6 +3865,25 @@ enum Course {
     Steps,
     /// Fails with this kind.
     Fail(FailureKind),
+    /// Loading (the engine's stage) for its first `loading` checks, drawing for `drawing`
+    /// more, then done.
+    Draws { loading: u32, drawing: u32 },
+    /// Loading for its first `loading` checks, then fails with this kind before it draws.
+    FailsLoading { loading: u32, kind: FailureKind },
+}
+
+/// How a [`FakeLocal`] run fails with `kind`.
+fn local_failure(kind: FailureKind) -> JobState {
+    JobState::Failed(MediaFailure {
+        kind,
+        stage: None,
+        charged: Some(false),
+        company_code: None,
+        request_id: None,
+        status: None,
+        message: "The Studio engine ran out of memory.".into(),
+        retry_after: None,
+    })
 }
 
 /// One run [`FakeLocal`] started.
@@ -4086,16 +4105,17 @@ impl MediaProvider for FakeLocal {
                 progress: Some(0.5),
             },
             Course::Steps => done,
-            Course::Fail(kind) => JobState::Failed(MediaFailure {
-                kind,
-                stage: None,
-                charged: Some(false),
-                company_code: None,
-                request_id: None,
-                status: None,
-                message: "The Studio engine ran out of memory.".into(),
-                retry_after: None,
-            }),
+            Course::Fail(kind) => local_failure(kind),
+            Course::Draws { loading, drawing } if run.checks <= loading + drawing => {
+                JobState::Running {
+                    progress: Some(0.5),
+                }
+            }
+            Course::Draws { .. } => done,
+            Course::FailsLoading { loading, .. } if run.checks <= loading => JobState::Running {
+                progress: Some(0.1),
+            },
+            Course::FailsLoading { kind, .. } => local_failure(kind),
         })
     }
 
@@ -4197,18 +4217,32 @@ impl LocalProvider for FakeLocal {
         let runs = self.runs.lock().unwrap();
         let run = runs.get(remote_id)?;
         let elapsed = run.started.elapsed();
-        let progress = matches!(run.course, Course::Steps).then(|| LocalProgress {
-            stage: LocalStage::Drawing,
-            pass: 1,
-            passes: 1,
-            step: u32::try_from(elapsed.as_millis() / 10)
-                .unwrap_or(100)
-                .min(100),
-            steps: 100,
-            picture: 1,
-            pictures: 1,
-            elapsed_ms: u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX),
-            sec_per_step: Some(0.01),
+        let stage = match run.course {
+            Course::Steps => Some(LocalStage::Drawing),
+            Course::Draws { loading, .. } if run.checks <= loading => Some(LocalStage::Loading),
+            Course::Draws { .. } => Some(LocalStage::Drawing),
+            Course::FailsLoading { .. } => Some(LocalStage::Loading),
+            Course::Done | Course::RetryThenDone | Course::Fail(_) => None,
+        };
+        let progress = stage.map(|stage| {
+            let drawing = stage == LocalStage::Drawing;
+            LocalProgress {
+                stage,
+                pass: 1,
+                passes: 1,
+                step: if drawing {
+                    u32::try_from(elapsed.as_millis() / 10)
+                        .unwrap_or(100)
+                        .min(100)
+                } else {
+                    0
+                },
+                steps: if drawing { 100 } else { 0 },
+                picture: 1,
+                pictures: 1,
+                elapsed_ms: u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX),
+                sec_per_step: drawing.then_some(0.01),
+            }
         });
         Some(LocalRunStatus {
             progress,
@@ -5449,6 +5483,63 @@ async fn every_local_fit_is_the_lanes_verdict() {
         .unwrap();
     assert_eq!(e.local.unwrap().fit, "afterUnload");
     assert!(e.eta.is_some_and(|eta| eta.measured));
+}
+
+#[tokio::test]
+async fn a_local_run_records_its_engine_load_at_its_first_drawing_step() {
+    let h = harness_with_local().await;
+    h.local.course(Course::Draws {
+        loading: 2,
+        drawing: 2,
+    });
+    let run = h
+        .manager
+        .start(h.local_req("lighthouse"), false)
+        .await
+        .unwrap();
+    h.wait_status(&run.id, "done").await;
+    let row = h.store_run(&run.id).await;
+    let job = &row.params["job"];
+    let load = job["load_ms"].as_u64().expect("the engine's load recorded");
+    // Drawing was first told at the third check, each after a wait of LOCAL_CHECK_EVERY.
+    let three_checks = 3 * u64::try_from(LOCAL_CHECK_EVERY.as_millis()).unwrap();
+    assert!(load >= three_checks, "{load} ms");
+    let elapsed = row.elapsed_ms.expect("the run's time");
+    assert!(load <= elapsed, "{load} ms of {elapsed} ms");
+    // What it was made at, and its settings, stay as recorded.
+    assert_eq!(
+        (&job["width"], &job["steps"], &job["pictures"]),
+        (&json!(1024), &json!(4), &json!(1))
+    );
+    let sent = h.local.starts.lock().unwrap()[0].0.clone();
+    assert_eq!(row.params["params"], Value::Object(sent.params));
+    // This computer's measured times read it.
+    let times = h
+        .store
+        .local_run_times(KLEIN, RX_7600_SHOWN, 10)
+        .await
+        .unwrap();
+    assert_eq!(times[0].params["job"]["load_ms"], load);
+}
+
+#[tokio::test]
+async fn a_local_run_that_never_drew_records_no_engine_load() {
+    let h = harness_with_local().await;
+    // It fails while loading.
+    h.local.course(Course::FailsLoading {
+        loading: 2,
+        kind: FailureKind::OutOfMemory,
+    });
+    let run = h.manager.start(h.local_req("x"), false).await.unwrap();
+    h.wait_status(&run.id, "failed").await;
+    let job = &h.store_run(&run.id).await.params["job"];
+    assert!(job.get("load_ms").is_none(), "{job}");
+    assert_eq!(job["width"], 1024);
+    // Its engine never told it was drawing (done at its first check).
+    let run = h.manager.start(h.local_req("y"), false).await.unwrap();
+    h.wait_status(&run.id, "done").await;
+    let job = &h.store_run(&run.id).await.params["job"];
+    assert!(job.get("load_ms").is_none(), "{job}");
 }
 
 #[tokio::test]
