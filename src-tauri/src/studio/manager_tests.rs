@@ -913,8 +913,9 @@ impl H {
     }
 
     async fn run_dto(&self, id: &str) -> RunDto {
+        let seq = self.manager.next_seq();
         let run = self.store.get_creation_run(id).await.unwrap().unwrap();
-        self.manager.run_dto(&run).await
+        self.manager.run_dto(&run, seq).await
     }
 
     /// The run once its status is `status` (at most 10 s). For a status a run ends with, also
@@ -932,8 +933,9 @@ impl H {
         );
         let deadline = Instant::now() + Duration::from_secs(10);
         loop {
+            let seq = manager.next_seq();
             let row = self.store.get_creation_run(id).await.unwrap().unwrap();
-            let run = manager.run_dto(&row).await;
+            let run = manager.run_dto(&row, seq).await;
             if run.status == status && !(ends && run.watching) {
                 return run;
             }
@@ -2941,6 +2943,46 @@ async fn a_refused_result_link_is_said_in_studios_words() {
             "{text}"
         );
     }
+}
+
+#[tokio::test]
+async fn a_newer_state_of_a_run_always_carries_a_higher_number() {
+    let h = harness().await;
+    let pause = h.sink.pause_at_sending();
+    let run = h.manager.start(h.openai_req(), true).await.unwrap();
+    wait_until("the run is recorded as sending", || {
+        pause.reached.load(Ordering::SeqCst)
+    })
+    .await;
+    // The task's `sending` may reach the webview before Start's answer (`queued`): it carries
+    // the higher number, so the webview keeps it.
+    assert_eq!(run.status, "queued");
+    let sending = h
+        .events_for(&run.id)
+        .into_iter()
+        .find(|e| e.status == "sending")
+        .unwrap();
+    assert!(sending.seq > run.seq, "{} !> {}", sending.seq, run.seq);
+    pause.go.store(true, Ordering::SeqCst);
+    let done = h.wait_status(&run.id, "done").await;
+    // Each state sent carries a higher number than the one before.
+    let events = h.events_for(&run.id);
+    assert_eq!(events[0].seq, run.seq, "Start's answer is its first event");
+    for pair in events.windows(2) {
+        assert!(
+            pair[0].seq < pair[1].seq,
+            "{} then {}",
+            pair[0].status,
+            pair[1].status
+        );
+    }
+    assert!(done.seq > events.last().unwrap().seq);
+    // A command's answer read after the last change is newer than every event before it,
+    // and so is a list read after it.
+    let again = h.manager.cancel(&run.id).await.unwrap();
+    assert!(again.seq > done.seq);
+    let live = h.manager.next_seq();
+    assert!(live > again.seq);
 }
 
 #[tokio::test]

@@ -314,6 +314,7 @@ impl StudioManager {
     /// an answer is given as it is.
     pub async fn answer_unload(&self, run_id: &str, unload: bool) -> AppResult<RunDto> {
         self.inner.give_answer(run_id, unload);
+        let seq = self.inner.next_seq();
         let run = self
             .inner
             .deps
@@ -321,7 +322,7 @@ impl StudioManager {
             .get_creation_run(run_id)
             .await?
             .ok_or_else(|| AppError::not_found("run"))?;
-        Ok(self.inner.dto_of(&run))
+        Ok(self.inner.dto_of(&run, seq))
     }
 
     /// *Quit and stop*: stops every local run, those waiting first, so none starts after the
@@ -363,8 +364,9 @@ impl StudioManager {
             .ok_or_else(errors::no_local_engine)?;
         // The same press sent again gives the run it made, whatever its checks say now
         // (checked again under the lock, for a press whose first copy is being recorded).
+        let seq = inner.next_seq();
         if let Some(run) = inner.known_press(&req.client_token).await? {
-            return Ok(inner.dto_of(&run));
+            return Ok(inner.dto_of(&run, seq));
         }
         if prompt_check::refuses(&req.prompt) {
             return Err(errors::wont_make());
@@ -393,8 +395,9 @@ impl StudioManager {
             .await
             .map_or(verdict.eta, |there| there.eta);
         let _starting = inner.starting.lock().await;
+        let seq = inner.next_seq();
         if let Some(run) = inner.known_press(&req.client_token).await? {
-            return Ok(inner.dto_of(&run));
+            return Ok(inner.dto_of(&run, seq));
         }
         // Found before the lock: the last result using one may have been deleted since.
         refs_still_there(&prepared.request.refs)?;
@@ -909,7 +912,9 @@ impl Inner {
         let run_id = &t.job.run_id;
         let on_wait = |wait: LeaseWait| {
             self.with_live(run_id, |live| live.waiting_for = Some(wait));
-            self.deps.sink.progress(&self.dto_of(row));
+            // While it waits for the card, only this task changes the run, so `row` is as it
+            // is now; the live state it adds is read after this number is taken.
+            self.deps.sink.progress(&self.dto_of(row, self.next_seq()));
         };
         let mut answered = None;
         loop {

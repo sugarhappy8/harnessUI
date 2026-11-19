@@ -511,8 +511,9 @@ impl WireHarness {
     }
 
     async fn run(&self, id: &str) -> RunDto {
+        let seq = self.manager.next_seq();
         let row = self.store.get_creation_run(id).await.unwrap().unwrap();
-        self.manager.run_dto(&row).await
+        self.manager.run_dto(&row, seq).await
     }
 
     /// Run `id` once its status is `status`; for a status a run ends with, also once its

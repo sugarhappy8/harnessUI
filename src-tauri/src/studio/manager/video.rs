@@ -305,9 +305,10 @@ impl Inner {
         }
         // Results kept before (ahead of a restart, or of a download that broke) stay as they
         // are.
+        let seq = self.next_seq();
         let kept: Vec<u32> = match self.deps.store.get_creation_run(&job.run_id).await {
             Ok(Some(run)) => {
-                self.deps.sink.progress(&self.dto_of(&run));
+                self.deps.sink.progress(&self.dto_of(&run, seq));
                 run.outputs.iter().map(|out| out.idx).collect()
             }
             Ok(None) => Vec::new(),

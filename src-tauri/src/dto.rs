@@ -782,6 +782,10 @@ pub struct OutputDto {
 pub struct RunDto {
     /// Its id.
     pub id: String,
+    /// Which state of a run is newest: one count for every run, taken just before the row is
+    /// read, so of two copies of the same run (an event, a command's answer) the webview keeps
+    /// the one with the higher number.
+    pub seq: u64,
     /// Pictures or video.
     pub kind: MediaKind,
     /// `cloud` or `local`.

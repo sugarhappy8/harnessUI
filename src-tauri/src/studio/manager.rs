@@ -83,6 +83,7 @@ pub(crate) use verdict::{
 use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 use std::future::Future;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError, RwLock};
 use std::time::Duration;
 
@@ -227,6 +228,9 @@ struct Inner {
     local_live: Mutex<HashMap<String, lane::LocalLive>>,
     /// The chat model a local run's grant unloaded, kept while the local queue has work.
     local_unloaded: Mutex<Option<String>>,
+    /// The last number given to a run as the webview gets it ([`RunDto::seq`]): one count
+    /// for every run, taken just before the row that the run is built from is read.
+    seq: AtomicU64,
 }
 
 /// A queue: one endpoint's runs of one kind, or the one queue of runs on this computer.
@@ -617,6 +621,7 @@ impl StudioManager {
                 stale: Mutex::new(HashMap::new()),
                 local_live: Mutex::new(HashMap::new()),
                 local_unloaded: Mutex::new(None),
+                seq: AtomicU64::new(0),
             }),
         }
     }
@@ -695,8 +700,9 @@ impl StudioManager {
             RunTarget::Endpoint(id) => store::ProviderId(id),
         };
         let _starting = self.inner.starting.lock().await;
+        let seq = self.inner.next_seq();
         if let Some(run) = self.inner.known_press(&req.client_token).await? {
-            return Ok(self.inner.dto_of(&run));
+            return Ok(self.inner.dto_of(&run, seq));
         }
         let prepared = self.inner.prepare(&req, id).await?;
         if !prepared.problems.is_empty() {
@@ -774,6 +780,7 @@ impl StudioManager {
                 .end_run(&job, Ending::stopped(&job, job.job_charge()), job.started())
                 .await;
         }
+        let seq = self.inner.next_seq();
         let run = self
             .inner
             .deps
@@ -781,7 +788,7 @@ impl StudioManager {
             .get_creation_run(run_id)
             .await?
             .ok_or_else(|| AppError::not_found("run"))?;
-        Ok(self.inner.dto_of(&run))
+        Ok(self.inner.dto_of(&run, seq))
     }
 
     /// "Get it anyway" on a stopped video, and "Check again" on one still not ready: checks
@@ -796,6 +803,7 @@ impl StudioManager {
     pub async fn fetch_anyway(&self, run_id: &str) -> AppResult<RunDto> {
         // One at a time, and never beside a start, so two presses follow a job once.
         let _one_at_a_time = self.inner.starting.lock().await;
+        let seq = self.inner.next_seq();
         let run = self
             .inner
             .deps
@@ -809,7 +817,7 @@ impl StudioManager {
         };
         use store::CreationStatus as S;
         let follow_up = match run.status {
-            S::Done => return Ok(self.inner.dto_of(&run)),
+            S::Done => return Ok(self.inner.dto_of(&run, seq)),
             S::Waiting | S::Running | S::Downloading => false,
             S::Failed | S::Cancelled => true,
             S::Queued | S::Sending | S::Blocked | S::Interrupted => {
@@ -817,10 +825,10 @@ impl StudioManager {
             }
         };
         match self.inner.followed(run_id) {
-            Followed::Queued => return Ok(self.inner.dto_of(&run)),
+            Followed::Queued => return Ok(self.inner.dto_of(&run, seq)),
             Followed::Running { ended } => {
                 if !follow_up && !self.inner.is_stale(run_id) {
-                    return Ok(self.inner.dto_of(&run));
+                    return Ok(self.inner.dto_of(&run, seq));
                 }
                 // Its last task is just finishing (it went stale or ended): it goes first, so
                 // two tasks never share the run's scratch folder.
@@ -829,7 +837,7 @@ impl StudioManager {
                     .is_err()
                 {
                     tracing::warn!(run = %run_id, "a Studio run's last task did not end in time");
-                    return Ok(self.inner.dto_of(&run));
+                    return Ok(self.inner.dto_of(&run, seq));
                 }
             }
             Followed::No => {}
@@ -909,13 +917,21 @@ impl StudioManager {
 
     /// The runs still working, oldest first.
     pub async fn live(&self) -> AppResult<Vec<RunDto>> {
+        let seq = self.inner.next_seq();
         let runs = self.inner.deps.store.live_creation_runs().await?;
-        Ok(runs.iter().map(|run| self.inner.dto_of(run)).collect())
+        Ok(runs.iter().map(|run| self.inner.dto_of(run, seq)).collect())
     }
 
-    /// `run` as the webview shows it, with its place in its queue.
-    pub async fn run_dto(&self, run: &store::CreationRun) -> RunDto {
-        self.inner.dto_of(run)
+    /// The next number for a run as the webview gets it ([`RunDto::seq`]). Taken just before
+    /// the rows are read, so a row read later never carries a lower number.
+    pub fn next_seq(&self) -> u64 {
+        self.inner.next_seq()
+    }
+
+    /// `run` as the webview shows it, with its place in its queue, numbered `seq` (taken
+    /// with [`Self::next_seq`] before `run` was read).
+    pub async fn run_dto(&self, run: &store::CreationRun, seq: u64) -> RunDto {
+        self.inner.dto_of(run, seq)
     }
 
     /// Today's spending, the limit, and what the gallery holds.
@@ -1299,29 +1315,33 @@ impl Inner {
     /// Queues a recorded run: its task starts now when its queue has room, else it waits.
     /// Gives the run as recorded, after its `queued` event.
     async fn enqueue(self: &Arc<Self>, job: Job) -> AppResult<RunDto> {
+        let seq = self.next_seq();
         let run = match self.deps.store.get_creation_run(&job.run_id).await {
             Ok(Some(run)) => run,
             Ok(None) => return Err(self.abandon(&job, AppError::not_found("run")).await),
             Err(e) => return Err(self.abandon(&job, e.into()).await),
         };
-        Ok(self.place_and_tell(job, &run))
+        Ok(self.place_and_tell(job, &run, seq))
     }
 
     /// Follows `job`'s video again: its task starts now when its queue has room, else it
     /// waits. Gives the run as it is, after its event.
     async fn watch(self: &Arc<Self>, job: Job) -> AppResult<RunDto> {
+        let seq = self.next_seq();
         let run = self
             .deps
             .store
             .get_creation_run(&job.run_id)
             .await?
             .ok_or_else(|| AppError::not_found("run"))?;
-        Ok(self.place_and_tell(job, &run))
+        Ok(self.place_and_tell(job, &run, seq))
     }
 
-    /// Gives `job` a place (or a turn in its queue), sends `run` as it is now, then starts the
-    /// task when it has a place. Once the app is closing, nothing starts.
-    fn place_and_tell(self: &Arc<Self>, job: Job, run: &store::CreationRun) -> RunDto {
+    /// Gives `job` a place (or a turn in its queue), sends `run` as it is now (numbered
+    /// `seq`, taken before it was read), then starts the task when it has a place. The task
+    /// may send newer states before the command's answer arrives: each carries a higher
+    /// number, so the webview keeps the newest. Once the app is closing, nothing starts.
+    fn place_and_tell(self: &Arc<Self>, job: Job, run: &store::CreationRun, seq: u64) -> RunDto {
         let admitted = {
             let mut lanes = self.lanes();
             if !self.root.is_cancelled()
@@ -1334,7 +1354,7 @@ impl Inner {
                 None
             }
         };
-        let dto = self.dto_of(run);
+        let dto = self.dto_of(run, seq);
         self.deps.sink.progress(&dto);
         if let Some(admitted) = admitted {
             spawn(self, admitted);
@@ -1686,6 +1706,7 @@ impl Inner {
             self.end_run(job, ending, started).await;
             return;
         }
+        let seq = self.next_seq();
         let run = self.deps.store.get_creation_run(&job.run_id).await;
         let recorded_cost = match &run {
             Ok(Some(run)) => {
@@ -1717,7 +1738,7 @@ impl Inner {
         )
         .await;
         if let Ok(Some(run)) = run {
-            self.deps.sink.progress(&self.dto_of(&run));
+            self.deps.sink.progress(&self.dto_of(&run, seq));
         }
     }
 
@@ -1767,6 +1788,7 @@ impl Inner {
         if let Err(e) = self.deps.store.update_creation_run(run_id, patch).await {
             tracing::warn!(run = %run_id, "how a Studio run ended was not recorded: {e}");
         }
+        let seq = self.next_seq();
         let run = self.deps.store.get_creation_run(run_id).await;
         let recorded_cost = match &run {
             Ok(Some(run)) => run.cost_usd.or(ending.cost_usd),
@@ -1775,7 +1797,7 @@ impl Inner {
         self.complete_audit(run_id, audit_id, ending.status, recorded_cost, started)
             .await;
         match run {
-            Ok(Some(run)) => self.deps.sink.progress(&self.dto_of(&run)),
+            Ok(Some(run)) => self.deps.sink.progress(&self.dto_of(&run, seq)),
             Ok(None) => {}
             Err(e) => tracing::warn!(run = %run_id, "a Studio run could not be read: {e}"),
         }
@@ -1851,6 +1873,7 @@ impl Inner {
             .map(|queue| queue.iter().map(|job| job.run_id.clone()).collect())
             .unwrap_or_default();
         for run_id in waiting {
+            let seq = self.next_seq();
             let run = match self.deps.store.get_creation_run(&run_id).await {
                 Ok(Some(run)) => run,
                 Ok(None) => continue,
@@ -1864,7 +1887,7 @@ impl Inner {
             // never still not ready (that one has no place to wait for).
             let lanes = self.lanes();
             if let Some(position) = lanes.position(&run_id) {
-                let mut dto = run_dto_of(&run, true, Some(position), false);
+                let mut dto = run_dto_of(&run, true, Some(position), false, seq);
                 self.fill_local(&run, &mut dto);
                 self.deps.sink.progress(&dto);
             }
@@ -1873,16 +1896,25 @@ impl Inner {
 
     /// Sends run `run_id`'s state to the sink.
     async fn emit(&self, run_id: &str) {
+        let seq = self.next_seq();
         match self.deps.store.get_creation_run(run_id).await {
-            Ok(Some(run)) => self.deps.sink.progress(&self.dto_of(&run)),
+            Ok(Some(run)) => self.deps.sink.progress(&self.dto_of(&run, seq)),
             Ok(None) => {}
             Err(e) => tracing::warn!(run = %run_id, "a Studio run could not be read: {e}"),
         }
     }
 
-    /// `run` as the webview shows it: whether Studio follows it, its queue place, and whether
-    /// it is still not ready (no longer followed).
-    fn dto_of(&self, run: &store::CreationRun) -> RunDto {
+    /// The next number for a run as the webview gets it ([`RunDto::seq`]): taken just before
+    /// the row is read. Every change is written first, then read and sent, so the state sent
+    /// for the last change always carries the highest number.
+    fn next_seq(&self) -> u64 {
+        self.seq.fetch_add(1, Ordering::SeqCst) + 1
+    }
+
+    /// `run` as the webview shows it, numbered `seq` (taken with [`Self::next_seq`] before
+    /// `run` was read): whether Studio follows it, its queue place, and whether it is still
+    /// not ready (no longer followed).
+    fn dto_of(&self, run: &store::CreationRun, seq: u64) -> RunDto {
         let (followed, queue_position) = {
             let lanes = self.lanes();
             let position = lanes.position(&run.id);
@@ -1892,7 +1924,7 @@ impl Inner {
             )
         };
         let stale = self.is_stale(&run.id);
-        let mut dto = run_dto_of(run, followed && !stale, queue_position, stale);
+        let mut dto = run_dto_of(run, followed && !stale, queue_position, stale, seq);
         self.fill_local(run, &mut dto);
         dto
     }
@@ -2081,12 +2113,13 @@ fn audit_entry(
     }
 }
 
-/// A run as the webview shows it.
+/// A run as the webview shows it, numbered `seq`.
 fn run_dto_of(
     run: &store::CreationRun,
     watching: bool,
     queue_position: Option<u32>,
     stale: bool,
+    seq: u64,
 ) -> RunDto {
     let settings = |key: &str| -> Map<String, Value> {
         run.params
@@ -2097,6 +2130,7 @@ fn run_dto_of(
     };
     RunDto {
         id: run.id.clone(),
+        seq,
         kind: media_kind(run.kind),
         runs_on: run.runs_on.as_str().to_owned(),
         provider_id: run.provider_id.map(|id| id.0),

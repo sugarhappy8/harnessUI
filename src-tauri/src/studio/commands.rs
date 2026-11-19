@@ -484,6 +484,7 @@ pub async fn runs(
         before: before.map(Into::into),
         limit,
     };
+    let seq = studio.next_seq();
     let rows = studio.deps().store.list_creation_runs(query).await?;
     let full = rows.len() >= limit as usize;
     let next = rows.last().filter(|_| full).map(|last| RunsCursorDto {
@@ -492,7 +493,7 @@ pub async fn runs(
     });
     let mut runs = Vec::with_capacity(rows.len());
     for run in &rows {
-        runs.push(studio.run_dto(run).await);
+        runs.push(studio.run_dto(run, seq).await);
     }
     Ok(RunsPage { runs, next })
 }
@@ -1997,8 +1998,9 @@ pub(crate) mod tests {
                 .await
                 .unwrap();
         }
+        let seq = h.manager.next_seq();
         let row = h.store.get_creation_run(&id).await.unwrap().unwrap();
-        h.manager.run_dto(&row).await
+        h.manager.run_dto(&row, seq).await
     }
 
     /// Installs catalog entry `id` of the bundled catalog, its parts in `models`.
