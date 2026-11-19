@@ -5,6 +5,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { act, cleanup, fireEvent, render, screen, within } from "@testing-library/react";
 import { useState } from "react";
 import { ConfirmDialog } from "./ConfirmDialog";
+import { alertDialogsAnimate, endAnimation } from "./fixtures/dialogs";
 
 afterEach(() => cleanup());
 
@@ -49,6 +50,25 @@ describe("ConfirmDialog", () => {
     expect(action.className).toContain("bg-danger");
     await click(action);
     expect(onConfirm).toHaveBeenCalledTimes(1);
+    expect(screen.queryByRole("alertdialog")).toBeNull();
+  });
+
+  it("while it closes, its action does nothing more", async () => {
+    // In the app the closing dialog stays on screen for its 130 ms animation, buttons and all;
+    // a double-click's second click lands on it.
+    alertDialogsAnimate();
+    const onConfirm = vi.fn();
+    render(<Asking destructive onConfirm={onConfirm} />);
+    await click(screen.getByRole("button", { name: "Ask" }));
+    const dialog = screen.getByRole("alertdialog");
+    const action = within(dialog).getByRole("button", { name: "Delete" });
+    await click(action);
+    expect(onConfirm).toHaveBeenCalledTimes(1);
+    expect(dialog.getAttribute("data-state")).toBe("closed");
+    expect(dialog.isConnected).toBe(true);
+    await click(action);
+    expect(onConfirm).toHaveBeenCalledTimes(1);
+    await endAnimation(dialog);
     expect(screen.queryByRole("alertdialog")).toBeNull();
   });
 

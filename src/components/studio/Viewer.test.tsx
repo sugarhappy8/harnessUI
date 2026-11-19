@@ -8,6 +8,7 @@
 // cancels a run.
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { alertDialogsAnimate, endAnimation } from "./fixtures/dialogs";
 import { LOCAL, LOCAL_RUN, MODELS, RUN } from "./fixtures/models";
 import type { MediaModel, Output, RefItem, Run, StudioEndpoint, StudioPrefs, Usage } from "./types";
 
@@ -364,6 +365,32 @@ describe("Viewer", () => {
     // The next result of the run takes its place.
     screen.getByText("1 / 3");
     expect(useStudio.getState().runs[0]!.outputs.map((o) => o.id)).toEqual(["o2", "o3", "o4"]);
+  });
+
+  it("while the question closes it keeps its words, and a second click deletes nothing more", async () => {
+    // In the app the question fades out for 130 ms, its buttons still there, with the next
+    // result already behind it: a double-click's second click must not delete that one.
+    alertDialogsAnimate();
+    setStore({ runs: [madeToday(RUN), LOCAL_RUN] });
+    vi.mocked(api.studioDelete).mockResolvedValue(undefined);
+    await open("o1");
+    await click(button("Delete"));
+    const question = screen.getByRole("alertdialog");
+    const confirm = within(question).getByRole("button", { name: "Delete" });
+    await click(confirm);
+    expect(question.getAttribute("data-state")).toBe("closed");
+    within(question).getByText("Delete this picture?");
+    within(question).getByText("The file and its record are removed from the gallery.");
+    within(question).getByText(
+      "The audit log keeps a line saying a run happened (model and cost), but not your prompt. It still counts toward today's spending.",
+    );
+    screen.getByText("1 / 3");
+    await click(confirm);
+    expect(api.studioDelete).toHaveBeenCalledTimes(1);
+    expect(api.studioDelete).toHaveBeenCalledWith(["o1"]);
+    expect(useStudio.getState().runs[0]!.outputs.map((o) => o.id)).toEqual(["o2", "o3", "o4"]);
+    await endAnimation(question);
+    expect(screen.queryByRole("alertdialog")).toBeNull();
   });
 
   it("deleting a cloud result made on an earlier day says only what the audit log keeps", async () => {

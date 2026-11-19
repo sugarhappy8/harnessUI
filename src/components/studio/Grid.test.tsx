@@ -4,6 +4,7 @@
 // next page on Load more; and several results selected to delete or save together.
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { alertDialogsAnimate } from "./fixtures/dialogs";
 import { LOCAL, LOCAL_RUN, MODELS, RUN } from "./fixtures/models";
 import type { Output, Run, RunsCursor, StudioEndpoint, StudioPrefs, Usage } from "./types";
 
@@ -322,6 +323,28 @@ describe("Grid", () => {
     expect(document.querySelector('[data-output-tile="o2"]')).toBeNull();
     tile("o3");
     expect(screen.queryByRole("button", { name: /^Delete \d/ })).toBeNull();
+  });
+
+  it("a second click on Delete while the question closes deletes nothing more", async () => {
+    // In the app the question fades out for 130 ms with its buttons still there.
+    alertDialogsAnimate();
+    await showGrid();
+    vi.mocked(api.studioDelete).mockResolvedValue(undefined);
+    await selectTiles("o1", "o2");
+    await click(screen.getByRole("button", { name: "Delete 2" }));
+    const question = screen.getByRole("alertdialog");
+    const confirm = within(question).getByRole("button", { name: "Delete" });
+    await act(async () => {
+      fireEvent.click(confirm);
+    });
+    expect(question.getAttribute("data-state")).toBe("closed");
+    within(question).getByText("Delete 2 pictures?");
+    await act(async () => {
+      fireEvent.click(confirm);
+    });
+    await flush();
+    expect(api.studioDelete).toHaveBeenCalledTimes(1);
+    expect(api.studioDelete).toHaveBeenCalledWith(["o1", "o2"]);
   });
 
   it("deleting cloud results made on an earlier day says only what the audit log keeps", async () => {

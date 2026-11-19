@@ -207,12 +207,16 @@ export function ConfirmDelete(props: {
   onConfirm(): void;
   onCancel(): void;
 }) {
-  const { results } = props;
+  // A closed question stays on screen while it fades out (styles.css, 130 ms): it keeps the
+  // words it asked with, not an empty title and body.
+  const [asked, setAsked] = useState(props.results);
+  if (props.results !== null && props.results !== asked) setAsked(props.results);
+  const results = props.results ?? asked;
   const today = localDayStart();
   const counts = results?.some((r) => r.run.runsOn === "cloud" && r.run.createdAt >= today) ?? false;
   return (
     <ConfirmDialog
-      open={results !== null}
+      open={props.results !== null}
       onOpenChange={(open) => {
         if (!open) props.onCancel();
       }}

@@ -8,9 +8,9 @@ import { AlertDialog } from "radix-ui";
 // own markup.
 
 /** The question: `title`, then `body`; with a `note`, `body` reads plain and the note quieter
- *  beneath it, else `body` reads quieter alone. `onConfirm` follows the action; the dialog then
- *  closes (`onOpenChange(false)`), as it does on Cancel or Esc. `destructive` colours the action
- *  as a deletion. */
+ *  beneath it, else `body` reads quieter alone. `onConfirm` follows the action while `open` (not
+ *  while a closed dialog fades out); the dialog then closes (`onOpenChange(false)`), as it does
+ *  on Cancel or Esc. `destructive` colours the action as a deletion. */
 export function ConfirmDialog(props: {
   open: boolean;
   onOpenChange(open: boolean): void;
@@ -44,7 +44,11 @@ export function ConfirmDialog(props: {
               {props.cancelLabel}
             </AlertDialog.Cancel>
             <AlertDialog.Action
-              onClick={props.onConfirm}
+              // A closed dialog stays on screen while it fades out (styles.css, 130 ms), its
+              // buttons still there: a second click (a double-click's) confirms nothing more.
+              onClick={() => {
+                if (props.open) props.onConfirm();
+              }}
               className={
                 props.destructive
                   ? "rounded-md bg-danger px-3 py-1.5 font-medium text-white hover:opacity-90"
