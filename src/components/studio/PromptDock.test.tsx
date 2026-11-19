@@ -479,7 +479,7 @@ describe("PromptDock", () => {
       await show({ prefs: prefs({ lastModel: CLOUD_LAST }) });
       // Judged on the prompt as it is, before any answer for it.
       vi.mocked(api.studioEstimate).mockClear();
-      typePrompt(" \n \u0085 ");
+      typePrompt(" \n\u00A0\u0085\u2003");
       screen.getByText("Write a prompt first.");
       expect(createButton().disabled).toBe(true);
       typePrompt("x".repeat(32_001));
@@ -1042,8 +1042,8 @@ describe("the prompt's own checks", () => {
     const cloud = { endpoint: 1 };
     expect(promptProblems("", "thisComputer")).toEqual(["Write a prompt first."]);
     // Rust's trim takes NEL (U+0085) and the line separator, and leaves U+FEFF.
-    expect(promptProblems(" \t\n \u0085 　", cloud)).toEqual(["Write a prompt first."]);
-    expect(promptProblems("﻿", cloud)).toEqual([]);
+    expect(promptProblems(" \t\n\u00A0\u0085\u2028\u3000", cloud)).toEqual(["Write a prompt first."]);
+    expect(promptProblems("\uFEFF", cloud)).toEqual([]);
     expect(promptProblems("x".repeat(4_000), "thisComputer")).toEqual([]);
     expect(promptProblems("x".repeat(4_001), "thisComputer")).toEqual([
       "Keep the prompt under 4,000 characters for local models.",
