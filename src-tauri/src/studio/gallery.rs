@@ -298,11 +298,21 @@ fn remove_quietly(path: &Path) {
     }
 }
 
+/// How the type the company gave counts when the bytes are another of the seven.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Claim {
+    /// The file is refused ([`GalleryError::Mismatch`]).
+    Checked,
+    /// The bytes win, and the type given is only logged: a result already paid for.
+    BytesWin,
+}
+
 /// The type a file at `partial` may be kept as, read from its first bytes and checked
-/// against `claimed` and `cap`. The file is closed before this returns.
+/// against `claimed` (as `claim` says) and `cap`. The file is closed before this returns.
 fn check_partial(
     partial: &Path,
     claimed: Option<&str>,
+    claim: Claim,
     cap: u64,
 ) -> Result<&'static str, GalleryError> {
     let mut file = std::fs::File::open(partial).map_err(io_error)?;
@@ -317,7 +327,21 @@ fn check_partial(
         .map_err(io_error)?;
     drop(file);
     let whole = head.len() as u64 >= size;
-    media_type(&head, whole, claimed)
+    match media_type(&head, whole, claimed) {
+        Err(GalleryError::Mismatch { claimed, found }) if claim == Claim::BytesWin => {
+            tracing::warn!(
+                claimed = %claimed,
+                found = %found,
+                "a Studio result was sent as one type and is another: kept as its bytes are"
+            );
+            MEDIA_TYPES
+                .iter()
+                .map(|(m, _)| *m)
+                .find(|m| *m == found)
+                .ok_or(GalleryError::NotMedia)
+        }
+        other => other,
+    }
 }
 
 /// The type to keep a file as, from its first bytes `head` (`whole` when they are the whole
@@ -413,9 +437,9 @@ impl Gallery {
 
     /// Keeps the file at `partial` as `<target_no_ext>.<ext>` and returns that path and its
     /// type. The type comes from the file's bytes; `claimed` is the type the company gave,
-    /// if any, and decides only for an SVG whose start cannot tell. A file over `cap` bytes, one that is none of the seven
-    /// types, and one the company called another of the seven are refused, and on every
-    /// refusal or failure the partial file is removed.
+    /// if any, and decides only for an SVG whose start cannot tell. A file over `cap` bytes,
+    /// one that is none of the seven types, and one the company called another of the seven
+    /// are refused, and on every refusal or failure the partial file is removed.
     pub fn finalize(
         &self,
         partial: &Path,
@@ -423,7 +447,33 @@ impl Gallery {
         target_no_ext: &Path,
         cap: u64,
     ) -> Result<(PathBuf, String), GalleryError> {
-        let mime = match check_partial(partial, claimed, cap) {
+        self.keep(partial, claimed, Claim::Checked, target_no_ext, cap)
+    }
+
+    /// [`Self::finalize`] for a result already paid for (a cloud company's): when the type
+    /// the company gave is another of the seven than the file's bytes, the file is kept as
+    /// its bytes are and the type given is only logged, so a charged result is never thrown
+    /// away for a wrong label.
+    pub fn finalize_paid(
+        &self,
+        partial: &Path,
+        claimed: Option<&str>,
+        target_no_ext: &Path,
+        cap: u64,
+    ) -> Result<(PathBuf, String), GalleryError> {
+        self.keep(partial, claimed, Claim::BytesWin, target_no_ext, cap)
+    }
+
+    /// [`Self::finalize`] and [`Self::finalize_paid`].
+    fn keep(
+        &self,
+        partial: &Path,
+        claimed: Option<&str>,
+        claim: Claim,
+        target_no_ext: &Path,
+        cap: u64,
+    ) -> Result<(PathBuf, String), GalleryError> {
+        let mime = match check_partial(partial, claimed, claim, cap) {
             Ok(mime) => mime,
             Err(e) => {
                 remove_quietly(partial);
@@ -920,6 +970,28 @@ mod tests {
 
         // Nothing reached the month folder.
         assert!(!target.parent().unwrap().exists());
+    }
+
+    #[test]
+    fn a_paid_result_that_is_not_what_it_claims_is_kept_as_its_bytes_are() {
+        let scratch = Scratch::new();
+        let g = Gallery::new(scratch.path().into());
+        let target = g.output_stem(ms(2026, 11, 17), "r1", 0);
+        let partial = scratch.write("o1", &png(2, 2));
+        let (path, mime) = g
+            .finalize_paid(&partial, Some("video/mp4"), &target, 1 << 20)
+            .unwrap();
+        assert_eq!(mime, "image/png");
+        assert_eq!(path.extension().unwrap(), "png");
+        assert!(!partial.exists());
+        // What is no picture or video at all is still refused.
+        let partial = scratch.write("o2", HTML);
+        let refused = g.finalize_paid(&partial, Some("image/png"), &target, 1 << 20);
+        assert!(
+            matches!(refused, Err(GalleryError::NotMedia)),
+            "{refused:?}"
+        );
+        assert!(!partial.exists());
     }
 
     #[test]

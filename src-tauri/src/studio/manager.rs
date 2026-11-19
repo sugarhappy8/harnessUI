@@ -1618,7 +1618,8 @@ impl Inner {
 
     /// Keeps one result as output `output_id` (number `idx`): moved into the gallery under
     /// the run's month once its bytes pass the type check and `cap`, with its thumbnail (a
-    /// picture's) and its row.
+    /// picture's) and its row. A cloud result the company gave another of the seven types
+    /// is kept as its bytes are ([`Gallery::finalize_paid`]): it was charged.
     async fn keep_one(
         &self,
         job: &Job,
@@ -1630,10 +1631,16 @@ impl Inner {
     ) -> AppResult<()> {
         let target = gallery.output_stem(job.created_at, &job.run_id, idx);
         let (from, claimed) = (saved.path.clone(), saved.mime.clone());
+        // A cloud result is already paid for: a wrong type on it never throws it away.
+        let paid = job.endpoint.company != Company::Local;
         let kept = {
             let gallery = gallery.clone();
             tokio::task::spawn_blocking(move || {
-                gallery.finalize(&from, Some(claimed.as_str()), &target, cap)
+                if paid {
+                    gallery.finalize_paid(&from, Some(claimed.as_str()), &target, cap)
+                } else {
+                    gallery.finalize(&from, Some(claimed.as_str()), &target, cap)
+                }
             })
             .await
             .map_err(AppError::internal)?

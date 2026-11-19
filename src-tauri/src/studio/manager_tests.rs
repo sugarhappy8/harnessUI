@@ -107,6 +107,8 @@ enum Answer {
     Done { pictures: usize, cost: Option<Cost> },
     /// The answer holds one file said to be a PNG that is not a picture at all.
     NotAPicture { cost: Option<Cost> },
+    /// The answer holds one JPEG picture the company calls a PNG.
+    Misnamed { cost: Option<Cost> },
     /// The request failed.
     Fail(MediaError),
     /// The company's code panics (a bug in the app).
@@ -332,6 +334,22 @@ impl MediaProvider for FakeProvider {
                     cost,
                 })
             }
+            Answer::Misnamed { cost } => {
+                let bytes = jpeg(4, 4);
+                let path = scratch.join("picture-0");
+                std::fs::write(&path, &bytes).unwrap();
+                Ok(Started::Done {
+                    outputs: vec![Saved {
+                        path,
+                        mime: "image/png".into(),
+                        size_bytes: bytes.len() as u64,
+                        width: Some(4),
+                        height: Some(4),
+                        duration_ms: None,
+                    }],
+                    cost,
+                })
+            }
             Answer::Fail(err) => Err(err),
             Answer::Panic => panic!("the fake company's code broke"),
         }
@@ -465,11 +483,13 @@ impl StudioSink for FakeSink {
 }
 
 /// A company's file host: it notes each link it is asked for (with the cap and where the file
-/// goes) and saves an MP4 file there, or fails as scripted.
+/// goes) and saves an MP4 file there (or the bytes and type scripted in `serve`), or fails
+/// as scripted.
 #[derive(Default)]
 struct FakeFetch {
     seen: Mutex<Vec<(Url, u64, PathBuf)>>,
     fail: Mutex<Option<FetchError>>,
+    serve: Mutex<Option<(Vec<u8>, String)>>,
 }
 
 #[async_trait]
@@ -481,6 +501,10 @@ impl ForeignFetch for FakeFetch {
             .push((url.clone(), cap, dest.to_owned()));
         if let Some(err) = self.fail.lock().unwrap().take() {
             return Err(err);
+        }
+        if let Some((bytes, kind)) = self.serve.lock().unwrap().clone() {
+            std::fs::write(dest, bytes).unwrap();
+            return Ok(kind);
         }
         std::fs::write(dest, mp4()).unwrap();
         Ok("video/mp4".into())
@@ -1999,6 +2023,82 @@ async fn a_delivered_file_that_is_not_a_picture_is_not_kept_but_counts() {
     let row = h.audit_rows().await.pop().unwrap();
     assert_eq!(row.result_status.as_deref(), Some("failed"));
     assert!(row.result_summary.unwrap().contains("$0.04"));
+}
+
+/// A JPEG picture.
+fn jpeg(w: u32, h: u32) -> Vec<u8> {
+    let picture = image::RgbImage::from_pixel(w, h, image::Rgb([40, 120, 200]));
+    let mut out = Vec::new();
+    picture
+        .write_to(
+            &mut std::io::Cursor::new(&mut out),
+            image::ImageFormat::Jpeg,
+        )
+        .unwrap();
+    out
+}
+
+/// A cloud result is already charged: one the company calls another of the seven types is
+/// kept as its bytes are, never thrown away.
+#[tokio::test]
+async fn a_charged_result_the_company_misnamed_is_kept_as_its_bytes_are() {
+    let h = harness().await;
+    h.provider.answer(Answer::Misnamed {
+        cost: Some(Cost {
+            usd: 0.04,
+            reported: true,
+        }),
+    });
+    let run = h.manager.start(h.picture_req("x"), false).await.unwrap();
+    let done = h.wait_status(&run.id, "done").await;
+    assert_eq!(done.outputs.len(), 1);
+    assert_eq!(done.outputs[0].mime, "image/jpeg");
+    assert!(
+        done.outputs[0].path.ends_with(".jpg"),
+        "{}",
+        done.outputs[0].path
+    );
+    assert!(Path::new(&done.outputs[0].path).is_file());
+    assert_eq!(done.cost_usd, Some(0.04));
+
+    // A video on a file host called WebM that is an MP4: kept, so Get it anyway never meets
+    // the same refusal again.
+    *h.fetch.serve.lock().unwrap() = Some((mp4(), "video/webm".into()));
+    h.provider.answer_check(Ok(done_job()));
+    h.provider.answer_download(Download::Elsewhere(
+        Url::parse("https://files.example.com/v/1").unwrap(),
+    ));
+    let run = h.manager.start(h.video_req(), true).await.unwrap();
+    let done = h.wait_status(&run.id, "done").await;
+    assert_eq!(done.outputs[0].mime, "video/mp4");
+}
+
+/// A file host that does not say what a file is (`application/octet-stream`, as object
+/// stores send one uploaded without a type): the bytes decide, a video is kept, and a page
+/// is refused when it is kept.
+#[tokio::test]
+async fn a_file_host_result_with_no_type_is_kept_only_when_its_bytes_are_media() {
+    let h = harness().await;
+    *h.fetch.serve.lock().unwrap() = Some((mp4(), "application/octet-stream".into()));
+    h.provider.check_from_now(Ok(done_job()));
+    let link = Url::parse("https://files.example.com/v/1").unwrap();
+    h.provider
+        .answer_download(Download::Elsewhere(link.clone()));
+    let run = h.manager.start(h.video_req(), true).await.unwrap();
+    let done = h.wait_status(&run.id, "done").await;
+    assert_eq!(done.outputs[0].mime, "video/mp4");
+
+    *h.fetch.serve.lock().unwrap() = Some((
+        b"<!doctype html><p>Sign in</p>".to_vec(),
+        "application/octet-stream".into(),
+    ));
+    h.provider.answer_download(Download::Elsewhere(link));
+    let run = h.manager.start(h.video_req(), true).await.unwrap();
+    let failed = h.wait_status(&run.id, "failed").await;
+    let error = failed.error.unwrap();
+    assert_eq!(error.code, "studio_not_media");
+    assert_eq!(error.charged, Some(true));
+    assert!(failed.outputs.is_empty());
 }
 
 #[tokio::test]
