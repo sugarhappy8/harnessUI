@@ -35,6 +35,7 @@ import {
   listsUpdatedWords,
   madeWords,
   STUDIO_DELETE,
+  STUDIO_TILE,
   amountNumber,
   appleLimitWords,
   barLegend,
@@ -1039,5 +1040,21 @@ describe("0.1.0 Studio: the viewer and the gallery in plain words", () => {
     expect(STUDIO_DELETE.title(3, ["image", "image", "image"])).toBe("Delete 3 pictures?");
     expect(STUDIO_DELETE.title(2, ["video", "video"])).toBe("Delete 2 videos?");
     expect(STUDIO_DELETE.title(2, ["image", "video"])).toBe("Delete 2 results?");
+  });
+
+  it("reads a tile's prompt cut to its start, never the whole of a long one", () => {
+    const short = "A lighthouse on a rocky coast at dusk";
+    expect(STUDIO_TILE.open("image", 2, 4, short)).toBe(`Open picture 2 of 4: ${short}`);
+    const long = `A lighthouse on a rocky coast at dusk, in watercolour, ${"waves crashing ".repeat(2000)}`;
+    const open = STUDIO_TILE.open("image", 2, 4, long);
+    expect(open).toBe("Open picture 2 of 4: A lighthouse on a rocky coast at dusk, in watercolour, waves crashing wa…");
+    expect(STUDIO_TILE.select("video", 1, 1, long)).toBe(
+      "Select video: A lighthouse on a rocky coast at dusk, in watercolour, waves crashing wa…",
+    );
+    // On one line, and never half of a character.
+    expect(STUDIO_TILE.open("image", 1, 1, "two\nlines")).toBe("Open picture: two lines");
+    const emoji = "🌊".repeat(100);
+    expect(STUDIO_TILE.open("image", 1, 1, emoji)).toBe(`Open picture: ${"🌊".repeat(72)}…`);
+    expect(STUDIO_TILE.open("image", 1, 1, "  ")).toBe("Open picture");
   });
 });

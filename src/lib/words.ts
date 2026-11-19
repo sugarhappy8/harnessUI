@@ -1600,14 +1600,26 @@ function resultName(kind: MediaKind, n: number, of: number): string {
   return of > 1 ? `${noun} ${n} of ${of}` : noun;
 }
 
+/** The most characters of a prompt a tile's label reads out. */
+const TILE_PROMPT_CHARS = 72;
+
+/** `prompt` cut for a tile's label: on one line, at most `TILE_PROMPT_CHARS` characters (never
+ *  half of one), with "…" when it was longer. A prompt may hold 32,000 characters. */
+function tilePrompt(prompt: string): string {
+  const line = prompt.replace(/\s+/gu, " ").trim();
+  const chars = Array.from(line);
+  return chars.length <= TILE_PROMPT_CHARS ? line : `${chars.slice(0, TILE_PROMPT_CHARS).join("").trimEnd()}…`;
+}
+
 /** A result's tile, on a card and in the grid (Task B9). */
 export const STUDIO_TILE = {
-  /** The tile itself, which opens the viewer: "Open picture 2 of 4: A lighthouse…". */
+  /** The tile itself, which opens the viewer: "Open picture 2 of 4: A lighthouse…" (the prompt
+   *  cut to its start). */
   open: (kind: MediaKind, n: number, of: number, prompt: string) =>
-    prompt ? `Open ${resultName(kind, n, of)}: ${prompt}` : `Open ${resultName(kind, n, of)}`,
-  /** Its box in the grid, to select it with others. */
+    tilePrompt(prompt) ? `Open ${resultName(kind, n, of)}: ${tilePrompt(prompt)}` : `Open ${resultName(kind, n, of)}`,
+  /** Its box in the grid, to select it with others (the prompt cut the same way). */
   select: (kind: MediaKind, n: number, of: number, prompt: string) =>
-    prompt ? `Select ${resultName(kind, n, of)}: ${prompt}` : `Select ${resultName(kind, n, of)}`,
+    tilePrompt(prompt) ? `Select ${resultName(kind, n, of)}: ${tilePrompt(prompt)}` : `Select ${resultName(kind, n, of)}`,
   /** Its star on a card: "Star picture 2 of 4" (pressed while starred). */
   star: (kind: MediaKind, n: number, of: number) => `Star ${resultName(kind, n, of)}`,
 } as const;
