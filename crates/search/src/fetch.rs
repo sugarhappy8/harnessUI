@@ -22,8 +22,9 @@
 //!
 //! [`Fetcher::fetch_to_file`] reads a result file (a picture or video Studio keeps, on a
 //! company's file host) under the same rules: binary, streamed to a file, at most a given
-//! size, only the [`MEDIA_TYPES`]. It never carries a key: a result link is an address
-//! someone else chose, too.
+//! size, only the [`MEDIA_TYPES`] (or a type that names nothing, [`UNNAMED_TYPES`], whose
+//! bytes the caller checks). It never carries a key: a result link is an address someone
+//! else chose, too.
 
 use std::future::Future;
 use std::net::{IpAddr, SocketAddr};
@@ -82,12 +83,19 @@ pub const MEDIA_TYPES: &[&str] = &[
     "video/webm",
 ];
 
+/// The types a file host gives a file it was not told the type of (S3, GCS and R2 send
+/// `application/octet-stream`, or no type at all, for a file uploaded without one). A result
+/// file with one of them is taken, and its bytes must then show what it is: the caller keeps
+/// only a picture or video its bytes prove (Studio's gallery checks every result that way).
+pub const UNNAMED_TYPES: &[&str] = &["application/octet-stream", "binary/octet-stream", ""];
+
 /// A result file saved by [`Fetcher::fetch_to_file`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FetchedFile {
     /// The address the file came from, after redirects.
     pub url: Url,
-    /// The media type without parameters, lower case: one of [`MEDIA_TYPES`].
+    /// The media type without parameters, lower case: one of [`MEDIA_TYPES`], or of
+    /// [`UNNAMED_TYPES`] when the host did not say (the bytes must then tell).
     pub content_type: String,
     /// How many bytes were saved.
     pub len: u64,
@@ -463,10 +471,12 @@ impl Fetcher {
     /// The same address rules as [`Fetcher::get`], binary, streamed to `dest`, at most
     /// `cap` bytes; never sends a key.
     ///
-    /// Only the [`MEDIA_TYPES`] are taken. The body is written to `dest` with the extension
-    /// `part`, which is renamed to `dest` once the whole body is there; on any failure,
-    /// running out of time included, the partial file is removed and `dest` is not
-    /// touched. The time limit is the fetcher's ([`Fetcher::with_timeout`]).
+    /// Only the [`MEDIA_TYPES`] are taken, and a type that names nothing
+    /// ([`UNNAMED_TYPES`]), returned as given: the caller must check such a file's bytes.
+    /// Any other named type (`text/html`) is refused. The body is written to `dest` with
+    /// the extension `part`, which is renamed to `dest` once the whole body is there; on
+    /// any failure, running out of time included, the partial file is removed and `dest`
+    /// is not touched. The time limit is the fetcher's ([`Fetcher::with_timeout`]).
     pub async fn fetch_to_file(
         &self,
         url: &Url,
@@ -505,7 +515,7 @@ impl Fetcher {
             Hop::Redirect(next) => return Ok(Hop::Redirect(next)),
         };
         let (media, _) = media_type(&header(&response, CONTENT_TYPE));
-        if !MEDIA_TYPES.contains(&media.as_str()) {
+        if !MEDIA_TYPES.contains(&media.as_str()) && !UNNAMED_TYPES.contains(&media.as_str()) {
             return Err(FetchError::NotMedia(media));
         }
         unpacked(&response)?;

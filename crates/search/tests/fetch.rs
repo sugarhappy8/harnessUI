@@ -880,20 +880,49 @@ async fn fetch_to_file_refuses_a_private_address() {
     assert_eq!(trap.connections(), 0);
 }
 
+/// Object stores (S3, GCS, R2) send a file uploaded without a type as
+/// `application/octet-stream`, `binary/octet-stream` or with no type at all: it is saved
+/// with that type, and the caller checks its bytes.
+#[tokio::test]
+async fn fetch_to_file_takes_a_file_whose_type_names_nothing() {
+    let body = video_bytes(4096);
+    let sent = body.clone();
+    let server = TestServer::start(move |request| match request.path() {
+        "/octet" => Response::new(200, "application/octet-stream", sent.clone()),
+        "/binary" => Response::new(200, "Binary/Octet-Stream", sent.clone()),
+        _ => Response {
+            status: 200,
+            headers: Vec::new(),
+            body: sent.clone(),
+            delay: Duration::ZERO,
+        },
+    })
+    .await;
+    let fetcher = file_fetcher(&[&server]);
+    let dir = tempfile::tempdir().unwrap();
+    for (path, kind) in [
+        ("/octet", "application/octet-stream"),
+        ("/binary", "binary/octet-stream"),
+        ("/untyped", ""),
+    ] {
+        let dest = dir.path().join(path.trim_start_matches('/'));
+        let saved = fetcher
+            .fetch_to_file(&server.url("files.test", path), 1 << 20, &dest)
+            .await
+            .unwrap_or_else(|e| panic!("{path}: {e:?}"));
+        assert_eq!(saved.content_type, kind, "{path}");
+        assert_eq!(std::fs::read(&dest).unwrap(), body, "{path}");
+        assert!(!part_of(&dest).exists(), "{path}");
+    }
+}
+
 #[tokio::test]
 async fn fetch_to_file_refuses_a_page() {
     let server = TestServer::start(|request| match request.path() {
         "/page" => Response::html("<p>Sign in to see this file</p>"),
         "/plain" => Response::new(200, "text/plain", "words"),
         "/json" => Response::json("{\"error\": \"expired\"}"),
-        "/binary" => Response::new(200, "application/octet-stream", video_bytes(16)),
         "/xhtml" => Response::new(200, "application/xhtml+xml", "<svg/>"),
-        "/untyped" => Response {
-            status: 200,
-            headers: Vec::new(),
-            body: video_bytes(16),
-            delay: Duration::ZERO,
-        },
         "/gzip" => Response::new(200, "image/png", vec![0x1f, 0x8b, 8, 0])
             .with_header("Content-Encoding", "gzip"),
         "/gone" => Response::new(404, "text/html", "<h1>Not found</h1>"),
@@ -917,9 +946,7 @@ async fn fetch_to_file_refuses_a_page() {
     for (path, kind) in [
         ("/plain", "text/plain"),
         ("/json", "application/json"),
-        ("/binary", "application/octet-stream"),
         ("/xhtml", "application/xhtml+xml"),
-        ("/untyped", ""),
     ] {
         assert_eq!(
             fetch(path).await,
