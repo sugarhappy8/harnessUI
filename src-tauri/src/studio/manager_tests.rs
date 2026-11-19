@@ -4010,7 +4010,7 @@ impl CardLease for FakeLease {
 /// This computer as probed: a graphics card (or the processor only), the chat model's bytes
 /// on it, and 8 logical cores. Asking for the hardware can be held, as a probe of every
 /// backend holds it, until the test lets it go.
-struct FixedHardware {
+pub(super) struct FixedHardware {
     target: Mutex<(Target, String, Option<String>)>,
     chat: Mutex<Option<u64>>,
     held: AtomicBool,
@@ -4022,7 +4022,7 @@ struct FixedHardware {
 
 impl FixedHardware {
     /// A Vulkan card with `free_gb` GB free, and `ram_gb` GB of free memory.
-    fn gpu(free_gb: u64, ram_gb: u64) -> Self {
+    pub(super) fn gpu(free_gb: u64, ram_gb: u64) -> Self {
         let hardware = Self {
             target: Mutex::new((Target::Cpu { ram_free_bytes: 0 }, String::new(), None)),
             chat: Mutex::new(None),
@@ -4073,7 +4073,7 @@ impl FixedHardware {
     }
 
     /// A chat model loaded taking `gb` GB on the card (`None`: none on it).
-    fn set_chat(&self, gb: Option<u64>) {
+    pub(super) fn set_chat(&self, gb: Option<u64>) {
         *self.chat.lock().unwrap() = gb.map(|gb| gb * GB);
     }
 }

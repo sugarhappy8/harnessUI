@@ -580,7 +580,7 @@ impl StudioGate for GpuLease {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use std::sync::Mutex as StdMutex;
     use std::sync::atomic::AtomicUsize;
     use std::time::Duration;
@@ -593,7 +593,7 @@ mod tests {
 
     /// The chat model's side, in memory: a model on the card (or none), "Keep in memory",
     /// the replies and Model checks that use it, and the unloads and reloads asked for.
-    struct FakeChat {
+    pub(crate) struct FakeChat {
         device_bytes: StdMutex<Option<u64>>,
         keeps_in_memory: bool,
         busy: Arc<BusyCounter>,
@@ -617,7 +617,7 @@ mod tests {
         }
 
         /// The chat model loaded on the card, taking `bytes` there.
-        fn loaded(bytes: u64) -> Arc<Self> {
+        pub(crate) fn loaded(bytes: u64) -> Arc<Self> {
             Self::with(Some(bytes), false)
         }
 
@@ -646,7 +646,7 @@ mod tests {
             *self.device_bytes.lock().unwrap() = None;
         }
 
-        fn unloads(&self) -> usize {
+        pub(crate) fn unloads(&self) -> usize {
             self.unloads.load(Ordering::SeqCst)
         }
 

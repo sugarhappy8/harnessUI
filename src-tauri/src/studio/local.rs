@@ -1682,7 +1682,7 @@ fn write<T>(lock: &RwLock<T>) -> RwLockWriteGuard<'_, T> {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use std::collections::BTreeMap;
     use std::ffi::OsString;
     use std::path::{Path, PathBuf};
@@ -1734,7 +1734,7 @@ mod tests {
     }
 
     /// This test binary as the engine, in `mode`, recording each start into `rec`.
-    fn fake_engine(mode: &str, rec: &Path) -> Engine {
+    pub(crate) fn fake_engine(mode: &str, rec: &Path) -> Engine {
         let program = std::env::current_exe().unwrap();
         Engine {
             dir: program.parent().unwrap().to_path_buf(),
@@ -1759,14 +1759,14 @@ mod tests {
     }
 
     /// The bundled catalog's picture and video models.
-    fn catalog() -> GenCatalog {
+    pub(crate) fn catalog() -> GenCatalog {
         gen_catalog(
             &Catalog::bundled(),
             runtime::sd::lock::embedded().sd_cpp.build,
         )
     }
 
-    struct Fixed(GenCatalog);
+    pub(crate) struct Fixed(pub(crate) GenCatalog);
 
     #[async_trait]
     impl GenCatalogSource for Fixed {
@@ -1787,7 +1787,7 @@ mod tests {
     /// Writes the parts of catalog entry `id` under `models` (its diffusion file the tiny model
     /// of the recorded tensor table `table`, every other part a few bytes) and returns its
     /// installed row, each part's `file` and `size` those of the file written.
-    fn install(models: &Path, id: &str, table: &str) -> store::NewGenModel {
+    pub(crate) fn install(models: &Path, id: &str, table: &str) -> store::NewGenModel {
         let entry = catalog().entries.remove(id).unwrap();
         let mut total = 0;
         let parts = entry
