@@ -1,8 +1,9 @@
 import { useEffect, useRef, useState, type ReactNode, type Ref } from "react";
 import { Film, ImageIcon, Star } from "lucide-react";
 import type { ErrorInfo } from "../../lib/types";
-import { STUDIO_DELETE, STUDIO_TILE } from "../../lib/words";
+import { STUDIO_DELETE, STUDIO_TILE, STUDIO_VIEWER } from "../../lib/words";
 import { toErrorInfo } from "../../store/app";
+import { visiblePath } from "../FolderChip";
 import * as api from "./api";
 import { ConfirmDialog } from "./ConfirmDialog";
 import { RefThumb } from "./RefTray";
@@ -15,6 +16,16 @@ import { clock } from "./Working";
 // worker could not shrink), always through an `img` element, where an SVG's scripts never run;
 // else, for a video, its length and its start frame. It reads its picture only once it comes
 // within a screen of what is shown.
+
+/** Where results were saved: the path left to right, with every invisible or
+ *  direction-changing character as its code (`visiblePath`), as Settings shows a folder. */
+export function SavedTo(props: { path: string }) {
+  return (
+    <>
+      {STUDIO_VIEWER.savedTo} <bdi dir="ltr">{visiblePath(props.path)}</bdi>
+    </>
+  );
+}
 
 /** A result and the run that made it. */
 export interface Result {

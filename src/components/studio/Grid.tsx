@@ -1,10 +1,10 @@
 import { useMemo, useState } from "react";
 import type { ErrorInfo } from "../../lib/types";
-import { STUDIO_GRID, STUDIO_TABS, STUDIO_VIEWER } from "../../lib/words";
+import { STUDIO_GRID, STUDIO_TABS } from "../../lib/words";
 import { toErrorInfo } from "../../store/app";
 import { useStudio } from "../../store/studio";
 import { ErrorBanner } from "../ErrorBanner";
-import { ConfirmDelete, localDayStart, ResultTile, resultsOf, type Result } from "./results";
+import { ConfirmDelete, localDayStart, ResultTile, resultsOf, SavedTo, type Result } from "./results";
 import { CARD_BUTTON } from "./styles";
 import type { Run, RunsFilter } from "./types";
 
@@ -154,7 +154,7 @@ export function Grid(props: { onOpen(outputId: string): void }) {
                   // A cancelled folder picker leaves the selection as it was.
                   if (folder === null) return;
                   clear();
-                  setSaved(STUDIO_VIEWER.savedTo(folder));
+                  setSaved(folder);
                 })
               }
             >
@@ -169,7 +169,7 @@ export function Grid(props: { onOpen(outputId: string): void }) {
       {error && <ErrorBanner error={error} onDismiss={() => setError(null)} />}
       {saved && (
         <p role="status" className="text-sm text-fg-muted">
-          {saved}
+          <SavedTo path={saved} />
         </p>
       )}
       {results.length === 0 ? (

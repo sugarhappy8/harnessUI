@@ -482,6 +482,35 @@ describe("Viewer", () => {
     expect(api.studioExport).toHaveBeenLastCalledWith("o1", "/home/me/Pictures/lighthouse.png", true);
   });
 
+  it("Save as says where it saved, the path left to right with invisible characters as codes", async () => {
+    setStore();
+    vi.mocked(dialog.save).mockResolvedValue("/home/me/\u202Egnp.png");
+    vi.mocked(api.studioExport).mockResolvedValue("/home/me/\u202Egnp.png");
+    await open("o1");
+    await click(button("Save as…"));
+    const status = screen.getByRole("status");
+    expect(status.textContent).toBe("Saved to /home/me/\\u{202E}gnp.png");
+    const path = status.querySelector("bdi");
+    expect(path?.getAttribute("dir")).toBe("ltr");
+    expect(path?.textContent).toBe("/home/me/\\u{202E}gnp.png");
+  });
+
+  it("opened on another result, it never falls back to the result it showed before", async () => {
+    setStore();
+    const onClose = vi.fn();
+    const { rerender } = render(<Viewer outputId="o2" onClose={onClose} />);
+    await flush();
+    screen.getByText("2 / 4");
+    // Opened on a result the store does not hold (deleted meanwhile): it closes, rather than
+    // showing the nearest result of the run it showed before.
+    await act(async () => {
+      rerender(<Viewer outputId="gone" onClose={onClose} />);
+    });
+    await flush();
+    expect(onClose).toHaveBeenCalled();
+    expect(screen.queryByText("2 / 4")).toBeNull();
+  });
+
   it("Save as that is cancelled saves nothing", async () => {
     setStore();
     vi.mocked(dialog.save).mockResolvedValue(null);

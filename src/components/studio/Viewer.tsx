@@ -39,7 +39,7 @@ import * as api from "./api";
 import { valueWords } from "./canonical";
 import { COST_TONE_CLASS, costTone, formatUsd } from "./cost";
 import { tookWords } from "./eta";
-import { ConfirmDelete, resultsOf, useOutputUrl } from "./results";
+import { ConfirmDelete, resultsOf, SavedTo, useOutputUrl } from "./results";
 import { LocalMark } from "./LocalMark";
 import { CARD_BUTTON } from "./styles";
 import type { Company, MediaModel, ModelChoice, Output, RequestPreview, Run, StudioEndpoint } from "./types";
@@ -61,8 +61,8 @@ import type { Company, MediaModel, ModelChoice, Output, RequestPreview, Run, Stu
 // one without a thumbnail plays, the frame shown is kept as its poster (`capturePoster`). A
 // video over 256 MiB is not played here: the viewer says so, and Show in folder opens it.
 
-/** Why an action said something: what it did, or why it could not. */
-type Said = { text: string; warn: boolean } | { error: ErrorInfo };
+/** Why an action said something: what it did (where it saved the result), or why it could not. */
+type Said = { text: string; warn: boolean } | { savedTo: string } | { error: ErrorInfo };
 
 /** The company a run went to, by name: its endpoint's, else known by its host; `null` when
  *  neither tells. */
@@ -260,11 +260,15 @@ export function Viewer(props: { outputId: string; onClose(): void }) {
   const [busy, setBusy] = useState(false);
   const [withSettings, setWithSettings] = useState(false);
   const [opened, setOpened] = useState(props.outputId);
+  // Where the result shown sits, its run and its place there (see below).
+  const [place, setPlace] = useState<{ runId: string; index: number } | null>(null);
   if (props.outputId !== opened) {
     setOpened(props.outputId);
     setShownId(props.outputId);
     setSaid(null);
     setOffer(null);
+    // The place of the result shown before is not this one's: never fall back to its run.
+    setPlace(null);
   }
   // Set by an action that leaves the cursor in the prompt box once the viewer has closed.
   const promptNext = useRef(false);
@@ -284,7 +288,6 @@ export function Viewer(props: { outputId: string; onClose(): void }) {
   // Where the result shown sits, its run and its place there: when it leaves the run (deleted
   // meanwhile, say after ← went back to it during a Delete), the result nearest its place takes
   // its place, and the viewer closes once the run has none left.
-  const [place, setPlace] = useState<{ runId: string; index: number } | null>(null);
   if (run && output && (place?.runId !== run.id || place.index !== index)) setPlace({ runId: run.id, index });
   const left = useStudio((s) => (run === null && place !== null ? runById(s, place.runId) : null));
   const remaining = left ? resultsOf(left) : [];
@@ -373,7 +376,7 @@ export function Viewer(props: { outputId: string; onClose(): void }) {
       });
       if (typeof path !== "string") return;
       const written = await api.studioExport(output.id, path, withSettings);
-      setSaid({ text: STUDIO_VIEWER.savedTo(written), warn: false });
+      setSaid({ savedTo: written });
     });
   };
   const copy = () => {
@@ -720,6 +723,10 @@ export function Viewer(props: { outputId: string; onClose(): void }) {
                 {said &&
                   ("error" in said ? (
                     <ErrorBanner error={said.error} onDismiss={() => setSaid(null)} />
+                  ) : "savedTo" in said ? (
+                    <p role="status" className="break-words text-fg-muted">
+                      <SavedTo path={said.savedTo} />
+                    </p>
                   ) : (
                     <p role="status" className={said.warn ? "text-warning" : "text-fg-muted"}>
                       {said.text}

@@ -367,15 +367,17 @@ describe("Grid", () => {
     await showGrid();
     vi.mocked(api.studioExport).mockImplementation(async (_id, path) => path);
     await selectTiles("o1", "o2");
-    vi.mocked(dialog.open).mockResolvedValue("/tmp/out");
+    vi.mocked(dialog.open).mockResolvedValue("/tmp/\u202Eout");
     await click(screen.getByRole("button", { name: "Save 2…" }));
     await waitFor(() => expect(api.studioExport).toHaveBeenCalledTimes(2));
     expect(dialog.open).toHaveBeenCalledWith(expect.objectContaining({ directory: true }));
-    expect(api.studioExport).toHaveBeenCalledWith("o1", expect.stringMatching(/^\/tmp\/out\//), false);
-    expect(api.studioExport).toHaveBeenCalledWith("o1", "/tmp/out/cloud-run-0.png", false);
-    expect(api.studioExport).toHaveBeenCalledWith("o2", "/tmp/out/cloud-run-1.png", false);
-    // Saved: it says where, and the selection is put away.
-    await screen.findByText("Saved to /tmp/out");
+    expect(api.studioExport).toHaveBeenCalledWith("o1", expect.stringMatching(/^\/tmp\/\u202Eout\//), false);
+    expect(api.studioExport).toHaveBeenCalledWith("o1", "/tmp/\u202Eout/cloud-run-0.png", false);
+    expect(api.studioExport).toHaveBeenCalledWith("o2", "/tmp/\u202Eout/cloud-run-1.png", false);
+    // Saved: it says where (left to right, an invisible character as its code), and the
+    // selection is put away.
+    await waitFor(() => expect(screen.getByRole("status").textContent).toBe("Saved to /tmp/\\u{202E}out"));
+    expect(screen.getByRole("status").querySelector("bdi[dir=ltr]")?.textContent).toBe("/tmp/\\u{202E}out");
     expect(screen.queryByRole("button", { name: /^Save \d/ })).toBeNull();
     expect((within(tile("o1")).getByRole("checkbox") as HTMLInputElement).checked).toBe(false);
   });

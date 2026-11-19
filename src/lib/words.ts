@@ -1727,7 +1727,9 @@ export const STUDIO_VIEWER = {
   addedAsReference: "Added to the prompt's pictures.",
   saveAs: "Save as…",
   withSettings: "Also save the settings as a .json file",
-  savedTo: (path: string) => `Saved to ${path}`,
+  /** Before the path a result was saved to (shown left to right, invisible characters as
+   *  codes): "Saved to /home/me/Pictures". */
+  savedTo: "Saved to",
   copy: "Copy",
   copied: "Copied",
   noCopy: "Copy is not available here. Use Save as… instead.",
