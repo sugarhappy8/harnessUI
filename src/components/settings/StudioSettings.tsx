@@ -10,13 +10,15 @@ import { ErrorBanner } from "../ErrorBanner";
 import { visiblePath } from "../FolderChip";
 import * as api from "../studio/api";
 import { EngineLine } from "../studio/EngineLine";
+import { LocalNotice } from "../studio/LocalNotice";
 import { BOX } from "../studio/styles";
 import type { GpuPolicy, LocalModels, StudioEndpoint, StudioPrefs, StudioPrefsPatch, Usage } from "../studio/types";
 
 // Settings → Studio (0.1.0 Task B10; design §4 and §5, local addendum L1/L2). Local first:
 // the picture and video models on this computer and the disk they take, with *Get local
-// models* (Studio's own view); the Studio engine's line; what happens to the chat model when a
-// local job needs the graphics card, and whether it loads again after Studio. Then what the
+// models* (Studio's own view); the Studio engine's line; *What local models mean*, the content
+// notice read only (Task B14); what happens to the chat model when a local job needs the
+// graphics card, and whether it loads again after Studio. Then what the
 // gallery holds and where, with *Open folder*, *Change…* (new results only) and *Delete
 // stopped and failed runs* (which asks first); the confirmations and the daily limit for cloud
 // runs; and when each cloud model list was updated, with *Update now*. Opening the page reads
@@ -83,10 +85,12 @@ export function StudioSettings() {
   );
 }
 
-/** The local block: models, the engine, and the chat model when the graphics card is needed. */
+/** The local block: models, the engine, the content notice, and the chat model when the
+ *  graphics card is needed. */
 function OnThisComputer(props: { local: LocalModels | null; prefs: StudioPrefs | null }) {
   const { local, prefs } = props;
   const [error, setError] = useState<ErrorInfo | null>(null);
+  const [notice, setNotice] = useState(false);
   return (
     <section aria-labelledby="studio-local" className="space-y-3">
       <h3 id="studio-local" className={HEADING}>
@@ -108,6 +112,13 @@ function OnThisComputer(props: { local: LocalModels | null; prefs: StudioPrefs |
           <EngineLine engine={local.engine} hasModel={local.installed.length > 0} removable />
         </>
       )}
+      <p>
+        <button type="button" className="text-fg-muted underline hover:text-fg" onClick={() => setNotice(true)}>
+          {STUDIO_SETTINGS.whatLocalMeans}
+        </button>
+      </p>
+      {/* Read only: it is accepted before the first local download. */}
+      <LocalNotice open={notice} readOnly onAccepted={() => setNotice(false)} onClose={() => setNotice(false)} />
       {prefs && (
         <fieldset>
           <legend className="mb-1 font-medium">{STUDIO_SETTINGS.gpu}</legend>

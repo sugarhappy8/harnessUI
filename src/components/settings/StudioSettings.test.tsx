@@ -183,6 +183,18 @@ describe("Settings → Studio", () => {
     expect(opened).toEqual(["local"]);
   });
 
+  it("What local models mean opens the content notice, read only", async () => {
+    await show();
+    await click(button("What local models mean"));
+    const notice = screen.getByRole("alertdialog");
+    within(notice).getByText("Local models run only on your computer.");
+    within(notice).getByText(/Don't create sexual images of children/);
+    expect(screen.queryByRole("button", { name: "I understand" })).toBeNull();
+    await click(within(notice).getByRole("button", { name: "Close" }));
+    expect(screen.queryByRole("alertdialog")).toBeNull();
+    expect(api.studioAcceptLocalNotice).not.toHaveBeenCalled();
+  });
+
   it("with no local model yet the line says so", async () => {
     await show({ ...LOCAL, installed: [], installedBytes: 0 });
     screen.getByText("Picture and video models: none yet");

@@ -61,6 +61,10 @@ export function licenceBadge(l: Licence): { tone: "green" | "amber" | "red"; tex
   return { tone: l.badge, text };
 }
 
+/** The id of the Studio engine's licence among a download's licences (the backend's
+ *  `engine_cmd::ENGINE_LICENCE_ID`): listed when the engine comes with the model. */
+export const ENGINE_LICENCE_ID = "studio-engine";
+
 /** What a Download button offers; Task B14's dialog shows it and sends every licence's hash. */
 export interface DownloadOffer {
   /** The model's name, as the dialog's title says it. */
@@ -163,7 +167,8 @@ export function TimeLine(props: { fit: LocalFit; kind: MediaKind }) {
 }
 
 /** *Download again*: the installed model's parts are checked, and what is missing or damaged is
- *  fetched again; then a line says so. */
+ *  fetched again; then a line says so. When a licence has to be accepted first, the download
+ *  dialog shows it instead. */
 function RepairButton(props: { id: string; onError: (e: unknown) => void }) {
   const repairLocal = useStudio((s) => s.repairLocal);
   const [busy, setBusy] = useState(false);
@@ -177,7 +182,7 @@ function RepairButton(props: { id: string; onError: (e: unknown) => void }) {
       onClick={() => {
         setBusy(true);
         repairLocal(props.id)
-          .then(() => setStarted(true), props.onError)
+          .then(setStarted, props.onError)
           .finally(() => setBusy(false));
       }}
     >

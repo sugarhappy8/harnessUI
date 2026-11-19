@@ -1751,6 +1751,8 @@ export const STUDIO_SETTINGS = {
   } satisfies Record<GpuPolicy, string>,
   reloadAfter: "Reload it after Studio",
   reloadHelp: "Loads the chat model again once, after the last local job.",
+  /** Opens the note about local models, read only (Task B14). */
+  whatLocalMeans: "What local models mean",
   results: "Results",
   /** What the gallery holds and where: "Studio uses 1.2 GB in ~/harnessUI/studio (312
    *  pictures, 14 videos)". Sizes in the same binary units as `amountGb`. */
@@ -1872,6 +1874,82 @@ export const LOCAL_MODELS = {
   hiddenNonCommercial: "Its files show when Show non-commercial models is ticked.",
   notice: "Local models run only on this computer; no company checks prompts or results.",
   whatThatMeans: "What that means",
+} as const;
+
+/** "username and email", "username, email and company". */
+function andList(items: readonly string[]): string {
+  return items.length <= 1 ? (items[0] ?? "") : `${items.slice(0, -1).join(", ")} and ${items[items.length - 1]}`;
+}
+
+/** The download confirmation of a local model (Task B14, local addendum Wireframe L3): every
+ *  part with its size and licence, what you make may be used for, the Studio engine, a gated
+ *  repository, an amber licence's condition, low disk space and the licences to read. */
+export const DOWNLOAD_LOCAL = {
+  title: (name: string) => `Download ${name}?`,
+  /** "3 files, 6.2 GB in all, from Hugging Face (huggingface.co)"; with some of it here
+   *  already, "…, 3.9 GB to download, from …". Amounts are `amountGb`'s. */
+  summary(files: number, total: number, toFetch: number): string {
+    const count = files === 1 ? "1 file" : `${files} files`;
+    const fetch = toFetch < total ? `, ${amountGb(toFetch)} to download` : "";
+    return `${count}, ${amountGb(total)} in all${fetch}, from Hugging Face (huggingface.co)`;
+  },
+  /** A part another model brought already: checked, not downloaded again. */
+  alreadyHere: "already on this computer",
+  /** What the pictures you make may be used for, by the strictest licence (`verdict`). */
+  verdict: {
+    yes: "Pictures you make: free for any use, including commercial.",
+    underRevenue: (limit: string | null) =>
+      limit === null
+        ? "Pictures you make: commercial use only under a revenue limit."
+        : `Pictures you make: commercial use only under ${limit} revenue.`,
+    registration: "Pictures you make: commercial use only after registering with the publisher.",
+    unclear: "Pictures you make: check the licence before any commercial use.",
+    no: "Pictures you make: non-commercial use only.",
+  } as const satisfies Record<Licence["commercial"], string | ((limit: string | null) => string)>,
+  /** The Studio engine comes with the model (Windows): "(29 MB, MIT licence)", from
+   *  `engineSizeWords`. */
+  engine: (size: string) => `Also downloads the Studio engine (${size} licence).`,
+  /** Which form a gated repository's publisher shows on Hugging Face. */
+  gate: {
+    auto: "This model is gated: accept the publisher's terms on its Hugging Face page first, and access is given at once.",
+    manual:
+      "This model is gated: ask for access on its Hugging Face page first, and the publisher approves each request.",
+  } as const,
+  /** What the publisher of a gated repository receives: "username and email". */
+  collects: (what: readonly string[]) => `The publisher receives your Hugging Face ${andList(what)}.`,
+  openModelPage: "Open the model page",
+  /** An amber licence's condition, then each duty it asks of you ("Review pictures before you
+   *  share them." reads "The licence asks you to review pictures before you share them."). */
+  amber(licence: Licence): string {
+    const condition =
+      licence.commercial === "registration"
+        ? "Commercial use only after registering with the publisher."
+        : licence.revenueLimitUsd === null
+          ? "Commercial use only if your organisation earns less than the licence's limit."
+          : `Commercial use only if your organisation earns less than ${revenueLimit(licence.revenueLimitUsd)} a year.`;
+    const duties = licence.obligations.map((o) => `The licence asks you to ${SETTING_WORDS.midSentence(o)}`);
+    return [condition, ...duties].join(" ");
+  },
+  lowDisk: "This leaves less than 10 GB free on this disk.",
+  /** The link to a licence's text; with several licences, each says which it opens. */
+  readLicences: (name: string | null) => (name === null ? "Read the licences" : `Read the licences (${name})`),
+  /** A licence or model page the browser did not open, and where to find it instead. */
+  notOpened: "The page could not be opened in your browser.",
+  goTo: (url: string) => `Go to ${url} in your browser.`,
+  accepting: "Downloading means you accept these licences.",
+  cancel: "Cancel",
+  accept: "Accept and download",
+} as const;
+
+/** The one-time note about local models (Task B14, local addendum L1), word for word: shown
+ *  before the first local download, and again from Get local models' footer and Settings →
+ *  Studio. `lead` is its first sentence, in bold. */
+export const LOCAL_NOTICE = {
+  lead: "Local models run only on your computer.",
+  body: "No company checks your prompts or pictures. Don't create sexual images of children, or sexual or intimate images of real people without their consent, and don't impersonate people. These are crimes in many countries. Each model's licence and use policy also applies.",
+  understand: "I understand",
+  cancel: "Cancel",
+  close: "Close",
 } as const;
 
 /** Models → Downloads: what a picture or video model's download is (Task B13). */

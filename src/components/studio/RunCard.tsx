@@ -259,14 +259,11 @@ export function RunCard(props: { run: Run }) {
     if (!stalled) setKeepWaiting(false);
   }
 
-  const perform = (action: () => Promise<void>, after?: () => void) => {
+  const perform = (action: () => Promise<void>) => {
     setBusy(true);
     setFailure(null);
     action().then(
-      () => {
-        setBusy(false);
-        after?.();
-      },
+      () => setBusy(false),
       (e: unknown) => {
         setBusy(false);
         setFailure(toErrorInfo(e));
@@ -423,7 +420,12 @@ export function RunCard(props: { run: Run }) {
               type="button"
               className={CARD_BUTTON}
               disabled={busy}
-              onClick={() => perform(() => store().repairLocal(run.model), () => setRepairing(true))}
+              onClick={() =>
+                perform(async () => {
+                  // A licence to accept first opens the download dialog in Get local models instead.
+                  if (await store().repairLocal(run.model)) setRepairing(true);
+                })
+              }
             >
               {STUDIO_ACTIONS.downloadAgain}
             </button>

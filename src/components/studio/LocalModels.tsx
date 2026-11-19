@@ -5,8 +5,10 @@ import { amountGb, LOCAL_MODELS, STUDIO_BAR, STUDIO_TABS } from "../../lib/words
 import { toErrorInfo } from "../../store/app";
 import { useStudio, type StudioTab } from "../../store/studio";
 import { ErrorBanner } from "../ErrorBanner";
+import { DownloadLocalModel } from "./DownloadLocalModel";
 import { EngineLine } from "./EngineLine";
-import { EntryRow, InstalledRow } from "./LocalModelRow";
+import { EntryRow, InstalledRow, type DownloadOffer } from "./LocalModelRow";
+import { LocalNotice } from "./LocalNotice";
 import { LocalSearch } from "./LocalSearch";
 import { CARD_BUTTON } from "./styles";
 import type { HardwareLine, LocalEntry, LocalModels as LocalModelsData } from "./types";
@@ -18,8 +20,9 @@ import type { HardwareLine, LocalEntry, LocalModels as LocalModelsData } from ".
 // the tab, then the installed ones the list does not hold, then "Not for this computer (n)"
 // folded away; Hugging Face search (LocalSearch.tsx); and the footer with the Studio engine's
 // line (EngineLine.tsx) and the content notice. Opening it reads what is saved and sends
-// nothing. *Download* sets the store's `offer` and *What that means* its `noticeOpen`: Task B14
-// shows the dialog and the notice from them.
+// nothing. *Download* sets the store's `offer`, which shows the download confirmation
+// (DownloadLocalModel.tsx, Task B14), or the content notice first (LocalNotice.tsx) while it
+// was never accepted; *What that means* shows the notice again, read only.
 
 const TABS: readonly StudioTab[] = ["image", "video"];
 
@@ -68,7 +71,10 @@ export function LocalModels() {
   const showNonCommercial = useStudio((s) => s.showNonCommercial);
   const setShowNonCommercial = useStudio((s) => s.setShowNonCommercial);
   const showLocalModels = useStudio((s) => s.showLocalModels);
+  const noticeOpen = useStudio((s) => s.noticeOpen);
   const setNoticeOpen = useStudio((s) => s.setNoticeOpen);
+  const offer = useStudio((s) => s.offer);
+  const setOffer = useStudio((s) => s.setOffer);
   const [error, setError] = useState<ErrorInfo | null>(null);
   const titleId = useId();
   const fail = (e: unknown) => setError(toErrorInfo(e));
@@ -129,9 +135,42 @@ export function LocalModels() {
               </button>
             </p>
           </footer>
+          <Offered
+            offer={offer}
+            noticeAccepted={local.noticeAccepted}
+            readingNotice={noticeOpen === "read"}
+            onCloseOffer={() => setOffer(null)}
+            onCloseNotice={() => setNoticeOpen(null)}
+          />
         </>
       )}
     </section>
+  );
+}
+
+/** The download confirmation for `offer`, and the content notice: in its place, to accept,
+ *  while the notice was never accepted (accepting it shows the confirmation), and read only
+ *  from the footer. */
+function Offered(props: {
+  offer: DownloadOffer | null;
+  noticeAccepted: boolean;
+  readingNotice: boolean;
+  onCloseOffer: () => void;
+  onCloseNotice: () => void;
+}) {
+  const { offer, onCloseOffer, onCloseNotice } = props;
+  const accepting = offer !== null && !props.noticeAccepted;
+  return (
+    <>
+      <LocalNotice
+        open={accepting || props.readingNotice}
+        readOnly={!accepting}
+        // The store records it, and the confirmation follows from the offer.
+        onAccepted={() => undefined}
+        onClose={accepting ? onCloseOffer : onCloseNotice}
+      />
+      <DownloadLocalModel offer={accepting ? null : offer} onClose={onCloseOffer} />
+    </>
   );
 }
 

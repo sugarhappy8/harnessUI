@@ -30,8 +30,10 @@
 // in Studio's Pictures tab, and Send to chat (in ./studioResults). Task B13: Get local models'
 // own Pictures and Video tab, Only what fits and Show non-commercial models, Hugging Face asked
 // only on Search or Enter and when one result is opened, an installed local model deleted, and
-// what a Download button offers and whether the note about local models is open (Task B14 shows
-// both).
+// what a Download button offers and whether the note about local models is open. Task B14: the
+// download confirmation's Accept (every licence it showed sent with the download), the note
+// about local models accepted, and a *Download again* refused for a licence not accepted
+// turned into that confirmation.
 import { create, type StoreApi, type UseBoundStore } from "zustand";
 import * as api from "../components/studio/api";
 import { carry, closestModel, defaultsFor, dropUnmet, familyOf, type Values } from "../components/studio/canonical";
@@ -44,6 +46,7 @@ import type {
   LocalModels,
   LocalRepo,
   LocalSearchHit,
+  LocalSource,
   MediaKind,
   MediaModel,
   ModelChoice,
@@ -64,7 +67,8 @@ import type {
 import * as ipc from "../lib/ipc";
 import { listenInEffect } from "../lib/listen";
 import type { ErrorInfo } from "../lib/types";
-import type { DownloadOffer } from "../components/studio/LocalModelRow";
+import { ENGINE_LICENCE_ID, offerForEntry, type DownloadOffer } from "../components/studio/LocalModelRow";
+import { visiblePath } from "../components/FolderChip";
 import { STUDIO_CHAT_LINK, STUDIO_EMPTY, STUDIO_FIELDS, STUDIO_REFS, STUDIO_SETUPS } from "../lib/words";
 import { toErrorInfo } from "./app";
 import { createResults, type StudioResultsState } from "./studioResults";
@@ -169,9 +173,12 @@ export interface StudioState extends StudioRunState, StudioResultsState {
    *  leaves the state as it was, and a trace; before the local models were read it does nothing. */
   refreshEngine(): Promise<void>;
   /** *Download again*: installed model `genModelId`'s parts are checked and what is missing or
-   *  damaged is fetched again. Rejects when it could not start (Task B14 asks for a licence the
-   *  download needs accepted first). */
-  repairLocal(genModelId: string): Promise<void>;
+   *  damaged is fetched again; resolves `true` once that started. When the backend refuses it
+   *  for a licence not accepted (`studio_license_not_accepted`), the local models are read
+   *  again and the download confirmation opens on Get local models with the licences to accept
+   *  (its Accept is `downloadLocal`), and this resolves `false`. Rejects when it could not
+   *  start, or with that refusal when no licence can be shown. */
+  repairLocal(genModelId: string): Promise<boolean>;
   /** Again, Run again: `run` once more, with its own settings where it ran (`start` from it, so
    *  a cloud run that needs confirming asks first, and a second press meanwhile does nothing). */
   again(run: Run): Promise<void>;
@@ -242,14 +249,23 @@ export interface StudioState extends StudioRunState, StudioResultsState {
    *  uses), then the local models are read again. Rejects when it was refused (while a run on
    *  this computer uses the model, `studio_model_in_use`). */
   deleteLocal(genModelId: string): Promise<void>;
-  /** What a Download button offers, every part and licence (Task B14's dialog shows it);
-   *  `null` while none is. */
+  /** What a Download button offers, every part and licence (Task B14's dialog shows it, or the
+   *  note about local models first while that was never accepted); `null` while none is. */
   offer: DownloadOffer | null;
   setOffer(offer: DownloadOffer | null): void;
-  /** The note about local models: before a first download (`"accept"`, Task B14), or read
-   *  again from Get local models' footer (`"read"`); `null` while it is closed. */
-  noticeOpen: "accept" | "read" | null;
-  setNoticeOpen(mode: "accept" | "read" | null): void;
+  /** The download confirmation's Accept: `offer`'s download, with the hash of every licence
+   *  it lists (all of them were shown); then the offer is put away and the local models are
+   *  read again (a failed read leaves them as they were, and a trace). Rejects, keeping the
+   *  offer, when the download could not start. */
+  downloadLocal(offer: DownloadOffer): Promise<void>;
+  /** *I understand* on the note about local models: the backend records it (local downloads
+   *  are refused until then), and the local models and preferences say so. */
+  acceptNotice(): Promise<void>;
+  /** The note about local models read again, read only, from Get local models' footer
+   *  (`"read"`); `null` while it is closed. (Before a first download it shows in place of the
+   *  download confirmation, from `offer`.) */
+  noticeOpen: "read" | null;
+  setNoticeOpen(mode: "read" | null): void;
   /** Sets `tab`'s draft to the model used last when it is still offered, else to
    *  `defaultModel`, at that model's starting values. Fetches nothing (not even a price). */
   selectInitialModel(tab: StudioTab): void;
@@ -688,7 +704,25 @@ export const useStudio: UseBoundStore<StoreApi<StudioState>> = create<StudioStat
       }
     },
     repairLocal: async (genModelId) => {
-      await api.studioLocalDownload({ installed: { genModelId } }, []);
+      const source: LocalSource = { installed: { genModelId } };
+      try {
+        await api.studioLocalDownload(source, []);
+        return true;
+      } catch (e) {
+        if (toErrorInfo(e).code !== "studio_license_not_accepted") throw e;
+        // The licences as the backend lists them now.
+        await get()
+          .refreshLocal()
+          .catch((err: unknown) => console.warn("Studio: the local models could not be read again", err));
+        const local = get().local;
+        const offer = local ? repairOffer(local, genModelId, source) : null;
+        // No empty dialog: the refusal says what to do instead.
+        if (!offer) throw e;
+        set({ offer });
+        // Visible also when the repair started from a run card.
+        get().showLocalModels(true);
+        return false;
+      }
     },
     again: async (run) => {
       await get().start(run.kind, false, run);
@@ -787,6 +821,17 @@ export const useStudio: UseBoundStore<StoreApi<StudioState>> = create<StudioStat
     },
     offer: null,
     setOffer: (offer) => set({ offer }),
+    downloadLocal: async (offer) => {
+      await api.studioLocalDownload(offer.source, offer.licences.map((l) => l.sha256));
+      set((s) => (s.offer === offer ? { offer: null } : {}));
+      await get()
+        .refreshLocal()
+        .catch((e: unknown) => console.warn("Studio: the local models could not be read again", e));
+    },
+    acceptNotice: async () => {
+      const prefs = await api.studioAcceptLocalNotice();
+      set((s) => ({ prefs, local: s.local ? { ...s.local, noticeAccepted: true } : null }));
+    },
     noticeOpen: null,
     setNoticeOpen: (noticeOpen) => set({ noticeOpen }),
     selectInitialModel: (tab) => {
@@ -1290,4 +1335,39 @@ export function placeRef(
 /** Where a local fit is kept in `localFits`: the model, the size and the clip's length. */
 export function localFitKey(modelId: string, width: number, height: number, seconds: number): string {
   return `${modelId}|${width}|${height}|${seconds}`;
+}
+
+// ---- a repair refused for a licence ---------------------------------------------------------
+
+/** What *Download again* on installed model `genModelId` asks to accept, when the backend
+ *  refused it for a licence not accepted: a model of the list offers its parts and licences as
+ *  its *Download* would; one from a search (the list does not hold it) offers the Studio
+ *  engine's licence, the only one this view knows it may need, when an entry lists it. `null`
+ *  when there is no licence to show. */
+export function repairOffer(local: LocalModels, genModelId: string, source: LocalSource): DownloadOffer | null {
+  const entries = [...local.recommended, ...local.notHere];
+  const entry = entries.find((e) => e.id === genModelId);
+  let offer: DownloadOffer | null = null;
+  if (entry) {
+    offer = { ...offerForEntry(entry, local), source };
+  } else {
+    const row = local.installed.find((m) => m.id === genModelId);
+    const engine = entries.flatMap((e) => e.licences).find((l) => l.id === ENGINE_LICENCE_ID);
+    if (row && engine) {
+      offer = {
+        // A name from a search can hold any character: shown with invisible ones as codes.
+        name: visiblePath(row.name),
+        source,
+        parts: [],
+        licences: [engine],
+        totalBytes: row.sizeBytes,
+        toFetchBytes: 0,
+        needsEngine: true,
+        engineBytes: local.engine.downloadBytes,
+        lowDisk: false,
+        gate: { mode: "none", collects: [] },
+      };
+    }
+  }
+  return offer && offer.licences.length > 0 ? offer : null;
 }

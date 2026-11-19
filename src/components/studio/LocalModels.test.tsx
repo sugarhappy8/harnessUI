@@ -2,10 +2,11 @@
 // computer has, the recommended models with their size, licence in plain words, fit and time,
 // the models that do not fit folded away, the installed ones (also those from a search) with
 // Download again and Delete, Hugging Face search only when asked, and the footer's engine line
-// and content notice. Download only sets the offer; Task B14 shows the dialog.
+// and content notice. Download only sets the offer (Task B14's dialog is tested in
+// DownloadLocalModel.test.tsx); a repair refused for a licence shows that dialog.
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { act, cleanup, fireEvent, render, screen, within } from "@testing-library/react";
-import { amountGb } from "../../lib/words";
+import { amountGb, LOCAL_MODELS } from "../../lib/words";
 import { LOCAL } from "./fixtures/models";
 import type {
   InstalledLocal,
@@ -116,6 +117,14 @@ function supported(patch: Partial<LocalRepo> = {}): LocalRepo {
     ...patch,
   };
 }
+
+/** The backend's refusal of a download whose licences were not all accepted. */
+const NOT_ACCEPTED = {
+  code: "studio_license_not_accepted",
+  message: "Accept the model's licence first.",
+  nextStep: "Download it from Get local models.",
+  details: "",
+};
 
 async function flush() {
   await act(async () => {
@@ -459,6 +468,24 @@ describe("Get local models", () => {
     expect(api.studioLocalDownload).toHaveBeenCalledWith({ installed: { genModelId: "flux2-klein-4b-q4" } }, []);
   });
 
+  it("a repair that needs the model's licences accepted shows the download dialog first", async () => {
+    await showLocal();
+    vi.mocked(api.studioLocalDownload).mockRejectedValueOnce(NOT_ACCEPTED);
+    const k = row(/FLUX.2 klein/);
+    await click(within(k).getByRole("button", { name: "Download again" }));
+    const dialog = screen.getByRole("alertdialog");
+    within(dialog).getByText("Download FLUX.2 klein 4B?");
+    // Nothing is being checked yet.
+    expect(within(k).queryByText(LOCAL_MODELS.repairing)).toBeNull();
+    await click(within(dialog).getByRole("button", { name: "Accept and download" }));
+    expect(api.studioLocalDownload).toHaveBeenLastCalledWith(
+      { installed: { genModelId: "flux2-klein-4b-q4" } },
+      klein.licences.map((l) => l.sha256),
+    );
+    expect(screen.queryByRole("alertdialog")).toBeNull();
+    expect(useStudio.getState().offer).toBeNull();
+  });
+
   it("an installed model can be deleted, and Back returns to the cards", async () => {
     await showLocal();
     await click(within(row(/FLUX.2 klein/)).getByRole("button", { name: "Delete" }));
@@ -539,6 +566,36 @@ describe("Get local models", () => {
       await click(within(r).getByRole("button", { name: "Delete" }));
       await click(within(screen.getByRole("alertdialog")).getByRole("button", { name: "Delete" }));
       expect(api.studioLocalDelete).toHaveBeenCalledWith(id);
+    });
+
+    it("its repair that needs the engine's licence accepted shows that licence", async () => {
+      const engine = licence({ id: "studio-engine", name: LOCAL.engine.licenseName, sha256: "e".repeat(64) });
+      const withEngine = (e: LocalEntry) => ({ ...e, needsEngine: true, licences: [...e.licences, engine] });
+      const pack = { ...LOCAL.engine, state: "notInstalled" as const, downloadBytes: 30_303_000 };
+      const local: LocalModels = {
+        ...LOCAL,
+        engine: pack,
+        installed: [searched(null), ...LOCAL.installed],
+        recommended: LOCAL.recommended.map((e) => (e.installed ? e : withEngine(e))),
+      };
+      await showLocal(local);
+      vi.mocked(api.studioLocalDownload).mockRejectedValueOnce(NOT_ACCEPTED);
+      await click(within(row("z.gguf")).getByRole("button", { name: "Download again" }));
+      const dialog = screen.getByRole("alertdialog");
+      within(dialog).getByText("Download z.gguf?");
+      within(dialog).getByText("Also downloads the Studio engine (29 MB, MIT licence).");
+      await click(within(dialog).getByRole("button", { name: "Accept and download" }));
+      expect(api.studioLocalDownload).toHaveBeenLastCalledWith({ installed: { genModelId: id } }, [engine.sha256]);
+    });
+
+    it("a repair refused for a licence it cannot show says why", async () => {
+      await showLocal({ ...LOCAL, installed: [searched(null), ...LOCAL.installed] });
+      vi.mocked(api.studioLocalDownload).mockRejectedValueOnce(NOT_ACCEPTED);
+      await click(within(row("z.gguf")).getByRole("button", { name: "Download again" }));
+      expect(screen.queryByRole("alertdialog")).toBeNull();
+      expect(useStudio.getState().offer).toBeNull();
+      screen.getByText(NOT_ACCEPTED.message);
+      screen.getByText(NOT_ACCEPTED.nextStep);
     });
 
     it("one this version cannot run says why, and can only be deleted", async () => {
