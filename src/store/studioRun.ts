@@ -11,7 +11,7 @@ import type { StoreApi } from "zustand";
 import * as api from "../components/studio/api";
 import type { Estimate, MediaModel, Run, RunTarget, StartRequest } from "../components/studio/types";
 import type { ErrorInfo } from "../lib/types";
-import { STUDIO_DOCK } from "../lib/words";
+import { STUDIO_DOCK, STUDIO_REUSE } from "../lib/words";
 import { toErrorInfo } from "./app";
 import { draftModel, listedModel, sameTarget, type Draft, type StudioState, type StudioTab } from "./studio";
 
@@ -37,8 +37,8 @@ export interface StudioRunState {
   dismissRefusal(tab: StudioTab): void;
   /**
    * Create: one press, with its own client token, of `tab`'s draft or, given `from`, of that
-   * run's own settings where it ran (a new seed unless the tab keeps its seed; the draft stays
-   * as it is). Once the draft's press is accepted, its seed goes back to Random unless it is
+   * run's own settings where it ran (always with a new seed: the draft's Keep it is for Create;
+   * the draft stays as it is; a run whose endpoint was removed is refused, `refusal`). Once the draft's press is accepted, its seed goes back to Random unless it is
    * kept, so the next press makes a new picture. A draft for the cloud whose estimate for it,
    * as it is, asks for a confirmation opens the confirmation instead; so does the backend's
    * `studio_needs_confirmation`, with the estimate asked for that press. A run on this computer
@@ -71,6 +71,11 @@ export const ESTIMATE_DELAY_MS = 150;
 
 /** The client token an estimate is asked with (each press makes its own). */
 const ESTIMATE_TOKEN = "estimate";
+
+/** Why Again, or Run again, cannot send a run whose endpoint was removed in Settings. */
+function endpointGone(): ErrorInfo {
+  return { code: "studio_endpoint_gone", message: STUDIO_REUSE.endpointGone, nextStep: STUDIO_REUSE.endpointGoneNext, details: "" };
+}
 
 /** The backend's refusal of a cloud run that needs the user's confirmation first. */
 const NEEDS_CONFIRMATION = "studio_needs_confirmation";
@@ -200,8 +205,15 @@ export function createRun(
       let req: StartRequest | null;
       if (from) {
         const target = targetOf(from);
+        // Again is the run's own settings with a new seed, always: the draft's Keep it is for
+        // Create (the run may not even have the seed the draft keeps).
         const model = target ? listedModel(target, from.model, s.local, s.endpoints) : null;
-        req = requestFromRun(from, token, model, s.drafts[from.kind].seedLocked);
+        req = requestFromRun(from, token, model, false);
+        if (!req) {
+          // Where it ran is no longer known (its endpoint was removed): say so, as Reuse does.
+          set((st) => ({ refusal: { ...st.refusal, [from.kind]: endpointGone() } }));
+          return null;
+        }
       } else {
         req = startRequestOf(tab, s.drafts[tab], token);
       }

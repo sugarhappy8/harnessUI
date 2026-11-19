@@ -6,7 +6,7 @@ import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
-import { STUDIO_DOCK } from "../../lib/words";
+import { STUDIO_DOCK, STUDIO_REUSE } from "../../lib/words";
 import type { StudioTab } from "../../store/studio";
 import { LOCAL, MODELS, RUN } from "./fixtures/models";
 import type {
@@ -907,13 +907,28 @@ describe("PromptDock", () => {
       expect(local?.params).not.toHaveProperty("seed");
     });
 
-    it("keeps the run's seed while the seed is kept", async () => {
+    it("sends a new seed even while the draft keeps its seed (Keep it is for Create only)", async () => {
       await show({ estimate: here() });
       act(() => useStudio.getState().lockSeed("video", true));
       await act(async () => {
         await useStudio.getState().start("video", false, veoRun);
       });
-      expect(started()[0]?.params).toMatchObject({ seed: 81723 });
+      expect(started()[0]?.params).toMatchObject({ duration: 8 });
+      expect(started()[0]?.params).not.toHaveProperty("seed");
+    });
+
+    it("a run whose endpoint was removed is refused with why, under the prompt", async () => {
+      await show({ estimate: here() });
+      act(() => useStudio.getState().setTab("video"));
+      const orphan: Run = { ...veoRun, id: "orphan", providerId: null };
+      let answer: Run | null = veoRun;
+      await act(async () => {
+        answer = await useStudio.getState().start("video", false, orphan);
+      });
+      expect(answer).toBeNull();
+      expect(api.studioStart).not.toHaveBeenCalled();
+      expect(useStudio.getState().refusal.video?.message).toBe(STUDIO_REUSE.endpointGone);
+      expect(useStudio.getState().starting).toBe(false);
     });
 
     it("the confirmation shows the run's settings, not the draft's", async () => {

@@ -1655,6 +1655,8 @@ export const STUDIO_REUSE = {
   gone: (endpoint: string) => `${endpoint} no longer offers this model.`,
   goneHere: "This model is no longer on this computer.",
   endpointGone: "This run's endpoint was removed in Settings → Endpoints.",
+  /** Again, or Run again, on such a run: what to do instead. */
+  endpointGoneNext: "Choose a model in the right panel, then press Create.",
 } as const;
 
 /** Animate and Edit when the tab's model cannot take the picture (Task B9): another model is

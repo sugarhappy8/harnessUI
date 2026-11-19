@@ -4663,7 +4663,7 @@ export function useOutputUrl(outputId: string, thumb: boolean): string | null;  
 export function Grid(props: { onOpen(outputId: string): void }): JSX.Element;
 export function Viewer(props: { outputId: string; onClose(): void }): JSX.Element;
 // store
-again(run: Run): Promise<void>;               // same settings, new seed unless locked; goes through start (confirm rules apply)
+again(run: Run): Promise<void>;               // same settings, always a new seed (Keep it is for Create only; ruling B7-x-B9-again as amended); goes through start (confirm rules apply)
 reuse(run: Run, withSeed: boolean): void;     // fills the draft; never starts
 animate(output: Output): void; editWithWords(output: Output): void; useAsReference(output: Output): Promise<void>;
 saveSeveral(outputIds: string[]): Promise<void>;   // folder picker, then studioExport per output (original names, settings off)
