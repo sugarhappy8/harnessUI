@@ -1332,6 +1332,7 @@ export const MODELS: MediaModel[] = [
 
 export const RUN: Run = {
   "id": "cloud-run",
+  "seq": 1,
   "kind": "image",
   "runsOn": "cloud",
   "providerId": 1,
@@ -2305,6 +2306,7 @@ export const LOCAL: LocalModels = {
 
 export const LOCAL_RUN: Run = {
   "id": "local-run",
+  "seq": 3,
   "kind": "image",
   "runsOn": "local",
   "providerId": null,

@@ -2131,11 +2131,47 @@ pub(crate) mod tests {
         );
         assert!(!run.watching);
 
-        // This computer: Wan 2.2 installed, then klein, and a finished run of klein (two
-        // pictures in 3 min 48 s), which is klein's measured time here.
+        // This computer: Wan 2.2 installed, then klein, an earlier run of klein at its
+        // defaults (one picture in 1 min 54 s, not in the fixture) and a finished run of
+        // klein (two pictures in 3 min 48 s): klein's measured times here.
         let models_dir = scratch.path().join("models");
         install_bundled(&h.store, &models_dir, WAN_ID).await;
         install_bundled(&h.store, &models_dir, KLEIN_ID).await;
+        record_ended(
+            &h,
+            store::NewCreationRun {
+                id: "earlier-local-run".into(),
+                kind: store::CreationKind::Image,
+                runs_on: store::RunsOn::Local,
+                provider_id: None,
+                provider_name: "This computer".into(),
+                provider_host: String::new(),
+                model: KLEIN_ID.into(),
+                model_label: "FLUX.2 klein 4B".into(),
+                prompt: "A lighthouse at dusk".into(),
+                params: json!({
+                    "params": {"aspect_ratio": "1:1", "seed": 7},
+                    "extra": {},
+                    "routing": null,
+                    "job": {"width": 1024, "height": 1024, "frames": 1, "steps": 4, "pictures": 1},
+                }),
+                refs: json!([]),
+                estimate_usd: Some(0.0),
+                gen_model_id: Some(KLEIN_ID.into()),
+                engine_build: Some(1106),
+                device: Some(FIXTURE_DEVICE.into()),
+                created_at: LOCAL_RUN_AT - 3_600_000,
+            },
+            store::CreationPatch {
+                status: Some(store::CreationStatus::Done),
+                cost_usd: Some(Some(0.0)),
+                elapsed_ms: Some(Some(114_000)),
+                ..Default::default()
+            },
+            &[("l0", 1_398_204)],
+            7,
+        )
+        .await;
         let local_run = record_ended(
             &h,
             store::NewCreationRun {

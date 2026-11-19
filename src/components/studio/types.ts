@@ -261,6 +261,11 @@ export interface LocalRun {
 /** A Studio run as the webview shows it (`studio-progress`, `studio_runs`, `studio_live`). */
 export interface Run {
   id: string;
+  /**
+   * Which copy of a run is newest: one count for every run, taken by the backend just before
+   * it reads the run, so of two copies (an event, a command's answer) the higher one is newer.
+   */
+  seq: number;
   kind: MediaKind;
   runsOn: "cloud" | "local";
   providerId: number | null;
