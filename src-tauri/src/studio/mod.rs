@@ -19,6 +19,8 @@
 //!   chat*; the preferences).
 //! - [`actions`]: what the gallery actions behind those commands do: export (with the run's
 //!   settings beside the copy), a video's poster frame, *Send to chat* and *Use in prompt*.
+//! - [`dropped`]: the files last dropped on the main window (Tauri's native drop), which the
+//!   prompt can add as pictures, the webview never sending a path.
 //! - [`engine_cmd`]: the Studio engine's state on this computer, and the Windows engine pack's
 //!   download (with the first local model, or from its own button), cancel and remove.
 //! - [`local_cmd`]: Get local models' commands: what this computer can run (the installed
@@ -43,6 +45,7 @@ pub mod actions;
 pub mod catalog;
 pub mod commands;
 pub mod deps;
+pub mod dropped;
 pub mod engine_cmd;
 pub mod errors;
 pub mod gallery;

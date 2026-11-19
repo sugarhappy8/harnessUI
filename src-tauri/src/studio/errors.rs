@@ -599,6 +599,17 @@ pub fn broke_off_following(company: Company, charged: Option<bool>) -> AppError 
     AppError::new("studio_interrupted", message, next, String::new())
 }
 
+/// *Drop a picture*: the file asked for is not among the files last dropped on the window,
+/// or they were dropped too long ago (`studio::dropped`), or it is a folder.
+pub fn drop_gone() -> AppError {
+    AppError::new(
+        "studio_drop_gone",
+        "The dropped picture can no longer be added.",
+        "Drop it again, or choose it.",
+        String::new(),
+    )
+}
+
 /// The company no longer has the finished result.
 pub fn result_expired(company: Company) -> AppError {
     if company == Company::Local {

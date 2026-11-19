@@ -339,6 +339,30 @@ pub async fn studio_add_ref(
     Ok(ref_dto(stored))
 }
 
+/// *Drop a picture* (the native drop, which carries files on Windows too): adds file `index`
+/// of the files last dropped on the main window to the prompt, for `role`
+/// ([`super::dropped::add_dropped`]). The webview names the file by its place in the drop,
+/// never by its path.
+#[tauri::command]
+pub async fn studio_add_dropped(
+    window: tauri::WebviewWindow,
+    studio: State<'_, Arc<StudioManager>>,
+    dropped: State<'_, super::dropped::DroppedFiles>,
+    index: usize,
+    role: Option<agent::media::RefRole>,
+) -> AppResult<RefDto> {
+    only_main_window(window.label())?;
+    super::dropped::add_dropped(
+        &studio,
+        &PictureWorker::app(),
+        &dropped,
+        index,
+        role,
+        std::time::Instant::now(),
+    )
+    .await
+}
+
 /// *Use in prompt*: adds picture output `output_id` to the prompt.
 #[tauri::command]
 pub async fn studio_ref_from_output(
@@ -1472,6 +1496,7 @@ pub(crate) mod tests {
         "studio_show_in_folder",
         "studio_open_folder",
         "studio_add_ref",
+        "studio_add_dropped",
         "studio_ref_from_output",
         "studio_output_for_chat",
         "studio_set_prefs",

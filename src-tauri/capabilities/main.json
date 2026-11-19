@@ -243,6 +243,7 @@
     "allow-studio-show-in-folder",
     "allow-studio-open-folder",
     "allow-studio-add-ref",
+    "allow-studio-add-dropped",
     "allow-studio-ref-from-output",
     "allow-studio-output-for-chat",
     "allow-studio-set-prefs",

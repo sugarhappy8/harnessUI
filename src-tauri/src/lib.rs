@@ -109,6 +109,9 @@ pub fn run() {
         .plugin(tauri_plugin_global_shortcut::Builder::new().build())
         // Artifact previews load from this scheme, into a sandboxed frame (artifacts.rs).
         .register_asynchronous_uri_scheme_protocol(artifacts::SCHEME, artifacts::serve)
+        // 0.1.0: the files of each native drop on the main window, which Studio's prompt can
+        // add as pictures (on Windows the webview's own drop carries none).
+        .on_webview_event(studio::dropped::on_webview_event)
         .invoke_handler(tauri::generate_handler![
             commands::app_info,
             chat::list_chats,
@@ -334,6 +337,7 @@ pub fn run() {
             studio::commands::studio_show_in_folder,
             studio::commands::studio_open_folder,
             studio::commands::studio_add_ref,
+            studio::commands::studio_add_dropped,
             studio::commands::studio_ref_from_output,
             studio::commands::studio_output_for_chat,
             studio::commands::studio_set_prefs,
@@ -505,6 +509,7 @@ pub fn run() {
             app.manage(packs_cmd::PackDownloads::default());
             // 0.1.0: the Studio engine's Windows pack, one download at a time.
             app.manage(studio::engine_cmd::EngineDownloads::default());
+            app.manage(studio::dropped::DroppedFiles::default());
             app.manage(hotkey::Hotkey::default());
             {
                 let handle = handle.clone();

@@ -216,6 +216,7 @@ studio_export
 studio_show_in_folder
 studio_open_folder
 studio_add_ref
+studio_add_dropped
 studio_ref_from_output
 studio_output_for_chat
 studio_set_prefs
