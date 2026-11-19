@@ -6,13 +6,16 @@ The sentences about rea's tests and CI (9.3, 13.6, 16 and 17) are checked agains
 name, and no `TODO(lead)` marker may be left in ARCHITECTURE.md. SECURITY.md, CHANGELOG.md
 and docs/dev/0.0.6/item5-spec.md may claim no more of those checks than ARCHITECTURE.md
 does. ARCHITECTURE.md and docs/dev/0.0.6/item6-spec.md state the `llama-fit-params` time
-limit the code sets. A failure names the sentence to correct.
+limit the code sets. What the docs say about Studio (0.1.0: hosts, money rules, audit row,
+CSP, the engine pin, the local rules and the scope note) is checked against the code that
+keeps it. A failure names the sentence to correct.
 
     python3 -I scripts/docs_test.py
 
 Standard library only.
 """
 
+import json
 import re
 import unittest
 from pathlib import Path
@@ -296,6 +299,80 @@ class FitParamsLimitAsTheCodeSetsIt(unittest.TestCase):
         self.assertIn(f"scrubbed environment, {self.secs} s,", threat_row, "13: the threat table row")
         measurement = paragraph(architecture(), "2. *The measurement,*")
         self.assertIn(f"killed after {self.secs} s", measurement, "7.7: the measurement")
+
+
+class StudioDocs(unittest.TestCase):
+    """What the docs say about Studio matches the code: hosts, money rules, audit row, CSP, scope note."""
+
+    def test_13_6_has_a_studio_row_with_its_hosts(self):
+        row = paragraph(section("### 13.6 Network use"), "| Studio |")
+        for words in ("`openrouter.ai`", "`api.openai.com`", "guarded fetcher", "without the key"):
+            self.assertIn(words, row)
+
+    def test_the_money_rules_are_the_codes(self):
+        spend = read("src-tauri/src/studio/spend.rs")
+        for name, value in (("CONFIRM_AT_USD", "1.0"), ("DEFAULT_DAILY_LIMIT_USD", "10.0"), ("UNKNOWN_PRICE_RESERVE_USD", "5.0")):
+            self.assertRegex(spend, rf"pub const {name}: f64 = {re.escape(value)};")
+        for doc in ("SECURITY.md", "README.md"):
+            self.assertIn("$10", read(doc), doc)
+            self.assertIn("$1 or more", read(doc), doc)
+
+    def test_the_audit_row_keeps_the_prompt_length_only(self):
+        bullet = paragraph(section("### 13.7 Audit log"), "- *Studio* (0.1.0)")
+        self.assertIn("length", bullet)
+        self.assertIn("not the prompt", bullet)
+
+    def test_the_spec_says_the_scope_changed(self):
+        self.assertIn("*(Changed in 0.1.0 at the owner's request: image and video generation on this computer, with cloud models "
+                      "as the backup; a picture or video model can run beside the chat model when both fit; "
+                      "see [docs/dev/0.1.0/README.md](dev/0.1.0/README.md).)*", read("docs/SPEC.md"))
+
+    def test_the_csp_the_docs_describe_is_the_apps(self):
+        csp = json.loads(read("src-tauri/tauri.conf.json"))["app"]["security"]["csp"]
+        self.assertIn("media-src blob:", csp)
+        self.assertIn(f"**CSP:** `{csp}`", paragraph(section("### 13.2 Webview lockdown"), "- **CSP:**"))
+        self.assertIn("media-src blob:", read("SECURITY.md"))
+
+    def test_the_offline_test_visits_studio(self):
+        self.assertIn('"Studio"', read("e2e/m8_offline.py"))
+
+    def test_13_6_has_a_row_for_studio_on_this_computer(self):
+        row = paragraph(section("### 13.6 Network use"), "| Studio on this computer |")
+        for words in ("`huggingface.co`", "GitHub", "on a click", "nothing while it runs"):
+            self.assertIn(words, row)
+
+    def test_the_engine_pin_the_docs_name_is_the_locks(self):
+        tag = json.loads(read("sd.lock.json"))["sd_cpp"]["tag"]
+        pin = "\n".join(section("### 7.1 Pinning and layout"))
+        self.assertIn(f"`{tag}`", pin)
+        self.assertIn("`sd.lock.json`", pin)
+        self.assertIn("re-recorded", pin)
+        self.assertEqual(read("crates/runtime/tests/fixtures/sd_fixtures_build.txt").strip(), tag)
+
+    def test_7_9_states_the_local_rules_the_code_keeps(self):
+        local = "\n".join(section("### 7.9 Studio on this computer (0.1.0)"))
+        for words in ("one `sd-cli` process per job", "no `sd-server`", "`--prompt-file`", "4,000 characters", "`.ckpt`",
+                      "`--disable-image-metadata`", "never `resources/llama/main`", "Unload the chat model"):
+            self.assertIn(words, local)
+        self.assertRegex(read("crates/runtime/src/sd/args.rs"), r"pub const PROMPT_MAX_CHARS: usize = 4_000;")
+
+    def test_security_says_a_local_run_sends_nothing(self):
+        self.assertIn("A local Studio run sends nothing", read("SECURITY.md"))
+
+    def test_the_readme_leads_studio_with_this_computer(self):
+        studio = doc_paragraph("README.md", "Studio makes pictures and short videos")
+        self.assertLess(studio.index("on this computer"), studio.index("OpenRouter"))
+
+    def test_the_notices_name_the_studio_engine(self):
+        notices = read("THIRD-PARTY-NOTICES.md")
+        self.assertIn("stable-diffusion.cpp", notices)
+        self.assertIn("The Studio engine is not part of the Windows installer.", notices)
+
+    def test_no_document_promises_a_local_time_before_the_benchmark(self):
+        if any(e.get("speed") for e in json.loads(read("catalog/models.json")).get("generators", {}).values()):
+            self.skipTest("the catalog has measured speed points: time figures may be written")
+        for doc in ("README.md", "CHANGELOG.md"):
+            self.assertNotRegex(read(doc), r"\b(s|seconds?|min|minutes?) (a|per|for a) (picture|clip)", doc)
 
 
 if __name__ == "__main__":

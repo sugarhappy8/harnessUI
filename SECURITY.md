@@ -542,6 +542,29 @@ build machine, and its Windows and macOS jobs have not run at all.
   and never through a system proxy (also for `0.0.0.0`, `[::]` and `localhost.`, which is
   reached as `localhost`, so no name server decides where it goes); anyone who can watch
   that network can read it.
+- **Studio (0.1.0).** A local Studio run sends nothing: the prompt, the pictures you add
+  and what it makes stay on this computer, and no company sees them. Get local models talks
+  to Hugging Face (`huggingface.co`, for search, model listings and model files, with the
+  token you already saved for a gated model, sent only to huggingface.co) and the Windows
+  Studio engine comes from GitHub, each only when you click: Search, opening a result, or
+  Download. Opening Studio, Get local models or Settings → Studio sends nothing. A cloud
+  run sends the prompt and the pictures you add to the company you picked, `openrouter.ai`
+  or `api.openai.com`, with that endpoint's key, which you saved in Settings → Endpoints;
+  OpenRouter passes it on to the company that runs the model, whose own terms say what it
+  keeps. A cloud result comes back from that company, or from the file host it points to,
+  which harnessUI reads through the same guarded fetcher as web pages: the key never goes
+  to a file host, or to any address but the endpoint's own. Results are kept in the gallery
+  folder on this computer (by default `harnessUI/studio` in your home folder), each with a
+  record of its settings beside it that never holds a key, and the prompt is never written
+  into a local result. Studio has no tool: a chat model cannot start a run or read the
+  gallery, and a picture reaches a chat only when you click *Send to chat*.
+- **Studio's spending rules (cloud runs).** The backend keeps them whatever the window
+  sends: it asks before every cloud video, any cloud run estimated at $1 or more and any
+  run whose price is unknown, and it keeps a daily limit of $10, on by default and counted
+  per calendar day on this computer (Settings → Studio changes both): a run that would take
+  today's spending past it is not sent, and a run with an unknown price needs $5 of the
+  limit left. Deleting a result never lowers today's spending. A run on this computer is
+  free, never asks and never counts.
 - The usage line under the model name (0.0.6) is read from this computer's own counters,
   only while the window is visible. Nothing is sent anywhere, and the model is never told
   the figures.
@@ -578,6 +601,9 @@ callable only from the main window, a strict Content Security Policy with Truste
 no shell, filesystem or HTTP plugin, navigation away from the app blocked, and model
 output rendered as text and React elements, never as HTML. Images in model output load
 only from `data:` or `blob:` URLs, so a model cannot leak data through an image link.
+Since 0.1.0 the policy also has `media-src blob:`, so Studio can play a video from a
+`blob:` address the webview makes from the bytes the app read from the gallery; no remote
+video can play.
 
 ## Audit log
 
@@ -586,7 +612,10 @@ you saw, the risk level, the decision and who made it, any note, the result and 
 duration. It can be filtered in Settings → Audit log and exported as JSON Lines or CSV.
 rea calls and hand-offs to Claude Code or Codex are recorded like any other tool call;
 requests from other apps through sharing are recorded under the server `other-apps`,
-without their text.
+without their text. Each Studio run (0.1.0) is one row under the server `studio`, tool
+`picture` or `video`, decided by you: it keeps the prompt's length only, never the prompt,
+and a local run's row names the model's revision and the Studio engine's build. A finished
+row is never changed.
 
 ## Model files
 
@@ -612,3 +641,45 @@ Since 0.0.6:
 - What a model is good at, in Compare, is quoted from the publisher's own model card. What
   an uploader writes on Hugging Face is shown as plain text with hidden characters made
   visible.
+
+## Running programs: the Studio engine (0.1.0)
+
+Studio's local pictures and videos are made by one more program, the Studio engine
+(stable-diffusion.cpp's `sd-cli`), at one pinned build: the Windows pack pinned by size and
+SHA-256, the Mac build by commit with its three submodules, built in CI and signed with the
+app. It is not part of the Windows installer: it downloads with your first local model,
+from GitHub only, after its licence is shown, into its own folder, never the chat model
+runner's.
+
+- One engine process runs per job, through the same spawn helper as llama-server: its own
+  process tree, which Stop kills whole, and almost none of your environment (no proxy
+  settings, no keys). There is no engine server listening on any port.
+- Its arguments come from typed fields only: a fixed flag for each model part, numbers, and
+  words from fixed lists. Nothing you type, and nothing in a model's listing, becomes a
+  flag. The prompt is never on its command line, where other programs could read it: it is
+  written to a file in the run's folder, which is deleted when the run ends. A local prompt
+  may be at most 4,000 characters.
+- Model files must be `.gguf` or `.safetensors`. `.ckpt`, `.pt` and `.pth` files are
+  refused everywhere, because they can run code when they are loaded. Every file is checked
+  against its published size and SHA-256, and a GGUF model file is checked by its own
+  tensor table, after download and before every run, so a file whose name lies is never
+  run. As with llama-server, a checksum proves where a file came from, not that the engine
+  parses it safely.
+
+## Content: what Studio makes (0.1.0)
+
+- Before the first local download Studio shows a note once, and records that you read it:
+  "Local models run only on your computer. No company checks your prompts or pictures.
+  Don't create sexual images of children, or sexual or intimate images of real people
+  without their consent, and don't impersonate people. These are crimes in many countries.
+  Each model's licence and use policy also applies." It can be read again from Get local
+  models and Settings → Studio. Every licence of every part of a model is shown and
+  accepted before it downloads.
+- A small prompt check that is always on refuses a local prompt that pairs sexual words
+  with words for children ("Studio won't make this."). It is a narrow check, not a filter,
+  and nothing is retried. Cloud companies apply their own filters; a refusal is explained
+  in plain words and never retried.
+- Every local picture and video carries a label in its own file saying it was made by AI
+  (XMP `DigitalSourceType = trainedAlgorithmicMedia`, harnessUI's version, the model and
+  its revision, a unique id and the date), and never the prompt. Cloud results are kept
+  exactly as the company sent them.
