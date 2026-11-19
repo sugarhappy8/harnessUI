@@ -650,7 +650,7 @@ impl Inner {
                 "params": request.params,
                 "extra": request.extra,
                 "routing": Value::Null,
-                "job": job_record(&shape),
+                "job": job_record(&shape, None),
             }),
             refs: refs_json(&request.refs),
             estimate_usd: Some(0.0),

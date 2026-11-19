@@ -244,7 +244,11 @@ pub(crate) fn device_name(description: &str) -> &str {
     name
 }
 
-/// This computer's measured runs, from what each recorded run was made at (its `job`).
+/// The key of a run's engine load in its `job`.
+const LOAD_MS: &str = "load_ms";
+
+/// This computer's measured runs, from what each recorded run was made at (its `job`), with
+/// its engine load when it recorded one (older runs did not).
 fn measured_runs(times: &[store::LocalRunTime]) -> Vec<MeasuredRun> {
     times
         .iter()
@@ -264,20 +268,27 @@ fn measured_runs(times: &[store::LocalRunTime]) -> Vec<MeasuredRun> {
                 steps: number("steps")?,
                 pictures: number("pictures").unwrap_or(1),
                 elapsed_ms: time.elapsed_ms,
+                load_ms: job.get(LOAD_MS).and_then(Value::as_u64),
             })
         })
         .collect()
 }
 
-/// What a run made at `shape` records of it, for this computer's measured times.
-pub(super) fn job_record(shape: &RunShape) -> Value {
-    json!({
+/// What a run made at `shape` records of it, for this computer's measured times: with
+/// `load_ms`, how long its engine took to load, once it is known (at its first drawing
+/// step).
+pub(super) fn job_record(shape: &RunShape, load_ms: Option<u64>) -> Value {
+    let mut job = json!({
         "width": shape.size.width,
         "height": shape.size.height,
         "frames": shape.size.frames,
         "steps": shape.steps,
         "pictures": shape.pictures,
-    })
+    });
+    if let Some(ms) = load_ms {
+        job[LOAD_MS] = json!(ms);
+    }
+    job
 }
 
 /// A time as the webview shows it: rounded as people read it (`gen_eta::round_for_display`),
@@ -304,6 +315,63 @@ pub(crate) fn word_tag(word: FitWord) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn time(job: Value, elapsed_ms: u64) -> store::LocalRunTime {
+        store::LocalRunTime {
+            params: json!({"params": {}, "extra": {}, "routing": null, "job": job}),
+            elapsed_ms,
+            created_at: 1,
+        }
+    }
+
+    /// A run's engine load (`load_ms` in its `job`) is read with what it was made at; a run
+    /// recorded without it, or with something else there, is read without it.
+    #[test]
+    fn a_measured_run_carries_its_load_when_it_recorded_one() {
+        let shape = RunShape {
+            size: GenSize {
+                width: 1024,
+                height: 768,
+                frames: 1,
+            },
+            steps: 4,
+            pictures: 2,
+        };
+        let loaded = job_record(&shape, Some(20_000));
+        assert_eq!(loaded["load_ms"], 20_000);
+        let without = job_record(&shape, None);
+        assert!(without.get("load_ms").is_none(), "{without}");
+        let mut odd = without.clone();
+        odd["load_ms"] = json!("soon");
+        let runs = measured_runs(&[
+            time(loaded, 100_000),
+            time(without, 90_000),
+            time(odd, 80_000),
+        ]);
+        let run = MeasuredRun {
+            size: shape.size,
+            steps: 4,
+            pictures: 2,
+            elapsed_ms: 100_000,
+            load_ms: Some(20_000),
+        };
+        assert_eq!(
+            runs,
+            [
+                run,
+                MeasuredRun {
+                    elapsed_ms: 90_000,
+                    load_ms: None,
+                    ..run
+                },
+                MeasuredRun {
+                    elapsed_ms: 80_000,
+                    load_ms: None,
+                    ..run
+                },
+            ]
+        );
+    }
 
     /// Ruling L15-x-B9-device: a device is shown by its name with the backend in brackets,
     /// never with the driver's code for its chip.

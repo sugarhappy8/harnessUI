@@ -58,6 +58,9 @@ pub struct MeasuredRun {
     pub pictures: u32,
     /// The whole run, the load included.
     pub elapsed_ms: u64,
+    /// How long the engine took to load before it started drawing (the run's time at its
+    /// first drawing step); `None` for a run recorded before this was kept.
+    pub load_ms: Option<u64>,
 }
 
 /// The word a model's fit gets on screen (Tasks L15, L16 and the webview).
@@ -107,9 +110,10 @@ pub fn device_class(target: &Target, backend: &str) -> DeviceClass {
 /// run whatever its size, so the point's load (at most the whole run) stays as it was and
 /// only the rest of each run is scaled (a run with no work to scale from, as a point with no
 /// step or decode time gives it, is kept as it was: a work ratio of 1). With no speed point
-/// of this backend the load cannot be told apart, so each whole run is scaled; the time is
-/// then never below the shortest run measured here, and for settings no run here was made
-/// at the range is [0.75×, 1.5×], never starting below that run either. Otherwise from the
+/// of this backend, the load is the one measured here: the median `load_ms` of the runs that
+/// recorded it is the fixed part, and only the rest of each such run (after its own load) is
+/// scaled, by steps and size alone; a run recorded without its load scales whole. For
+/// settings no run here was made at, the range is then [0.75×, 1.5×]. Otherwise from the
 /// speed point of the same backend nearest in memory: load + per picture (steps × seconds
 /// a step × (tokens / the point's tokens)^1.3 + decode × the pixel-frames ratio), as
 /// [0.75×, 1.5×]. Video on Apple silicon (`metal`) grows by [`APPLE_VIDEO_PAD`]. No point of
@@ -125,42 +129,56 @@ pub fn estimate(
     let point = nearest_point(entry, class);
     let scale = Scale { entry, point };
     let (load, work) = scale.seconds(size, steps, pictures);
-    let runs = measured
-        .iter()
-        .filter_map(|m| {
+    let timed = || measured.iter().filter(|m| m.elapsed_ms > 0);
+    // With no point, the load measured here: the median of the runs that recorded it (each
+    // at most its whole run).
+    let load_here = match point {
+        Some(_) => None,
+        None => median(
+            timed()
+                .filter_map(|m| Some(m.load_ms?.min(m.elapsed_ms) as f64))
+                .collect(),
+        ),
+    };
+    let runs = timed()
+        .map(|m| {
             let (then_load, then_work) = scale.seconds(m.size, m.steps, m.pictures);
             let elapsed = m.elapsed_ms as f64;
-            let fixed = (then_load * 1000.0).min(elapsed);
+            // The run's own load, left out of what is scaled, and the load added back.
+            let (own, fixed) = match (point, m.load_ms, load_here) {
+                (Some(_), _, _) => {
+                    let load = (then_load * 1000.0).min(elapsed);
+                    (load, load)
+                }
+                (None, Some(own), Some(here)) => ((own as f64).min(elapsed), here),
+                // Recorded without its load: the whole run scaled.
+                (None, _, _) => (0.0, 0.0),
+            };
             // A run the point gives no work to scale from is kept as it was.
             let ratio = if then_work > 0.0 {
                 work / then_work
             } else {
                 1.0
             };
-            (m.elapsed_ms > 0).then_some(fixed + (elapsed - fixed) * ratio)
+            fixed + (elapsed - own) * ratio
         })
         .collect();
-    // `floor`: the least the range may start at.
-    let (ms, (low, high), measured, floor) = match (median(runs), point) {
-        (Some(ms), Some(_)) => (ms, MEASURED_RANGE, true, 0.0),
-        // With no point, the load cannot be told from the rest, so the whole run scaled:
-        // it never comes out below the shortest run measured here, and for settings no run
-        // here was made at, the range is as wide as a first guess's.
+    let (ms, (low, high), measured) = match (median(runs), point) {
+        (Some(ms), Some(_)) => (ms, MEASURED_RANGE, true),
+        // With no point, settings no run here was made at come from others by steps and
+        // size alone: the range is as wide as a first guess's.
         (Some(ms), None) => {
-            let made_here = measured.iter().any(|m| {
-                m.elapsed_ms > 0
-                    && m.size == size
-                    && m.steps == steps
-                    && m.pictures.max(1) == pictures.max(1)
+            let made_here = timed().any(|m| {
+                m.size == size && m.steps == steps && m.pictures.max(1) == pictures.max(1)
             });
-            let floor = shortest_run(measured);
-            if made_here {
-                (ms.max(floor), MEASURED_RANGE, true, 0.0)
+            let range = if made_here {
+                MEASURED_RANGE
             } else {
-                (ms.max(floor), GUESS_RANGE, true, floor)
-            }
+                GUESS_RANGE
+            };
+            (ms, range, true)
         }
-        (None, Some(_)) => ((load + work) * 1000.0, GUESS_RANGE, false, 0.0),
+        (None, Some(_)) => ((load + work) * 1000.0, GUESS_RANGE, false),
         (None, None) => return None,
     };
     let pad = if class.backend == "metal" && entry.kind == GenKind::Video {
@@ -169,20 +187,10 @@ pub fn estimate(
         1.0
     };
     Some(Eta {
-        low_ms: (ms * pad * low).max(floor).round() as u64,
+        low_ms: (ms * pad * low).round() as u64,
         high_ms: (ms * pad * high).round() as u64,
         measured,
     })
-}
-
-/// The shortest run measured here, in milliseconds (0 with none).
-fn shortest_run(measured: &[MeasuredRun]) -> f64 {
-    measured
-        .iter()
-        .map(|m| m.elapsed_ms)
-        .filter(|&ms| ms > 0)
-        .min()
-        .map_or(0.0, |ms| ms as f64)
 }
 
 /// How a run's time grows with its settings: from a speed point, its load once plus, per
@@ -393,6 +401,7 @@ mod tests {
             steps,
             pictures,
             elapsed_ms,
+            load_ms: None,
         }
     }
 
@@ -499,6 +508,15 @@ mod tests {
             got,
             eta((ms * 0.9).round() as u64, (ms * 1.15).round() as u64, true)
         );
+        // With a point, its load is the fixed part, whatever load the run recorded.
+        let recorded = [MeasuredRun {
+            load_ms: Some(20_000),
+            ..runs[0]
+        }];
+        assert_eq!(
+            estimate(&e, sq(512), 4, 1, &class("vulkan", 8), &recorded),
+            Some(got)
+        );
         // From a point far slower than this computer (170 s at 1024²), scaling the whole run
         // would give 5.9 s, under the load alone.
         let e = with_speed(klein(), "vulkan-8", 6.0, 40.0, 4.0);
@@ -513,30 +531,62 @@ mod tests {
     }
 
     #[test]
-    fn with_no_speed_point_the_time_never_falls_below_the_shortest_run_here() {
-        // No point to tell the load from the rest: scaling a 15 s run at 1024² down to 512²
-        // as a whole would give 2.5 s, under what the load alone took. It stays at the
-        // shortest run measured here, and the range never starts below it.
-        let runs = [
-            run(sq(1024), 4, 1, 15_000),
-            run(sq(1024), 8, 1, 25_000),
-            run(sq(768), 4, 1, 40_000),
-        ];
-        let got = estimate(&klein(), sq(512), 4, 1, &class("vulkan", 8), &runs).unwrap();
-        assert_eq!(got, eta(15_000, 22_500, true));
-        // Fewer steps than any run: the same floor.
-        let got = estimate(&klein(), sq(1024), 2, 1, &class("vulkan", 8), &runs).unwrap();
-        assert!(got.low_ms >= 15_000, "{got:?}");
+    fn with_no_speed_point_only_the_rest_after_the_load_measured_here_is_scaled() {
+        // One run here of 2 pictures in 100 s, 20 s of it loading: 1 picture at the same
+        // size and steps is that load and half the rest, 20 + 40 = 60 s. As no run here was
+        // made at these settings, the range is as wide as a first guess's.
+        let two = run(sq(1024), 4, 2, 100_000);
+        let loaded = MeasuredRun {
+            load_ms: Some(20_000),
+            ..two
+        };
+        let one_picture = |runs: &[MeasuredRun]| {
+            estimate(&klein(), sq(1024), 4, 1, &class("vulkan", 8), runs).unwrap()
+        };
+        assert_eq!(one_picture(&[loaded]), eta(45_000, 90_000, true));
+        // A run recorded without its load scales whole: 100 × 1/2 = 50 s, and nothing keeps
+        // it at the 2 pictures' time.
+        assert_eq!(one_picture(&[two]), eta(37_500, 75_000, true));
         // Settings a run was made at keep the narrow range of a time measured here.
+        assert_eq!(
+            estimate(&klein(), sq(1024), 4, 2, &class("vulkan", 8), &[loaded]),
+            Some(eta(90_000, 115_000, true))
+        );
+        // Fewer steps than any run here: 30 s scaled to 2 steps of 4 is 15 s, never the
+        // whole run's.
         let same = [run(sq(1024), 4, 1, 30_000)];
         assert_eq!(
-            estimate(&klein(), sq(1024), 4, 1, &class("vulkan", 8), &same),
-            Some(eta(27_000, 34_500, true))
+            estimate(&klein(), sq(1024), 2, 1, &class("vulkan", 8), &same),
+            Some(eta(11_250, 22_500, true))
         );
-        // With a speed point, the load is told apart, so a run scales below the shortest.
-        let e = with_speed(klein(), "vulkan-8", 1.0, 2.0, 1.0);
-        let got = estimate(&e, sq(512), 4, 1, &class("vulkan", 8), &same).unwrap();
-        assert!(got.high_ms < 30_000, "{got:?}");
+    }
+
+    #[test]
+    fn with_no_speed_point_the_fixed_part_is_the_median_load_measured_here() {
+        let with_load = |elapsed_ms, load_ms| MeasuredRun {
+            load_ms: Some(load_ms),
+            ..run(sq(1024), 4, 1, elapsed_ms)
+        };
+        let two_pictures = |runs: &[MeasuredRun]| {
+            estimate(&klein(), sq(1024), 4, 2, &class("vulkan", 8), runs).unwrap()
+        };
+        // Loads of 10, 30 and 35 s: 30 s is the fixed part of each, and each run's rest after
+        // its own load (40, 40 and 25 s) doubles for 2 pictures: 110, 110 and 80 s.
+        let runs = [
+            with_load(50_000, 10_000),
+            with_load(70_000, 30_000),
+            with_load(60_000, 35_000),
+        ];
+        assert_eq!(two_pictures(&runs), eta(82_500, 165_000, true));
+        // A run with no load recorded scales whole beside one that has it: 20 + 30 × 2 = 80 s
+        // and 50 × 2 = 100 s, whose median is 90 s.
+        let runs = [with_load(50_000, 20_000), run(sq(1024), 4, 1, 50_000)];
+        assert_eq!(two_pictures(&runs), eta(67_500, 135_000, true));
+        // A run that was all load (its load at or past its end) has nothing to scale.
+        assert_eq!(
+            two_pictures(&[with_load(30_000, 45_000)]),
+            eta(22_500, 45_000, true)
+        );
     }
 
     #[test]
