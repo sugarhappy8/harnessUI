@@ -4,18 +4,20 @@ import {
   engineDownloadWords,
   STUDIO_ACTIONS,
   STUDIO_CARD,
-  STUDIO_CONFIRM,
   STUDIO_DOCK,
   STUDIO_PRICE,
   STUDIO_QUEUE,
-  STUDIO_TIME,
 } from "../../lib/words";
 import { toErrorInfo, useApp } from "../../store/app";
 import { listedModel, useStudio, type StudioState } from "../../store/studio";
-import { valueWords } from "./canonical";
 import { COST_TONE_CLASS, costTone, formatUsd } from "./cost";
 import { etaText, timeWords } from "./eta";
-import type { Canonical, MediaModel, Run } from "./types";
+import { settingsParts } from "./settingsLine";
+import { CARD_BUTTON } from "./styles";
+import type { Run } from "./types";
+import { Working } from "./Working";
+
+export { localLine } from "./Working";
 
 // A run's card in Studio's stream (0.1.0 Task B8; design Wireframe 3, local addendum Wireframe
 // L4): the prompt; the settings line (model, where it ran, its settings, then the estimate and
@@ -27,14 +29,12 @@ import type { Canonical, MediaModel, Run } from "./types";
 // Stop watching while it works, *Get it anyway* and *Check again* for a video (never a create),
 // the engine's or a damaged model's download, Edit prompt after a refusal (which is never
 // retried), and Again. The results row (tiles) and the other actions are Task B9's. Esc never
-// cancels a card. The card follows the run's newest state in the store.
+// cancels a card. The card follows the run's newest state in the store. The settings line is
+// built in settingsLine.ts, the status line of a run still working in Working.tsx.
 
 /** The parts of the queue strip, in its order. */
 const QUEUE_ORDER = ["making", "waiting", "done", "stopped", "failed"] as const;
 type QueueState = (typeof QUEUE_ORDER)[number];
-
-/** The local stages before a step was timed: the first guess stands in for the time left. */
-const BEFORE_A_STEP: ReadonlySet<string | null> = new Set([null, "loading", "readingPrompt", "drawing"]);
 
 /** The finished runs the usual time is taken from. */
 const USUAL_OF_LAST = 10;
@@ -72,15 +72,17 @@ export function queueSummary(runs: Run[]): string {
     .join(STUDIO_CARD.joiner);
 }
 
-/** How long model `model`'s runs usually take, in seconds: the median of its last 10 finished
- *  runs (by when they finished); `null` before one finished. */
-export function usualSeconds(runs: Run[], model: string): number | null {
-  const finished = runs.flatMap((r) =>
-    r.model === model && r.status === "done" && r.startedAt !== null && r.finishedAt !== null
-      ? [{ at: r.finishedAt, seconds: (r.finishedAt - r.startedAt) / 1000 }]
-      : [],
-  );
-  const times = finished
+/** A finished run's time, in seconds, with when it finished; `null` for a run not finished. */
+function finishedTime(run: Run): { at: number; seconds: number } | null {
+  return run.status === "done" && run.startedAt !== null && run.finishedAt !== null
+    ? { at: run.finishedAt, seconds: (run.finishedAt - run.startedAt) / 1000 }
+    : null;
+}
+
+/** The median, in seconds, of the last 10 of `finished` (by when they finished); `null` for
+ *  none. */
+function usualOf(finished: { at: number; seconds: number }[]): number | null {
+  const times = [...finished]
     .sort((a, b) => b.at - a.at)
     .slice(0, USUAL_OF_LAST)
     .map((f) => f.seconds)
@@ -90,49 +92,28 @@ export function usualSeconds(runs: Run[], model: string): number | null {
   return times.length % 2 === 1 ? (times[mid] ?? null) : ((times[mid - 1] ?? 0) + (times[mid] ?? 0)) / 2;
 }
 
-/** A time on a clock: "0:21", "1:12", "1:02:05". */
-function clock(ms: number): string {
-  const total = Math.max(0, Math.floor(ms / 1000));
-  const hours = Math.floor(total / 3600);
-  const minutes = Math.floor((total % 3600) / 60);
-  const seconds = String(total % 60).padStart(2, "0");
-  return hours > 0 ? `${hours}:${String(minutes).padStart(2, "0")}:${seconds}` : `${minutes}:${seconds}`;
+/** How long model `model`'s runs usually take, in seconds: the median of its last 10 finished
+ *  runs (by when they finished); `null` before one finished. */
+export function usualSeconds(runs: Run[], model: string): number | null {
+  return usualOf(runs.flatMap((r) => (r.model === model ? (finishedTime(r) ?? []) : [])));
 }
 
-/** When a run started working (when it was recorded, before that is known). */
-function startOf(run: Run): number {
-  return run.startedAt ?? run.createdAt;
-}
-
-/**
- * A local run's status line while it runs: the picture of several, the stage (the pass and step
- * while drawing), the time so far, then the time left as timed live from this run's steps
- * ("about 0:30 left"); before a step is timed, the estimate (`etaText`, "(first guess)" until
- * measured here) stands in for it, and while decoding or saving no time is said.
- * "Picture 1 of 2 · step 3 of 4 · 0:21 so far · about 0:30 left".
- */
-export function localLine(run: Run, now: number): string {
-  const local = run.local;
-  const stage = local?.stage ?? null;
-  const parts: string[] = [];
-  if (local?.picture != null && local.pictures != null && local.pictures > 1) {
-    parts.push(STUDIO_CARD.picture(local.picture, local.pictures));
+/** `usualSeconds` of every model with a finished run among `runs`, worked out in one pass. */
+function usualTimes(runs: Run[]): Map<string, number> {
+  const byModel = new Map<string, { at: number; seconds: number }[]>();
+  for (const run of runs) {
+    const time = finishedTime(run);
+    if (!time) continue;
+    const finished = byModel.get(run.model);
+    if (finished) finished.push(time);
+    else byModel.set(run.model, [time]);
   }
-  if (stage === "drawing" && local?.step != null && local.steps != null) {
-    if (local.pass != null && local.passes != null && local.passes > 1) parts.push(STUDIO_CARD.pass(local.pass, local.passes));
-    parts.push(STUDIO_CARD.step(local.step, local.steps));
-  } else {
-    parts.push(stage === null ? STUDIO_CARD.starting : STUDIO_CARD.stage[stage]);
+  const times = new Map<string, number>();
+  for (const [model, finished] of byModel) {
+    const usual = usualOf(finished);
+    if (usual !== null) times.set(model, usual);
   }
-  parts.push(STUDIO_CARD.soFar(clock(now - startOf(run))));
-  const left = run.eta?.leftMs ?? null;
-  if (left !== null) {
-    parts.push(STUDIO_CARD.left(clock(left)));
-  } else if (BEFORE_A_STEP.has(stage)) {
-    const guess = etaText(run.eta);
-    if (guess) parts.push(guess);
-  }
-  return parts.join(STUDIO_CARD.joiner);
+  return times;
 }
 
 /** Whether `run` is still working: queued, sending, running, downloading, or a video Studio is
@@ -166,62 +147,23 @@ function knownRuns(s: Pick<StudioState, "live" | "recentRuns" | "runs">): Run[] 
   return [...byId.values()];
 }
 
-/** The settings line after the model and where it ran, from the run's own settings (the model
- *  as listed names their fields, else their usual keys): a cloud run's length, shape,
- *  resolution, size, sound, count, seed and added pictures; a local run's exact size (else its
- *  results', else its shape), length, resolution, count, seed and added pictures. */
-function settingsParts(run: Run, model: MediaModel | null): string[] {
-  const field = (canonical: Canonical) => model?.params.find((p) => p.canonical === canonical);
-  const value = (canonical: Canonical, key: string): unknown => {
-    const v = run.params[field(canonical)?.key ?? key];
-    return v === undefined || v === null || v === "" ? null : v;
-  };
-  const words = (canonical: Canonical, key: string): string | null => {
-    const v = value(canonical, key);
-    return v === null ? null : valueWords(v, field(canonical));
-  };
-  const size = (): string | null => {
-    const v = value("size", "size");
-    const sides = typeof v === "string" ? v.split("x") : [];
-    return sides.length === 2 ? STUDIO_CARD.size(sides[0] ?? "", sides[1] ?? "") : v === null ? null : String(v);
-  };
-  const length = (): string | null => {
-    const v = value("length", "duration");
-    if (v === null) return null;
-    return field("length") ? valueWords(v, field("length")) : typeof v === "number" ? STUDIO_TIME.seconds(v) : String(v);
-  };
-  const sound = value("sound", "generate_audio");
-  const count = value("count", "n");
-  const seed = value("seed", "seed");
-  const refs: string[] = [];
-  const references = run.refs.filter((r) => (r.role ?? "reference") === "reference").length;
-  if (run.refs.some((r) => r.role === "startFrame")) refs.push(STUDIO_CARD.startFrame);
-  if (run.refs.some((r) => r.role === "endFrame")) refs.push(STUDIO_CARD.endFrame);
-  if (references > 0) refs.push(STUDIO_CARD.addedPictures(references));
-  const output = run.outputs[0];
-  const shown =
-    run.runsOn === "local"
-      ? [
-          size() ??
-            (output?.width != null && output.height != null
-              ? STUDIO_CARD.size(String(output.width), String(output.height))
-              : words("shape", "aspect_ratio")),
-          length(),
-          words("resolution", "resolution"),
-        ]
-      : [
-          length(),
-          words("shape", "aspect_ratio"),
-          words("resolution", "resolution"),
-          size(),
-          typeof sound === "boolean" ? STUDIO_CONFIRM.sound(sound) : null,
-        ];
-  return [
-    ...shown,
-    typeof count === "number" && count > 1 ? STUDIO_CARD.count(count) : null,
-    seed === null ? null : STUDIO_CARD.seed(String(seed)),
-    ...refs,
-  ].filter((p): p is string => p !== null);
+/** The store's runs `usualTimesOf` last worked from, and what it found. */
+let usualMemo: {
+  live: StudioState["live"];
+  recentRuns: Run[];
+  runs: Run[];
+  times: ReadonlyMap<string, number>;
+} | null = null;
+
+/** How long each model's runs usually take, in seconds, from every run the store knows of. A
+ *  selector every video card shares: it is worked out again only when the store's runs change
+ *  (not on each card, nor on an update of something else), however many cards ask. */
+export function usualTimesOf(s: Pick<StudioState, "live" | "recentRuns" | "runs">): ReadonlyMap<string, number> {
+  const memo = usualMemo;
+  if (memo && memo.live === s.live && memo.recentRuns === s.recentRuns && memo.runs === s.runs) return memo.times;
+  const times = usualTimes(knownRuns(s));
+  usualMemo = { live: s.live, recentRuns: s.recentRuns, runs: s.runs, times };
+  return times;
 }
 
 /** The figure at the end of the settings line: a cloud run's estimate, then what it cost; a
@@ -274,8 +216,6 @@ function useNow(active: boolean): number {
 }
 
 const CARD = "enter flex flex-col gap-1.5 rounded-xl border border-border bg-surface p-3.5 shadow-soft";
-const BUTTON =
-  "rounded-lg border border-border bg-bg px-2.5 py-1 text-sm hover:border-border-strong hover:bg-bg-muted disabled:opacity-60";
 const LINK = "shrink-0 text-xs underline hover:text-fg disabled:opacity-60";
 
 /** One run's card. */
@@ -287,7 +227,7 @@ export function RunCard(props: { run: Run }) {
   );
   const engine = useStudio((s) => s.local?.engine ?? null);
   const usual = useStudio((s) =>
-    run.kind === "video" && !local ? usualSeconds(knownRuns(s), run.model) : null,
+    run.kind === "video" && !local ? (usualTimesOf(s).get(run.model) ?? null) : null,
   );
   const unloaded = run.local?.unloadedChat ?? null;
   const chatLoaded = useApp(
@@ -298,7 +238,9 @@ export function RunCard(props: { run: Run }) {
   );
   const working = isWorking(run);
   const now = useNow(working && run.status !== "queued");
-  // An action on its way (its buttons wait), and why the last one failed.
+  // An action on its way (its buttons wait), and why the last one failed: every action on the
+  // card, the status line's (Working's answer to "Unload the chat model?") too, runs through
+  // `perform` and is said at the card's foot with its next step.
   const [busy, setBusy] = useState(false);
   const [failure, setFailure] = useState<ErrorInfo | null>(null);
   const [repairing, setRepairing] = useState(false);
@@ -340,7 +282,9 @@ export function RunCard(props: { run: Run }) {
   );
   const figure = figureOf(run);
   const error = run.error;
-  const ended = !working && run.status !== "done" && !(run.status === "waiting" && !run.watching);
+  // A waiting video has not ended: Studio follows it, will follow it again, or stopped checking
+  // after its 30 minutes (stale).
+  const ended = !working && run.status !== "done" && run.status !== "waiting";
   const charge = chargeLine(run);
   const pct = run.progress === null ? null : Math.round(Math.min(1, Math.max(0, run.progress)) * 100);
   const engineMissing = local && run.status === "failed" && error?.code === "studio_engine_missing";
@@ -378,15 +322,20 @@ export function RunCard(props: { run: Run }) {
           />
         </div>
       )}
-      {working && <Working run={run} now={now} usual={usual} busy={busy} onCancel={cancel} />}
-      {run.status === "waiting" && !run.watching && (
-        <div className="flex flex-wrap items-center gap-2 text-sm">
-          <p>{STUDIO_CARD.stillNotReady}</p>
-          <button type="button" className={BUTTON} disabled={busy} onClick={fetchAnyway}>
-            {STUDIO_CARD.checkAgain}
-          </button>
-        </div>
-      )}
+      {working && <Working run={run} now={now} usual={usual} busy={busy} perform={perform} onCancel={cancel} />}
+      {run.status === "waiting" &&
+        !run.watching &&
+        (run.stale ? (
+          <div className="flex flex-wrap items-center gap-2 text-sm">
+            <p>{STUDIO_CARD.stillNotReady}</p>
+            <button type="button" className={CARD_BUTTON} disabled={busy} onClick={fetchAnyway}>
+              {STUDIO_CARD.checkAgain}
+            </button>
+          </div>
+        ) : (
+          // Not followed yet (read from the saved runs before its watch resumes): it just waits.
+          <p className="text-sm text-fg-muted">{STUDIO_CARD.queued(null)}</p>
+        ))}
 
       {local && working && (
         <>
@@ -436,7 +385,7 @@ export function RunCard(props: { run: Run }) {
           {offerEngine && engine && (
             <button
               type="button"
-              className={BUTTON}
+              className={CARD_BUTTON}
               title={engine.licenseName}
               disabled={busy}
               onClick={() => perform(() => store().downloadEngine())}
@@ -447,7 +396,7 @@ export function RunCard(props: { run: Run }) {
           {fileBad && !repairing && (
             <button
               type="button"
-              className={BUTTON}
+              className={CARD_BUTTON}
               disabled={busy}
               onClick={() => perform(() => store().repairLocal(run.model), () => setRepairing(true))}
             >
@@ -455,16 +404,16 @@ export function RunCard(props: { run: Run }) {
             </button>
           )}
           {canGetAnyway(run) && (
-            <button type="button" className={BUTTON} disabled={busy} onClick={fetchAnyway}>
+            <button type="button" className={CARD_BUTTON} disabled={busy} onClick={fetchAnyway}>
               {STUDIO_CARD.getAnyway}
             </button>
           )}
           {run.status === "blocked" ? (
-            <button type="button" className={BUTTON} onClick={editPrompt}>
+            <button type="button" className={CARD_BUTTON} onClick={editPrompt}>
               {STUDIO_CARD.editPrompt}
             </button>
           ) : (
-            <button type="button" className={BUTTON} disabled={busy} onClick={again}>
+            <button type="button" className={CARD_BUTTON} disabled={busy} onClick={again}>
               {local && ended ? STUDIO_CARD.runAgain : STUDIO_CARD.again}
             </button>
           )}
@@ -487,98 +436,5 @@ export function RunCard(props: { run: Run }) {
         </div>
       )}
     </article>
-  );
-}
-
-/** The status line of a run still working, with what stops it: where it waits in the queue, or
- *  what a local run waits for (and the question to unload the chat model), "Making it" with a
- *  timer (a video's time so far and usual time, and that the app may be closed), or a local
- *  run's stage, step and time left. */
-function Working(props: { run: Run; now: number; usual: number | null; busy: boolean; onCancel(): void }) {
-  const { run, now, usual, busy } = props;
-  const local = run.runsOn === "local";
-  const waitingFor = run.local?.waitingFor ?? null;
-  const [answering, setAnswering] = useState(false);
-  const [failure, setFailure] = useState<ErrorInfo | null>(null);
-  const answer = (unload: boolean) => {
-    setAnswering(true);
-    setFailure(null);
-    useStudio
-      .getState()
-      .answerUnload(run.id, unload)
-      .then(
-        () => setAnswering(false),
-        (e: unknown) => {
-          setAnswering(false);
-          setFailure(toErrorInfo(e));
-        },
-      );
-  };
-  const stopButton = (label: string) => (
-    <button type="button" className={BUTTON} disabled={busy} onClick={props.onCancel}>
-      {label}
-    </button>
-  );
-
-  if (run.status === "queued") {
-    return (
-      <div className="flex flex-col gap-1.5 text-sm">
-        {waitingFor === "answer" ? (
-          <div className="flex flex-wrap items-center gap-2">
-            <p className="min-w-0 flex-1">{STUDIO_CARD.askUnload}</p>
-            <button type="button" className={BUTTON} disabled={answering} onClick={() => answer(true)}>
-              {STUDIO_CARD.unload}
-            </button>
-            <button type="button" className={BUTTON} disabled={answering} onClick={() => answer(false)}>
-              {STUDIO_CARD.keepChat}
-            </button>
-            {stopButton(STUDIO_CARD.cancel)}
-          </div>
-        ) : (
-          <div className="flex flex-wrap items-center gap-2">
-            <p className="min-w-0 flex-1 text-fg-muted">
-              {waitingFor === null ? STUDIO_CARD.queued(run.queuePosition) : STUDIO_CARD.waitingFor[waitingFor]}
-            </p>
-            {stopButton(STUDIO_CARD.cancel)}
-          </div>
-        )}
-        {failure && <p className="text-xs text-danger">{failure.message}</p>}
-      </div>
-    );
-  }
-
-  if (local) {
-    return (
-      <div className="flex flex-wrap items-center gap-2 text-sm">
-        <p className="min-w-0 flex-1 tabular-nums">{localLine(run, now)}</p>
-        {stopButton(STUDIO_CARD.stop)}
-      </div>
-    );
-  }
-
-  const elapsed = clock(now - startOf(run));
-  if (run.kind === "video") {
-    const usually =
-      usual === null
-        ? null
-        : etaText({ lowMs: usual * 1000, highMs: usual * 1000, measured: true, leftMs: null });
-    const line = [STUDIO_CARD.making, STUDIO_CARD.soFar(elapsed), usually && STUDIO_CARD.usually(usually)]
-      .filter((p): p is string => typeof p === "string")
-      .join(STUDIO_CARD.joiner);
-    return (
-      <div className="flex flex-col gap-1 text-sm">
-        <p className="tabular-nums">{line}</p>
-        <div className="flex flex-wrap items-center gap-2">
-          <p className="min-w-0 flex-1 text-xs text-fg-muted">{STUDIO_CARD.keepWorking}</p>
-          {stopButton(STUDIO_CARD.stopWatching)}
-        </div>
-      </div>
-    );
-  }
-  return (
-    <div className="flex flex-wrap items-center gap-2 text-sm">
-      <p className="min-w-0 flex-1 tabular-nums">{`${STUDIO_CARD.making}${STUDIO_CARD.joiner}${elapsed}`}</p>
-      {stopButton(STUDIO_CARD.cancel)}
-    </div>
   );
 }

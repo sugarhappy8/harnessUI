@@ -12,7 +12,7 @@ vi.mock("../../lib/ipc", () => ({ isTauri: () => true }));
 vi.mock("./api");
 
 const api = await import("./api");
-const { RunCard, localLine, queueSummary, usualSeconds } = await import("./RunCard");
+const { RunCard, localLine, queueSummary, usualSeconds, usualTimesOf } = await import("./RunCard");
 const { useStudio } = await import("../../store/studio");
 const { useApp } = await import("../../store/app");
 
@@ -253,6 +253,15 @@ describe("RunCard", () => {
       expect(api.studioStart).not.toHaveBeenCalled();
     });
 
+    it("a waiting video Studio does not follow yet, its watch not run out, just waits", async () => {
+      // As read from the saved runs before its watch resumes: not followed, but not stale.
+      await show(video({ status: "waiting", watching: false, stale: false }));
+      screen.getByText("Waiting");
+      expect(screen.queryByText("Still not ready.")).toBeNull();
+      noButton("Check again");
+      noButton("Again");
+    });
+
     it("a refused run explains it and offers no retry", async () => {
       await show(
         run({
@@ -373,6 +382,20 @@ describe("RunCard", () => {
       expect(usualSeconds([...runs, done(5, 500, "other"), run({ status: "failed" })], RUN.model)).toBe(55);
       expect(usualSeconds(runs, "other")).toBeNull();
     });
+
+    it("the usual times are worked out once per change of the store's runs, whichever card asks", () => {
+      const done = (seconds: number, finishedAt: number): Run =>
+        run({ id: `u${finishedAt}`, status: "done", startedAt: finishedAt - seconds * 1000, finishedAt });
+      const s = { live: {}, recentRuns: [], runs: [done(100, 1), done(120, 2), done(150, 3)] };
+      const times = usualTimesOf(s);
+      expect(times.get(RUN.model)).toBe(120);
+      // The same runs (another card, or an update of something else): the same answer, kept.
+      expect(usualTimesOf({ ...s })).toBe(times);
+      // New runs: worked out again.
+      const more = { ...s, runs: [...s.runs, done(200, 4)] };
+      expect(usualTimesOf(more).get(RUN.model)).toBe(135);
+      expect(usualTimesOf(more).get(RUN.model)).toBe(usualSeconds(more.runs, RUN.model));
+    });
   });
 
   describe("a local run", () => {
@@ -445,6 +468,37 @@ describe("RunCard", () => {
       await show(queued("chatModelLoading"));
       screen.getByText("Waiting for the chat model to finish loading.");
       button("Cancel");
+    });
+
+    it("an answer to the question waits like the card's other actions, and a failed one says what to do", async () => {
+      let refuse: (e: unknown) => void = () => undefined;
+      vi.mocked(api.studioAnswerUnload).mockImplementation(
+        () => new Promise((_, reject) => (refuse = reject)),
+      );
+      await show(
+        localRun(
+          { id: "ask", status: "queued", outputs: [], startedAt: null, finishedAt: null },
+          { waitingFor: "answer", elapsedMs: null },
+        ),
+      );
+      await click(button("Unload"));
+      expect(api.studioAnswerUnload).toHaveBeenCalledWith("ask", true);
+      // On its way: the answers and Cancel wait.
+      for (const name of ["Unload", "Keep the chat model", "Cancel"]) {
+        expect((button(name) as HTMLButtonElement).disabled).toBe(true);
+      }
+      await act(async () =>
+        refuse({
+          code: "studio_failed",
+          message: "The chat model could not be unloaded.",
+          nextStep: "Try again when the chat reply ends.",
+          details: "",
+        }),
+      );
+      await flush();
+      screen.getByText("The chat model could not be unloaded.");
+      screen.getByText("Try again when the chat reply ends.");
+      expect((button("Unload") as HTMLButtonElement).disabled).toBe(false);
     });
 
     it("the unloaded chat model can be loaded again from the card", async () => {

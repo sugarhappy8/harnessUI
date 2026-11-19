@@ -254,6 +254,25 @@ describe("Esc", () => {
     fireEvent.keyDown(window, { key: "Escape" });
     expect(ipcMock.stopGeneration).toHaveBeenCalledWith(4);
   });
+
+  it("that closes a dialog leaves the reply being written alone", async () => {
+    let asked: (() => void) | null = null;
+    vi.mocked(studioApi.onQuitRequested).mockImplementation(async (handler) => {
+      asked = handler;
+      return () => {};
+    });
+    await renderApp();
+    useApp.setState({ activeChatId: 1, generation: turn(1) });
+    act(() => asked!());
+    screen.getByText(/Quitting stops it/);
+    // Pressed in the dialog: Radix closes it on the document, and the key goes on to the window.
+    fireEvent.keyDown(document.activeElement ?? document.body, { key: "Escape" });
+    expect(screen.queryByText(/Quitting stops it/)).toBeNull();
+    expect(ipcMock.stopGeneration).not.toHaveBeenCalled();
+    // With no dialog open, Esc stops the reply.
+    fireEvent.keyDown(document.activeElement ?? document.body, { key: "Escape" });
+    expect(ipcMock.stopGeneration).toHaveBeenCalledWith(1);
+  });
 });
 
 // 0.1.0 Studio: a view beside the chat, which keeps running (and keeps its draft) while

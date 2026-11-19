@@ -91,6 +91,9 @@ export default function App() {
 
   useEffect(() => {
     function onKey(event: KeyboardEvent) {
+      // A key something on screen already took: Esc that closed a dialog (Radix prevents its
+      // default but lets it reach the window) or a popup, never also the reply being written.
+      if (event.defaultPrevented) return;
       const mod = event.metaKey || event.ctrlKey;
       if (mod && event.key === ",") {
         event.preventDefault();

@@ -2,7 +2,7 @@
 // `studio-quit-requested` when the main window is closed, or the app quit, while a picture or
 // video is being made on this computer; Quit and stop stops it and quits, once.
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, within } from "@testing-library/react";
 import { LOCAL_RUN } from "./fixtures/models";
 
 vi.mock("../../lib/ipc", () => ({ isTauri: () => true }));
@@ -67,6 +67,28 @@ describe("QuitWhileMaking", () => {
     });
     expect(screen.queryByText(/Quitting stops it/)).toBeNull();
     expect(api.studioQuitNow).not.toHaveBeenCalled();
+  });
+
+  it("a quit that failed says why and what to do, and can be pressed again", async () => {
+    vi.mocked(api.studioQuitNow).mockRejectedValueOnce({
+      code: "studio_failed",
+      message: "The local run could not be stopped.",
+      nextStep: "Stop it in Studio, then quit.",
+      details: "",
+    });
+    useStudio.setState({ live: { p: { ...LOCAL_RUN, id: "p", status: "running" } } });
+    await mount();
+    act(() => asked!());
+    fireEvent.click(screen.getByRole("button", { name: "Quit and stop" }));
+    await flush();
+    within(screen.getByRole("alertdialog")).getByText("The local run could not be stopped.");
+    within(screen.getByRole("alertdialog")).getByText("Stop it in Studio, then quit.");
+    const again = screen.getByRole<HTMLButtonElement>("button", { name: "Quit and stop" });
+    expect(again.disabled).toBe(false);
+    fireEvent.click(again);
+    await flush();
+    expect(api.studioQuitNow).toHaveBeenCalledTimes(2);
+    expect(screen.queryByText("The local run could not be stopped.")).toBeNull();
   });
 
   it("stops listening when it goes", async () => {
