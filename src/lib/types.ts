@@ -453,6 +453,10 @@ export interface DownloadGroup {
   /** 0.1.0 Studio: what the picture or video model this group downloads makes; `null` (or
    *  left out) for a chat model's. */
   generatorKind?: "image" | "image-edit" | "video" | null;
+  /** 0.1.0 Studio: the installed id of the picture or video model this group downloads (its
+   *  catalog id, or a searched file's `hf:<owner>/<repo>:<file>`); `null` (or left out) for a
+   *  chat model's. */
+  genModelId?: string | null;
 }
 
 export interface ModelSummaryView {

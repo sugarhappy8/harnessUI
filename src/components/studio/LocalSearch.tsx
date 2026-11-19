@@ -7,8 +7,8 @@ import { toErrorInfo } from "../../store/app";
 import { useStudio, type StudioTab } from "../../store/studio";
 import { ErrorBanner } from "../ErrorBanner";
 import { visiblePath } from "../FolderChip";
-import { FitLine, LicenceBadge, TimeLine } from "./LocalModelRow";
-import { offerForFile } from "./localOffers";
+import { DownloadProgress, FitLine, LicenceBadge, TimeLine, useModelDownload } from "./LocalModelRow";
+import { offerForFile, searchedModelId } from "./localOffers";
 import { CARD_BUTTON, PRIMARY_BUTTON } from "./styles";
 import type { LocalFileChoice, LocalModels, LocalRepo } from "./types";
 
@@ -16,10 +16,10 @@ import type { LocalFileChoice, LocalModels, LocalRepo } from "./types";
 // Search or Enter (never as typing goes) and when one result is opened, and the box says first
 // that the words go to huggingface.co. A hit shows its downloads and the repository's own
 // licence label; opened, it is read at its latest commit and shows each file Studio recognises
-// with its parts, total size, licence and fit, and *Download*, or why it has none ("Not
-// supported yet", "Not offered in harnessUI"). A result whose licence is red shows its files only
-// while *Show non-commercial models* is ticked. Names from Hugging Face can hold any character:
-// they are shown with invisible ones as codes.
+// with its parts, total size, licence and fit, and *Download* (how far its download got while
+// it runs), or why it has none ("Not supported yet", "Not offered in harnessUI"). A result whose
+// licence is red shows its files only while *Show non-commercial models* is ticked. Names from
+// Hugging Face can hold any character: they are shown with invisible ones as codes.
 
 /** An opened search result: the repository's name, and what reading it gave (`null` while it
  *  is being read). */
@@ -182,6 +182,7 @@ function RepoResult(props: { repo: LocalRepo; local: LocalModels; tab: StudioTab
 function FileChoice(props: { repo: LocalRepo; file: LocalFileChoice; local: LocalModels; tab: StudioTab }) {
   const { repo, file: f, local, tab } = props;
   const setOffer = useStudio((s) => s.setOffer);
+  const download = useModelDownload(searchedModelId(repo.repo, f.file));
   return (
     <div className="flex flex-col gap-1 rounded-lg border border-border p-2.5">
       <p className="text-sm font-medium">
@@ -195,12 +196,18 @@ function FileChoice(props: { repo: LocalRepo; file: LocalFileChoice; local: Loca
       </ul>
       <FitLine fit={f.fit} />
       <TimeLine fit={f.fit} kind={tab} />
-      {f.fit.word !== "notHere" && (
+      {download ? (
         <div className="pt-1">
-          <button type="button" className={PRIMARY_BUTTON} onClick={() => setOffer(offerForFile(repo, f, local))}>
-            {LOCAL_MODELS.download}
-          </button>
+          <DownloadProgress group={download} name={visiblePath(f.file)} />
         </div>
+      ) : (
+        f.fit.word !== "notHere" && (
+          <div className="pt-1">
+            <button type="button" className={PRIMARY_BUTTON} onClick={() => setOffer(offerForFile(repo, f, local, tab))}>
+              {LOCAL_MODELS.download}
+            </button>
+          </div>
+        )
       )}
     </div>
   );

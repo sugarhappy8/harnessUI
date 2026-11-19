@@ -1,8 +1,9 @@
-import { useId, useState } from "react";
+import { useEffect, useId, useState } from "react";
 import { Tabs } from "radix-ui";
 import type { ErrorInfo } from "../../lib/types";
 import { amountGb, LOCAL_MODELS } from "../../lib/words";
 import { toErrorInfo } from "../../store/app";
+import { followDownloads } from "../../store/downloads";
 import { useStudio, type StudioTab } from "../../store/studio";
 import { ErrorBanner } from "../ErrorBanner";
 import { DownloadLocalModel } from "./DownloadLocalModel";
@@ -25,7 +26,9 @@ import type { HardwareLine, LocalEntry, LocalModels as LocalModelsData } from ".
 // is saved and sends nothing. *Download* sets the store's `offer` (localOffers.ts), which shows
 // the download confirmation (DownloadLocalModel.tsx, Task B14), or the content notice first
 // (LocalNotice.tsx) while it was never accepted; *What that means* shows the notice again, read
-// only.
+// only. While it is open it follows the app's downloads (store/downloads.ts), so a model that
+// downloads shows how far it got on its row, and once it is done the local models are read
+// again (it is installed now).
 
 /** What this computer has, as the header says it: "This computer: Radeon RX 7600, 8 GB graphics
  *  memory · 32 GB memory · 412 GB free"; on shared memory the computer's memory only (never the
@@ -76,6 +79,20 @@ export function LocalModels() {
   const [error, setError] = useState<ErrorInfo | null>(null);
   const titleId = useId();
   const fail = (e: unknown) => setError(toErrorInfo(e));
+
+  useEffect(
+    () =>
+      followDownloads((group) => {
+        // A picture or video model that finished downloading is installed now.
+        if (group.genModelId && group.status === "done") {
+          useStudio
+            .getState()
+            .refreshLocal()
+            .catch((e: unknown) => console.warn("Studio: the local models could not be read again", e));
+        }
+      }),
+    [],
+  );
 
   return (
     <section data-local-models aria-labelledby={titleId} className="flex flex-col gap-3">

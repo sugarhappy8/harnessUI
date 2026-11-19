@@ -9,29 +9,31 @@ import { ErrorBanner } from "../ErrorBanner";
 // The note about local models (0.1.0 Task B14, local addendum L1), word for word: once before
 // the first local download, where *I understand* records it with the backend (which refuses
 // local downloads until then) and *Cancel* downloads nothing; and read only, with *Close*,
-// from Get local models' footer and Settings → Studio.
+// from Get local models' footer and Settings → Studio. While *I understand* is on its way,
+// Cancel and Esc wait for it, so its refusal shows.
 
 /** The note; `onAccepted` follows *I understand* once the backend recorded it. Cancel, Close
- *  or Esc call `onClose`. */
+ *  or Esc call `onClose`, except while *I understand* is on its way. */
 export function LocalNotice(props: { open: boolean; readOnly?: boolean; onAccepted(): void; onClose(): void }) {
   const { open, onClose } = props;
+  const [busy, setBusy] = useState(false);
   return (
-    <AlertDialog.Root open={open} onOpenChange={(o) => !o && onClose()}>
+    <AlertDialog.Root open={open} onOpenChange={(o) => !o && !busy && onClose()}>
       <AlertDialog.Portal>
         <AlertDialog.Overlay className="dialog-overlay fixed inset-0" />
         <AlertDialog.Content className="fixed top-1/2 left-1/2 w-[30rem] max-w-[92vw] -translate-x-1/2 -translate-y-1/2 rounded-2xl border border-border bg-surface p-5 text-sm shadow-pop">
-          <Notice readOnly={props.readOnly ?? false} onAccepted={props.onAccepted} />
+          <Notice readOnly={props.readOnly ?? false} busy={busy} setBusy={setBusy} onAccepted={props.onAccepted} />
         </AlertDialog.Content>
       </AlertDialog.Portal>
     </AlertDialog.Root>
   );
 }
 
-/** The words and the buttons; what *I understand* is waiting for, or why it failed, goes
+/** The words and the buttons (`busy` while *I understand* is on its way); why it failed goes
  *  with the dialog when it closes. */
-function Notice(props: { readOnly: boolean; onAccepted(): void }) {
+function Notice(props: { readOnly: boolean; busy: boolean; setBusy(busy: boolean): void; onAccepted(): void }) {
+  const { busy, setBusy } = props;
   const acceptNotice = useStudio((s) => s.acceptNotice);
-  const [busy, setBusy] = useState(false);
   const [error, setError] = useState<ErrorInfo | null>(null);
 
   function accept() {
@@ -72,7 +74,10 @@ function Notice(props: { readOnly: boolean; onAccepted(): void }) {
           </AlertDialog.Cancel>
         ) : (
           <>
-            <AlertDialog.Cancel className="rounded-md border border-border px-3 py-1.5 hover:bg-bg-muted">
+            <AlertDialog.Cancel
+              disabled={busy}
+              className="rounded-md border border-border px-3 py-1.5 hover:bg-bg-muted disabled:opacity-60"
+            >
               {LOCAL_NOTICE.cancel}
             </AlertDialog.Cancel>
             <button

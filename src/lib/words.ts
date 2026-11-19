@@ -4,10 +4,12 @@
 // walks every value of the contract's enums.
 import type { Company, GpuPolicy, Licence, LocalFit, MediaKind, RefRole } from "../components/studio/types";
 import { APP_NAME } from "./app";
+import { formatEta } from "./format";
 import type {
   BackendKind,
   ContextSource,
   DeviceOption,
+  DownloadGroup,
   FitDevice,
   FitResult,
   GpuUse,
@@ -1844,6 +1846,8 @@ export const LOCAL_MODELS = {
   videoNote: "Local video is slower and simpler than cloud video, but free and private.",
   /** A time line without an estimate (nothing measured here, no first guess). */
   noTime: STUDIO_TIME.notYet.charAt(0).toUpperCase() + STUDIO_TIME.notYet.slice(1),
+  /** The bar of a model's download on its row, while it runs. */
+  downloading: (name: string) => `Downloading ${name}`,
   /** After *Download again*: what happens now. */
   repairing: "Its files are being checked; anything missing or damaged downloads again (Models → Downloads).",
   deleteTitle: (name: string) => `Delete ${name}?`,
@@ -1899,16 +1903,17 @@ export const DOWNLOAD_LOCAL = {
   },
   /** A part another model brought already: checked, not downloaded again. */
   alreadyHere: "already on this computer",
-  /** What the pictures you make may be used for, by the strictest licence (`verdict`). */
+  /** What the pictures or videos you make may be used for, by the strictest licence
+   *  (`verdict`): "Pictures you make: free for any use, including commercial.", "Videos you
+   *  make: …" for a video model. */
+  verdictLead: { image: "Pictures you make", video: "Videos you make" } as const satisfies Record<MediaKind, string>,
   verdict: {
-    yes: "Pictures you make: free for any use, including commercial.",
+    yes: "free for any use, including commercial.",
     underRevenue: (limit: string | null) =>
-      limit === null
-        ? "Pictures you make: commercial use only under a revenue limit."
-        : `Pictures you make: commercial use only under ${limit} revenue.`,
-    registration: "Pictures you make: commercial use only after registering with the publisher.",
-    unclear: "Pictures you make: check the licence before any commercial use.",
-    no: "Pictures you make: non-commercial use only.",
+      limit === null ? "commercial use only under a revenue limit." : `commercial use only under ${limit} revenue.`,
+    registration: "commercial use only after registering with the publisher.",
+    unclear: "check the licence before any commercial use.",
+    no: "non-commercial use only.",
   } as const satisfies Record<Licence["commercial"], string | ((limit: string | null) => string)>,
   /** The Studio engine comes with the model (Windows): "(29 MB, MIT licence)", from
    *  `engineSizeWords`. */
@@ -1935,7 +1940,8 @@ export const DOWNLOAD_LOCAL = {
     return [condition, ...duties].join(" ");
   },
   lowDisk: "This leaves less than 10 GB free on this disk.",
-  /** The link to a licence's text; with several licences, each says which it opens. */
+  /** The link to a licence's text; with several licences, each says which it opens (by its
+   *  name, the Studio engine's by its short word: "Read the licences (MIT)"). */
   readLicences: (name: string | null) => (name === null ? "Read the licences" : `Read the licences (${name})`),
   /** A licence or model page the browser did not open, and where to find it instead. */
   notOpened: "The page could not be opened in your browser.",
@@ -1955,6 +1961,28 @@ export const LOCAL_NOTICE = {
   cancel: "Cancel",
   close: "Close",
 } as const;
+
+/** What a download is doing, as Models → Downloads says it. [0.0.7 P6b] Checking a file
+ *  already there, or stopping and deleting its files after Cancel, each take a while. */
+function downloadStatusWords(g: DownloadGroup): string {
+  if (g.status === "downloading" && g.checking === true) return "checking the file…";
+  if (g.status === "cancelling") return "cancelling…";
+  return g.status;
+}
+
+/** A download's progress as Models → Downloads says it, also on a picture or video model's row
+ *  in Get local models (0.1.0 Task B14): "1.2 GB of 6.6 GB · downloading · 3 min left", with
+ *  " · no published checksum" when a file has none. `amount` writes the sizes (Models:
+ *  `formatBytes`; Studio: `amountGb`, as its model sizes are written). 0.0.7 (P6b review m5): no
+ *  time left while a file is checked. */
+export function downloadProgressWords(g: DownloadGroup, amount: (bytes: number) => string): string {
+  const checking = g.status === "downloading" && g.checking === true;
+  const eta = g.status === "downloading" && !checking ? formatEta(g.bytesTotal - g.bytesDone, g.bytesPerSecond) : null;
+  return (
+    `${amount(g.bytesDone)} of ${amount(g.bytesTotal)} · ${downloadStatusWords(g)}` +
+    `${eta ? ` · ${eta}` : ""}${g.unverified ? " · no published checksum" : ""}`
+  );
+}
 
 /** Models → Downloads: what a picture or video model's download is (Task B13). */
 export const DOWNLOAD_KIND_WORDS: Record<"image" | "image-edit" | "video", string> = {

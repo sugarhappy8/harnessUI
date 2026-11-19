@@ -11,6 +11,7 @@ import * as api from "../components/studio/api";
 import { ENGINE_LICENCE_ID, offerForEntry, type DownloadOffer } from "../components/studio/localOffers";
 import type { LocalModels, LocalRepo, LocalSearchHit, LocalSource } from "../components/studio/types";
 import { toErrorInfo } from "./app";
+import { useDownloads } from "./downloads";
 import type { StudioState, StudioTab } from "./studio";
 
 /** The part of Studio's state this module keeps. */
@@ -58,9 +59,10 @@ export interface StudioLocalState {
   offer: DownloadOffer | null;
   setOffer(offer: DownloadOffer | null): void;
   /** The download confirmation's Accept: `offer`'s download, with the hash of every licence
-   *  it lists (all of them were shown); then the offer is put away and the local models are
-   *  read again (a failed read leaves them as they were, and a trace). Rejects, keeping the
-   *  offer, when the download could not start. */
+   *  it lists (all of them were shown); then the offer is put away, and the app's downloads
+   *  (so the model's row shows its download at once) and the local models are read again (a
+   *  failed read leaves them as they were, and a trace). Rejects, keeping the offer, when the
+   *  download could not start. */
   downloadLocal(offer: DownloadOffer): Promise<void>;
   /** *I understand* on the note about local models: the backend records it (local downloads
    *  are refused until then), and the local models and preferences say so. */
@@ -126,6 +128,10 @@ export function createLocal(
     downloadLocal: async (offer) => {
       await api.studioLocalDownload(offer.source, offer.licences.map((l) => l.sha256));
       set((s) => (s.offer === offer ? { offer: null } : {}));
+      await useDownloads
+        .getState()
+        .read()
+        .catch((e: unknown) => console.warn("Studio: the downloads could not be read", e));
       await get()
         .refreshLocal()
         .catch((e: unknown) => console.warn("Studio: the local models could not be read again", e));
@@ -159,6 +165,7 @@ export function repairOffer(local: LocalModels, genModelId: string, source: Loca
       offer = {
         // As it came: the dialog shows it with invisible characters as codes.
         name: row.name,
+        kind: row.kind,
         source,
         parts: [],
         licences: [engine],

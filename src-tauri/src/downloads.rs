@@ -298,6 +298,10 @@ pub struct DownloadGroupDto {
     /// 0.1.0 Studio: what the picture or video model this group downloads makes (`image`,
     /// `image-edit` or `video`), so Downloads labels it; `None` for a chat model's group.
     pub generator_kind: Option<String>,
+    /// 0.1.0 Studio: the installed id of the picture or video model this group downloads
+    /// ([`GenGroup::gen_model_id`]), so Get local models shows its progress on that model's
+    /// row; `None` for a chat model's group.
+    pub gen_model_id: Option<String>,
 }
 
 #[derive(Default)]
@@ -1110,6 +1114,10 @@ impl DownloadManager {
                 .as_ref()
                 .and_then(|m| m.generator.as_ref())
                 .map(|g| g.kind.clone()),
+            gen_model_id: meta
+                .as_ref()
+                .and_then(|m| m.generator.as_ref())
+                .map(|g| g.gen_model_id.clone()),
         }))
     }
 
@@ -3623,7 +3631,8 @@ mod tests {
         );
     }
 
-    /// Downloads labels a picture or video model's group by what it makes.
+    /// Downloads labels a picture or video model's group by what it makes, and the group says
+    /// which installed model it downloads (Get local models shows its progress on that row).
     #[tokio::test]
     async fn a_picture_or_video_models_download_says_what_it_makes() {
         let dir = Scratch::new();
@@ -3664,6 +3673,16 @@ mod tests {
         );
         assert_eq!(
             serde_json::to_value(&chat).unwrap()["generatorKind"],
+            serde_json::Value::Null
+        );
+        assert_eq!(chat.gen_model_id, None);
+        assert_eq!(clip.gen_model_id.as_deref(), Some("flux2-klein-4b-q4"));
+        assert_eq!(
+            serde_json::to_value(&clip).unwrap()["genModelId"],
+            "flux2-klein-4b-q4"
+        );
+        assert_eq!(
+            serde_json::to_value(&chat).unwrap()["genModelId"],
             serde_json::Value::Null
         );
     }

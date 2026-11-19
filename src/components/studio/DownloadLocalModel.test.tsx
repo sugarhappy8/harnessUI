@@ -8,23 +8,21 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { amountGb } from "../../lib/words";
 import { LOCAL } from "./fixtures/models";
-import type { Licence, LocalModels, StudioPrefs, Usage } from "./types";
+import type { Licence } from "./types";
 
-// Radix positions menus with ResizeObserver, which jsdom does not have.
-globalThis.ResizeObserver ??= class {
-  observe() {}
-  unobserve() {}
-  disconnect() {}
-} as unknown as typeof ResizeObserver;
-
-vi.mock("../../lib/ipc", () => ({ isTauri: () => true }));
+// Get local models follows the app's downloads: none here.
+vi.mock("../../lib/ipc", () => ({
+  isTauri: () => true,
+  listDownloads: () => Promise.resolve([]),
+  onDownloadProgress: () => Promise.resolve(() => undefined),
+}));
 vi.mock("./api");
 const openUrl = vi.hoisted(() => vi.fn<(url: string) => Promise<void>>());
 vi.mock("@tauri-apps/plugin-opener", () => ({ openUrl }));
 
 const api = await import("./api");
-const { StudioView } = await import("./StudioView");
 const { DownloadLocalModel, verdict } = await import("./DownloadLocalModel");
+const { PREFS, click, flush, showLocal } = await import("./testing/local");
 const { offerForEntry } = await import("./localOffers");
 const { useStudio } = await import("../../store/studio");
 
@@ -34,30 +32,6 @@ const INITIAL = useStudio.getState();
 
 const zimage = LOCAL.recommended.find((e) => e.id === "z-image-turbo-q4")!;
 const apache = zimage.licence;
-
-const PREFS: StudioPrefs = {
-  lastModel: {},
-  advancedOpen: false,
-  confirmEveryVideo: true,
-  confirmAtUsd: 1,
-  dailyLimitUsd: 10,
-  setups: [],
-  galleryDir: null,
-  gpuPolicy: "unload",
-  reloadChatAfter: false,
-  suggestionDismissed: true,
-  localNoticeAcceptedAt: null,
-};
-
-const USAGE: Usage = {
-  spentTodayUsd: 0,
-  pendingUsd: 0,
-  limitUsd: 10,
-  folder: "~/harnessUI/studio",
-  bytes: 0,
-  pictures: 0,
-  videos: 0,
-};
 
 /** Commercial use under a $5M yearly revenue, with a duty for what you share. */
 const kommunity: Licence = {
@@ -88,19 +62,6 @@ function offer(patch: Partial<Offer> = {}): Offer {
   return { ...offerForEntry(zimage, LOCAL), ...patch };
 }
 
-async function flush() {
-  await act(async () => {
-    for (let i = 0; i < 10; i++) await Promise.resolve();
-  });
-}
-
-async function click(el: HTMLElement) {
-  await act(async () => {
-    fireEvent.click(el);
-  });
-  await flush();
-}
-
 const onClose = vi.fn<() => void>();
 
 /** The dialog alone, for `o`, with the fixture's local models in the store. */
@@ -108,34 +69,6 @@ function renderDialog(o: Offer) {
   useStudio.setState({ local: LOCAL, offer: o });
   render(<DownloadLocalModel offer={o} onClose={onClose} />);
   return screen.getByRole("alertdialog");
-}
-
-/** Studio shown on Get local models, with `local` as the backend reads it. */
-async function showLocal(local: LocalModels = LOCAL) {
-  vi.mocked(api.studioModels).mockResolvedValue({ endpoints: [] });
-  vi.mocked(api.studioLocalModels).mockResolvedValue(local);
-  vi.mocked(api.studioRuns).mockResolvedValue({ runs: [], next: null });
-  vi.mocked(api.studioLive).mockResolvedValue([]);
-  vi.mocked(api.studioGetPrefs).mockResolvedValue(PREFS);
-  vi.mocked(api.studioUsage).mockResolvedValue(USAGE);
-  vi.mocked(api.studioEstimate).mockResolvedValue({
-    usd: 0,
-    reasons: [],
-    confirmAtUsd: 1,
-    limit: { limitUsd: 10, spentTodayUsd: 0, pendingUsd: 0, wouldPass: true },
-    invalid: [],
-    eta: null,
-    local: null,
-  });
-  vi.mocked(api.onEngineProgress).mockResolvedValue(() => undefined);
-  vi.mocked(api.studioEngineStatus).mockResolvedValue(local.engine);
-  useStudio.setState({ local, loaded: true });
-  useStudio.getState().showStudio();
-  useStudio.getState().showLocalModels(true);
-  await act(async () => {
-    render(<StudioView />);
-  });
-  await flush();
 }
 
 /** *Download* on the row of model `name`. */
@@ -156,20 +89,36 @@ afterEach(cleanup);
 
 describe("verdict", () => {
   it("says what the pictures you make may be used for, by the strictest licence", () => {
-    expect(verdict([apache])).toBe("Pictures you make: free for any use, including commercial.");
-    expect(verdict([apache, kommunity])).toBe("Pictures you make: commercial use only under $5M revenue.");
-    expect(verdict([kommunity, { ...kommunity, id: "tiny", revenueLimitUsd: 1_000_000 }])).toBe(
+    expect(verdict([apache], "image")).toBe("Pictures you make: free for any use, including commercial.");
+    expect(verdict([apache, kommunity], "image")).toBe("Pictures you make: commercial use only under $5M revenue.");
+    expect(verdict([kommunity, { ...kommunity, id: "tiny", revenueLimitUsd: 1_000_000 }], "image")).toBe(
       "Pictures you make: commercial use only under $1M revenue.",
     );
-    expect(verdict([{ ...kommunity, commercial: "registration", revenueLimitUsd: null }, kommunity])).toBe(
+    expect(verdict([{ ...kommunity, commercial: "registration", revenueLimitUsd: null }, kommunity], "image")).toBe(
       "Pictures you make: commercial use only after registering with the publisher.",
     );
-    expect(verdict([apache, { ...nonCommercial, commercial: "unclear" }])).toBe(
+    expect(verdict([apache, { ...nonCommercial, commercial: "unclear" }], "image")).toBe(
       "Pictures you make: check the licence before any commercial use.",
     );
-    expect(verdict([kommunity, nonCommercial, { ...nonCommercial, commercial: "unclear" }])).toBe(
+    expect(verdict([kommunity, nonCommercial, { ...nonCommercial, commercial: "unclear" }], "image")).toBe(
       "Pictures you make: non-commercial use only.",
     );
+    expect(verdict([], "image")).toBe("");
+  });
+
+  it("a video model's says what the videos you make may be used for", () => {
+    expect(verdict([apache], "video")).toBe("Videos you make: free for any use, including commercial.");
+    expect(verdict([apache, kommunity], "video")).toBe("Videos you make: commercial use only under $5M revenue.");
+    expect(verdict([{ ...kommunity, revenueLimitUsd: null }], "video")).toBe(
+      "Videos you make: commercial use only under a revenue limit.",
+    );
+    expect(verdict([{ ...kommunity, commercial: "registration" }], "video")).toBe(
+      "Videos you make: commercial use only after registering with the publisher.",
+    );
+    expect(verdict([{ ...nonCommercial, commercial: "unclear" }], "video")).toBe(
+      "Videos you make: check the licence before any commercial use.",
+    );
+    expect(verdict([nonCommercial], "video")).toBe("Videos you make: non-commercial use only.");
   });
 });
 
@@ -218,6 +167,13 @@ describe("the download confirmation", () => {
     expect(within(dialog).queryByText(/less than 10 GB/)).toBeNull();
     expect(within(dialog).queryByText(/Hugging Face username/)).toBeNull();
     expect(within(dialog).queryByText("already on this computer")).toBeNull();
+  });
+
+  it("a video model's dialog says what the videos you make may be used for", () => {
+    const wan = LOCAL.recommended.find((e) => e.kind === "video")!;
+    const dialog = renderDialog(offerForEntry(wan, LOCAL));
+    within(dialog).getByText("Videos you make: free for any use, including commercial.");
+    expect(within(dialog).queryByText(/^Pictures you make/)).toBeNull();
   });
 
   it("Read the licences opens the licence in the browser", async () => {
@@ -305,6 +261,34 @@ describe("the download confirmation", () => {
     expect(api.studioLocalModels).not.toHaveBeenCalled();
   });
 
+  it("while Accept is on its way, Cancel and Esc wait for it", async () => {
+    let fail: (e: unknown) => void = () => undefined;
+    vi.mocked(api.studioLocalDownload).mockReturnValue(
+      new Promise<string>((_, reject) => {
+        fail = reject;
+      }),
+    );
+    const o = offer();
+    const dialog = renderDialog(o);
+    await click(within(dialog).getByRole("button", { name: "Accept and download" }));
+    const cancel = within(dialog).getByRole<HTMLButtonElement>("button", { name: "Cancel" });
+    expect(cancel.disabled).toBe(true);
+    await click(cancel);
+    fireEvent.keyDown(dialog, { key: "Escape" });
+    await flush();
+    expect(onClose).not.toHaveBeenCalled();
+    // The refusal still shows where it can be read.
+    await act(async () => {
+      fail({ code: "download_busy", message: "The download could not start.", nextStep: "Try again.", details: "" });
+    });
+    await flush();
+    within(dialog).getByText("The download could not start.");
+    expect(useStudio.getState().offer).toBe(o);
+    expect(cancel.disabled).toBe(false);
+    fireEvent.keyDown(dialog, { key: "Escape" });
+    expect(onClose).toHaveBeenCalledTimes(1);
+  });
+
   it("the engine comes with the first model on Windows, and says so", () => {
     const dialog = renderDialog(offer({ needsEngine: true, engineBytes: 30_303_000 }));
     const line = within(dialog).getByText("Also downloads the Studio engine (29 MB, MIT licence).");
@@ -326,6 +310,12 @@ describe("the download confirmation", () => {
     within(dialog).getByText("Pictures you make: commercial use only under $5M revenue.");
     const links = within(dialog).getAllByRole("link", { name: /^Read the licences/ });
     expect(links.map((a) => a.getAttribute("href"))).toEqual([kommunity.url, LOCAL.engine.licenseUrl]);
+    // The engine's licence by its short word; each link's whole name is its tooltip.
+    expect(links.map((a) => a.textContent)).toEqual([
+      "Read the licences (Example Community Licence)",
+      "Read the licences (MIT)",
+    ]);
+    expect(links.map((a) => a.getAttribute("title"))).toEqual([kommunity.name, LOCAL.engine.licenseName]);
     await click(within(dialog).getByRole("button", { name: "Accept and download" }));
     expect(api.studioLocalDownload).toHaveBeenCalledWith(expect.anything(), [kommunity.sha256, engine.sha256]);
   });

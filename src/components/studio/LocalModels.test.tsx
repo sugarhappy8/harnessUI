@@ -5,7 +5,8 @@
 // and content notice. Download only sets the offer (Task B14's dialog is tested in
 // DownloadLocalModel.test.tsx); a repair refused for a licence shows that dialog.
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { act, cleanup, fireEvent, render, screen, within } from "@testing-library/react";
+import { act, cleanup, fireEvent, screen, within } from "@testing-library/react";
+import type { DownloadGroup } from "../../lib/types";
 import { amountGb, LOCAL_MODELS } from "../../lib/words";
 import { LOCAL } from "./fixtures/models";
 import type {
@@ -16,24 +17,21 @@ import type {
   LocalRepo,
   LocalSearchPage,
   Part,
-  StudioPrefs,
-  Usage,
 } from "./types";
 
-// Radix positions menus with ResizeObserver, which jsdom does not have.
-globalThis.ResizeObserver ??= class {
-  observe() {}
-  unobserve() {}
-  disconnect() {}
-} as unknown as typeof ResizeObserver;
-
-vi.mock("../../lib/ipc", () => ({ isTauri: () => true }));
+const ipc = vi.hoisted(() => ({
+  isTauri: () => true,
+  listDownloads: vi.fn<() => Promise<DownloadGroup[]>>(),
+  onDownloadProgress: vi.fn<(handler: (g: DownloadGroup) => void) => Promise<() => void>>(),
+}));
+vi.mock("../../lib/ipc", () => ipc);
 vi.mock("./api");
 
 const api = await import("./api");
-const { StudioView } = await import("./StudioView");
+const { click, flush, showLocal } = await import("./testing/local");
+const { useDownloads } = await import("../../store/downloads");
 const { hardwareLine, visibleEntries } = await import("./LocalModels");
-const { licenceBadge, offerForEntry, offerForFile } = await import("./localOffers");
+const { activeDownload, licenceBadge, offerForEntry, offerForFile } = await import("./localOffers");
 const { useStudio } = await import("../../store/studio");
 
 const INITIAL = useStudio.getState();
@@ -43,30 +41,6 @@ const klein = LOCAL.recommended.find((e) => e.id === "flux2-klein-4b-q4")!;
 const zimage = LOCAL.recommended.find((e) => e.id === "z-image-turbo-q4")!;
 const wan = LOCAL.recommended.find((e) => e.id === "wan22-ti2v-5b-fast-q6")!;
 const apache = zimage.licence;
-
-const PREFS: StudioPrefs = {
-  lastModel: {},
-  advancedOpen: false,
-  confirmEveryVideo: true,
-  confirmAtUsd: 1,
-  dailyLimitUsd: 10,
-  setups: [],
-  galleryDir: null,
-  gpuPolicy: "unload",
-  reloadChatAfter: false,
-  suggestionDismissed: true,
-  localNoticeAcceptedAt: 1,
-};
-
-const USAGE: Usage = {
-  spentTodayUsd: 0,
-  pendingUsd: 0,
-  limitUsd: 10,
-  folder: "~/harnessUI/studio",
-  bytes: 0,
-  pictures: 0,
-  videos: 0,
-};
 
 /** A licence of another kind than Apache-2.0's. */
 function licence(patch: Partial<Licence>): Licence {
@@ -126,52 +100,8 @@ const NOT_ACCEPTED = {
   details: "",
 };
 
-async function flush() {
-  await act(async () => {
-    for (let i = 0; i < 10; i++) await Promise.resolve();
-  });
-}
-
-async function click(el: HTMLElement) {
-  await act(async () => {
-    fireEvent.click(el);
-  });
-  await flush();
-}
-
 function typeIn(el: HTMLElement, text: string) {
   fireEvent.change(el, { target: { value: text } });
-}
-
-/** Studio shown on Get local models, with `local` as the backend reads it. */
-async function showLocal(local: LocalModels = LOCAL) {
-  vi.mocked(api.studioModels).mockResolvedValue({ endpoints: [] });
-  vi.mocked(api.studioLocalModels).mockResolvedValue(local);
-  vi.mocked(api.studioRuns).mockResolvedValue({ runs: [], next: null });
-  vi.mocked(api.studioLive).mockResolvedValue([]);
-  vi.mocked(api.studioGetPrefs).mockResolvedValue(PREFS);
-  vi.mocked(api.studioUsage).mockResolvedValue(USAGE);
-  vi.mocked(api.studioEstimate).mockResolvedValue({
-    usd: 0,
-    reasons: [],
-    confirmAtUsd: 1,
-    limit: { limitUsd: 10, spentTodayUsd: 0, pendingUsd: 0, wouldPass: true },
-    invalid: [],
-    eta: null,
-    local: null,
-  });
-  vi.mocked(api.onEngineProgress).mockResolvedValue(() => undefined);
-  vi.mocked(api.studioEngineStatus).mockResolvedValue(local.engine);
-  vi.mocked(api.studioEngineDownload).mockResolvedValue(undefined);
-  vi.mocked(api.studioLocalDownload).mockResolvedValue("group-1");
-  vi.mocked(api.studioLocalDelete).mockResolvedValue(undefined);
-  useStudio.setState({ local, loaded: true });
-  useStudio.getState().showStudio();
-  useStudio.getState().showLocalModels(true);
-  await act(async () => {
-    render(<StudioView />);
-  });
-  await flush();
 }
 
 function searchBox(): HTMLElement {
@@ -199,9 +129,38 @@ function row(name: RegExp | string): HTMLElement {
   return screen.getByRole("article", { name });
 }
 
+/** What the download manager's `download-progress` event tells the view, once it listens. */
+let progress: (g: DownloadGroup) => void = () => undefined;
+
+/** Z-Image Turbo's download, as the download manager reports it: a third done. */
+function group(patch: Partial<DownloadGroup> = {}): DownloadGroup {
+  return {
+    id: "group-1",
+    repo: "leejet/Z-Image-Turbo-GGUF",
+    label: "Z-Image Turbo",
+    fileCount: 3,
+    bytesDone: 2 * GIB,
+    bytesTotal: 6 * GIB,
+    status: "downloading",
+    error: null,
+    bytesPerSecond: null,
+    unverified: false,
+    checking: false,
+    generatorKind: "image",
+    genModelId: "z-image-turbo-q4",
+    ...patch,
+  };
+}
+
 beforeEach(() => {
   vi.clearAllMocks();
   useStudio.setState(INITIAL, true);
+  useDownloads.setState({ groups: [] });
+  ipc.listDownloads.mockResolvedValue([]);
+  ipc.onDownloadProgress.mockImplementation((handler) => {
+    progress = handler;
+    return Promise.resolve(() => undefined);
+  });
 });
 
 afterEach(cleanup);
@@ -250,6 +209,19 @@ describe("licenceBadge", () => {
     // The backend sends `commercial` as a string: a newer one may send a word not known here.
     const unknown = licence({ badge: "red", commercial: "somethingNew" as Licence["commercial"] });
     expect(licenceBadge(unknown)).toEqual({ tone: "red", text: "Check the licence" });
+  });
+});
+
+describe("activeDownload", () => {
+  it("is a model's download while it runs, not once it is done or cancelled", () => {
+    for (const status of ["queued", "downloading", "paused", "verifying", "error", "cancelling"] as const) {
+      expect(activeDownload([group({ status })], "z-image-turbo-q4")).toEqual(group({ status }));
+    }
+    expect(activeDownload([group({ status: "done" })], "z-image-turbo-q4")).toBeNull();
+    expect(activeDownload([group({ status: "cancelled" })], "z-image-turbo-q4")).toBeNull();
+    expect(activeDownload([group()], "flux2-klein-4b-q4")).toBeNull();
+    // A chat model's download is no picture or video model's.
+    expect(activeDownload([group({ genModelId: null, generatorKind: null })], "z-image-turbo-q4")).toBeNull();
   });
 });
 
@@ -399,7 +371,7 @@ describe("Get local models", () => {
     const result = await openResult("someone/Z-Image-Turbo-GGUF");
     await click(within(result).getByRole("button", { name: "Download" }));
     const repo = supported();
-    expect(useStudio.getState().offer).toEqual(offerForFile(repo, repo.files[0]!, LOCAL));
+    expect(useStudio.getState().offer).toEqual(offerForFile(repo, repo.files[0]!, LOCAL, "image"));
     expect(useStudio.getState().offer).toMatchObject({
       source: { search: { repo: "someone/Z-Image-Turbo-GGUF", commit: "c".repeat(40), file: "z-image-turbo-Q5_K_M.gguf" } },
       parts,
@@ -685,5 +657,75 @@ describe("Get local models", () => {
     for (const e of entries.filter((x) => x.kind === "video")) {
       expect(screen.queryByRole("article", { name: e.name })).toBeNull();
     }
+  });
+});
+
+describe("a model downloading", () => {
+  it("after Accept, its row shows how far the download got in Models → Downloads' words, and no Download", async () => {
+    await showLocal();
+    await click(within(row("Z-Image Turbo")).getByRole("button", { name: "Download" }));
+    ipc.listDownloads.mockResolvedValue([group({ bytesDone: 0, status: "queued" })]);
+    await click(screen.getByRole("button", { name: "Accept and download" }));
+    const z = row("Z-Image Turbo");
+    expect(within(z).queryByRole("button", { name: "Download" })).toBeNull();
+    within(z).getByText("0 GB of 6 GB · queued");
+    const bar = within(z).getByRole("progressbar", { name: "Downloading Z-Image Turbo" });
+    expect(bar.getAttribute("aria-valuenow")).toBe("0");
+    // Its progress events move it on.
+    act(() => progress(group({ bytesDone: 3 * GIB, bytesPerSecond: 64 * 1024 * 1024 })));
+    within(z).getByText("3 GB of 6 GB · downloading · 48 s left");
+    expect(bar.getAttribute("aria-valuenow")).toBe("50");
+    act(() => progress(group({ bytesDone: 3 * GIB, checking: true })));
+    within(z).getByText("3 GB of 6 GB · checking the file…");
+    // Another model's row is as it was.
+    within(row(/FLUX.2 klein/)).getByRole("button", { name: "Download again" });
+  });
+
+  it("a download already running when the view opens shows, and once done the model is installed", async () => {
+    ipc.listDownloads.mockResolvedValue([group()]);
+    await showLocal();
+    const z = row("Z-Image Turbo");
+    within(z).getByText("2 GB of 6 GB · downloading");
+    expect(within(z).queryByRole("button", { name: "Download" })).toBeNull();
+    const installed: LocalModels = {
+      ...LOCAL,
+      recommended: LOCAL.recommended.map((e) => (e.id === zimage.id ? { ...e, installed: true } : e)),
+      installed: [{ ...LOCAL.installed[0]!, id: zimage.id, name: zimage.name }, ...LOCAL.installed],
+    };
+    vi.mocked(api.studioLocalModels).mockResolvedValue(installed);
+    const reads = vi.mocked(api.studioLocalModels).mock.calls.length;
+    act(() => progress(group({ status: "done", bytesDone: 6 * GIB })));
+    await flush();
+    expect(vi.mocked(api.studioLocalModels).mock.calls.length).toBe(reads + 1);
+    within(row("Z-Image Turbo")).getByText("Installed");
+    expect(within(row("Z-Image Turbo")).queryByRole("progressbar")).toBeNull();
+  });
+
+  it("an installed model downloading again shows that in place of Download again", async () => {
+    ipc.listDownloads.mockResolvedValue([
+      group({ id: "group-2", genModelId: "flux2-klein-4b-q4", label: "FLUX.2 klein 4B", status: "paused" }),
+    ]);
+    await showLocal();
+    const k = row(/FLUX.2 klein/);
+    within(k).getByText("Installed");
+    within(k).getByText("2 GB of 6 GB · paused");
+    expect(within(k).queryByRole("button", { name: "Download again" })).toBeNull();
+    within(k).getByRole("button", { name: "Delete" });
+  });
+
+  it("a searched file downloading shows that in place of Download, and why it stopped", async () => {
+    ipc.listDownloads.mockResolvedValue([
+      group({
+        genModelId: "hf:someone/Z-Image-Turbo-GGUF:z-image-turbo-Q5_K_M.gguf",
+        status: "error",
+        error: { code: "download_failed", message: "The download stopped.", nextStep: "Resume it in Models → Downloads.", details: "" },
+      }),
+    ]);
+    await showLocal();
+    const result = await openResult("someone/Z-Image-Turbo-GGUF");
+    expect(within(result).queryByRole("button", { name: "Download" })).toBeNull();
+    within(result).getByText("2 GB of 6 GB · error");
+    within(result).getByText("The download stopped. Resume it in Models → Downloads.");
+    within(result).getByRole("progressbar", { name: "Downloading z-image-turbo-Q5_K_M.gguf" });
   });
 });

@@ -1,9 +1,21 @@
+import type { DownloadGroup } from "../../lib/types";
 import { LICENCE_BADGE, revenueLimit } from "../../lib/words";
-import type { Gate, Licence, LocalEntry, LocalFileChoice, LocalModels, LocalRepo, LocalSource, Part } from "./types";
+import type {
+  Gate,
+  Licence,
+  LocalEntry,
+  LocalFileChoice,
+  LocalModels,
+  LocalRepo,
+  LocalSource,
+  MediaKind,
+  Part,
+} from "./types";
 
-// What Get local models offers to download, and a licence's badge (0.1.0 Tasks B13 and B14), as
-// plain functions with no React: the rows (LocalModelRow.tsx), Hugging Face search
-// (LocalSearch.tsx), the download confirmation (DownloadLocalModel.tsx) and the store use them.
+// What Get local models offers to download, a licence's badge, and a model's download while it
+// runs (0.1.0 Tasks B13 and B14), as plain functions with no React: the rows
+// (LocalModelRow.tsx), Hugging Face search (LocalSearch.tsx), the download confirmation
+// (DownloadLocalModel.tsx) and the store use them.
 // An offer keeps names as they came (a searched file's path can hold any character); whatever
 // shows one escapes it there (`visiblePath`).
 
@@ -43,6 +55,9 @@ export interface DownloadOffer {
   /** The model's name, as the dialog's title says it (as it came: shown through
    *  `visiblePath`). */
   name: string;
+  /** What it makes: the dialog says what the pictures, or the videos, you make may be used
+   *  for. */
+  kind: MediaKind;
   source: LocalSource;
   parts: Part[];
   /** Every distinct licence of its parts: all are shown and accepted. */
@@ -63,6 +78,7 @@ export interface DownloadOffer {
 export function offerForEntry(e: LocalEntry, local: LocalModels): DownloadOffer {
   return {
     name: e.name,
+    kind: e.kind,
     source: { catalog: { entryId: e.id } },
     parts: e.parts,
     licences: e.licences,
@@ -76,11 +92,13 @@ export function offerForEntry(e: LocalEntry, local: LocalModels): DownloadOffer 
 }
 
 /** A searched repository's file and the parts it needs beside it, at the commit it was read
- *  at (the backend recognises it there again before downloading). Its name is the file's path
- *  as Hugging Face gave it. */
-export function offerForFile(repo: LocalRepo, f: LocalFileChoice, local: LocalModels): DownloadOffer {
+ *  at (the backend recognises it there again before downloading), found on the `kind` tab (a
+ *  search finds only that kind's repositories). Its name is the file's path as Hugging Face
+ *  gave it. */
+export function offerForFile(repo: LocalRepo, f: LocalFileChoice, local: LocalModels, kind: MediaKind): DownloadOffer {
   return {
     name: f.file,
+    kind,
     source: { search: { repo: repo.repo, commit: repo.commit, file: f.file } },
     parts: f.parts,
     licences: f.licences,
@@ -91,4 +109,19 @@ export function offerForFile(repo: LocalRepo, f: LocalFileChoice, local: LocalMo
     lowDisk: f.lowDisk,
     gate: repo.gate,
   };
+}
+
+/** The installed id a searched repository's file gets (the backend's `gen_search::entry_for`):
+ *  its download group carries it while it downloads. */
+export function searchedModelId(repo: string, file: string): string {
+  return `hf:${repo}:${file}`;
+}
+
+/** The download of local model `genModelId` while it runs (queued, downloading, paused,
+ *  checking, failed and waiting for Resume, or being cancelled), from the app's download
+ *  groups; `null` when none is (never started, done or cancelled). */
+export function activeDownload(groups: readonly DownloadGroup[], genModelId: string): DownloadGroup | null {
+  return (
+    groups.find((g) => g.genModelId === genModelId && g.status !== "done" && g.status !== "cancelled") ?? null
+  );
 }

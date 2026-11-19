@@ -4,65 +4,25 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { LOCAL } from "./fixtures/models";
-import type { LocalModels, StudioPrefs, Usage } from "./types";
 
-// Radix positions menus with ResizeObserver, which jsdom does not have.
-globalThis.ResizeObserver ??= class {
-  observe() {}
-  unobserve() {}
-  disconnect() {}
-} as unknown as typeof ResizeObserver;
-
-vi.mock("../../lib/ipc", () => ({ isTauri: () => true }));
+// Get local models follows the app's downloads: none here.
+vi.mock("../../lib/ipc", () => ({
+  isTauri: () => true,
+  listDownloads: () => Promise.resolve([]),
+  onDownloadProgress: () => Promise.resolve(() => undefined),
+}));
 vi.mock("./api");
 
 const api = await import("./api");
-const { StudioView } = await import("./StudioView");
 const { LocalNotice } = await import("./LocalNotice");
+const { PREFS, click, flush, showLocal } = await import("./testing/local");
 const { useStudio } = await import("../../store/studio");
 
 const INITIAL = useStudio.getState();
 
-const PREFS: StudioPrefs = {
-  lastModel: {},
-  advancedOpen: false,
-  confirmEveryVideo: true,
-  confirmAtUsd: 1,
-  dailyLimitUsd: 10,
-  setups: [],
-  galleryDir: null,
-  gpuPolicy: "unload",
-  reloadChatAfter: false,
-  suggestionDismissed: true,
-  localNoticeAcceptedAt: null,
-};
-
-const USAGE: Usage = {
-  spentTodayUsd: 0,
-  pendingUsd: 0,
-  limitUsd: 10,
-  folder: "~/harnessUI/studio",
-  bytes: 0,
-  pictures: 0,
-  videos: 0,
-};
-
 /** The notice, addendum L1, word for word after its bold first sentence. */
 const BODY =
   "No company checks your prompts or pictures. Don't create sexual images of children, or sexual or intimate images of real people without their consent, and don't impersonate people. These are crimes in many countries. Each model's licence and use policy also applies.";
-
-async function flush() {
-  await act(async () => {
-    for (let i = 0; i < 10; i++) await Promise.resolve();
-  });
-}
-
-async function click(el: HTMLElement) {
-  await act(async () => {
-    fireEvent.click(el);
-  });
-  await flush();
-}
 
 const onAccepted = vi.fn<() => void>();
 const onClose = vi.fn<() => void>();
@@ -71,34 +31,6 @@ function renderNotice(readOnly?: boolean) {
   useStudio.setState({ local: { ...LOCAL, noticeAccepted: false } });
   render(<LocalNotice open readOnly={readOnly} onAccepted={onAccepted} onClose={onClose} />);
   return screen.getByRole("alertdialog");
-}
-
-/** Studio shown on Get local models, with `local` as the backend reads it. */
-async function showLocal(local: LocalModels = LOCAL) {
-  vi.mocked(api.studioModels).mockResolvedValue({ endpoints: [] });
-  vi.mocked(api.studioLocalModels).mockResolvedValue(local);
-  vi.mocked(api.studioRuns).mockResolvedValue({ runs: [], next: null });
-  vi.mocked(api.studioLive).mockResolvedValue([]);
-  vi.mocked(api.studioGetPrefs).mockResolvedValue(PREFS);
-  vi.mocked(api.studioUsage).mockResolvedValue(USAGE);
-  vi.mocked(api.studioEstimate).mockResolvedValue({
-    usd: 0,
-    reasons: [],
-    confirmAtUsd: 1,
-    limit: { limitUsd: 10, spentTodayUsd: 0, pendingUsd: 0, wouldPass: true },
-    invalid: [],
-    eta: null,
-    local: null,
-  });
-  vi.mocked(api.onEngineProgress).mockResolvedValue(() => undefined);
-  vi.mocked(api.studioEngineStatus).mockResolvedValue(local.engine);
-  useStudio.setState({ local, loaded: true });
-  useStudio.getState().showStudio();
-  useStudio.getState().showLocalModels(true);
-  await act(async () => {
-    render(<StudioView />);
-  });
-  await flush();
 }
 
 beforeEach(() => {
@@ -139,6 +71,33 @@ describe("the content notice", () => {
     screen.getByText("Local models run only on your computer.");
     expect(onAccepted).not.toHaveBeenCalled();
     expect(useStudio.getState().local?.noticeAccepted).toBe(false);
+  });
+
+  it("while I understand is on its way, Cancel and Esc wait for it", async () => {
+    let fail: (e: unknown) => void = () => undefined;
+    vi.mocked(api.studioAcceptLocalNotice).mockReturnValue(
+      new Promise((_, reject) => {
+        fail = reject;
+      }),
+    );
+    const dialog = renderNotice();
+    await click(screen.getByRole("button", { name: "I understand" }));
+    const cancel = within(dialog).getByRole<HTMLButtonElement>("button", { name: "Cancel" });
+    expect(cancel.disabled).toBe(true);
+    await click(cancel);
+    fireEvent.keyDown(dialog, { key: "Escape" });
+    await flush();
+    expect(onClose).not.toHaveBeenCalled();
+    // The refusal still shows where it can be read.
+    await act(async () => {
+      fail({ code: "studio_prefs", message: "Studio's settings could not be saved.", nextStep: "Try again.", details: "" });
+    });
+    await flush();
+    within(dialog).getByText("Studio's settings could not be saved.");
+    expect(onAccepted).not.toHaveBeenCalled();
+    expect(cancel.disabled).toBe(false);
+    fireEvent.keyDown(dialog, { key: "Escape" });
+    expect(onClose).toHaveBeenCalledTimes(1);
   });
 
   it("Cancel before a first download accepts nothing", async () => {
