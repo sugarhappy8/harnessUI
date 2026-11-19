@@ -419,7 +419,7 @@ export function FrameDrop(props: { tab: StudioTab; spec: ParamSpec }) {
         type="file"
         accept={PICTURE_TYPES}
         hidden
-        aria-label={`${spec.label}: ${STUDIO_REFS.choose}`}
+        aria-label={STUDIO_REFS.chooseFor(spec.label)}
         onChange={(e) => {
           if (e.target.files) take([...e.target.files]);
           e.target.value = "";

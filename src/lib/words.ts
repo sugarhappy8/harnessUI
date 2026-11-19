@@ -1346,10 +1346,15 @@ export const STUDIO_PLACE = {
   cloud: (name: string) => `via ${name} · Cloud`,
 } as const;
 
+/** The tray's and frame zones' file chooser. */
+const CHOOSE_PICTURE = "Choose a picture";
+
 /** Added pictures: the tray, the frame drop zones and their role chips (Task B5). */
 export const STUDIO_REFS = {
   add: "+ Add picture",
-  choose: "Choose a picture",
+  choose: CHOOSE_PICTURE,
+  /** The file chooser of a frame zone, named by its field: "Start frame: Choose a picture". */
+  chooseFor: (label: string) => `${label}: ${CHOOSE_PICTURE}`,
   role: {
     reference: "Reference",
     startFrame: "Start frame",
@@ -1857,6 +1862,8 @@ export const LOCAL_MODELS = {
   processorOnly: "processor only",
   graphicsMemory: (amount: string) => `${amount} graphics memory`,
   sharedMemory: (amount: string) => `${amount} shared memory`,
+  /** The device with its memory, in the header: "Radeon RX 7600, 8 GB graphics memory". */
+  deviceWith: (device: string, memory: string) => `${device}, ${memory}`,
   memory: (amount: string) => `${amount} memory`,
   freeDisk: (amount: string) => `${amount} free`,
   onlyFits: "Only what fits",
@@ -1918,9 +1925,13 @@ function andList(items: readonly string[]): string {
   return items.length <= 1 ? (items[0] ?? "") : `${items.slice(0, -1).join(", ")} and ${items[items.length - 1]}`;
 }
 
+/** Whose files the download dialog's verdict is about, by the model's kind. */
+const VERDICT_LEAD = { image: "Pictures you make", video: "Videos you make" } as const satisfies Record<MediaKind, string>;
+
 /** The download confirmation of a local model (Task B14, local addendum Wireframe L3): every
  *  part with its size and licence, what you make may be used for, the Studio engine, a gated
  *  repository, an amber licence's condition, low disk space and the licences to read. */
+
 export const DOWNLOAD_LOCAL = {
   title: (name: string) => `Download ${name}?`,
   /** "3 files, 6.2 GB in all, from Hugging Face (huggingface.co)"; with some of it here
@@ -1935,7 +1946,9 @@ export const DOWNLOAD_LOCAL = {
   /** What the pictures or videos you make may be used for, by the strictest licence
    *  (`verdict`): "Pictures you make: free for any use, including commercial.", "Videos you
    *  make: …" for a video model. */
-  verdictLead: { image: "Pictures you make", video: "Videos you make" } as const satisfies Record<MediaKind, string>,
+  verdictLead: VERDICT_LEAD,
+  /** The verdict as one line: "Pictures you make: you may use them commercially". */
+  verdictLine: (kind: MediaKind, allowed: string) => `${VERDICT_LEAD[kind]}: ${allowed}`,
   verdict: {
     yes: "free for any use, including commercial.",
     underRevenue: (limit: string | null) =>
@@ -2024,6 +2037,8 @@ export const DOWNLOAD_KIND_WORDS: Record<"image" | "image-edit" | "video", strin
  *  (Task B13): "Picture and video models: 2 (14 GB) · Manage in Studio". */
 export const INSTALLED_STUDIO_LINE = {
   models: STUDIO_SETTINGS.models,
+  /** The line before its *Manage in Studio* button: "Picture and video models: 2 · 12 GB · ". */
+  lead: (count: number, bytes: number) => `${STUDIO_SETTINGS.models(count, bytes)} · `,
   manage: "Manage in Studio",
 } as const;
 

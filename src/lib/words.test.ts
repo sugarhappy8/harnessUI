@@ -36,6 +36,10 @@ import {
   madeWords,
   STUDIO_DELETE,
   STUDIO_TILE,
+  STUDIO_REFS,
+  LOCAL_MODELS,
+  DOWNLOAD_LOCAL,
+  INSTALLED_STUDIO_LINE,
   amountNumber,
   appleLimitWords,
   barLegend,
@@ -1040,6 +1044,17 @@ describe("0.1.0 Studio: the viewer and the gallery in plain words", () => {
     expect(STUDIO_DELETE.title(3, ["image", "image", "image"])).toBe("Delete 3 pictures?");
     expect(STUDIO_DELETE.title(2, ["video", "video"])).toBe("Delete 2 videos?");
     expect(STUDIO_DELETE.title(2, ["image", "video"])).toBe("Delete 2 results?");
+  });
+
+  it("puts the pieces components join together in words, here and not in the components", () => {
+    expect(LOCAL_MODELS.deviceWith("Radeon RX 7600", LOCAL_MODELS.graphicsMemory("8 GB"))).toBe(
+      "Radeon RX 7600, 8 GB graphics memory",
+    );
+    expect(DOWNLOAD_LOCAL.verdictLine("video", "you may use them commercially")).toBe(
+      "Videos you make: you may use them commercially",
+    );
+    expect(STUDIO_REFS.chooseFor("Start frame")).toBe(`Start frame: ${STUDIO_REFS.choose}`);
+    expect(INSTALLED_STUDIO_LINE.lead(2, 12e9)).toBe(`${INSTALLED_STUDIO_LINE.models(2, 12e9)} · `);
   });
 
   it("reads a tile's prompt cut to its start, never the whole of a long one", () => {

@@ -7,6 +7,7 @@ import * as ipc from "../lib/ipc";
 import type { AppInfo } from "../lib/ipc";
 import type { FirstRunInfo, UpdateStatus } from "../lib/types";
 import { APP_NAME } from "../lib/app";
+import { STUDIO_NAV } from "../lib/words";
 import { toErrorInfo, turnChatId, useApp } from "../store/app";
 import { listenInEffect } from "../lib/listen";
 import { askBeforeChange, backendWhenIdle, runChange } from "../store/modelChange";
@@ -688,7 +689,7 @@ export function SettingsDialog(props: {
               <Tabs.Trigger value="reverse" className={tabClass}>Reverse engineering</Tabs.Trigger>
               <Tabs.Trigger value="otherApps" className={tabClass}>Other apps</Tabs.Trigger>
               <Tabs.Trigger value="endpoints" className={tabClass}>Endpoints</Tabs.Trigger>
-              <Tabs.Trigger value="studio" className={tabClass}>Studio</Tabs.Trigger>
+              <Tabs.Trigger value="studio" className={tabClass}>{STUDIO_NAV.name}</Tabs.Trigger>
               <Tabs.Trigger value="huggingface" className={tabClass}>Hugging Face</Tabs.Trigger>
               <Tabs.Trigger value="mcp" className={tabClass}>MCP servers</Tabs.Trigger>
               <Tabs.Trigger value="skills" className={tabClass}>Skills</Tabs.Trigger>

@@ -242,7 +242,7 @@ export function Installed(props: { onClose: () => void }) {
       {/* With none yet ("Picture and video models: none yet") it still leads to Get local models. */}
       {pictureModels !== null && (
         <p className="text-xs text-fg-muted">
-          {INSTALLED_STUDIO_LINE.models(pictureModels.count, pictureModels.bytes)} ·{" "}
+          {INSTALLED_STUDIO_LINE.lead(pictureModels.count, pictureModels.bytes)}
           <button type="button" className="underline hover:text-fg" onClick={manageInStudio}>
             {INSTALLED_STUDIO_LINE.manage}
           </button>

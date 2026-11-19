@@ -38,12 +38,12 @@ export function hardwareLine(h: HardwareLine): string {
   let what: string;
   const parts: string[] = [];
   if (h.sharedMemory) {
-    what = h.ramBytes === null ? h.device : `${h.device}, ${LOCAL_MODELS.sharedMemory(amountGb(h.ramBytes))}`;
+    what = h.ramBytes === null ? h.device : LOCAL_MODELS.deviceWith(h.device, LOCAL_MODELS.sharedMemory(amountGb(h.ramBytes)));
   } else {
     what =
       h.graphicsBytes === null
         ? LOCAL_MODELS.processorOnly
-        : `${h.device}, ${LOCAL_MODELS.graphicsMemory(amountGb(h.graphicsBytes))}`;
+        : LOCAL_MODELS.deviceWith(h.device, LOCAL_MODELS.graphicsMemory(amountGb(h.graphicsBytes)));
     if (h.ramBytes !== null) parts.push(LOCAL_MODELS.memory(amountGb(h.ramBytes)));
   }
   if (h.freeDiskBytes !== null) parts.push(LOCAL_MODELS.freeDisk(amountGb(h.freeDiskBytes)));

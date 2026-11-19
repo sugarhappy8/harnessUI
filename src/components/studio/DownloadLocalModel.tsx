@@ -50,7 +50,7 @@ export function verdict(licences: Licence[], kind: MediaKind): string {
     typeof words === "string"
       ? words
       : words(strictest.revenueLimitUsd === null ? null : revenueLimit(strictest.revenueLimitUsd));
-  return `${DOWNLOAD_LOCAL.verdictLead[kind]}: ${allowed}`;
+  return DOWNLOAD_LOCAL.verdictLine(kind, allowed);
 }
 
 /** What a licence's link says it opens: its name; the Studio engine's by its short word, since
