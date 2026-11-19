@@ -5579,6 +5579,27 @@ async fn quit_and_stop_stops_every_local_run_and_starts_none() {
     assert_eq!(h.local.cancels(), 1);
 }
 
+/// *Quit and stop* with "Reload it after Studio" on: the running run's task, once stopped,
+/// finds the queue empty, but the app is closing, so the chat model is never reloaded.
+#[tokio::test]
+async fn quit_and_stop_never_reloads_the_chat_model() {
+    let h = harness_with_local().await;
+    h.set_prefs(json!({"reloadChatAfter": true})).await;
+    h.lease.then(LeaseStep::Grant(Grant::AfterUnload {
+        unloaded: Some(CHAT.into()),
+    }));
+    h.local.hold();
+    let first = h.manager.start(h.local_req("one"), false).await.unwrap();
+    let second = h.manager.start(h.local_req("two"), false).await.unwrap();
+    h.wait_status(&first.id, "running").await;
+    h.manager.stop_local().await;
+    for id in [&first.id, &second.id] {
+        assert_eq!(h.run_dto(id).await.status, "cancelled");
+    }
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert!(h.lease.reloads().is_empty(), "{:?}", h.lease.reloads());
+}
+
 // ---- fix round 2 (rulings L15-starting-lock, L15-processor-eta, L15-tests) ------------------
 
 /// Ruling L15-starting-lock: a local start asks for the hardware (which can wait for a probe

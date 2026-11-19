@@ -40,6 +40,7 @@
 use std::any::Any;
 use std::collections::{BTreeMap, VecDeque};
 use std::path::Path;
+use std::sync::atomic::Ordering;
 use std::sync::{Arc, PoisonError};
 use std::time::Instant;
 
@@ -346,8 +347,15 @@ impl StudioManager {
     }
 
     /// *Quit and stop*: stops every local run, those waiting first, so none starts after the
-    /// one running.
+    /// one running. The app is closing, so the chat model a grant unloaded is not loaded
+    /// again ("Reload it after Studio") once the queue is empty.
     pub async fn stop_local(&self) {
+        self.inner.quitting.store(true, Ordering::SeqCst);
+        self.inner
+            .local_unloaded
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .take();
         let ids: Vec<String> = {
             let lanes = self.inner.lanes();
             let waiting = lanes
@@ -720,7 +728,8 @@ impl Inner {
     /// is loaded again, once (in a task of its own: the lane does not wait for it), when the
     /// preferences say so; either way it is no longer kept.
     fn after_local(&self, lane: &LocalLane) {
-        if self.root.is_cancelled() {
+        // The app is closing (*Quit and stop*): a reload would start just as it exits.
+        if self.root.is_cancelled() || self.quitting.load(Ordering::SeqCst) {
             return;
         }
         let empty = self

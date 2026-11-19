@@ -84,7 +84,7 @@ pub(crate) use verdict::{
 use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::future::Future;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError, RwLock};
 use std::time::Duration;
 
@@ -230,6 +230,8 @@ struct Inner {
     local_live: Mutex<HashMap<String, lane::LocalLive>>,
     /// The chat model a local run's grant unloaded, kept while the local queue has work.
     local_unloaded: Mutex<Option<String>>,
+    /// Set by *Quit and stop*: the app is closing, so no chat model is loaded again.
+    quitting: AtomicBool,
     /// The last number given to a run as the webview gets it ([`RunDto::seq`]): one count
     /// for every run, taken just before the row that the run is built from is read.
     seq: AtomicU64,
@@ -624,6 +626,7 @@ impl StudioManager {
                 stale: Mutex::new(HashMap::new()),
                 local_live: Mutex::new(HashMap::new()),
                 local_unloaded: Mutex::new(None),
+                quitting: AtomicBool::new(false),
                 seq: AtomicU64::new(0),
             }),
         }
