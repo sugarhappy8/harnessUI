@@ -211,7 +211,12 @@ impl Inner {
                 Ok(JobState::Done(done)) => {
                     return self.download(t, remote_id, &done, started).await;
                 }
-                Ok(JobState::Failed(failure)) => {
+                Ok(JobState::Failed(mut failure)) => {
+                    // A job known to have finished was charged (its cost stays recorded),
+                    // whatever a later check says.
+                    if job.job_charge() == Some(true) {
+                        failure.charged = Some(true);
+                    }
                     let ending = self.ending_of(job, MediaError::Answered(failure));
                     return self.end_run(job, ending, started).await;
                 }

@@ -2824,6 +2824,42 @@ async fn stop_watching_then_get_it_anyway_records_done_with_the_cost() {
     assert_eq!(rows[1].decision, AuditDecision::AllowedWithoutPrompt);
 }
 
+/// A job known to have finished was charged (its cost is recorded): a later check that says
+/// it failed, with the company's `charged: false`, never un-charges it.
+#[tokio::test]
+async fn a_finished_job_that_a_later_check_calls_failed_stays_charged() {
+    let h = harness().await;
+    h.provider.answer_check(Ok(done_job()));
+    h.provider
+        .answer_download(Download::Fail(MediaError::Local(LocalIo::DiskFull)));
+    let run = h.manager.start(h.video_req(), true).await.unwrap();
+    let failed = h.wait_status(&run.id, "failed").await;
+    assert_eq!(failed.error.unwrap().charged, Some(true));
+    assert_eq!(failed.cost_usd, Some(0.36));
+
+    h.provider.check_from_now(Ok(JobState::Failed(MediaFailure {
+        kind: FailureKind::Server,
+        stage: None,
+        charged: Some(false),
+        company_code: None,
+        request_id: Some("gen-9".into()),
+        status: None,
+        message: "The job failed".into(),
+        retry_after: None,
+    })));
+    h.manager.fetch_anyway(&run.id).await.unwrap();
+    let again = h
+        .wait_for(&run.id, "failed again", |r| {
+            r.status == "failed" && !r.watching && r.error.is_some()
+        })
+        .await;
+    let error = again.error.unwrap();
+    assert_eq!(error.charged, Some(true), "{error:?}");
+    assert_eq!(again.cost_usd, Some(0.36));
+    let spent = h.manager.usage().await.unwrap().spent_today_usd;
+    assert!((spent - 0.36).abs() < 1e-9, "{spent}");
+}
+
 #[tokio::test]
 async fn a_second_get_it_anyway_copies_the_first_rows_arguments() {
     let h = harness().await;
