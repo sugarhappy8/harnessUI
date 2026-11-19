@@ -122,6 +122,9 @@ export function PromptDock(props: { tab: StudioTab }) {
         onKeyDown={(e) => {
           if (e.key === "Enter" && !e.shiftKey && !e.nativeEvent.isComposing) {
             e.preventDefault();
+            // Enter held down repeats: one press is one run (the prompt stays after Create, and
+            // each start is answered within moments).
+            if (e.repeat) return;
             create();
           }
         }}

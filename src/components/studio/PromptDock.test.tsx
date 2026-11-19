@@ -309,6 +309,22 @@ describe("PromptDock", () => {
       await flush();
     });
 
+    it("holding Enter down starts one run, not one per key repeat", async () => {
+      await show({ prefs: prefs({ lastModel: CLOUD_LAST }) });
+      typePrompt("a lighthouse");
+      fireEvent.keyDown(promptBox(), { key: "Enter" });
+      await flush();
+      expect(api.studioStart).toHaveBeenCalledTimes(1);
+      // The start was answered, and the prompt is still there; the key is still down.
+      for (let i = 0; i < 3; i++) {
+        const repeat = fireEvent.keyDown(promptBox(), { key: "Enter", repeat: true });
+        // No line is added either.
+        expect(repeat).toBe(false);
+        await flush();
+      }
+      expect(api.studioStart).toHaveBeenCalledTimes(1);
+    });
+
     it("Create is disabled while a start is on its way", async () => {
       await show({ prefs: prefs({ lastModel: CLOUD_LAST }) });
       vi.mocked(api.studioStart).mockReturnValue(new Promise<Run>(() => undefined));
