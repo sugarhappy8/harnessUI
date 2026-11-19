@@ -122,7 +122,7 @@ export const MessageItem = memo(function MessageItem(props: Props) {
   const [copied, setCopied] = useState(false);
   // [0.1.0 B11] *Open in Studio* on its way, and why the last one did not add the picture.
   const [opening, setOpening] = useState(false);
-  const [notInStudio, setNotInStudio] = useState<string | null>(null);
+  const [notInStudio, setNotInStudio] = useState<{ why: string; nextStep: string } | null>(null);
 
   /** Puts the attached picture `src` (a `data:` URI) in Studio's Pictures tab, and shows Studio;
    *  says here why when it cannot. */
@@ -133,9 +133,10 @@ export const MessageItem = memo(function MessageItem(props: Props) {
     setNotInStudio(null);
     try {
       const why = await useStudio.getState().openInStudio(picture);
-      if (why) setNotInStudio(STUDIO_CHAT_LINK.notAdded(why));
+      if (why) setNotInStudio({ why: STUDIO_CHAT_LINK.notAdded(why), nextStep: "" });
     } catch (e) {
-      setNotInStudio(STUDIO_CHAT_LINK.notAdded(toErrorInfo(e).message));
+      const error = toErrorInfo(e);
+      setNotInStudio({ why: STUDIO_CHAT_LINK.notAdded(error.message), nextStep: error.nextStep });
     } finally {
       setOpening(false);
     }
@@ -261,9 +262,10 @@ export const MessageItem = memo(function MessageItem(props: Props) {
               </div>
             )}
             {notInStudio && (
-              <p role="status" className="text-xs text-warning">
-                {notInStudio}
-              </p>
+              <div role="status" className="text-right text-xs">
+                <p className="text-warning">{notInStudio.why}</p>
+                {notInStudio.nextStep && <p className="text-fg-muted">{notInStudio.nextStep}</p>}
+              </div>
             )}
             {(m.documents ?? []).length > 0 && (
               <div className="flex flex-wrap justify-end gap-1">

@@ -24,9 +24,30 @@ import type { ParamSpec, RefItem, RefRole } from "./types";
 /** The picture types the file chooser offers (`readImage` checks each file again). */
 const PICTURE_TYPES = "image/png,image/jpeg,image/gif,image/webp";
 
-/** The words for why adding failed: `readImage`'s own, or the backend's. */
-function failureWords(e: unknown): string {
-  return e instanceof Error ? e.message : toErrorInfo(e).message;
+/** Why a picture was not added, and what to do about it when there is a next step. */
+interface Refusal {
+  message: string;
+  nextStep: string;
+}
+
+/** Why adding failed: `readImage`'s own words, or the backend's with its next step. */
+function failureWords(e: unknown): Refusal {
+  if (e instanceof Error) return { message: e.message, nextStep: "" };
+  const { message, nextStep } = toErrorInfo(e);
+  return { message, nextStep };
+}
+
+/** A refusal without a next step (the model's limit, a role with no room). */
+const refusal = (message: string): Refusal => ({ message, nextStep: "" });
+
+/** `error`'s words, with its next step in a quieter colour. */
+function RefusalWords(props: { error: Refusal }) {
+  return (
+    <>
+      {props.error.message}
+      {props.error.nextStep && <span className="text-fg-muted"> {props.error.nextStep}</span>}
+    </>
+  );
 }
 
 /** A picture to add, kept by the backend once it is asked for (after the model's limit was
@@ -50,13 +71,13 @@ function fromDrop(count: number): Source[] {
  * picture of a full role takes the place of the one there. Stops at the first picture not
  * added and returns why, else `null`.
  */
-async function addPictures(tab: StudioTab, sources: Source[], role: RefRole | null, replace: boolean): Promise<string | null> {
+async function addPictures(tab: StudioTab, sources: Source[], role: RefRole | null, replace: boolean): Promise<Refusal | null> {
   /** The draft's pictures that count against the limit: with `replace`, not those of `role`. */
   const counted = (refs: RefItem[]) => (replace ? refs.filter((r) => (r.role ?? "reference") !== role) : refs);
   for (const source of sources) {
     const before = useStudio.getState();
     const placed = placeRef(draftModel(before, tab), counted(before.drafts[tab].refs), role);
-    if ("refused" in placed) return placed.refused;
+    if ("refused" in placed) return refusal(placed.refused);
     let kept: RefItem;
     try {
       kept = await source();
@@ -69,14 +90,14 @@ async function addPictures(tab: StudioTab, sources: Source[], role: RefRole | nu
       if (there >= 0) now.removeRef(tab, there);
     }
     const why = useStudio.getState().addRef(tab, { ...kept, role });
-    if (why) return why;
+    if (why) return refusal(why);
   }
   return null;
 }
 
 /** Adding pictures to `tab`'s draft: `add`, and why the last attempt stopped, if it did. */
 function useAdding(tab: StudioTab) {
-  const [error, setError] = useState<string | null>(null);
+  const [error, setError] = useState<Refusal | null>(null);
   const add = useCallback(
     (sources: Source[], role: RefRole | null, replace = false) => {
       if (sources.length === 0) return;
@@ -306,7 +327,7 @@ export function RefTray(props: { tab: StudioTab }) {
       {refs.map((item, i) => (
         <div key={refKey(refs, i)} className="flex items-center gap-1.5 rounded-lg border border-border p-1 pr-1.5">
           <RefThumb sha256={item.sha256} mime={item.mime} alt={STUDIO_REFS.picture(i + 1)} className="h-8 w-8 rounded" />
-          <RoleChip tab={tab} index={i} item={item} roles={roles} refs={refs} onRefused={setError} />
+          <RoleChip tab={tab} index={i} item={item} roles={roles} refs={refs} onRefused={(why) => setError(refusal(why))} />
           <button
             type="button"
             aria-label={STUDIO_REFS.remove(i + 1)}
@@ -341,7 +362,7 @@ export function RefTray(props: { tab: StudioTab }) {
       />
       {error && (
         <span role="alert" className="text-xs text-danger">
-          {error}
+          <RefusalWords error={error} />
         </span>
       )}
     </div>
@@ -406,7 +427,7 @@ export function FrameDrop(props: { tab: StudioTab; spec: ParamSpec }) {
       />
       {error && (
         <p role="alert" className="text-xs text-danger">
-          {error}
+          <RefusalWords error={error} />
         </p>
       )}
     </div>

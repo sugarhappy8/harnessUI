@@ -229,6 +229,9 @@ describe("RefTray", () => {
     });
     dropFile(screen.getByText("+ Add picture"), pngFile());
     await screen.findByText("The disk is full.");
+    // With what to do about it.
+    screen.getByText("Free up space.");
+    expect(screen.getByRole("alert").textContent).toBe("The disk is full. Free up space.");
     expect(refs()).toEqual([]);
   });
 

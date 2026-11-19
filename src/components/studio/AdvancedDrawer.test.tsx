@@ -779,6 +779,24 @@ describe("My setups", () => {
     expect(api.studioSetPrefs).toHaveBeenCalledWith({ setups: [LOCAL_SQUARE, { ...PRODUCT_SHOT, params: {} }] });
   });
 
+  it("a save that fails says why and what to do", async () => {
+    await renderPanel(flare);
+    vi.mocked(api.studioSetPrefs).mockRejectedValue({
+      code: "io",
+      message: "Studio's preferences could not be saved.",
+      nextStep: "Free up some disk space, then try again.",
+      details: "",
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Save as setup…" }));
+    fireEvent.change(screen.getByRole("textbox", { name: "Setup name" }), { target: { value: "Product shot" } });
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: "Save setup" }));
+    });
+    await flush();
+    screen.getByText("Studio's preferences could not be saved.");
+    screen.getByText("Free up some disk space, then try again.");
+  });
+
   it("keeps at most 50 setups", async () => {
     const fifty = Array.from({ length: 50 }, (_, i) => ({ ...PRODUCT_SHOT, name: `Setup ${i + 1}` }));
     await renderPanel(flare, { prefs: { setups: fifty } });

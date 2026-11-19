@@ -301,6 +301,20 @@ describe("Open in Studio", () => {
     expect(useStudio.getState().view).toBe("chat");
   });
 
+  it("a refusal with a next step says what to do", async () => {
+    studioOn(flare);
+    vi.mocked(studioApi.studioAddRef).mockRejectedValue({
+      code: "studio_disk_full",
+      message: "The disk is full.",
+      nextStep: "Free up some space, then try again.",
+      details: "",
+    });
+    await shown(user({ documents: [], mentions: [] }));
+    await click(screen.getByRole("button", { name: "Open in Studio" }));
+    screen.getByText("Not added to Studio. The disk is full.");
+    screen.getByText("Free up some space, then try again.");
+  });
+
   it("reads what Studio has saved first when Studio was never opened, and sends nothing", async () => {
     vi.mocked(studioApi.studioModels).mockResolvedValue({
       endpoints: [

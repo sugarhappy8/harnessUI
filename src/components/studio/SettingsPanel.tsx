@@ -123,6 +123,8 @@ function MySetups(props: {
   // The name being typed (`null` while not saving), and why a pick or a save did not happen.
   const [name, setName] = useState<string | null>(null);
   const [message, setMessage] = useState<string | null>(null);
+  // What to do about a save that failed (the backend's next step), shown under its reason.
+  const [nextStep, setNextStep] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
   const setups = all.filter((s) => s.kind === tab);
   const shown = from !== null && from.draft === draft ? setups.findIndex((s) => s.name === from.name) : -1;
@@ -132,11 +134,13 @@ function MySetups(props: {
     if (!setup) return;
     const refused = applySetup(setup);
     setMessage(refused);
+    setNextStep(null);
     onFrom(tab, refused === null ? { name: setup.name, draft: useStudio.getState().drafts[tab] } : null);
   };
   const save = async () => {
     if (name === null || name.trim() === "" || saving) return;
     setSaving(true);
+    setNextStep(null);
     try {
       const refused = await saveSetup(tab, name);
       setMessage(refused);
@@ -145,7 +149,9 @@ function MySetups(props: {
         setName(null);
       }
     } catch (e: unknown) {
-      setMessage(toErrorInfo(e).message);
+      const error = toErrorInfo(e);
+      setMessage(error.message);
+      setNextStep(error.nextStep || null);
     } finally {
       setSaving(false);
     }
@@ -211,6 +217,7 @@ function MySetups(props: {
             onClick={() => {
               setName(null);
               setMessage(null);
+              setNextStep(null);
             }}
             className={SMALL_BUTTON}
           >
@@ -219,6 +226,7 @@ function MySetups(props: {
         </div>
       )}
       {message && <p className="text-xs text-warning">{message}</p>}
+      {message && nextStep && <p className="text-xs text-fg-muted">{nextStep}</p>}
     </div>
   );
 }
