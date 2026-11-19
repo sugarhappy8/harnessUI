@@ -155,6 +155,8 @@ struct FakeProvider {
     checked: Mutex<Vec<Check>>,
     downloads: Mutex<VecDeque<Download>>,
     downloaded: AtomicUsize,
+    /// The next check panics (a bug in the app), once.
+    check_panics: AtomicBool,
 }
 
 impl FakeProvider {
@@ -172,7 +174,13 @@ impl FakeProvider {
             checked: Mutex::new(Vec::new()),
             downloads: Mutex::new(VecDeque::new()),
             downloaded: AtomicUsize::new(0),
+            check_panics: AtomicBool::new(false),
         }
+    }
+
+    /// The next check panics (a bug in the app's code), once.
+    fn panic_at_next_check(&self) {
+        self.check_panics.store(true, Ordering::SeqCst);
     }
 
     /// A company whose every check says the job is done ([`done_job`]).
@@ -356,6 +364,9 @@ impl MediaProvider for FakeProvider {
     }
 
     async fn check(&self, remote_id: &str) -> Result<JobState, MediaError> {
+        if self.check_panics.swap(false, Ordering::SeqCst) {
+            panic!("the fake company's check broke");
+        }
         let at = Instant::now();
         let holder = match self.store.get() {
             Some(store) => store
@@ -1968,6 +1979,38 @@ async fn a_run_whose_task_breaks_off_is_recorded_as_interrupted_and_frees_its_pl
     let next = h.manager.start(h.picture_req("y"), false).await.unwrap();
     h.wait_status(&next.id, "done").await;
     assert_eq!(h.provider.starts(), 3);
+}
+
+/// Finding mgr-broken-task-leaves-engine: a cloud video whose job started (it has a job id)
+/// when its task broke off may still finish: it is recorded failed, charged unknown, so
+/// *Get it anyway* still follows it (an interrupted run is refused).
+#[tokio::test]
+async fn a_started_video_whose_task_breaks_off_can_still_be_got() {
+    let h = harness().await;
+    h.provider.panic_at_next_check();
+    let run = h.manager.start(h.video_req(), true).await.unwrap();
+    let failed = h.wait_status(&run.id, "failed").await;
+    assert_eq!(failed.remote_id.as_deref(), Some("vid_1"));
+    let error = failed.error.unwrap();
+    assert_eq!(
+        (error.code.as_str(), error.charged),
+        ("studio_interrupted", None)
+    );
+    assert!(
+        error.next_step.contains("Get it anyway"),
+        "{}",
+        error.next_step
+    );
+    assert_eq!(
+        h.audit_rows_for(&run.id).await[0].result_status.as_deref(),
+        Some("failed")
+    );
+    h.provider.check_from_now(Ok(done_job()));
+    let back = h.manager.fetch_anyway(&run.id).await.unwrap();
+    assert_eq!(back.status, "waiting");
+    let done = h.wait_status(&run.id, "done").await;
+    assert_eq!(done.outputs.len(), 1);
+    assert_eq!(h.provider.starts(), 1);
 }
 
 #[tokio::test]
@@ -3870,6 +3913,8 @@ enum Course {
     Draws { loading: u32, drawing: u32 },
     /// Loading for its first `loading` checks, then fails with this kind before it draws.
     FailsLoading { loading: u32, kind: FailureKind },
+    /// Its first check panics (a bug in the app) while the engine job runs.
+    Panics,
 }
 
 /// How a [`FakeLocal`] run fails with `kind`.
@@ -4081,6 +4126,11 @@ impl MediaProvider for FakeLocal {
         let Some(run) = runs.get_mut(remote_id) else {
             return Ok(JobState::Gone);
         };
+        if matches!(run.course, Course::Panics) {
+            // Not while the lock is held: Cancel takes it afterwards.
+            drop(runs);
+            panic!("the lane's code broke while the engine job ran");
+        }
         run.checks += 1;
         if self.is_held(run.nth) {
             return Ok(JobState::Running {
@@ -4116,6 +4166,7 @@ impl MediaProvider for FakeLocal {
                 progress: Some(0.1),
             },
             Course::FailsLoading { kind, .. } => local_failure(kind),
+            Course::Panics => unreachable!("it panicked above"),
         })
     }
 
@@ -4222,7 +4273,7 @@ impl LocalProvider for FakeLocal {
             Course::Draws { loading, .. } if run.checks <= loading => Some(LocalStage::Loading),
             Course::Draws { .. } => Some(LocalStage::Drawing),
             Course::FailsLoading { .. } => Some(LocalStage::Loading),
-            Course::Done | Course::RetryThenDone | Course::Fail(_) => None,
+            Course::Done | Course::RetryThenDone | Course::Fail(_) | Course::Panics => None,
         };
         let progress = stage.map(|stage| {
             let drawing = stage == LocalStage::Drawing;
@@ -5603,6 +5654,28 @@ async fn quit_and_stop_never_reloads_the_chat_model() {
     }
     tokio::time::sleep(Duration::from_millis(100)).await;
     assert!(h.lease.reloads().is_empty(), "{:?}", h.lease.reloads());
+}
+
+/// Finding mgr-broken-task-leaves-engine: a local run whose task breaks off while its engine
+/// job runs has that job stopped (the hold on the card went with the task, so the card reads
+/// as free), and is recorded interrupted, never charged.
+#[tokio::test]
+async fn a_local_run_whose_task_breaks_off_stops_its_engine() {
+    let h = harness_with_local().await;
+    h.local.course(Course::Panics);
+    let run = h.manager.start(h.local_req("x"), false).await.unwrap();
+    let ended = h.wait_status(&run.id, "interrupted").await;
+    let error = ended.error.unwrap();
+    assert_eq!(
+        (error.code.as_str(), error.charged),
+        ("studio_interrupted", Some(false))
+    );
+    assert_eq!(h.local.cancels(), 1, "the engine job was stopped");
+    assert_eq!(h.lease.drops().len(), 1);
+    eventually("its place is freed", || !h.manager.local_running()).await;
+    // The next run starts and finishes.
+    let next = h.manager.start(h.local_req("y"), false).await.unwrap();
+    h.wait_status(&next.id, "done").await;
 }
 
 // ---- fix round 2 (rulings L15-starting-lock, L15-processor-eta, L15-tests) ------------------

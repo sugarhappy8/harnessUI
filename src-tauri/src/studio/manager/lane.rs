@@ -1320,7 +1320,10 @@ impl Inner {
 }
 
 /// Kills engine job `remote_id`'s whole tree and removes its folder.
-async fn stop_engine(provider: &dyn crate::studio::local::LocalProvider, remote_id: &str) {
+pub(super) async fn stop_engine(
+    provider: &dyn crate::studio::local::LocalProvider,
+    remote_id: &str,
+) {
     if let Err(e) = provider.cancel(remote_id).await {
         tracing::warn!("a local Studio run's engine was not stopped: {e}");
     }

@@ -425,7 +425,7 @@ impl Inner {
 /// Whether recorded run `run`'s video job is known to have reported done, so it was charged:
 /// its result was downloading, its cost is recorded (only a job that reported done has one),
 /// or how it ended said it was charged (a failure after done, or a Stop while downloading).
-fn finished_job(run: &store::CreationRun) -> bool {
+pub(super) fn finished_job(run: &store::CreationRun) -> bool {
     run.status == store::CreationStatus::Downloading
         || run.cost_usd.is_some()
         || run

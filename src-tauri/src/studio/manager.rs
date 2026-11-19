@@ -1855,7 +1855,11 @@ impl Inner {
     /// Records run `run_id` (made through `company`, with audit row `audit_id`) as the next
     /// start would find it, after its task broke off (a panic) before recording how it went:
     /// `interrupted`, charged unknown (not charged for a run on this computer), its audit row
-    /// completed, its scratch folder removed. A run already recorded as ended keeps its record.
+    /// completed, its scratch folder removed. A run on this computer has its engine job
+    /// stopped (the hold on the card went with the task, so the card reads as free); a cloud
+    /// job that started (it has a job id) may still finish, so it is `failed`, charged as
+    /// [`video::finished_job`] says, and *Get it anyway* can follow it again. A run already
+    /// recorded as ended keeps its record.
     async fn record_broken(
         &self,
         run_id: &str,
@@ -1874,11 +1878,24 @@ impl Inner {
         if !still_going(run.status) {
             return;
         }
-        // A run on this computer is never charged; a cloud run may have started.
-        let charged = (company == Company::Local).then_some(false);
-        let ending = Ending {
+        let interrupted = |charged| Ending {
             status: store::CreationStatus::Interrupted,
             ..Ending::failed(errors::broke_off(company), charged)
+        };
+        let ending = match (company, run.remote_id.as_deref()) {
+            // Never charged; its engine job, when one began, is stopped.
+            (Company::Local, remote_id) => {
+                if let (Some(remote_id), Some(local)) = (remote_id, &self.deps.local) {
+                    lane::stop_engine(local.provider.as_ref(), remote_id).await;
+                }
+                interrupted(Some(false))
+            }
+            (_, Some(_)) => {
+                let charged = video::finished_job(&run).then_some(true);
+                Ending::failed(errors::broke_off_following(company, charged), charged)
+            }
+            // It may have started.
+            (_, None) => interrupted(None),
         };
         self.record_end(run_id, company, audit_id, ending, run.started_at)
             .await;

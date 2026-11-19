@@ -577,6 +577,28 @@ pub fn broke_off(company: Company) -> AppError {
     }
 }
 
+/// A cloud video whose job had started (it has a job id) when Studio's task following it
+/// broke off after an error in the app: the job may still finish, or did (`charged` is
+/// `Some(true)`), so *Get it anyway* is offered.
+pub fn broke_off_following(company: Company, charged: Option<bool>) -> AppError {
+    let who = name(company);
+    let (message, next) = match charged {
+        Some(true) => (
+            format!(
+                "Studio stopped following this after an error in the app. {who} finished it, so it was charged."
+            ),
+            "Press Get it anyway to download it.",
+        ),
+        _ => (
+            format!(
+                "Studio stopped following this after an error in the app. {who} may still finish and charge for it."
+            ),
+            "Press Get it anyway to download it if it finished.",
+        ),
+    };
+    AppError::new("studio_interrupted", message, next, String::new())
+}
+
 /// The company no longer has the finished result.
 pub fn result_expired(company: Company) -> AppError {
     if company == Company::Local {
@@ -2241,6 +2263,22 @@ mod tests {
             "Studio stopped following this after an error in the app; it may or may not have started."
         );
         assert!(e.next_step.contains("platform.openai.com"));
+        // A video whose job had started: it may still finish, or did, and can still be got.
+        let e = broke_off_following(Company::OpenRouter, None);
+        assert_eq!(
+            (e.code.as_str(), e.message.as_str(), e.next_step.as_str()),
+            (
+                "studio_interrupted",
+                "Studio stopped following this after an error in the app. OpenRouter may still finish and charge for it.",
+                "Press Get it anyway to download it if it finished."
+            )
+        );
+        let e = broke_off_following(Company::OpenAi, Some(true));
+        assert!(
+            e.message
+                .ends_with("OpenAI finished it, so it was charged.")
+        );
+        assert_eq!(e.next_step, "Press Get it anyway to download it.");
         let e = added_picture_missing();
         assert_eq!(
             (e.code.as_str(), e.message.as_str(), e.next_step.as_str()),
