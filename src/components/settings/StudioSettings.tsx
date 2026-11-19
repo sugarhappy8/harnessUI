@@ -50,12 +50,15 @@ function amountFrom(text: string): number | null {
 }
 
 /** Writes `patch` (only the fields it names); a refusal goes to `onError`. */
-function changePrefs(patch: StudioPrefsPatch, onError: (e: ErrorInfo | null) => void) {
+function changePrefs(patch: StudioPrefsPatch, onError: (e: ErrorInfo | null) => void, onRefused?: () => void) {
   onError(null);
   useStudio
     .getState()
     .setPrefs(patch)
-    .catch((e: unknown) => onError(toErrorInfo(e)));
+    .catch((e: unknown) => {
+      onError(toErrorInfo(e));
+      onRefused?.();
+    });
 }
 
 export function StudioSettings() {
@@ -362,7 +365,10 @@ function Spending(props: { prefs: StudioPrefs }) {
             disabled={limit === null}
             onCommit={(usd) => {
               setKept(usd);
-              changePrefs({ dailyLimitUsd: usd }, setError);
+              // A refused amount is not kept: the limit comes back at the saved one.
+              changePrefs({ dailyLimitUsd: usd }, setError, () =>
+                setKept((now) => (now === usd ? (useStudio.getState().prefs?.dailyLimitUsd ?? limit ?? DEFAULT_LIMIT_USD) : now)),
+              );
             }}
           />
         </div>

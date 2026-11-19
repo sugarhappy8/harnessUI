@@ -357,6 +357,25 @@ describe("Settings → Studio", () => {
     expect(api.studioSetPrefs).toHaveBeenLastCalledWith({ confirmAtUsd: 2.5 });
   });
 
+  it("a limit the backend refused is not the amount the limit comes back at", async () => {
+    await show();
+    vi.mocked(api.studioSetPrefs).mockRejectedValueOnce({
+      code: "io",
+      message: "Studio's preferences could not be saved.",
+      nextStep: "Try again.",
+      details: "",
+    });
+    await setAmount("Daily limit in US dollars", "20");
+    await flush();
+    screen.getByText("Studio's preferences could not be saved.");
+    // The box shows the saved amount, and turned off and on again the limit is that amount.
+    expect((screen.getByLabelText("Daily limit in US dollars") as HTMLInputElement).value).toBe("10");
+    await click(screen.getByRole("checkbox", { name: "Daily limit" }));
+    expect(api.studioSetPrefs).toHaveBeenLastCalledWith({ dailyLimitUsd: null });
+    await click(screen.getByRole("checkbox", { name: "Daily limit" }));
+    expect(api.studioSetPrefs).toHaveBeenLastCalledWith({ dailyLimitUsd: 10 });
+  });
+
   it("a limit typed and turned off at once comes back at the amount typed", async () => {
     await show();
     // The backend answers only when let: unticking the box leaves the amount box first, so its
