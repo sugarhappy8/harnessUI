@@ -2,7 +2,7 @@
 // a raw identifier such as "vulkan", "Vulkan0" or "text_model". Every phrase of the model
 // loading screens lives here, so the wording stays the same wherever it appears; the test
 // walks every value of the contract's enums.
-import type { Company, GpuPolicy, LocalFit, MediaKind, RefRole } from "../components/studio/types";
+import type { Company, GpuPolicy, Licence, LocalFit, MediaKind, RefRole } from "../components/studio/types";
 import { APP_NAME } from "./app";
 import type {
   BackendKind,
@@ -1785,6 +1785,107 @@ export const STUDIO_SETTINGS = {
   listNone: (name: string) => `${name} · no lists saved yet`,
   updateNow: "Update now",
   noEndpoint: "No endpoint makes pictures or video yet. Add OpenRouter or OpenAI in Endpoints.",
+} as const;
+
+/** What a model licence allows for what you make, as its badge says it (Task B13): green,
+ *  amber with its condition ("$5M" from the revenue limit, `revenueLimit`), or red. */
+export const LICENCE_BADGE = {
+  yes: "Free for any use, including commercial",
+  underRevenue: (limit: string | null) =>
+    limit === null ? "Commercial use only under a revenue limit" : `Commercial use only under ${limit} revenue`,
+  registration: "Commercial use only after registering with the publisher",
+  unclear: "Check the licence",
+  no: "Non-commercial",
+} as const satisfies Record<Licence["commercial"], string | ((limit: string | null) => string)>;
+
+/** A yearly revenue limit as a licence badge says it: "$5M", "$2.5M", "$500K". */
+export function revenueLimit(usd: number): string {
+  const units: readonly (readonly [number, string])[] = [
+    [1e9, "B"],
+    [1e6, "M"],
+    [1e3, "K"],
+  ];
+  for (const [size, unit] of units) if (usd >= size) return `$${Math.round((usd / size) * 10) / 10}${unit}`;
+  return `$${usd}`;
+}
+
+/** Get local models, Studio's own view (Task B13, local addendum Wireframe L2): the header,
+ *  the filters, each model's row, Hugging Face search and the footer. */
+export const LOCAL_MODELS = {
+  title: STUDIO_ACTIONS.getLocalModels,
+  back: "Back",
+  /** The header's parts: "This computer: Radeon RX 7600, 8 GB graphics memory · 32 GB
+   *  memory · 412 GB free"; amounts are `amountGb`'s. */
+  thisComputer: (what: string) => `This computer: ${what}`,
+  processorOnly: "processor only",
+  graphicsMemory: (amount: string) => `${amount} graphics memory`,
+  sharedMemory: (amount: string) => `${amount} shared memory`,
+  memory: (amount: string) => `${amount} memory`,
+  freeDisk: (amount: string) => `${amount} free`,
+  onlyFits: "Only what fits",
+  showNonCommercial: "Show non-commercial models",
+  recommended: "Recommended for this computer",
+  installed: "Installed",
+  download: "Download",
+  delete: "Delete",
+  /** The folded list of models that do not fit this computer. */
+  notHere: (n: number) => `Not for this computer (${n})`,
+  /** The tab has no model that fits this computer. */
+  noneFit: {
+    image: "No picture model fits this computer.",
+    video: "No video model fits this computer.",
+  } satisfies Record<MediaKind, string>,
+  videoNote: "Local video is slower and simpler than cloud video, but free and private.",
+  /** A time line without an estimate (nothing measured here, no first guess). */
+  noTime: STUDIO_TIME.notYet.charAt(0).toUpperCase() + STUDIO_TIME.notYet.slice(1),
+  /** After *Download again*: what happens now. */
+  repairing: "Its files are being checked; anything missing or damaged downloads again (Models → Downloads).",
+  deleteTitle: (name: string) => `Delete ${name}?`,
+  deleteBody:
+    "Its files are removed from this computer, except parts another model still uses. Pictures and videos you made stay in the gallery.",
+  cancel: "Cancel",
+  search: "Search Hugging Face",
+  searchPlaceholder: "Search Hugging Face for picture and video models…",
+  searchButton: "Search",
+  searchSends: "Searching sends your words to huggingface.co.",
+  searching: "Searching…",
+  results: "Found on Hugging Face",
+  noResults: "Hugging Face found no picture or video models for that.",
+  /** A search hit's downloads, as `formatCount` gives them ("12.3k"). */
+  downloads: (count: string) => `${count} downloads`,
+  /** A search hit's licence, as its repository labels it. */
+  labelled: (label: string) => `labelled ${label}`,
+  opening: "Reading the repository on huggingface.co…",
+  /** A searched file: "3 parts · 7.1 GB in all · 4.6 GB to download" (the last part only when
+   *  some of it is already here). */
+  fileLine(parts: number, total: number, toFetch: number): string {
+    const line = `${parts === 1 ? "1 part" : `${parts} parts`} · ${amountGb(total)} in all`;
+    return toFetch < total ? `${line} · ${amountGb(toFetch)} to download` : line;
+  },
+  /** One part of a searched file: "reads your prompt · 2.5 GB · already on this computer". */
+  part: (label: string, bytes: number, here: boolean) =>
+    `${label} · ${amountGb(bytes)}${here ? " · already on this computer" : ""}`,
+  notSupportedYet: "Not supported yet",
+  /** `reason` is the backend's clause ("its licence excludes some regions"). */
+  notOffered: (reason: string | null) =>
+    reason ? `Not offered in ${APP_NAME}: ${reason}.` : `Not offered in ${APP_NAME}.`,
+  hiddenNonCommercial: "Its files show when Show non-commercial models is ticked.",
+  notice: "Local models run only on this computer; no company checks prompts or results.",
+  whatThatMeans: "What that means",
+} as const;
+
+/** Models → Downloads: what a picture or video model's download is (Task B13). */
+export const DOWNLOAD_KIND_WORDS: Record<"image" | "image-edit" | "video", string> = {
+  image: "Picture model",
+  "image-edit": "Picture model",
+  video: "Video model",
+};
+
+/** Models → Installed: the one line for picture and video models, which open in Studio
+ *  (Task B13): "Picture and video models: 2 (14 GB) · Manage in Studio". */
+export const INSTALLED_STUDIO_LINE = {
+  models: STUDIO_SETTINGS.models,
+  manage: "Manage in Studio",
 } as const;
 
 /** What an endpoint card says it can do (Settings → Endpoints, 0.1.0): "Chat · Pictures ·

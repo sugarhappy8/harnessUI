@@ -3,9 +3,11 @@ import { Pause, Play, X } from "lucide-react";
 import * as ipc from "../../lib/ipc";
 import type { DownloadGroup, ErrorInfo } from "../../lib/types";
 import { formatBytes, formatEta } from "../../lib/format";
+import { DOWNLOAD_KIND_WORDS } from "../../lib/words";
 import { toErrorInfo } from "../../store/app";
 import { ErrorBanner } from "../ErrorBanner";
 import { visiblePath } from "../FolderChip";
+import { Badge } from "./Badge";
 
 /** What a row says it is doing. [0.0.7 P6b] Checking a file already there, or stopping and
  *  deleting its files after Cancel, each take a while. */
@@ -15,7 +17,8 @@ function statusText(g: DownloadGroup, checking: boolean): string {
   return g.status;
 }
 
-/** Models → Downloads: progress, pause, resume and cancel. */
+/** Models → Downloads: progress, pause, resume and cancel; a picture or video model's
+ *  download (0.1.0 Studio) says which it is. */
 export function Downloads() {
   const [groups, setGroups] = useState<DownloadGroup[]>([]);
   const [error, setError] = useState<ErrorInfo | null>(null);
@@ -71,11 +74,15 @@ export function Downloads() {
             <li key={g.id} className="rounded-md border border-border px-3 py-2 text-sm">
               <div className="flex items-center gap-2">
                 <div className="min-w-0 flex-1">
-                  <p className="truncate font-medium">
-                    <bdi dir="ltr">
-                      {visiblePath(g.repo)} · {visiblePath(g.label)}
-                    </bdi>
-                  </p>
+                  <div className="flex min-w-0 items-center gap-2">
+                    <p className="truncate font-medium">
+                      <bdi dir="ltr">
+                        {visiblePath(g.repo)} · {visiblePath(g.label)}
+                      </bdi>
+                    </p>
+                    {/* 0.1.0 Studio: a picture or video model's download says so. */}
+                    {g.generatorKind && <Badge>{DOWNLOAD_KIND_WORDS[g.generatorKind]}</Badge>}
+                  </div>
                   <p className="text-xs text-fg-muted">
                     {formatBytes(g.bytesDone)} of {formatBytes(g.bytesTotal)} · {statusText(g, checking)}
                     {eta ? ` · ${eta}` : ""}

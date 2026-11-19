@@ -328,6 +328,21 @@ describe("Studio", () => {
     expect(useStudio.getState()).toMatchObject({ view: "studio", tab: "video" });
   });
 
+  it('app:open-studio with "local" opens Studio on Get local models', async () => {
+    useStudio.setState({ localView: false });
+    await renderApp();
+    act(() => {
+      window.dispatchEvent(new CustomEvent("app:open-studio", { detail: "video" }));
+    });
+    act(() => useStudio.getState().showChat());
+    expect(useStudio.getState().localView).toBe(false);
+    act(() => {
+      window.dispatchEvent(new CustomEvent("app:open-studio", { detail: "local" }));
+    });
+    // On the tab shown last, which its own tabs start on.
+    expect(useStudio.getState()).toMatchObject({ view: "studio", tab: "video", localView: true, localTab: "video" });
+  });
+
   it("the chat stays mounted, hidden, while Studio is shown", async () => {
     await renderApp();
     expect(screen.queryByTestId("studio-view")).toBeNull(); // mounted on first open

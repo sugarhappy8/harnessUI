@@ -27,7 +27,11 @@
 // into one folder: in ./studioResults, composed in here), the grid's filters and Load more.
 // Task B10: the Studio engine's state read again (Settings → Studio's engine line), and Delete
 // stopped and failed runs (in ./studioResults). Task B11: a picture attached in a chat opened
-// in Studio's Pictures tab, and Send to chat (in ./studioResults).
+// in Studio's Pictures tab, and Send to chat (in ./studioResults). Task B13: Get local models'
+// own Pictures and Video tab, Only what fits and Show non-commercial models, Hugging Face asked
+// only on Search or Enter and when one result is opened, an installed local model deleted, and
+// what a Download button offers and whether the note about local models is open (Task B14 shows
+// both).
 import { create, type StoreApi, type UseBoundStore } from "zustand";
 import * as api from "../components/studio/api";
 import { carry, closestModel, defaultsFor, dropUnmet, familyOf, type Values } from "../components/studio/canonical";
@@ -38,6 +42,8 @@ import type {
   LocalEntry,
   LocalFit,
   LocalModels,
+  LocalRepo,
+  LocalSearchHit,
   MediaKind,
   MediaModel,
   ModelChoice,
@@ -58,6 +64,7 @@ import type {
 import * as ipc from "../lib/ipc";
 import { listenInEffect } from "../lib/listen";
 import type { ErrorInfo } from "../lib/types";
+import type { DownloadOffer } from "../components/studio/LocalModelRow";
 import { STUDIO_CHAT_LINK, STUDIO_EMPTY, STUDIO_FIELDS, STUDIO_REFS, STUDIO_SETUPS } from "../lib/words";
 import { toErrorInfo } from "./app";
 import { createResults, type StudioResultsState } from "./studioResults";
@@ -206,7 +213,43 @@ export interface StudioState extends StudioRunState, StudioResultsState {
   /** Reads the local models again (after a download or a delete). */
   refreshLocal(): Promise<void>;
   setTab(tab: StudioTab): void;
+  /** Get local models in place of the card stream (its own tabs start on `tab`), or the
+   *  cards again (`tab` stays as it was). */
   showLocalModels(show: boolean): void;
+  /** Get local models' own tab, Pictures or Video: set from `tab` each time the view opens;
+   *  changing it leaves `tab` as it is. */
+  localTab: StudioTab;
+  setLocalTab(tab: StudioTab): void;
+  /** *Only what fits* (on by default): the models that do not fit this computer are folded
+   *  away under "Not for this computer". */
+  onlyFits: boolean;
+  setOnlyFits(on: boolean): void;
+  /** *Show non-commercial models* (off by default): an opened search result whose licence is
+   *  red shows its files. */
+  showNonCommercial: boolean;
+  setShowNonCommercial(on: boolean): void;
+  /** The last Hugging Face search: its words, the tab it was for and what it found; `null`
+   *  before the first. */
+  localSearch: { text: string; tab: StudioTab; hits: LocalSearchHit[] } | null;
+  /** Search or Enter in Get local models (never as typing goes): asks Hugging Face for `tab`'s
+   *  kind of repositories matching `text`. An answer to a search asked before the last one is
+   *  dropped. Rejects when Hugging Face could not be asked. */
+  search(text: string, tab: StudioTab): Promise<void>;
+  /** One search result opened: asks Hugging Face for repository `repo` at its latest commit,
+   *  as Studio recognises it. */
+  openRepo(repo: string): Promise<LocalRepo>;
+  /** Delete on an installed picture or video model: its files go (not a part another model
+   *  uses), then the local models are read again. Rejects when it was refused (while a run on
+   *  this computer uses the model, `studio_model_in_use`). */
+  deleteLocal(genModelId: string): Promise<void>;
+  /** What a Download button offers, every part and licence (Task B14's dialog shows it);
+   *  `null` while none is. */
+  offer: DownloadOffer | null;
+  setOffer(offer: DownloadOffer | null): void;
+  /** The note about local models: before a first download (`"accept"`, Task B14), or read
+   *  again from Get local models' footer (`"read"`); `null` while it is closed. */
+  noticeOpen: "accept" | "read" | null;
+  setNoticeOpen(mode: "accept" | "read" | null): void;
   /** Sets `tab`'s draft to the model used last when it is still offered, else to
    *  `defaultModel`, at that model's starting values. Fetches nothing (not even a price). */
   selectInitialModel(tab: StudioTab): void;
@@ -348,6 +391,9 @@ let loading: Promise<void> | null = null;
 
 /** The gallery's next page while it is being read, so a second *Load more* waits for it. */
 let paging: Promise<void> | null = null;
+
+/** Counts Hugging Face searches as they are asked, so only the last one's answer is kept. */
+let searchTick = 0;
 
 /** The words a saved model that is gone is explained with (a setup's, or a run's). */
 export interface GoneWords {
@@ -721,7 +767,28 @@ export const useStudio: UseBoundStore<StoreApi<StudioState>> = create<StudioStat
       fillDrafts();
     },
     setTab: (tab) => set({ tab }),
-    showLocalModels: (show) => set({ localView: show }),
+    showLocalModels: (show) => set((s) => (show ? { localView: true, localTab: s.tab } : { localView: false })),
+    localTab: "image",
+    setLocalTab: (localTab) => set({ localTab }),
+    onlyFits: true,
+    setOnlyFits: (onlyFits) => set({ onlyFits }),
+    showNonCommercial: false,
+    setShowNonCommercial: (showNonCommercial) => set({ showNonCommercial }),
+    localSearch: null,
+    search: async (text, tab) => {
+      const mine = ++searchTick;
+      const page = await api.studioLocalSearch(text, tab);
+      if (mine === searchTick) set({ localSearch: { text, tab, hits: page.items } });
+    },
+    openRepo: (repo) => api.studioLocalRepo(repo),
+    deleteLocal: async (genModelId) => {
+      await api.studioLocalDelete(genModelId);
+      await get().refreshLocal();
+    },
+    offer: null,
+    setOffer: (offer) => set({ offer }),
+    noticeOpen: null,
+    setNoticeOpen: (noticeOpen) => set({ noticeOpen }),
     selectInitialModel: (tab) => {
       // The draft starts again: nothing is held aside for a model it no longer has.
       delete held[tab];

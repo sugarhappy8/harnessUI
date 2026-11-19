@@ -450,6 +450,9 @@ export interface DownloadGroup {
   unverified: boolean;
   /** [0.0.7 P6b] A file is being checked (minutes for a large one): the row says so. */
   checking?: boolean;
+  /** 0.1.0 Studio: what the picture or video model this group downloads makes; `null` (or
+   *  left out) for a chat model's. */
+  generatorKind?: "image" | "image-edit" | "video" | null;
 }
 
 export interface ModelSummaryView {

@@ -8,6 +8,7 @@ import { useStudio, type StudioTab } from "../../store/studio";
 import { ErrorBanner } from "../ErrorBanner";
 import { Notices } from "./EmptyStates";
 import { Grid } from "./Grid";
+import { LocalModels } from "./LocalModels";
 import { PromptDock } from "./PromptDock";
 import { queueSummary, RunCard } from "./RunCard";
 import { SettingsPanel } from "./SettingsPanel";
@@ -27,8 +28,9 @@ import { Viewer } from "./Viewer";
 // since; above them, the queue strip counts this session's runs of the tab by state, and under
 // them *Load more* reads the gallery's next page. With Grid on, the gallery's grid takes the
 // stream's place (B9), and a result opened from a card, a tile or the chat's notice shows in the
-// viewer over the whole view. A later task fills the other slot: Get local models in place of
-// the stream while `localView` is on (B13).
+// viewer over the whole view. While `localView` is on, Get local models (B13, LocalModels.tsx)
+// takes the middle column's place, notices and empty states included, and the top bar hides
+// its tabs and the gallery's controls; Back brings them all back.
 
 /** The card stream of `tab`: the gallery's runs with each run's newest state, and the runs
  *  reported since (`live`) that it has not read, newest first. */
@@ -46,6 +48,7 @@ export function StudioView() {
   const runs = useStudio((s) => s.runs);
   const live = useStudio((s) => s.live);
   const grid = useStudio((s) => s.grid);
+  const localView = useStudio((s) => s.localView);
   const viewer = useStudio((s) => s.viewer);
   const openViewer = useStudio((s) => s.openViewer);
   const more = useStudio((s) => s.next !== null);
@@ -88,8 +91,10 @@ export function StudioView() {
           <main className="min-w-0 flex-1 overflow-y-auto">
             <div className="mx-auto flex max-w-3xl flex-col gap-3 px-4 py-4">
               {error && <ErrorBanner error={error.info} onDismiss={() => setError(null)} />}
-              {loaded && <Notices tab={tab} onError={fail} />}
-              {grid ? (
+              {!localView && loaded && <Notices tab={tab} onError={fail} />}
+              {localView ? (
+                <LocalModels />
+              ) : grid ? (
                 <Grid onOpen={openViewer} />
               ) : (
                 <div data-card-stream className="flex flex-col gap-3">

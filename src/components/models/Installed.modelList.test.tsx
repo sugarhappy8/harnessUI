@@ -25,6 +25,12 @@ const ipcMock = vi.hoisted(() => ({
 const dialog = vi.hoisted(() => ({ open: vi.fn<() => Promise<string | null>>() }));
 vi.mock("../../lib/ipc", () => ipcMock);
 vi.mock("@tauri-apps/plugin-dialog", () => dialog);
+// 0.1.0 Studio: the line for picture and video models reads them once; none are installed.
+vi.mock("../studio/api", () => ({
+  studioLocalModels: vi.fn(async () => {
+    throw new Error("not needed here");
+  }),
+}));
 
 const { Installed } = await import("./Installed");
 const { useApp } = await import("../../store/app");

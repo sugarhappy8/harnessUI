@@ -99,6 +99,8 @@ async function show(
   vi.mocked(api.studioGetPrefs).mockResolvedValue(p);
   vi.mocked(api.studioSetPrefs).mockImplementation(async (patch) => ({ ...p, ...patch }));
   vi.mocked(api.studioUsage).mockResolvedValue(saved.usage ?? usage());
+  // Get local models' footer follows the engine's download (Task B13).
+  vi.mocked(api.onEngineProgress).mockResolvedValue(() => undefined);
   // The prompt dock asks for the draft's estimate (Task B7).
   vi.mocked(api.studioEstimate).mockResolvedValue({
     usd: 0,
@@ -169,11 +171,13 @@ describe("StudioView", () => {
     await show({ endpoints: [], local: { ...LOCAL, installed: [] } });
     screen.getByText("Make pictures and videos on this computer: free, and nothing is sent.");
     screen.getByText(`${klein.name} fits this computer (${amountGb(klein.sizeBytes)}).`);
-    await click(screen.getByRole("button", { name: "Get local models" }));
-    expect(useStudio.getState().localView).toBe(true);
     screen.getByText("No good graphics card? Cloud models are the backup: OpenRouter or OpenAI."); // second, smaller
     await click(screen.getByRole("button", { name: "Open Endpoints" }));
     expect(opened).toEqual(["endpoints"]); // app:open-settings detail
+    // Get local models takes the empty state's place (Task B13).
+    await click(screen.getByRole("button", { name: "Get local models" }));
+    expect(useStudio.getState().localView).toBe(true);
+    expect(screen.queryByText("Make pictures and videos on this computer: free, and nothing is sent.")).toBeNull();
   });
 
   it("each empty state follows one ordered rule", () => {

@@ -74,10 +74,13 @@ export default function App() {
       setSettingsTab(typeof tab === "string" ? tab : undefined);
       setSettingsOpen(true);
     };
-    // Studio, on the tab the detail names ("image" or "video"), else on the one shown last.
+    // Studio, on the tab the detail names ("image" or "video"), else on the one shown last;
+    // "local" opens it on Get local models (Settings → Studio, Models → Installed).
     const onOpenStudio = (event: Event) => {
       const tab: unknown = (event as CustomEvent<unknown>).detail;
-      useStudio.getState().showStudio(tab === "image" || tab === "video" ? tab : undefined);
+      const studio = useStudio.getState();
+      studio.showStudio(tab === "image" || tab === "video" ? tab : undefined);
+      if (tab === "local") studio.showLocalModels(true);
     };
     window.addEventListener("app:open-models", onOpenModels);
     window.addEventListener("app:open-settings", onOpenSettings);

@@ -19,6 +19,8 @@ import { LocalMark } from "./LocalMark";
 // gallery's search, Starred and Grid, where the chosen model runs, cloud spending today, and
 // the menu with *Update model lists* and *Get local models*. While the grid is open, its own
 // All, Pictures and Video choose what it shows, and [Pictures | Video] is hidden (Task B9).
+// While Get local models is shown, its own [Pictures | Video] stand in for these, and the
+// gallery's search, Starred and Grid, which act on the hidden cards, are hidden (Task B13).
 
 const TABS: readonly StudioTab[] = ["image", "video"];
 
@@ -32,20 +34,22 @@ const MENU_ITEM =
 const TOGGLE =
   "flex shrink-0 items-center gap-1.5 rounded-lg px-2 py-1.5 text-sm whitespace-nowrap hover:bg-bg-muted aria-pressed:text-accent";
 
-/** Title, [Pictures | Video] (not while the grid is open), search, Starred, Grid, where the
- *  chosen model runs, cloud spending today, and the menu. */
+/** Title, [Pictures | Video] (not while the grid or Get local models is open), search, Starred
+ *  and Grid (not while Get local models is open), where the chosen model runs, cloud spending
+ *  today, and the menu. */
 export function TopBar(props: { onError: (e: unknown) => void }) {
   const setTab = useStudio((s) => s.setTab);
   const starred = useStudio((s) => s.filter.starred ?? false);
   const grid = useStudio((s) => s.grid);
+  const localView = useStudio((s) => s.localView);
   const setFilter = useStudio((s) => s.setFilter);
   const setGrid = useStudio((s) => s.setGrid);
 
   return (
     <header className="glass z-10 flex flex-wrap items-center gap-x-2 gap-y-1 border-b border-border px-3 py-2">
       <h1 className="text-sm font-semibold">{STUDIO_NAV.name}</h1>
-      {/* The grid's own kind toggles stand in for these while it is open. */}
-      {!grid && (
+      {/* The grid's own kind toggles, or Get local models' own tabs, stand in for these. */}
+      {!grid && !localView && (
         <Tabs.List aria-label={STUDIO_BAR.tabs} className="flex gap-0.5 rounded-lg bg-bg-muted p-0.5 text-fg-muted">
           {TABS.map((t) => (
             // A click selects too: assistive technology may send one without a mouse press.
@@ -55,23 +59,27 @@ export function TopBar(props: { onError: (e: unknown) => void }) {
           ))}
         </Tabs.List>
       )}
-      <SearchBox onError={props.onError} />
-      <button
-        type="button"
-        aria-pressed={starred}
-        onClick={() => void setFilter({ starred: !starred }).catch(props.onError)}
-        className={TOGGLE}
-      >
-        <Star size={14} aria-hidden /> {STUDIO_BAR.starred}
-      </button>
-      <button
-        type="button"
-        aria-pressed={grid}
-        onClick={() => void setGrid(!grid).catch(props.onError)}
-        className={TOGGLE}
-      >
-        <LayoutGrid size={14} aria-hidden /> {STUDIO_BAR.grid}
-      </button>
+      {!localView && (
+        <>
+          <SearchBox onError={props.onError} />
+          <button
+            type="button"
+            aria-pressed={starred}
+            onClick={() => void setFilter({ starred: !starred }).catch(props.onError)}
+            className={TOGGLE}
+          >
+            <Star size={14} aria-hidden /> {STUDIO_BAR.starred}
+          </button>
+          <button
+            type="button"
+            aria-pressed={grid}
+            onClick={() => void setGrid(!grid).catch(props.onError)}
+            className={TOGGLE}
+          >
+            <LayoutGrid size={14} aria-hidden /> {STUDIO_BAR.grid}
+          </button>
+        </>
+      )}
       <div className="ml-auto flex items-center gap-2">
         <WhereItRuns />
         <Spending />

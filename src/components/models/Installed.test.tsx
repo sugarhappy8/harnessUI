@@ -2,6 +2,9 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
 import type { DownloadGroup, ImageFileOffer, InstalledModel, ModelBusy, ModelLoadInfo, RuntimeStatus } from "../../lib/types";
 import { FINE_LAUNCH_NONE, fineFacts, processorPicture } from "../fine.fixtures";
+import type { LocalModels } from "../studio/types";
+import { LOCAL } from "../studio/fixtures/models";
+import { amountGb } from "../../lib/words";
 
 const ipcMock = vi.hoisted(() => ({
   isTauri: () => false,
@@ -25,6 +28,9 @@ const ipcMock = vi.hoisted(() => ({
 }));
 vi.mock("../../lib/ipc", () => ipcMock);
 vi.mock("@tauri-apps/plugin-dialog", () => ({ open: vi.fn() }));
+// 0.1.0 Studio: the picture and video models installed here, for the line that opens Studio.
+const studioApi = vi.hoisted(() => ({ studioLocalModels: vi.fn<() => Promise<LocalModels>>() }));
+vi.mock("../studio/api", () => studioApi);
 
 const { Installed } = await import("./Installed");
 const { QuestionHost } = await import("../ModelSettings");
@@ -145,6 +151,7 @@ describe("Models → Installed", () => {
     );
     useApp.setState({ runtime: null, activeChatId: 3, detail: null, error: null });
     useCompare.setState({ entries: [] });
+    studioApi.studioLocalModels.mockResolvedValue(LOCAL);
   });
   afterEach(cleanup);
 
@@ -460,5 +467,32 @@ describe("Models → Installed", () => {
     expect(folder.parentElement?.textContent).toBe("2.0 GB in /home/u/X-\\u{202E}sledom");
     expect(folder.parentElement?.getAttribute("title")).toBe("/home/u/X-\\u{202E}sledom");
     expect(new XMLSerializer().serializeToString(document.body)).not.toContain("\u202E");
+  });
+
+  it("Installed has one line for picture and video models that opens Studio", async () => {
+    const opened: unknown[] = [];
+    const onOpen = (e: Event) => opened.push((e as CustomEvent<unknown>).detail);
+    window.addEventListener("app:open-studio", onOpen);
+    try {
+      const onClose = await show();
+      const line = screen.getByText(/^Picture and video models:/);
+      expect(line.textContent).toBe(
+        `Picture and video models: ${LOCAL.installed.length} (${amountGb(LOCAL.installedBytes)}) · Manage in Studio`,
+      );
+      // The list never offers Use for them: its rows are the chat models.
+      expect(useButtons()).toHaveLength(2);
+      await click(screen.getByRole("button", { name: "Manage in Studio" }));
+      expect(opened).toEqual(["local"]);
+      expect(onClose).toHaveBeenCalledTimes(1);
+    } finally {
+      window.removeEventListener("app:open-studio", onOpen);
+    }
+  });
+
+  it("has no Studio line while no picture or video model is installed", async () => {
+    studioApi.studioLocalModels.mockResolvedValue({ ...LOCAL, installed: [], installedBytes: 0 });
+    await show();
+    expect(screen.queryByText(/^Picture and video models:/)).toBeNull();
+    expect(screen.queryByRole("button", { name: "Manage in Studio" })).toBeNull();
   });
 });
