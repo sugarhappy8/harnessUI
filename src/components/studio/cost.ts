@@ -71,10 +71,12 @@ export function placeLine(target: RunTarget, host: string, estimate: Estimate | 
 
 /**
  * Cloud as the backup for a local run that does not fit this computer or would be very slow
- * (more than 15 minutes): "useCloud" when a saved endpoint has a model of `tab`'s kind Studio
- * can use (OpenAI makes no video, whatever its lists hold), else "addEndpoint" (Settings →
- * Endpoints). `null` for any other run, or before there is an estimate. It only offers: Studio
- * never moves a draft to the cloud by itself.
+ * (more than 15 minutes): "useCloud" when an endpoint saved for it is there, one whose company
+ * makes `tab`'s kind (OpenAI makes no video, whatever its lists hold) and whose lists are not
+ * saved yet or list a model of that kind Studio can use, its key saved or not (the picker and
+ * *Get the list* say what is missing); else "addEndpoint" (Settings → Endpoints). `null` for any
+ * other run, or before there is an estimate. It only offers: Studio never moves a draft to the
+ * cloud by itself.
  */
 export function cloudBackup(
   tab: StudioTab,
@@ -83,8 +85,10 @@ export function cloudBackup(
 ): "useCloud" | "addEndpoint" | null {
   const local = estimate?.local;
   if (!local || (local.fit !== "notHere" && !local.verySlow)) return null;
-  const usable = endpoints.some((e) => e.cloud && makesKind(e, tab) && cloudModelsFor(e, tab).length > 0);
-  return usable ? "useCloud" : "addEndpoint";
+  // The models it lists for the kind, whether or not its key is saved yet.
+  const lists = (e: StudioEndpoint) => cloudModelsFor({ ...e, hasKey: true }, tab).length > 0;
+  const saved = endpoints.some((e) => e.cloud && makesKind(e, tab) && (e.fetchedAt === null || lists(e)));
+  return saved ? "useCloud" : "addEndpoint";
 }
 
 /** In place of Create while a cloud run would pass the daily limit: what was spent today (the

@@ -1,7 +1,6 @@
 import { useEffect, useId, useMemo, useRef } from "react";
 import { STUDIO_ACTIONS, STUDIO_BAR, STUDIO_DOCK } from "../../lib/words";
 import {
-  currentEstimate,
   draftModel,
   endpointOf,
   requestKey,
@@ -23,12 +22,13 @@ import { RefTray } from "./RefTray";
 // as chips (ChipsRow), the line saying where the prompt goes, then the price of the whole run
 // (a cloud model, its colour a second cue) or the time here (a local one) beside Create. The
 // estimate is asked of the backend once the draft has stayed as it is for 150 ms (it sends
-// nothing anywhere); Create does not wait for it. For a cloud model the daily limit takes
+// nothing anywhere); Create does not wait for it, but stays greyed out while the answer shown
+// (for this model and place) says why it cannot run. For a cloud model the daily limit takes
 // Create's place, and the confirmation opens when the run needs one. A local model never asks
-// and never meets the limit: one that does not fit here greys Create out with why, a run over
-// 15 minutes says so in amber, and cloud is offered as the backup when it does not fit or is
-// very slow (Studio never moves the draft by itself). Other screens put the cursor in the
-// prompt with the window event `app:focus-studio-prompt`.
+// and never meets the limit: one that does not fit here greys Create out with why and offers a
+// cloud model instead, a run over 15 minutes says so in amber, and cloud is offered as the
+// backup when it is very slow (Studio never moves the draft by itself). Other screens put the
+// cursor in the prompt with the window event `app:focus-studio-prompt`.
 
 const SECONDARY =
   "rounded-lg border border-border bg-bg px-2.5 py-1 text-sm hover:border-border-strong hover:bg-bg-muted";
@@ -48,7 +48,6 @@ export function PromptDock(props: { tab: StudioTab }) {
   const prefs = useStudio((s) => s.prefs);
   const usage = useStudio((s) => s.usage);
   const shown = useStudio((s) => shownEstimate(s, tab));
-  const current = useStudio((s) => currentEstimate(s, tab));
   const starting = useStudio((s) => s.starting);
   const pending = useStudio((s) => s.pending);
   const pendingEstimate = useStudio((s) => s.pendingEstimate);
@@ -86,12 +85,14 @@ export function PromptDock(props: { tab: StudioTab }) {
   const here = target === "thisComputer";
   const known = shown?.estimate ?? null;
   const local = here ? (known?.local ?? null) : null;
-  // What the model would refuse, and a local model that does not fit here, as of an answer for
-  // the draft exactly as it is: an answer for the draft as it was does not hold Create back.
-  const blocked = current !== null && (current.invalid.length > 0 || (here && current.local?.fit === "notHere"));
-  const disabled = model === null || key === null || starting || blocked;
-  const overLimit = !here && known !== null && !known.limit.wouldPass;
   const notHere = local?.fit === "notHere";
+  // What the model would refuse, and a local model that does not fit here, as shown: an answer
+  // for this model and place, until the one for the draft as it is now replaces it. Create
+  // agrees with what is on screen, and an answer that greys nothing out is no reason to wait.
+  const blocked = known !== null && (known.invalid.length > 0 || notHere);
+  // The daily limit has taken Create's place (Enter included).
+  const overLimit = !here && known !== null && !known.limit.wouldPass;
+  const disabled = model === null || key === null || starting || blocked || overLimit;
   const longRun = local?.over15Min ? etaText(known?.eta ?? null) : null;
   const backup = here ? cloudBackup(tab, known, endpoints) : null;
 
@@ -170,7 +171,7 @@ export function PromptDock(props: { tab: StudioTab }) {
       {longRun && <p className="text-xs text-warning">{STUDIO_DOCK.over15(longRun)}</p>}
       {backup === "useCloud" && (
         <div className="flex flex-wrap items-center gap-2 text-xs text-fg-muted">
-          <p>{STUDIO_DOCK.tooSlow}</p>
+          <p>{notHere ? STUDIO_DOCK.cloudInstead : STUDIO_DOCK.tooSlow}</p>
           <button type="button" className={SECONDARY} onClick={() => openPicker("cloud")}>
             {STUDIO_DOCK.chooseCloud}
           </button>

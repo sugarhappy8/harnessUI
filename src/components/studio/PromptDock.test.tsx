@@ -213,6 +213,7 @@ beforeEach(() => {
 
 afterEach(() => {
   cleanup();
+  vi.useRealTimers();
   window.removeEventListener("app:open-settings", onOpenSettings);
 });
 
@@ -299,6 +300,18 @@ describe("PromptDock", () => {
       expect(screen.queryByRole("button", { name: /Create/ })).toBeNull();
     });
 
+    it("Enter starts nothing while the daily limit has taken Create's place", async () => {
+      await show({
+        prefs: prefs({ lastModel: CLOUD_LAST }),
+        estimate: est({ limit: { limitUsd: 10, spentTodayUsd: 9.5, pendingUsd: 0, wouldPass: false } }),
+      });
+      typePrompt("a lighthouse");
+      fireEvent.keyDown(promptBox(), { key: "Enter" });
+      await flush();
+      expect(api.studioStart).not.toHaveBeenCalled();
+      screen.getByText("Daily limit reached: $9.50 of $10 spent today");
+    });
+
     it("a refused start says why under the prompt, and Create works again", async () => {
       await show({ prefs: prefs({ lastModel: CLOUD_LAST }) });
       vi.mocked(api.studioStart).mockRejectedValueOnce({
@@ -376,6 +389,23 @@ describe("PromptDock", () => {
       expect(screen.queryByText("Make this video?")).toBeNull();
       expect(screen.queryByRole("alertdialog")).toBeNull();
     });
+
+    it("a local run never opens it, even when the estimate for the draft as it is names a reason", async () => {
+      await show({ tab: "video", estimate: here({}, { reasons: ["video"] }) });
+      typePrompt("waves");
+      // The estimate for this very draft: the one a cloud draft's press would go by.
+      await estimated();
+      expect(useStudio.getState().estimates.video?.estimate?.reasons).toEqual(["video"]);
+      await click(createButton());
+      expect(api.studioStart).toHaveBeenCalledTimes(1);
+      expect(api.studioStart).toHaveBeenCalledWith(
+        expect.objectContaining({ target: "thisComputer", prompt: "waves" }),
+        false,
+      );
+      expect(useStudio.getState().pendingEstimate).toBeNull();
+      expect(screen.queryByText("Make this video?")).toBeNull();
+      expect(screen.queryByRole("alertdialog")).toBeNull();
+    });
   });
 
   describe("a local model", () => {
@@ -448,8 +478,44 @@ describe("PromptDock", () => {
       await show({ estimate: here({ fit: "notHere", reason: "needs 6 GB of graphics memory" }, { eta: null }) });
       expect(createButton().disabled).toBe(true);
       screen.getByText("Not for this computer: needs 6 GB of graphics memory");
-      screen.getByText("Too slow here? A cloud model makes this in minutes, for a price you see first.");
-      screen.getByRole("button", { name: "Choose a cloud model" });
+      // It cannot run here at all: not "too slow".
+      screen.getByText("A cloud model can make this instead.");
+      expect(screen.queryByText(/Too slow here\?/)).toBeNull();
+      await click(screen.getByRole("button", { name: "Choose a cloud model" }));
+      screen.getByRole("listbox", { name: "via OpenRouter" });
+      expect(useStudio.getState().drafts.image.target).toBe("thisComputer");
+    });
+
+    it("a local model that does not fit here, without an endpoint for this kind, points to Settings → Endpoints", async () => {
+      await show({
+        endpoints: [],
+        estimate: here({ fit: "notHere", reason: "needs 6 GB of graphics memory" }, { eta: null }),
+      });
+      screen.getByText("Not for this computer: needs 6 GB of graphics memory");
+      screen.getByText("Add OpenRouter or OpenAI in Settings → Endpoints to use a cloud model instead.");
+      expect(screen.queryByText(/Too slow here\?/)).toBeNull();
+      await click(screen.getByRole("button", { name: "Open Endpoints" }));
+      expect(opened).toEqual(["endpoints"]);
+    });
+
+    it("typing on a model that does not fit here never enables Create", async () => {
+      await show({ estimate: here({ fit: "notHere", reason: "needs 6 GB of graphics memory" }, { eta: null }) });
+      vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+      for (const text of ["a", "a f", "a fo", "a fox"]) {
+        typePrompt(text);
+        expect(createButton().disabled).toBe(true);
+        fireEvent.keyDown(promptBox(), { key: "Enter" });
+        act(() => vi.advanceTimersByTime(100));
+        expect(createButton().disabled).toBe(true);
+      }
+      // The answer for the draft as it is now comes back the same.
+      await act(async () => {
+        vi.advanceTimersByTime(150);
+      });
+      await flush();
+      expect(api.studioEstimate).toHaveBeenLastCalledWith(expect.objectContaining({ prompt: "a fox" }));
+      expect(createButton().disabled).toBe(true);
+      expect(api.studioStart).not.toHaveBeenCalled();
     });
 
     it("a local model that fits once the chat model is unloaded can be created", async () => {
@@ -478,15 +544,86 @@ describe("PromptDock", () => {
       expect(screen.queryByText(/Daily limit reached/)).toBeNull();
     });
 
-    it("Create does not wait for the estimate", async () => {
+    it("Create stays greyed out while the sentence that greys it is on screen", async () => {
       await show({ estimate: here({}, { invalid: ["Write a prompt first."] }) });
       expect(createButton().disabled).toBe(true);
-      // Typed and pressed at once: the answer for the empty prompt is no reason to wait.
+      vi.mocked(api.studioEstimate).mockResolvedValue(here());
+      vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
       typePrompt("a fox");
+      // The answer for the empty prompt is still the one shown: Create agrees with it.
+      screen.getByText("Write a prompt first.");
+      expect(createButton().disabled).toBe(true);
+      fireEvent.keyDown(promptBox(), { key: "Enter" });
+      expect(api.studioStart).not.toHaveBeenCalled();
+      await act(async () => {
+        vi.advanceTimersByTime(150);
+      });
+      await flush();
+      expect(screen.queryByText("Write a prompt first.")).toBeNull();
       expect(createButton().disabled).toBe(false);
       fireEvent.keyDown(promptBox(), { key: "Enter" });
       expect(api.studioStart).toHaveBeenCalledTimes(1);
       await flush();
+    });
+
+    it("Create does not wait for the estimate", async () => {
+      await show({ estimate: here() });
+      // The answer for the new prompt never comes: an answer that greys nothing out is no reason
+      // to wait.
+      vi.mocked(api.studioEstimate).mockReturnValue(new Promise<Estimate>(() => undefined));
+      typePrompt("a fox");
+      expect(createButton().disabled).toBe(false);
+      fireEvent.keyDown(promptBox(), { key: "Enter" });
+      expect(api.studioStart).toHaveBeenCalledTimes(1);
+      expect(api.studioStart).toHaveBeenCalledWith(expect.objectContaining({ prompt: "a fox" }), false);
+      await flush();
+    });
+  });
+
+  describe("the seed after a press", () => {
+    /** The Pictures draft's seed (the local model's seed field). */
+    const seedOf = () => useStudio.getState().drafts.image.values.seed;
+
+    it("a seed from the dice is used once: after the press it is Random again", async () => {
+      await show({ estimate: here() });
+      typePrompt("a fox");
+      act(() => useStudio.getState().newSeed("image"));
+      const dice = seedOf();
+      expect(typeof dice).toBe("number");
+      await click(createButton());
+      expect(started()[0]?.params).toMatchObject({ seed: dice });
+      expect(seedOf()).toBeUndefined();
+      await click(createButton());
+      expect(started()[1]?.params).not.toHaveProperty("seed");
+    });
+
+    it("a refused press keeps the seed", async () => {
+      await show({ estimate: here() });
+      vi.mocked(api.studioStart).mockRejectedValueOnce({
+        code: "studio_wont_make",
+        message: "Studio won't make this.",
+        nextStep: "Change the prompt.",
+        details: "",
+      });
+      typePrompt("a fox");
+      act(() => useStudio.getState().newSeed("image"));
+      const dice = seedOf();
+      await click(createButton());
+      expect(seedOf()).toBe(dice);
+    });
+
+    it("a kept seed stays for the next press", async () => {
+      await show({ estimate: here() });
+      typePrompt("a fox");
+      act(() => {
+        useStudio.getState().newSeed("image");
+        useStudio.getState().lockSeed("image", true);
+      });
+      const dice = seedOf();
+      await click(createButton());
+      expect(seedOf()).toBe(dice);
+      await click(createButton());
+      expect(started().map((req) => req.params.seed)).toEqual([dice, dice]);
     });
   });
 
@@ -526,6 +663,30 @@ describe("PromptDock", () => {
       });
       expect(req?.params).not.toHaveProperty("seed");
       expect(useStudio.getState().drafts.image.prompt).toBe("my own draft");
+    });
+
+    it("drops the seed of a run whose model is no longer listed", async () => {
+      await show({ estimate: here() });
+      const gone: Run = { ...veoRun, id: "gone-run", model: "google/veo-0-gone", modelLabel: "Veo 0" };
+      const goneHere: Run = {
+        ...veoRun,
+        id: "gone-here",
+        runsOn: "local",
+        providerId: null,
+        model: "removed-local-model",
+        params: { width: 832, height: 480, seed: 4242 },
+      };
+      await act(async () => {
+        await useStudio.getState().start("video", false, gone);
+      });
+      await act(async () => {
+        await useStudio.getState().start("video", false, goneHere);
+      });
+      const [cloud, local] = started();
+      expect(cloud).toMatchObject({ target: { endpoint: 1 }, model: "google/veo-0-gone", params: { duration: 8 } });
+      expect(cloud?.params).not.toHaveProperty("seed");
+      expect(local).toMatchObject({ target: "thisComputer", model: "removed-local-model", params: { width: 832 } });
+      expect(local?.params).not.toHaveProperty("seed");
     });
 
     it("keeps the run's seed while the seed is kept", async () => {

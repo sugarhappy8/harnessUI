@@ -120,12 +120,26 @@ describe("cloudBackup", () => {
   it("points to Settings → Endpoints when no saved endpoint has a model of the tab's kind", () => {
     const slow = est({ usd: 0, local: localEst({ verySlow: true }) });
     expect(cloudBackup("image", slow, [])).toBe("addEndpoint");
-    expect(cloudBackup("image", slow, [endpoint({ hasKey: false })])).toBe("addEndpoint");
     expect(cloudBackup("image", slow, [openai])).toBe("useCloud");
     // OpenAI makes no video, whatever its saved lists hold.
     expect(cloudBackup("video", slow, [endpoint({ company: "openai", models: MODELS })])).toBe("addEndpoint");
     expect(cloudBackup("video", slow, [openrouter])).toBe("useCloud");
     expect(cloudBackup("video", slow, [endpoint({ models: MODELS.filter((m) => m.kind === "image") })])).toBe(
+      "addEndpoint",
+    );
+  });
+
+  it("an endpoint already saved for this kind is the backup even without its key or its lists", () => {
+    // The picker then says what is missing (no key; Get the list): Settings → Endpoints would ask
+    // to add what is already there.
+    const slow = est({ usd: 0, local: localEst({ verySlow: true }) });
+    const notHere = est({ usd: 0, local: localEst({ fit: "notHere" }) });
+    expect(cloudBackup("image", slow, [endpoint({ hasKey: false })])).toBe("useCloud");
+    expect(cloudBackup("video", notHere, [endpoint({ hasKey: false })])).toBe("useCloud");
+    expect(cloudBackup("image", slow, [endpoint({ fetchedAt: null, models: [] })])).toBe("useCloud");
+    expect(cloudBackup("video", slow, [endpoint({ hasKey: false, fetchedAt: null, models: [] })])).toBe("useCloud");
+    // Still never OpenAI for video.
+    expect(cloudBackup("video", slow, [endpoint({ company: "openai", hasKey: false, fetchedAt: null })])).toBe(
       "addEndpoint",
     );
   });

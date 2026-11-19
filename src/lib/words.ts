@@ -1354,8 +1354,10 @@ export const STUDIO_DOCK = {
   /** Beside the greyed-out Create of a local model that does not fit this computer, with why
    *  ("needs 6 GB of graphics memory"). */
   notHere: (reason: string | null) => (reason ? `Not for this computer: ${reason}` : "Not for this computer"),
-  /** A local run that does not fit here or is very slow, while an endpoint can make it. */
+  /** A local run that is very slow here, while an endpoint can make it. */
   tooSlow: "Too slow here? A cloud model makes this in minutes, for a price you see first.",
+  /** A local model that cannot run on this computer at all, while an endpoint can make it. */
+  cloudInstead: "A cloud model can make this instead.",
   chooseCloud: "Choose a cloud model",
   /** The same, while no saved endpoint can make the tab's kind (OpenAI makes no video). */
   addEndpoint: {

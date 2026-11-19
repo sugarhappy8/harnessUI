@@ -15,11 +15,9 @@
 // how long a local clip takes here at each size and length, asked once each. Task B6: Advanced's
 // Reset all, the seed's dice and lock, Extra fields, an OpenRouter picture's routing, and My
 // setups (a model and every setting under a name; at most 50, kept in the preferences). Task B7:
-// each tab's estimate, asked once the draft has stayed as it is for 150 ms; Create, one press
-// with its own client token at a time (from the draft, or from a run's own settings), the
-// confirmation a cloud run may need (asked by the draft's estimate or by the backend), why a
-// press was refused, the model used last saved as a run starts, today's spending read again as
-// a cloud run starts and ends, and the picker opened on its cloud models from the dock. Task B8:
+// each tab's estimate and Create, with the confirmation and why a press was refused (in
+// ./studioRun, composed in here), today's spending read again as a cloud run starts and ends,
+// and the picker opened on its cloud models from the dock. Task B8:
 // a run stopped (Cancel, Stop, Stop watching), a video's job checked again (*Get it anyway*,
 // *Check again*), the answer to "Unload the chat model?", the Studio engine's download and a
 // damaged local model's download again, a run made again from its own settings, and the result
@@ -29,7 +27,6 @@ import * as api from "../components/studio/api";
 import { carry, closestModel, defaultsFor, dropUnmet, familyOf, type Values } from "../components/studio/canonical";
 import type {
   Company,
-  Estimate,
   InstalledLocal,
   LocalEntry,
   LocalFit,
@@ -46,7 +43,6 @@ import type {
   RunStatus,
   RunTarget,
   Setup,
-  StartRequest,
   StudioEndpoint,
   StudioPrefs,
   StudioPrefsPatch,
@@ -57,6 +53,18 @@ import { listenInEffect } from "../lib/listen";
 import type { ErrorInfo } from "../lib/types";
 import { STUDIO_EMPTY, STUDIO_FIELDS, STUDIO_REFS, STUDIO_SETUPS } from "../lib/words";
 import { toErrorInfo } from "./app";
+import { createRun, targetOf, type StudioRunState } from "./studioRun";
+
+// Studio's estimate and Create live in ./studioRun; they are used from here.
+export {
+  currentEstimate,
+  ESTIMATE_DELAY_MS,
+  requestKey,
+  shownEstimate,
+  startRequestOf,
+  type StudioRunState,
+  type TabEstimate,
+} from "./studioRun";
 
 /** Studio's tabs: Pictures and Video. */
 export type StudioTab = MediaKind;
@@ -83,7 +91,7 @@ export interface Draft {
 /** Which empty state a tab shows in place of the card stream, if any. */
 export type EmptyState = "getLocal" | "cloudBackup" | "addEndpoint" | null;
 
-export interface StudioState {
+export interface StudioState extends StudioRunState {
   /** What the main window shows beside the chat list. */
   view: "chat" | "studio";
   tab: StudioTab;
@@ -237,55 +245,10 @@ export interface StudioState {
   /** Changes only the preferences `patch` names. */
   setPrefs(patch: StudioPrefsPatch): Promise<void>;
 
-  /** Each tab's latest estimate, with the draft it was asked for; `null` until one is asked,
-   *  or after one was asked while the tab had no model. */
-  estimates: Record<StudioTab, TabEstimate | null>;
-  /** Asks what `tab`'s draft would cost and meet once it has stayed as it is for
-   *  `ESTIMATE_DELAY_MS` (each call starts that pause again). Resolves once that answer is in
-   *  `estimates` (a failure too, with the draft it was for); never rejects. Sends nothing
-   *  anywhere. */
-  estimate(tab: StudioTab): Promise<void>;
-  /** A press of Create on its way: from the press until the backend answers it, and while its
-   *  confirmation is open. Another press meanwhile does nothing. */
-  starting: boolean;
-  /** That press's request, as it will be sent (the confirmation shows it). */
-  pending: StartRequest | null;
-  /** The estimate the confirmation shows for `pending`; `null` while it is not open. */
-  pendingEstimate: Estimate | null;
-  /** Why each tab's last press was refused, shown under the prompt until the next press. */
-  refusal: Record<StudioTab, ErrorInfo | null>;
-  dismissRefusal(tab: StudioTab): void;
-  /**
-   * Create: one press, with its own client token, of `tab`'s draft or, given `from`, of that
-   * run's own settings where it ran (a new seed unless the tab keeps its seed; the draft stays
-   * as it is). A draft for the cloud whose estimate for it, as it is, asks for a confirmation
-   * opens the confirmation instead; so does the backend's `studio_needs_confirmation`, with the
-   * estimate asked for that press. A run on this computer never asks. `confirmed` sends it as
-   * confirmed. Resolves with the run; `null` when there is nothing to send, a press is already
-   * on its way, the confirmation opened, or it was refused (`refusal`). Never rejects.
-   */
-  start(tab: StudioTab, confirmed: boolean, from?: Run): Promise<Run | null>;
-  /** The confirmation's *Make video* or *Create*: sends `pending` as it is, confirmed, once
-   *  "don't ask again for videos" is saved when `dontAskVideos` (nothing is sent when that
-   *  fails: `refusal`). */
-  confirmStart(dontAskVideos: boolean): Promise<Run | null>;
-  /** The confirmation's *Cancel*: nothing is sent. */
-  cancelStart(): void;
   /** The model picker opened from elsewhere: `"cloud"` on its first cloud group (*Choose a
    *  cloud model*); `null` once it closes. */
   pickerOpen: "cloud" | null;
   openPicker(place: "cloud" | null): void;
-}
-
-/** A tab's latest estimate, with the draft it was asked for. */
-export interface TabEstimate {
-  /** That draft's request, as `requestKey` writes it. */
-  key: string;
-  target: RunTarget;
-  model: string;
-  estimate: Estimate | null;
-  /** Why it could not be worked out, when it could not. */
-  error: ErrorInfo | null;
 }
 
 const EMPTY_DRAFT: Draft = {
@@ -308,15 +271,6 @@ const RECENT_RUNS = 50;
 
 /** The most setups the preferences keep (the backend's `prefs::MAX_SETUPS`). */
 const MAX_SETUPS = 50;
-
-/** How long a draft stays as it is before its estimate is asked. */
-export const ESTIMATE_DELAY_MS = 150;
-
-/** The client token an estimate is asked with (each press makes its own). */
-const ESTIMATE_TOKEN = "estimate";
-
-/** The backend's refusal of a cloud run that needs the user's confirmation first. */
-const NEEDS_CONFIRMATION = "studio_needs_confirmation";
 
 /** The states a run ends in. */
 const ENDED: ReadonlySet<RunStatus> = new Set<RunStatus>(["done", "failed", "blocked", "cancelled", "interrupted"]);
@@ -490,76 +444,6 @@ export const useStudio: UseBoundStore<StoreApi<StudioState>> = create<StudioStat
         (usage) => set({ usage }),
         (e: unknown) => console.warn("Studio: today's spending could not be read", e),
       );
-  };
-
-  /** Each tab's estimate while its pause runs, with the callers waiting for its answer. */
-  const estimateWaits: Partial<Record<StudioTab, { timer: ReturnType<typeof setTimeout>; done: (() => void)[] }>> =
-    {};
-  /** Counts each tab's estimates as they are asked, so an older answer is not kept over a newer. */
-  const estimateAsked: Record<StudioTab, number> = { image: 0, video: 0 };
-
-  /** Asks the estimate of `tab`'s draft as it is now and keeps the answer (or why there is
-   *  none) with that draft, unless a later one was asked meanwhile. */
-  const askEstimate = async (tab: StudioTab) => {
-    const mine = ++estimateAsked[tab];
-    const req = startRequestOf(tab, get().drafts[tab], ESTIMATE_TOKEN);
-    let known: TabEstimate | null = null;
-    if (req) {
-      const asked = { key: requestKey(req), target: req.target, model: req.model };
-      try {
-        known = { ...asked, estimate: await api.studioEstimate(req), error: null };
-      } catch (e) {
-        known = { ...asked, estimate: null, error: toErrorInfo(e) };
-      }
-    }
-    if (mine === estimateAsked[tab]) set((s) => ({ estimates: { ...s.estimates, [tab]: known } }));
-  };
-
-  /** Ends a press that was refused (or whose confirmation could not be asked): `tab` shows why. */
-  const refuse = (tab: StudioTab, error: ErrorInfo) =>
-    set((s) => ({ starting: false, pending: null, pendingEstimate: null, refusal: { ...s.refusal, [tab]: error } }));
-
-  /** Keeps `target` and `model` as the model `tab` used last, sending only that field and only
-   *  when it changed. A failure leaves a trace; the run has started all the same. */
-  const rememberModel = (tab: StudioTab, target: RunTarget, model: string) => {
-    const last = get().prefs?.lastModel[tab];
-    if (last && sameTarget(last.target, target) && last.model === model) return;
-    Promise.resolve()
-      .then(async () => {
-        // The other tab's is kept (read first if Studio has not read the preferences yet).
-        const { lastModel } = get().prefs ?? (await api.studioGetPrefs());
-        await get().setPrefs({ lastModel: { ...lastModel, [tab]: { target, model } } });
-      })
-      .catch((e: unknown) => console.warn("Studio: the model used last could not be saved", e));
-  };
-
-  /** Sends press `req` (`confirmed` when the user confirmed it). Accepted, the run joins the live
-   *  runs, its model becomes the one used last and, for a cloud run, today's spending is read
-   *  again. The backend's `studio_needs_confirmation` opens the confirmation with the estimate
-   *  for this very press, which stays pending; any other refusal ends the press with why. */
-  const send = async (req: StartRequest, confirmed: boolean): Promise<Run | null> => {
-    const tab = req.kind;
-    let run: Run;
-    try {
-      run = await api.studioStart(req, confirmed);
-    } catch (e) {
-      const error = toErrorInfo(e);
-      if (error.code !== NEEDS_CONFIRMATION || confirmed) {
-        refuse(tab, error);
-        return null;
-      }
-      try {
-        set({ pendingEstimate: await api.studioEstimate(req) });
-      } catch (asked) {
-        refuse(tab, toErrorInfo(asked));
-      }
-      return null;
-    }
-    set({ starting: false, pending: null, pendingEstimate: null });
-    get().applyProgress(run);
-    rememberModel(tab, req.target, req.model);
-    if (run.runsOn === "cloud") rereadUsage();
-    return run;
   };
 
   return {
@@ -941,65 +825,7 @@ export const useStudio: UseBoundStore<StoreApi<StudioState>> = create<StudioStat
       set({ prefs });
     },
 
-    estimates: { image: null, video: null },
-    estimate: (tab) =>
-      new Promise<void>((resolve) => {
-        const waiting = estimateWaits[tab];
-        if (waiting) clearTimeout(waiting.timer);
-        const done = [...(waiting?.done ?? []), resolve];
-        const timer = setTimeout(() => {
-          delete estimateWaits[tab];
-          void askEstimate(tab).finally(() => {
-            for (const answered of done) answered();
-          });
-        }, ESTIMATE_DELAY_MS);
-        estimateWaits[tab] = { timer, done };
-      }),
-    starting: false,
-    pending: null,
-    pendingEstimate: null,
-    refusal: { image: null, video: null },
-    dismissRefusal: (tab) => set((s) => ({ refusal: { ...s.refusal, [tab]: null } })),
-    start: async (tab, confirmed, from) => {
-      const s = get();
-      if (s.starting) return null;
-      const token = crypto.randomUUID();
-      let req: StartRequest | null;
-      if (from) {
-        const target = targetOf(from);
-        const model = target ? listedModel(target, from.model, s.local, s.endpoints) : null;
-        req = requestFromRun(from, token, model, s.drafts[from.kind].seedLocked);
-      } else {
-        req = startRequestOf(tab, s.drafts[tab], token);
-      }
-      if (!req) return null;
-      const kind = req.kind;
-      set((st) => ({ starting: true, pending: req, refusal: { ...st.refusal, [kind]: null } }));
-      // A draft for the cloud whose estimate, for it as it is, asks first opens the confirmation.
-      // A press from a run goes straight to the backend, which refuses a cloud run that needs
-      // confirming before anything is recorded; a run on this computer never asks.
-      const asks = !from && !confirmed && req.target !== "thisComputer" ? currentEstimate(s, tab) : null;
-      if (asks && asks.reasons.length > 0) {
-        set({ pendingEstimate: asks });
-        return null;
-      }
-      return send(req, confirmed);
-    },
-    confirmStart: async (dontAskVideos) => {
-      const { pending: req, pendingEstimate } = get();
-      if (!req || !pendingEstimate) return null;
-      set({ pendingEstimate: null });
-      if (dontAskVideos) {
-        try {
-          await get().setPrefs({ confirmEveryVideo: false });
-        } catch (e) {
-          refuse(req.kind, toErrorInfo(e));
-          return null;
-        }
-      }
-      return send(req, true);
-    },
-    cancelStart: () => set({ starting: false, pending: null, pendingEstimate: null }),
+    ...createRun(set, get, rereadUsage),
     pickerOpen: null,
     openPicker: (place) => set({ pickerOpen: place }),
   };
@@ -1078,7 +904,7 @@ export function nothingInstalled(local: LocalModels | null): boolean {
 }
 
 /** Whether two targets are the same place: this computer, or one endpoint. */
-function sameTarget(a: RunTarget, b: RunTarget): boolean {
+export function sameTarget(a: RunTarget, b: RunTarget): boolean {
   return a === "thisComputer" || b === "thisComputer" ? a === b : a.endpoint === b.endpoint;
 }
 
@@ -1091,78 +917,6 @@ export function listedModel(
 ): MediaModel | null {
   if (target === "thisComputer") return local?.installed.find((m) => m.model.id === id)?.model ?? null;
   return endpoints.find((e) => e.providerId === target.endpoint)?.models.find((m) => m.id === id) ?? null;
-}
-
-/** What Create would send for `tab`'s draft (`studio_estimate` and `studio_preview` take the
- *  same), as press `clientToken`; `null` while the draft has no model. An added picture recorded
- *  without a role goes as a reference. */
-export function startRequestOf(tab: StudioTab, draft: Draft, clientToken: string): StartRequest | null {
-  if (draft.target === null || draft.model === null) return null;
-  return {
-    clientToken,
-    target: draft.target,
-    kind: tab,
-    model: draft.model,
-    prompt: draft.prompt,
-    params: draft.values,
-    extra: draft.extra,
-    refs: draft.refs.map((r) => ({ sha256: r.sha256, role: r.role ?? "reference" })),
-    routing: draft.routing,
-  };
-}
-
-/** A request without its client token, as one string: the same draft gives the same key. */
-export function requestKey(req: StartRequest): string {
-  return JSON.stringify({ ...req, clientToken: "" });
-}
-
-/** `tab`'s latest estimate while the draft is still on the model and place it was asked for
- *  (the prompt or a setting may have changed since, and the new answer be on its way): what the
- *  dock shows. */
-export function shownEstimate(s: Pick<StudioState, "drafts" | "estimates">, tab: StudioTab): TabEstimate | null {
-  const known = s.estimates[tab];
-  const { target, model } = s.drafts[tab];
-  return known && target !== null && sameTarget(known.target, target) && known.model === model ? known : null;
-}
-
-/** `tab`'s estimate when it was asked for the draft exactly as it is: what Create goes by (an
- *  answer for the draft as it was is no reason to wait, nor to ask). */
-export function currentEstimate(s: Pick<StudioState, "drafts" | "estimates">, tab: StudioTab): Estimate | null {
-  const known = s.estimates[tab];
-  const req = startRequestOf(tab, s.drafts[tab], ESTIMATE_TOKEN);
-  return known && req && known.key === requestKey(req) ? known.estimate : null;
-}
-
-/** Where `run` ran: this computer, or the endpoint it was sent to (`null` once that is not
- *  known). */
-function targetOf(run: Run): RunTarget | null {
-  if (run.runsOn === "local") return "thisComputer";
-  return run.providerId === null ? null : { endpoint: run.providerId };
-}
-
-/** What pressing again from `run` sends, as press `clientToken`: its own settings where it ran,
- *  without the seed of `model` (its model as listed, so a new seed is picked) unless `keepSeed`;
- *  `null` when the endpoint it ran at is not known. */
-function requestFromRun(
-  run: Run,
-  clientToken: string,
-  model: MediaModel | null,
-  keepSeed: boolean,
-): StartRequest | null {
-  const target = targetOf(run);
-  if (target === null) return null;
-  const seed = keepSeed ? undefined : model?.params.find((p) => p.kind.type === "seed")?.key;
-  return {
-    clientToken,
-    target,
-    kind: run.kind,
-    model: run.model,
-    prompt: run.prompt,
-    params: Object.fromEntries(Object.entries(run.params).filter(([key]) => key !== seed)),
-    extra: run.extra,
-    refs: run.refs.map((r) => ({ sha256: r.sha256, role: r.role ?? "reference" })),
-    routing: run.routing,
-  };
 }
 
 /** The saved endpoint `target` names; `null` for this computer, without a target, or once the
