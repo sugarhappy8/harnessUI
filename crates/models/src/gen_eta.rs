@@ -106,7 +106,10 @@ pub fn device_class(target: &Target, backend: &str) -> DeviceClass {
 /// settings as a speed point scales, as [0.9×, 1.15×] and `measured`; the load is once a
 /// run whatever its size, so the point's load (at most the whole run) stays as it was and
 /// only the rest of each run is scaled (a run with no work to scale from, as a point with no
-/// step or decode time gives it, is kept as it was: a work ratio of 1). Otherwise from the
+/// step or decode time gives it, is kept as it was: a work ratio of 1). With no speed point
+/// of this backend the load cannot be told apart, so each whole run is scaled; the time is
+/// then never below the shortest run measured here, and for settings no run here was made
+/// at the range is [0.75×, 1.5×], never starting below that run either. Otherwise from the
 /// speed point of the same backend nearest in memory: load + per picture (steps × seconds
 /// a step × (tokens / the point's tokens)^1.3 + decode × the pixel-frames ratio), as
 /// [0.75×, 1.5×]. Video on Apple silicon (`metal`) grows by [`APPLE_VIDEO_PAD`]. No point of
@@ -137,9 +140,27 @@ pub fn estimate(
             (m.elapsed_ms > 0).then_some(fixed + (elapsed - fixed) * ratio)
         })
         .collect();
-    let (ms, (low, high), measured) = match (median(runs), point) {
-        (Some(ms), _) => (ms, MEASURED_RANGE, true),
-        (None, Some(_)) => ((load + work) * 1000.0, GUESS_RANGE, false),
+    // `floor`: the least the range may start at.
+    let (ms, (low, high), measured, floor) = match (median(runs), point) {
+        (Some(ms), Some(_)) => (ms, MEASURED_RANGE, true, 0.0),
+        // With no point, the load cannot be told from the rest, so the whole run scaled:
+        // it never comes out below the shortest run measured here, and for settings no run
+        // here was made at, the range is as wide as a first guess's.
+        (Some(ms), None) => {
+            let made_here = measured.iter().any(|m| {
+                m.elapsed_ms > 0
+                    && m.size == size
+                    && m.steps == steps
+                    && m.pictures.max(1) == pictures.max(1)
+            });
+            let floor = shortest_run(measured);
+            if made_here {
+                (ms.max(floor), MEASURED_RANGE, true, 0.0)
+            } else {
+                (ms.max(floor), GUESS_RANGE, true, floor)
+            }
+        }
+        (None, Some(_)) => ((load + work) * 1000.0, GUESS_RANGE, false, 0.0),
         (None, None) => return None,
     };
     let pad = if class.backend == "metal" && entry.kind == GenKind::Video {
@@ -148,10 +169,20 @@ pub fn estimate(
         1.0
     };
     Some(Eta {
-        low_ms: (ms * pad * low).round() as u64,
+        low_ms: (ms * pad * low).max(floor).round() as u64,
         high_ms: (ms * pad * high).round() as u64,
         measured,
     })
+}
+
+/// The shortest run measured here, in milliseconds (0 with none).
+fn shortest_run(measured: &[MeasuredRun]) -> f64 {
+    measured
+        .iter()
+        .map(|m| m.elapsed_ms)
+        .filter(|&ms| ms > 0)
+        .min()
+        .map_or(0.0, |ms| ms as f64)
 }
 
 /// How a run's time grows with its settings: from a speed point, its load once plus, per
@@ -439,10 +470,14 @@ mod tests {
             got,
             eta((ms * 0.9).round() as u64, (ms * 1.15).round() as u64, true)
         );
-        // With no speed point, the whole run scales as steps do.
+        // With no speed point, the whole run scales as steps do, and as these settings
+        // differ from every run measured here, the range is as wide as a first guess's.
         let got = estimate(&klein(), wide, 4, 1, &class("vulkan", 8), &runs).unwrap();
         let ms = 15_000.0 * 2f64.powf(1.3);
-        assert_eq!(got.high_ms, (ms * 1.15).round() as u64);
+        assert_eq!(
+            got,
+            eta((ms * 0.75).round() as u64, (ms * 1.5).round() as u64, true)
+        );
         // Twice the steps, from the guess: 6 + 16 + 1 = 23 s.
         assert_eq!(
             estimate(&e, sq(1024), 8, 1, &class("vulkan", 8), &[]),
@@ -475,6 +510,33 @@ mod tests {
             estimate(&e, sq(512), 4, 1, &class("vulkan", 8), &quick),
             Some(eta(4_500, 5_750, true))
         );
+    }
+
+    #[test]
+    fn with_no_speed_point_the_time_never_falls_below_the_shortest_run_here() {
+        // No point to tell the load from the rest: scaling a 15 s run at 1024² down to 512²
+        // as a whole would give 2.5 s, under what the load alone took. It stays at the
+        // shortest run measured here, and the range never starts below it.
+        let runs = [
+            run(sq(1024), 4, 1, 15_000),
+            run(sq(1024), 8, 1, 25_000),
+            run(sq(768), 4, 1, 40_000),
+        ];
+        let got = estimate(&klein(), sq(512), 4, 1, &class("vulkan", 8), &runs).unwrap();
+        assert_eq!(got, eta(15_000, 22_500, true));
+        // Fewer steps than any run: the same floor.
+        let got = estimate(&klein(), sq(1024), 2, 1, &class("vulkan", 8), &runs).unwrap();
+        assert!(got.low_ms >= 15_000, "{got:?}");
+        // Settings a run was made at keep the narrow range of a time measured here.
+        let same = [run(sq(1024), 4, 1, 30_000)];
+        assert_eq!(
+            estimate(&klein(), sq(1024), 4, 1, &class("vulkan", 8), &same),
+            Some(eta(27_000, 34_500, true))
+        );
+        // With a speed point, the load is told apart, so a run scales below the shortest.
+        let e = with_speed(klein(), "vulkan-8", 1.0, 2.0, 1.0);
+        let got = estimate(&e, sq(512), 4, 1, &class("vulkan", 8), &same).unwrap();
+        assert!(got.high_ms < 30_000, "{got:?}");
     }
 
     #[test]
