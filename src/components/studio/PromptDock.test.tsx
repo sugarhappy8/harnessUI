@@ -437,6 +437,31 @@ describe("PromptDock", () => {
       screen.getByText("$0.16 today");
     });
 
+    it("an empty prompt says so quietly until a press is refused for it, then aloud", async () => {
+      await show({ prefs: prefs({ lastModel: CLOUD_LAST }) });
+      const sentence = () => screen.getByText("Write a prompt first.").parentElement!;
+      // Nothing was done yet: not a fault.
+      expect(sentence().className).toContain("text-fg-muted");
+      expect(sentence().className).not.toContain("text-danger");
+      expect(sentence().getAttribute("role")).toBeNull();
+      // The prompt box is described by it.
+      expect(promptBox().getAttribute("aria-describedby")).toBe(sentence().id);
+      fireEvent.keyDown(promptBox(), { key: "Enter" });
+      expect(api.studioStart).not.toHaveBeenCalled();
+      expect(sentence().className).toContain("text-danger");
+      expect(sentence().getAttribute("role")).toBe("alert");
+      expect(promptBox().getAttribute("aria-describedby")).toBe(sentence().id);
+    });
+
+    it("a prompt typed and emptied again says so as a fault", async () => {
+      await show({ prefs: prefs({ lastModel: CLOUD_LAST }) });
+      typePrompt("a");
+      expect(screen.queryByText("Write a prompt first.")).toBeNull();
+      expect(promptBox().getAttribute("aria-describedby")).toBeNull();
+      typePrompt("");
+      expect(screen.getByText("Write a prompt first.").parentElement!.className).toContain("text-danger");
+    });
+
     it("a prompt over 32,000 characters, or of white space only, says so before Create", async () => {
       await show({ prefs: prefs({ lastModel: CLOUD_LAST }) });
       // Judged on the prompt as it is, before any answer for it.

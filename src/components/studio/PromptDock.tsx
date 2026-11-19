@@ -1,4 +1,4 @@
-import { useEffect, useId, useMemo, useRef } from "react";
+import { useEffect, useId, useMemo, useRef, useState } from "react";
 import { STUDIO_ACTIONS, STUDIO_BAR, STUDIO_DOCK } from "../../lib/words";
 import {
   draftModel,
@@ -68,6 +68,12 @@ export function PromptDock(props: { tab: StudioTab }) {
   const promptRef = useRef<HTMLTextAreaElement>(null);
   // What Create would cost or take, or why it cannot run here, read out with it.
   const aboutId = useId();
+  // What the prompt itself lacks, read out with the prompt box.
+  const promptAboutId = useId();
+  // Whether the prompt was typed in (so an empty one was emptied on purpose), and each press
+  // refused for the prompt: until either, its sentences say it quietly, not as a fault.
+  const [typed, setTyped] = useState(false);
+  const [refusedPresses, setRefusedPresses] = useState(0);
 
   // The estimate follows the draft as Create would send it, and what else it depends on: the
   // model as listed (its price may have come since), the preferences (the limit, what asks)
@@ -96,9 +102,10 @@ export function PromptDock(props: { tab: StudioTab }) {
   // prompt as it is (no answer about it is waited for), then the rest of the answer shown, for
   // this model and place (typing does not change it). A failed answer, or one still on its way,
   // holds nothing back once the prompt as it is passes; the backend checks every start.
-  const refused =
-    target !== null && key !== null ? [...promptProblems(draft.prompt, target), ...settingsProblems(known)] : [];
-  const blocked = refused.length > 0 || notHere;
+  const promptRefused = target !== null && key !== null ? promptProblems(draft.prompt, target) : [];
+  const settingsRefused = target !== null && key !== null ? settingsProblems(known) : [];
+  const blocked = promptRefused.length > 0 || settingsRefused.length > 0 || notHere;
+  const promptFault = typed || refusedPresses > 0;
   // The daily limit has taken Create's place (Enter included).
   const overLimit = !here && known !== null && !known.limit.wouldPass;
   // Extra settings held aside until the model's price says which it takes: Create waits for it.
@@ -108,6 +115,8 @@ export function PromptDock(props: { tab: StudioTab }) {
 
   const create = () => {
     if (!disabled) void start(tab, false);
+    // A press the prompt holds back says why, aloud.
+    else if (promptRefused.length > 0) setRefusedPresses((n) => n + 1);
   };
 
   return (
@@ -118,7 +127,11 @@ export function PromptDock(props: { tab: StudioTab }) {
         aria-label={STUDIO_BAR.prompt}
         placeholder={STUDIO_BAR.promptPlaceholder[tab]}
         value={draft.prompt}
-        onChange={(e) => setPrompt(tab, e.target.value)}
+        aria-describedby={promptRefused.length > 0 ? promptAboutId : undefined}
+        onChange={(e) => {
+          if (e.target.value !== "") setTyped(true);
+          setPrompt(tab, e.target.value);
+        }}
         onKeyDown={(e) => {
           if (e.key === "Enter" && !e.shiftKey && !e.nativeEvent.isComposing) {
             e.preventDefault();
@@ -131,7 +144,20 @@ export function PromptDock(props: { tab: StudioTab }) {
         rows={2}
         className="w-full resize-none rounded-xl border border-border bg-bg px-3 py-2 text-sm outline-none focus:border-border-strong"
       />
-      {refused.map((sentence) => (
+      {promptRefused.length > 0 && (
+        // Each refused press puts it in again, so it is read out again.
+        <div
+          key={refusedPresses}
+          id={promptAboutId}
+          role={refusedPresses > 0 ? "alert" : undefined}
+          className={`text-xs ${promptFault ? "text-danger" : "text-fg-muted"}`}
+        >
+          {promptRefused.map((sentence) => (
+            <p key={sentence}>{sentence}</p>
+          ))}
+        </div>
+      )}
+      {settingsRefused.map((sentence) => (
         <p key={sentence} className="text-xs text-danger">
           {sentence}
         </p>
