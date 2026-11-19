@@ -3,9 +3,10 @@
 // role, so `aspect_ratio` on one model fills the Shape field of another, cloud or local),
 // moved to the nearest value that model takes, and one note names everything that changed.
 // Also: the values Studio starts a model with, which fields show (what each requires is met)
-// and the values that no longer apply, Advanced's changed count, and model families (the same
-// rule as Rust's `family_of`) for offering a model in place of a retired one.
-import { CARRY_WORDS } from "../../lib/words";
+// and the values that no longer apply, which Advanced settings are changed (counted in its
+// header, a chip each under the prompt), and model families (the same rule as Rust's
+// `family_of`) for offering a model in place of a retired one. The words are in words.ts.
+import { CARRY_WORDS, SETTING_WORDS, STUDIO_TIME } from "../../lib/words";
 import type { Choice, Layer, MediaModel, ParamSpec, RefItem, RefRole, SizeRules } from "./types";
 
 /** A draft's settings, by the model's field keys; an unset field has no key. */
@@ -48,7 +49,8 @@ function holdsValue(field: ParamSpec): boolean {
  * the nearest (the shorter on a tie); anything else `to` does not offer is removed. Added
  * pictures are kept, in order, up to `to`'s limit for their role; Extra fields only where `to`
  * accepts them. Every key left unset is filled from `defaultsFor(to)`. The note has one
- * sentence for each change, in the order of `from`'s fields, or `null` when nothing changed.
+ * sentence for each change, in the order of `from`'s fields (`to`'s when `from` is not known),
+ * or `null` when nothing changed.
  */
 export function carry(
   from: MediaModel | null,
@@ -59,9 +61,10 @@ export function carry(
 ): { values: Values; extra: Values; refs: RefItem[]; note: string | null } {
   const model = to.displayName;
   const notes: { at: number; text: string }[] = [];
-  /** Where a sentence goes: at the first of `from`'s fields that `pick` matches, else last. */
+  const order = (from ?? to).params;
+  /** Where a sentence goes: at the first field of `order` that `pick` matches, else last. */
   const at = (pick: (field: ParamSpec) => boolean) => {
-    const index = from?.params.findIndex(pick) ?? -1;
+    const index = order.findIndex(pick);
     return index < 0 ? Infinity : index;
   };
 
@@ -73,7 +76,7 @@ export function carry(
     const target = to.params.find((f) => holdsValue(f) && (role ? f.canonical === role : f.key === key));
     const here = at((f) => f.key === key);
     if (!target) {
-      notes.push({ at: here, text: CARRY_WORDS.noSetting(model, source ? nameOf(source) : key.replaceAll("_", " ")) });
+      notes.push({ at: here, text: CARRY_WORDS.noSetting(model, source ? nameOf(source) : SETTING_WORDS.keyName(key)) });
       continue;
     }
     const placed = snap(target, value) ?? startingValue(target);
@@ -83,7 +86,10 @@ export function carry(
       continue;
     }
     carried[target.key] = placed;
-    if (placed !== value) notes.push({ at: here, text: CARRY_WORDS.became(target.label, was, valueWords(placed, target)) });
+    if (placed !== value) {
+      const now = valueWords(placed, target);
+      notes.push({ at: here, text: CARRY_WORDS.became(target.label, SETTING_WORDS.midSentence(was), SETTING_WORDS.midSentence(now)) });
+    }
   }
   for (const [key, start] of Object.entries(defaultsFor(to))) {
     if (!(key in carried)) carried[key] = start;
@@ -126,9 +132,10 @@ function pictureLimit(model: MediaModel, role: RefRole): number {
   return 0;
 }
 
-/** A field's name in the middle of a sentence ("Seed" → "seed", "How many" → "how many"). */
-function nameOf(field: ParamSpec): string {
-  return field.label.charAt(0).toLowerCase() + field.label.slice(1);
+/** A field's name in the middle of a sentence ("Seed" → "seed", "How many" → "how many",
+ *  "CFG scale" as it is). */
+export function nameOf(field: ParamSpec): string {
+  return SETTING_WORDS.midSentence(field.label);
 }
 
 function choicesOf(field: ParamSpec): Choice[] {
@@ -137,16 +144,14 @@ function choicesOf(field: ParamSpec): Choice[] {
 
 /** A value as the first of `fields` that lists it shows it ("7 s", "Extra high"), else with
  *  the field's unit, else as it is. */
-function valueWords(value: unknown, ...fields: (ParamSpec | undefined)[]): string {
+export function valueWords(value: unknown, ...fields: (ParamSpec | undefined)[]): string {
   for (const field of fields) {
     const choice = field && choicesOf(field).find((c) => c.value === value);
     if (choice) return choice.label;
   }
   const field = fields.find((f) => f !== undefined);
-  if (field?.kind.type === "range" && field.kind.unit) {
-    return field.kind.unit === "%" ? `${String(value)}%` : `${String(value)} ${field.kind.unit}`;
-  }
-  if (field?.canonical === "length" && typeof value === "number") return `${value} s`;
+  if (field?.kind.type === "range" && field.kind.unit) return SETTING_WORDS.withUnit(String(value), field.kind.unit);
+  if (field?.canonical === "length" && typeof value === "number") return STUDIO_TIME.seconds(value);
   return String(value);
 }
 
@@ -311,11 +316,18 @@ export function dropUnmet(model: MediaModel, values: Values): Values {
   }
 }
 
-/** How many Advanced settings `values` and `extra` change: each Advanced field set, plus each
- *  Extra field. A Simple field (quality, say) is not counted. */
-export function changedCount(model: MediaModel, values: Values, extra: Values): number {
+/** The Advanced settings `values` and `extra` change: the key of each Advanced field set, in
+ *  the model's order, and each Extra field. A Simple field (quality, say) is not one. */
+export function changedKeys(model: MediaModel, values: Values, extra: Values): { values: string[]; extra: string[] } {
   const advanced = model.params.filter((f) => f.layer === "advanced" && holdsValue(f) && isSet(values[f.key]));
-  return advanced.length + Object.keys(extra).length;
+  return { values: advanced.map((f) => f.key), extra: Object.keys(extra) };
+}
+
+/** How many Advanced settings `values` and `extra` change (`changedKeys`): Advanced's header
+ *  counts them, and each is a chip under the prompt. */
+export function changedCount(model: MediaModel, values: Values, extra: Values): number {
+  const changed = changedKeys(model, values, extra);
+  return changed.values.length + changed.extra.length;
 }
 
 /**
@@ -339,12 +351,12 @@ export function familyOf(id: string): string {
   return maker === null ? name.slice(0, cut) : `${maker}/${name.slice(0, cut)}`;
 }
 
-/** The model to offer for a retired one: the newest usable model of its family (by
- *  `created`; one without a date counts as the oldest), or `null` when there is none. */
+/** The model to offer for a retired one: the newest usable model of its family other than
+ *  itself (by `created`; one without a date counts as the oldest), or `null` when there is none. */
 export function closestModel(models: MediaModel[], retired: { id: string; family: string }): MediaModel | null {
   let best: MediaModel | null = null;
   for (const model of models) {
-    if (model.family !== retired.family || model.usable !== null) continue;
+    if (model.id === retired.id || model.family !== retired.family || model.usable !== null) continue;
     if (!best || (model.created ?? -Infinity) > (best.created ?? -Infinity)) best = model;
   }
   return best;

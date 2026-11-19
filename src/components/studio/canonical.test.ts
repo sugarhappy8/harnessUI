@@ -1,7 +1,8 @@
 // Carrying settings from one model to another (0.1.0 Task B4): by what each field means, to
 // the nearest value the new model takes, with one note that says what changed.
 import { describe, expect, it } from "vitest";
-import { carry, changedCount, closestModel, defaultsFor, familyOf } from "./canonical";
+import { SETTING_WORDS } from "../../lib/words";
+import { carry, changedCount, changedKeys, closestModel, defaultsFor, familyOf } from "./canonical";
 import { LOCAL, MODELS } from "./fixtures/models";
 import type { MediaModel, ParamKind, RefItem, RefRole } from "./types";
 
@@ -90,7 +91,7 @@ describe("carry", () => {
     const upToHigh = withKind(flare, "quality", choicesOf(flare, "quality", ["low", "medium", "high"]));
     const xhigh = carry(flare, upToHigh, { quality: "xhigh" }, {}, []);
     expect(xhigh.values.quality).toBe("high");
-    expect(xhigh.note).toBe("Quality Extra high became High.");
+    expect(xhigh.note).toBe("Quality extra high became high."); // word values mid-sentence
     expect(carry(flare, upToHigh, { quality: "max" }, {}, []).values.quality).toBe("high");
     const low = carry(flare, upToHigh, { quality: "low" }, {}, []);
     expect(low.values.quality).toBe("low");
@@ -165,7 +166,7 @@ describe("carry", () => {
     const withAuto = withKind(veo, "resolution", { type: "enum", values: [{ value: "auto", label: "Auto" }] });
     const r = carry(withAuto, grokLite, { resolution: "auto" }, {}, []);
     expect(r.values.resolution).toBe("720p");
-    expect(r.note).toBe("Resolution Auto became 720p.");
+    expect(r.note).toBe("Resolution auto became 720p.");
   });
 
   it("matches a value whose key the old model does not declare by the same key", () => {
@@ -173,6 +174,16 @@ describe("carry", () => {
     const r = carry(null, veo, { duration: 5, foo_bar: 1 }, {}, []);
     expect(r.values).toEqual({ duration: 4, resolution: "720p" });
     expect(r.note).toBe("Length 5 s became 4 s. Veo 3.1 has no foo bar setting, so it was removed.");
+  });
+
+  it("without the old model, writes the note in the new model's field order", () => {
+    const r = carry(null, klein, { steps: 60, aspect_ratio: "21:9" }, {}, []); // klein: Shape before Steps
+    expect(r.note).toBe("Shape 21:9 became 16:9. Steps 60 became 50.");
+  });
+
+  it("leaves a name whose first word is in capitals as it is", () => {
+    const cfg = { ...klein, params: klein.params.map((p) => (p.key === "steps" ? { ...p, label: "CFG scale" } : p)) };
+    expect(carry(cfg, k3Edit, { steps: 3 }, {}, []).note).toBe("K3 Edit has no CFG scale setting, so it was removed.");
   });
 
   it("keeps an exact size only when the new model can make it", () => {
@@ -217,6 +228,15 @@ describe("changedCount", () => {
     expect(changedCount(flare, {}, { moderation: "low" })).toBe(1);
     expect(changedCount(flare, {}, {})).toBe(0);
   });
+
+  it("names the Advanced fields set, in the model's order, then the Extra fields", () => {
+    const values = { background: "transparent", quality: "high", output_format: "png", foo: 1 }; // foo: no such field
+    expect(changedKeys(flare, values, { moderation: "low" })).toEqual({
+      values: ["output_format", "background"],
+      extra: ["moderation"],
+    });
+    expect(changedCount(flare, values, { moderation: "low" })).toBe(3);
+  });
 });
 
 describe("closestModel", () => {
@@ -224,6 +244,12 @@ describe("closestModel", () => {
     const newer = { ...veo, id: "google/veo-3.2", created: veo.created! + 1 };
     expect(closestModel([veo, newer, grokLite], { id: "google/veo-3.0", family: "google/veo" })?.id).toBe("google/veo-3.2");
     expect(closestModel([grokLite], { id: "google/veo-3.0", family: "google/veo" })).toBeNull();
+  });
+
+  it("never offers the retired model itself", () => {
+    const newer = { ...veo, id: "google/veo-3.2", created: veo.created! + 1 };
+    expect(closestModel([veo, newer], { id: "google/veo-3.2", family: "google/veo" })?.id).toBe("google/veo-3.1");
+    expect(closestModel([veo], { id: "google/veo-3.1", family: "google/veo" })).toBeNull();
   });
 
   it("never offers a model Studio cannot use", () => {
@@ -239,5 +265,23 @@ describe("familyOf", () => {
     expect(familyOf("openai/gpt-image-2.6-flare")).toBe("openai/gpt-image");
     expect(familyOf("gpt-image-2.6-flare")).toBe("gpt-image");
     expect(familyOf("meta/muse-image")).toBe("meta/muse-image");
+  });
+});
+
+describe("setting words", () => {
+  it("lower-cases a word's first letter mid-sentence, unless its first word has another capital", () => {
+    expect(SETTING_WORDS.midSentence("Extra high")).toBe("extra high");
+    expect(SETTING_WORDS.midSentence("Transparent")).toBe("transparent");
+    expect(SETTING_WORDS.midSentence("PNG")).toBe("PNG");
+    expect(SETTING_WORDS.midSentence("WebP")).toBe("WebP");
+    expect(SETTING_WORDS.midSentence("CFG scale")).toBe("CFG scale");
+    expect(SETTING_WORDS.midSentence("DPM++ 2M")).toBe("DPM++ 2M");
+    expect(SETTING_WORDS.midSentence("16:9")).toBe("16:9");
+  });
+
+  it("writes a number with its unit, and a key with spaces", () => {
+    expect(SETTING_WORDS.withUnit("80", "%")).toBe("80%");
+    expect(SETTING_WORDS.withUnit("120", "ms")).toBe("120 ms");
+    expect(SETTING_WORDS.keyName("foo_bar")).toBe("foo bar");
   });
 });

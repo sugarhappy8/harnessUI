@@ -12,10 +12,12 @@
 // per tab); the newest runs whatever the gallery's filter, and the recent models. Task B5:
 // each field set or reset (a value whose field no longer applies leaves the draft, and a
 // transparent background moves the file type to PNG), the added pictures and their roles, and
-// how long a local clip takes here at each size and length, asked once each.
+// how long a local clip takes here at each size and length, asked once each. Task B6: Advanced's
+// Reset all, the seed's dice and lock, Extra fields, an OpenRouter picture's routing, and My
+// setups (a model and every setting under a name; at most 50, kept in the preferences).
 import { create, type StoreApi, type UseBoundStore } from "zustand";
 import * as api from "../components/studio/api";
-import { carry, defaultsFor, dropUnmet, type Values } from "../components/studio/canonical";
+import { carry, closestModel, defaultsFor, dropUnmet, familyOf, type Values } from "../components/studio/canonical";
 import type {
   Company,
   InstalledLocal,
@@ -33,6 +35,8 @@ import type {
   RunsFilter,
   RunStatus,
   RunTarget,
+  Setup,
+  StartRequest,
   StudioEndpoint,
   StudioPrefs,
   StudioPrefsPatch,
@@ -41,7 +45,7 @@ import type {
 import * as ipc from "../lib/ipc";
 import { listenInEffect } from "../lib/listen";
 import type { ErrorInfo } from "../lib/types";
-import { STUDIO_FIELDS, STUDIO_REFS } from "../lib/words";
+import { STUDIO_EMPTY, STUDIO_FIELDS, STUDIO_REFS, STUDIO_SETUPS } from "../lib/words";
 import { toErrorInfo } from "./app";
 
 /** Studio's tabs: Pictures and Video. */
@@ -157,6 +161,28 @@ export interface StudioState {
   setRefRole(tab: StudioTab, index: number, role: RefRole): string | null;
   /** Puts away the note of what changed. */
   dismissNote(tab: StudioTab): void;
+  /** *Reset all*: every Advanced field back to Automatic, no Extra fields and no routing (and
+   *  the seed no longer kept); then every value whose field no longer applies leaves the draft. */
+  resetAdvanced(tab: StudioTab): void;
+  /** The dice: a new random seed, other than the one set, for a model that takes a seed. */
+  newSeed(tab: StudioTab): void;
+  /** *Keep it*: whether the seed stays as it is for the next run. */
+  lockSeed(tab: StudioTab, locked: boolean): void;
+  /** Sets `tab`'s Extra fields (checked by `parseExtra` first). */
+  setExtra(tab: StudioTab, extra: Values): void;
+  /** Sets which companies may run `tab`'s OpenRouter picture (`null`: OpenRouter chooses). */
+  setRouting(tab: StudioTab, routing: Routing | null): void;
+  /** *Save as setup…*: keeps `tab`'s model, where it runs and every setting under `name` in the
+   *  preferences, in place of a setup of that kind with the same name. Returns why it was not
+   *  saved (no name, no model, 50 setups already), or `null`; a failure to save rejects. */
+  saveSetup(tab: StudioTab, name: string): Promise<string | null>;
+  /** Picking a setup: its tab's draft goes to the setup's model where it runs, with its
+   *  settings, Extra fields and routing as saved (the prompt stays; added pictures stay up to
+   *  the model's limit). When that model is no longer offered there, its family's newest takes
+   *  its place, the settings carried to it (`carry`) with a note of what changed. An OpenRouter
+   *  picture model whose price was never asked is asked for it, as when picked. Returns why
+   *  the setup cannot be used (its model and family are gone), or `null`. */
+  applySetup(setup: Setup): string | null;
   /** How long an installed model takes here, by `localFitKey`: asked once for each size and
    *  length, and asked again once the local models are read again (a run may have been
    *  measured since). */
@@ -190,6 +216,14 @@ const RUNS_PAGE = 50;
 
 /** How many of the newest runs `recentRuns` keeps. */
 const RECENT_RUNS = 50;
+
+/** The most setups the preferences keep (the backend's `prefs::MAX_SETUPS`). */
+const MAX_SETUPS = 50;
+
+/** A random seed from 0 to `max`. */
+function randomSeed(max: number): number {
+  return Math.floor(Math.random() * (max + 1));
+}
 
 /** Whether `filter` lets every run through, as the backend reads it (a blank text does not
  *  filter, nor does Starred off). */
@@ -544,6 +578,95 @@ export const useStudio: UseBoundStore<StoreApi<StudioState>> = create<StudioStat
       return null;
     },
     dismissNote: (tab) => set((s) => ({ drafts: { ...s.drafts, [tab]: { ...s.drafts[tab], note: null } } })),
+    resetAdvanced: (tab) =>
+      set((s) => {
+        const draft = s.drafts[tab];
+        const model = draftModel(s, tab);
+        const advanced = new Set(model?.params.filter((p) => p.layer === "advanced").map((p) => p.key));
+        const kept = Object.fromEntries(Object.entries(draft.values).filter(([k]) => !advanced.has(k)));
+        const values = model ? dropUnmet(model, kept) : kept;
+        return { drafts: { ...s.drafts, [tab]: { ...draft, values, extra: {}, routing: null, seedLocked: false } } };
+      }),
+    newSeed: (tab) => {
+      const field = draftModel(get(), tab)?.params.find((p) => p.kind.type === "seed");
+      if (!field || field.kind.type !== "seed") return;
+      const now = get().drafts[tab].values[field.key];
+      let seed = randomSeed(field.kind.max);
+      while (seed === now && field.kind.max > 0) seed = randomSeed(field.kind.max);
+      get().setValue(tab, field.key, seed);
+    },
+    lockSeed: (tab, locked) =>
+      set((s) => ({ drafts: { ...s.drafts, [tab]: { ...s.drafts[tab], seedLocked: locked } } })),
+    setExtra: (tab, extra) => set((s) => ({ drafts: { ...s.drafts, [tab]: { ...s.drafts[tab], extra } } })),
+    setRouting: (tab, routing) => set((s) => ({ drafts: { ...s.drafts, [tab]: { ...s.drafts[tab], routing } } })),
+    saveSetup: async (tab, name) => {
+      const s = get();
+      const draft = s.drafts[tab];
+      const named = name.trim();
+      if (named === "") return STUDIO_SETUPS.noName;
+      if (draft.target === null || draft.model === null) return STUDIO_SETUPS.noModel;
+      const setup: Setup = {
+        name: named,
+        kind: tab,
+        target: draft.target,
+        model: draft.model,
+        params: draft.values,
+        extra: draft.extra,
+        routing: draft.routing,
+      };
+      // The setups saved so far (read first if Studio has not read them yet, so none is lost).
+      const { setups } = s.prefs ?? (await api.studioGetPrefs());
+      const same = setups.findIndex((x) => x.kind === tab && x.name === named);
+      const next = same < 0 ? [...setups, setup] : setups.map((x, i) => (i === same ? setup : x));
+      if (next.length > MAX_SETUPS) return STUDIO_SETUPS.tooMany;
+      await get().setPrefs({ setups: next });
+      return null;
+    },
+    applySetup: (setup) => {
+      const tab = setup.kind;
+      const s = get();
+      const { target } = setup;
+      const endpoint = target === "thisComputer" ? null : s.endpoints.find((e) => e.providerId === target.endpoint);
+      let model = offeredModel(tab, target, setup.model, s.local, s.endpoints);
+      let values: Values = setup.params;
+      let extra: Values = setup.extra;
+      let routing = setup.routing;
+      let note: string | null = null;
+      if (!model) {
+        if (target === "thisComputer") return STUDIO_SETUPS.goneHere;
+        if (!endpoint) return STUDIO_SETUPS.endpointGone;
+        if (!endpoint.hasKey) return STUDIO_EMPTY.noKey(endpoint.name);
+        const closest = closestModel(cloudModelsFor(endpoint, tab), { id: setup.model, family: familyOf(setup.model) });
+        if (!closest) return STUDIO_SETUPS.gone(endpoint.name);
+        const carried = carry(null, closest, setup.params, setup.extra, []);
+        model = closest;
+        values = carried.values;
+        extra = carried.extra;
+        // Which companies may run it belongs to the model it was saved for.
+        routing = null;
+        note = [STUDIO_SETUPS.replaced(endpoint.name, closest.displayName), carried.note].filter((n) => n !== null).join(" ");
+      }
+      const to = model;
+      const draft = s.drafts[tab];
+      // The added pictures stay up to the model's limit for each role, with a note for the rest.
+      const pictures = carry(to, to, {}, {}, draft.refs);
+      note = [note, pictures.note].filter((n) => n !== null).join(" ") || null;
+      // The draft starts again: nothing is held aside for the model it had.
+      delete held[tab];
+      set((st) => ({
+        drafts: {
+          ...st.drafts,
+          [tab]: { ...draft, target, model: to.id, values: dropUnmet(to, values), extra, refs: pictures.refs, routing, note },
+        },
+        priceError: { ...st.priceError, [tab]: null },
+      }));
+      // Picking a setup picks its model: an OpenRouter picture model is asked for its price once
+      // (a failure is kept in `priceError`).
+      if (endpoint && priceNotAsked(to, endpoint.company)) {
+        priceFor(tab, endpoint.providerId, to.id).catch(() => undefined);
+      }
+      return null;
+    },
     localFits: {},
     askLocalFit: (modelId, width, height, seconds) => {
       const key = localFitKey(modelId, width, height, seconds);
@@ -659,6 +782,24 @@ function listedModel(
 ): MediaModel | null {
   if (target === "thisComputer") return local?.installed.find((m) => m.model.id === id)?.model ?? null;
   return endpoints.find((e) => e.providerId === target.endpoint)?.models.find((m) => m.id === id) ?? null;
+}
+
+/** What Create would send for `tab`'s draft (`studio_estimate` and `studio_preview` take the
+ *  same), as press `clientToken`; `null` while the draft has no model. An added picture recorded
+ *  without a role goes as a reference. */
+export function startRequestOf(tab: StudioTab, draft: Draft, clientToken: string): StartRequest | null {
+  if (draft.target === null || draft.model === null) return null;
+  return {
+    clientToken,
+    target: draft.target,
+    kind: tab,
+    model: draft.model,
+    prompt: draft.prompt,
+    params: draft.values,
+    extra: draft.extra,
+    refs: draft.refs.map((r) => ({ sha256: r.sha256, role: r.role ?? "reference" })),
+    routing: draft.routing,
+  };
 }
 
 /** The model of `tab`'s draft as listed, whether or not it can be used now; `null` without one. */

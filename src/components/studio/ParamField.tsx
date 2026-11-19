@@ -1,6 +1,6 @@
 import { useId, useState, type ReactNode } from "react";
 import { DropdownMenu } from "radix-ui";
-import { Check, ChevronDown, CircleHelp, Plus, RotateCcw } from "lucide-react";
+import { Check, ChevronDown, CircleHelp, Dices, Plus, RotateCcw } from "lucide-react";
 import { STUDIO_FIELDS } from "../../lib/words";
 import type { Choice, ParamKind, ParamSpec, SizeRules } from "./types";
 
@@ -8,10 +8,11 @@ import type { Choice, ParamKind, ParamSpec, SizeRules } from "./types";
 // model's own `ParamSpec`, so there is no code per company. Shape and How many are chips
 // (Shape's first five values, the rest under More shapes; How many 1, 2 and 4, more in a number
 // box up to the model's maximum), a short list is a set of radios, a long one a select, a range
-// a slider with a number box, a boolean a switch, a seed a number box, a custom size width and
-// height boxes checked as they are typed, a text a text box. An unset field reads "Automatic
-// (company default)" ("Automatic" on this computer) and is not sent; a set one offers its
-// reset. Added pictures (RefTray.tsx) and Extra fields (Advanced, Task B6) are drawn elsewhere.
+// a slider with a number box, a boolean a switch, a seed a number box (under Advanced with its
+// dice and *Keep it*, Task B6), a custom size width and height boxes checked as they are typed,
+// a text a text box. An unset field reads "Automatic (company default)" ("Automatic" on this
+// computer) and is not sent; a set one offers its reset. Added pictures (RefTray.tsx) and Extra
+// fields (AdvancedDrawer.tsx) are drawn elsewhere.
 // Which fields show, and the values that no longer apply, are worked out in canonical.ts.
 
 /** How a field is drawn. */
@@ -63,8 +64,9 @@ const BOX =
 /**
  * One field: its label (with its help as a tooltip), "Automatic" while it is unset or its reset
  * once set, and its control. `local` says the model runs on this computer, where there is no
- * company default to name. `timeOf` gives a chip its time here ("2 s · about 3 min"). Pictures
- * (`drop`) and Extra fields (`json`) are drawn by the tray and by Advanced, so nothing here.
+ * company default to name. `timeOf` gives a chip its time here ("2 s · about 3 min"). `seed`
+ * gives a seed its dice (a new seed) and its lock (*Keep it*). Pictures (`drop`) and Extra fields
+ * (`json`) are drawn by the tray and by Advanced, so nothing here.
  */
 export function ParamField(props: {
   spec: ParamSpec;
@@ -73,9 +75,11 @@ export function ParamField(props: {
   onReset(): void;
   local?: boolean;
   timeOf?: (value: unknown) => string | null;
+  seed?: SeedControls;
 }) {
   const { spec, value, onChange, onReset } = props;
   const labelId = useId();
+  const helpId = useId();
   const widget = widgetFor(spec);
   if (widget === "drop" || widget === "json") return null;
   const set = isSet(value);
@@ -85,7 +89,13 @@ export function ParamField(props: {
   const namesUnset = widget === "select" || widget === "seed" || (spec.kind.type === "size" && spec.kind.values.length > 0);
 
   return (
-    <div role="group" aria-labelledby={labelId} data-param={spec.key} className="flex flex-col gap-1.5">
+    <div
+      role="group"
+      aria-labelledby={labelId}
+      aria-describedby={spec.help ? helpId : undefined}
+      data-param={spec.key}
+      className="flex flex-col gap-1.5"
+    >
       <div className="flex min-h-5 items-center gap-1.5">
         <span id={labelId} className="text-xs font-medium text-fg-muted">
           {spec.label}
@@ -93,7 +103,9 @@ export function ParamField(props: {
         {spec.help && (
           <span title={spec.help} className="text-fg-muted">
             <CircleHelp size={12} aria-hidden />
-            <span className="sr-only">{spec.help}</span>
+            <span id={helpId} className="sr-only">
+              {spec.help}
+            </span>
           </span>
         )}
         {set ? (
@@ -119,9 +131,19 @@ export function ParamField(props: {
         onChange={onChange}
         onReset={onReset}
         timeOf={props.timeOf}
+        seed={props.seed}
       />
     </div>
   );
+}
+
+/** A seed's dice and lock. */
+export interface SeedControls {
+  /** The seed stays as it is for the next run. */
+  locked: boolean;
+  /** The dice: a new random seed. */
+  onNew(): void;
+  onLock(locked: boolean): void;
 }
 
 /** The control `widget` draws for the field's kind. */
@@ -134,6 +156,7 @@ function Control(props: {
   onChange(v: unknown): void;
   onReset(): void;
   timeOf?: (value: unknown) => string | null;
+  seed?: SeedControls;
 }) {
   const { spec, widget, labelId, value, onChange, onReset } = props;
   const kind = spec.kind;
@@ -176,17 +199,42 @@ function Control(props: {
     );
   }
   if (widget === "seed" && kind.type === "seed") {
+    const seed = props.seed;
     return (
-      <NumberBox
-        labelledBy={labelId}
-        value={number}
-        min={0}
-        max={kind.max}
-        step={1}
-        placeholder={STUDIO_FIELDS.random}
-        onCommit={orReset}
-        className={`${BOX} w-36`}
-      />
+      <div className="flex items-center gap-2">
+        <NumberBox
+          labelledBy={labelId}
+          value={number}
+          min={0}
+          max={kind.max}
+          step={1}
+          placeholder={STUDIO_FIELDS.random}
+          onCommit={orReset}
+          className={`${BOX} w-36`}
+        />
+        {seed && (
+          <>
+            <button
+              type="button"
+              aria-label={STUDIO_FIELDS.newSeed}
+              title={STUDIO_FIELDS.newSeed}
+              onClick={seed.onNew}
+              className="rounded-md border border-border p-1 text-fg-muted hover:border-border-strong hover:text-fg"
+            >
+              <Dices size={14} aria-hidden />
+            </button>
+            <label className="flex items-center gap-1 text-xs">
+              <input
+                type="checkbox"
+                checked={seed.locked}
+                onChange={(e) => seed.onLock(e.target.checked)}
+                className="accent-[var(--accent)]"
+              />
+              {STUDIO_FIELDS.keepIt}
+            </label>
+          </>
+        )}
+      </div>
     );
   }
   if (widget === "size" && kind.type === "size") {

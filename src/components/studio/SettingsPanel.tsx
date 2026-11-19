@@ -1,20 +1,23 @@
-import { useEffect, useState } from "react";
-import { ChevronDown, ChevronRight, X } from "lucide-react";
-import { LOCAL_MARK, STUDIO_FIELDS, STUDIO_PLACE } from "../../lib/words";
-import { draftModel, localFitKey, useStudio, type StudioTab } from "../../store/studio";
-import { changedCount, visibleFields, type Values } from "./canonical";
+import { useEffect, useId, useState } from "react";
+import { X } from "lucide-react";
+import { LOCAL_MARK, STUDIO_FIELDS, STUDIO_PLACE, STUDIO_SETUPS } from "../../lib/words";
+import { toErrorInfo } from "../../store/app";
+import { draftModel, localFitKey, useStudio, type Draft, type StudioTab } from "../../store/studio";
+import { AdvancedDrawer } from "./AdvancedDrawer";
+import { visibleFields, type Values } from "./canonical";
 import { etaText } from "./eta";
 import { ModelPicker } from "./ModelPicker";
 import { ParamField } from "./ParamField";
 import { FrameDrop } from "./RefTray";
-import type { Canonical, MediaModel, ParamSpec } from "./types";
+import type { Canonical, MediaModel, ParamSpec, Setup } from "./types";
 
 // Studio's right panel (0.1.0 Task B5; design Wireframe 1, local addendum "Right panel"): the
 // Model field (ModelPicker.tsx) with where the model runs ("On this computer · <device>" or
 // "via <endpoint> · Cloud"), the note of what changed, the model's simple fields in its own
-// order (a frame as a drop zone; reference pictures go in the tray), My setups (Task B6) and
-// the Advanced toggle with its change count. On this computer, each Length and Resolution chip
-// of a video shows its own time here, asked once per chip and size (nothing is sent).
+// order (a frame as a drop zone; reference pictures go in the tray), My setups and the Advanced
+// drawer with its change count (Task B6, AdvancedDrawer.tsx). On this computer, each Length
+// and Resolution chip of a video shows its own time here, asked once per chip and size
+// (nothing is sent).
 
 /** A `W:H` shape's two sides; `null` for anything else (`auto`). */
 function shapeOf(value: unknown): { w: number; h: number } | null {
@@ -117,22 +120,12 @@ export function SettingsPanel(props: { tab: StudioTab }) {
   const local = useStudio((s) => s.local);
   const endpoints = useStudio((s) => s.endpoints);
   const localFits = useStudio((s) => s.localFits);
-  const savedOpen = useStudio((s) => s.prefs?.advancedOpen ?? false);
   const setValue = useStudio((s) => s.setValue);
   const resetValue = useStudio((s) => s.resetValue);
   const dismissNote = useStudio((s) => s.dismissNote);
   const askLocalFit = useStudio((s) => s.askLocalFit);
-  const setPrefs = useStudio((s) => s.setPrefs);
   const here = draft.target === "thisComputer";
   const localVideo = here && model?.kind === "video";
-  // Whether Advanced is open: what was saved, and the toggle's own choice even when saving it
-  // fails; a choice saved elsewhere since is followed.
-  const [advancedOpen, setAdvancedOpen] = useState(savedOpen);
-  const [shownSaved, setShownSaved] = useState(savedOpen);
-  if (shownSaved !== savedOpen) {
-    setShownSaved(savedOpen);
-    setAdvancedOpen(savedOpen);
-  }
 
   // A local clip's chips each ask for their time, once per size and length: the store keeps
   // the answers (and which could not be worked out) and asks only for what it has not got. It
@@ -191,17 +184,6 @@ export function SettingsPanel(props: { tab: StudioTab }) {
     );
   };
 
-  const hasAdvanced = model.params.some((p) => p.layer === "advanced");
-  const changed = changedCount(model, draft.values, draft.extra);
-  const toggleAdvanced = () => {
-    const open = !advancedOpen;
-    setAdvancedOpen(open);
-    setPrefs({ advancedOpen: open }).catch((e: unknown) =>
-      // It opens or closes all the same, for now; the failure leaves a trace.
-      console.warn("Studio: whether Advanced is open could not be saved", e),
-    );
-  };
-
   return (
     <div data-settings-panel className="flex flex-col gap-4 p-3">
       <div className="flex flex-col gap-1">
@@ -223,21 +205,132 @@ export function SettingsPanel(props: { tab: StudioTab }) {
         </div>
       )}
       {visibleFields(model.params, "simple", draft.values).map(draw)}
-      {/* My setups (Task B6). */}
-      {hasAdvanced && (
-        <div className="flex flex-col gap-4 border-t border-border pt-3">
+      <MySetups tab={tab} />
+      <AdvancedDrawer tab={tab} />
+    </div>
+  );
+}
+
+const BOX =
+  "rounded-md border border-border bg-bg px-2 py-1 text-sm outline-none focus:border-border-strong disabled:opacity-60";
+const SMALL_BUTTON = "rounded-md px-1.5 py-0.5 text-xs text-fg-muted hover:bg-bg-muted hover:text-fg";
+
+/** While the preferences hold no setups. */
+const NO_SETUPS: Setup[] = [];
+
+/**
+ * My setups: a menu of the tab's saved setups, which applies the one picked (or says why it
+ * cannot), and *Save as setup…*, which keeps the model and every setting under a name. The menu
+ * names the setup applied or saved last until the draft changes, then None.
+ */
+function MySetups(props: { tab: StudioTab }) {
+  const { tab } = props;
+  const all = useStudio((s) => s.prefs?.setups) ?? NO_SETUPS;
+  const draft = useStudio((s) => s.drafts[tab]);
+  const applySetup = useStudio((s) => s.applySetup);
+  const saveSetup = useStudio((s) => s.saveSetup);
+  const menuId = useId();
+  // The setup the draft was set from, with the draft it gave.
+  const [from, setFrom] = useState<{ name: string; draft: Draft } | null>(null);
+  // The name being typed (`null` while not saving), and why a pick or a save did not happen.
+  const [name, setName] = useState<string | null>(null);
+  const [message, setMessage] = useState<string | null>(null);
+  const [saving, setSaving] = useState(false);
+  const setups = all.filter((s) => s.kind === tab);
+  const shown = from !== null && from.draft === draft ? setups.findIndex((s) => s.name === from.name) : -1;
+
+  const pick = (value: string) => {
+    const setup = value === "" ? undefined : setups[Number(value)];
+    if (!setup) return;
+    const refused = applySetup(setup);
+    setMessage(refused);
+    setFrom(refused === null ? { name: setup.name, draft: useStudio.getState().drafts[tab] } : null);
+  };
+  const save = async () => {
+    if (name === null || name.trim() === "" || saving) return;
+    setSaving(true);
+    try {
+      const refused = await saveSetup(tab, name);
+      setMessage(refused);
+      if (refused === null) {
+        setFrom({ name: name.trim(), draft: useStudio.getState().drafts[tab] });
+        setName(null);
+      }
+    } catch (e: unknown) {
+      setMessage(toErrorInfo(e).message);
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  return (
+    <div className="flex flex-col gap-1.5">
+      <div className="flex items-center gap-2">
+        <label htmlFor={menuId} className="text-xs font-medium text-fg-muted">
+          {STUDIO_SETUPS.label}
+        </label>
+        <select
+          id={menuId}
+          value={shown < 0 ? "" : String(shown)}
+          onChange={(e) => pick(e.target.value)}
+          className={`${BOX} min-w-0 flex-1`}
+        >
+          <option value="">{STUDIO_SETUPS.none}</option>
+          {setups.map((setup, i) => (
+            <option key={`${i} ${setup.name}`} value={String(i)}>
+              {setup.name}
+            </option>
+          ))}
+        </select>
+      </div>
+      {name === null ? (
+        <button
+          type="button"
+          onClick={() => {
+            setName("");
+            setMessage(null);
+          }}
+          className={`${SMALL_BUTTON} self-start`}
+        >
+          {STUDIO_SETUPS.saveAs}
+        </button>
+      ) : (
+        <div className="flex items-center gap-1.5">
+          <input
+            aria-label={STUDIO_SETUPS.name}
+            placeholder={STUDIO_SETUPS.name}
+            value={name}
+            autoFocus
+            onChange={(e) => setName(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === "Enter") {
+                e.preventDefault();
+                void save();
+              }
+            }}
+            className={`${BOX} min-w-0 flex-1`}
+          />
           <button
             type="button"
-            aria-expanded={advancedOpen}
-            onClick={toggleAdvanced}
-            className="flex items-center gap-1 self-start text-sm font-medium hover:text-fg"
+            disabled={saving || name.trim() === ""}
+            onClick={() => void save()}
+            className="rounded-md border border-border px-2 py-0.5 text-xs whitespace-nowrap hover:border-border-strong disabled:opacity-60"
           >
-            {advancedOpen ? <ChevronDown size={14} aria-hidden /> : <ChevronRight size={14} aria-hidden />}
-            {changed > 0 ? STUDIO_FIELDS.advancedChanged(changed) : STUDIO_FIELDS.advanced}
+            {STUDIO_SETUPS.save}
           </button>
-          {advancedOpen && visibleFields(model.params, "advanced", draft.values).map(draw)}
+          <button
+            type="button"
+            onClick={() => {
+              setName(null);
+              setMessage(null);
+            }}
+            className={SMALL_BUTTON}
+          >
+            {STUDIO_SETUPS.cancel}
+          </button>
         </div>
       )}
+      {message && <p className="text-xs text-warning">{message}</p>}
     </div>
   );
 }

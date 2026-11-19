@@ -6,6 +6,7 @@ import { STUDIO_BAR } from "../../lib/words";
 import { toErrorInfo } from "../../store/app";
 import { useStudio, type StudioTab } from "../../store/studio";
 import { ErrorBanner } from "../ErrorBanner";
+import { ChipsRow } from "./AdvancedDrawer";
 import { Notices } from "./EmptyStates";
 import { RefTray } from "./RefTray";
 import { SettingsPanel } from "./SettingsPanel";
@@ -78,7 +79,8 @@ export function StudioView() {
   );
 }
 
-/** The tab's added pictures and prompt, kept per tab; Task B7's prompt dock takes this place. */
+/** The tab's added pictures, prompt and changed Advanced settings (their chips), kept per tab;
+ *  Task B7's prompt dock takes this place. */
 function PromptBox(props: { tab: StudioTab }) {
   const prompt = useStudio((s) => s.drafts[props.tab].prompt);
   const setPrompt = useStudio((s) => s.setPrompt);
@@ -93,6 +95,7 @@ function PromptBox(props: { tab: StudioTab }) {
         rows={2}
         className="w-full resize-none rounded-xl border border-border bg-bg px-3 py-2 text-sm outline-none focus:border-border-strong"
       />
+      <ChipsRow tab={props.tab} />
     </div>
   );
 }

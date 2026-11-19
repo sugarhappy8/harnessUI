@@ -943,6 +943,22 @@ const PICTURE_NOUNS: Record<RefRole, readonly [string, string]> = {
   endFrame: ["end frame", "end frames"],
 };
 
+/** How a setting and its value read inside Studio's sentences and chips (Tasks B4 and B6). */
+export const SETTING_WORDS = {
+  /** A name or a word value in the middle of a sentence: its first letter lower-cased ("Extra
+   *  high" → "extra high"), unless its first word has a capital past its first letter, as a
+   *  name in capitals does ("PNG", "WebP" and "CFG scale" stay as they are). */
+  midSentence(text: string): string {
+    const first = text.split(" ", 1)[0] ?? "";
+    if (/[A-Z]/.test(first.slice(1))) return text;
+    return text.charAt(0).toLowerCase() + text.slice(1);
+  },
+  /** A number with its field's unit: "80%", "120 ms". */
+  withUnit: (value: string, unit: string) => (unit === "%" ? `${value}%` : `${value} ${unit}`),
+  /** A setting known only by its key: "foo_bar" → "foo bar". */
+  keyName: (key: string) => key.replaceAll("_", " "),
+} as const;
+
 /**
  * The note after switching models (Task B4): one sentence for each setting that did not carry
  * over as it was. `name` is a field's name in the middle of a sentence ("seed", "how many"),
@@ -1188,6 +1204,72 @@ export const STUDIO_FIELDS = {
   /** Choosing a transparent background changed the file type. */
   transparentNote: (type: string) => `Transparent needs PNG or WebP, so the file type is now ${type}.`,
   putNoteAway: "Put the note away",
+  /** The seed's dice (Task B6). */
+  newSeed: "New seed",
+  /** The seed's lock: it stays as it is for the next run. */
+  keepIt: "Keep it",
+} as const;
+
+/** The Advanced drawer (Task B6, design Wireframe 2): the chips under the prompt, Reset all, an
+ *  OpenRouter picture's routing, Extra fields (JSON) and the exact request or command. */
+export const STUDIO_ADVANCED = {
+  resetAll: "Reset all",
+  /** A changed setting's chip: "background: transparent" (`name` and `value` mid-sentence). */
+  chip: (name: string, value: string) => `${name}: ${value}`,
+  /** A seed's chip: "seed 81723". */
+  seedChip: (name: string, value: string) => `${name} ${value}`,
+  /** A switch's value in a chip. */
+  on: "on",
+  off: "off",
+  removeChip: (chip: string) => `Remove ${chip}`,
+  /** The chips row's name for a screen reader. */
+  chips: "Changed settings",
+  company: "Company that runs it",
+  /** The company list's first choice: no routing is sent. */
+  openRouterChooses: "OpenRouter chooses",
+  allowAnother: "Allow another company if that one is busy",
+  zdr: "Only companies that keep no data",
+  /** Extra fields (JSON) with nothing set. */
+  noneSet: "none set",
+  editJson: "Edit JSON",
+  save: "Save",
+  cancel: "Cancel",
+  /** The names the model's Extra field takes, as written in JSON. */
+  accepts: (names: string[]) => `This model accepts: ${names.join(", ")}`,
+  /** An OpenRouter picture model whose price, and with it its Extra field, was not asked for. */
+  pickToSee: "Pick the model to see its extra settings.",
+  notJson: "This is not valid JSON.",
+  notObject: 'Write the extra fields as one JSON object, like {"moderation": "low"}.',
+  notAccepted: (key: string) => `This model does not accept ${key}.`,
+  /** A name the model takes as one of its own fields. */
+  typed: (key: string) => `Set ${key} with its own field above.`,
+  seeRequest: "See the exact request",
+  seeCommand: "See the exact command",
+  /** Under the exact request: "key removed · goes to openrouter.ai". */
+  goesTo: (host: string) => `key removed · goes to ${host}`,
+  /** The exact command's prompt, which the engine reads from a file. */
+  promptFile: (prompt: string) => `Prompt (passed in prompt.txt): ${prompt}`,
+  negativeFile: (text: string) => `Negative prompt (passed in negative.txt): ${text}`,
+  runsHere: "Runs on this computer; nothing is sent.",
+} as const;
+
+/** My setups (Task B6): a model and all its settings saved under a name. */
+export const STUDIO_SETUPS = {
+  label: "My setups",
+  none: "None",
+  saveAs: "Save as setup…",
+  name: "Setup name",
+  save: "Save setup",
+  cancel: "Cancel",
+  /** The same limit and words as the backend's (`errors::TOO_MANY_SETUPS`). */
+  tooMany: "Keep at most 50 setups.",
+  noName: "Give the setup a name.",
+  noModel: "Choose a model first.",
+  /** The setup's model is gone, and `model` of its family is used in its place. */
+  replaced: (endpoint: string, model: string) => `${endpoint} no longer offers this setup's model, so ${model} is used.`,
+  gone: (endpoint: string) => `${endpoint} no longer offers this setup's model.`,
+  goneHere: "This setup's model is no longer on this computer.",
+  endpointGone: "This setup's endpoint was removed in Settings → Endpoints.",
 } as const;
 
 /** Under the Model field: where the chosen model runs. */
