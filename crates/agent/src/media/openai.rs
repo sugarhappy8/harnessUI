@@ -439,7 +439,9 @@ pub(crate) fn bundled() -> &'static OpenAiSpec {
     &SPEC
 }
 
-/// The entry for a model id: the longest prefix that is the whole id or is followed by `-`.
+/// The entry for a model id: the longest prefix that is the whole id or is followed only by a
+/// snapshot's name (`-YYYY-MM-DD` or `-latest`). Any other ending (`-pro`, `-hd`) is another
+/// model, which never gets this one's settings or prices.
 pub(crate) fn match_spec(id: &str) -> Option<&'static OpenAiEntry> {
     let id = id.to_ascii_lowercase();
     bundled()
@@ -447,9 +449,23 @@ pub(crate) fn match_spec(id: &str) -> Option<&'static OpenAiEntry> {
         .iter()
         .filter(|entry| {
             id.strip_prefix(entry.prefix.as_str())
-                .is_some_and(|rest| rest.is_empty() || rest.starts_with('-'))
+                .is_some_and(|rest| rest.is_empty() || is_snapshot(rest))
         })
         .max_by_key(|entry| entry.prefix.len())
+}
+
+/// Whether the end of an id names a snapshot of its model: `-latest`, or a date `-YYYY-MM-DD`.
+fn is_snapshot(rest: &str) -> bool {
+    if rest == "-latest" {
+        return true;
+    }
+    let Some(date) = rest.strip_prefix('-') else {
+        return false;
+    };
+    let parts: Vec<&str> = date.split('-').collect();
+    matches!(parts.as_slice(), [year, month, day]
+        if year.len() == 4 && month.len() == 2 && day.len() == 2
+            && parts.iter().all(|part| part.bytes().all(|b| b.is_ascii_digit())))
 }
 
 /// The picture models of OpenAI's `/v1/models` answer, in its order, each with the controls
@@ -1153,6 +1169,18 @@ mod tests {
         // A newer version is not the older one: no settings or prices of gpt-image-2.
         assert!(match_spec("gpt-image-2.5-flare").is_none());
         assert!(match_spec("gpt-image-1").is_none());
+        assert_eq!(
+            match_spec("gpt-image-2-latest").unwrap().prefix,
+            "gpt-image-2"
+        );
+        // Another model with the same start is not a snapshot: no older prices or settings.
+        assert!(match_spec("gpt-image-2-pro").is_none());
+        assert!(match_spec("gpt-image-1.5-hd").is_none());
+        assert!(match_spec("gpt-image-2-2026-04").is_none());
+        assert!(match_spec("gpt-image-2-20260421").is_none());
+        let pro = model_for("gpt-image-2-pro");
+        assert_eq!(pro.price, Price::Unknown);
+        assert!(pro.notes.contains(&NEW_MODEL.to_string()));
         let snapshot = model_for("gpt-image-2.6-flare-2026-11-04");
         assert_eq!(snapshot.display_name, "GPT Image 2.6 Flare (2026-11-04)");
     }
