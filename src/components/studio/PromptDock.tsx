@@ -3,7 +3,9 @@ import { STUDIO_ACTIONS, STUDIO_BAR, STUDIO_DOCK } from "../../lib/words";
 import {
   draftModel,
   endpointOf,
+  promptProblems,
   requestKey,
+  settingsProblems,
   shownEstimate,
   startRequestOf,
   useStudio,
@@ -22,13 +24,15 @@ import { RefTray } from "./RefTray";
 // as chips (ChipsRow), the line saying where the prompt goes, then the price of the whole run
 // (a cloud model, its colour a second cue) or the time here (a local one) beside Create. The
 // estimate is asked of the backend once the draft has stayed as it is for 150 ms (it sends
-// nothing anywhere); Create does not wait for it, but stays greyed out while the answer shown
-// (for this model and place) says why it cannot run. For a cloud model the daily limit takes
-// Create's place, and the confirmation opens when the run needs one. A local model never asks
-// and never meets the limit: one that does not fit here greys Create out with why and offers a
-// cloud model instead, a run over 15 minutes says so in amber, and cloud is offered as the
-// backup when it is very slow (Studio never moves the draft by itself). Other screens put the
-// cursor in the prompt with the window event `app:focus-studio-prompt`.
+// nothing anywhere); Create never waits for it. The prompt's own checks (empty, too long) are
+// judged here on the prompt as it is; what does not depend on the prompt (a setting the model
+// refuses, a model that does not fit here, the daily limit) comes from the answer shown, for
+// this model and place, and greys Create out while it says so. For a cloud model the daily
+// limit takes Create's place, and the confirmation opens when the run needs one. A local model
+// never asks and never meets the limit: one that does not fit here greys Create out with why
+// and offers a cloud model instead, a run over 15 minutes says so in amber, and cloud is
+// offered as the backup when it is very slow (Studio never moves the draft by itself). Other
+// screens put the cursor in the prompt with the window event `app:focus-studio-prompt`.
 
 const SECONDARY =
   "rounded-lg border border-border bg-bg px-2.5 py-1 text-sm hover:border-border-strong hover:bg-bg-muted";
@@ -86,10 +90,13 @@ export function PromptDock(props: { tab: StudioTab }) {
   const known = shown?.estimate ?? null;
   const local = here ? (known?.local ?? null) : null;
   const notHere = local?.fit === "notHere";
-  // What the model would refuse, and a local model that does not fit here, as shown: an answer
-  // for this model and place, until the one for the draft as it is now replaces it. Create
-  // agrees with what is on screen, and an answer that greys nothing out is no reason to wait.
-  const blocked = known !== null && (known.invalid.length > 0 || notHere);
+  // What Create would be refused for, as shown under the prompt: the prompt's own checks, on the
+  // prompt as it is (no answer about it is waited for), then the rest of the answer shown, for
+  // this model and place (typing does not change it). A failed answer, or one still on its way,
+  // holds nothing back once the prompt as it is passes; the backend checks every start.
+  const refused =
+    target !== null && key !== null ? [...promptProblems(draft.prompt, target), ...settingsProblems(known)] : [];
+  const blocked = refused.length > 0 || notHere;
   // The daily limit has taken Create's place (Enter included).
   const overLimit = !here && known !== null && !known.limit.wouldPass;
   const disabled = model === null || key === null || starting || blocked || overLimit;
@@ -118,7 +125,7 @@ export function PromptDock(props: { tab: StudioTab }) {
         rows={2}
         className="w-full resize-none rounded-xl border border-border bg-bg px-3 py-2 text-sm outline-none focus:border-border-strong"
       />
-      {known?.invalid.map((sentence) => (
+      {refused.map((sentence) => (
         <p key={sentence} className="text-xs text-danger">
           {sentence}
         </p>

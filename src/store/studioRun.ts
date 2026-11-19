@@ -4,11 +4,14 @@
 // client token at a time (from the draft, or from a run's own settings), the confirmation a
 // cloud run may need (asked by the draft's estimate or by the backend), why a press was
 // refused, a seed the draft's press used given back to Random unless it is kept, the model used
-// last saved as a run starts, and today's spending read again as a cloud run starts.
+// last saved as a run starts, and today's spending read again as a cloud run starts. Also what
+// the backend would refuse in the prompt itself, judged on it as it is, apart from the rest of
+// what an estimate says.
 import type { StoreApi } from "zustand";
 import * as api from "../components/studio/api";
 import type { Estimate, MediaModel, Run, RunTarget, StartRequest } from "../components/studio/types";
 import type { ErrorInfo } from "../lib/types";
+import { STUDIO_DOCK } from "../lib/words";
 import { toErrorInfo } from "./app";
 import { draftModel, listedModel, sameTarget, type Draft, type StudioState, type StudioTab } from "./studio";
 
@@ -252,6 +255,40 @@ export function startRequestOf(tab: StudioTab, draft: Draft, clientToken: string
   };
 }
 
+/** The most characters a prompt may have, as the backend counts them: on this computer
+ *  (`runtime::sd::args::PROMPT_MAX_CHARS`) and for the cloud (`media::spec`'s). */
+export const PROMPT_MAX_CHARS = { thisComputer: 4_000, cloud: 32_000 } as const;
+
+/** The backend's sentences about the prompt itself, among an estimate's `invalid`. */
+const PROMPT_SENTENCES: ReadonlySet<string> = new Set([
+  STUDIO_DOCK.writePrompt,
+  STUDIO_DOCK.promptTooLong,
+  STUDIO_DOCK.promptTooLongHere,
+]);
+
+/** Nothing but white space, as the backend's `trim` has it (Unicode's White_Space). */
+const BLANK = /^\p{White_Space}*$/u;
+
+/** What the backend would refuse in `prompt` for a run at `target`, in its words: an empty
+ *  prompt, or one longer than the cap there, counted as it counts (characters, not UTF-16
+ *  units). Judged on the prompt as it is, so Create never waits for an estimate to say it. */
+export function promptProblems(prompt: string, target: RunTarget): string[] {
+  if (BLANK.test(prompt)) return [STUDIO_DOCK.writePrompt];
+  const here = target === "thisComputer";
+  const max = here ? PROMPT_MAX_CHARS.thisComputer : PROMPT_MAX_CHARS.cloud;
+  // Never more characters than UTF-16 units: only a longer prompt needs counting.
+  if (prompt.length > max && Array.from(prompt).length > max) {
+    return [here ? STUDIO_DOCK.promptTooLongHere : STUDIO_DOCK.promptTooLong];
+  }
+  return [];
+}
+
+/** What else `estimate` says the run would refuse (its settings, its pictures, a model that
+ *  cannot be used): its sentences about the prompt are left to `promptProblems`. */
+export function settingsProblems(estimate: Estimate | null): string[] {
+  return estimate?.invalid.filter((sentence) => !PROMPT_SENTENCES.has(sentence)) ?? [];
+}
+
 /** A request without its client token, as one string: the same draft gives the same key. */
 export function requestKey(req: StartRequest): string {
   return JSON.stringify({ ...req, clientToken: "" });
@@ -266,8 +303,9 @@ export function shownEstimate(s: Pick<StudioState, "drafts" | "estimates">, tab:
   return known && target !== null && sameTarget(known.target, target) && known.model === model ? known : null;
 }
 
-/** `tab`'s estimate when it was asked for the draft exactly as it is: what Create goes by (an
- *  answer for the draft as it was is no reason to wait, nor to ask). */
+/** `tab`'s estimate when it was asked for the draft exactly as it is: what a press of the draft
+ *  goes by to open the confirmation first (an answer for the draft as it was is no reason to
+ *  ask). */
 export function currentEstimate(s: Pick<StudioState, "drafts" | "estimates">, tab: StudioTab): Estimate | null {
   const known = s.estimates[tab];
   const req = startRequestOf(tab, s.drafts[tab], ESTIMATE_TOKEN);

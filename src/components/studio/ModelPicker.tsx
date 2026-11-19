@@ -10,10 +10,13 @@ import {
   STUDIO_PRICE,
   STUDIO_TIME,
 } from "../../lib/words";
+import type { ErrorInfo } from "../../lib/types";
+import { toErrorInfo } from "../../store/app";
 import {
   FITTING,
   fittingEntry,
   isAutoModel,
+  makesKind,
   priceNotAsked,
   recentChoices,
   useStudio,
@@ -45,9 +48,10 @@ import type {
 // where the prompt goes and each model's price hint. A model Studio cannot use, or one of an
 // endpoint without a key, is greyed out with the reason. Never an "Auto" model, which would
 // hide where the prompt goes. Picking an OpenRouter picture model asks for its price once
-// (`chooseModel`); a model restored when Studio opens is asked only on *Get the price*. The
-// prompt dock's *Choose a cloud model* opens it from the store (`pickerOpen`), on its first
-// cloud group (Task B7).
+// (`chooseModel`); a model restored when Studio opens is asked only on *Get the price*. An
+// endpoint of the tab's kind whose lists are not saved yet has a *Get the list* row in place of
+// its models. The prompt dock's *Choose a cloud model* opens it from the store (`pickerOpen`),
+// on its first cloud group (Task B7).
 
 /** What the filter chips select: models that take added pictures (Edit, References), a
  *  start or end frame, that make sound, or a transparent background. */
@@ -355,13 +359,13 @@ export function ModelPicker(props: { tab: StudioTab }) {
             onOpenAutoFocus={(e) => {
               e.preventDefault();
               // Asked for its cloud models: the first cloud model Studio can use, in the first
-              // cloud group that has one (else the search box, as always).
+              // cloud group that has one, else the first endpoint's *Get the list* (else the
+              // search box, as always).
+              const list = pickerOpen === "cloud" ? listRef.current : null;
               const cloud =
-                pickerOpen === "cloud"
-                  ? listRef.current?.querySelector<HTMLElement>(
-                      '[data-picker-place="cloud"] [role="option"]:not([aria-disabled="true"])',
-                    )
-                  : null;
+                list?.querySelector<HTMLElement>(
+                  '[data-picker-place="cloud"] [role="option"]:not([aria-disabled="true"])',
+                ) ?? list?.querySelector<HTMLElement>("[data-picker-get-list] button");
               (cloud ?? searchRef.current)?.focus();
             }}
             onKeyDown={onKeyDown}
@@ -421,14 +425,19 @@ export function ModelPicker(props: { tab: StudioTab }) {
               )}
               {endpoints.map((endpoint) => {
                 const families = groups.filter((g) => g.endpoint === endpoint);
-                return families.length > 0 ? (
-                  <EndpointSection
-                    key={endpoint.providerId}
-                    endpoint={endpoint}
-                    families={families}
-                    isSelected={isSelected}
-                    onChoose={choose}
-                  />
+                if (families.length > 0) {
+                  return (
+                    <EndpointSection
+                      key={endpoint.providerId}
+                      endpoint={endpoint}
+                      families={families}
+                      isSelected={isSelected}
+                      onChoose={choose}
+                    />
+                  );
+                }
+                return listsNotSaved(endpoint, tab) ? (
+                  <GetListRow key={endpoint.providerId} endpoint={endpoint} />
                 ) : null;
               })}
               {nothing && <p className="px-2 py-3 text-sm text-fg-muted">{STUDIO_PICKER.nothingMatches}</p>}
@@ -564,6 +573,37 @@ function EndpointSection(props: {
           </div>
         ))}
       </div>
+    </section>
+  );
+}
+
+/** Whether `endpoint` is a cloud endpoint whose company makes `tab`'s kind and whose lists are
+ *  not saved yet (the dock's cloud backup counts it, `cloudBackup`). */
+function listsNotSaved(endpoint: StudioEndpoint, tab: StudioTab): boolean {
+  return endpoint.cloud && endpoint.fetchedAt === null && makesKind(endpoint, tab);
+}
+
+/** In place of the models of an endpoint whose lists are not saved yet: *Get the list* fetches
+ *  them (lists are fetched only when asked), and its models then take the row's place; a
+ *  failure says why under it. */
+function GetListRow(props: { endpoint: StudioEndpoint }) {
+  const refreshModels = useStudio((s) => s.refreshModels);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<ErrorInfo | null>(null);
+  const { endpoint } = props;
+  const getList = () => {
+    setBusy(true);
+    setError(null);
+    refreshModels(endpoint.providerId)
+      .catch((e: unknown) => setError(toErrorInfo(e)))
+      .finally(() => setBusy(false));
+  };
+  return (
+    <section data-picker-place="cloud" data-picker-get-list className="flex flex-col gap-1 pt-2">
+      <button type="button" disabled={busy} className={`${LINK_BUTTON} disabled:opacity-60`} onClick={getList}>
+        {STUDIO_PICKER.getList(endpoint.name)}
+      </button>
+      {error && <ErrorBanner error={error} onDismiss={() => setError(null)} />}
     </section>
   );
 }

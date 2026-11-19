@@ -64,9 +64,12 @@ import { createRun, seedKey, targetOf, type StudioRunState } from "./studioRun";
 export {
   currentEstimate,
   ESTIMATE_DELAY_MS,
+  PROMPT_MAX_CHARS,
+  promptProblems,
   requestFromRun,
   requestKey,
   seedKey,
+  settingsProblems,
   shownEstimate,
   startRequestOf,
   targetOf,

@@ -1194,6 +1194,8 @@ export const STUDIO_PICKER = {
   } satisfies Record<MediaKind, string>,
   nothingMatches: "No models match.",
   getPrice: "Get the price",
+  /** An endpoint of the tab's kind whose lists are not saved yet: "OpenRouter: Get the list". */
+  getList: (name: string) => `${name}: ${STUDIO_ACTIONS.getTheList}`,
 } as const;
 
 /** Studio's right panel and its fields (Task B5). */
@@ -1340,6 +1342,11 @@ export const STUDIO_COMPANY: Record<Company, string> = {
  *  above Create, the price or time on it, the daily limit, and cloud as the backup. */
 export const STUDIO_DOCK = {
   create: "Create",
+  /** Under the prompt, judged on it as it is: the backend's own words for the same checks
+   *  (`errors::invalid_sentences`, `errors::PROMPT_TOO_LONG_HERE`). */
+  writePrompt: "Write a prompt first.",
+  promptTooLong: "Keep the prompt under 32,000 characters.",
+  promptTooLongHere: "Keep the prompt under 4,000 characters for local models.",
   /** A cloud run's estimate for the whole run, on Create: "~ $0.16". */
   estimate: (usd: string) => `~ ${usd}`,
   /** The line above Create for a model on this computer. */

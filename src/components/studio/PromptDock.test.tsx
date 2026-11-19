@@ -2,8 +2,11 @@
 // time (local), where the prompt goes, Enter to create, one start per press, the confirmation
 // a cloud run may need, the daily limit (cloud only), cloud as the backup for a local run that
 // does not fit or is very slow, and what a refused start says.
+import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { STUDIO_DOCK } from "../../lib/words";
 import type { StudioTab } from "../../store/studio";
 import { LOCAL, MODELS, RUN } from "./fixtures/models";
 import type {
@@ -30,7 +33,7 @@ vi.mock("./api");
 const api = await import("./api");
 const { StudioView } = await import("./StudioView");
 const { cloudBackup } = await import("./cost");
-const { useStudio } = await import("../../store/studio");
+const { PROMPT_MAX_CHARS, promptProblems, settingsProblems, useStudio } = await import("../../store/studio");
 
 const INITIAL = useStudio.getState();
 
@@ -200,6 +203,30 @@ function started(): StartRequest[] {
   return vi.mocked(api.studioStart).mock.calls.map(([req]) => req);
 }
 
+/** Lets the estimate's 150 ms pause run out under fake timers, and its answer come in. */
+async function pauseEnds() {
+  await act(async () => {
+    vi.advanceTimersByTime(150);
+  });
+  await flush();
+}
+
+/** The backend's refusal of a cloud run that needs confirming first. */
+const NEEDS_CONFIRMATION = {
+  code: "studio_needs_confirmation",
+  message: "Confirm this run before it is sent.",
+  nextStep: "Check the price, then confirm to send it.",
+  details: "",
+};
+
+/** An estimate the backend could not work out. */
+const ESTIMATE_FAILED = {
+  code: "internal",
+  message: "Something went wrong.",
+  nextStep: "Try again.",
+  details: "",
+};
+
 /** What each `app:open-settings` asked for (its detail). */
 let opened: unknown[] = [];
 const onOpenSettings = (e: Event) => opened.push((e as CustomEvent<unknown>).detail);
@@ -357,6 +384,61 @@ describe("PromptDock", () => {
       expect(api.studioUsage).toHaveBeenCalledTimes(3);
       screen.getByText("$0.16 today");
     });
+
+    it("a prompt over 32,000 characters, or of white space only, says so before Create", async () => {
+      await show({ prefs: prefs({ lastModel: CLOUD_LAST }) });
+      // Judged on the prompt as it is, before any answer for it.
+      vi.mocked(api.studioEstimate).mockClear();
+      typePrompt(" \n \u0085 ");
+      screen.getByText("Write a prompt first.");
+      expect(createButton().disabled).toBe(true);
+      typePrompt("x".repeat(32_001));
+      screen.getByText("Keep the prompt under 32,000 characters.");
+      expect(createButton().disabled).toBe(true);
+      fireEvent.keyDown(promptBox(), { key: "Enter" });
+      expect(api.studioStart).not.toHaveBeenCalled();
+      typePrompt("x".repeat(32_000));
+      expect(screen.queryByText(/^Keep the prompt under/)).toBeNull();
+      expect(createButton().disabled).toBe(false);
+      expect(api.studioEstimate).not.toHaveBeenCalled();
+    });
+
+    it.each([
+      ["fails", () => vi.mocked(api.studioEstimate).mockRejectedValue(ESTIMATE_FAILED)],
+      ["never answers", () => vi.mocked(api.studioEstimate).mockReturnValue(new Promise<Estimate>(() => undefined))],
+    ])("an estimate that %s does not keep Create greyed out", async (_, answer) => {
+      // The answer for the empty prompt says to write one.
+      await show({ prefs: prefs({ lastModel: CLOUD_LAST }), estimate: est({ invalid: ["Write a prompt first."] }) });
+      expect(createButton().disabled).toBe(true);
+      answer();
+      vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+      typePrompt("a lighthouse");
+      expect(createButton().disabled).toBe(false);
+      await pauseEnds();
+      expect(api.studioEstimate).toHaveBeenLastCalledWith(expect.objectContaining({ prompt: "a lighthouse" }));
+      expect(screen.queryByText("Write a prompt first.")).toBeNull();
+      expect(createButton().disabled).toBe(false);
+      fireEvent.keyDown(promptBox(), { key: "Enter" });
+      expect(api.studioStart).toHaveBeenCalledTimes(1);
+      expect(api.studioStart).toHaveBeenCalledWith(expect.objectContaining({ prompt: "a lighthouse" }), false);
+      await flush();
+    });
+
+    it("a setting the model refuses keeps Create greyed out while the answer shown says so", async () => {
+      await show({
+        prefs: prefs({ lastModel: CLOUD_LAST }),
+        estimate: est({ invalid: ["This model takes at most 8 reference pictures."] }),
+      });
+      vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+      typePrompt("a lighthouse");
+      // Typing changes the prompt, not the settings: the answer for this model and place holds.
+      screen.getByText("This model takes at most 8 reference pictures.");
+      expect(createButton().disabled).toBe(true);
+      fireEvent.keyDown(promptBox(), { key: "Enter" });
+      await pauseEnds();
+      expect(createButton().disabled).toBe(true);
+      expect(api.studioStart).not.toHaveBeenCalled();
+    });
   });
 
   describe("the confirmation", () => {
@@ -454,6 +536,24 @@ describe("PromptDock", () => {
       expect(useStudio.getState().pickerOpen).toBe("cloud");
     });
 
+    it("an endpoint whose lists are not saved yet is the backup, and the picker gets its list", async () => {
+      const unsaved = endpoint({ fetchedAt: null, models: [] });
+      const slow = here({ fit: "slow", verySlow: true });
+      await show({ endpoints: [unsaved], estimate: slow });
+      expect(cloudBackup("image", slow, [unsaved])).toBe("useCloud");
+      vi.mocked(api.studioRefreshModels).mockResolvedValue({ endpoints: [openrouter] });
+      await click(screen.getByRole("button", { name: "Choose a cloud model" }));
+      // The picker has a row for it, and starts there: it has no model to show yet.
+      const getList = screen.getByRole("button", { name: "OpenRouter: Get the list" });
+      expect(document.activeElement).toBe(getList);
+      await click(getList);
+      expect(api.studioRefreshModels).toHaveBeenCalledTimes(1);
+      expect(api.studioRefreshModels).toHaveBeenCalledWith(1);
+      screen.getByRole("listbox", { name: "via OpenRouter" });
+      expect(screen.queryByRole("button", { name: "OpenRouter: Get the list" })).toBeNull();
+      expect(useStudio.getState().drafts.image.target).toBe("thisComputer");
+    });
+
     it("without an endpoint that makes this kind, the backup is Settings → Endpoints", async () => {
       const slow = here({ fit: "slow", verySlow: true });
       await show({ endpoints: [], estimate: slow });
@@ -516,6 +616,15 @@ describe("PromptDock", () => {
       expect(api.studioEstimate).toHaveBeenLastCalledWith(expect.objectContaining({ prompt: "a fox" }));
       expect(createButton().disabled).toBe(true);
       expect(api.studioStart).not.toHaveBeenCalled();
+      // An answer that never comes leaves the one shown, for this model and place, in charge.
+      vi.mocked(api.studioEstimate).mockReturnValue(new Promise<Estimate>(() => undefined));
+      typePrompt("a fox in deep snow");
+      expect(createButton().disabled).toBe(true);
+      await pauseEnds();
+      expect(createButton().disabled).toBe(true);
+      fireEvent.keyDown(promptBox(), { key: "Enter" });
+      expect(api.studioStart).not.toHaveBeenCalled();
+      screen.getByText("Not for this computer: needs 6 GB of graphics memory");
     });
 
     it("a local model that fits once the chat model is unloaded can be created", async () => {
@@ -530,9 +639,26 @@ describe("PromptDock", () => {
     });
 
     it("a local prompt over 4,000 characters says so before Create", async () => {
-      await show({ estimate: here({}, { invalid: ["Keep the prompt under 4,000 characters for local models."] }) });
-      screen.getByText("Keep the prompt under 4,000 characters for local models.");
+      const tooLong = "Keep the prompt under 4,000 characters for local models.";
+      await show({ estimate: here() });
+      vi.mocked(api.studioEstimate).mockResolvedValue(here({}, { invalid: [tooLong] }));
+      typePrompt("x".repeat(4_001));
+      // Said at once, on the prompt as it is.
+      screen.getByText(tooLong);
       expect(createButton().disabled).toBe(true);
+      fireEvent.keyDown(promptBox(), { key: "Enter" });
+      expect(api.studioStart).not.toHaveBeenCalled();
+      // The answer says the same; it is said once.
+      await estimated();
+      expect(screen.getAllByText(tooLong)).toHaveLength(1);
+      // Counted as the backend counts: 4,000 characters, however many UTF-16 units they take.
+      // The answer shown, for the longer prompt, no longer holds Create back.
+      typePrompt("🦊".repeat(4_000));
+      expect(screen.queryByText(tooLong)).toBeNull();
+      expect(createButton().disabled).toBe(false);
+      fireEvent.keyDown(promptBox(), { key: "Enter" });
+      expect(api.studioStart).toHaveBeenCalledTimes(1);
+      await flush();
     });
 
     it("the daily limit never replaces Create for a local model", async () => {
@@ -544,26 +670,23 @@ describe("PromptDock", () => {
       expect(screen.queryByText(/Daily limit reached/)).toBeNull();
     });
 
-    it("Create stays greyed out while the sentence that greys it is on screen", async () => {
+    it("typing a prompt and pressing Enter at once starts the run", async () => {
+      // The answer for the empty prompt says to write one.
       await show({ estimate: here({}, { invalid: ["Write a prompt first."] }) });
+      screen.getByText("Write a prompt first.");
       expect(createButton().disabled).toBe(true);
+      vi.mocked(api.studioEstimate).mockClear();
       vi.mocked(api.studioEstimate).mockResolvedValue(here());
       vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
       typePrompt("a fox");
-      // The answer for the empty prompt is still the one shown: Create agrees with it.
-      screen.getByText("Write a prompt first.");
-      expect(createButton().disabled).toBe(true);
-      fireEvent.keyDown(promptBox(), { key: "Enter" });
-      expect(api.studioStart).not.toHaveBeenCalled();
-      await act(async () => {
-        vi.advanceTimersByTime(150);
-      });
-      await flush();
+      // The prompt is judged as it is: no waiting for the answer for it.
       expect(screen.queryByText("Write a prompt first.")).toBeNull();
       expect(createButton().disabled).toBe(false);
       fireEvent.keyDown(promptBox(), { key: "Enter" });
       expect(api.studioStart).toHaveBeenCalledTimes(1);
-      await flush();
+      expect(api.studioStart).toHaveBeenCalledWith(expect.objectContaining({ prompt: "a fox" }), false);
+      expect(api.studioEstimate).not.toHaveBeenCalled();
+      await pauseEnds();
     });
 
     it("Create does not wait for the estimate", async () => {
@@ -624,6 +747,81 @@ describe("PromptDock", () => {
       expect(seedOf()).toBe(dice);
       await click(createButton());
       expect(started().map((req) => req.params.seed)).toEqual([dice, dice]);
+    });
+
+    /** The Video draft's seed (Veo 3.1's seed field). */
+    const videoSeed = () => useStudio.getState().drafts.video.values.seed;
+    /** The seed and the confirmation each `studio_start` was sent with. */
+    const sent = () => vi.mocked(api.studioStart).mock.calls.map(([req, confirmed]) => [req.params.seed, confirmed]);
+
+    it("a press confirmed from its estimate uses up a dice seed, and a kept one stays", async () => {
+      await show({
+        tab: "video",
+        prefs: prefs({ lastModel: CLOUD_LAST }),
+        estimate: est({ usd: 0.09, reasons: ["video"] }),
+      });
+      typePrompt("waves");
+      act(() => useStudio.getState().newSeed("video"));
+      const dice = videoSeed();
+      expect(typeof dice).toBe("number");
+      // The estimate for the draft as it is asks first: the confirmation opens from it.
+      await estimated();
+      await click(createButton());
+      expect(api.studioStart).not.toHaveBeenCalled();
+      await click(screen.getByRole("button", { name: "Make video" }));
+      expect(sent()).toEqual([[dice, true]]);
+      expect(videoSeed()).toBeUndefined();
+
+      act(() => {
+        useStudio.getState().newSeed("video");
+        useStudio.getState().lockSeed("video", true);
+      });
+      const kept = videoSeed();
+      await estimated();
+      await click(createButton());
+      await click(screen.getByRole("button", { name: "Make video" }));
+      expect(sent()).toEqual([
+        [dice, true],
+        [kept, true],
+      ]);
+      expect(videoSeed()).toBe(kept);
+    });
+
+    it("a press the backend asks to confirm uses up a dice seed once confirmed, and a kept one stays", async () => {
+      await show({ tab: "video", prefs: prefs({ lastModel: CLOUD_LAST }) });
+      // The draft's estimate asks for nothing: only the backend asks, and the estimate for that
+      // very press fills the confirmation.
+      vi.mocked(api.studioEstimate).mockImplementation(async (req) =>
+        req.clientToken === "estimate" ? est({ usd: 0.09 }) : est({ usd: 0.09, reasons: ["video"] }),
+      );
+      typePrompt("waves");
+      act(() => useStudio.getState().newSeed("video"));
+      const dice = videoSeed();
+      vi.mocked(api.studioStart).mockRejectedValueOnce(NEEDS_CONFIRMATION);
+      await click(createButton());
+      screen.getByText("Make this video?");
+      expect(videoSeed()).toBe(dice);
+      await click(screen.getByRole("button", { name: "Make video" }));
+      expect(sent()).toEqual([
+        [dice, false],
+        [dice, true],
+      ]);
+      expect(videoSeed()).toBeUndefined();
+
+      act(() => {
+        useStudio.getState().newSeed("video");
+        useStudio.getState().lockSeed("video", true);
+      });
+      const kept = videoSeed();
+      vi.mocked(api.studioStart).mockRejectedValueOnce(NEEDS_CONFIRMATION);
+      await click(createButton());
+      screen.getByText("Make this video?");
+      await click(screen.getByRole("button", { name: "Make video" }));
+      expect(sent().slice(2)).toEqual([
+        [kept, false],
+        [kept, true],
+      ]);
+      expect(videoSeed()).toBe(kept);
     });
   });
 
@@ -715,5 +913,52 @@ describe("PromptDock", () => {
       screen.getByText("Veo 3.1 through OpenRouter");
       screen.getByText("8 s · 720p · sound on · 1 video");
     });
+  });
+});
+
+describe("the prompt's own checks", () => {
+  /** A number constant of a Rust source file, as written there (`4_000`). */
+  function rustConst(path: string, name: string): number {
+    const source = readFileSync(resolve(process.cwd(), path), "utf8");
+    const found = new RegExp(`const ${name}: usize = ([\\d_]+);`).exec(source)?.[1];
+    return Number(found?.replace(/_/g, ""));
+  }
+
+  it("are the backend's: the same caps, in the same words", () => {
+    expect(rustConst("crates/runtime/src/sd/args.rs", "PROMPT_MAX_CHARS")).toBe(PROMPT_MAX_CHARS.thisComputer);
+    expect(rustConst("crates/agent/src/media/spec.rs", "PROMPT_MAX_CHARS")).toBe(PROMPT_MAX_CHARS.cloud);
+    const errors = readFileSync(resolve(process.cwd(), "src-tauri/src/studio/errors.rs"), "utf8");
+    for (const sentence of [STUDIO_DOCK.writePrompt, STUDIO_DOCK.promptTooLong, STUDIO_DOCK.promptTooLongHere]) {
+      expect(errors).toContain(`"${sentence}"`);
+    }
+  });
+
+  it("count as the backend counts: white space as Unicode has it, characters not UTF-16 units", () => {
+    const cloud = { endpoint: 1 };
+    expect(promptProblems("", "thisComputer")).toEqual(["Write a prompt first."]);
+    // Rust's trim takes NEL (U+0085) and the line separator, and leaves U+FEFF.
+    expect(promptProblems(" \t\n \u0085 　", cloud)).toEqual(["Write a prompt first."]);
+    expect(promptProblems("﻿", cloud)).toEqual([]);
+    expect(promptProblems("x".repeat(4_000), "thisComputer")).toEqual([]);
+    expect(promptProblems("x".repeat(4_001), "thisComputer")).toEqual([
+      "Keep the prompt under 4,000 characters for local models.",
+    ]);
+    expect(promptProblems("🦊".repeat(4_000), "thisComputer")).toEqual([]);
+    expect(promptProblems("x".repeat(32_000), cloud)).toEqual([]);
+    expect(promptProblems("🦊".repeat(32_000), cloud)).toEqual([]);
+    expect(promptProblems("x".repeat(32_001), cloud)).toEqual(["Keep the prompt under 32,000 characters."]);
+  });
+
+  it("leave the prompt's sentences out of an estimate's, and keep the rest", () => {
+    const answer = est({
+      invalid: [
+        "Write a prompt first.",
+        "This model takes at most 8 reference pictures.",
+        "Keep the prompt under 32,000 characters.",
+        "Keep the prompt under 4,000 characters for local models.",
+      ],
+    });
+    expect(settingsProblems(answer)).toEqual(["This model takes at most 8 reference pictures."]);
+    expect(settingsProblems(null)).toEqual([]);
   });
 });

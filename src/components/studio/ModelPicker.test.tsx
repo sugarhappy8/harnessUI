@@ -387,6 +387,32 @@ describe("ModelPicker", () => {
     expect(screen.getByTitle("Your prompt and added pictures go to openrouter.ai.")).toBeTruthy();
   });
 
+  it("an endpoint whose lists are not saved yet has a row that gets them, and says why when it cannot", async () => {
+    const openai = endpoint({
+      providerId: 2,
+      name: "OpenAI",
+      company: "openai",
+      host: "api.openai.com",
+      fetchedAt: null,
+      models: [],
+    });
+    await load({ endpoints: [endpoint({ fetchedAt: null, models: [] }), openai] });
+    await renderPicker("video");
+    await openPicker();
+    // OpenAI makes no video: it has no row on the Video tab.
+    expect(screen.queryByRole("button", { name: "OpenAI: Get the list" })).toBeNull();
+    vi.mocked(api.studioRefreshModels).mockRejectedValueOnce(unreachable);
+    await click(screen.getByRole("button", { name: "OpenRouter: Get the list" }));
+    expect(api.studioRefreshModels).toHaveBeenCalledWith(1);
+    screen.getByText("OpenRouter could not be reached.");
+    vi.mocked(api.studioRefreshModels).mockResolvedValueOnce({ endpoints: [openrouter, openai] });
+    await click(screen.getByRole("button", { name: "OpenRouter: Get the list" }));
+    expect(api.studioRefreshModels).toHaveBeenCalledTimes(2);
+    expect(screen.queryByText("OpenRouter could not be reached.")).toBeNull();
+    expect(screen.queryByRole("button", { name: "OpenRouter: Get the list" })).toBeNull();
+    option(/Veo 3\.1/);
+  });
+
   it("greys out an endpoint without a key", async () => {
     await load({ endpoints: [endpoint({ hasKey: false })] });
     await renderPicker();
