@@ -90,7 +90,7 @@ function est(patch: Partial<Estimate> = {}): Estimate {
     usd: 0.16,
     reasons: [],
     confirmAtUsd: 1,
-    limit: { limitUsd: 10, spentTodayUsd: 0, pendingUsd: 0, wouldPass: true },
+    limit: { limitUsd: 10, spentTodayUsd: 0, pendingUsd: 0, wouldPass: true, refusal: null, reserveUsd: 5 },
     invalid: [],
     eta: null,
     local: null,
@@ -319,7 +319,7 @@ describe("PromptDock", () => {
     it("the daily limit replaces Create", async () => {
       await show({
         prefs: prefs({ lastModel: CLOUD_LAST }),
-        estimate: est({ limit: { limitUsd: 10, spentTodayUsd: 9.5, pendingUsd: 0, wouldPass: false } }),
+        estimate: est({ limit: { limitUsd: 10, spentTodayUsd: 9.5, pendingUsd: 0, wouldPass: false, refusal: "over", reserveUsd: 5 } }),
       });
       screen.getByText("Daily limit reached: $9.50 of $10 spent today");
       await click(screen.getByRole("button", { name: "Raise the limit" }));
@@ -327,10 +327,30 @@ describe("PromptDock", () => {
       expect(screen.queryByRole("button", { name: /Create/ })).toBeNull();
     });
 
+    it("a run whose price is unknown, refused for the reserve, says so in Create's place", async () => {
+      await show({
+        prefs: prefs({ lastModel: CLOUD_LAST }),
+        estimate: est({
+          usd: null,
+          limit: {
+            limitUsd: 3,
+            spentTodayUsd: 0,
+            pendingUsd: 0,
+            wouldPass: false,
+            refusal: "unknownNeedsReserve",
+            reserveUsd: 5,
+          },
+        }),
+      });
+      screen.getByText("This model's price is unknown, so Studio needs $5 of today's limit left ($3.00 left).");
+      expect(screen.queryByText(/Daily limit reached/)).toBeNull();
+      screen.getByRole("button", { name: "Raise the limit" });
+    });
+
     it("Enter starts nothing while the daily limit has taken Create's place", async () => {
       await show({
         prefs: prefs({ lastModel: CLOUD_LAST }),
-        estimate: est({ limit: { limitUsd: 10, spentTodayUsd: 9.5, pendingUsd: 0, wouldPass: false } }),
+        estimate: est({ limit: { limitUsd: 10, spentTodayUsd: 9.5, pendingUsd: 0, wouldPass: false, refusal: "over", reserveUsd: 5 } }),
       });
       typePrompt("a lighthouse");
       fireEvent.keyDown(promptBox(), { key: "Enter" });
@@ -663,7 +683,7 @@ describe("PromptDock", () => {
 
     it("the daily limit never replaces Create for a local model", async () => {
       await show({
-        estimate: here({}, { limit: { limitUsd: 10, spentTodayUsd: 10, pendingUsd: 0, wouldPass: false } }),
+        estimate: here({}, { limit: { limitUsd: 10, spentTodayUsd: 10, pendingUsd: 0, wouldPass: false, refusal: "over", reserveUsd: 5 } }),
       });
       typePrompt("a fox");
       expect(createButton().disabled).toBe(false);

@@ -1414,6 +1414,10 @@ export const STUDIO_DOCK = {
   /** In place of Create while a cloud run would pass the daily limit (the same words as the
    *  backend's `errors::daily_limit`). */
   limitReached: (spent: string, limit: string) => `Daily limit reached: ${spent} of ${limit} spent today`,
+  /** The same, for a run whose price is unknown while less than the reserve of the limit is
+   *  left (the same words as the backend's `errors::unknown_price_needs_reserve`). */
+  limitNeedsReserve: (reserve: string, left: string) =>
+    `This model's price is unknown, so Studio needs ${reserve} of today's limit left (${left} left).`,
   raiseLimit: "Raise the limit",
 } as const;
 

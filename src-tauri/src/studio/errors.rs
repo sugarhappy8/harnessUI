@@ -15,7 +15,7 @@ use runtime::sd::failure::SdFailure;
 use search::FetchError;
 
 use super::gallery::GalleryError;
-use super::spend::ConfirmReason;
+use super::spend::{self, ConfirmReason};
 use crate::error::AppError;
 
 /// Settings → Studio: the daily limit is outside [`super::prefs::DAILY_LIMIT_RANGE`].
@@ -164,6 +164,22 @@ pub fn daily_limit(spent: f64, limit: f64) -> AppError {
             usd_short(limit)
         ),
         "Raise the limit in Settings → Studio, or wait until tomorrow.",
+        String::new(),
+    )
+}
+
+/// A run whose price is unknown counts as [`spend::UNKNOWN_PRICE_RESERVE_USD`], and less than
+/// that is left of today's limit `limit` with `spent` spent. The same code as
+/// [`daily_limit`]: it is the daily limit that refuses it.
+pub fn unknown_price_needs_reserve(spent: f64, limit: f64) -> AppError {
+    AppError::new(
+        "studio_daily_limit",
+        format!(
+            "This model's price is unknown, so Studio needs {} of today's limit left ({} left).",
+            usd_short(spend::UNKNOWN_PRICE_RESERVE_USD),
+            usd(limit - spent)
+        ),
+        "Raise the limit in Settings → Studio, or pick a model whose price is shown.",
         String::new(),
     )
 }
@@ -1593,6 +1609,7 @@ mod tests {
         let mut all = vec![
             needs_confirmation(&[ConfirmReason::Video]),
             daily_limit(9.5, 10.0),
+            unknown_price_needs_reserve(0.0, 3.0),
             no_endpoint(),
             no_key("My OpenRouter"),
             wrong_kind(MediaKind::Video),
@@ -2193,6 +2210,26 @@ mod tests {
         assert_eq!(
             daily_limit(999.99, 1000.0).message,
             "Daily limit reached: $999.99 of $1,000 spent today"
+        );
+    }
+
+    #[test]
+    fn an_unknown_price_refused_for_the_reserve_says_so() {
+        let e = unknown_price_needs_reserve(0.0, 3.0);
+        assert_eq!(e.code, "studio_daily_limit");
+        assert_eq!(
+            e.message,
+            "This model's price is unknown, so Studio needs $5 of today's limit left ($3.00 left)."
+        );
+        assert_eq!(
+            unknown_price_needs_reserve(5.8, 10.0).message,
+            "This model's price is unknown, so Studio needs $5 of today's limit left ($4.20 left)."
+        );
+        // Spent past the limit: nothing is left.
+        assert!(
+            unknown_price_needs_reserve(10.4, 10.0)
+                .message
+                .ends_with("($0.00 left).")
         );
     }
 

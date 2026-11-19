@@ -207,6 +207,43 @@ pub enum LimitRefusal {
         /// The daily limit, in US dollars.
         limit: f64,
     },
+    /// The run's price is unknown, and less than [`UNKNOWN_PRICE_RESERVE_USD`] of the limit
+    /// is left (with a limit below that, always).
+    UnknownNeedsReserve {
+        /// Today's spending so far, settled and pending, in US dollars.
+        spent: f64,
+        /// The daily limit, in US dollars.
+        limit: f64,
+    },
+}
+
+/// The daily limit as it stands for a run billed `billing` (the webview's `LimitDto`).
+pub fn limit_dto(limit: Option<f64>, spend: &Spend, billing: Billing) -> crate::dto::LimitDto {
+    use crate::dto::LimitRefusalDto;
+    let refusal = check_limit(limit, spend, billing).err();
+    crate::dto::LimitDto {
+        limit_usd: limit,
+        spent_today_usd: spend.settled_usd,
+        pending_usd: spend.pending_usd,
+        would_pass: refusal.is_none(),
+        refusal: refusal.map(|r| match r {
+            LimitRefusal::Over { .. } => LimitRefusalDto::Over,
+            LimitRefusal::UnknownNeedsReserve { .. } => LimitRefusalDto::UnknownNeedsReserve,
+        }),
+        reserve_usd: UNKNOWN_PRICE_RESERVE_USD,
+    }
+}
+
+impl LimitRefusal {
+    /// The refusal in Studio's words (`studio_daily_limit`).
+    pub fn error(self) -> crate::error::AppError {
+        match self {
+            Self::Over { spent, limit } => super::errors::daily_limit(spent, limit),
+            Self::UnknownNeedsReserve { spent, limit } => {
+                super::errors::unknown_price_needs_reserve(spent, limit)
+            }
+        }
+    }
 }
 
 /// Whether a run billed `billing` may be sent with today's spending at `spend` under the
@@ -225,7 +262,10 @@ pub fn check_limit(
     let spent = spend.settled_usd + spend.pending_usd;
     let usd = estimate.unwrap_or(UNKNOWN_PRICE_RESERVE_USD);
     if spent + usd > limit + LEEWAY_USD {
-        return Err(LimitRefusal::Over { spent, limit });
+        return Err(match estimate {
+            Some(_) => LimitRefusal::Over { spent, limit },
+            None => LimitRefusal::UnknownNeedsReserve { spent, limit },
+        });
     }
     Ok(())
 }
@@ -412,7 +452,7 @@ mod tests {
             )
             .is_ok()
         );
-        assert!(
+        assert_eq!(
             check_limit(
                 Some(10.0),
                 &Spend {
@@ -420,8 +460,20 @@ mod tests {
                     pending_usd: 0.0
                 },
                 Paid(None)
-            )
-            .is_err()
+            ),
+            Err(LimitRefusal::UnknownNeedsReserve {
+                spent: 5.01,
+                limit: 10.0
+            })
+        );
+        // A limit below the reserve refuses every run whose price is unknown, for that
+        // reason, not because the limit was reached.
+        assert_eq!(
+            check_limit(Some(3.0), &Spend::default(), Paid(None)),
+            Err(LimitRefusal::UnknownNeedsReserve {
+                spent: 0.0,
+                limit: 3.0
+            })
         );
     }
 

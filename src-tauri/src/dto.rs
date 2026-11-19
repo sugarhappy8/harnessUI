@@ -916,6 +916,20 @@ pub struct LimitDto {
     pub pending_usd: f64,
     /// Whether `spend::check_limit` would allow this run (`true`: it may be sent).
     pub would_pass: bool,
+    /// Why it would not: `over` (it would take today's spending past the limit) or
+    /// `unknownNeedsReserve` (its price is unknown and less than `reserve_usd` of the limit is
+    /// left); `None` when it would pass.
+    pub refusal: Option<LimitRefusalDto>,
+    /// What a run whose price is unknown counts against the limit, in US dollars.
+    pub reserve_usd: f64,
+}
+
+/// Why the daily limit refuses a run (`LimitDto::refusal`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum LimitRefusalDto {
+    Over,
+    UnknownNeedsReserve,
 }
 
 /// What a run would cost and meet before it is sent, without sending anything.

@@ -108,9 +108,7 @@ use super::local::{LocalJobOptions, MemoryChoice, runs_on_processor};
 use super::prefs::{self, RunTarget, StudioPrefs, StudioPrefsPatch};
 use super::spend::{self, Billing, LimitRefusal, RunState, Spend, SpendRow};
 use crate::attachments::PictureWorker;
-use crate::dto::{
-    EstimateDto, LimitDto, OutputDto, RefDto, RunDto, RunErrorDto, StartRequest, UsageDto,
-};
+use crate::dto::{EstimateDto, OutputDto, RefDto, RunDto, RunErrorDto, StartRequest, UsageDto};
 use crate::error::{AppError, AppResult};
 use crate::gpu_lease::Grant;
 
@@ -666,13 +664,7 @@ impl StudioManager {
                 &prefs.confirm_rules(),
             ),
             confirm_at_usd: prefs.confirm_at_usd,
-            limit: LimitDto {
-                limit_usd: prefs.daily_limit_usd,
-                spent_today_usd: spend.settled_usd,
-                pending_usd: spend.pending_usd,
-                would_pass: spend::check_limit(prefs.daily_limit_usd, &spend, prepared.billing)
-                    .is_ok(),
-            },
+            limit: spend::limit_dto(prefs.daily_limit_usd, &spend, prepared.billing),
             invalid: errors::invalid_sentences(&prepared.problems, &prepared.model),
             eta: None,
             local: None,
@@ -719,7 +711,7 @@ impl StudioManager {
         let prefs = self.inner.prefs();
         let spend = self.inner.spend_today().await?;
         spend::check_limit(prefs.daily_limit_usd, &spend, prepared.billing)
-            .map_err(|LimitRefusal::Over { spent, limit }| errors::daily_limit(spent, limit))?;
+            .map_err(LimitRefusal::error)?;
         let reasons = spend::confirm_reasons(
             prepared.model.kind,
             prepared.billing,

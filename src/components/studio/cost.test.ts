@@ -14,7 +14,7 @@ function est(patch: Partial<Estimate> = {}): Estimate {
     usd: 0.16,
     reasons: [],
     confirmAtUsd: 1,
-    limit: { limitUsd: 10, spentTodayUsd: 0, pendingUsd: 0, wouldPass: true },
+    limit: { limitUsd: 10, spentTodayUsd: 0, pendingUsd: 0, wouldPass: true, refusal: null, reserveUsd: 5 },
     invalid: [],
     eta: null,
     local: null,
@@ -151,6 +151,8 @@ describe("the daily limit", () => {
     spentTodayUsd: 9,
     pendingUsd: 0.5,
     wouldPass: false,
+    refusal: "over",
+    reserveUsd: 5,
     ...patch,
   });
 
@@ -163,6 +165,20 @@ describe("the daily limit", () => {
     );
     expect(limitLine(limit({ limitUsd: 1000, spentTodayUsd: 1234.5, pendingUsd: 0 }))).toBe(
       "Daily limit reached: $1,234.50 of $1,000 spent today",
+    );
+  });
+
+  it("says why a run whose price is unknown is refused for the reserve", () => {
+    const reserve = limit({ refusal: "unknownNeedsReserve", limitUsd: 3, spentTodayUsd: 0, pendingUsd: 0 });
+    expect(limitLine(reserve)).toBe(
+      "This model's price is unknown, so Studio needs $5 of today's limit left ($3.00 left).",
+    );
+    expect(limitLine(limit({ refusal: "unknownNeedsReserve" }))).toBe(
+      "This model's price is unknown, so Studio needs $5 of today's limit left ($0.50 left).",
+    );
+    // Spent past the limit: nothing is left.
+    expect(limitLine(limit({ refusal: "unknownNeedsReserve", spentTodayUsd: 11 }))).toBe(
+      "This model's price is unknown, so Studio needs $5 of today's limit left ($0.00 left).",
     );
   });
 

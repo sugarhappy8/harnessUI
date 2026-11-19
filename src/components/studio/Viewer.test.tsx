@@ -975,7 +975,7 @@ async function showStudio() {
     usd: 0.04,
     reasons: [],
     confirmAtUsd: 1,
-    limit: { limitUsd: 10, spentTodayUsd: 0, pendingUsd: 0, wouldPass: true },
+    limit: { limitUsd: 10, spentTodayUsd: 0, pendingUsd: 0, wouldPass: true, refusal: null, reserveUsd: 5 },
     invalid: [],
     eta: null,
     local: null,

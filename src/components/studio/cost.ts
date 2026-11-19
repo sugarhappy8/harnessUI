@@ -92,10 +92,16 @@ export function cloudBackup(
 }
 
 /** In place of Create while a cloud run would pass the daily limit: what was spent today (the
- *  runs still going included) of the limit, in the backend's words (`errors::daily_limit`). */
+ *  runs still going included) of the limit, in the backend's words (`errors::daily_limit`); or,
+ *  for a run whose price is unknown refused for the reserve, what it needs and what is left
+ *  (`errors::unknown_price_needs_reserve`). */
 export function limitLine(limit: Limit): string {
-  return STUDIO_DOCK.limitReached(
-    usdWithCents(limit.spentTodayUsd + limit.pendingUsd),
-    formatUsdShort(limit.limitUsd ?? 0),
-  );
+  const spent = limit.spentTodayUsd + limit.pendingUsd;
+  if (limit.refusal === "unknownNeedsReserve") {
+    return STUDIO_DOCK.limitNeedsReserve(
+      formatUsdShort(limit.reserveUsd),
+      usdWithCents(Math.max((limit.limitUsd ?? 0) - spent, 0)),
+    );
+  }
+  return STUDIO_DOCK.limitReached(usdWithCents(spent), formatUsdShort(limit.limitUsd ?? 0));
 }

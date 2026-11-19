@@ -308,6 +308,13 @@ export interface Limit {
   spentTodayUsd: number;
   pendingUsd: number;
   wouldPass: boolean;
+  /**
+   * Why it would not pass: past the limit, or a price that is unknown with less than
+   * `reserveUsd` of the limit left. `null` when it would pass.
+   */
+  refusal: "over" | "unknownNeedsReserve" | null;
+  /** What a run whose price is unknown counts against the limit, in US dollars. */
+  reserveUsd: number;
 }
 
 /** Why a cloud run asks before it is sent. */

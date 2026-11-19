@@ -50,7 +50,7 @@ use super::prefs::{self, GpuPolicy, RunTarget, StudioPrefs, StudioPrefsPatch};
 use super::spend::{Charge, ConfirmReason, UNKNOWN_PRICE_RESERVE_USD, day_start_in};
 use super::test_support::{Scratch, mp4, png};
 use crate::attachments::PictureWorker;
-use crate::dto::{EstimateDto, RefInput, RunDto, StartRequest};
+use crate::dto::{EstimateDto, LimitRefusalDto, RefInput, RunDto, StartRequest};
 use crate::error::{AppError, AppResult};
 use crate::gpu_lease::{Grant, LeaseWait, Refused, StudioNeed};
 use models::catalog::Catalog;
@@ -1342,6 +1342,40 @@ async fn a_run_over_the_daily_limit_is_refused_whatever_the_webview_says() {
     assert_eq!(err.code, "studio_daily_limit");
     assert_eq!(err.message, "Daily limit reached: $9.50 of $10 spent today");
     assert_eq!(h.provider.starts(), 0);
+}
+
+/// Review finding spend-unknown-price-refusal-wording: a run whose price is unknown needs the
+/// reserve of the limit left; refused for that, it says so, never "Daily limit reached".
+#[tokio::test]
+async fn an_unknown_price_refused_for_the_reserve_says_why() {
+    let h = harness().await;
+    h.set_prefs(json!({"dailyLimitUsd": 3})).await;
+    let estimate = h.manager.estimate(&h.openai_req()).await.unwrap();
+    assert_eq!(
+        estimate.usd, None,
+        "OpenAI's flare has no price for this run"
+    );
+    assert!(!estimate.limit.would_pass);
+    assert_eq!(
+        estimate.limit.refusal,
+        Some(LimitRefusalDto::UnknownNeedsReserve)
+    );
+    assert_eq!(estimate.limit.reserve_usd, UNKNOWN_PRICE_RESERVE_USD);
+    let err = h.manager.start(h.openai_req(), true).await.unwrap_err();
+    assert_eq!(err.code, "studio_daily_limit");
+    assert_eq!(
+        err.message,
+        "This model's price is unknown, so Studio needs $5 of today's limit left ($3.00 left)."
+    );
+    assert_eq!(h.provider.starts(), 0);
+    // A known price over the limit is still "reached".
+    h.seed_done_run_costing(2.50).await;
+    let estimate = h
+        .manager
+        .estimate(&h.video_req_estimated(0.96))
+        .await
+        .unwrap();
+    assert_eq!(estimate.limit.refusal, Some(LimitRefusalDto::Over));
 }
 
 #[tokio::test]

@@ -62,7 +62,7 @@ use super::{
     Waited, audit_settings, creation_kind, job_options, pick_seed, refs_json, remove_scratch,
     tool_of,
 };
-use crate::dto::{EstimateDto, LimitDto, LocalEstimateDto, LocalRunDto, RunDto, StartRequest};
+use crate::dto::{EstimateDto, LocalEstimateDto, LocalRunDto, RunDto, StartRequest};
 use crate::error::{AppError, AppResult};
 use crate::gpu_lease::{Grant, LeaseWait, Refused, StudioNeed};
 use crate::studio::deps::{Endpoint, LocalLane};
@@ -457,12 +457,7 @@ impl StudioManager {
             usd: Some(0.0),
             reasons: spend::confirm_reasons(model.kind, billing, &prefs.confirm_rules()),
             confirm_at_usd: prefs.confirm_at_usd,
-            limit: LimitDto {
-                limit_usd: prefs.daily_limit_usd,
-                spent_today_usd: spend.settled_usd,
-                pending_usd: spend.pending_usd,
-                would_pass: spend::check_limit(prefs.daily_limit_usd, &spend, billing).is_ok(),
-            },
+            limit: spend::limit_dto(prefs.daily_limit_usd, &spend, billing),
             invalid,
             eta: verdict
                 .and_then(|v| v.eta.as_ref())
