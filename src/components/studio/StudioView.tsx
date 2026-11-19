@@ -179,8 +179,9 @@ export function StudioView() {
               )}
             </div>
           </main>
-          {/* The right panel: the model and its settings. */}
-          <aside data-studio-panel className="w-72 shrink-0 overflow-y-auto border-l border-border">
+          {/* The right panel: the model and its settings; narrower below 1000 px, so the middle
+              column keeps room at the window's smallest with the chat list shown. */}
+          <aside data-studio-panel className="w-60 shrink-0 overflow-y-auto border-l border-border min-[1000px]:w-72">
             <SettingsPanel tab={tab} />
           </aside>
         </div>

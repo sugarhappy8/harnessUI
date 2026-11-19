@@ -1001,6 +1001,8 @@ export const STUDIO_TABS: Record<MediaKind, string> = { image: "Pictures", video
 
 /** Studio's top bar, its menu and the prompt box (Task B2). */
 export const STUDIO_BAR = {
+  /** The button beside Studio's name that shows or hides the chat list (Ctrl/⌘ B too). */
+  chatList: "Show or hide the chat list",
   tabs: "Pictures or video",
   search: "Search",
   searchPlaceholder: "Search…",

@@ -730,3 +730,13 @@ describe("a model downloading", () => {
     within(result).getByRole("progressbar", { name: "Downloading z-image-turbo-Q5_K_M.gguf" });
   });
 });
+
+describe("at the window's smallest", () => {
+  it("the search row wraps rather than scroll the middle column sideways", async () => {
+    await showLocal();
+    // jsdom lays nothing out: the class is the layout (at most 128 px before the row wraps).
+    const box = screen.getByRole("searchbox", { name: LOCAL_MODELS.search }).closest("label")!;
+    expect(box.className.split(/\s+/)).toContain("min-w-32");
+    expect(box.className.split(/\s+/)).not.toContain("min-w-48");
+  });
+});

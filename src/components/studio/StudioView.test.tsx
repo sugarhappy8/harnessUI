@@ -427,6 +427,22 @@ describe("StudioView", () => {
     }
   });
 
+  it("at the window's smallest the middle column keeps room: a narrower panel, and a chat list toggle", async () => {
+    await show();
+    // jsdom lays nothing out: the classes are the layout (288 px from 1000 px, 240 px below).
+    const panel = (document.querySelector("[data-studio-panel]")?.getAttribute("class") ?? "").split(/\s+/);
+    expect(panel).toEqual(expect.arrayContaining(["w-60", "min-[1000px]:w-72"]));
+    expect(panel).not.toContain("w-72");
+    const toggled = vi.fn();
+    window.addEventListener("app:toggle-sidebar", toggled);
+    try {
+      await click(screen.getByRole("button", { name: "Show or hide the chat list" }));
+      expect(toggled).toHaveBeenCalledTimes(1);
+    } finally {
+      window.removeEventListener("app:toggle-sidebar", toggled);
+    }
+  });
+
   it("outside the grid the gallery is read for the tab shown, and read again on another tab", async () => {
     await show({ runs: [RUN] });
     expect(api.studioRuns).toHaveBeenCalledWith({ kind: "image" }, null, 60);

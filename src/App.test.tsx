@@ -54,7 +54,7 @@ const ipcMock = vi.hoisted(() => {
 });
 vi.mock("./lib/ipc", () => ipcMock);
 vi.mock("@tauri-apps/plugin-dialog", () => ({ open: vi.fn() }));
-vi.mock("./components/Sidebar", () => ({ Sidebar: () => null }));
+vi.mock("./components/Sidebar", () => ({ Sidebar: () => <nav data-testid="chat-list" /> }));
 vi.mock("./components/ChatView", () => ({ ChatView: () => <div data-testid="chat-view" /> }));
 vi.mock("./components/Workbench", () => ({ Workbench: () => null }));
 vi.mock("./components/studio/StudioView", () => ({ StudioView: () => <div data-testid="studio-view" /> }));
@@ -326,6 +326,19 @@ describe("Studio", () => {
     } finally {
       window.removeEventListener("app:focus-studio-prompt", focused);
     }
+  });
+
+  it("Studio's top bar shows or hides the chat list, as Ctrl+B does", async () => {
+    await renderApp();
+    screen.getByTestId("chat-list");
+    act(() => {
+      window.dispatchEvent(new Event("app:toggle-sidebar"));
+    });
+    expect(screen.queryByTestId("chat-list")).toBeNull();
+    act(() => {
+      window.dispatchEvent(new Event("app:toggle-sidebar"));
+    });
+    screen.getByTestId("chat-list");
   });
 
   it("the stop hotkey leaves Studio runs alone", async () => {

@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { DropdownMenu } from "radix-ui";
-import { Cloud, Ellipsis, LayoutGrid, Microchip, RefreshCw, Search, Star } from "lucide-react";
+import { Cloud, Ellipsis, LayoutGrid, Microchip, PanelLeft, RefreshCw, Search, Star } from "lucide-react";
 import {
   cloudChipWords,
   cloudGoesTo,
@@ -43,6 +43,16 @@ export function TopBar(props: { onError: (e: unknown) => void }) {
 
   return (
     <header className="glass z-10 flex flex-wrap items-center gap-x-2 gap-y-1 border-b border-border px-3 py-2">
+      {/* At the window's smallest the chat list leaves Studio's middle column little room. */}
+      <button
+        type="button"
+        aria-label={STUDIO_BAR.chatList}
+        title={STUDIO_BAR.chatList}
+        onClick={() => window.dispatchEvent(new Event("app:toggle-sidebar"))}
+        className="rounded-lg p-1.5 text-fg-muted hover:bg-bg-muted hover:text-fg"
+      >
+        <PanelLeft size={14} aria-hidden />
+      </button>
       <h1 className="text-sm font-semibold">{STUDIO_NAV.name}</h1>
       {/* The grid's own kind toggles, or Get local models' own tabs, stand in for these. */}
       {!grid && !localView && <KindTabs onSelect={setTab} />}

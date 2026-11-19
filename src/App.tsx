@@ -89,13 +89,17 @@ export default function App() {
       if (tab === "local") studio.showLocalModels(true);
       focusStudioPrompt();
     };
+    // Studio's top bar shows or hides the chat list, as Ctrl/⌘ B does.
+    const onToggleSidebar = () => setSidebarOpen((o) => !o);
     window.addEventListener("app:open-models", onOpenModels);
     window.addEventListener("app:open-settings", onOpenSettings);
     window.addEventListener("app:open-studio", onOpenStudio);
+    window.addEventListener("app:toggle-sidebar", onToggleSidebar);
     return () => {
       window.removeEventListener("app:open-models", onOpenModels);
       window.removeEventListener("app:open-settings", onOpenSettings);
       window.removeEventListener("app:open-studio", onOpenStudio);
+      window.removeEventListener("app:toggle-sidebar", onToggleSidebar);
     };
   }, []);
 
