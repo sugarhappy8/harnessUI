@@ -296,9 +296,9 @@ export interface StudioState extends StudioRunState, StudioResultsState, StudioL
   /** *Load more*: the gallery's next page, after the last one read, for the same filter (one
    *  at a time; a page for a filter changed since is dropped). */
   loadMore(): Promise<void>;
-  /** The grid in place of the card stream, or the cards again. Leaving the grid puts its own
-   *  filters away, Pictures or Video and the date (the first page read again): the cards follow
-   *  the tab. */
+  /** The grid in place of the card stream, or the cards again. The grid opens on All (both
+   *  kinds, its first page read again); leaving it puts its own filters away, Pictures or Video
+   *  and the date: the cards read the tab's own gallery (its first page read again). */
   setGrid(grid: boolean): Promise<void>;
   /** Changes only the preferences `patch` names. */
   setPrefs(patch: StudioPrefsPatch): Promise<void>;
@@ -691,7 +691,10 @@ export const useStudio: UseBoundStore<StoreApi<StudioState>> = create<StudioStat
       loading ??= (async () => {
         try {
           const since = ++listsTick;
-          const filter = get().filter;
+          // The card stream reads the gallery of the tab shown (the grid, its own filters).
+          const { grid, tab } = get();
+          const filter = grid || get().filter.kind === tab ? get().filter : { ...get().filter, kind: tab };
+          if (filter !== get().filter) set({ filter });
           // The newest runs whatever the filter: the gallery's first page when it has none.
           const all = unfiltered(filter);
           const [models, local, page, newest, live, prefs, usage] = await Promise.all([
@@ -989,7 +992,10 @@ export const useStudio: UseBoundStore<StoreApi<StudioState>> = create<StudioStat
     setGrid: async (grid) => {
       set({ grid });
       const { kind, since } = get().filter;
-      if (!grid && (kind || since != null)) await get().setFilter({ kind: null, since: null });
+      const tab = get().tab;
+      // The grid opens on All; the cards read the tab's own gallery, at any date.
+      if (grid && kind) await get().setFilter({ kind: null });
+      if (!grid && (kind !== tab || since != null)) await get().setFilter({ kind: tab, since: null });
     },
     setPrefs: async (patch) => {
       const prefs = await api.studioSetPrefs(patch);

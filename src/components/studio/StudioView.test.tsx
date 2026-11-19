@@ -366,24 +366,77 @@ describe("StudioView", () => {
       vi.advanceTimersByTime(1);
     });
     expect(api.studioRuns).toHaveBeenCalledTimes(1);
-    expect(api.studioRuns).toHaveBeenCalledWith({ text: "fox" }, null, 60);
+    expect(api.studioRuns).toHaveBeenCalledWith({ kind: "image", text: "fox" }, null, 60);
     expect(search.value).toBe("fox");
   });
 
-  it("Load more under the cards reads the gallery's next page", async () => {
+  it("Load more above the cards reads the gallery's next page, and what is shown stays where it was", async () => {
     const next = { createdAt: RUN.createdAt, id: RUN.id };
     vi.mocked(api.studioOutputBytes).mockReturnValue(new Promise(() => {}));
     vi.mocked(api.studioRuns).mockResolvedValueOnce({ runs: [RUN], next });
-    await show({ runs: [RUN] });
-    const older: Run = { ...RUN, id: "older", createdAt: RUN.createdAt - 1000, prompt: "An older picture", outputs: [] };
-    vi.mocked(api.studioRuns).mockResolvedValueOnce({ runs: [older], next: null });
-    await click(screen.getByRole("button", { name: "Load more" }));
-    expect(api.studioRuns).toHaveBeenLastCalledWith({}, next, 60);
-    expect(document.querySelector('[data-run-card="older"]')).not.toBeNull();
-    expect(screen.queryByRole("button", { name: "Load more" })).toBeNull();
+    // The stream's height as laid out: 1000 px, then 1600 px once the older page is in.
+    let height = 1000;
+    const main = Object.getOwnPropertyDescriptor(Element.prototype, "scrollHeight");
+    Object.defineProperty(HTMLElement.prototype, "scrollHeight", { configurable: true, get: () => height });
+    try {
+      await show({ runs: [RUN] });
+      const scroller = document.querySelector("main")!;
+      // It opened at its newest card.
+      expect(scroller.scrollTop).toBe(1000);
+      const more = screen.getByRole("button", { name: "Load more" });
+      // Above every card.
+      expect(more.compareDocumentPosition(document.querySelector("[data-run-card]")!) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+      scroller.scrollTop = 400; // 600 px from the bottom
+      const older: Run = { ...RUN, id: "older", createdAt: RUN.createdAt - 1000, prompt: "An older picture", outputs: [] };
+      vi.mocked(api.studioRuns).mockImplementationOnce(async () => {
+        height = 1600;
+        return { runs: [older], next: null };
+      });
+      await click(more);
+      expect(api.studioRuns).toHaveBeenLastCalledWith({ kind: "image" }, next, 60);
+      expect(document.querySelector('[data-run-card="older"]')).not.toBeNull();
+      expect(screen.queryByRole("button", { name: "Load more" })).toBeNull();
+      // Still 600 px from the bottom: the cards shown did not move.
+      expect(scroller.scrollTop).toBe(1000);
+    } finally {
+      if (main) Object.defineProperty(HTMLElement.prototype, "scrollHeight", main);
+      else delete (HTMLElement.prototype as { scrollHeight?: number }).scrollHeight;
+    }
   });
 
-  it("the card stream shows the tab's runs, newest first, under the queue strip of this session's runs", async () => {
+  it("a press accepted from Studio brings its new card into view", async () => {
+    const shownCards: Element[] = [];
+    Element.prototype.scrollIntoView = vi.fn(function (this: Element) {
+      shownCards.push(this);
+    });
+    try {
+      await show({ runs: [RUN] });
+      const made: Run = { ...RUN, id: "again", seq: 9, status: "queued", outputs: [], createdAt: RUN.createdAt + 1000 };
+      vi.mocked(api.studioStart).mockResolvedValue(made);
+      await act(async () => {
+        await useStudio.getState().again(RUN);
+      });
+      await flush();
+      expect(shownCards.map((c) => c.getAttribute("data-run-card"))).toEqual(["again"]);
+      // Only once: a later change of the same run leaves the scroll alone.
+      act(() => useStudio.getState().applyProgress({ ...made, seq: 10, status: "running" }));
+      await flush();
+      expect(shownCards).toHaveLength(1);
+    } finally {
+      delete (Element.prototype as { scrollIntoView?: unknown }).scrollIntoView;
+    }
+  });
+
+  it("outside the grid the gallery is read for the tab shown, and read again on another tab", async () => {
+    await show({ runs: [RUN] });
+    expect(api.studioRuns).toHaveBeenCalledWith({ kind: "image" }, null, 60);
+    vi.mocked(api.studioRuns).mockClear();
+    await click(screen.getByRole("tab", { name: "Video" }));
+    expect(api.studioRuns).toHaveBeenCalledTimes(1);
+    expect(api.studioRuns).toHaveBeenCalledWith({ kind: "video" }, null, 60);
+  });
+
+  it("the card stream shows the tab's runs, oldest first and newest above the dock, over the queue strip of this session's runs", async () => {
     const older: Run = { ...RUN, id: "older", createdAt: RUN.createdAt - 1000, prompt: "An older picture" };
     const making: Run = {
       ...RUN,
@@ -399,7 +452,10 @@ describe("StudioView", () => {
     const clip: Run = { ...RUN, id: "clip", kind: "video", prompt: "A clip" };
     await show({ runs: [RUN, older, clip], live: [making] });
     const cards = () => [...document.querySelectorAll("[data-run-card]")].map((c) => c.getAttribute("data-run-card"));
-    expect(cards()).toEqual(["making", RUN.id, "older"]);
+    expect(cards()).toEqual(["older", RUN.id, "making"]);
+    // The queue strip is under the newest card.
+    const strip = document.querySelector("[data-queue-strip]")!;
+    expect(document.querySelector('[data-run-card="making"]')!.compareDocumentPosition(strip) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
     screen.getByText("1 making");
     act(() => useStudio.getState().applyProgress({ ...making, status: "done", finishedAt: Date.now(), seq: making.seq + 1 }));
     screen.getByText("1 done");
@@ -444,7 +500,8 @@ describe("StudioView", () => {
       expect(screen.queryByText(cloudBackup)).toBeNull();
       expect(useStudio.getState().drafts.image).toMatchObject({ target: { endpoint: 1 }, model: "openai/gpt-image-2.6-flare" });
       for (const read of SAVED_READS) expect(read).toHaveBeenCalledTimes(2);
-      expect(api.studioRuns).toHaveBeenCalledTimes(1); // the gallery's pages stay as read
+      // The gallery's pages stay as read: the tab's first page and the newest runs, once each.
+      expect(api.studioRuns).toHaveBeenCalledTimes(2);
       expect(api.studioRefreshModels).not.toHaveBeenCalled();
       expect(api.studioModelPrice).not.toHaveBeenCalled();
       expect(api.studioLocalSearch).not.toHaveBeenCalled();
@@ -481,7 +538,8 @@ describe("StudioView", () => {
       act(() => useStudio.getState().showStudio());
       await flush();
       expect(useStudio.getState().loaded).toBe(true);
-      expect(api.studioRuns).toHaveBeenCalledTimes(2); // the whole first read again
+      // The whole first read again (the tab's first page and the newest runs).
+      expect(api.studioRuns).toHaveBeenCalledTimes(4);
       expect(screen.queryByText("Something went wrong.")).toBeNull(); // the read worked
       expect(screen.queryByRole("alert")).toBeNull();
     });

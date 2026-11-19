@@ -32,6 +32,9 @@ export interface StudioRunState {
   pending: StartRequest | null;
   /** The estimate the confirmation shows for `pending`; `null` while it is not open. */
   pendingEstimate: Estimate | null;
+  /** The run of the last press accepted (Create, Again, Run again, a confirmation): the card
+   *  stream brings its card into view. `null` until one is. */
+  startedRun: string | null;
   /** Why each tab's last press was refused, shown under the prompt until the next press. */
   refusal: Record<StudioTab, ErrorInfo | null>;
   dismissRefusal(tab: StudioTab): void;
@@ -167,7 +170,7 @@ export function createRun(
       }
       return null;
     }
-    set({ starting: false, pending: null, pendingEstimate: null });
+    set({ starting: false, pending: null, pendingEstimate: null, startedRun: run.id });
     get().applyProgress(run);
     if (req === draftPress) {
       draftPress = null;
@@ -196,6 +199,7 @@ export function createRun(
     starting: false,
     pending: null,
     pendingEstimate: null,
+    startedRun: null,
     refusal: { image: null, video: null },
     dismissRefusal: (tab) => set((s) => ({ refusal: { ...s.refusal, [tab]: null } })),
     start: async (tab, confirmed, from) => {

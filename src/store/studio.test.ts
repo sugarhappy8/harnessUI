@@ -309,11 +309,28 @@ describe("what is saved", () => {
 
   it("reads each saved thing once, even when asked twice at once", async () => {
     saved();
+    // The grid on All: its first page is the newest runs too.
+    useStudio.setState({ grid: true });
     await Promise.all([useStudio.getState().load(), useStudio.getState().load()]);
     for (const read of [api.studioModels, api.studioLocalModels, api.studioRuns, api.studioLive, api.studioGetPrefs, api.studioUsage]) {
       expect(read).toHaveBeenCalledTimes(1);
     }
     expect(useStudio.getState().loaded).toBe(true);
+  });
+
+  it("the cards read the tab's own gallery, and the newest runs of both kinds besides", async () => {
+    saved();
+    useStudio.getState().showStudio("video");
+    await useStudio.getState().load();
+    expect(api.studioRuns).toHaveBeenCalledTimes(2);
+    expect(api.studioRuns).toHaveBeenCalledWith({ kind: "video" }, null, 60);
+    expect(api.studioRuns).toHaveBeenCalledWith({}, null, 50);
+    expect(useStudio.getState().filter).toEqual({ kind: "video" });
+    // Leaving the grid goes back to the tab's own gallery; the grid opens on All.
+    await useStudio.getState().setGrid(true);
+    expect(api.studioRuns).toHaveBeenLastCalledWith({ kind: null }, null, 60);
+    await useStudio.getState().setGrid(false);
+    expect(api.studioRuns).toHaveBeenLastCalledWith({ kind: "video", since: null }, null, 60);
   });
 
   it("the runs still working are kept as live", async () => {
@@ -364,11 +381,12 @@ describe("what is saved", () => {
     // OpenRouter was added in Settings, and something was spent in the meantime.
     vi.mocked(api.studioModels).mockResolvedValue({ endpoints: [openrouter] });
     vi.mocked(api.studioUsage).mockResolvedValue({ spentTodayUsd: 0.5, pendingUsd: 0, limitUsd: 10, folder: "", bytes: 0, pictures: 0, videos: 0 });
+    const pages = vi.mocked(api.studioRuns).mock.calls.length;
     await useStudio.getState().reread();
     for (const read of [api.studioModels, api.studioLocalModels, api.studioGetPrefs, api.studioUsage]) {
       expect(read).toHaveBeenCalledTimes(2);
     }
-    expect(api.studioRuns).toHaveBeenCalledTimes(1);
+    expect(api.studioRuns).toHaveBeenCalledTimes(pages);
     expect(api.studioLive).toHaveBeenCalledTimes(1);
     expect(api.studioRefreshModels).not.toHaveBeenCalled();
     expect(useStudio.getState()).toMatchObject({ endpoints: [openrouter], runs: [RUN, LOCAL_RUN], usage: { spentTodayUsd: 0.5 } });
@@ -386,7 +404,7 @@ describe("what is saved", () => {
     vi.mocked(api.studioRuns).mockResolvedValue({ runs: [RUN], next: null });
     await useStudio.getState().setFilter({ text: "fox" });
     await useStudio.getState().setFilter({ starred: true });
-    expect(api.studioRuns).toHaveBeenLastCalledWith({ text: "fox", starred: true }, null, expect.any(Number));
+    expect(api.studioRuns).toHaveBeenLastCalledWith({ kind: "image", text: "fox", starred: true }, null, expect.any(Number));
     expect(useStudio.getState().runs).toEqual([RUN]);
   });
 
@@ -428,13 +446,14 @@ describe("what is saved", () => {
     answerLoad({ runs: [RUN], next: null }); // the unfiltered page, answered last
     await loading;
     expect(useStudio.getState().runs).toEqual([LOCAL_RUN]);
-    expect(useStudio.getState()).toMatchObject({ loaded: true, filter: { text: "fox" } });
+    expect(useStudio.getState()).toMatchObject({ loaded: true, filter: { kind: "image", text: "fox" } });
   });
 
   it("the newest runs are kept whatever the gallery's filter, with the runs heard of since", async () => {
     saved();
     vi.mocked(api.studioRuns).mockImplementation(async (filter) => ({ runs: filter.kind ? [] : [RUN], next: null }));
-    // Opened on an unfiltered gallery, its first page is the newest runs: one read.
+    // Opened on an unfiltered gallery (the grid on All), its first page is the newest runs: one read.
+    useStudio.setState({ grid: true });
     await useStudio.getState().load();
     expect(api.studioRuns).toHaveBeenCalledTimes(1);
     expect(useStudio.getState().recentRuns).toEqual([RUN]);

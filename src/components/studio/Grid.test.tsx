@@ -291,11 +291,14 @@ describe("Grid", () => {
 
   it("leaving the grid puts its Pictures or Video filter away, so the cards follow the tab", async () => {
     await showGrid();
+    // The grid opens on All, whatever the tab.
+    expect(useStudio.getState().filter.kind).toBeNull();
     await click(screen.getByRole("button", { name: "Video" }));
     expect(useStudio.getState().filter.kind).toBe("video");
     await click(screen.getByRole("button", { name: "Grid" }));
-    expect(useStudio.getState().filter.kind).toBeNull();
-    expect(api.studioRuns).toHaveBeenLastCalledWith(expect.objectContaining({ kind: null }), null, 60);
+    // The cards read the tab's own gallery (Pictures).
+    expect(useStudio.getState().filter.kind).toBe("image");
+    expect(api.studioRuns).toHaveBeenLastCalledWith(expect.objectContaining({ kind: "image" }), null, 60);
   });
 
   it("Load more reads the next page from where the last one ended", async () => {
@@ -304,7 +307,7 @@ describe("Grid", () => {
     const older: Run = { ...GIF, createdAt: VIDEO.createdAt - 1000 };
     vi.mocked(api.studioRuns).mockResolvedValue({ runs: [older], next: null });
     await click(screen.getByRole("button", { name: "Load more" }));
-    expect(api.studioRuns).toHaveBeenLastCalledWith({}, next, 60);
+    expect(api.studioRuns).toHaveBeenLastCalledWith({ kind: null }, next, 60);
     tile("g1");
     expect(screen.queryByRole("button", { name: "Load more" })).toBeNull();
   });
