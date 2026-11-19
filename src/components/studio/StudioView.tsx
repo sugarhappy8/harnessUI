@@ -2,13 +2,11 @@ import { useEffect, useState } from "react";
 import { Tabs } from "radix-ui";
 import * as ipc from "../../lib/ipc";
 import type { ErrorInfo } from "../../lib/types";
-import { STUDIO_BAR } from "../../lib/words";
 import { toErrorInfo } from "../../store/app";
 import { useStudio, type StudioTab } from "../../store/studio";
 import { ErrorBanner } from "../ErrorBanner";
-import { ChipsRow } from "./AdvancedDrawer";
 import { Notices } from "./EmptyStates";
-import { RefTray } from "./RefTray";
+import { PromptDock } from "./PromptDock";
 import { SettingsPanel } from "./SettingsPanel";
 import { TopBar } from "./TopBar";
 
@@ -16,10 +14,10 @@ import { TopBar } from "./TopBar";
 // middle with the notices and empty states above it, local first (EmptyStates.tsx), the right
 // panel and the prompt dock. Opening Studio reads what is saved and nothing else (again each
 // time it is shown, and when Settings closes over it): lists are fetched only on *Get the
-// list* or *Update model lists*. The right panel holds the model and its settings (B5). Later
-// tasks fill the other slots: the run cards (B8), the prompt dock (B7, which takes over the
-// prompt box here and its tray of added pictures) and Get local models in place of the stream
-// while `localView` is on (B13).
+// list* or *Update model lists*. The right panel holds the model and its settings (B5), and the
+// prompt dock the added pictures, the prompt, the changed settings and Create (B7,
+// PromptDock.tsx). Later tasks fill the other slots: the run cards (B8) and Get local models in
+// place of the stream while `localView` is on (B13).
 
 export function StudioView() {
   const tab = useStudio((s) => s.tab);
@@ -73,29 +71,8 @@ export function StudioView() {
             <SettingsPanel tab={tab} />
           </aside>
         </div>
-        <PromptBox tab={tab} />
+        <PromptDock tab={tab} />
       </Tabs.Content>
     </Tabs.Root>
-  );
-}
-
-/** The tab's added pictures, prompt and changed Advanced settings (their chips), kept per tab;
- *  Task B7's prompt dock takes this place. */
-function PromptBox(props: { tab: StudioTab }) {
-  const prompt = useStudio((s) => s.drafts[props.tab].prompt);
-  const setPrompt = useStudio((s) => s.setPrompt);
-  return (
-    <div data-prompt-dock className="flex flex-col gap-2 border-t border-border px-4 py-3">
-      <RefTray tab={props.tab} />
-      <textarea
-        aria-label={STUDIO_BAR.prompt}
-        placeholder={STUDIO_BAR.promptPlaceholder[props.tab]}
-        value={prompt}
-        onChange={(e) => setPrompt(props.tab, e.target.value)}
-        rows={2}
-        className="w-full resize-none rounded-xl border border-border bg-bg px-3 py-2 text-sm outline-none focus:border-border-strong"
-      />
-      <ChipsRow tab={props.tab} />
-    </div>
   );
 }

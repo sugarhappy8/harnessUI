@@ -1304,3 +1304,69 @@ export const STUDIO_REFS = {
     return `This model takes ${max} ${max === 1 ? one : many}.`;
   },
 } as const;
+
+/** Each company's name as Studio shows it (the backend's `errors::name`). */
+export const STUDIO_COMPANY: Record<Company, string> = {
+  openrouter: "OpenRouter",
+  openai: "OpenAI",
+  local: "This computer",
+};
+
+/** The prompt dock (Task B7, design Wireframe 1 and local addendum Wireframe L4): the line
+ *  above Create, the price or time on it, the daily limit, and cloud as the backup. */
+export const STUDIO_DOCK = {
+  create: "Create",
+  /** A cloud run's estimate for the whole run, on Create: "~ $0.16". */
+  estimate: (usd: string) => `~ ${usd}`,
+  /** The line above Create for a model on this computer. */
+  here: "On this computer: your prompt and pictures stay here",
+  /** After `here`, when the chat model is unloaded to make room for the run. */
+  unloadChat: "the chat model will be unloaded to make room",
+  /** Joins the parts of the line above Create. */
+  joiner: " · ",
+  /** Under Create, in amber, for a local run that takes more than 15 minutes. */
+  over15: (time: string) =>
+    `This will take ${time} and keep the graphics card busy. On a MacBook it will get warm.`,
+  /** Beside the greyed-out Create of a local model that does not fit this computer, with why
+   *  ("needs 6 GB of graphics memory"). */
+  notHere: (reason: string | null) => (reason ? `Not for this computer: ${reason}` : "Not for this computer"),
+  /** A local run that does not fit here or is very slow, while an endpoint can make it. */
+  tooSlow: "Too slow here? A cloud model makes this in minutes, for a price you see first.",
+  chooseCloud: "Choose a cloud model",
+  /** The same, while no saved endpoint can make the tab's kind (OpenAI makes no video). */
+  addEndpoint: {
+    image: "Add OpenRouter or OpenAI in Settings → Endpoints to use a cloud model instead.",
+    video: "Add OpenRouter in Settings → Endpoints to use a cloud model instead.",
+  } satisfies Record<MediaKind, string>,
+  /** In place of Create while a cloud run would pass the daily limit (the same words as the
+   *  backend's `errors::daily_limit`). */
+  limitReached: (spent: string, limit: string) => `Daily limit reached: ${spent} of ${limit} spent today`,
+  raiseLimit: "Raise the limit",
+} as const;
+
+/** The confirmation before a cloud run (Task B7, design Wireframe 3). */
+export const STUDIO_CONFIRM = {
+  title: (kind: MediaKind, count: number) =>
+    kind === "video" ? "Make this video?" : count === 1 ? "Make this picture?" : "Make these pictures?",
+  /** The model and the endpoint it is sent to: "Veo 3.1 through OpenRouter". */
+  through: (model: string, endpoint: string) => `${model} through ${endpoint}`,
+  sound: (on: boolean) => (on ? "sound on" : "sound off"),
+  count: (n: number, kind: MediaKind) =>
+    kind === "video" ? (n === 1 ? "1 video" : `${n} videos`) : n === 1 ? "1 picture" : `${n} pictures`,
+  /** Joins the settings: "8 s · 720p · sound on · 1 video". */
+  joiner: " · ",
+  estimate: "Estimated cost",
+  /** Where the estimate comes from, and when the company's prices were saved. */
+  priceList: (company: string, day: string | null) =>
+    day ? `(${company}'s price list, ${day})` : `(${company}'s price list)`,
+  /** What leaves the computer and where it goes; OpenRouter passes the job on to a company. */
+  goesTo(host: string, pictures: boolean, routed: boolean): string {
+    const what = pictures ? "Your prompt and added pictures go" : "Your prompt goes";
+    return routed ? `${what} to ${host} and the company it sends the job to.` : `${what} to ${host}.`;
+  },
+  videoCharge: (company: string) =>
+    `${company} charges for a video once it has started, even if you stop watching it.`,
+  dontAskVideos: (usd: string) => `Don't ask again for videos under ${usd}`,
+  cancel: "Cancel",
+  makeVideo: "Make video",
+} as const;

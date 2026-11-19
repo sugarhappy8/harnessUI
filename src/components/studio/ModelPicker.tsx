@@ -45,7 +45,9 @@ import type {
 // where the prompt goes and each model's price hint. A model Studio cannot use, or one of an
 // endpoint without a key, is greyed out with the reason. Never an "Auto" model, which would
 // hide where the prompt goes. Picking an OpenRouter picture model asks for its price once
-// (`chooseModel`); a model restored when Studio opens is asked only on *Get the price*.
+// (`chooseModel`); a model restored when Studio opens is asked only on *Get the price*. The
+// prompt dock's *Choose a cloud model* opens it from the store (`pickerOpen`), on its first
+// cloud group (Task B7).
 
 /** What the filter chips select: models that take added pictures (Edit, References), a
  *  start or end frame, that make sound, or a transparent background. */
@@ -261,10 +263,24 @@ export function ModelPicker(props: { tab: StudioTab }) {
   const recentRuns = useStudio((s) => s.recentRuns);
   const chooseModel = useStudio((s) => s.chooseModel);
   const showLocalModels = useStudio((s) => s.showLocalModels);
-  const [open, setOpen] = useState(false);
+  const pickerOpen = useStudio((s) => s.pickerOpen);
+  const openPicker = useStudio((s) => s.openPicker);
+  // Opened from its trigger here, or from elsewhere through the store.
+  const [openedHere, setOpenedHere] = useState(false);
+  const open = openedHere || pickerOpen !== null;
   const [query, setQuery] = useState("");
   const [filters, setFilters] = useState<PickerFilter[]>([]);
+  // Opened from elsewhere, it starts with every model shown, so its cloud groups are there.
+  const [seenRequest, setSeenRequest] = useState(pickerOpen);
+  if (pickerOpen !== seenRequest) {
+    setSeenRequest(pickerOpen);
+    if (pickerOpen !== null) {
+      setQuery("");
+      setFilters([]);
+    }
+  }
   const searchRef = useRef<HTMLInputElement>(null);
+  const listRef = useRef<HTMLDivElement>(null);
   const labelId = useId();
   const nameId = useId();
 
@@ -280,6 +296,10 @@ export function ModelPicker(props: { tab: StudioTab }) {
 
   const isSelected = (target: RunTarget, model: MediaModel) =>
     draft.target !== null && targetKey(draft.target) === targetKey(target) && draft.model === model.id;
+  const setOpen = (o: boolean) => {
+    setOpenedHere(o);
+    if (!o) openPicker(null);
+  };
   const choose = (target: RunTarget, model: MediaModel) => {
     chooseModel(tab, target, model.id);
     setOpen(false);
@@ -334,7 +354,15 @@ export function ModelPicker(props: { tab: StudioTab }) {
             aria-label={STUDIO_PICKER.choose}
             onOpenAutoFocus={(e) => {
               e.preventDefault();
-              searchRef.current?.focus();
+              // Asked for its cloud models: the first cloud model Studio can use, in the first
+              // cloud group that has one (else the search box, as always).
+              const cloud =
+                pickerOpen === "cloud"
+                  ? listRef.current?.querySelector<HTMLElement>(
+                      '[data-picker-place="cloud"] [role="option"]:not([aria-disabled="true"])',
+                    )
+                  : null;
+              (cloud ?? searchRef.current)?.focus();
             }}
             onKeyDown={onKeyDown}
             className="z-50 flex max-h-[var(--radix-popover-content-available-height)] w-[26rem] max-w-[calc(100vw-1rem)] flex-col rounded-xl border border-border bg-surface shadow-pop"
@@ -360,7 +388,7 @@ export function ModelPicker(props: { tab: StudioTab }) {
                 ))}
               </div>
             </div>
-            <div className="min-h-0 overflow-y-auto p-1.5">
+            <div ref={listRef} className="min-h-0 overflow-y-auto p-1.5">
               {local && localGroup && (
                 <LocalSection
                   tab={tab}
@@ -372,7 +400,7 @@ export function ModelPicker(props: { tab: StudioTab }) {
                 />
               )}
               {recentGroup && (
-                <section className="pt-2">
+                <section data-picker-place="cloud" className="pt-2">
                   <h3 className="px-2 pb-1 text-xs font-semibold text-fg-muted">{STUDIO_PICKER.recent}</h3>
                   <div role="listbox" aria-label={STUDIO_PICKER.recent}>
                     {recentGroup.models.map((model, i) => {
@@ -514,7 +542,7 @@ function EndpointSection(props: {
   const target: RunTarget = { endpoint: endpoint.providerId };
   const title = STUDIO_PICKER.goesTo(endpoint.host);
   return (
-    <section className="pt-2">
+    <section data-picker-place="cloud" className="pt-2">
       <div className="flex items-center gap-2 px-2 pb-1">
         <h3 className="text-xs font-semibold text-fg-muted">{STUDIO_PICKER.via(endpoint.name)}</h3>
         <PlaceMark mark="cloud" icon={Cloud} label={cloudChipWords("")} title={title} className="ml-auto" />

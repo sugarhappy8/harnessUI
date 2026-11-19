@@ -90,6 +90,16 @@ async function show(saved: { endpoints?: StudioEndpoint[]; local?: LocalModels; 
   vi.mocked(api.studioGetPrefs).mockResolvedValue(p);
   vi.mocked(api.studioSetPrefs).mockImplementation(async (patch) => ({ ...p, ...patch }));
   vi.mocked(api.studioUsage).mockResolvedValue(saved.usage ?? usage());
+  // The prompt dock asks for the draft's estimate (Task B7).
+  vi.mocked(api.studioEstimate).mockResolvedValue({
+    usd: 0,
+    reasons: [],
+    confirmAtUsd: 1,
+    limit: { limitUsd: 10, spentTodayUsd: 0, pendingUsd: 0, wouldPass: true },
+    invalid: [],
+    eta: null,
+    local: null,
+  });
   useStudio.getState().showStudio();
   await act(async () => {
     render(<StudioView />);
