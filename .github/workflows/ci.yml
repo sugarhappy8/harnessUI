@@ -32,7 +32,10 @@ jobs:
         timeout-minutes: 30
         run: |
           apt_get() { sudo timeout --kill-after=10 "$1" apt-get -o Acquire::Retries=2 -o Acquire::http::Timeout=20 -o Acquire::https::Timeout=20 -o DPkg::Lock::Timeout=120 -o APT::Update::Error-Mode=any "${@:2}"; }
-          install() { apt_get 150 update && apt_get 400 install -y --no-install-recommends libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev libxdo-dev libssl-dev; }
+          # An attempt killed by its timeout can leave dpkg half-configured ("dpkg was
+          # interrupted"), and every later apt-get then refuses to run: finish that first.
+          repair() { sudo timeout --kill-after=10 300 dpkg --configure -a || true; }
+          install() { repair && apt_get 150 update && apt_get 400 install -y --no-install-recommends libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev libxdo-dev libssl-dev; }
           use_mirror() {
             echo "The package install failed or timed out; switching apt to $1"
             printf '%s\tpriority:1\n' "$1" | sudo tee /etc/apt/apt-mirrors.txt
