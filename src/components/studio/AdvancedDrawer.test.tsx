@@ -811,6 +811,45 @@ describe("My setups", () => {
     expect((menu as HTMLSelectElement).selectedOptions[0]?.textContent).toBe("Local square");
   });
 
+  it("the menu still names the setup a tab was set from after another tab was shown", async () => {
+    const clip: Setup = { ...PRODUCT_SHOT, name: "A clip", kind: "video", model: veo.id, params: { duration: 8 } };
+    await load({
+      prefs: prefs({
+        lastModel: { image: { target: { endpoint: 1 }, model: flare.id }, video: { target: { endpoint: 1 }, model: veo.id } },
+        setups: [clip, PRODUCT_SHOT],
+      }),
+    });
+    useStudio.getState().showStudio("image");
+    let view: RenderResult | null = null;
+    await act(async () => {
+      view = render(<SettingsPanel tab="image" />);
+    });
+    await flush();
+    const rerender = async (tab: StudioTab) => {
+      await act(async () => {
+        view!.rerender(<SettingsPanel tab={tab} />);
+      });
+      await flush();
+    };
+    const menu = () => screen.getByRole("combobox", { name: "My setups" }) as HTMLSelectElement;
+    fireEvent.change(menu(), { target: { value: "0" } });
+    expect(menu().selectedOptions[0]?.textContent).toBe("Product shot");
+    const pictures = useStudio.getState().drafts.image;
+
+    // The same panel shows the Video tab: nothing was applied there yet.
+    await rerender("video");
+    expect(menu().selectedOptions[0]?.textContent).toBe("None");
+    fireEvent.change(menu(), { target: { value: "0" } });
+    expect(menu().selectedOptions[0]?.textContent).toBe("A clip");
+
+    // Back on Pictures, the draft is as Product shot left it, so the menu still names it.
+    await rerender("image");
+    expect(useStudio.getState().drafts.image).toBe(pictures);
+    expect(menu().selectedOptions[0]?.textContent).toBe("Product shot");
+    await rerender("video");
+    expect(menu().selectedOptions[0]?.textContent).toBe("A clip");
+  });
+
   it("picking a setup that cannot run says why", async () => {
     await renderPanel(flare, { prefs: { setups: [{ ...PRODUCT_SHOT, model: "acme/gone-1" }] } });
     fireEvent.change(screen.getByRole("combobox", { name: "My setups" }), { target: { value: "0" } });

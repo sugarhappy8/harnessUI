@@ -28,6 +28,9 @@ export function SettingsPanel(props: { tab: StudioTab }) {
   const localFits = useStudio((s) => s.localFits);
   const dismissNote = useStudio((s) => s.dismissNote);
   const askLocalFit = useStudio((s) => s.askLocalFit);
+  // Per tab, the setup its draft was set from: kept here, so it outlasts My setups being drawn
+  // afresh for another tab (or while the tab has no model).
+  const [fromByTab, setFromByTab] = useState<Partial<Record<StudioTab, SetupFrom>>>({});
   const here = draft.target === "thisComputer";
   const localVideo = here && model?.kind === "video";
 
@@ -80,8 +83,14 @@ export function SettingsPanel(props: { tab: StudioTab }) {
       {visibleFields(model.params, "simple", draft.values).map((spec) => (
         <SettingField key={spec.key} tab={tab} spec={spec} />
       ))}
-      {/* A name being typed, or a refusal, is for one tab: another tab starts afresh. */}
-      <MySetups key={tab} tab={tab} />
+      {/* A name being typed, or a refusal, is for one tab: another tab starts afresh. The setup
+          each tab was set from is kept by the panel, so coming back to a tab still names it. */}
+      <MySetups
+        key={tab}
+        tab={tab}
+        from={fromByTab[tab] ?? null}
+        onFrom={(of, from) => setFromByTab((all) => ({ ...all, [of]: from }))}
+      />
       <AdvancedDrawer tab={tab} />
     </div>
   );
@@ -90,20 +99,27 @@ export function SettingsPanel(props: { tab: StudioTab }) {
 /** While the preferences hold no setups. */
 const NO_SETUPS: Setup[] = [];
 
+/** The setup a tab's draft was set from (applied or saved), with the draft it gave. */
+type SetupFrom = { name: string; draft: Draft };
+
 /**
  * My setups: a menu of the tab's saved setups, which applies the one picked (or says why it
  * cannot), and *Save as setup…*, which keeps the model and every setting under a name. The menu
- * names the setup applied or saved last until the draft changes, then None.
+ * names the setup applied or saved last until the draft changes, then None. That setup is kept
+ * by the panel (`from`, set through `onFrom` for the tab it was applied or saved on), so it is
+ * still named after another tab was shown.
  */
-function MySetups(props: { tab: StudioTab }) {
-  const { tab } = props;
+function MySetups(props: {
+  tab: StudioTab;
+  from: SetupFrom | null;
+  onFrom: (tab: StudioTab, from: SetupFrom | null) => void;
+}) {
+  const { tab, from, onFrom } = props;
   const all = useStudio((s) => s.prefs?.setups) ?? NO_SETUPS;
   const draft = useStudio((s) => s.drafts[tab]);
   const applySetup = useStudio((s) => s.applySetup);
   const saveSetup = useStudio((s) => s.saveSetup);
   const menuId = useId();
-  // The setup the draft was set from, with the draft it gave.
-  const [from, setFrom] = useState<{ name: string; draft: Draft } | null>(null);
   // The name being typed (`null` while not saving), and why a pick or a save did not happen.
   const [name, setName] = useState<string | null>(null);
   const [message, setMessage] = useState<string | null>(null);
@@ -116,7 +132,7 @@ function MySetups(props: { tab: StudioTab }) {
     if (!setup) return;
     const refused = applySetup(setup);
     setMessage(refused);
-    setFrom(refused === null ? { name: setup.name, draft: useStudio.getState().drafts[tab] } : null);
+    onFrom(tab, refused === null ? { name: setup.name, draft: useStudio.getState().drafts[tab] } : null);
   };
   const save = async () => {
     if (name === null || name.trim() === "" || saving) return;
@@ -125,7 +141,7 @@ function MySetups(props: { tab: StudioTab }) {
       const refused = await saveSetup(tab, name);
       setMessage(refused);
       if (refused === null) {
-        setFrom({ name: name.trim(), draft: useStudio.getState().drafts[tab] });
+        onFrom(tab, { name: name.trim(), draft: useStudio.getState().drafts[tab] });
         setName(null);
       }
     } catch (e: unknown) {
