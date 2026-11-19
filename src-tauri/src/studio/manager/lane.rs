@@ -216,9 +216,9 @@ fn this_computer() -> Endpoint {
 }
 
 /// How a local engine job's failure is recorded: as the engine named it, never charged.
-fn local_ending(e: &MediaError, cap: u64) -> Ending {
+fn local_ending(e: &MediaError, kind: MediaKind, cap: u64) -> Ending {
     let error = match e {
-        MediaError::Answered(f) => errors::from_failure(Company::Local, f),
+        MediaError::Answered(f) => errors::from_local_failure(f, kind),
         MediaError::Local(io) => errors::from_local(io, cap),
         MediaError::NotSent(why) => AppError {
             details: why.to_string(),
@@ -550,7 +550,7 @@ impl Inner {
             .provider
             .fetch_catalog()
             .await
-            .map_err(|e| local_ending(&e, self.deps.limits.picture_cap).error)?;
+            .map_err(|e| local_ending(&e, req.kind, self.cap_of(req.kind)).error)?;
         let model = parse_catalog(Company::Local, &raw, &BTreeMap::new())
             .into_iter()
             .find(|m| m.id == req.model)
@@ -579,7 +579,7 @@ impl Inner {
         // A local prompt has its own, shorter limit.
         problems.retain(|p| !matches!(p, Invalid::PromptTooLong));
         let shape = run_shape(&entry, &request)
-            .map_err(|e| local_ending(&e, self.deps.limits.picture_cap).error);
+            .map_err(|e| local_ending(&e, model.kind, self.cap_of(model.kind)).error);
         let verdict = match &shape {
             Ok(shape) => Some(
                 verdict(
@@ -911,7 +911,7 @@ impl Inner {
                 return;
             }
             Waited::Got(Err(e)) => {
-                let ending = local_ending(&e, self.cap_of(job.kind));
+                let ending = local_ending(&e, job.kind, self.cap_of(job.kind));
                 self.end_run(job, ending, Some(started)).await;
                 return;
             }
@@ -1073,7 +1073,7 @@ impl Inner {
                     match outputs {
                         Ok(outputs) => self.keep_local(t, step, outputs, started, clock).await,
                         Err(e) => {
-                            self.end_run(job, local_ending(&e, cap), Some(started))
+                            self.end_run(job, local_ending(&e, job.kind, cap), Some(started))
                                 .await;
                         }
                     }
@@ -1082,7 +1082,7 @@ impl Inner {
                 Ok(JobState::Failed(f)) => {
                     provider.release(remote_id).await;
                     let ending =
-                        Ending::failed(errors::from_failure(Company::Local, &f), Some(false));
+                        Ending::failed(errors::from_local_failure(&f, job.kind), Some(false));
                     self.end_run(job, ending, Some(started)).await;
                     return;
                 }
@@ -1094,7 +1094,7 @@ impl Inner {
                 }
                 Err(e) => {
                     provider.release(remote_id).await;
-                    self.end_run(job, local_ending(&e, cap), Some(started))
+                    self.end_run(job, local_ending(&e, job.kind, cap), Some(started))
                         .await;
                     return;
                 }

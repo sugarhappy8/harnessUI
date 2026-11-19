@@ -1256,6 +1256,13 @@ pub const LOCAL_NEGATIVE_TOO_LONG: &str = "The negative prompt is longer than 4,
 pub const LOCAL_ALREADY_RUNNING: &str = "This run is already running.";
 /// A result asked for that the run did not make, or not yet.
 pub const LOCAL_NO_SUCH_RESULT: &str = "This run has no such result.";
+/// The Studio folder's path holds `%`, up to three digits and `d` (`100%done`,
+/// `50%discount`), which the Studio engine reads as a numbering template for the file it
+/// writes (`ArgsError::PercentInOutputPath`): [`from_local_failure`] names the folder.
+pub const LOCAL_FOLDER_NUMBERED: &str = "The Studio folder's path holds % followed by d, which the Studio engine reads as a numbering template.";
+/// A file or folder the Studio engine is given has a path that is not valid Unicode
+/// (`ArgsError::NotUnicode`; the path itself is left out): [`from_local_failure`] says so.
+pub const LOCAL_PATH_NOT_UNICODE: &str = "A path the Studio engine is given is not valid Unicode.";
 
 /// A setting whose value the engine job cannot take (the check before the run refuses it
 /// first); the setting's key is named.
@@ -1263,9 +1270,15 @@ pub fn local_bad_value(key: &str) -> String {
     format!("The value of {key} is not one this model takes.")
 }
 
-/// The engine's arguments refused the job: their own sentence (the prompt's length, a size,
-/// a `%d` in the gallery folder's path).
+/// The engine's arguments refused the job: their own sentence (the prompt's length, a size),
+/// or for a `%d` in the gallery folder's path and a path that is not valid Unicode, the
+/// sentence [`from_local_failure`] knows them by.
 pub fn local_args_refused(e: &ArgsError) -> String {
+    match e {
+        ArgsError::PercentInOutputPath => return LOCAL_FOLDER_NUMBERED.to_owned(),
+        ArgsError::NotUnicode(_) => return LOCAL_PATH_NOT_UNICODE.to_owned(),
+        _ => {}
+    }
     let text = e.to_string();
     let mut chars = text.chars();
     match chars.next() {
@@ -1424,6 +1437,37 @@ pub fn from_local(e: &LocalIo, cap: u64) -> AppError {
             tracing::warn!("a Studio result could not be written: {text}");
             files()
         }
+    }
+}
+
+/// A run on this computer's failure (the Studio engine's, or a refusal before it started) as
+/// [`from_failure`] says it, with what only a local run of `kind` says: running out of memory
+/// names a smaller size and Memory saving for a picture (480p or a shorter clip for a
+/// video), and a Studio folder the engine cannot write to by name, or a path it cannot read,
+/// names what to change.
+pub fn from_local_failure(f: &MediaFailure, kind: MediaKind) -> AppError {
+    let error = from_failure(Company::Local, f);
+    match f.kind {
+        FailureKind::OutOfMemory if kind == MediaKind::Image => AppError {
+            next_step: "Try a smaller size, or turn Memory saving on.".to_owned(),
+            ..error
+        },
+        FailureKind::BadRequest if f.message == LOCAL_FOLDER_NUMBERED => AppError {
+            code: "studio_folder_numbered".to_owned(),
+            message: "Studio can't save local results in a folder whose name has % followed by d."
+                .to_owned(),
+            next_step: "Choose another Studio folder in Settings → Studio.".to_owned(),
+            ..error
+        },
+        FailureKind::BadRequest if f.message == LOCAL_PATH_NOT_UNICODE => AppError {
+            code: "studio_path_not_unicode".to_owned(),
+            message: "Studio can't use a file or folder whose name has characters the Studio engine cannot read."
+                .to_owned(),
+            next_step: "Choose another Studio folder in Settings → Studio, or rename the folder."
+                .to_owned(),
+            ..error
+        },
+        _ => error,
     }
 }
 
@@ -2479,7 +2523,89 @@ mod tests {
         );
         assert_eq!(
             local_args_refused(&ArgsError::PercentInOutputPath),
-            "The output path holds a %d numbering template."
+            LOCAL_FOLDER_NUMBERED
+        );
+        assert_eq!(
+            local_args_refused(&ArgsError::NotUnicode("/a/b".into())),
+            LOCAL_PATH_NOT_UNICODE
+        );
+    }
+
+    /// A local run's failure: running out of memory says what to change by kind, and a
+    /// Studio folder the engine would read as a numbering template, or a path it cannot
+    /// read, is named in plain words, never with the engine's arguments' own sentence.
+    #[test]
+    fn a_local_failure_says_what_to_change_by_kind() {
+        let local = |kind: FailureKind, message: String| MediaFailure {
+            kind,
+            stage: None,
+            charged: Some(false),
+            company_code: None,
+            request_id: None,
+            status: None,
+            message,
+            retry_after: None,
+        };
+        let oom = local(FailureKind::OutOfMemory, String::new());
+        let picture = from_local_failure(&oom, MediaKind::Image);
+        assert_eq!(
+            (
+                picture.code.as_str(),
+                picture.message.as_str(),
+                picture.next_step.as_str()
+            ),
+            (
+                "studio_out_of_memory",
+                "Ran out of graphics memory.",
+                "Try a smaller size, or turn Memory saving on."
+            )
+        );
+        let video = from_local_failure(&oom, MediaKind::Video);
+        assert_eq!(video.next_step, "Try 480p or a shorter clip.");
+
+        let numbered = local(
+            FailureKind::BadRequest,
+            local_args_refused(&ArgsError::PercentInOutputPath),
+        );
+        let e = from_local_failure(&numbered, MediaKind::Image);
+        assert_eq!(
+            (e.code.as_str(), e.message.as_str(), e.next_step.as_str()),
+            (
+                "studio_folder_numbered",
+                "Studio can't save local results in a folder whose name has % followed by d.",
+                "Choose another Studio folder in Settings → Studio."
+            )
+        );
+        assert!(!e.message.contains("output path"), "{}", e.message);
+        let unreadable = local(
+            FailureKind::BadRequest,
+            local_args_refused(&ArgsError::NotUnicode("/a/b".into())),
+        );
+        let e = from_local_failure(&unreadable, MediaKind::Video);
+        assert_eq!(e.code, "studio_path_not_unicode");
+        assert!(e.next_step.contains("Settings → Studio"), "{}", e.next_step);
+        assert!(!e.details.contains("/a/b"), "{}", e.details);
+        // Any other refusal reads as from_failure says it.
+        let other = local(FailureKind::BadRequest, "x".into());
+        let (a, b) = (
+            from_local_failure(&other, MediaKind::Image),
+            from_failure(Company::Local, &other),
+        );
+        assert_eq!(
+            (a.code, a.message, a.next_step, a.details),
+            (b.code, b.message, b.next_step, b.details)
+        );
+    }
+
+    #[test]
+    fn keeping_the_chat_model_for_a_run_that_needs_the_card_says_so() {
+        let e = chat_model_kept();
+        assert_eq!(
+            (e.message.as_str(), e.next_step.as_str()),
+            (
+                "Not started: the chat model stays loaded.",
+                "Press Again and choose Unload, or choose a cloud model."
+            )
         );
     }
 }

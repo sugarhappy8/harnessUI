@@ -2503,6 +2503,30 @@ pub(crate) mod tests {
         assert_eq!(std::fs::read_dir(w.partial()).unwrap().count(), 0);
     }
 
+    /// A Studio folder whose path holds % followed by d (`50%discount`) is refused before the
+    /// engine starts, and the card names the folder in plain words, never the arguments' own
+    /// sentence about an output path (finding local-percent-gallery-wording).
+    #[tokio::test]
+    async fn a_studio_folder_with_percent_d_in_its_path_is_named_in_plain_words() {
+        let w = world("ok").await;
+        let partial = w.dir.path().join("50%discount").join(".partial");
+        std::fs::create_dir_all(&partial).unwrap();
+        let f = refusal(w.provider.start(&req("x"), &partial).await);
+        assert_eq!(
+            (f.kind, f.message.as_str()),
+            (FailureKind::BadRequest, errors::LOCAL_FOLDER_NUMBERED)
+        );
+        assert!(no_argv_recorded(&w.rec()));
+        let e = errors::from_local_failure(&f, MediaKind::Image);
+        assert_eq!(
+            (e.message.as_str(), e.next_step.as_str()),
+            (
+                "Studio can't save local results in a folder whose name has % followed by d.",
+                "Choose another Studio folder in Settings → Studio."
+            )
+        );
+    }
+
     #[tokio::test]
     async fn start_local_matches_the_device_by_description() {
         let w = world("ok").await;

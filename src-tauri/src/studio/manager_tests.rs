@@ -5553,7 +5553,12 @@ async fn a_local_run_that_fails_says_why_and_is_never_charged() {
         (error.code.as_str(), error.charged, error.company.as_str()),
         ("studio_out_of_memory", Some(false), "local")
     );
-    assert_eq!(error.next_step, "Try 480p or a shorter clip.");
+    // A picture: a smaller size or Memory saving, never a clip's 480p (finding
+    // mgr-oom-picture-next-step).
+    assert_eq!(
+        error.next_step,
+        "Try a smaller size, or turn Memory saving on."
+    );
     assert_eq!(h.local.releases(), 1);
     assert_eq!(h.lease.drops().len(), 1);
     assert!(failed.outputs.is_empty());
