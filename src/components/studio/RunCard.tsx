@@ -10,6 +10,7 @@ import {
   STUDIO_QUEUE,
 } from "../../lib/words";
 import { toErrorInfo, useApp } from "../../store/app";
+import { switchModel } from "../../store/modelChange";
 import { listedModel, useStudio, type StudioState } from "../../store/studio";
 import { COST_TONE_CLASS, costTone, formatUsd } from "./cost";
 import { etaText, timeWords } from "./eta";
@@ -249,6 +250,8 @@ export function RunCard(props: { run: Run }) {
   const [busy, setBusy] = useState(false);
   const [failure, setFailure] = useState<ErrorInfo | null>(null);
   const [repairing, setRepairing] = useState(false);
+  // *Load it again* on its way.
+  const [loadingChat, setLoadingChat] = useState(false);
   const [detailsOpen, setDetailsOpen] = useState(false);
   // *Keep waiting* puts the stall line away until the run stalls again.
   const stalled = run.local?.stalled ?? false;
@@ -271,6 +274,18 @@ export function RunCard(props: { run: Run }) {
     );
   };
   const store = useStudio.getState;
+  // *Load it again*: the chat model loads as it was (the open chat keeps its own model); a
+  // failure is said on the card with its next step.
+  const loadAgain = (path: string) => {
+    setLoadingChat(true);
+    perform(async () => {
+      try {
+        await switchModel(useApp.getState().runtime, path);
+      } finally {
+        setLoadingChat(false);
+      }
+    });
+  };
   const cancel = () => perform(() => store().cancel(run.id));
   const fetchAnyway = () => perform(() => store().fetchAnyway(run.id));
   const again = () => perform(() => store().again(run));
@@ -364,9 +379,13 @@ export function RunCard(props: { run: Run }) {
       {unloaded !== null && !chatLoaded && (
         <div className="flex flex-wrap items-center gap-2 text-xs text-fg-muted">
           <p>{STUDIO_CARD.unloaded}</p>
-          <button type="button" className={LINK} onClick={() => void useApp.getState().pickModel(`local:${unloaded}`)}>
-            {STUDIO_CARD.loadAgain}
-          </button>
+          {loadingChat ? (
+            <p role="status">{STUDIO_CARD.loadingChat}</p>
+          ) : (
+            <button type="button" className={LINK} disabled={busy} onClick={() => loadAgain(unloaded)}>
+              {STUDIO_CARD.loadAgain}
+            </button>
+          )}
         </div>
       )}
 

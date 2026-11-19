@@ -9,10 +9,11 @@ import { COMPOSE_IMAGES_EVENT } from "../../lib/composeImages";
 import { LOCAL, LOCAL_RUN, MODELS, RUN } from "./fixtures/models";
 import type { LocalRun, Run, RunError, StudioPrefs } from "./types";
 
-vi.mock("../../lib/ipc", () => ({ isTauri: () => true }));
+vi.mock("../../lib/ipc", () => ({ isTauri: () => true, loadLocalModel: vi.fn(), modelBusy: vi.fn() }));
 vi.mock("./api");
 
 const api = await import("./api");
+const ipc = await import("../../lib/ipc");
 const { RunCard, localLine, queueSummary, usualSeconds, usualTimesOf } = await import("./RunCard");
 const { useStudio } = await import("../../store/studio");
 const { useApp } = await import("../../store/app");
@@ -624,11 +625,32 @@ describe("RunCard", () => {
 
     it("the unloaded chat model can be loaded again from the card", async () => {
       const pickModel = vi.fn(async () => undefined);
-      useApp.setState({ pickModel });
+      useApp.setState({ pickModel, runtime: { modelPath: null, state: "stopped" } as never });
+      let loaded: (done: boolean) => void = () => undefined;
+      vi.mocked(ipc.loadLocalModel).mockReturnValue(new Promise((resolve) => (loaded = resolve)));
       await show(localWorking({ stage: "drawing", step: 1, steps: 4, unloadedChat: "/m/chat.gguf" }));
       screen.getByText("The chat model was unloaded to make room.");
       await click(button("Load it again"));
-      expect(pickModel).toHaveBeenCalledWith("local:/m/chat.gguf");
+      // The runtime loads it as it was: the open chat keeps its own model.
+      expect(ipc.loadLocalModel).toHaveBeenCalledWith("/m/chat.gguf", null, true);
+      expect(pickModel).not.toHaveBeenCalled();
+      // It may wait while this job holds the graphics card: the card says it is on its way.
+      screen.getByText("Loading the chat model…");
+      noButton("Load it again");
+      await act(async () => loaded(true));
+      await flush();
+      button("Load it again");
+      // A load that fails says why on the card, with what to do.
+      vi.mocked(ipc.loadLocalModel).mockRejectedValue({
+        code: "load_failed",
+        message: "The model could not be loaded.",
+        nextStep: "Check the file in Models → Installed.",
+        details: "",
+      });
+      await click(button("Load it again"));
+      await flush();
+      screen.getByText("The model could not be loaded.");
+      screen.getByText("Check the file in Models → Installed.");
       cleanup();
       // Said after the run too, until the chat model is loaded again.
       await show(localRun({}, { unloadedChat: "/m/chat.gguf" }));

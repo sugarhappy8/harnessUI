@@ -1524,6 +1524,9 @@ export const STUDIO_CARD = {
   keepChat: "Keep the chat model",
   unloaded: "The chat model was unloaded to make room.",
   loadAgain: "Load it again",
+  /** While *Load it again* loads the chat model (it waits while another local job holds the
+   *  graphics card). */
+  loadingChat: "Loading the chat model…",
   alongside: "Chat replies may be slower while this runs",
   onProcessor: "Running on the processor: slower, and chat will be slow while this runs.",
   retrying: "Ran out of graphics memory, trying again with memory saving (slower)",
