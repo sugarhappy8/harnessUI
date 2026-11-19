@@ -505,12 +505,28 @@ pub fn nothing_to_fetch() -> AppError {
     )
 }
 
-/// The app closed while the run was being sent (cloud) or made (this computer).
-pub fn interrupted(company: Company) -> AppError {
-    match company {
-        Company::Local => AppError::new(
+/// The app closed while the run was being sent (cloud) or made (this computer), charged as
+/// `charged` says: a run on this computer never; an OpenRouter picture that never arrived
+/// not (`Some(false)`: OpenRouter bills only a picture it delivered); else unknown.
+pub fn interrupted(company: Company, charged: Option<bool>) -> AppError {
+    match (company, charged) {
+        (Company::Local, _) => AppError::new(
             "studio_interrupted",
             "The app closed while this was being made.",
+            "Nothing was charged. Make it again if you still want it.",
+            String::new(),
+        ),
+        // OpenRouter bills only a picture it delivered.
+        (Company::OpenRouter, Some(false)) => AppError::new(
+            "studio_interrupted",
+            "The app closed while sending.",
+            "OpenRouter does not charge for a picture you did not receive. Make it again if \
+             you still want it.",
+            String::new(),
+        ),
+        (_, Some(false)) => AppError::new(
+            "studio_interrupted",
+            "The app closed while sending.",
             "Nothing was charged. Make it again if you still want it.",
             String::new(),
         ),
@@ -1544,7 +1560,8 @@ mod tests {
             blocked(company, Some(Stage::Output), Some(true), None),
             job_lost(company),
             closed_before_its_turn(company),
-            interrupted(company),
+            interrupted(company, None),
+            interrupted(company, Some(false)),
             broke_off(company),
             result_expired(company),
             not_sent(company),
@@ -2236,14 +2253,21 @@ mod tests {
 
     #[test]
     fn an_interrupted_run_says_where_to_look() {
-        let e = interrupted(Company::OpenRouter);
+        let e = interrupted(Company::OpenRouter, None);
         assert_eq!(
             e.message,
             "The app closed while sending; it may or may not have started."
         );
         assert_eq!(e.next_step, "Check your activity page on openrouter.ai.");
+        let picture = interrupted(Company::OpenRouter, Some(false));
+        assert_eq!(picture.message, "The app closed while sending.");
         assert_eq!(
-            interrupted(Company::Local).message,
+            picture.next_step,
+            "OpenRouter does not charge for a picture you did not receive. Make it again if you \
+             still want it."
+        );
+        assert_eq!(
+            interrupted(Company::Local, Some(false)).message,
             "The app closed while this was being made."
         );
     }

@@ -2690,6 +2690,70 @@ async fn a_run_left_sending_becomes_interrupted_and_is_never_sent_again() {
     );
 }
 
+/// OpenRouter bills only a picture it delivered: one the app closed while sending, so never
+/// received, was not charged (as `unanswered_charge` says of a timeout). Any other company's
+/// may or may not have started.
+#[tokio::test]
+async fn an_openrouter_picture_left_sending_was_not_charged() {
+    let h = harness().await;
+    let seed = |provider: i64, host: &str, model: &str| {
+        let id = uuid::Uuid::new_v4().to_string();
+        let run = store::NewCreationRun {
+            id: id.clone(),
+            kind: store::CreationKind::Image,
+            runs_on: store::RunsOn::Cloud,
+            provider_id: Some(store::ProviderId(provider)),
+            provider_name: "My endpoint".into(),
+            provider_host: host.into(),
+            model: model.into(),
+            model_label: "GPT Image 2.6 Flare".into(),
+            prompt: "a red kite".into(),
+            params: json!({"params": {"n": 1}, "extra": {}, "routing": null}),
+            refs: json!([]),
+            estimate_usd: Some(0.04),
+            gen_model_id: None,
+            engine_build: None,
+            device: None,
+            created_at: h.now - 60_000,
+        };
+        let store = h.store.clone();
+        async move {
+            store.insert_creation_run(run).await.unwrap();
+            store
+                .update_creation_run(
+                    &id,
+                    store::CreationPatch {
+                        status: Some(store::CreationStatus::Sending),
+                        started_at: Some(Some(h.now - 60_000)),
+                        ..Default::default()
+                    },
+                )
+                .await
+                .unwrap();
+            id
+        }
+    };
+    let openrouter = seed(h.openrouter, "openrouter.ai", FLARE_ON_OPENROUTER).await;
+    let openai = seed(h.openai, "api.openai.com", FLARE).await;
+    h.manager.resume_interrupted().await;
+
+    let run = h.run_dto(&openrouter).await;
+    assert_eq!(run.status, "interrupted");
+    let error = run.error.unwrap();
+    assert_eq!(error.code, "studio_interrupted");
+    assert_eq!(error.charged, Some(false));
+    assert_eq!(error.message, "The app closed while sending.");
+    assert_eq!(
+        error.next_step,
+        "OpenRouter does not charge for a picture you did not receive. Make it again if you still want it."
+    );
+
+    let error = h.run_dto(&openai).await.error.unwrap();
+    assert_eq!(error.charged, None);
+    assert!(error.message.contains("may or may not have started"));
+    assert_eq!(h.provider.starts(), 0);
+}
+
 #[tokio::test]
 async fn a_queued_run_is_not_sent_after_a_restart() {
     let h = harness().await;

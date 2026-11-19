@@ -1192,7 +1192,10 @@ impl Inner {
     pub(super) async fn interrupt_local(&self, run: &store::CreationRun) {
         let ending = Ending {
             status: store::CreationStatus::Interrupted,
-            ..Ending::failed(errors::interrupted(Company::Local), Some(false))
+            ..Ending::failed(
+                errors::interrupted(Company::Local, Some(false)),
+                Some(false),
+            )
         };
         self.record_end(
             &run.id,

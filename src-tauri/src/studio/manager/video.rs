@@ -55,9 +55,17 @@ impl Inner {
                     }
                 }
             }
-            // Sent with no job to check: Studio cannot know whether it started.
+            // Sent with no job to check: Studio cannot know whether it started, except that
+            // OpenRouter bills only a picture it delivered, and this one never arrived.
             _ => {
-                let ending = end(S::Interrupted, errors::interrupted(company), None);
+                let charged = (company == Company::OpenRouter
+                    && run.kind == store::CreationKind::Image)
+                    .then_some(false);
+                let ending = end(
+                    S::Interrupted,
+                    errors::interrupted(company, charged),
+                    charged,
+                );
                 self.record_end(&run.id, company, run.audit_id, ending, run.started_at)
                     .await;
             }
