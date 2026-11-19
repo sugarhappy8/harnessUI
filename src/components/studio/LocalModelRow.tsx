@@ -1,5 +1,4 @@
 import { useState } from "react";
-import { AlertDialog } from "radix-ui";
 import {
   amountGb,
   LICENCE_BADGE,
@@ -12,6 +11,7 @@ import {
 import { useStudio } from "../../store/studio";
 import { FitDot } from "../FitBadge";
 import { visiblePath } from "../FolderChip";
+import { ConfirmDialog } from "./ConfirmDialog";
 import { etaText } from "./eta";
 import { CARD_BUTTON } from "./styles";
 import type {
@@ -201,31 +201,21 @@ function DeleteButton(props: { id: string; name: string; onError: (e: unknown) =
       <button type="button" className={CARD_BUTTON} disabled={busy} onClick={() => setAsking(true)}>
         {LOCAL_MODELS.delete}
       </button>
-      <AlertDialog.Root open={asking} onOpenChange={setAsking}>
-        <AlertDialog.Portal>
-          <AlertDialog.Overlay className="dialog-overlay fixed inset-0" />
-          <AlertDialog.Content className="fixed top-1/2 left-1/2 w-[26rem] max-w-[92vw] -translate-x-1/2 -translate-y-1/2 rounded-2xl border border-border bg-surface p-5 text-sm shadow-pop">
-            <AlertDialog.Title className="text-base font-semibold">{LOCAL_MODELS.deleteTitle(props.name)}</AlertDialog.Title>
-            <AlertDialog.Description className="mt-2 text-fg-muted">{LOCAL_MODELS.deleteBody}</AlertDialog.Description>
-            <div className="mt-4 flex justify-end gap-2">
-              <AlertDialog.Cancel className="rounded-md border border-border px-3 py-1.5 hover:bg-bg-muted">
-                {LOCAL_MODELS.cancel}
-              </AlertDialog.Cancel>
-              <AlertDialog.Action
-                onClick={() => {
-                  setBusy(true);
-                  deleteLocal(props.id)
-                    .catch(props.onError)
-                    .finally(() => setBusy(false));
-                }}
-                className="rounded-md bg-danger px-3 py-1.5 font-medium text-white hover:opacity-90"
-              >
-                {LOCAL_MODELS.delete}
-              </AlertDialog.Action>
-            </div>
-          </AlertDialog.Content>
-        </AlertDialog.Portal>
-      </AlertDialog.Root>
+      <ConfirmDialog
+        open={asking}
+        onOpenChange={setAsking}
+        title={LOCAL_MODELS.deleteTitle(props.name)}
+        body={LOCAL_MODELS.deleteBody}
+        cancelLabel={LOCAL_MODELS.cancel}
+        actionLabel={LOCAL_MODELS.delete}
+        destructive
+        onConfirm={() => {
+          setBusy(true);
+          deleteLocal(props.id)
+            .catch(props.onError)
+            .finally(() => setBusy(false));
+        }}
+      />
     </>
   );
 }

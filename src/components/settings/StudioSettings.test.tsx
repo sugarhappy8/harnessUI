@@ -334,6 +334,59 @@ describe("Settings → Studio", () => {
     expect(screen.queryByText("Choose an amount from $1 to $1,000.")).toBeNull();
   });
 
+  it("an amount may be written with thousands separators", async () => {
+    await show();
+    await setAmount("Daily limit in US dollars", "1,000");
+    expect(api.studioSetPrefs).toHaveBeenLastCalledWith({ dailyLimitUsd: 1000 });
+    expect(screen.queryByText("Choose an amount from $1 to $1,000.")).toBeNull();
+    await setAmount("Daily limit in US dollars", "500");
+    expect(api.studioSetPrefs).toHaveBeenLastCalledWith({ dailyLimitUsd: 500 });
+    await setAmount("Daily limit in US dollars", "$1,000.00");
+    expect(api.studioSetPrefs).toHaveBeenLastCalledWith({ dailyLimitUsd: 1000 });
+    expect(screen.queryByText("Choose an amount from $1 to $1,000.")).toBeNull();
+    // A comma that does not group thousands is not read as one (a decimal comma would be
+    // read ten times too big).
+    vi.mocked(api.studioSetPrefs).mockClear();
+    await setAmount("Daily limit in US dollars", "1,5");
+    screen.getByText("Choose an amount from $1 to $1,000.");
+    expect(api.studioSetPrefs).not.toHaveBeenCalled();
+    // The confirmation amount reads them too.
+    await setAmount("Ask before runs of", "$1,00");
+    screen.getByText("Choose an amount from $0.25 to $100.");
+    await setAmount("Ask before runs of", "$2.50");
+    expect(api.studioSetPrefs).toHaveBeenLastCalledWith({ confirmAtUsd: 2.5 });
+  });
+
+  it("a limit typed and turned off at once comes back at the amount typed", async () => {
+    await show();
+    // The backend answers only when let: unticking the box leaves the amount box first, so its
+    // change is sent and still unanswered when the box is unticked.
+    const answers: (() => void)[] = [];
+    vi.mocked(api.studioSetPrefs).mockImplementation(
+      (patch) =>
+        new Promise((resolve) =>
+          answers.push(() => {
+            held = { ...held, ...patch };
+            resolve(held);
+          }),
+        ),
+    );
+    const box = screen.getByLabelText("Daily limit in US dollars");
+    await act(async () => {
+      fireEvent.change(box, { target: { value: "20" } });
+      fireEvent.blur(box);
+    });
+    await click(screen.getByRole("checkbox", { name: "Daily limit" }));
+    expect(vi.mocked(api.studioSetPrefs).mock.calls).toEqual([[{ dailyLimitUsd: 20 }], [{ dailyLimitUsd: null }]]);
+    await act(async () => {
+      for (const answer of answers.splice(0)) answer();
+    });
+    await flush();
+    expect(useStudio.getState().prefs?.dailyLimitUsd).toBeNull();
+    await click(screen.getByRole("checkbox", { name: "Daily limit" }));
+    expect(api.studioSetPrefs).toHaveBeenLastCalledWith({ dailyLimitUsd: 20 });
+  });
+
   it("the confirmation choices can be changed", async () => {
     await show();
     const video = screen.getByRole("checkbox", { name: "Ask before every video" }) as HTMLInputElement;

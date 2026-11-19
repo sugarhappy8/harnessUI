@@ -1,10 +1,10 @@
 import { useEffect, useRef, useState, type ReactNode, type Ref } from "react";
-import { AlertDialog } from "radix-ui";
 import { Film, ImageIcon, Star } from "lucide-react";
 import type { ErrorInfo } from "../../lib/types";
 import { STUDIO_DELETE, STUDIO_TILE } from "../../lib/words";
 import { toErrorInfo } from "../../store/app";
 import * as api from "./api";
+import { ConfirmDialog } from "./ConfirmDialog";
 import { RefThumb } from "./RefTray";
 import type { MediaKind, Output, Run } from "./types";
 import { clock } from "./Working";
@@ -211,47 +211,29 @@ export function ConfirmDelete(props: {
   const today = localDayStart();
   const counts = results?.some((r) => r.run.runsOn === "cloud" && r.run.createdAt >= today) ?? false;
   return (
-    <AlertDialog.Root
+    <ConfirmDialog
       open={results !== null}
       onOpenChange={(open) => {
         if (!open) props.onCancel();
       }}
-    >
-      <AlertDialog.Portal>
-        <AlertDialog.Overlay className="dialog-overlay fixed inset-0" />
-        <AlertDialog.Content className="fixed top-1/2 left-1/2 w-[26rem] max-w-[92vw] -translate-x-1/2 -translate-y-1/2 rounded-2xl border border-border bg-surface p-5 text-sm shadow-pop">
-          {results && (
-            <>
-              <AlertDialog.Title className="text-base font-semibold">
-                {STUDIO_DELETE.title(
-                  results.length,
-                  results.map((r) => r.run.kind),
-                )}
-              </AlertDialog.Title>
-              <AlertDialog.Description asChild>
-                <div className="mt-2 flex flex-col gap-1.5">
-                  <p>{STUDIO_DELETE.removes(results.length)}</p>
-                  <p className="text-fg-muted">
-                    {STUDIO_DELETE.audit}
-                    {counts ? ` ${STUDIO_DELETE.spending}` : ""}
-                  </p>
-                </div>
-              </AlertDialog.Description>
-              <div className="mt-4 flex justify-end gap-2">
-                <AlertDialog.Cancel className="rounded-md border border-border px-3 py-1.5 hover:bg-bg-muted">
-                  {STUDIO_DELETE.cancel}
-                </AlertDialog.Cancel>
-                <AlertDialog.Action
-                  onClick={props.onConfirm}
-                  className="rounded-md bg-danger px-3 py-1.5 font-medium text-white hover:opacity-90"
-                >
-                  {STUDIO_DELETE.delete}
-                </AlertDialog.Action>
-              </div>
-            </>
-          )}
-        </AlertDialog.Content>
-      </AlertDialog.Portal>
-    </AlertDialog.Root>
+      title={
+        results &&
+        STUDIO_DELETE.title(
+          results.length,
+          results.map((r) => r.run.kind),
+        )
+      }
+      body={results && STUDIO_DELETE.removes(results.length)}
+      note={
+        <>
+          {STUDIO_DELETE.audit}
+          {counts ? ` ${STUDIO_DELETE.spending}` : ""}
+        </>
+      }
+      cancelLabel={STUDIO_DELETE.cancel}
+      actionLabel={STUDIO_DELETE.delete}
+      destructive
+      onConfirm={props.onConfirm}
+    />
   );
 }

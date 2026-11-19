@@ -1076,6 +1076,8 @@ export const ENGINE_LINE = {
   unpacking: "Studio engine: unpacking…",
   /** Linux without a development engine. */
   unavailable: "Studio engine: not available on this computer",
+  /** Between the installed line and *Remove*. */
+  separator: "·",
   remove: "Remove",
   removeTitle: "Remove the Studio engine?",
   /** Under the question; `size` is its download ("29 MB"). */
@@ -1773,6 +1775,8 @@ export const STUDIO_SETTINGS = {
     n === 0 ? "There were no stopped or failed runs." : n === 1 ? "1 run was deleted." : `${n} runs were deleted.`,
   spending: "Cloud spending",
   confirmVideo: "Ask before every video",
+  /** Before an amount box, which takes US dollars. */
+  dollar: "$",
   /** Before the amount box; "or more" follows it. */
   confirmAt: "Ask before runs of",
   orMore: "or more",

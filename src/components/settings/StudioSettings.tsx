@@ -1,5 +1,4 @@
 import { useEffect, useState } from "react";
-import { AlertDialog } from "radix-ui";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import * as ipc from "../../lib/ipc";
 import type { ErrorInfo } from "../../lib/types";
@@ -9,6 +8,7 @@ import { useStudio } from "../../store/studio";
 import { ErrorBanner } from "../ErrorBanner";
 import { visiblePath } from "../FolderChip";
 import * as api from "../studio/api";
+import { ConfirmDialog } from "../studio/ConfirmDialog";
 import { EngineLine } from "../studio/EngineLine";
 import { LocalNotice } from "../studio/LocalNotice";
 import { BOX } from "../studio/styles";
@@ -36,11 +36,16 @@ const GPU_POLICIES: readonly GpuPolicy[] = ["unload", "ask", "processor"];
 const BUTTON = "rounded-md border border-border px-3 py-1 text-sm hover:bg-bg-muted disabled:opacity-60";
 const HEADING = "text-sm font-medium";
 
-/** A typed amount in US dollars ("2.5", "$15"); `null` when it is not a number. */
+/** Commas between groups of three digits ("1,000", "1,000.00"), which only separate thousands. */
+const THOUSANDS = /^\d{1,3}(,\d{3})+(\.\d*)?$/;
+
+/** A typed amount in US dollars ("2.5", "$15", "$1,000.00"); `null` when it is not a number.
+ *  A comma that does not separate thousands ("1,5") is not read, so a decimal comma is never
+ *  taken for an amount ten times too big. */
 function amountFrom(text: string): number | null {
   const bare = text.trim().replace(/^\$\s*/, "");
   if (bare === "") return null;
-  const n = Number(bare);
+  const n = Number(THOUSANDS.test(bare) ? bare.replaceAll(",", "") : bare);
   return Number.isFinite(n) ? n : null;
 }
 
@@ -217,31 +222,17 @@ function Results(props: { usage: Usage | null }) {
         )}
       </div>
       {error && <ErrorBanner error={error} onDismiss={() => setError(null)} />}
-      <AlertDialog.Root open={asking} onOpenChange={setAsking}>
-        <AlertDialog.Portal>
-          <AlertDialog.Overlay className="dialog-overlay fixed inset-0" />
-          <AlertDialog.Content className="fixed top-1/2 left-1/2 w-[26rem] max-w-[92vw] -translate-x-1/2 -translate-y-1/2 rounded-2xl border border-border bg-surface p-5 text-sm shadow-pop">
-            <AlertDialog.Title className="text-base font-semibold">{STUDIO_SETTINGS.deleteTitle}</AlertDialog.Title>
-            <AlertDialog.Description asChild>
-              <div className="mt-2 flex flex-col gap-1.5">
-                <p>{STUDIO_SETTINGS.deleteBody}</p>
-                <p className="text-fg-muted">{STUDIO_DELETE.audit}</p>
-              </div>
-            </AlertDialog.Description>
-            <div className="mt-4 flex justify-end gap-2">
-              <AlertDialog.Cancel className="rounded-md border border-border px-3 py-1.5 hover:bg-bg-muted">
-                {STUDIO_DELETE.cancel}
-              </AlertDialog.Cancel>
-              <AlertDialog.Action
-                onClick={() => void deleteUnfinished()}
-                className="rounded-md bg-danger px-3 py-1.5 font-medium text-white hover:opacity-90"
-              >
-                {STUDIO_DELETE.delete}
-              </AlertDialog.Action>
-            </div>
-          </AlertDialog.Content>
-        </AlertDialog.Portal>
-      </AlertDialog.Root>
+      <ConfirmDialog
+        open={asking}
+        onOpenChange={setAsking}
+        title={STUDIO_SETTINGS.deleteTitle}
+        body={STUDIO_SETTINGS.deleteBody}
+        note={STUDIO_DELETE.audit}
+        cancelLabel={STUDIO_DELETE.cancel}
+        actionLabel={STUDIO_DELETE.delete}
+        destructive
+        onConfirm={() => void deleteUnfinished()}
+      />
     </section>
   );
 }
@@ -281,7 +272,7 @@ function AmountField(props: {
     <div>
       <div className="flex flex-wrap items-center gap-1.5">
         {props.label && <label htmlFor={props.id}>{props.label}</label>}
-        <span aria-hidden>$</span>
+        <span aria-hidden>{STUDIO_SETTINGS.dollar}</span>
         <input
           id={props.id}
           type="text"
@@ -314,8 +305,15 @@ function Spending(props: { prefs: StudioPrefs }) {
   const { prefs } = props;
   const limit = prefs.dailyLimitUsd;
   const [error, setError] = useState<ErrorInfo | null>(null);
-  // The amount the limit is turned on again at.
+  // The amount the limit is turned on again at: the newest one, kept in the box here or saved.
+  // Unticking leaves the box first, so an amount just kept there may not be saved yet (`limit`
+  // still the old one) when the box is unticked: that amount, not `limit`, comes back.
   const [kept, setKept] = useState(limit ?? DEFAULT_LIMIT_USD);
+  const [savedLimit, setSavedLimit] = useState(limit);
+  if (limit !== savedLimit) {
+    setSavedLimit(limit);
+    if (limit !== null) setKept(limit);
+  }
   return (
     <section aria-labelledby="studio-spending" className="space-y-3">
       <h3 id="studio-spending" className={HEADING}>
@@ -347,12 +345,7 @@ function Spending(props: { prefs: StudioPrefs }) {
               checked={limit !== null}
               aria-describedby="studio-limit-help"
               onChange={(e) => {
-                if (e.target.checked) {
-                  changePrefs({ dailyLimitUsd: kept }, setError);
-                } else {
-                  if (limit !== null) setKept(limit);
-                  changePrefs({ dailyLimitUsd: null }, setError);
-                }
+                changePrefs({ dailyLimitUsd: e.target.checked ? kept : null }, setError);
               }}
             />
             {STUDIO_SETTINGS.limit}
