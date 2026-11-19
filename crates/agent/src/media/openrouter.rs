@@ -38,7 +38,7 @@ use url::Url;
 use super::{
     Company, Cost, FailureKind, Fetched, JobDone, JobState, LocalIo, MediaError, MediaFailure,
     MediaKind, MediaLimits, MediaModel, MediaProvider, MediaRequest, RawCatalog, RefImage, RefRole,
-    RequestPreview, Routing, Saved, SignedUrl, Stage, Started, base_failure,
+    RequestPreview, Routing, Saved, SignedUrl, Stage, Started, base_failure, unanswered,
 };
 use crate::client::{OnceBody, OnceReply, OpenAiClient, join};
 use crate::cloud::scrub_text;
@@ -405,10 +405,7 @@ fn speaks_of_moderation(message: &str) -> bool {
 fn refused(status: u16, headers: &HeaderMap, body: &[u8], key: Option<&str>) -> MediaError {
     let failure = openrouter_failure(status, headers, body, key);
     if failure.kind == FailureKind::Server && failure.charged.is_none() {
-        MediaError::Unknown(ProviderError::Http {
-            status,
-            message: failure.message,
-        })
+        unanswered(status, failure)
     } else {
         MediaError::Answered(failure)
     }

@@ -38,7 +38,7 @@ use super::{
     Canonical, Choice, Company, Cost, FailureKind, Fetched, JobDone, JobState, Layer, LocalIo,
     MediaError, MediaFailure, MediaKind, MediaLimits, MediaModel, MediaProvider, MediaRequest,
     OPENAI_SIZE_RULES, ParamKind, ParamSpec, Price, RawCatalog, RefImage, RefRole, RequestPreview,
-    Requires, Saved, Stage, Started, base_failure, family_of,
+    Requires, Saved, Stage, Started, base_failure, family_of, unanswered,
 };
 use crate::client::{OnceBody, OnceReply, OpenAiClient, join};
 use crate::cloud::{openai_media_kind, scrub_text};
@@ -398,10 +398,7 @@ fn asks_for_verification(message: &str) -> bool {
 fn refused(status: u16, headers: &HeaderMap, body: &[u8], key: Option<&str>) -> MediaError {
     let failure = openai_failure(status, headers, body, key);
     if failure.kind == FailureKind::Server {
-        MediaError::Unknown(ProviderError::Http {
-            status,
-            message: failure.message,
-        })
+        unanswered(status, failure)
     } else {
         MediaError::Answered(failure)
     }

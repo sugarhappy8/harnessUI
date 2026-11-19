@@ -318,13 +318,17 @@ async fn a_500_is_never_sent_again() {
     let server = MockServer::start(|_| {
         Reply::json(
             500,
-            &json!({"error": {"code": 500, "message": "Internal Server Error"}}),
+            &json!({"id": "gen-123", "error": {"code": 500, "message": "Internal Server Error"}}),
         )
     })
     .await;
     let dir = tempfile::tempdir().unwrap();
     let result = openrouter(&server).start(&req(), dir.path()).await;
-    assert!(matches!(result, Err(MediaError::Unknown(_))), "{result:?}");
+    let Err(MediaError::Unknown(err)) = result else {
+        panic!("{result:?}");
+    };
+    // The request id stays, so the log can name the request to the company.
+    assert!(err.to_string().contains("gen-123"), "{err}");
     assert_eq!(server.requests().len(), 1);
 }
 
@@ -1327,13 +1331,20 @@ async fn an_openai_500_is_never_sent_again() {
     let server = MockServer::start(|_| {
         openai_error(
             500,
-            r#"{"error": {"message": "The server had an error", "code": null}}"#,
+            r#"{"error": {"message": "The server had an error", "code": "server_error"}}"#,
         )
     })
     .await;
     let dir = tempfile::tempdir().unwrap();
     let result = openai(&server).start(&openai_req(), dir.path()).await;
-    assert!(matches!(result, Err(MediaError::Unknown(_))), "{result:?}");
+    let Err(MediaError::Unknown(err)) = result else {
+        panic!("{result:?}");
+    };
+    // The request id and the company's code stay for the log.
+    let said = err.to_string();
+    assert!(said.contains("req_8f2"), "{said}");
+    assert!(said.contains("server_error"), "{said}");
+    assert!(!said.contains(OPENAI_KEY));
     assert_eq!(server.requests().len(), 1);
 }
 

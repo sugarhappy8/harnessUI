@@ -529,6 +529,25 @@ pub(crate) fn base_failure(
     }
 }
 
+/// A refusal whose charge is unknown (a server failure), reported as no answer, like a
+/// timeout: the request may have run. The message keeps the request id and the company's
+/// code the failure read, so the log can still name the request to the company.
+pub(crate) fn unanswered(status: u16, failure: MediaFailure) -> MediaError {
+    let named: Vec<String> = [
+        failure.request_id.map(|id| format!("request {id}")),
+        failure.company_code.map(|code| format!("code {code}")),
+    ]
+    .into_iter()
+    .flatten()
+    .collect();
+    let message = if named.is_empty() {
+        failure.message
+    } else {
+        format!("{} ({})", failure.message, named.join(", "))
+    };
+    MediaError::Unknown(ProviderError::Http { status, message })
+}
+
 /// The message in an error answer: the error object's `message` (or `detail`), a bare error
 /// string, else the body as text, else the status.
 fn failure_text(status: u16, value: Option<&Value>, body: &[u8]) -> String {
