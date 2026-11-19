@@ -12,8 +12,6 @@
 //! - **An estimate** ([`estimate`]) for the settings of a request ([`choice_for`]): `None`
 //!   when the price is not known; a run on this computer costs nothing.
 
-use std::cmp::Ordering;
-
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
@@ -258,9 +256,9 @@ pub fn parse_pricing_skus(skus: &Map<String, Value>) -> Price {
     })
 }
 
-/// A picture model's price from one saved `/endpoints` answer. With several companies the
-/// dearest is used, unless `routing` pins one (`only`, or `allow_fallbacks == false`): then
-/// that company's price.
+/// A picture model's price from one saved `/endpoints` answer. With several companies, each
+/// priced item is the dearest of theirs (below), unless `routing` pins one (`only`, or
+/// `allow_fallbacks == false`): then that company's price.
 ///
 /// Per company: `output_image` rows with unit `image` are prices per picture, keyed by their
 /// `variant` (none: every resolution), matched without regard to case to the company's
@@ -270,8 +268,11 @@ pub fn parse_pricing_skus(skus: &Map<String, Value>) -> Price {
 /// unit `token` makes the company [`Price::PerToken`]; any other row makes it
 /// [`Price::Unknown`].
 ///
-/// Among the companies the routing allows, an unknown price wins, then a price per token,
-/// then the company whose dearest picture costs the most. No company allowed: unknown.
+/// Among the companies the routing allows, an unknown price wins, then a price per token.
+/// Otherwise every resolution any of them names, and any other resolution, costs the dearest
+/// of their prices for it, and an added picture the dearest of their prices for one: a run the
+/// routing sends to any of these companies never costs more than its estimate. No company
+/// allowed: unknown.
 pub fn parse_image_endpoints(answer: &Value, routing: Option<&Routing>) -> Price {
     let prices = answer
         .get("endpoints")
@@ -280,18 +281,11 @@ pub fn parse_image_endpoints(answer: &Value, routing: Option<&Routing>) -> Price
         .flatten()
         .filter(|record| routing_allows(routing, provider_tag(record)))
         .map(company_price);
-    let mut dearest: Option<Table> = None;
+    let mut tables = Vec::new();
     let mut per_token = false;
     for price in prices {
         match price {
-            Price::PerImage(table) => {
-                if dearest
-                    .as_ref()
-                    .is_none_or(|best| dearer(&table, best) == Ordering::Greater)
-                {
-                    dearest = Some(table);
-                }
-            }
+            Price::PerImage(table) => tables.push(table),
             Price::PerToken => per_token = true,
             _ => return Price::Unknown,
         }
@@ -299,7 +293,63 @@ pub fn parse_image_endpoints(answer: &Value, routing: Option<&Routing>) -> Price
     if per_token {
         return Price::PerToken;
     }
-    dearest.map_or(Price::Unknown, Price::PerImage)
+    dearest_of(tables).map_or(Price::Unknown, Price::PerImage)
+}
+
+/// One table for several companies' picture prices: a row for each resolution any of them
+/// names (and the plain row, for any other resolution) at the dearest price among the
+/// companies that price it, and the dearest added picture. One company's table is kept as it
+/// is; none gives `None`.
+fn dearest_of(tables: Vec<Table>) -> Option<Table> {
+    if tables.len() <= 1 {
+        return tables.into_iter().next();
+    }
+    let mut resolutions: Vec<Option<String>> = Vec::new();
+    for row in tables.iter().flat_map(|table| &table.rows) {
+        if !resolutions
+            .iter()
+            .any(|seen| same_resolution(seen.as_deref(), row.resolution.as_deref()))
+        {
+            resolutions.push(row.resolution.clone());
+        }
+    }
+    let rows = resolutions
+        .into_iter()
+        .filter_map(|resolution| {
+            let choice = PriceChoice {
+                count: 1,
+                seconds: None,
+                resolution: resolution.clone(),
+                quality: None,
+                audio: None,
+                start_frame: false,
+                input_images: 0,
+            };
+            let usd = tables
+                .iter()
+                .filter_map(|table| picture_price(table, &choice))
+                .reduce(f64::max)?;
+            Some(PriceRow {
+                mode: None,
+                resolution,
+                quality: None,
+                audio: None,
+                usd,
+            })
+        })
+        .collect();
+    Some(Table {
+        rows,
+        per_input_image_usd: tables
+            .iter()
+            .filter_map(|table| table.per_input_image_usd)
+            .reduce(f64::max),
+        input_images_unpriced: tables.iter().any(|table| table.input_images_unpriced),
+        minimum_usd: tables
+            .iter()
+            .filter_map(|table| table.minimum_usd)
+            .reduce(f64::max),
+    })
 }
 
 /// What a run with these settings would cost, in US dollars: `None` when the price is not
@@ -556,19 +606,6 @@ fn company_price(record: &Value) -> Price {
         input_images_unpriced: false,
         minimum_usd: None,
     })
-}
-
-/// Which of two companies' picture prices is dearer: by their dearest picture, then their
-/// cheapest, then an added picture.
-fn dearer(a: &Table, b: &Table) -> Ordering {
-    let key = |table: &Table| {
-        let (low, high) = bounds(&table.rows).unwrap_or((0.0, 0.0));
-        (high, low, table.per_input_image_usd.unwrap_or(0.0))
-    };
-    let (a, b) = (key(a), key(b));
-    a.0.total_cmp(&b.0)
-        .then(a.1.total_cmp(&b.1))
-        .then(a.2.total_cmp(&b.2))
 }
 
 /// A video's shorter side as a resolution name: `1280x720` → `720p`; 2160 lines are `4K`,
@@ -1061,6 +1098,44 @@ mod tests {
             ),
             0.04,
         );
+    }
+
+    #[test]
+    fn with_several_companies_each_choice_takes_the_dearest_price() {
+        // Their tables cross: a is dearer at 2K, b at 1K, and only b charges for an added
+        // picture. A run may go to either, so each priced item is the dearer of the two.
+        let record = |tag: &str, pricing: Value| {
+            json!({
+                "provider_slug": tag,
+                "provider_tag": tag,
+                "supported_parameters": {"resolution": {"type": "enum", "values": ["1K", "2K", "4K"]}},
+                "pricing": pricing
+            })
+        };
+        let answer = json!({"endpoints": [
+            record("a", json!([
+                {"billable": "output_image", "unit": "image", "variant": "1K", "cost_usd": 0.03},
+                {"billable": "output_image", "unit": "image", "variant": "2K", "cost_usd": 0.12}
+            ])),
+            record("b", json!([
+                {"billable": "output_image", "unit": "image", "variant": "1k", "cost_usd": 0.05},
+                {"billable": "output_image", "unit": "image", "variant": "2K", "cost_usd": 0.08},
+                {"billable": "output_image", "unit": "image", "cost_usd": 0.20},
+                {"billable": "input_image", "unit": "image", "cost_usd": 0.01}
+            ]))
+        ]});
+        let both = parse_image_endpoints(&answer, None);
+        usd(estimate(&both, &pics(1, "1K", 0)), 0.05);
+        usd(estimate(&both, &pics(1, "2K", 0)), 0.12);
+        usd(estimate(&both, &pics(2, "1K", 3)), 0.13);
+        // Only b states a price for 4K.
+        usd(estimate(&both, &pics(1, "4K", 0)), 0.20);
+        // Pinned, each company keeps its own prices.
+        let a = parse_image_endpoints(&answer, Some(&only("a")));
+        usd(estimate(&a, &pics(1, "1K", 1)), 0.03);
+        assert_eq!(estimate(&a, &pics(1, "4K", 0)), None);
+        let b = parse_image_endpoints(&answer, Some(&only("b")));
+        usd(estimate(&b, &pics(1, "2K", 0)), 0.08);
     }
 
     #[test]
