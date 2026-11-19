@@ -15,7 +15,7 @@
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
-use super::spec::routing_allows;
+use super::spec::{resolution_lines, routing_allows};
 use super::{MediaKind, MediaModel, MediaRequest, RefRole, Routing};
 
 /// How a model is priced.
@@ -410,8 +410,9 @@ pub fn openai_cost(usage: &Value, rates: &OpenAiRates) -> Option<f64> {
 ///
 /// The count is `n` (1 when absent; always 1 for a video); the length is `duration`; the
 /// resolution is `resolution`, else a picture's `size` as sent (`1024x1024`); a video's
-/// `size`, sent in place of its resolution, gives its shorter side (`1280x720` → `720p`,
-/// `3840x2160` → `4K`). What the request sends comes first: the company defaults of
+/// `size`, sent in place of its resolution, gives its shorter side in lines (`1280x720` →
+/// `720p`, `3840x2160` → `2160p`), which the estimate matches to a row by its line count
+/// (`2160p` is the `4K` row's). What the request sends comes first: the company defaults of
 /// `resolution` and `size` are read, in the same order, only when it sends neither. The
 /// quality is `quality`, the sound `generate_audio`; a start frame is noted, and every added
 /// picture counts.
@@ -608,15 +609,38 @@ fn company_price(record: &Value) -> Price {
     })
 }
 
-/// A video's shorter side as a resolution name: `1280x720` → `720p`; 2160 lines are `4K`,
-/// as every catalogue names 3840 × 2160.
+/// A video's shorter side in lines: `1280x720` (or `1280X720`) → `720p`.
 fn shorter_side(size: &str) -> Option<String> {
-    let (width, height) = size.split_once('x')?;
-    let lines = width.parse::<u32>().ok()?.min(height.parse().ok()?);
-    match lines {
-        0 => None,
-        2160 => Some("4K".to_owned()),
-        n => Some(format!("{n}p")),
+    let (width, height) = size.split_once(['x', 'X'])?;
+    let lines = width
+        .trim()
+        .parse::<u32>()
+        .ok()?
+        .min(height.trim().parse().ok()?);
+    (lines > 0).then(|| format!("{lines}p"))
+}
+
+/// Whether two video resolution names are one resolution: the same name, or the same line
+/// count. A `p` name counts lines; a `K` name counts thousands of width (a `K` is 1024, as
+/// [`resolution_lines`] counts it), so it is the line counts within half a `K` of that
+/// width's 16:9 height: `4K` is 2016 to 2592 lines (2160), `2K` 864 to 1440 (1080 and 1440).
+fn same_video_resolution(a: &str, b: &str) -> bool {
+    if a.eq_ignore_ascii_case(b) {
+        return true;
+    }
+    /// Lines, and whether the name counts thousands of width.
+    fn lines(label: &str) -> Option<(f64, bool)> {
+        let wide = label.trim().to_ascii_lowercase().ends_with('k');
+        Some((resolution_lines(label)?, wide))
+    }
+    const HEIGHT: f64 = 9.0 / 16.0;
+    match (lines(a), lines(b)) {
+        (Some((a, wide_a)), Some((b, wide_b))) if wide_a == wide_b => a == b,
+        (Some((width, true)), Some((height, false)))
+        | (Some((height, false)), Some((width, true))) => {
+            (height - width * HEIGHT).abs() <= 512.0 * HEIGHT
+        }
+        _ => false,
     }
 }
 
@@ -670,7 +694,11 @@ fn specificity(row: &PriceRow) -> usize {
 /// [`parse_pricing_skus`] has no cents row beside a plain `duration_seconds`, so this follows
 /// the key order of [`SKU_FAMILIES`].)
 fn second_price(table: &Table, choice: &PriceChoice) -> Option<f64> {
-    let resolution = choice.resolution.as_deref().filter(|r| !r.is_empty());
+    let resolution = choice
+        .resolution
+        .as_deref()
+        .filter(|r| !r.is_empty())
+        .map(|r| row_resolution(table, r));
     let mut tries: Vec<(Option<Mode>, Option<&str>, Option<bool>)> = Vec::new();
     if let Some(sound) = choice.audio {
         tries.push((None, resolution, Some(sound)));
@@ -693,6 +721,22 @@ fn second_price(table: &Table, choice: &PriceChoice) -> Option<f64> {
             })
             .map(|row| row.usd)
     })
+}
+
+/// The name a table gives a video resolution: a row's own name for it when one has it,
+/// else the first row of the same line count ([`same_video_resolution`]), else the name as
+/// it is.
+fn row_resolution<'a>(table: &'a Table, resolution: &'a str) -> &'a str {
+    let names = || {
+        table
+            .rows
+            .iter()
+            .filter_map(|row| row.resolution.as_deref())
+    };
+    names()
+        .find(|name| name.eq_ignore_ascii_case(resolution))
+        .or_else(|| names().find(|name| same_video_resolution(name, resolution)))
+        .unwrap_or(resolution)
 }
 
 /// Text to video, or image to video when a start frame is sent.
@@ -901,6 +945,36 @@ mod tests {
     /// The price of a synthetic `pricing_skus` object, for key mixes no recorded model has.
     fn skus(object: Value) -> Price {
         parse_pricing_skus(object.as_object().unwrap())
+    }
+
+    #[test]
+    fn a_video_size_finds_its_row_by_line_count_whatever_the_row_is_called() {
+        let k_rows = skus(json!({
+            "duration_seconds": 0.10,
+            "duration_seconds_2k": 0.30,
+            "duration_seconds_4k": 0.50
+        }));
+        let p_rows = skus(json!({
+            "duration_seconds": 0.10,
+            "duration_seconds_1440p": 0.30,
+            "duration_seconds_2160p": 0.50
+        }));
+        for price in [&k_rows, &p_rows] {
+            usd(secs(price, 1.0, "1440p", None, false, 0), 0.30);
+            usd(secs(price, 1.0, "2160p", None, false, 0), 0.50);
+            // A name is still matched as it is.
+            usd(secs(price, 1.0, "4K", None, false, 0), 0.50);
+            usd(secs(price, 1.0, "2K", None, false, 0), 0.30);
+            // No row for 720 lines: the plain price.
+            usd(secs(price, 1.0, "720p", None, false, 0), 0.10);
+        }
+        // A row named exactly as the choice comes before one of the same class.
+        let both = skus(json!({
+            "duration_seconds_1080p": 0.20,
+            "duration_seconds_2k": 0.30
+        }));
+        usd(secs(&both, 1.0, "1080p", None, false, 0), 0.20);
+        usd(secs(&both, 1.0, "1440p", None, false, 0), 0.30);
     }
 
     #[test]
@@ -1283,8 +1357,20 @@ mod tests {
         assert_eq!(choice_for(&veo, &tall).resolution.as_deref(), Some("1080p"));
         let uhd = request(&veo, json!({"duration": 8, "size": "3840x2160"}));
         let choice = choice_for(&veo, &uhd);
-        assert_eq!(choice.resolution.as_deref(), Some("4K"));
+        assert_eq!(choice.resolution.as_deref(), Some("2160p"));
+        // 2160 lines are the 4K row's.
         usd(estimate(&sku("google/veo-3.1"), &choice), 4.80);
+        let upper = request(&veo, json!({"duration": 8, "size": "3840X2160"}));
+        assert_eq!(
+            choice_for(&veo, &upper).resolution.as_deref(),
+            Some("2160p")
+        );
+        // 1080 lines are not 4K: the plain row.
+        let full_hd = request(&veo, json!({"duration": 8, "size": "1920x1080"}));
+        usd(
+            estimate(&sku("google/veo-3.1"), &choice_for(&veo, &full_hd)),
+            3.20,
+        );
 
         let mischief = model(&models, "tbc/mischief-1");
         assert_eq!(
@@ -1334,7 +1420,10 @@ mod tests {
         let sent = request(&veo, json!({"resolution": "720p"}));
         assert_eq!(choice_for(&veo, &sent).resolution.as_deref(), Some("720p"));
         let neither = request(&veo, json!({}));
-        assert_eq!(choice_for(&veo, &neither).resolution.as_deref(), Some("4K"));
+        assert_eq!(
+            choice_for(&veo, &neither).resolution.as_deref(),
+            Some("2160p")
+        );
     }
 
     #[test]

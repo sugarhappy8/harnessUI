@@ -899,7 +899,7 @@ fn picture_model(id: &str, entry: &Value, answer: Option<&Value>) -> MediaModel 
 }
 
 /// A resolution's height, enough to order them: `720p` → 720; a `K` counts 1024 lines.
-fn resolution_lines(label: &str) -> Option<f64> {
+pub(crate) fn resolution_lines(label: &str) -> Option<f64> {
     let lower = label.trim().to_ascii_lowercase();
     match lower.strip_suffix('k') {
         Some(thousands) => thousands.parse::<f64>().ok().map(|k| k * 1024.0),
