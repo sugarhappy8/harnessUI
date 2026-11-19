@@ -1,6 +1,7 @@
-import { useCallback, useEffect, useId, useRef, useState, type DragEvent } from "react";
+import { useCallback, useEffect, useEffectEvent, useId, useRef, useState, type DragEvent, type RefObject } from "react";
 import { DropdownMenu } from "radix-ui";
 import { Check, ChevronDown, Image as ImageIcon, X } from "lucide-react";
+import * as ipc from "../../lib/ipc";
 import { STUDIO_REFS } from "../../lib/words";
 import { toErrorInfo } from "../../store/app";
 import { draftModel, pictureRoles, placeRef, useStudio, type StudioTab } from "../../store/studio";
@@ -14,6 +15,11 @@ import type { ParamSpec, RefItem, RefRole } from "./types";
 // (`studio_add_ref`) and shown with its role chip (Reference, Start frame, End frame: the
 // roles of the model's own picture fields). A picture past the model's limit is refused before
 // it is kept. The right panel's frame drop zones (`FrameDrop`) take one picture for their role.
+// A picture dropped from the file manager comes through the webview's own drop where it carries
+// files (macOS, Linux) and through Tauri's native drop on Windows, where the window keeps
+// Tauri's drag-and-drop and the webview's drop has no files (`useNativePictureDrops`, which
+// hands the tray or frame zone under the drop the number of files dropped: the backend keeps
+// them from the paths it recorded, `studio_add_dropped`).
 
 /** The picture types the file chooser offers (`readImage` checks each file again). */
 const PICTURE_TYPES = "image/png,image/jpeg,image/gif,image/webp";
@@ -23,23 +29,37 @@ function failureWords(e: unknown): string {
   return e instanceof Error ? e.message : toErrorInfo(e).message;
 }
 
+/** A picture to add, kept by the backend once it is asked for (after the model's limit was
+ *  checked): a file read here, or a file of the native drop. */
+type Source = () => Promise<RefItem>;
+
+/** `files` as pictures to add: each read as the composer reads one, then kept. */
+function fromFiles(files: File[]): Source[] {
+  return files.map((file) => async () => api.studioAddRef(await readImage(file)));
+}
+
+/** The first `count` files of the native drop just made, as pictures to add. */
+function fromDrop(count: number): Source[] {
+  return Array.from({ length: count }, (_, index) => () => api.studioAddDropped(index, null));
+}
+
 /**
- * Adds `files` to `tab`'s draft one at a time, as `role` (or, without one, as the first role of
- * the model's picture fields with room). Each is checked against the model's limit before it
+ * Adds `sources` to `tab`'s draft one at a time, as `role` (or, without one, as the first role
+ * of the model's picture fields with room). Each is checked against the model's limit before it
  * is read and kept, so a picture refused is never sent to the backend; with `replace`, a
  * picture of a full role takes the place of the one there. Stops at the first picture not
  * added and returns why, else `null`.
  */
-async function addPictures(tab: StudioTab, files: File[], role: RefRole | null, replace: boolean): Promise<string | null> {
+async function addPictures(tab: StudioTab, sources: Source[], role: RefRole | null, replace: boolean): Promise<string | null> {
   /** The draft's pictures that count against the limit: with `replace`, not those of `role`. */
   const counted = (refs: RefItem[]) => (replace ? refs.filter((r) => (r.role ?? "reference") !== role) : refs);
-  for (const file of files) {
+  for (const source of sources) {
     const before = useStudio.getState();
     const placed = placeRef(draftModel(before, tab), counted(before.drafts[tab].refs), role);
     if ("refused" in placed) return placed.refused;
     let kept: RefItem;
     try {
-      kept = await api.studioAddRef(await readImage(file));
+      kept = await source();
     } catch (e) {
       return failureWords(e);
     }
@@ -58,17 +78,21 @@ async function addPictures(tab: StudioTab, files: File[], role: RefRole | null, 
 function useAdding(tab: StudioTab) {
   const [error, setError] = useState<string | null>(null);
   const add = useCallback(
-    (files: File[], role: RefRole | null, replace = false) => {
-      if (files.length === 0) return;
+    (sources: Source[], role: RefRole | null, replace = false) => {
+      if (sources.length === 0) return;
       setError(null);
-      void addPictures(tab, files, role, replace).then(setError);
+      void addPictures(tab, sources, role, replace).then(setError);
     },
     [tab],
   );
   return { add, error, setError };
 }
 
-/** The handlers that take files dropped on an element. */
+/** When the webview's own drop last carried files (ms since the epoch): on macOS and Linux
+ *  Tauri's native drop comes with it, and must not add the same pictures again. */
+let htmlDropAt = 0;
+
+/** The handlers that take files dropped on an element (the webview's own drop). */
 function dropTarget(take: (files: File[]) => void) {
   return {
     onDragOver: (e: DragEvent) => {
@@ -78,9 +102,70 @@ function dropTarget(take: (files: File[]) => void) {
       const files = [...e.dataTransfer.files];
       if (files.length === 0) return;
       e.preventDefault();
+      htmlDropAt = Date.now();
       take(files);
     },
   };
+}
+
+/** The event a tray or frame zone gets for a native drop on it: `detail` is how many files. */
+const NATIVE_DROP = "studio:native-drop";
+
+/** How long a native drop waits for the webview's own drop of the same files, and how close
+ *  together the two count as one drop. */
+export const NATIVE_DROP_SETTLE_MS = 300;
+const SAME_DROP_MS = 1500;
+
+/** Calls `take` with the number of files of each native drop on `zone`. */
+function useNativeDropOn(zone: RefObject<HTMLElement | null>, take: (count: number) => void) {
+  const onDrop = useEffectEvent((count: number) => take(count));
+  useEffect(() => {
+    const el = zone.current;
+    if (!el) return;
+    const listener = (e: Event) => onDrop((e as CustomEvent<number>).detail);
+    el.addEventListener(NATIVE_DROP, listener);
+    return () => el.removeEventListener(NATIVE_DROP, listener);
+  });
+}
+
+/** The tray or frame zone at `x`, `y` (CSS pixels): a frame zone, the tray, or the tray of the
+ *  prompt dock dropped on (the prompt box takes a picture as the chat's message box does). */
+function zoneAt(x: number, y: number): HTMLElement | null {
+  const hit = document.elementFromPoint?.(x, y)?.closest<HTMLElement>("[data-frame-drop], [data-ref-tray], [data-prompt-dock]");
+  if (!hit || hit.matches("[data-frame-drop], [data-ref-tray]")) return hit ?? null;
+  return hit.querySelector<HTMLElement>("[data-ref-tray]");
+}
+
+/**
+ * While `active` (Studio is shown): each native drop of files on the tray, a frame zone or the
+ * prompt dock goes to that zone, which adds the files as it adds a picture dropped on it. A
+ * moment later, so a drop the webview's own drop already took (macOS, Linux) is not added
+ * twice. Outside the app it does nothing.
+ */
+export function useNativePictureDrops(active: boolean) {
+  useEffect(() => {
+    if (!active || !ipc.isTauri()) return;
+    let alive = true;
+    const onDrop = (count: number, at: { x: number; y: number }) => {
+      const zone = zoneAt(at.x, at.y);
+      if (!zone || count === 0) return;
+      const dropped = Date.now();
+      setTimeout(() => {
+        if (!alive || htmlDropAt > dropped - SAME_DROP_MS) return;
+        zone.dispatchEvent(new CustomEvent(NATIVE_DROP, { detail: count }));
+      }, NATIVE_DROP_SETTLE_MS);
+    };
+    const unlisten = Promise.resolve()
+      .then(() => api.onNativeDrop(onDrop))
+      .catch((e: unknown) => {
+        console.warn("Studio: dropped pictures cannot be followed", e);
+        return undefined;
+      });
+    return () => {
+      alive = false;
+      void unlisten.then((u) => u?.());
+    };
+  }, [active]);
 }
 
 /** An added picture from its bytes in the gallery folder, as a `blob:` URL let go with it; a
@@ -195,7 +280,9 @@ export function RefTray(props: { tab: StudioTab }) {
   const removeRef = useStudio((s) => s.removeRef);
   const { add, error, setError } = useAdding(tab);
   const fileInput = useRef<HTMLInputElement>(null);
+  const tray = useRef<HTMLDivElement>(null);
   const roles = pictureRoles(model);
+  useNativeDropOn(tray, (count) => add(fromDrop(count), null));
 
   // A paste goes to the focused element, so the tray listens on the document for one in
   // Studio's view (the prompt box, mostly) that carries pictures while the model takes any
@@ -207,7 +294,7 @@ export function RefTray(props: { tab: StudioTab }) {
       const files = [...(e.clipboardData?.files ?? [])].filter((f) => f.type.startsWith("image/"));
       if (files.length === 0) return;
       e.preventDefault();
-      add(files, null);
+      add(fromFiles(files), null);
     };
     document.addEventListener("paste", onPaste);
     return () => document.removeEventListener("paste", onPaste);
@@ -215,7 +302,7 @@ export function RefTray(props: { tab: StudioTab }) {
 
   if (roles.length === 0 && refs.length === 0 && !error) return null;
   return (
-    <div data-ref-tray className="flex flex-wrap items-center gap-2" {...dropTarget((files) => add(files, null))}>
+    <div ref={tray} data-ref-tray className="flex flex-wrap items-center gap-2" {...dropTarget((files) => add(fromFiles(files), null))}>
       {refs.map((item, i) => (
         <div key={refKey(refs, i)} className="flex items-center gap-1.5 rounded-lg border border-border p-1 pr-1.5">
           <RefThumb sha256={item.sha256} mime={item.mime} alt={STUDIO_REFS.picture(i + 1)} className="h-8 w-8 rounded" />
@@ -248,7 +335,7 @@ export function RefTray(props: { tab: StudioTab }) {
         hidden
         aria-label={STUDIO_REFS.choose}
         onChange={(e) => {
-          if (e.target.files) add([...e.target.files], null);
+          if (e.target.files) add(fromFiles([...e.target.files]), null);
           e.target.value = "";
         }}
       />
@@ -273,7 +360,9 @@ export function FrameDrop(props: { tab: StudioTab; spec: ParamSpec }) {
   const labelId = useId();
   const index = refs.findIndex((r) => (r.role ?? "reference") === role);
   const item = index >= 0 ? refs[index] : undefined;
-  const take = (files: File[]) => add(files.slice(0, 1), role, true);
+  const take = (files: File[]) => add(fromFiles(files.slice(0, 1)), role, true);
+  const zone = useRef<HTMLButtonElement>(null);
+  useNativeDropOn(zone, () => add(fromDrop(1), role, true));
 
   return (
     <div role="group" aria-labelledby={labelId} data-param={spec.key} className="flex flex-col gap-1.5">
@@ -282,7 +371,9 @@ export function FrameDrop(props: { tab: StudioTab; spec: ParamSpec }) {
       </span>
       <div className="flex items-start gap-1.5">
         <button
+          ref={zone}
           type="button"
+          data-frame-drop
           aria-label={item ? STUDIO_REFS.change(spec.label) : undefined}
           onClick={() => fileInput.current?.click()}
           className="flex h-20 min-w-0 flex-1 items-center justify-center overflow-hidden rounded-lg border border-dashed border-border px-2 text-center text-xs text-fg-muted hover:border-border-strong hover:text-fg"

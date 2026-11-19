@@ -17,7 +17,7 @@ vi.mock("../../lib/ipc", () => ({ isTauri: () => true }));
 vi.mock("./api");
 
 const api = await import("./api");
-const { RefTray } = await import("./RefTray");
+const { FrameDrop, RefTray, useNativePictureDrops, NATIVE_DROP_SETTLE_MS } = await import("./RefTray");
 const { useStudio } = await import("../../store/studio");
 
 const INITIAL = useStudio.getState();
@@ -349,5 +349,115 @@ describe("RefTray", () => {
     await renderTray({ ...flare, params: flare.params.filter((p) => p.kind.type !== "images") });
     expect(screen.queryByText("+ Add picture")).toBeNull();
     expect(useStudio.getState().addRef("image", kept(1))).toBe("This model takes no added pictures.");
+  });
+});
+
+// On Windows the window keeps Tauri's drag-and-drop, and the webview's own drop carries no
+// files: a picture dropped from the file manager comes as Tauri's native drop, which goes to
+// the tray or frame zone under it; the backend keeps the files from the paths it recorded
+// (`studio_add_dropped`, by their place in the drop). On macOS and Linux both drops come, and
+// the webview's own takes them.
+describe("a native drop (Windows)", () => {
+  type OnDrop = (count: number, at: { x: number; y: number }) => void;
+  let dropped: OnDrop = () => undefined;
+
+  function Following(props: { tab: "image" | "video" }) {
+    useNativePictureDrops(true);
+    const spec = useStudio((s) => {
+      const { target, model } = s.drafts[props.tab];
+      const m = target && model ? s.endpoints[0]?.models.find((x) => x.id === model) : undefined;
+      return m?.params.find((p) => p.kind.type === "images" && p.kind.role === "startFrame") ?? null;
+    });
+    return (
+      <div data-studio-view>
+        <div data-prompt-dock>
+          <RefTray tab={props.tab} />
+          <textarea aria-label="Prompt" />
+        </div>
+        {spec && <FrameDrop tab={props.tab} spec={spec} />}
+      </div>
+    );
+  }
+
+  async function follow(m: MediaModel) {
+    vi.mocked(api.onNativeDrop).mockImplementation(async (handler: OnDrop) => {
+      dropped = handler;
+      return () => undefined;
+    });
+    await renderTray(m);
+    cleanup();
+    await act(async () => {
+      render(<Following tab={m.kind} />);
+    });
+    await flush();
+  }
+
+  /** A native drop of `count` files on `el` (found under the drop's point). */
+  async function nativeDrop(el: Element, count = 1) {
+    document.elementFromPoint = vi.fn(() => el);
+    act(() => dropped(count, { x: 10, y: 20 }));
+    await act(async () => {
+      vi.advanceTimersByTime(NATIVE_DROP_SETTLE_MS);
+    });
+    await flush();
+  }
+
+  beforeEach(() => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "Date"] });
+    // Well after the webview's own drops of the tests before.
+    vi.setSystemTime(Date.now() + 60_000);
+  });
+  afterEach(() => {
+    vi.useRealTimers();
+    delete (document as { elementFromPoint?: unknown }).elementFromPoint;
+  });
+
+  it("files dropped on the prompt are added from the drop, by their place in it", async () => {
+    await follow(flare);
+    vi.mocked(api.studioAddDropped).mockResolvedValueOnce(kept(1)).mockResolvedValueOnce(kept(2));
+    await nativeDrop(screen.getByRole("textbox", { name: "Prompt" }), 2);
+    expect(api.studioAddDropped).toHaveBeenNthCalledWith(1, 0, null);
+    expect(api.studioAddDropped).toHaveBeenNthCalledWith(2, 1, null);
+    expect(refs().map((r) => r.sha256)).toEqual([kept(1).sha256, kept(2).sha256]);
+    expect(api.studioAddRef).not.toHaveBeenCalled();
+  });
+
+  it("a file dropped on the start frame zone becomes the start frame", async () => {
+    await follow(veo);
+    vi.mocked(api.studioAddDropped).mockResolvedValue(kept(3));
+    await nativeDrop(screen.getByText("Drop a picture here, or choose one"), 2);
+    expect(api.studioAddDropped).toHaveBeenCalledTimes(1);
+    expect(refs("video")).toEqual([{ ...kept(3), role: "startFrame" }]);
+  });
+
+  it("past the model's limit it is refused before anything is kept, and a refusal says why", async () => {
+    await follow(flareOne);
+    vi.mocked(api.studioAddDropped).mockResolvedValueOnce(kept(1));
+    await nativeDrop(screen.getByText("+ Add picture"), 2);
+    screen.getByText("This model takes 1 added picture.");
+    expect(api.studioAddDropped).toHaveBeenCalledTimes(1);
+  });
+
+  it("a drop the webview's own drop took (macOS, Linux) is not added twice", async () => {
+    await follow(flare);
+    vi.mocked(api.studioAddRef).mockResolvedValue(kept(1));
+    const tray = screen.getByText("+ Add picture");
+    dropFile(tray, pngFile());
+    await nativeDrop(tray, 1);
+    // The webview's own drop reads its file meanwhile.
+    for (let i = 0; i < 5 && vi.mocked(api.studioAddRef).mock.calls.length === 0; i++) {
+      await act(async () => {
+        vi.advanceTimersByTime(100);
+      });
+      await flush();
+    }
+    expect(api.studioAddDropped).not.toHaveBeenCalled();
+    expect(api.studioAddRef).toHaveBeenCalledTimes(1);
+  });
+
+  it("a drop elsewhere adds nothing", async () => {
+    await follow(flare);
+    await nativeDrop(document.body, 1);
+    expect(api.studioAddDropped).not.toHaveBeenCalled();
   });
 });

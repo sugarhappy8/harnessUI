@@ -19,6 +19,7 @@ import type {
   MediaModel,
   Output,
   RefItem,
+  RefRole,
   RequestPreview,
   Run,
   RunsCursor,
@@ -83,6 +84,11 @@ export const studioShowInFolder = (outputId: string) => invoke<void>("studio_sho
 export const studioOpenFolder = () => invoke<void>("studio_open_folder");
 /** Keeps a picture added to the prompt in the gallery. */
 export const studioAddRef = (image: ImageInput) => invoke<RefItem>("studio_add_ref", { image });
+/** *Drop a picture* through Tauri's native drop (the only one that carries files on Windows):
+ *  keeps file `index` of the files last dropped on the window, as `studio_add_ref` keeps a
+ *  picture. The backend reads only the paths it recorded; the webview never sends one. */
+export const studioAddDropped = (index: number, role: RefRole | null) =>
+  invoke<RefItem>("studio_add_dropped", { index, role });
 /** *Use in prompt*. */
 export const studioRefFromOutput = (outputId: string) => invoke<RefItem>("studio_ref_from_output", { outputId });
 /** *Send to chat*: the picture as the composer takes one. */
@@ -132,6 +138,16 @@ export function onStudioProgress(handler: (run: Run) => void): Promise<UnlistenF
 /** The Windows engine pack's download, at most every 300 ms, then once finished. */
 export function onEngineProgress(handler: (p: EngineProgress) => void): Promise<UnlistenFn> {
   return listen<EngineProgress>("studio-engine-progress", (e) => handler(e.payload));
+}
+/** Files dropped on the window (Tauri's native drop): how many, and where, in CSS pixels from
+ *  the webview's top left corner. */
+export async function onNativeDrop(handler: (count: number, at: { x: number; y: number }) => void): Promise<UnlistenFn> {
+  const { getCurrentWebview } = await import("@tauri-apps/api/webview");
+  return getCurrentWebview().onDragDropEvent((e) => {
+    if (e.payload.type !== "drop") return;
+    const scale = window.devicePixelRatio || 1;
+    handler(e.payload.paths.length, { x: e.payload.position.x / scale, y: e.payload.position.y / scale });
+  });
 }
 /** Closing the main window, or quitting, while a local job runs. */
 export function onQuitRequested(handler: () => void): Promise<UnlistenFn> {

@@ -10,6 +10,7 @@ import { Notices } from "./EmptyStates";
 import { Grid } from "./Grid";
 import { LocalModels } from "./LocalModels";
 import { PromptDock } from "./PromptDock";
+import { useNativePictureDrops } from "./RefTray";
 import { queueSummary, RunCard } from "./RunCard";
 import { SettingsPanel } from "./SettingsPanel";
 import { CARD_BUTTON } from "./styles";
@@ -70,6 +71,9 @@ export function StudioView() {
   // that one away, but not an action's (a failed *Get the list* stays until dismissed).
   const [error, setError] = useState<{ info: ErrorInfo; read: boolean } | null>(null);
   const fail = (e: unknown) => setError({ info: toErrorInfo(e), read: false });
+  // A picture dropped from the file manager on the tray or a frame zone, through Tauri's native
+  // drop (the webview's own carries no files on Windows), while Studio is shown.
+  useNativePictureDrops(shown);
 
   // What is saved, each time Studio is shown (App keeps it mounted while the chat is shown)
   // and when Settings closes over it: an endpoint or a preference may have changed there. The
