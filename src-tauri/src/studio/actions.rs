@@ -440,7 +440,10 @@ mod tests {
             )
             .await
             .unwrap();
-            assert_eq!(Path::new(&saved), link);
+            // The folder as resolved: on macOS the temporary folder is under /var, which is a
+            // link to /private/var.
+            let folder = docs.path().canonicalize().unwrap();
+            assert_eq!(Path::new(&saved), folder.join(name));
             let meta = std::fs::symlink_metadata(&link).unwrap();
             assert!(meta.is_file(), "{name}: the link was replaced by the copy");
             assert_eq!(std::fs::read(&link).unwrap(), picture);
