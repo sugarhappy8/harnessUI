@@ -24,8 +24,10 @@ CHANGELOG or the website.
     check that `certutil -hashfile sd-master-532d2c1-bin-win-vulkan-x64.zip SHA256` prints
     `3e66222c87ca27074e1fd8ce79706eef17a8aaf39949906aa1bee7e060f22ecc`, unzip it into a new
     folder and copy `msvcp140.dll`, `msvcp140_codecvt_ids.dll`, `vcomp140.dll`,
-    `vcruntime140.dll` and `vcruntime140_1.dll` next to `sd-cli.exe` from harnessUI's
-    `resources\llama\main` folder.
+    `vcruntime140.dll` and `vcruntime140_1.dll` next to `sd-cli.exe` from the installed app's
+    `llama\main` folder (in the folder harnessUI was installed into, where
+    `src-tauri/tauri.windows.conf.json` puts llama.cpp's files; not a source checkout's
+    `resources\llama\main`).
 - **The model files**, as the provisional starter entries pin them (plan, Task L7): each
   downloaded once into one folder, run from that folder.
   - FLUX.2 klein 4B: `flux-2-klein-4b-Q4_0.gguf` (`leejet/FLUX.2-klein-4B-GGUF`),
@@ -114,7 +116,8 @@ CHANGELOG or the website.
      file: the hand-written `sd_list_devices_vulkan.txt` stays, because tests depend on its
      card;
    - `sd_list_devices_metal.txt` (`--list-devices` on the Mac), over the hand-written one;
-   - `sd_help.txt` (`"$SD" -h`), over the hand-written one;
+   - `sd_help.txt` (`"$SD" -h`): it is already a recording from the pinned processor-only
+     build, so record it again from the release build only if its output differs;
    - `sd_fixtures_build.txt`, holding the build's tag: `master-1106-532d2c1`.
 
    The other hand-written fixtures stay as they are.
@@ -139,3 +142,72 @@ applied; a row left empty keeps the provisional value it names.
 | 6. Sharing | FLUX.2 klein 4B beside a loaded 4B and a loaded 9B chat model: runs (yes/no), how much slower, memory left | | Task L12's "fits alongside" margin | |
 | 7. Shared encoder | One Qwen3-4B GGUF serves both FLUX.2 klein and Z-Image (yes/no) | | One shared `llm` part for both picture entries | |
 | 8. Fixtures | The files of item 8 recorded (list them) | | The recordings replace the hand-written fixtures; `progress.rs` and `failure.rs` change only where a recording differs | |
+
+## Local real runs (the MacBook Air and the Windows PC)
+
+On each computer, from a fresh install of a build of this branch (the CI disk image or
+installer). Each item says what must happen; write down anything else that does.
+
+1. **Get local models** shows the right hardware line (the graphics card or the Mac, its memory
+   and the free disk) and the recommended list, every entry free for any use.
+2. **Download FLUX.2 klein 4B.** On Windows the Studio engine downloads with it, and
+   SmartScreen or the antivirus does not block `sd-cli.exe`, or the block is named and the
+   download offered again. On the Mac nothing asks for permission and Gatekeeper is silent.
+3. **A picture with a chat model loaded.** When it does not fit beside the chat model, the chat
+   model is unloaded and the card says "The chat model was unloaded to make room." with *Load
+   it again*; loading the chat model again while Studio works waits for it ("Studio is using
+   the graphics card. The chat model loads when it finishes.").
+4. **Stop a 2 s video halfway.** The card says nothing was charged, and the computer goes quiet
+   (no `sd-cli` process left, the fans and the graphics card at rest).
+5. **Hugging Face search.** One search that finds a recognised quantization (its parts, the
+   total size and the licence are shown before Download), and one that shows "Not supported
+   yet" (no Download button).
+6. **Quit while a video is being made**, once by closing the window and, on the Mac, once with
+   ⌘Q: the question appears both ways. Meanwhile try *Install update*: it is refused with
+   "Stop it in Studio, or install the update when it finishes."
+7. **Windows without the Visual C++ redistributable** (a PC or a fresh virtual machine where it
+   was never installed): the engine starts from its own folder, with the runtime files copied
+   next to `sd-cli.exe` (`vcomp140.dll` among them).
+8. **The AI label.** `sd-cli -M metadata --image <result>` on a picture Studio made shows the AI
+   label (`trainedAlgorithmicMedia`, "Made with harnessUI 0.1.0, …") and not the prompt.
+
+## Cloud real runs
+
+One real run on each company, under $1 in total, in the app:
+
+1. **OpenAI:** a low-quality GPT Image 2.6 Flare picture.
+2. **OpenRouter:** a picture, and a 4 s 480p Grok Imagine Video 1.5 Lite video (about $0.08
+   without a start frame).
+3. **One safety refusal on each company**: the card explains it in plain words, with the
+   company, whether it was charged and the request id, and nothing is retried.
+4. **The costs:** compare each cost Studio shows with the company's activity page.
+5. **Playback:** play an OpenRouter video in the viewer on Windows and on the Mac (it plays from
+   a `blob:` address, and seeking works).
+6. **How long OpenRouter keeps a finished video:** open its content address again later (an
+   hour, a day) until it is gone, and write down how long it lasted.
+
+**Record the real traffic** into `crates/agent/tests/fixtures/media/`, so the shapes Tasks A4
+and A5 check come from the companies, not from their documentation. *See the exact request* in
+the viewer shows each body Studio sends; to record an answer, send that body again with `curl`
+and your key (`-D headers.txt -o answer.json`), within the same $1. Cut every `b64_json` down
+to a few bytes, and never save a video's bytes.
+
+- **OpenAI:** the generation answer over `openai-images-answer.json`, and its
+  `moderation_blocked` error over `openai-moderation-blocked.json`.
+- **OpenRouter** (dated files, new): `openrouter-image-answer-<date>.json` (the picture
+  answer); `openrouter-video-create-<date>.json` (the answer that starts the job);
+  `openrouter-video-status-<date>.json` (its pending, in_progress and completed answers);
+  `openrouter-video-content-<date>.json` (the content endpoint's status and headers:
+  `Content-Type`, `Content-Length`, and `Location` when it redirects). Then change the answers
+  written inline in `crates/agent/tests/media_endpoints.rs` to the same keys and value types:
+  `pictures_answer`, `submitted()`, the pending, in_progress and completed answers in
+  `a_video_job_starts_checks_and_downloads` and `signed_urls_are_kept_for_the_guarded_fetcher`,
+  and the redirect in `a_link_to_another_host_is_handed_back_not_followed`.
+- **The request bodies OpenRouter accepted**, one picture with a reference picture and an
+  extra setting and one video with a start frame, as `openrouter-request-accepted-<date>.json`,
+  with the same top-level keys as `openrouter-request-examples-2026-11-17.json`. Point the
+  `EXAMPLES` constant in `media_endpoints.rs` at it, so `assert_same_shape` checks the recorded
+  bodies; the documentation copy stays.
+
+Then run `cargo test -p agent` again, and change a test only where a recording differs from
+what it expected.
