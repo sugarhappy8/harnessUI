@@ -1,6 +1,7 @@
 import { useEffect, useId, useRef, useState } from "react";
 import { ArrowUp, AtSign, FileText, Paperclip, Square, X } from "lucide-react";
 import type { DocumentInput, ImageInput, MentionHit, MentionInput } from "../lib/types";
+import { COMPOSE_IMAGES_EVENT, type ComposeImagesDetail } from "../lib/composeImages";
 import { resolveMentions, searchMentions } from "../lib/ipc";
 import { COMPOSER_WORDS } from "../lib/words";
 import { ApprovalHint } from "./AllowAllButton";
@@ -231,7 +232,7 @@ export function Composer(props: {
     // limit, saying so when some are left out); sending checks them again.
     function onComposeImages(event: Event) {
       const detail: unknown = (event as CustomEvent<unknown>).detail;
-      const pictures = Array.isArray(detail) ? detail.filter(isPicture) : [];
+      const pictures: ComposeImagesDetail = Array.isArray(detail) ? detail.filter(isPicture) : [];
       if (pictures.length === 0) return;
       setImageError(null);
       setAttached((old) => withPictures(old, pictures));
@@ -239,11 +240,11 @@ export function Composer(props: {
     }
     window.addEventListener("app:focus-input", onFocus);
     window.addEventListener("app:compose", onCompose);
-    window.addEventListener("app:compose-images", onComposeImages);
+    window.addEventListener(COMPOSE_IMAGES_EVENT, onComposeImages);
     return () => {
       window.removeEventListener("app:focus-input", onFocus);
       window.removeEventListener("app:compose", onCompose);
-      window.removeEventListener("app:compose-images", onComposeImages);
+      window.removeEventListener(COMPOSE_IMAGES_EVENT, onComposeImages);
     };
   }, []);
 
@@ -310,7 +311,8 @@ export function Composer(props: {
               <button
                 type="button"
                 aria-label={`Remove ${img.fileName}`}
-                onClick={() => setAttached((old) => ({ ...old, images: old.images.filter((_, j) => j !== i) }))}
+                // The "8 pictures at most" notice goes too: what is attached now was all kept.
+                onClick={() => setAttached((old) => ({ images: old.images.filter((_, j) => j !== i), cut: false }))}
                 className="absolute -top-1.5 -right-1.5 rounded-full bg-bg p-0.5 shadow"
               >
                 <X size={12} aria-hidden />

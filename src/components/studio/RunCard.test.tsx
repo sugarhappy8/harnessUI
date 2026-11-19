@@ -5,6 +5,7 @@
 // damaged part's download, and the queue strip's counts. Esc never cancels a card.
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { act, cleanup, fireEvent, render, screen, within } from "@testing-library/react";
+import { COMPOSE_IMAGES_EVENT } from "../../lib/composeImages";
 import { LOCAL, LOCAL_RUN, MODELS, RUN } from "./fixtures/models";
 import type { LocalRun, Run, RunError, StudioPrefs } from "./types";
 
@@ -433,7 +434,7 @@ describe("RunCard", () => {
       useApp.setState({ activeChatId: 3 });
       const composed: unknown[] = [];
       const onCompose = (e: Event) => composed.push((e as CustomEvent<unknown>).detail);
-      window.addEventListener("app:compose-images", onCompose);
+      window.addEventListener(COMPOSE_IMAGES_EVENT, onCompose);
       try {
         useStudio.getState().showStudio();
         await show(run({ outputs: [RUN.outputs[0]!] }));
@@ -442,7 +443,7 @@ describe("RunCard", () => {
         expect(useStudio.getState().view).toBe("chat");
         expect(composed).toEqual([[picture]]);
       } finally {
-        window.removeEventListener("app:compose-images", onCompose);
+        window.removeEventListener(COMPOSE_IMAGES_EVENT, onCompose);
       }
     });
 

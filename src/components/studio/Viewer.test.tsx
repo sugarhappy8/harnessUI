@@ -9,6 +9,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { alertDialogsAnimate, endAnimation } from "./fixtures/dialogs";
+import { COMPOSE_IMAGES_EVENT } from "../../lib/composeImages";
 import { LOCAL, LOCAL_RUN, MODELS, RUN } from "./fixtures/models";
 import type { MediaModel, Output, RefItem, Run, StudioEndpoint, StudioPrefs, Usage } from "./types";
 
@@ -705,13 +706,13 @@ describe("Send to chat", () => {
 
   beforeEach(() => {
     composed = [];
-    window.addEventListener("app:compose-images", onCompose);
+    window.addEventListener(COMPOSE_IMAGES_EVENT, onCompose);
     useApp.setState(INITIAL_APP, true);
     useApp.setState({ activeChatId: 3 });
     vi.mocked(api.studioOutputForChat).mockResolvedValue(PICTURE);
   });
   afterEach(() => {
-    window.removeEventListener("app:compose-images", onCompose);
+    window.removeEventListener(COMPOSE_IMAGES_EVENT, onCompose);
   });
 
   it("Send to chat puts the picture in the message box", async () => {

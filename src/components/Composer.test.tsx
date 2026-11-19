@@ -1,6 +1,8 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { COMPOSE_IMAGES_EVENT } from "../lib/composeImages";
 import type { MentionCheck, MentionHit, MentionInput, MentionSearch } from "../lib/types";
+import { RUN } from "./studio/fixtures/models";
 
 const ipcMock = vi.hoisted(() => ({
   searchMentions: vi.fn<(chatId: number | null, query: string, limit?: number) => Promise<MentionSearch>>(),
@@ -8,8 +10,15 @@ const ipcMock = vi.hoisted(() => ({
 }));
 vi.mock("../lib/ipc", () => ipcMock);
 vi.mock("./AllowAllButton", () => ({ ApprovalHint: () => null }));
+// Studio's backend, for its *Send to chat*.
+vi.mock("./studio/api");
 
 const { Composer } = await import("./Composer");
+const studioApi = await import("./studio/api");
+const { useStudio } = await import("../store/studio");
+const { useApp } = await import("../store/app");
+const INITIAL_STUDIO = useStudio.getState();
+const INITIAL_APP = useApp.getState();
 const { mentionQueryAt, tokenIndex, removeToken, insertMention, chipsInText } = await import("./MentionPicker");
 
 const ADD: MentionHit = { kind: "function", label: "calc.py#add", path: "/w/calc.py", symbol: "add", line: 4, endLine: 5 };
@@ -165,14 +174,19 @@ describe("Composer mentions", () => {
 // `app:compose-images`: the box takes it as an attached picture, up to its 8, and says so when
 // some were left out, as for a drop or a paste.
 describe("app:compose-images", () => {
-  afterEach(cleanup);
+  afterEach(() => {
+    cleanup();
+    useStudio.setState(INITIAL_STUDIO, true);
+    useApp.setState(INITIAL_APP, true);
+  });
 
   const picture = (n: number) => ({ mime: "image/png", fileName: `lighthouse-${n}.png`, data: `iVBORw0KGgo${n}` });
   const compose = (detail: unknown) =>
     act(() => {
-      window.dispatchEvent(new CustomEvent("app:compose-images", { detail }));
+      window.dispatchEvent(new CustomEvent(COMPOSE_IMAGES_EVENT, { detail }));
     });
   const attached = () => within(screen.getByRole("group", { name: "Attachments" })).queryAllByRole("img");
+  const NOTICE = "8 pictures at most in one message. The rest were not added.";
 
   it("app:compose-images adds pictures up to 8", () => {
     setup();
@@ -204,6 +218,43 @@ describe("app:compose-images", () => {
     compose("not pictures");
     compose([{ mime: "image/svg+xml", fileName: "x.svg", data: "PHN2Zz4=" }, { fileName: "no-data.png" }]);
     expect(screen.queryByRole("group", { name: "Attachments" })).toBeNull();
+  });
+
+  it("removing an attached picture takes the notice away", () => {
+    setup();
+    compose([1, 2, 3, 4, 5, 6, 7, 8, 9].map(picture));
+    screen.getByText(NOTICE);
+    fireEvent.click(screen.getByRole("button", { name: "Remove lighthouse-3.png" }));
+    expect(attached().map((img) => img.getAttribute("alt"))).toEqual(
+      [1, 2, 4, 5, 6, 7, 8].map((n) => `lighthouse-${n}.png`),
+    );
+    expect(screen.queryByText(NOTICE)).toBeNull();
+  });
+
+  it("pasting 9 pictures attaches 8 and says the rest were not added", async () => {
+    const { box } = setup();
+    const files = [1, 2, 3, 4, 5, 6, 7, 8, 9].map(
+      (n) => new File([new Uint8Array([0x89, 0x50, 0x4e, 0x47, n])], `pasted-${n}.png`, { type: "image/png" }),
+    );
+    fireEvent.paste(box, { clipboardData: { files } });
+    await screen.findByText(NOTICE);
+    expect(attached().map((img) => img.getAttribute("alt"))).toEqual(
+      [1, 2, 3, 4, 5, 6, 7, 8].map((n) => `pasted-${n}.png`),
+    );
+  });
+
+  // Both halves together: the store's *Send to chat* sends the event the box listens for.
+  it("Studio's Send to chat attaches the picture in the box", async () => {
+    const sent = { mime: "image/png", fileName: "lighthouse-1.png", data: "iVBORw0KGgoStudio" };
+    vi.mocked(studioApi.studioOutputForChat).mockResolvedValue(sent);
+    useApp.setState({ activeChatId: 3 });
+    setup();
+    await act(() => useStudio.getState().sendToChat(RUN.outputs[0]!));
+    expect(studioApi.studioOutputForChat).toHaveBeenCalledWith(RUN.outputs[0]!.id);
+    const shown = attached();
+    expect(shown.map((img) => img.getAttribute("alt"))).toEqual(["lighthouse-1.png"]);
+    expect(shown[0]?.getAttribute("src")).toBe("data:image/png;base64,iVBORw0KGgoStudio");
+    expect(useStudio.getState().view).toBe("chat");
   });
 });
 

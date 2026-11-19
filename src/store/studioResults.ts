@@ -10,7 +10,6 @@ import type { StoreApi } from "zustand";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import * as api from "../components/studio/api";
 import type {
-  ImageInput,
   MediaModel,
   ModelChoice,
   Output,
@@ -19,6 +18,7 @@ import type {
   Run,
   RunStatus,
 } from "../components/studio/types";
+import { COMPOSE_IMAGES_EVENT, type ComposeImagesDetail } from "../lib/composeImages";
 import { STUDIO_OFFER, STUDIO_REUSE } from "../lib/words";
 import { useApp } from "./app";
 import {
@@ -252,7 +252,7 @@ export function createResults(
       if (chat.activeChatId === null) await chat.newChat();
       get().showChat();
       // The composer stays mounted while Studio is shown, so it hears this whichever is shown.
-      window.dispatchEvent(new CustomEvent<ImageInput[]>("app:compose-images", { detail: [picture] }));
+      window.dispatchEvent(new CustomEvent<ComposeImagesDetail>(COMPOSE_IMAGES_EVENT, { detail: [picture] }));
     },
   };
 }
