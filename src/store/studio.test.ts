@@ -534,6 +534,36 @@ describe("the gallery's results (Task B9)", () => {
     expect(api.studioUsage).toHaveBeenCalled();
   });
 
+  it("a run is judged on its newest copy: an older page copy without results does not bring its card back", async () => {
+    // The gallery's page read the video while it was waiting; it finished since (`live`).
+    const waiting = run({ id: "v", kind: "video", status: "waiting", outputs: [], seq: 3 });
+    const done = run({ id: "v", kind: "video", status: "done", outputs: [{ ...RUN.outputs[0]!, id: "v1", runId: "v" }], seq: 9 });
+    const other = run({ id: "kept", seq: 2 });
+    useStudio.setState({ runs: [waiting, other], recentRuns: [waiting, other], live: { v: done } });
+    vi.mocked(api.studioDelete).mockResolvedValue(undefined);
+    vi.mocked(api.studioUsage).mockResolvedValue({ spentTodayUsd: 0, pendingUsd: 0, limitUsd: 10, folder: "/g", bytes: 0, pictures: 0, videos: 0 });
+    await useStudio.getState().remove(["v1"]);
+    const s = useStudio.getState();
+    expect(s.runs.map((r) => r.id)).toEqual(["kept"]);
+    expect(s.recentRuns.map((r) => r.id)).toEqual(["kept"]);
+    expect(s.live).toEqual({});
+  });
+
+  it("a run kept after a delete shows its newest copy, stripped, in every place", async () => {
+    const outputs = RUN.outputs.slice(0, 2).map((o, i) => ({ ...o, id: `r${i}`, runId: "r" }));
+    const older = run({ id: "r", status: "running", outputs: [], seq: 1 });
+    const newest = run({ id: "r", status: "done", outputs, seq: 5 });
+    useStudio.setState({ runs: [older], recentRuns: [older], live: { r: newest } });
+    vi.mocked(api.studioDelete).mockResolvedValue(undefined);
+    vi.mocked(api.studioUsage).mockResolvedValue({ spentTodayUsd: 0, pendingUsd: 0, limitUsd: 10, folder: "/g", bytes: 0, pictures: 0, videos: 0 });
+    await useStudio.getState().remove(["r0"]);
+    const s = useStudio.getState();
+    for (const copy of [s.runs[0], s.recentRuns[0], s.live.r]) {
+      expect(copy).toMatchObject({ status: "done", seq: 5 });
+      expect(copy?.outputs.map((o) => o.id)).toEqual(["r1"]);
+    }
+  });
+
   it("Delete stopped and failed runs takes every run that ended without finishing off the cards", async () => {
     const ended = (id: string, status: Run["status"]) => run({ id, status, outputs: [] });
     const failed = ended("failed", "failed");

@@ -194,24 +194,31 @@ export function createResults(
     remove: async (outputIds) => {
       await api.studioDelete(outputIds);
       const gone = new Set(outputIds);
-      // As the backend: a finished run left without results goes; one still working, or one that
-      // ended without finishing, keeps its card.
-      const strip = (run: Run): Run | null => {
-        const outputs = run.outputs.filter((o) => !gone.has(o.id));
-        if (outputs.length === run.outputs.length) return run;
-        return run.status === "done" && outputs.length === 0 ? null : { ...run, outputs };
-      };
-      const kept = (runs: Run[]) => runs.map(strip).filter((r): r is Run => r !== null);
-      set((s) => ({
-        runs: kept(s.runs),
-        recentRuns: kept(s.recentRuns),
-        live: Object.fromEntries(
-          Object.entries(s.live).flatMap(([id, run]) => {
-            const left = strip(run);
-            return left ? [[id, left]] : [];
-          }),
-        ),
-      }));
+      set((s) => {
+        // Each run that held a deleted result is judged on its newest copy (the one the backend
+        // numbered highest, the live one first), as Delete stopped and failed runs judges: as the
+        // backend, a finished run left without results goes, and one still working, or one that
+        // ended without finishing, keeps its card. What is left of it takes the place of every
+        // copy, so an older copy without results (a page read while it waited) never brings the
+        // card back in that older state.
+        const copies = [...Object.values(s.live), ...s.runs, ...s.recentRuns];
+        const newest = new Map<string, Run | null>();
+        for (const id of new Set(copies.filter((r) => r.outputs.some((o) => gone.has(o.id))).map((r) => r.id))) {
+          const run = copies.filter((r) => r.id === id).reduce((a, b) => (b.seq > a.seq ? b : a));
+          const outputs = run.outputs.filter((o) => !gone.has(o.id));
+          newest.set(id, run.status === "done" && outputs.length === 0 ? null : { ...run, outputs });
+        }
+        const left = (run: Run): Run[] => {
+          if (!newest.has(run.id)) return [run];
+          const now = newest.get(run.id);
+          return now ? [now] : [];
+        };
+        return {
+          runs: s.runs.flatMap(left),
+          recentRuns: s.recentRuns.flatMap(left),
+          live: Object.fromEntries(Object.values(s.live).flatMap((run) => left(run).map((r) => [r.id, r]))),
+        };
+      });
       // What the gallery holds changed (today's spending does not).
       deps.rereadUsage();
     },
