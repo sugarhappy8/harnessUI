@@ -3,13 +3,24 @@
 // Reuse without seed, which fill the prompt box and never start a run; Animate, Edit and Use as
 // reference, which keep the picture as an added picture (another model offered when the tab's
 // cannot take it, an installed local one first); Star; Delete, after which a finished run left
-// without results goes too; several saved into one folder; and Settings → Studio's Delete
-// stopped and failed runs (Task B10).
+// without results goes too; several saved into one folder; Settings → Studio's Delete stopped
+// and failed runs (Task B10); and Send to chat, which puts a picture in the chat's message box
+// (Task B11).
 import type { StoreApi } from "zustand";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import * as api from "../components/studio/api";
-import type { MediaModel, ModelChoice, Output, RefItem, RefRole, Run, RunStatus } from "../components/studio/types";
+import type {
+  ImageInput,
+  MediaModel,
+  ModelChoice,
+  Output,
+  RefItem,
+  RefRole,
+  Run,
+  RunStatus,
+} from "../components/studio/types";
 import { STUDIO_OFFER, STUDIO_REUSE } from "../lib/words";
+import { useApp } from "./app";
 import {
   cloudModelsFor,
   draftModel,
@@ -82,6 +93,13 @@ export interface StudioResultsState {
    *  the picker is cancelled; a copy that fails does not stop the others, and the first failure
    *  rejects once all were tried. */
   saveSeveral(outputIds: string[]): Promise<string | null>;
+  /** Send to chat: picture `output` as the composer takes one (`studio_output_for_chat`, which
+   *  refuses a video and a picture over 20 MB), put in the open chat's message box through the
+   *  window event `app:compose-images` (a new chat is made first when none is open), and the
+   *  chat is shown. Sending it from there goes through the chat's own checks and copies it into
+   *  the chat's attachments, so deleting it from the gallery never breaks the chat. Rejects, with
+   *  Studio left as it was, when the picture cannot go into a chat or no chat could be made. */
+  sendToChat(output: Output): Promise<void>;
 }
 
 /** What the result actions use of the store's own workings. */
@@ -220,6 +238,14 @@ export function createResults(
       }
       if (failed !== null) throw failed;
       return folder;
+    },
+    sendToChat: async (output) => {
+      const picture = await api.studioOutputForChat(output.id);
+      const chat = useApp.getState();
+      if (chat.activeChatId === null) await chat.newChat();
+      get().showChat();
+      // The composer stays mounted while Studio is shown, so it hears this whichever is shown.
+      window.dispatchEvent(new CustomEvent<ImageInput[]>("app:compose-images", { detail: [picture] }));
     },
   };
 }

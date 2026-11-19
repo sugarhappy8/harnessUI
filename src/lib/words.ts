@@ -1557,6 +1557,29 @@ export const STUDIO_CHAT_WAIT = {
   stop: "Stop Studio job",
 } as const;
 
+/** Studio and the chat (Task B11): *Send to chat* on a picture, and *Open in Studio* on a
+ *  picture attached in a chat. */
+export const STUDIO_CHAT_LINK = {
+  sendToChat: "Send to chat",
+  /** On a chat picture; with several in the message, which one: "Open picture 2 in Studio". */
+  openInStudio: (n: number, of: number) => (of > 1 ? `Open picture ${n} in Studio` : "Open in Studio"),
+  /** The name a chat picture goes to Studio under, as the backend's checks of it say it
+   *  ("This picture is larger than 20 MB."). */
+  pictureName: "This picture",
+  /** Why a chat picture did not go into Studio's Pictures tab: the tray's own words (the model
+   *  takes no more), or `noModel`. */
+  notAdded: (why: string) => `Not added to Studio. ${why}`,
+  noModel: "There is no picture model yet: open Studio to get one.",
+} as const;
+
+/** The chat's message box (Task B11): its list of attached files, and the limit it keeps to
+ *  (the backend's `MAX_IMAGES`). */
+export const COMPOSER_WORDS = {
+  attachments: "Attachments",
+  /** A drop, a paste or *Send to chat* that went past the limit. */
+  tooManyPictures: (max: number) => `${max} pictures at most in one message. The rest were not added.`,
+} as const;
+
 /** A result's name in Studio's gallery: "picture 2 of 4" among a run's results, "video" alone. */
 function resultName(kind: MediaKind, n: number, of: number): string {
   const noun = kind === "video" ? "video" : "picture";

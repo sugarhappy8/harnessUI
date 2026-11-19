@@ -13,6 +13,7 @@ import {
   STUDIO_ACTIONS,
   STUDIO_ADVANCED,
   STUDIO_CARD,
+  STUDIO_CHAT_LINK,
   STUDIO_COMPANY,
   STUDIO_OFFER,
   STUDIO_PRICE,
@@ -52,10 +53,11 @@ import type { Company, MediaModel, ModelChoice, Output, RequestPreview, Run, Stu
 // run, the AI label in the file. The actions: Star, Again, Edit, Animate, Use as reference, Show
 // in folder, Delete (after the question that says what the audit log keeps), Reuse all and
 // Reuse without seed (which fill the prompt box and never start a run), Save as (the settings
-// file only when asked), Copy (a picture, as a PNG; Save as when the clipboard refuses) and the
-// exact request or command. Keys: ←/→, F, R, Shift R, A, S, C, Del, Space and Esc, which closes
-// the viewer and never cancels a run. A picture is shown with an `img` element only, so an SVG's
-// scripts never run; a video plays from a `blob:` URL.
+// file only when asked), Copy (a picture, as a PNG; Save as when the clipboard refuses), Send to
+// chat (a picture, into the chat's message box: Task B11) and the exact request or command.
+// Keys: ←/→, F, R, Shift R, A, S, C, Del, Space and Esc, which closes the viewer and never
+// cancels a run. A picture is shown with an `img` element only, so an SVG's scripts never run;
+// a video plays from a `blob:` URL.
 
 /** Why an action said something: what it did, or why it could not. */
 type Said = { text: string; warn: boolean } | { error: ErrorInfo };
@@ -330,6 +332,12 @@ export function Viewer(props: { outputId: string; onClose(): void }) {
         setSaid({ text: STUDIO_VIEWER.noCopy, warn: true });
       },
     );
+  };
+  const sendToChat = () => {
+    if (!output || !picture) return;
+    // The chat is shown once it is in the message box, and the viewer closes with that; why it
+    // cannot go is said here, with Studio left as it was.
+    perform(() => store().sendToChat(output));
   };
   const copyPrompt = () => {
     if (!run) return;
@@ -606,6 +614,11 @@ export function Viewer(props: { outputId: string; onClose(): void }) {
                 </div>
                 <div className="flex flex-col gap-1.5">
                   <div className="flex flex-wrap gap-2">
+                    {picture && (
+                      <button type="button" disabled={busy} onClick={sendToChat} className={CARD_BUTTON}>
+                        {STUDIO_CHAT_LINK.sendToChat}
+                      </button>
+                    )}
                     <button type="button" disabled={busy} onClick={saveAs} className={CARD_BUTTON}>
                       {STUDIO_VIEWER.saveAs}
                     </button>

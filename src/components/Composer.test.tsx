@@ -161,6 +161,52 @@ describe("Composer mentions", () => {
   });
 });
 
+// [0.1.0 B11] Studio's *Send to chat* puts a picture in the message box with the window event
+// `app:compose-images`: the box takes it as an attached picture, up to its 8, and says so when
+// some were left out, as for a drop or a paste.
+describe("app:compose-images", () => {
+  afterEach(cleanup);
+
+  const picture = (n: number) => ({ mime: "image/png", fileName: `lighthouse-${n}.png`, data: `iVBORw0KGgo${n}` });
+  const compose = (detail: unknown) =>
+    act(() => {
+      window.dispatchEvent(new CustomEvent("app:compose-images", { detail }));
+    });
+  const attached = () => within(screen.getByRole("group", { name: "Attachments" })).queryAllByRole("img");
+
+  it("app:compose-images adds pictures up to 8", () => {
+    setup();
+    compose([1, 2, 3, 4, 5, 6].map(picture));
+    expect(attached()).toHaveLength(6);
+    expect(screen.queryByText(/8 pictures at most/)).toBeNull();
+    compose([7, 8, 9].map(picture));
+    const shown = attached();
+    expect(shown).toHaveLength(8);
+    expect(shown.map((img) => img.getAttribute("alt"))).toEqual(
+      [1, 2, 3, 4, 5, 6, 7, 8].map((n) => `lighthouse-${n}.png`),
+    );
+    expect(shown[0]?.getAttribute("src")).toBe("data:image/png;base64,iVBORw0KGgo1");
+    screen.getByText("8 pictures at most in one message. The rest were not added.");
+  });
+
+  it("the pictures it adds are sent with the message, and the notice goes with them", async () => {
+    const { box, onSend } = setup();
+    compose([1, 2, 3, 4, 5, 6, 7, 8, 9].map(picture));
+    type(box, "What do you see?");
+    fireEvent.keyDown(box, { key: "Enter" });
+    await waitFor(() => expect(onSend).toHaveBeenCalled());
+    expect(onSend.mock.calls[0]?.[1]).toEqual([1, 2, 3, 4, 5, 6, 7, 8].map(picture));
+    expect(screen.queryByText(/8 pictures at most/)).toBeNull();
+  });
+
+  it("a detail that is not a list of pictures is ignored", () => {
+    setup();
+    compose("not pictures");
+    compose([{ mime: "image/svg+xml", fileName: "x.svg", data: "PHN2Zz4=" }, { fileName: "no-data.png" }]);
+    expect(screen.queryByRole("group", { name: "Attachments" })).toBeNull();
+  });
+});
+
 describe("mention text", () => {
   it("finds the @query before the caret", () => {
     expect(mentionQueryAt("see @src/li", 11)).toEqual({ start: 4, query: "src/li" });

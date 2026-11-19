@@ -1,15 +1,34 @@
 import { memo, useEffect, useState } from "react";
-import { AtSign, ChevronLeft, ChevronRight, Copy, FileText, Pencil, RotateCcw, Check, X } from "lucide-react";
+import { AtSign, ChevronLeft, ChevronRight, Copy, FileText, Pencil, RotateCcw, Check, Sparkles, X } from "lucide-react";
 import { writeText } from "@tauri-apps/plugin-clipboard-manager";
-import type { MessageDto } from "../lib/types";
+import type { ImageInput, MessageDto } from "../lib/types";
+import { STUDIO_CHAT_LINK } from "../lib/words";
+import { toErrorInfo } from "../store/app";
+import { useStudio } from "../store/studio";
 import { Markdown } from "./Markdown";
 import { useCitations } from "./sources/useCitations";
 import { ErrorBanner } from "./ErrorBanner";
 import { getAttachment, isTauri } from "../lib/ipc";
 import { PinMessageButton } from "./context/PinMessageButton";
 
-/** An attached image, loaded from the backend as a data: URI. `small`: a thumbnail. */
-function AttachedImage(props: { id: number; small?: boolean }) {
+/** A `data:` URI's picture as the backend takes one, named `fileName`; `null` for a URI that
+ *  is not base64. */
+function pictureOf(uri: string, fileName: string): ImageInput | null {
+  const [, mime, data] = /^data:([^;,]+);base64,(.+)$/.exec(uri) ?? [];
+  return mime && data ? { mime, fileName, data } : null;
+}
+
+/** [0.1.0 B11] *Open in Studio* on an attached picture: its button's words, and what it does
+ *  with the picture's `data:` URI. */
+interface OpenInStudio {
+  label: string;
+  busy: boolean;
+  open(src: string): void;
+}
+
+/** An attached image, loaded from the backend as a data: URI. `small`: a thumbnail. With
+ *  `studio`, it has *Open in Studio* once loaded. */
+function AttachedImage(props: { id: number; small?: boolean; studio?: OpenInStudio }) {
   const [src, setSrc] = useState<string | null>(null);
   useEffect(() => {
     let alive = true;
@@ -24,7 +43,26 @@ function AttachedImage(props: { id: number; small?: boolean }) {
   if (props.small) {
     return <img src={src} alt="Attached image" className="h-16 w-16 rounded-md border border-border object-cover" />;
   }
-  return <img src={src} alt="Attached image" className="max-h-48 max-w-xs rounded-md border border-border object-contain" />;
+  const picture = (
+    <img src={src} alt="Attached image" className="max-h-48 max-w-xs rounded-md border border-border object-contain" />
+  );
+  const studio = props.studio;
+  if (!studio) return picture;
+  return (
+    <div className="relative">
+      {picture}
+      <button
+        type="button"
+        aria-label={studio.label}
+        title={studio.label}
+        disabled={studio.busy}
+        onClick={() => studio.open(src)}
+        className="absolute right-1 bottom-1 rounded-md bg-black/55 p-1 text-white opacity-80 hover:bg-black/70 hover:opacity-100 disabled:opacity-40"
+      >
+        <Sparkles size={13} aria-hidden />
+      </button>
+    </div>
+  );
 }
 
 interface Props {
@@ -82,6 +120,26 @@ export const MessageItem = memo(function MessageItem(props: Props) {
   const mentions = m.mentions ?? [];
   const [kept, setKept] = useState<number[]>([]);
   const [copied, setCopied] = useState(false);
+  // [0.1.0 B11] *Open in Studio* on its way, and why the last one did not add the picture.
+  const [opening, setOpening] = useState(false);
+  const [notInStudio, setNotInStudio] = useState<string | null>(null);
+
+  /** Puts the attached picture `src` (a `data:` URI) in Studio's Pictures tab, and shows Studio;
+   *  says here why when it cannot. */
+  async function openInStudio(src: string) {
+    const picture = pictureOf(src, STUDIO_CHAT_LINK.pictureName);
+    if (!picture) return;
+    setOpening(true);
+    setNotInStudio(null);
+    try {
+      const why = await useStudio.getState().openInStudio(picture);
+      if (why) setNotInStudio(STUDIO_CHAT_LINK.notAdded(why));
+    } catch (e) {
+      setNotInStudio(STUDIO_CHAT_LINK.notAdded(toErrorInfo(e).message));
+    } finally {
+      setOpening(false);
+    }
+  }
 
   async function copy() {
     try {
@@ -189,10 +247,23 @@ export const MessageItem = memo(function MessageItem(props: Props) {
           <div className="flex max-w-[85%] flex-col items-end gap-2">
             {(m.imageIds ?? []).length > 0 && (
               <div className="flex flex-wrap justify-end gap-2">
-                {m.imageIds.map((id) => (
-                  <AttachedImage key={id} id={id} />
+                {m.imageIds.map((id, i) => (
+                  <AttachedImage
+                    key={id}
+                    id={id}
+                    studio={{
+                      label: STUDIO_CHAT_LINK.openInStudio(i + 1, m.imageIds.length),
+                      busy: opening,
+                      open: (src) => void openInStudio(src),
+                    }}
+                  />
                 ))}
               </div>
+            )}
+            {notInStudio && (
+              <p role="status" className="text-xs text-warning">
+                {notInStudio}
+              </p>
             )}
             {(m.documents ?? []).length > 0 && (
               <div className="flex flex-wrap justify-end gap-1">

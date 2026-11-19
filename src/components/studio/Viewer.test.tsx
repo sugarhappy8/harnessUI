@@ -4,7 +4,8 @@
 // and the actions on it: Star, Again, Reuse all and Reuse without seed (which never start a
 // run), Edit, Animate, Use as reference, Save as (the settings file left off unless asked),
 // Copy (Save as when the clipboard refuses), Show in folder and Delete (with what the audit
-// log keeps). Esc closes the viewer and never cancels a run.
+// log keeps), and Send to chat for a picture (Task B11). Esc closes the viewer and never
+// cancels a run.
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { LOCAL, LOCAL_RUN, MODELS, RUN } from "./fixtures/models";
@@ -31,6 +32,7 @@ const dialog = await import("@tauri-apps/plugin-dialog");
 const { Viewer } = await import("./Viewer");
 const { StudioView } = await import("./StudioView");
 const { useStudio } = await import("../../store/studio");
+const { useApp } = await import("../../store/app");
 
 const INITIAL = useStudio.getState();
 
@@ -660,6 +662,85 @@ describe("Viewer", () => {
     expect(useStudio.getState().viewer).toBeNull();
     const promptBox = screen.getByRole("textbox", { name: "Prompt" });
     await waitFor(() => expect(document.activeElement).toBe(promptBox));
+  });
+});
+
+// [0.1.0 B11] Send to chat: the picture as the composer takes one (`studio_output_for_chat`, which
+// refuses a video and a picture over 20 MB) goes into the chat's message box through the window
+// event `app:compose-images`, and the chat is shown (a new chat when none is open). From there it
+// goes through the chat's own send path, so deleting it from the gallery never breaks the chat.
+describe("Send to chat", () => {
+  /** The picture `studio_output_for_chat` gives. */
+  const PICTURE = { mime: "image/png", fileName: "lighthouse-1.png", data: "iVBORw0KGgo=" };
+  let composed: unknown[] = [];
+  const onCompose = (e: Event) => composed.push((e as CustomEvent<unknown>).detail);
+  const INITIAL_APP = useApp.getState();
+
+  beforeEach(() => {
+    composed = [];
+    window.addEventListener("app:compose-images", onCompose);
+    useApp.setState(INITIAL_APP, true);
+    useApp.setState({ activeChatId: 3 });
+    vi.mocked(api.studioOutputForChat).mockResolvedValue(PICTURE);
+  });
+  afterEach(() => {
+    window.removeEventListener("app:compose-images", onCompose);
+  });
+
+  it("Send to chat puts the picture in the message box", async () => {
+    setStore();
+    await open("o2");
+    await click(button("Send to chat"));
+    expect(api.studioOutputForChat).toHaveBeenCalledWith("o2");
+    expect(useStudio.getState()).toMatchObject({ view: "chat", viewer: null });
+    expect(composed).toEqual([[PICTURE]]);
+  });
+
+  it("with no chat open, a new chat is made first and gets it", async () => {
+    const newChat = vi.fn(async () => {
+      useApp.setState({ activeChatId: 9 });
+    });
+    useApp.setState({ activeChatId: null, newChat });
+    setStore();
+    await open("o1");
+    await click(button("Send to chat"));
+    expect(newChat).toHaveBeenCalledTimes(1);
+    expect(useStudio.getState().view).toBe("chat");
+    expect(composed).toEqual([[PICTURE]]);
+  });
+
+  it("Send to chat is hidden for videos", async () => {
+    setStore({ runs: [videoRun()] });
+    await open("v1");
+    expect(screen.queryByRole("button", { name: "Send to chat" })).toBeNull();
+  });
+
+  it("a picture over 20 MB cannot be sent and says why", async () => {
+    vi.mocked(api.studioOutputForChat).mockRejectedValue({
+      code: "bad_request",
+      message: "This picture is over 20 MB, so it cannot go into a chat.",
+      nextStep: "",
+      details: "",
+    });
+    setStore();
+    await open("o1");
+    await click(button("Send to chat"));
+    await screen.findByText("This picture is over 20 MB, so it cannot go into a chat.");
+    expect(useStudio.getState().view).toBe("studio");
+    expect(composed).toEqual([]);
+  });
+
+  it("a new chat that cannot be made leaves Studio as it was and says why", async () => {
+    const newChat = vi.fn(async () => {
+      throw { code: "internal", message: "The chat could not be made.", nextStep: "", details: "" };
+    });
+    useApp.setState({ activeChatId: null, newChat });
+    setStore();
+    await open("o1");
+    await click(button("Send to chat"));
+    await screen.findByText("The chat could not be made.");
+    expect(useStudio.getState().view).toBe("studio");
+    expect(composed).toEqual([]);
   });
 });
 

@@ -26,12 +26,14 @@
 // picture; Star; Delete, after which a finished run left without results goes too; several saved
 // into one folder: in ./studioResults, composed in here), the grid's filters and Load more.
 // Task B10: the Studio engine's state read again (Settings → Studio's engine line), and Delete
-// stopped and failed runs (in ./studioResults).
+// stopped and failed runs (in ./studioResults). Task B11: a picture attached in a chat opened
+// in Studio's Pictures tab, and Send to chat (in ./studioResults).
 import { create, type StoreApi, type UseBoundStore } from "zustand";
 import * as api from "../components/studio/api";
 import { carry, closestModel, defaultsFor, dropUnmet, familyOf, type Values } from "../components/studio/canonical";
 import type {
   Company,
+  ImageInput,
   InstalledLocal,
   LocalEntry,
   LocalFit,
@@ -56,7 +58,7 @@ import type {
 import * as ipc from "../lib/ipc";
 import { listenInEffect } from "../lib/listen";
 import type { ErrorInfo } from "../lib/types";
-import { STUDIO_EMPTY, STUDIO_FIELDS, STUDIO_REFS, STUDIO_SETUPS } from "../lib/words";
+import { STUDIO_CHAT_LINK, STUDIO_EMPTY, STUDIO_FIELDS, STUDIO_REFS, STUDIO_SETUPS } from "../lib/words";
 import { toErrorInfo } from "./app";
 import { createResults, type StudioResultsState } from "./studioResults";
 import { createRun, targetOf, type StudioRunState } from "./studioRun";
@@ -125,6 +127,14 @@ export interface StudioState extends StudioRunState, StudioResultsState {
   showStudio(tab?: StudioTab): void;
   /** Shows the chat; the viewer closes (it would stay over the chat). */
   showChat(): void;
+  /** *Open in Studio* on a picture attached in a chat: `image` is kept as an added picture
+   *  (`studio_add_ref`, with the checks of a picture dropped on the tray) and added to the
+   *  Pictures tab's draft as the first of its model's picture roles with room, and Studio is
+   *  shown on that tab. When Studio was never opened, what it has saved is read first (`load`,
+   *  which fetches nothing). Returns why it was not added (no picture model yet, or the model
+   *  takes no more: checked before the picture is kept), or `null`; rejects when it could not
+   *  be kept. */
+  openInStudio(image: ImageInput): Promise<string | null>;
   /** A run's new state, from `studio-progress` or `studio_live`. */
   applyProgress(run: Run): void;
   /** Puts away the notice of a video that finished while the chat was shown (opening Studio
@@ -580,6 +590,18 @@ export const useStudio: UseBoundStore<StoreApi<StudioState>> = create<StudioStat
     // The finished video is on its card in Studio now.
     showStudio: (tab) => set((s) => ({ view: "studio", tab: tab ?? s.tab, readyNotice: null })),
     showChat: () => set({ view: "chat", viewer: null }),
+    openInStudio: async (image) => {
+      if (!get().loaded) await get().load();
+      const before = get();
+      const model = draftModel(before, "image");
+      if (!model) return STUDIO_CHAT_LINK.noModel;
+      const placed = placeRef(model, before.drafts.image.refs, null);
+      if ("refused" in placed) return placed.refused;
+      const kept = await api.studioAddRef(image);
+      const refused = get().addRef("image", { ...kept, role: null });
+      if (refused === null) get().showStudio("image");
+      return refused;
+    },
     applyProgress: (run) => {
       const before = get().live[run.id];
       set((s) => {

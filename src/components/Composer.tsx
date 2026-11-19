@@ -2,6 +2,7 @@ import { useEffect, useId, useRef, useState } from "react";
 import { ArrowUp, AtSign, FileText, Paperclip, Square, X } from "lucide-react";
 import type { DocumentInput, ImageInput, MentionHit, MentionInput } from "../lib/types";
 import { resolveMentions, searchMentions } from "../lib/ipc";
+import { COMPOSER_WORDS } from "../lib/words";
 import { ApprovalHint } from "./AllowAllButton";
 import { messagePlaceholder, useWorkingFolderName } from "./FolderChip";
 import { dropNoteText, useDroppedPrograms } from "./useDroppedPrograms";
@@ -71,6 +72,32 @@ export function readImage(file: File): Promise<ImageInput> {
   });
 }
 
+/** The pictures attached to the message, and whether the last ones added went past
+ *  `MAX_IMAGES` (some were left out). */
+interface Attached {
+  images: ImageInput[];
+  cut: boolean;
+}
+
+/** `old` with `more` after its pictures, up to `MAX_IMAGES`. */
+function withPictures(old: Attached, more: ImageInput[]): Attached {
+  const all = [...old.images, ...more];
+  return { images: all.slice(0, MAX_IMAGES), cut: all.length > MAX_IMAGES };
+}
+
+/** Whether `value` is a picture as the box takes one: one of its types, with its bytes. */
+function isPicture(value: unknown): value is ImageInput {
+  if (typeof value !== "object" || value === null) return false;
+  const { mime, fileName, data } = value as Record<string, unknown>;
+  return (
+    typeof mime === "string" &&
+    IMAGE_TYPES.includes(mime) &&
+    typeof fileName === "string" &&
+    typeof data === "string" &&
+    data.length > 0
+  );
+}
+
 /** The message of an error from the app or the browser. */
 function messageOf(err: unknown): string {
   if (err instanceof Error) return err.message;
@@ -90,7 +117,8 @@ export function Composer(props: {
   // [0.0.6 item 7] The placeholder names the working folder when there is one.
   const workingFolderName = useWorkingFolderName(chatId);
   const [text, setText] = useState("");
-  const [images, setImages] = useState<ImageInput[]>([]);
+  const [attached, setAttached] = useState<Attached>({ images: [], cut: false });
+  const images = attached.images;
   const [documents, setDocuments] = useState<DocumentInput[]>([]);
   const [imageError, setImageError] = useState<string | null>(null);
   const ref = useRef<HTMLTextAreaElement>(null);
@@ -175,7 +203,7 @@ export function Composer(props: {
     const docs = all.filter((f) => !f.type.startsWith("image/"));
     try {
       const read = await Promise.all(imgs.map(readImage));
-      setImages((old) => [...old, ...read].slice(0, MAX_IMAGES));
+      if (read.length > 0) setAttached((old) => withPictures(old, read));
       const readDocs = await Promise.all(docs.map(readDocument));
       setDocuments((old) => [...old, ...readDocs].slice(0, MAX_IMAGES));
     } catch (err) {
@@ -199,11 +227,23 @@ export function Composer(props: {
         box.setSelectionRange(detail.length, detail.length);
       });
     }
+    // [0.1.0 B11] Studio's *Send to chat*: pictures to attach, taken as a drop is (up to the
+    // limit, saying so when some are left out); sending checks them again.
+    function onComposeImages(event: Event) {
+      const detail: unknown = (event as CustomEvent<unknown>).detail;
+      const pictures = Array.isArray(detail) ? detail.filter(isPicture) : [];
+      if (pictures.length === 0) return;
+      setImageError(null);
+      setAttached((old) => withPictures(old, pictures));
+      requestAnimationFrame(() => ref.current?.focus());
+    }
     window.addEventListener("app:focus-input", onFocus);
     window.addEventListener("app:compose", onCompose);
+    window.addEventListener("app:compose-images", onComposeImages);
     return () => {
       window.removeEventListener("app:focus-input", onFocus);
       window.removeEventListener("app:compose", onCompose);
+      window.removeEventListener("app:compose-images", onComposeImages);
     };
   }, []);
 
@@ -232,7 +272,7 @@ export function Composer(props: {
     }
     props.onSend(t, images, documents, mentions);
     setText("");
-    setImages([]);
+    setAttached({ images: [], cut: false });
     setDocuments([]);
     setChips([]);
     setPicking(null);
@@ -254,8 +294,12 @@ export function Composer(props: {
         }
       }}
     >
-      {(images.length > 0 || documents.length > 0 || imageError) && (
-        <div className="mx-auto mb-2 flex max-w-3xl flex-wrap items-center gap-2">
+      {(images.length > 0 || documents.length > 0 || imageError || attached.cut) && (
+        <div
+          role="group"
+          aria-label={COMPOSER_WORDS.attachments}
+          className="mx-auto mb-2 flex max-w-3xl flex-wrap items-center gap-2"
+        >
           {images.map((img, i) => (
             <div key={`${img.fileName}-${i}`} className="relative">
               <img
@@ -266,7 +310,7 @@ export function Composer(props: {
               <button
                 type="button"
                 aria-label={`Remove ${img.fileName}`}
-                onClick={() => setImages((old) => old.filter((_, j) => j !== i))}
+                onClick={() => setAttached((old) => ({ ...old, images: old.images.filter((_, j) => j !== i) }))}
                 className="absolute -top-1.5 -right-1.5 rounded-full bg-bg p-0.5 shadow"
               >
                 <X size={12} aria-hidden />
@@ -285,6 +329,7 @@ export function Composer(props: {
               </button>
             </span>
           ))}
+          {attached.cut && <span className="text-xs text-warning">{COMPOSER_WORDS.tooManyPictures(MAX_IMAGES)}</span>}
           {imageError && <span className="text-xs text-danger">{imageError}</span>}
         </div>
       )}

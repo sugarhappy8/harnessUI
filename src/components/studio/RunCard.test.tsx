@@ -424,6 +424,52 @@ describe("RunCard", () => {
       expect(document.querySelector("[data-output-tile]")).toBeNull();
       noButton("Reuse");
     });
+
+    // [0.1.0 B11] A card with one picture sends it to the chat; with several, the viewer sends
+    // the one wanted; a video is never sent (chat models do not take video).
+    it("a finished card with one picture sends it to the chat", async () => {
+      const picture = { mime: "image/png", fileName: "Studio picture.png", data: "iVBORw0KGgo=" };
+      vi.mocked(api.studioOutputForChat).mockResolvedValue(picture);
+      useApp.setState({ activeChatId: 3 });
+      const composed: unknown[] = [];
+      const onCompose = (e: Event) => composed.push((e as CustomEvent<unknown>).detail);
+      window.addEventListener("app:compose-images", onCompose);
+      try {
+        useStudio.getState().showStudio();
+        await show(run({ outputs: [RUN.outputs[0]!] }));
+        await click(button("Send to chat"));
+        expect(api.studioOutputForChat).toHaveBeenCalledWith("o1");
+        expect(useStudio.getState().view).toBe("chat");
+        expect(composed).toEqual([[picture]]);
+      } finally {
+        window.removeEventListener("app:compose-images", onCompose);
+      }
+    });
+
+    it("Send to chat is not on a card with several pictures, a video or a run still working", async () => {
+      await show(run());
+      noButton("Send to chat");
+      cleanup();
+      await show(video({ status: "done", watching: false, outputs: [{ ...RUN.outputs[0]!, mime: "video/mp4" }] }));
+      noButton("Send to chat");
+      cleanup();
+      await show(working());
+      noButton("Send to chat");
+    });
+
+    it("a picture that cannot go into a chat says why on the card", async () => {
+      vi.mocked(api.studioOutputForChat).mockRejectedValue({
+        code: "bad_request",
+        message: "This picture is over 20 MB, so it cannot go into a chat.",
+        nextStep: "",
+        details: "",
+      });
+      useStudio.getState().showStudio();
+      await show(run({ outputs: [RUN.outputs[0]!] }));
+      await click(button("Send to chat"));
+      within(screen.getByRole("alert")).getByText("This picture is over 20 MB, so it cannot go into a chat.");
+      expect(useStudio.getState().view).toBe("studio");
+    });
   });
 
   describe("the queue strip and the usual time", () => {

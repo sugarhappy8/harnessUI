@@ -4,6 +4,7 @@ import {
   engineDownloadWords,
   STUDIO_ACTIONS,
   STUDIO_CARD,
+  STUDIO_CHAT_LINK,
   STUDIO_DOCK,
   STUDIO_PRICE,
   STUDIO_QUEUE,
@@ -30,9 +31,11 @@ export { localLine } from "./Working";
 // Stop watching while it works, *Get it anyway* and *Check again* for a video (never a create),
 // the engine's or a damaged model's download, Edit prompt after a refusal (which is never
 // retried), and Again. Task B9: its results as tiles (each opens the viewer, each with its
-// star) and Reuse, which fills the prompt box from the run and never starts it. Esc never
-// cancels a card. The card follows the run's newest state in the store. The settings line is
-// built in settingsLine.ts, the status line of a run still working in Working.tsx.
+// star) and Reuse, which fills the prompt box from the run and never starts it. Task B11: Send to
+// chat on a finished card with one picture (with several, the viewer sends the one wanted; a
+// video is never sent). Esc never cancels a card. The card follows the run's newest state in
+// the store. The settings line is built in settingsLine.ts, the status line of a run still
+// working in Working.tsx.
 
 /** The parts of the queue strip, in its order. */
 const QUEUE_ORDER = ["making", "waiting", "done", "stopped", "failed"] as const;
@@ -297,6 +300,8 @@ export function RunCard(props: { run: Run }) {
   const engineMissing = local && run.status === "failed" && error?.code === "studio_engine_missing";
   const offerEngine = engineMissing && (engine?.state === "notInstalled" || engine?.state === "partial");
   const fileBad = local && run.status === "failed" && error?.code === "studio_model_file_bad";
+  // Send to chat: the card's one picture.
+  const forChat = run.kind === "image" && run.status === "done" && run.outputs.length === 1 ? run.outputs[0] : null;
 
   return (
     <article data-run-card={run.id} className={CARD}>
@@ -440,6 +445,16 @@ export function RunCard(props: { run: Run }) {
           <button type="button" className={CARD_BUTTON} onClick={reuse}>
             {STUDIO_CARD.reuse}
           </button>
+          {forChat && (
+            <button
+              type="button"
+              className={CARD_BUTTON}
+              disabled={busy}
+              onClick={() => perform(() => store().sendToChat(forChat))}
+            >
+              {STUDIO_CHAT_LINK.sendToChat}
+            </button>
+          )}
           {ended && error?.details && (
             <button
               type="button"
