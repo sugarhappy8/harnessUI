@@ -5,6 +5,27 @@ has no Mac, no Windows PC and no graphics card. This file starts with the one-da
 which comes first because its results decide what the app and the documents may say. The
 checks of the finished app (cloud and local real runs) follow it.
 
+## Before you tag v0.1.0
+
+The release waits for all of these (the plan's one gate is Task L17). Nothing in CI or
+`release.yml` checks them, so tick them here.
+
+- [ ] **The benchmark is applied.** The **Results** table below is filled in (rows 1–8), and
+      Task L17 has written it into the catalog: every generator in `catalog/models.json` has
+      its measured `speed` points (today every one is `speed: []`), the video entry is
+      confirmed or replaced, and the catalog is re-signed.
+- [ ] **The real runs are done.** The **Local real runs** on the MacBook Air and the Windows
+      PC, and the **Cloud real runs**, with their answers recorded as fixtures.
+- [ ] **Legal review of the AI labels.** Whether harnessUI counts as a "provider", and the
+      curated download list as a "GenAI hosting platform", under EU AI Act Art. 50(2) and
+      California SB 942 as amended ([studio-local-design.md](studio-local-design.md), "Get
+      legal review before release").
+- [ ] **The website goes with it.** The website's privacy and terms pull request (the
+      `harnessUI-website` repository, the branch of the same name) is merged on release day,
+      with the terms' "0.0.x are early test builds" line brought up to date.
+- [ ] **The CHANGELOG's 0.1.0 heading carries the release day.**
+- [ ] **The updater key is in the repository's secrets**, as for every release since 0.0.8.
+
 ## Local benchmark (do this before any time is shown or written)
 
 The one-day benchmark of addendum L7 ([studio-local-design.md](studio-local-design.md)). Until
@@ -41,8 +62,9 @@ CHANGELOG or the website.
     (`city96/umt5-xxl-encoder-gguf`) and `VAE/Wan2.2_VAE.safetensors`
     (`QuantStack/Wan2.2-TI2V-5B-GGUF`).
   - Only if item 2 needs it, Wan 2.1 T2V 1.3B: `split_files/diffusion_models/wan2.1_t2v_1.3B_fp16.safetensors`
-    and `split_files/vae/wan_2.1_vae.safetensors` (`Comfy-Org/Wan_2.1_ComfyUI_repackaged`),
-    with the same text encoder as Wan 2.2.
+    (`Comfy-Org/Wan_2.1_ComfyUI_repackaged`), and the decoder the catalog pins,
+    `split_files/vae/wan_2.1_vae.safetensors` from `Comfy-Org/Wan-2.1` at revision `123acf1`
+    (`catalog/models.json`, family `wan2.1-t2v-1.3b`), with the same text encoder as Wan 2.2.
 - **How to run and record.** One command per run, from the model folder, written to a file with
   the engine's normal and error output together, as the app reads them:
   - Mac (Terminal): `"$SD" <arguments> > run.txt 2>&1`, with
@@ -66,6 +88,7 @@ CHANGELOG or the website.
   - Z-Image Turbo: `--diffusion-model z_image_turbo-Q4_K.gguf --llm Qwen3-4B-Instruct-2507-Q4_K_M.gguf --vae ae.safetensors --cfg-scale 1.0 --steps 8 -W 1024 -H 1024 -o zimage.png`
   - Wan 2.2 5B fast, 2 s at 480p: `-M vid_gen --diffusion-model FastWan2.2-TI2V-5B-q6_k.gguf --t5xxl umt5-xxl-encoder-Q5_K_M.gguf --vae Wan2.2_VAE.safetensors --cfg-scale 1.0 --steps 4 --flow-shift 3.0 --sampling-method euler -W 832 -H 480 --video-frames 49 --fps 24 -o clip.webm`;
     4 s: `--video-frames 97`; 5 s at 720p: `-W 1280 -H 704 --video-frames 121`.
+  - Wan 2.1 1.3B, only if item 2 needs it (its family defaults, about 2 s at 480p): `-M vid_gen --diffusion-model wan2.1_t2v_1.3B_fp16.safetensors --t5xxl umt5-xxl-encoder-Q5_K_M.gguf --vae wan_2.1_vae.safetensors --cfg-scale 6.0 --steps 20 --flow-shift 3.0 --sampling-method euler -W 832 -H 480 --video-frames 33 --fps 16 -o clip21.webm`.
 
 ### The runs
 

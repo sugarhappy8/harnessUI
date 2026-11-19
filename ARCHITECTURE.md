@@ -1588,6 +1588,7 @@ After each milestone I stop with: what works, how to test it by hand, known issu
 | An NVIDIA tester | Optional, any time | Nobody on this project can run CUDA |
 | Time on both machines for the 0.0.6 checklist | Before the 0.0.6 release | The graphics choices, Save memory, Keep the model in memory, Automatic, Fine control, the picture's measurement and the usage line on the RX 9070 XT and on the 16 GB Mac; Claude Code and Codex using the shared model, and `ask_claude_code` / `ask_codex` on both; rea with Ghidra on Windows and Kuna on the Mac (`docs/dev/0.0.6/item5-spec.md` section 9), including, with the lead, the built app's connections and name lookups recorded while it opens and decompiles a test file (13.6). None of these can run on the build machine |
 | Review of the catalog's comparison quotes | Before the 0.0.6 release | Every "good at" phrase and quote is the publisher's own; the owner reads the table before it ships (11) |
+| One day on both machines for the Studio benchmark and real runs, and a legal review of the AI labels | Before the 0.1.0 release | Local times, the video entry and the engine's recorded output come only from the benchmark (Task L17); the build machine has no Mac, Windows PC or graphics card. The list is "Before you tag v0.1.0" in `docs/dev/0.1.0/owner-checklist.md` |
 
 ---
 
