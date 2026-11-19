@@ -15,8 +15,7 @@
 // how long a local clip takes here at each size and length, asked once each.
 import { create, type StoreApi, type UseBoundStore } from "zustand";
 import * as api from "../components/studio/api";
-import { carry, defaultsFor, type Values } from "../components/studio/canonical";
-import { dropUnmet } from "../components/studio/ParamField";
+import { carry, defaultsFor, dropUnmet, type Values } from "../components/studio/canonical";
 import type {
   Company,
   InstalledLocal,
@@ -163,8 +162,9 @@ export interface StudioState {
    *  measured since). */
   localFits: Record<string, LocalFit>;
   /** Asks how long installed model `modelId` takes here at `width` × `height` and, for a clip,
-   *  `seconds` (0 for a picture, or for the model's own length), unless it was asked already.
-   *  Worked out on this computer: nothing is sent anywhere. */
+   *  `seconds` (0 for a picture, or for the model's own length), unless it was asked already
+   *  (one that could not be worked out is not asked again until the local models are read
+   *  again). Worked out on this computer: nothing is sent anywhere. */
   askLocalFit(modelId: string, width: number, height: number, seconds: number): void;
   /** Changes the gallery's filter and reads its first page again. */
   setFilter(patch: Partial<RunsFilter>): Promise<void>;
@@ -298,9 +298,13 @@ export const useStudio: UseBoundStore<StoreApi<StudioState>> = create<StudioStat
   /** The local fits asked for and not answered yet. A new set each time the answers are put
    *  away, so an answer to an older one is not kept. */
   let fitting = new Set<string>();
+  /** The local fits that could not be worked out: not asked again until the answers are put
+   *  away (their chips show no time). */
+  let fitFailed = new Set<string>();
   /** Puts away the local fits: the local models were read again. */
   const forgetFits = () => {
     fitting = new Set();
+    fitFailed = new Set();
     set({ localFits: {} });
   };
 
@@ -544,7 +548,7 @@ export const useStudio: UseBoundStore<StoreApi<StudioState>> = create<StudioStat
     askLocalFit: (modelId, width, height, seconds) => {
       const key = localFitKey(modelId, width, height, seconds);
       const mine = fitting;
-      if (key in get().localFits || mine.has(key)) return;
+      if (key in get().localFits || mine.has(key) || fitFailed.has(key)) return;
       mine.add(key);
       Promise.resolve()
         .then(() => api.studioLocalFit({ installed: { genModelId: modelId } }, width, height, seconds))
@@ -552,8 +556,12 @@ export const useStudio: UseBoundStore<StoreApi<StudioState>> = create<StudioStat
           (fit) => {
             if (mine === fitting) set((s) => ({ localFits: { ...s.localFits, [key]: fit } }));
           },
-          // The chip shows no time; the failure leaves a trace.
-          (e: unknown) => console.warn("Studio: how long a local run takes could not be worked out", e),
+          (e: unknown) => {
+            // The chip shows no time, and it is not asked again until the local models are
+            // read again; the failure leaves a trace.
+            if (mine === fitting) fitFailed.add(key);
+            console.warn("Studio: how long a local run takes could not be worked out", e);
+          },
         )
         .finally(() => mine.delete(key));
     },

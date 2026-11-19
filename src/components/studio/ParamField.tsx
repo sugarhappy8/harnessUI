@@ -2,8 +2,7 @@ import { useId, useState, type ReactNode } from "react";
 import { DropdownMenu } from "radix-ui";
 import { Check, ChevronDown, CircleHelp, Plus, RotateCcw } from "lucide-react";
 import { STUDIO_FIELDS } from "../../lib/words";
-import type { Values } from "./canonical";
-import type { Choice, Layer, MediaModel, ParamKind, ParamSpec, SizeRules } from "./types";
+import type { Choice, ParamKind, ParamSpec, SizeRules } from "./types";
 
 // One of Studio's controls (0.1.0 Task B5; design 3, "Widgets"): every field is drawn from the
 // model's own `ParamSpec`, so there is no code per company. Shape and How many are chips
@@ -13,7 +12,7 @@ import type { Choice, Layer, MediaModel, ParamKind, ParamSpec, SizeRules } from 
 // height boxes checked as they are typed, a text a text box. An unset field reads "Automatic
 // (company default)" ("Automatic" on this computer) and is not sent; a set one offers its
 // reset. Added pictures (RefTray.tsx) and Extra fields (Advanced, Task B6) are drawn elsewhere.
-// Also: which fields show (what each requires is met) and the values that no longer apply.
+// Which fields show, and the values that no longer apply, are worked out in canonical.ts.
 
 /** How a field is drawn. */
 export type Widget = "chips" | "segmented" | "select" | "slider" | "switch" | "seed" | "drop" | "size" | "text" | "json";
@@ -22,7 +21,7 @@ export type Widget = "chips" | "segmented" | "select" | "slider" | "switch" | "s
 const SEGMENTED_MAX = 5;
 /** How many shapes show as chips; the rest are under More shapes. */
 const SHAPES_SHOWN = 5;
-/** How many's chips (those within the model's range); the simple layer stops at 4. */
+/** How many's chips (those the model's range takes); the simple layer stops at 4. */
 const COUNT_CHIPS = [1, 2, 4];
 
 /** The widget for `spec`: Shape and How many by their role, whatever their size, then by kind. */
@@ -52,37 +51,6 @@ export function widgetFor(spec: ParamSpec): Widget {
 
 function isSet(value: unknown): boolean {
   return value !== undefined && value !== null;
-}
-
-/** Whether what `spec` requires is met: the field it names has one of the values listed, an
- *  unset field counting as its company default (the backend's `unmet` rule). */
-function applies(params: ParamSpec[], spec: ParamSpec, values: Values): boolean {
-  const requires = spec.requires;
-  if (!requires) return true;
-  const set = values[requires.key];
-  const current = isSet(set) ? set : (params.find((p) => p.key === requires.key)?.companyDefault ?? null);
-  return current !== null && requires.values.some((v) => v === current);
-}
-
-/** The fields of `layer`, in the model's order, whose requirements `values` meets. */
-export function visibleFields(params: ParamSpec[], layer: Layer, values: Values): ParamSpec[] {
-  return params.filter((p) => p.layer === layer && applies(params, p, values));
-}
-
-/** `values` without each value whose field requires what `values` no longer has, again until
- *  nothing more goes (a field may require one that went). The same object when nothing goes. */
-export function dropUnmet(model: MediaModel, values: Values): Values {
-  let now = values;
-  for (;;) {
-    const gone = new Set(
-      Object.keys(now).filter((key) => {
-        const spec = model.params.find((p) => p.key === key);
-        return spec !== undefined && !applies(model.params, spec, now);
-      }),
-    );
-    if (gone.size === 0) return now;
-    now = Object.fromEntries(Object.entries(now).filter(([key]) => !gone.has(key)));
-  }
 }
 
 // ---- the field ------------------------------------------------------------------------------
@@ -347,7 +315,16 @@ function moreThan(chips: number[], kind: { min: number; max: number; step?: numb
   return false;
 }
 
-/** How many: 1, 2 and 4 (those within the range) as chips, and More, a number box up to the
+/** Whether the range takes `n`: within `min`..`max`, and on its steps from `min` when it has
+ *  steps (`min + k × step`). */
+function takes(kind: { min: number; max: number; step?: number | null }, n: number): boolean {
+  if (n < kind.min || n > kind.max) return false;
+  if (!kind.step || kind.step <= 0) return true;
+  const steps = (n - kind.min) / kind.step;
+  return Math.abs(steps - Math.round(steps)) < 1e-9;
+}
+
+/** How many: 1, 2 and 4 (those the range takes) as chips, and More, a number box up to the
  *  model's maximum (open whenever the number set is not a chip). */
 function CountChips(props: {
   labelId: string;
@@ -356,7 +333,7 @@ function CountChips(props: {
   onChange(n: number | null): void;
 }) {
   const { kind, value } = props;
-  const chips = COUNT_CHIPS.filter((n) => n >= kind.min && n <= kind.max);
+  const chips = COUNT_CHIPS.filter((n) => takes(kind, n));
   const [more, setMore] = useState(false);
   const open = more || (value !== null && !chips.includes(value));
   const choices = chips.map((n) => ({ value: n, label: String(n) }));
@@ -574,14 +551,19 @@ function SizeField(props: {
 }) {
   const { listed, value } = props;
   const index = listed.findIndex((c) => c.value === value);
-  const isCustom = (v: string | null) => listed.length === 0 || (v !== null && !listed.some((c) => c.value === v));
-  const [custom, setCustom] = useState(isCustom(value));
-  // A size changed elsewhere (a reset, another model) picks its own place in the list.
-  const [shown, setShown] = useState(value);
-  if (shown !== value) {
-    setShown(value);
-    if (value === null || index >= 0) setCustom(isCustom(value));
+  // The one thing kept here: Custom size chosen (or the boxes emptied) with no size typed yet.
+  // It is forgotten when a listed size is set and when the field changes to another model's.
+  const [chosen, setChosen] = useState(false);
+  const field = `${JSON.stringify(props.rules)} ${listed.map((c) => String(c.value)).join(" ")}`;
+  const [shownField, setShownField] = useState(field);
+  if (shownField !== field) {
+    setShownField(field);
+    setChosen(false);
   }
+  if (chosen && index >= 0) setChosen(false);
+  // Everything else follows the size set and the field, whoever set it (a carry, a setup, the
+  // store): a size not in the list is a custom one, and a field that lists none has only boxes.
+  const custom = listed.length === 0 || (value !== null ? index < 0 : chosen);
   return (
     <div className="flex flex-col gap-1.5">
       {listed.length > 0 && (
@@ -590,9 +572,11 @@ function SizeField(props: {
           value={custom ? "custom" : index < 0 ? "" : String(index)}
           onChange={(e) => {
             const picked = e.target.value;
-            setCustom(picked === "custom");
             const choice = listed[Number(picked)];
-            if (picked === "") props.onReset();
+            setChosen(picked === "custom");
+            // Custom size starts with empty boxes: a listed size set goes, as nothing is
+            // sent until a custom one fits.
+            if (picked === "" || (picked === "custom" && value !== null)) props.onReset();
             else if (picked !== "custom" && choice) props.onChange(choice.value);
           }}
           className={BOX}
@@ -606,7 +590,18 @@ function SizeField(props: {
           <option value="custom">{STUDIO_FIELDS.customSize}</option>
         </select>
       )}
-      {custom && <SizeBoxes rules={props.rules} value={index < 0 ? value : null} onChange={props.onChange} onReset={props.onReset} />}
+      {custom && (
+        <SizeBoxes
+          rules={props.rules}
+          value={value}
+          onChange={props.onChange}
+          onReset={() => {
+            // Boxes emptied to type another size stay open.
+            setChosen(true);
+            props.onReset();
+          }}
+        />
+      )}
     </div>
   );
 }

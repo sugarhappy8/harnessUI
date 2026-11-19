@@ -177,6 +177,14 @@ function RoleChip(props: {
   );
 }
 
+/** A stable key for added picture `index`: its bytes' hash and which of the pictures with that
+ *  hash it is, so removing one keeps every other thumbnail (and its bytes read) as it was. */
+function refKey(refs: RefItem[], index: number): string {
+  const sha256 = refs[index]?.sha256 ?? "";
+  const same = refs.slice(0, index).filter((r) => r.sha256 === sha256).length;
+  return `${sha256} ${same}`;
+}
+
 /** The added pictures of `tab`'s draft, each with its role chip, and *+ Add picture* while the
  *  model takes pictures. A picture pasted anywhere in Studio's view comes here too. */
 export function RefTray(props: { tab: StudioTab }) {
@@ -189,10 +197,12 @@ export function RefTray(props: { tab: StudioTab }) {
   const roles = pictureRoles(model);
 
   // A paste goes to the focused element, so the tray listens on the document for one in
-  // Studio's view (the prompt box, mostly) that carries pictures; anything else is left alone.
+  // Studio's view (the prompt box, mostly) that carries pictures while the model takes any
+  // (read as the paste comes); anything else is left alone, to go where it was pasted.
   useEffect(() => {
     const onPaste = (e: ClipboardEvent) => {
       if (!(e.target instanceof Element) || !e.target.closest("[data-studio-view]")) return;
+      if (pictureRoles(draftModel(useStudio.getState(), tab)).length === 0) return;
       const files = [...(e.clipboardData?.files ?? [])].filter((f) => f.type.startsWith("image/"));
       if (files.length === 0) return;
       e.preventDefault();
@@ -200,13 +210,13 @@ export function RefTray(props: { tab: StudioTab }) {
     };
     document.addEventListener("paste", onPaste);
     return () => document.removeEventListener("paste", onPaste);
-  }, [add]);
+  }, [add, tab]);
 
-  if (roles.length === 0 && refs.length === 0) return null;
+  if (roles.length === 0 && refs.length === 0 && !error) return null;
   return (
     <div data-ref-tray className="flex flex-wrap items-center gap-2" {...dropTarget((files) => add(files, null))}>
       {refs.map((item, i) => (
-        <div key={`${item.sha256} ${i}`} className="flex items-center gap-1.5 rounded-lg border border-border p-1 pr-1.5">
+        <div key={refKey(refs, i)} className="flex items-center gap-1.5 rounded-lg border border-border p-1 pr-1.5">
           <RefThumb sha256={item.sha256} mime={item.mime} alt={STUDIO_REFS.picture(i + 1)} className="h-8 w-8 rounded" />
           <RoleChip tab={tab} index={i} item={item} roles={roles} refs={refs} onRefused={setError} />
           <button

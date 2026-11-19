@@ -265,6 +265,42 @@ describe("SettingsPanel", () => {
     within(field("Length")).getByRole("radio", { name: "2 s · about 3 min" });
   });
 
+  it("a time that could not be worked out is not asked again until the local models are read again", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    try {
+      // 720p at 2 s always fails; every other chip has its time.
+      vi.mocked(api.studioLocalFit).mockImplementation(async (_source, w, h, seconds) => {
+        if (w === 1280 && seconds === 2) throw new Error("no fit");
+        return localFit(seconds, h);
+      });
+      await renderPanel(wan, { target: "thisComputer" });
+      await flush();
+      expect(api.studioLocalFit).toHaveBeenCalledTimes(6);
+      // The chip shows no time; the others do.
+      within(field("Resolution")).getByRole("radio", { name: "720p" });
+      within(field("Resolution")).getByRole("radio", { name: "480p · about 3 min" });
+
+      // Another field changed, and the store asked directly: neither asks again.
+      act(() => useStudio.getState().setValue("video", "seed", 42));
+      await flush();
+      act(() => useStudio.getState().askLocalFit(wan.id, 1280, 704, 2));
+      await flush();
+      expect(api.studioLocalFit).toHaveBeenCalledTimes(6);
+      expect(warn).toHaveBeenCalledTimes(1);
+
+      // Read again, as a run may have been measured since: asked again.
+      vi.mocked(api.studioLocalFit).mockImplementation(async (_source, _w, h, seconds) => localFit(seconds, h));
+      await act(async () => {
+        await useStudio.getState().reread();
+      });
+      await flush();
+      expect(api.studioLocalFit).toHaveBeenCalledTimes(12);
+      within(field("Resolution")).getByRole("radio", { name: "720p · about 10 min" });
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
   it("a local picture's fields ask for no time", async () => {
     await renderPanel(klein, { target: "thisComputer" });
     expect(api.studioLocalFit).not.toHaveBeenCalled();
@@ -322,6 +358,40 @@ describe("SettingsPanel", () => {
     expect(screen.queryByText("Compression")).toBeNull();
   });
 
+  it("the Advanced toggle opens and closes even when saving that fails", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    try {
+      await renderPanel(flare);
+      vi.mocked(api.studioSetPrefs).mockRejectedValue({ code: "io", message: "The disk is full.", nextStep: "", details: "" });
+      await act(async () => {
+        fireEvent.click(screen.getByRole("button", { name: "Advanced" }));
+      });
+      await flush();
+      expect(api.studioSetPrefs).toHaveBeenCalledWith({ advancedOpen: true });
+      expect(screen.getByRole("button", { name: "Advanced" }).getAttribute("aria-expanded")).toBe("true");
+      screen.getByText("File type");
+      await act(async () => {
+        fireEvent.click(screen.getByRole("button", { name: "Advanced" }));
+      });
+      await flush();
+      expect(api.studioSetPrefs).toHaveBeenLastCalledWith({ advancedOpen: false });
+      expect(screen.getByRole("button", { name: "Advanced" }).getAttribute("aria-expanded")).toBe("false");
+      expect(screen.queryByText("File type")).toBeNull();
+      expect(warn).toHaveBeenCalledTimes(2);
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  it("the Advanced toggle follows a saved choice changed elsewhere", async () => {
+    await renderPanel(flare);
+    expect(screen.getByRole("button", { name: "Advanced" }).getAttribute("aria-expanded")).toBe("false");
+    await act(async () => {
+      await useStudio.getState().setPrefs({ advancedOpen: true });
+    });
+    expect(screen.getByRole("button", { name: "Advanced" }).getAttribute("aria-expanded")).toBe("true");
+  });
+
   it("with nothing changed, the toggle reads Advanced", async () => {
     await renderPanel(flare);
     screen.getByRole("button", { name: "Advanced" });
@@ -337,6 +407,8 @@ describe("SettingsPanel", () => {
   });
 });
 
+// The same five cases are pinned on the backend's side by `size_of_matches_the_webviews_local_clip_size`
+// in src-tauri/src/studio/local.rs: a change to either rule shows in both tests.
 describe("localClipSize", () => {
   it("follows the shape and resolution on the model's multiple and longest side", () => {
     expect(localClipSize(wan, { resolution: "480p" })).toEqual({ w: 832, h: 480 });

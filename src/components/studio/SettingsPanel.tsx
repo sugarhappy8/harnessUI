@@ -1,11 +1,11 @@
-import { useEffect } from "react";
+import { useEffect, useState } from "react";
 import { ChevronDown, ChevronRight, X } from "lucide-react";
 import { LOCAL_MARK, STUDIO_FIELDS, STUDIO_PLACE } from "../../lib/words";
 import { draftModel, localFitKey, useStudio, type StudioTab } from "../../store/studio";
-import { changedCount, type Values } from "./canonical";
+import { changedCount, visibleFields, type Values } from "./canonical";
 import { etaText } from "./eta";
 import { ModelPicker } from "./ModelPicker";
-import { ParamField, visibleFields } from "./ParamField";
+import { ParamField } from "./ParamField";
 import { FrameDrop } from "./RefTray";
 import type { Canonical, MediaModel, ParamSpec } from "./types";
 
@@ -117,7 +117,7 @@ export function SettingsPanel(props: { tab: StudioTab }) {
   const local = useStudio((s) => s.local);
   const endpoints = useStudio((s) => s.endpoints);
   const localFits = useStudio((s) => s.localFits);
-  const advancedOpen = useStudio((s) => s.prefs?.advancedOpen ?? false);
+  const savedOpen = useStudio((s) => s.prefs?.advancedOpen ?? false);
   const setValue = useStudio((s) => s.setValue);
   const resetValue = useStudio((s) => s.resetValue);
   const dismissNote = useStudio((s) => s.dismissNote);
@@ -125,10 +125,19 @@ export function SettingsPanel(props: { tab: StudioTab }) {
   const setPrefs = useStudio((s) => s.setPrefs);
   const here = draft.target === "thisComputer";
   const localVideo = here && model?.kind === "video";
+  // Whether Advanced is open: what was saved, and the toggle's own choice even when saving it
+  // fails; a choice saved elsewhere since is followed.
+  const [advancedOpen, setAdvancedOpen] = useState(savedOpen);
+  const [shownSaved, setShownSaved] = useState(savedOpen);
+  if (shownSaved !== savedOpen) {
+    setShownSaved(savedOpen);
+    setAdvancedOpen(savedOpen);
+  }
 
   // A local clip's chips each ask for their time, once per size and length: the store keeps
-  // the answers and asks only for what it has not got. It forgets them when the local models
-  // are read again, so this runs again as `localFits` changes and asks for them again.
+  // the answers (and which could not be worked out) and asks only for what it has not got. It
+  // forgets them when the local models are read again, so this runs again as `localFits`
+  // changes and asks for them again.
   useEffect(() => {
     if (!model || !localVideo) return;
     for (const ask of clipAsks(model, draft.values)) askLocalFit(model.id, ask.width, ask.height, ask.seconds);
@@ -185,8 +194,10 @@ export function SettingsPanel(props: { tab: StudioTab }) {
   const hasAdvanced = model.params.some((p) => p.layer === "advanced");
   const changed = changedCount(model, draft.values, draft.extra);
   const toggleAdvanced = () => {
-    setPrefs({ advancedOpen: !advancedOpen }).catch((e: unknown) =>
-      // The drawer stays as it was; the failure leaves a trace.
+    const open = !advancedOpen;
+    setAdvancedOpen(open);
+    setPrefs({ advancedOpen: open }).catch((e: unknown) =>
+      // It opens or closes all the same, for now; the failure leaves a trace.
       console.warn("Studio: whether Advanced is open could not be saved", e),
     );
   };

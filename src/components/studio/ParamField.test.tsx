@@ -3,7 +3,7 @@
 // met, and values that no longer apply dropped from the draft.
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
-import type { Values } from "./canonical";
+import { dropUnmet, visibleFields, type Values } from "./canonical";
 import { MODELS } from "./fixtures/models";
 import type { Choice, Layer, MediaModel, ParamKind, ParamSpec, StudioEndpoint, StudioPrefs } from "./types";
 
@@ -11,7 +11,7 @@ vi.mock("../../lib/ipc", () => ({ isTauri: () => true }));
 vi.mock("./api");
 
 const api = await import("./api");
-const { ParamField, dropUnmet, visibleFields, widgetFor } = await import("./ParamField");
+const { ParamField, widgetFor } = await import("./ParamField");
 const { useStudio } = await import("../../store/studio");
 
 const INITIAL = useStudio.getState();
@@ -363,6 +363,163 @@ describe("ParamField", () => {
     expect(onChange).toHaveBeenLastCalledWith("1024x512");
     fireEvent.change(screen.getByRole("spinbutton", { name: "Height" }), { target: { value: "128" } });
     screen.getByText("The shape must be between 1:4 and 4:1.");
+  });
+
+  /** How many, over `kind`'s range. */
+  function count(kind: Extract<ParamKind, { type: "range" }>): ParamSpec {
+    return spec({ key: "n", canonical: "count", label: "How many", kind });
+  }
+
+  it("How many offers no chip above the model's maximum", () => {
+    field(count({ type: "range", min: 1, max: 3, step: 1 }), undefined);
+    expect(screen.getAllByRole("radio").map((r) => r.textContent)).toEqual(["1", "2"]);
+    // 3 is not a chip, so More offers it.
+    fireEvent.click(screen.getByRole("button", { name: "More" }));
+    expect(screen.getByRole("spinbutton", { name: "How many" }).getAttribute("max")).toBe("3");
+  });
+
+  it("How many offers only the chips on the model's steps", () => {
+    // 1, 4, 7 and 10: 2 is not a number this model takes.
+    field(count({ type: "range", min: 1, max: 10, step: 3 }), undefined);
+    expect(screen.getAllByRole("radio").map((r) => r.textContent)).toEqual(["1", "4"]);
+    cleanup();
+    field(count({ type: "range", min: 2, max: 8, step: 2 }), undefined);
+    expect(screen.getAllByRole("radio").map((r) => r.textContent)).toEqual(["2", "4"]);
+  });
+
+  describe("a text field", () => {
+    const negative = spec({ key: "negative_prompt", label: "Leave out", layer: "advanced", kind: { type: "text", maxChars: 5 } });
+
+    it("keeps within its limit, counted by character, not by UTF-16 unit", () => {
+      const onChange = vi.fn();
+      const onReset = vi.fn();
+      const { rerender } = render(<ParamField spec={negative} value={undefined} onChange={onChange} onReset={onReset} />);
+      screen.getByText("5 left");
+      // Six emoji are twelve UTF-16 units: five of them are kept, none cut in half.
+      fireEvent.change(screen.getByRole("textbox", { name: "Leave out" }), { target: { value: "😀😀😀😀😀😀" } });
+      expect(onChange).toHaveBeenLastCalledWith("😀😀😀😀😀");
+      rerender(<ParamField spec={negative} value="a😀" onChange={onChange} onReset={onReset} />);
+      expect((screen.getByRole("textbox", { name: "Leave out" }) as HTMLTextAreaElement).value).toBe("a😀");
+      screen.getByText("3 left");
+      expect(onReset).not.toHaveBeenCalled();
+    });
+
+    it("emptied, the field is unset", () => {
+      const { onChange, onReset } = field(negative, "blur");
+      fireEvent.change(screen.getByRole("textbox", { name: "Leave out" }), { target: { value: "" } });
+      expect(onReset).toHaveBeenCalledTimes(1);
+      expect(onChange).not.toHaveBeenCalled();
+    });
+  });
+
+  describe("a size with listed sizes", () => {
+    const rules = { multipleOf: 16, minRatio: 0.25, maxRatio: 4, maxSide: 2048, minPixels: 16384, maxPixels: 4194304 };
+    const listedSize = spec({
+      key: "size",
+      canonical: "size",
+      label: "Size",
+      kind: {
+        type: "size",
+        rules,
+        values: [
+          { value: "1024x1024", label: "1024 × 1024" },
+          { value: "1536x1024", label: "1536 × 1024" },
+        ],
+      },
+    });
+    const freeSize = spec({ key: "size", canonical: "size", label: "Size", kind: { type: "size", rules, values: [] } });
+    const select = () => screen.getByRole("combobox", { name: "Size" }) as HTMLSelectElement;
+    const box = (name: "Width" | "Height") => screen.getByRole("spinbutton", { name }) as HTMLInputElement;
+
+    it("is a select starting at Automatic; choosing a listed size sends it", () => {
+      const { onChange } = field(listedSize, undefined);
+      expect(select().selectedOptions[0]?.textContent).toBe("Automatic (company default)");
+      expect(screen.queryByRole("spinbutton", { name: "Width" })).toBeNull();
+      fireEvent.change(select(), { target: { value: "1" } });
+      expect(onChange).toHaveBeenCalledWith("1536x1024");
+    });
+
+    it("shows the size set, Custom size with its sides when it is not in the list", () => {
+      field(listedSize, "1536x1024");
+      expect(select().selectedOptions[0]?.textContent).toBe("1536 × 1024");
+      expect(screen.queryByRole("spinbutton", { name: "Width" })).toBeNull();
+      cleanup();
+      field(listedSize, "1280x720");
+      expect(select().selectedOptions[0]?.textContent).toBe("Custom size");
+      expect([box("Width").value, box("Height").value]).toEqual(["1280", "720"]);
+    });
+
+    it("a size not in the list, set from the store, shows the boxes with its numbers", () => {
+      const sized: MediaModel = { ...flare, params: [listedSize] };
+      renderFields(sized, "simple", {});
+      expect(select().selectedOptions[0]?.textContent).toBe("Automatic (company default)");
+      // As a carry or a setup writes it: not chosen in the select.
+      setValue("size", "1280x720");
+      expect(select().selectedOptions[0]?.textContent).toBe("Custom size");
+      expect([box("Width").value, box("Height").value]).toEqual(["1280", "720"]);
+      setValue("size", "1024x1024");
+      expect(select().selectedOptions[0]?.textContent).toBe("1024 × 1024");
+      expect(screen.queryByRole("spinbutton", { name: "Width" })).toBeNull();
+    });
+
+    it("Custom size opens empty boxes until a size is typed", () => {
+      const { onChange } = field(listedSize, undefined);
+      fireEvent.change(select(), { target: { value: "custom" } });
+      expect(select().selectedOptions[0]?.textContent).toBe("Custom size");
+      expect([box("Width").value, box("Height").value]).toEqual(["", ""]);
+      expect(onChange).not.toHaveBeenCalled();
+      fireEvent.change(box("Width"), { target: { value: "1280" } });
+      fireEvent.change(box("Height"), { target: { value: "720" } });
+      expect(onChange).toHaveBeenLastCalledWith("1280x720");
+    });
+
+    it("Custom size over a listed size unsets it, and boxes emptied stay open", () => {
+      const sized: MediaModel = { ...flare, params: [listedSize] };
+      renderFields(sized, "simple", { size: "1024x1024" });
+      fireEvent.change(select(), { target: { value: "custom" } });
+      // Nothing is sent until a custom size fits.
+      expect(values()).toEqual({});
+      expect(select().selectedOptions[0]?.textContent).toBe("Custom size");
+      expect([box("Width").value, box("Height").value]).toEqual(["", ""]);
+      fireEvent.change(box("Width"), { target: { value: "1280" } });
+      fireEvent.change(box("Height"), { target: { value: "720" } });
+      expect(values()).toEqual({ size: "1280x720" });
+      cleanup();
+      // A custom size set from the store, emptied to type another: unset, and the boxes stay.
+      renderFields(sized, "simple", { size: "1280x720" });
+      fireEvent.change(box("Width"), { target: { value: "" } });
+      fireEvent.change(box("Height"), { target: { value: "" } });
+      expect(values()).toEqual({});
+      expect(select().selectedOptions[0]?.textContent).toBe("Custom size");
+      box("Width");
+    });
+
+    it("a model whose size field lists nothing shows the boxes, under the same key too", () => {
+      const onChange = vi.fn();
+      const onReset = vi.fn();
+      const { rerender } = render(<ParamField spec={listedSize} value={undefined} onChange={onChange} onReset={onReset} />);
+      expect(screen.queryByRole("spinbutton", { name: "Width" })).toBeNull();
+      // Another model, whose size field has the same key and lists no sizes.
+      rerender(<ParamField spec={freeSize} value={undefined} onChange={onChange} onReset={onReset} />);
+      expect(screen.queryByRole("combobox", { name: "Size" })).toBeNull();
+      box("Width");
+      box("Height");
+    });
+
+    it("a Custom size chosen is forgotten when the field changes to another model's", () => {
+      const onChange = vi.fn();
+      const onReset = vi.fn();
+      const { rerender } = render(<ParamField spec={listedSize} value={undefined} onChange={onChange} onReset={onReset} />);
+      fireEvent.change(select(), { target: { value: "custom" } });
+      box("Width");
+      const other = spec({
+        ...listedSize,
+        kind: { type: "size", rules, values: [{ value: "768x768", label: "768 × 768" }] },
+      });
+      rerender(<ParamField spec={other} value={undefined} onChange={onChange} onReset={onReset} />);
+      expect(select().selectedOptions[0]?.textContent).toBe("Automatic (company default)");
+      expect(screen.queryByRole("spinbutton", { name: "Width" })).toBeNull();
+    });
   });
 
   it("asks nothing of the backend", () => {

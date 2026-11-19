@@ -2,10 +2,11 @@
 // A value goes to the field that means the same thing on the new model (its `canonical`
 // role, so `aspect_ratio` on one model fills the Shape field of another, cloud or local),
 // moved to the nearest value that model takes, and one note names everything that changed.
-// Also: the values Studio starts a model with, Advanced's changed count, and model families
-// (the same rule as Rust's `family_of`) for offering a model in place of a retired one.
+// Also: the values Studio starts a model with, which fields show (what each requires is met)
+// and the values that no longer apply, Advanced's changed count, and model families (the same
+// rule as Rust's `family_of`) for offering a model in place of a retired one.
 import { CARRY_WORDS } from "../../lib/words";
-import type { Choice, MediaModel, ParamSpec, RefItem, RefRole, SizeRules } from "./types";
+import type { Choice, Layer, MediaModel, ParamSpec, RefItem, RefRole, SizeRules } from "./types";
 
 /** A draft's settings, by the model's field keys; an unset field has no key. */
 export type Values = Record<string, unknown>;
@@ -277,6 +278,37 @@ function sizeFits(size: string, rules: SizeRules): boolean {
   if (Math.max(width, height) > rules.maxSide) return false;
   const pixels = width * height;
   return pixels >= rules.minPixels && pixels <= rules.maxPixels;
+}
+
+/** Whether what `spec` requires is met: the field it names has one of the values listed, an
+ *  unset field counting as its company default (the backend's `unmet` rule). */
+function applies(params: ParamSpec[], spec: ParamSpec, values: Values): boolean {
+  const requires = spec.requires;
+  if (!requires) return true;
+  const set = values[requires.key];
+  const current = isSet(set) ? set : (params.find((p) => p.key === requires.key)?.companyDefault ?? null);
+  return current !== null && requires.values.some((v) => v === current);
+}
+
+/** The fields of `layer`, in the model's order, whose requirements `values` meets. */
+export function visibleFields(params: ParamSpec[], layer: Layer, values: Values): ParamSpec[] {
+  return params.filter((p) => p.layer === layer && applies(params, p, values));
+}
+
+/** `values` without each value whose field requires what `values` no longer has, again until
+ *  nothing more goes (a field may require one that went). The same object when nothing goes. */
+export function dropUnmet(model: MediaModel, values: Values): Values {
+  let now = values;
+  for (;;) {
+    const gone = new Set(
+      Object.keys(now).filter((key) => {
+        const spec = model.params.find((p) => p.key === key);
+        return spec !== undefined && !applies(model.params, spec, now);
+      }),
+    );
+    if (gone.size === 0) return now;
+    now = Object.fromEntries(Object.entries(now).filter(([key]) => !gone.has(key)));
+  }
 }
 
 /** How many Advanced settings `values` and `extra` change: each Advanced field set, plus each

@@ -1279,6 +1279,8 @@ fn size_rules(entry: &GenEntry) -> SizeRules {
 /// default size when neither Shape nor Resolution is set; else the shape (the default size's
 /// own when not set) at a shorter side of the resolution's lines for a clip (the default's
 /// shorter side when not set), or for a picture keeping about the default size's pixels.
+/// The webview works out a clip's size the same way (`localClipSize`); the test
+/// `size_of_matches_the_webviews_local_clip_size` holds the two to the same cases.
 fn size_of(entry: &GenEntry, req: &MediaRequest) -> Result<(u32, u32), MediaError> {
     if let Some(size) = text_param(req, key::SIZE)? {
         return parse_size(size).ok_or_else(|| bad_value(key::SIZE));
@@ -3095,6 +3097,46 @@ mod tests {
             .unwrap();
         assert_eq!(job.init_image, Some(dir.path().join("start.png")));
         assert!(strings(build_args(&job).unwrap()).contains(&"vid_gen".to_owned()));
+    }
+
+    /// The webview works out a local clip's size itself, to ask each Length and Resolution
+    /// chip's time (`localClipSize` in src/components/studio/SettingsPanel.tsx). These are the
+    /// five cases of its test (`describe("localClipSize")` in
+    /// src/components/studio/SettingsPanel.test.tsx), on a multiple of 32 and a longest side
+    /// of 1280: a change to either rule shows in both tests.
+    #[test]
+    fn size_of_matches_the_webviews_local_clip_size() {
+        let mut wan = catalog().entries.remove(WAN).unwrap();
+        wan.limits.multiple_of = 32;
+        wan.limits.max_side = 1280;
+        for (params, size) in [
+            // 480p at the default shape, 16:9.
+            (json!({"resolution": "480p"}), (832, 480)),
+            (
+                json!({"resolution": "720p", "aspect_ratio": "16:9"}),
+                (1280, 704),
+            ),
+            (
+                json!({"resolution": "720p", "aspect_ratio": "9:16"}),
+                (704, 1280),
+            ),
+            (
+                json!({"resolution": "720p", "aspect_ratio": "1:1"}),
+                (704, 704),
+            ),
+            // An exact size as it is, whatever the shape and resolution.
+            (json!({"size": "1024x576"}), (1024, 576)),
+            (
+                json!({"size": "1024x576", "resolution": "480p", "aspect_ratio": "9:16"}),
+                (1024, 576),
+            ),
+        ] {
+            assert_eq!(
+                size_of(&wan, &clip(params.clone())).unwrap(),
+                size,
+                "{params}"
+            );
+        }
     }
 
     /// A shape at a resolution keeps within the entry's longest side, the shorter side keeping

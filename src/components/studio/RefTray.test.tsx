@@ -255,6 +255,96 @@ describe("RefTray", () => {
     }
   });
 
+  it("a picture pasted past the limit says why where it can be seen", async () => {
+    await renderTray(flareOne);
+    vi.mocked(api.studioAddRef).mockResolvedValue(kept(1));
+    fireEvent.paste(screen.getByRole("textbox", { name: "Prompt" }), { clipboardData: { files: [pngFile()] } });
+    await screen.findByRole("button", { name: "Reference" });
+    fireEvent.paste(screen.getByRole("textbox", { name: "Prompt" }), { clipboardData: { files: [pngFile("b.png")] } });
+    expect((await screen.findByRole("alert")).textContent).toBe("This model takes 1 added picture.");
+    expect(api.studioAddRef).toHaveBeenCalledTimes(1);
+  });
+
+  it("a picture refused because the model changed while it was kept says why", async () => {
+    await renderTray(flare);
+    let keep: (ref: RefItem) => void = () => undefined;
+    vi.mocked(api.studioAddRef).mockImplementation(() => new Promise((resolve) => (keep = resolve)));
+    fireEvent.paste(screen.getByRole("textbox", { name: "Prompt" }), { clipboardData: { files: [pngFile()] } });
+    await waitFor(() => expect(api.studioAddRef).toHaveBeenCalledTimes(1));
+    // Meanwhile the model became one that takes no pictures: the tray has nothing else to show.
+    const none = { ...flare, params: flare.params.filter((p) => p.kind.type !== "images") };
+    act(() => useStudio.setState({ endpoints: [endpoint([none, ...MODELS.filter((x) => x.id !== flare.id)])] }));
+    expect(screen.queryByText("+ Add picture")).toBeNull();
+    await act(async () => keep(kept(1)));
+    expect((await screen.findByRole("alert")).textContent).toBe("This model takes no added pictures.");
+    expect(refs()).toEqual([]);
+  });
+
+  it("a picture pasted while the model takes none is left to the box it was pasted in", async () => {
+    await renderTray({ ...flare, params: flare.params.filter((p) => p.kind.type !== "images") });
+    // Not taken over: the paste goes on as it would without Studio.
+    const notPrevented = fireEvent.paste(screen.getByRole("textbox", { name: "Prompt" }), {
+      clipboardData: { files: [pngFile()] },
+    });
+    expect(notPrevented).toBe(true);
+    await flush();
+    expect(api.studioAddRef).not.toHaveBeenCalled();
+    expect(useStudio.getState().drafts.image.refs).toEqual([]);
+  });
+
+  it("removing a picture does not read the others' bytes again", async () => {
+    const original = { create: URL.createObjectURL, revoke: URL.revokeObjectURL };
+    URL.createObjectURL = vi.fn(() => "blob:thumb");
+    URL.revokeObjectURL = vi.fn();
+    try {
+      await renderTray(flare);
+      vi.mocked(api.studioRefBytes).mockResolvedValue(new Uint8Array([1, 2, 3]).buffer);
+      const three = [1, 2, 3].map((n) => ({ ...kept(n), role: "reference" as const }));
+      act(() => {
+        useStudio.setState((s) => ({ drafts: { ...s.drafts, image: { ...s.drafts.image, refs: three } } }));
+      });
+      await waitFor(() => expect(api.studioRefBytes).toHaveBeenCalledTimes(3));
+      await flush();
+      vi.mocked(api.studioRefBytes).mockClear();
+      fireEvent.click(screen.getByRole("button", { name: "Remove picture 1" }));
+      await flush();
+      expect(refs().map((r) => r.sha256)).toEqual([kept(2).sha256, kept(3).sha256]);
+      expect(screen.getAllByRole("img").map((i) => i.getAttribute("alt"))).toEqual(["Picture 1", "Picture 2"]);
+      expect(api.studioRefBytes).not.toHaveBeenCalled();
+    } finally {
+      URL.createObjectURL = original.create;
+      URL.revokeObjectURL = original.revoke;
+    }
+  });
+
+  it("the same picture twice keeps each one's thumbnail when the first goes", async () => {
+    const original = { create: URL.createObjectURL, revoke: URL.revokeObjectURL };
+    URL.createObjectURL = vi.fn(() => "blob:thumb");
+    URL.revokeObjectURL = vi.fn();
+    try {
+      await renderTray(veo);
+      vi.mocked(api.studioRefBytes).mockResolvedValue(new Uint8Array([1, 2, 3]).buffer);
+      // One picture as both frames, for a loop.
+      const loop = [
+        { ...kept(1), role: "startFrame" as const },
+        { ...kept(1), role: "endFrame" as const },
+      ];
+      act(() => {
+        useStudio.setState((s) => ({ drafts: { ...s.drafts, video: { ...s.drafts.video, refs: loop } } }));
+      });
+      await waitFor(() => expect(api.studioRefBytes).toHaveBeenCalledTimes(2));
+      await flush();
+      fireEvent.click(screen.getByRole("button", { name: "Remove picture 1" }));
+      await flush();
+      expect(refs("video").map((r) => r.role)).toEqual(["endFrame"]);
+      screen.getByRole("button", { name: "End frame" });
+      screen.getByRole("img", { name: "Picture 1" });
+    } finally {
+      URL.createObjectURL = original.create;
+      URL.revokeObjectURL = original.revoke;
+    }
+  });
+
   it("a model that takes no pictures has no tray", async () => {
     await renderTray({ ...flare, params: flare.params.filter((p) => p.kind.type !== "images") });
     expect(screen.queryByText("+ Add picture")).toBeNull();
