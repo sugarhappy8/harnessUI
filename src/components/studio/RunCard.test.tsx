@@ -4,8 +4,8 @@
 // left, the graphics card's wait and question, the unloaded chat model, the engine's and a
 // damaged part's download, and the queue strip's counts. Esc never cancels a card.
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
-import { LOCAL, LOCAL_RUN, RUN } from "./fixtures/models";
+import { act, cleanup, fireEvent, render, screen, within } from "@testing-library/react";
+import { LOCAL, LOCAL_RUN, MODELS, RUN } from "./fixtures/models";
 import type { LocalRun, Run, RunError, StudioPrefs } from "./types";
 
 vi.mock("../../lib/ipc", () => ({ isTauri: () => true }));
@@ -114,6 +114,8 @@ beforeEach(() => {
   vi.clearAllMocks();
   useStudio.setState(INITIAL, true);
   useApp.setState(INITIAL_APP, true);
+  // A result's tile waits for its bytes; the tests of its results give them.
+  vi.mocked(api.studioOutputBytes).mockReturnValue(new Promise(() => {}));
 });
 
 afterEach(cleanup);
@@ -349,6 +351,78 @@ describe("RunCard", () => {
       await show(working({ startedAt: Date.now() }));
       await click(button("Cancel"));
       screen.getByText("The run could not be stopped.");
+    });
+  });
+
+  describe("its results", () => {
+    const original = { create: URL.createObjectURL, revoke: URL.revokeObjectURL };
+    beforeEach(() => {
+      URL.createObjectURL = vi.fn(() => "blob:tile");
+      URL.revokeObjectURL = vi.fn();
+      vi.mocked(api.studioOutputBytes).mockResolvedValue(new ArrayBuffer(8));
+    });
+    afterEach(() => {
+      URL.createObjectURL = original.create;
+      URL.revokeObjectURL = original.revoke;
+    });
+
+    const tile = (id: string) => document.querySelector<HTMLElement>(`[data-output-tile="${id}"]`)!;
+
+    it("a finished run shows each result as a tile from its thumbnail, and a tile opens the viewer", async () => {
+      await show(run());
+      await flush();
+      expect([...document.querySelectorAll("[data-output-tile]")].map((t) => t.getAttribute("data-output-tile"))).toEqual(
+        ["o1", "o2", "o3", "o4"],
+      );
+      expect(api.studioOutputBytes).toHaveBeenCalledWith("o2", true);
+      await click(within(tile("o2")).getByRole("button", { name: /^Open picture 2 of 4/ }));
+      expect(useStudio.getState().viewer).toBe("o2");
+    });
+
+    it("a result's star stars it", async () => {
+      vi.mocked(api.studioStar).mockResolvedValue({ ...RUN.outputs[1]!, starred: true });
+      useStudio.setState({ runs: [RUN] });
+      await show(run());
+      const star = within(tile("o2")).getByRole("button", { name: "Star picture 2 of 4" });
+      expect(star.getAttribute("aria-pressed")).toBe("false");
+      await click(star);
+      expect(api.studioStar).toHaveBeenCalledWith("o2", true);
+      expect(within(tile("o2")).getByRole("button", { name: "Star picture 2 of 4" }).getAttribute("aria-pressed")).toBe(
+        "true",
+      );
+    });
+
+    it("Reuse fills the prompt and every setting and starts nothing", async () => {
+      useStudio.setState({
+        endpoints: [
+          {
+            providerId: 1,
+            name: "OpenRouter",
+            company: "openrouter",
+            host: "openrouter.ai",
+            cloud: true,
+            hasKey: true,
+            fetchedAt: 1,
+            models: MODELS,
+          },
+        ],
+      });
+      await show(run());
+      await click(button("Reuse"));
+      expect(api.studioStart).not.toHaveBeenCalled();
+      expect(useStudio.getState().drafts.image).toMatchObject({ prompt: RUN.prompt, values: RUN.params, model: RUN.model });
+    });
+
+    it("Reuse says why when the run's model is gone", async () => {
+      await show(run());
+      await click(button("Reuse"));
+      screen.getByText("This run's endpoint was removed in Settings → Endpoints.");
+    });
+
+    it("a run still working shows no tiles yet", async () => {
+      await show(working());
+      expect(document.querySelector("[data-output-tile]")).toBeNull();
+      noButton("Reuse");
     });
   });
 

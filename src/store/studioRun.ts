@@ -286,7 +286,7 @@ export function targetOf(run: Run): RunTarget | null {
 const SEED_KEY = "seed";
 
 /** The key of `model`'s seed field (by its role); `SEED_KEY` when the model is not listed now. */
-function seedKey(model: MediaModel | null): string {
+export function seedKey(model: MediaModel | null): string {
   return model?.params.find((p) => p.canonical === "seed" || p.kind.type === "seed")?.key ?? SEED_KEY;
 }
 
@@ -294,7 +294,7 @@ function seedKey(model: MediaModel | null): string {
  *  without its seed (the field of `model`, its model as listed, or the usual seed key when it is
  *  no longer listed), so a new seed is picked, unless `keepSeed`; `null` when the endpoint it ran
  *  at is not known. */
-function requestFromRun(
+export function requestFromRun(
   run: Run,
   clientToken: string,
   model: MediaModel | null,

@@ -1,6 +1,6 @@
 // How long a local run takes, in words (0.1.0): one figure, a first guess labelled as one.
 import { describe, expect, it } from "vitest";
-import { etaText } from "./eta";
+import { etaText, tookWords } from "./eta";
 import type { Eta } from "./types";
 
 function eta(lowMs: number, highMs: number, measured = true): Eta {
@@ -23,5 +23,15 @@ describe("etaText", () => {
     expect(etaText(eta(180_000, 300_000, false), "a picture")).toBe("about 4 min a picture (first guess)");
     expect(etaText(eta(180_000, 300_000), "for a 2 s clip")).toBe("about 4 min for a 2 s clip");
     expect(etaText(null)).toBeNull();
+  });
+});
+
+describe("tookWords", () => {
+  it("says a time under a minute to a tenth of a second, a longer one in minutes and seconds", () => {
+    expect(tookWords(13_800)).toBe("13.8 s");
+    expect(tookWords(13_000)).toBe("13 s");
+    expect(tookWords(59_940)).toBe("59.9 s");
+    expect(tookWords(59_960)).toBe("1 min");
+    expect(tookWords(228_000)).toBe("3 min 48 s");
   });
 });

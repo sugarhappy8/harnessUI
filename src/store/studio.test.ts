@@ -275,7 +275,7 @@ describe("what is saved", () => {
     vi.mocked(api.studioRuns).mockClear();
     await useStudio.getState().load();
     expect(api.studioRuns).toHaveBeenCalledTimes(2);
-    expect(api.studioRuns).toHaveBeenCalledWith({ kind: "video" }, null, 50);
+    expect(api.studioRuns).toHaveBeenCalledWith({ kind: "video" }, null, 60);
     expect(api.studioRuns).toHaveBeenCalledWith({}, null, 50);
     expect(useStudio.getState()).toMatchObject({ runs: [], recentRuns: [RUN] });
   });
@@ -391,5 +391,80 @@ describe("what is saved", () => {
       await useStudio.getState().reread();
       expect(useStudio.getState().drafts.image).toBe(image);
     });
+  });
+});
+
+describe("the gallery's results (Task B9)", () => {
+  it("a star joins the result wherever the store holds it", async () => {
+    useStudio.setState({ runs: [RUN], recentRuns: [RUN], live: { [RUN.id]: RUN } });
+    vi.mocked(api.studioStar).mockResolvedValue({ ...RUN.outputs[1]!, starred: true });
+    await useStudio.getState().star("o2", true);
+    expect(api.studioStar).toHaveBeenCalledWith("o2", true);
+    const s = useStudio.getState();
+    for (const held of [s.runs[0]!, s.recentRuns[0]!, s.live[RUN.id]!]) {
+      expect(held.outputs.map((o) => o.starred)).toEqual([false, true, false, false]);
+    }
+  });
+
+  it("deleted results leave the store, and a finished run left without results goes with them", async () => {
+    const failed = run({ id: "failed", status: "failed", outputs: [{ ...RUN.outputs[0]!, id: "f1", runId: "failed" }] });
+    useStudio.setState({ runs: [RUN, LOCAL_RUN, failed], recentRuns: [RUN, LOCAL_RUN], live: { [RUN.id]: RUN } });
+    vi.mocked(api.studioDelete).mockResolvedValue(undefined);
+    vi.mocked(api.studioUsage).mockResolvedValue({
+      spentTodayUsd: 0.04,
+      pendingUsd: 0,
+      limitUsd: 10,
+      folder: "/g",
+      bytes: 0,
+      pictures: 0,
+      videos: 0,
+    });
+    await useStudio.getState().remove(["o1", "o2", "o3", "o4", "l1", "f1"]);
+    expect(api.studioDelete).toHaveBeenCalledWith(["o1", "o2", "o3", "o4", "l1", "f1"]);
+    const s = useStudio.getState();
+    expect(s.runs.map((r) => r.id)).toEqual(["local-run", "failed"]);
+    expect(s.runs[0]!.outputs.map((o) => o.id)).toEqual(["l2"]);
+    // A run that ended without finishing keeps its card (as the backend keeps it).
+    expect(s.runs[1]!.outputs).toEqual([]);
+    expect(s.recentRuns.map((r) => r.id)).toEqual(["local-run"]);
+    expect(s.live).toEqual({});
+    await flush();
+    // What the gallery holds is read again; today's spending stays as the backend says.
+    expect(api.studioUsage).toHaveBeenCalled();
+  });
+
+  it("a delete that fails changes nothing", async () => {
+    useStudio.setState({ runs: [RUN] });
+    vi.mocked(api.studioDelete).mockRejectedValue({ code: "internal", message: "no", nextStep: "", details: "" });
+    await expect(useStudio.getState().remove(["o1"])).rejects.toMatchObject({ code: "internal" });
+    expect(useStudio.getState().runs).toEqual([RUN]);
+  });
+
+  it("Load more reads the page after the last one for the same filter, once at a time", async () => {
+    const next = { createdAt: RUN.createdAt, id: RUN.id };
+    useStudio.setState({ runs: [RUN], next, filter: { starred: true } });
+    let answer: (page: { runs: Run[]; next: null }) => void = () => undefined;
+    vi.mocked(api.studioRuns).mockReturnValue(new Promise((resolve) => (answer = resolve)));
+    const first = useStudio.getState().loadMore();
+    const second = useStudio.getState().loadMore();
+    answer({ runs: [LOCAL_RUN, RUN], next: null });
+    await Promise.all([first, second]);
+    expect(api.studioRuns).toHaveBeenCalledTimes(1);
+    expect(api.studioRuns).toHaveBeenCalledWith({ starred: true }, next, 60);
+    // A run already read is not shown twice.
+    expect(useStudio.getState()).toMatchObject({ runs: [RUN, LOCAL_RUN], next: null });
+  });
+
+  it("a page for a filter changed since is dropped", async () => {
+    const next = { createdAt: RUN.createdAt, id: RUN.id };
+    useStudio.setState({ runs: [RUN], next, filter: {} });
+    let answer: (page: { runs: Run[]; next: null }) => void = () => undefined;
+    vi.mocked(api.studioRuns).mockReturnValueOnce(new Promise((resolve) => (answer = resolve)));
+    const more = useStudio.getState().loadMore();
+    vi.mocked(api.studioRuns).mockResolvedValueOnce({ runs: [], next: null });
+    await useStudio.getState().setFilter({ kind: "video" });
+    answer({ runs: [LOCAL_RUN], next: null });
+    await more;
+    expect(useStudio.getState().runs).toEqual([]);
   });
 });

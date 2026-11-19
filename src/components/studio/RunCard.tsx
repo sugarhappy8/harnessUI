@@ -12,6 +12,7 @@ import { toErrorInfo, useApp } from "../../store/app";
 import { listedModel, useStudio, type StudioState } from "../../store/studio";
 import { COST_TONE_CLASS, costTone, formatUsd } from "./cost";
 import { etaText, timeWords } from "./eta";
+import { ResultTile, resultsOf } from "./Grid";
 import { settingsParts } from "./settingsLine";
 import { CARD_BUTTON } from "./styles";
 import type { Run } from "./types";
@@ -28,7 +29,8 @@ export { localLine } from "./Working";
 // the charge line the backend recorded for a cloud run; and the card's buttons: Cancel, Stop or
 // Stop watching while it works, *Get it anyway* and *Check again* for a video (never a create),
 // the engine's or a damaged model's download, Edit prompt after a refusal (which is never
-// retried), and Again. The results row (tiles) and the other actions are Task B9's. Esc never
+// retried), and Again. Task B9: its results as tiles (each opens the viewer, each with its
+// star) and Reuse, which fills the prompt box from the run and never starts it. Esc never
 // cancels a card. The card follows the run's newest state in the store. The settings line is
 // built in settingsLine.ts, the status line of a run still working in Working.tsx.
 
@@ -220,7 +222,7 @@ const LINK = "shrink-0 text-xs underline hover:text-fg disabled:opacity-60";
 
 /** One run's card. */
 export function RunCard(props: { run: Run }) {
-  const run = useStudio((s) => s.live[props.run.id]) ?? props.run;
+  const run = useStudio((s) => s.live[props.run.id] ?? s.runs.find((r) => r.id === props.run.id)) ?? props.run;
   const local = run.runsOn === "local";
   const model = useStudio((s) =>
     listedModel(local ? "thisComputer" : { endpoint: run.providerId ?? -1 }, run.model, s.local, s.endpoints),
@@ -272,6 +274,11 @@ export function RunCard(props: { run: Run }) {
   const cancel = () => perform(() => store().cancel(run.id));
   const fetchAnyway = () => perform(() => store().fetchAnyway(run.id));
   const again = () => perform(() => store().again(run));
+  const reuse = () => {
+    const refused = store().reuse(run, true);
+    setFailure(refused === null ? null : { code: "studio_reuse", message: refused, nextStep: "", details: "" });
+    if (refused === null) window.dispatchEvent(new Event("app:focus-studio-prompt"));
+  };
   const editPrompt = () => {
     store().setPrompt(run.kind, run.prompt);
     window.dispatchEvent(new Event("app:focus-studio-prompt"));
@@ -378,7 +385,20 @@ export function RunCard(props: { run: Run }) {
       )}
       {fileBad && repairing && <p className="text-xs text-fg-muted">{STUDIO_CARD.repairing}</p>}
 
-      {/* The results row: Task B9's tiles. */}
+      {run.outputs.length > 0 && (
+        <div className="flex flex-wrap gap-2">
+          {resultsOf(run).map((output) => (
+            <ResultTile
+              key={output.id}
+              run={run}
+              output={output}
+              onOpen={(id) => store().openViewer(id)}
+              onStar={() => perform(() => store().star(output.id, !output.starred))}
+              className="size-28"
+            />
+          ))}
+        </div>
+      )}
 
       {!working && run.status !== "waiting" && (
         <div className="flex flex-wrap items-center gap-2">
@@ -417,6 +437,9 @@ export function RunCard(props: { run: Run }) {
               {local && ended ? STUDIO_CARD.runAgain : STUDIO_CARD.again}
             </button>
           )}
+          <button type="button" className={CARD_BUTTON} onClick={reuse}>
+            {STUDIO_CARD.reuse}
+          </button>
           {ended && error?.details && (
             <button
               type="button"

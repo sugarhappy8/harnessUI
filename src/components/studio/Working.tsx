@@ -14,8 +14,8 @@ import type { Run } from "./types";
 /** The local stages before a step was timed: the first guess stands in for the time left. */
 const BEFORE_A_STEP: ReadonlySet<string | null> = new Set([null, "loading", "readingPrompt", "drawing"]);
 
-/** A time on a clock: "0:21", "1:12", "1:02:05". */
-function clock(ms: number): string {
+/** A time on a clock: "0:21", "1:12", "1:02:05" (a video's length on its tile too). */
+export function clock(ms: number): string {
   const total = Math.max(0, Math.floor(ms / 1000));
   const hours = Math.floor(total / 3600);
   const minutes = Math.floor((total % 3600) / 60);

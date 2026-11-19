@@ -33,6 +33,8 @@ import {
   amountGb,
   getListWords,
   listsUpdatedWords,
+  madeWords,
+  STUDIO_DELETE,
   amountNumber,
   appleLimitWords,
   barLegend,
@@ -1022,5 +1024,20 @@ describe("0.1.0 Studio: the saved lists in plain words", () => {
   it("offers an endpoint's lists by what its company makes", () => {
     expect(getListWords("OpenRouter", "openrouter")).toBe("Get OpenRouter's picture and video models");
     expect(getListWords("Work key", "openai")).toBe("Get Work key's picture models");
+  });
+});
+
+describe("0.1.0 Studio: the viewer and the gallery in plain words", () => {
+  it("says when a run was made with the day, the year and the time", () => {
+    expect(madeWords(new Date(2026, 10, 17, 14, 2).getTime())).toBe("17 Nov 2026 14:02");
+    expect(madeWords(new Date(2025, 0, 3, 9, 30).getTime())).toBe("3 Jan 2025 09:30");
+  });
+
+  it("names what a delete removes by how many and of which kind", () => {
+    expect(STUDIO_DELETE.title(1, ["image"])).toBe("Delete this picture?");
+    expect(STUDIO_DELETE.title(1, ["video"])).toBe("Delete this video?");
+    expect(STUDIO_DELETE.title(3, ["image", "image", "image"])).toBe("Delete 3 pictures?");
+    expect(STUDIO_DELETE.title(2, ["video", "video"])).toBe("Delete 2 videos?");
+    expect(STUDIO_DELETE.title(2, ["image", "video"])).toBe("Delete 2 results?");
   });
 });

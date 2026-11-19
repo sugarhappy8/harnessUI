@@ -2,15 +2,19 @@ import { useEffect, useMemo, useState } from "react";
 import { Tabs } from "radix-ui";
 import * as ipc from "../../lib/ipc";
 import type { ErrorInfo } from "../../lib/types";
+import { STUDIO_GRID } from "../../lib/words";
 import { toErrorInfo } from "../../store/app";
 import { useStudio, type StudioTab } from "../../store/studio";
 import { ErrorBanner } from "../ErrorBanner";
 import { Notices } from "./EmptyStates";
+import { Grid } from "./Grid";
 import { PromptDock } from "./PromptDock";
 import { queueSummary, RunCard } from "./RunCard";
 import { SettingsPanel } from "./SettingsPanel";
+import { CARD_BUTTON } from "./styles";
 import { TopBar } from "./TopBar";
 import type { Run } from "./types";
+import { Viewer } from "./Viewer";
 
 // Studio's view (0.1.0, design Wireframe 1): the top bar (TopBar.tsx), the card stream in the
 // middle with the notices and empty states above it, local first (EmptyStates.tsx), the right
@@ -20,9 +24,11 @@ import type { Run } from "./types";
 // prompt dock the added pictures, the prompt, the changed settings and Create (B7,
 // PromptDock.tsx). The card stream holds the tab's runs, newest first, as RunCards (B8): the
 // gallery's runs read so far with each run's newest state, and the runs started or heard of
-// since; above them, the queue strip counts this session's runs of the tab by state. Later
-// tasks fill the other slots: the gallery's grid (B9) and Get local models in place of the
-// stream while `localView` is on (B13).
+// since; above them, the queue strip counts this session's runs of the tab by state, and under
+// them *Load more* reads the gallery's next page. With Grid on, the gallery's grid takes the
+// stream's place (B9), and a result opened from a card, a tile or the chat's notice shows in the
+// viewer over the whole view. A later task fills the other slot: Get local models in place of
+// the stream while `localView` is on (B13).
 
 /** The card stream of `tab`: the gallery's runs with each run's newest state, and the runs
  *  reported since (`live`) that it has not read, newest first. */
@@ -39,6 +45,10 @@ export function StudioView() {
   const shown = useStudio((s) => s.view === "studio");
   const runs = useStudio((s) => s.runs);
   const live = useStudio((s) => s.live);
+  const grid = useStudio((s) => s.grid);
+  const viewer = useStudio((s) => s.viewer);
+  const openViewer = useStudio((s) => s.openViewer);
+  const more = useStudio((s) => s.next !== null);
   const stream = useMemo(() => streamOf(runs, live, tab), [runs, live, tab]);
   const queue = useMemo(() => queueSummary(Object.values(live).filter((r) => r.kind === tab)), [live, tab]);
   // The banner's error, and whether a read of what is saved gave it: a read that works puts
@@ -79,17 +89,29 @@ export function StudioView() {
             <div className="mx-auto flex max-w-3xl flex-col gap-3 px-4 py-4">
               {error && <ErrorBanner error={error.info} onDismiss={() => setError(null)} />}
               {loaded && <Notices tab={tab} onError={fail} />}
-              {/* The run cards, or the gallery's grid (Task B9). */}
-              <div data-card-stream className="flex flex-col gap-3">
-                {queue && (
-                  <p data-queue-strip className="text-xs text-fg-muted" aria-live="polite">
-                    {queue}
-                  </p>
-                )}
-                {stream.map((run) => (
-                  <RunCard key={run.id} run={run} />
-                ))}
-              </div>
+              {grid ? (
+                <Grid onOpen={openViewer} />
+              ) : (
+                <div data-card-stream className="flex flex-col gap-3">
+                  {queue && (
+                    <p data-queue-strip className="text-xs text-fg-muted" aria-live="polite">
+                      {queue}
+                    </p>
+                  )}
+                  {stream.map((run) => (
+                    <RunCard key={run.id} run={run} />
+                  ))}
+                  {more && (
+                    <button
+                      type="button"
+                      className={`${CARD_BUTTON} self-center`}
+                      onClick={() => void useStudio.getState().loadMore().catch(fail)}
+                    >
+                      {STUDIO_GRID.loadMore}
+                    </button>
+                  )}
+                </div>
+              )}
             </div>
           </main>
           {/* The right panel: the model and its settings. */}
@@ -99,6 +121,7 @@ export function StudioView() {
         </div>
         <PromptDock tab={tab} />
       </Tabs.Content>
+      {viewer !== null && <Viewer outputId={viewer} onClose={() => openViewer(null)} />}
     </Tabs.Root>
   );
 }

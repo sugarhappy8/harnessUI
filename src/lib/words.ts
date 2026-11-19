@@ -1431,6 +1431,8 @@ export const STUDIO_CARD = {
   checkAgain: "Check again",
   again: "Again",
   runAgain: "Run again",
+  /** Fills the prompt and every setting from the run (Task B9); never starts it. */
+  reuse: "Reuse",
   editPrompt: "Edit prompt",
   details: "Details",
   /** Whether an ended cloud run was charged, as the backend recorded it. */
@@ -1510,4 +1512,157 @@ export const STUDIO_QUIT = {
 export const STUDIO_CHAT_WAIT = {
   waiting: "Studio is using the graphics card. The chat model loads when it finishes.",
   stop: "Stop Studio job",
+} as const;
+
+/** A result's name in Studio's gallery: "picture 2 of 4" among a run's results, "video" alone. */
+function resultName(kind: MediaKind, n: number, of: number): string {
+  const noun = kind === "video" ? "video" : "picture";
+  return of > 1 ? `${noun} ${n} of ${of}` : noun;
+}
+
+/** A result's tile, on a card and in the grid (Task B9). */
+export const STUDIO_TILE = {
+  /** The tile itself, which opens the viewer: "Open picture 2 of 4: A lighthouse…". */
+  open: (kind: MediaKind, n: number, of: number, prompt: string) =>
+    prompt ? `Open ${resultName(kind, n, of)}: ${prompt}` : `Open ${resultName(kind, n, of)}`,
+  /** Its box in the grid, to select it with others. */
+  select: (kind: MediaKind, n: number, of: number, prompt: string) =>
+    prompt ? `Select ${resultName(kind, n, of)}: ${prompt}` : `Select ${resultName(kind, n, of)}`,
+  /** Its star on a card: "Star picture 2 of 4" (pressed while starred). */
+  star: (kind: MediaKind, n: number, of: number) => `Star ${resultName(kind, n, of)}`,
+} as const;
+
+/** The gallery's grid (Task B9): its filters beside the top bar's search and Starred, Load
+ *  more, and what several selected results can do together. */
+export const STUDIO_GRID = {
+  kinds: "Show",
+  all: "All",
+  /** The date filter. */
+  when: "When",
+  since: {
+    any: "Any time",
+    today: "Today",
+    week: "Last 7 days",
+    month: "Last 30 days",
+  },
+  loadMore: "Load more",
+  empty: "Nothing here yet.",
+  nothingMatches: "No results match.",
+  selected: (n: number) => `${n} selected`,
+  deleteSome: (n: number) => `Delete ${n}`,
+  saveSome: (n: number) => `Save ${n}…`,
+  clear: "Clear selection",
+} as const;
+
+/** Deleting results, in the viewer or several from the grid (Task B9): the file and its record
+ *  go; the audit log keeps its line, and a cloud run still counts toward today's spending. */
+export const STUDIO_DELETE = {
+  title(count: number, kinds: readonly MediaKind[]): string {
+    const pictures = kinds.every((k) => k === "image");
+    const videos = kinds.every((k) => k === "video");
+    if (count === 1) return videos ? "Delete this video?" : "Delete this picture?";
+    return pictures ? `Delete ${count} pictures?` : videos ? `Delete ${count} videos?` : `Delete ${count} results?`;
+  },
+  removes: (count: number) =>
+    count === 1 ? "The file and its record are removed from the gallery." : "The files and their records are removed from the gallery.",
+  audit: "The audit log keeps a line saying a run happened (model and cost), but not your prompt.",
+  /** Added after `audit` when a cloud run's result is among those deleted. */
+  spending: "It still counts toward today's spending.",
+  delete: "Delete",
+  cancel: "Cancel",
+} as const;
+
+/** Reuse all and Reuse without seed when the run's model is no longer offered (Task B9). */
+export const STUDIO_REUSE = {
+  /** The model is gone, and `model` of its family is used in its place. */
+  replaced: (endpoint: string, model: string) => `${endpoint} no longer offers this model, so ${model} is used.`,
+  gone: (endpoint: string) => `${endpoint} no longer offers this model.`,
+  goneHere: "This model is no longer on this computer.",
+  endpointGone: "This run's endpoint was removed in Settings → Endpoints.",
+} as const;
+
+/** Animate and Edit when the tab's model cannot take the picture (Task B9): another model is
+ *  offered, an installed local one first. */
+export const STUDIO_OFFER = {
+  animate: (model: string | null, offered: string) =>
+    model ? `${model} takes no start frame. Use ${offered} instead?` : `Make the video with ${offered}?`,
+  edit: (model: string | null, offered: string) =>
+    model ? `${model} cannot change a picture. Use ${offered} instead?` : `Change the picture with ${offered}?`,
+  noneAnimate: "No video model here takes a start frame.",
+  noneEdit: "No picture model here can change a picture.",
+  /** The offer's button ("use" would read as a React hook to the linter). */
+  choose: (model: string) => `Use ${model}`,
+} as const;
+
+const pad2 = (n: number) => String(n).padStart(2, "0");
+
+/** When a run was made, as the viewer says it: "17 Nov 2026 14:02". */
+export function madeWords(at: number): string {
+  const d = new Date(at);
+  return `${d.getDate()} ${MONTHS[d.getMonth()]} ${d.getFullYear()} ${pad2(d.getHours())}:${pad2(d.getMinutes())}`;
+}
+
+/** Studio's viewer (Task B9, design Wireframe 4 and the local addendum). */
+export const STUDIO_VIEWER = {
+  /** The viewer's name for a screen reader. */
+  title: (kind: MediaKind) => (kind === "video" ? "Video" : "Picture"),
+  position: (n: number, of: number) => `${n} / ${of}`,
+  previous: "Previous",
+  next: "Next",
+  close: "Close",
+  /** A row's name before its value: "Cost: ". */
+  row: (label: string) => `${label}: `,
+  prompt: "Prompt",
+  copyPrompt: "Copy prompt",
+  model: "Model",
+  /** Where OpenRouter ran it, when known: "OpenRouter (runs at OpenAI)". */
+  runsAt: (company: string, upstream: string | null) => (upstream ? `${company} (runs at ${upstream})` : company),
+  size: "Size",
+  settings: "Settings",
+  cost: "Cost",
+  made: "Made",
+  file: "File",
+  notes: "Notes",
+  /** After the device a local run ran on. */
+  on: (device: string) => `on ${device}`,
+  engineBuild: (build: number) => `engine build ${build}`,
+  labelled: "Labelled as AI-made in the file",
+  /** A setting and its value in the settings row: "Quality low". */
+  setting: (label: string, value: string) => `${label} ${value}`,
+  star: "Star",
+  edit: "Edit",
+  animate: "Animate",
+  useAsReference: "Use as reference",
+  showInFolder: "Show in folder",
+  delete: "Delete",
+  reuseAll: "Reuse all",
+  reuseWithoutSeed: "Reuse without seed",
+  /** Reuse filled the draft; the viewer stays open. */
+  reused: "Filled in the prompt and settings. Nothing was started.",
+  /** Use as reference added the picture to the tab's added pictures. */
+  addedAsReference: "Added to the prompt's pictures.",
+  saveAs: "Save as…",
+  withSettings: "Also save the settings as a .json file",
+  savedTo: (path: string) => `Saved to ${path}`,
+  copy: "Copy",
+  copied: "Copied",
+  noCopy: "Copy is not available here. Use Save as… instead.",
+  /** The file types the save dialog offers: "PNG picture", "MP4 video". */
+  fileType: (ext: string, kind: MediaKind) => `${ext.toUpperCase()} ${kind === "video" ? "video" : "picture"}`,
+} as const;
+
+/** The shortcut sheet's keys for Studio's viewer (Task B9). */
+export const STUDIO_VIEWER_KEYS = {
+  title: "In Studio's viewer",
+  rows: [
+    ["← →", "Previous or next result"],
+    ["F", "Star or unstar"],
+    ["R", "Reuse all (Shift R: without the seed)"],
+    ["A", "Animate a picture"],
+    ["S", "Save as…"],
+    ["C", "Copy a picture"],
+    ["Del", "Delete"],
+    ["Space", "Play or pause a video"],
+    ["Esc", "Close the viewer (never stops a Studio job)"],
+  ] as const satisfies readonly (readonly [string, string])[],
 } as const;

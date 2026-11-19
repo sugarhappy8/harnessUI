@@ -362,8 +362,21 @@ describe("StudioView", () => {
       vi.advanceTimersByTime(1);
     });
     expect(api.studioRuns).toHaveBeenCalledTimes(1);
-    expect(api.studioRuns).toHaveBeenCalledWith({ text: "fox" }, null, 50);
+    expect(api.studioRuns).toHaveBeenCalledWith({ text: "fox" }, null, 60);
     expect(search.value).toBe("fox");
+  });
+
+  it("Load more under the cards reads the gallery's next page", async () => {
+    const next = { createdAt: RUN.createdAt, id: RUN.id };
+    vi.mocked(api.studioOutputBytes).mockReturnValue(new Promise(() => {}));
+    vi.mocked(api.studioRuns).mockResolvedValueOnce({ runs: [RUN], next });
+    await show({ runs: [RUN] });
+    const older: Run = { ...RUN, id: "older", createdAt: RUN.createdAt - 1000, prompt: "An older picture", outputs: [] };
+    vi.mocked(api.studioRuns).mockResolvedValueOnce({ runs: [older], next: null });
+    await click(screen.getByRole("button", { name: "Load more" }));
+    expect(api.studioRuns).toHaveBeenLastCalledWith({}, next, 60);
+    expect(document.querySelector('[data-run-card="older"]')).not.toBeNull();
+    expect(screen.queryByRole("button", { name: "Load more" })).toBeNull();
   });
 
   it("the card stream shows the tab's runs, newest first, under the queue strip of this session's runs", async () => {

@@ -60,7 +60,12 @@ export function TopBar(props: { onError: (e: unknown) => void }) {
       >
         <Star size={14} aria-hidden /> {STUDIO_BAR.starred}
       </button>
-      <button type="button" aria-pressed={grid} onClick={() => setGrid(!grid)} className={TOGGLE}>
+      <button
+        type="button"
+        aria-pressed={grid}
+        onClick={() => void setGrid(!grid).catch(props.onError)}
+        className={TOGGLE}
+      >
         <LayoutGrid size={14} aria-hidden /> {STUDIO_BAR.grid}
       </button>
       <div className="ml-auto flex items-center gap-2">

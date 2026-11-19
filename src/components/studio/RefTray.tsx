@@ -84,8 +84,9 @@ function dropTarget(take: (files: File[]) => void) {
 }
 
 /** An added picture from its bytes in the gallery folder, as a `blob:` URL let go with it; a
- *  picture icon until then (and if its bytes cannot be read). */
-function RefThumb(props: { sha256: string; mime: string; alt: string; className: string }) {
+ *  picture icon until then (and if its bytes cannot be read). A video's tile shows its start
+ *  frame this way until its poster frame is saved (Task B9). */
+export function RefThumb(props: { sha256: string; mime: string; alt: string; className: string }) {
   const { sha256, mime } = props;
   const [src, setSrc] = useState<string | null>(null);
   useEffect(() => {

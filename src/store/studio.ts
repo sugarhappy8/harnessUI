@@ -21,8 +21,12 @@
 // a run stopped (Cancel, Stop, Stop watching), a video's job checked again (*Get it anyway*,
 // *Check again*), the answer to "Unload the chat model?", the Studio engine's download and a
 // damaged local model's download again, a run made again from its own settings, and the result
-// open in the viewer (Task B9 draws it).
+// open in the viewer. Task B9: the actions on a result (Reuse all and Reuse without seed, which
+// never start a run; Animate, Edit and Use as reference, which keep the picture as an added
+// picture; Star; Delete, after which a finished run left without results goes too; several saved
+// into one folder), the grid's filters and Load more.
 import { create, type StoreApi, type UseBoundStore } from "zustand";
+import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import * as api from "../components/studio/api";
 import { carry, closestModel, defaultsFor, dropUnmet, familyOf, type Values } from "../components/studio/canonical";
 import type {
@@ -34,6 +38,7 @@ import type {
   MediaKind,
   MediaModel,
   ModelChoice,
+  Output,
   RefItem,
   RefRole,
   Routing,
@@ -51,17 +56,20 @@ import type {
 import * as ipc from "../lib/ipc";
 import { listenInEffect } from "../lib/listen";
 import type { ErrorInfo } from "../lib/types";
-import { STUDIO_EMPTY, STUDIO_FIELDS, STUDIO_REFS, STUDIO_SETUPS } from "../lib/words";
+import { STUDIO_EMPTY, STUDIO_FIELDS, STUDIO_OFFER, STUDIO_REFS, STUDIO_REUSE, STUDIO_SETUPS } from "../lib/words";
 import { toErrorInfo } from "./app";
-import { createRun, targetOf, type StudioRunState } from "./studioRun";
+import { createRun, seedKey, targetOf, type StudioRunState } from "./studioRun";
 
 // Studio's estimate and Create live in ./studioRun; they are used from here.
 export {
   currentEstimate,
   ESTIMATE_DELAY_MS,
+  requestFromRun,
   requestKey,
+  seedKey,
   shownEstimate,
   startRequestOf,
+  targetOf,
   type StudioRunState,
   type TabEstimate,
 } from "./studioRun";
@@ -86,6 +94,17 @@ export interface Draft {
   routing: Routing | null;
   /** What changed when the model was switched, until it is put away. */
   note: string | null;
+}
+
+/** A model offered for Animate or Edit when the tab's model cannot take the picture. */
+export interface ModelOffer {
+  /** The question ("No Frames takes no start frame. Use Grok Imagine Video 1.5 Lite
+   *  instead?"), or why there is nothing to offer. */
+  text: string;
+  /** The model offered and where it runs; `null` when no model here can take the picture. */
+  choice: ModelChoice | null;
+  /** The offered model's name, for its button; `null` with no choice. */
+  name: string | null;
 }
 
 /** Which empty state a tab shows in place of the card stream, if any. */
@@ -131,6 +150,39 @@ export interface StudioState extends StudioRunState {
   /** Again, Run again: `run` once more, with its own settings where it ran (`start` from it, so
    *  a cloud run that needs confirming asks first, and a second press meanwhile does nothing). */
   again(run: Run): Promise<void>;
+  /** Reuse all, or Reuse without seed (`withSeed` false: the seed goes back to Random): the tab
+   *  of `run`'s kind gets its prompt, its model where it ran, every setting, its Extra fields,
+   *  routing and added pictures (up to the model's limit), and is shown. Never starts a run.
+   *  When the model is no longer offered there, its family's newest takes its place, the
+   *  settings carried to it (`carry`) with a note of what changed. Returns why it cannot be
+   *  reused (its model and family are gone, or its endpoint or key), or `null`. */
+  reuse(run: Run, withSeed: boolean): string | null;
+  /** Animate: picture `output` as the start frame of the Video tab's draft (in place of one
+   *  there), on its model or, given `use`, on that model (picked as in the picker); the Video tab
+   *  is shown. While the draft's model takes no start frame and no `use` is given, nothing
+   *  changes and the model to offer comes back: an installed local one first, then the one used
+   *  most recently, then the first an endpoint lists. Rejects when the picture could not be kept
+   *  as an added picture. */
+  animate(output: Output, use?: ModelChoice): Promise<ModelOffer | null>;
+  /** Edit (with words): picture `output` as the picture to change, the one added picture of the
+   *  Pictures tab's draft, on its model or, given `use`, on that model; the Pictures tab is
+   *  shown and the prompt gets the cursor (`app:focus-studio-prompt`). While the draft's model
+   *  takes no pictures and no `use` is given, nothing changes and the model to offer comes back,
+   *  as for `animate`. Rejects when the picture could not be kept. */
+  editWithWords(output: Output, use?: ModelChoice): Promise<ModelOffer | null>;
+  /** Use as reference: picture `output` added to the shown tab's draft, as the first of its
+   *  model's picture roles with room. Returns why it was not added (the model takes no more), or
+   *  `null`; rejects when the picture could not be kept. */
+  useAsReference(output: Output): Promise<string | null>;
+  /** Stars or unstars result `outputId`; its new state joins the runs. */
+  star(outputId: string, starred: boolean): Promise<void>;
+  /** Deletes results `outputIds`, their files and records (today's spending stays as it is):
+   *  they leave the runs, and a finished run left without results goes with them. */
+  remove(outputIds: string[]): Promise<void>;
+  /** Save several: the folder picker, then each result copied into that folder under its own
+   *  file name, without its settings. Nothing when the picker is cancelled; a copy that fails
+   *  does not stop the others, and the first failure rejects once all were tried. */
+  saveSeveral(outputIds: string[]): Promise<void>;
 
   /** The endpoints that make pictures or video, with their saved lists. */
   endpoints: StudioEndpoint[];
@@ -241,7 +293,13 @@ export interface StudioState extends StudioRunState {
   askLocalFit(modelId: string, width: number, height: number, seconds: number): void;
   /** Changes the gallery's filter and reads its first page again. */
   setFilter(patch: Partial<RunsFilter>): Promise<void>;
-  setGrid(grid: boolean): void;
+  /** *Load more*: the gallery's next page, after the last one read, for the same filter (one
+   *  at a time; a page for a filter changed since is dropped). */
+  loadMore(): Promise<void>;
+  /** The grid in place of the card stream, or the cards again. Leaving the grid puts its own
+   *  filters away, Pictures or Video and the date (the first page read again): the cards follow
+   *  the tab. */
+  setGrid(grid: boolean): Promise<void>;
   /** Changes only the preferences `patch` names. */
   setPrefs(patch: StudioPrefsPatch): Promise<void>;
 
@@ -264,7 +322,7 @@ const EMPTY_DRAFT: Draft = {
 };
 
 /** How many runs one page of the gallery holds. */
-const RUNS_PAGE = 50;
+const RUNS_PAGE = 60;
 
 /** How many of the newest runs `recentRuns` keeps. */
 const RECENT_RUNS = 50;
@@ -302,6 +360,26 @@ function newestRuns(runs: Run[]): Run[] {
 
 /** The read of what is saved while it is under way, so a second `load` waits for it. */
 let loading: Promise<void> | null = null;
+
+/** The gallery's next page while it is being read, so a second *Load more* waits for it. */
+let paging: Promise<void> | null = null;
+
+/** The words a saved model that is gone is explained with (a setup's, or a run's). */
+interface GoneWords {
+  goneHere: string;
+  endpointGone: string;
+  replaced(endpoint: string, model: string): string;
+  gone(endpoint: string): string;
+}
+
+/** A setup, or a run to reuse: a model where it runs, with its settings. */
+interface SavedModel {
+  target: RunTarget;
+  model: string;
+  params: Values;
+  extra: Values;
+  routing: Routing | null;
+}
 
 /** Extra settings a tab's draft holds aside while its model's price, and with it the model's
  *  Extra field, is on its way: where the model runs, the model as listed when it was picked,
@@ -446,6 +524,110 @@ export const useStudio: UseBoundStore<StoreApi<StudioState>> = create<StudioStat
       );
   };
 
+  /**
+   * Puts `saved` (a setup, or a run to reuse) in `tab`'s draft: its model where it runs, its
+   * settings, Extra fields and routing, `prompt`, and `refs` up to the model's limit for each
+   * role (with a note for the rest). When the model is no longer offered there, its family's
+   * newest takes its place, the settings carried to it (`carry`) with a note of what changed
+   * (`words`). An OpenRouter picture model whose price was never asked is asked for it, as when
+   * picked, and the extra settings are held aside until the answer brings the model's Extra
+   * field (each one it does not take is then removed with the note). Returns why it cannot be
+   * used (its model and family are gone, or its endpoint or key), or `null`.
+   */
+  const fillDraft = (
+    tab: StudioTab,
+    saved: SavedModel,
+    refs: RefItem[],
+    prompt: string,
+    words: GoneWords,
+  ): string | null => {
+    const s = get();
+    const { target } = saved;
+    const endpoint = endpointOf(target, s.endpoints);
+    const offered = offeredModel(tab, target, saved.model, s.local, s.endpoints);
+    let to = offered;
+    if (!to) {
+      if (target === "thisComputer") return words.goneHere;
+      if (!endpoint) return words.endpointGone;
+      if (!endpoint.hasKey) return STUDIO_EMPTY.noKey(endpoint.name);
+      to = closestModel(cloudModelsFor(endpoint, tab), { id: saved.model, family: familyOf(saved.model) });
+      if (!to) return words.gone(endpoint.name);
+    }
+    // An OpenRouter picture model whose price was never asked has no Extra field yet: the
+    // extra settings are held aside until its answer, as when the model is picked.
+    const unpriced = endpoint !== null && priceNotAsked(to, endpoint.company);
+    const hold = mustHold(to, unpriced, saved.extra);
+    let values: Values = saved.params;
+    let extra: Values = hold ? {} : saved.extra;
+    let routing = saved.routing;
+    let note: string | null = null;
+    if (!offered && endpoint) {
+      const carried = carry(null, to, values, extra, []);
+      values = carried.values;
+      extra = carried.extra;
+      // Which companies may run it belongs to the model it was saved for.
+      routing = null;
+      note = [words.replaced(endpoint.name, to.displayName), carried.note].filter((n) => n !== null).join(" ");
+    }
+    const model = to;
+    // The added pictures stay up to the model's limit for each role, with a note for the rest.
+    const pictures = carry(model, model, {}, {}, refs);
+    note = [note, pictures.note].filter((n) => n !== null).join(" ") || null;
+    // The draft starts again: nothing is held aside for the model it had.
+    delete held[tab];
+    set((st) => ({
+      drafts: {
+        ...st.drafts,
+        [tab]: {
+          ...st.drafts[tab],
+          target,
+          model: model.id,
+          prompt,
+          values: dropUnmet(model, values),
+          extra,
+          refs: pictures.refs,
+          routing,
+          note,
+        },
+      },
+      priceError: { ...st.priceError, [tab]: null },
+    }));
+    // Using it picks its model: an OpenRouter picture model is asked for its price once.
+    if (unpriced && endpoint) askPriceHolding(tab, target, endpoint, model, hold ? saved.extra : null);
+    return null;
+  };
+
+  /** Animate's and Edit's part: picture `output` in `tab`'s draft as `role` (Animate's start
+   *  frame takes the place of one there; Edit's picture is the only one), on the draft's model or
+   *  on `use`; `tab` is shown. While the draft's model takes no such picture and no `use` is
+   *  given, the model to offer instead (`offer` words the question). */
+  const putPicture = async (
+    tab: StudioTab,
+    role: RefRole,
+    output: Output,
+    use: ModelChoice | undefined,
+    offer: (model: string | null, offered: string) => string,
+    none: string,
+  ): Promise<ModelOffer | null> => {
+    const s = get();
+    const current = draftModel(s, tab);
+    if (!use && !(current && takesRole(current, role))) {
+      const found = modelTaking(s, tab, role);
+      if (!found) return { text: none, choice: null, name: null };
+      const name = found.model.displayName;
+      return { text: offer(current?.displayName ?? null, name), choice: found.choice, name };
+    }
+    const kept = await api.studioRefFromOutput(output.id);
+    if (use) get().chooseModel(tab, use.target, use.model);
+    const ref: RefItem = { ...kept, role };
+    set((st) => {
+      const draft = st.drafts[tab];
+      const refs = role === "startFrame" ? [ref, ...draft.refs.filter((r) => r.role !== "startFrame")] : [ref];
+      return { tab, drafts: { ...st.drafts, [tab]: { ...draft, refs } } };
+    });
+    return null;
+  };
+
   return {
     view: "chat",
     tab: "image",
@@ -495,6 +677,79 @@ export const useStudio: UseBoundStore<StoreApi<StudioState>> = create<StudioStat
     },
     again: async (run) => {
       await get().start(run.kind, false, run);
+    },
+    reuse: (run, withSeed) => {
+      const target = targetOf(run);
+      if (target === null) return STUDIO_REUSE.endpointGone;
+      const s = get();
+      // Without its seed, the seed goes back to Random: Studio picks a new one for the run.
+      const seed = withSeed ? null : seedKey(listedModel(target, run.model, s.local, s.endpoints));
+      const params = Object.fromEntries(Object.entries(run.params).filter(([key]) => key !== seed));
+      const refs = run.refs.map((r) => ({ ...r, role: r.role ?? "reference" }));
+      const saved = { target, model: run.model, params, extra: run.extra, routing: run.routing };
+      const refused = fillDraft(run.kind, saved, refs, run.prompt, STUDIO_REUSE);
+      if (refused === null) set({ tab: run.kind });
+      return refused;
+    },
+    animate: (output, use) =>
+      putPicture("video", "startFrame", output, use, STUDIO_OFFER.animate, STUDIO_OFFER.noneAnimate),
+    editWithWords: async (output, use) => {
+      const offer = await putPicture("image", "reference", output, use, STUDIO_OFFER.edit, STUDIO_OFFER.noneEdit);
+      if (offer === null) window.dispatchEvent(new Event("app:focus-studio-prompt"));
+      return offer;
+    },
+    useAsReference: async (output) => {
+      const kept = await api.studioRefFromOutput(output.id);
+      return get().addRef(get().tab, { ...kept, role: null });
+    },
+    star: async (outputId, starred) => {
+      const output = await api.studioStar(outputId, starred);
+      const change = (run: Run): Run =>
+        run.id === output.runId ? { ...run, outputs: run.outputs.map((o) => (o.id === output.id ? output : o)) } : run;
+      set((s) => ({
+        runs: s.runs.map(change),
+        recentRuns: s.recentRuns.map(change),
+        live: Object.fromEntries(Object.entries(s.live).map(([id, run]) => [id, change(run)])),
+      }));
+    },
+    remove: async (outputIds) => {
+      await api.studioDelete(outputIds);
+      const gone = new Set(outputIds);
+      // As the backend: a finished run left without results goes; one still working, or one that
+      // ended without finishing, keeps its card.
+      const strip = (run: Run): Run | null => {
+        const outputs = run.outputs.filter((o) => !gone.has(o.id));
+        if (outputs.length === run.outputs.length) return run;
+        return run.status === "done" && outputs.length === 0 ? null : { ...run, outputs };
+      };
+      const kept = (runs: Run[]) => runs.map(strip).filter((r): r is Run => r !== null);
+      set((s) => ({
+        runs: kept(s.runs),
+        recentRuns: kept(s.recentRuns),
+        live: Object.fromEntries(
+          Object.entries(s.live).flatMap(([id, run]) => {
+            const left = strip(run);
+            return left ? [[id, left]] : [];
+          }),
+        ),
+      }));
+      // What the gallery holds changed (today's spending does not).
+      rereadUsage();
+    },
+    saveSeveral: async (outputIds) => {
+      const folder = await openDialog({ directory: true, multiple: false });
+      if (typeof folder !== "string") return;
+      let failed: unknown = null;
+      for (const id of outputIds) {
+        const output = runOfOutput(get(), id)?.outputs.find((o) => o.id === id);
+        if (!output) continue;
+        try {
+          await api.studioExport(id, joinPath(folder, fileNameOf(output.path)), false);
+        } catch (e) {
+          failed ??= e;
+        }
+      }
+      if (failed !== null) throw failed;
     },
 
     endpoints: [],
@@ -735,61 +990,9 @@ export const useStudio: UseBoundStore<StoreApi<StudioState>> = create<StudioStat
       return null;
     },
     applySetup: (setup) => {
-      const tab = setup.kind;
-      const s = get();
-      const { target } = setup;
-      const endpoint = endpointOf(target, s.endpoints);
-      const offered = offeredModel(tab, target, setup.model, s.local, s.endpoints);
-      let to = offered;
-      if (!to) {
-        if (target === "thisComputer") return STUDIO_SETUPS.goneHere;
-        if (!endpoint) return STUDIO_SETUPS.endpointGone;
-        if (!endpoint.hasKey) return STUDIO_EMPTY.noKey(endpoint.name);
-        to = closestModel(cloudModelsFor(endpoint, tab), { id: setup.model, family: familyOf(setup.model) });
-        if (!to) return STUDIO_SETUPS.gone(endpoint.name);
-      }
-      // An OpenRouter picture model whose price was never asked has no Extra field yet: the
-      // setup's extra settings are held aside until its answer, as when the model is picked.
-      const unpriced = endpoint !== null && priceNotAsked(to, endpoint.company);
-      const hold = mustHold(to, unpriced, setup.extra);
-      let values: Values = setup.params;
-      let extra: Values = hold ? {} : setup.extra;
-      let routing = setup.routing;
-      let note: string | null = null;
-      if (!offered && endpoint) {
-        const carried = carry(null, to, values, extra, []);
-        values = carried.values;
-        extra = carried.extra;
-        // Which companies may run it belongs to the model it was saved for.
-        routing = null;
-        note = [STUDIO_SETUPS.replaced(endpoint.name, to.displayName), carried.note].filter((n) => n !== null).join(" ");
-      }
-      const model = to;
-      const draft = s.drafts[tab];
-      // The added pictures stay up to the model's limit for each role, with a note for the rest.
-      const pictures = carry(model, model, {}, {}, draft.refs);
-      note = [note, pictures.note].filter((n) => n !== null).join(" ") || null;
-      // The draft starts again: nothing is held aside for the model it had.
-      delete held[tab];
-      set((st) => ({
-        drafts: {
-          ...st.drafts,
-          [tab]: {
-            ...draft,
-            target,
-            model: model.id,
-            values: dropUnmet(model, values),
-            extra,
-            refs: pictures.refs,
-            routing,
-            note,
-          },
-        },
-        priceError: { ...st.priceError, [tab]: null },
-      }));
-      // Picking a setup picks its model: an OpenRouter picture model is asked for its price once.
-      if (unpriced && endpoint) askPriceHolding(tab, target, endpoint, model, hold ? setup.extra : null);
-      return null;
+      const draft = get().drafts[setup.kind];
+      // The prompt stays; the added pictures stay up to the model's limit.
+      return fillDraft(setup.kind, setup, draft.refs, draft.prompt, STUDIO_SETUPS);
     },
     localFits: {},
     askLocalFit: (modelId, width, height, seconds) => {
@@ -819,7 +1022,29 @@ export const useStudio: UseBoundStore<StoreApi<StudioState>> = create<StudioStat
       // An answer for a filter changed since is old.
       if (get().filter === filter) set({ runs: page.runs, next: page.next });
     },
-    setGrid: (grid) => set({ grid }),
+    loadMore: () => {
+      paging ??= (async () => {
+        try {
+          const { filter, next } = get();
+          if (next === null) return;
+          const page = await api.studioRuns(filter, next, RUNS_PAGE);
+          // A page for a filter changed since (its first page read again) is old.
+          if (get().filter !== filter || get().next !== next) return;
+          set((s) => {
+            const known = new Set(s.runs.map((r) => r.id));
+            return { runs: [...s.runs, ...page.runs.filter((r) => !known.has(r.id))], next: page.next };
+          });
+        } finally {
+          paging = null;
+        }
+      })();
+      return paging;
+    },
+    setGrid: async (grid) => {
+      set({ grid });
+      const { kind, since } = get().filter;
+      if (!grid && (kind || since != null)) await get().setFilter({ kind: null, since: null });
+    },
     setPrefs: async (patch) => {
       const prefs = await api.studioSetPrefs(patch);
       set({ prefs });
@@ -946,6 +1171,33 @@ function offeredModel(
   if (target === "thisComputer") return localModelsFor(tab, local).find((m) => m.model.id === id)?.model ?? null;
   const endpoint = endpoints.find((e) => e.providerId === target.endpoint);
   return (endpoint && cloudModelsFor(endpoint, tab).find((m) => m.id === id)) ?? null;
+}
+
+/** Whether `model` takes a picture as `role`. */
+function takesRole(model: MediaModel, role: RefRole): boolean {
+  return pictureRoles(model).some((r) => r.role === role && r.max > 0);
+}
+
+/** The model to offer `tab` for a picture as `role`, which the draft's model does not take: an
+ *  installed local model that takes it (one that fits first; never one not for this computer),
+ *  else the cloud model used most recently that takes it, else the first an endpoint lists. */
+function modelTaking(
+  s: Pick<StudioState, "local" | "endpoints" | "recentRuns">,
+  tab: StudioTab,
+  role: RefRole,
+): { choice: ModelChoice; model: MediaModel } | null {
+  const locals = localModelsFor(tab, s.local).filter((m) => m.fit.word !== "notHere" && takesRole(m.model, role));
+  const local = locals.find((m) => FITTING.has(m.fit.word)) ?? locals[0];
+  if (local) return { choice: { target: "thisComputer", model: local.model.id }, model: local.model };
+  for (const choice of recentChoices(s.recentRuns, tab, RECENT_RUNS)) {
+    const model = offeredModel(tab, choice.target, choice.model, s.local, s.endpoints);
+    if (model && takesRole(model, role)) return { choice, model };
+  }
+  for (const endpoint of s.endpoints) {
+    const model = cloudModelsFor(endpoint, tab).find((m) => takesRole(m, role));
+    if (model) return { choice: { target: { endpoint: endpoint.providerId }, model: model.id }, model };
+  }
+  return null;
 }
 
 /** The model `tab` starts with when none was used last: an installed local model that fits
@@ -1098,4 +1350,25 @@ export function placeRef(
 /** Where a local fit is kept in `localFits`: the model, the size and the clip's length. */
 export function localFitKey(modelId: string, width: number, height: number, seconds: number): string {
   return `${modelId}|${width}|${height}|${seconds}`;
+}
+
+// ---- results ------------------------------------------------------------------------------
+
+/** The run that made result `outputId`, at its newest state (the live runs first, then the
+ *  gallery's and the newest runs); `null` when the store holds none. */
+export function runOfOutput(s: Pick<StudioState, "live" | "runs" | "recentRuns">, outputId: string): Run | null {
+  const made = (run: Run) => run.outputs.some((o) => o.id === outputId);
+  return Object.values(s.live).find(made) ?? s.runs.find(made) ?? s.recentRuns.find(made) ?? null;
+}
+
+/** A file's name, the last part of `path` (either separator). */
+export function fileNameOf(path: string): string {
+  return path.split(/[\\/]/).pop() ?? path;
+}
+
+/** `name` in `folder`, joined with the separator the folder's path uses (a Windows path that
+ *  has only backslashes keeps them). */
+export function joinPath(folder: string, name: string): string {
+  const separator = folder.includes("\\") && !folder.includes("/") ? "\\" : "/";
+  return `${folder.replace(/[\\/]+$/, "")}${separator}${name}`;
 }

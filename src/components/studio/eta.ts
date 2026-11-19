@@ -27,6 +27,12 @@ export function timeWords(ms: number): string {
   return left > 0 ? `${STUDIO_TIME.hours(hours)} ${STUDIO_TIME.minutes(left)}` : STUDIO_TIME.hours(hours);
 }
 
+/** How long a run took, as the viewer says it: to a tenth of a second under a minute
+ *  ("13.8 s"), else as `timeWords` ("3 min 48 s"). */
+export function tookWords(ms: number): string {
+  return ms < 59_950 ? STUDIO_TIME.seconds(Math.round(ms / 100) / 10) : timeWords(ms);
+}
+
 /**
  * How long a run takes, as one figure: the middle of the range, rounded ("about 4 min"), then
  * `per` when given ("a picture", "for a 2 s clip"), then "(first guess)" when it was not
