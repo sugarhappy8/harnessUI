@@ -1155,3 +1155,68 @@ export const STUDIO_PICKER = {
   nothingMatches: "No models match.",
   getPrice: "Get the price",
 } as const;
+
+/** Studio's right panel and its fields (Task B5). */
+export const STUDIO_FIELDS = {
+  /** An unset field: not sent, so the company decides. */
+  automatic: "Automatic (company default)",
+  /** An unset field of a model on this computer. */
+  automaticHere: "Automatic",
+  reset: (label: string) => `Reset ${label}`,
+  moreShapes: "More shapes",
+  more: "More",
+  /** An unset seed: Studio picks one for each run. */
+  random: "Random",
+  /** A chip with its time here: "2 s · about 3 min". */
+  withTime: (value: string, time: string) => `${value} · ${time}`,
+  customSize: "Custom size",
+  width: "Width",
+  height: "Height",
+  /** Why a custom size is not sent yet, checked as it is typed. */
+  size: {
+    both: "Enter a width and a height.",
+    multipleOf: (n: number) => `Both sides must be multiples of ${n}.`,
+    ratio: (low: string, high: string) => `The shape must be between ${low} and ${high}.`,
+    longestSide: (n: number) => `The longer side can be at most ${n}.`,
+    tooSmall: "This size is too small for this model.",
+    tooLarge: "This size is too large for this model.",
+  },
+  /** Characters left in a text field. */
+  charsLeft: (n: number) => `${n} left`,
+  advanced: "Advanced",
+  advancedChanged: (n: number) => `Advanced · ${n} changed`,
+  /** Choosing a transparent background changed the file type. */
+  transparentNote: (type: string) => `Transparent needs PNG or WebP, so the file type is now ${type}.`,
+  putNoteAway: "Put the note away",
+} as const;
+
+/** Under the Model field: where the chosen model runs. */
+export const STUDIO_PLACE = {
+  here: (device: string) => `${LOCAL_MARK.name} · ${device}`,
+  cloud: (name: string) => `via ${name} · Cloud`,
+} as const;
+
+/** Added pictures: the tray, the frame drop zones and their role chips (Task B5). */
+export const STUDIO_REFS = {
+  add: "+ Add picture",
+  choose: "Choose a picture",
+  role: {
+    reference: "Reference",
+    startFrame: "Start frame",
+    endFrame: "End frame",
+  } satisfies Record<RefRole, string>,
+  roleMenu: "What this picture is for",
+  picture: (n: number) => `Picture ${n}`,
+  remove: (n: number) => `Remove picture ${n}`,
+  /** A frame's drop zone, empty. */
+  dropHere: "Drop a picture here, or choose one",
+  /** A frame's drop zone with its picture, which another replaces. */
+  change: (label: string) => `${label}: change the picture`,
+  removeFrame: (label: string) => `Remove ${label.charAt(0).toLowerCase()}${label.slice(1)}`,
+  /** The most pictures of `role` the model takes (`null`: of any role, together). */
+  takes(max: number, role: RefRole | null): string {
+    const [one, many] = PICTURE_NOUNS[role ?? "reference"];
+    if (max === 0) return `This model takes no ${many}.`;
+    return `This model takes ${max} ${max === 1 ? one : many}.`;
+  },
+} as const;

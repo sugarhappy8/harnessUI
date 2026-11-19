@@ -7,15 +7,18 @@ import { toErrorInfo } from "../../store/app";
 import { useStudio, type StudioTab } from "../../store/studio";
 import { ErrorBanner } from "../ErrorBanner";
 import { Notices } from "./EmptyStates";
+import { RefTray } from "./RefTray";
+import { SettingsPanel } from "./SettingsPanel";
 import { TopBar } from "./TopBar";
 
 // Studio's view (0.1.0, design Wireframe 1): the top bar (TopBar.tsx), the card stream in the
 // middle with the notices and empty states above it, local first (EmptyStates.tsx), the right
 // panel and the prompt dock. Opening Studio reads what is saved and nothing else (again each
 // time it is shown, and when Settings closes over it): lists are fetched only on *Get the
-// list* or *Update model lists*. Later tasks fill the slots: the run cards (B8), the right
-// panel (B5), the prompt dock (B7, which takes over the prompt box here) and Get local models
-// in place of the stream while `localView` is on (B13).
+// list* or *Update model lists*. The right panel holds the model and its settings (B5). Later
+// tasks fill the other slots: the run cards (B8), the prompt dock (B7, which takes over the
+// prompt box here and its tray of added pictures) and Get local models in place of the stream
+// while `localView` is on (B13).
 
 export function StudioView() {
   const tab = useStudio((s) => s.tab);
@@ -64,8 +67,10 @@ export function StudioView() {
               <div data-card-stream />
             </div>
           </main>
-          {/* The right panel: the model and its settings (Task B5). */}
-          <aside data-studio-panel className="w-72 shrink-0 overflow-y-auto border-l border-border" />
+          {/* The right panel: the model and its settings. */}
+          <aside data-studio-panel className="w-72 shrink-0 overflow-y-auto border-l border-border">
+            <SettingsPanel tab={tab} />
+          </aside>
         </div>
         <PromptBox tab={tab} />
       </Tabs.Content>
@@ -73,12 +78,13 @@ export function StudioView() {
   );
 }
 
-/** The tab's prompt, kept per tab; Task B7's prompt dock takes this place. */
+/** The tab's added pictures and prompt, kept per tab; Task B7's prompt dock takes this place. */
 function PromptBox(props: { tab: StudioTab }) {
   const prompt = useStudio((s) => s.drafts[props.tab].prompt);
   const setPrompt = useStudio((s) => s.setPrompt);
   return (
-    <div data-prompt-dock className="border-t border-border px-4 py-3">
+    <div data-prompt-dock className="flex flex-col gap-2 border-t border-border px-4 py-3">
+      <RefTray tab={props.tab} />
       <textarea
         aria-label={STUDIO_BAR.prompt}
         placeholder={STUDIO_BAR.promptPlaceholder[props.tab]}

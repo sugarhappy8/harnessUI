@@ -9,19 +9,25 @@
 // the model used last or, local first, a default, and starts again when its endpoint is
 // removed. Task B3: the user's pick in the model picker, which carries the draft's settings
 // to the model picked and asks for an OpenRouter picture model's price once (a failure kept
-// per tab); the newest runs whatever the gallery's filter, and the recent models.
+// per tab); the newest runs whatever the gallery's filter, and the recent models. Task B5:
+// each field set or reset (a value whose field no longer applies leaves the draft, and a
+// transparent background moves the file type to PNG), the added pictures and their roles, and
+// how long a local clip takes here at each size and length, asked once each.
 import { create, type StoreApi, type UseBoundStore } from "zustand";
 import * as api from "../components/studio/api";
 import { carry, defaultsFor, type Values } from "../components/studio/canonical";
+import { dropUnmet } from "../components/studio/ParamField";
 import type {
   Company,
   InstalledLocal,
   LocalEntry,
+  LocalFit,
   LocalModels,
   MediaKind,
   MediaModel,
   ModelChoice,
   RefItem,
+  RefRole,
   Routing,
   Run,
   RunsCursor,
@@ -36,6 +42,7 @@ import type {
 import * as ipc from "../lib/ipc";
 import { listenInEffect } from "../lib/listen";
 import type { ErrorInfo } from "../lib/types";
+import { STUDIO_FIELDS, STUDIO_REFS } from "../lib/words";
 import { toErrorInfo } from "./app";
 
 /** Studio's tabs: Pictures and Video. */
@@ -134,6 +141,31 @@ export interface StudioState {
   priceError: Record<StudioTab, ErrorInfo | null>;
   dismissPriceError(tab: StudioTab): void;
   setPrompt(tab: StudioTab, text: string): void;
+  /** Sets field `key` of `tab`'s draft. A transparent background moves a file type that cannot
+   *  be transparent to PNG (else WebP) and says so in the note; then every value whose field
+   *  no longer applies leaves the draft (`dropUnmet`). */
+  setValue(tab: StudioTab, key: string, value: unknown): void;
+  /** Unsets field `key` (back to Automatic, so it is not sent), and with it every value whose
+   *  field no longer applies. */
+  resetValue(tab: StudioTab, key: string): void;
+  /** Adds a picture kept by `studio_add_ref` to `tab`'s draft, as `ref.role` or, without one,
+   *  as the first role of the model's picture fields with room. Returns why it was not added
+   *  (the model takes no more), or `null`. */
+  addRef(tab: StudioTab, ref: RefItem): string | null;
+  removeRef(tab: StudioTab, index: number): void;
+  /** Moves added picture `index` to `role`; returns why not (the model takes no more of that
+   *  role), or `null`. */
+  setRefRole(tab: StudioTab, index: number, role: RefRole): string | null;
+  /** Puts away the note of what changed. */
+  dismissNote(tab: StudioTab): void;
+  /** How long an installed model takes here, by `localFitKey`: asked once for each size and
+   *  length, and asked again once the local models are read again (a run may have been
+   *  measured since). */
+  localFits: Record<string, LocalFit>;
+  /** Asks how long installed model `modelId` takes here at `width` × `height` and, for a clip,
+   *  `seconds` (0 for a picture, or for the model's own length), unless it was asked already.
+   *  Worked out on this computer: nothing is sent anywhere. */
+  askLocalFit(modelId: string, width: number, height: number, seconds: number): void;
   /** Changes the gallery's filter and reads its first page again. */
   setFilter(patch: Partial<RunsFilter>): Promise<void>;
   setGrid(grid: boolean): void;
@@ -257,8 +289,19 @@ export const useStudio: UseBoundStore<StoreApi<StudioState>> = create<StudioStat
       const draft = s.drafts[tab];
       if (draft.target === null || !sameTarget(draft.target, hold.target) || draft.model !== hold.model.id) return {};
       const note = [draft.note, carried.note].filter((n) => n !== null).join(" ") || null;
-      return { drafts: { ...s.drafts, [tab]: { ...draft, extra: { ...draft.extra, ...carried.extra }, note } } };
+      // The model as it came back may require more of a value than as listed.
+      const values = dropUnmet(model, draft.values);
+      return { drafts: { ...s.drafts, [tab]: { ...draft, values, extra: { ...draft.extra, ...carried.extra }, note } } };
     });
+  };
+
+  /** The local fits asked for and not answered yet. A new set each time the answers are put
+   *  away, so an answer to an older one is not kept. */
+  let fitting = new Set<string>();
+  /** Puts away the local fits: the local models were read again. */
+  const forgetFits = () => {
+    fitting = new Set();
+    set({ localFits: {} });
   };
 
   /** Counts the reads and fetches of the endpoints' lists as they start and as fetches come
@@ -353,6 +396,7 @@ export const useStudio: UseBoundStore<StoreApi<StudioState>> = create<StudioStat
         api.studioUsage(),
       ]);
       set({ endpoints: newestLists(models.endpoints, since), local, prefs, usage });
+      forgetFits();
       fillDrafts();
     },
     refreshModels: async (providerId) => {
@@ -365,6 +409,7 @@ export const useStudio: UseBoundStore<StoreApi<StudioState>> = create<StudioStat
     refreshLocal: async () => {
       const local = await api.studioLocalModels();
       set({ local });
+      forgetFits();
       fillDrafts();
     },
     setTab: (tab) => set({ tab }),
@@ -416,7 +461,7 @@ export const useStudio: UseBoundStore<StoreApi<StudioState>> = create<StudioStat
             ...draft,
             target,
             model: to.id,
-            values: carried.values,
+            values: dropUnmet(to, carried.values),
             extra: carried.extra,
             refs: carried.refs,
             // Which companies may run it belongs to the model it was set for.
@@ -445,6 +490,73 @@ export const useStudio: UseBoundStore<StoreApi<StudioState>> = create<StudioStat
     priceError: { image: null, video: null },
     dismissPriceError: (tab) => set((s) => ({ priceError: { ...s.priceError, [tab]: null } })),
     setPrompt: (tab, text) => set((s) => ({ drafts: { ...s.drafts, [tab]: { ...s.drafts[tab], prompt: text } } })),
+    setValue: (tab, key, value) =>
+      set((s) => {
+        const draft = s.drafts[tab];
+        const model = draftModel(s, tab);
+        let values: Values = { ...draft.values, [key]: value };
+        let note = draft.note;
+        const field = model?.params.find((p) => p.key === key);
+        if (model && field?.canonical === "background" && value === "transparent") {
+          const moved = transparentFormat(model, values);
+          if (moved) {
+            values = moved.values;
+            note = STUDIO_FIELDS.transparentNote(moved.label);
+          }
+        }
+        if (model) values = dropUnmet(model, values);
+        return { drafts: { ...s.drafts, [tab]: { ...draft, values, note } } };
+      }),
+    resetValue: (tab, key) =>
+      set((s) => {
+        const draft = s.drafts[tab];
+        const model = draftModel(s, tab);
+        const values = Object.fromEntries(Object.entries(draft.values).filter(([k]) => k !== key));
+        return { drafts: { ...s.drafts, [tab]: { ...draft, values: model ? dropUnmet(model, values) : values } } };
+      }),
+    addRef: (tab, ref) => {
+      const s = get();
+      const draft = s.drafts[tab];
+      const placed = placeRef(draftModel(s, tab), draft.refs, ref.role);
+      if ("refused" in placed) return placed.refused;
+      const refs = [...draft.refs, { ...ref, role: placed.role }];
+      set((st) => ({ drafts: { ...st.drafts, [tab]: { ...st.drafts[tab], refs } } }));
+      return null;
+    },
+    removeRef: (tab, index) =>
+      set((s) => {
+        const draft = s.drafts[tab];
+        return { drafts: { ...s.drafts, [tab]: { ...draft, refs: draft.refs.filter((_, i) => i !== index) } } };
+      }),
+    setRefRole: (tab, index, role) => {
+      const s = get();
+      const draft = s.drafts[tab];
+      const ref = draft.refs[index];
+      if (!ref || (ref.role ?? "reference") === role) return null;
+      const placed = placeRef(draftModel(s, tab), draft.refs.filter((_, i) => i !== index), role);
+      if ("refused" in placed) return placed.refused;
+      const refs = draft.refs.map((r, i) => (i === index ? { ...r, role } : r));
+      set((st) => ({ drafts: { ...st.drafts, [tab]: { ...st.drafts[tab], refs } } }));
+      return null;
+    },
+    dismissNote: (tab) => set((s) => ({ drafts: { ...s.drafts, [tab]: { ...s.drafts[tab], note: null } } })),
+    localFits: {},
+    askLocalFit: (modelId, width, height, seconds) => {
+      const key = localFitKey(modelId, width, height, seconds);
+      const mine = fitting;
+      if (key in get().localFits || mine.has(key)) return;
+      mine.add(key);
+      Promise.resolve()
+        .then(() => api.studioLocalFit({ installed: { genModelId: modelId } }, width, height, seconds))
+        .then(
+          (fit) => {
+            if (mine === fitting) set((s) => ({ localFits: { ...s.localFits, [key]: fit } }));
+          },
+          // The chip shows no time; the failure leaves a trace.
+          (e: unknown) => console.warn("Studio: how long a local run takes could not be worked out", e),
+        )
+        .finally(() => mine.delete(key));
+    },
     setFilter: async (patch) => {
       const filter = { ...get().filter, ...patch };
       set({ filter });
@@ -539,6 +651,15 @@ function listedModel(
 ): MediaModel | null {
   if (target === "thisComputer") return local?.installed.find((m) => m.model.id === id)?.model ?? null;
   return endpoints.find((e) => e.providerId === target.endpoint)?.models.find((m) => m.id === id) ?? null;
+}
+
+/** The model of `tab`'s draft as listed, whether or not it can be used now; `null` without one. */
+export function draftModel(
+  s: Pick<StudioState, "drafts" | "local" | "endpoints">,
+  tab: StudioTab,
+): MediaModel | null {
+  const { target, model } = s.drafts[tab];
+  return target !== null && model !== null ? listedModel(target, model, s.local, s.endpoints) : null;
 }
 
 /** The model `id` at `target`, when `tab` can still use it. */
@@ -656,4 +777,53 @@ export function followStudio(): () => void {
     stopped = true;
     stopListening();
   };
+}
+
+// ---- settings and added pictures ----------------------------------------------------------
+
+/** The file types a transparent background can have, in the order Studio picks them. */
+const TRANSPARENT_TYPES = ["png", "webp"];
+
+/** For a transparent background: `values` with the File type field moved to PNG (else WebP)
+ *  when it is set, or defaults, to a type that cannot be transparent, and that type's name;
+ *  `null` when nothing has to move (or the model offers neither). */
+function transparentFormat(model: MediaModel, values: Values): { values: Values; label: string } | null {
+  const field = model.params.find((p) => p.canonical === "format");
+  if (!field || field.kind.type !== "enum") return null;
+  const current = values[field.key] ?? field.companyDefault ?? null;
+  if (current === null || TRANSPARENT_TYPES.includes(String(current).toLowerCase())) return null;
+  const choices = field.kind.values;
+  const to = TRANSPARENT_TYPES.map((t) => choices.find((c) => String(c.value).toLowerCase() === t)).find(
+    (c) => c !== undefined,
+  );
+  return to ? { values: { ...values, [field.key]: to.value }, label: to.label } : null;
+}
+
+/** The roles of the model's picture fields, in its order, with how many each takes. */
+export function pictureRoles(model: MediaModel | null): { role: RefRole; max: number }[] {
+  return model?.params.flatMap((p) => (p.kind.type === "images" ? [{ role: p.kind.role, max: p.kind.max }] : [])) ?? [];
+}
+
+/** Where a picture goes among `refs`: as `role`, or without one as the first of the model's
+ *  roles with room; else why it cannot be added (the most the model takes of that role, or of
+ *  all of them together). A picture recorded without a role counts as a reference. */
+export function placeRef(
+  model: MediaModel | null,
+  refs: RefItem[],
+  role: RefRole | null,
+): { role: RefRole } | { refused: string } {
+  const roles = pictureRoles(model);
+  const count = (r: RefRole) => refs.filter((ref) => (ref.role ?? "reference") === r).length;
+  if (role !== null) {
+    const max = roles.find((r) => r.role === role)?.max ?? 0;
+    return count(role) < max ? { role } : { refused: STUDIO_REFS.takes(max, role) };
+  }
+  const open = roles.find((r) => count(r.role) < r.max);
+  if (open) return { role: open.role };
+  return { refused: STUDIO_REFS.takes(roles.reduce((n, r) => n + r.max, 0), null) };
+}
+
+/** Where a local fit is kept in `localFits`: the model, the size and the clip's length. */
+export function localFitKey(modelId: string, width: number, height: number, seconds: number): string {
+  return `${modelId}|${width}|${height}|${seconds}`;
 }
