@@ -613,9 +613,9 @@ duration. It can be filtered in Settings → Audit log and exported as JSON Line
 rea calls and hand-offs to Claude Code or Codex are recorded like any other tool call;
 requests from other apps through sharing are recorded under the server `other-apps`,
 without their text. Each Studio run (0.1.0) is one row under the server `studio`, tool
-`picture` or `video`, decided by you: it keeps the prompt's length only, never the prompt,
-and a local run's row names the model's revision and the Studio engine's build. A finished
-row is never changed.
+`picture` or `video`, decided by you: it keeps the prompt's length only, never the prompt
+(and a negative prompt's length only, never its text), and a local run's row names the
+model's revision and the Studio engine's build. A finished row is never changed.
 
 ## Model files
 

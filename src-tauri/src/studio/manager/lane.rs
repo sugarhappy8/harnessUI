@@ -59,7 +59,8 @@ use super::verdict::{
 };
 use super::{
     Ending, Inner, Job, LOCAL_CHECK_EVERY, LaneKey, PROGRESS_EVERY, Step, StudioManager, Task,
-    Waited, creation_kind, job_options, pick_seed, refs_json, remove_scratch, tool_of,
+    Waited, audit_settings, creation_kind, job_options, pick_seed, refs_json, remove_scratch,
+    tool_of,
 };
 use crate::dto::{EstimateDto, LimitDto, LocalEstimateDto, LocalRunDto, RunDto, StartRequest};
 use crate::error::{AppError, AppResult};
@@ -235,9 +236,9 @@ fn refs_still_there(refs: &[RefImage]) -> AppResult<()> {
     })
 }
 
-/// The run's audit row: as a cloud run's (the model, the settings set, the prompt's length but
-/// never the prompt), on this computer, with the catalog id, the revision and the engine's
-/// build.
+/// The run's audit row: as a cloud run's (the model, the settings set, the prompt's and a
+/// negative prompt's length but never their text: [`audit_settings`]), on this computer,
+/// with the catalog id, the revision and the engine's build.
 fn audit_entry(
     req: &StartRequest,
     model: &MediaModel,
@@ -252,26 +253,31 @@ fn audit_entry(
         MediaKind::Video => "a video",
     };
     let extra_fields: Vec<&String> = req.extra.keys().collect();
+    let (changed, text_lengths) = audit_settings(model, &request.params);
+    let mut arguments = json!({
+        "endpoint": THIS_COMPUTER,
+        "host": "",
+        "model": model.id,
+        "changed": changed,
+        "extra_fields": extra_fields,
+        "pictures_sent": request.refs.len(),
+        "estimate_usd": 0.0,
+        "confirmed": false,
+        "prompt_chars": req.prompt.chars().count(),
+        "runsOn": "local",
+        "catalog_id": row.catalog_id,
+        "revision": revision,
+        "engine_build": engine_build,
+    });
+    if let Some(arguments) = arguments.as_object_mut() {
+        arguments.extend(text_lengths);
+    }
     store::AuditEntry {
         ts: Some(at),
         chat_id: None,
         server: "studio".to_owned(),
         tool: tool_of(model.kind).to_owned(),
-        arguments: json!({
-            "endpoint": THIS_COMPUTER,
-            "host": "",
-            "model": model.id,
-            "changed": request.params,
-            "extra_fields": extra_fields,
-            "pictures_sent": request.refs.len(),
-            "estimate_usd": 0.0,
-            "confirmed": false,
-            "prompt_chars": req.prompt.chars().count(),
-            "runsOn": "local",
-            "catalog_id": row.catalog_id,
-            "revision": revision,
-            "engine_build": engine_build,
-        }),
+        arguments,
         preview: format!("Made {what} on this computer with {}", model.display_name),
         risk: "normal".to_owned(),
         decision: store::AuditDecision::AllowedWithoutPrompt,

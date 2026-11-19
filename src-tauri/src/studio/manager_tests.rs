@@ -43,7 +43,8 @@ use super::label::read_label;
 use super::local::{LocalJobOptions, LocalMediaProvider, LocalProvider, LocalRunStatus};
 use super::manager::{
     LOCAL_CHECK_EVERY, LocalVerdict, PICTURES_AT_ONCE, PollPlan, StudioDeps, StudioManager,
-    VIDEOS_AT_ONCE, job_options, local_verdict, place_extra_or_refuse, poll_delay, spend_row,
+    VIDEOS_AT_ONCE, audit_settings, job_options, local_verdict, place_extra_or_refuse, poll_delay,
+    spend_row,
 };
 use super::prefs::{self, GpuPolicy, RunTarget, StudioPrefs, StudioPrefsPatch};
 use super::spend::{Charge, ConfirmReason, UNKNOWN_PRICE_RESERVE_USD, day_start_in};
@@ -1553,6 +1554,26 @@ async fn extra_settings_go_to_the_companies_that_take_them() {
     // The run keeps the extra settings as the user set them.
     let row = h.store.get_creation_run(&run.id).await.unwrap().unwrap();
     assert_eq!(row.params["extra"], json!({"moderation": "low"}));
+}
+
+#[test]
+fn a_cloud_audit_row_keeps_a_free_text_setting_by_its_length_only() {
+    // No cloud catalogue makes a text field today; one that did would be written as a local
+    // run's negative prompt is.
+    let catalog = openrouter_catalog(0);
+    let mut flare =
+        agent::media::parse_catalog(Company::OpenRouter, &catalog.raw, &Default::default())
+            .into_iter()
+            .find(|m| m.id == FLARE_ON_OPENROUTER)
+            .unwrap();
+    let mut negative = flare.params[0].clone();
+    negative.key = "negative_prompt".into();
+    negative.kind = agent::media::ParamKind::Text { max_chars: 4_000 };
+    flare.params.push(negative);
+    let params = object(json!({"n": 2, "negative_prompt": "a watermark in the corner"}));
+    let (changed, lengths) = audit_settings(&flare, &params);
+    assert_eq!(Value::Object(changed), json!({"n": 2}));
+    assert_eq!(Value::Object(lengths), json!({"negative_prompt_chars": 25}));
 }
 
 #[test]
@@ -3569,7 +3590,7 @@ struct FakeRun {
 /// scripted ([`Course`], by default done at its first check, its results small PNG pictures)
 /// and can be held running until released.
 struct FakeLocal {
-    entries: Vec<(store::GenModel, GenEntry)>,
+    entries: Mutex<Vec<(store::GenModel, GenEntry)>>,
     starts: Mutex<Vec<(MediaRequest, PathBuf, LocalJobOptions)>>,
     courses: Mutex<VecDeque<Course>>,
     held: AtomicBool,
@@ -3620,7 +3641,7 @@ impl FakeLocal {
             })
             .collect();
         Self {
-            entries,
+            entries: Mutex::new(entries),
             starts: Mutex::new(Vec::new()),
             courses: Mutex::new(VecDeque::new()),
             held: AtomicBool::new(false),
@@ -3634,6 +3655,14 @@ impl FakeLocal {
 
     fn starts(&self) -> usize {
         self.starts.lock().unwrap().len()
+    }
+
+    /// Gives installed model `id` a default guidance of `cfg` (above 1, it then offers a
+    /// negative prompt).
+    fn set_guidance(&self, id: &str, cfg: f32) {
+        let mut entries = self.entries.lock().unwrap();
+        let (_, entry) = entries.iter_mut().find(|(row, _)| row.id == id).unwrap();
+        entry.defaults.cfg = cfg;
     }
 
     fn releases(&self) -> usize {
@@ -3692,6 +3721,8 @@ impl MediaProvider for FakeLocal {
     async fn fetch_catalog(&self) -> Result<RawCatalog, MediaError> {
         let models: Vec<MediaModel> = self
             .entries
+            .lock()
+            .unwrap()
             .iter()
             .map(|(row, entry)| {
                 let params = LocalMediaProvider::params_for(entry);
@@ -3898,6 +3929,8 @@ impl LocalProvider for FakeLocal {
 
     async fn entry_of(&self, model_id: &str) -> Option<(store::GenModel, GenEntry)> {
         self.entries
+            .lock()
+            .unwrap()
             .iter()
             .find(|(row, _)| row.id == model_id)
             .cloned()
@@ -4898,6 +4931,31 @@ async fn the_audit_row_says_this_computer_and_never_the_prompt() {
     assert!(!row.arguments.to_string().contains("lighthouse"));
     assert_eq!(row.result_status.as_deref(), Some("done"));
     assert_eq!(row.result_summary.as_deref(), Some("cost $0.00"));
+
+    // A negative prompt is free text like the prompt: its length only, never its text.
+    h.local.set_guidance(KLEIN, 3.5);
+    let negative = "blurry watermark text, extra fingers";
+    let req = StartRequest {
+        params: json!({"negative_prompt": negative, "cfg_scale": 4.0})
+            .as_object()
+            .cloned()
+            .unwrap(),
+        ..h.local_req(prompt)
+    };
+    let run = h.manager.start(req, false).await.unwrap();
+    h.wait_status(&run.id, "done").await;
+    let row = h.audit_rows_for(&run.id).await.remove(0);
+    assert!(
+        !row.arguments.to_string().contains("watermark"),
+        "{}",
+        row.arguments
+    );
+    assert_eq!(
+        row.arguments["negative_prompt_chars"],
+        negative.chars().count()
+    );
+    assert_eq!(row.arguments["changed"]["cfg_scale"], 4.0);
+    assert!(row.arguments["changed"].get("negative_prompt").is_none());
 }
 
 #[tokio::test]

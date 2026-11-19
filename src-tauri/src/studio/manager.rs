@@ -2065,8 +2065,8 @@ fn upstream_of(model: &MediaModel, routing: Option<&Routing>) -> Option<String> 
 }
 
 /// The run's audit row: the endpoint, the model, the settings set (extra settings by name
-/// only), how many pictures go with it, the estimate, whether the user confirmed, and the
-/// prompt's length, never the prompt.
+/// only, free text by its length only: [`audit_settings`]), how many pictures go with it,
+/// the estimate, whether the user confirmed, and the prompt's length, never the prompt.
 fn audit_entry(
     req: &StartRequest,
     model: &MediaModel,
@@ -2087,22 +2087,27 @@ fn audit_entry(
             model.display_name, endpoint.name
         ),
     };
+    let (changed, text_lengths) = audit_settings(model, &request.params);
+    let mut arguments = json!({
+        "endpoint": endpoint.name,
+        "host": endpoint.host,
+        "model": model.id,
+        "changed": changed,
+        "extra_fields": extra_fields,
+        "pictures_sent": request.refs.len(),
+        "estimate_usd": usd,
+        "confirmed": confirmed,
+        "prompt_chars": req.prompt.chars().count(),
+    });
+    if let Some(arguments) = arguments.as_object_mut() {
+        arguments.extend(text_lengths);
+    }
     store::AuditEntry {
         ts: Some(at),
         chat_id: None,
         server: "studio".to_owned(),
         tool: tool_of(model.kind).to_owned(),
-        arguments: json!({
-            "endpoint": endpoint.name,
-            "host": endpoint.host,
-            "model": model.id,
-            "changed": request.params,
-            "extra_fields": extra_fields,
-            "pictures_sent": request.refs.len(),
-            "estimate_usd": usd,
-            "confirmed": confirmed,
-            "prompt_chars": req.prompt.chars().count(),
-        }),
+        arguments,
         preview,
         risk: "normal".to_owned(),
         decision: store::AuditDecision::AllowedWithoutPrompt,
@@ -2111,6 +2116,35 @@ fn audit_entry(
         parent_audit_id: None,
         result: None,
     }
+}
+
+/// What an audit row keeps of a run's settings `params`: the settings themselves (for
+/// `changed`), except free text (a [`ParamKind::Text`] field of `model`, such as a negative
+/// prompt), which is written like the prompt is, as its length only (`<key>_chars`, beside
+/// `prompt_chars`), never its text.
+pub(crate) fn audit_settings(
+    model: &MediaModel,
+    params: &Map<String, Value>,
+) -> (Map<String, Value>, Map<String, Value>) {
+    let is_text = |key: &str| {
+        model
+            .params
+            .iter()
+            .any(|p| p.key == key && matches!(p.kind, ParamKind::Text { .. }))
+    };
+    let mut changed = Map::new();
+    let mut lengths = Map::new();
+    for (key, value) in params {
+        if is_text(key) {
+            let chars = value
+                .as_str()
+                .map_or_else(|| value.to_string().chars().count(), |t| t.chars().count());
+            lengths.insert(format!("{key}_chars"), json!(chars));
+        } else {
+            changed.insert(key.clone(), value.clone());
+        }
+    }
+    (changed, lengths)
 }
 
 /// A run as the webview shows it, numbered `seq`.
