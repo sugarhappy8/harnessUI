@@ -42,9 +42,9 @@ use super::deps::{
 use super::label::read_label;
 use super::local::{LocalJobOptions, LocalMediaProvider, LocalProvider, LocalRunStatus};
 use super::manager::{
-    LOCAL_CHECK_EVERY, LocalVerdict, PICTURES_AT_ONCE, PollPlan, StudioDeps, StudioManager,
-    VIDEOS_AT_ONCE, audit_settings, job_options, local_verdict, place_extra_or_refuse, poll_delay,
-    spend_row,
+    EARLIER_GALLERIES_KEY, LOCAL_CHECK_EVERY, LocalVerdict, PICTURES_AT_ONCE, PollPlan, StudioDeps,
+    StudioManager, VIDEOS_AT_ONCE, audit_settings, job_options, local_verdict,
+    place_extra_or_refuse, poll_delay, spend_row,
 };
 use super::prefs::{self, GpuPolicy, RunTarget, StudioPrefs, StudioPrefsPatch};
 use super::spend::{Charge, ConfirmReason, UNKNOWN_PRICE_RESERVE_USD, day_start_in};
@@ -3818,6 +3818,95 @@ async fn a_picture_still_in_the_prompt_tray_survives_deleting_its_only_run() {
     // Create again with the same tray.
     let again = h.manager.start(with_picture(), true).await.unwrap();
     h.wait_status(&again.id, "done").await;
+}
+
+/// Finding storage-refs-after-folder-change: after Settings → Studio moves the gallery, an
+/// added picture kept in the earlier folder's `refs/` is still found: the card shows it,
+/// Again makes a run with it, and so after a restart; once no kept run uses it, the next start
+/// removes it there too and forgets that folder.
+#[tokio::test]
+async fn an_added_picture_in_an_earlier_gallery_folder_is_still_found_then_swept() {
+    // Made first, so it goes after the harness has stopped every run.
+    let moved_to = Scratch::new();
+    let h = harness().await;
+    let added = h
+        .manager
+        .add_ref(&PictureWorker::app(), &png_input(&png(8, 8)))
+        .await
+        .unwrap();
+    let with_picture = || StartRequest {
+        refs: vec![RefInput {
+            sha256: added.sha256.clone(),
+            role: RefRole::Reference,
+        }],
+        ..h.openai_req()
+    };
+    let first = h.manager.start(with_picture(), true).await.unwrap();
+    let first = h.wait_status(&first.id, "done").await;
+    let kept = h
+        .gallery_root
+        .join("refs")
+        .join(format!("{}.png", added.sha256));
+    h.manager
+        .set_prefs(patch(json!({"galleryDir": moved_to.path()})))
+        .await
+        .unwrap();
+
+    // The card shows it, and Again makes a run with it (its result in the new folder).
+    let shown = crate::studio::commands::ref_bytes(&h.manager, &added.sha256)
+        .await
+        .unwrap();
+    assert_eq!(shown, std::fs::read(&kept).unwrap());
+    let again = h.manager.start(with_picture(), true).await.unwrap();
+    let again = h.wait_status(&again.id, "done").await;
+    assert!(
+        again.outputs[0]
+            .path
+            .starts_with(&*moved_to.path().to_string_lossy())
+    );
+    // Its bytes count in the usage line.
+    let usage = h.manager.usage().await.unwrap();
+    assert!(usage.bytes >= std::fs::metadata(&kept).unwrap().len());
+
+    // After a restart, with the new folder as the gallery.
+    let restarted = make_manager(
+        &h.store,
+        &h.provider,
+        &h.endpoints,
+        &h.sink,
+        &h.fetch,
+        h.now,
+        moved_to.path(),
+        None,
+        h.poll,
+        None,
+    );
+    let shown = crate::studio::commands::ref_bytes(&restarted, &added.sha256)
+        .await
+        .unwrap();
+    assert_eq!(shown, std::fs::read(&kept).unwrap());
+
+    // Once no kept run uses it, the next start removes it from the earlier folder too.
+    h.manager
+        .delete_outputs(output_ids_of(&first))
+        .await
+        .unwrap();
+    h.manager.resume_interrupted().await;
+    assert!(kept.exists(), "the Again run still uses it");
+    h.manager
+        .delete_outputs(output_ids_of(&again))
+        .await
+        .unwrap();
+    assert!(kept.exists(), "a delete never removes an added picture");
+    h.manager.resume_interrupted().await;
+    assert!(!kept.exists());
+    let earlier: Vec<PathBuf> = h
+        .store
+        .get_setting(EARLIER_GALLERIES_KEY)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(earlier.is_empty(), "{earlier:?}");
 }
 
 #[tokio::test]

@@ -571,7 +571,7 @@ impl Inner {
             prompt: req.prompt.clone(),
             params,
             extra: req.extra.clone(),
-            refs: self.refs_of(req)?,
+            refs: self.refs_of(req).await?,
             routing: None,
             provider_options: BTreeMap::new(),
         };

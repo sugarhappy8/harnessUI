@@ -35,7 +35,7 @@ use tauri_plugin_opener::OpenerExt;
 use super::actions::{export, output_for_chat, output_of, ref_dto, ref_from_output, save_thumb};
 use super::catalog::{self, EndpointModels};
 use super::errors;
-use super::gallery::{GalleryError, io_error};
+use super::gallery::{GalleryError, io_error, ref_file_in};
 use super::manager::{StudioManager, creation_kind, output_dto};
 use super::prefs::{StudioPrefs, StudioPrefsPatch};
 use crate::attachments::{ImageInput, PictureWorker};
@@ -524,13 +524,14 @@ pub async fn output_bytes(
         .map_err(AppError::internal)?
 }
 
-/// The bytes of the added picture named `sha256` in the gallery folder's `refs/`. A name
+/// The bytes of the added picture named `sha256` in the gallery folder's `refs/`, or an
+/// earlier gallery folder's (Settings → Studio moved the gallery since it was added). A name
 /// that is not a SHA-256 is refused before anything is looked up.
 pub async fn ref_bytes(studio: &StudioManager, sha256: &str) -> AppResult<Vec<u8>> {
-    let gallery = studio.gallery();
+    let galleries = studio.galleries().await;
     let sha256 = sha256.to_owned();
     tokio::task::spawn_blocking(move || {
-        let (path, _) = gallery.ref_file(&sha256).map_err(|e| match e {
+        let (path, _) = ref_file_in(&galleries, &sha256).map_err(|e| match e {
             GalleryError::BadName => errors::bad_ref_name(),
             e => errors::from_gallery(&e),
         })?;

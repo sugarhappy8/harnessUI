@@ -103,7 +103,7 @@ use tokio_util::sync::CancellationToken;
 use super::catalog;
 use super::deps::{Clock, Endpoint, ForeignFetch, LocalLane, ProviderSource, StudioSink};
 use super::errors;
-use super::gallery::{Gallery, GalleryError, io_error};
+use super::gallery::{Gallery, GalleryError, io_error, ref_file_in};
 use super::local::{LocalJobOptions, MemoryChoice, runs_on_processor};
 use super::prefs::{self, RunTarget, StudioPrefs, StudioPrefsPatch};
 use super::spend::{self, Billing, LimitRefusal, RunState, Spend, SpendRow};
@@ -130,6 +130,10 @@ pub const PROGRESS_EVERY: Duration = Duration::from_millis(250);
 /// How often a run on this computer is checked: in memory, with no `PollPlan` and no watch
 /// limit.
 pub const LOCAL_CHECK_EVERY: Duration = Duration::from_millis(250);
+
+/// The settings key of the earlier gallery folders whose `refs/` still holds added pictures
+/// (Settings → Studio moved the gallery away from them), as one JSON list of paths.
+pub const EARLIER_GALLERIES_KEY: &str = "studioEarlierGalleries";
 
 /// When a video job is checked, and for how long Studio keeps checking it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -232,6 +236,9 @@ struct Inner {
     local_unloaded: Mutex<Option<String>>,
     /// Set by *Quit and stop*: the app is closing, so no chat model is loaded again.
     quitting: AtomicBool,
+    /// The earlier gallery folders whose `refs/` still holds added pictures, oldest first
+    /// ([`EARLIER_GALLERIES_KEY`]); read from the store the first time they are needed.
+    earlier_galleries: tokio::sync::Mutex<Option<Vec<PathBuf>>>,
     /// The last number given to a run as the webview gets it ([`RunDto::seq`]): one count
     /// for every run, taken just before the row that the run is built from is read.
     seq: AtomicU64,
@@ -627,6 +634,7 @@ impl StudioManager {
                 local_live: Mutex::new(HashMap::new()),
                 local_unloaded: Mutex::new(None),
                 quitting: AtomicBool::new(false),
+                earlier_galleries: tokio::sync::Mutex::new(None),
                 seq: AtomicU64::new(0),
             }),
         }
@@ -941,11 +949,14 @@ impl StudioManager {
         let prefs = self.inner.prefs();
         let spend = self.inner.spend_today().await?;
         let kept = self.inner.deps.store.creation_usage().await?;
-        let gallery = self.gallery();
-        let folder = gallery.root().display().to_string();
-        let refs = tokio::task::spawn_blocking(move || gallery.refs_bytes())
-            .await
-            .unwrap_or(0);
+        let folder = self.gallery().root().display().to_string();
+        // The added pictures kept in earlier gallery folders count too.
+        let galleries = self.inner.galleries().await;
+        let refs = tokio::task::spawn_blocking(move || {
+            galleries.iter().map(Gallery::refs_bytes).sum::<u64>()
+        })
+        .await
+        .unwrap_or(0);
         Ok(UsageDto {
             spent_today_usd: spend.settled_usd,
             pending_usd: spend.pending_usd,
@@ -1008,12 +1019,21 @@ impl StudioManager {
     /// holds it, so the next run reads it.
     pub async fn set_prefs(&self, patch: StudioPrefsPatch) -> AppResult<StudioPrefs> {
         let _one_at_a_time = self.inner.prefs_writes.lock().await;
+        let before = self.inner.gallery();
         let next = self
             .inner
             .prefs()
             .apply(patch)
             .map_err(AppError::bad_request)?;
-        self.hold_prefs(next).await
+        let held = self.hold_prefs(next).await?;
+        self.inner.gallery_moved(&before).await;
+        Ok(held)
+    }
+
+    /// The gallery folder now, then the earlier ones whose `refs/` still holds added pictures:
+    /// where an added picture is looked for ([`super::gallery::ref_file_in`]).
+    pub async fn galleries(&self) -> Vec<Gallery> {
+        self.inner.galleries().await
     }
 
     /// Records that the note about local models was accepted, now (the clock's time): saved,
@@ -1104,8 +1124,9 @@ impl Inner {
     }
 
     /// At start (under the `starting` lock): removes each added picture in `refs/` that no
-    /// kept run uses. No prompt tray holds one then (drafts are not kept), and a picture
-    /// added meanwhile waits for this. A failure is only logged.
+    /// kept run uses, in the gallery folder and in each earlier one; an earlier folder left
+    /// with none is forgotten. No prompt tray holds one then (drafts are not kept), and a
+    /// picture added meanwhile waits for this. A failure is only logged.
     async fn sweep_refs(&self) {
         let _alone = self.refs_sweep.write().await;
         let in_use = match self.deps.store.creation_ref_hashes().await {
@@ -1115,11 +1136,105 @@ impl Inner {
                 return;
             }
         };
-        let gallery = self.gallery();
-        let swept = tokio::task::spawn_blocking(move || gallery.remove_unused_refs(&in_use)).await;
-        if let Err(e) = swept {
-            tracing::warn!("Studio's unused added pictures were not all removed: {e}");
+        let galleries = self.galleries().await;
+        let swept = tokio::task::spawn_blocking(move || {
+            for gallery in &galleries {
+                gallery.remove_unused_refs(&in_use);
+            }
+            // The earlier folders whose added pictures are all gone.
+            galleries
+                .iter()
+                .skip(1)
+                .filter(|gallery| !gallery.holds_refs())
+                .map(|gallery| gallery.root().to_owned())
+                .collect::<Vec<_>>()
+        })
+        .await;
+        match swept {
+            Ok(emptied) if !emptied.is_empty() => {
+                self.change_earlier(|earlier| earlier.retain(|root| !emptied.contains(root)))
+                    .await;
+            }
+            Ok(_) => {}
+            Err(e) => tracing::warn!("Studio's unused added pictures were not all removed: {e}"),
         }
+    }
+
+    /// The gallery folder now, then the earlier ones still remembered.
+    async fn galleries(&self) -> Vec<Gallery> {
+        let current = self.gallery();
+        let mut earlier = self.earlier_galleries.lock().await;
+        let earlier = self.read_earlier(&mut earlier).await;
+        let others = earlier
+            .iter()
+            .filter(|root| root.as_path() != current.root())
+            .map(|root| Gallery::new(root.clone()))
+            .collect::<Vec<_>>();
+        std::iter::once(current).chain(others).collect()
+    }
+
+    /// The earlier gallery folders held in `slot`, read from the store into it the first time
+    /// (none when they cannot be read).
+    async fn read_earlier<'a>(&self, slot: &'a mut Option<Vec<PathBuf>>) -> &'a mut Vec<PathBuf> {
+        if slot.is_none() {
+            let read = match self
+                .deps
+                .store
+                .get_setting::<Vec<PathBuf>>(EARLIER_GALLERIES_KEY)
+                .await
+            {
+                Ok(read) => read.unwrap_or_default(),
+                Err(e) => {
+                    tracing::warn!("Studio's earlier gallery folders could not be read: {e}");
+                    Vec::new()
+                }
+            };
+            *slot = Some(read);
+        }
+        slot.get_or_insert_with(Vec::new)
+    }
+
+    /// Changes the earlier gallery folders with `change` and saves them when they changed. A
+    /// failure to save is only logged: they are held all the same until the app closes.
+    async fn change_earlier(&self, change: impl FnOnce(&mut Vec<PathBuf>)) {
+        let mut slot = self.earlier_galleries.lock().await;
+        let earlier = self.read_earlier(&mut slot).await;
+        let before = earlier.clone();
+        change(earlier);
+        if *earlier != before
+            && let Err(e) = self
+                .deps
+                .store
+                .set_setting(EARLIER_GALLERIES_KEY, &*earlier)
+                .await
+        {
+            tracing::warn!("Studio's earlier gallery folders were not saved: {e}");
+        }
+    }
+
+    /// After a change to the preferences: when the gallery folder moved away from `before`,
+    /// `before` is remembered while its `refs/` holds added pictures (the runs made there keep
+    /// using them, and the start-up sweep still finds them), and the new folder is no longer
+    /// an earlier one.
+    async fn gallery_moved(&self, before: &Gallery) {
+        let now = self.gallery();
+        if now.root() == before.root() {
+            return;
+        }
+        let keep = {
+            let before = before.clone();
+            tokio::task::spawn_blocking(move || before.holds_refs())
+                .await
+                .unwrap_or(true)
+        };
+        let (before, now) = (before.root().to_owned(), now.root().to_owned());
+        self.change_earlier(|earlier| {
+            earlier.retain(|root| *root != now);
+            if keep && !earlier.contains(&before) {
+                earlier.push(before);
+            }
+        })
+        .await;
     }
 
     /// Today's spending, from the runs made since the local day started.
@@ -1155,7 +1270,7 @@ impl Inner {
             prompt: req.prompt.clone(),
             params,
             extra: req.extra.clone(),
-            refs: self.refs_of(req)?,
+            refs: self.refs_of(req).await?,
             routing: req.routing.clone(),
             provider_options: BTreeMap::new(),
         };
@@ -1185,14 +1300,18 @@ impl Inner {
         })
     }
 
-    /// The added pictures of `req`, from the gallery's `refs/`. One no longer there (it went
-    /// with the last run that used it, or was removed by hand) is refused by name.
-    fn refs_of(&self, req: &StartRequest) -> AppResult<Vec<RefImage>> {
-        let gallery = self.gallery();
+    /// The added pictures of `req`, from the gallery's `refs/`, or an earlier gallery
+    /// folder's (Settings → Studio moved the gallery since it was added). One no longer there
+    /// (swept at a start once no kept run used it, or removed by hand) is refused by name.
+    async fn refs_of(&self, req: &StartRequest) -> AppResult<Vec<RefImage>> {
+        if req.refs.is_empty() {
+            return Ok(Vec::new());
+        }
+        let galleries = self.galleries().await;
         req.refs
             .iter()
             .map(|input| {
-                let (path, mime) = gallery.ref_file(&input.sha256).map_err(|e| match e {
+                let (path, mime) = ref_file_in(&galleries, &input.sha256).map_err(|e| match e {
                     // `ref_file` found no file of any picture type under that name.
                     GalleryError::Io(_) => errors::added_picture_missing(),
                     e => errors::from_gallery(&e),

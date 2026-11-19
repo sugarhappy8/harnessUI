@@ -373,6 +373,25 @@ fn media_type(
     }
 }
 
+/// The file of the added picture named `sha256` in the first of `galleries` whose `refs/`
+/// has it, and its type: the gallery folder now, then the earlier ones, whose added pictures
+/// stay where they were when Settings → Studio moved the gallery. Refused as
+/// [`Gallery::ref_file`] refuses (a name that is not a SHA-256; `GalleryError::Io` when none
+/// has it).
+pub fn ref_file_in(galleries: &[Gallery], sha256: &str) -> Result<(PathBuf, String), GalleryError> {
+    let mut missing = GalleryError::Io(format!(
+        "the added picture {sha256} is not in the gallery folder"
+    ));
+    for gallery in galleries {
+        match gallery.ref_file(sha256) {
+            Ok(found) => return Ok(found),
+            Err(GalleryError::Io(why)) => missing = GalleryError::Io(why),
+            Err(e) => return Err(e),
+        }
+    }
+    Err(missing)
+}
+
 /// The gallery folder.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Gallery {
@@ -544,6 +563,23 @@ impl Gallery {
                     "the added picture {sha256} is not in the gallery folder"
                 ))
             })
+    }
+
+    /// Whether `refs/` holds an added picture (a `<sha256>.<picture type>` file).
+    pub fn holds_refs(&self) -> bool {
+        let Ok(entries) = std::fs::read_dir(self.refs_dir()) else {
+            return false;
+        };
+        entries.flatten().any(|entry| {
+            let name = entry.file_name();
+            entry.file_type().is_ok_and(|kind| kind.is_file())
+                && name
+                    .to_str()
+                    .and_then(|name| name.split_once('.'))
+                    .is_some_and(|(sha256, ext)| {
+                        is_sha256(sha256) && PICTURE_TYPES.iter().any(|(_, known)| *known == ext)
+                    })
+        })
     }
 
     /// Removes what a delete left behind: each output's file and thumbnail, and each deleted
