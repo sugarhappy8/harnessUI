@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
 import type { RuntimeStatus } from "../lib/types";
 import type { Run } from "./studio/types";
 import { RUN } from "./studio/fixtures/models";
@@ -213,6 +213,21 @@ describe("the Studio button", () => {
     expect(studio.textContent).toBe("");
     fireEvent.click(studio);
     expect(useStudio.getState().view).toBe("studio");
+  });
+
+  it("while Studio is shown, only the Studio button is current, not the open chat", () => {
+    useStudio.setState({ view: "studio", live: {} });
+    show({ activeChatId: 1 });
+    const chat = screen.getByRole("button", { name: "Install the toolchain" });
+    const row = chat.parentElement as HTMLElement;
+    expect(chat.getAttribute("aria-current")).toBeNull();
+    expect(row.className).not.toContain("before:bg-accent");
+    expect(screen.getByRole("button", { name: "Studio" }).getAttribute("aria-current")).toBe("page");
+    // Back in the chat, the open chat is current again, with its accent.
+    act(() => useStudio.getState().showChat());
+    expect(chat.getAttribute("aria-current")).toBe("page");
+    expect(row.className).toContain("before:bg-accent");
+    expect(screen.getByRole("button", { name: "Studio" }).getAttribute("aria-current")).toBeNull();
   });
 
   it("a chat click or New chat leaves Studio", () => {

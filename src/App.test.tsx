@@ -96,6 +96,8 @@ beforeEach(() => {
   listeners.delayed = true;
   useApp.setState({ activeChatId: null, detail: null, generation: null, runningTurn: null, approvals: [] });
   useStudio.setState({ view: "chat", tab: "image", live: {}, readyNotice: null });
+  // The automock answers undefined, which is no list of runs.
+  vi.mocked(studioApi.studioLive).mockResolvedValue([]);
 });
 afterEach(cleanup);
 
@@ -258,6 +260,18 @@ describe("Studio", () => {
   function run(patch: Partial<Run>): Run {
     return { ...RUN, ...patch };
   }
+
+  it("reads the runs still working at start, without a warning", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    try {
+      await renderApp();
+      await act(flush);
+      expect(studioApi.studioLive).toHaveBeenCalledTimes(1);
+      expect(warn).not.toHaveBeenCalled();
+    } finally {
+      warn.mockRestore();
+    }
+  });
 
   it("Ctrl+G opens Studio and Esc there stops nothing", async () => {
     await renderApp();

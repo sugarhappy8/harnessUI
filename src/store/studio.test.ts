@@ -109,6 +109,22 @@ describe("following the backend", () => {
     expect(unlisten).toHaveBeenCalledTimes(1);
   });
 
+  it("a failed read of the runs still working leaves a warning", async () => {
+    listen();
+    const failure = new Error("database is locked");
+    vi.mocked(api.studioLive).mockRejectedValue(failure);
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    try {
+      const stop = followStudio();
+      await flush();
+      expect(warn).toHaveBeenCalledTimes(1);
+      expect(warn).toHaveBeenCalledWith(expect.stringContaining("Studio"), failure);
+      stop();
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
   it("keeps what an event said over an older answer of the read at start", async () => {
     listen();
     let answer: (runs: Run[]) => void = () => undefined;
@@ -229,11 +245,129 @@ describe("what is saved", () => {
     expect(useStudio.getState().runs).toEqual([LOCAL_RUN]);
   });
 
+  it("the first page read when Studio opens does not replace a newer filter's runs", async () => {
+    saved();
+    let answerLoad: (page: { runs: Run[]; next: null }) => void = () => undefined;
+    vi.mocked(api.studioRuns).mockImplementationOnce(() => new Promise((resolve) => (answerLoad = resolve)));
+    const loading = useStudio.getState().load();
+    vi.mocked(api.studioRuns).mockResolvedValueOnce({ runs: [LOCAL_RUN], next: null });
+    await useStudio.getState().setFilter({ text: "fox" });
+    answerLoad({ runs: [RUN], next: null }); // the unfiltered page, answered last
+    await loading;
+    expect(useStudio.getState().runs).toEqual([LOCAL_RUN]);
+    expect(useStudio.getState()).toMatchObject({ loaded: true, filter: { text: "fox" } });
+  });
+
   it("changing the preferences sends only what changed", async () => {
     saved();
     vi.mocked(api.studioSetPrefs).mockResolvedValue({ ...prefs, suggestionDismissed: true });
     await useStudio.getState().setPrefs({ suggestionDismissed: true });
     expect(api.studioSetPrefs).toHaveBeenCalledWith({ suggestionDismissed: true });
     expect(useStudio.getState().prefs?.suggestionDismissed).toBe(true);
+  });
+
+  describe("lists read and fetched at the same time", () => {
+    const unlisted: StudioEndpoint = { ...openrouter, fetchedAt: null, models: [] };
+    const openai: StudioEndpoint = {
+      providerId: 2,
+      name: "OpenAI",
+      company: "openai",
+      host: "api.openai.com",
+      cloud: true,
+      hasKey: true,
+      fetchedAt: 1794800000000,
+      models: [],
+    };
+
+    it("a read of what is saved does not put back the lists a fetch got while it was on its way", async () => {
+      saved({ ...LOCAL, installed: [] }, [unlisted]);
+      await useStudio.getState().load();
+      let answerRead: (models: { endpoints: StudioEndpoint[] }) => void = () => undefined;
+      vi.mocked(api.studioModels).mockImplementationOnce(() => new Promise((resolve) => (answerRead = resolve)));
+      const reading = useStudio.getState().reread(); // Settings closed
+      vi.mocked(api.studioRefreshModels).mockResolvedValueOnce({ endpoints: [openrouter] });
+      await useStudio.getState().refreshModels(1); // *Get the list*, answered first
+      answerRead({ endpoints: [{ ...unlisted, name: "My OpenRouter" }] }); // read before the lists were saved
+      await reading;
+      // The endpoint as read (its new name), with the lists fetched.
+      expect(useStudio.getState().endpoints).toEqual([{ ...openrouter, name: "My OpenRouter" }]);
+      expect(useStudio.getState().drafts.image).toMatchObject({ target: { endpoint: 1 }, model: "openai/gpt-image-2.6-flare" });
+      // A read started after the fetch takes what is saved, as it is.
+      vi.mocked(api.studioModels).mockResolvedValueOnce({ endpoints: [unlisted] }); // the endpoint's address changed
+      await useStudio.getState().reread();
+      expect(useStudio.getState().endpoints).toEqual([unlisted]);
+    });
+
+    it("so does the first read, when Studio opens", async () => {
+      saved({ ...LOCAL, installed: [] }, [unlisted]);
+      let answerRead: (models: { endpoints: StudioEndpoint[] }) => void = () => undefined;
+      vi.mocked(api.studioModels).mockImplementationOnce(() => new Promise((resolve) => (answerRead = resolve)));
+      const loading = useStudio.getState().load();
+      vi.mocked(api.studioRefreshModels).mockResolvedValueOnce({ endpoints: [openrouter] });
+      await useStudio.getState().refreshModels(1);
+      answerRead({ endpoints: [unlisted] });
+      await loading;
+      expect(useStudio.getState().endpoints).toEqual([openrouter]);
+    });
+
+    it("an older fetch's answer does not put back another endpoint's lists fetched since", async () => {
+      saved(LOCAL, [unlisted, openai]);
+      await useStudio.getState().load();
+      let answerFirst: (models: { endpoints: StudioEndpoint[] }) => void = () => undefined;
+      vi.mocked(api.studioRefreshModels).mockImplementationOnce(() => new Promise((resolve) => (answerFirst = resolve)));
+      const first = useStudio.getState().refreshModels(1);
+      const openaiNow: StudioEndpoint = { ...openai, fetchedAt: 1794950000000, models: [{ ...MODELS[0]!, id: "gpt-image-2.6-flare" }] };
+      vi.mocked(api.studioRefreshModels).mockResolvedValueOnce({ endpoints: [unlisted, openaiNow] });
+      await useStudio.getState().refreshModels(2);
+      answerFirst({ endpoints: [openrouter, openai] }); // OpenAI's lists as they were when it started
+      await first;
+      expect(useStudio.getState().endpoints).toEqual([openrouter, openaiNow]);
+    });
+  });
+
+  describe("an endpoint removed in Settings", () => {
+    const openai: StudioEndpoint = {
+      providerId: 2,
+      name: "OpenAI",
+      company: "openai",
+      host: "api.openai.com",
+      cloud: true,
+      hasKey: true,
+      fetchedAt: 1794900000000,
+      models: [{ ...MODELS[0]!, id: "gpt-image-2.6-flare" }],
+    };
+
+    it("a tab set to it gets its first model again, and a tab set elsewhere stays", async () => {
+      saved({ ...LOCAL, installed: [] }, [openrouter, openai]);
+      await useStudio.getState().load();
+      useStudio.getState().chooseModel("image", { endpoint: 2 }, "gpt-image-2.6-flare");
+      useStudio.getState().setPrompt("video", "waves");
+      expect(useStudio.getState().drafts.video).toMatchObject({ target: { endpoint: 1 }, model: "google/veo-3.1" });
+      const image = useStudio.getState().drafts.image;
+      vi.mocked(api.studioModels).mockResolvedValue({ endpoints: [openai] }); // OpenRouter removed
+      await useStudio.getState().reread();
+      expect(useStudio.getState().drafts.image).toBe(image);
+      // OpenAI makes no video, and no local video model is installed: no model, the prompt kept.
+      expect(useStudio.getState().drafts.video).toMatchObject({ target: null, model: null, prompt: "waves" });
+    });
+
+    it("also when an answer to Update model lists no longer has it", async () => {
+      saved({ ...LOCAL, installed: [] }, [openrouter, openai]);
+      await useStudio.getState().load();
+      expect(useStudio.getState().drafts.image).toMatchObject({ target: { endpoint: 1 }, model: "openai/gpt-image-2.6-flare" });
+      vi.mocked(api.studioRefreshModels).mockResolvedValueOnce({ endpoints: [openai] });
+      await useStudio.getState().refreshModels(2);
+      expect(useStudio.getState().drafts.image).toMatchObject({ target: { endpoint: 2 }, model: "gpt-image-2.6-flare" });
+    });
+
+    it("never moves a tab between this computer and the cloud otherwise", async () => {
+      saved(LOCAL, [openrouter]);
+      await useStudio.getState().load();
+      const image = useStudio.getState().drafts.image;
+      expect(image).toMatchObject({ target: "thisComputer", model: "flux2-klein-4b-q4" });
+      vi.mocked(api.studioLocalModels).mockResolvedValue({ ...LOCAL, installed: [] }); // deleted
+      await useStudio.getState().reread();
+      expect(useStudio.getState().drafts.image).toBe(image);
+    });
   });
 });

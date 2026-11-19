@@ -1034,6 +1034,11 @@ export const STUDIO_EMPTY = {
   /** The Video tab on a computer that cannot make video here. */
   noVideoHere:
     "Video on this computer needs a graphics card or an Apple-silicon Mac. OpenRouter makes videos in the cloud: add it in Settings → Endpoints.",
+  /** A saved endpoint makes the tab's kind but has no key, so none of its models can be used. */
+  noKey: (name: string) => `${name} has no key, so Studio cannot use its models. Add a key in Settings → Endpoints.`,
+  /** A saved endpoint makes the tab's kind, but its saved lists have no such model Studio can use. */
+  noModel: (name: string, kind: MediaKind) =>
+    `${name}'s saved lists have no ${kind === "image" ? "picture" : "video"} model Studio can use. Update model lists from the menu, or add another endpoint in Settings → Endpoints.`,
 } as const;
 
 /** The one-time suggestion while nothing is installed locally. */

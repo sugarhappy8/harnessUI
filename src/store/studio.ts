@@ -5,8 +5,9 @@
 // Task B2: what Studio has saved (endpoints and their lists, local models, the gallery's first
 // page, preferences, today's spending), read when Studio opens and never fetched then (the
 // lists, local models, preferences and spending are read again each time Studio is shown and
-// when Settings closes); each tab's draft, which starts at the model used last or, local first,
-// a default. Task B3: the user's pick in the model picker, which carries the draft's settings
+// when Settings closes; lists fetched meanwhile are kept); each tab's draft, which starts at
+// the model used last or, local first, a default, and starts again when its endpoint is
+// removed. Task B3: the user's pick in the model picker, which carries the draft's settings
 // to the model picked and asks for an OpenRouter picture model's price once; the recent models.
 import { create, type StoreApi, type UseBoundStore } from "zustand";
 import * as api from "../components/studio/api";
@@ -97,7 +98,8 @@ export interface StudioState {
   /** Reads again what may have changed while Studio was hidden or Settings was open: the
    *  lists, local models, preferences and today's spending. Not the gallery's pages (the
    *  pages read further on stay) nor the runs working (`studio-progress` follows them). Never
-   *  fetches; each tab without a model then gets its first, and a chosen model stays. */
+   *  fetches; each tab without a model then gets its first, and a chosen model stays unless
+   *  its endpoint was removed. Lists fetched while this read was on its way stay. */
   reread(): Promise<void>;
   /** *Get the list*, *Update model lists*: fetches endpoint `providerId`'s lists. */
   refreshModels(providerId: number): Promise<void>;
@@ -154,10 +156,16 @@ interface HeldExtra {
 }
 
 export const useStudio: UseBoundStore<StoreApi<StudioState>> = create<StudioState>((set, get) => {
-  /** Gives each tab still without a model its first one (a list or a model got later). */
-  const fillEmptyDrafts = () => {
+  /** Gives each tab its first model when it has none (a list or a model got later) or when
+   *  its endpoint was removed in Settings. Otherwise the model chosen stays: Studio never
+   *  moves a tab between this computer and the cloud by itself. */
+  const fillDrafts = () => {
+    const { drafts, endpoints } = get();
     for (const tab of ["image", "video"] as const) {
-      if (get().drafts[tab].model === null) get().selectInitialModel(tab);
+      const { target, model } = drafts[tab];
+      const gone =
+        target !== null && target !== "thisComputer" && !endpoints.some((e) => e.providerId === target.endpoint);
+      if (model === null || gone) get().selectInitialModel(tab);
     }
   };
 
@@ -204,6 +212,25 @@ export const useStudio: UseBoundStore<StoreApi<StudioState>> = create<StudioStat
     });
   };
 
+  /** Counts the reads and fetches of the endpoints' lists as they start and as fetches come
+   *  back, so an answer can tell what came back after it was asked for. */
+  let listsTick = 0;
+  /** For each endpoint, the tick at which a fetch of its lists last came back. */
+  const fetchedTick = new Map<number, number>();
+
+  /** `answer`'s endpoints (which endpoints there are, their names and keys), each with the
+   *  lists in it, except where a fetch of an endpoint's lists came back after `since` (when
+   *  this answer was asked for): those lists are newer, and stay. `fetched` is the endpoint
+   *  this answer fetched, whose lists are the newest. */
+  const newestLists = (answer: StudioEndpoint[], since: number, fetched?: number): StudioEndpoint[] => {
+    const now = get().endpoints;
+    return answer.map((e) => {
+      if (e.providerId === fetched || (fetchedTick.get(e.providerId) ?? 0) <= since) return e;
+      const kept = now.find((n) => n.providerId === e.providerId);
+      return kept ? { ...e, fetchedAt: kept.fetchedAt, models: kept.models } : e;
+    });
+  };
+
   return {
     view: "chat",
     tab: "image",
@@ -234,17 +261,21 @@ export const useStudio: UseBoundStore<StoreApi<StudioState>> = create<StudioStat
     load: () => {
       loading ??= (async () => {
         try {
+          const since = ++listsTick;
+          const filter = get().filter;
           const [models, local, page, live, prefs, usage] = await Promise.all([
             api.studioModels(),
             api.studioLocalModels(),
-            api.studioRuns(get().filter, null, RUNS_PAGE),
+            api.studioRuns(filter, null, RUNS_PAGE),
             api.studioLive(),
             api.studioGetPrefs(),
             api.studioUsage(),
           ]);
-          set({ endpoints: models.endpoints, local, runs: page.runs, next: page.next, prefs, usage, loaded: true });
+          set({ endpoints: newestLists(models.endpoints, since), local, prefs, usage, loaded: true });
+          // A page for a filter changed since is old (`setFilter` read the new one).
+          if (get().filter === filter) set({ runs: page.runs, next: page.next });
           for (const run of live) get().applyProgress(run);
-          fillEmptyDrafts();
+          fillDrafts();
         } finally {
           loading = null;
         }
@@ -252,28 +283,33 @@ export const useStudio: UseBoundStore<StoreApi<StudioState>> = create<StudioStat
       return loading;
     },
     reread: async () => {
+      const since = ++listsTick;
       const [models, local, prefs, usage] = await Promise.all([
         api.studioModels(),
         api.studioLocalModels(),
         api.studioGetPrefs(),
         api.studioUsage(),
       ]);
-      set({ endpoints: models.endpoints, local, prefs, usage });
-      fillEmptyDrafts();
+      set({ endpoints: newestLists(models.endpoints, since), local, prefs, usage });
+      fillDrafts();
     },
     refreshModels: async (providerId) => {
+      const since = ++listsTick;
       const { endpoints } = await api.studioRefreshModels(providerId);
-      set({ endpoints });
-      fillEmptyDrafts();
+      set({ endpoints: newestLists(endpoints, since, providerId) });
+      fetchedTick.set(providerId, ++listsTick);
+      fillDrafts();
     },
     refreshLocal: async () => {
       const local = await api.studioLocalModels();
       set({ local });
-      fillEmptyDrafts();
+      fillDrafts();
     },
     setTab: (tab) => set({ tab }),
     showLocalModels: (show) => set({ localView: show }),
-    selectInitialModel: (tab) =>
+    selectInitialModel: (tab) => {
+      // The draft starts again: nothing is held aside for a model it no longer has.
+      delete held[tab];
       set((s) => {
         const offered = (c: { target: RunTarget; model: string }) =>
           offeredModel(tab, c.target, c.model, s.local, s.endpoints);
@@ -288,7 +324,8 @@ export const useStudio: UseBoundStore<StoreApi<StudioState>> = create<StudioStat
           values: model ? defaultsFor(model) : {},
         };
         return { drafts: { ...s.drafts, [tab]: draft } };
-      }),
+      });
+    },
     chooseModel: (tab, target, modelId) => {
       const s = get();
       const to = offeredModel(tab, target, modelId, s.local, s.endpoints);
@@ -391,8 +428,10 @@ export function isAutoModel(model: MediaModel): boolean {
   return /(^|\/)auto$/i.test(model.id) || /^auto( |$)/i.test(model.displayName);
 }
 
-/** The models of `endpoint`'s saved lists that `tab` can use. */
+/** The models of `endpoint`'s saved lists that `tab` can use: none while it has no key (the
+ *  picker greys them out). */
 function cloudModelsFor(endpoint: StudioEndpoint, tab: StudioTab): MediaModel[] {
+  if (!endpoint.hasKey) return [];
   return endpoint.models.filter((m) => m.kind === tab && m.usable === null && !isAutoModel(m));
 }
 
@@ -442,9 +481,9 @@ function offeredModel(
 }
 
 /** The model `tab` starts with when none was used last: an installed local model that fits
- *  (not one that is slow here), else the first usable model of the first endpoint with one,
- *  its own GPT Image 2.6 Flare or Veo 3.1 Fast when offered; `null` when there is none. Never
- *  an "Auto" model, which would hide where the prompt goes. */
+ *  (not one that is slow here), else the first usable model of the first endpoint with one
+ *  (and a key), its own GPT Image 2.6 Flare or Veo 3.1 Fast when offered; `null` when there
+ *  is none. Never an "Auto" model, which would hide where the prompt goes. */
 export function defaultModel(
   tab: StudioTab,
   local: LocalModels | null,
@@ -464,18 +503,19 @@ export function defaultModel(
 /**
  * What `tab` shows in place of the card stream, by one ordered rule, the first that applies:
  * nothing when the tab has a model to use (an installed local model of its kind, or an
- * endpoint's); *Get local models* when a recommended entry of its kind fits this computer
- * (after the chat model is unloaded counts; video also needs a computer that can make it);
- * cloud as the backup when no endpoint is saved; *add an endpoint* when the saved ones make
- * no such kind (the Video tab with only OpenAI). An endpoint that makes the kind but has no
- * saved list shows nothing here: *Get the list* stands in for it.
+ * endpoint's, which needs a key); *Get local models* when a recommended entry of its kind
+ * fits this computer (after the chat model is unloaded counts; video also needs a computer
+ * that can make it); cloud as the backup when no endpoint is saved; nothing while an
+ * endpoint that makes the kind has no saved list (its *Get the list* stands in); else *add
+ * an endpoint*: the saved ones make no such kind (the Video tab with only OpenAI), or offer
+ * none Studio can use (no key, or no such model in their lists), and the card says which.
  */
 export function emptyState(tab: StudioTab, local: LocalModels | null, endpoints: StudioEndpoint[]): EmptyState {
   if (localModelsFor(tab, local).length > 0 || endpoints.some((e) => cloudModelsFor(e, tab).length > 0)) return null;
   if (fittingEntry(tab, local)) return "getLocal";
   if (endpoints.length === 0) return "cloudBackup";
-  if (!endpoints.some((e) => makesKind(e, tab))) return "addEndpoint";
-  return null;
+  if (endpoints.some((e) => e.fetchedAt === null && makesKind(e, tab))) return null;
+  return "addEndpoint";
 }
 
 /** The models of the newest runs of `kind`, each once, newest first: at most `n`. */
@@ -519,7 +559,8 @@ export function followStudio(): () => void {
           if (stopped) return;
           for (const run of runs) if (!heard.has(run.id)) useStudio.getState().applyProgress(run);
         })
-        .catch(() => undefined);
+        // `studio-progress` still follows them; the failure leaves a trace.
+        .catch((e: unknown) => console.warn("Studio: the runs still working could not be read", e));
     }
     return unlisten;
   });

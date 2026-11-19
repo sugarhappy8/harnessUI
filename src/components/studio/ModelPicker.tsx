@@ -15,6 +15,7 @@ import { toErrorInfo } from "../../store/app";
 import { FITTING, fittingEntry, isAutoModel, recentModels, useStudio, type Draft, type StudioTab } from "../../store/studio";
 import { ErrorBanner } from "../ErrorBanner";
 import { FitDot } from "../FitBadge";
+import { PlaceMark } from "../PlaceMark";
 import { formatUsd } from "./cost";
 import { etaText } from "./eta";
 import { LocalMark } from "./LocalMark";
@@ -476,15 +477,7 @@ function EndpointSection(props: {
     <section className="pt-2">
       <div className="flex items-center gap-2 px-2 pb-1">
         <h3 className="text-xs font-semibold text-fg-muted">{STUDIO_PICKER.via(endpoint.name)}</h3>
-        <span
-          data-cloud-mark
-          title={title}
-          className="ml-auto flex shrink-0 items-center gap-1 rounded-full border border-border px-1.5 text-xs whitespace-nowrap text-fg-muted"
-        >
-          <Cloud size={12} aria-hidden />
-          {cloudChipWords("")}
-          <span className="sr-only">: {title}</span>
-        </span>
+        <PlaceMark mark="cloud" icon={Cloud} label={cloudChipWords("")} title={title} className="ml-auto" />
       </div>
       {!endpoint.hasKey && <p className="px-2 pb-1 text-xs text-fg-muted">{STUDIO_PICKER.noKey}</p>}
       <div role="listbox" aria-label={STUDIO_PICKER.via(endpoint.name)}>

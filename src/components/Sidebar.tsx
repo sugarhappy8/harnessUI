@@ -197,6 +197,9 @@ export function Sidebar(props: {
         )}
         <ul className="space-y-0.5">
           {chats.map((c, index) => {
+            // The open chat is the current page only while the chat is shown: while Studio is,
+            // the Studio button is.
+            const current = c.id === activeChatId && !studioShown;
             // Headings by day, except in search results, which are ordered by match.
             const group = search ? null : dayGroup(c.updatedAt);
             const heading =
@@ -238,7 +241,7 @@ export function Sidebar(props: {
                     <div
                       className={
                         "relative flex items-center rounded-lg transition-colors duration-150 " +
-                        (c.id === activeChatId
+                        (current
                           ? "bg-bg-muted before:absolute before:top-2 before:bottom-2 before:left-0 before:w-[3px] before:rounded-full before:bg-accent"
                           : "hover:bg-bg-muted/70")
                       }
@@ -254,9 +257,7 @@ export function Sidebar(props: {
                           setDraft(c.title);
                         }}
                         className="min-w-0 flex-1 px-2.5 py-1.5 text-left"
-                        aria-current={
-                          c.id === activeChatId ? "page" : undefined
-                        }
+                        aria-current={current ? "page" : undefined}
                       >
                         <span className="flex items-center gap-1.5">
                           <span className="min-w-0 flex-1 truncate text-sm">

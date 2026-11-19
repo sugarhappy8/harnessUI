@@ -226,6 +226,50 @@ describe("StudioView", () => {
     expect(useStudio.getState().drafts.image).toMatchObject({ target: { endpoint: 1 }, model: "openai/gpt-image-2.6-flare" });
   });
 
+  it("an endpoint without a key offers no model to use", async () => {
+    const keyless = endpoint({ hasKey: false });
+    const none = { ...LOCAL, installed: [] };
+    const nothingFits = { ...none, recommended: [], notHere: LOCAL.recommended, videoPossible: false };
+    const openai = endpoint({ providerId: 2, company: "openai" });
+    expect(defaultModel("image", none, [keyless])).toBeNull();
+    expect(defaultModel("image", none, [keyless, openai])).toEqual({ target: { endpoint: 2 }, model: "gpt-image-2.6-flare" });
+    expect(emptyState("image", none, [keyless])).toBe("getLocal");
+    expect(emptyState("image", nothingFits, [keyless])).toBe("addEndpoint");
+    expect(emptyState("image", nothingFits, [keyless, openai])).toBeNull();
+    // Nor is the model used last, while its endpoint has no key.
+    await show({
+      endpoints: [keyless],
+      local: nothingFits,
+      prefs: prefs({ lastModel: { image: { target: { endpoint: 1 }, model: "openai/gpt-image-2.6-flare" } } }),
+    });
+    expect(useStudio.getState().drafts.image).toMatchObject({ target: null, model: null });
+    screen.getByText("OpenRouter has no key, so Studio cannot use its models. Add a key in Settings → Endpoints.");
+    await click(screen.getByRole("button", { name: "Open Endpoints" }));
+    expect(opened).toEqual(["endpoints"]);
+  });
+
+  it("a saved list without a model of the tab's kind is explained, not left blank", async () => {
+    const nothingFits = { ...LOCAL, installed: [], recommended: [], notHere: LOCAL.recommended };
+    const picturesOnly = endpoint({ models: MODELS.filter((m) => m.kind === "image") });
+    expect(emptyState("video", nothingFits, [picturesOnly])).toBe("addEndpoint");
+    // Only an endpoint without a saved list stands in: its *Get the list* says what is missing.
+    expect(emptyState("video", nothingFits, [endpoint({ fetchedAt: null, models: [] })])).toBeNull();
+    await show({ endpoints: [picturesOnly], local: nothingFits });
+    await click(screen.getByRole("tab", { name: "Video" }));
+    expect(useStudio.getState().drafts.video.model).toBeNull();
+    screen.getByText(
+      "OpenRouter's saved lists have no video model Studio can use. Update model lists from the menu, or add another endpoint in Settings → Endpoints.",
+    );
+    screen.getByRole("button", { name: "Open Endpoints" });
+  });
+
+  it("with a local model to get, the card's second line says why a saved endpoint is not used", async () => {
+    await show({ endpoints: [endpoint({ hasKey: false })], local: { ...LOCAL, installed: [] } });
+    screen.getByText(`${klein.name} fits this computer (${amountGb(klein.sizeBytes)}).`);
+    screen.getByText("OpenRouter has no key, so Studio cannot use its models. Add a key in Settings → Endpoints.");
+    expect(screen.queryByText("No good graphics card? Cloud models are the backup: OpenRouter or OpenAI.")).toBeNull();
+  });
+
   it("an endpoint without a saved list offers to get it", async () => {
     await show({ endpoints: [endpoint({ fetchedAt: null, models: [] })] });
     screen.getByText("Get OpenRouter's picture and video models");
@@ -262,11 +306,45 @@ describe("StudioView", () => {
     // The day names no year in the year it is.
     vi.useFakeTimers({ toFake: ["Date"] });
     vi.setSystemTime(new Date(2026, 10, 18, 12));
-    await show({ endpoints: [endpoint({ fetchedAt: new Date(2026, 10, 17, 9).getTime() })] });
+    // OpenAI first: its failure does not stop OpenRouter's update.
+    const openai = endpoint({ providerId: 2, company: "openai", fetchedAt: new Date(2026, 10, 16, 9).getTime() });
+    const before = endpoint({ fetchedAt: new Date(2026, 10, 17, 9).getTime() });
+    await show({ endpoints: [openai, before] });
+    vi.mocked(api.studioRefreshModels).mockImplementation(async (id) => {
+      if (id === 2) {
+        throw { code: "network", message: "OpenAI could not be reached.", nextStep: "Check the connection.", details: "" };
+      }
+      return { endpoints: [openai, { ...before, fetchedAt: new Date(2026, 10, 18, 11).getTime() }] };
+    });
     await openMenu();
-    await click(screen.getByRole("menuitem", { name: "Update model lists" }));
     screen.getByText("OpenRouter's lists updated 17 Nov");
-    expect(api.studioRefreshModels).toHaveBeenCalledWith(1);
+    await click(screen.getByRole("menuitem", { name: "Update model lists" }));
+    expect(api.studioRefreshModels).toHaveBeenNthCalledWith(1, 2);
+    expect(api.studioRefreshModels).toHaveBeenNthCalledWith(2, 1);
+    screen.getByText("OpenRouter's lists updated 18 Nov");
+    screen.getByText("OpenAI's lists updated 16 Nov");
+    expect(screen.queryByText("OpenRouter's lists updated 17 Nov")).toBeNull();
+    screen.getByText("OpenAI could not be reached."); // in the error banner
+  });
+
+  it("the search box asks for the gallery 250 ms after the last key", async () => {
+    await show();
+    vi.mocked(api.studioRuns).mockClear();
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    const search = screen.getByRole("searchbox", { name: "Search" }) as HTMLInputElement;
+    for (const text of ["f", "fo", "fox"]) {
+      fireEvent.change(search, { target: { value: text } });
+      act(() => vi.advanceTimersByTime(100));
+    }
+    expect(search.value).toBe("fox");
+    act(() => vi.advanceTimersByTime(149));
+    expect(api.studioRuns).not.toHaveBeenCalled();
+    await act(async () => {
+      vi.advanceTimersByTime(1);
+    });
+    expect(api.studioRuns).toHaveBeenCalledTimes(1);
+    expect(api.studioRuns).toHaveBeenCalledWith({ text: "fox" }, null, 50);
+    expect(search.value).toBe("fox");
   });
 
   it("the Video tab offers a local video model first, and OpenRouter as the backup", async () => {
@@ -343,6 +421,49 @@ describe("StudioView", () => {
       await flush();
       expect(useStudio.getState().loaded).toBe(true);
       expect(api.studioRuns).toHaveBeenCalledTimes(2); // the whole first read again
+      expect(screen.queryByText("Something went wrong.")).toBeNull(); // the read worked
+      expect(screen.queryByRole("alert")).toBeNull();
+    });
+
+    it("a failed read shows in the error banner", async () => {
+      vi.mocked(api.studioRuns).mockRejectedValueOnce({
+        code: "store",
+        message: "Studio's saved runs could not be read.",
+        nextStep: "Try again.",
+        details: "database is locked",
+      });
+      await show();
+      expect(screen.getByRole("alert").textContent).toContain("Studio's saved runs could not be read.");
+    });
+
+    it("a read again that works puts away a failed read's banner, not an action's", async () => {
+      await show({ endpoints: [endpoint({ fetchedAt: null, models: [] })] });
+      // A read again fails, then works.
+      vi.mocked(api.studioUsage).mockRejectedValueOnce(new Error("database is locked"));
+      await act(async () => {
+        window.dispatchEvent(new Event("app:settings-closed"));
+      });
+      await flush();
+      screen.getByText("Something went wrong.");
+      await act(async () => {
+        window.dispatchEvent(new Event("app:settings-closed"));
+      });
+      await flush();
+      expect(screen.queryByRole("alert")).toBeNull();
+      // *Get the list* fails: a read that works afterwards leaves that banner.
+      vi.mocked(api.studioRefreshModels).mockRejectedValueOnce({
+        code: "network",
+        message: "OpenRouter could not be reached.",
+        nextStep: "Check the connection.",
+        details: "",
+      });
+      await click(screen.getByRole("button", { name: "Get the list" }));
+      screen.getByText("OpenRouter could not be reached.");
+      await act(async () => {
+        window.dispatchEvent(new Event("app:settings-closed"));
+      });
+      await flush();
+      screen.getByText("OpenRouter could not be reached.");
     });
   });
 });
