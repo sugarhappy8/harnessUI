@@ -2234,6 +2234,7 @@ pub(crate) mod tests {
             engine: status_from(sd_lock::embedded(), &layout, "macos-aarch64", None),
             engine_need: EngineNeed::Found,
             notice_accepted: true,
+            installed_files: crate::studio::local_models::InstalledFiles::default(),
         };
         let mut local = local_models(&deps).await.unwrap();
         // The store dates an install by its own clock: fixed here.

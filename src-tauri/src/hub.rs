@@ -526,9 +526,14 @@ async fn start_group(
             e.to_string(),
         )
     })?;
+    // 0.1.0: a file there that an installed picture or video model uses at another revision
+    // is never replaced: this file then goes to a place of its own.
+    let state = app.state::<AppState>();
+    let used = gen_files_used(&state.store.list_gen_models().await?, None);
     let mut files = Vec::new();
     for f in model_files.iter().chain(projector) {
-        let dest = models::download::destination(&dir, repo, &f.path).map_err(hf_error)?;
+        let dest = download_destination(&dir, repo, &f.path, commit, f.sha256.as_deref(), &used)
+            .map_err(hf_error)?;
         files.push((file_spec(repo, commit, f), dest));
     }
     let meta = GroupMeta {
@@ -1439,6 +1444,90 @@ pub(crate) fn used_elsewhere(
         || gen_files
             .iter()
             .any(|g| crate::model_options::same_file(g, &spelled))
+}
+
+/// 0.1.0: a file an installed model uses, with the SHA-256 recorded for it (`None` when none
+/// is recorded).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct UsedFile {
+    pub path: String,
+    pub sha256: Option<String>,
+}
+
+/// 0.1.0: the files the installed chat models use ([`files_used`]): each model's file with
+/// the SHA-256 recorded on its row, and its other shards and image files with none.
+pub(crate) fn chat_files_used(models: &[store::ModelRecord]) -> Vec<UsedFile> {
+    models
+        .iter()
+        .flat_map(|m| {
+            files_used(m).into_iter().map(move |file| {
+                let path = file.display().to_string();
+                let sha256 = crate::model_options::same_file(&path, &m.path)
+                    .then(|| m.sha256.clone())
+                    .flatten();
+                UsedFile { path, sha256 }
+            })
+        })
+        .collect()
+}
+
+/// 0.1.0: the part files of the installed picture and video models, other than model
+/// `except` (the one being downloaded again), each with the SHA-256 its part records.
+pub(crate) fn gen_files_used(models: &[store::GenModel], except: Option<&str>) -> Vec<UsedFile> {
+    models
+        .iter()
+        .filter(|m| Some(m.id.as_str()) != except)
+        .flat_map(|m| m.parts.as_array().cloned().unwrap_or_default())
+        .filter_map(|part| {
+            Some(UsedFile {
+                path: part.get("file")?.as_str()?.to_owned(),
+                sha256: part
+                    .get("sha256")
+                    .and_then(serde_json::Value::as_str)
+                    .map(str::to_owned),
+            })
+        })
+        .collect()
+}
+
+/// 0.1.0: where a download of `repo`'s file `path` at revision `commit`, pinned to SHA-256
+/// `pinned`, goes: `<models>/<owner>/<repo>/<path>` ([`models::download::destination`]),
+/// unless a file is already there that an installed model in `used` uses with another
+/// SHA-256 (or with none recorded, or the download pins none, so they cannot be told the
+/// same): then `<models>/<owner>/<repo>/@<commit, 12 characters>/<path>`, a file of its own. A
+/// download renames its file over its destination once it is checked, so it never replaces a
+/// file another installed model uses; deletion and [`used_elsewhere`] treat that place as
+/// another file.
+pub(crate) fn download_destination(
+    models_dir: &Path,
+    repo: &str,
+    path: &str,
+    commit: &str,
+    pinned: Option<&str>,
+    used: &[UsedFile],
+) -> Result<PathBuf, HfError> {
+    let dest = models::download::destination(models_dir, repo, path)?;
+    let spelled = dest.display().to_string();
+    let another = used
+        .iter()
+        .filter(|u| crate::model_options::same_file(&u.path, &spelled))
+        .any(|u| match (pinned, u.sha256.as_deref()) {
+            (Some(pinned), Some(recorded)) => !pinned.eq_ignore_ascii_case(recorded),
+            _ => true,
+        });
+    if !another || !dest.is_file() {
+        return Ok(dest);
+    }
+    let tag: String = commit.chars().take(12).collect();
+    if tag.is_empty() || !tag.chars().all(|c| c.is_ascii_alphanumeric()) {
+        return Err(HfError::InvalidName(commit.to_owned()));
+    }
+    let (owner, name) = models::hf::validate_repo_id(repo)?;
+    let mut own = models_dir.join(owner).join(name).join(format!("@{tag}"));
+    for segment in models::hf::validate_repo_path(path)? {
+        own.push(segment);
+    }
+    Ok(own)
 }
 
 /// 0.0.7 (P6): whether `file` is a file of a model on the Installed list (any shard of it),
@@ -2374,6 +2463,85 @@ mod tests {
             "the image file recorded meanwhile goes too"
         );
         assert!(store.get_model(rec.id).await.unwrap().is_none());
+    }
+
+    /// Finding local-shared-path-revision-overwrite: a chat download at another commit of a
+    /// file an installed picture model uses under another SHA-256 (FLUX.2 klein's text encoder)
+    /// goes to a place of its own, never renamed over the picture model's part; the same file
+    /// is shared. The chat models' files carry the SHA-256 their rows record.
+    #[test]
+    fn a_download_never_replaces_another_installed_models_file_of_another_revision() {
+        let root = scratch();
+        let models = root.0.join("models");
+        let repo = "unsloth/Qwen3-4B-GGUF";
+        let file = "Qwen3-4B-Q4_K_M.gguf";
+        let shared = models.join("unsloth").join("Qwen3-4B-GGUF").join(file);
+        std::fs::create_dir_all(shared.parent().unwrap()).unwrap();
+        std::fs::write(&shared, b"gguf").unwrap();
+        let (old, new) = ("a".repeat(64), "b".repeat(64));
+        let commit = "0123456789abcdef0123456789abcdef01234567";
+        let klein = store::GenModel {
+            id: "flux2-klein-4b-q4".into(),
+            catalog_id: Some("flux2-klein-4b-q4".into()),
+            name: "FLUX.2 klein 4B".into(),
+            kind: "image".into(),
+            family: "flux2-klein-4b".into(),
+            parts: serde_json::json!([
+                {"role": "llm", "file": shared.display().to_string(), "sha256": old}
+            ]),
+            size_bytes: 4,
+            source: store::GenSource::Catalog,
+            added_at: 1,
+        };
+        let used = gen_files_used(std::slice::from_ref(&klein), None);
+        assert_eq!(
+            used,
+            [UsedFile {
+                path: shared.display().to_string(),
+                sha256: Some(old.clone())
+            }]
+        );
+        let own = download_destination(&models, repo, file, commit, Some(&new), &used).unwrap();
+        assert_eq!(
+            own,
+            models
+                .join("unsloth")
+                .join("Qwen3-4B-GGUF")
+                .join("@0123456789ab")
+                .join(file)
+        );
+        assert!(!used_elsewhere(
+            &[],
+            &BTreeSet::from([shared.display().to_string()]),
+            &own
+        ));
+        // The same file, the model itself being downloaded again, or nothing using it: its
+        // usual place.
+        assert_eq!(
+            download_destination(&models, repo, file, commit, Some(&old), &used).unwrap(),
+            shared
+        );
+        assert!(gen_files_used(std::slice::from_ref(&klein), Some(&klein.id)).is_empty());
+        assert_eq!(
+            download_destination(&models, repo, file, commit, Some(&new), &[]).unwrap(),
+            shared
+        );
+        // A commit that cannot name a folder is refused rather than written anywhere.
+        assert!(download_destination(&models, repo, file, "../x", Some(&new), &used).is_err());
+
+        // A chat model's file with the SHA-256 its row records; its image file with none.
+        let image = shared.with_file_name("mmproj-F16.gguf");
+        let mut chat = downloaded(1, &shared, Some(&image));
+        chat.sha256 = Some(new.clone());
+        let files = chat_files_used(std::slice::from_ref(&chat));
+        assert!(files.contains(&UsedFile {
+            path: shared.display().to_string(),
+            sha256: Some(new.clone())
+        }));
+        assert!(files.contains(&UsedFile {
+            path: image.display().to_string(),
+            sha256: None
+        }));
     }
 
     /// 0.1.0 Studio: FLUX.2 klein's text encoder is the same file as a common chat download

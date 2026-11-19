@@ -7,8 +7,10 @@
 //!   model (its saved parts, with no request).
 //! - **What it takes** ([`plan_download`]): every part, pinned by repository, revision, size
 //!   and SHA-256, lands at `<models>/<owner>/<repo>/<path>`, so a part already there (a shared
-//!   text encoder) is checked instead of fetched. A download that does not fit on the disk is
-//!   refused before anything starts.
+//!   text encoder) is checked instead of fetched; where another installed model uses another
+//!   revision of the file there, the part lands at `<models>/<owner>/<repo>/@<commit>/<path>`
+//!   instead, never renamed over it. A download that does not fit on the disk is refused
+//!   before anything starts.
 //! - **What it needs first** ([`check_acceptance`]): the note about local models, then every
 //!   licence of every part, and the Studio engine's when it comes too, each accepted by its
 //!   SHA-256 (recorded in `license_acceptances`).
@@ -27,6 +29,8 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use models::download::{FileSpec, destination};
+
+use crate::hub::{UsedFile, chat_files_used, download_destination, gen_files_used};
 use models::gen_catalog::{
     FamilyRecord, GateMode, GenCatalog, GenEntry, GenFamily, GenGate, GenLicence, GenPart, GenRole,
     gen_catalog,
@@ -97,8 +101,40 @@ impl DownloadPlan {
     }
 }
 
+/// The files the installed models use, which a download never renames over another
+/// revision of ([`plan_download`]).
+#[derive(Debug, Clone, Default)]
+pub struct InstalledFiles {
+    /// The installed chat models' files.
+    pub chat: Vec<UsedFile>,
+    /// The installed picture and video models.
+    pub gen_models: Vec<store::GenModel>,
+}
+
+impl InstalledFiles {
+    /// The installed models in `store` and their files.
+    pub async fn read(store: &store::Store) -> AppResult<Self> {
+        Ok(Self {
+            chat: chat_files_used(&store.list_models().await?),
+            gen_models: store.list_gen_models().await?,
+        })
+    }
+
+    /// The files models other than picture or video model `id` (the one being downloaded,
+    /// perhaps again) use.
+    pub fn except(&self, id: &str) -> Vec<UsedFile> {
+        let mut used = self.chat.clone();
+        used.extend(gen_files_used(&self.gen_models, Some(id)));
+        used
+    }
+}
+
 /// What downloading `entry` into `models_dir` takes: one pinned file per part (`commit` the
-/// part's revision), a part whose destination already has its pinned size counted as here,
+/// part's revision), each at `<models>/<owner>/<repo>/<path>` unless a file there that
+/// another installed model uses (`used`: chat models, and picture and video models other than
+/// this one) is another revision's (`hub::download_destination`: the part then has a place
+/// of its own, never renamed over that file), a part whose destination already has its
+/// pinned size counted as here,
 /// every licence to accept, and what the Studio engine needs (`engine`,
 /// `engine_cmd::engine_need`): its pack comes too, with its licence to accept; an engine that
 /// is neither here nor a pack changes nothing here (Get local models tells it from the
@@ -109,13 +145,21 @@ pub fn plan_download(
     models_dir: &Path,
     engine: &EngineNeed,
     free_bytes: Option<u64>,
+    used: &[UsedFile],
 ) -> AppResult<DownloadPlan> {
     let mut files = Vec::with_capacity(entry.parts.len());
     let mut already_here = Vec::new();
     let mut to_fetch_bytes = 0;
     for part in &entry.parts {
-        let dest = destination(models_dir, &part.repo, &part.path)
-            .map_err(|e| AppError::internal(format!("a part's place: {e}")))?;
+        let dest = download_destination(
+            models_dir,
+            &part.repo,
+            &part.path,
+            &part.revision,
+            Some(&part.sha256),
+            used,
+        )
+        .map_err(|e| AppError::internal(format!("a part's place: {e}")))?;
         if std::fs::metadata(&dest).is_ok_and(|m| m.is_file() && m.len() == part.size) {
             already_here.push(dest.clone());
         } else {
@@ -448,7 +492,9 @@ pub async fn start_local_download(
     let models_dir = crate::hub::models_dir(app).await;
     let free = reverse::diskspace::free_bytes(&models_dir);
     let engine = super::engine_cmd::engine_need(app);
-    let plan = plan_download(entry, &models_dir, &engine, free)?;
+    // The files the other installed models use, which no part is renamed over.
+    let used = InstalledFiles::read(&state.store).await?.except(&entry.id);
+    let plan = plan_download(entry, &models_dir, &engine, free, &used)?;
     let studio = app.state::<Arc<StudioManager>>();
     let notice_accepted = studio.prefs().local_notice_accepted_at.is_some();
     let accepted = Accepted {
@@ -786,7 +832,7 @@ mod tests {
         let e = entry();
         let encoder = dest(&dir.0, &e.parts[1]);
         write(&encoder, 2_000);
-        let plan = plan_download(e.clone(), &dir.0, &EngineNeed::Found, None).unwrap();
+        let plan = plan_download(e.clone(), &dir.0, &EngineNeed::Found, None, &[]).unwrap();
         assert_eq!(plan.already_here, vec![encoder.clone()]);
         assert_eq!(plan.total_bytes, 6_300);
         assert_eq!(plan.to_fetch_bytes, 4_300);
@@ -806,9 +852,66 @@ mod tests {
         }
         // A file of another size there is fetched.
         write(&encoder, 1_999);
-        let plan = plan_download(e, &dir.0, &EngineNeed::Found, None).unwrap();
+        let plan = plan_download(e, &dir.0, &EngineNeed::Found, None, &[]).unwrap();
         assert!(plan.already_here.is_empty());
         assert_eq!(plan.to_fetch_bytes, 6_300);
+    }
+
+    /// Finding local-shared-path-revision-overwrite: a part whose place holds a file an
+    /// installed chat model uses under another SHA-256 (another revision of the same file)
+    /// goes to a place of its own, `@<commit>`, never renamed over the chat model's file; the
+    /// same file (the same SHA-256) is shared as before, and so is a file no model uses.
+    #[test]
+    fn a_part_never_replaces_a_chat_models_file_of_another_revision() {
+        let dir = Scratch::new();
+        let e = entry();
+        let part = &e.parts[1];
+        let shared = dest(&dir.0, part);
+        write(&shared, 2_000);
+        let chat = |sha256: &str| crate::hub::UsedFile {
+            path: shared.display().to_string(),
+            sha256: Some(sha256.to_owned()),
+        };
+        let place = |used: &[crate::hub::UsedFile]| {
+            plan_download(e.clone(), &dir.0, &EngineNeed::Found, None, used)
+                .unwrap()
+                .files[1]
+                .1
+                .clone()
+        };
+
+        let other_revision = place(&[chat(&"f".repeat(64))]);
+        assert_ne!(other_revision, shared);
+        let (owner, name) = part.repo.split_once('/').unwrap();
+        let tag: String = part.revision.chars().take(12).collect();
+        let mut want = dir.0.join(owner).join(name).join(format!("@{tag}"));
+        for segment in part.path.split('/') {
+            want.push(segment);
+        }
+        assert_eq!(other_revision, want);
+        // That place is fetched; the chat model's file is not counted as here.
+        let plan = plan_download(
+            e.clone(),
+            &dir.0,
+            &EngineNeed::Found,
+            None,
+            &[chat(&"f".repeat(64))],
+        )
+        .unwrap();
+        assert!(plan.already_here.is_empty());
+        // A chat model whose file records no SHA-256 cannot be told the same: not replaced.
+        let unknown = crate::hub::UsedFile {
+            path: shared.display().to_string(),
+            sha256: None,
+        };
+        assert_eq!(place(&[unknown]), want);
+
+        // The same file is shared, and a file no installed model uses is the part's place.
+        assert_eq!(place(&[chat(&part.sha256.to_uppercase())]), shared);
+        assert_eq!(place(&[]), shared);
+        // Nothing there yet: the usual place.
+        std::fs::remove_file(&shared).unwrap();
+        assert_eq!(place(&[chat(&"f".repeat(64))]), shared);
     }
 
     /// Nothing downloads before the note about local models is accepted, and every licence of
@@ -816,7 +919,7 @@ mod tests {
     #[test]
     fn downloads_are_refused_until_the_notice_and_every_licence_are_accepted() {
         let dir = Scratch::new();
-        let plan = plan_download(two_licences(), &dir.0, &EngineNeed::Found, None).unwrap();
+        let plan = plan_download(two_licences(), &dir.0, &EngineNeed::Found, None, &[]).unwrap();
         assert_eq!(
             plan.licences
                 .iter()
@@ -854,7 +957,7 @@ mod tests {
     #[test]
     fn a_disk_too_small_is_refused_before_anything_starts() {
         let dir = Scratch::new();
-        let e = plan_download(entry(), &dir.0, &EngineNeed::Found, Some(1_000)).unwrap_err();
+        let e = plan_download(entry(), &dir.0, &EngineNeed::Found, Some(1_000), &[]).unwrap_err();
         assert_eq!(e.code, "studio_disk_too_small");
         assert_eq!(
             e.next_step,
@@ -866,7 +969,8 @@ mod tests {
                 entry(),
                 &dir.0,
                 &EngineNeed::Found,
-                Some(total + 5_000_000_000)
+                Some(total + 5_000_000_000),
+                &[]
             )
             .unwrap()
             .low_disk()
@@ -876,19 +980,20 @@ mod tests {
             &dir.0,
             &EngineNeed::Found,
             Some(total + LOW_DISK_BYTES),
+            &[],
         )
         .unwrap();
         assert!(!roomy.low_disk());
         assert_eq!(roomy.free_bytes, Some(total + LOW_DISK_BYTES));
         // The free space unknown: nothing is refused or said.
         assert!(
-            !plan_download(entry(), &dir.0, &EngineNeed::Found, None)
+            !plan_download(entry(), &dir.0, &EngineNeed::Found, None, &[])
                 .unwrap()
                 .low_disk()
         );
         // Only what is fetched counts.
         write(&dest(&dir.0, &entry().parts[0]), 4_000);
-        assert!(plan_download(entry(), &dir.0, &EngineNeed::Found, Some(2_300)).is_ok());
+        assert!(plan_download(entry(), &dir.0, &EngineNeed::Found, Some(2_300), &[]).is_ok());
     }
 
     /// The Studio engine's licence where it is a pack (Windows): `sd.lock.json`'s.
@@ -908,7 +1013,7 @@ mod tests {
     #[test]
     fn the_engine_comes_with_the_first_model_where_it_is_a_pack() {
         let dir = Scratch::new();
-        let model_licences = plan_download(two_licences(), &dir.0, &EngineNeed::Found, None)
+        let model_licences = plan_download(two_licences(), &dir.0, &EngineNeed::Found, None, &[])
             .unwrap()
             .licences;
 
@@ -918,6 +1023,7 @@ mod tests {
             &dir.0,
             &EngineNeed::Pack(engine.clone()),
             None,
+            &[],
         )
         .unwrap();
         assert!(plan.needs_engine);
@@ -936,11 +1042,12 @@ mod tests {
         every.push(&engine.sha256);
         assert!(check_acceptance(&plan, &set(&every), true).is_ok());
 
-        let found = plan_download(two_licences(), &dir.0, &EngineNeed::Found, None).unwrap();
+        let found = plan_download(two_licences(), &dir.0, &EngineNeed::Found, None, &[]).unwrap();
         assert!(!found.needs_engine);
         assert!(!found.licences.contains(&engine));
 
-        let missing = plan_download(two_licences(), &dir.0, &EngineNeed::Missing, None).unwrap();
+        let missing =
+            plan_download(two_licences(), &dir.0, &EngineNeed::Missing, None, &[]).unwrap();
         assert!(!missing.needs_engine, "no engine download promised");
         assert_eq!(missing.licences, model_licences);
     }
@@ -964,7 +1071,14 @@ mod tests {
         let dir = Scratch::new();
         let store = store::Store::open_in_memory().unwrap();
         let engine = engine_licence();
-        let plan = plan_download(entry(), &dir.0, &EngineNeed::Pack(engine.clone()), None).unwrap();
+        let plan = plan_download(
+            entry(),
+            &dir.0,
+            &EngineNeed::Pack(engine.clone()),
+            None,
+            &[],
+        )
+        .unwrap();
         let apache = apache_sha();
         let started = AtomicUsize::new(0);
         let start = |_: DownloadPlan| async {
@@ -1217,10 +1331,10 @@ mod tests {
         }
         assert_eq!(e.effective_licence().badge(), Badge::Red);
         assert_eq!(
-            plan_download(e.clone(), models, &EngineNeed::Found, None)
+            plan_download(e.clone(), models, &EngineNeed::Found, None, &[])
                 .unwrap()
                 .licences,
-            plan_download(searched.clone(), models, &EngineNeed::Found, None)
+            plan_download(searched.clone(), models, &EngineNeed::Found, None, &[])
                 .unwrap()
                 .licences,
             "the same licences to accept"

@@ -43,8 +43,8 @@ use super::local::{
     media_model,
 };
 use super::local_models::{
-    DownloadPlan, LocalSource, delete_local_model, entry_from_installed, entry_with, plan_download,
-    start_local_download, word,
+    DownloadPlan, InstalledFiles, LocalSource, delete_local_model, entry_from_installed,
+    entry_with, plan_download, start_local_download, word,
 };
 use super::manager::{LocalVerdict, StudioManager, device_label, eta_dto, local_verdict, word_tag};
 use super::prefs::StudioPrefs;
@@ -82,6 +82,9 @@ pub struct LocalCmdDeps {
     pub engine_need: EngineNeed,
     /// The note about local models was accepted (the manager's held preferences).
     pub notice_accepted: bool,
+    /// The files the installed models use: a part's place is shown as its download would
+    /// have it (`local_models::plan_download`).
+    pub installed_files: InstalledFiles,
 }
 
 // ---- the list ---------------------------------------------------------------------------------
@@ -555,7 +558,8 @@ async fn repo_dto(deps: &LocalCmdDeps, detail: &RepoDetail) -> LocalRepoDto {
 /// What downloading `entry` takes here (`local_models::plan_download`), never refused for the
 /// disk: a list says that with `low_disk`, and the download itself refuses it.
 fn plan(deps: &LocalCmdDeps, entry: GenEntry) -> AppResult<DownloadPlan> {
-    let mut plan = plan_download(entry, &deps.models_dir, &deps.engine_need, None)?;
+    let used = deps.installed_files.except(&entry.id);
+    let mut plan = plan_download(entry, &deps.models_dir, &deps.engine_need, None, &used)?;
     plan.free_bytes = deps.free_disk_bytes;
     Ok(plan)
 }
@@ -620,8 +624,15 @@ fn gate_dto(gate: &GenGate) -> GateDto {
 /// a command that asks Hugging Face.
 async fn app_deps(app: &AppHandle, studio: &StudioManager, hf: Option<HfClient>) -> LocalCmdDeps {
     let models_dir = crate::hub::models_dir(app).await;
+    let store = app.state::<AppState>().store.clone();
+    let installed_files = InstalledFiles::read(&store)
+        .await
+        .inspect_err(
+            |e| tracing::warn!(code = %e.code, "the installed models' files were not read"),
+        )
+        .unwrap_or_default();
     LocalCmdDeps {
-        store: app.state::<AppState>().store.clone(),
+        store,
         catalog: Arc::new(AppGenCatalog(app.clone())),
         hardware: Arc::new(AppHardware(app.clone())),
         hf,
@@ -631,6 +642,7 @@ async fn app_deps(app: &AppHandle, studio: &StudioManager, hf: Option<HfClient>)
         engine: engine_cmd::engine_status(app),
         engine_need: engine_cmd::engine_need(app),
         notice_accepted: studio.prefs().local_notice_accepted_at.is_some(),
+        installed_files,
     }
 }
 
@@ -1176,6 +1188,7 @@ mod tests {
             engine: engine_built_in(),
             engine_need: EngineNeed::Found,
             notice_accepted: false,
+            installed_files: InstalledFiles::default(),
         }
     }
 
