@@ -467,8 +467,9 @@ export function Viewer(props: { outputId: string; onClose(): void }) {
       Backspace: () => setAsking(output !== null),
     };
     if (key === " ") {
-      // A focused button takes Space itself.
-      if (e.target instanceof HTMLButtonElement) return;
+      // A focused button, or checkbox, takes Space itself (a checkbox ticks on the keyup only
+      // when its keydown was left alone).
+      if (e.target instanceof HTMLButtonElement || e.target instanceof HTMLInputElement) return;
       e.preventDefault();
       playPause();
       return;

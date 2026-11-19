@@ -925,6 +925,21 @@ describe("Video playback and poster frames", () => {
     expect(warn).toHaveBeenCalledExactlyOnceWith("Studio: a video's poster frame could not be kept", refusal);
   });
 
+  it("Space on the settings-file checkbox ticks it, and leaves the video alone", async () => {
+    setStore({ runs: [nine()] });
+    const play = vi.spyOn(HTMLMediaElement.prototype, "play").mockResolvedValue(undefined);
+    await open("o9");
+    const box = screen.getByRole("checkbox", { name: "Also save the settings as a .json file" });
+    box.focus();
+    let taken = false;
+    await act(async () => {
+      // `false` when a handler called preventDefault: the checkbox would then not tick on keyup.
+      taken = !fireEvent.keyDown(box, { key: " " });
+    });
+    expect(taken).toBe(false);
+    expect(play).not.toHaveBeenCalled();
+  });
+
   it("a play the webview refuses leaves the video as it was, and a trace in the log", async () => {
     setStore({ runs: [nine()] });
     const refusal = new DOMException("play() needs a user gesture", "NotAllowedError");
