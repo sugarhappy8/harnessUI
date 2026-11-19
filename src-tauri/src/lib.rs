@@ -385,6 +385,18 @@ pub fn run() {
             }));
             app.manage(lease.clone());
             runtime.set_studio_gate(lease.clone());
+            // 0.1.0: the Studio engine's runs on this computer. The count of its processes
+            // is shared with the engine's download and Remove, which never replace or delete
+            // the folder a process runs from.
+            let local_provider = Arc::new(studio::local::LocalMediaProvider::new(
+                store.clone(),
+                Arc::new(studio::local::AppGenCatalog(handle.clone())),
+                {
+                    let handle = handle.clone();
+                    Arc::new(move || studio::engine_cmd::current_engine(&handle))
+                },
+            ));
+            app.manage(local_provider.engine_use());
             // 0.1.0: Studio's runs, holding Settings → Studio as saved.
             let studio = Arc::new(studio::manager::StudioManager::new(
                 studio::manager::StudioDeps {
@@ -416,14 +428,7 @@ pub fn run() {
                     // (looked for again after a download), the one lease the chat loads ask
                     // too, and this computer's hardware.
                     local: Some(studio::deps::LocalLane {
-                        provider: Arc::new(studio::local::LocalMediaProvider::new(
-                            store.clone(),
-                            Arc::new(studio::local::AppGenCatalog(handle.clone())),
-                            {
-                                let handle = handle.clone();
-                                Arc::new(move || studio::engine_cmd::current_engine(&handle))
-                            },
-                        )),
+                        provider: local_provider,
                         lease: Arc::new(studio::deps::AppLease(lease.clone())),
                         hardware: Arc::new(studio::deps::AppHardware(handle.clone())),
                     }),

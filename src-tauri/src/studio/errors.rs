@@ -1260,6 +1260,9 @@ pub fn not_here_reason(not_for: NotFor, processor_only: bool) -> String {
 
 /// No Studio engine is found on this computer (Windows before its pack is installed).
 pub const LOCAL_ENGINE_NOT_FOUND: &str = "The Studio engine is not on this computer.";
+/// The engine's folder is being replaced (its pack installs) or removed, so no engine process
+/// starts now.
+pub const LOCAL_ENGINE_BEING_REPLACED: &str = "The Studio engine is being installed or removed.";
 /// The model asked for is not among the installed ones.
 pub const LOCAL_NOT_INSTALLED: &str = "This model is not installed on this computer.";
 /// A request for a picture from a video model, or the other way round.

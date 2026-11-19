@@ -292,6 +292,68 @@ pub trait LocalProvider: MediaProvider {
     fn engine_build(&self) -> Option<u32>;
 }
 
+/// The Studio engine's processes running now (runs and device listings), and whether its
+/// folder is being replaced (a pack install) or removed: the two never overlap, so the folder
+/// an engine runs from is never deleted under it. Cheap to clone: every clone is the same
+/// count. The provider counts its processes; the engine's download and *Remove* claim the
+/// folder (`engine_cmd`).
+#[derive(Clone, Default)]
+pub struct EngineUse(Arc<Mutex<EngineUseState>>);
+
+#[derive(Default)]
+struct EngineUseState {
+    processes: usize,
+    replacing: bool,
+}
+
+impl EngineUse {
+    /// One engine process begins, counted until the guard is dropped; `None` while the
+    /// engine's folder is being replaced or removed.
+    pub fn process(&self) -> Option<EngineProcess> {
+        let mut state = lock(&self.0);
+        if state.replacing {
+            return None;
+        }
+        state.processes += 1;
+        Some(EngineProcess(self.clone()))
+    }
+
+    /// The engine's folder may be replaced or removed: no engine process runs, and none starts
+    /// until the guard is dropped. `None` while one runs (or another claim holds it).
+    pub fn replace(&self) -> Option<EngineReplace> {
+        let mut state = lock(&self.0);
+        if state.processes > 0 || state.replacing {
+            return None;
+        }
+        state.replacing = true;
+        Some(EngineReplace(self.clone()))
+    }
+
+    /// Whether an engine process runs now.
+    pub fn in_use(&self) -> bool {
+        lock(&self.0).processes > 0
+    }
+}
+
+/// An engine process counted by [`EngineUse::process`]; uncounted when dropped.
+pub struct EngineProcess(EngineUse);
+
+impl Drop for EngineProcess {
+    fn drop(&mut self) {
+        let mut state = lock(&(self.0).0);
+        state.processes = state.processes.saturating_sub(1);
+    }
+}
+
+/// The engine's folder claimed by [`EngineUse::replace`]; freed when dropped.
+pub struct EngineReplace(EngineUse);
+
+impl Drop for EngineReplace {
+    fn drop(&mut self) {
+        lock(&(self.0).0).replacing = false;
+    }
+}
+
 /// Studio's runs on this computer: the installed models, and one Studio engine process per
 /// run.
 pub struct LocalMediaProvider {
@@ -309,6 +371,8 @@ pub struct LocalMediaProvider {
     devices: DeviceCache,
     /// The runs not yet released, by remote id.
     runs: Mutex<HashMap<String, LocalRun>>,
+    /// The engine processes running now; a pack install or *Remove* waits for none.
+    in_use: EngineUse,
 }
 
 /// One run: its folder, what its results are, what stops it, what it has told and its task.
@@ -400,7 +464,14 @@ impl LocalMediaProvider {
             installed: RwLock::new(Vec::new()),
             devices: Arc::new(tokio::sync::Mutex::new(None)),
             runs: Mutex::new(HashMap::new()),
+            in_use: EngineUse::default(),
         }
+    }
+
+    /// The count of the engine's processes this provider starts, which the engine's download
+    /// and *Remove* claim its folder from.
+    pub fn engine_use(&self) -> EngineUse {
+        self.in_use.clone()
     }
 
     /// Sets the engine. A `None`, or an engine whose program is gone, is looked for again
@@ -806,9 +877,13 @@ impl LocalMediaProvider {
     async fn devices_of(&self, engine: &Engine) -> Option<Vec<SdDevice>> {
         let cache = Arc::clone(&self.devices);
         let engine = engine.clone();
+        let in_use = self.in_use.clone();
         let listing = tokio::spawn(async move {
             let mut listed = cache.lock_owned().await;
             if listed.as_ref().is_none_or(|(by, _)| *by != engine) {
+                // The engine's folder is being replaced or removed: nothing is listed, and it
+                // is asked again next time.
+                let process = in_use.process()?;
                 let devices = list_devices(&engine)
                     .await
                     .inspect_err(|failure| {
@@ -818,6 +893,7 @@ impl LocalMediaProvider {
                         );
                     })
                     .ok();
+                drop(process);
                 *listed = Some((engine, devices));
             }
             listed.as_ref().and_then(|(_, devices)| devices.clone())
@@ -887,6 +963,13 @@ impl LocalMediaProvider {
                 errors::LOCAL_ALREADY_RUNNING,
             ));
         }
+        // Counted until the engine's process has ended.
+        let process = self.in_use.process().ok_or_else(|| {
+            refused(
+                FailureKind::EngineMissing,
+                errors::LOCAL_ENGINE_BEING_REPLACED,
+            )
+        })?;
         let state = Arc::new(Mutex::new(RunState::default()));
         let cancel = CancellationToken::new();
         let run = LocalRun {
@@ -895,7 +978,7 @@ impl LocalMediaProvider {
             results: ResultShape::of(&job),
             cancel: cancel.clone(),
             state: Arc::clone(&state),
-            task: tokio::spawn(run(engine, job, cancel, state)),
+            task: tokio::spawn(run(engine, job, cancel, state, process)),
         };
         runs.insert(remote_id.to_owned(), run);
         Ok(())
@@ -920,10 +1003,18 @@ impl LocalMediaProvider {
     }
 }
 
-/// One run's task: the engine job, with what it tells kept in `state`.
-async fn run(engine: Engine, job: SdJob, cancel: CancellationToken, state: Arc<Mutex<RunState>>) {
+/// One run's task: the engine job, with what it tells kept in `state`, counted as an engine
+/// process (`process`) until the job has ended.
+async fn run(
+    engine: Engine,
+    job: SdJob,
+    cancel: CancellationToken,
+    state: Arc<Mutex<RunState>>,
+    process: EngineProcess,
+) {
     let on_event = |event: SdRunEvent| lock(&state).heard(event);
     let ended = run_job(&engine, &job, RunLimits::default(), cancel, &on_event).await;
+    drop(process);
     lock(&state).ended = Some(ended);
 }
 
@@ -2760,6 +2851,68 @@ pub(crate) mod tests {
         poll_until_done(&w.provider, &remote_id).await;
         assert!(!argv(&w.rec(), 0).unwrap().contains(&"--backend".to_owned()));
         assert!(!pid_file.exists(), "the engine was asked again");
+    }
+
+    /// Finding local-engine-folder-deleted-while-running: a run's engine process is counted
+    /// until it has ended, and while one runs the engine's folder cannot be claimed (for a
+    /// pack install or Remove); while the folder is claimed, no run starts.
+    #[tokio::test]
+    async fn a_running_engine_holds_its_folder_and_a_claimed_folder_starts_none() {
+        let w = world("hang").await;
+        let engine = w.provider.engine_use();
+        assert!(!engine.in_use());
+        let remote_id = started(&w, &req("x")).await;
+        assert!(engine.in_use());
+        assert!(engine.replace().is_none(), "the folder is in use");
+        w.provider.cancel(&remote_id).await.unwrap();
+        assert!(!engine.in_use());
+
+        let folder = engine.replace().expect("no engine process runs");
+        let f = refusal(w.provider.start(&req("x"), &w.partial()).await);
+        assert_eq!(
+            (f.kind, f.message.as_str(), f.charged),
+            (
+                FailureKind::EngineMissing,
+                errors::LOCAL_ENGINE_BEING_REPLACED,
+                Some(false)
+            )
+        );
+        assert!(!engine.in_use());
+        drop(folder);
+        let remote_id = started(&w, &req("x")).await;
+        assert!(engine.in_use());
+        w.provider.cancel(&remote_id).await.unwrap();
+        assert!(!engine.in_use());
+    }
+
+    /// The one-off device listing a first estimate or command starts runs the engine for up to
+    /// 30 s: it holds the engine's folder until it has ended, after the command came back.
+    #[tokio::test]
+    async fn a_device_listing_holds_the_engine_folder_until_it_ends() {
+        let w = world("devices-hang").await;
+        w.provider.fetch_catalog().await.unwrap();
+        let engine = w.provider.engine_use();
+        let opts = on_the_rx_7600();
+        let pid_file = w.rec().join("devices-hang.txt");
+        // A paused clock that the test moves on, as in the listing tests above.
+        tokio::time::pause();
+        let ((), pid) = tokio::join!(w.provider.list_devices_for(&opts), async {
+            let file = pid_file.clone();
+            let pid = tokio::task::spawn_blocking(move || wait_for_pid(&file))
+                .await
+                .unwrap();
+            tokio::time::advance(PREVIEW_DEVICES_WAIT + Duration::from_millis(1)).await;
+            pid
+        });
+        let pid = pid.expect("the engine's process id");
+        assert!(runtime::process_alive(pid), "{pid} was stopped");
+        assert!(engine.in_use(), "the listing goes on");
+        assert!(engine.replace().is_none());
+        // At its own limit the listing stops the engine and keeps its failure.
+        tokio::time::advance(LIST_DEVICES_TIMEOUT).await;
+        drop(w.provider.devices.lock().await);
+        assert!(!engine.in_use());
+        assert!(engine.replace().is_some());
     }
 
     /// llama.cpp's own device listing ends a row with the card's memory, which the engine's

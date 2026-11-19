@@ -474,8 +474,12 @@ pub async fn start_local_download(
             generator: Some(gen_group(&plan.entry, catalog_id, origin)),
         };
         let group = downloads.start(app, meta, plan.files).await?;
-        if plan.needs_engine {
-            super::engine_cmd::start_engine_download(app).await?;
+        // Refused only while an engine process runs from the folder it would replace: the
+        // model downloads, and the engine's own button offers it again.
+        if plan.needs_engine
+            && let Err(e) = super::engine_cmd::start_engine_download(app).await
+        {
+            tracing::warn!(code = %e.code, "the Studio engine did not download with the model");
         }
         Ok(group)
     })

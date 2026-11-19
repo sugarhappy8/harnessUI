@@ -25,6 +25,7 @@ use tauri::{AppHandle, Emitter, Manager};
 use tokio_util::sync::CancellationToken;
 
 use super::errors;
+use super::local::{EngineReplace, EngineUse};
 use super::manager::StudioManager;
 use crate::commands::only_main_window;
 use crate::dto::{EngineProgressDto, EngineStatusDto};
@@ -273,30 +274,58 @@ fn needs_the_pack(lock: &SdLock, layout: &EngineLayout, platform: &str) -> bool 
     )
 }
 
+/// The count of the Studio engine's processes the app runs (its runs and device listings).
+fn engine_use(app: &AppHandle) -> EngineUse {
+    app.try_state::<EngineUse>()
+        .map(|state| state.inner().clone())
+        .unwrap_or_default()
+}
+
+/// The engine's folder for a pack download that just claimed the download's slot: its
+/// install replaces that folder, so it is refused while an engine process runs from it (a run
+/// with an engine found earlier, whose pack has since lost a file, or a device listing), and
+/// the slot is freed again. Held for the whole download, so no engine process starts from the
+/// folder meanwhile.
+fn claim_for_install(downloads: &EngineDownloads, engine: &EngineUse) -> AppResult<EngineReplace> {
+    engine.replace().ok_or_else(|| {
+        downloads.end();
+        errors::engine_in_use()
+    })
+}
+
 /// Starts the pack download when this platform has a pack and has no engine yet; returns at
 /// once. Nothing starts on a platform without a pack (macOS, Linux), when an engine is found
 /// (the pack installed, or a development folder on a Windows development machine), or while
-/// its download already runs or a removal holds its slot. How it goes comes as
-/// [`ENGINE_PROGRESS_EVENT`]s.
+/// its download already runs or a removal holds its slot; it is refused while an engine process
+/// runs (`studio_engine_in_use`), as its install replaces the engine's folder. How it goes
+/// comes as [`ENGINE_PROGRESS_EVENT`]s.
 pub async fn start_engine_download(app: &AppHandle) -> AppResult<()> {
     let lock = sd_lock::embedded();
     let layout = engine_layout(app);
     if !needs_the_pack(lock, &layout, current_platform()) {
         return Ok(());
     }
-    let Some(token) = app.state::<EngineDownloads>().begin() else {
+    let downloads = app.state::<EngineDownloads>();
+    let Some(token) = downloads.begin() else {
         return Ok(());
     };
+    let folder = claim_for_install(&downloads, &engine_use(app))?;
     let app = app.clone();
-    tauri::async_runtime::spawn(async move { run_download(&app, &layout, &token).await });
+    tauri::async_runtime::spawn(async move { run_download(&app, &layout, &token, folder).await });
     Ok(())
 }
 
 /// Downloads and installs the pack into `layout`, saying how it goes, then frees the
-/// download's place before the last event, so a status read on that event sees the result.
-/// [`start_engine_download`] claimed the place; a [`Claim`] frees it however the task ends,
-/// so a panic in the install does not leave the status `downloading`.
-async fn run_download(app: &AppHandle, layout: &EngineLayout, token: &CancellationToken) {
+/// download's place (and the engine's folder, `folder`) before the last event, so a status
+/// read on that event sees the result. [`start_engine_download`] claimed both; a [`Claim`]
+/// frees the place however the task ends, so a panic in the install does not leave the status
+/// `downloading`.
+async fn run_download(
+    app: &AppHandle,
+    layout: &EngineLayout,
+    token: &CancellationToken,
+    folder: EngineReplace,
+) {
     let claim = Claim(app.state::<EngineDownloads>().inner());
     let lock = sd_lock::embedded();
     let emit = |p: EngineProgressDto| {
@@ -315,6 +344,7 @@ async fn run_download(app: &AppHandle, layout: &EngineLayout, token: &Cancellati
         }
     };
     let result = engine::install(lock, layout, token, &progress).await;
+    drop(folder);
     drop(claim);
     let total = lock
         .pack_for_current_platform()
@@ -357,11 +387,14 @@ where
 /// *Remove*: `delete` takes the installed pack, a half-unpacked one and any partial download
 /// (`engine::remove`; a bundled or development engine is left alone). Refused while the pack
 /// downloads, as its download is still writing there, and while a local job works
-/// (`local_running`), as the engine runs from it. The removal holds the download's slot until
-/// it ends, so no download (from its button, or with a first local model) starts writing into
-/// the folders it deletes.
+/// (`local_running`) or any engine process runs (`engine`: a run, or the one-off device
+/// listing a first estimate or command starts, which can take 30 s), as the engine runs from
+/// it. The removal holds the download's slot and the engine's folder until it ends, so no
+/// download (from its button, or with a first local model) starts writing into the folders it
+/// deletes, and no engine process starts from them.
 async fn remove<F, Fut>(
     downloads: &EngineDownloads,
+    engine: &EngineUse,
     local_running: bool,
     delete: F,
 ) -> AppResult<()>
@@ -374,6 +407,9 @@ where
     }
     let Some(_claim) = downloads.hold() else {
         return Err(errors::engine_still_downloading());
+    };
+    let Some(_folder) = engine.replace() else {
+        return Err(errors::engine_in_use());
     };
     delete()
         .await
@@ -422,9 +458,12 @@ pub async fn studio_engine_remove(window: tauri::WebviewWindow, app: AppHandle) 
     let local_running = app
         .try_state::<std::sync::Arc<StudioManager>>()
         .is_some_and(|studio| studio.local_running());
-    remove(&app.state::<EngineDownloads>(), local_running, || {
-        engine::remove(sd_lock::embedded(), &engines_dir)
-    })
+    remove(
+        &app.state::<EngineDownloads>(),
+        &engine_use(&app),
+        local_running,
+        || engine::remove(sd_lock::embedded(), &engines_dir),
+    )
     .await
 }
 
@@ -816,11 +855,13 @@ mod tests {
     #[tokio::test]
     async fn a_removal_holds_the_slot_so_no_download_starts_meanwhile() {
         let downloads = EngineDownloads::default();
+        let engine = EngineUse::default();
         let tried = std::sync::atomic::AtomicBool::new(false);
-        remove(&downloads, false, || async {
+        remove(&downloads, &engine, false, || async {
             // what start_engine_download asks before it starts: the slot is taken
             assert!(downloads.running());
             assert!(downloads.begin().is_none(), "no download starts");
+            assert!(engine.process().is_none(), "no engine process starts");
             tried.store(true, std::sync::atomic::Ordering::SeqCst);
             Ok(())
         })
@@ -831,7 +872,7 @@ mod tests {
         assert!(!downloads.running());
 
         // and when it fails
-        let err = remove(&downloads, false, || async {
+        let err = remove(&downloads, &engine, false, || async {
             assert!(downloads.begin().is_none(), "no download starts");
             Err(PackError::Cancelled)
         })
@@ -839,6 +880,10 @@ mod tests {
         .unwrap_err();
         assert_eq!(err.message, "The Studio engine could not be removed.");
         assert!(!downloads.running());
+        assert!(
+            engine.process().is_some(),
+            "an engine process starts afterwards"
+        );
         assert!(downloads.begin().is_some(), "a download starts afterwards");
     }
 
@@ -858,11 +903,14 @@ mod tests {
             "installed"
         );
         let delete = || engine::remove(lock, &engines_dir);
+        let processes = EngineUse::default();
 
         // not while it downloads: the download is still writing there
         let downloads = EngineDownloads::default();
         let token = downloads.begin().unwrap();
-        let err = remove(&downloads, false, delete).await.unwrap_err();
+        let err = remove(&downloads, &processes, false, delete)
+            .await
+            .unwrap_err();
         assert_eq!(err.message, "The Studio engine is still downloading.");
         assert!(engines_dir.join(&lock.packs[0].dir).is_dir());
         // the refusal leaves the download's claim alone
@@ -871,7 +919,9 @@ mod tests {
         downloads.end();
 
         // not while a local job runs: the engine is working from it
-        let err = remove(&downloads, true, delete).await.unwrap_err();
+        let err = remove(&downloads, &processes, true, delete)
+            .await
+            .unwrap_err();
         assert_eq!(err.code, "studio_engine_in_use");
         assert_eq!(
             err.next_step,
@@ -880,12 +930,48 @@ mod tests {
         assert!(engines_dir.join(&lock.packs[0].dir).is_dir());
         assert!(!downloads.running(), "the refusal holds no slot");
 
-        remove(&downloads, false, delete).await.unwrap();
+        // nor while an engine process runs from it with no local job: the one-off device
+        // listing a first estimate starts (finding local-engine-folder-deleted-while-running)
+        let listing = processes.process().unwrap();
+        let err = remove(&downloads, &processes, false, delete)
+            .await
+            .unwrap_err();
+        assert_eq!(err.code, "studio_engine_in_use");
+        assert!(engines_dir.join(&lock.packs[0].dir).is_dir());
+        assert!(!downloads.running(), "the refusal holds no slot");
+        drop(listing);
+
+        remove(&downloads, &processes, false, delete).await.unwrap();
         assert!(!engines_dir.join(&lock.packs[0].dir).exists());
         let s = status_from(lock, &layout, "windows-x86_64", None);
         assert_eq!((s.state.as_str(), s.bytes_done), ("notInstalled", None));
         // nothing left to remove is not an error
-        remove(&downloads, false, delete).await.unwrap();
+        remove(&downloads, &processes, false, delete).await.unwrap();
         assert!(!downloads.running());
+    }
+
+    /// Finding local-engine-folder-deleted-while-running: a pack download's install replaces
+    /// the engine's folder, so it is refused while an engine process runs from it (a run with
+    /// an engine found earlier, whose pack has since lost a file), freeing the download's slot
+    /// again; once claimed, the folder lets no engine process start until the install ends.
+    #[test]
+    fn a_pack_install_waits_for_no_engine_process_and_starts_none() {
+        let downloads = EngineDownloads::default();
+        let engine = EngineUse::default();
+        let run = engine.process().unwrap();
+        assert!(downloads.begin().is_some());
+        let err = claim_for_install(&downloads, &engine).err().unwrap();
+        assert_eq!(err.code, "studio_engine_in_use");
+        assert!(!downloads.running(), "the slot is freed again");
+        drop(run);
+
+        assert!(downloads.begin().is_some());
+        let folder = claim_for_install(&downloads, &engine).unwrap();
+        assert!(
+            engine.process().is_none(),
+            "no engine process starts meanwhile"
+        );
+        drop(folder);
+        assert!(engine.process().is_some());
     }
 }
