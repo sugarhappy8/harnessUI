@@ -32,7 +32,7 @@ pub enum Recognition {
         family: GenFamily,
         files: Vec<RepoFile>,
     },
-    /// Shown as "Not supported yet" with this sentence, and never downloaded.
+    /// No runnable setup. The weights can still be saved independently.
     NotSupportedYet(String),
 }
 
@@ -41,20 +41,31 @@ pub enum Recognition {
 pub enum NameMatch {
     /// One family's name.
     Family(GenFamily),
-    /// Wan 2.2 TI2V-5B, but not the fast version harnessUI runs.
-    UncheckedWan22,
+    /// A related checkpoint that requires another inference recipe.
+    OtherVariant,
     /// More than one family's name.
     Several,
     /// No family's name.
     None,
 }
 
-/// Each family's names, compared after [`normalise`]. A family's token wins over
-/// [`UNCHECKED_WAN22_TOKENS`], which is part of the fast Wan's.
+/// Names used by Hugging Face publishers, compared after [`normalise`].
 const FAMILY_TOKENS: &[(GenFamily, &[&str])] = &[
     (
         GenFamily::Flux2Klein4b,
         &["flux.2-klein-4b", "flux2-klein-4b", "flux-2-klein-4b"],
+    ),
+    (
+        GenFamily::Flux3ImageKlein,
+        &[
+            "flux-3-image-klein",
+            "flux.3-image-klein",
+            "flux3-image-klein",
+        ],
+    ),
+    (
+        GenFamily::Wan22Ti2v5b,
+        &["wan2.2-ti2v-5b", "wan-2.2-ti2v-5b"],
     ),
     (GenFamily::ZImageTurbo, &["z-image-turbo"]),
     // FastVideo's distillation, the family's upstream (Apache-2.0).
@@ -62,17 +73,12 @@ const FAMILY_TOKENS: &[(GenFamily, &[&str])] = &[
     (GenFamily::Wan21T2v1_3b, &["wan2.1-t2v-1.3b"]),
 ];
 
-/// The full Wan 2.2 5B (about 30–50 steps, cfg 5) and other distillations harnessUI has not
-/// checked (a "turbo" whose base states no licence). Read only when no family token
-/// matches.
-const UNCHECKED_WAN22_TOKENS: &[&str] = &["wan2.2-ti2v-5b"];
-
 /// File names that mark an encoder, a decoder or a projector, never the diffusion model
 /// (`text_encoder` reads `text-encoder` after [`normalise`]).
 const NOT_DIFFUSION_MARKERS: &[&str] = &["vae", "text-encoder", "umt5", "qwen3", "mmproj"];
 
 const UNKNOWN_KIND: &str = "harnessUI does not know this kind of model yet.";
-const UNCHECKED_WAN22: &str = "harnessUI runs FastVideo's fast version of Wan 2.2 5B; this one is the full model or a version it has not checked.";
+const OTHER_VARIANT: &str = "This checkpoint needs a different generator setup.";
 const SEVERAL_KINDS: &str = "This repository holds several kinds of model.";
 const OTHER_SIZE: &str = "This file is a different size of model than its name says.";
 const NO_CHECKSUM: &str = "No file here has a published checksum.";
@@ -80,8 +86,12 @@ const NO_CHECKSUM: &str = "No file here has a published checksum.";
 /// What sort of search finds a family's repositories.
 pub fn search_kind(family: GenFamily) -> GenSearchKind {
     match family {
-        GenFamily::Flux2Klein4b | GenFamily::ZImageTurbo => GenSearchKind::Pictures,
-        GenFamily::Wan22Ti2v5bFast | GenFamily::Wan21T2v1_3b => GenSearchKind::Video,
+        GenFamily::Flux2Klein4b | GenFamily::Flux3ImageKlein | GenFamily::ZImageTurbo => {
+            GenSearchKind::Pictures
+        }
+        GenFamily::Wan22Ti2v5b | GenFamily::Wan22Ti2v5bFast | GenFamily::Wan21T2v1_3b => {
+            GenSearchKind::Video
+        }
     }
 }
 
@@ -98,30 +108,29 @@ fn normalise(name: &str) -> String {
 /// The family `name` (a repository id or a file name) names, by the family tokens only:
 /// what the untagged search keeps and what [`recognise`] starts from.
 pub fn family_of_name(name: &str) -> NameMatch {
-    family_of_names(iter::once(name))
-}
-
-/// [`family_of_name`] over several names together: one family between them all, several,
-/// or (with none) the unchecked Wan 2.2.
-fn family_of_names<'a>(names: impl Iterator<Item = &'a str>) -> NameMatch {
-    let mut found = BTreeSet::new();
-    let mut unchecked = false;
-    for name in names {
-        let name = normalise(name);
-        for (family, tokens) in FAMILY_TOKENS {
-            if tokens.iter().any(|t| name.contains(t)) {
-                found.insert(*family);
-            }
+    let name = normalise(name);
+    let words: Vec<_> = name.split(|c: char| !c.is_ascii_alphanumeric()).collect();
+    let mut found = None;
+    for &(family, tokens) in FAMILY_TOKENS {
+        if !tokens.iter().any(|t| name.contains(t)) {
+            continue;
         }
-        unchecked |= UNCHECKED_WAN22_TOKENS.iter().any(|t| name.contains(t));
+        if family == GenFamily::Wan22Ti2v5b && name.contains("fastwan2.2-ti2v-5b") {
+            continue;
+        }
+        let other = match family {
+            GenFamily::Flux3ImageKlein => &["base", "pup", "te", "encoder", "lora"][..],
+            GenFamily::Wan22Ti2v5b => &["turbo", "lightning", "distilled", "lora"][..],
+            _ => &[],
+        };
+        if other.iter().any(|w| words.contains(w)) {
+            return NameMatch::OtherVariant;
+        }
+        if found.replace(family).is_some() {
+            return NameMatch::Several;
+        }
     }
-    let mut found = found.into_iter();
-    match (found.next(), found.next()) {
-        (Some(family), None) => NameMatch::Family(family),
-        (Some(_), Some(_)) => NameMatch::Several,
-        (None, _) if unchecked => NameMatch::UncheckedWan22,
-        (None, _) => NameMatch::None,
-    }
+    found.map_or(NameMatch::None, NameMatch::Family)
 }
 
 /// A `.gguf` file whose name does not mark it as an encoder, a decoder or a projector.
@@ -134,7 +143,7 @@ fn not_yet(why: &str) -> Recognition {
     Recognition::NotSupportedYet(why.to_string())
 }
 
-/// A repository must name exactly one supported family, of the size
+/// A repository or its files must identify a supported family, of the size
 /// the record states (when the listing states one) and an architecture a picture or video
 /// model has (when it states one); then its diffusion files are the `.gguf` files that are
 /// not encoders, decoders or projectors, whose own name names no other model, and that
@@ -143,17 +152,26 @@ fn not_yet(why: &str) -> Recognition {
 /// A name cannot prove a file's family: the downloaded file's tensor table is read before
 /// it is added and before every run.
 pub fn recognise(detail: &RepoDetail, families: &BTreeMap<GenFamily, FamilyRecord>) -> Recognition {
-    let candidates: Vec<&RepoFile> = detail
+    let own: Vec<_> = detail
         .files
         .iter()
         .filter(|f| is_diffusion_candidate(&f.path))
+        .map(|f| (f, family_of_name(&f.path)))
         .collect();
-    let names = iter::once(detail.id.as_str()).chain(candidates.iter().map(|f| f.path.as_str()));
-    let family = match family_of_names(names) {
-        NameMatch::Family(family) => family,
-        NameMatch::UncheckedWan22 => return not_yet(UNCHECKED_WAN22),
-        NameMatch::Several => return not_yet(SEVERAL_KINDS),
-        NameMatch::None => return not_yet(UNKNOWN_KIND),
+    let named_families: BTreeSet<_> = own
+        .iter()
+        .filter_map(|(_, m)| match m {
+            NameMatch::Family(f) => Some(*f),
+            _ => None,
+        })
+        .collect();
+    let repo_name = detail.id.rsplit('/').next().unwrap_or(&detail.id);
+    let family = match family_of_name(repo_name) {
+        NameMatch::Family(f) if named_families.is_empty() || named_families.contains(&f) => f,
+        NameMatch::OtherVariant => return not_yet(OTHER_VARIANT),
+        NameMatch::None if named_families.len() == 1 => *named_families.first().unwrap(),
+        NameMatch::None if named_families.is_empty() => return not_yet(UNKNOWN_KIND),
+        _ => return not_yet(SEVERAL_KINDS),
     };
     let Some(record) = families.get(&family) else {
         return not_yet(UNKNOWN_KIND);
@@ -171,28 +189,17 @@ pub fn recognise(detail: &RepoDetail, families: &BTreeMap<GenFamily, FamilyRecor
             return not_yet(UNKNOWN_KIND);
         }
     }
-    // One family token decides for the id and every file name together, so a file whose own
-    // name says it is another model (the full Wan 2.2 beside FastWan) is not offered under
-    // this family; nor, when the other files name the family, one that names none (a 9B
-    // klein beside the 4B).
-    let own: Vec<(&RepoFile, NameMatch)> = candidates
+    // Unnamed files can inherit a repository's recipe when no file supplies a family name.
+    let named: Vec<_> = own
         .into_iter()
-        .map(|f| (f, family_of_name(&f.path)))
+        .filter(|(_, m)| match m {
+            NameMatch::Family(f) => *f == family,
+            NameMatch::None => named_families.is_empty(),
+            NameMatch::OtherVariant | NameMatch::Several => false,
+        })
         .collect();
-    let files_name_it = own.iter().any(|(_, m)| *m == NameMatch::Family(family));
-    let (named, other): (Vec<_>, Vec<_>) = own.into_iter().partition(|(_, m)| match m {
-        NameMatch::Family(f) => *f == family,
-        NameMatch::None => !files_name_it,
-        NameMatch::UncheckedWan22 | NameMatch::Several => false,
-    });
-    if named.is_empty() && !other.is_empty() {
-        return not_yet(
-            match family_of_names(other.iter().map(|(f, _)| f.path.as_str())) {
-                NameMatch::UncheckedWan22 => UNCHECKED_WAN22,
-                NameMatch::Family(_) | NameMatch::Several => SEVERAL_KINDS,
-                NameMatch::None => UNKNOWN_KIND,
-            },
-        );
+    if named.is_empty() {
+        return not_yet(OTHER_VARIANT);
     }
     let files: Vec<RepoFile> = named
         .into_iter()
@@ -240,6 +247,18 @@ const SIGNATURES: &[TensorSignature] = &[
             ("layers.", 30),
             ("noise_refiner.", 2),
             ("context_refiner.", 2),
+        ],
+        channels: None,
+    },
+    TensorSignature {
+        family: GenFamily::Flux3ImageKlein,
+        required: &["emb_in.image.", "final_layer.image."],
+        width: ("emb_in.image.weight", 1, 3072),
+        blocks: &[
+            ("content_mode_blocks.image.", 5),
+            ("content_mode_blocks.image_cond.", 5),
+            ("txt_mode_blocks.", 5),
+            ("single_blocks.", 28),
         ],
         channels: None,
     },
@@ -678,6 +697,14 @@ mod tests {
             include_str!("../tests/fixtures/hf/repo-flux2-klein-4b-gguf.json"),
         ),
         (
+            "repo-flux3-klein-gguf.json",
+            include_str!("../tests/fixtures/hf/repo-flux3-klein-gguf.json"),
+        ),
+        (
+            "repo-qwen3-vl-4b-instruct-gguf.json",
+            include_str!("../tests/fixtures/hf/repo-qwen3-vl-4b-instruct-gguf.json"),
+        ),
+        (
             "repo-flux2-klein-9b-gguf.json",
             include_str!("../tests/fixtures/hf/repo-flux2-klein-9b-gguf.json"),
         ),
@@ -838,7 +865,7 @@ mod tests {
                 e.id
             );
         }
-        assert_eq!(g.families.len(), 4);
+        assert_eq!(g.families.len(), 6);
         assert_eq!(g.tiers.image[&0], ["flux2-klein-4b-q4"]);
         assert_eq!(g.tiers.image[&8], ["z-image-turbo-q4", "flux2-klein-4b-q4"]);
     }
@@ -877,7 +904,7 @@ mod tests {
             );
             checked += 1;
         }
-        // Three entries of three parts, four records of two companions.
+        // Every catalog entry and family's companion must have a recorded pinned listing.
         assert!(checked >= 17, "{checked}");
     }
 
@@ -1026,7 +1053,10 @@ mod tests {
     fn the_full_wan_2_2_is_not_the_fast_one() {
         assert!(matches!(
             recognise(&detail("repo-wan22-ti2v-5b-full-gguf.json"), &families()),
-            Recognition::NotSupportedYet(r) if r.contains("fast version")
+            Recognition::Supported {
+                family: GenFamily::Wan22Ti2v5b,
+                ..
+            }
         ));
         assert!(matches!(
             recognise(&detail("repo-fastwan22-ti2v-5b-gguf.json"), &families()),
@@ -1035,6 +1065,31 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    #[test]
+    fn unsloth_flux3_quants_use_the_flux3_transformer_and_vl_encoder() {
+        let r = detail("repo-flux3-klein-gguf.json");
+        let catalog = families();
+        let Recognition::Supported { family, files } = recognise(&r, &catalog) else {
+            panic!("missing FLUX.3")
+        };
+        assert_eq!(family, GenFamily::Flux3ImageKlein);
+        assert_eq!(files.len(), 10);
+        let entry = entry_for(&r, &files[0], &catalog[&family]).unwrap();
+        assert_eq!(entry.defaults.steps, 16);
+        assert_eq!(entry.parts[1].repo, "Qwen/Qwen3-VL-4B-Instruct-GGUF");
+        assert_eq!(
+            family_from_tensors(&table("flux3-klein-tensors.txt")),
+            Some(family)
+        );
+        for other in ["base", "pup", "TE"] {
+            assert_eq!(
+                family_of_name(&format!("flux-3-image-klein-{other}-GGUF")),
+                NameMatch::OtherVariant
+            );
+        }
+        assert_eq!(catalog[&GenFamily::Wan22Ti2v5b].defaults.steps, 20);
     }
 
     /// The listing `name` with its `.gguf` files replaced by `files`, each taken from the
@@ -1079,13 +1134,13 @@ mod tests {
         );
         assert_eq!(
             family_of_name("Wan2.2-TI2V-5B-Q4_K_M.gguf"),
-            NameMatch::UncheckedWan22
+            NameMatch::Family(GenFamily::Wan22Ti2v5b)
         );
         assert_eq!(offered(&mixed), ["FastWan2.2-TI2V-5B-q6_k.gguf"]);
         // Only the full Wan 2.2 under a FastWan name: nothing, and why.
         assert!(matches!(
             recognise(&with_ggufs(FAST, &[(FULL, "Wan2.2-TI2V-5B-Q4_K_M.gguf")]), &families()),
-            Recognition::NotSupportedYet(r) if r.contains("fast version")
+            Recognition::NotSupportedYet(r) if r.contains("several kinds")
         ));
         // A 9B klein beside the 4B files of a 4B repository (its name has no family token).
         const KLEIN: &str = "repo-flux2-klein-4b-gguf.json";
@@ -1124,7 +1179,7 @@ mod tests {
         );
         assert_eq!(
             family_of_name("hum-ma/Wan2.2-TI2V-5B-Turbo-GGUF"),
-            NameMatch::UncheckedWan22
+            NameMatch::OtherVariant
         );
         assert_eq!(
             family_of_name("z_image_turbo-Q4_K.gguf"),

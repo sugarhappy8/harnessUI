@@ -1513,6 +1513,7 @@ pub(crate) mod tests {
         "studio_local_repo",
         "studio_local_fit",
         "studio_local_download",
+        "studio_local_download_file",
         "studio_local_delete",
         "studio_accept_local_notice",
     ];

@@ -449,6 +449,90 @@ fn gen_group(entry: &GenEntry, catalog_id: Option<String>, source: store::GenSou
     }
 }
 
+/// Weight files that the download manager can verify independently of any inference setup.
+pub(crate) fn is_weight_file(file: &models::RepoFile) -> bool {
+    let ext = Path::new(&file.path).extension().and_then(|e| e.to_str());
+    file.size > 0
+        && file.sha256.is_some()
+        && ext.is_some_and(|e| {
+            e.eq_ignore_ascii_case("gguf") || e.eq_ignore_ascii_case("safetensors")
+        })
+}
+
+fn plan_weight_file(
+    detail: &RepoDetail,
+    commit: &str,
+    path: &str,
+    models_dir: &Path,
+) -> AppResult<(FileSpec, PathBuf)> {
+    if detail.commit != commit
+        || commit.len() != 40
+        || !commit.bytes().all(|b| b.is_ascii_hexdigit())
+    {
+        return Err(AppError::bad_request(
+            "The repository revision does not match this download.",
+        ));
+    }
+    let file = detail
+        .files
+        .iter()
+        .find(|f| f.path == path && is_weight_file(f))
+        .ok_or_else(|| {
+            AppError::bad_request("Choose a model weight file with a published size and SHA-256.")
+        })?;
+    // A namespace outside the valid Hub owner names keeps raw files separate from installed models.
+    let root = models_dir.join("@files").join(commit);
+    let dest =
+        models::download::destination(&root, &detail.id, path).map_err(crate::hub::hf_error)?;
+    let spec = crate::hub::file_spec(&detail.id, commit, file);
+    Ok((spec, dest))
+}
+
+/// Re-read the pinned listing and save the selected weights through the normal resumable queue.
+pub async fn download_weight_file(
+    app: &AppHandle,
+    repo: &str,
+    commit: &str,
+    file: &str,
+) -> AppResult<String> {
+    let hf = crate::hub::hf_client(app).await?;
+    let detail = hf
+        .repo(repo, Some(commit))
+        .await
+        .map_err(crate::hub::hf_error)?;
+    let models_dir = crate::hub::models_dir(app).await;
+    let (spec, dest) = plan_weight_file(&detail, commit, file, &models_dir)?;
+    let present = std::fs::metadata(&dest).is_ok_and(|m| m.is_file() && m.len() == spec.size);
+    let remaining = if present {
+        0
+    } else {
+        spec.size
+            .saturating_sub(models::download::resumable_bytes(&dest, &spec))
+    };
+    if reverse::diskspace::free_bytes(&models_dir).is_some_and(|free| remaining > free) {
+        return Err(errors::disk_too_small(remaining));
+    }
+    let meta = GroupMeta {
+        repo: detail.id,
+        commit: detail.commit,
+        label: spec.path.clone(),
+        file_only: true,
+        model_files: Vec::new(),
+        projector: None,
+        catalog_id: None,
+        parameters: None,
+        hub: None,
+        image_file_for: None,
+        image_files: None,
+        generator: None,
+    };
+    app.state::<Arc<DownloadManager>>()
+        .inner()
+        .clone()
+        .start(app, meta, vec![(spec, dest)])
+        .await
+}
+
 /// Starts a new download or checks and repairs the pinned files of an installed model.
 pub async fn start_local_download(app: &AppHandle, source: LocalSource) -> AppResult<String> {
     let state = app.state::<AppState>();
@@ -484,6 +568,7 @@ pub async fn start_local_download(app: &AppHandle, source: LocalSource) -> AppRe
         parameters: None,
         image_file_for: None,
         image_files: None,
+        file_only: false,
         generator: Some(gen_group(&plan.entry, catalog_id, origin)),
     };
     let group = downloads.start(app, meta, plan.files).await?;
@@ -702,6 +787,27 @@ mod tests {
         let v: Value = serde_json::from_str(text).unwrap();
         let endpoint = url::Url::parse(OFFICIAL_ENDPOINT).unwrap();
         parse_repo_detail(v["id"].as_str().unwrap(), &v, &endpoint).unwrap()
+    }
+
+    #[test]
+    fn standalone_weights_are_bound_to_the_published_revision_and_path() {
+        let mut listing = detail("repo-unknown-diffusion.json");
+        let root = Path::new("models");
+        let sha = listing.commit.clone();
+        let path = "sample-diffusion-2b-Q4_0.gguf";
+        let (spec, dest) = plan_weight_file(&listing, &sha, path, root).unwrap();
+        assert_eq!(
+            dest,
+            root.join("@files").join(&sha).join(&listing.id).join(path)
+        );
+        assert_eq!(spec.sha256, Some("b".repeat(64)));
+        for bad in ["README.md", "../hidden.gguf", "unlisted.gguf"] {
+            assert!(plan_weight_file(&listing, &sha, bad, root).is_err());
+        }
+        assert!(plan_weight_file(&listing, &"c".repeat(40), path, root).is_err());
+        let weight = listing.files.iter_mut().find(|f| f.path == path).unwrap();
+        weight.sha256 = None;
+        assert!(plan_weight_file(&listing, &sha, path, root).is_err());
     }
 
     /// The source names, as the webview sends them.

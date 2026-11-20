@@ -287,15 +287,16 @@ pub fn read_with_tensors<R: Read + Seek>(
     reader: R,
     len: u64,
 ) -> Result<(GgufHeader, Vec<TensorEntry>), GgufError> {
-    read_checked_table(reader, len).map(|(header, _, tensors)| (header, tensors))
+    read_checked_table(reader, len, MAX_DIMS).map(|(header, _, tensors)| (header, tensors))
 }
 
 /// The header, the tensor table as written and each tensor's size, with every refusal of
 /// [`read_tensor_table`]: the one reader [`read_with_tensors`] and [`read_tensor_shapes`]
-/// share, so they refuse the same files.
+/// share, with the dimension limit appropriate to their engine.
 fn read_checked_table<R: Read + Seek>(
     reader: R,
     len: u64,
+    max_dims: u32,
 ) -> Result<(GgufHeader, Vec<RawTensor>, Vec<TensorEntry>), GgufError> {
     let mut r = Reader {
         inner: reader,
@@ -304,14 +305,13 @@ fn read_checked_table<R: Read + Seek>(
         kept: 0,
     };
     let header = read_header(&mut r, false)?;
-    let raw = read_raw_tensors(&mut r, &header)?;
+    let raw = read_raw_tensors(&mut r, &header, max_dims)?;
     let tensors = sizes_from_offsets(&raw, r.pos, len, alignment(&header)?)?;
     Ok((header, raw, tensors))
 }
 
-/// Reads every tensor's name and dimensions from the GGUF file at `path`, as written. Refused
-/// exactly where [`read_tensor_table`] is (the offsets are checked the same way, so a table
-/// that would not load is never taken for a model's).
+/// Read the names and dimensions used to identify diffusion models. Wan converters can
+/// store a 3D convolution as five dimensions, which stable-diffusion.cpp loads directly.
 pub fn read_tensor_shapes(path: &Path) -> Result<Vec<TensorShape>, GgufError> {
     let file = File::open(path)?;
     let len = file.metadata()?.len();
@@ -320,7 +320,7 @@ pub fn read_tensor_shapes(path: &Path) -> Result<Vec<TensorShape>, GgufError> {
 
 /// [`read_tensor_shapes`] from `reader`, which holds `len` bytes in total.
 fn read_shapes<R: Read + Seek>(reader: R, len: u64) -> Result<Vec<TensorShape>, GgufError> {
-    let (_, raw, _) = read_checked_table(reader, len)?;
+    let (_, raw, _) = read_checked_table(reader, len, 5)?;
     Ok(raw
         .into_iter()
         .map(|t| TensorShape {
@@ -344,6 +344,7 @@ fn alignment(header: &GgufHeader) -> Result<u64, GgufError> {
 fn read_raw_tensors<R: Read + Seek>(
     r: &mut Reader<R>,
     header: &GgufHeader,
+    max_dims: u32,
 ) -> Result<Vec<RawTensor>, GgufError> {
     let count = header.tensor_count;
     if count > MAX_TENSORS || count.saturating_mul(MIN_TENSOR_ENTRY) > r.remaining() {
@@ -358,12 +359,12 @@ fn read_raw_tensors<R: Read + Seek>(
         }
         let name = r.utf8(name_len)?;
         let n_dims = r.u32()?;
-        if n_dims > MAX_DIMS {
+        if n_dims > max_dims {
             return Err(GgufError::Corrupt(format!(
                 "tensor with {n_dims} dimensions"
             )));
         }
-        let mut dims = Vec::with_capacity(4);
+        let mut dims = Vec::with_capacity(n_dims as usize);
         for _ in 0..n_dims {
             dims.push(r.u64()?);
         }
@@ -755,7 +756,11 @@ pub mod testing {
 
     /// The recorded tensor tables (tests/fixtures/gguf/, README.md there): each tensor's
     /// name and dimensions as the pinned files write them, one `name d0 d1 …` a line.
-    const TABLES: [(&str, &str); 6] = [
+    const TABLES: [(&str, &str); 7] = [
+        (
+            "flux3-klein-tensors.txt",
+            include_str!("../tests/fixtures/gguf/flux3-klein-tensors.txt"),
+        ),
         (
             "klein4b-tensors.txt",
             include_str!("../tests/fixtures/gguf/klein4b-tensors.txt"),
@@ -783,13 +788,14 @@ pub mod testing {
     ];
 
     /// The names [`shapes`] and [`diffusion_gguf`] take.
-    pub const TENSOR_FIXTURES: [&str; 6] = [
+    pub const TENSOR_FIXTURES: [&str; 7] = [
         TABLES[0].0,
         TABLES[1].0,
         TABLES[2].0,
         TABLES[3].0,
         TABLES[4].0,
         TABLES[5].0,
+        TABLES[6].0,
     ];
 
     /// The recorded table `fixture` names (`"klein4b-tensors.txt"`).
@@ -1167,13 +1173,18 @@ mod tests {
         assert_eq!(shapes_of(&sized).unwrap(), [shape("a", &[100])]);
     }
 
-    /// The shapes are refused exactly where the table is.
+    /// Diffusion tables have the same offset and size checks and allow 3D convolution kernels.
     #[test]
     fn tensor_shapes_have_the_tables_refusals() {
         let corrupt = |bytes: &[u8]| matches!(shapes_of(bytes), Err(GgufError::Corrupt(_)));
         assert!(corrupt(&hand_table(&[(b"a", 1, 64), (b"b", 1, 0)], 96)));
         assert!(corrupt(&hand_table(&[(b"a", 1, 0), (b"b", 1, 97)], 96)));
-        assert!(corrupt(&hand_table(&[(b"a", 5, 0)], 96)));
+        assert!(corrupt(&hand_table(&[(b"a", 6, 0)], 96)));
+        let wan = Writer::new()
+            .shaped_tensor("patch_embedding.weight", &[2, 2, 1, 48, 3072])
+            .build();
+        assert_eq!(shapes_of(&wan).unwrap()[0].dims, [2, 2, 1, 48, 3072]);
+        assert!(table(&wan).is_err(), "chat tensors still use GGML_MAX_DIMS");
         assert!(corrupt(&hand_table(&[(&[0xff, 0xfe], 1, 0)], 96)));
         assert!(corrupt(&Writer::new().tensors(u64::MAX).build()));
         assert!(matches!(shapes_of(b"GGML"), Err(GgufError::NotGguf)));
@@ -1366,7 +1377,7 @@ mod tests {
             kept: 0,
         };
         let header = read_header(&mut r, false).unwrap();
-        let raw = read_raw_tensors(&mut r, &header).unwrap();
+        let raw = read_raw_tensors(&mut r, &header, MAX_DIMS).unwrap();
         let data_start = r.pos.next_multiple_of(alignment(&header).unwrap());
         let (_, tensors) = read_file_with_tensors(Path::new(&path)).unwrap();
         assert_eq!(tensors.len() as u64, header.tensor_count);

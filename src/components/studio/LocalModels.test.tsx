@@ -70,6 +70,7 @@ function supported(patch: Partial<LocalRepo> = {}): LocalRepo {
     commit: "c".repeat(40),
     status: "supported",
     reason: null,
+    standaloneFiles: [],
     family: "Z-Image Turbo",
     files: [
       {
@@ -372,6 +373,16 @@ describe("Get local models", () => {
     });
   });
 
+  it("keeps Download available when a recognised file exceeds the hardware estimate", async () => {
+    await showLocal();
+    const repo = supported();
+    repo.files[0]!.fit = { ...zimage.fit, word: "notHere", verdict: "red", reason: "needs more memory" };
+    const result = await openResult(repo.repo, repo);
+    within(result).getByText(/needs more memory/);
+    await click(within(result).getByRole("button", { name: "Download" }));
+    expect(useStudio.getState().offer?.source).toEqual({ search: { repo: repo.repo, commit: repo.commit, file: repo.files[0]!.file } });
+  });
+
   it("a searched file's name stays as it came in the offer, and shows with invisible characters as codes", async () => {
     await showLocal();
     const file = "z-image‮turbo.gguf";
@@ -384,19 +395,23 @@ describe("Get local models", () => {
     expect(new XMLSerializer().serializeToString(document.body)).not.toContain("‮");
   });
 
-  it("an unknown family says Not supported yet and offers no Download", async () => {
+  it("an unknown family offers a pinned standalone download and its Hub files", async () => {
     await showLocal();
     const result = await openResult("someone/Mystery-Diffusion-GGUF", {
       ...supported({ repo: "someone/Mystery-Diffusion-GGUF" }),
       status: "notSupportedYet",
+      standaloneFiles: [{ path: "weights/Q4.gguf", size: 4000, sha256: "b".repeat(64) }],
       reason: "harnessUI does not know this kind of model yet.",
       files: [],
       licence: null,
       licences: [],
     });
-    within(result).getByText("Not supported yet");
+    within(result).getByText(LOCAL_MODELS.noLocalSetup);
     within(result).getByText("harnessUI does not know this kind of model yet.");
-    expect(within(result).queryByRole("button", { name: "Download" })).toBeNull();
+    await click(within(result).getByRole("button", { name: LOCAL_MODELS.saveWeight }));
+    expect(api.studioLocalDownloadFile).toHaveBeenCalledWith("someone/Mystery-Diffusion-GGUF", "c".repeat(40), "weights/Q4.gguf");
+    expect(api.studioLocalDownload).not.toHaveBeenCalled();
+    expect(within(result).getByRole("link").getAttribute("href")).toBe(`https://huggingface.co/someone/Mystery-Diffusion-GGUF/tree/${"c".repeat(40)}`);
   });
 
   it("a label that differs from the family's licence is pointed out", async () => {

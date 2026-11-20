@@ -457,6 +457,7 @@ export interface DownloadGroup {
    *  catalog id, or a searched file's `hf:<owner>/<repo>:<file>`); `null` (or left out) for a
    *  chat model's. */
   genModelId?: string | null;
+  savedFile?: { commit: string; path: string };
 }
 
 export interface ModelSummaryView {

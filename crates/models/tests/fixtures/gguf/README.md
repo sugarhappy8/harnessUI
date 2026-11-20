@@ -13,6 +13,7 @@ leejet's and Green-Sky's files hold no metadata keys at all, so there is no
 
 | File | Repository @ revision, file |
 |---|---|
+| `flux3-klein-tensors.txt` | unsloth/flux-3-image-klein-GGUF @ 12ef13ce920d53f45fe805093910c899668b9e76, `flux-3-image-klein-Q4_K_M.gguf` (first 256 KiB, 2026-11-20) |
 | `klein4b-tensors.txt` | leejet/FLUX.2-klein-4B-GGUF @ 3b1f5a9dc3abb32238b053aeb3d823c30afdacbd, `flux-2-klein-4b-Q4_0.gguf` |
 | `klein9b-tensors.txt` | leejet/FLUX.2-klein-9B-GGUF @ cc588497a95ffc2937ebbd6b9b3916a11ada6e5b, `flux-2-klein-9b-Q4_0.gguf` |
 | `zimage-tensors.txt` | leejet/Z-Image-Turbo-GGUF @ c61c0e422dc8b541b7548cf33a4ef8302b0f8085, `z_image_turbo-Q4_K.gguf` |

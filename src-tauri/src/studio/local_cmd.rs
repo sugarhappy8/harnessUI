@@ -465,13 +465,18 @@ pub async fn local_repo(deps: &LocalCmdDeps, repo: &str) -> AppResult<LocalRepoD
 /// each of its diffusion files with a published SHA-256 as the entry it makes
 /// (`gen_search::entry_for`: its family's parts beside it, the stricter of the family's
 /// licence and the repository's label), what its download takes here and its fit at the
-/// family's default size; else why not, with no file. A recognised repository none of whose
-/// files can be offered is not supported yet.
+/// family's default size. Verified weights outside those plans can be saved individually.
 async fn repo_dto(deps: &LocalCmdDeps, detail: &RepoDetail) -> LocalRepoDto {
     let catalog = deps.catalog.gen_catalog().await;
     let mut dto = LocalRepoDto {
         repo: detail.id.clone(),
         commit: detail.commit.clone(),
+        standalone_files: detail
+            .files
+            .iter()
+            .filter(|f| super::local_models::is_weight_file(f))
+            .cloned()
+            .collect(),
         status: String::new(),
         reason: None,
         family: None,
@@ -541,6 +546,9 @@ async fn repo_dto(deps: &LocalCmdDeps, detail: &RepoDetail) -> LocalRepoDto {
         dto.reason = Some(errors::NO_FILE_OFFERED.to_owned());
         return dto;
     }
+    let offered: BTreeSet<&str> = dto.files.iter().map(|f| f.file.as_str()).collect();
+    dto.standalone_files
+        .retain(|f| !offered.contains(f.path.as_str()));
     dto.status = "supported".into();
     dto.family = Some(record.name.clone());
     dto.label_mismatch = searched.label_mismatch;
@@ -716,6 +724,19 @@ pub async fn studio_local_download(
 ) -> AppResult<String> {
     only_main_window(window.label())?;
     start_local_download(&app, source).await
+}
+
+/// Download an individual weight file even when Studio has no matching generation recipe.
+#[tauri::command]
+pub async fn studio_local_download_file(
+    window: tauri::WebviewWindow,
+    app: AppHandle,
+    repo: String,
+    commit: String,
+    file: String,
+) -> AppResult<String> {
+    only_main_window(window.label())?;
+    super::local_models::download_weight_file(&app, &repo, &commit, &file).await
 }
 
 /// Deletes the installed model `gen_model_id`, and each of its files nothing else uses.
@@ -1752,10 +1773,9 @@ mod tests {
 
     // ---- a searched repository ------------------------------------------------------------
 
-    /// A repository of a family harnessUI does not run is "Not supported yet", with no file
-    /// to download.
+    /// A family without a runnable recipe still has downloadable weights.
     #[tokio::test]
-    async fn a_searched_repo_of_an_unknown_family_offers_no_download() {
+    async fn an_unknown_family_offers_a_standalone_download() {
         let scratch = Scratch::new();
         let hub = Hub::listing("repo-unknown-diffusion.json").await;
         let deps = deps_with(catalog(), gpu(8, 32), &scratch, Some(hub.client()));
@@ -1768,6 +1788,11 @@ mod tests {
         assert!(
             asked[0].starts_with("GET /api/models/example-labs/Sample-Diffusion-2B-GGUF?"),
             "{asked:?}"
+        );
+        assert_eq!(repo.standalone_files.len(), 1);
+        assert_eq!(
+            repo.standalone_files[0].path,
+            "sample-diffusion-2b-Q4_0.gguf"
         );
         assert_eq!(repo.repo, "example-labs/Sample-Diffusion-2B-GGUF");
         assert_eq!(repo.commit, "2".repeat(40));
@@ -1819,7 +1844,7 @@ mod tests {
         assert_eq!(repo.status, "notSupportedYet");
         assert_eq!(
             repo.reason.as_deref(),
-            Some("None of this repository's model files can be downloaded here.")
+            Some("Studio could not assemble the files needed to run this model.")
         );
         assert!(repo.files.is_empty());
         assert!(repo.licences.is_empty());

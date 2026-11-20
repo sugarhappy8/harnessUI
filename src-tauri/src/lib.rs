@@ -352,6 +352,7 @@ pub fn run() {
             studio::local_cmd::studio_local_repo,
             studio::local_cmd::studio_local_fit,
             studio::local_cmd::studio_local_download,
+            studio::local_cmd::studio_local_download_file,
             studio::local_cmd::studio_local_delete,
             studio::local_cmd::studio_accept_local_notice,
         ])

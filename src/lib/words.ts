@@ -1915,7 +1915,14 @@ export const LOCAL_MODELS = {
   /** One part of a searched file: "reads your prompt · 2.5 GB · already on this computer". */
   part: (label: string, bytes: number, here: boolean) =>
     `${label} · ${amountGb(bytes)}${here ? " · already on this computer" : ""}`,
-  notSupportedYet: "Not supported yet",
+  noLocalSetup: "Studio has no generation setup for this model.",
+  standaloneHelp: "Save individual weights for use with another app.",
+  weightFile: "Weight file",
+  saveWeight: "Download file",
+  openFiles: "View files on Hugging Face",
+  showInFolder: "Show in folder",
+  queuedFile: "Queued in Models → Downloads.",
+  otherFiles: "Other model files",
   notice: "Local models run only on this computer; no company checks prompts or results.",
   whatThatMeans: "What that means",
 } as const;

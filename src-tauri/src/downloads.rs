@@ -100,6 +100,9 @@ pub struct GroupMeta {
     /// Studio's installed models ([`register_gen_model`]). Absent in every other group.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub generator: Option<GenGroup>,
+    /// Save a verified Hub file without registering an installed chat or Studio model.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub file_only: bool,
 }
 
 /// The commit `file` of `repo` is downloaded at. The `downloads` table has no commit column:
@@ -183,6 +186,8 @@ pub(crate) fn check_diffusion_file(family: GenFamily, path: &Path) -> AppResult<
         .map_err(|e| studio_errors::not_that_model(format!("its tensor table: {e}")))?;
     match models::gen_search::family_from_tensors(&shapes) {
         Some(found) if found == family => Ok(()),
+        // The full and distilled Wan checkpoints have identical tensor layouts.
+        Some(GenFamily::Wan22Ti2v5bFast) if family == GenFamily::Wan22Ti2v5b => Ok(()),
         found => Err(studio_errors::not_that_model(format!(
             "expected {family:?}, its tensor table is {}",
             found.map_or_else(|| "no known family's".to_string(), |f| format!("{f:?}'s"))
@@ -302,6 +307,14 @@ pub struct DownloadGroupDto {
     /// ([`GenGroup::gen_model_id`]), so Get local models shows its progress on that model's
     /// row; `None` for a chat model's group.
     pub gen_model_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub saved_file: Option<SavedFileDto>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct SavedFileDto {
+    pub commit: String,
+    pub path: String,
 }
 
 #[derive(Default)]
@@ -688,7 +701,9 @@ fn plan_start(
     let all_there = dests.iter().all(|d| busy.iter().any(|r| &r.dest_path == d));
     // 0.1.0 Studio: a chat download of FLUX.2 klein's text encoder never joins klein's.
     let same_kind = meta_of(group).is_some_and(|m| {
-        m.image_file_for == new.image_file_for && generator_id(&m) == generator_id(new)
+        m.file_only == new.file_only
+            && m.image_file_for == new.image_file_for
+            && generator_id(&m) == generator_id(new)
     });
     if !(one_group && all_there && same_kind) {
         return Start::Busy {
@@ -1102,6 +1117,10 @@ impl DownloadManager {
                 .as_ref()
                 .map(|m| m.label.clone())
                 .unwrap_or_else(|| rows[0].file.clone()),
+            saved_file: meta.as_ref().filter(|m| m.file_only).map(|m| SavedFileDto {
+                commit: m.commit.clone(),
+                path: rows[0].dest_path.clone(),
+            }),
             file_count: rows.len(),
             bytes_done,
             bytes_total,
@@ -1430,6 +1449,7 @@ impl DownloadManager {
             return Ok(());
         }
         let added = match meta.image_file_for.as_deref() {
+            None if meta.file_only => Ok(()),
             Some(model) => self.attach_image_file(app, group, &meta, model).await,
             None => self.register_model(app, group, &meta).await,
         };
@@ -2316,6 +2336,7 @@ mod tests {
             image_file_for: image_file_for.map(|p| p.display().to_string()),
             image_files: None,
             generator: None,
+            file_only: false,
         }
     }
 
@@ -3685,6 +3706,29 @@ mod tests {
             serde_json::to_value(&chat).unwrap()["genModelId"],
             serde_json::Value::Null
         );
+    }
+
+    #[tokio::test]
+    async fn a_standalone_file_keeps_its_destination_across_a_restart() {
+        let dir = Scratch::new();
+        let path = dir.path().join("weights.gguf");
+        let store = store::Store::open_in_memory().unwrap();
+        recorded(&store, "raw", &path, 100, S::Completed).await;
+        let meta = GroupMeta {
+            file_only: true,
+            ..meta()
+        };
+        store.set_setting(&meta_key("raw"), &meta).await.unwrap();
+        let group = DownloadManager::default()
+            .group_dto(&store, "raw")
+            .await
+            .unwrap()
+            .unwrap();
+        let saved = group.saved_file.unwrap();
+        assert_eq!(saved.commit, meta.commit);
+        assert_eq!(saved.path, path.display().to_string());
+        assert_eq!(group.status, "done");
+        assert!(group.generator_kind.is_none() && group.gen_model_id.is_none());
     }
 
     /// No recommended model's download is refused as another model: each recommended entry

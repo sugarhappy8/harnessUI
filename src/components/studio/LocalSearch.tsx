@@ -1,10 +1,13 @@
 import { useId, useState } from "react";
 import { Search } from "lucide-react";
-import { formatCount } from "../../lib/format";
+import { formatBytes, formatCount } from "../../lib/format";
 import type { ErrorInfo } from "../../lib/types";
 import { LOCAL_MODELS } from "../../lib/words";
 import { toErrorInfo } from "../../store/app";
 import { useStudio, type StudioTab } from "../../store/studio";
+import { useDownloads } from "../../store/downloads";
+import { BrowserLink, modelPage } from "./BrowserLink";
+import { studioLocalDownloadFile } from "./api";
 import { ErrorBanner } from "../ErrorBanner";
 import { visiblePath } from "../FolderChip";
 import { DownloadProgress, FitLine, LicenceBadge, TimeLine, useModelDownload } from "./LocalModelRow";
@@ -147,16 +150,17 @@ export function LocalSearch(props: { tab: StudioTab }) {
 /** What an opened result holds: its files to download, or why there are none. */
 function RepoResult(props: { repo: LocalRepo; local: LocalModels; tab: StudioTab }) {
   const { repo, local, tab } = props;
-  if (repo.status === "notSupportedYet") {
-    return (
-      <div className="flex flex-col gap-0.5 text-sm">
-        <p className="font-medium">{LOCAL_MODELS.notSupportedYet}</p>
-        {repo.reason && <p className="text-fg-muted">{repo.reason}</p>}
-      </div>
-    );
-  }
+  const [error, setError] = useState<ErrorInfo | null>(null);
+  const canRun = repo.status === "supported";
+  const standalone = repo.standaloneFiles.length > 0 && <StandaloneFile repo={repo} onError={setError} />;
   return (
     <div className="flex flex-col gap-2">
+      {!canRun && (
+        <div className="text-sm">
+          <p className="font-medium">{LOCAL_MODELS.noLocalSetup}</p>
+          {repo.reason && <p className="text-fg-muted">{repo.reason}</p>}
+        </div>
+      )}
       {repo.licence && (
         <div>
           <LicenceBadge licence={repo.licence} />
@@ -164,6 +168,68 @@ function RepoResult(props: { repo: LocalRepo; local: LocalModels; tab: StudioTab
       )}
       {repo.labelMismatch && <p className="text-xs text-fg-muted">{repo.labelMismatch}</p>}
       {repo.files.map((f) => <FileChoice key={f.file} repo={repo} file={f} local={local} tab={tab} />)}
+      {standalone && canRun ? (
+        <details className="text-sm">
+          <summary>{LOCAL_MODELS.otherFiles}</summary>
+          {standalone}
+        </details>
+      ) : standalone}
+      {!canRun && (
+        <div className="text-xs">
+          <BrowserLink href={`${modelPage(repo.repo)}/tree/${repo.commit}`} onError={setError}>
+            {LOCAL_MODELS.openFiles}
+          </BrowserLink>
+        </div>
+      )}
+      {error && <ErrorBanner error={error} onDismiss={() => setError(null)} />}
+    </div>
+  );
+}
+
+/** Save one set of weights, without installing an inference recipe or any companions. */
+function StandaloneFile({ repo, onError }: { repo: LocalRepo; onError: (error: ErrorInfo) => void }) {
+  const [path, setPath] = useState(repo.standaloneFiles[0]!.path);
+  const [starting, setStarting] = useState(false);
+  const [queued, setQueued] = useState<string | null>(null);
+  const group = useDownloads((s) => s.groups.find((g) =>
+    g.repo === repo.repo && g.savedFile?.commit === repo.commit && g.label === path
+  ));
+  async function download() {
+    setStarting(true);
+    try {
+      await studioLocalDownloadFile(repo.repo, repo.commit, path);
+      setQueued(path);
+    } catch (e) {
+      onError(toErrorInfo(e));
+    } finally {
+      setStarting(false);
+    }
+  }
+  return (
+    <div className="flex flex-col items-start gap-1.5 text-sm">
+      <p>{LOCAL_MODELS.standaloneHelp}</p>
+      <select
+        aria-label={LOCAL_MODELS.weightFile}
+        className="max-w-full rounded border border-border bg-bg p-1"
+        value={path}
+        disabled={starting}
+        onChange={(e) => setPath(e.target.value)}
+      >
+        {repo.standaloneFiles.map((file) => (
+          <option key={file.path} value={file.path}>{visiblePath(file.path)} · {formatBytes(file.size)}</option>
+        ))}
+      </select>
+      {group && group.status !== "cancelled" && group.status !== "done" ? (
+        <div className="w-full"><DownloadProgress group={group} name={visiblePath(path)} /></div>
+      ) : (
+        <button type="button" className={CARD_BUTTON} disabled={starting} onClick={() => void download()}>
+          {LOCAL_MODELS.saveWeight}
+        </button>
+      )}
+      {group?.status === "done" && group.savedFile && (
+        <p className="max-w-full break-all text-xs"><bdi dir="ltr">{visiblePath(group.savedFile.path)}</bdi></p>
+      )}
+      {queued === path && !group && <p role="status">{LOCAL_MODELS.queuedFile}</p>}
     </div>
   );
 }
@@ -191,13 +257,11 @@ function FileChoice(props: { repo: LocalRepo; file: LocalFileChoice; local: Loca
           <DownloadProgress group={download} name={visiblePath(f.file)} />
         </div>
       ) : (
-        f.fit.word !== "notHere" && (
-          <div className="pt-1">
-            <button type="button" className={PRIMARY_BUTTON} onClick={() => setOffer(offerForFile(repo, f, local, tab))}>
-              {LOCAL_MODELS.download}
-            </button>
-          </div>
-        )
+        <div className="pt-1">
+          <button type="button" className={PRIMARY_BUTTON} onClick={() => setOffer(offerForFile(repo, f, local, tab))}>
+            {LOCAL_MODELS.download}
+          </button>
+        </div>
       )}
     </div>
   );
