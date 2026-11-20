@@ -182,7 +182,7 @@ pub(crate) fn check_diffusion_file(family: GenFamily, path: &Path) -> AppResult<
     if !gguf {
         return Ok(());
     }
-    let shapes = models::read_tensor_shapes(path)
+    let shapes = models::gguf::read_diffusion_tensor_shapes(path)
         .map_err(|e| studio_errors::not_that_model(format!("its tensor table: {e}")))?;
     match models::gen_search::family_from_tensors(&shapes) {
         Some(found) if found == family => Ok(()),

@@ -310,17 +310,29 @@ fn read_checked_table<R: Read + Seek>(
     Ok((header, raw, tensors))
 }
 
-/// Read the names and dimensions used to identify diffusion models. Wan converters can
-/// store a 3D convolution as five dimensions, which stable-diffusion.cpp loads directly.
+/// Read a tensor table with the dimension limit used by llama.cpp.
 pub fn read_tensor_shapes(path: &Path) -> Result<Vec<TensorShape>, GgufError> {
+    file_shapes(path, MAX_DIMS)
+}
+
+/// Stable-diffusion.cpp also loads five-dimensional video convolution kernels.
+pub fn read_diffusion_tensor_shapes(path: &Path) -> Result<Vec<TensorShape>, GgufError> {
+    file_shapes(path, 5)
+}
+
+fn file_shapes(path: &Path, max_dims: u32) -> Result<Vec<TensorShape>, GgufError> {
     let file = File::open(path)?;
     let len = file.metadata()?.len();
-    read_shapes(BufReader::with_capacity(256 * 1024, file), len)
+    read_shapes(BufReader::with_capacity(256 * 1024, file), len, max_dims)
 }
 
 /// [`read_tensor_shapes`] from `reader`, which holds `len` bytes in total.
-fn read_shapes<R: Read + Seek>(reader: R, len: u64) -> Result<Vec<TensorShape>, GgufError> {
-    let (_, raw, _) = read_checked_table(reader, len, 5)?;
+fn read_shapes<R: Read + Seek>(
+    reader: R,
+    len: u64,
+    max_dims: u32,
+) -> Result<Vec<TensorShape>, GgufError> {
+    let (_, raw, _) = read_checked_table(reader, len, max_dims)?;
     Ok(raw
         .into_iter()
         .map(|t| TensorShape {
@@ -1132,7 +1144,7 @@ mod tests {
     // ---- 0.1.0 Studio: tensor shapes ----------------------------------------------------
 
     fn shapes_of(bytes: &[u8]) -> Result<Vec<TensorShape>, GgufError> {
-        read_shapes(Cursor::new(bytes), bytes.len() as u64)
+        read_shapes(Cursor::new(bytes), bytes.len() as u64, 5)
     }
 
     fn shape(name: &str, dims: &[u64]) -> TensorShape {
