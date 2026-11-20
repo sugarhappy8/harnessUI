@@ -1842,6 +1842,9 @@ export const LICENCE_BADGE = {
   no: "Non-commercial",
 } as const satisfies Record<Licence["commercial"], string | ((limit: string | null) => string)>;
 
+/** Commercial-use wording for a licence with excluded regions. */
+export const REGIONAL_USE = "Commercial use in permitted regions";
+
 /** A yearly revenue limit as a licence badge says it: "$5M", "$2.5M", "$500K". */
 export function revenueLimit(usd: number): string {
   const units: readonly (readonly [number, string])[] = [
@@ -1869,7 +1872,6 @@ export const LOCAL_MODELS = {
   memory: (amount: string) => `${amount} memory`,
   freeDisk: (amount: string) => `${amount} free`,
   onlyFits: "Only what fits",
-  showNonCommercial: "Show non-commercial models",
   recommended: "Recommended for this computer",
   installed: "Installed",
   download: "Download",
@@ -1914,10 +1916,6 @@ export const LOCAL_MODELS = {
   part: (label: string, bytes: number, here: boolean) =>
     `${label} · ${amountGb(bytes)}${here ? " · already on this computer" : ""}`,
   notSupportedYet: "Not supported yet",
-  /** `reason` is the backend's clause ("its licence excludes some regions"). */
-  notOffered: (reason: string | null) =>
-    reason ? `Not offered in ${APP_NAME}: ${reason}.` : `Not offered in ${APP_NAME}.`,
-  hiddenNonCommercial: "Its files show when Show non-commercial models is ticked.",
   notice: "Local models run only on this computer; no company checks prompts or results.",
   whatThatMeans: "What that means",
 } as const;
@@ -1990,9 +1988,9 @@ export const DOWNLOAD_LOCAL = {
   /** A licence or model page the browser did not open, and where to find it instead. */
   notOpened: "The page could not be opened in your browser.",
   goTo: (url: string) => `Go to ${url} in your browser.`,
-  accepting: "Downloading means you accept these licences.",
+  excludedRegions: (licence: string, regions: string[]) => `${licence} excludes ${andList(regions)}.`,
   cancel: "Cancel",
-  accept: "Accept and download",
+  download: "Download",
 } as const;
 
 /** The one-time note about local models (Task B14, local addendum L1), word for word: shown

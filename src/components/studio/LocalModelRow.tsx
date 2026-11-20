@@ -113,8 +113,7 @@ export function DownloadProgress(props: { group: DownloadGroup; name: string }) 
 }
 
 /** *Download again*: the installed model's parts are checked, and what is missing or damaged is
- *  fetched again; then a line says so. When a licence has to be accepted first, the download
- *  dialog shows it instead. */
+ *  fetched again. */
 function RepairButton(props: { id: string; onError: (e: unknown) => void }) {
   const repairLocal = useStudio((s) => s.repairLocal);
   const [busy, setBusy] = useState(false);
@@ -128,7 +127,7 @@ function RepairButton(props: { id: string; onError: (e: unknown) => void }) {
       onClick={() => {
         setBusy(true);
         repairLocal(props.id)
-          .then(setStarted, props.onError)
+          .then(() => setStarted(true), props.onError)
           .finally(() => setBusy(false));
       }}
     >

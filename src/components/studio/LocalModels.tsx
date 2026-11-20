@@ -19,7 +19,7 @@ import type { HardwareLine, LocalEntry, LocalModels as LocalModelsData } from ".
 // Get local models (0.1.0 Task B13, local addendum Wireframe L2): Studio's own view, in place of
 // the card stream while `localView` is on, with *Back*. The header says what this computer has,
 // so the estimates can be checked; its own [Pictures | Video] tabs (KindTabs.tsx, as the top
-// bar's, which give way to them), *Only what fits* (on) and *Show non-commercial models* (off);
+// bar's, which give way to them), *Only what fits* (on);
 // the recommended models of the tab, then the installed ones the list does not hold, then "Not
 // for this computer (n)" folded away; Hugging Face search (LocalSearch.tsx); and the footer
 // with the Studio engine's line (EngineLine.tsx) and the content notice. Opening it reads what
@@ -69,8 +69,6 @@ export function LocalModels() {
   const setLocalTab = useStudio((s) => s.setLocalTab);
   const onlyFits = useStudio((s) => s.onlyFits);
   const setOnlyFits = useStudio((s) => s.setOnlyFits);
-  const showNonCommercial = useStudio((s) => s.showNonCommercial);
-  const setShowNonCommercial = useStudio((s) => s.setShowNonCommercial);
   const showLocalModels = useStudio((s) => s.showLocalModels);
   const noticeOpen = useStudio((s) => s.noticeOpen);
   const setNoticeOpen = useStudio((s) => s.setNoticeOpen);
@@ -118,14 +116,6 @@ export function LocalModels() {
               <label className="ml-auto flex items-center gap-1.5 text-sm">
                 <input type="checkbox" checked={onlyFits} onChange={(e) => setOnlyFits(e.target.checked)} />
                 {LOCAL_MODELS.onlyFits}
-              </label>
-              <label className="flex items-center gap-1.5 text-sm">
-                <input
-                  type="checkbox"
-                  checked={showNonCommercial}
-                  onChange={(e) => setShowNonCommercial(e.target.checked)}
-                />
-                {LOCAL_MODELS.showNonCommercial}
               </label>
             </div>
             <Tabs.Content value={localTab} className="flex flex-col gap-3 outline-none">

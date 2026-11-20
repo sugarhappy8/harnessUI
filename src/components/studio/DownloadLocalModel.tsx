@@ -2,7 +2,7 @@ import { useState, type ReactNode } from "react";
 import { AlertDialog } from "radix-ui";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import type { ErrorInfo } from "../../lib/types";
-import { amountGb, DOWNLOAD_LOCAL, engineSizeWords, licenceWord, revenueLimit } from "../../lib/words";
+import { amountGb, DOWNLOAD_LOCAL, REGIONAL_USE, engineSizeWords, licenceWord, revenueLimit } from "../../lib/words";
 import { toErrorInfo } from "../../store/app";
 import { useStudio } from "../../store/studio";
 import { ErrorBanner } from "../ErrorBanner";
@@ -15,10 +15,7 @@ import type { Licence, MediaKind, Part } from "./types";
 // size and its licence; what the pictures (or videos) you make may be used for (the strictest
 // licence); the Studio engine when it comes with the model; a gated repository's form, what its
 // publisher receives and *Open the model page*; an amber licence's condition; low disk space;
-// *Read the licences*, one link for each licence; *Cancel* and *Accept and download*, which
-// sends the hash of every licence listed (all of them were shown: each part's, and the
-// engine's when it comes too), never only the strictest. While Accept is on its way, Cancel
-// and Esc wait for it, so a download never starts after the dialog closed and a refusal shows.
+// Licence links are informational. Download confirms the file transfer.
 
 /** How strict a licence is for what you make, from the least strict (the backend's
  *  `Commercial` order). */
@@ -45,6 +42,9 @@ function stricter(l: Licence, than: Licence): boolean {
 export function verdict(licences: Licence[], kind: MediaKind): string {
   const strictest = licences.reduce<Licence | null>((best, l) => (best === null || stricter(l, best) ? l : best), null);
   if (strictest === null) return "";
+  if (strictest.commercial === "yes" && licences.some((l) => l.excludedRegions?.length)) {
+    return DOWNLOAD_LOCAL.verdictLine(kind, REGIONAL_USE.toLowerCase() + ".");
+  }
   const words = DOWNLOAD_LOCAL.verdict[strictest.commercial];
   const allowed =
     typeof words === "string"
@@ -89,7 +89,7 @@ function BrowserLink(props: { href: string; title?: string; children: ReactNode;
 }
 
 /** The confirmation for `offer`, while there is one; Cancel or Esc calls `onClose`, except
- *  while Accept is on its way. */
+ *  while the download is starting. */
 export function DownloadLocalModel(props: { offer: DownloadOffer | null; onClose(): void }) {
   const { offer, onClose } = props;
   const [busy, setBusy] = useState(false);
@@ -105,7 +105,7 @@ export function DownloadLocalModel(props: { offer: DownloadOffer | null; onClose
 
 const MUTED = "text-fg-muted";
 
-/** The dialog's content: what downloads and under which licences, and Accept (`busy` while
+/** The dialog's content: what downloads and under which licences, and Download (`busy` while
  *  it is on its way). */
 function Confirm(props: { offer: DownloadOffer; busy: boolean; setBusy(busy: boolean): void }) {
   const { offer, busy, setBusy } = props;
@@ -122,7 +122,7 @@ function Confirm(props: { offer: DownloadOffer; busy: boolean; setBusy(busy: boo
   const pageRepo = (offer.parts.find((p) => MAKES_THE_PICTURE.has(p.role)) ?? offer.parts[0])?.repo;
   const several = offer.licences.length > 1;
 
-  function accept() {
+  function download() {
     setBusy(true);
     setError(null);
     downloadLocal(offer)
@@ -195,7 +195,11 @@ function Confirm(props: { offer: DownloadOffer; busy: boolean; setBusy(busy: boo
               </BrowserLink>
             ))}
           </p>
-          <p className={MUTED}>{DOWNLOAD_LOCAL.accepting}</p>
+          {offer.licences.map((l) =>
+            l.excludedRegions?.length ? (
+              <p key={l.id} className="text-warning">{DOWNLOAD_LOCAL.excludedRegions(l.name, l.excludedRegions)}</p>
+            ) : null,
+          )}
         </div>
       </AlertDialog.Description>
       {error && (
@@ -213,10 +217,10 @@ function Confirm(props: { offer: DownloadOffer; busy: boolean; setBusy(busy: boo
         <button
           type="button"
           disabled={busy}
-          onClick={accept}
+          onClick={download}
           className="btn-primary rounded-md px-3 py-1.5 font-medium disabled:opacity-60"
         >
-          {DOWNLOAD_LOCAL.accept}
+          {DOWNLOAD_LOCAL.download}
         </button>
       </div>
     </AlertDialog.Content>

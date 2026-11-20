@@ -471,7 +471,7 @@ export interface Licence {
   id: string;
   name: string;
   url: string;
-  /** What its acceptance is recorded under. */
+  /** The fingerprint supplied with the licence. */
   sha256: string;
   badge: "green" | "amber" | "red";
   /** What it allows for what you make. */
@@ -479,6 +479,7 @@ export interface Licence {
   revenueLimitUsd: number | null;
   plainWords: string;
   obligations: string[];
+  excludedRegions?: string[];
 }
 
 /** How a gated repository is gated (also a search hit's `gated`). */
@@ -526,7 +527,7 @@ export interface LocalEntry {
   sizeBytes: number;
   /** The strictest licence of its parts. */
   licence: Licence;
-  /** Every licence the download asks to accept. */
+  /** Every licence shown with the download. */
   licences: Licence[];
   gate: Gate;
   fit: LocalFit;
@@ -594,7 +595,7 @@ export interface LocalFileChoice {
 export interface LocalRepo {
   repo: string;
   commit: string;
-  status: "supported" | "notSupportedYet" | "notOffered";
+  status: "supported" | "notSupportedYet";
   reason: string | null;
   family: string | null;
   files: LocalFileChoice[];

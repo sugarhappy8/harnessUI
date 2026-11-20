@@ -1,5 +1,5 @@
 import type { DownloadGroup } from "../../lib/types";
-import { LICENCE_BADGE, revenueLimit } from "../../lib/words";
+import { LICENCE_BADGE, REGIONAL_USE, revenueLimit } from "../../lib/words";
 import type {
   Gate,
   Licence,
@@ -22,6 +22,7 @@ import type {
 /** A licence's badge: its colour (as the backend judged it) and what it allows for what you
  *  make, in plain words. A kind this version does not know reads "Check the licence". */
 export function licenceBadge(l: Licence): { tone: "green" | "amber" | "red"; text: string } {
+  if (l.commercial === "yes" && l.excludedRegions?.length) return { tone: "amber", text: REGIONAL_USE };
   let text: string;
   switch (l.commercial) {
     case "yes":
@@ -50,7 +51,7 @@ export function licenceBadge(l: Licence): { tone: "green" | "amber" | "red"; tex
  *  `engine_cmd::ENGINE_LICENCE_ID`): listed when the engine comes with the model. */
 export const ENGINE_LICENCE_ID = "studio-engine";
 
-/** What a Download button offers; Task B14's dialog shows it and sends every licence's hash. */
+/** What a Download button offers; the dialog shows the files and their licences. */
 export interface DownloadOffer {
   /** The model's name, as the dialog's title says it (as it came: shown through
    *  `visiblePath`). */
@@ -60,7 +61,7 @@ export interface DownloadOffer {
   kind: MediaKind;
   source: LocalSource;
   parts: Part[];
-  /** Every distinct licence of its parts: all are shown and accepted. */
+  /** Every distinct licence of its parts: all are shown. */
   licences: Licence[];
   totalBytes: number;
   /** What is not on this computer yet. */

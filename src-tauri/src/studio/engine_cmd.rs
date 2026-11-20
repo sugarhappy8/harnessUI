@@ -153,7 +153,7 @@ pub enum EngineNeed {
     /// An engine is found: the app's own program, a development folder or the installed pack.
     Found,
     /// No engine yet, and this platform has a pack: it downloads with the model, under this
-    /// licence, accepted with the model's.
+    /// licence, listed with the model's.
     Pack(GenLicence),
     /// No engine, and no pack for this platform: a Mac whose bundled program is missing, Linux
     /// without a development folder.

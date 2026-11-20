@@ -28,13 +28,8 @@
 // Task B10: the Studio engine's state read again (Settings → Studio's engine line), and Delete
 // stopped and failed runs (in ./studioResults). Task B11: a picture attached in a chat opened
 // in Studio's Pictures tab, and Send to chat (in ./studioResults). Task B13: Get local models'
-// own Pictures and Video tab, Only what fits and Show non-commercial models, Hugging Face asked
-// only on Search or Enter and when one result is opened, an installed local model deleted, and
-// what a Download button offers and whether the note about local models is open. Task B14: the
-// download confirmation's Accept (every licence it showed sent with the download), the note
-// about local models accepted, and a *Download again* refused for a licence not accepted
-// turned into that confirmation (B13's and B14's part, with B8's *Download again*, in
-// ./studioLocal, composed in here).
+// tabs, hardware filter, Hugging Face search, download confirmation, repairs and the local
+// model notice are in ./studioLocal.
 import { create, type StoreApi, type UseBoundStore } from "zustand";
 import * as api from "../components/studio/api";
 import { carry, closestModel, defaultsFor, dropUnmet, familyOf, type Values } from "../components/studio/canonical";
@@ -99,7 +94,7 @@ export {
 } from "./studioResults";
 
 // Get local models' state and actions live in ./studioLocal; they are used from here.
-export { repairOffer, type StudioLocalState } from "./studioLocal";
+export type { StudioLocalState } from "./studioLocal";
 
 /** Studio's tabs: Pictures and Video. */
 export type StudioTab = MediaKind;

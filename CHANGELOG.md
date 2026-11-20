@@ -2,6 +2,12 @@
 
 All notable changes, by milestone. Dates are UTC.
 
+## 0.1.1 (2026-11-20)
+
+- Studio now offers compatible Hugging Face models whose licences are non-commercial, unclear or region-limited, including repositories marked for mature audiences or labelled “uncensored” or “abliterated”.
+- The download dialog shows the publisher’s licence and any listed regional exclusions. You can download or repair a model without a separate licence acceptance in harnessUI. Gated repositories still require access on Hugging Face.
+- When a model endpoint returns an HTML error page, the app shows a short explanation and keeps the page markup out of the log.
+
 ## 0.1.0 (2026-11-19)
 
 The picture and video update. The owner asked, word for word: "For the cloud update let's make 0.1 let's add image and video gen section for those models, make it easy to use but not dumbed down", and later the same day: "I also mean like downloading local models that can generate video." So 0.1.0 adds **Studio**, which makes pictures and short videos: simple to start with, with each model's own settings a click away. Studio leads with **On this computer**: free models you download once and run here, where your prompt and your pictures never leave the computer. Cloud models from OpenRouter and OpenAI are the backup for computers without a good graphics card, with prices shown before you run and a daily spending limit.

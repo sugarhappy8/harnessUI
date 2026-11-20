@@ -23,17 +23,6 @@ use crate::gen_catalog::{
 use crate::gguf::TensorShape;
 use crate::hf::{GenSearchKind, OFFICIAL_ENDPOINT, RepoDetail, uploader_text};
 
-/// Why a repository is never offered, whatever it holds.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum NotOffered {
-    /// Its licence excludes some regions (HunyuanVideo, HunyuanImage, MiniMax-H3).
-    RegionLimited,
-    /// Made without safety limits ("uncensored", "abliterated").
-    Uncensored,
-    /// Tagged not for all audiences.
-    AdultContent,
-}
-
 /// What a repository's listing offers in Studio.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Recognition {
@@ -43,8 +32,6 @@ pub enum Recognition {
         family: GenFamily,
         files: Vec<RepoFile>,
     },
-    /// Shown as "Not offered in harnessUI".
-    NotOffered(NotOffered),
     /// Shown as "Not supported yet" with this sentence, and never downloaded.
     NotSupportedYet(String),
 }
@@ -79,17 +66,6 @@ const FAMILY_TOKENS: &[(GenFamily, &[&str])] = &[
 /// checked (a "turbo" whose base states no licence). Read only when no family token
 /// matches.
 const UNCHECKED_WAN22_TOKENS: &[&str] = &["wan2.2-ti2v-5b"];
-
-/// Models whose licence excludes some regions (outputs included).
-const REGION_LIMITED_TOKENS: &[&str] = &[
-    "hunyuanvideo",
-    "hunyuan-video",
-    "hunyuanimage",
-    "minimax-h3",
-];
-
-/// Models made without safety limits.
-const UNCENSORED_TOKENS: &[&str] = &["uncensored", "abliterated"];
 
 /// File names that mark an encoder, a decoder or a projector, never the diffusion model
 /// (`text_encoder` reads `text-encoder` after [`normalise`]).
@@ -158,9 +134,7 @@ fn not_yet(why: &str) -> Recognition {
     Recognition::NotSupportedYet(why.to_string())
 }
 
-/// What a repository offers, from its listing and the catalog's family records, in this
-/// order: not for all audiences, a region-limited model or an uncensored one is not
-/// offered; then it must name exactly one family harnessUI has a record of, of the size
+/// A repository must name exactly one supported family, of the size
 /// the record states (when the listing states one) and an architecture a picture or video
 /// model has (when it states one); then its diffusion files are the `.gguf` files that are
 /// not encoders, decoders or projectors, whose own name names no other model, and that
@@ -169,26 +143,6 @@ fn not_yet(why: &str) -> Recognition {
 /// A name cannot prove a file's family: the downloaded file's tensor table is read before
 /// it is added and before every run.
 pub fn recognise(detail: &RepoDetail, families: &BTreeMap<GenFamily, FamilyRecord>) -> Recognition {
-    if detail.not_for_all_audiences {
-        return Recognition::NotOffered(NotOffered::AdultContent);
-    }
-    let names: Vec<String> = iter::once(detail.id.as_str())
-        .chain(detail.files.iter().map(|f| f.path.as_str()))
-        .map(normalise)
-        .collect();
-    let named = |tokens: &[&str]| names.iter().any(|n| tokens.iter().any(|t| n.contains(t)));
-    if named(REGION_LIMITED_TOKENS) {
-        return Recognition::NotOffered(NotOffered::RegionLimited);
-    }
-    if named(UNCENSORED_TOKENS)
-        || detail
-            .info
-            .tags
-            .iter()
-            .any(|t| UNCENSORED_TOKENS.contains(&t.as_str()))
-    {
-        return Recognition::NotOffered(NotOffered::Uncensored);
-    }
     let candidates: Vec<&RepoFile> = detail
         .files
         .iter()
@@ -513,7 +467,7 @@ fn known_label(id: &str) -> Option<&'static KnownLabel> {
     KNOWN_LABELS.iter().find(|k| k.id.eq_ignore_ascii_case(id))
 }
 
-/// A licence the repository's label names, accepted per repository revision: its SHA-256
+/// A licence the repository's label names, identified by repository revision: its SHA-256
 /// is the bundled canonical text's when there is one, else that of
 /// `<repo>@<commit>:<label>`, and its link is the repository at that commit.
 fn label_licence(
@@ -1013,7 +967,7 @@ mod tests {
     }
 
     /// The licence the repository's label makes stricter is on the diffusion part, so it
-    /// decides the badge and is shown and accepted with the others.
+    /// decides the badge and is shown with the others.
     #[test]
     fn a_searched_entry_carries_the_stricter_label() {
         let d = relabelled("repo-z-image-turbo-gguf.json", Some("cc-by-nc-4.0"));
@@ -1292,39 +1246,27 @@ mod tests {
     }
 
     #[test]
-    fn an_uncensored_or_region_limited_repo_is_not_offered() {
-        assert_eq!(
-            recognise(&detail("repo-uncensored.json"), &families()),
-            Recognition::NotOffered(NotOffered::Uncensored)
-        );
-        assert_eq!(
-            recognise(
-                &renamed(
-                    "repo-unknown-diffusion.json",
-                    "someone/HunyuanVideo-1.5-GGUF"
-                ),
-                &families()
+    fn repository_labels_and_names_do_not_disqualify_supported_files() {
+        for detail in [
+            detail("repo-uncensored.json"),
+            renamed(
+                "repo-flux2-klein-4b-gguf.json",
+                "HunyuanVideo/FLUX.2-klein-4B-abliterated",
             ),
-            Recognition::NotOffered(NotOffered::RegionLimited)
-        );
-        assert_eq!(
-            recognise(
-                &renamed(
-                    "repo-flux2-klein-4b-gguf.json",
-                    "someone/FLUX.2-klein-4B-abliterated"
+            RepoDetail {
+                not_for_all_audiences: true,
+                ..detail("repo-flux2-klein-4b-gguf.json")
+            },
+        ] {
+            assert!(
+                matches!(
+                    recognise(&detail, &families()),
+                    Recognition::Supported { .. }
                 ),
-                &families()
-            ),
-            Recognition::NotOffered(NotOffered::Uncensored)
-        );
-        let adult = RepoDetail {
-            not_for_all_audiences: true,
-            ..detail("repo-flux2-klein-4b-gguf.json")
-        };
-        assert_eq!(
-            recognise(&adult, &families()),
-            Recognition::NotOffered(NotOffered::AdultContent)
-        );
+                "{}",
+                detail.id
+            );
+        }
     }
 
     #[test]

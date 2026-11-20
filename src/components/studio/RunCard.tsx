@@ -441,8 +441,8 @@ export function RunCard(props: { run: Run }) {
               disabled={busy}
               onClick={() =>
                 perform(async () => {
-                  // A licence to accept first opens the download dialog in Get local models instead.
-                  if (await store().repairLocal(run.model)) setRepairing(true);
+                  await store().repairLocal(run.model);
+                  setRepairing(true);
                 })
               }
             >

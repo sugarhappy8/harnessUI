@@ -10,8 +10,7 @@
 //!   [`Store::file_uses`] counts every use in both tables, so a delete removes a file only
 //!   when nothing else uses it.
 //! - A **licence acceptance** is kept once per licence text (its SHA-256), whichever model
-//!   it was accepted for. A local download is refused until every licence of every part is
-//!   accepted.
+//!   it was accepted for. These rows record downloads made with Studio 0.1.0.
 
 use std::collections::BTreeSet;
 

@@ -208,6 +208,20 @@ pub(crate) fn error_from_body(status: Option<u16>, body: &[u8], reason: &str) ->
         return error_from_value(&value, status);
     }
     let text = String::from_utf8_lossy(body);
+    // A web page from a proxy or a website URL has no API error message. Keep its
+    // markup out of the log and UI, including any lines that resemble streamed data.
+    let start = text.trim_start_matches(|c: char| c.is_whitespace() || c == '\u{feff}');
+    if ["<!doctype html", "<html"].iter().any(|prefix| {
+        start
+            .get(..prefix.len())
+            .is_some_and(|s| s.eq_ignore_ascii_case(prefix))
+    }) {
+        return classify(ErrorParts {
+            status,
+            message: "The endpoint returned a web page.".into(),
+            ..ErrorParts::default()
+        });
+    }
     // Some servers send an error status with an event-stream body.
     for line in text.lines() {
         if let Some(data) = line.strip_prefix("data:")
@@ -427,12 +441,23 @@ mod tests {
     }
 
     #[test]
+    fn a_website_404_omits_the_html_from_the_log_and_ui() {
+        let body = b" \n<!DOCTYPE html><html>\ndata: {\"error\":\"unrelated page data\"}\n</html>";
+        let error = error_from_body(Some(404), body, "Not Found");
+        assert_eq!(
+            error.to_string(),
+            "HTTP 404: The endpoint returned a web page."
+        );
+        assert!(error.user_message().contains("Check the base URL"));
+    }
+
+    #[test]
     fn plain_text_and_string_errors() {
         assert_eq!(
             error_from_body(Some(502), b"<html>Bad gateway</html>", "Bad Gateway"),
             ProviderError::Http {
                 status: 502,
-                message: "<html>Bad gateway</html>".into()
+                message: "The endpoint returned a web page.".into()
             }
         );
         assert_eq!(

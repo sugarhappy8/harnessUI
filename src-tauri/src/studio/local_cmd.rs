@@ -62,7 +62,7 @@ const GB: u64 = 1_000_000_000;
 
 /// What Get local models reads: each part a test can stand in for.
 pub struct LocalCmdDeps {
-    /// The installed models, this computer's measured runs and the accepted licences.
+    /// The installed models, this computer's measured runs.
     pub store: store::Store,
     /// The signed catalog's picture and video models.
     pub catalog: Arc<dyn GenCatalogSource>,
@@ -486,11 +486,6 @@ async fn repo_dto(deps: &LocalCmdDeps, detail: &RepoDetail) -> LocalRepoDto {
     };
     let (family, files) = match recognise(detail, &catalog.families) {
         Recognition::Supported { family, files } => (family, files),
-        Recognition::NotOffered(why) => {
-            dto.status = "notOffered".into();
-            dto.reason = Some(errors::not_offered_reason(why).to_owned());
-            return dto;
-        }
         Recognition::NotSupportedYet(why) => {
             dto.status = "notSupportedYet".into();
             dto.reason = Some(why);
@@ -607,6 +602,7 @@ fn licence_dto(licence: &GenLicence) -> LicenceDto {
             .filter(|_| licence.commercial_outputs == Commercial::UnderRevenue),
         plain_words: licence.plain_words.clone(),
         obligations: licence.obligations.clone(),
+        excluded_regions: licence.excluded_regions.clone(),
     }
 }
 
@@ -711,18 +707,15 @@ pub async fn studio_local_fit(
     .await
 }
 
-/// Downloads the model `source` names, once the note about local models and every licence
-/// of the download are accepted (`accepted_license_sha256s` adds those accepted now); returns
-/// the download group's id.
+/// Starts a checked download of the model and returns its download group.
 #[tauri::command]
 pub async fn studio_local_download(
     window: tauri::WebviewWindow,
     app: AppHandle,
     source: LocalSource,
-    accepted_license_sha256s: Vec<String>,
 ) -> AppResult<String> {
     only_main_window(window.label())?;
-    start_local_download(&app, source, accepted_license_sha256s).await
+    start_local_download(&app, source).await
 }
 
 /// Deletes the installed model `gen_model_id`, and each of its files nothing else uses.
@@ -1419,7 +1412,7 @@ mod tests {
         assert_eq!(z.licence.badge, "green");
         assert_eq!(z.licence.commercial, "yes");
 
-        // Where the engine comes with the first model, its licence is accepted with it.
+        // Where the engine comes with the first model, its licence is listed with it.
         let engine = GenLicence {
             id: crate::studio::engine_cmd::ENGINE_LICENCE_ID.into(),
             sha256: "ef".repeat(32),
@@ -1785,9 +1778,9 @@ mod tests {
         assert_eq!((repo.family, repo.licence), (None, None));
     }
 
-    /// A repository Studio never offers says why in the clause `studio_not_offered` uses.
+    /// A supported repository tagged uncensored lists its pinned files.
     #[tokio::test]
-    async fn a_searched_repo_never_offered_says_why() {
+    async fn a_supported_uncensored_repo_lists_its_files() {
         let scratch = Scratch::new();
         let hub = Hub::listing("repo-uncensored.json").await;
         let deps = deps_with(catalog(), gpu(8, 32), &scratch, Some(hub.client()));
@@ -1795,12 +1788,13 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(hub.requests().len(), 1);
-        assert_eq!(repo.status, "notOffered");
-        assert_eq!(
-            repo.reason.as_deref(),
-            Some("it was made without safety limits")
+        assert_eq!(repo.status, "supported");
+        assert_eq!(repo.reason, None);
+        assert!(
+            repo.files
+                .iter()
+                .any(|f| f.file == "z_image_turbo_uncensored-Q4_K.gguf")
         );
-        assert!(repo.files.is_empty());
     }
 
     /// A recognised repository none of whose files can be offered (here each file's entry is

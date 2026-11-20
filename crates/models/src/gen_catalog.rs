@@ -5,7 +5,7 @@
 //! An entry or family record that cannot be used is hidden with a reason, never an
 //! error: an unknown family, role, input, kind or quirk (a newer catalog than this
 //! build), a newer Studio engine, a part that is not a pinned `.gguf` or `.safetensors`
-//! file, a licence that is region-limited or whose text is not the bundled one. The
+//! file, a licence whose text is not the bundled one. The
 //! chat catalog never depends on any of it.
 
 use std::cmp::Reverse;
@@ -180,7 +180,7 @@ pub struct GenLicence {
     pub commercial_outputs: Commercial,
     #[serde(default)]
     pub revenue_limit_usd: Option<u64>,
-    /// Regions where the licence does not apply; such a licence is never offered.
+    /// Regions excluded by the licence.
     #[serde(default)]
     pub excluded_regions: Vec<String>,
     #[serde(default)]
@@ -202,12 +202,16 @@ impl GenLicence {
 
 /// How strict a licence is: by [`Commercial`], then a lower revenue limit is stricter
 /// (an unstated limit counts as the lowest).
-pub(crate) fn strictness(l: &GenLicence) -> (Commercial, Reverse<u64>) {
+pub(crate) fn strictness(l: &GenLicence) -> (Commercial, Reverse<u64>, bool) {
     let limit = match l.commercial_outputs {
         Commercial::UnderRevenue => l.revenue_limit_usd.unwrap_or(0),
         _ => 0,
     };
-    (l.commercial_outputs, Reverse(limit))
+    (
+        l.commercial_outputs,
+        Reverse(limit),
+        !l.excluded_regions.is_empty(),
+    )
 }
 
 /// The strictest of `licences`, the first of equals.
@@ -465,7 +469,6 @@ const NEWER_ENGINE: &str = "needs a newer Studio engine";
 const NOT_ALLOWED_FILE: &str = "not a .gguf or .safetensors file";
 const NOT_PINNED: &str = "a part is not pinned";
 const NO_LICENCE: &str = "a part has no licence";
-const REGION_LIMITED: &str = "region-limited";
 const TEXT_MISMATCH: &str = "licence text does not match";
 const NO_MODEL_PART: &str = "no model part";
 const SEVERAL_MODEL_PARTS: &str = "more than one model part";
@@ -749,12 +752,9 @@ pub(crate) fn check_parts(
     Ok(())
 }
 
-/// No licence is region-limited, and each one with a bundled text pins that text.
+/// Each licence with a bundled text pins that text.
 pub(crate) fn check_licences(licenses: &BTreeMap<String, GenLicence>) -> Result<(), String> {
     for l in licenses.values() {
-        if !l.excluded_regions.is_empty() {
-            return Err(REGION_LIMITED.into());
-        }
         let bundled = BUNDLED_LICENCE_TEXTS
             .iter()
             .find(|(id, _)| id.eq_ignore_ascii_case(&l.id));
@@ -1206,10 +1206,13 @@ mod tests {
     }
 
     #[test]
-    fn a_region_limited_licence_is_never_offered() {
-        hidden_for("region-limited", |e| {
-            e["licenses"]["apache-2.0"]["excludedRegions"] = json!(["EU"])
-        });
+    fn a_region_limited_licence_keeps_its_terms() {
+        let catalog =
+            read_changed(|e| e["licenses"]["apache-2.0"]["excludedRegions"] = json!(["EU"]));
+        assert_eq!(
+            catalog.entries["sample-image"].licenses["apache-2.0"].excluded_regions,
+            ["EU"]
+        );
     }
 
     #[test]
@@ -1409,10 +1412,6 @@ mod tests {
         assert_eq!(
             family(|f| f["companions"][0]["license"] = json!("mit")),
             "a part has no licence"
-        );
-        assert_eq!(
-            family(|f| f["licenses"]["apache-2.0"]["excludedRegions"] = json!(["EU"])),
-            "region-limited"
         );
         assert_eq!(
             family(|f| f["licenses"]["apache-2.0"]["sha256"] = json!("0".repeat(64))),

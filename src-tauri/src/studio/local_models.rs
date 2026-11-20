@@ -11,9 +11,7 @@
 //!   revision of the file there, the part lands at `<models>/<owner>/<repo>/@<commit>/<path>`
 //!   instead, never renamed over it. A download that does not fit on the disk is refused
 //!   before anything starts.
-//! - **What it needs first** ([`check_acceptance`]): the note about local models, then every
-//!   licence of every part, and the Studio engine's when it comes too, each accepted by its
-//!   SHA-256 (recorded in `license_acceptances`).
+//! - **Before downloading**, Studio shows the model licences and asks first-time users to read the local model notice.
 //! - **The download** ([`start_local_download`]): one group of the download manager, each part
 //!   at its own revision; once every part is checked, and the diffusion file's own tensor table
 //!   is its family's, it joins Studio's installed models (`downloads::register_gen_model`). The
@@ -24,7 +22,7 @@
 //!   another picture or video model, a download not finished yet), then the folders that
 //!   leaves empty.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -40,7 +38,7 @@ use models::hf::{Gated, HfClient, HubInfo, RepoDetail};
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Manager};
 
-use super::engine_cmd::{ENGINE_LICENCE_ID, EngineNeed};
+use super::engine_cmd::EngineNeed;
 use super::errors;
 use super::manager::StudioManager;
 use crate::downloads::{DownloadManager, GenGroup, GenGroupPart, GroupMeta, files_being_written};
@@ -80,7 +78,7 @@ pub struct DownloadPlan {
     /// The parts not in place yet: what is fetched.
     pub to_fetch_bytes: u64,
     /// Every licence of every part, each once, in the parts' order, then the Studio engine's
-    /// when it downloads with the model: all are accepted first.
+    /// when it downloads with the model: shown in the confirmation.
     pub licences: Vec<GenLicence>,
     /// The Studio engine is not on this computer and this platform has it as a pack (Windows):
     /// it downloads with the model, its licence among [`licences`](Self::licences).
@@ -135,8 +133,8 @@ impl InstalledFiles {
 /// this one) is another revision's (`hub::download_destination`: the part then has a place
 /// of its own, never renamed over that file), a part whose destination already has its
 /// pinned size counted as here,
-/// every licence to accept, and what the Studio engine needs (`engine`,
-/// `engine_cmd::engine_need`): its pack comes too, with its licence to accept; an engine that
+/// every licence to show, and what the Studio engine needs (`engine`,
+/// `engine_cmd::engine_need`): its pack comes too, with its licence; an engine that
 /// is neither here nor a pack changes nothing here (Get local models tells it from the
 /// engine's state). Refused with `studio_disk_too_small` when what it fetches is more than
 /// `free_bytes` (when known).
@@ -205,22 +203,6 @@ pub fn plan_download(
         needs_engine,
         free_bytes,
     })
-}
-
-/// Refuses a download until the note about local models was accepted (`notice_accepted`),
-/// then until every licence of the plan is among `accepted` (SHA-256s).
-pub fn check_acceptance(
-    plan: &DownloadPlan,
-    accepted: &BTreeSet<String>,
-    notice_accepted: bool,
-) -> AppResult<()> {
-    if !notice_accepted {
-        return Err(errors::notice_needed());
-    }
-    if !plan.licences.iter().all(|l| accepted.contains(&l.sha256)) {
-        return Err(errors::license_not_accepted());
-    }
-    Ok(())
 }
 
 /// The catalog's picture and video models as this build's Studio engine can run them.
@@ -317,8 +299,7 @@ pub(crate) async fn entry_with(
 }
 
 /// The entry `file` of the listing `detail` makes, recognised from the listing
-/// (`gen_search::recognise`): a family harnessUI does not run is `studio_not_supported_yet`, a
-/// repository it never offers `studio_not_offered`, and a file that is not one of the
+/// (`gen_search::recognise`): a family harnessUI does not run is `studio_not_supported_yet`, and a file that is not one of the
 /// repository's diffusion files with a published SHA-256 `not_found`.
 pub fn entry_from_listing(
     detail: &RepoDetail,
@@ -336,7 +317,6 @@ pub fn entry_from_listing(
                 .ok_or_else(|| errors::not_supported_yet(errors::FAMILY_RECORD_MISSING))?;
             entry_for(detail, found, record).map_err(errors::not_supported_yet)
         }
-        Recognition::NotOffered(why) => Err(errors::not_offered(why)),
         Recognition::NotSupportedYet(why) => Err(errors::not_supported_yet(why)),
     }
 }
@@ -345,7 +325,7 @@ pub fn entry_from_listing(
 /// SHA-256s it was downloaded at), with the rest from its catalog entry when the catalog still
 /// lists it, else from its family record as a searched file's entry is made
 /// (`gen_search::entry_for`). A searched file's licence is worked out again from its saved
-/// repository, revision and licence id, so it has the SHA-256 it was accepted under. A family
+/// repository, revision and licence id, so repairs show the same metadata. A family
 /// this build has no record of is `studio_not_supported_yet`.
 pub fn entry_from_installed(model: &store::GenModel, catalog: &GenCatalog) -> AppResult<GenEntry> {
     let parts: Vec<GenPart> = serde_json::from_value(model.parts.clone())
@@ -469,21 +449,17 @@ fn gen_group(entry: &GenEntry, catalog_id: Option<String>, source: store::GenSou
     }
 }
 
-/// Starts downloading the model `source` names, once the note about local models and every
-/// licence of every part (and of the Studio engine, when it comes too) are accepted (those
-/// accepted before, or sent now as `accepted_license_sha256s`; a sent hash that is no licence
-/// of the download is ignored), and when it fits on the disk. Each newly accepted licence is
-/// recorded. Where the Studio engine is a pack and not here (Windows), its download starts
-/// too. Returns the download group's id.
-///
-/// An installed source with no new hashes is *Download again*: every part is checked, and
-/// what is missing or does not match its SHA-256 is fetched again.
-pub async fn start_local_download(
-    app: &AppHandle,
-    source: LocalSource,
-    accepted_license_sha256s: Vec<String>,
-) -> AppResult<String> {
+/// Starts a new download or checks and repairs the pinned files of an installed model.
+pub async fn start_local_download(app: &AppHandle, source: LocalSource) -> AppResult<String> {
     let state = app.state::<AppState>();
+    if app
+        .state::<Arc<StudioManager>>()
+        .prefs()
+        .local_notice_accepted_at
+        .is_none()
+    {
+        return Err(errors::notice_needed());
+    }
     let Resolved {
         entry,
         catalog_id,
@@ -495,92 +471,30 @@ pub async fn start_local_download(
     // The files the other installed models use, which no part is renamed over.
     let used = InstalledFiles::read(&state.store).await?.except(&entry.id);
     let plan = plan_download(entry, &models_dir, &engine, free, &used)?;
-    let studio = app.state::<Arc<StudioManager>>();
-    let notice_accepted = studio.prefs().local_notice_accepted_at.is_some();
-    let accepted = Accepted {
-        sent: &accepted_license_sha256s,
-        notice: notice_accepted,
-        catalog_id: catalog_id.clone(),
-        now: studio.deps().clock.now_ms(),
-    };
     let downloads = app.state::<Arc<DownloadManager>>().inner().clone();
-    accept_then_start(&state.store, plan, accepted, |plan| async move {
-        let diffusion = plan.entry.diffusion();
-        let meta = GroupMeta {
-            repo: diffusion.repo.clone(),
-            commit: diffusion.revision.clone(),
-            label: plan.entry.name.clone(),
-            model_files: Vec::new(),
-            projector: None,
-            catalog_id: catalog_id.clone(),
-            hub: None,
-            parameters: None,
-            image_file_for: None,
-            image_files: None,
-            generator: Some(gen_group(&plan.entry, catalog_id, origin)),
-        };
-        let group = downloads.start(app, meta, plan.files).await?;
-        // Refused only while an engine process runs from the folder it would replace: the
-        // model downloads, and the engine's own button offers it again.
-        if plan.needs_engine
-            && let Err(e) = super::engine_cmd::start_engine_download(app).await
-        {
-            tracing::warn!(code = %e.code, "the Studio engine did not download with the model");
-        }
-        Ok(group)
-    })
-    .await
-}
-
-/// What a local download was given to go ahead: the licence SHA-256s sent with it, whether the
-/// note about local models was accepted, the catalog entry it is for and the time now (Unix
-/// ms) to record acceptances at.
-struct Accepted<'a> {
-    sent: &'a [String],
-    notice: bool,
-    catalog_id: Option<String>,
-    now: i64,
-}
-
-/// The steps of [`start_local_download`] after its plan: refused ([`check_acceptance`]) unless
-/// the note and every licence of the plan, the Studio engine's included when it comes, are
-/// accepted, before (in `store`) or now (`accepted.sent`, any letter case); then each licence of
-/// the plan sent now is recorded (the engine's for no catalog entry), and `start` starts the
-/// download. A refusal records and starts nothing.
-async fn accept_then_start<F, Fut>(
-    store: &store::Store,
-    plan: DownloadPlan,
-    accepted: Accepted<'_>,
-    start: F,
-) -> AppResult<String>
-where
-    F: FnOnce(DownloadPlan) -> Fut,
-    Fut: Future<Output = AppResult<String>>,
-{
-    let sent: BTreeSet<String> = accepted
-        .sent
-        .iter()
-        .map(|h| h.to_ascii_lowercase())
-        .collect();
-    let mut known = store.accepted_license_hashes().await?;
-    known.extend(sent.iter().cloned());
-    check_acceptance(&plan, &known, accepted.notice)?;
-    for licence in plan.licences.iter().filter(|l| sent.contains(&l.sha256)) {
-        let catalog_id = if licence.id == ENGINE_LICENCE_ID {
-            None
-        } else {
-            accepted.catalog_id.clone()
-        };
-        store
-            .record_license_acceptance(store::LicenseAcceptance {
-                sha256: licence.sha256.clone(),
-                license_id: licence.id.clone(),
-                catalog_id,
-                accepted_at: accepted.now,
-            })
-            .await?;
+    let diffusion = plan.entry.diffusion();
+    let meta = GroupMeta {
+        repo: diffusion.repo.clone(),
+        commit: diffusion.revision.clone(),
+        label: plan.entry.name.clone(),
+        model_files: Vec::new(),
+        projector: None,
+        catalog_id: catalog_id.clone(),
+        hub: None,
+        parameters: None,
+        image_file_for: None,
+        image_files: None,
+        generator: Some(gen_group(&plan.entry, catalog_id, origin)),
+    };
+    let group = downloads.start(app, meta, plan.files).await?;
+    // Refused only while an engine process runs from the folder it would replace: the
+    // model downloads, and the engine's own button offers it again.
+    if plan.needs_engine
+        && let Err(e) = super::engine_cmd::start_engine_download(app).await
+    {
+        tracing::warn!(code = %e.code, "the Studio engine did not download with the model");
     }
-    start(plan).await
+    Ok(group)
 }
 
 /// Deletes the installed model `id`, and each of its part files that nothing else uses and no
@@ -743,10 +657,6 @@ mod tests {
             },
         );
         e
-    }
-
-    fn set(hashes: &[&str]) -> BTreeSet<String> {
-        hashes.iter().map(|h| (*h).to_string()).collect()
     }
 
     /// A folder of its own for one test, removed when it is dropped.
@@ -915,10 +825,8 @@ mod tests {
         assert_eq!(place(&[chat(&"f".repeat(64))]), shared);
     }
 
-    /// Nothing downloads before the note about local models is accepted, and every licence of
-    /// every part.
     #[test]
-    fn downloads_are_refused_until_the_notice_and_every_licence_are_accepted() {
+    fn the_download_plan_lists_each_parts_licence() {
         let dir = Scratch::new();
         let plan = plan_download(two_licences(), &dir.0, &EngineNeed::Found, None, &[]).unwrap();
         assert_eq!(
@@ -932,25 +840,6 @@ mod tests {
             ],
             "each licence once, in the parts' order"
         );
-        let apache = apache_sha();
-        assert_eq!(
-            check_acceptance(&plan, &set(&[]), false).unwrap_err().code,
-            "studio_notice_needed"
-        );
-        assert_eq!(
-            check_acceptance(&plan, &set(&[&apache, KOMMUNITY_SHA]), false)
-                .unwrap_err()
-                .code,
-            "studio_notice_needed"
-        );
-        assert_eq!(
-            check_acceptance(&plan, &set(&[&apache]), true)
-                .unwrap_err()
-                .code,
-            "studio_license_not_accepted",
-            "one licence of two"
-        );
-        assert!(check_acceptance(&plan, &set(&[&apache, KOMMUNITY_SHA]), true).is_ok());
     }
 
     /// A download that does not fit on the disk is refused before anything starts; one that
@@ -1009,7 +898,7 @@ mod tests {
     }
 
     /// Where the Studio engine is a pack (Windows), the first model's download brings it, and
-    /// its licence is accepted with the model's; where it is found, nothing comes; where it is
+    /// its licence is listed with the model's; where it is found, nothing comes; where it is
     /// neither found nor a pack, the plan promises no engine download.
     #[test]
     fn the_engine_comes_with_the_first_model_where_it_is_a_pack() {
@@ -1031,18 +920,6 @@ mod tests {
         let mut with_engine = model_licences.clone();
         with_engine.push(engine.clone());
         assert_eq!(plan.licences, with_engine, "the model's, then the engine's");
-        let model_hashes: Vec<&str> = model_licences.iter().map(|l| l.sha256.as_str()).collect();
-        assert_eq!(
-            check_acceptance(&plan, &set(&model_hashes), true)
-                .unwrap_err()
-                .code,
-            "studio_license_not_accepted",
-            "the engine's licence not accepted"
-        );
-        let mut every = model_hashes.clone();
-        every.push(&engine.sha256);
-        assert!(check_acceptance(&plan, &set(&every), true).is_ok());
-
         let found = plan_download(two_licences(), &dir.0, &EngineNeed::Found, None, &[]).unwrap();
         assert!(!found.needs_engine);
         assert!(!found.licences.contains(&engine));
@@ -1051,68 +928,6 @@ mod tests {
             plan_download(two_licences(), &dir.0, &EngineNeed::Missing, None, &[]).unwrap();
         assert!(!missing.needs_engine, "no engine download promised");
         assert_eq!(missing.licences, model_licences);
-    }
-
-    /// What a download is given: the licences `sent`, after the note was accepted.
-    fn given(sent: &[String]) -> Accepted<'_> {
-        Accepted {
-            sent,
-            notice: true,
-            catalog_id: Some("flux2-klein-4b-q4".into()),
-            now: 7,
-        }
-    }
-
-    /// A download that brings the engine is refused without the engine's licence: nothing is
-    /// recorded and nothing starts. With it, each licence sent is recorded and the download
-    /// starts once.
-    #[tokio::test]
-    async fn a_start_without_the_engine_licence_downloads_nothing() {
-        use std::sync::atomic::{AtomicUsize, Ordering};
-        let dir = Scratch::new();
-        let store = store::Store::open_in_memory().unwrap();
-        let engine = engine_licence();
-        let plan = plan_download(
-            entry(),
-            &dir.0,
-            &EngineNeed::Pack(engine.clone()),
-            None,
-            &[],
-        )
-        .unwrap();
-        let apache = apache_sha();
-        let started = AtomicUsize::new(0);
-        let start = |_: DownloadPlan| async {
-            started.fetch_add(1, Ordering::SeqCst);
-            Ok("g".to_string())
-        };
-        let model_only = [apache.to_uppercase()];
-        let err = accept_then_start(&store, plan.clone(), given(&model_only), start)
-            .await
-            .unwrap_err();
-        assert_eq!(err.code, "studio_license_not_accepted");
-        assert_eq!(started.load(Ordering::SeqCst), 0, "nothing downloads");
-        assert!(
-            store.accepted_license_hashes().await.unwrap().is_empty(),
-            "nothing is recorded"
-        );
-
-        let both = [apache.clone(), engine.sha256.clone()];
-        let group = accept_then_start(&store, plan.clone(), given(&both), start)
-            .await
-            .unwrap();
-        assert_eq!(group, "g");
-        assert_eq!(started.load(Ordering::SeqCst), 1);
-        assert_eq!(
-            store.accepted_license_hashes().await.unwrap(),
-            set(&[&apache, &engine.sha256])
-        );
-
-        // Accepted before: nothing needs sending again.
-        accept_then_start(&store, plan, given(&[]), start)
-            .await
-            .unwrap();
-        assert_eq!(started.load(Ordering::SeqCst), 2);
     }
 
     /// The backend recognises a searched file again: the webview's word is never taken for
@@ -1145,12 +960,10 @@ mod tests {
         assert_eq!(e.family, GenFamily::ZImageTurbo);
         assert_eq!(e.diffusion().revision, d.commit);
         let d = detail("repo-uncensored.json");
-        assert_eq!(
-            entry_from_listing(&d, &d.files[0].path, &families())
-                .unwrap_err()
-                .code,
-            "studio_not_offered"
-        );
+        let file = "z_image_turbo_uncensored-Q4_K.gguf";
+        let entry = entry_from_listing(&d, file, &families()).unwrap();
+        assert_eq!(entry.diffusion().path, file);
+        assert_eq!(entry.diffusion().revision, d.commit);
     }
 
     /// An installed model whose parts are the files at `files`, each `(role, path)`.
@@ -1338,7 +1151,7 @@ mod tests {
             plan_download(searched.clone(), models, &EngineNeed::Found, None, &[])
                 .unwrap()
                 .licences,
-            "the same licences to accept"
+            "the same licences to show"
         );
 
         // A recommended model keeps its saved parts too, with the catalog's figures.

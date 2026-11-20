@@ -1,9 +1,7 @@
 // The download confirmation (0.1.0 Task B14, local addendum Wireframe L3): every part with its
 // size and licence, what the pictures you make may be used for (the strictest licence), the
 // Studio engine when it comes with the model, a gated repository's form, an amber licence's
-// condition, low disk space, a link to each licence, and Accept and download, which sends the
-// hash of every licence it showed. Before the first local download, the content notice comes
-// first.
+// condition, low disk space and links to the licences. The content notice precedes the first download.
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { amountGb } from "../../lib/words";
@@ -150,6 +148,9 @@ describe("the download confirmation", () => {
   });
 
   it("the dialog lists every part with its size and licence, then the verdict", () => {
+    expect(verdict([apache, { ...apache, excludedRegions: ["EU"] }], "image")).toBe(
+      "Pictures you make: commercial use in permitted regions.",
+    );
     const dialog = renderDialog(offer());
     within(dialog).getByText("Download Z-Image Turbo?");
     within(dialog).getByText(`3 files, ${amountGb(zimage.sizeBytes)} in all, from Hugging Face (huggingface.co)`);
@@ -159,7 +160,6 @@ describe("the download confirmation", () => {
     for (const part of zimage.parts) within(dialog).getByText(amountGb(part.sizeBytes));
     expect(within(dialog).getAllByText("Apache License 2.0")).toHaveLength(3);
     within(dialog).getByText("Pictures you make: free for any use, including commercial.");
-    within(dialog).getByText("Downloading means you accept these licences.");
     const link = within(dialog).getByRole("link", { name: "Read the licences" });
     expect(link.getAttribute("href")).toBe(apache.url);
     // Nothing else to say about this one.
@@ -182,36 +182,31 @@ describe("the download confirmation", () => {
     expect(openUrl).toHaveBeenCalledWith(apache.url);
   });
 
-  it("Accept and download sends the licence hashes it showed", async () => {
+  it("Download starts the transfer with the pinned source", async () => {
     const dialog = renderDialog(offer());
-    fireEvent.click(within(dialog).getByRole("button", { name: "Accept and download" }));
-    expect(api.studioLocalDownload).toHaveBeenCalledWith(
-      { catalog: { entryId: "z-image-turbo-q4" } },
-      zimage.licences.map((l) => l.sha256),
-    );
+    fireEvent.click(within(dialog).getByRole("button", { name: "Download" }));
+    expect(api.studioLocalDownload).toHaveBeenCalledWith({ catalog: { entryId: "z-image-turbo-q4" } });
     await flush();
     // The offer is put away and the local models are read again.
     expect(useStudio.getState().offer).toBeNull();
     expect(api.studioLocalModels).toHaveBeenCalledTimes(1);
   });
 
-  it("from Get local models, Accept and download closes the dialog", async () => {
+  it("from Get local models, Download closes the dialog", async () => {
     await showLocal();
     await clickDownload("Z-Image Turbo");
     const reads = vi.mocked(api.studioLocalModels).mock.calls.length;
-    await click(screen.getByRole("button", { name: "Accept and download" }));
-    expect(api.studioLocalDownload).toHaveBeenCalledWith(
-      { catalog: { entryId: "z-image-turbo-q4" } },
-      zimage.licences.map((l) => l.sha256),
-    );
+    await click(within(screen.getByRole("alertdialog")).getByRole("button", { name: "Download" }));
+    expect(api.studioLocalDownload).toHaveBeenCalledWith({ catalog: { entryId: "z-image-turbo-q4" } });
     expect(screen.queryByText("Download Z-Image Turbo?")).toBeNull();
     expect(useStudio.getState().offer).toBeNull();
     expect(vi.mocked(api.studioLocalModels).mock.calls.length).toBe(reads + 1);
   });
 
-  it("a model with two licences shows and sends both", async () => {
+  it("a model with two licences shows both", async () => {
     const parts = zimage.parts.map((p, i) => (i === 1 ? { ...p, licenceId: "kommunity" } : p));
-    const dialog = renderDialog(offer({ parts, licences: [apache, kommunity] }));
+    const dialog = renderDialog(offer({ parts, licences: [apache, { ...kommunity, excludedRegions: ["EU"] }] }));
+    within(dialog).getByText("Example Community Licence excludes EU.");
     expect(within(dialog).getAllByText("Apache License 2.0")).toHaveLength(2);
     within(dialog).getByText("Example Community Licence");
     const links = within(dialog).getAllByRole("link", { name: /^Read the licences/ });
@@ -222,11 +217,8 @@ describe("the download confirmation", () => {
       "Read the licences (Example Community Licence)",
     ]);
     within(dialog).getByText("Pictures you make: commercial use only under $5M revenue.");
-    await click(within(dialog).getByRole("button", { name: "Accept and download" }));
-    expect(api.studioLocalDownload).toHaveBeenCalledWith({ catalog: { entryId: "z-image-turbo-q4" } }, [
-      apache.sha256,
-      kommunity.sha256,
-    ]);
+    await click(within(dialog).getByRole("button", { name: "Download" }));
+    expect(api.studioLocalDownload).toHaveBeenCalledWith({ catalog: { entryId: "z-image-turbo-q4" } });
   });
 
   it("Cancel downloads nothing", async () => {
@@ -247,21 +239,21 @@ describe("the download confirmation", () => {
 
   it("a download that could not start says why and keeps the dialog", async () => {
     vi.mocked(api.studioLocalDownload).mockRejectedValue({
-      code: "studio_license_not_accepted",
-      message: "A licence changed since this list was read.",
-      nextStep: "Close this and press Download again.",
+      code: "studio_disk_too_small",
+      message: "There is not enough free space for this model.",
+      nextStep: "Free up space or choose another models folder.",
       details: "",
     });
     const o = offer();
     const dialog = renderDialog(o);
-    await click(within(dialog).getByRole("button", { name: "Accept and download" }));
-    within(dialog).getByText("A licence changed since this list was read.");
-    within(dialog).getByText("Close this and press Download again.");
+    await click(within(dialog).getByRole("button", { name: "Download" }));
+    within(dialog).getByText("There is not enough free space for this model.");
+    within(dialog).getByText("Free up space or choose another models folder.");
     expect(useStudio.getState().offer).toBe(o);
     expect(api.studioLocalModels).not.toHaveBeenCalled();
   });
 
-  it("while Accept is on its way, Cancel and Esc wait for it", async () => {
+  it("while Download is on its way, Cancel and Esc wait for it", async () => {
     let fail: (e: unknown) => void = () => undefined;
     vi.mocked(api.studioLocalDownload).mockReturnValue(
       new Promise<string>((_, reject) => {
@@ -270,7 +262,7 @@ describe("the download confirmation", () => {
     );
     const o = offer();
     const dialog = renderDialog(o);
-    await click(within(dialog).getByRole("button", { name: "Accept and download" }));
+    await click(within(dialog).getByRole("button", { name: "Download" }));
     const cancel = within(dialog).getByRole<HTMLButtonElement>("button", { name: "Cancel" });
     expect(cancel.disabled).toBe(true);
     await click(cancel);
@@ -295,7 +287,7 @@ describe("the download confirmation", () => {
     expect(line.getAttribute("title")).toBe(LOCAL.engine.licenseName);
   });
 
-  it("the engine's licence is linked and accepted with the model's, and leaves the verdict alone", async () => {
+  it("the engine's licence is linked with the model's, and leaves the verdict alone", async () => {
     const engine: Licence = {
       ...apache,
       id: "studio-engine",
@@ -316,8 +308,8 @@ describe("the download confirmation", () => {
       "Read the licences (MIT)",
     ]);
     expect(links.map((a) => a.getAttribute("title"))).toEqual([kommunity.name, LOCAL.engine.licenseName]);
-    await click(within(dialog).getByRole("button", { name: "Accept and download" }));
-    expect(api.studioLocalDownload).toHaveBeenCalledWith(expect.anything(), [kommunity.sha256, engine.sha256]);
+    await click(within(dialog).getByRole("button", { name: "Download" }));
+    expect(api.studioLocalDownload).toHaveBeenCalledWith(expect.anything());
   });
 
   it("a part already here, a gated part, an amber licence and low disk space each say so", async () => {

@@ -8,7 +8,6 @@ use agent::media::{
     Company, FailureKind, Invalid, LocalIo, MediaFailure, MediaKind, MediaModel, RefRole, Stage,
 };
 use models::gen_fit::{GenSize, NotFor};
-use models::gen_search::NotOffered;
 use runtime::packs::PackError;
 use runtime::sd::args::ArgsError;
 use runtime::sd::failure::SdFailure;
@@ -1035,16 +1034,6 @@ pub fn notice_needed() -> AppError {
     )
 }
 
-/// A local download with a licence of one of its parts not accepted.
-pub fn license_not_accepted() -> AppError {
-    AppError::new(
-        "studio_license_not_accepted",
-        "Accept the licences to download this model.",
-        "Tick each licence, then Download.",
-        String::new(),
-    )
-}
-
 /// A local download that needs more than the free space on the models folder's disk;
 /// `needed` is what it would fetch.
 pub fn disk_too_small(needed: u64) -> AppError {
@@ -1068,28 +1057,6 @@ pub fn not_supported_yet(why: impl Into<String>) -> AppError {
         "harnessUI cannot run this model yet.",
         "Choose a model from the recommended list.",
         why,
-    )
-}
-
-/// Why harnessUI never offers a repository, as a plain clause: what `studio_not_offered`
-/// says after "harnessUI does not offer this model:", and what Get local models shows after
-/// "Not offered in harnessUI:".
-pub fn not_offered_reason(why: NotOffered) -> &'static str {
-    match why {
-        NotOffered::RegionLimited => "its licence excludes some regions",
-        NotOffered::Uncensored => "it was made without safety limits",
-        NotOffered::AdultContent => "it is marked as not for all audiences",
-    }
-}
-
-/// A repository harnessUI never offers, whatever it holds, with the reason.
-pub fn not_offered(why: NotOffered) -> AppError {
-    let reason = not_offered_reason(why);
-    AppError::new(
-        "studio_not_offered",
-        format!("harnessUI does not offer this model: {reason}."),
-        "Choose another model.",
-        String::new(),
     )
 }
 
@@ -1732,12 +1699,8 @@ mod tests {
             engine_not_removed("denied"),
             not_that_model("klein 9B"),
             notice_needed(),
-            license_not_accepted(),
             disk_too_small(5_000_000_000),
             not_supported_yet("harnessUI does not know this kind of model yet."),
-            not_offered(NotOffered::RegionLimited),
-            not_offered(NotOffered::Uncensored),
-            not_offered(NotOffered::AdultContent),
             model_incomplete(),
             wont_make(),
             prompt_too_long_here(),
@@ -2012,14 +1975,6 @@ mod tests {
             disk_too_small(5_000_000_000).next_step,
             "It needs 5.0 GB; free up space or choose another models folder."
         );
-        assert_eq!(
-            words(not_offered(NotOffered::RegionLimited)),
-            (
-                "studio_not_offered".into(),
-                "harnessUI does not offer this model: its licence excludes some regions.".into(),
-                "Choose another model.".into()
-            )
-        );
         let e = not_supported_yet("This repository holds several kinds of model.");
         assert_eq!(
             (e.code.as_str(), e.message.as_str(), e.details.as_str()),
@@ -2040,10 +1995,6 @@ mod tests {
         assert_eq!(
             notice_needed().message,
             "Read the note about local models first."
-        );
-        assert_eq!(
-            license_not_accepted().message,
-            "Accept the licences to download this model."
         );
     }
 
@@ -2145,10 +2096,8 @@ mod tests {
         );
     }
 
-    /// Get local models' words: a smaller size that fits, and why a repository is never
-    /// offered in the clause `studio_not_offered` uses.
     #[test]
-    fn get_local_models_says_what_fits_and_what_is_never_offered() {
+    fn get_local_models_shows_a_smaller_size_that_fits() {
         let size = |width, height, frames| GenSize {
             width,
             height,
@@ -2159,19 +2108,6 @@ mod tests {
             fits_at(size(832, 480, 49), true),
             "Fits at 832×480, 49 frames"
         );
-        for why in [
-            NotOffered::RegionLimited,
-            NotOffered::Uncensored,
-            NotOffered::AdultContent,
-        ] {
-            assert_eq!(
-                not_offered(why).message,
-                format!(
-                    "harnessUI does not offer this model: {}.",
-                    not_offered_reason(why)
-                )
-            );
-        }
     }
 
     #[test]

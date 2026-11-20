@@ -148,7 +148,7 @@ pub struct RepoSummary {
     pub license: Option<String>,
     pub last_modified: Option<String>,
     pub pipeline_tag: Option<String>,
-    /// 0.1.0 Studio: tagged `not-for-all-audiences`; a picture and video search hides it.
+    /// 0.1.0 Studio: tagged `not-for-all-audiences`.
     pub not_for_all_audiences: bool,
 }
 
@@ -186,7 +186,7 @@ pub struct RepoDetail {
     pub template_thinking: bool,
     /// 0.0.6: what the uploader lists about the repository, made safe to show.
     pub info: HubInfo,
-    /// 0.1.0 Studio: tagged `not-for-all-audiences` (Studio never offers it).
+    /// 0.1.0 Studio: tagged `not-for-all-audiences`.
     pub not_for_all_audiences: bool,
 }
 
@@ -813,7 +813,7 @@ impl HfClient {
     /// `expand[]` of [`HfClient::search`]): one for each of the kind's two pipeline tags
     /// (text-to-image and image-to-image, or text-to-video and image-to-video) and one
     /// without a pipeline tag, which finds repositories that carry none. Merged by
-    /// [`merge_generator_searches`]; repositories not for all audiences are dropped.
+    /// [`merge_generator_searches`].
     pub async fn search_generators(
         &self,
         text: &str,
@@ -1132,7 +1132,7 @@ fn parse_search_items(arr: &[serde_json::Value]) -> Vec<RepoSummary> {
 /// 0.1.0 Studio: one list by repository id, most downloads first. Every item of the tagged
 /// searches is kept; an item of the untagged search only when its name is a family of
 /// `kind` (`gen_search::family_of_name`), since it can be anything a text matches (chat
-/// models among them). Repositories not for all audiences are dropped.
+/// models among them).
 pub fn merge_generator_searches(
     tagged: Vec<Vec<RepoSummary>>,
     untagged: Vec<RepoSummary>,
@@ -1150,10 +1150,7 @@ pub fn merge_generator_searches(
     for item in all {
         by_id.entry(item.id.clone()).or_insert(item);
     }
-    let mut out: Vec<RepoSummary> = by_id
-        .into_values()
-        .filter(|i| !i.not_for_all_audiences)
-        .collect();
+    let mut out: Vec<RepoSummary> = by_id.into_values().collect();
     out.sort_by(|a, b| b.downloads.cmp(&a.downloads).then_with(|| a.id.cmp(&b.id)));
     out
 }
@@ -1819,7 +1816,7 @@ mod tests {
     }
 
     #[test]
-    fn generator_search_drops_repos_not_for_all_audiences() {
+    fn generator_search_includes_repos_not_for_all_audiences() {
         let mut v: serde_json::Value = serde_json::from_str(GEN_TEXT_TO_IMAGE).unwrap();
         v[3]["tags"]
             .as_array_mut()
@@ -1837,8 +1834,8 @@ mod tests {
             [v[3]["id"].as_str().unwrap()]
         );
         let merged = merge_generator_searches(vec![items], vec![], GenSearchKind::Pictures);
-        assert_eq!(merged.len(), 29);
-        assert!(merged.iter().all(|i| !i.not_for_all_audiences));
+        assert_eq!(merged.len(), 30);
+        assert!(merged.iter().any(|i| i.id == v[3]["id"].as_str().unwrap()));
     }
 
     fn query(url: &Url) -> Vec<(String, String)> {

@@ -3,7 +3,7 @@
 // the models that do not fit folded away, the installed ones (also those from a search) with
 // Download again and Delete, Hugging Face search only when asked, and the footer's engine line
 // and content notice. Download only sets the offer (Task B14's dialog is tested in
-// DownloadLocalModel.test.tsx); a repair refused for a licence shows that dialog.
+// DownloadLocalModel.test.tsx).
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { act, cleanup, fireEvent, screen, within } from "@testing-library/react";
 import type { DownloadGroup } from "../../lib/types";
@@ -91,14 +91,6 @@ function supported(patch: Partial<LocalRepo> = {}): LocalRepo {
     ...patch,
   };
 }
-
-/** The backend's refusal of a download whose licences were not all accepted. */
-const NOT_ACCEPTED = {
-  code: "studio_license_not_accepted",
-  message: "Accept the model's licence first.",
-  nextStep: "Download it from Get local models.",
-  details: "",
-};
 
 function typeIn(el: HTMLElement, text: string) {
   fireEvent.change(el, { target: { value: text } });
@@ -201,6 +193,7 @@ describe("licenceBadge", () => {
     expect(licenceBadge(licence({ badge: "amber", commercial: "underRevenue", revenueLimitUsd: 2_500_000 })).text).toBe(
       "Commercial use only under $2.5M revenue",
     );
+    expect(licenceBadge({ ...apache, excludedRegions: ["EU"] })).toEqual({ tone: "amber", text: "Commercial use in permitted regions" });
     expect(licenceBadge(nonCommercial)).toEqual({ tone: "red", text: "Non-commercial" });
     expect(licenceBadge(licence({ badge: "red", commercial: "unclear" }))).toEqual({ tone: "red", text: "Check the licence" });
   });
@@ -265,7 +258,6 @@ describe("Get local models", () => {
     expect(screen.getAllByRole("tablist")).toHaveLength(1);
     expect(screen.queryByRole("button", { name: "Grid" })).toBeNull();
     expect((screen.getByRole("checkbox", { name: "Only what fits" }) as HTMLInputElement).checked).toBe(true);
-    expect((screen.getByRole("checkbox", { name: "Show non-commercial models" }) as HTMLInputElement).checked).toBe(false);
   });
 
   it("each model shows what it is good at, size, licence in plain words, fit and time", async () => {
@@ -407,20 +399,6 @@ describe("Get local models", () => {
     expect(within(result).queryByRole("button", { name: "Download" })).toBeNull();
   });
 
-  it("a model harnessUI does not offer says why", async () => {
-    await showLocal();
-    const result = await openResult("someone/Region-Video-GGUF", {
-      ...supported({ repo: "someone/Region-Video-GGUF" }),
-      status: "notOffered",
-      reason: "its licence excludes some regions",
-      files: [],
-      licence: null,
-      licences: [],
-    });
-    within(result).getByText("Not offered in harnessUI: its licence excludes some regions.");
-    expect(within(result).queryByRole("button", { name: "Download" })).toBeNull();
-  });
-
   it("a label that differs from the family's licence is pointed out", async () => {
     await showLocal();
     const mismatch = "The repository is labelled MIT, but the model's own licence is Apache 2.0; that one applies.";
@@ -428,24 +406,23 @@ describe("Get local models", () => {
     within(result).getByText(mismatch);
   });
 
-  it("non-commercial results stay hidden unless asked for", async () => {
+  it.each([
+    [nonCommercial, "Non-commercial"],
+    [licence({ id: "other", badge: "red", commercial: "unclear" }), "Check the licence"],
+  ] as const)("offers a file with the licence badge %j", async (terms, badge) => {
     await showLocal();
     const red = supported({
-      licence: nonCommercial,
-      licences: [nonCommercial],
-      files: supported().files.map((f) => ({ ...f, licences: [nonCommercial] })),
+      licence: terms,
+      licences: [terms],
+      files: supported().files.map((f) => ({ ...f, licences: [terms] })),
     });
-    const result = await openResult("someone/Z-Image-Turbo-GGUF", red);
-    within(result).getByText("Non-commercial");
-    within(result).getByText("Its files show when Show non-commercial models is ticked.");
-    expect(within(result).queryByText("z-image-turbo-Q5_K_M.gguf")).toBeNull();
-    expect(within(result).queryByRole("button", { name: "Download" })).toBeNull();
-    await click(screen.getByRole("checkbox", { name: "Show non-commercial models" }));
-    within(result).getByText("Non-commercial");
-    within(result).getByText("z-image-turbo-Q5_K_M.gguf");
-    within(result).getByRole("button", { name: "Download" });
-    await click(screen.getByRole("checkbox", { name: "Show non-commercial models" }));
-    expect(within(result).queryByText("z-image-turbo-Q5_K_M.gguf")).toBeNull();
+    const result = await openResult(red.repo, red);
+    within(result).getByText(badge);
+    await click(within(result).getByRole("button", { name: "Download" }));
+    await click(within(screen.getByRole("alertdialog")).getByRole("button", { name: "Download" }));
+    expect(api.studioLocalDownload).toHaveBeenCalledWith({
+      search: { repo: red.repo, commit: red.commit, file: red.files[0]!.file },
+    });
   });
 
   it("the footer shows the engine and the content notice", async () => {
@@ -487,25 +464,7 @@ describe("Get local models", () => {
     within(k).getByText("Installed");
     expect(within(k).queryByRole("button", { name: "Download" })).toBeNull();
     await click(within(k).getByRole("button", { name: "Download again" }));
-    expect(api.studioLocalDownload).toHaveBeenCalledWith({ installed: { genModelId: "flux2-klein-4b-q4" } }, []);
-  });
-
-  it("a repair that needs the model's licences accepted shows the download dialog first", async () => {
-    await showLocal();
-    vi.mocked(api.studioLocalDownload).mockRejectedValueOnce(NOT_ACCEPTED);
-    const k = row(/FLUX.2 klein/);
-    await click(within(k).getByRole("button", { name: "Download again" }));
-    const dialog = screen.getByRole("alertdialog");
-    within(dialog).getByText("Download FLUX.2 klein 4B?");
-    // Nothing is being checked yet.
-    expect(within(k).queryByText(LOCAL_MODELS.repairing)).toBeNull();
-    await click(within(dialog).getByRole("button", { name: "Accept and download" }));
-    expect(api.studioLocalDownload).toHaveBeenLastCalledWith(
-      { installed: { genModelId: "flux2-klein-4b-q4" } },
-      klein.licences.map((l) => l.sha256),
-    );
-    expect(screen.queryByRole("alertdialog")).toBeNull();
-    expect(useStudio.getState().offer).toBeNull();
+    expect(api.studioLocalDownload).toHaveBeenCalledWith({ installed: { genModelId: "flux2-klein-4b-q4" } });
   });
 
   it("an installed model can be deleted, and Back returns to the cards", async () => {
@@ -584,40 +543,10 @@ describe("Get local models", () => {
       within(r).getByText(amountGb(base.sizeBytes));
       within(r).getByText("Fits");
       await click(within(r).getByRole("button", { name: "Download again" }));
-      expect(api.studioLocalDownload).toHaveBeenCalledWith({ installed: { genModelId: id } }, []);
+      expect(api.studioLocalDownload).toHaveBeenCalledWith({ installed: { genModelId: id } });
       await click(within(r).getByRole("button", { name: "Delete" }));
       await click(within(screen.getByRole("alertdialog")).getByRole("button", { name: "Delete" }));
       expect(api.studioLocalDelete).toHaveBeenCalledWith(id);
-    });
-
-    it("its repair that needs the engine's licence accepted shows that licence", async () => {
-      const engine = licence({ id: "studio-engine", name: LOCAL.engine.licenseName, sha256: "e".repeat(64) });
-      const withEngine = (e: LocalEntry) => ({ ...e, needsEngine: true, licences: [...e.licences, engine] });
-      const pack = { ...LOCAL.engine, state: "notInstalled" as const, downloadBytes: 30_303_000 };
-      const local: LocalModels = {
-        ...LOCAL,
-        engine: pack,
-        installed: [searched(null), ...LOCAL.installed],
-        recommended: LOCAL.recommended.map((e) => (e.installed ? e : withEngine(e))),
-      };
-      await showLocal(local);
-      vi.mocked(api.studioLocalDownload).mockRejectedValueOnce(NOT_ACCEPTED);
-      await click(within(row("z.gguf")).getByRole("button", { name: "Download again" }));
-      const dialog = screen.getByRole("alertdialog");
-      within(dialog).getByText("Download z.gguf?");
-      within(dialog).getByText("Also downloads the Studio engine (29 MB, MIT licence).");
-      await click(within(dialog).getByRole("button", { name: "Accept and download" }));
-      expect(api.studioLocalDownload).toHaveBeenLastCalledWith({ installed: { genModelId: id } }, [engine.sha256]);
-    });
-
-    it("a repair refused for a licence it cannot show says why", async () => {
-      await showLocal({ ...LOCAL, installed: [searched(null), ...LOCAL.installed] });
-      vi.mocked(api.studioLocalDownload).mockRejectedValueOnce(NOT_ACCEPTED);
-      await click(within(row("z.gguf")).getByRole("button", { name: "Download again" }));
-      expect(screen.queryByRole("alertdialog")).toBeNull();
-      expect(useStudio.getState().offer).toBeNull();
-      screen.getByText(NOT_ACCEPTED.message);
-      screen.getByText(NOT_ACCEPTED.nextStep);
     });
 
     it("one this version cannot run says why, and can only be deleted", async () => {
@@ -665,7 +594,7 @@ describe("a model downloading", () => {
     await showLocal();
     await click(within(row("Z-Image Turbo")).getByRole("button", { name: "Download" }));
     ipc.listDownloads.mockResolvedValue([group({ bytesDone: 0, status: "queued" })]);
-    await click(screen.getByRole("button", { name: "Accept and download" }));
+    await click(within(screen.getByRole("alertdialog")).getByRole("button", { name: "Download" }));
     const z = row("Z-Image Turbo");
     expect(within(z).queryByRole("button", { name: "Download" })).toBeNull();
     // The same words and sizes as Models → Downloads (6 GiB is 6.4 GB there).

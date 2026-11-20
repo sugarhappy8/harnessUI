@@ -377,8 +377,9 @@ class StudioDocs(unittest.TestCase):
             self.assertNotRegex(read(doc), r"\b(s|seconds?|min|minutes?) (a|per|for a) (picture|clip)", doc)
 
     def test_the_changelog_tells_users_what_0_1_0_does(self):
-        entry = read("CHANGELOG.md").split("\n## ")[1]
-        self.assertTrue(entry.startswith("0.1.0 ("))
+        entries = read("CHANGELOG.md").split("\n## ")[1:]
+        entry = next((item for item in entries if item.startswith("0.1.0 (")), "")
+        self.assertTrue(entry, "missing 0.1.0 changelog entry")
         for words in ("Studio", "On this computer", "stable-diffusion.cpp", "Hugging Face", "$10", "$1 or more", "### Added", "### Known limits"):
             self.assertIn(words, entry)
         self.assertLess(entry.index("On this computer"), entry.index("OpenRouter"))

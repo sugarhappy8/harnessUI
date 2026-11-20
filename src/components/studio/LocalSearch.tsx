@@ -17,9 +17,8 @@ import type { LocalFileChoice, LocalModels, LocalRepo } from "./types";
 // that the words go to huggingface.co. A hit shows its downloads and the repository's own
 // licence label; opened, it is read at its latest commit and shows each file Studio recognises
 // with its parts, total size, licence and fit, and *Download* (how far its download got while
-// it runs), or why it has none ("Not supported yet", "Not offered in harnessUI"). A result whose
-// licence is red shows its files only while *Show non-commercial models* is ticked. Names from
-// Hugging Face can hold any character: they are shown with invisible ones as codes.
+// it runs), or why the engine cannot run it. Names from Hugging Face are shown with
+// invisible characters as codes.
 
 /** An opened search result: the repository's name, and what reading it gave (`null` while it
  *  is being read). */
@@ -148,10 +147,6 @@ export function LocalSearch(props: { tab: StudioTab }) {
 /** What an opened result holds: its files to download, or why there are none. */
 function RepoResult(props: { repo: LocalRepo; local: LocalModels; tab: StudioTab }) {
   const { repo, local, tab } = props;
-  const showNonCommercial = useStudio((s) => s.showNonCommercial);
-  if (repo.status === "notOffered") {
-    return <p className="text-sm">{LOCAL_MODELS.notOffered(repo.reason)}</p>;
-  }
   if (repo.status === "notSupportedYet") {
     return (
       <div className="flex flex-col gap-0.5 text-sm">
@@ -160,7 +155,6 @@ function RepoResult(props: { repo: LocalRepo; local: LocalModels; tab: StudioTab
       </div>
     );
   }
-  const hidden = repo.licence?.badge === "red" && !showNonCommercial;
   return (
     <div className="flex flex-col gap-2">
       {repo.licence && (
@@ -169,11 +163,7 @@ function RepoResult(props: { repo: LocalRepo; local: LocalModels; tab: StudioTab
         </div>
       )}
       {repo.labelMismatch && <p className="text-xs text-fg-muted">{repo.labelMismatch}</p>}
-      {hidden ? (
-        <p className="text-xs text-fg-muted">{LOCAL_MODELS.hiddenNonCommercial}</p>
-      ) : (
-        repo.files.map((f) => <FileChoice key={f.file} repo={repo} file={f} local={local} tab={tab} />)
-      )}
+      {repo.files.map((f) => <FileChoice key={f.file} repo={repo} file={f} local={local} tab={tab} />)}
     </div>
   );
 }

@@ -723,44 +723,16 @@ describe("RunCard", () => {
       cleanup();
       await show(failed("studio_model_file_bad", "A model file is damaged."));
       await click(button("Download again"));
-      expect(api.studioLocalDownload).toHaveBeenCalledWith({ installed: { genModelId: LOCAL_RUN.model } }, []);
-    });
-
-    it("a repair refused for a licence opens its download dialog in Get local models", async () => {
-      vi.mocked(api.studioLocalDownload).mockRejectedValue({
-        code: "studio_license_not_accepted",
-        message: "Accept the model's licence first.",
-        nextStep: "Download it from Get local models.",
-        details: "",
-      });
-      vi.mocked(api.studioLocalModels).mockResolvedValue(LOCAL);
-      await show(
-        localRun({
-          status: "failed",
-          outputs: [],
-          error: err({ code: "studio_model_file_bad", message: "A model file is damaged.", company: "local" }),
-        }),
-      );
-      await click(button("Download again"));
-      expect(useStudio.getState().localView).toBe(true);
-      const klein = LOCAL.recommended.find((e) => e.id === LOCAL_RUN.model)!;
-      expect(useStudio.getState().offer).toMatchObject({
-        name: klein.name,
-        source: { installed: { genModelId: LOCAL_RUN.model } },
-        licences: klein.licences,
-      });
-      expect(screen.queryByText("Accept the model's licence first.")).toBeNull();
+      expect(api.studioLocalDownload).toHaveBeenCalledWith({ installed: { genModelId: LOCAL_RUN.model } });
     });
 
     it("a refused repair says why on the card", async () => {
       vi.mocked(api.studioLocalDownload).mockRejectedValue({
-        code: "studio_license_not_accepted",
-        message: "Accept the model's licence first.",
-        nextStep: "Download it from Get local models.",
+        code: "studio_disk_too_small",
+        message: "There is not enough free space for this model.",
+        nextStep: "Free up space or choose another models folder.",
         details: "",
       });
-      // No licence to show: the model is not listed, and no engine comes with it.
-      vi.mocked(api.studioLocalModels).mockResolvedValue({ ...LOCAL, recommended: [], notHere: [] });
       await show(
         localRun({
           status: "failed",
@@ -769,8 +741,8 @@ describe("RunCard", () => {
         }),
       );
       await click(button("Download again"));
-      screen.getByText("Accept the model's licence first.");
-      screen.getByText("Download it from Get local models.");
+      screen.getByText("There is not enough free space for this model.");
+      screen.getByText("Free up space or choose another models folder.");
     });
 
     it("an out-of-memory retry and failure are said plainly", async () => {

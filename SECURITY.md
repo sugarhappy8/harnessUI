@@ -673,8 +673,8 @@ runner's.
   Don't create sexual images of children, or sexual or intimate images of real people
   without their consent, and don't impersonate people. These are crimes in many countries.
   Each model's licence and use policy also applies." It can be read again from Get local
-  models and Settings → Studio. Every licence of every part of a model is shown and
-  accepted before it downloads.
+  models and Settings → Studio. The download dialog shows the licence for each part.
+  Hugging Face enforces publisher access requirements for gated repositories.
 - A small prompt check that is always on refuses a local prompt that pairs sexual words
   with words for children ("Studio won't make this."). It is a narrow check, not a filter,
   and nothing is retried. Cloud companies apply their own filters; a refusal is explained

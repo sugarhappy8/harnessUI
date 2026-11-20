@@ -1207,7 +1207,7 @@ pub struct LicenceDto {
     pub name: String,
     /// The upstream page at a pinned revision.
     pub url: String,
-    /// The SHA-256 its acceptance is recorded under (`studio_local_download` takes it).
+    /// The licence fingerprint supplied with the model metadata.
     pub sha256: String,
     /// `green`, `amber` or `red`.
     pub badge: String,
@@ -1219,6 +1219,8 @@ pub struct LicenceDto {
     pub revenue_limit_usd: Option<u64>,
     pub plain_words: String,
     pub obligations: Vec<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub excluded_regions: Vec<String>,
 }
 
 /// How a model's Hugging Face repository is gated.
@@ -1287,7 +1289,7 @@ pub struct LocalEntryDto {
     pub size_bytes: u64,
     /// The strictest licence of its parts: it decides the badge.
     pub licence: LicenceDto,
-    /// Every licence the download asks to accept, each once: its parts', then the Studio
+    /// Every licence shown with the download, each once: its parts', then the Studio
     /// engine's when the engine comes with it.
     pub licences: Vec<LicenceDto>,
     pub gate: GateDto,
@@ -1377,7 +1379,7 @@ pub struct LocalFileChoiceDto {
     /// Its quantisation (`Q4_K`), when its name says.
     pub quant: String,
     pub parts: Vec<PartDto>,
-    /// Every licence the download asks to accept, each once.
+    /// Every licence shown with the download, each once.
     pub licences: Vec<LicenceDto>,
     /// Every part's size.
     pub total_bytes: u64,
@@ -1398,10 +1400,9 @@ pub struct LocalRepoDto {
     pub repo: String,
     /// The commit the listing describes; a download pins it.
     pub commit: String,
-    /// `supported`, `notSupportedYet` (no download) or `notOffered` (never offered).
+    /// `supported` or `notSupportedYet`.
     pub status: String,
-    /// Why not: a sentence for `notSupportedYet`, a plain clause for `notOffered` ("its licence
-    /// excludes some regions").
+    /// Why Studio cannot run this model.
     pub reason: Option<String>,
     /// The family's name, when supported.
     pub family: Option<String>,
@@ -1409,7 +1410,7 @@ pub struct LocalRepoDto {
     pub files: Vec<LocalFileChoiceDto>,
     /// The strictest licence of its files' parts, for the badge, when supported.
     pub licence: Option<LicenceDto>,
-    /// Every licence its files' downloads ask to accept, each once.
+    /// Every licence shown with its files, each once.
     pub licences: Vec<LicenceDto>,
     /// "The repository says MIT; FLUX.2 klein 4B is Apache 2.0." when its label is not its
     /// family's licence.

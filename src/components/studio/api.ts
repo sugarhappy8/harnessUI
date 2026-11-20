@@ -122,9 +122,9 @@ export const studioLocalRepo = (repo: string) => invoke<LocalRepo>("studio_local
 /** A fit at a size and, for a clip, a length in seconds (0 for a picture). */
 export const studioLocalFit = (source: LocalSource, width: number, height: number, seconds: number) =>
   invoke<LocalFit>("studio_local_fit", { source, width, height, seconds });
-/** Downloads a model once every licence shown is accepted; its download group's id. */
-export const studioLocalDownload = (source: LocalSource, acceptedLicenseSha256s: string[]) =>
-  invoke<string>("studio_local_download", { source, acceptedLicenseSha256s });
+/** Downloads a model and returns its download group ID. */
+export const studioLocalDownload = (source: LocalSource) =>
+  invoke<string>("studio_local_download", { source });
 export const studioLocalDelete = (genModelId: string) => invoke<void>("studio_local_delete", { genModelId });
 /** The note about local models, accepted. */
 export const studioAcceptLocalNotice = () => invoke<StudioPrefs>("studio_accept_local_notice");
