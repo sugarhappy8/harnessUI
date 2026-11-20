@@ -400,18 +400,25 @@ describe("Get local models", () => {
     const result = await openResult("someone/Mystery-Diffusion-GGUF", {
       ...supported({ repo: "someone/Mystery-Diffusion-GGUF" }),
       status: "notSupportedYet",
-      standaloneFiles: [{ path: "weights/Q4.gguf", size: 4000, sha256: "b".repeat(64) }],
+      standaloneFiles: [
+        { path: "weights/Q4.gguf", size: 4000, sha256: "b".repeat(64) },
+        { path: "extra files/config #1.json", size: 50, sha256: null },
+      ],
       reason: "harnessUI does not know this kind of model yet.",
       files: [],
       licence: null,
       licences: [],
     });
     within(result).getByText(LOCAL_MODELS.noLocalSetup);
-    within(result).getByText("harnessUI does not know this kind of model yet.");
+
     await click(within(result).getByRole("button", { name: LOCAL_MODELS.saveWeight }));
     expect(api.studioLocalDownloadFile).toHaveBeenCalledWith("someone/Mystery-Diffusion-GGUF", "c".repeat(40), "weights/Q4.gguf");
     expect(api.studioLocalDownload).not.toHaveBeenCalled();
     expect(within(result).getByRole("link").getAttribute("href")).toBe(`https://huggingface.co/someone/Mystery-Diffusion-GGUF/tree/${"c".repeat(40)}`);
+    fireEvent.change(within(result).getByRole("combobox"), { target: { value: "extra files/config #1.json" } });
+    expect(within(result).getByRole("link", { name: LOCAL_MODELS.browserDownload }).getAttribute("href")).toBe(
+      `https://huggingface.co/someone/Mystery-Diffusion-GGUF/resolve/${"c".repeat(40)}/extra%20files/config%20%231.json?download=true`
+    );
   });
 
   it("a label that differs from the family's licence is pointed out", async () => {

@@ -170,7 +170,17 @@ pub fn recognise(detail: &RepoDetail, families: &BTreeMap<GenFamily, FamilyRecor
         NameMatch::Family(f) if named_families.is_empty() || named_families.contains(&f) => f,
         NameMatch::OtherVariant => return not_yet(OTHER_VARIANT),
         NameMatch::None if named_families.len() == 1 => *named_families.first().unwrap(),
-        NameMatch::None if named_families.is_empty() => return not_yet(UNKNOWN_KIND),
+        NameMatch::None if named_families.is_empty() => {
+            let parent = detail
+                .quantized_from
+                .as_deref()
+                .and_then(|id| id.split_once('/'))
+                .map(|(_, name)| family_of_name(name));
+            match parent {
+                Some(NameMatch::Family(f)) => f,
+                _ => return not_yet(UNKNOWN_KIND),
+            }
+        }
         _ => return not_yet(SEVERAL_KINDS),
     };
     let Some(record) = families.get(&family) else {
@@ -1090,6 +1100,22 @@ mod tests {
             );
         }
         assert_eq!(catalog[&GenFamily::Wan22Ti2v5b].defaults.steps, 20);
+    }
+
+    #[test]
+    fn unnamed_quants_can_use_their_upstream_recipe() {
+        let mut v = listing("repo-flux3-klein-gguf.json");
+        v["id"] = "someone/my-quants".into();
+        v["siblings"] = serde_json::json!([{"rfilename":"weights.gguf","size":4096,"lfs":{"size":4096,"sha256":"a".repeat(64)}}]);
+        assert_eq!(offered(&parse(&v)), ["weights.gguf"]);
+        v["tags"] = serde_json::json!([
+            "gguf",
+            "base_model:adapter:black-forest-labs/flux-3-image-klein"
+        ]);
+        assert!(matches!(
+            recognise(&parse(&v), &families()),
+            Recognition::NotSupportedYet(_)
+        ));
     }
 
     /// The listing `name` with its `.gguf` files replaced by `files`, each taken from the

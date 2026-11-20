@@ -374,6 +374,7 @@ pub fn entry_from_installed(model: &store::GenModel, catalog: &GenCatalog) -> Ap
 /// which the saved diffusion part holds, so the licence (and its SHA-256) is the same.
 fn from_record(model: &store::GenModel, record: &FamilyRecord, diffusion: &GenPart) -> GenEntry {
     let saved = RepoDetail {
+        quantized_from: None,
         id: diffusion.repo.clone(),
         commit: diffusion.revision.clone(),
         gated: Gated::No,
@@ -449,16 +450,6 @@ fn gen_group(entry: &GenEntry, catalog_id: Option<String>, source: store::GenSou
     }
 }
 
-/// Weight files that the download manager can verify independently of any inference setup.
-pub(crate) fn is_weight_file(file: &models::RepoFile) -> bool {
-    let ext = Path::new(&file.path).extension().and_then(|e| e.to_str());
-    file.size > 0
-        && file.sha256.is_some()
-        && ext.is_some_and(|e| {
-            e.eq_ignore_ascii_case("gguf") || e.eq_ignore_ascii_case("safetensors")
-        })
-}
-
 fn plan_weight_file(
     detail: &RepoDetail,
     commit: &str,
@@ -476,9 +467,9 @@ fn plan_weight_file(
     let file = detail
         .files
         .iter()
-        .find(|f| f.path == path && is_weight_file(f))
+        .find(|f| f.path == path && f.size > 0 && f.sha256.is_some())
         .ok_or_else(|| {
-            AppError::bad_request("Choose a model weight file with a published size and SHA-256.")
+            AppError::bad_request("Choose a repository file with a published size and SHA-256.")
         })?;
     // A namespace outside the valid Hub owner names keeps raw files separate from installed models.
     let root = models_dir.join("@files").join(commit);

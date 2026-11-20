@@ -1408,7 +1408,7 @@ pub struct LocalRepoDto {
     pub family: Option<String>,
     /// Its diffusion files with a published SHA-256; empty unless supported.
     pub files: Vec<LocalFileChoiceDto>,
-    /// Verified weights that can be saved without a local inference recipe.
+    /// Repository files outside the runnable choices, including files served through the browser.
     pub standalone_files: Vec<models::RepoFile>,
     /// The strictest licence of its files' parts, for the badge, when supported.
     pub licence: Option<LicenceDto>,

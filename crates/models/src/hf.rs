@@ -178,6 +178,8 @@ pub struct RepoDetail {
     pub id: String,
     /// The commit the listing describes; downloads pin it.
     pub commit: String,
+    /// The upstream of an explicitly tagged quantization, if unambiguous.
+    pub quantized_from: Option<String>,
     pub gated: Gated,
     pub license: Option<String>,
     pub files: Vec<RepoFile>,
@@ -815,6 +817,26 @@ impl HfClient {
         text: &str,
         kind: GenSearchKind,
     ) -> Result<Vec<RepoSummary>, HfError> {
+        let text = text.trim();
+        if validate_repo_id(text).is_ok() {
+            // An exact repository can be private, untagged or outside the popular search page.
+            match self.repo(text, None).await {
+                Ok(repo) => {
+                    return Ok(vec![RepoSummary {
+                        id: repo.id,
+                        gated: repo.gated,
+                        license: repo.license,
+                        downloads: repo.info.downloads.unwrap_or_default(),
+                        likes: repo.info.likes.unwrap_or_default(),
+                        pipeline_tag: repo.info.pipeline_tag,
+                        last_modified: repo.info.last_modified,
+                        not_for_all_audiences: repo.not_for_all_audiences,
+                    }]);
+                }
+                Err(HfError::NotFound) => {}
+                Err(e) => return Err(e),
+            }
+        }
         let [first, second, untagged] = self.generator_search_urls(text, kind);
         let (first, second, untagged) = futures_util::try_join!(
             self.search_url(first),
@@ -1281,8 +1303,17 @@ pub fn parse_repo_detail(
             .map(str::to_string)
     });
     let info = parse_hub_info(repo_id, &commit, endpoint, v);
+    let mut quantized = strings(v.get("tags"))
+        .into_iter()
+        .filter_map(|tag| tag.strip_prefix("base_model:quantized:"))
+        .filter(|id| validate_repo_id(id).is_ok());
+    let quantized_from = quantized
+        .next()
+        .filter(|first| quantized.all(|other| other == *first))
+        .map(str::to_owned);
     Ok(RepoDetail {
         info,
+        quantized_from,
         id: repo_id.to_string(),
         commit,
         gated: gated_of(v.get("gated").unwrap_or(&serde_json::Value::Bool(false))),

@@ -471,12 +471,7 @@ async fn repo_dto(deps: &LocalCmdDeps, detail: &RepoDetail) -> LocalRepoDto {
     let mut dto = LocalRepoDto {
         repo: detail.id.clone(),
         commit: detail.commit.clone(),
-        standalone_files: detail
-            .files
-            .iter()
-            .filter(|f| super::local_models::is_weight_file(f))
-            .cloned()
-            .collect(),
+        standalone_files: detail.files.clone(),
         status: String::new(),
         reason: None,
         family: None,
@@ -489,6 +484,29 @@ async fn repo_dto(deps: &LocalCmdDeps, detail: &RepoDetail) -> LocalRepoDto {
             collects: Vec::new(),
         }),
     };
+    // Put common weight formats first, then verified files, then repository metadata.
+    // The extension only affects display order.
+    dto.standalone_files.sort_by_cached_key(|f| {
+        let ext = std::path::Path::new(&f.path)
+            .extension()
+            .and_then(|s| s.to_str())
+            .unwrap_or("")
+            .to_ascii_lowercase();
+        let weights = matches!(
+            ext.as_str(),
+            "gguf"
+                | "safetensors"
+                | "onnx"
+                | "ckpt"
+                | "pth"
+                | "pt"
+                | "bin"
+                | "mlmodel"
+                | "tflite"
+                | "h5"
+        );
+        (!weights, f.sha256.is_none())
+    });
     let (family, files) = match recognise(detail, &catalog.families) {
         Recognition::Supported { family, files } => (family, files),
         Recognition::NotSupportedYet(why) => {
@@ -1789,7 +1807,7 @@ mod tests {
             asked[0].starts_with("GET /api/models/example-labs/Sample-Diffusion-2B-GGUF?"),
             "{asked:?}"
         );
-        assert_eq!(repo.standalone_files.len(), 1);
+        assert_eq!(repo.standalone_files.len(), 3);
         assert_eq!(
             repo.standalone_files[0].path,
             "sample-diffusion-2b-Q4_0.gguf"
