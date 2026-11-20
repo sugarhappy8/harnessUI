@@ -2,6 +2,12 @@
 
 All notable changes, by milestone. Dates are UTC.
 
+## 0.1.2 (2026-11-20)
+
+- Studio can download and run FLUX.3 Image Klein and the full Wan 2.2 TI2V-5B from Hugging Face. Each download includes the text encoder and decoder the model needs.
+- Download files from any accessible repository by name. Files with a published size and SHA-256 use the in-app download manager, where *Show in folder* reveals the completed download. Other files open directly in your browser.
+- Hugging Face search now lists matching GGUF families first and accepts an exact repository name. Studio also keeps the download action available when a model exceeds the computer’s estimated generation memory.
+
 ## 0.1.1 (2026-11-20)
 
 - Studio now offers compatible Hugging Face models whose licences are non-commercial, unclear or region-limited, including repositories marked for mature audiences or labelled “uncensored” or “abliterated”.

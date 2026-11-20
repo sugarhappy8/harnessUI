@@ -1,6 +1,6 @@
-import { useState, type ReactNode } from "react";
+import { useState } from "react";
 import { AlertDialog } from "radix-ui";
-import { openUrl } from "@tauri-apps/plugin-opener";
+import { BrowserLink, modelPage } from "./BrowserLink";
 import type { ErrorInfo } from "../../lib/types";
 import { amountGb, DOWNLOAD_LOCAL, REGIONAL_USE, engineSizeWords, licenceWord, revenueLimit } from "../../lib/words";
 import { toErrorInfo } from "../../store/app";
@@ -62,31 +62,6 @@ function linkName(l: Licence): string {
 
 /** The parts that make the picture: a gated model's page is its repository's. */
 const MAKES_THE_PICTURE: ReadonlySet<Part["role"]> = new Set(["diffusion", "high-noise-diffusion", "model"]);
-
-/** A model's page on Hugging Face. */
-function modelPage(repo: string): string {
-  return `https://huggingface.co/${repo.split("/").map(encodeURIComponent).join("/")}`;
-}
-
-/** A link that opens in the browser, never in the app's window; a failure says where to go. */
-function BrowserLink(props: { href: string; title?: string; children: ReactNode; onError(e: ErrorInfo): void }) {
-  const { href, onError } = props;
-  return (
-    <a
-      href={href}
-      title={props.title}
-      className="text-accent underline"
-      onClick={(e) => {
-        e.preventDefault();
-        openUrl(href).catch((err: unknown) =>
-          onError({ ...toErrorInfo(err), message: DOWNLOAD_LOCAL.notOpened, nextStep: DOWNLOAD_LOCAL.goTo(href) }),
-        );
-      }}
-    >
-      {props.children}
-    </a>
-  );
-}
 
 /** The confirmation for `offer`, while there is one; Cancel or Esc calls `onClose`, except
  *  while the download is starting. */

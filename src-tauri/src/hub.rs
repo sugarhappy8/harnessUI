@@ -495,7 +495,7 @@ pub async fn hub_clear_token(state: State<'_, AppState>) -> AppResult<()> {
 
 // ---- Downloads ----------------------------------------------------------------
 
-fn file_spec(repo: &str, commit: &str, f: &models::RepoFile) -> FileSpec {
+pub(crate) fn file_spec(repo: &str, commit: &str, f: &models::RepoFile) -> FileSpec {
     FileSpec {
         repo: repo.into(),
         commit: commit.into(),
@@ -548,6 +548,7 @@ async fn start_group(
         image_file_for: None,
         image_files,
         generator: None,
+        file_only: false,
     };
     let manager = app.state::<Arc<DownloadManager>>().inner().clone();
     manager.start(app, meta, files).await

@@ -125,6 +125,8 @@ export const studioLocalFit = (source: LocalSource, width: number, height: numbe
 /** Downloads a model and returns its download group ID. */
 export const studioLocalDownload = (source: LocalSource) =>
   invoke<string>("studio_local_download", { source });
+export const studioLocalDownloadFile = (repo: string, commit: string, file: string) =>
+  invoke<string>("studio_local_download_file", { repo, commit, file });
 export const studioLocalDelete = (genModelId: string) => invoke<void>("studio_local_delete", { genModelId });
 /** The note about local models, accepted. */
 export const studioAcceptLocalNotice = () => invoke<StudioPrefs>("studio_accept_local_notice");

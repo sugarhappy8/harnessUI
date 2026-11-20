@@ -1363,7 +1363,7 @@ pub struct LocalSearchHitDto {
     pub license_label: Option<String>,
 }
 
-/// A Hugging Face search for picture or video models: one page, most downloads first.
+/// A Hugging Face search for picture or video models: one page, matching GGUF families first.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct LocalSearchPage {
@@ -1408,6 +1408,8 @@ pub struct LocalRepoDto {
     pub family: Option<String>,
     /// Its diffusion files with a published SHA-256; empty unless supported.
     pub files: Vec<LocalFileChoiceDto>,
+    /// Repository files outside the runnable choices, including files served through the browser.
+    pub standalone_files: Vec<models::RepoFile>,
     /// The strictest licence of its files' parts, for the badge, when supported.
     pub licence: Option<LicenceDto>,
     /// Every licence shown with its files, each once.

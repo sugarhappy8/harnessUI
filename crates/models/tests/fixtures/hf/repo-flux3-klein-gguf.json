@@ -1,0 +1,184 @@
+{
+  "id": "unsloth/flux-3-image-klein-GGUF",
+  "gguf": {
+    "total": 5548681984,
+    "architecture": "flux"
+  },
+  "sha": "12ef13ce920d53f45fe805093910c899668b9e76",
+  "gated": false,
+  "tags": [
+    "gguf",
+    "unsloth",
+    "text-to-image",
+    "image-editing",
+    "image-to-image",
+    "flux",
+    "flux-3",
+    "black-forest-labs",
+    "en",
+    "base_model:black-forest-labs/flux-3-image-klein",
+    "base_model:quantized:black-forest-labs/flux-3-image-klein",
+    "license:other",
+    "region:us"
+  ],
+  "pipeline_tag": "image-to-image",
+  "siblings": [
+    {
+      "rfilename": ".gitattributes",
+      "blobId": "689180f5427e7f0b41b860b2fe38a451b0267b23",
+      "size": 2670
+    },
+    {
+      "rfilename": "LICENSE.md",
+      "blobId": "044cf48568c278150d132a7479ea237a79766ea7",
+      "size": 19593
+    },
+    {
+      "rfilename": "NOTICE.md",
+      "blobId": "de00039ba4b615c5b2c0e51aaa2bd341ffda6cc0",
+      "size": 416
+    },
+    {
+      "rfilename": "README.md",
+      "blobId": "f6c73a64c27a4cc3c50f36a497728ac6ecf81a94",
+      "size": 17152
+    },
+    {
+      "rfilename": "flux-3-image-klein-BF16.gguf",
+      "blobId": "b5c98d8a709bc9880bec11bca68b2a8cd0f411d4",
+      "size": 11097412512,
+      "lfs": {
+        "sha256": "86b6f43e51f8083a1a2bd51b635d7aa8e6517433ba10f22dc721dc832a74feea",
+        "size": 11097412512,
+        "pointerSize": 136
+      }
+    },
+    {
+      "rfilename": "flux-3-image-klein-Q3_K_M.gguf",
+      "blobId": "cef380395141d23b4d41264305bf9fa213a50330",
+      "size": 3012400032,
+      "lfs": {
+        "sha256": "2b60e07a3b1100625da9ad017b19572319aeda8bbf2ea4a74b5b199accdd5b46",
+        "size": 3012400032,
+        "pointerSize": 135
+      }
+    },
+    {
+      "rfilename": "flux-3-image-klein-Q4_K_M.gguf",
+      "blobId": "00448c9a6e10dd8650b40154614346741659af13",
+      "size": 3666908064,
+      "lfs": {
+        "sha256": "a0fe17e27da7660832a3ae3fe35b9c5cd0d81566a4ea5ec7bb4a26421d4f8542",
+        "size": 3666908064,
+        "pointerSize": 135
+      }
+    },
+    {
+      "rfilename": "flux-3-image-klein-Q5_K_M.gguf",
+      "blobId": "bc7d681742a08f8b88d8632243faa326a3715b5a",
+      "size": 4216230816,
+      "lfs": {
+        "sha256": "0a796f9a549e44dd19bdc60f9a350ec692eb0b8679db3675c410a543958ee334",
+        "size": 4216230816,
+        "pointerSize": 135
+      }
+    },
+    {
+      "rfilename": "flux-3-image-klein-Q6_K.gguf",
+      "blobId": "238864a5f35e88ca528eed7c10b8af4592e114c9",
+      "size": 4799886240,
+      "lfs": {
+        "sha256": "a33abd53ee3484cb9aec0a81c4bc5227e0a0fc40a67e645834f3253195cf5ed8",
+        "size": 4799886240,
+        "pointerSize": 135
+      }
+    },
+    {
+      "rfilename": "flux-3-image-klein-Q8_0.gguf",
+      "blobId": "f07d2c2f285cbd06ffa74f2b32eefee3d6cbd632",
+      "size": 6092755872,
+      "lfs": {
+        "sha256": "af562de40a975439a0f55340221bf48c951e2fc5ad0e11df0bdd73c8091eefcf",
+        "size": 6092755872,
+        "pointerSize": 135
+      }
+    },
+    {
+      "rfilename": "flux-3-image-klein-UD-Q2_K_XL.gguf",
+      "blobId": "853c2124173b7c24bee3c4adf8453b7e99d29846",
+      "size": 2619454368,
+      "lfs": {
+        "sha256": "3884a92132597e7052c309e9e23708721ca903197228b01041d111ef756c0e52",
+        "size": 2619454368,
+        "pointerSize": 135
+      }
+    },
+    {
+      "rfilename": "flux-3-image-klein-UD-Q3_K_XL.gguf",
+      "blobId": "5c73c29ec36ba143d2284747f7a7178a68fe78e9",
+      "size": 3279836064,
+      "lfs": {
+        "sha256": "8508bfefa5c0e62de434336a9836c5ac8a234c73f02a296507c1d637f560ac9c",
+        "size": 3279836064,
+        "pointerSize": 135
+      }
+    },
+    {
+      "rfilename": "flux-3-image-klein-UD-Q4_K_XL.gguf",
+      "blobId": "bd97cbb0c8d56ffad8ce25e7856f04f39504ce5f",
+      "size": 3929944992,
+      "lfs": {
+        "sha256": "0a057e07550a5b2169e344d686171a7dd3c7d82c7d8d1d1605d8d881c16e9fa7",
+        "size": 3929944992,
+        "pointerSize": 135
+      }
+    },
+    {
+      "rfilename": "flux-3-image-klein-UD-Q5_K_XL.gguf",
+      "blobId": "456106b6be53518908c6b9dc52cbeabbbd5e5d45",
+      "size": 4479218592,
+      "lfs": {
+        "sha256": "12ed7d9f4fbd4aba881bc1741f7d35dc840435c754ffb298a04e8199df9e275b",
+        "size": 4479218592,
+        "pointerSize": 135
+      }
+    },
+    {
+      "rfilename": "samples/UD-Q4_K_XL_knitted.png",
+      "blobId": "40bf5d415a951690254edf84a1f6f0d45235f18b",
+      "size": 1955303,
+      "lfs": {
+        "sha256": "10ef37294956a73fb423a11ac8c07f404f0d9865c20a7f8b0420099b481d6560",
+        "size": 1955303,
+        "pointerSize": 132
+      }
+    },
+    {
+      "rfilename": "samples/compare_church.png",
+      "blobId": "a73e718dc0995872abaa99621c378b603d786191",
+      "size": 2165043,
+      "lfs": {
+        "sha256": "3c8e7357ac5f98890bb879ed244800ed66b9ae2aedcbb3f076e5925d261c801f",
+        "size": 2165043,
+        "pointerSize": 132
+      }
+    },
+    {
+      "rfilename": "samples/compare_knitted.png",
+      "blobId": "18bc5fee6a89995820b9bf67f2b3c7715e0d31c1",
+      "size": 1716474,
+      "lfs": {
+        "sha256": "a78d9f48896c6f5e786120d03d6a026d10e36aa8ba67a85bfc3bad17adb5a0eb",
+        "size": 1716474,
+        "pointerSize": 132
+      }
+    }
+  ],
+  "cardData": {
+    "license": "other",
+    "license_name": "flux-kommunity-license",
+    "base_model": [
+      "black-forest-labs/flux-3-image-klein"
+    ]
+  }
+}

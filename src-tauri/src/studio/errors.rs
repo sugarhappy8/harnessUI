@@ -1168,7 +1168,7 @@ pub const FAMILY_RECORD_MISSING: &str = "its family record is missing";
 
 /// Why a recognised repository offers no file: each of its model files was refused when its
 /// entry or its download was worked out (a part not pinned, a licence not known).
-pub const NO_FILE_OFFERED: &str = "None of this repository's model files can be downloaded here.";
+pub const NO_FILE_OFFERED: &str = "Studio could not assemble the files needed to run this model.";
 
 /// Why an installed model that this build cannot read is not for this computer (its family
 /// record hidden by a newer signed catalog, a part's licence no longer known, a family this

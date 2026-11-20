@@ -37,11 +37,16 @@ pub enum GenFamily {
     /// FLUX.2 klein 4B.
     #[serde(rename = "flux2-klein-4b")]
     Flux2Klein4b,
+    /// FLUX.3 Image Klein, distilled.
+    #[serde(rename = "flux3-image-klein")]
+    Flux3ImageKlein,
     /// Z-Image Turbo.
     #[serde(rename = "z-image-turbo")]
     ZImageTurbo,
-    /// A 4-step distillation of Wan 2.2 TI2V-5B. The full Wan 2.2 5B (about 30–50 steps,
-    /// cfg 5) is not a family.
+    /// The full Wan 2.2 TI2V-5B.
+    #[serde(rename = "wan2.2-ti2v-5b")]
+    Wan22Ti2v5b,
+    /// A 4-step distillation of Wan 2.2 TI2V-5B.
     #[serde(rename = "wan2.2-ti2v-5b-fast")]
     Wan22Ti2v5bFast,
     /// Wan 2.1 T2V 1.3B.

@@ -258,6 +258,7 @@
     "allow-studio-local-repo",
     "allow-studio-local-fit",
     "allow-studio-local-download",
+    "allow-studio-local-download-file",
     "allow-studio-local-delete",
     "allow-studio-accept-local-notice"
   ]

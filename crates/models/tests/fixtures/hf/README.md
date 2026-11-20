@@ -18,6 +18,10 @@ network.
 - `repo-uncensored.json`: a Z-Image Turbo re-upload tagged `uncensored`.
 - `repo-no-hashes.json`: a Z-Image Turbo repository whose files have no LFS SHA-256.
 
+## Recorded on 2026-11-20
+
+`repo-flux3-klein-gguf.json` and `repo-qwen3-vl-4b-instruct-gguf.json` retain the identity, revision, tags, licence, architecture, parameter count and file listing for the Unsloth FLUX.3 checkpoint and its Qwen text encoder.
+
 ## Recorded on 2026-11-18 (0.1.0 Studio)
 
 Real answers from huggingface.co, recorded the day the catalog's picture and video parts

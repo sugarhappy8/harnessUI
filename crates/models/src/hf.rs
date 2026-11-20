@@ -178,6 +178,8 @@ pub struct RepoDetail {
     pub id: String,
     /// The commit the listing describes; downloads pin it.
     pub commit: String,
+    /// The upstream of an explicitly tagged quantization, if unambiguous.
+    pub quantized_from: Option<String>,
     pub gated: Gated,
     pub license: Option<String>,
     pub files: Vec<RepoFile>,
@@ -808,27 +810,44 @@ impl HfClient {
         self.search_url(url).await
     }
 
-    /// 0.1.0 Studio: picture or video GGUF repositories matching `text`, from three queries
-    /// (each `filter=gguf` with the text, most downloads first, 30 at most and the
-    /// `expand[]` of [`HfClient::search`]): one for each of the kind's two pipeline tags
-    /// (text-to-image and image-to-image, or text-to-video and image-to-video) and one
-    /// without a pipeline tag, which finds repositories that carry none. Merged by
-    /// [`merge_generator_searches`].
+    /// Search both media pipeline tags across formats, plus GGUF repositories without a tag.
+    /// An exact owner/repository query can also find an untagged weight repository.
     pub async fn search_generators(
         &self,
         text: &str,
         kind: GenSearchKind,
     ) -> Result<Vec<RepoSummary>, HfError> {
+        let text = text.trim();
+        if validate_repo_id(text).is_ok() {
+            // An exact repository can be private, untagged or outside the popular search page.
+            match self.repo(text, None).await {
+                Ok(repo) => {
+                    return Ok(vec![RepoSummary {
+                        id: repo.id,
+                        gated: repo.gated,
+                        license: repo.license,
+                        downloads: repo.info.downloads.unwrap_or_default(),
+                        likes: repo.info.likes.unwrap_or_default(),
+                        pipeline_tag: repo.info.pipeline_tag,
+                        last_modified: repo.info.last_modified,
+                        not_for_all_audiences: repo.not_for_all_audiences,
+                    }]);
+                }
+                Err(HfError::NotFound) => {}
+                Err(e) => return Err(e),
+            }
+        }
         let [first, second, untagged] = self.generator_search_urls(text, kind);
         let (first, second, untagged) = futures_util::try_join!(
             self.search_url(first),
             self.search_url(second),
             self.search_url(untagged)
         )?;
-        Ok(merge_generator_searches(
+        Ok(rank_generator_searches(
             vec![first.items, second.items],
             untagged.items,
             kind,
+            text.trim(),
         ))
     }
 
@@ -840,9 +859,10 @@ impl HfClient {
             let mut url = self.url("/api/models");
             {
                 let mut p = url.query_pairs_mut();
-                p.append_pair("filter", "gguf");
                 if let Some(tag) = tag {
                     p.append_pair("pipeline_tag", tag);
+                } else if validate_repo_id(text.trim()).is_err() {
+                    p.append_pair("filter", "gguf");
                 }
                 let text = text.trim();
                 if !text.is_empty() {
@@ -1129,29 +1149,53 @@ fn parse_search_items(arr: &[serde_json::Value]) -> Vec<RepoSummary> {
         .collect()
 }
 
-/// 0.1.0 Studio: one list by repository id, most downloads first. Every item of the tagged
-/// searches is kept; an item of the untagged search only when its name is a family of
-/// `kind` (`gen_search::family_of_name`), since it can be anything a text matches (chat
-/// models among them).
+/// Merge media search pages when no exact repository was requested.
 pub fn merge_generator_searches(
     tagged: Vec<Vec<RepoSummary>>,
     untagged: Vec<RepoSummary>,
     kind: GenSearchKind,
 ) -> Vec<RepoSummary> {
-    let of_kind = |item: &RepoSummary| match gen_search::family_of_name(&item.id) {
+    rank_generator_searches(tagged, untagged, kind, "")
+}
+
+/// Search results by exact repository name, then matching GGUF families, then popularity.
+fn rank_generator_searches(
+    tagged: Vec<Vec<RepoSummary>>,
+    untagged: Vec<RepoSummary>,
+    kind: GenSearchKind,
+    query: &str,
+) -> Vec<RepoSummary> {
+    let of_kind = |item: &RepoSummary| match gen_search::family_of_name(
+        item.id.rsplit('/').next().unwrap_or(&item.id),
+    ) {
         gen_search::NameMatch::Family(f) => gen_search::search_kind(f) == kind,
         _ => false,
     };
+    let exact = |item: &RepoSummary| item.id.eq_ignore_ascii_case(query);
+    let matching: std::collections::BTreeSet<_> = untagged
+        .iter()
+        .filter(|i| of_kind(i))
+        .map(|i| i.id.clone())
+        .collect();
     let mut by_id: BTreeMap<String, RepoSummary> = BTreeMap::new();
-    let all = tagged
-        .into_iter()
-        .flatten()
-        .chain(untagged.into_iter().filter(of_kind));
+    let all = tagged.into_iter().flatten().chain(
+        untagged
+            .into_iter()
+            .filter(|i| matching.contains(&i.id) || exact(i)),
+    );
     for item in all {
         by_id.entry(item.id.clone()).or_insert(item);
     }
     let mut out: Vec<RepoSummary> = by_id.into_values().collect();
-    out.sort_by(|a, b| b.downloads.cmp(&a.downloads).then_with(|| a.id.cmp(&b.id)));
+    out.sort_by_cached_key(|item| {
+        (
+            !exact(item),
+            !(matching.contains(&item.id)
+                || (item.id.to_ascii_lowercase().contains("gguf") && of_kind(item))),
+            std::cmp::Reverse(item.downloads),
+            item.id.clone(),
+        )
+    });
     out
 }
 
@@ -1259,8 +1303,17 @@ pub fn parse_repo_detail(
             .map(str::to_string)
     });
     let info = parse_hub_info(repo_id, &commit, endpoint, v);
+    let mut quantized = strings(v.get("tags"))
+        .into_iter()
+        .filter_map(|tag| tag.strip_prefix("base_model:quantized:"))
+        .filter(|id| validate_repo_id(id).is_ok());
+    let quantized_from = quantized
+        .next()
+        .filter(|first| quantized.all(|other| other == *first))
+        .map(str::to_owned);
     Ok(RepoDetail {
         info,
+        quantized_from,
         id: repo_id.to_string(),
         commit,
         gated: gated_of(v.get("gated").unwrap_or(&serde_json::Value::Bool(false))),
@@ -1833,7 +1886,7 @@ mod tests {
                 .collect::<Vec<_>>(),
             [v[3]["id"].as_str().unwrap()]
         );
-        let merged = merge_generator_searches(vec![items], vec![], GenSearchKind::Pictures);
+        let merged = rank_generator_searches(vec![items], vec![], GenSearchKind::Pictures, "");
         assert_eq!(merged.len(), 30);
         assert!(merged.iter().any(|i| i.id == v[3]["id"].as_str().unwrap()));
     }
@@ -1858,7 +1911,11 @@ mod tests {
                         .filter(|(k, _)| k == "filter")
                         .map(|(_, v)| v.as_str())
                         .collect();
-                    assert_eq!(filters, ["gguf"], "never conversational: {u}");
+                    if q.iter().any(|(k, _)| k == "pipeline_tag") {
+                        assert!(filters.is_empty(), "also find safetensors: {u}");
+                    } else {
+                        assert_eq!(filters, ["gguf"]);
+                    }
                     for (k, v) in [
                         ("search", "wan2.2 5b"),
                         ("sort", "downloads"),
@@ -1897,30 +1954,43 @@ mod tests {
 
     #[test]
     fn video_search_finds_turbo_and_untagged_repos() {
-        let m = merge_generator_searches(
+        let m = rank_generator_searches(
             vec![items(GEN_IMAGE_TO_VIDEO)],
             items(GEN_UNTAGGED),
             GenSearchKind::Video,
+            "5b",
         );
-        // Shown, then "Not supported yet" when opened.
+        // Other distillations remain visible for standalone download.
         assert!(m.iter().any(|i| i.id.to_lowercase().contains("turbo")));
         assert!(
             m.iter()
                 .any(|i| i.id == "Green-Sky/FastWan2.2-TI2V-5B-FullAttn-GGUF")
         );
-        // Untagged items need a family name of this kind: the recorded answer has Qwen3 and
-        // full Wan 2.2 repositories that are not shown from it.
+        // Untagged results include the full Wan family, and exclude unrelated chat models.
         assert!(items(GEN_UNTAGGED).iter().any(|i| i.id.contains("Qwen3")));
         assert!(m.iter().all(|i| !i.id.contains("Qwen3")));
-        assert!(!m.iter().any(|i| i.id == "QuantStack/Wan2.2-TI2V-5B-GGUF"));
-        // Once each, most downloads first.
+        assert!(m.iter().any(|i| i.id == "QuantStack/Wan2.2-TI2V-5B-GGUF"));
+        // Known GGUF families appear before download-only results.
         let ids: BTreeSet<&str> = m.iter().map(|i| i.id.as_str()).collect();
         assert_eq!(ids.len(), m.len());
-        assert!(m.windows(2).all(|w| w[0].downloads >= w[1].downloads));
-        assert_eq!(m.len(), items(GEN_IMAGE_TO_VIDEO).len() + 1);
+        assert_eq!(m[0].id, "QuantStack/Wan2.2-TI2V-5B-GGUF");
+        assert_eq!(m.len(), items(GEN_IMAGE_TO_VIDEO).len() + 6);
         // A picture search keeps none of the video names.
-        let p = merge_generator_searches(vec![], items(GEN_UNTAGGED), GenSearchKind::Pictures);
+        let p = rank_generator_searches(vec![], items(GEN_UNTAGGED), GenSearchKind::Pictures, "");
         assert!(p.is_empty(), "{p:?}");
+    }
+
+    #[test]
+    fn exact_search_includes_an_untagged_repository_of_any_format() {
+        let query = "some-owner/Weights";
+        let c = HfClient::new(HfConfig::default()).unwrap();
+        let urls = c.generator_search_urls(query, GenSearchKind::Pictures);
+        assert!(urls[2].query_pairs().all(|(k, _)| k != "filter"));
+        let mut list = items(GEN_UNTAGGED);
+        list[0].id = query.to_string();
+        let found = rank_generator_searches(vec![], list, GenSearchKind::Pictures, query);
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].id, query);
     }
 
     /// A server answering `n` requests, each with `status`, `headers` and the body `respond`
@@ -1997,7 +2067,7 @@ mod tests {
                 .iter()
                 .any(|i| i.id == "Green-Sky/FastWan2.2-TI2V-5B-FullAttn-GGUF")
         );
-        assert_eq!(found.len(), items(GEN_IMAGE_TO_VIDEO).len() + 1);
+        assert_eq!(found.len(), items(GEN_IMAGE_TO_VIDEO).len() + 6);
     }
 
     #[test]
