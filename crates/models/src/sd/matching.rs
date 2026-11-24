@@ -9,6 +9,7 @@ use serde::{Deserialize, Serialize};
 use crate::gen_catalog::GenInput;
 use crate::sd::CannotRunReason;
 use crate::sd::detect::SdVersion;
+use crate::sd::index::{PICKLE_EXTENSIONS, READ_EXTENSIONS};
 use crate::sd::inspect::MatchFacts;
 use crate::sd::recipes::{SlotId, recipe, recipes};
 
@@ -110,7 +111,8 @@ const TABLE: &[(&[SdVersion], Outcome, &[Rule])] = {
             To("sdxl-checkpoint"),
             &[
                 (&[Is(W("turbo"))], To("sdxl-turbo")),
-                (&[Is(W("nitro"))], To("nitrosd-realism")),
+                // NitroFusion's files are `nitrosd-realism_unet`, `nitrosd-vibrant_unet`.
+                (&[Any(&[W("nitro"), W("nitrosd")])], To("nitrosd-realism")),
             ],
         ),
         (&[SdxlPix2pix], To("cosxl-edit"), &[]),
@@ -262,8 +264,20 @@ const TABLE: &[(&[SdVersion], Outcome, &[Rule])] = {
             &[Pixart],
             To("pixart-sigma"),
             &[
-                (&[Is(W("alpha")), Is(W("512"))], To("pixart-alpha-512")),
-                (&[Is(W("alpha"))], To("pixart-alpha-1024")),
+                // Every official PixArt repo is under `PixArt-alpha/`, Sigma's too, and the
+                // 512 one is `PixArt-XL-2-512x512`.
+                (
+                    &[
+                        Is(W("alpha")),
+                        Any(&[W("512"), W("512x512")]),
+                        NoneOf(&[W("sigma")]),
+                    ],
+                    To("pixart-alpha-512"),
+                ),
+                (
+                    &[Is(W("alpha")), NoneOf(&[W("sigma")])],
+                    To("pixart-alpha-1024"),
+                ),
             ],
         ),
         (
@@ -310,7 +324,8 @@ const TABLE: &[(&[SdVersion], Outcome, &[Rule])] = {
                 (
                     &[
                         Any(&[W("ltx-2"), W("ltx2")]),
-                        NoneOf(&[W("2.3"), W("23"), W("2.5"), W("25")]),
+                        // `ltx-2-3`: Kijai/LTX2.3_comfy's `ltx-2-3-22b-dev_transformer_only`.
+                        NoneOf(&[W("2.3"), W("23"), W("2.5"), W("25"), W("ltx-2-3")]),
                     ],
                     Refuse(CannotRunReason::Ltx2),
                 ),
@@ -426,8 +441,14 @@ const INPUTS: &[(&[&str], &[RecipeInput])] = {
             &[input(Source, 0, 1), input(Mask, 0, 1), input(Control, 0, 1)],
         ),
         (
-            &["wan21-i2v", "wan22-i2v", "hunyuan-video-15-i2v"],
+            &["wan21-i2v", "hunyuan-video-15-i2v"],
             &[input(StartFrame, 1, 1)],
+        ),
+        // Wan 2.2 I2V also takes an end frame: the engine puts it in the last conditioning
+        // frame and marks it in the mask (`src/pipeline/video.cpp:934-937, 978-980, 1000-1004`).
+        (
+            &["wan22-i2v"],
+            &[input(StartFrame, 1, 1), input(EndFrame, 0, 1)],
         ),
         (
             &["wan21-flf2v"],
@@ -438,19 +459,56 @@ const INPUTS: &[(&[&str], &[RecipeInput])] = {
 
 // ---- Names ---------------------------------------------------------------------------
 
-/// Lower case, with `_` and ` ` read as `-`.
-fn normalise(text: &str) -> String {
-    text.to_lowercase().replace(['_', ' '], "-")
+/// The extensions a name sheds before it is read for words: the weights files Studio reads
+/// or refuses, and `.json`.
+const EXTENSIONS: [&[&str]; 3] = [&READ_EXTENSIONS, &PICKLE_EXTENSIONS, &[".json"]];
+
+/// `text` without one trailing extension of [`EXTENSIONS`], in any case.
+fn without_extension(text: &str) -> &str {
+    EXTENSIONS
+        .iter()
+        .flat_map(|group| group.iter())
+        .find_map(|ext| {
+            let cut = text.len().checked_sub(ext.len())?;
+            text.get(cut..)
+                .filter(|end| end.eq_ignore_ascii_case(ext))
+                .and_then(|_| text.get(..cut))
+        })
+        .unwrap_or(text)
 }
 
-/// The words of `text`: lower case, with `_` and ` ` read as `-`, split at every character
-/// other than an ASCII letter, a digit or `.` (so `wan2.2` and `2.3` stay whole).
+/// `text` without its extension, lower case, with `_` and ` ` read as `-`.
+fn normalise(text: &str) -> String {
+    without_extension(text)
+        .to_lowercase()
+        .replace(['_', ' '], "-")
+}
+
+/// The words of `text`. A trailing weights or config extension (`.safetensors`, `.sft`,
+/// `.gguf`, `.ckpt`, `.pt`, `.pth`, `.bin`, `.json`, in any case) is dropped first; then
+/// the text is lower-cased, `_` and ` ` read as `-`, and split at every character other
+/// than an ASCII letter or digit, except a `.` between two digits (so `wan2.1`, `0.9` and
+/// `v1.5` stay whole, and `ae.safetensors` gives `ae`).
 pub fn tokens(text: &str) -> Vec<String> {
-    normalise(text)
-        .split(|c: char| !(c.is_ascii_alphanumeric() || c == '.'))
-        .filter(|t| !t.is_empty())
-        .map(str::to_owned)
-        .collect()
+    let chars: Vec<char> = normalise(text).chars().collect();
+    let digit = |i: Option<usize>| {
+        i.and_then(|i| chars.get(i))
+            .is_some_and(|c| c.is_ascii_digit())
+    };
+    let mut words = Vec::new();
+    let mut word = String::new();
+    for (i, &c) in chars.iter().enumerate() {
+        let joins = c == '.' && digit(i.checked_sub(1)) && digit(Some(i + 1));
+        if c.is_ascii_alphanumeric() || joins {
+            word.push(c);
+        } else if !word.is_empty() {
+            words.push(std::mem::take(&mut word));
+        }
+    }
+    if !word.is_empty() {
+        words.push(word);
+    }
+    words
 }
 
 /// A name read for tokens.
@@ -1182,10 +1240,147 @@ mod tests {
         assert_eq!(
             tokens("unsloth/LTX-2.3-GGUF/ltx-2.3-22b-dev-Q4_K_M.gguf"),
             [
-                "unsloth", "ltx", "2.3", "gguf", "ltx", "2.3", "22b", "dev", "q4", "k", "m.gguf"
+                "unsloth", "ltx", "2.3", "gguf", "ltx", "2.3", "22b", "dev", "q4", "k", "m"
+            ]
+        );
+        assert_eq!(
+            tokens("Comfy-Org/Wan-2.1/wan2.1_t2v_1.3B_fp16.safetensors"),
+            [
+                "comfy", "org", "wan", "2.1", "wan2.1", "t2v", "1.3b", "fp16"
             ]
         );
         assert!(tokens(" _-/ ").is_empty());
+    }
+
+    // ---- Pre-review round: the extension, real names, the Wan 2.2 end frame ----------
+
+    #[test]
+    fn tokens_drop_the_extension_and_split_dots_between_letters() {
+        // The FLUX.1 VAE, and the engine docs' renamed copy (`docs/models/flux.md`).
+        assert_eq!(
+            tokens("black-forest-labs/FLUX.1-dev/ae.safetensors"),
+            ["black", "forest", "labs", "flux", "1", "dev", "ae"]
+        );
+        assert_eq!(tokens("ae.sft"), ["ae"]);
+        assert_eq!(tokens("o/sd-v1.5/x.CKPT"), ["o", "sd", "v1.5", "x"]);
+        assert_eq!(tokens("model.pth"), ["model"]);
+        assert_eq!(tokens("model.pt"), ["model"]);
+        assert_eq!(tokens("config.json"), ["config"]);
+        // Only the very end, and only once.
+        assert_eq!(tokens("x.gguf.part"), ["x", "gguf", "part"]);
+        assert_eq!(tokens("x.safetensors.json"), ["x", "safetensors"]);
+        assert_eq!(tokens("ltx-0.9.8"), ["ltx", "0.9.8"]);
+        assert_eq!(tokens("a.b"), ["a", "b"]);
+        // `.sft` goes too, or a renamed MOSS-Image base file would read as SFT.
+        assert_eq!(
+            m(SdVersion::MossImage, "o/r/moss_image_base.sft"),
+            Match::Recipe {
+                id: "moss-image-base",
+                part: None
+            }
+        );
+    }
+
+    #[test]
+    fn a_rule_word_right_before_the_extension_counts() {
+        let recipe = |id| Match::Recipe { id, part: None };
+        assert_eq!(
+            m(
+                SdVersion::Ltxav,
+                "Lightricks/LTX-2.3/ltx-2.3-22b-distilled.safetensors"
+            ),
+            recipe("ltx23-distilled")
+        );
+        assert_eq!(
+            m(
+                SdVersion::ErnieImage,
+                "Comfy-Org/ERNIE-Image/diffusion_models/ernie-image-turbo.safetensors"
+            ),
+            recipe("ernie-image-turbo")
+        );
+        assert_eq!(
+            noise_part("o/r/Wan2.2-T2V-A14B-HighNoise.gguf"),
+            Some(NoisePart::High)
+        );
+    }
+
+    #[test]
+    fn nitrosd_files_match_the_nitrosd_recipe() {
+        for name in [
+            "ChenDY/NitroFusion/nitrosd-realism_unet.safetensors",
+            "ChenDY/NitroFusion/nitrosd-realism_comfyui.safetensors",
+        ] {
+            assert_eq!(
+                m(SdVersion::Sdxl, name),
+                Match::Recipe {
+                    id: "nitrosd-realism",
+                    part: None
+                },
+                "{name}"
+            );
+        }
+    }
+
+    #[test]
+    fn pixart_reads_512x512_and_sigma_under_the_pixart_alpha_owner() {
+        let pixart = |name| m(SdVersion::Pixart, name);
+        let recipe = |id| Match::Recipe { id, part: None };
+        assert_eq!(
+            pixart(
+                "PixArt-alpha/PixArt-XL-2-512x512/transformer/diffusion_pytorch_model.safetensors"
+            ),
+            recipe("pixart-alpha-512")
+        );
+        assert_eq!(
+            pixart(
+                "PixArt-alpha/PixArt-XL-2-1024-MS/transformer/diffusion_pytorch_model.safetensors"
+            ),
+            recipe("pixart-alpha-1024")
+        );
+        assert_eq!(
+            pixart(
+                "PixArt-alpha/PixArt-Sigma-XL-2-1024-MS/transformer/diffusion_pytorch_model.safetensors"
+            ),
+            recipe("pixart-sigma")
+        );
+    }
+
+    #[test]
+    fn kijais_ltx_2_3_file_runs_and_ltx_2_files_are_still_refused() {
+        assert_eq!(
+            m(
+                SdVersion::Ltxav,
+                "Kijai/LTX2.3_comfy/diffusion_models/ltx-2-3-22b-dev_transformer_only_fp8_input_scaled.safetensors"
+            ),
+            Match::Recipe {
+                id: "ltx23-dev",
+                part: None
+            }
+        );
+        for name in [
+            "Kijai/LTXV2_comfy/diffusion_models/ltx-2-19b-dev_fp4_transformer_only.safetensors",
+            "Lightricks/LTX-2/ltx-2-19b-distilled.safetensors",
+        ] {
+            assert_eq!(
+                m(SdVersion::Ltxav, name),
+                Match::Refused(CannotRunReason::Ltx2),
+                "{name}"
+            );
+        }
+    }
+
+    #[test]
+    fn wan22_i2v_takes_an_optional_end_frame() {
+        // `src/pipeline/video.cpp:934-937, 978-980, 1000-1004` at the pin.
+        assert!(recipe("wan22-i2v").unwrap().feature("end_image"));
+        let ins = inputs_of("wan22-i2v")
+            .into_iter()
+            .map(|i| (i.role, i.min, i.max))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            ins,
+            [(GenInput::StartFrame, 1, 1), (GenInput::EndFrame, 0, 1)]
+        );
     }
 
     #[test]
@@ -1207,7 +1402,7 @@ mod tests {
         };
         assert_eq!(ins("flux2-klein-4b"), [(GenInput::Reference, 0, 4)]);
         assert_eq!(ins("minimax-h3-ref2va"), [(GenInput::Reference, 0, 4)]);
-        assert_eq!(ins("wan22-i2v"), [(GenInput::StartFrame, 1, 1)]);
+        assert_eq!(ins("wan21-i2v"), [(GenInput::StartFrame, 1, 1)]);
         assert_eq!(
             ins("ltx23-dev"),
             [(GenInput::StartFrame, 0, 1), (GenInput::EndFrame, 0, 1)]
