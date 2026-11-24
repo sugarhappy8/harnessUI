@@ -111,7 +111,13 @@ pub fn parse_prefix(bytes: &[u8]) -> Result<TensorIndex, IndexError> {
 }
 
 fn parse_gguf(bytes: &[u8]) -> Result<TensorIndex, IndexError> {
-    let (raw, metadata) = gguf::tensor_table_from_prefix(bytes)?;
+    let (raw, metadata, end) = gguf::tensor_table_with_end(bytes)?;
+    // A caller may hand over more than the cap; the table still has to end inside it.
+    if end > GGUF_HEADER_CAP {
+        return Err(IndexError::TooLarge {
+            cap: GGUF_HEADER_CAP,
+        });
+    }
     Ok(TensorIndex {
         format: FileFormat::Gguf,
         tensors: raw
@@ -437,6 +443,59 @@ mod tests {
                 "cut {cut}"
             );
         }
+    }
+
+    /// A GGUF with a string array, a fixed-size array and a tensor table.
+    fn gguf_with_arrays() -> Vec<u8> {
+        gguf::testing::Writer::new()
+            .str("general.architecture", "flux")
+            .str_array("general.tags", &["alpha", "beta", "gamma", "delta"])
+            .u32_array("x.heads", &[1, 2, 3, 4, 5, 6])
+            .shaped_tensor("a.weight", &[4, 4])
+            .shaped_tensor("b.weight", &[8])
+            .build()
+    }
+
+    #[test]
+    fn every_cut_inside_arrays_and_the_table_is_truncated() {
+        let g = gguf_with_arrays();
+        let end = match parse_prefix(&g) {
+            Ok(_) => {
+                // The first length that parses is where the table ends.
+                (0..g.len())
+                    .find(|&n| parse_prefix(&g[..n]).is_ok())
+                    .unwrap()
+            }
+            Err(e) => panic!("{e}"),
+        };
+        assert!(end > 100, "arrays should come before the end");
+        for cut in 0..end {
+            assert!(
+                matches!(parse_prefix(&g[..cut]), Err(IndexError::Truncated { .. })),
+                "cut {cut}"
+            );
+        }
+        assert_eq!(parse_prefix(&g[..end]).unwrap().tensors.len(), 2);
+    }
+
+    #[test]
+    fn a_gguf_table_ending_past_the_cap_is_too_large() {
+        // Metadata of a 70 MiB kept string pushes the table end past 64 MiB.
+        let big = "x".repeat(70 * 1024 * 1024);
+        let mut w = gguf::testing::Writer::new();
+        w = w.str("general.architecture", "flux").str("pad", &big);
+        let g = w.shaped_tensor("a.weight", &[4]).build();
+        assert!(matches!(
+            parse_prefix(&g),
+            Err(IndexError::TooLarge {
+                cap: GGUF_HEADER_CAP
+            })
+        ));
+        // And a prefix that is still inside the metadata past the cap is TooLarge too.
+        assert!(matches!(
+            parse_prefix(&g[..1024]),
+            Err(IndexError::TooLarge { .. })
+        ));
     }
 
     #[test]

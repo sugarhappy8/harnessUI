@@ -364,6 +364,14 @@ const METADATA_STEP: u64 = 1024 * 1024;
 pub fn tensor_table_from_prefix(
     bytes: &[u8],
 ) -> Result<(Vec<RawTensor>, BTreeMap<String, String>), GgufError> {
+    tensor_table_with_end(bytes).map(|(raw, strings, _)| (raw, strings))
+}
+
+/// The tensors, the string metadata and the byte position where the table ends.
+pub type TableWithEnd = (Vec<RawTensor>, BTreeMap<String, String>, u64);
+
+/// [`tensor_table_from_prefix`] and the byte position where the table ends.
+pub fn tensor_table_with_end(bytes: &[u8]) -> Result<TableWithEnd, GgufError> {
     let mut r = Reader {
         inner: io::Cursor::new(bytes),
         pos: 0,
@@ -392,7 +400,7 @@ pub fn tensor_table_from_prefix(
             _ => None,
         })
         .collect();
-    Ok((raw, strings))
+    Ok((raw, strings, r.pos))
 }
 
 /// ggml's name for a tensor type number, as `type_traits` has it at the ggml commit in
@@ -663,7 +671,9 @@ impl<R: Read + Seek> Reader<R> {
                     _ => return Err(GgufError::Corrupt(format!("unknown value type {elem}"))),
                 };
                 if count.saturating_mul(min_size) > self.remaining() {
-                    return Err(GgufError::Corrupt("array longer than the file".into()));
+                    return Err(
+                        self.short(count.saturating_mul(min_size), "array longer than the file")
+                    );
                 }
                 if count > MAX_KEPT_ARRAY || !self.keep(count.saturating_mul(VALUE_COST)) {
                     match fixed_size(elem) {
@@ -712,7 +722,9 @@ impl<R: Read + Seek> Reader<R> {
                     Some(size) => self.skip(count.saturating_mul(size)),
                     None => {
                         if count.saturating_mul(8) > self.remaining() {
-                            return Err(GgufError::Corrupt("array longer than the file".into()));
+                            return Err(
+                                self.short(count.saturating_mul(8), "array longer than the file")
+                            );
                         }
                         for _ in 0..count {
                             self.skip_value(elem, depth + 1)?;
