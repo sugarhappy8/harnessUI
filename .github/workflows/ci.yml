@@ -79,6 +79,7 @@ jobs:
       # the release notes release.yml makes from CHANGELOG.md (scripts/release_notes.py).
       - run: python3 -I scripts/setup_updater_test.py
       - run: python3 -I scripts/release_notes_test.py
+      - run: python3 -I scripts/vendor_sd_recipes_test.py
       # ARCHITECTURE.md's sentences about rea's tests and CI against the workflows and test
       # files they describe, and no TODO(lead) marker left in it.
       - run: python3 -I scripts/docs_test.py

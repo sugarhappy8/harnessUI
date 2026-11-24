@@ -35,7 +35,7 @@ SOFTWARE.
 
 ### stable-diffusion.cpp (the Studio engine, sd-cli) — MIT
 
-Pinned build master-1106-532d2c1; see sd.lock.json. On macOS sd-cli is built into the app from the pinned commit with its ggml, libwebp and libwebm submodules. On Windows the Studio engine is the upstream Vulkan build of the same commit (sd-cli.exe, stable-diffusion.dll, the ggml, libwebp, libsharpyuv and webm DLLs), downloaded with your first local model; its zip carries only the ggml and stable-diffusion.cpp licence texts. Both builds include the components in the entries that follow, whose texts are taken from the pinned commit's tree.
+Pinned build master-1106-532d2c1; see sd.lock.json. On macOS sd-cli is built into the app from the pinned commit with its ggml, libwebp and libwebm submodules. On Windows the Studio engine is the upstream Vulkan build of the same commit (sd-cli.exe, stable-diffusion.dll, the ggml, libwebp, libsharpyuv and webm DLLs), downloaded with your first local model; its zip carries only the ggml and stable-diffusion.cpp licence texts. Both builds include the components in the entries that follow, whose texts are taken from the pinned commit's tree. catalog/sd-recipes.json is copied from stable-diffusion.cpp (MIT) at the pinned commit.
 
 ```text
 MIT License

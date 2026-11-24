@@ -26,6 +26,8 @@ pub mod hf;
 // 0.0.6 item 6 (WP10b): what each part of a model weighs and where it goes.
 pub mod layers;
 pub mod placement;
+// 0.2.0 Studio: the pinned engine's recipes and the file-header detection built on them.
+pub mod sd;
 pub use gguf::{TensorEntry, TensorShape, read_tensor_shapes, read_tensor_table};
 pub use layers::{LayerSize, LayerSizes};
 // 0.0.7 P1: the conversation memory as llama.cpp allocates it, layer by layer.

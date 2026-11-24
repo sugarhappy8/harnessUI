@@ -112,7 +112,8 @@ def render() -> str:
          "its ggml, libwebp and libwebm submodules. On Windows the Studio engine is the upstream Vulkan build of the same commit "
          "(sd-cli.exe, stable-diffusion.dll, the ggml, libwebp, libsharpyuv and webm DLLs), downloaded with your first local "
          "model; its zip carries only the ggml and stable-diffusion.cpp licence texts. Both builds include the components "
-         "in the entries that follow, whose texts are taken from the pinned commit's tree."),
+         "in the entries that follow, whose texts are taken from the pinned commit's tree. "
+         "catalog/sd-recipes.json is copied from stable-diffusion.cpp (MIT) at the pinned commit."),
         ("ggml (built into the Studio engine) — MIT", "ggml-LICENSE", ""),
         ("libwebp, with its sharpyuv library (built into the Studio engine) — BSD-3-Clause", "libwebp-COPYING", ""),
         ("libwebm (built into the Studio engine) — BSD-3-Clause", "libwebm-LICENSE.TXT", ""),
