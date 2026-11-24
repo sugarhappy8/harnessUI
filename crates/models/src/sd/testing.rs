@@ -440,7 +440,7 @@ pub fn fixture_source(name: &str) -> FixtureSource {
 /// dtype is `"f16"`.
 ///
 /// # Panics
-/// For a name that is not one of `gguf::testing::TENSOR_FIXTURES`.
+/// For a short name (`"klein4b"`) whose `<name>-tensors.txt` is not one of `gguf::testing::TENSOR_FIXTURES`.
 pub fn gguf_txt_fixture(name: &str) -> crate::sd::index::TensorIndex {
     crate::sd::index::TensorIndex {
         format: crate::sd::index::FileFormat::Gguf,

@@ -22,8 +22,9 @@ file order. GGUF dtypes are ggml's names.
 ## Trim rule
 
 - Keep every tensor whose name contains a marker of the detection table (the literals of
-  `ModelLoader::get_sd_version`), the parameter-label tables or the matching facts (the
-  `MARKERS` list of the script).
+  `ModelLoader::get_sd_version`) or of R6's tables and R7's facts: the `MARKERS` list of
+  the script. In the LoRA files a marker is matched against the module part of the name,
+  without the `.lora_down.weight`, `.lora_up.weight`, `.alpha` and similar suffixes.
 - Keep the first tensor of each top-level name prefix (the text before the first `.`), and
   the first tensor of the lowest and the highest N of each numbered block (`...blocks.N.`,
   `...layers.N.`).

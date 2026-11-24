@@ -22,6 +22,14 @@
    ]
   ],
   [
+   "enc.blk.0.attn_q.weight",
+   "q5_K",
+   [
+    4096,
+    4096
+   ]
+  ],
+  [
    "token_embd.weight",
    "q6_K",
    [

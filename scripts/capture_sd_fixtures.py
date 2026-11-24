@@ -24,7 +24,6 @@ SAFETENSORS_HEADER_CAP = 100 * 1024 * 1024
 GGUF_HEADER_CAP = 64 * 1024 * 1024
 FIRST_READ = 1 << 20
 
-R = lambda repo, rev: (repo, rev)
 # (name, repo, revision, path, size, sha256)
 FIXTURES = [
     ("sd15", "stable-diffusion-v1-5/stable-diffusion-v1-5", "451f4fe16113bff5a5d2269ed5ad43b0592e9a14", "v1-5-pruned-emaonly.safetensors", 4265146304, "6ce0161689b3853acaa03779ec93eafe75a02f4ced659bee03f50797806fa2fa"),
@@ -99,11 +98,22 @@ MARKERS = [
     # video and other families' own fingerprints (R6 labels, R7 facts)
     "head.head.weight", "img_emb.proj", "time_projection", "text_embedding.0.weight",
     "patch_embedding.", "single_transformer_blocks.0.",
+    # fix round 1: the rest of the tables' literals
+    "byt5_in.fc1.weight", "blk.0.attn_q.weight", "conditioner.embedders.1", "cond_stage_model.1",
+    "te.1", "video_patch_proj.weight", "connector.layers.0.self_attn.q_proj.weight",
+    "decoder.proj_out.weight", "text_encoders.clip_l.", "text_encoders.clip_g.",
+    "text_encoders.t5xxl.", "text_encoders.llm.", "cond_stage_model.1.",
+    "conditioner.embedders.1.", "mm.", "v.blk.",
+    "encoder.block.0.layer.0.SelfAttention.q.weight", "wav2vec2.",
+    "feature_extractor.conv_layers.", "audio_vae.", "vocoder.", "connectors.",
+    "embeddings_connector",
     "context_refiner", "noise_refiner", "token_embd.weight", "shared.weight",
     "encoder.final_layer_norm", "decoder.conv_in", "encoder.conv_in", "quant_conv",
     "logit_scale", "text_projection", "position_ids",
 ]
 LORA_EXTRA = ["attn2_to_k", "lora_te2_", "te2."]
+# A LoRA name is its module plus a format suffix; markers match the module part.
+LORA_SUFFIX = re.compile(r"\.(lora_down|lora_up|lora_A|lora_B|lora\.down|lora\.up|lora_A\.default|lora_B\.default)(\.weight)?$|\.(alpha|diff|diff_b)$|\.(weight|bias)$")
 KEPT_METADATA = re.compile(r"^(modelspec\.(?!thumbnail$).*|ss_base_model_version|ss_network_module|general\.architecture|general\.name)$")
 NUMBERED = re.compile(r"^(.*?)\.(\d+)\.")
 
@@ -180,7 +190,7 @@ class Cursor:
     def string(self):
         return self.take(self.unpack("<Q")).decode("utf-8", "replace")
 
-    def value(self, ty, keep):
+    def value(self, ty):
         """Reads one metadata value; arrays are skipped, only strings are kept."""
         if ty == 8:
             return self.string()
@@ -190,7 +200,7 @@ class Cursor:
                 self.take(struct.calcsize(SCALAR[inner]) * count)
             else:
                 for _ in range(count):
-                    self.value(inner, False)
+                    self.value(inner)
             return None
         if ty in SCALAR:
             return self.unpack(SCALAR[ty])
@@ -206,7 +216,7 @@ def parse_gguf(buf):
     metadata = {}
     for _ in range(kv_count):
         key = c.string()
-        v = c.value(c.unpack("<I"), True)
+        v = c.value(c.unpack("<I"))
         if isinstance(v, str):
             metadata[key] = v
     tensors = []
@@ -248,7 +258,12 @@ def trim(name, tensors, metadata):
     seen_prefix = set()
     blocks = {}  # key -> {N: first index}
     for i, (tname, _, _) in enumerate(tensors):
-        if any(m in tname for m in markers):
+        if lora:
+            module = LORA_SUFFIX.sub("", tname)
+            hit = any(re.sub(r"\.(weight|bias)$", "", m) in module for m in markers)
+        else:
+            hit = any(m in tname for m in markers)
+        if hit:
             keep[i] = True
         prefix = tname.split(".", 1)[0]
         if prefix not in seen_prefix:
@@ -313,8 +328,9 @@ file order. GGUF dtypes are ggml's names.
 ## Trim rule
 
 - Keep every tensor whose name contains a marker of the detection table (the literals of
-  `ModelLoader::get_sd_version`), the parameter-label tables or the matching facts (the
-  `MARKERS` list of the script).
+  `ModelLoader::get_sd_version`) or of R6's tables and R7's facts: the `MARKERS` list of
+  the script. In the LoRA files a marker is matched against the module part of the name,
+  without the `.lora_down.weight`, `.lora_up.weight`, `.alpha` and similar suffixes.
 - Keep the first tensor of each top-level name prefix (the text before the first `.`), and
   the first tensor of the lowest and the highest N of each numbered block (`...blocks.N.`,
   `...layers.N.`).

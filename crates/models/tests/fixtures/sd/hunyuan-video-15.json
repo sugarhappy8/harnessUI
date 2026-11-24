@@ -18,6 +18,14 @@
    ]
   ],
   [
+   "byt5_in.fc1.weight",
+   "F16",
+   [
+    2048,
+    1472
+   ]
+  ],
+  [
    "cond_type_embedding.weight",
    "F16",
    [
