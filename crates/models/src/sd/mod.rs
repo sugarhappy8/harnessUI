@@ -10,6 +10,7 @@ pub mod detect;
 pub mod index;
 pub mod inspect;
 pub mod lora;
+pub mod matching;
 pub mod recipes;
 pub mod remote;
 #[cfg(any(test, feature = "test-support"))]

@@ -83,7 +83,8 @@ impl GenRole {
     }
 }
 
-/// A picture a model takes beside the prompt.
+/// A picture a model takes beside the prompt: the one vocabulary of input pictures, for
+/// catalog entries and for the engine's recipes (`sd::matching::inputs_of`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum GenInput {
@@ -93,6 +94,13 @@ pub enum GenInput {
     StartFrame,
     /// The last frame of a clip.
     EndFrame,
+    /// The picture to change (the engine's `-i`), for inpainting, Fill and Flex.2.
+    Source,
+    /// Which part of the picture to change (`--mask`): any picture, which the engine
+    /// resizes and rounds to black and white; the white areas change.
+    Mask,
+    /// A control picture (`--control-image`), such as edges or depth.
+    Control,
 }
 
 /// A compiled-in adjustment for one platform; never free text.
@@ -1056,6 +1064,9 @@ mod tests {
             (json!(GenInput::Reference), "reference"),
             (json!(GenInput::StartFrame), "startFrame"),
             (json!(GenInput::EndFrame), "endFrame"),
+            (json!(GenInput::Source), "source"),
+            (json!(GenInput::Mask), "mask"),
+            (json!(GenInput::Control), "control"),
             (json!(Quirk::MetalTensorOff), "metal-tensor-off"),
             (json!(Quirk::VideoWebpOnMac), "video-webp-on-mac"),
             (json!(Commercial::UnderRevenue), "underRevenue"),
@@ -1088,7 +1099,7 @@ mod tests {
             );
         }
         hidden_for("unknown family, role, input, kind or quirk", |e| {
-            e["inputs"] = json!(["mask"])
+            e["inputs"] = json!(["audio"])
         });
         hidden_for("unknown family, role, input, kind or quirk", |e| {
             e["kind"] = json!("audio")
