@@ -7,13 +7,14 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use serde::Deserialize;
+use serde::de::IntoDeserializer;
 
 use crate::catalog::{Catalog, is_hex};
 use crate::gen_catalog::{ALLOWED_PART_EXTENSIONS, GenLicence, check_licences, keyed};
 use crate::hf::{validate_repo_id, validate_repo_path};
 use crate::sd::detect::SdVersion;
 use crate::sd::matching::{in_scope_recipes, recipes_for};
-use crate::sd::recipes::SlotId;
+use crate::sd::recipes::{SlotId, recipe};
 
 /// One shared extra file.
 #[derive(Debug, Clone, PartialEq, Deserialize)]
@@ -50,6 +51,40 @@ pub struct CompanionTable {
     pub by_recipe: BTreeMap<String, BTreeMap<SlotId, String>>,
 }
 
+/// A file as the catalog writes it: its version and slot words are read as strings, so that
+/// a word a newer catalog adds is skipped rather than failing the table.
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct CompanionRaw {
+    id: String,
+    slot: String,
+    versions: Vec<String>,
+    repo: String,
+    revision: String,
+    path: String,
+    size: u64,
+    sha256: String,
+    license: String,
+}
+
+/// The section as the catalog writes it, every word a string.
+#[derive(Default, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+struct TableRaw {
+    licenses: BTreeMap<String, GenLicence>,
+    files: Vec<CompanionRaw>,
+    by_version: BTreeMap<String, BTreeMap<String, String>>,
+    by_recipe: BTreeMap<String, BTreeMap<String, String>>,
+}
+
+/// The slot a word names, by [`SlotId`]'s own serde names; `None` for a word this build
+/// does not know.
+fn slot_of(word: &str) -> Option<SlotId> {
+    let word: serde::de::value::StrDeserializer<'_, serde::de::value::Error> =
+        word.into_deserializer();
+    SlotId::deserialize(word).ok()
+}
+
 /// The slots a companion may not fill: the model's own weights, and the adapters that put
 /// a recipe out of scope.
 fn is_companion_slot(slot: SlotId) -> bool {
@@ -65,19 +100,80 @@ fn is_companion_slot(slot: SlotId) -> bool {
 
 impl CompanionTable {
     /// Reads and checks the catalog's companion table; a catalog without one gives an
-    /// empty table. Refused, naming what is wrong, when:
+    /// empty table.
+    ///
+    /// Words this build does not know (a newer signed catalog's) are skipped, so that they
+    /// never take the other companions away:
+    /// - an unknown version word is dropped from a file's `versions`, and a file left with
+    ///   no known version, or with an unknown slot word, is skipped;
+    /// - a default keyed by an unknown version, slot or recipe word is skipped, and so is
+    ///   one naming a skipped file.
+    ///
+    /// Refused, naming what is wrong, when:
     /// - a repo id or path is not valid, a revision is not 40 hex, a SHA-256 not 64 hex, a
     ///   size 0, an extension not in [`ALLOWED_PART_EXTENSIONS`], or an id listed twice;
     /// - a file fills a model or adapter slot;
     /// - a licence a file names is missing, or one with bundled text does not pin it;
     /// - a default names no companion, or one of another slot, or one whose `versions`
     ///   leave out the version (for `byRecipe`, every version whose recipes include it);
-    /// - a `byRecipe` key is not a recipe Studio runs.
+    /// - a `byRecipe` key is a recipe Studio leaves out ([`in_scope_recipes`]).
     pub fn from_catalog(catalog: &Catalog) -> Result<CompanionTable, String> {
         let raw = serde_json::Value::Object(catalog.companions.clone().into_iter().collect());
-        let mut table: CompanionTable = serde_json::from_value(raw)
+        let raw: TableRaw = serde_json::from_value(raw)
             .map_err(|e| format!("the companion table does not read: {e}"))?;
-        table.licenses = keyed(table.licenses);
+        let mut ids = BTreeSet::new();
+        let mut skipped = BTreeSet::new();
+        let mut files = Vec::new();
+        for f in raw.files {
+            if !ids.insert(f.id.clone()) {
+                return Err(format!("companion {}: listed twice", f.id));
+            }
+            let versions: Vec<SdVersion> = f
+                .versions
+                .iter()
+                .filter_map(|w| SdVersion::from_word(w))
+                .collect();
+            match slot_of(&f.slot) {
+                Some(slot) if !versions.is_empty() => files.push(Companion {
+                    id: f.id,
+                    slot,
+                    versions,
+                    repo: f.repo,
+                    revision: f.revision,
+                    path: f.path,
+                    size: f.size,
+                    sha256: f.sha256,
+                    license: f.license,
+                }),
+                _ => {
+                    skipped.insert(f.id);
+                }
+            }
+        }
+        let known = |slots: BTreeMap<String, String>| -> BTreeMap<SlotId, String> {
+            slots
+                .into_iter()
+                .filter(|(_, id)| !skipped.contains(id))
+                .filter_map(|(word, id)| Some((slot_of(&word)?, id)))
+                .collect()
+        };
+        let by_version = raw
+            .by_version
+            .into_iter()
+            .filter_map(|(word, slots)| Some((SdVersion::from_word(&word)?, known(slots))))
+            .collect();
+        let by_recipe = raw
+            .by_recipe
+            .into_iter()
+            .filter(|(id, _)| recipe(id).is_some())
+            .map(|(id, slots)| (id, known(slots)))
+            .collect();
+        let table = CompanionTable {
+            licenses: keyed(raw.licenses),
+            files,
+            by_version,
+            by_recipe,
+        };
         table.check()?;
         Ok(table)
     }
@@ -122,13 +218,10 @@ impl CompanionTable {
                 return Err(format!("licence {}: the SHA-256 is not 64 hex", l.id));
             }
         }
-        let mut ids = BTreeSet::new();
         for c in &self.files {
             let id = &c.id;
             let path = c.path.to_ascii_lowercase();
-            let fault = if !ids.insert(id.as_str()) {
-                "listed twice"
-            } else if validate_repo_id(&c.repo).is_err() {
+            let fault = if validate_repo_id(&c.repo).is_err() {
                 "not a valid repo id"
             } else if validate_repo_path(&c.path).is_err() {
                 "not a valid path"
@@ -208,13 +301,28 @@ mod tests {
         CompanionTable::from_catalog(&Catalog::bundled()).unwrap()
     }
 
-    /// Why the bundled table, with one change to its JSON, is refused.
-    fn refused(edit: impl FnOnce(&mut Value)) -> String {
+    /// The bundled table with one change to its JSON.
+    fn changed(edit: impl FnOnce(&mut Value)) -> Result<CompanionTable, String> {
         let mut c = Catalog::bundled();
         let mut v = Value::Object(c.companions.into_iter().collect());
         edit(&mut v);
         c.companions = v.as_object().unwrap().clone().into_iter().collect();
-        CompanionTable::from_catalog(&c).unwrap_err()
+        CompanionTable::from_catalog(&c)
+    }
+
+    /// Why the bundled table, with one change to its JSON, is refused.
+    fn refused(edit: impl FnOnce(&mut Value)) -> String {
+        changed(edit).unwrap_err()
+    }
+
+    /// The index in `files` of the companion `id`.
+    fn at(v: &Value, id: &str) -> usize {
+        v["files"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .position(|f| f["id"] == id)
+            .unwrap()
     }
 
     fn id(c: Option<&Companion>) -> Option<&str> {
@@ -331,6 +439,10 @@ mod tests {
         // No bundled text: the 0.1.x rule, the SHA-256 of `<repo>@<commit>:<id>`.
         let sai = t.licence("stabilityai-ai-community").unwrap();
         assert_eq!(
+            sai.url,
+            "https://huggingface.co/Comfy-Org/stable-diffusion-3.5/blob/934251d1e6168bcb45a069abc5bd5cdd5f8fea00/README.md"
+        );
+        assert_eq!(
             sai.sha256,
             sha256_hex(
                 b"Comfy-Org/stable-diffusion-3.5@934251d1e6168bcb45a069abc5bd5cdd5f8fea00:stabilityai-ai-community"
@@ -396,13 +508,11 @@ mod tests {
                 json!("t5xxl-fp8"),
                 "companion t5xxl-fp8: listed twice",
             ),
+            ("size", json!("big"), "the companion table does not read"),
         ] {
             let err = refused(|v| v["files"][0][key] = value.clone());
             assert!(err.contains(says), "{key} {value}: {err}");
         }
-        // A word this build does not know.
-        let err = refused(|v| v["files"][0]["versions"][0] = json!("flux9"));
-        assert!(err.contains("the companion table does not read"), "{err}");
     }
 
     #[test]
@@ -430,22 +540,142 @@ mod tests {
                 ("byRecipe", "flux2-klein-9b", "llm", "qwen3-4b-2507-q8"),
                 "byRecipe flux2-klein-9b llm: qwen3-4b-2507-q8 does not suit flux2-klein",
             ),
-            (
-                ("byRecipe", "flux1-fill", "vae", "ae-flux1"),
-                "byRecipe flux1-fill vae: ae-flux1 does not suit flux-fill",
-            ),
         ] {
             let (section, key, slot, companion) = edit;
             let err = refused(|v| v[section][key][slot] = json!(companion));
             assert!(err.contains(says), "{err}");
         }
-        for recipe in ["sd1-controlnet", "no-such-recipe"] {
-            let err = refused(|v| v["byRecipe"][recipe] = json!({}));
-            assert!(
-                err.contains(&format!("byRecipe {recipe}: not a recipe Studio runs")),
-                "{err}"
-            );
+        // flux1-fill is reached from flux and flux-fill: its own default must suit both.
+        let err = refused(|v| {
+            let ae = at(v, "ae-flux1");
+            v["files"][ae]["versions"]
+                .as_array_mut()
+                .unwrap()
+                .retain(|w| w != "flux-fill");
+            v["byVersion"]["flux-fill"]
+                .as_object_mut()
+                .unwrap()
+                .remove("vae");
+            v["byRecipe"]["flux1-fill"] = json!({ "vae": "ae-flux1" });
+        });
+        assert!(
+            err.contains("byRecipe flux1-fill vae: ae-flux1 does not suit flux-fill"),
+            "{err}"
+        );
+        // A known recipe that Studio leaves out.
+        let err = refused(|v| v["byRecipe"]["sd1-controlnet"] = json!({}));
+        assert!(
+            err.contains("byRecipe sd1-controlnet: not a recipe Studio runs"),
+            "{err}"
+        );
+    }
+
+    /// The engine runs Flux Fill and Flux Controls as Flux (`sd_version_is_flux`,
+    /// `src/model.h:139-150`): the same encoders (`build_flux`,
+    /// `src/model/integrations/flux.cpp:28-33`) and VAE (`vae_kind = ModelVAEKind::FLUX`,
+    /// `flux.cpp:53`, `68`, `84`).
+    #[test]
+    fn native_flux_fill_and_controls_files_take_flux_companions() {
+        let t = bundled();
+        for (recipe, version) in [
+            ("flux1-fill", SdVersion::FluxFill),
+            ("flux1-canny", SdVersion::FluxControls),
+            ("flux1-depth", SdVersion::FluxControls),
+        ] {
+            assert!(recipes_for(version).contains(&recipe), "{recipe}");
+            for (slot, want) in [
+                (SlotId::ClipL, "clip-l"),
+                (SlotId::T5xxl, "t5xxl-fp8"),
+                (SlotId::Vae, "ae-flux1"),
+            ] {
+                assert_eq!(
+                    id(t.default_for(recipe, version, slot)),
+                    Some(want),
+                    "{recipe} {slot:?}"
+                );
+            }
         }
+    }
+
+    /// A newer signed catalog never takes the companions this build knows away.
+    #[test]
+    fn an_unknown_version_word_is_dropped_and_the_file_kept() {
+        let t = changed(|v| {
+            let clip = at(v, "clip-l");
+            v["files"][clip]["versions"]
+                .as_array_mut()
+                .unwrap()
+                .push(json!("flux9"));
+        })
+        .unwrap();
+        assert_eq!(t.files.len(), 22);
+        let clip = t.files.iter().find(|c| c.id == "clip-l").unwrap();
+        use SdVersion::*;
+        assert_eq!(clip.versions, [Flux, FluxFill, FluxControls, Flex2, Sd3]);
+        assert_eq!(
+            id(t.default_for("flux1-dev", Flux, SlotId::ClipL)),
+            Some("clip-l")
+        );
+    }
+
+    #[test]
+    fn a_file_of_only_unknown_versions_or_an_unknown_slot_is_skipped() {
+        let t = changed(|v| {
+            let fp8 = at(v, "t5xxl-fp8");
+            let mut new_version = v["files"][fp8].clone();
+            new_version["id"] = json!("t5xxl-flux9");
+            new_version["versions"] = json!(["flux9"]);
+            let mut new_slot = v["files"][fp8].clone();
+            new_slot["id"] = json!("encoder-9");
+            new_slot["slot"] = json!("text_encoder_9");
+            let files = v["files"].as_array_mut().unwrap();
+            files.push(new_version);
+            files.push(new_slot);
+            // Defaults naming a skipped file are skipped too.
+            v["byVersion"]["chroma"]["t5xxl"] = json!("t5xxl-flux9");
+            v["byRecipe"]["flux1-dev"] = json!({ "t5xxl": "encoder-9" });
+        })
+        .unwrap();
+        assert_eq!(t.files.len(), 22);
+        assert!(
+            t.files
+                .iter()
+                .all(|c| c.id != "t5xxl-flux9" && c.id != "encoder-9")
+        );
+        assert_eq!(
+            t.default_for("chroma", SdVersion::Chroma, SlotId::T5xxl),
+            None
+        );
+        assert_eq!(
+            id(t.default_for("flux1-dev", SdVersion::Flux, SlotId::T5xxl)),
+            Some("t5xxl-fp8")
+        );
+        // A default naming a file that was never listed is still refused.
+        let err = refused(|v| v["byVersion"]["chroma"]["t5xxl"] = json!("never-listed"));
+        assert!(
+            err.contains("byVersion chroma t5xxl: never-listed is not a companion"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn a_default_keyed_by_an_unknown_word_is_skipped() {
+        let t = changed(|v| {
+            v["byVersion"]["flux9"] = json!({ "t5xxl": "t5xxl-fp8" });
+            v["byVersion"]["flux"]["text_encoder_9"] = json!("t5xxl-fp8");
+            v["byRecipe"]["flux9-dev"] = json!({ "t5xxl": "t5xxl-fp8" });
+        })
+        .unwrap();
+        assert_eq!((t.files.len(), t.by_version.len()), (22, 33));
+        assert_eq!(
+            t.by_version[&SdVersion::Flux]
+                .keys()
+                .copied()
+                .collect::<Vec<_>>(),
+            [SlotId::ClipL, SlotId::T5xxl, SlotId::Vae]
+        );
+        assert!(!t.by_recipe.contains_key("flux9-dev"));
+        assert_eq!(t, bundled());
     }
 
     #[test]

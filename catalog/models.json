@@ -1410,7 +1410,7 @@
       },
       "stabilityai-ai-community": {
         "name": "Stability AI Community License Agreement",
-        "url": "https://huggingface.co/Comfy-Org/stable-diffusion-3.5/blob/934251d1e6168bcb45a069abc5bd5cdd5f8fea00/LICENSE.md",
+        "url": "https://huggingface.co/Comfy-Org/stable-diffusion-3.5/blob/934251d1e6168bcb45a069abc5bd5cdd5f8fea00/README.md",
         "sha256": "d57ccd6052c6aedc71fbd7ba897815a5a6714c0b981e7d632988e9c2803da3ca",
         "commercialOutputs": "underRevenue",
         "revenueLimitUsd": 1000000,
@@ -1425,6 +1425,8 @@
         "slot": "clip_l",
         "versions": [
           "flux",
+          "flux-fill",
+          "flux-controls",
           "flex-2",
           "sd3"
         ],
@@ -1440,6 +1442,8 @@
         "slot": "t5xxl",
         "versions": [
           "flux",
+          "flux-fill",
+          "flux-controls",
           "flex-2",
           "chroma",
           "chroma-radiance",
@@ -1457,6 +1461,8 @@
         "slot": "t5xxl",
         "versions": [
           "flux",
+          "flux-fill",
+          "flux-controls",
           "flex-2",
           "chroma",
           "chroma-radiance",
@@ -1487,6 +1493,8 @@
         "slot": "vae",
         "versions": [
           "flux",
+          "flux-fill",
+          "flux-controls",
           "flex-2",
           "chroma",
           "z-image",
@@ -1758,6 +1766,16 @@
         "t5xxl": "t5xxl-fp8",
         "vae": "ae-flux1"
       },
+      "flux-fill": {
+        "clip_l": "clip-l",
+        "t5xxl": "t5xxl-fp8",
+        "vae": "ae-flux1"
+      },
+      "flux-controls": {
+        "clip_l": "clip-l",
+        "t5xxl": "t5xxl-fp8",
+        "vae": "ae-flux1"
+      },
       "flex-2": {
         "clip_l": "clip-l",
         "t5xxl": "t5xxl-fp8",
@@ -1786,8 +1804,7 @@
       },
       "longcat": {
         "llm": "qwen2.5-vl-7b-q8",
-        "vae": "ae-flux1",
-        "llm_vision": "qwen2.5-vl-7b-mmproj"
+        "vae": "ae-flux1"
       },
       "hunyuan-video": {
         "llm": "qwen2.5-vl-7b-q8"
