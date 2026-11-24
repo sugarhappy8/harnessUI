@@ -435,6 +435,26 @@ pub fn fixture_source(name: &str) -> FixtureSource {
     fixture_file(name).source
 }
 
+/// An index of `names` with their shapes as written, every dtype `F16`.
+pub fn index_of(
+    format: crate::sd::index::FileFormat,
+    names: &[(&str, &[u64])],
+) -> crate::sd::index::TensorIndex {
+    crate::sd::index::TensorIndex {
+        format,
+        tensors: names
+            .iter()
+            .map(|(name, shape)| crate::sd::index::TensorInfo {
+                name: name.to_string(),
+                dtype: "F16".into(),
+                shape: shape.to_vec(),
+            })
+            .collect(),
+        metadata: Default::default(),
+        parameters_hint: None,
+    }
+}
+
 /// `index` without every tensor whose name contains `part`.
 pub fn without(index: &crate::sd::index::TensorIndex, part: &str) -> crate::sd::index::TensorIndex {
     let mut out = index.clone();

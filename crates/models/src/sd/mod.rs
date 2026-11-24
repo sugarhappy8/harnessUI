@@ -9,6 +9,7 @@ use crate::sd::inspect::{FileKind, MatchFacts};
 pub mod detect;
 pub mod index;
 pub mod inspect;
+pub mod lora;
 pub mod recipes;
 pub mod remote;
 #[cfg(any(test, feature = "test-support"))]
