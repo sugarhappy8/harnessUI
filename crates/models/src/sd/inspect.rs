@@ -490,6 +490,25 @@ fn extra_slot(index: &TensorIndex) -> Option<SlotId> {
     if (named("decoder.conv_in.weight") || prefixed("first_stage_model.decoder.")) && !diffusion {
         return Some(SlotId::Vae);
     }
+    // The Wan 2.1 and 2.2 VAE, also Qwen-Image's, in its own names: the decoder's `conv1`
+    // and `head.2` (`src/model/vae/wan_vae.hpp:871-876, 918-927`; Wan 2.2 TI2V-5B differs
+    // only inside its up blocks, 889-899) and the top-level `conv2` (1105-1110). The runner
+    // probes `decoder.conv1.weight` itself (1326). Diffusers names meet the row above, which
+    // the engine converts (`src/name_conversion.cpp:1253-1344`).
+    if named("decoder.conv1.weight")
+        && named("decoder.head.2.weight")
+        && named("conv2.weight")
+        && !diffusion
+    {
+        return Some(SlotId::Vae);
+    }
+    // The HunyuanVideo 1.5 and LTX causal VAEs, whose decoder `conv_in` and `conv_out` are
+    // causal convolutions holding a `conv` (`src/model/vae/hunyuan_vae.hpp:64-78, 670, 689`;
+    // `src/model/vae/ltx_vae.hpp:86-100, 907, 943`). The LTX audio VAE's are under
+    // `audio_vae.` (`ltx_audio_vae.hpp:81-82`).
+    if named("decoder.conv_in.conv.weight") && named("decoder.conv_out.conv.weight") && !diffusion {
+        return Some(SlotId::Vae);
+    }
     // TAESD.
     if prefixed("decoder.layers.") && prefixed("encoder.layers.") {
         return Some(SlotId::Tae);
@@ -1180,5 +1199,259 @@ mod tests {
             assert_eq!(serde_json::to_value(&kind).unwrap(), want);
             assert_eq!(serde_json::from_value::<FileKind>(want).unwrap(), kind);
         }
+    }
+
+    #[test]
+    fn every_fixture_keeps_its_answer() {
+        use SdVersion::*;
+        let model = |version, layout, embeds: &[SlotId]| FileKind::Model {
+            version,
+            layout,
+            embeds: embeds.to_vec(),
+        };
+        let dit = |version| model(version, Layout::DiffusionOnly, &[]);
+        let extra = |slot| FileKind::Extra { slot };
+        let fixtures = [
+            (
+                "sd15",
+                model(Sd1, Layout::Checkpoint, &[SlotId::ClipL, SlotId::Vae]),
+            ),
+            (
+                "sdxl",
+                model(
+                    Sdxl,
+                    Layout::Checkpoint,
+                    &[SlotId::ClipL, SlotId::ClipG, SlotId::Vae],
+                ),
+            ),
+            (
+                "sd35-medium",
+                model(Sd3, Layout::Checkpoint, &[SlotId::Vae]),
+            ),
+            ("flux1-dev", dit(Flux)),
+            ("flux1-kontext", dit(Flux)),
+            ("chroma", dit(Chroma)),
+            ("qwen-image", dit(QwenImage)),
+            ("qwen-image-edit-2509", dit(QwenImage)),
+            ("z-image-turbo", dit(ZImage)),
+            ("flux2-klein-4b", dit(Flux2Klein)),
+            ("wan21-t2v-1.3b", model(Wan2, Layout::Checkpoint, &[])),
+            ("wan21-i2v-14b", dit(Wan2)),
+            ("wan22-ti2v-5b", dit(Wan22Ti2v)),
+            ("wan22-t2v-a14b-high", dit(Wan2)),
+            ("wan22-t2v-a14b-low", dit(Wan2)),
+            ("hunyuan-video-15", dit(HunyuanVideo)),
+            ("ltx23", dit(Ltxav)),
+            (
+                "sdxl-lora-pixel-art",
+                FileKind::Lora {
+                    format: LoraFormat::Kohya,
+                    base: Some(Sdxl),
+                },
+            ),
+            (
+                "flux-lora-realism",
+                FileKind::Lora {
+                    format: LoraFormat::Kohya,
+                    base: Some(Flux),
+                },
+            ),
+            (
+                "lumina2",
+                FileKind::CannotRun {
+                    reason: CannotRunReason::Lumina2,
+                    version: Some(ZImage),
+                },
+            ),
+            (
+                "sd14-diffusers-unet",
+                FileKind::CannotRun {
+                    reason: CannotRunReason::UnknownWeights,
+                    version: None,
+                },
+            ),
+            ("sd14-diffusers-text-encoder", extra(SlotId::ClipL)),
+            ("ae-flux1", extra(SlotId::Vae)),
+            ("clip-l", extra(SlotId::ClipL)),
+            ("umt5-xxl-q5km", extra(SlotId::T5xxl)),
+        ];
+        assert_eq!(fixtures.len(), 25);
+        for (name, want) in fixtures {
+            assert_eq!(inspect(&fixture(name)).kind, want, "{name}");
+        }
+        for (name, want) in [
+            ("klein4b", dit(Flux2Klein)),
+            ("klein9b", dit(Flux2Klein)),
+            ("zimage", dit(ZImage)),
+            ("wan22-ti2v-5b", dit(Wan22Ti2v)),
+            ("wan21-t2v-1.3b", model(Wan2, Layout::Checkpoint, &[])),
+            ("flux3-klein", dit(Flux3)),
+            ("qwen3-4b", extra(SlotId::Llm)),
+        ] {
+            assert_eq!(inspect(&gguf_txt_fixture(name)).kind, want, "{name}");
+        }
+    }
+
+    const UNKNOWN: FileKind = FileKind::CannotRun {
+        reason: CannotRunReason::UnknownWeights,
+        version: None,
+    };
+
+    #[test]
+    fn a_wan_vae_is_an_extra_vae_in_both_its_versions() {
+        let vae = FileKind::Extra { slot: SlotId::Vae };
+        // Wan 2.1, also Qwen-Image's: z_dim 16, decoder width 384, RGB out.
+        let wan21: &[(&str, &[u64])] = &[
+            ("conv1.weight", &[32, 32, 1, 1, 1]),
+            ("conv2.weight", &[16, 16, 1, 1, 1]),
+            ("decoder.conv1.bias", &[384]),
+            ("decoder.conv1.weight", &[384, 16, 3, 3, 3]),
+            ("decoder.head.0.gamma", &[96, 1, 1, 1]),
+            ("decoder.head.2.weight", &[3, 96, 3, 3, 3]),
+            ("decoder.middle.0.residual.0.gamma", &[384, 1, 1, 1]),
+            (
+                "decoder.upsamples.0.residual.2.weight",
+                &[384, 384, 3, 3, 3],
+            ),
+            ("encoder.conv1.weight", &[96, 3, 3, 3, 3]),
+            ("encoder.head.2.weight", &[32, 384, 3, 3, 3]),
+        ];
+        assert_eq!(kind(S, wan21), vae);
+        // Wan 2.2 TI2V-5B: z_dim 48, decoder width 1024, 12 patchified channels out, and
+        // the nested `upsamples.N.upsamples.M` of its up blocks.
+        let wan22: &[(&str, &[u64])] = &[
+            ("conv1.weight", &[96, 96, 1, 1, 1]),
+            ("conv2.weight", &[48, 48, 1, 1, 1]),
+            ("decoder.conv1.weight", &[1024, 48, 3, 3, 3]),
+            ("decoder.head.2.weight", &[12, 256, 3, 3, 3]),
+            (
+                "decoder.upsamples.0.upsamples.0.residual.2.weight",
+                &[1024, 1024, 3, 3, 3],
+            ),
+            ("encoder.conv1.weight", &[160, 12, 3, 3, 3]),
+        ];
+        assert_eq!(kind(S, wan22), vae);
+        // A decode-only export, and a 2D one with 4-D weights (`wan_vae.hpp:1326-1327`).
+        assert_eq!(
+            kind(
+                G,
+                &[
+                    ("conv2.weight", &[1, 1, 16, 16]),
+                    ("decoder.conv1.weight", &[3, 3, 16, 384]),
+                    ("decoder.head.2.weight", &[3, 3, 96, 3]),
+                ]
+            ),
+            vae
+        );
+        // It takes all three names.
+        assert_eq!(kind(S, &wan21[3..4]), UNKNOWN);
+        assert_eq!(kind(S, &[wan21[1], wan21[3]]), UNKNOWN, "no decoder.head.2");
+        assert_eq!(kind(S, &[wan21[3], wan21[5]]), UNKNOWN, "no conv2");
+        assert_eq!(kind(S, &[wan21[1], wan21[5]]), UNKNOWN, "no decoder.conv1");
+    }
+
+    #[test]
+    fn hunyuan_and_ltx_causal_vaes_are_extra_vaes() {
+        let vae = FileKind::Extra { slot: SlotId::Vae };
+        // HunyuanVideo 1.5: 32 latent channels, RMS norms, `mid.block_1`, `up.N.block.M`.
+        let hunyuan: &[(&str, &[u64])] = &[
+            ("decoder.conv_in.conv.bias", &[1024]),
+            ("decoder.conv_in.conv.weight", &[1024, 32, 3, 3, 3]),
+            ("decoder.conv_out.conv.weight", &[3, 128, 3, 3, 3]),
+            (
+                "decoder.mid.block_1.conv1.conv.weight",
+                &[1024, 1024, 3, 3, 3],
+            ),
+            ("decoder.mid.block_1.norm1.gamma", &[1024, 1, 1, 1]),
+            ("decoder.norm_out.gamma", &[128, 1, 1, 1]),
+            (
+                "decoder.up.0.block.0.conv1.conv.weight",
+                &[1024, 1024, 3, 3, 3],
+            ),
+            ("encoder.conv_in.conv.weight", &[128, 3, 3, 3, 3]),
+        ];
+        assert_eq!(kind(S, hunyuan), vae);
+        // LTX: 128 latent channels, `up_blocks.N.res_blocks.M`, 48 patchified channels out,
+        // and the per-channel statistics.
+        let ltx: &[(&str, &[u64])] = &[
+            ("decoder.conv_in.conv.bias", &[1024]),
+            ("decoder.conv_in.conv.weight", &[1024, 128, 3, 3, 3]),
+            ("decoder.conv_out.conv.weight", &[48, 128, 3, 3, 3]),
+            (
+                "decoder.up_blocks.0.res_blocks.0.conv1.conv.weight",
+                &[1024, 1024, 3, 3, 3],
+            ),
+            ("encoder.conv_in.conv.weight", &[128, 48, 3, 3, 3]),
+            ("per_channel_statistics.mean-of-means", &[128]),
+            ("per_channel_statistics.std-of-means", &[128]),
+        ];
+        assert_eq!(kind(S, ltx), vae);
+        // A decoder needs both ends.
+        assert_eq!(kind(S, &ltx[1..2]), UNKNOWN);
+        // The LTX audio VAE's same names sit under `audio_vae.`.
+        assert_eq!(
+            kind(
+                S,
+                &[
+                    ("audio_vae.decoder.conv_in.conv.weight", &[512, 8, 3, 3]),
+                    ("audio_vae.decoder.conv_out.conv.weight", &[2, 128, 3, 3]),
+                ]
+            ),
+            FileKind::Extra {
+                slot: SlotId::AudioVae
+            }
+        );
+    }
+
+    #[test]
+    fn no_model_lora_or_marked_file_reads_as_one_of_these_vaes() {
+        let wan_vae: [(&str, &[u64]); 3] = [
+            ("conv2.weight", &[16, 16, 1, 1, 1]),
+            ("decoder.conv1.weight", &[384, 16, 3, 3, 3]),
+            ("decoder.head.2.weight", &[3, 96, 3, 3, 3]),
+        ];
+        let causal_vae: [(&str, &[u64]); 2] = [
+            ("decoder.conv_in.conv.weight", &[1024, 128, 3, 3, 3]),
+            ("decoder.conv_out.conv.weight", &[48, 128, 3, 3, 3]),
+        ];
+        let with = |mut index: TensorIndex, names: &[(&str, &[u64])]| {
+            index
+                .tensors
+                .extend(names_index(index.format, names).tensors);
+            index
+        };
+        // A diffusion model that carries the VAE's names is still the model.
+        assert!(matches!(
+            inspect(&with(fixture("wan21-i2v-14b"), &wan_vae)).kind,
+            FileKind::Model {
+                version: SdVersion::Wan2,
+                ..
+            }
+        ));
+        assert!(matches!(
+            inspect(&with(fixture("ltx23"), &causal_vae)).kind,
+            FileKind::Model {
+                version: SdVersion::Ltxav,
+                ..
+            }
+        ));
+        // With a diffusion marker the engine does not recognise, they are unknown weights.
+        for vae in [&wan_vae[..], &causal_vae[..]] {
+            for marker in ["model.diffusion_model.x.weight", "diffusion_model.x.weight"] {
+                let names = with(names_index(S, &[(marker, &[4])]), vae);
+                assert_eq!(inspect(&names).kind, UNKNOWN, "{marker}");
+            }
+        }
+        // A LoRA for a VAE is a LoRA.
+        assert!(matches!(
+            kind(
+                S,
+                &[
+                    ("decoder.conv_in.conv.lora_down.weight", &[8, 1024]),
+                    ("decoder.conv1.lora_down.weight", &[8, 384]),
+                ]
+            ),
+            FileKind::Lora { .. }
+        ));
     }
 }

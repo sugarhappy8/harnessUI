@@ -47,5 +47,7 @@ pub struct FileFacts {
     pub facts: MatchFacts,
     /// The whole file's parameter count ([`index::TensorIndex::parameters`]).
     pub parameters: u64,
+    /// Means nothing for `CannotRun { Pickle }`: a pickle file is never read, so the kind is
+    /// what counts.
     pub format: FileFormat,
 }
