@@ -435,6 +435,13 @@ pub fn fixture_source(name: &str) -> FixtureSource {
     fixture_file(name).source
 }
 
+/// `index` without every tensor whose name contains `part`.
+pub fn without(index: &crate::sd::index::TensorIndex, part: &str) -> crate::sd::index::TensorIndex {
+    let mut out = index.clone();
+    out.tensors.retain(|t| !t.name.contains(part));
+    out
+}
+
 /// A GGUF index from a 0.1.x `fixtures/gguf/<name>-tensors.txt` (`"klein4b"`), in file order
 /// with no metadata, as those files have none. The text files carry no types, so every
 /// dtype is `"f16"`.
