@@ -1071,6 +1071,7 @@ mod tests {
             name: format!("Model {id}"),
             kind: "image".into(),
             family: "z-image-turbo".into(),
+            recipe_id: Some("z-image-turbo".into()),
             parts: Value::Array(
                 files
                     .iter()
@@ -1188,6 +1189,7 @@ mod tests {
             name: entry.name.clone(),
             kind: "image".into(),
             family: "z-image-turbo".into(),
+            recipe_id: Some("z-image-turbo".into()),
             parts: Value::Array(parts),
             size_bytes: entry.total_bytes(),
             source: if catalog_id.is_some() {
@@ -1256,6 +1258,7 @@ mod tests {
         klein.parts[0].revision = "0".repeat(40);
         let row = store::GenModel {
             family: "flux2-klein-4b".into(),
+            recipe_id: Some("flux2-klein-4b".into()),
             ..installed_from(&klein, models, Some("flux2-klein-4b-q4"))
         };
         let e = entry_from_installed(&row, &catalog).unwrap();

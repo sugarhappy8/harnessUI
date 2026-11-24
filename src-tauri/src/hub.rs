@@ -2487,6 +2487,7 @@ mod tests {
             name: "FLUX.2 klein 4B".into(),
             kind: "image".into(),
             family: "flux2-klein-4b".into(),
+            recipe_id: Some("flux2-klein-4b".into()),
             parts: serde_json::json!([
                 {"role": "llm", "file": shared.display().to_string(), "sha256": old}
             ]),
@@ -2597,6 +2598,7 @@ mod tests {
             name: "FLUX.2 klein 4B".into(),
             kind: "image".into(),
             family: "flux2-klein-4b".into(),
+            recipe_id: Some("flux2-klein-4b".into()),
             parts: serde_json::json!([{"role": "llm", "file": encoder.display().to_string()}]),
             size_bytes: 700,
             source: store::GenSource::Catalog,

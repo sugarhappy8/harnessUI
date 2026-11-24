@@ -1538,6 +1538,9 @@ mod tests {
                 name: name.into(),
                 kind: "image".into(),
                 family: family.into(),
+                recipe_id: serde_json::from_value::<GenFamily>(json!(family))
+                    .ok()
+                    .map(|f| f.recipe_id().into()),
                 parts: json!(saved),
                 size_bytes: parts.iter().map(|p| p.size).sum(),
                 source: if catalog_id.is_some() {

@@ -17,6 +17,7 @@ use sha2::{Digest, Sha256};
 
 use crate::catalog::{Catalog, is_hex};
 use crate::hf::{Gated, validate_repo_id, validate_repo_path};
+use crate::sd::detect::SdVersion;
 
 /// What a model makes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
@@ -52,6 +53,42 @@ pub enum GenFamily {
     /// Wan 2.1 T2V 1.3B.
     #[serde(rename = "wan2.1-t2v-1.3b")]
     Wan21T2v1_3b,
+}
+
+impl GenFamily {
+    /// Every family, in declaration order.
+    pub const ALL: [GenFamily; 6] = [
+        GenFamily::Flux2Klein4b,
+        GenFamily::Flux3ImageKlein,
+        GenFamily::ZImageTurbo,
+        GenFamily::Wan22Ti2v5b,
+        GenFamily::Wan22Ti2v5bFast,
+        GenFamily::Wan21T2v1_3b,
+    ];
+
+    /// 0.2.0: the pinned engine's recipe a model of this family runs with (an id in
+    /// `catalog/sd-recipes.json`), which schema 4 gives every model 0.1.x installed. The
+    /// distilled Wan 2.2 TI2V-5B runs with the full model's recipe.
+    pub fn recipe_id(self) -> &'static str {
+        match self {
+            GenFamily::Flux2Klein4b => "flux2-klein-4b",
+            GenFamily::Flux3ImageKlein => "flux3-klein",
+            GenFamily::ZImageTurbo => "z-image-turbo",
+            GenFamily::Wan22Ti2v5b | GenFamily::Wan22Ti2v5bFast => "wan22-ti2v-5b",
+            GenFamily::Wan21T2v1_3b => "wan21-t2v",
+        }
+    }
+
+    /// 0.2.0: the engine version the pinned engine detects a model of this family as.
+    pub fn version(self) -> SdVersion {
+        match self {
+            GenFamily::Flux2Klein4b => SdVersion::Flux2Klein,
+            GenFamily::Flux3ImageKlein => SdVersion::Flux3,
+            GenFamily::ZImageTurbo => SdVersion::ZImage,
+            GenFamily::Wan22Ti2v5b | GenFamily::Wan22Ti2v5bFast => SdVersion::Wan22Ti2v,
+            GenFamily::Wan21T2v1_3b => SdVersion::Wan2,
+        }
+    }
 }
 
 /// What a part is to the engine; each role has one fixed engine flag.
@@ -1082,6 +1119,44 @@ mod tests {
             serde_json::from_str::<GenFamily>("\"wan2.1-t2v-1.3b\"").unwrap(),
             GenFamily::Wan21T2v1_3b
         );
+    }
+
+    /// 0.2.0: each of 0.1.x's families runs with one of the pinned engine's recipes, the
+    /// one schema 4 gives its installed models, and is the engine version that recipe is
+    /// matched from.
+    #[test]
+    fn each_01x_family_names_its_recipe_and_version() {
+        use GenFamily::*;
+        assert_eq!(
+            [
+                Flux2Klein4b,
+                Flux3ImageKlein,
+                ZImageTurbo,
+                Wan22Ti2v5b,
+                Wan22Ti2v5bFast,
+                Wan21T2v1_3b
+            ]
+            .map(|f| (f.recipe_id(), f.version())),
+            [
+                ("flux2-klein-4b", SdVersion::Flux2Klein),
+                ("flux3-klein", SdVersion::Flux3),
+                ("z-image-turbo", SdVersion::ZImage),
+                ("wan22-ti2v-5b", SdVersion::Wan22Ti2v),
+                ("wan22-ti2v-5b", SdVersion::Wan22Ti2v),
+                ("wan21-t2v", SdVersion::Wan2)
+            ]
+        );
+        for f in GenFamily::ALL {
+            assert!(crate::sd::recipes::recipe(f.recipe_id()).is_some(), "{f:?}");
+            assert!(
+                crate::sd::matching::in_scope_recipes().contains(&f.recipe_id()),
+                "{f:?}"
+            );
+            assert!(
+                crate::sd::matching::recipes_for(f.version()).contains(&f.recipe_id()),
+                "{f:?}: a file of its version can take its recipe"
+            );
+        }
     }
 
     #[test]

@@ -4065,6 +4065,7 @@ fn installed_row(entry: &GenEntry) -> store::GenModel {
             .as_str()
             .unwrap()
             .to_owned(),
+        recipe_id: Some(entry.family.recipe_id().into()),
         parts: json!([]),
         size_bytes: entry.total_bytes(),
         source: store::GenSource::Catalog,
@@ -5525,6 +5526,7 @@ async fn a_model_a_local_run_waits_for_or_uses_is_not_deleted() {
                 name: row.name,
                 kind: row.kind,
                 family: row.family,
+                recipe_id: row.recipe_id,
                 parts: json!([{"role": "diffusion", "file": file.display().to_string(), "size": 4}]),
                 size_bytes: 4,
                 source: row.source,

@@ -496,6 +496,49 @@ CREATE TABLE license_acceptances (
 );
 "#;
 
+/// Version 4 (app 0.2.0): Studio runs any picture or video model the pinned engine
+/// supports. Each installed model names the engine recipe it runs with (`recipe_id`), a
+/// model can be imported from a file on this computer (source `import`), and LoRAs get
+/// their own table. Not shipped until 0.2.0 is released.
+///
+/// SQLite cannot change a CHECK in place, so `gen_models` is rebuilt, as version 2 rebuilt
+/// the audit log: every row is copied as it was, and each of 0.1.x's six families (the only
+/// ones 0.1.x wrote, catalog or searched) gets its recipe, as `GenFamily::recipe_id` gives
+/// it. Nothing references `gen_models` (`creation_runs.gen_model_id` is not a foreign key),
+/// and it has no index, trigger or view to create again.
+const V4: &str = r#"
+CREATE TABLE gen_models_v4 (
+    id TEXT PRIMARY KEY, catalog_id TEXT, name TEXT NOT NULL,
+    kind TEXT NOT NULL CHECK (kind IN ('image', 'image-edit', 'video')),
+    -- a 0.1.x family word, an engine version word (models::sd::SdVersion), or 'unknown'
+    family TEXT NOT NULL,
+    -- an engine recipe id (catalog/sd-recipes.json); NULL: the model needs Set it up yourself
+    recipe_id TEXT,
+    parts_json TEXT NOT NULL CHECK (json_valid(parts_json)),
+    size_bytes INTEGER NOT NULL CHECK (size_bytes >= 0),
+    source TEXT NOT NULL CHECK (source IN ('catalog', 'search', 'import')),
+    added_at INTEGER NOT NULL);
+INSERT INTO gen_models_v4 SELECT id, catalog_id, name, kind, family,
+    CASE family WHEN 'flux2-klein-4b' THEN 'flux2-klein-4b' WHEN 'flux3-image-klein' THEN 'flux3-klein'
+        WHEN 'z-image-turbo' THEN 'z-image-turbo' WHEN 'wan2.2-ti2v-5b' THEN 'wan22-ti2v-5b'
+        WHEN 'wan2.2-ti2v-5b-fast' THEN 'wan22-ti2v-5b' WHEN 'wan2.1-t2v-1.3b' THEN 'wan21-t2v' ELSE NULL END,
+    parts_json, size_bytes, source, added_at FROM gen_models;
+DROP TABLE gen_models;
+ALTER TABLE gen_models_v4 RENAME TO gen_models;
+CREATE TABLE gen_loras (
+    id TEXT PRIMARY KEY,                -- "hf:<owner>/<repo>:<path>" or "local:<sha256>"
+    name TEXT NOT NULL,
+    file TEXT NOT NULL,                 -- absolute, under <models>/@loras
+    rel_name TEXT NOT NULL UNIQUE,      -- relative to <models>/@loras, '/' separators, no extension
+    repo TEXT, revision TEXT, path TEXT,
+    size_bytes INTEGER NOT NULL CHECK (size_bytes >= 0),
+    sha256 TEXT NOT NULL,
+    base_hint TEXT,                     -- an engine version word
+    format TEXT NOT NULL CHECK (format IN ('kohya', 'peft', 'lycoris', 'diff')),
+    source TEXT NOT NULL CHECK (source IN ('search', 'import')),
+    added_at INTEGER NOT NULL);
+"#;
+
 /// One schema step: the SQL that takes `user_version` from its index to index + 1.
 #[derive(Debug, Clone, Copy)]
 pub struct Migration {
@@ -511,6 +554,7 @@ pub const MIGRATIONS: Migrations = Migrations(&[
     Migration { sql: V1 },
     Migration { sql: V2 },
     Migration { sql: V3 },
+    Migration { sql: V4 },
 ]);
 
 /// Why bringing the schema up to date failed.
@@ -922,6 +966,11 @@ mod tests {
         Migrations(&[Migration { sql: V1 }, Migration { sql: V2 }])
             .to_latest(&mut conn)
             .expect("version 2");
+        let to_v3 = Migrations(&[
+            Migration { sql: V1 },
+            Migration { sql: V2 },
+            Migration { sql: V3 },
+        ]);
         conn.execute(
             "INSERT INTO providers (name, kind, base_url, secret_ref, enabled, created_at) \
              VALUES ('OpenRouter', 'openrouter', 'https://openrouter.ai/api/v1', \
@@ -970,7 +1019,7 @@ mod tests {
         let before = rows(&conn);
         assert!(!table_exists(&conn, "creation_runs"));
 
-        MIGRATIONS.to_latest(&mut conn).expect("version 3");
+        to_v3.to_latest(&mut conn).expect("version 3");
 
         let version: i64 = conn
             .pragma_query_value(None, "user_version", |r| r.get(0))
@@ -1055,5 +1104,264 @@ mod tests {
             .query_row("SELECT count(*) FROM license_acceptances", [], |r| r.get(0))
             .expect("count");
         assert_eq!(held, 1);
+    }
+
+    /// A database as 0.1.x left it: versions 1 to 3, opened as the app opens it (foreign
+    /// keys and recursive triggers on), with one installed model per `(id, family, source)`
+    /// as 0.1.x wrote them: every part with its file on disk (one under a Windows profile
+    /// with a non-ASCII name, one shared by every model), a catalog id for a catalog model,
+    /// and each its own install time.
+    fn at_v3_with_rows(rows: &[(&str, &str, &str)]) -> rusqlite::Connection {
+        at_v3_with_rows_in(rusqlite::Connection::open_in_memory().expect("open"), rows)
+    }
+
+    /// [`at_v3_with_rows`] in `conn`.
+    fn at_v3_with_rows_in(
+        mut conn: rusqlite::Connection,
+        rows: &[(&str, &str, &str)],
+    ) -> rusqlite::Connection {
+        conn.pragma_update(None, "foreign_keys", "ON")
+            .expect("pragma");
+        conn.pragma_update(None, "recursive_triggers", "ON")
+            .expect("pragma");
+        Migrations(&[
+            Migration { sql: V1 },
+            Migration { sql: V2 },
+            Migration { sql: V3 },
+        ])
+        .to_latest(&mut conn)
+        .expect("version 3");
+        for (n, (id, family, source)) in (0_i64..).zip(rows) {
+            let kind = if family.starts_with("wan") {
+                "video"
+            } else {
+                "image"
+            };
+            let part = |role: &str, file: String| {
+                serde_json::json!({
+                    "role": role,
+                    "repo": "o/r",
+                    "revision": "0123456789abcdef0123456789abcdef01234567",
+                    "path": file.rsplit(['/', '\\']).next(),
+                    "file": file,
+                    "size": 1_000 + n,
+                    "sha256": "ab".repeat(32),
+                    "license": "apache-2.0",
+                })
+            };
+            let parts = serde_json::json!([
+                part(
+                    "diffusion",
+                    format!("C:\\Users\\Zoë\\harnessUI\\models\\o\\r\\{n}.gguf")
+                ),
+                part("vae", "/m/o/r/vae.safetensors".into()),
+            ]);
+            conn.execute(
+                "INSERT INTO gen_models (id, catalog_id, name, kind, family, parts_json, \
+                 size_bytes, source, added_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+                rusqlite::params![
+                    id,
+                    (*source == "catalog").then_some(*id),
+                    format!("Model {n} ü"),
+                    kind,
+                    family,
+                    parts.to_string(),
+                    2_000 + 2 * n,
+                    source,
+                    1_700_000_000_000 + n,
+                ],
+            )
+            .expect("a 0.1.x row");
+        }
+        conn
+    }
+
+    /// Every row `sql` selects, every column as SQLite holds it.
+    fn dump(conn: &rusqlite::Connection, sql: &str) -> Vec<Vec<rusqlite::types::Value>> {
+        let mut stmt = conn.prepare(sql).expect("prepare");
+        let columns = stmt.column_count();
+        stmt.query_map([], |r| (0..columns).map(|i| r.get(i)).collect())
+            .expect("query")
+            .collect::<Result<_, _>>()
+            .expect("rows")
+    }
+
+    /// The one text column `sql` selects.
+    fn column(conn: &rusqlite::Connection, sql: &str) -> Vec<String> {
+        conn.prepare(sql)
+            .expect("prepare")
+            .query_map([], |r| r.get(0))
+            .expect("query")
+            .collect::<Result<_, _>>()
+            .expect("rows")
+    }
+
+    /// Brings `conn` up to the latest schema, version 4.
+    fn migrate_to_latest(conn: &mut rusqlite::Connection) {
+        MIGRATIONS.to_latest(conn).expect("version 4");
+        let version: i64 = conn
+            .pragma_query_value(None, "user_version", |r| r.get(0))
+            .expect("user_version");
+        assert_eq!(version, 4);
+    }
+
+    /// [studio 0.2.0] Version 4 rebuilds `gen_models` with a recipe per model: every row
+    /// 0.1.x wrote is kept as it was, each of 0.1.x's six families (catalog or searched)
+    /// gets its engine recipe, and the LoRA table is added.
+    #[test]
+    fn v4_maps_each_01x_family_to_its_recipe_and_keeps_every_row() {
+        let mut conn = at_v3_with_rows(&[
+            ("flux2-klein-4b-q4", "flux2-klein-4b", "catalog"),
+            ("z-image-turbo-q4", "z-image-turbo", "catalog"),
+            ("wan22-ti2v-5b-fast-q6", "wan2.2-ti2v-5b-fast", "catalog"),
+            ("hf:o/r:w.gguf", "wan2.2-ti2v-5b", "search"),
+            ("hf:o/r:w1.gguf", "wan2.1-t2v-1.3b", "search"),
+            ("hf:o/r:f3.gguf", "flux3-image-klein", "search"),
+        ]);
+        let before = dump(
+            &conn,
+            "SELECT id, catalog_id, name, kind, family, parts_json, size_bytes, source, added_at \
+             FROM gen_models ORDER BY id",
+        );
+        migrate_to_latest(&mut conn);
+        assert_eq!(
+            dump(
+                &conn,
+                "SELECT id, catalog_id, name, kind, family, parts_json, size_bytes, source, \
+                 added_at FROM gen_models ORDER BY id"
+            ),
+            before
+        );
+        // Ids sorted (BINARY): flux2-…, hf:…:f3, hf:…:w., hf:…:w1, wan22-…, z-image-….
+        assert_eq!(
+            column(&conn, "SELECT recipe_id FROM gen_models ORDER BY id"),
+            [
+                "flux2-klein-4b",
+                "flux3-klein",
+                "wan22-ti2v-5b",
+                "wan21-t2v",
+                "wan22-ti2v-5b",
+                "z-image-turbo"
+            ]
+        );
+        assert!(table_exists(&conn, "gen_loras"));
+    }
+
+    /// [studio 0.2.0] Upgrading keeps the rest of 0.1.x's Studio as it was: the runs that
+    /// name an installed model, their files and the accepted licences. Models installed in
+    /// the same millisecond keep their place in the list (the rowid breaks the tie). A
+    /// family 0.1.x never wrote is kept, with no recipe: it needs Set it up yourself. No
+    /// trace of the rebuild is left.
+    #[test]
+    fn v4_keeps_the_rest_of_01x_studio_and_the_order_of_the_list() {
+        let mut conn = at_v3_with_rows(&[
+            ("z-image-turbo-q4", "z-image-turbo", "catalog"),
+            ("flux2-klein-4b-q4", "flux2-klein-4b", "catalog"),
+            ("hf:o/r:later.gguf", "a-later-family", "search"),
+        ]);
+        conn.execute("UPDATE gen_models SET added_at = 5", [])
+            .expect("installed in the same millisecond");
+        conn.execute_batch(
+            "INSERT INTO creation_runs (id, kind, runs_on, provider_name, provider_host, model, \
+             model_label, prompt, params_json, refs_json, status, gen_model_id, engine_build, \
+             device, elapsed_ms, created_at, started_at, finished_at) VALUES ('r1', 'image', \
+             'local', 'This computer', '', 'flux2-klein-4b-q4', 'FLUX.2 klein', 'a lighthouse', \
+             '{\"steps\":4}', '[]', 'done', 'flux2-klein-4b-q4', 1106, 'Vulkan0', 228000, 1, 2, 3);
+             INSERT INTO creation_outputs (id, run_id, idx, path, thumb_path, mime, size_bytes, \
+             width, height, seed, created_at) VALUES ('o1', 'r1', 0, 'C:\\Users\\Zoë\\out.png', \
+             NULL, 'image/png', 1234, 1024, 1024, 42, 3);
+             INSERT INTO license_acceptances (sha256, license_id, catalog_id, accepted_at) \
+             VALUES ('cd', 'apache-2.0', 'flux2-klein-4b-q4', 1);",
+        )
+        .expect("0.1.x runs and licences");
+        let studio = |conn: &rusqlite::Connection| {
+            [
+                "SELECT * FROM creation_runs ORDER BY id",
+                "SELECT * FROM creation_outputs ORDER BY id",
+                "SELECT * FROM license_acceptances ORDER BY sha256",
+            ]
+            .map(|sql| dump(conn, sql))
+        };
+        let listed = "SELECT id FROM gen_models ORDER BY added_at DESC, rowid DESC";
+        let (runs_before, list_before) = (studio(&conn), column(&conn, listed));
+        assert_eq!(list_before.len(), 3);
+
+        migrate_to_latest(&mut conn);
+
+        assert_eq!(studio(&conn), runs_before);
+        assert_eq!(column(&conn, listed), list_before);
+        let (family, recipe): (String, Option<String>) = conn
+            .query_row(
+                "SELECT family, recipe_id FROM gen_models WHERE id = 'hf:o/r:later.gguf'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .expect("the unknown family's row");
+        assert_eq!((family.as_str(), recipe), ("a-later-family", None));
+        assert!(!table_exists(&conn, "gen_models_v4"));
+        let sql: String = conn
+            .query_row(
+                "SELECT sql FROM sqlite_master WHERE name = 'gen_models'",
+                [],
+                |r| r.get(0),
+            )
+            .expect("sql");
+        assert!(!sql.contains("gen_models_v4"), "{sql}");
+        assert!(sql.contains("'import'"), "{sql}");
+    }
+
+    /// [studio 0.2.0] A 0.1.x database file, opened as the app opens it, is upgraded once
+    /// and its models read back with their recipes.
+    #[tokio::test]
+    async fn an_01x_database_file_opens_with_its_models_and_their_recipes() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("app.sqlite3");
+        drop(at_v3_with_rows_in(
+            rusqlite::Connection::open(&path).expect("open"),
+            &[
+                ("flux2-klein-4b-q4", "flux2-klein-4b", "catalog"),
+                ("hf:o/r:w.gguf", "wan2.2-ti2v-5b", "search"),
+            ],
+        ));
+        let store = crate::Store::open(&path).await.expect("upgraded");
+        let models = store.list_gen_models().await.expect("list");
+        let read: Vec<_> = models
+            .iter()
+            .map(|m| (m.id.as_str(), m.recipe_id.as_deref(), m.source))
+            .collect();
+        assert_eq!(
+            read,
+            [
+                (
+                    "hf:o/r:w.gguf",
+                    Some("wan22-ti2v-5b"),
+                    crate::GenSource::Search
+                ),
+                (
+                    "flux2-klein-4b-q4",
+                    Some("flux2-klein-4b"),
+                    crate::GenSource::Catalog
+                ),
+            ],
+            "newest first"
+        );
+        assert_eq!(
+            models[1].parts[0]["file"],
+            "C:\\Users\\Zoë\\harnessUI\\models\\o\\r\\0.gguf"
+        );
+        drop(store);
+        // Opened again, nothing more to do.
+        let store = crate::Store::open(&path).await.expect("reopened");
+        assert_eq!(store.list_gen_models().await.expect("list"), models);
+    }
+
+    #[test]
+    fn a_database_newer_than_v4_is_refused() {
+        let mut conn = rusqlite::Connection::open_in_memory().expect("open");
+        conn.pragma_update(None, "user_version", 5).expect("pragma");
+        assert!(matches!(
+            MIGRATIONS.to_latest(&mut conn),
+            Err(MigrationError::TooNew { found: 5, known: 4 })
+        ));
     }
 }

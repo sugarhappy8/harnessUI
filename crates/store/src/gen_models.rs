@@ -2,13 +2,17 @@
 //! user accepted (app 0.1.0).
 //!
 //! - An **installed model** is one row of `gen_models`: an entry of the signed catalog's
-//!   recommended list, or a Hugging Face search result, whose every part (the diffusion
-//!   model, its text encoder, its decoder) is downloaded and verified. Each part is a file
-//!   in the models folder. These rows never go into `models`, which feeds the chat picker.
+//!   recommended list or a Hugging Face search result, whose every part (the diffusion
+//!   model, its text encoder, its decoder) is downloaded and verified, or (0.2.0) a model
+//!   imported from files on this computer. Each part is a file. These rows never go into
+//!   `models`, which feeds the chat picker.
+//! - 0.2.0: each installed model names the **engine recipe** it runs with (`recipe_id`, an
+//!   id in `catalog/sd-recipes.json`), or none when it still needs *Set it up yourself*.
 //! - **Shared files.** One file can serve several models: two picture models with the same
 //!   text encoder, or a chat model whose GGUF is also a picture model's encoder.
 //!   [`Store::file_uses`] counts every use in both tables, so a delete removes a file only
-//!   when nothing else uses it.
+//!   when nothing else uses it. [`Store::gen_model_files`] also counts every LoRA's file
+//!   (`gen_loras`), so a model delete never removes a LoRA's file.
 //! - A **licence acceptance** is kept once per licence text (its SHA-256), whichever model
 //!   it was accepted for. These rows record downloads made with Studio 0.1.0.
 
@@ -29,6 +33,8 @@ sql_enum!(
         Catalog => "catalog",
         /// A Hugging Face search.
         Search => "search",
+        /// 0.2.0: a file imported from this computer.
+        Import => "import",
     }
 );
 
@@ -45,12 +51,15 @@ pub struct NewGenModel {
     pub kind: String,
     /// Its family in the known-good family table.
     pub family: String,
+    /// 0.2.0: the engine recipe it runs with (an id in `catalog/sd-recipes.json`); `None`
+    /// only for a model that still needs *Set it up yourself*.
+    pub recipe_id: Option<String>,
     /// Its files: a JSON array of `{role, repo, revision, path, file, size, sha256,
     /// license}`, where `file` is the absolute path on disk.
     pub parts: Value,
     /// The parts' total size.
     pub size_bytes: u64,
-    /// The recommended list or a Hugging Face search.
+    /// The recommended list, a Hugging Face search or an imported file.
     pub source: GenSource,
 }
 
@@ -67,12 +76,15 @@ pub struct GenModel {
     pub kind: String,
     /// Its family in the known-good family table.
     pub family: String,
+    /// 0.2.0: the engine recipe it runs with (an id in `catalog/sd-recipes.json`); `None`
+    /// only for a model that still needs *Set it up yourself*.
+    pub recipe_id: Option<String>,
     /// Its files: a JSON array of `{role, repo, revision, path, file, size, sha256,
     /// license}`, where `file` is the absolute path on disk.
     pub parts: Value,
     /// The parts' total size.
     pub size_bytes: u64,
-    /// The recommended list or a Hugging Face search.
+    /// The recommended list, a Hugging Face search or an imported file.
     pub source: GenSource,
     /// Unix ms when it was installed (or last installed again).
     pub added_at: i64,
@@ -93,7 +105,7 @@ pub struct LicenseAcceptance {
 }
 
 const GEN_MODEL_COLUMNS: &str =
-    "id, catalog_id, name, kind, family, parts_json, size_bytes, source, added_at";
+    "id, catalog_id, name, kind, family, recipe_id, parts_json, size_bytes, source, added_at";
 
 /// Every part's `file`, one row per part of every installed model (NULL for a part without
 /// one). Reading `file` through the whole array's path keeps a part that is not an object
@@ -108,10 +120,11 @@ fn gen_model_from_row(r: &Row<'_>) -> rusqlite::Result<GenModel> {
         name: r.get(2)?,
         kind: r.get(3)?,
         family: r.get(4)?,
-        parts: r.get::<_, JsonColumn>(5)?.0,
-        size_bytes: r.get(6)?,
-        source: r.get(7)?,
-        added_at: r.get(8)?,
+        recipe_id: r.get(5)?,
+        parts: r.get::<_, JsonColumn>(6)?.0,
+        size_bytes: r.get(7)?,
+        source: r.get(8)?,
+        added_at: r.get(9)?,
     })
 }
 
@@ -147,14 +160,16 @@ fn insert_gen_model(conn: &Connection, m: NewGenModel) -> Result<(), StoreError>
     // REPLACE deletes the old row and inserts a new one, so a model installed again is
     // the newest.
     conn.execute(
-        "INSERT OR REPLACE INTO gen_models (id, catalog_id, name, kind, family, parts_json, \
-         size_bytes, source, added_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+        "INSERT OR REPLACE INTO gen_models (id, catalog_id, name, kind, family, recipe_id, \
+         parts_json, size_bytes, source, added_at) \
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
         params![
             m.id,
             m.catalog_id,
             m.name,
             m.kind,
             m.family,
+            m.recipe_id,
             json_text(&m.parts)?,
             sql_u64("size_bytes", m.size_bytes)?,
             m.source,
@@ -197,7 +212,10 @@ fn file_uses(conn: &Connection, path: &str) -> Result<u32, StoreError> {
 }
 
 fn gen_model_files(conn: &Connection) -> Result<BTreeSet<String>, StoreError> {
-    let sql = format!("SELECT DISTINCT file FROM ({PART_FILES}) WHERE typeof(file) = 'text'");
+    let sql = format!(
+        "SELECT file FROM ({PART_FILES}) WHERE typeof(file) = 'text' \
+         UNION SELECT file FROM gen_loras"
+    );
     let mut stmt = conn.prepare_cached(&sql)?;
     let rows = stmt.query_map([], |r| r.get(0))?;
     Ok(rows.collect::<Result<_, _>>()?)
@@ -246,8 +264,8 @@ impl Store {
         self.call(move |c| file_uses(c, &path)).await
     }
 
-    /// Every part file of every installed picture or video model (deleting a chat model
-    /// keeps these).
+    /// Every part file of every installed picture or video model, and (0.2.0) every LoRA's
+    /// file, each once (deleting a chat model or a picture or video model keeps these).
     pub async fn gen_model_files(&self) -> Result<BTreeSet<String>, StoreError> {
         self.call(|c| gen_model_files(c)).await
     }
@@ -309,6 +327,7 @@ mod tests {
             name: format!("Model {id}"),
             kind: "image".into(),
             family: "flux2-klein-4b".into(),
+            recipe_id: Some("flux2-klein-4b".into()),
             parts: json!([
                 part("diffusion", &format!("/m/acme/{id}-GGUF/{id}.gguf")),
                 part("llm", ENCODER),
@@ -339,6 +358,7 @@ mod tests {
             .insert_gen_model(NewGenModel {
                 catalog_id: None,
                 kind: "video".into(),
+                recipe_id: None,
                 source: GenSource::Search,
                 ..gen_model("hf:acme/b-GGUF:b.gguf")
             })
@@ -358,6 +378,7 @@ mod tests {
                 a.name.as_str(),
                 a.kind.as_str(),
                 a.family.as_str(),
+                a.recipe_id.as_deref(),
                 a.size_bytes,
                 a.source
             ),
@@ -367,9 +388,19 @@ mod tests {
                 "Model a",
                 "image",
                 "flux2-klein-4b",
+                Some("flux2-klein-4b"),
                 3_000,
                 GenSource::Catalog
             )
+        );
+        let b = store
+            .get_gen_model("hf:acme/b-GGUF:b.gguf")
+            .await
+            .expect("get");
+        assert_eq!(
+            b.expect("installed").recipe_id,
+            None,
+            "a model that needs Set it up yourself"
         );
         assert_eq!(a.parts, want.parts, "the parts read back as written");
         assert!(a.added_at > 0, "the store's clock");
@@ -453,6 +484,79 @@ mod tests {
             "audio is not a kind"
         );
         assert!(store.list_gen_models().await.expect("list").is_empty());
+    }
+
+    /// An installed picture or video model as `id`, from `source`, with `recipe_id`.
+    fn model(id: &str, source: GenSource, recipe_id: Option<&str>) -> NewGenModel {
+        NewGenModel {
+            catalog_id: None,
+            family: "sdxl".into(),
+            recipe_id: recipe_id.map(str::to_owned),
+            source,
+            ..gen_model(id)
+        }
+    }
+
+    /// Inserts a row of `gen_models` straight into the database, every column valid but
+    /// `column`, which is `value`.
+    async fn raw_insert(
+        store: &Store,
+        column: &'static str,
+        value: &'static str,
+    ) -> Result<usize, StoreError> {
+        store
+            .call(move |c| {
+                let mut row = [
+                    ("id", format!("raw:{column}={value}")),
+                    ("name", "Raw".into()),
+                    ("kind", "image".into()),
+                    ("family", "unknown".into()),
+                    ("parts_json", "[]".into()),
+                    ("size_bytes", "0".into()),
+                    ("source", "import".into()),
+                    ("added_at", "0".into()),
+                ];
+                row.iter_mut()
+                    .find(|(name, _)| *name == column)
+                    .expect("a column of gen_models")
+                    .1 = value.into();
+                let names = row.each_ref().map(|(name, _)| *name).join(", ");
+                let marks = (1..=row.len())
+                    .map(|i| format!("?{i}"))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                let sql = format!("INSERT INTO gen_models ({names}) VALUES ({marks})");
+                Ok(c.execute(&sql, rusqlite::params_from_iter(row.map(|(_, v)| v)))?)
+            })
+            .await
+    }
+
+    /// 0.2.0: a model imported from a file on this computer is a third source; any other
+    /// source is refused by the database.
+    #[tokio::test]
+    async fn import_is_a_source_and_others_are_refused() {
+        let s = Store::open_in_memory().expect("open");
+        s.insert_gen_model(model(
+            "local:ab",
+            GenSource::Import,
+            Some("sdxl-checkpoint"),
+        ))
+        .await
+        .expect("an imported model");
+        let imported = s
+            .get_gen_model("local:ab")
+            .await
+            .expect("get")
+            .expect("installed");
+        assert_eq!(
+            (imported.source, imported.recipe_id.as_deref()),
+            (GenSource::Import, Some("sdxl-checkpoint"))
+        );
+        assert_eq!(GenSource::ALL.len(), 3);
+        raw_insert(&s, "family", "sdxl")
+            .await
+            .expect("every column valid");
+        assert!(raw_insert(&s, "source", "elsewhere").await.is_err());
     }
 
     #[tokio::test]

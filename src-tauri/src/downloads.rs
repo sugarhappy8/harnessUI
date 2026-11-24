@@ -152,12 +152,18 @@ pub(crate) fn gen_model_from(
         .source
         .parse::<store::GenSource>()
         .map_err(AppError::internal)?;
+    // 0.2.0: the engine recipe its family runs with. A family this build does not know has
+    // none; `register_gen_model` refuses it.
+    let recipe_id = serde_json::from_value::<GenFamily>(generator.family.clone().into())
+        .ok()
+        .map(|f| f.recipe_id().to_owned());
     Ok(store::NewGenModel {
         id: generator.gen_model_id.clone(),
         catalog_id: generator.catalog_id.clone(),
         name: generator.name.clone(),
         kind: generator.kind.clone(),
         family: generator.family.clone(),
+        recipe_id,
         parts: serde_json::Value::Array(parts),
         size_bytes: generator.parts.iter().map(|p| p.size).sum(),
         source,
@@ -2891,6 +2897,7 @@ mod tests {
                 name: "Z-Image Turbo".into(),
                 kind: "image".into(),
                 family: "z-image-turbo".into(),
+                recipe_id: Some("z-image-turbo".into()),
                 parts: serde_json::json!([{"role": "llm", "file": encoder.display().to_string()}]),
                 size_bytes: 100,
                 source: store::GenSource::Catalog,
@@ -3542,6 +3549,7 @@ mod tests {
                 new.name.as_str(),
                 new.kind.as_str(),
                 new.family.as_str(),
+                new.recipe_id.as_deref(),
                 new.size_bytes,
                 new.source,
             ),
@@ -3551,6 +3559,7 @@ mod tests {
                 "FLUX.2 klein 4B",
                 "image",
                 "flux2-klein-4b",
+                Some("flux2-klein-4b"),
                 6_000,
                 store::GenSource::Catalog,
             )
@@ -3580,8 +3589,22 @@ mod tests {
         };
         let new = gen_model_from(&searched, &rows([S::Verifying; 3])).unwrap();
         assert_eq!(
-            (new.catalog_id, new.source),
-            (None, store::GenSource::Search)
+            (new.catalog_id, new.recipe_id.as_deref(), new.source),
+            (None, Some("flux2-klein-4b"), store::GenSource::Search)
+        );
+        // A family this build does not know has no recipe (registering it is refused).
+        let unknown = GroupMeta {
+            generator: Some(GenGroup {
+                family: "a-later-family".into(),
+                ..group.clone()
+            }),
+            ..meta.clone()
+        };
+        assert_eq!(
+            gen_model_from(&unknown, &rows([S::Verifying; 3]))
+                .unwrap()
+                .recipe_id,
+            None
         );
         assert_eq!(
             gen_model_from(&group_meta(None), &[]).unwrap_err().code,
