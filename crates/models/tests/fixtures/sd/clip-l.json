@@ -1,0 +1,45 @@
+{
+ "source": {
+  "repo": "comfyanonymous/flux_text_encoders",
+  "revision": "6af2a98e3f615bdfa612fbd85da93d1ed5f69ef5",
+  "path": "clip_l.safetensors",
+  "size": 246144152,
+  "sha256": "660c6f5b1abae9dc498ac2d21e1347d2abdb0cf6c0c0c8576cd796491d9a6cdd",
+  "capturedOn": "2026-11-24"
+ },
+ "format": "safetensors",
+ "metadata": {},
+ "tensors": [
+  [
+   "text_model.embeddings.position_embedding.weight",
+   "F16",
+   [
+    77,
+    768
+   ]
+  ],
+  [
+   "text_model.embeddings.token_embedding.weight",
+   "F16",
+   [
+    49408,
+    768
+   ]
+  ],
+  [
+   "text_model.encoder.layers.0.layer_norm1.bias",
+   "F16",
+   [
+    768
+   ]
+  ],
+  [
+   "text_model.encoder.layers.11.layer_norm1.bias",
+   "F16",
+   [
+    768
+   ]
+  ]
+ ],
+ "parameters": 123060480
+}

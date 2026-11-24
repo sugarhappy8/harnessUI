@@ -1,0 +1,111 @@
+{
+ "source": {
+  "repo": "Comfy-Org/Flux-1-Dev",
+  "revision": "10cf201a3d49f7ff4de84d6a97d6a32cdfa8cb86",
+  "path": "flux1-dev.safetensors",
+  "size": 23802932552,
+  "sha256": "4610115bb0c89560703c892c59ac2742fa821e60ef5871b33493ba544683abd7",
+  "capturedOn": "2026-11-24"
+ },
+ "format": "safetensors",
+ "metadata": {
+  "modelspec.title": "Flux.1-dev",
+  "modelspec.author": "Black Forest Labs",
+  "modelspec.sai_model_spec": "1.0.1",
+  "modelspec.architecture": "Flux.1-dev",
+  "modelspec.license": "FLUX.1 [dev] Non-Commercial License",
+  "modelspec.hash_sha256": "0x2f3c5caac0469f474439cf84eb09f900bd8e5900f4ad9404c4e05cec12314df6",
+  "modelspec.date": "2024-08-01",
+  "modelspec.implementation": "https://github.com/black-forest-labs/flux",
+  "modelspec.description": "A guidance distilled rectified flow model."
+ },
+ "tensors": [
+  [
+   "double_blocks.0.img_attn.norm.key_norm.scale",
+   "BF16",
+   [
+    128
+   ]
+  ],
+  [
+   "double_blocks.18.img_attn.norm.key_norm.scale",
+   "BF16",
+   [
+    128
+   ]
+  ],
+  [
+   "final_layer.adaLN_modulation.1.bias",
+   "BF16",
+   [
+    6144
+   ]
+  ],
+  [
+   "guidance_in.in_layer.bias",
+   "BF16",
+   [
+    3072
+   ]
+  ],
+  [
+   "img_in.bias",
+   "BF16",
+   [
+    3072
+   ]
+  ],
+  [
+   "img_in.weight",
+   "BF16",
+   [
+    3072,
+    64
+   ]
+  ],
+  [
+   "single_blocks.0.linear1.bias",
+   "BF16",
+   [
+    21504
+   ]
+  ],
+  [
+   "single_blocks.37.linear1.bias",
+   "BF16",
+   [
+    21504
+   ]
+  ],
+  [
+   "time_in.in_layer.bias",
+   "BF16",
+   [
+    3072
+   ]
+  ],
+  [
+   "txt_in.bias",
+   "BF16",
+   [
+    3072
+   ]
+  ],
+  [
+   "txt_in.weight",
+   "BF16",
+   [
+    3072,
+    4096
+   ]
+  ],
+  [
+   "vector_in.in_layer.bias",
+   "BF16",
+   [
+    3072
+   ]
+  ]
+ ],
+ "parameters": 11901408320
+}

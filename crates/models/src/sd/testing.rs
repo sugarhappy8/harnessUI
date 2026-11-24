@@ -281,3 +281,245 @@ impl From<Body> for BodyArg {
         BodyArg(b)
     }
 }
+
+// ---- Detection fixtures (Task R4) -------------------------------------------------------
+
+/// Where a fixture's tensor table was read: the pinned file it is a trimmed copy of.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FixtureSource {
+    pub repo: String,
+    pub revision: String,
+    pub path: String,
+    pub size: u64,
+    pub sha256: String,
+    /// A date, or `"hand-built"`.
+    pub captured_on: String,
+}
+
+#[derive(serde::Deserialize)]
+struct FixtureFile {
+    source: FixtureSource,
+    format: crate::sd::index::FileFormat,
+    metadata: std::collections::BTreeMap<String, String>,
+    tensors: Vec<(String, String, Vec<u64>)>,
+    parameters: u64,
+}
+
+const FIXTURE_FILES: &[(&str, &str)] = &[
+    ("sd15", include_str!("../../tests/fixtures/sd/sd15.json")),
+    ("sdxl", include_str!("../../tests/fixtures/sd/sdxl.json")),
+    (
+        "sd35-medium",
+        include_str!("../../tests/fixtures/sd/sd35-medium.json"),
+    ),
+    (
+        "flux1-dev",
+        include_str!("../../tests/fixtures/sd/flux1-dev.json"),
+    ),
+    (
+        "flux1-kontext",
+        include_str!("../../tests/fixtures/sd/flux1-kontext.json"),
+    ),
+    (
+        "chroma",
+        include_str!("../../tests/fixtures/sd/chroma.json"),
+    ),
+    (
+        "qwen-image",
+        include_str!("../../tests/fixtures/sd/qwen-image.json"),
+    ),
+    (
+        "qwen-image-edit-2509",
+        include_str!("../../tests/fixtures/sd/qwen-image-edit-2509.json"),
+    ),
+    (
+        "z-image-turbo",
+        include_str!("../../tests/fixtures/sd/z-image-turbo.json"),
+    ),
+    (
+        "flux2-klein-4b",
+        include_str!("../../tests/fixtures/sd/flux2-klein-4b.json"),
+    ),
+    (
+        "wan21-t2v-1.3b",
+        include_str!("../../tests/fixtures/sd/wan21-t2v-1.3b.json"),
+    ),
+    (
+        "wan21-i2v-14b",
+        include_str!("../../tests/fixtures/sd/wan21-i2v-14b.json"),
+    ),
+    (
+        "wan22-ti2v-5b",
+        include_str!("../../tests/fixtures/sd/wan22-ti2v-5b.json"),
+    ),
+    (
+        "wan22-t2v-a14b-high",
+        include_str!("../../tests/fixtures/sd/wan22-t2v-a14b-high.json"),
+    ),
+    (
+        "wan22-t2v-a14b-low",
+        include_str!("../../tests/fixtures/sd/wan22-t2v-a14b-low.json"),
+    ),
+    (
+        "hunyuan-video-15",
+        include_str!("../../tests/fixtures/sd/hunyuan-video-15.json"),
+    ),
+    ("ltx23", include_str!("../../tests/fixtures/sd/ltx23.json")),
+    (
+        "sdxl-lora-pixel-art",
+        include_str!("../../tests/fixtures/sd/sdxl-lora-pixel-art.json"),
+    ),
+    (
+        "flux-lora-realism",
+        include_str!("../../tests/fixtures/sd/flux-lora-realism.json"),
+    ),
+    (
+        "lumina2",
+        include_str!("../../tests/fixtures/sd/lumina2.json"),
+    ),
+    (
+        "sd14-diffusers-unet",
+        include_str!("../../tests/fixtures/sd/sd14-diffusers-unet.json"),
+    ),
+    (
+        "sd14-diffusers-text-encoder",
+        include_str!("../../tests/fixtures/sd/sd14-diffusers-text-encoder.json"),
+    ),
+    (
+        "ae-flux1",
+        include_str!("../../tests/fixtures/sd/ae-flux1.json"),
+    ),
+    (
+        "clip-l",
+        include_str!("../../tests/fixtures/sd/clip-l.json"),
+    ),
+    (
+        "umt5-xxl-q5km",
+        include_str!("../../tests/fixtures/sd/umt5-xxl-q5km.json"),
+    ),
+];
+
+fn fixture_file(name: &str) -> FixtureFile {
+    let (_, json) = FIXTURE_FILES
+        .iter()
+        .find(|(n, _)| *n == name)
+        .unwrap_or_else(|| panic!("no detection fixture {name}"));
+    serde_json::from_str(json).unwrap_or_else(|e| panic!("fixture {name} does not read: {e}"))
+}
+
+/// The trimmed tensor table of a real file, with `parameters_hint` set to the whole file's
+/// parameter count.
+///
+/// # Panics
+/// For a name that is not a fixture.
+pub fn fixture(name: &str) -> crate::sd::index::TensorIndex {
+    let f = fixture_file(name);
+    crate::sd::index::TensorIndex {
+        format: f.format,
+        tensors: f
+            .tensors
+            .into_iter()
+            .map(|(name, dtype, shape)| crate::sd::index::TensorInfo { name, dtype, shape })
+            .collect(),
+        metadata: f.metadata,
+        parameters_hint: Some(f.parameters),
+    }
+}
+
+/// The pinned file the fixture was captured from.
+///
+/// # Panics
+/// For a name that is not a fixture.
+pub fn fixture_source(name: &str) -> FixtureSource {
+    fixture_file(name).source
+}
+
+/// A GGUF index from a 0.1.x `fixtures/gguf/<name>-tensors.txt` (`"klein4b"`), in file order
+/// with no metadata, as those files have none. The text files carry no types, so every
+/// dtype is `"f16"`.
+///
+/// # Panics
+/// For a name that is not one of `gguf::testing::TENSOR_FIXTURES`.
+pub fn gguf_txt_fixture(name: &str) -> crate::sd::index::TensorIndex {
+    crate::sd::index::TensorIndex {
+        format: crate::sd::index::FileFormat::Gguf,
+        tensors: crate::gguf::testing::shapes(&format!("{name}-tensors.txt"))
+            .into_iter()
+            .map(|t| crate::sd::index::TensorInfo {
+                name: t.name,
+                dtype: "f16".into(),
+                shape: t.dims,
+            })
+            .collect(),
+        metadata: Default::default(),
+        parameters_hint: None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const FIXTURES: [&str; 25] = [
+        "sd15",
+        "sdxl",
+        "sd35-medium",
+        "flux1-dev",
+        "flux1-kontext",
+        "chroma",
+        "qwen-image",
+        "qwen-image-edit-2509",
+        "z-image-turbo",
+        "flux2-klein-4b",
+        "wan21-t2v-1.3b",
+        "wan21-i2v-14b",
+        "wan22-ti2v-5b",
+        "wan22-t2v-a14b-high",
+        "wan22-t2v-a14b-low",
+        "hunyuan-video-15",
+        "ltx23",
+        "sdxl-lora-pixel-art",
+        "flux-lora-realism",
+        "lumina2",
+        "sd14-diffusers-unet",
+        "sd14-diffusers-text-encoder",
+        "ae-flux1",
+        "clip-l",
+        "umt5-xxl-q5km",
+    ];
+
+    #[test]
+    fn a_0_1_x_text_table_becomes_a_gguf_index() {
+        let ix = gguf_txt_fixture("klein4b");
+        assert_eq!(ix.format, crate::sd::index::FileFormat::Gguf);
+        assert_eq!(
+            ix.tensors[0].name,
+            "double_blocks.0.img_attn.norm.query_norm.scale"
+        );
+        assert_eq!(ix.tensors[2].shape, [3072, 3072]);
+        assert!(ix.metadata.is_empty());
+    }
+
+    #[test]
+    fn a_fixture_reports_the_whole_files_parameters() {
+        assert_eq!(fixture("sd15").parameters(), 1_066_247_386);
+    }
+
+    #[test]
+    fn every_fixture_names_its_pinned_source() {
+        for name in FIXTURES {
+            let s = fixture_source(name);
+            assert!(
+                s.revision.len() == 40 && s.revision.bytes().all(|b| b.is_ascii_hexdigit()),
+                "{name}"
+            );
+            assert!(s.sha256.len() == 64 && s.size > 0, "{name}");
+            assert!(!fixture(name).tensors.is_empty(), "{name}");
+        }
+        assert_eq!(
+            fixture_source("lumina2").sha256,
+            "736e7a524186c943568dfe688d87ce3556cfbd97f7026125065b0aa44c351f6a"
+        );
+    }
+}

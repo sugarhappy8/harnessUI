@@ -1,0 +1,108 @@
+{
+ "source": {
+  "repo": "QuantStack/Wan2.2-T2V-A14B-GGUF",
+  "revision": "73eafba53a1a8f29254e4c77f92e74ea27d7cd6f",
+  "path": "LowNoise/Wan2.2-T2V-A14B-LowNoise-Q4_K_M.gguf",
+  "size": 9650090496,
+  "sha256": "091a5bae02e14aa016bc9b10a7892efda4c629346b81c5dcebbe30ea2ac8923a",
+  "capturedOn": "2026-11-24"
+ },
+ "format": "gguf",
+ "metadata": {
+  "general.architecture": "wan"
+ },
+ "tensors": [
+  [
+   "blocks.0.cross_attn.k.bias",
+   "f16",
+   [
+    5120
+   ]
+  ],
+  [
+   "blocks.0.cross_attn.norm_k.weight",
+   "f16",
+   [
+    5120
+   ]
+  ],
+  [
+   "blocks.39.cross_attn.k.bias",
+   "f16",
+   [
+    5120
+   ]
+  ],
+  [
+   "head.head.bias",
+   "f16",
+   [
+    64
+   ]
+  ],
+  [
+   "head.head.weight",
+   "f16",
+   [
+    5120,
+    64
+   ]
+  ],
+  [
+   "patch_embedding.bias",
+   "f16",
+   [
+    5120
+   ]
+  ],
+  [
+   "patch_embedding.weight",
+   "f32",
+   [
+    2,
+    2,
+    1,
+    16,
+    5120
+   ]
+  ],
+  [
+   "text_embedding.0.bias",
+   "f16",
+   [
+    5120
+   ]
+  ],
+  [
+   "text_embedding.0.weight",
+   "f16",
+   [
+    4096,
+    5120
+   ]
+  ],
+  [
+   "time_embedding.0.bias",
+   "f16",
+   [
+    5120
+   ]
+  ],
+  [
+   "time_projection.1.bias",
+   "f16",
+   [
+    30720
+   ]
+  ],
+  [
+   "time_projection.1.weight",
+   "f16",
+   [
+    5120,
+    30720
+   ]
+  ]
+ ],
+ "parameters": 14288491584
+}

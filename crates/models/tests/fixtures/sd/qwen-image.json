@@ -1,0 +1,104 @@
+{
+ "source": {
+  "repo": "QuantStack/Qwen-Image-GGUF",
+  "revision": "257f261fa92593bed760aa6fa3f7921a49fea00f",
+  "path": "Qwen_Image-Q4_0.gguf",
+  "size": 11852773920,
+  "sha256": "ab0f20d548f3bfb197ec0f0f61c15acc2f0f865495fee2941c658fef4391cd61",
+  "capturedOn": "2026-11-24"
+ },
+ "format": "gguf",
+ "metadata": {
+  "general.architecture": "qwen_image"
+ },
+ "tensors": [
+  [
+   "img_in.bias",
+   "f32",
+   [
+    3072
+   ]
+  ],
+  [
+   "img_in.weight",
+   "bf16",
+   [
+    64,
+    3072
+   ]
+  ],
+  [
+   "norm_out.linear.bias",
+   "f32",
+   [
+    6144
+   ]
+  ],
+  [
+   "proj_out.bias",
+   "f32",
+   [
+    64
+   ]
+  ],
+  [
+   "time_text_embed.timestep_embedder.linear_1.bias",
+   "f32",
+   [
+    3072
+   ]
+  ],
+  [
+   "transformer_blocks.0.attn.add_k_proj.bias",
+   "f32",
+   [
+    3072
+   ]
+  ],
+  [
+   "transformer_blocks.0.attn.norm_added_q.weight",
+   "f32",
+   [
+    128
+   ]
+  ],
+  [
+   "transformer_blocks.0.img_mod.1.weight",
+   "q4_0",
+   [
+    3072,
+    18432
+   ]
+  ],
+  [
+   "transformer_blocks.59.attn.add_k_proj.bias",
+   "f32",
+   [
+    3072
+   ]
+  ],
+  [
+   "txt_in.bias",
+   "f32",
+   [
+    3072
+   ]
+  ],
+  [
+   "txt_in.weight",
+   "bf16",
+   [
+    3584,
+    3072
+   ]
+  ],
+  [
+   "txt_norm.weight",
+   "f32",
+   [
+    3584
+   ]
+  ]
+ ],
+ "parameters": 20430401088
+}

@@ -1,0 +1,31 @@
+{
+ "source": {
+  "repo": "XLabs-AI/flux-lora-collection",
+  "revision": "9ddb42ad970b5d31f50ac02d223adea81413ba4c",
+  "path": "realism_lora_comfy_converted.safetensors",
+  "size": 22433528,
+  "sha256": "379e73dccfb57822ee3b12f374e141ce1c79a13b7ff19da4219ef2a2a610038e",
+  "capturedOn": "2026-11-24"
+ },
+ "format": "safetensors",
+ "metadata": {},
+ "tensors": [
+  [
+   "diffusion_model.double_blocks.0.img_attn.proj.lora_down.weight",
+   "BF16",
+   [
+    16,
+    3072
+   ]
+  ],
+  [
+   "diffusion_model.double_blocks.18.img_attn.proj.lora_down.weight",
+   "BF16",
+   [
+    16,
+    3072
+   ]
+  ]
+ ],
+ "parameters": 11206656
+}

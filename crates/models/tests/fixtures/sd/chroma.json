@@ -1,0 +1,111 @@
+{
+ "source": {
+  "repo": "silveroxides/Chroma1-HD-GGUF",
+  "revision": "d3b77bf4eb5b84c0b50e9a1e83f6e8074ed85f82",
+  "path": "Chroma1-HD-Q4_0.gguf",
+  "size": 5432053920,
+  "sha256": "1aa9f3c059a415320bb9b8b6231ea14e118df26653b5bb937c92e00cf0cc127e",
+  "capturedOn": "2026-11-24"
+ },
+ "format": "gguf",
+ "metadata": {
+  "general.architecture": "flux"
+ },
+ "tensors": [
+  [
+   "distilled_guidance_layer.in_proj.bias",
+   "f32",
+   [
+    5120
+   ]
+  ],
+  [
+   "distilled_guidance_layer.in_proj.weight",
+   "bf16",
+   [
+    64,
+    5120
+   ]
+  ],
+  [
+   "distilled_guidance_layer.layers.0.in_layer.bias",
+   "f32",
+   [
+    5120
+   ]
+  ],
+  [
+   "distilled_guidance_layer.layers.4.in_layer.bias",
+   "f32",
+   [
+    5120
+   ]
+  ],
+  [
+   "double_blocks.0.img_attn.norm.key_norm.scale",
+   "f32",
+   [
+    128
+   ]
+  ],
+  [
+   "double_blocks.18.img_attn.norm.key_norm.scale",
+   "f32",
+   [
+    128
+   ]
+  ],
+  [
+   "final_layer.linear.bias",
+   "f32",
+   [
+    64
+   ]
+  ],
+  [
+   "img_in.bias",
+   "f32",
+   [
+    3072
+   ]
+  ],
+  [
+   "img_in.weight",
+   "bf16",
+   [
+    64,
+    3072
+   ]
+  ],
+  [
+   "single_blocks.0.linear1.bias",
+   "f32",
+   [
+    21504
+   ]
+  ],
+  [
+   "single_blocks.37.linear1.bias",
+   "f32",
+   [
+    21504
+   ]
+  ],
+  [
+   "txt_in.bias",
+   "f32",
+   [
+    3072
+   ]
+  ],
+  [
+   "txt_in.weight",
+   "bf16",
+   [
+    4096,
+    3072
+   ]
+  ]
+ ],
+ "parameters": 8899983424
+}
