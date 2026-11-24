@@ -297,7 +297,8 @@ const TABLE: &[(&[SdVersion], Outcome, &[Rule])] = {
                 (&[Any(&[ImgEmbPos, W("flf2v")])], To("wan21-flf2v")),
                 (&[Is(HasImgEmb)], To("wan21-i2v")),
                 (
-                    &[Any(&[W("wan2.2"), W("wan22")]), Is(Part)],
+                    // `wan2-2`: Kijai's `Wan2_2-T2V-A14B-HIGH_…`.
+                    &[Any(&[W("wan2.2"), W("wan22"), W("wan2-2")]), Is(Part)],
                     To("wan22-t2v"),
                 ),
             ],
@@ -439,6 +440,11 @@ const INPUTS: &[(&[&str], &[RecipeInput])] = {
         (
             &["flex2"],
             &[input(Source, 0, 1), input(Mask, 0, 1), input(Control, 0, 1)],
+        ),
+        // UNet edit models read only the first reference (`src/pipeline/image.cpp:494-495`).
+        (
+            &["instruct-pix2pix", "cosxl-edit"],
+            &[input(Reference, 1, 1)],
         ),
         (
             &["wan21-i2v", "hunyuan-video-15-i2v"],
@@ -1381,6 +1387,89 @@ mod tests {
             ins,
             [(GenInput::StartFrame, 1, 1), (GenInput::EndFrame, 0, 1)]
         );
+    }
+
+    // ---- Fix round 1 -------------------------------------------------------------------
+
+    #[test]
+    fn kijais_wan2_2_names_match_wan_2_2_with_their_part() {
+        use NoisePart::*;
+        let kijai = "Kijai/WanVideo_comfy_fp8_scaled";
+        for (v, file, id, part) in [
+            (
+                SdVersion::Wan2,
+                "T2V/Wan2_2-T2V-A14B-HIGH_fp8_e5m2_scaled_KJ.safetensors",
+                "wan22-t2v",
+                Some(High),
+            ),
+            (
+                SdVersion::Wan2,
+                "T2V/Wan2_2-T2V-A14B-LOW_fp8_e4m3fn_scaled_KJ.safetensors",
+                "wan22-t2v",
+                Some(Low),
+            ),
+            (
+                SdVersion::Wan2,
+                "T2V/Wan2_2-T2V-A14B_HIGH_fp8_e4m3fn_scaled_KJ.safetensors",
+                "wan22-t2v",
+                Some(High),
+            ),
+            (
+                SdVersion::Wan22I2v,
+                "I2V/Wan2_2-I2V-A14B-HIGH_fp8_e4m3fn_scaled_KJ.safetensors",
+                "wan22-i2v",
+                Some(High),
+            ),
+            (
+                SdVersion::Wan22I2v,
+                "I2V/Wan2_2-I2V-A14B-LOW_fp8_e5m2_scaled_KJ.safetensors",
+                "wan22-i2v",
+                Some(Low),
+            ),
+            (
+                SdVersion::Wan22Ti2v,
+                "TI2V/Wan2_2-TI2V-5B_fp8_e4m3fn_scaled_KJ.safetensors",
+                "wan22-ti2v-5b",
+                None,
+            ),
+            (
+                SdVersion::Wan2,
+                "T2V/Wan2_1-T2V-14B_fp8_e4m3fn_scaled_KJ.safetensors",
+                "wan21-t2v",
+                None,
+            ),
+        ] {
+            let name = format!("{kijai}/{file}");
+            assert_eq!(m(v, &name), Match::Recipe { id, part }, "{name}");
+        }
+        // `wan2-2` is never read in a Wan 2.1 name.
+        for name in [
+            format!("{kijai}/T2V/Wan2_1-T2V-14B_fp8_e4m3fn_scaled_KJ.safetensors"),
+            format!("{kijai}/T2V/Wan2_1-T2V-14B-FastWan-480p_fp8_e4m3fn_scaled_KJ.safetensors"),
+            format!("{kijai}/I2V/Wan2_1-I2V-14B-720p_fp8_e5m2_scaled_KJ.safetensors"),
+            format!("{kijai}/VACE/Wan2_1-VACE-module-14B_fp8_e4m3fn_scaled_KJ.safetensors"),
+            "Comfy-Org/Wan_2.1_ComfyUI_repackaged/split_files/diffusion_models/wan2.1_t2v_14B_fp16.safetensors".into(),
+        ] {
+            assert!(!Name::new(&name).has("wan2-2"), "{name}");
+        }
+    }
+
+    #[test]
+    fn unet_edit_recipes_take_one_reference() {
+        // The engine reads only `ref_latents[0]` for these (`src/pipeline/image.cpp:494-495`;
+        // `is_unet_edit` in `src/model/integrations/sd.cpp:79-82, 194-198`).
+        for id in ["instruct-pix2pix", "cosxl-edit"] {
+            assert_eq!(
+                inputs_of(id),
+                [RecipeInput {
+                    role: GenInput::Reference,
+                    min: 1,
+                    max: 1
+                }],
+                "{id}"
+            );
+        }
+        assert_eq!(inputs_of("qwen-image-edit")[0].max, 4);
     }
 
     #[test]
