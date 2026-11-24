@@ -8,12 +8,13 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use serde::Deserialize;
 use serde::de::IntoDeserializer;
+use serde_json::Value;
 
 use crate::catalog::{Catalog, is_hex};
-use crate::gen_catalog::{ALLOWED_PART_EXTENSIONS, GenLicence, check_licences, keyed};
+use crate::gen_catalog::{ALLOWED_PART_EXTENSIONS, Commercial, GenLicence, check_licences, keyed};
 use crate::hf::{validate_repo_id, validate_repo_path};
 use crate::sd::detect::SdVersion;
-use crate::sd::matching::{in_scope_recipes, recipes_for};
+use crate::sd::matching::{out_of_scope, recipes_for};
 use crate::sd::recipes::{SlotId, recipe};
 
 /// One shared extra file.
@@ -49,6 +50,20 @@ pub struct CompanionTable {
     pub by_version: BTreeMap<SdVersion, BTreeMap<SlotId, String>>,
     /// Defaults for one recipe, which win over its version's.
     pub by_recipe: BTreeMap<String, BTreeMap<SlotId, String>>,
+    /// What [`CompanionTable::from_catalog`] left out, each also logged as a warning.
+    #[serde(skip)]
+    pub skipped: Vec<Skipped>,
+}
+
+/// Something a newer signed catalog may add that this build leaves out, where it was and
+/// why. The bundled catalog skips nothing (`the_bundled_table_skips_nothing`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Skipped {
+    /// `licence <id>`, `file <id>`, `file <id> version <word>`, `byVersion <version>`,
+    /// `byVersion <version> <slot>`, `byRecipe <recipe>` or `byRecipe <recipe> <slot>`, in the
+    /// catalog's own words.
+    pub place: String,
+    pub reason: String,
 }
 
 /// A file as the catalog writes it: its version and slot words are read as strings, so that
@@ -67,112 +82,191 @@ struct CompanionRaw {
     license: String,
 }
 
-/// The section as the catalog writes it, every word a string.
+/// The section as the catalog writes it, every word a string and each licence raw.
 #[derive(Default, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
 struct TableRaw {
-    licenses: BTreeMap<String, GenLicence>,
+    licenses: BTreeMap<String, Value>,
     files: Vec<CompanionRaw>,
     by_version: BTreeMap<String, BTreeMap<String, String>>,
     by_recipe: BTreeMap<String, BTreeMap<String, String>>,
 }
 
-/// The slot a word names, by [`SlotId`]'s own serde names; `None` for a word this build
-/// does not know.
-fn slot_of(word: &str) -> Option<SlotId> {
-    let word: serde::de::value::StrDeserializer<'_, serde::de::value::Error> =
+/// The value of a unit enum a word names, by the enum's own serde names; `None` for a word
+/// this build does not know.
+fn known<'a, T: Deserialize<'a>>(word: &'a str) -> Option<T> {
+    let word: serde::de::value::StrDeserializer<'a, serde::de::value::Error> =
         word.into_deserializer();
-    SlotId::deserialize(word).ok()
+    T::deserialize(word).ok()
 }
 
-/// The slots a companion may not fill: the model's own weights, and the adapters that put
-/// a recipe out of scope.
-fn is_companion_slot(slot: SlotId) -> bool {
-    !slot.is_adapter()
-        && !matches!(
-            slot,
-            SlotId::Model
-                | SlotId::DiffusionModel
-                | SlotId::HighNoiseDiffusionModel
-                | SlotId::UncondDiffusionModel
-        )
+/// The slots that hold a model's own weights, which no companion fills.
+fn is_model_slot(slot: SlotId) -> bool {
+    matches!(
+        slot,
+        SlotId::Model
+            | SlotId::DiffusionModel
+            | SlotId::HighNoiseDiffusionModel
+            | SlotId::UncondDiffusionModel
+    )
+}
+
+/// What reading leaves out, as it goes.
+#[derive(Default)]
+struct Skips {
+    list: Vec<Skipped>,
+    licences: BTreeSet<String>,
+    files: BTreeSet<String>,
+}
+
+impl Skips {
+    fn skip(&mut self, place: String, reason: String) {
+        self.list.push(Skipped { place, reason });
+    }
+
+    /// The defaults of one row whose slot this build knows and whose file it kept.
+    fn defaults(
+        &mut self,
+        place: &str,
+        slots: BTreeMap<String, String>,
+    ) -> BTreeMap<SlotId, String> {
+        let mut out = BTreeMap::new();
+        for (word, id) in slots {
+            let at = format!("{place} {word}");
+            match known::<SlotId>(&word) {
+                None => self.skip(at, "a slot this build does not know".into()),
+                Some(_) if self.files.contains(&id) => {
+                    self.skip(at, format!("names the skipped file {id}"))
+                }
+                Some(slot) => {
+                    out.insert(slot, id);
+                }
+            }
+        }
+        out
+    }
 }
 
 impl CompanionTable {
     /// Reads and checks the catalog's companion table; a catalog without one gives an
     /// empty table.
     ///
-    /// Words this build does not know (a newer signed catalog's) are skipped, so that they
-    /// never take the other companions away:
-    /// - an unknown version word is dropped from a file's `versions`, and a file left with
-    ///   no known version, or with an unknown slot word, is skipped;
-    /// - a default keyed by an unknown version, slot or recipe word is skipped, and so is
-    ///   one naming a skipped file.
+    /// What a newer signed catalog may add that this build cannot use is skipped, listed in
+    /// `skipped` and logged, so that it never takes the other companions away:
+    /// - a licence whose `commercialOutputs` word this build does not know, with the files
+    ///   under it;
+    /// - an unknown version word in a file's `versions`; a file left with no known version,
+    ///   or with an unknown slot word or an adapter slot;
+    /// - a `byVersion` row of an unknown version, a `byRecipe` row of an unknown recipe or
+    ///   of one Studio leaves out, and a default of an unknown slot or naming a skipped file.
     ///
     /// Refused, naming what is wrong, when:
+    /// - a licence does not read otherwise, or one with bundled text does not pin it;
     /// - a repo id or path is not valid, a revision is not 40 hex, a SHA-256 not 64 hex, a
     ///   size 0, an extension not in [`ALLOWED_PART_EXTENSIONS`], or an id listed twice;
-    /// - a file fills a model or adapter slot;
-    /// - a licence a file names is missing, or one with bundled text does not pin it;
+    /// - a file fills a model slot, or names a licence that is not listed;
     /// - a default names no companion, or one of another slot, or one whose `versions`
-    ///   leave out the version (for `byRecipe`, every version whose recipes include it);
-    /// - a `byRecipe` key is a recipe Studio leaves out ([`in_scope_recipes`]).
+    ///   leave out the version (for `byRecipe`, every version whose recipes include it).
     pub fn from_catalog(catalog: &Catalog) -> Result<CompanionTable, String> {
-        let raw = serde_json::Value::Object(catalog.companions.clone().into_iter().collect());
+        let raw = Value::Object(catalog.companions.clone().into_iter().collect());
         let raw: TableRaw = serde_json::from_value(raw)
             .map_err(|e| format!("the companion table does not read: {e}"))?;
+        let mut skips = Skips::default();
+
+        let mut licenses = BTreeMap::new();
+        for (id, raw) in raw.licenses {
+            let commercial = raw.get("commercialOutputs").and_then(Value::as_str);
+            if let Some(word) = commercial.filter(|w| known::<Commercial>(w).is_none()) {
+                skips.skip(
+                    format!("licence {id}"),
+                    format!("commercial use this build does not know: {word}"),
+                );
+                skips.licences.insert(id);
+                continue;
+            }
+            let licence: GenLicence = serde_json::from_value(raw)
+                .map_err(|e| format!("licence {id} does not read: {e}"))?;
+            licenses.insert(id, licence);
+        }
+
         let mut ids = BTreeSet::new();
-        let mut skipped = BTreeSet::new();
         let mut files = Vec::new();
         for f in raw.files {
             if !ids.insert(f.id.clone()) {
                 return Err(format!("companion {}: listed twice", f.id));
             }
-            let versions: Vec<SdVersion> = f
-                .versions
-                .iter()
-                .filter_map(|w| SdVersion::from_word(w))
-                .collect();
-            match slot_of(&f.slot) {
-                Some(slot) if !versions.is_empty() => files.push(Companion {
-                    id: f.id,
-                    slot,
-                    versions,
-                    repo: f.repo,
-                    revision: f.revision,
-                    path: f.path,
-                    size: f.size,
-                    sha256: f.sha256,
-                    license: f.license,
-                }),
-                _ => {
-                    skipped.insert(f.id);
+            let place = format!("file {}", f.id);
+            let mut versions = Vec::new();
+            for word in &f.versions {
+                match SdVersion::from_word(word) {
+                    Some(v) => versions.push(v),
+                    None => skips.skip(
+                        format!("{place} version {word}"),
+                        "a version this build does not know".into(),
+                    ),
                 }
             }
+            let reason = match known::<SlotId>(&f.slot) {
+                None => format!("a slot this build does not know: {}", f.slot),
+                Some(slot) if slot.is_adapter() => format!("an adapter slot: {}", f.slot),
+                Some(_) if versions.is_empty() => "no version this build knows".into(),
+                Some(_) if skips.licences.contains(&f.license) => {
+                    format!("its licence {} is skipped", f.license)
+                }
+                Some(slot) => {
+                    files.push(Companion {
+                        id: f.id,
+                        slot,
+                        versions,
+                        repo: f.repo,
+                        revision: f.revision,
+                        path: f.path,
+                        size: f.size,
+                        sha256: f.sha256,
+                        license: f.license,
+                    });
+                    continue;
+                }
+            };
+            skips.skip(place, reason);
+            skips.files.insert(f.id);
         }
-        let known = |slots: BTreeMap<String, String>| -> BTreeMap<SlotId, String> {
-            slots
-                .into_iter()
-                .filter(|(_, id)| !skipped.contains(id))
-                .filter_map(|(word, id)| Some((slot_of(&word)?, id)))
-                .collect()
-        };
-        let by_version = raw
-            .by_version
-            .into_iter()
-            .filter_map(|(word, slots)| Some((SdVersion::from_word(&word)?, known(slots))))
-            .collect();
-        let by_recipe = raw
-            .by_recipe
-            .into_iter()
-            .filter(|(id, _)| recipe(id).is_some())
-            .map(|(id, slots)| (id, known(slots)))
-            .collect();
+
+        let mut by_version = BTreeMap::new();
+        for (word, slots) in raw.by_version {
+            let place = format!("byVersion {word}");
+            match SdVersion::from_word(&word) {
+                Some(v) => {
+                    by_version.insert(v, skips.defaults(&place, slots));
+                }
+                None => skips.skip(place, "a version this build does not know".into()),
+            }
+        }
+        let mut by_recipe = BTreeMap::new();
+        for (id, slots) in raw.by_recipe {
+            let place = format!("byRecipe {id}");
+            if recipe(&id).is_none() {
+                skips.skip(place, "a recipe this build does not know".into());
+            } else if out_of_scope(&id).is_some() {
+                skips.skip(place, "a recipe Studio leaves out".into());
+            } else {
+                by_recipe.insert(id, skips.defaults(&place, slots));
+            }
+        }
+
+        for s in &skips.list {
+            tracing::warn!(
+                place = %s.place,
+                reason = %s.reason,
+                "a companion entry is skipped"
+            );
+        }
         let table = CompanionTable {
-            licenses: keyed(raw.licenses),
+            licenses: keyed(licenses),
             files,
             by_version,
             by_recipe,
+            skipped: skips.list,
         };
         table.check()?;
         Ok(table)
@@ -238,8 +332,8 @@ impl CompanionTable {
                 "no size"
             } else if !self.licenses.contains_key(&c.license) {
                 "its licence is not listed"
-            } else if !is_companion_slot(c.slot) {
-                "fills a model or adapter slot"
+            } else if is_model_slot(c.slot) {
+                "fills a model slot"
             } else {
                 continue;
             };
@@ -249,13 +343,10 @@ impl CompanionTable {
             let place = format!("byVersion {}", version.word());
             self.check_defaults(&place, slots, &[*version])?;
         }
-        let in_scope = in_scope_recipes();
         for (recipe_id, slots) in &self.by_recipe {
             let place = format!("byRecipe {recipe_id}");
-            if !in_scope.contains(&recipe_id.as_str()) {
-                return Err(format!("{place}: not a recipe Studio runs"));
-            }
-            // Never empty: Task R7's table reaches every recipe Studio runs.
+            // Never empty: reading keeps only recipes Studio runs, and Task R7's table
+            // reaches every one of them.
             let versions: Vec<SdVersion> = SdVersion::ALL
                 .into_iter()
                 .filter(|v| recipes_for(*v).contains(&recipe_id.as_str()))
@@ -294,8 +385,8 @@ impl CompanionTable {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::gen_catalog::{BUNDLED_LICENCE_TEXTS, Badge, Commercial, gen_catalog, sha256_hex};
-    use serde_json::{Value, json};
+    use crate::gen_catalog::{BUNDLED_LICENCE_TEXTS, Badge, gen_catalog, sha256_hex};
+    use serde_json::json;
 
     fn bundled() -> CompanionTable {
         CompanionTable::from_catalog(&Catalog::bundled()).unwrap()
@@ -327,6 +418,25 @@ mod tests {
 
     fn id(c: Option<&Companion>) -> Option<&str> {
         c.map(|c| c.id.as_str())
+    }
+
+    /// Where each skipped item was, in order.
+    fn places(t: &CompanionTable) -> Vec<&str> {
+        t.skipped.iter().map(|s| s.place.as_str()).collect()
+    }
+
+    /// The table without its list of what it skipped.
+    fn kept(t: &CompanionTable) -> CompanionTable {
+        CompanionTable {
+            skipped: Vec::new(),
+            ..t.clone()
+        }
+    }
+
+    /// The strict guard: a misspelt word in the catalog we ship is never skipped quietly.
+    #[test]
+    fn the_bundled_table_skips_nothing() {
+        assert_eq!(bundled().skipped, []);
     }
 
     #[test]
@@ -468,6 +578,34 @@ mod tests {
             err.contains("licence stabilityai-ai-community: the SHA-256 is not 64 hex"),
             "{err}"
         );
+        // A licence that does not read for any other reason than a newer word.
+        for (key, value) in [("name", json!(5)), ("commercialOutputs", json!(5))] {
+            let err = refused(|v| v["licenses"]["apache-2.0"][key] = value);
+            assert!(err.contains("licence apache-2.0 does not read"), "{err}");
+        }
+    }
+
+    /// The licence asks for registration with Stability AI before commercial use
+    /// (`https://stability.ai/community-license-agreement`: "If You are using or distributing
+    /// the Stability AI Materials for a Commercial Purpose, You must register with Stability
+    /// AI."). Studio's amber sentence lists each obligation after the revenue limit
+    /// (`LICENCE_WORDS.amber`, `src/lib/words.ts`): "… The licence asks you to register with
+    /// Stability AI before any commercial use."
+    #[test]
+    fn the_sd35_licence_asks_for_registration_before_commercial_use() {
+        let t = bundled();
+        let sai = t.licence("stabilityai-ai-community").unwrap();
+        assert_eq!(sai.badge(), Badge::Amber);
+        assert_eq!(
+            sai.obligations,
+            ["Register with Stability AI before any commercial use."]
+        );
+        // Written as the 0.1.x licences' obligations are: one sentence, a capital to a stop.
+        let apache = t.licence("apache-2.0").unwrap();
+        assert_eq!(
+            apache.obligations,
+            ["Keep the licence and copyright notices with the files."]
+        );
     }
 
     #[test]
@@ -493,16 +631,7 @@ mod tests {
             ),
             ("size", json!(0), "no size"),
             ("license", json!("mit"), "its licence is not listed"),
-            (
-                "slot",
-                json!("diffusion_model"),
-                "fills a model or adapter slot",
-            ),
-            (
-                "slot",
-                json!("control_net"),
-                "fills a model or adapter slot",
-            ),
+            ("slot", json!("diffusion_model"), "fills a model slot"),
             (
                 "id",
                 json!("t5xxl-fp8"),
@@ -562,12 +691,6 @@ mod tests {
             err.contains("byRecipe flux1-fill vae: ae-flux1 does not suit flux-fill"),
             "{err}"
         );
-        // A known recipe that Studio leaves out.
-        let err = refused(|v| v["byRecipe"]["sd1-controlnet"] = json!({}));
-        assert!(
-            err.contains("byRecipe sd1-controlnet: not a recipe Studio runs"),
-            "{err}"
-        );
     }
 
     /// The engine runs Flux Fill and Flux Controls as Flux (`sd_version_is_flux`,
@@ -616,6 +739,13 @@ mod tests {
             id(t.default_for("flux1-dev", Flux, SlotId::ClipL)),
             Some("clip-l")
         );
+        assert_eq!(
+            t.skipped,
+            [Skipped {
+                place: "file clip-l version flux9".into(),
+                reason: "a version this build does not know".into(),
+            }]
+        );
     }
 
     #[test]
@@ -650,6 +780,22 @@ mod tests {
             id(t.default_for("flux1-dev", SdVersion::Flux, SlotId::T5xxl)),
             Some("t5xxl-fp8")
         );
+        assert_eq!(
+            places(&t),
+            [
+                "file t5xxl-flux9 version flux9",
+                "file t5xxl-flux9",
+                "file encoder-9",
+                "byVersion chroma t5xxl",
+                "byRecipe flux1-dev t5xxl",
+            ]
+        );
+        assert_eq!(t.skipped[1].reason, "no version this build knows");
+        assert_eq!(
+            t.skipped[2].reason,
+            "a slot this build does not know: text_encoder_9"
+        );
+        assert_eq!(t.skipped[3].reason, "names the skipped file t5xxl-flux9");
         // A default naming a file that was never listed is still refused.
         let err = refused(|v| v["byVersion"]["chroma"]["t5xxl"] = json!("never-listed"));
         assert!(
@@ -675,7 +821,75 @@ mod tests {
             [SlotId::ClipL, SlotId::T5xxl, SlotId::Vae]
         );
         assert!(!t.by_recipe.contains_key("flux9-dev"));
-        assert_eq!(t, bundled());
+        assert_eq!(kept(&t), bundled());
+        assert_eq!(
+            places(&t),
+            [
+                "byVersion flux text_encoder_9",
+                "byVersion flux9",
+                "byRecipe flux9-dev"
+            ]
+        );
+        assert_eq!(t.skipped[2].reason, "a recipe this build does not know");
+    }
+
+    /// What a later build may bring in scope, or a later licence word, is skipped with
+    /// everything that depends on it; the rest of the table loads.
+    #[test]
+    fn later_scope_and_licence_words_are_skipped_with_what_depends_on_them() {
+        let t = changed(|v| {
+            // A file in an adapter slot, and a default for it.
+            let clip = at(v, "clip-vision-h");
+            let mut adapter = v["files"][clip].clone();
+            adapter["id"] = json!("ip-adapter-x");
+            adapter["slot"] = json!("ip_adapter");
+            adapter["versions"] = json!(["sdxl"]);
+            v["files"].as_array_mut().unwrap().push(adapter);
+            v["byVersion"]["sdxl"] = json!({ "ip_adapter": "ip-adapter-x" });
+            // A recipe Studio leaves out.
+            v["byRecipe"]["sd1-controlnet"] = json!({ "vae": "ae-flux1" });
+            // A licence word this build does not know: clip-g and sd3's clip_g default go.
+            v["licenses"]["stabilityai-ai-community"]["commercialOutputs"] = json!("attribution");
+        })
+        .unwrap();
+        assert_eq!(t.files.len(), 21);
+        assert!(t.licence("stabilityai-ai-community").is_none());
+        assert!(t.files.iter().all(|c| c.id != "clip-g"));
+        assert_eq!(
+            t.default_for("sd35-medium", SdVersion::Sd3, SlotId::ClipG),
+            None
+        );
+        assert_eq!(
+            id(t.default_for("sd35-medium", SdVersion::Sd3, SlotId::ClipL)),
+            Some("clip-l")
+        );
+        assert!(t.by_version[&SdVersion::Sdxl].is_empty());
+        assert!(!t.by_recipe.contains_key("sd1-controlnet"));
+        let skipped: Vec<(&str, &str)> = t
+            .skipped
+            .iter()
+            .map(|s| (s.place.as_str(), s.reason.as_str()))
+            .collect();
+        assert_eq!(
+            skipped,
+            [
+                (
+                    "licence stabilityai-ai-community",
+                    "commercial use this build does not know: attribution"
+                ),
+                (
+                    "file clip-g",
+                    "its licence stabilityai-ai-community is skipped"
+                ),
+                ("file ip-adapter-x", "an adapter slot: ip_adapter"),
+                ("byVersion sd3 clip_g", "names the skipped file clip-g"),
+                (
+                    "byVersion sdxl ip_adapter",
+                    "names the skipped file ip-adapter-x"
+                ),
+                ("byRecipe sd1-controlnet", "a recipe Studio leaves out"),
+            ]
+        );
     }
 
     #[test]

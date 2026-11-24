@@ -1415,7 +1415,9 @@
         "commercialOutputs": "underRevenue",
         "revenueLimitUsd": 1000000,
         "excludedRegions": [],
-        "obligations": [],
+        "obligations": [
+          "Register with Stability AI before any commercial use."
+        ],
         "plainWords": "Commercial use only under $1,000,000 a year in revenue."
       }
     },
