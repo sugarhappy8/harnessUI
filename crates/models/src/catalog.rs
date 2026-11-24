@@ -53,6 +53,16 @@ pub struct Catalog {
         skip_serializing_if = "BTreeMap::is_empty"
     )]
     pub generator_families: BTreeMap<String, serde_json::Value>,
+
+    // ---- 0.2.0 Studio: read by `sd::companions`, raw for the same reasons.
+    /// Shared extra files (text encoders, decoders, CLIP vision), their licences and the
+    /// default per version and recipe.
+    #[serde(
+        default,
+        deserialize_with = "companions_or_empty",
+        skip_serializing_if = "BTreeMap::is_empty"
+    )]
+    pub companions: BTreeMap<String, serde_json::Value>,
 }
 
 fn generators_or_empty<'de, D: serde::Deserializer<'de>>(
@@ -65,6 +75,12 @@ fn families_or_empty<'de, D: serde::Deserializer<'de>>(
     d: D,
 ) -> Result<BTreeMap<String, serde_json::Value>, D::Error> {
     object_or_empty(d, "generatorFamilies")
+}
+
+fn companions_or_empty<'de, D: serde::Deserializer<'de>>(
+    d: D,
+) -> Result<BTreeMap<String, serde_json::Value>, D::Error> {
+    object_or_empty(d, "companions")
 }
 
 /// Reads the catalog's `key` as a map of raw values. Anything but an object (a malformed
@@ -812,12 +828,25 @@ mod tests {
         assert!(written["generatorFamilies"]["flux2-klein-4b"].is_object());
         assert_eq!(Catalog::parse(&written.to_string()).unwrap(), c);
         let others = serde_json::to_value(Catalog::parse(TEST_CATALOG).unwrap()).unwrap();
-        for key in ["generators", "generatorTiers", "generatorFamilies"] {
+        for key in [
+            "generators",
+            "generatorTiers",
+            "generatorFamilies",
+            "companions",
+        ] {
             assert!(others.get(key).is_none(), "{key}");
         }
+        // The bundled catalog's companion table is written back as it came.
+        let bundled = serde_json::to_value(Catalog::bundled()).unwrap();
+        let raw: serde_json::Value = serde_json::from_str(BUNDLED).unwrap();
+        assert_eq!(bundled["companions"], raw["companions"]);
+        assert_eq!(
+            Catalog::parse(&bundled.to_string()).unwrap(),
+            Catalog::bundled()
+        );
     }
 
-    /// The three keys are read as they come; one that is not even an object is left out,
+    /// The Studio keys are read as they come; one that is not even an object is left out,
     /// never a reason to refuse the chat models, and the log names the key so that a
     /// malformed signed catalog shows. (The only test that reaches that warning: met first
     /// on a thread with no capture, its callsite could be cached as never logging.)
@@ -827,11 +856,17 @@ mod tests {
         v["generators"] = serde_json::json!([1, 2]);
         v["generatorTiers"] = serde_json::json!("nope");
         v["generatorFamilies"] = serde_json::json!(5);
+        v["companions"] = serde_json::json!(true);
         let (c, log) = warnings(|| Catalog::parse(&v.to_string()).unwrap());
         assert_eq!(c.models.len(), 1);
         assert!(c.generators.is_empty() && c.generator_families.is_empty());
+        assert!(c.companions.is_empty());
         assert_eq!(c.generator_tiers, "nope");
-        assert_eq!(log.lines().count(), 2, "{log}");
+        assert_eq!(log.lines().count(), 3, "{log}");
+        assert!(
+            log.contains(r#"key="companions" found="a boolean""#),
+            "{log}"
+        );
         assert!(log.contains(r#"key="generators" found="a list""#), "{log}");
         assert!(
             log.contains(r#"key="generatorFamilies" found="a number""#),

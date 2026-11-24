@@ -1,8 +1,8 @@
 {
   "schemaVersion": 1,
-  "sequence": 4,
-  "generated": "2026-11-20",
-  "note": "Pinned commits, sizes and SHA-256 were HEAD-verified on 2026-11-10 (docs/research/huggingface.md). 'tested' records a passing scripts/catalog_test.py run (template shapes and a real tool-call round trip) under the pinned llama.cpp. The picture and video parts (generators, generatorFamilies) were pinned from their Hugging Face listings on 2026-11-18 and 2026-11-20 (recorded in crates/models/tests/fixtures/hf/); each licence pins the SHA-256 of its text.",
+  "sequence": 5,
+  "generated": "2026-11-24",
+  "note": "Pinned commits, sizes and SHA-256 were HEAD-verified on 2026-11-10 (docs/research/huggingface.md). 'tested' records a passing scripts/catalog_test.py run (template shapes and a real tool-call round trip) under the pinned llama.cpp. The picture and video parts (generators, generatorFamilies) were pinned from their Hugging Face listings on 2026-11-18 and 2026-11-20 (recorded in crates/models/tests/fixtures/hf/); each licence pins the SHA-256 of its text. The companions (shared text encoders, decoders and CLIP vision files) were pinned from their Hugging Face listings on 2026-11-24.",
   "tiers": {
     "8": {
       "recommendedCtx": 16384,
@@ -1392,6 +1392,492 @@
         4500000000,
         5500000000
       ]
+    }
+  },
+  "companions": {
+    "licenses": {
+      "apache-2.0": {
+        "name": "Apache License 2.0",
+        "url": "https://www.apache.org/licenses/LICENSE-2.0.txt",
+        "sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30",
+        "commercialOutputs": "yes",
+        "revenueLimitUsd": null,
+        "excludedRegions": [],
+        "obligations": [
+          "Keep the licence and copyright notices with the files."
+        ],
+        "plainWords": "Free for any use, including commercial."
+      },
+      "stabilityai-ai-community": {
+        "name": "Stability AI Community License Agreement",
+        "url": "https://huggingface.co/Comfy-Org/stable-diffusion-3.5/blob/934251d1e6168bcb45a069abc5bd5cdd5f8fea00/LICENSE.md",
+        "sha256": "d57ccd6052c6aedc71fbd7ba897815a5a6714c0b981e7d632988e9c2803da3ca",
+        "commercialOutputs": "underRevenue",
+        "revenueLimitUsd": 1000000,
+        "excludedRegions": [],
+        "obligations": [],
+        "plainWords": "Commercial use only under $1,000,000 a year in revenue."
+      }
+    },
+    "files": [
+      {
+        "id": "clip-l",
+        "slot": "clip_l",
+        "versions": [
+          "flux",
+          "flex-2",
+          "sd3"
+        ],
+        "repo": "comfyanonymous/flux_text_encoders",
+        "revision": "6af2a98e3f615bdfa612fbd85da93d1ed5f69ef5",
+        "path": "clip_l.safetensors",
+        "size": 246144152,
+        "sha256": "660c6f5b1abae9dc498ac2d21e1347d2abdb0cf6c0c0c8576cd796491d9a6cdd",
+        "license": "apache-2.0"
+      },
+      {
+        "id": "t5xxl-fp8",
+        "slot": "t5xxl",
+        "versions": [
+          "flux",
+          "flex-2",
+          "chroma",
+          "chroma-radiance",
+          "sd3"
+        ],
+        "repo": "comfyanonymous/flux_text_encoders",
+        "revision": "6af2a98e3f615bdfa612fbd85da93d1ed5f69ef5",
+        "path": "t5xxl_fp8_e4m3fn.safetensors",
+        "size": 4893934904,
+        "sha256": "7d330da4816157540d6bb7838bf63a0f02f573fc48ca4d8de34bb0cbfd514f09",
+        "license": "apache-2.0"
+      },
+      {
+        "id": "t5xxl-fp16",
+        "slot": "t5xxl",
+        "versions": [
+          "flux",
+          "flex-2",
+          "chroma",
+          "chroma-radiance",
+          "sd3"
+        ],
+        "repo": "comfyanonymous/flux_text_encoders",
+        "revision": "6af2a98e3f615bdfa612fbd85da93d1ed5f69ef5",
+        "path": "t5xxl_fp16.safetensors",
+        "size": 9787841024,
+        "sha256": "6e480b09fae049a72d2a8c5fbccb8d3e92febeb233bbe9dfe7256958a9167635",
+        "license": "apache-2.0"
+      },
+      {
+        "id": "clip-g",
+        "slot": "clip_g",
+        "versions": [
+          "sd3"
+        ],
+        "repo": "Comfy-Org/stable-diffusion-3.5",
+        "revision": "934251d1e6168bcb45a069abc5bd5cdd5f8fea00",
+        "path": "text_encoders/clip_g.safetensors",
+        "size": 1389382176,
+        "sha256": "ec310df2af79c318e24d20511b601a591ca8cd4f1fce1d8dff822a356bcdb1f4",
+        "license": "stabilityai-ai-community"
+      },
+      {
+        "id": "ae-flux1",
+        "slot": "vae",
+        "versions": [
+          "flux",
+          "flex-2",
+          "chroma",
+          "z-image",
+          "ovis-image",
+          "longcat",
+          "boogu-image"
+        ],
+        "repo": "lodestones/Chroma",
+        "revision": "2f3b2730d7b5edbd02cdff12f72610af5787300b",
+        "path": "ae.safetensors",
+        "size": 335304388,
+        "sha256": "afc8e28272cd15db3919bacdb6918ce9c1ed22e96cb12c4d5ed0fba823529e38",
+        "license": "apache-2.0"
+      },
+      {
+        "id": "flux2-vae",
+        "slot": "vae",
+        "versions": [
+          "flux2",
+          "flux2-klein",
+          "flux3",
+          "ernie-image",
+          "fibo2",
+          "lens",
+          "moss-image",
+          "sefi-image",
+          "ideogram4",
+          "llada-image"
+        ],
+        "repo": "Comfy-Org/Flux-2-Klein-4B",
+        "revision": "5b3abca5c0dc1ecd4eaf3340868d09063fc1c965",
+        "path": "split_files/vae/flux2-vae.safetensors",
+        "size": 336211292,
+        "sha256": "868fe7b343cc8f3a19dbcfcafbc3d5f888802be3f89bd81b65b3621a066ce8f3",
+        "license": "apache-2.0"
+      },
+      {
+        "id": "qwen-image-vae",
+        "slot": "vae",
+        "versions": [
+          "qwen-image",
+          "qwen-image-layered",
+          "anima"
+        ],
+        "repo": "Comfy-Org/Qwen-Image",
+        "revision": "1f12b17be14c89b026c51a91d67c32f84bb047bc",
+        "path": "split_files/vae/qwen_image_vae.safetensors",
+        "size": 253806246,
+        "sha256": "a70580f0213e67967ee9c95f05bb400e8fb08307e017a924bf3441223e023d1f",
+        "license": "apache-2.0"
+      },
+      {
+        "id": "qwen2.5-vl-7b-q8",
+        "slot": "llm",
+        "versions": [
+          "qwen-image",
+          "qwen-image-layered",
+          "longcat",
+          "hunyuan-video"
+        ],
+        "repo": "unsloth/Qwen2.5-VL-7B-Instruct-GGUF",
+        "revision": "68bb8bc4b7df5289c143aaec0ab477a7d4051aab",
+        "path": "Qwen2.5-VL-7B-Instruct-Q8_0.gguf",
+        "size": 8098524032,
+        "sha256": "ee770c700d7429cc6f0c74d6c7ab3c063bf521312fc36e80776d1d79bc9fa4ad",
+        "license": "apache-2.0"
+      },
+      {
+        "id": "qwen2.5-vl-7b-mmproj",
+        "slot": "llm_vision",
+        "versions": [
+          "qwen-image",
+          "longcat"
+        ],
+        "repo": "unsloth/Qwen2.5-VL-7B-Instruct-GGUF",
+        "revision": "68bb8bc4b7df5289c143aaec0ab477a7d4051aab",
+        "path": "mmproj-F16.gguf",
+        "size": 1354163040,
+        "sha256": "987dd0733033fb5dd9b124d1ca926ae865572e432384eee7618b2eec3e735e17",
+        "license": "apache-2.0"
+      },
+      {
+        "id": "umt5-xxl-q8",
+        "slot": "t5xxl",
+        "versions": [
+          "wan2",
+          "wan2.2-i2v",
+          "wan2.2-ti2v"
+        ],
+        "repo": "city96/umt5-xxl-encoder-gguf",
+        "revision": "b535255bee98c2b0a59ea7c0ae2dcd0c6657b3b7",
+        "path": "umt5-xxl-encoder-Q8_0.gguf",
+        "size": 6043068256,
+        "sha256": "2521d4de0bf9e1cc6549866463ceae85e4ec3239bc6063f7488810be39033bbc",
+        "license": "apache-2.0"
+      },
+      {
+        "id": "umt5-xxl-q5km",
+        "slot": "t5xxl",
+        "versions": [
+          "wan2",
+          "wan2.2-i2v",
+          "wan2.2-ti2v"
+        ],
+        "repo": "city96/umt5-xxl-encoder-gguf",
+        "revision": "b535255bee98c2b0a59ea7c0ae2dcd0c6657b3b7",
+        "path": "umt5-xxl-encoder-Q5_K_M.gguf",
+        "size": 4145878880,
+        "sha256": "eaea358bb438c5d211721a4feecc162000e3636e9cb96f51e216f1f44ebd12ce",
+        "license": "apache-2.0"
+      },
+      {
+        "id": "wan21-vae",
+        "slot": "vae",
+        "versions": [
+          "wan2",
+          "wan2.2-i2v",
+          "krea2",
+          "lingbot-video"
+        ],
+        "repo": "Comfy-Org/Wan-2.1",
+        "revision": "d6258323e18f14c60d37899da97ca555f3118259",
+        "path": "split_files/vae/wan_2.1_vae.safetensors",
+        "size": 253815318,
+        "sha256": "2fc39d31359a4b0a64f55876d8ff7fa8d780956ae2cb13463b0223e15148976b",
+        "license": "apache-2.0"
+      },
+      {
+        "id": "wan22-vae",
+        "slot": "vae",
+        "versions": [
+          "wan2.2-ti2v"
+        ],
+        "repo": "Comfy-Org/Wan-2.2",
+        "revision": "5df3a4a3ed0628002308022198249dbbbd045d09",
+        "path": "split_files/vae/wan2.2_vae.safetensors",
+        "size": 1409400960,
+        "sha256": "e40321bd36b9709991dae2530eb4ac303dd168276980d3e9bc4b6e2b75fed156",
+        "license": "apache-2.0"
+      },
+      {
+        "id": "clip-vision-h",
+        "slot": "clip_vision",
+        "versions": [
+          "wan2"
+        ],
+        "repo": "Comfy-Org/Wan-2.1",
+        "revision": "d6258323e18f14c60d37899da97ca555f3118259",
+        "path": "split_files/clip_vision/clip_vision_h.safetensors",
+        "size": 1264219396,
+        "sha256": "64a7ef761bfccbadbaa3da77366aac4185a6c58fa5de5f589b42a65bcc21f161",
+        "license": "apache-2.0"
+      },
+      {
+        "id": "qwen3-4b-q8",
+        "slot": "llm",
+        "versions": [
+          "flux2-klein"
+        ],
+        "repo": "unsloth/Qwen3-4B-GGUF",
+        "revision": "22c9fc8a8c7700b76a1789366280a6a5a1ad1120",
+        "path": "Qwen3-4B-Q8_0.gguf",
+        "size": 4280405792,
+        "sha256": "eed555233267a33c7e8ee31682762cc7751b3f6d224039086e0e846f05fffa5d",
+        "license": "apache-2.0"
+      },
+      {
+        "id": "qwen3-4b-q4km",
+        "slot": "llm",
+        "versions": [
+          "flux2-klein"
+        ],
+        "repo": "unsloth/Qwen3-4B-GGUF",
+        "revision": "22c9fc8a8c7700b76a1789366280a6a5a1ad1120",
+        "path": "Qwen3-4B-Q4_K_M.gguf",
+        "size": 2497281312,
+        "sha256": "f6f851777709861056efcdad3af01da38b31223a3ba26e61a4f8bf3a2195813a",
+        "license": "apache-2.0"
+      },
+      {
+        "id": "qwen3-8b-q8",
+        "slot": "llm",
+        "versions": [
+          "flux2-klein"
+        ],
+        "repo": "unsloth/Qwen3-8B-GGUF",
+        "revision": "a6adef130ffb23ddaf1a62fec9dced968c9bc482",
+        "path": "Qwen3-8B-Q8_0.gguf",
+        "size": 8709519168,
+        "sha256": "0cfbf745760f07a76ddeb358dd025a27f2e11d1ca9c9a4169a373d52990fe86e",
+        "license": "apache-2.0"
+      },
+      {
+        "id": "qwen3-4b-2507-q8",
+        "slot": "llm",
+        "versions": [
+          "z-image",
+          "z-image-l2p"
+        ],
+        "repo": "unsloth/Qwen3-4B-Instruct-2507-GGUF",
+        "revision": "a06e946bb6b655725eafa393f4a9745d460374c9",
+        "path": "Qwen3-4B-Instruct-2507-Q8_0.gguf",
+        "size": 4280405600,
+        "sha256": "391c1e410fd9f4cf2de2b510273b56a84c19ce18f4fa3bfb3774031dac4ef068",
+        "license": "apache-2.0"
+      },
+      {
+        "id": "qwen3-4b-2507-q4km",
+        "slot": "llm",
+        "versions": [
+          "z-image",
+          "z-image-l2p"
+        ],
+        "repo": "unsloth/Qwen3-4B-Instruct-2507-GGUF",
+        "revision": "a06e946bb6b655725eafa393f4a9745d460374c9",
+        "path": "Qwen3-4B-Instruct-2507-Q4_K_M.gguf",
+        "size": 2497281120,
+        "sha256": "3605803b982cb64aead44f6c1b2ae36e3acdb41d8e46c8a94c6533bc4c67e597",
+        "license": "apache-2.0"
+      },
+      {
+        "id": "qwen3-vl-4b-q4km",
+        "slot": "llm",
+        "versions": [
+          "flux3",
+          "krea2",
+          "mage-flow",
+          "iris",
+          "lingbot-video",
+          "fibo2"
+        ],
+        "repo": "Qwen/Qwen3-VL-4B-Instruct-GGUF",
+        "revision": "1cd86afb9a95c410a6038ab3b40d8b578c892266",
+        "path": "Qwen3VL-4B-Instruct-Q4_K_M.gguf",
+        "size": 2497281664,
+        "sha256": "66358cb18bb6b3b1b6675aa412c7a88ef01d228f481184d13668e5201c730a0a",
+        "license": "apache-2.0"
+      },
+      {
+        "id": "mistral-small-3.2-24b-q4km",
+        "slot": "llm",
+        "versions": [
+          "flux2"
+        ],
+        "repo": "unsloth/Mistral-Small-3.2-24B-Instruct-2506-GGUF",
+        "revision": "b750ec2299225e492f1bd27cab88a0a595fa848f",
+        "path": "Mistral-Small-3.2-24B-Instruct-2506-Q4_K_M.gguf",
+        "size": 14333922848,
+        "sha256": "a3cc56310807ed0d145eaf9f018ccda9ae7ad8edb41ec870aa2454b0d4700b3c",
+        "license": "apache-2.0"
+      },
+      {
+        "id": "ovis-2.5",
+        "slot": "llm",
+        "versions": [
+          "ovis-image"
+        ],
+        "repo": "Comfy-Org/Ovis-Image",
+        "revision": "b7d0cb855e82448c28936c9907a143bf319c80a0",
+        "path": "split_files/text_encoders/ovis_2.5.safetensors",
+        "size": 5140950080,
+        "sha256": "f453ee5e7a25cb23cf2adf7aae3e5b405f22097cb67f2cfcca029688cb3f740d",
+        "license": "apache-2.0"
+      }
+    ],
+    "byVersion": {
+      "flux": {
+        "clip_l": "clip-l",
+        "t5xxl": "t5xxl-fp8",
+        "vae": "ae-flux1"
+      },
+      "flex-2": {
+        "clip_l": "clip-l",
+        "t5xxl": "t5xxl-fp8",
+        "vae": "ae-flux1"
+      },
+      "chroma": {
+        "t5xxl": "t5xxl-fp8",
+        "vae": "ae-flux1"
+      },
+      "chroma-radiance": {
+        "t5xxl": "t5xxl-fp8"
+      },
+      "sd3": {
+        "clip_l": "clip-l",
+        "clip_g": "clip-g",
+        "t5xxl": "t5xxl-fp8"
+      },
+      "qwen-image": {
+        "llm": "qwen2.5-vl-7b-q8",
+        "vae": "qwen-image-vae",
+        "llm_vision": "qwen2.5-vl-7b-mmproj"
+      },
+      "qwen-image-layered": {
+        "llm": "qwen2.5-vl-7b-q8",
+        "vae": "qwen-image-vae"
+      },
+      "longcat": {
+        "llm": "qwen2.5-vl-7b-q8",
+        "vae": "ae-flux1",
+        "llm_vision": "qwen2.5-vl-7b-mmproj"
+      },
+      "hunyuan-video": {
+        "llm": "qwen2.5-vl-7b-q8"
+      },
+      "anima": {
+        "vae": "qwen-image-vae"
+      },
+      "wan2": {
+        "t5xxl": "umt5-xxl-q8",
+        "vae": "wan21-vae",
+        "clip_vision": "clip-vision-h"
+      },
+      "wan2.2-i2v": {
+        "t5xxl": "umt5-xxl-q8",
+        "vae": "wan21-vae"
+      },
+      "wan2.2-ti2v": {
+        "t5xxl": "umt5-xxl-q8",
+        "vae": "wan22-vae"
+      },
+      "lingbot-video": {
+        "llm": "qwen3-vl-4b-q4km",
+        "vae": "wan21-vae"
+      },
+      "z-image": {
+        "llm": "qwen3-4b-2507-q8",
+        "vae": "ae-flux1"
+      },
+      "z-image-l2p": {
+        "llm": "qwen3-4b-2507-q8"
+      },
+      "flux2-klein": {
+        "llm": "qwen3-4b-q8",
+        "vae": "flux2-vae"
+      },
+      "flux2": {
+        "llm": "mistral-small-3.2-24b-q4km",
+        "vae": "flux2-vae"
+      },
+      "flux3": {
+        "llm": "qwen3-vl-4b-q4km",
+        "vae": "flux2-vae"
+      },
+      "fibo2": {
+        "llm": "qwen3-vl-4b-q4km",
+        "vae": "flux2-vae"
+      },
+      "ovis-image": {
+        "llm": "ovis-2.5",
+        "vae": "ae-flux1"
+      },
+      "boogu-image": {
+        "vae": "ae-flux1"
+      },
+      "ernie-image": {
+        "vae": "flux2-vae"
+      },
+      "lens": {
+        "vae": "flux2-vae"
+      },
+      "moss-image": {
+        "vae": "flux2-vae"
+      },
+      "sefi-image": {
+        "vae": "flux2-vae"
+      },
+      "ideogram4": {
+        "vae": "flux2-vae"
+      },
+      "llada-image": {
+        "vae": "flux2-vae"
+      },
+      "krea2": {
+        "llm": "qwen3-vl-4b-q4km",
+        "vae": "wan21-vae"
+      },
+      "mage-flow": {
+        "llm": "qwen3-vl-4b-q4km"
+      },
+      "iris": {
+        "llm": "qwen3-vl-4b-q4km"
+      }
+    },
+    "byRecipe": {
+      "flux2-klein-9b": {
+        "llm": "qwen3-8b-q8"
+      },
+      "flux2-klein-base-9b": {
+        "llm": "qwen3-8b-q8"
+      }
     }
   }
 }

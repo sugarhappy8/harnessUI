@@ -729,7 +729,7 @@ fn read_family(key: &str, raw: &Value) -> Result<FamilyRecord, String> {
 }
 
 /// Each licence with its id set to its key.
-fn keyed(licenses: BTreeMap<String, GenLicence>) -> BTreeMap<String, GenLicence> {
+pub(crate) fn keyed(licenses: BTreeMap<String, GenLicence>) -> BTreeMap<String, GenLicence> {
     licenses
         .into_iter()
         .map(|(id, mut l)| {

@@ -6,6 +6,7 @@ use serde::{Deserialize, Serialize};
 use crate::sd::index::FileFormat;
 use crate::sd::inspect::{FileKind, MatchFacts};
 
+pub mod companions;
 pub mod detect;
 pub mod index;
 pub mod inspect;
