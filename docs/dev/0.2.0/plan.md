@@ -36,7 +36,9 @@
 - **Phase R** adds library code and catalog data only. Nothing in the app calls it yet.
 - **Phase S** switches Studio's local side onto it, keeping the 0.1.2 webview working with small adaptations.
 - **Phase U** replaces those screens. Its click-count target (at most 4 clicks from the results to using a new model) is a test in Task U7.
-- **Phases G and F** do not depend on Phase U. They may run beside it.
+- **Strictly in this order, one task at a time, with no phase run beside another** (coordinator ruling P1).
+  - Phase G edits Phase U's components (`Composer`, `ModelCard`, `ModelDetail`, `SwitchField`, the top bar).
+  - Phases G, F and D all edit `scripts/docs_test.py`, ARCHITECTURE.md, SECURITY.md and README.md.
 
 ---
 
@@ -79,8 +81,12 @@ Each is decided below in the task named. None is silently diverged from.
    - **LTX-Video 0.9** detects as `LTXAV`. Studio tells it apart by the missing `audio_patchify_proj`.
    - **HunyuanVideo v1** detects as `HUNYUAN_VIDEO`, the same as 1.5. Studio tells it apart by the missing `byt5_in.fc1.weight`, which 1.5 has.
 9. **Diffusers folders and sharded files (section 3, 7.2).**
-   - Section 3 implies SD 1.x/2.x/XL diffusers folders run. They do, with `-m <folder>`: the engine reads `unet/`, `vae/`, `text_encoder/` and `text_encoder_2/` (`src/model_loader.cpp:421-441`). Task R6.
-   - The engine loads one file per slot and never joins shards. A `*.safetensors.index.json` model is read, to say what it is, and labelled "Can't run in Studio: split into parts". Its index file also has no LFS SHA-256 to pin.
+   - **Section 3 implies SD 1.x/2.x/XL diffusers folders run. They do, with `-m <folder>`.**
+     - A folder counts as diffusers when it holds `model_index.json` or `unet/diffusion_pytorch_model.safetensors` (`src/model_loader.cpp:207-210`).
+     - The engine then reads exactly `unet/diffusion_pytorch_model.safetensors`, plus `vae/diffusion_pytorch_model.safetensors`, `text_encoder/model.safetensors` and `text_encoder_2/model.safetensors` when present (`model_loader.cpp:423-442`).
+     - Studio plans, downloads and runs such folders (Tasks R5, R6, S4–S7 and S11; coordinator ruling P33).
+     - The engine opens only those exact names, so an fp16 variant (`*.fp16.safetensors`) is saved under the engine's name (Task S7).
+   - **Sharded models.** The engine can load one through its `*.safetensors.index.json` (`model_loader.cpp:211-227`), but the index is a plain git file with no LFS SHA-256 to pin. Studio reads it to say what the model is, and labels it "Can't run in Studio: split into parts".
 10. **The `tokenizer` slot takes a `.json` file, not weights.** The recipes that need it are `lens*`, `llada-image*`, `ming-image` and `moss-image-*`. `.json` is allowed for that slot only. Task S3.
 11. **Removing C5, the saved Full-access start mode asked again at launch, removes a documented protection** against another program editing the setting. The owner chose this (9.3). SECURITY.md says so in Task G4.
 12. **Section 11's guesses at the Reverse engineering failures, refined (Tasks F1 and F2):**
@@ -108,6 +114,11 @@ Each is decided below in the task named. None is silently diverged from.
 19. **Design 11a's "black-and-white" mask.**
     - The engine resizes any mask to the output size and rounds each pixel to black or white (`image.cpp:262-264`), so a grey mask works too.
     - Studio accepts any picture as a mask, and says white areas are the ones changed (Tasks R7 and S12).
+20. **"The notices and other dialogs stay" (the owner's decisions at the top of the design) against 10.3's one Download.**
+    - 0.1.2 confirmed each local download in a dialog.
+    - Design 10.3 instead puts every file, its role, size and licence, and the total, in the result's detail panel, with one Download that counts as one of the four clicks.
+    - The detail panel is the pre-download review. Its licence wording shows before Download, and no second confirmation follows. The one-time local-model notice stays.
+    - Task U6; coordinator ruling P34. The owner can overturn this.
 
 ## Global Constraints
 
@@ -324,8 +335,8 @@ pub struct RecipeDefaults { pub sampling_method: Option<String>, pub scheduler: 
     pub fps: Option<u32>, #[serde(default)] pub custom_sigmas: Vec<f32>, pub img_cfg_scale: Option<f32>, pub high_noise_steps: Option<i32>,
     pub high_noise_cfg_scale: Option<f32>, pub high_noise_sampling_method: Option<String>, pub high_noise_flow_shift: Option<f32>,
     pub moe_boundary: Option<f32>, pub shifted_timestep: Option<u32>, pub strength: Option<f32> }
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)] #[serde(rename_all = "lowercase")]
-pub enum FrameRounding { Floor, Ceil }
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)] #[serde(rename_all = "lowercase")]
+pub enum FrameRounding { Floor, Ceil }   // Serialize too: VideoRule, and GenLimits in Task S3, are serialised
 #[derive(Debug, Clone, Deserialize)] #[serde(deny_unknown_fields)]
 pub struct VideoConstraints { pub frame_step: Option<u32>, pub frame_offset: Option<u32>, pub frame_rounding: Option<FrameRounding>,
     pub min_frames: Option<u32>, pub max_frames: Option<u32>, pub fixed_fps: Option<u32> }
@@ -439,11 +450,14 @@ git commit -m "Studio: vendor the pinned engine's 112 recipes, checked against s
 ### Task R2: The tensor index of a local file
 
 **Files:**
-- Create: `crates/models/src/sd/index.rs`
+- Create:
+  - `crates/models/src/sd/index.rs`;
+  - `crates/models/src/sd/testing.rs`, `#[cfg(any(test, feature = "test-support"))]`, with the `safetensors(header: &Value) -> Vec<u8>` and `big_header(json_bytes: usize) -> Value` builders. Task R4 adds the fixture loader to it.
 - Modify: `crates/models/src/gguf.rs`:
   - add `GgufError::Truncated { need: u64 }`;
   - add `tensor_table_from_prefix`;
-  - add `ggml_type_name`.
+  - add `ggml_type_name`;
+  - make `RawTensor` and its fields `pub` (`gguf.rs:256-264`), with doc comments. It appears in a public signature, which `private_interfaces` would refuse under `-D warnings`, and `ggml_type` loses its `allow(dead_code)` because `sd::index` reads it.
 - Test: inline
 
 **Interfaces:**
@@ -458,7 +472,8 @@ pub enum FileFormat { Safetensors, Gguf }
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TensorInfo { pub name: String, pub dtype: String, /** As written in the file: safetensors outermost first, GGUF `ne` order. */ pub shape: Vec<u64> }
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct TensorIndex { pub format: FileFormat, /** GGUF: file order; safetensors: sorted by name. */ pub tensors: Vec<TensorInfo>, pub metadata: BTreeMap<String, String> }
+pub struct TensorIndex { pub format: FileFormat, /** GGUF: file order; safetensors: sorted by name. */ pub tensors: Vec<TensorInfo>, pub metadata: BTreeMap<String, String>,
+    /** The whole file's parameter count when `tensors` is a trimmed list (Task R4's fixtures); `None` for a real read. */ #[serde(default)] pub parameters_hint: Option<u64> }
 #[derive(Debug, thiserror::Error)]
 pub enum IndexError { #[error("not a weights file")] NotWeights, #[error("header larger than {cap} bytes")] TooLarge { cap: u64 },
     #[error("needs {need} bytes")] Truncated { need: u64 }, #[error("corrupt header: {0}")] Corrupt(String),
@@ -474,7 +489,7 @@ pub fn read_local(path: &Path) -> Result<TensorIndex, IndexError>;     // reads 
 pub fn parse_shard_index(json: &[u8]) -> Result<ShardIndex, IndexError>;
 impl TensorIndex {
     pub fn engine_order(&self) -> Vec<&TensorInfo>;   // safetensors: sorted by name; GGUF: file order
-    pub fn parameters(&self) -> u64;                  // Σ product of shape over all tensors
+    pub fn parameters(&self) -> u64;                  // parameters_hint when set, else Σ product of shape over all tensors
 }
 pub fn engine_ne(t: &TensorInfo, format: FileFormat) -> [u64; 4];
 ```
@@ -489,7 +504,7 @@ pub fn engine_ne(t: &TensorInfo, format: FileFormat) -> [u64; 4];
 
 **Steps**
 
-- [ ] **Step 1: Write the failing tests.** They use a `safetensors(header: &Value)` builder in `sd/testing.rs` and the existing `gguf::testing::Writer`.
+- [ ] **Step 1: Write the failing tests.** They use the `safetensors(header: &Value)` and `big_header(n)` builders of `sd/testing.rs` (`big_header(n)` is a one-tensor header whose JSON is exactly `n` bytes, padded in `__metadata__`) and the existing `gguf::testing::Writer`.
 ```rust
 #[test] fn a_safetensors_header_is_read_and_visited_in_engine_order() {
     let ix = parse_prefix(&safetensors(&json!({"b": {"dtype": "F16", "shape": [2, 3], "data_offsets": [0, 12]},
@@ -514,7 +529,7 @@ pub fn engine_ne(t: &TensorInfo, format: FileFormat) -> [u64; 4];
 #[test] fn a_short_prefix_asks_for_exactly_what_it_needs() {
     let file = safetensors(&big_header(2_000));                 // header JSON of 2,000 bytes
     assert!(matches!(parse_prefix(&file[..100]), Err(IndexError::Truncated { need: 2_008 })));
-    let g = gguf::testing::diffusion_gguf();                    // a whole small GGUF
+    let g = gguf::testing::diffusion_gguf("klein4b-tensors.txt");   // a whole small GGUF (gguf.rs:840 takes the fixture's name)
     assert!(matches!(parse_prefix(&g[..64]), Err(IndexError::Truncated { .. })));
 }
 #[test] fn pickle_files_are_named_and_never_opened() {
@@ -547,7 +562,7 @@ pub fn engine_ne(t: &TensorInfo, format: FileFormat) -> [u64; 4];
     - Parses with `serde_json` into a `Map`. The workspace does not enable `preserve_order`, so the map is a `BTreeMap` and `tensors` holds the names sorted, which is the engine's own order.
   - **GGUF:**
     - `tensor_table_from_prefix` reuses `read_checked_table` and `read_raw_tensors`.
-    - It reports `Truncated { need }` with the byte count reached plus one table entry, or plus 1 MiB when that is unknown.
+    - It reports `Truncated { need }`: a lower bound, the byte count reached plus one table entry, or plus 1 MiB when that is unknown. Task R3 grows its reads geometrically from it.
     - It refuses when the table would end past `GGUF_HEADER_CAP`.
     - `MAX_TENSORS` is raised from 65,536 to 262,144. Plan decision: LTX-2.3 has 4,444 tensors and LoRA files reach tens of thousands; the 64 MiB cap stays the real bound.
   - `read_local` opens the file, reads up to the cap with the same parser, and never reads tensor data.
@@ -573,7 +588,6 @@ git commit -m "Studio: read safetensors and GGUF tensor tables, in the engine's 
 - Produces:
 ```rust
 pub const FIRST_READ: u64 = 1 << 20;                 // Plan decision: 1 MiB covers most GGUF tables and safetensors headers in one request
-pub const MAX_READS_PER_FILE: u32 = 4;
 pub const MAX_FILES_PER_REPO: usize = 24;
 #[derive(Debug, thiserror::Error)]
 pub enum RemoteError { #[error(transparent)] Hf(#[from] HfError), #[error(transparent)] Index(#[from] IndexError) }
@@ -581,9 +595,11 @@ pub async fn read_remote(hf: &HfClient, repo: &str, commit: &str, path: &str, si
 ```
 - The algorithm:
   1. Read `min(FIRST_READ, size)` bytes and parse.
-  2. On `Truncated { need }`, read again from byte 0 with `max_bytes = min(need, size)`. Plan decision: from 0, which keeps `fetch_head` unchanged and costs at most the prefix again.
-  3. Stop after `MAX_READS_PER_FILE` reads, or when `need` passes the format's cap (`TooLarge`).
-- A gated file's `HfError::NeedsToken` or `NeedsTerms` passes through unchanged. Task S4 turns it into a label.
+  2. On `Truncated { need }`, read again from byte 0. Plan decision: from 0, which keeps `fetch_head` unchanged and costs at most the prefix again.
+     - safetensors: `max_bytes = min(need, size)`, which is exact (`8 + len`), so at most two reads;
+     - GGUF: `max_bytes = min(max(need, 2 × the last read), GGUF_HEADER_CAP, size)`. The read size doubles up to the 64 MiB cap (coordinator ruling P41), so text encoders whose tokenizer metadata runs to 8 MiB or more (Qwen3, `fixtures/gguf/README.md`) are read: 1, 2, 4, 8, 16 MiB.
+  3. Stop at success, at `TooLarge` (the format's cap passed), or when a read at the cap or at the whole file is still truncated (`IndexError::Corrupt`). With doubling from 1 MiB that is at most 8 reads.
+- A gated file's `HfError::NeedsToken` or `NeedsTerms` passes through unchanged. Task S5 turns it into a label.
 
 **Steps**
 
@@ -612,6 +628,13 @@ pub async fn read_remote(hf: &HfClient, repo: &str, commit: &str, path: &str, si
     let s = range_server(gguf_claiming_table_bytes(65 << 20), RangeMode::Honour).await;
     assert!(matches!(read_remote(&s.client(), "o/r", COMMIT, "m.gguf", 70 << 20).await,
         Err(RemoteError::Index(IndexError::TooLarge { cap: GGUF_HEADER_CAP }))));
+}
+#[tokio::test] async fn a_gguf_header_of_8_mib_is_read_by_doubling() {
+    // a 20 MiB file whose tensor table ends at 8,400,000 bytes: each truncated read asks for one more entry, so the reads double
+    let file = gguf_with_table_ending_at(8_400_000, 20 << 20);
+    let s = range_server(file.clone(), RangeMode::Honour).await;
+    assert!(read_remote(&s.client(), "o/r", COMMIT, "qwen3.gguf", file.len() as u64).await.is_ok());
+    assert_eq!(s.ranges(), ["bytes=0-1048575", "bytes=0-2097151", "bytes=0-4194303", "bytes=0-8388607", "bytes=0-16777215"]);
 }
 #[tokio::test] async fn a_gated_file_passes_the_hub_error_through() {
     let s = status_server(401).await;
@@ -645,11 +668,14 @@ git commit -m "Studio: read a Hugging Face file's header with bounded Range requ
 - Create:
   - `scripts/capture_sd_fixtures.py`: committed, standard library, run by hand, not in CI.
   - `crates/models/tests/fixtures/sd/<name>.json` (25 files) and `crates/models/tests/fixtures/sd/README.md`.
-  - `fixture(name: &str) -> TensorIndex` in `crates/models/src/sd/testing.rs`.
+- Modify: `crates/models/src/sd/testing.rs` (created in Task R2): `fixture`, `fixture_source`, `gguf_txt_fixture`.
 - Test: inline in `sd/testing.rs`
 
 **Interfaces:**
-- Produces: `pub fn fixture(name: &str) -> TensorIndex` and `pub fn fixture_source(name: &str) -> FixtureSource { repo, revision, path, size, sha256, captured_on }`, both under `#[cfg(any(test, feature = "test-support"))]`.
+- Produces, all under `#[cfg(any(test, feature = "test-support"))]`:
+  - `pub fn fixture(name: &str) -> TensorIndex`, which sets `parameters_hint` from the JSON's `parameters`;
+  - `pub fn fixture_source(name: &str) -> FixtureSource { repo, revision, path, size, sha256, captured_on }`;
+  - `pub fn gguf_txt_fixture(name: &str) -> TensorIndex`: a GGUF index from the 0.1.x `fixtures/gguf/<name>-tensors.txt` through `gguf::testing::shapes`, with no metadata, as those files have none.
 - The fixture JSON format:
 ```json
 {"source": {"repo": "…", "revision": "<40 hex>", "path": "…", "size": 0, "sha256": "<64 hex>", "capturedOn": "2026-11-24"},
@@ -728,6 +754,8 @@ The existing `crates/models/tests/fixtures/gguf/*.txt` files stay and are also u
   - Run it once:
     - Run: `python3 -I scripts/capture_sd_fixtures.py`
     - Expected: `25 fixtures written`. Each file is under 200 KB.
+    - huggingface.co is reachable from the executing machine (coordinator ruling P32; the API answered 200).
+    - **Fallback** if it is not: write each fixture by hand from the same rule, using the names and shapes the detection, inspection and matching tables need, keep the table's source fields, and set `capturedOn` to `"hand-built"`. The tests are the same. Say so in the README.
 
 - [ ] **Step 4: Run the test and see it pass.**
   - Run: `cargo test -p models --features test-support --lib sd::testing`
@@ -931,8 +959,14 @@ fn as_model(name: &str) -> Option<SdVersion> { let ix = fixture(name); detect_ve
         assert_eq!(detect_version(&[LoadedFile { slot: SlotId::DiffusionModel, index: &gguf_txt_fixture(txt) }]), Some(v), "{txt}");
     }
 }
-#[test] fn companions_and_loras_are_not_models() {
-    for name in ["ae-flux1", "clip-l", "umt5-xxl-q5km", "sdxl-lora-pixel-art", "flux-lora-realism"] { assert_eq!(as_diffusion(name), None, "{name}"); assert_eq!(as_model(name), None, "{name}"); }
+#[test] fn companions_and_loras_answer_as_the_engine_would() {
+    // the engine's own answers, row by row; Task R6 keeps these files out of "Works in Studio" by its LoRA check and layout rule
+    for name in ["ae-flux1", "clip-l", "umt5-xxl-q5km", "sdxl-lora-pixel-art"] { assert_eq!(as_diffusion(name), None, "{name}"); }
+    for name in ["ae-flux1", "umt5-xxl-q5km", "sdxl-lora-pixel-art"] { assert_eq!(as_model(name), None, "{name}"); }
+    // clip_l in the model slot: row 43 takes text_model.embeddings.token_embedding.weight (ne[0] 768) and row 51, with no UNet guard, says sdxs-512-ds
+    assert_eq!(as_model("clip-l"), Some(SdVersion::Sdxs512Ds));
+    // XLabs' "diffusion_model.double_blocks.…" names: row 4 sees them in the diffusion slot, and pass 2's prefix map in the model slot
+    assert_eq!((as_diffusion("flux-lora-realism"), as_model("flux-lora-realism")), (Some(SdVersion::Flux), Some(SdVersion::Flux)));
 }
 #[test] fn a_diffusers_folder_is_detected_from_its_parts() {
     assert_eq!(detect_folder(&[(FolderPart::Unet, &fixture("sd14-diffusers-unet")), (FolderPart::TextEncoder, &fixture("sd14-diffusers-text-encoder"))]), Some(SdVersion::Sd1));
@@ -982,26 +1016,38 @@ git commit -m "Studio: port the engine's model-version detection, in its evaluat
 - Produces:
 ```rust
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)] #[serde(rename_all = "camelCase")]
-pub enum Layout { Checkpoint, DiffusionOnly }
+pub enum Layout { Checkpoint, DiffusionOnly, Folder }   // Folder: an SD 1.x/2.x/XL diffusers folder, run with -m <folder> (correction 9)
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)] #[serde(rename_all = "lowercase")]
 pub enum LoraFormat { Kohya, Peft, Lycoris, Diff }
+// sd/mod.rs: the one list of reasons. Task R7's out-of-scope recipes and Task S5's labels use it too.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)] #[serde(rename_all = "camelCase")]
-pub enum CannotRun { Lumina2, LtxVideo09, HunyuanVideo1, Svd, UnknownWeights, Sharded, Pickle, NoSha }
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)] #[serde(rename_all = "camelCase")]
+pub enum CannotRunReason { Lumina2, LtxVideo09, HunyuanVideo1, Svd, UnknownWeights, Sharded, Pickle, NoSha,
+                           Adapter, NeedsControlFrames, NeedsAudio, Upscaler, FolderModel, NotThisEngine, Ltx2 }
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)] #[serde(rename_all = "camelCase", rename_all_fields = "camelCase")]
 pub enum FileKind {
     Model { version: SdVersion, layout: Layout, embeds: Vec<SlotId> },
     Lora { format: LoraFormat, base: Option<SdVersion> },
     Extra { slot: SlotId },
-    CannotRun { reason: CannotRun, version: Option<SdVersion> },
+    CannotRun { reason: CannotRunReason, version: Option<SdVersion> },
 }
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)] #[serde(rename_all = "camelCase")]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)] #[serde(rename_all = "camelCase")]
 pub struct MatchFacts { pub sd3_blocks: Option<u32>, pub flux2_width: Option<u64>, pub zero_cond: bool, pub img_emb_pos: bool, pub has_img_emb: bool }
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)] #[serde(rename_all = "camelCase")]
 pub struct FileFacts { pub kind: FileKind, pub facts: MatchFacts, pub parameters: u64, pub format: FileFormat }   // in sd/mod.rs
 pub fn inspect(index: &TensorIndex) -> FileFacts;
 pub fn inspect_folder(parts: &[(FolderPart, &TensorIndex)]) -> FileFacts;
-pub fn inspect_local(path: &Path) -> Result<FileFacts, IndexError>;   // read_local + inspect; Pickle → CannotRun::Pickle
+pub fn inspect_local(path: &Path) -> Result<FileFacts, IndexError>;   // read_local + inspect; a pickle file → CannotRun { Pickle }
+pub fn inspect_local_folder(root: &Path) -> Result<FileFacts, IndexError>;   // the four diffusers files under root, by the engine's names
 ```
+
+**The order of the checks**, in `inspect`:
+1. **The LoRA format** (below). A file with LoRA tensor names is a LoRA whatever its other names, because the engine would read XLabs' `diffusion_model.double_blocks.…lora_down.weight` as FLUX (Task R5's test).
+2. **The layout and detection.**
+3. **The guards.**
+4. **The extra-file table.**
+5. `CannotRun { UnknownWeights }`.
+
+`inspect_folder` detects with `detect_folder` and gives `Layout::Folder`. Embedded parts are `vae` when `vae/` is present, `clip_l` for `text_encoder/` and `clip_g` for `text_encoder_2/`.
 
 **Layout and slot:**
 - **Checkpoint** when any name starts with `model.diffusion_model.`, or the file has `first_stage_model.`, `cond_stage_model.` or `conditioner.` names. It is detected in the `model` slot.
@@ -1026,13 +1072,13 @@ pub fn inspect_local(path: &Path) -> Result<FileFacts, IndexError>;   // read_lo
 
 These are the engine's suffixes (`name_conversion.cpp`, the LoRA suffix map).
 
-**LoRA base hint.** First match:
+**LoRA base hint.** The markers match on each name with `_` read as `.`, so kohya's `lora_unet_double_blocks_0_…` meets `double_blocks`. First match:
 
 | Marker | Base |
 |---|---|
 | `lora_te2_` or `te2.` names, or a `…attn2_to_k.lora_down.weight` whose shape `[1]` is 2048 | sdxl |
 | `…attn2_to_k.lora_down.weight` with shape `[1]` 1024 | sd2 |
-| `…attn2_to_k.lora_down.weight` with shape `[1]` 768, or `lora_unet_` names with neither of the above | sd1 |
+| `…attn2_to_k.lora_down.weight` with shape `[1]` 768 | sd1 |
 | `double_stream_modulation` | flux2 |
 | `double_blocks` or `single_blocks` | flux |
 | `joint_blocks` | sd3 |
@@ -1040,6 +1086,7 @@ These are the engine's suffixes (`name_conversion.cpp`, the LoRA suffix map).
 | `blocks.N.cross_attn` or `blocks.N.self_attn` | wan2 |
 | `cap_embedder` or `layers.N.adaLN_modulation` | z-image |
 | `__metadata__` `ss_base_model_version` starting `sdxl` / `sd_v1` / `sd_v2` / `flux` | sdxl / sd1 / sd2 / flux |
+| `lora_unet_` names with none of the above: the UNet fallback, after every DiT row | sd1 |
 | none | None ("LoRA for an unknown model type") |
 
 **Extra file kinds** (a file with no version and no LoRA marker):
@@ -1048,6 +1095,7 @@ These are the engine's suffixes (`name_conversion.cpp`, the LoRA suffix map).
 |---|---|
 | GGUF `general.architecture` `clip` with `mm.` or `v.blk.` names | `llm_vision` |
 | GGUF `general.architecture` in `qwen2`, `qwen2vl`, `qwen3`, `qwen3vl`, `qwen35`, `mistral3`, `llama`, `gemma2`, `gemma3` | `llm` |
+| llama.cpp tensor names `token_embd.weight` and `blk.0.attn_q.weight`, with no diffusion marker. This catches a GGUF language model without metadata, such as the 0.1.x `qwen3-4b` fixture (`fixtures/gguf/README.md`: "no metadata keys") | `llm` |
 | `model.layers.0.self_attn.q_proj.weight` (safetensors language models) | `llm` |
 | `encoder.block.0.layer.0.SelfAttention.q.weight`, or GGUF `enc.blk.0.` | `t5xxl` |
 | `text_model.encoder.layers.0.` with hidden width 768 | `clip_l` |
@@ -1067,7 +1115,7 @@ These are the engine's suffixes (`name_conversion.cpp`, the LoRA suffix map).
 | ltxav | no `model.diffusion_model.audio_patchify_proj.weight` | `CannotRun { LtxVideo09, Some(Ltxav) }` |
 | hunyuan-video | no `byt5_in.fc1.weight` (HunyuanVideo 1.5 has it, v1 has not) | `CannotRun { HunyuanVideo1, Some(HunyuanVideo) }` |
 | svd | — | `CannotRun { Svd, Some(Svd) }` |
-| None | no LoRA or extra marker | `CannotRun { UnknownWeights, None }` |
+| None | no extra-file marker either (step 5) | `CannotRun { UnknownWeights, None }` |
 
 **Facts for matching (Task R7):**
 - `sd3_blocks`: the highest `joint_blocks.N` plus 1.
@@ -1088,14 +1136,14 @@ These are the engine's suffixes (`name_conversion.cpp`, the LoRA suffix map).
     assert!(matches!(inspect(&fixture("flux1-kontext")).kind, FileKind::Model { layout: Layout::DiffusionOnly, .. }));
 }
 #[test] fn lumina_2_is_refused_although_the_engine_calls_it_z_image() {
-    assert_eq!(inspect(&fixture("lumina2")).kind, FileKind::CannotRun { reason: CannotRun::Lumina2, version: Some(SdVersion::ZImage) });
+    assert_eq!(inspect(&fixture("lumina2")).kind, FileKind::CannotRun { reason: CannotRunReason::Lumina2, version: Some(SdVersion::ZImage) });
     assert!(matches!(inspect(&fixture("z-image-turbo")).kind, FileKind::Model { version: SdVersion::ZImage, .. }));
 }
 #[test] fn ltx_video_09_and_hunyuan_video_1_are_refused() {
     assert!(matches!(inspect(&fixture("ltx23")).kind, FileKind::Model { version: SdVersion::Ltxav, .. }));
-    assert_eq!(inspect(&without(&fixture("ltx23"), "audio_patchify_proj")).kind, FileKind::CannotRun { reason: CannotRun::LtxVideo09, version: Some(SdVersion::Ltxav) });
+    assert_eq!(inspect(&without(&fixture("ltx23"), "audio_patchify_proj")).kind, FileKind::CannotRun { reason: CannotRunReason::LtxVideo09, version: Some(SdVersion::Ltxav) });
     assert!(matches!(inspect(&fixture("hunyuan-video-15")).kind, FileKind::Model { version: SdVersion::HunyuanVideo, .. }));
-    assert_eq!(inspect(&without(&fixture("hunyuan-video-15"), "byt5_in")).kind, FileKind::CannotRun { reason: CannotRun::HunyuanVideo1, version: Some(SdVersion::HunyuanVideo) });
+    assert_eq!(inspect(&without(&fixture("hunyuan-video-15"), "byt5_in")).kind, FileKind::CannotRun { reason: CannotRunReason::HunyuanVideo1, version: Some(SdVersion::HunyuanVideo) });
 }
 #[test] fn loras_are_named_with_a_base_hint() {
     assert_eq!(inspect(&fixture("sdxl-lora-pixel-art")).kind, FileKind::Lora { format: LoraFormat::Kohya, base: Some(SdVersion::Sdxl) });
@@ -1114,7 +1162,7 @@ These are the engine's suffixes (`name_conversion.cpp`, the LoRA suffix map).
     assert_eq!(inspect(&fixture("wan22-t2v-a14b-high")).parameters / 1_000_000_000, 14);
 }
 #[test] fn a_pickle_file_is_named_without_being_read() {
-    assert_eq!(inspect_local(Path::new("/nope/m.ckpt")).unwrap().kind, FileKind::CannotRun { reason: CannotRun::Pickle, version: None });
+    assert_eq!(inspect_local(Path::new("/nope/m.ckpt")).unwrap().kind, FileKind::CannotRun { reason: CannotRunReason::Pickle, version: None });
 }
 ```
 `without(index, part)` drops every tensor whose name contains `part`. `parameters` reads the fixture's stored full count.
@@ -1139,6 +1187,7 @@ git commit -m "Studio: say what a weights file is: model and layout, LoRA and ba
 
 **Files:**
 - Create: `crates/models/src/sd/matching.rs`
+- Modify: `crates/models/src/gen_catalog.rs` (`GenInput` gains `Source`, `Mask` and `Control`)
 - Test: inline
 
 **Interfaces:**
@@ -1147,20 +1196,19 @@ git commit -m "Studio: say what a weights file is: model and layout, LoRA and ba
 ```rust
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)] #[serde(rename_all = "camelCase")]
 pub enum RecipeKind { Picture, PictureEdit, Video }
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)] #[serde(rename_all = "camelCase")]
-pub enum OutOfScope { Adapter, NeedsControlFrames, NeedsAudio, Upscaler, FolderModel, NotThisEngine, Ltx2 }
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)] #[serde(rename_all = "camelCase")]
-pub enum InputRole { Reference, StartFrame, EndFrame, Source, Mask, Control }   // Source: the picture to change (-i)
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)] #[serde(rename_all = "camelCase")] pub struct RecipeInput { pub role: InputRole, pub min: u32, pub max: u32 }
+// Refusals use CannotRunReason (Task R6): Adapter, NeedsControlFrames, NeedsAudio, Upscaler, FolderModel, NotThisEngine, Ltx2.
+// The input roles are gen_catalog's GenInput, which this task extends (one vocabulary; agent's RefRole mirrors it word for word):
+pub enum GenInput { Reference, StartFrame, EndFrame, Source, Mask, Control }   // gains Source (the picture to change, -i), Mask, Control; serde camelCase
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)] #[serde(rename_all = "camelCase")] pub struct RecipeInput { pub role: GenInput, pub min: u32, pub max: u32 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)] #[serde(rename_all = "camelCase")]
 pub enum NoisePart { High, Low }
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Match { Recipe { id: &'static str, part: Option<NoisePart> }, Refused(OutOfScope) }
+pub enum Match { Recipe { id: &'static str, part: Option<NoisePart> }, Refused(CannotRunReason) }
 pub fn tokens(text: &str) -> Vec<String>;                   // lower case; "_" and " " read as "-"; split at chars other than ASCII letters, digits and '.'
 pub fn match_recipe(version: SdVersion, facts: &MatchFacts, embeds: &[SlotId], name: &str) -> Match;   // name = "<repo>/<path>"
 pub fn recipes_for(version: SdVersion) -> Vec<&'static str>;  // every in-scope recipe this version can take: the Model type menu
 pub fn kind_of(recipe_id: &str) -> RecipeKind;
-pub fn out_of_scope(recipe_id: &str) -> Option<OutOfScope>;
+pub fn out_of_scope(recipe_id: &str) -> Option<CannotRunReason>;
 pub fn in_scope_recipes() -> Vec<&'static str>;              // 94, sorted
 pub fn inputs_of(recipe_id: &str) -> Vec<RecipeInput>;     // the input pictures a recipe takes, by the table below
 pub fn noise_part(name: &str) -> Option<NoisePart>;          // tokens high, highnoise, high-noise / low, lownoise, low-noise
@@ -1281,7 +1329,7 @@ fn m(v: SdVersion, name: &str) -> Match { match_recipe(v, &MatchFacts::default()
     assert_eq!(m(SdVersion::Wan2, "QuantStack/Wan2.2-T2V-A14B-GGUF/LowNoise/Wan2.2-T2V-A14B-LowNoise-Q4_K_M.gguf"), Match::Recipe { id: "wan22-t2v", part: Some(NoisePart::Low) });
     assert_eq!(match_recipe(SdVersion::Wan2, &MatchFacts { has_img_emb: true, ..Default::default() }, &[], "city96/Wan2.1-I2V-14B-480P-gguf/w.gguf"), Match::Recipe { id: "wan21-i2v", part: None });
     assert_eq!(m(SdVersion::Wan2, "Comfy-Org/Wan-2.1/wan2.1_t2v_1.3B_fp16.safetensors"), Match::Recipe { id: "wan21-t2v", part: None });
-    assert_eq!(m(SdVersion::Wan2, "o/Wan2.1-VACE-14B/x.gguf"), Match::Refused(OutOfScope::NeedsControlFrames));
+    assert_eq!(m(SdVersion::Wan2, "o/Wan2.1-VACE-14B/x.gguf"), Match::Refused(CannotRunReason::NeedsControlFrames));
 }
 #[test] fn sd3_and_klein_use_the_files_own_facts() {
     let f = |b| MatchFacts { sd3_blocks: Some(b), ..Default::default() };
@@ -1291,14 +1339,14 @@ fn m(v: SdVersion, name: &str) -> Match { match_recipe(v, &MatchFacts::default()
 }
 #[test] fn ltx_2_is_refused_and_ltx_2_3_runs() {
     assert_eq!(m(SdVersion::Ltxav, "unsloth/LTX-2.3-GGUF/ltx-2.3-22b-dev-Q4_K_M.gguf"), Match::Recipe { id: "ltx23-dev", part: None });
-    assert_eq!(m(SdVersion::Ltxav, "Lightricks/LTX-2/ltx-2-19b-dev.safetensors"), Match::Refused(OutOfScope::Ltx2));
+    assert_eq!(m(SdVersion::Ltxav, "Lightricks/LTX-2/ltx-2-19b-dev.safetensors"), Match::Refused(CannotRunReason::Ltx2));
 }
 #[test] fn every_in_scope_recipe_is_reachable_and_exists() {
     assert_eq!(in_scope_recipes().len(), 94);
     let reached: BTreeSet<_> = SdVersion::ALL.iter().flat_map(|v| recipes_for(*v)).collect();
     assert_eq!(reached, in_scope_recipes().into_iter().collect());
     assert!(recipes().iter().all(|r| out_of_scope(&r.id).is_some() != in_scope_recipes().contains(&r.id.as_str())));
-    assert!(recipes().iter().filter(|r| r.slots.iter().any(|s| s.id.is_adapter())).all(|r| out_of_scope(&r.id) == Some(OutOfScope::Adapter)));
+    assert!(recipes().iter().filter(|r| r.slots.iter().any(|s| s.id.is_adapter())).all(|r| out_of_scope(&r.id) == Some(CannotRunReason::Adapter)));
 }
 #[test] fn kinds() {
     assert_eq!((kind_of("flux1-kontext"), kind_of("wan22-t2v"), kind_of("sdxl-checkpoint")), (RecipeKind::PictureEdit, RecipeKind::Video, RecipeKind::Picture));
@@ -1309,12 +1357,12 @@ fn m(v: SdVersion, name: &str) -> Match { match_recipe(v, &MatchFacts::default()
     assert_eq!(m(SdVersion::FluxFill, "o/r/flux1-fill-dev.safetensors"), Match::Recipe { id: "flux1-fill", part: None });
     assert_eq!(m(SdVersion::FluxControls, "o/FLUX.1-Depth-dev/x.safetensors"), Match::Recipe { id: "flux1-depth", part: None });
     let ins = |id| inputs_of(id).into_iter().map(|i| (i.role, i.min, i.max)).collect::<Vec<_>>();
-    assert_eq!(ins("sdxl-inpainting"), [(InputRole::Source, 1, 1), (InputRole::Mask, 1, 1)]);
-    assert_eq!(ins("flux1-canny"), [(InputRole::Control, 1, 1)]);
-    assert_eq!(ins("flex2"), [(InputRole::Source, 0, 1), (InputRole::Mask, 0, 1), (InputRole::Control, 0, 1)]);
-    assert_eq!(ins("flux1-kontext"), [(InputRole::Reference, 1, 4)]);
-    assert_eq!(ins("wan21-flf2v"), [(InputRole::StartFrame, 1, 1), (InputRole::EndFrame, 1, 1)]);
-    assert_eq!((out_of_scope("sd1-controlnet"), out_of_scope("flux1-fill")), (Some(OutOfScope::Adapter), None));
+    assert_eq!(ins("sdxl-inpainting"), [(GenInput::Source, 1, 1), (GenInput::Mask, 1, 1)]);
+    assert_eq!(ins("flux1-canny"), [(GenInput::Control, 1, 1)]);
+    assert_eq!(ins("flex2"), [(GenInput::Source, 0, 1), (GenInput::Mask, 0, 1), (GenInput::Control, 0, 1)]);
+    assert_eq!(ins("flux1-kontext"), [(GenInput::Reference, 1, 4)]);
+    assert_eq!(ins("wan21-flf2v"), [(GenInput::StartFrame, 1, 1), (GenInput::EndFrame, 1, 1)]);
+    assert_eq!((out_of_scope("sd1-controlnet"), out_of_scope("flux1-fill")), (Some(CannotRunReason::Adapter), None));
 }
 #[test] fn tokens_split_like_the_spec() {
     assert_eq!(tokens("Wan2.2_T2V-A14B HighNoise"), ["wan2.2", "t2v", "a14b", "highnoise"]);
@@ -1345,7 +1393,7 @@ git commit -m "Studio: pick the engine recipe for a detected version, with name 
   - `catalog/models.json`:
     - add `"companions"`;
     - set `sequence` 5 and `generated` `"2026-11-24"`, so the bundled catalog wins over a stored signed one of sequence 4.
-  - `crates/models/src/catalog.rs`: keep `companions` raw, with `object_or_empty` as for `generators`.
+  - `crates/models/src/catalog.rs`: `pub companions: BTreeMap<String, serde_json::Value>`, read raw with `object_or_empty` as `generators` is (`catalog.rs:40-46`), with `skip_serializing_if = "BTreeMap::is_empty"`.
 - Test: inline in `companions.rs`; the existing `catalog.rs` test that parses the catalog the way 0.0.5 did stays green.
 
 **Interfaces:**
@@ -1461,7 +1509,7 @@ These come from the same repo (Task S3: `Comfy-Org/Hunyuan-Video-1.5` and `unslo
     assert!(t.default_for("hunyuan-video-15-t2v", SdVersion::HunyuanVideo, SlotId::Vae).is_none());
 }
 #[test] fn a_default_for_the_wrong_slot_or_version_is_refused() {
-    let mut c = Catalog::bundled(); c.companions["byVersion"]["sd3"]["t5xxl"] = json!("umt5-xxl-q8");
+    let mut c = Catalog::bundled(); c.companions.get_mut("byVersion").unwrap()["sd3"]["t5xxl"] = json!("umt5-xxl-q8");   // companions: BTreeMap<String, Value>
     assert!(CompanionTable::from_catalog(&c).unwrap_err().contains("umt5-xxl-q8"));
 }
 #[test] fn the_01x_catalog_parts_are_known_companions_by_sha() {
@@ -1475,7 +1523,7 @@ These come from the same repo (Task S3: `Comfy-Org/Hunyuan-Video-1.5` and `unslo
         ("e40321bd36b9709991dae2530eb4ac303dd168276980d3e9bc4b6e2b75fed156", "wan22-vae")] {
         assert_eq!(t.by_sha(sha).map(|c| c.id.as_str()), Some(id));
     }
-    for e in gen_catalog(&Catalog::bundled(), 1106).entries { for p in &e.parts {
+    for e in gen_catalog(&Catalog::bundled(), 1106).entries.values() { for p in &e.parts {
         if let Some(c) = t.by_sha(&p.sha256) { assert_eq!(c.size, p.size, "{}", c.id); } } }
 }
 ```
@@ -1506,7 +1554,7 @@ git commit -m "Studio: a signed table of 22 ungated companion files, with per-ve
   - `crates/store/src/gen_models.rs` (`recipe_id`, `GenSource::Import`, `gen_model_files` counts LoRA files);
   - `crates/store/src/lib.rs`;
   - `crates/models/src/gen_catalog.rs` (`GenFamily::recipe_id`, `GenFamily::version`);
-  - `src-tauri/src/downloads.rs` and `src-tauri/src/studio/local_models.rs`: callers pass `recipe_id`.
+  - every struct literal of `NewGenModel` and `GenModel` gains `recipe_id`: `src-tauri/src/downloads.rs`, `src-tauri/src/studio/local_models.rs`, `src-tauri/src/hub.rs` (2484, 2594), `src-tauri/src/studio/commands.rs` (2047), `src-tauri/src/studio/local.rs` (1909, 1923), `src-tauri/src/studio/local_cmd.rs` (1535) and `src-tauri/src/studio/manager_tests.rs` (4058, 5522).
 - Create: `crates/store/src/gen_loras.rs`
 - Test: inline in `schema.rs`, `gen_models.rs`, `gen_loras.rs` and `gen_catalog.rs`
 
@@ -1580,14 +1628,18 @@ CREATE TABLE gen_loras (
     migrate_to_latest(&conn);
     assert_eq!(dump(&conn, "SELECT id, catalog_id, name, kind, family, parts_json, size_bytes, source, added_at FROM gen_models ORDER BY id"), before);
     assert_eq!(column(&conn, "SELECT recipe_id FROM gen_models ORDER BY id"),
-        ["wan22-ti2v-5b", "flux3-klein", "wan21-t2v", "flux2-klein-4b", "wan22-ti2v-5b", "z-image-turbo"]);   // ids sorted
+        ["flux2-klein-4b", "flux3-klein", "wan22-ti2v-5b", "wan21-t2v", "wan22-ti2v-5b", "z-image-turbo"]);   // ids sorted (BINARY): flux2-…, hf:…:f3, hf:…:w., hf:…:w1, wan22-…, z-image-…
     assert!(table_exists(&conn, "gen_loras"));
 }
 #[test] fn import_is_a_source_and_others_are_refused() {
     let s = store(); insert(&s, model("local:ab", GenSource::Import, Some("sdxl-checkpoint")));
     assert!(raw_insert(&s, "source", "elsewhere").is_err());
 }
-#[test] fn a_database_newer_than_v4_is_refused() { /* user_version 5 → StoreError::TooNew, as for V3 */ }
+#[test] fn a_database_newer_than_v4_is_refused() {               // as newer_database_is_refused (schema.rs:616) does
+    let mut conn = rusqlite::Connection::open_in_memory().unwrap();
+    conn.pragma_update(None, "user_version", 5).unwrap();
+    assert!(matches!(MIGRATIONS.to_latest(&mut conn), Err(MigrationError::TooNew { found: 5, known: 4 })));
+}
 #[tokio::test] async fn loras_round_trip_and_rel_names_are_unique() {
     let s = Store::open_in_memory().await.unwrap();
     s.insert_gen_lora(lora("local:1", "local/pixel art ü")).await.unwrap();
@@ -1603,7 +1655,7 @@ CREATE TABLE gen_loras (
     assert_eq!([Flux2Klein4b, Flux3ImageKlein, ZImageTurbo, Wan22Ti2v5b, Wan22Ti2v5bFast, Wan21T2v1_3b].map(|f| (f.recipe_id(), f.version())),
         [("flux2-klein-4b", SdVersion::Flux2Klein), ("flux3-klein", SdVersion::Flux3), ("z-image-turbo", SdVersion::ZImage),
          ("wan22-ti2v-5b", SdVersion::Wan22Ti2v), ("wan22-ti2v-5b", SdVersion::Wan22Ti2v), ("wan21-t2v", SdVersion::Wan2)]);
-    for f in GenFamily::ALL { assert!(models::sd::recipe(f.recipe_id()).is_some()); }
+    for f in GenFamily::ALL { assert!(crate::sd::recipe(f.recipe_id()).is_some()); }
 }
 ```
 `GenFamily::ALL` (the six variants, in declaration order) is added with this test.
@@ -1622,7 +1674,7 @@ CREATE TABLE gen_loras (
 
 - [ ] **Step 5: Commit.**
 ```bash
-git add crates/store crates/models/src/gen_catalog.rs src-tauri/src/downloads.rs src-tauri/src/studio/local_models.rs
+git add crates/store crates/models/src/gen_catalog.rs src-tauri/src/downloads.rs src-tauri/src/hub.rs src-tauri/src/studio
 git commit -m "Store: schema 4, with each Studio model's recipe, imported models and LoRAs"
 ```
 
@@ -1632,8 +1684,9 @@ git commit -m "Store: schema 4, with each Studio model's recipe, imported models
 - Modify:
   - `crates/runtime/src/sd/args.rs`, `crates/runtime/src/sd/run.rs` and `crates/runtime/src/sd/testing.rs`;
   - `crates/runtime/tests/sd_contract.rs`;
+  - `crates/runtime/tests/sd_cli.rs`: its `SdJob` literals (`picture_job`, `video_job`) and `out_of_memory_retries_once_with_memory_saving` (483);
   - `src-tauri/src/studio/local.rs`: compile only, as below. Task S11 does the real change.
-- Test: inline in `args.rs` and `run.rs`; `crates/runtime/tests/sd_contract.rs`
+- Test: inline in `args.rs` and `run.rs`; `crates/runtime/tests/sd_cli.rs` and `sd_contract.rs`
 
 **Interfaces:**
 - Produces (`args.rs`):
@@ -1650,10 +1703,13 @@ pub struct HighNoise { pub steps: i32, pub cfg: f32, pub sampler: Option<Sampler
 pub struct LoraTag { pub name: String, pub weight: f32, pub high_noise: bool }
 pub const MAX_LORAS: usize = 8;
 pub const LORA_WEIGHT_RANGE: std::ops::RangeInclusive<f32> = -1.0..=2.0;
+pub const LORA_WEIGHT_STEP: f32 = 0.05;
+pub const LORA_WEIGHT_DEFAULT: f32 = 1.0;             // the slider's values; Task S11's ParamKind::Loras reads these three (one source, preflight P46)
 pub struct SdJob {
     /* unchanged fields, except: */
     // `memory_saving: bool` is replaced by:
     pub vae_tiling: bool, pub offload_to_cpu: bool,
+    pub tiling_allowed: bool,                     // false when the recipe disables vae_tiling (correction 5): the retry then never tiles
     pub size_multiple: u32,                       // the recipe's (8 when omitted); replaces SIZE_MULTIPLE 16
     pub guidance: Option<f32>, pub img_cfg: Option<f32>, pub timestep_shift: Option<u32>, pub sigmas: Vec<f32>,
     pub high_noise: Option<HighNoise>, pub moe_boundary: Option<f32>, pub strength: Option<f32>, pub end_image: Option<PathBuf>,
@@ -1681,9 +1737,11 @@ pub fn valid_lora_name(name: &str) -> bool;         // non-empty, relative, '/' 
   - `size_multiple` 0 is refused as `BadSize`.
   - `model_args` must be `key=value` pairs joined by `,`, matching `[a-z0-9_]+=[A-Za-z0-9_.]+`.
   - LoRAs need `lora_dir`, at most `MAX_LORAS`, a valid name each, and a weight in `LORA_WEIGHT_RANGE`.
-- `run.rs`: `write_prompt_files` writes `prompt_file_text(job)`: UTF-8, no trailing newline. `with_retry` sets `vae_tiling = true` and `offload_to_cpu = true` on its one out-of-memory retry, which was `memory_saving = true`.
-- `src-tauri/src/studio/local.rs::job_for` keeps compiling:
-  - `vae_tiling` and `offload_to_cpu` both from `opts.memory_saving`;
+- `run.rs`:
+  - `write_prompt_files` writes `prompt_file_text(job)`: UTF-8, no trailing newline.
+  - `with_retry` retries once on out of memory when `!job.offload_to_cpu` (was `!job.memory_saving`), with `offload_to_cpu = true` and `vae_tiling = job.tiling_allowed`. The four pixel-space recipes are never tiled (preflight P7).
+- `src-tauri/src/studio/local.rs::job_for` (the `LocalMediaProvider` method, `local.rs:771`) keeps compiling:
+  - `vae_tiling` and `offload_to_cpu` both from `opts.memory_saving`, and `tiling_allowed: true`;
   - `size_multiple: entry.limits.multiple_of`;
   - every new field empty.
 - A `mask_image` without an `init_image` is refused (`MaskWithoutPicture`): the engine would repaint the whole picture (`src/pipeline/image.cpp:274-281`). `--control-strength` is never sent; it is for ControlNet files, which stay out.
@@ -1696,13 +1754,10 @@ pub fn valid_lora_name(name: &str) -> bool;         // non-empty, relative, '/' 
 
 - [ ] **Step 1: Write the failing tests.**
 ```rust
-#[test] fn a_0_1_2_job_builds_the_same_arguments() {
-    // the existing `the_arguments_come_in_their_fixed_order` vector for `job()` (args.rs:1059) stays byte for byte,
-    // with every new field empty and vae_tiling = offload_to_cpu = false
-    assert_eq!(build_args(&job()).unwrap(), os(&FIXED_ORDER_0_1_2));            // the literal of that test, unchanged
-}
+// The existing `the_arguments_come_in_their_fixed_order` (args.rs:1059) stays, its literal byte for byte. Its job, a Wan video with
+// `memory_saving: true`, becomes `vae_tiling: true, offload_to_cpu: true`, with every new field empty: the 0.1.2 order is kept.
 #[test] fn recipe_fields_reach_their_flags_in_order() {
-    let mut j = wan_a14b_job();     // two diffusion parts, t5xxl, vae, frames 33, fps 16, size_multiple 16
+    let mut j = wan_a14b_job();     // two diffusion parts, t5xxl, vae, frames 33, fps 16, flow_shift Some(12.0), size_multiple 16
     j.guidance = Some(3.5); j.high_noise = Some(HighNoise { steps: -1, cfg: 4.0, sampler: Some(Sampler::Euler) }); j.moe_boundary = Some(0.875);
     j.sigmas = vec![1.0, 0.5, 0.0]; j.vae_format = Some(VaeFormat::Wan); j.model_args = Some("qwen_image_zero_cond_t=true".into());
     let a = strings(build_args(&j).unwrap());
@@ -1716,11 +1771,13 @@ pub fn valid_lora_name(name: &str) -> bool;         // non-empty, relative, '/' 
     j.size_multiple = 8; assert!(build_args(&j).is_ok());
 }
 #[test] fn every_sampler_and_scheduler_is_the_engines_word() {
-    assert_eq!(Sampler::ALL.len(), 21); assert_eq!(Scheduler::ALL.len(), 17);
+    // against the help's own "one of [...]" lists (help_options(…).choices(), args.rs), not a loose `contains`
     let help = include_str!("../../tests/fixtures/sd_help.txt");
-    for s in Sampler::ALL { assert!(help.contains(s.as_str()), "{}", s.as_str()); }
-    for s in Scheduler::ALL { assert!(help.contains(s.as_str()), "{}", s.as_str()); }
+    let choices = |flag: &str| help_options(help).into_iter().find(|o| o.names.contains(&flag)).unwrap().choices();
+    assert_eq!(Sampler::ALL.iter().map(|s| s.as_str()).collect::<Vec<_>>(), choices("--sampling-method"));    // 21, in the engine's order
+    assert_eq!(Scheduler::ALL.iter().map(|s| s.as_str()).collect::<Vec<_>>(), choices("--scheduler"));       // 17
 }
+// `the_whitelisted_words_are_the_pinned_cli_words` (args.rs:1210) takes the 21 and 17 words, and drops "ddim_trailing" and "ays" from its refused lists.
 #[test] fn typed_lora_tags_are_removed_and_attached_ones_appended() {
     let mut j = klein_job(); j.prompt = "a cat <lora:evil:3> on a mat".into(); j.lora_dir = Some("/m/@loras".into());
     j.loras = vec![LoraTag { name: "local/pixel art ü".into(), weight: 0.8, high_noise: false }];
@@ -1752,7 +1809,20 @@ pub fn valid_lora_name(name: &str) -> bool;         // non-empty, relative, '/' 
     // the engine's pattern <lora:([^:>]+):([^>]+)> (common.cpp:2356) finds both, names intact
     assert_eq!(engine_lora_spans(&text), [("local/pixel art ü".into(), "0.8".into()), ("|high_noise|o/r/日本語 スタイル".into(), "1".into())]);
 }
-#[tokio::test] async fn the_out_of_memory_retry_turns_on_tiling_and_offload() { /* fake engine: first run OOM; the second's args hold --vae-tiling and --offload-to-cpu */ }
+// crates/runtime/tests/sd_cli.rs (harness = false; listed in its main):
+fn out_of_memory_retries_once_with_tiling_and_offload() {        // was out_of_memory_retries_once_with_memory_saving (483)
+    let f = folders(); let job = picture_job(&f.gallery);
+    let (result, events) = run(&fake("oom-once", &f.rec), &job, RunLimits::default());
+    assert!(result.is_ok()); assert_eq!((retries(&events), starts(&f.rec)), (vec![SdFailure::OutOfMemory], 2));
+    let second = recorded_argv(&f.rec, 1);
+    assert!(second.contains(&"--vae-tiling".to_string()) && second.contains(&"--offload-to-cpu".to_string()));
+}
+fn the_retry_never_tiles_where_the_recipe_disables_it() {
+    let f = folders(); let job = SdJob { tiling_allowed: false, ..picture_job(&f.gallery) };
+    run(&fake("oom-once", &f.rec), &job, RunLimits::default()).0.unwrap();
+    let second = recorded_argv(&f.rec, 1);
+    assert!(second.contains(&"--offload-to-cpu".to_string()) && !second.contains(&"--vae-tiling".to_string()));
+}
 ```
 In `sd_contract.rs`, which needs `SD_CLI_BIN` like its neighbours:
 - `the_pinned_engine_parses_recipe_arguments`: builds `wan_a14b_job()` with every new field set (a LoRA tag and a tiny `@loras` folder included), and a picture job with `-i`, `--mask` and `--control-image` (tiny PNGs). It runs the engine in metadata mode (`-M metadata --image png`) as `the_pinned_engine_parses_the_exact_arguments_studio_builds` does, and asserts exit 0 and no `unknown argument` or `invalid` line.
@@ -1760,7 +1830,16 @@ In `sd_contract.rs`, which needs `SD_CLI_BIN` like its neighbours:
 
 `engine_lora_spans` is a test helper that applies the engine's pattern by hand (runtime has no `regex` dependency).
 
-**Record the 0.1.2 klein vector first.** Before any change, add `an_01x_klein_picture_keeps_its_0_1_2_arguments` (its body is in Task S11) to `src-tauri/src/studio/local.rs`'s tests:
+**Record the 0.1.2 klein vector first.** Before any change, add `an_01x_klein_picture_keeps_its_0_1_2_arguments` to `src-tauri/src/studio/local.rs`'s tests, written against the 0.1.2 method (preflight P4):
+```rust
+#[test] fn an_01x_klein_picture_keeps_its_0_1_2_arguments() {
+    // the klein catalog entry, 1024×1024, 4 steps, seed 7; a green fit, so 0.1.2's options have memory_saving: false; Vulkan0
+    let opts = LocalJobOptions { processor_only: false, memory_saving: false, threads: None, device_description: None };
+    let job = provider().job_for(&catalog_entry("flux2-klein-4b-q4"), &klein_row(), &klein_request(), &opts, Some("Vulkan0".into()), OUT, "r1").unwrap();
+    assert_eq!(strings(build_args(&job).unwrap()), KLEIN_0_1_2_ARGS);
+}
+```
+Then:
 - run it once against the unchanged code;
 - paste the printed vector as the constant `KLEIN_0_1_2_ARGS` in that test module;
 - see it pass.
@@ -1811,18 +1890,20 @@ pub struct GenDefaults { /* as now, plus, all #[serde(default)] */ pub guidance:
                          pub sigmas: Vec<f32>, pub high_noise: Option<HighNoiseDefaults>, pub moe_boundary: Option<f32>, pub strength: Option<f32> }
 pub struct GenLimits { /* as now, plus */ #[serde(default)] pub video: Option<VideoRule> }
 impl GenLimits { pub fn video_rule(&self) -> Option<VideoRule>; }   // `video`, else frame_rule 4n+1 → step 4 offset 1 floor, 8n+1 → step 8 offset 1
-pub struct GenPart { /* as now, plus */ #[serde(default)] pub local: Option<PathBuf> }   // a file from disk: repo and revision empty
-pub const ALLOWED_PART_EXTENSIONS: [&str; 3] = [".gguf", ".safetensors", ".sft"];     // and ".json" for the tokenizer role only
+pub struct GenPart { /* as now, plus */ #[serde(default)] pub local: Option<PathBuf>,   // a file from disk: repo and revision empty
+    #[serde(default)] pub folder: Option<String> }   // a diffusers folder part: its engine name in the folder (unet/diffusion_pytorch_model.safetensors, …)
+pub const ALLOWED_PART_EXTENSIONS: [&str; 3] = crate::sd::index::READ_EXTENSIONS;   // one list (preflight P46); ".json" too for the tokenizer role only
+pub(crate) fn check_parts(parts: &[GenPart], licenses: &BTreeMap<String, GenLicence>) -> Result<(), String>;   // as now (gen_catalog.rs:735), plus the local and tokenizer rules below
 pub struct GenericSpec<'a> { pub id: String, pub name: String, pub publisher: String, pub recipe: &'a Recipe, pub version: Option<SdVersion>,
     pub parts: Vec<GenPart>, pub licenses: BTreeMap<String, GenLicence>, pub gate: GenGate, pub untested: bool }
 pub fn generic_entry(spec: GenericSpec<'_>) -> GenEntry;
 pub fn fallback_for(recipe: &Recipe) -> FitFallback;
 // src-tauri/src/downloads.rs
-pub(crate) fn check_main_file(entry: &GenEntry, path: &Path) -> AppResult<()>;   // inspect_local: a Model of entry.version (or, untested, any readable weights)
+pub(crate) fn check_main_file(entry: &GenEntry, path: &Path) -> AppResult<()>;   // see below
 ```
 **`generic_entry` rules:**
 - **kind:** `kind_of(recipe)`. Picture → `image`, PictureEdit → `image-edit`, Video → `video`.
-- **inputs:** one `GenInput` per `inputs_of(recipe)` row (Task R7). `GenInput` gains `Source`, `Mask` and `Control` (serde `source`, `mask`, `control`) beside `Reference`, `StartFrame` and `EndFrame`, and `GenEntry` gains `#[serde(default)] pub input_counts: Vec<RecipeInput>` with each row's min and max. Catalog entries keep their own `inputs`, with counts as in 0.1.2.
+- **inputs:** one `GenInput` per `inputs_of(recipe)` row. `GenInput` and its new `Source`, `Mask` and `Control` come from Task R7. `GenEntry` gains `#[serde(default)] pub input_counts: Vec<RecipeInput>` with each row's min and max. Catalog entries keep their own `inputs` and an empty `input_counts`, and keep 0.1.2's picture fields (Task S11).
 - **defaults** come from the recipe, field for field:
   - `sampling_method` → `sampler`, `distilled_guidance` → `guidance`, `img_cfg_scale` → `img_cfg`;
   - `shifted_timestep` → `timestep_shift`, `custom_sigmas` → `sigmas`;
@@ -1835,13 +1916,22 @@ pub(crate) fn check_main_file(entry: &GenEntry, path: &Path) -> AppResult<()>;  
   - pictures: `act_base_bytes` 500_000_000, `act_bytes_per_token` 100_000, `vae_bytes_per_pixel_frame` 300, `vae_tile_cap_bytes` 500_000_000; `token_div` 32 when `size_multiple ≥ 32`, else 16; `frame_div` and `vae_chunk_frames` None.
   - video: 1_000_000_000, 250_000, 400 and 2_500_000_000; `token_div` as for pictures; `frame_div = Some(video.frame_step)`, `vae_chunk_frames = Some(4)`.
 
+- **`check_parts`** keeps every 0.1.x rule for Hub parts.
+  - A part with `local: Some(_)` may have an empty `repo` and `revision` and an empty `license` (the person's own file), but needs a 64-hex SHA-256 (computed on import, Task S8) and an allowed extension.
+  - `.json` is allowed only for the `tokenizer` role.
+- **`check_main_file`:**
+  - The file's `inspect_local` must be a `Model` whose version `v` satisfies `recipes_for(v).contains(entry.recipe)`, so an SDXL Vega or SSD-1B file passes the `sdxl-checkpoint` recipe (preflight P36).
+  - For an untested entry, any readable weights pass.
+  - For a folder entry (parts with `folder`), the folder root is checked with `inspect_local_folder`.
+- **0.1.x search rows.** These are installed by 0.1.2 with a 0.1.x family word, no catalog id, and V4's recipe. They keep their 0.1.2 entry: `entry_from_installed` reads the family as a `GenFamily` first, and then uses its `FamilyRecord` (`from_record`, `local_models.rs:375`), as now. Only family words that are no `GenFamily` go through `generic_entry` (preflight P23).
+
 **Steps**
 
 - [ ] **Step 1: Write the failing tests.**
 ```rust
 #[test] fn catalog_entries_carry_their_recipe_and_version() {
     let c = gen_catalog(&Catalog::bundled(), 1106);
-    let klein = c.entries.iter().find(|e| e.id == "flux2-klein-4b-q4").unwrap();
+    let klein = &c.entries["flux2-klein-4b-q4"];                     // GenCatalog.entries is a BTreeMap by id
     assert_eq!((klein.recipe.as_str(), klein.version), ("flux2-klein-4b", Some(SdVersion::Flux2Klein)));
     assert_eq!(klein.defaults.steps, 4);   // the catalog's tested defaults stay; recipe defaults are for generic models only
 }
@@ -1858,14 +1948,24 @@ pub(crate) fn check_main_file(entry: &GenEntry, path: &Path) -> AppResult<()>;  
     assert_eq!(e.defaults.moe_boundary, Some(0.875));
 }
 #[test] fn the_tokenizer_role_takes_a_json_file_and_no_other_role_does() {
-    assert!(check_parts(&[part(GenRole::Tokenizer, "tokenizer.json", 1)]).is_ok());
-    assert!(check_parts(&[part(GenRole::Vae, "vae.json", 1)]).is_err());
-    assert!(check_parts(&[part(GenRole::Diffusion, "m.sft", 1)]).is_ok());
+    let l = apache();                                                  // the licence map the parts name
+    assert!(check_parts(&[part(GenRole::Tokenizer, "tokenizer.json", 1)], &l).is_ok());
+    assert!(check_parts(&[part(GenRole::Vae, "vae.json", 1)], &l).is_err());
+    assert!(check_parts(&[part(GenRole::Diffusion, "m.sft", 1)], &l).is_ok());
+    assert!(check_parts(&[local_part(GenRole::Model, "/home/me/m.safetensors", SHA)], &l).is_ok());   // empty repo, revision and licence
+    assert!(check_parts(&[local_part(GenRole::Model, "/home/me/m.safetensors", "")], &l).is_err());   // a local part needs its SHA-256
 }
 #[test] fn the_01x_family_signature_check_now_uses_detection() {      // downloads.rs
     let klein = catalog_entry("flux2-klein-4b-q4");
     assert!(check_main_file(&klein, &write_gguf_txt_fixture("klein4b")).is_ok());
     assert_eq!(check_main_file(&klein, &write_gguf_txt_fixture("zimage")).unwrap_err().code, errors::NOT_THAT_MODEL);
+    let sdxl = generic_entry(spec(recipe("sdxl-checkpoint").unwrap(), Some(SdVersion::Sdxl), vec![]));
+    assert!(check_main_file(&sdxl, &write_safetensors_names(SDXL_VEGA_NAMES)).is_ok());   // sdxl-vega takes the sdxl-checkpoint recipe
+}
+#[test] fn an_01x_search_row_keeps_its_0_1_2_entry() {                 // local_models.rs
+    let row = search_row("hf:o/FLUX.3-Image-Klein-GGUF:f3.gguf", "flux3-image-klein", Some("flux3-klein"));
+    let e = entry_from_installed(&row, &gen_catalog(&Catalog::bundled(), 1106)).unwrap();
+    assert_eq!((e.family, e.untested, e.defaults.steps), (Some(GenFamily::Flux3ImageKlein), false, 16));   // the family record's defaults, as 0.1.2
 }
 #[test] fn every_slot_has_a_role_and_back() { for s in SlotId::RUNNABLE { assert_eq!(GenRole::from_slot(s).unwrap().slot(), s); } }
 #[test] fn an_inpainting_entry_takes_a_picture_to_change_and_a_mask() {
@@ -1881,6 +1981,7 @@ pub(crate) fn check_main_file(entry: &GenEntry, path: &Path) -> AppResult<()>;  
 
 - [ ] **Step 3: Implement.**
   - `entry_from_installed` uses the catalog entry when `catalog_id` is set.
+  - Otherwise, a family that reads as a `GenFamily` uses its record, as 0.1.2 did.
   - Otherwise it uses `generic_entry` with `recipe(record.recipe_id)` and `SdVersion::from_word(&record.family)`, and `untested` when `family == "unknown"` or the recipe is not in `recipes_for(version)`.
   - It returns `None` when `recipe_id` is NULL. Such a model is listed with *Set it up yourself* (Task S9).
 
@@ -1894,35 +1995,79 @@ git add crates/models src-tauri/src/downloads.rs src-tauri/src/studio
 git commit -m "Studio: generic models from a recipe: 16 part roles, recipe defaults and limits, a fit estimate by kind"
 ```
 
-### Task S4: The set-up planner
+### Task S4: The set-up planner, file names, and diffusers folders
 
 **Files:**
-- Create: `crates/models/src/sd/setup.rs`
-- Test: inline, with Task R4 fixtures as the files' facts.
+- Create:
+  - `crates/models/src/sd/setup.rs`;
+  - `crates/models/src/sd/names.rs`: what a repo's file names say. Task S5 uses it.
+- Test: inline in both, with Task R4 fixtures as the files' facts.
 
 **Interfaces:**
 - Consumes: `Recipe` (Task R1), `FileFacts` (Task R6), `noise_part` (Task R7), `CompanionTable` (Task R8), `RepoFile` (`files.rs:19`), `quant_label` (`files.rs:95`).
 - Produces:
 ```rust
+// sd/names.rs
+pub fn companion_by_name(path: &str) -> Option<SlotId>;   // the table below
+pub fn looks_like_lora(path: &str) -> bool;              // a "lora" token in the path
+#[derive(Debug, Clone, PartialEq)] pub struct FolderFile { pub file: RepoFile, pub save_as: &'static str }   // save_as: the engine's name in the folder
+#[derive(Debug, Clone, PartialEq)] pub struct DiffusersFolder { pub root: String, pub unet: FolderFile, pub vae: Option<FolderFile>,
+    pub text_encoder: Option<FolderFile>, pub text_encoder_2: Option<FolderFile>, pub fp16: bool }
+pub fn diffusers_folder(files: &[RepoFile]) -> Option<DiffusersFolder>;
+// sd/setup.rs
 #[derive(Debug, Clone, PartialEq)] pub enum PlannedFile {
-    Hub { repo: String, revision: String, path: String, size: u64, sha256: String, licence: LicenceRef },
+    Hub { repo: String, revision: String, path: String, size: u64, sha256: String, licence: LicenceRef, save_as: Option<String> },   // save_as: a folder part's engine name
     Local { path: PathBuf, size: u64, sha256: Option<String> } }
 #[derive(Debug, Clone, PartialEq, Eq)] pub enum LicenceRef { Repo, Companion(String) }   // the main repo's licence, or a companion licence id
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)] #[serde(rename_all = "camelCase")]
-pub enum PartSource { Main, Sibling, Installed, Repo, Companion, Chosen, Embedded, Missing }
+pub enum PartSource { Main, Sibling, Installed, Repo, Companion, Chosen, Embedded, Folder, Missing }   // Folder: a diffusers folder's own file, downloaded with it
 #[derive(Debug, Clone, PartialEq)] pub struct PlannedPart { pub slot: SlotId, pub required: bool, pub source: PartSource, pub file: Option<PlannedFile> }
 #[derive(Debug, Clone, PartialEq)] pub struct SetupPlan { pub recipe_id: String, pub parts: Vec<PlannedPart>, pub untested: bool }
 impl SetupPlan { pub fn missing(&self) -> Vec<SlotId>; pub fn can_run(&self) -> bool; pub fn to_fetch(&self) -> Vec<&PlannedFile>; }
 pub struct InstalledFile { pub slot: SlotId, pub path: PathBuf, pub sha256: String, pub size: u64 }
 pub enum SlotChoice { Hub { repo: String, revision: String, file: RepoFile }, Local { path: PathBuf, size: u64, sha256: Option<String> }, Empty }
-pub enum MainFile<'a> { Hub { repo: &'a str, revision: &'a str, file: &'a RepoFile }, Local { path: &'a Path, size: u64, sha256: Option<&'a str> } }
+pub enum MainFile<'a> { Hub { repo: &'a str, revision: &'a str, file: &'a RepoFile }, Local { path: &'a Path, size: u64, sha256: Option<&'a str> },
+                        HubFolder { repo: &'a str, revision: &'a str, folder: &'a DiffusersFolder } }
 pub struct SetupInput<'a> {
     pub main: MainFile<'a>, pub facts: &'a FileFacts, pub recipe: &'a Recipe, pub version: Option<SdVersion>, pub part: Option<NoisePart>,
     pub listing: &'a [RepoFile], pub listing_facts: &'a BTreeMap<String, FileFacts>,     // the same repo; empty for a local file
     pub installed: &'a [InstalledFile], pub companions: &'a CompanionTable, pub overrides: &'a [(SlotId, SlotChoice)], pub untested: bool }
 pub fn plan_setup(input: &SetupInput<'_>) -> SetupPlan;
 ```
+**`diffusers_folder`** (correction 9; coordinator ruling P33):
+- **When it applies.** The listing has `<root>unet/diffusion_pytorch_model.safetensors` or `<root>unet/diffusion_pytorch_model.fp16.safetensors`, where root is `""` or one folder level. `model_index.json` is not needed, because the engine takes the unet file as the sign (`model_loader.cpp:207-210`).
+- **The four components** are `unet/` (required), `vae/diffusion_pytorch_model`, `text_encoder/model` and `text_encoder_2/model`, each `.safetensors` or `.fp16.safetensors`.
+- **Precision.**
+  - When both files of a component exist and the plain one is fp32, the fp16 one is chosen.
+  - Plan decision: "fp32" is read from size, the plain file being at least 1.8 times the fp16 one. This spends no header-read budget.
+  - `fp16` is true when any chosen file is an fp16 variant.
+- **`save_as`** is always the engine's own name (`unet/diffusion_pytorch_model.safetensors`, …), because the engine opens only those names (`model_loader.cpp:423-442`).
+- **Pinning.** A component without an LFS SHA-256 makes the folder `None`; it then gets Task S5's `CannotRun { NoSha }`.
+
+**The names table** (`companion_by_name`), moved here from Task S5, which uses it:
+
+`companion_by_name` matches tokens, substrings of the normalised name, and folders. A file whose name also has a model token (`image`, `edit`, `diffusion`, `unet`, `transformer`, `dit`, `checkpoint`, `pruned`, `ema`, `baked`, `merged`, `with`) is never a companion by name.
+
+| Tokens, substrings or folder | Slot |
+|---|---|
+| `vae`, `ae` (whole tokens), folder `vae/`; only for files under 2 GB (the largest VAE, Wan 2.2's, is 1.4 GB) | `vae` |
+| `taesd`, `tae` | `tae` |
+| `umt5`, `t5xxl`, `t5`, `byt5` | `t5xxl` |
+| `clip-l` | `clip_l` |
+| `clip-g` | `clip_g` |
+| `clip-vision` | `clip_vision` |
+| `mmproj` | `llm_vision` |
+| `connector`, `connectors` | `embeddings_connectors` |
+| `audio-vae` | `audio_vae` |
+| `wav2vec2` | `audio_encoder` |
+| substrings `qwen2.5-vl`, `qwen-2.5-vl`, `qwen3-`, `qwen3vl`, `qwen-3-`; tokens `gemma`, `mistral`, `llama`, `text-encoder`, `text-encoders`; folder `text_encoders/` | `llm` |
+| `tokenizer*.json` | `tokenizer` |
+
 **The rules, in 7.4's order:**
+0. **A diffusers folder** (`MainFile::HubFolder`).
+   - The plan is `model` ← the unet file (`Main`), then `vae`, `clip_l` (`text_encoder/`) and `clip_g` (`text_encoder_2/`) when present, each `Folder` with its `save_as`.
+   - `clip_l` is required, and `clip_g` too for an sdxl version: missing means `Missing`.
+   - The recipe's other slots follow rules 3–5. Rules 1 and 2 don't apply.
 1. **The main file.**
    - `Checkpoint` layout: it goes into `model`. If the recipe's main slot is `diffusion_model`, `model` takes its place. Plan decision: the engine's `-m` takes a full checkpoint for any version.
    - `DiffusionOnly`: it goes into the recipe's main slot.
@@ -1933,12 +2078,13 @@ pub fn plan_setup(input: &SetupInput<'_>) -> SetupPlan;
 3. **Every other slot that is required, plus `vae` for `required_any [[vae, tae]]` when neither is filled,** is filled from the first of:
    - **Embedded:** the checkpoint embeds it.
    - **Installed:** an installed file with a companion's SHA-256 that suits the version, or with the SHA-256 the next two sources would pick. A slot's default or any variant of it counts, so 0.1.x installs are reused.
-   - **Repo:** a listing file whose facts say `Extra { slot }`, or whose name says so (`companion_by_name`, Task S5). The smallest wins; on a tie, the same quant label as the main file. Files without a SHA-256 are skipped.
+   - **Repo:** a listing file whose facts say `Extra { slot }`, or whose name says so (`companion_by_name`). The smallest wins; on a tie, the same quant label as the main file. Files without a SHA-256 are skipped.
    - **Companion:** `companions.default_for(recipe, version, slot)`.
    - **Missing.**
 4. **Optional slots.**
    - `llm_vision` and `clip_vision` are filled by the same order when the recipe takes an input picture (`feature("ref_images")` or `feature("init_image")`). Plan decision: the engine reads the reference through them.
    - Every other optional slot is filled only by Embedded or an override.
+   - An optional slot that the main file embeds is listed, as `Embedded`, so the person sees where it comes from. Plan decision (preflight P6).
 5. **Overrides** replace the slot's choice with source `Chosen`. `Empty` clears an optional slot, or makes a required one `Missing`.
 
 **Steps**
@@ -1952,9 +2098,34 @@ pub fn plan_setup(input: &SetupInput<'_>) -> SetupPlan;
     assert_eq!(hub_path(&p, SlotId::T5xxl), "t5xxl_fp8_e4m3fn.safetensors");
     assert!(p.can_run() && !p.untested);
 }
-#[test] fn an_sd15_checkpoint_needs_nothing_else() {
+#[test] fn an_sd15_checkpoint_needs_nothing_else_and_shows_its_own_vae() {
     let p = plan(main_hub("stable-diffusion-v1-5/stable-diffusion-v1-5", "v1-5-pruned-emaonly.safetensors", "sd15"), "sd1-checkpoint", &[], &[]);
-    assert_eq!(sources(&p), [(SlotId::Model, PartSource::Main)]);
+    assert_eq!(sources(&p), [(SlotId::Model, PartSource::Main), (SlotId::Vae, PartSource::Embedded)]);   // optional vae, embedded (rule 4)
+    assert!(p.to_fetch().len() == 1 && p.can_run());
+}
+#[test] fn a_diffusers_folder_takes_the_fp16_files_where_the_plain_ones_are_fp32() {      // names.rs
+    let d = diffusers_folder(&[rf("unet/diffusion_pytorch_model.safetensors", 3_438_167_534), rf("unet/diffusion_pytorch_model.fp16.safetensors", 1_719_125_304),
+        rf("text_encoder/model.safetensors", 492_265_879), rf("text_encoder/model.fp16.safetensors", 246_144_352),
+        rf("vae/diffusion_pytorch_model.safetensors", 334_643_268), rf("model_index.json", 543), rf("safety_checker/model.safetensors", 1_215_981_830)]).unwrap();
+    assert!(d.fp16);
+    assert_eq!((d.unet.file.path.as_str(), d.unet.save_as), ("unet/diffusion_pytorch_model.fp16.safetensors", "unet/diffusion_pytorch_model.safetensors"));
+    assert_eq!(d.vae.as_ref().unwrap().file.path, "vae/diffusion_pytorch_model.safetensors");   // no fp16 variant: the plain file
+    assert!(d.text_encoder_2.is_none());
+    assert!(diffusers_folder(&[rf("transformer/diffusion_pytorch_model.safetensors", 1)]).is_none());   // not an SD folder
+}
+#[test] fn a_diffusers_folder_plan_lists_its_own_files() {
+    let p = plan_folder("CompVis/stable-diffusion-v1-4", &sd14_folder(), "sd1-checkpoint");   // facts from detect_folder on the two sd14 fixtures
+    assert_eq!(sources(&p), [(SlotId::Model, PartSource::Main), (SlotId::Vae, PartSource::Folder), (SlotId::ClipL, PartSource::Folder)]);
+    assert_eq!(save_as(&p, SlotId::ClipL), Some("text_encoder/model.safetensors"));
+    assert!(p.can_run());
+    assert_eq!(plan_folder("o/sdxl-base", &sdxl_folder_without_text_encoder_2(), "sdxl-checkpoint").missing(), [SlotId::ClipG]);
+}
+#[test] fn file_names_that_say_companion() {                                              // names.rs
+    assert_eq!(companion_by_name("split_files/vae/qwen_image_vae.safetensors"), Some(SlotId::Vae));
+    assert_eq!(companion_by_name("Qwen3-4B-Q8_0.gguf"), Some(SlotId::Llm));
+    assert_eq!(companion_by_name("mmproj-F16.gguf"), Some(SlotId::LlmVision));
+    assert_eq!(companion_by_name("Qwen_Image-Q4_0.gguf"), None);
+    assert_eq!(companion_by_name("sd15-baked-vae.safetensors"), None);
 }
 #[test] fn sd35_medium_embeds_its_vae_and_fetches_three_encoders() {
     let p = plan(main_hub("second-state/stable-diffusion-3.5-medium-GGUF", "sd3.5_medium.safetensors", "sd35-medium"), "sd35-medium", &[], &[]);
@@ -1998,13 +2169,13 @@ pub fn plan_setup(input: &SetupInput<'_>) -> SetupPlan;
 ```
 
 - [ ] **Step 2: Run them and see them fail.**
-  - Run: `cargo test -p models --features test-support --lib sd::setup`
+  - Run: `cargo test -p models --features test-support --lib sd::setup sd::names`
   - Expected: FAIL to compile.
 
-- [ ] **Step 3: Implement `plan_setup`** by the rules. Parts are listed in the recipe's slot order, the slots of the plan only.
+- [ ] **Step 3: Implement `plan_setup`, `diffusers_folder` and `companion_by_name`** by the rules. Parts are listed in the recipe's slot order, the slots of the plan only. A folder's parts that are not slots of the recipe come last, in the order `vae`, `clip_l`, `clip_g`.
 
 - [ ] **Step 4: Run them and see them pass.**
-  - Run: `cargo test -p models --features test-support --lib sd::setup`
+  - Run: `cargo test -p models --features test-support --lib sd::setup sd::names`
   - Expected: PASS.
 
 - [ ] **Step 5: Commit.**
@@ -2020,28 +2191,25 @@ git commit -m "Studio: plan a model's set-up: main file, high/low sibling, insta
   - `crates/models/src/sd/candidates.rs`;
   - `src-tauri/src/studio/detect.rs`: `DetectService`, kept in Tauri state beside `StudioManager`.
 - Modify:
-  - `crates/models/src/sd/mod.rs`: `FileLabel`, `CannotRunReason`, `NotRead`, `Verdict`, `label_for`.
+  - `crates/models/src/sd/mod.rs`: `FileLabel`, `NotRead`, `Verdict`, `label_for`.
   - `crates/models/src/gen_search.rs`: `verdict_hint` replaces `recognise` and `family_of_name`; the token table is below.
-  - `crates/models/src/hf.rs`: `GenSearchKind::Loras` and its three URLs; ranking by `verdict_hint`.
+  - `crates/models/src/hf.rs`: `GenSearchKind::Loras` and its three URLs; the untagged query loses `filter=gguf`; ranking by `verdict_hint`.
   - `crates/models/src/files.rs`: `quant_label` also strips `.safetensors` and `.sft`.
   - `src-tauri/src/lib.rs`: manage the `DetectService`.
 - Test: inline in `candidates.rs`, `detect.rs`, `gen_search.rs` and `hf.rs`
 
 **Interfaces:**
-- Consumes: `read_remote` and `MAX_FILES_PER_REPO` (Task R3); `inspect` (Task R6); `match_recipe` and `noise_part` (Task R7); `RepoDetail` (`hf.rs:177`).
+- Consumes: `read_remote` and `MAX_FILES_PER_REPO` (Task R3); `inspect`, `inspect_folder` (Task R6); `match_recipe` and `noise_part` (Task R7); `companion_by_name`, `looks_like_lora` and `diffusers_folder` (Task S4); `RepoDetail` (`hf.rs:177`).
 - Produces:
 ```rust
-// sd/mod.rs
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)] #[serde(rename_all = "camelCase")]
-pub enum CannotRunReason { Lumina2, LtxVideo09, HunyuanVideo1, Svd, UnknownWeights, Sharded, Pickle, NoSha, Adapter,
-                           NeedsControlFrames, NeedsAudio, Upscaler, FolderModel, NotThisEngine, Ltx2 }
+// sd/mod.rs (CannotRunReason is Task R6's)
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)] #[serde(rename_all = "camelCase")]
 pub enum NotRead { NeedsToken, NeedsTerms, Budget, Failed }
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)] #[serde(rename_all = "camelCase")]
-pub enum FileLabel { Works { version: SdVersion, recipe: String, kind: RecipeKind, part: Option<NoisePart>, parameters: u64 },
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)] #[serde(rename_all = "camelCase", rename_all_fields = "camelCase")]
+pub enum FileLabel { Works { version: SdVersion, recipe: String, kind: RecipeKind, part: Option<NoisePart>, parameters: u64, folder: bool },
                      Lora { base: Option<SdVersion> }, Extra { role: GenRole }, CannotRun { reason: CannotRunReason, version: Option<SdVersion> },
                      NotRead { reason: NotRead } }
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)] #[serde(rename_all = "camelCase")]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)] #[serde(rename_all = "camelCase", rename_all_fields = "camelCase")]
 pub enum Verdict { Works { version: SdVersion, kind: RecipeKind }, Lora { base: Option<SdVersion> },
                    CannotRun { reason: CannotRunReason, version: Option<SdVersion> }, Unknown }
 pub fn label_for(facts: &FileFacts, name: &str) -> FileLabel;
@@ -2049,11 +2217,9 @@ pub fn verdict_of(labels: &[FileLabel]) -> Verdict;   // the Works label with th
 // sd/candidates.rs
 pub const MIN_CANDIDATE_BYTES: u64 = 10_000_000;
 pub struct QuantGroup { pub key: String, pub read: String, pub members: Vec<String> }   // `read`: the smallest member
-pub struct Candidates { pub groups: Vec<QuantGroup>, pub by_name: BTreeMap<String, FileLabel> }
+pub struct Candidates { pub folder: Option<DiffusersFolder>, pub groups: Vec<QuantGroup>, pub by_name: BTreeMap<String, FileLabel> }
 pub fn candidates(files: &[RepoFile]) -> Candidates;
 pub fn group_key(path: &str) -> String;               // the path lower-cased, with quant_label's match removed
-pub fn companion_by_name(path: &str) -> Option<SlotId>;
-pub fn looks_like_lora(path: &str) -> bool;            // a "lora" token in the path
 // gen_search.rs
 pub fn verdict_hint(repo_id: &str, pipeline_tag: Option<&str>) -> Verdict;
 // hf.rs
@@ -2070,30 +2236,23 @@ impl DetectService {
     pub fn verdict(&self, repo: &str) -> Option<Verdict>;   // the last read_repo's verdict for `repo`
 }
 ```
-**`candidates`.** Each weight file gets one of:
+**`candidates`.** First, a diffusers folder (`diffusers_folder`, Task S4) becomes `Candidates.folder`:
+- its unet, `text_encoder/` and `text_encoder_2/` files are read (two or three reads), and `detect_folder` decides the version;
+- the unet file gets `Works { …, folder: true }` when that is an sd1, sd2 or sdxl version;
+- the folder's `vae/`, `text_encoder/` and `text_encoder_2/` files are `Extra` (`vae`, `clip-l`, `clip-g`);
+- its other component folders (`safety_checker/`, `feature_extractor/`, `scheduler/`, `tokenizer*/`) are not listed.
+
+A repo with `model_index.json` and diffusers weights but no `unet/` (a `transformer/` model) gets `CannotRun { FolderModel }` on those files (design section 3).
+
+Then each other weight file gets one of:
 - **Pickle extensions:** `by_name` `CannotRun { Pickle }`.
 - **`*.safetensors.index.json` with shards:** the index and every shard are `CannotRun { Sharded }`, and the first shard is read for the version.
 - **No SHA-256:** `CannotRun { NoSha }`.
-- **`companion_by_name`:** `Extra { role }`. Plan decision: such files are read only with budget left after every model group, so the budget goes to models first. Read or not, the name label stands unless the header says otherwise.
+- **`companion_by_name`:** `Extra { role }`, never read: design 7.3 and Global Constraints make obvious companions non-candidates (preflight P47). The model-token guard of Task S4's names table keeps model files with companion words, such as `Qwen_Image-…` and `…-baked-vae`, out of this rule.
 - **Below `MIN_CANDIDATE_BYTES`**, unless `looks_like_lora`: not listed.
 - **Otherwise**, a member of the group of its `group_key`.
 
-`companion_by_name` matches tokens, substrings of the normalised name, and folders. A file whose name also has a model token (`image`, `edit`, `diffusion`, `unet`, `transformer`, `dit`, `checkpoint`, `pruned`, `ema`, `baked`, `merged`, `with`) is never a companion by name.
-
-| Tokens, substrings or folder | Slot |
-|---|---|
-| `vae`, `ae` (whole tokens), folder `vae/`; only for files under 2 GB (the largest VAE, Wan 2.2's, is 1.4 GB) | `vae` |
-| `taesd`, `tae` | `tae` |
-| `umt5`, `t5xxl`, `t5`, `byt5` | `t5xxl` |
-| `clip-l` | `clip_l` |
-| `clip-g` | `clip_g` |
-| `clip-vision` | `clip_vision` |
-| `mmproj` | `llm_vision` |
-| `connector`, `connectors` | `embeddings_connectors` |
-| `audio-vae` | `audio_vae` |
-| `wav2vec2` | `audio_encoder` |
-| substrings `qwen2.5-vl`, `qwen-2.5-vl`, `qwen3-`, `qwen3vl`, `qwen-3-`; tokens `gemma`, `mistral`, `llama`, `text-encoder`, `text-encoders`; folder `text_encoders/` | `llm` |
-| `tokenizer*.json` | `tokenizer` |
+`companion_by_name`, `looks_like_lora` and `diffusers_folder` are Task S4's (`sd/names.rs`).
 
 **`read_repo`:**
 1. When the repo is gated and the client has no token, every candidate gets `NotRead { NeedsToken }`, with no request.
@@ -2139,6 +2298,11 @@ impl DetectService {
 - `pipeline_tag=image-to-video&filter=lora`;
 - `filter=lora`.
 
+**Pictures and Video keep their three requests**, but the third, untagged one no longer adds `filter=gguf` (`hf.rs:864-866`, coordinator ruling P42).
+- Plan decision: dropping the filter, rather than adding a fourth request, keeps the request budget, and finds single-file `.safetensors` repos without a pipeline tag (goal 1).
+- An untagged hit is kept only when `verdict_hint` gives it a version, a LoRA or a can't-run reason, as 0.1.x kept only untagged hits whose names matched a family. Untagged chat models and other repos read `Unknown` and are dropped.
+- An exact `owner/repo` query is answered as now.
+
 **Steps**
 
 - [ ] **Step 1: Write the failing tests.**
@@ -2170,6 +2334,15 @@ impl DetectService {
     assert_eq!((s.header_requests(), r.read, r.unread), (24, 24, 6));
     assert_eq!(r.labels.values().filter(|l| **l == FileLabel::NotRead { reason: NotRead::Budget }).count(), 6);
 }
+#[tokio::test] async fn a_diffusers_repo_reads_its_folder_and_labels_the_unet() {
+    let s = hub_server_with(sd14_diffusers_repo()).await;        // unet and text_encoder headers from the sd14 fixtures, plain and fp16 files
+    let r = DetectService::new().read_repo(&s.client(), &s.detail()).await;
+    assert_eq!(s.header_requests(), 2);
+    assert!(matches!(&r.labels["unet/diffusion_pytorch_model.fp16.safetensors"],
+        FileLabel::Works { version: SdVersion::Sd1, recipe, folder: true, .. } if recipe == "sd1-checkpoint"));
+    assert_eq!(r.labels["text_encoder/model.fp16.safetensors"], FileLabel::Extra { role: GenRole::ClipL });
+    assert!(!r.labels.contains_key("safety_checker/model.safetensors"));
+}
 #[test] fn candidates_name_what_they_skip() {
     let c = candidates(&[f("m.ckpt", 4e9), f("t5xxl_fp8_e4m3fn.safetensors", 4.8e9), f("tiny.safetensors", 1e6), f("lora/style.safetensors", 2e6),
                          f("m-Q4_0.gguf", 7e9), f("m-Q8_0.gguf", 12e9), f_no_sha("x.safetensors", 3e9)]);
@@ -2197,6 +2370,12 @@ impl DetectService {
     let urls = client().generator_search_urls("style", GenSearchKind::Loras);
     assert!(urls.iter().all(|u| u.query().unwrap().contains("filter=lora")));
 }
+#[test] fn the_untagged_query_finds_safetensors_repos_and_drops_unknown_names() {     // hf.rs
+    let [_, _, untagged] = client().generator_search_urls("sdxl", GenSearchKind::Pictures);
+    assert!(!untagged.query().unwrap().contains("filter=gguf") && !untagged.query().unwrap().contains("pipeline_tag"));
+    let ranked = rank_generator_searches(vec![vec![], vec![]], vec![summary("o/my-sdxl-merge", None), summary("Qwen/Qwen3-8B", None)], GenSearchKind::Pictures, "");
+    assert_eq!(ranked.iter().map(|r| r.id.as_str()).collect::<Vec<_>>(), ["o/my-sdxl-merge"]);
+}
 ```
 
 - [ ] **Step 2: Run them and see them fail.**
@@ -2206,8 +2385,8 @@ impl DetectService {
 - [ ] **Step 3: Implement** as specified. The LRU is a hand-written `HashMap` plus `VecDeque`. Plan decision: no crate for 512 entries.
 
 - [ ] **Step 4: Run them and see them pass.**
-  - Run: `cargo test -p models --features test-support && cargo test -p app --lib studio::`
-  - Expected: PASS.
+  - Run: `cargo test -p models --features test-support && cargo test -p app --lib studio:: hub::`
+  - Expected: PASS. `files::` and `hub::` cover the chat-model downloads, which also use `quant_label`.
 
 - [ ] **Step 5: Commit.**
 ```bash
@@ -2227,8 +2406,10 @@ git commit -m "Studio: read a repository's files when it opens (one read per qua
   - command registration: `src-tauri/commands.list`, `capabilities/main.json`, `src-tauri/src/lib.rs`;
   - `src/components/studio/types.ts`, `src/components/studio/api.ts`;
   - `src/components/studio/LocalSearch.tsx` and `localOffers.ts`: kept working, as below;
+  - `src/store/studioLocal.ts`: `search(text, tab)` keeps its signature and calls `api.studioLocalSearch(text, tab === "image" ? "pictures" : "video")` (`studioLocal.ts:75`); Task S12 changes the store's own signature;
+  - `src/components/studio/DownloadLocalModel.tsx` (`STRICTNESS`, line 22) and `src/lib/words.ts` (the `satisfies Record<Licence["commercial"], …>` tables at 1843 and 1966): each gains `withUseRules`;
   - `src/lib/words.ts`.
-- Test: inline in `local_cmd.rs`; `src/components/studio/LocalModels.test.tsx` (the search part)
+- Test: inline in `local_cmd.rs` and `gen_search.rs`; `src/components/studio/LocalModels.test.tsx` (the search part, whose `toHaveBeenCalledWith("klein", "image")` at line 247 becomes `("klein", "pictures")`)
 
 **Interfaces:**
 - Consumes: `DetectService::read_repo` and `verdict` (Task S5); `plan_setup` (Task S4); `generic_entry` (Task S3); `GenFit` and `gen_fit`.
@@ -2248,7 +2429,7 @@ pub struct LocalSearchHitDto { pub repo: String, pub author: String, pub downloa
     pub gated: String, pub license_label: Option<String>, pub verdict: Verdict, pub exact: bool }
 pub struct SetupChoice { pub recipe: Option<String>, #[serde(default)] pub overrides: Vec<SlotOverride> }      // Deserialize
 pub struct SlotOverride { pub role: GenRole, pub file: SlotFile }
-#[serde(rename_all = "camelCase")] pub enum SlotFile { Hub { repo: String, commit: String, path: String }, Installed { gen_model_id: String, role: GenRole },
+#[serde(rename_all = "camelCase", rename_all_fields = "camelCase")] pub enum SlotFile { Hub { repo: String, commit: String, path: String }, Installed { gen_model_id: String, role: GenRole },
                                                        Disk { path: String }, None }
 // local_models.rs
 pub enum LocalSource { Catalog { entry_id: String }, Search { repo: String, commit: String, file: String }, Installed { gen_model_id: String }, Disk { path: String } }
@@ -2257,12 +2438,13 @@ pub enum LocalSource { Catalog { entry_id: String }, Search { repo: String, comm
 #[tauri::command] pub async fn studio_setup_plan(window, app, studio, source: LocalSource, choice: SetupChoice) -> AppResult<SetupPlanDto>;
 ```
 - **`files`** holds one entry per `Works` main file. For an A14B pair, that means one per high/low quantisation; the low-noise half is folded into its high-noise sibling's plan.
+- **A diffusers folder** is one entry: `file` is its unet file, `quant` is "fp16" or "fp32", and its plan comes from `MainFile::HubFolder` (Task S4).
 - They are sorted by total size, largest first.
 - **`best`** marks the largest whose fit word is `fits` or `afterUnload`. Plan decision: "fits this computer" means it runs on the device.
 - **`summary`** is the model card's first paragraph after the front matter, through `hf::uploader_text(text, 400)`. It is read with the listing, and `None` when that fails.
 - **`exact`** on a hit is true when `DetectService::verdict(repo)` exists. The hit's verdict is that one; otherwise `verdict_hint`.
 - **Licences of searched files** (design 11a). This task owns licence classification for searched files.
-  - `Commercial` gains `WithUseRules` (serde `withUseRules`), whose badge is `Badge::Amber`.
+  - `Commercial` gains `WithUseRules` (serde `withUseRules`), whose badge is `Badge::Amber`. It goes right after `Registration`: the enum's order is its strictness (`gen_catalog.rs:108-121`), and it is laxer than `Unclear`.
   - `KNOWN_LABELS` gains four labels, each `Commercial::WithUseRules` with plain words "Commercial use allowed, with use rules":
     - `creativeml-openrail-m` "CreativeML Open RAIL-M";
     - `openrail` "Open RAIL";
@@ -2283,7 +2465,7 @@ export type CannotRunReason = "lumina2" | "ltxVideo09" | "hunyuanVideo1" | "svd"
   | "needsControlFrames" | "needsAudio" | "upscaler" | "folderModel" | "notThisEngine" | "ltx2";
 export type NotReadReason = "needsToken" | "needsTerms" | "budget" | "failed";
 export type FileLabel =
-  | { works: { version: SdVersion; recipe: string; kind: RecipeKind; part: "high" | "low" | null; parameters: number } }
+  | { works: { version: SdVersion; recipe: string; kind: RecipeKind; part: "high" | "low" | null; parameters: number; folder: boolean } }
   | { lora: { base: SdVersion | null } }
   | { extra: { role: PartRole } }
   | { cannotRun: { reason: CannotRunReason; version: SdVersion | null } }
@@ -2292,7 +2474,7 @@ export type Verdict = { works: { version: SdVersion; kind: RecipeKind } } | { lo
   | { cannotRun: { reason: CannotRunReason; version: SdVersion | null } } | "unknown";
 export interface Part { role: PartRole; repo: string; path: string; sizeBytes: number; licenceId: string; alreadyHere: boolean; local: boolean }
 // Licence.commercial gains "withUseRules" (amber).
-export type PartSource = "main" | "sibling" | "installed" | "repo" | "companion" | "chosen" | "embedded" | "missing";
+export type PartSource = "main" | "sibling" | "installed" | "repo" | "companion" | "chosen" | "embedded" | "folder" | "missing";
 export interface PlannedSlot { role: PartRole; required: boolean; source: PartSource; part: Part | null }
 export interface SetupPlan { recipe: RecipeChoice; recipes: RecipeChoice[]; slots: PlannedSlot[]; licences: Licence[]; totalBytes: number;
   toFetchBytes: number; fit: LocalFit; canDownload: boolean; lowDisk: boolean; needsEngine: boolean; untested: boolean }
@@ -2376,7 +2558,13 @@ export type LocalSource = { catalog: { entryId: string } } | { search: { repo: s
     assert_eq!((page.items[0].author.as_str(), page.items[0].exact), ("QuantStack", false));
     assert!(matches!(page.items[0].verdict, Verdict::Works { kind: RecipeKind::Video, .. }));
 }
-#[test] fn the_new_commands_are_registered() { /* commands_list_matches_capabilities covers studio_setup_plan */ }
+#[tokio::test] async fn a_diffusers_repo_is_one_choice_whose_plan_lists_the_folder_files() {
+    let r = local_repo(&deps_with(hub(sd14_diffusers_repo()), gpu_free_gb(8)), "CompVis/stable-diffusion-v1-4").await.unwrap();
+    assert_eq!(r.files.len(), 1);
+    assert_eq!((r.files[0].quant.as_str(), r.files[0].plan.recipe.id.as_str()), ("fp16", "sd1-checkpoint"));
+    assert_eq!(r.files[0].plan.slots.iter().map(|s| (s.role, s.source)).collect::<Vec<_>>(),
+        [(GenRole::Model, PartSource::Main), (GenRole::Vae, PartSource::Folder), (GenRole::ClipL, PartSource::Folder)]);
+}
 ```
 In `LocalModels.test.tsx`:
 - `a search result shows its verdict in words`: a hit with `{ works: { version: "sdxl", kind: "picture" } }` shows "Works in Studio · SDXL picture model".
@@ -2406,7 +2594,9 @@ git commit -m "Studio: a repository shows every file's label, one choice per qua
   - `src-tauri/src/downloads.rs`: `GenGroup` and `GenGroupPart` additions, `gen_model_from`, `register_gen_model`;
   - `src-tauri/src/studio/local_cmd.rs`: `studio_local_download(source, choice)`;
   - `src-tauri/src/studio/errors.rs`;
-  - `src/components/studio/api.ts`, `src/components/studio/localOffers.ts`, `src/components/studio/DownloadLocalModel.tsx` (pass the choice through).
+  - `src/components/studio/api.ts`, `src/components/studio/localOffers.ts`, `src/components/studio/DownloadLocalModel.tsx` (pass the choice through);
+  - `src/store/studioLocal.ts`: `repairLocal` and `downloadLocal` pass `null` as the choice (`studioLocal.ts:90, 95`);
+  - `src/components/studio/RunCard.test.tsx` (line 726) and `DownloadLocalModel.test.tsx` (188, 200): the expected calls gain the `null` choice.
 - Test: inline in `local_models.rs` and `downloads.rs`, with the module's existing fake deps and Hub server.
 
 **Interfaces:**
@@ -2428,13 +2618,16 @@ pub fn setup_incomplete(missing: &[GenRole]) -> AppError;   // code "studio_setu
   4. It refuses `low_disk` as now.
   5. It creates one group whose parts are exactly the plan's parts: Hub files to fetch, plus `present` for installed and local ones.
   6. It downloads each Hub file to `<models>/<owner>/<repo>/<path>`, or `@<commit12>` for another revision, as `plan_download` does now.
+     - A diffusers folder part (`save_as` set) goes to `<models>/<owner>/<repo>[@<commit12>][/@fp16]/<save_as>`, so the engine finds it under its own name.
+     - Plan decision: an fp16 folder sits under its own `@fp16` root, so the two precisions never share files.
 - **`register_gen_model`** writes:
   - id `hf:<owner>/<repo>:<file>`;
   - `recipe_id` from the plan;
-  - `family` = the version word, or `unknown` when untested;
+  - `family` = the detected version word, kept even when the set-up is untested; `unknown` only when no version was detected (preflight P44: "untested" is derived, as in Tasks S3 and S9, from the family and the recipe);
   - `kind` from `kind_of`;
   - `source` `search`;
-  - one part per planned slot with its `GenRole`, and `file` = the row's destination or the `present` path.
+  - one part per planned slot with its `GenRole`, and `file` = the row's destination or the `present` path;
+  - for a folder part, `GenPart.folder = Some(save_as)` (Task S3).
 - `Catalog` and `Installed` sources work as in 0.1.2, with `recipe_id` from the family.
 
 **Steps**
@@ -2470,6 +2663,17 @@ pub fn setup_incomplete(missing: &[GenRole]) -> AppError;   // code "studio_setu
     let t = harness(hub(wan_a14b_repo(&["Q4_K_M"]))).await;
     let g = start_local_download(&t.app, search_source("HighNoise/Wan2.2-T2V-A14B-HighNoise-Q4_K_M.gguf"), None).await.unwrap();
     assert!(t.group_files(&g).contains(&"LowNoise/Wan2.2-T2V-A14B-LowNoise-Q4_K_M.gguf".to_string()));
+}
+#[tokio::test] async fn a_diffusers_repo_downloads_its_folder_files_under_the_engines_names() {
+    let t = harness(hub(sd14_diffusers_repo())).await;                // plain fp32 and fp16 files for unet and text_encoder, a plain vae
+    let g = start_local_download(&t.app, search_source("unet/diffusion_pytorch_model.fp16.safetensors"), None).await.unwrap();
+    assert_eq!(t.group_files(&g), ["unet/diffusion_pytorch_model.fp16.safetensors", "vae/diffusion_pytorch_model.safetensors", "text_encoder/model.fp16.safetensors"]);
+    t.complete(&g).await;
+    let root = t.models_dir.join("CompVis/stable-diffusion-v1-4/@fp16");
+    for name in ["unet/diffusion_pytorch_model.safetensors", "vae/diffusion_pytorch_model.safetensors", "text_encoder/model.safetensors"] { assert!(root.join(name).exists(), "{name}"); }
+    let row = t.store.get_gen_model("hf:CompVis/stable-diffusion-v1-4:unet/diffusion_pytorch_model.fp16.safetensors").await.unwrap().unwrap();
+    assert_eq!((row.recipe_id.as_deref(), row.family.as_str()), (Some("sd1-checkpoint"), "sd1"));
+    assert!(row.parts.as_array().unwrap().iter().all(|p| p["folder"].is_string()));
 }
 #[tokio::test] async fn deleting_one_model_keeps_a_companion_a_generic_model_reuses() {
     let t = harness(hub(chroma_repo())).await;
@@ -2622,6 +2826,7 @@ git commit -m "Studio: add a model file from the computer, copied or used where 
 - Create: `src-tauri/src/studio/setup_cmd.rs` (`studio_setup_plan` moves here from `local_cmd.rs`)
 - Modify:
   - `src-tauri/src/dto.rs`: `InstalledLocalDto` additions, `ModelFilesDto`;
+  - `src-tauri/src/studio/errors.rs` (`cannot_run`);
   - `src-tauri/src/studio/local_cmd.rs`: installed rows without a recipe are listed;
   - command registration;
   - `src/components/studio/types.ts`, `src/components/studio/api.ts`.
@@ -2651,6 +2856,7 @@ pub struct InstalledLocalDto { /* as now */ pub recipe: Option<RecipeChoiceDto>,
   - When a Hub file must be fetched, it starts a group whose completion replaces the row (same id, `INSERT OR REPLACE`). Otherwise it rewrites the row at once.
   - A file the old set-up used and nothing uses now is removed by `remove_unused_files` (inside the models folder only).
 - **Set it up yourself from a repo.** `studio_setup_plan` with an explicit `recipe` is accepted for a file labelled `CannotRun { UnknownWeights }` or `NotRead { Budget | Failed }`, and gives `untested: true`.
+  - Any other can't-run label is refused with a new `errors::cannot_run(reason: CannotRunReason) -> AppError`, code `"studio_cannot_run"`. Its message is the label's sentence from Task S6's words, and its next step is "Download the file anyway to use it elsewhere.".
   - Plan decision: never for pickle files, sharded files or the named can't-run models. The engine is known to refuse or misrun those.
 - Untested runs are marked in the run's settings line by the webview, from `InstalledLocal.untested` ("untested set-up").
 - `types.ts`: `ModelFiles`, `SetModelFilesResult`, and the `InstalledLocal` fields above.
@@ -2814,34 +3020,46 @@ git commit -m "Studio: LoRAs from Hugging Face or the computer, kept in one fold
 
 **Files:**
 - Modify:
-  - `src-tauri/src/studio/local.rs`: `params_for`, `job_for`, `frames_for`, `size_of`, `check_files`;
-  - `src-tauri/src/studio/manager.rs`: `job_options` passes the `MemoryChoice` instead of deciding `memory_saving`;
-  - `src-tauri/src/studio/manager/lane.rs`: remove the `NotHere` refusals at 416–422 and 789–793;
+  - `src-tauri/src/studio/local.rs`: `params_for`, the `LocalMediaProvider::job_for` method (`local.rs:771`), `frames_for`, `size_of` and `check_files`;
+  - `src-tauri/src/studio/manager.rs`: `job_options` (2099) passes the `MemoryChoice` instead of deciding `memory_saving`;
+  - `src-tauri/src/studio/manager/lane.rs`:
+    - remove the `NotHere` refusals (`start_local`, 0.1.2 lines 416–422, and `make_local`, 789–793);
+    - remove `Card::DoesNotFit` (802–806, 965), which the lease no longer gives;
+  - `src-tauri/src/gpu_lease.rs` (`step`, 445–447): a job that fits neither beside the chat model nor after an unload, and can't run on the processor, now unloads the chat model and runs. `Refused::DoesNotFit` stays only for "keep the chat model" under *Ask*, which the lane already reads as `Card::KeptChat` (964);
   - `crates/models/src/gen_fit.rs`: video judged by memory; `video_on_processor`;
-  - `crates/agent/src/media/spec.rs` (`ParamKind::Loras` and its validation);
+  - `crates/agent/src/media/mod.rs` (`RefRole`, line 103) and `crates/agent/src/media/spec.rs` (`ParamKind::Loras`, and its arm in `fits`);
   - `src-tauri/src/dto.rs`: `LocalFitDto.video_on_processor`; `LocalModelsDto.video_possible` is replaced by `video_on_processor`;
   - `src-tauri/src/studio/local_cmd.rs`;
-  - `src-tauri/src/studio/errors.rs`: remove the unused "does not fit" refusal copy at 1100–1109; add `studio_lora_missing`;
+  - `src-tauri/src/studio/errors.rs`:
+    - remove `does_not_fit` (1100–1109), now unused;
+    - remove the `NotFor::VideoNeedsGpu` and `VideoNotOnThisMac` arms (1226–1229), so it compiles (preflight P27);
+    - add `LORA_MISSING` and `MASK_NEEDS_PICTURE` copy;
+  - `src-tauri/src/studio/manager_tests.rs` (the lease's fake at 4547 and the processor cases at 5108, 6071, 6097), `src-tauri/src/gpu_lease.rs`'s test at 857;
   - `src/components/studio/types.ts`.
-- Test: inline in `local.rs`, `manager.rs`, `gen_fit.rs` and `spec.rs`
+- Test: inline in `local.rs`, `gen_fit.rs`, `spec.rs` and `gpu_lease.rs`; `manager_tests.rs`
 
 **Interfaces:**
-- Consumes: `SdJob` (Task S2), `GenEntry` (Task S3), `store::gen_loras` (Task S1), `lora_folder` (Task S10).
+- Consumes: `SdJob`, `LORA_WEIGHT_RANGE`, `LORA_WEIGHT_STEP` and `LORA_WEIGHT_DEFAULT` (Task S2); `GenEntry`, `GenPart.folder` (Task S3); `store::GenLora` (Task S1); `lora_folder` (Task S10).
 - Produces:
 ```rust
 // agent/src/media/spec.rs
 pub enum ParamKind { /* … */ Loras { max: u32, high_noise: bool, weight_min: f64, weight_max: f64, weight_step: f64, weight_default: f64 } }
-// the value is [{"id": string, "weight": number, "highNoise": bool}], at most `max`; weight within [min, max]; highNoise only when `high_noise`
-pub enum RefRole { Reference, StartFrame, EndFrame, Source, Mask, Control }   // gains Source, Mask, Control (serde "source", "mask", "control"; design 11a)
+// the value is [{"id": string, "weight": number, "highNoise": bool}], at most `max`; weight within [min, max] on its step; highNoise only when
+// `high_noise`. Checked by `fits` (spec.rs:1107), so `validate(model, req)` (spec.rs:427) gives `Invalid::BadValue("loras")`.
+// agent/src/media/mod.rs
+pub enum RefRole { Reference, StartFrame, EndFrame, Source, Mask, Control }   // gains Source, Mask, Control: the words of models' GenInput (Task R7)
 // local.rs
-pub mod key { /* … */ pub const GUIDANCE: &str = "guidance"; pub const IMG_CFG: &str = "img_cfg_scale"; pub const HIGH_NOISE_STEPS: &str = "high_noise_steps";
-              pub const HIGH_NOISE_CFG: &str = "high_noise_cfg_scale"; pub const LORAS: &str = "loras";
-              pub const SOURCE: &str = "source_picture"; pub const MASK: &str = "mask_picture"; pub const CONTROL: &str = "control_picture"; }
-pub const LORA_WEIGHT: (f64, f64, f64, f64) = (-1.0, 2.0, 0.05, 1.0);   // min, max, step, default
+mod key { /* … the existing keys; GUIDANCE stays "cfg_scale" … */ pub const DISTILLED_GUIDANCE: &str = "guidance"; pub const IMG_CFG: &str = "img_cfg_scale";
+          pub const HIGH_NOISE_STEPS: &str = "high_noise_steps"; pub const HIGH_NOISE_CFG: &str = "high_noise_cfg_scale"; pub const LORAS: &str = "loras";
+          pub const SOURCE: &str = "source_picture"; pub const MASK: &str = "mask_picture"; pub const CONTROL: &str = "control_picture"; }
+const DISTILLED_GUIDANCE_RANGE: (f64, f64, f64) = (0.5, 100.0, 0.5);   // the recipes' defaults reach 30 (flux1-canny, flux1-fill) (preflight P11)
 pub struct LocalJobOptions { pub processor_only: bool, pub memory: MemoryChoice, pub threads: Option<u32>, pub device_description: Option<String> }
-pub fn job_for(entry: &GenEntry, model: &GenModel, req: &MediaRequest, opts: &LocalJobOptions, loras: &[GenLora], lora_dir: &Path,
-               backend: Option<&str>, out_dir: &Path, run_id: &str) -> AppResult<SdJob>;
-pub fn memory_flags(entry: &GenEntry, recipe: Option<&Recipe>, width: u32, height: u32, video: bool, memory: MemoryChoice) -> (bool, bool);  // (vae_tiling, offload_to_cpu)
+impl LocalMediaProvider {
+    #[expect(clippy::too_many_arguments, reason = "as now")]
+    pub fn job_for(&self, entry: &GenEntry, model: &store::GenModel, req: &MediaRequest, opts: &LocalJobOptions, loras: &[store::GenLora],
+                   lora_dir: &Path, backend: Option<String>, out_dir: &Path, run_id: &str) -> Result<SdJob, MediaError>;   // refusals: refused(FailureKind::BadRequest, …)
+}
+pub fn memory_flags(recipe: Option<&Recipe>, width: u32, height: u32, video: bool, memory: MemoryChoice) -> (bool, bool);  // (vae_tiling, offload_to_cpu)
 // gen_fit.rs
 pub struct GenFitResult { /* … */ pub video_on_processor: bool }
 ```
@@ -2850,101 +3068,143 @@ pub struct GenFitResult { /* … */ pub video_on_processor: bool }
   - sizes are offered as multiples of `limits.multiple_of`;
   - frames follow `limits.video_rule()`;
   - `fps` is fixed (no field) when `video_rule().fixed_fps` is set;
-  - `GUIDANCE` (range 0.5–10, step 0.5) when the recipe has `feature("distilled_guidance")`;
+  - `DISTILLED_GUIDANCE` (`DISTILLED_GUIDANCE_RANGE`) when the recipe has `feature("distilled_guidance")`;
   - `IMG_CFG` (range 1–20, step 0.5) for `feature("img_cfg")`;
-  - `HIGH_NOISE_STEPS` (range −1–50; −1 reads "Automatic") and `HIGH_NOISE_CFG` (`GUIDANCE_RANGE`), both under Advanced, for `feature("high_noise")`;
-  - `LORAS` with `max` `MAX_LORAS` and `high_noise` from the recipe, for `feature("lora")`;
-  - one `ParamKind::Images { min, max, role }` per `entry.input_counts` row (Task S3), so inpainting asks for a picture to change and a mask, Canny and Depth for a control picture, and Flex.2 offers all three.
+  - `HIGH_NOISE_STEPS` (range −1–50; −1 reads "Automatic") and `HIGH_NOISE_CFG` (the existing `GUIDANCE_RANGE`), both under Advanced, for `feature("high_noise")`;
+  - `LORAS` with `max` `MAX_LORAS`, `high_noise` from the recipe, and the weight range, step and default from Task S2's constants, for `feature("lora")`;
+  - **picture fields:** one `ParamKind::Images { min, max, role }` per `entry.input_counts` row (Task S3), so inpainting asks for a picture to change and a mask, Canny and Depth for a control picture, and Flex.2 offers all three. An empty `input_counts`, as every catalog entry has, keeps 0.1.2's picture fields from `entry.inputs` (`REFERENCES`, `START_FRAME`), so klein keeps its reference field (preflight P43).
   - Catalog entries keep their tested defaults and limits.
   - The guidance and negative prompt are hidden when the default cfg is 1, the 0.1.x rule (inventory S46).
 - **`job_for`:**
   - each part becomes its `PartRole`;
+  - **a diffusers folder entry** (parts with `folder`) gives one `(PartRole::Single, root)`, where root is the model part's `file` with its `folder` suffix removed. Its other parts pass no flag; the engine reads them from the folder (correction 9);
   - the recipe's `custom_sigmas`, `shifted_timestep`, `strength`, `moe_boundary` and `context` (`vae_format`, `model_args`) are passed as given;
   - `guidance`, `img_cfg` and `high_noise` come from params over defaults;
   - `end_image` comes from the `endFrame` reference;
   - `init_image` comes from `source` (or `startFrame` for video), `mask_image` from `mask`, and `control_image` from `control`;
-  - a mask without a picture to change is refused with `studio_mask_needs_picture` ("Add the picture to change before its mask." / "Add it, or remove the mask.");
-  - with a picture to change and no size chosen, the size follows the picture: its aspect, at the recipe default's pixel count, rounded to the multiple.
-  - `size_multiple` comes from the limits.
-  - **LoRAs:** each attached id is looked up in `gen_loras`. A missing row or file is refused with `studio_lora_missing` ("A LoRA's file is missing: <name>." / "Add it again, or remove it from the settings."). Otherwise `lora_dir = lora_folder(models_dir)` and `LoraTag { name: rel_name, weight, high_noise }`. With no LoRAs attached, `lora_dir` is `None`.
+  - a mask without a picture to change is refused: `refused(FailureKind::BadRequest, errors::MASK_NEEDS_PICTURE)` ("Add the picture to change before its mask.");
+  - with a picture to change and no size chosen, the size follows the picture: its aspect, at the recipe default's pixel count, rounded to the multiple;
+  - `size_multiple` comes from the limits, and `tiling_allowed` from `recipe.feature("vae_tiling")`;
+  - **LoRAs:** each attached id is looked up in `loras`.
+    - A missing row or file is refused: `refused(FailureKind::BadRequest, errors::lora_missing(name))` ("A LoRA's file is missing: <name>. Add it again, or remove it from the settings.").
+    - Otherwise `lora_dir` is the given folder and each `LoraTag` is `{ name: rel_name, weight, high_noise }`.
+    - With no LoRAs attached, `lora_dir` is `None`.
+  - The refusals stay `MediaError`, so the lane's failure path and `FailureKind` are unchanged (preflight P9).
 - **`memory_flags`:**
-  - `On`: (true, true).
-  - `Off`: (false, false).
-  - `Automatic`: tiling when `video || width * height > 1024 * 1024`, unless the recipe disables `vae_tiling`; never offload.
+  - `On`: `(tiling_allowed, true)`.
+  - `Off`: `(false, false)`.
+  - `Automatic`: tiling when `video || width * height > 1024 * 1024` and `tiling_allowed`; never offload.
+  - `tiling_allowed` is `recipe.map_or(true, |r| r.feature("vae_tiling"))`, so the four pixel-space recipes are never tiled (correction 5, preflight P7).
   - Spec correction 4: Automatic no longer adds `--offload-to-cpu` on a tight fit, because the engine's auto-fit does that.
-  - The out-of-memory retry (Task S2) still turns both on.
+  - The out-of-memory retry (Task S2) turns offload on, and tiling only where allowed.
 - **`gen_fit`:**
   - `NotFor::VideoNeedsGpu` and `NotFor::VideoNotOnThisMac` are removed. A video on `Target::Cpu` is judged by memory like a picture, and gets `video_on_processor: true`.
   - On Apple silicon, a video whose catalog entry says `runs_on_apple: false` is judged by memory too.
   - The fit word, reason and suggestion stay; they now only warn.
-- `LocalModelsDto.video_on_processor` is true when this computer runs models on the processor. `types.ts`: `LocalFit.videoOnProcessor: boolean`; `LocalModels.videoOnProcessor` replaces `videoPossible`; `RefRole` gains `"source" | "mask" | "control"`; `ParamKind` gains `{ type: "loras"; max: number; highNoise: boolean; weightMin: number; weightMax: number; weightStep: number; weightDefault: number }`; and `export interface LoraUse { id: string; weight: number; highNoise: boolean }` is the value of the `loras` param.
+- **The GPU lease** (design 9.2: "the run goes ahead"). When the job fits neither beside the chat model nor after an unload, and can't run on the processor, `step` returns `Step::Unload(AfterIt::AfterUnload)`. The engine's auto-fit then spreads the weights over the card, memory and disk.
+- `LocalModelsDto.video_on_processor` is true when this computer runs models on the processor.
+- **`types.ts`:**
+  - `LocalFit.videoOnProcessor: boolean`;
+  - `LocalModels.videoOnProcessor` replaces `videoPossible`;
+  - `RefRole` gains `"source" | "mask" | "control"`;
+  - `ParamKind` gains `{ type: "loras"; max: number; highNoise: boolean; weightMin: number; weightMax: number; weightStep: number; weightDefault: number }`;
+  - `export interface LoraUse { id: string; weight: number; highNoise: boolean }` is the value of the `loras` param.
 
 **Steps**
 
-- [ ] **Step 1: Write the failing tests.**
+- [ ] **Step 1: Write the failing tests.** `provider()`, `catalog_entry`, `generic`, `req`, `req_with_refs`, `opts`, `strings` and `after` are `local.rs` test helpers. `refusal(e)` gives a `MediaError::Answered`'s `(kind, message)`.
 ```rust
 #[test] fn an_01x_klein_picture_keeps_its_0_1_2_arguments() {
-    // the klein catalog entry, 1024×1024, 4 steps, seed 7, memory automatic, green fit, Vulkan0
-    let job = job_for(&catalog_entry("flux2-klein-4b-q4"), &klein_row(), &klein_request(), &opts(MemoryChoice::Automatic), &[], LORAS, Some("Vulkan0"), OUT, "r1").unwrap();
-    assert_eq!(build_args(&job).unwrap(), os(&KLEIN_0_1_2_ARGS));
+    // recorded in Task S2 from 0.1.2; only the call changes: memory Automatic is 0.1.2's memory_saving false at a green fit
+    let job = provider().job_for(&catalog_entry("flux2-klein-4b-q4"), &klein_row(), &klein_request(), &opts(MemoryChoice::Automatic), &[], LORAS,
+                                 Some("Vulkan0".into()), OUT, "r1").unwrap();
+    assert_eq!(strings(build_args(&job).unwrap()), KLEIN_0_1_2_ARGS);
 }
 #[test] fn a_generic_sdxl_picture_runs_with_m_and_the_recipe_defaults() {
-    let a = strings(build_args(&job_for(&generic("sdxl-checkpoint", SdVersion::Sdxl), &sdxl_row(), &req(json!({})), &opts(MemoryChoice::Automatic), &[], LORAS, None, OUT, "r").unwrap()).unwrap());
+    let job = provider().job_for(&generic("sdxl-checkpoint", SdVersion::Sdxl), &sdxl_row(), &req(json!({})), &opts(MemoryChoice::Automatic), &[], LORAS, None, OUT, "r").unwrap();
+    let a = strings(build_args(&job).unwrap());
     assert_eq!((after(&a, "-m").ends_with("sd_xl_base_1.0.safetensors"), after(&a, "--steps"), after(&a, "--cfg-scale"), after(&a, "-W")), (true, "20", "5", "1024"));
-    assert!(!a.contains(&"--diffusion-model".into()) && !a.contains(&"--vae-tiling".into()));
+    assert!(!a.contains(&"--diffusion-model".to_string()) && !a.contains(&"--vae-tiling".to_string()));
+}
+#[test] fn a_diffusers_folder_runs_with_m_and_its_root() {
+    let job = provider().job_for(&generic_folder("sd1-checkpoint", SdVersion::Sd1), &sd14_folder_row(), &req(json!({})), &opts(MemoryChoice::Automatic), &[], LORAS, None, OUT, "r").unwrap();
+    let a = strings(build_args(&job).unwrap());
+    assert!(after(&a, "-m").ends_with("CompVis/stable-diffusion-v1-4/@fp16"));
+    assert!(!a.contains(&"--vae".to_string()) && !a.contains(&"--clip_l".to_string()));
 }
 #[test] fn video_and_big_pictures_tile_the_decoder_unless_the_recipe_says_no() {
-    assert_eq!(memory_flags(&e("wan22-ti2v-5b"), Some(r("wan22-ti2v-5b")), 832, 480, true, MemoryChoice::Automatic), (true, false));
-    assert_eq!(memory_flags(&e("sdxl-checkpoint"), Some(r("sdxl-checkpoint")), 1024, 1024, false, MemoryChoice::Automatic), (false, false));
-    assert_eq!(memory_flags(&e("sdxl-checkpoint"), Some(r("sdxl-checkpoint")), 1088, 1024, false, MemoryChoice::Automatic), (true, false));
-    assert_eq!(memory_flags(&e("z-image-l2p"), Some(r("z-image-l2p")), 2048, 2048, false, MemoryChoice::Automatic), (false, false));
-    assert_eq!(memory_flags(&e("z-image-l2p"), Some(r("z-image-l2p")), 512, 512, false, MemoryChoice::On), (true, true));
+    assert_eq!(memory_flags(recipe("wan22-ti2v-5b"), 832, 480, true, MemoryChoice::Automatic), (true, false));
+    assert_eq!(memory_flags(recipe("sdxl-checkpoint"), 1024, 1024, false, MemoryChoice::Automatic), (false, false));
+    assert_eq!(memory_flags(recipe("sdxl-checkpoint"), 1088, 1024, false, MemoryChoice::Automatic), (true, false));
+    assert_eq!(memory_flags(recipe("z-image-l2p"), 2048, 2048, false, MemoryChoice::Automatic), (false, false));
+    assert_eq!(memory_flags(recipe("z-image-l2p"), 512, 512, false, MemoryChoice::On), (false, true));     // never tiled, even with On
+    assert_eq!(memory_flags(recipe("sdxl-checkpoint"), 512, 512, false, MemoryChoice::On), (true, true));
 }
 #[test] fn attached_loras_reach_the_job_and_a_missing_one_is_refused() {
     let l = lora_row("local/pixel art ü", existing_file());
-    let job = job_for(&generic("sdxl-checkpoint", SdVersion::Sdxl), &sdxl_row(), &req(json!({"loras": [{"id": l.id, "weight": 0.8, "highNoise": false}]})),
-                      &opts(MemoryChoice::Automatic), &[l.clone()], LORAS, None, OUT, "r").unwrap();
+    let job = provider().job_for(&generic("sdxl-checkpoint", SdVersion::Sdxl), &sdxl_row(), &req(json!({"loras": [{"id": l.id, "weight": 0.8, "highNoise": false}]})),
+                                 &opts(MemoryChoice::Automatic), &[l.clone()], LORAS, None, OUT, "r").unwrap();
     assert_eq!(job.loras, [LoraTag { name: "local/pixel art ü".into(), weight: 0.8, high_noise: false }]);
     assert_eq!(job.lora_dir.as_deref(), Some(LORAS));
     let gone = lora_row("local/x", PathBuf::from("/nope/x.safetensors"));
-    assert_eq!(job_for(&generic("sdxl-checkpoint", SdVersion::Sdxl), &sdxl_row(), &req(json!({"loras": [{"id": gone.id, "weight": 1.0, "highNoise": false}]})),
-                       &opts(MemoryChoice::Automatic), &[gone], LORAS, None, OUT, "r").unwrap_err().code, "studio_lora_missing");
+    let e = provider().job_for(&generic("sdxl-checkpoint", SdVersion::Sdxl), &sdxl_row(), &req(json!({"loras": [{"id": gone.id, "weight": 1.0, "highNoise": false}]})),
+                               &opts(MemoryChoice::Automatic), &[gone], LORAS, None, OUT, "r").unwrap_err();
+    let (kind, message) = refusal(e);
+    assert_eq!(kind, FailureKind::BadRequest); assert!(message.contains("local/x") || message.contains("x"));
 }
 #[test] fn a_mask_and_a_control_picture_reach_the_job() {
     let inpaint = generic("sdxl-inpainting", SdVersion::SdxlInpaint);
-    assert!(matches!(spec(&params_for(&inpaint), key::MASK).kind, ParamKind::Images { min: 1, max: 1, role: RefRole::Mask }));
-    let job = job_for(&inpaint, &row(), &req_with_refs(&[(RefRole::Source, "in.png"), (RefRole::Mask, "mask.png")]), &opts(MemoryChoice::Automatic), &[], LORAS, None, OUT, "r").unwrap();
+    assert!(matches!(spec(&LocalMediaProvider::params_for(&inpaint), key::MASK).kind, ParamKind::Images { min: 1, max: 1, role: RefRole::Mask }));
+    let job = provider().job_for(&inpaint, &row(), &req_with_refs(&[(RefRole::Source, "in.png"), (RefRole::Mask, "mask.png")]), &opts(MemoryChoice::Automatic), &[], LORAS, None, OUT, "r").unwrap();
     assert!(job.init_image.unwrap().ends_with("in.png") && job.mask_image.unwrap().ends_with("mask.png"));
-    let flex = generic("flex2", SdVersion::Flex2);
-    assert_eq!(job_for(&flex, &row(), &req_with_refs(&[(RefRole::Mask, "mask.png")]), &opts(MemoryChoice::Automatic), &[], LORAS, None, OUT, "r").unwrap_err().code, "studio_mask_needs_picture");
-    let canny = job_for(&generic("flux1-canny", SdVersion::FluxControls), &row(), &req_with_refs(&[(RefRole::Control, "edges.png")]), &opts(MemoryChoice::Automatic), &[], LORAS, None, OUT, "r").unwrap();
+    let e = provider().job_for(&generic("flex2", SdVersion::Flex2), &row(), &req_with_refs(&[(RefRole::Mask, "mask.png")]), &opts(MemoryChoice::Automatic), &[], LORAS, None, OUT, "r").unwrap_err();
+    assert_eq!(refusal(e).1, errors::MASK_NEEDS_PICTURE);
+    let canny = provider().job_for(&generic("flux1-canny", SdVersion::FluxControls), &row(), &req_with_refs(&[(RefRole::Control, "edges.png")]), &opts(MemoryChoice::Automatic), &[], LORAS, None, OUT, "r").unwrap();
     assert!(canny.control_image.unwrap().ends_with("edges.png"));
 }
+#[test] fn klein_keeps_its_reference_field() {
+    let p = LocalMediaProvider::params_for(&catalog_entry("flux2-klein-4b-q4"));
+    assert!(matches!(spec(&p, key::REFERENCES).kind, ParamKind::Images { role: RefRole::Reference, .. }));
+}
+#[test] fn distilled_guidance_reaches_the_recipes_own_defaults() {
+    let p = LocalMediaProvider::params_for(&generic("flux1-fill", SdVersion::FluxFill));
+    assert!(matches!(spec(&p, key::DISTILLED_GUIDANCE).kind, ParamKind::Range { min, max, .. } if min <= 0.5 && max >= 30.0));
+}
 #[test] fn a_wan_a14b_model_offers_high_noise_settings_and_high_noise_loras() {
-    let p = params_for(&generic("wan22-t2v", SdVersion::Wan2));
+    let p = LocalMediaProvider::params_for(&generic("wan22-t2v", SdVersion::Wan2));
     assert!(matches!(spec(&p, key::LORAS).kind, ParamKind::Loras { max: 8, high_noise: true, weight_min, weight_max, weight_step, weight_default }
-        if (weight_min, weight_max, weight_step, weight_default) == (-1.0, 2.0, 0.05, 1.0)));
+        if (weight_min, weight_max, weight_default) == (-1.0, 2.0, 1.0) && (weight_step - 0.05).abs() < 1e-9));
     assert!(has(&p, key::HIGH_NOISE_STEPS) && has(&p, key::HIGH_NOISE_CFG));
 }
-#[test] fn the_loras_value_is_validated() {       // spec.rs
-    let k = ParamKind::Loras { max: 8, high_noise: false, weight_min: -1.0, weight_max: 2.0, weight_step: 0.05, weight_default: 1.0 };
-    assert!(validate_value(&k, &json!([{"id": "a", "weight": 2.5, "highNoise": false}])).is_err());
-    assert!(validate_value(&k, &json!([{"id": "a", "weight": 1.0, "highNoise": true}])).is_err());
-    assert!(validate_value(&k, &json!((0..9).map(|i| json!({"id": i.to_string(), "weight": 1.0, "highNoise": false})).collect::<Vec<_>>())).is_err());
+#[test] fn the_loras_value_is_validated() {       // spec.rs, through validate (spec.rs:427)
+    let m = model_with(vec![loras_spec(8, false)]);                     // a MediaModel whose one field is `loras`
+    let bad = |v: Value| validate(&m, &request_p(json!({ "loras": v })));
+    assert_eq!(bad(json!([{"id": "a", "weight": 2.5, "highNoise": false}])), Err(vec![Invalid::BadValue("loras".into())]));
+    assert_eq!(bad(json!([{"id": "a", "weight": 1.0, "highNoise": true}])), Err(vec![Invalid::BadValue("loras".into())]));
+    assert_eq!(bad(json!((0..9).map(|i| json!({"id": i.to_string(), "weight": 1.0, "highNoise": false})).collect::<Vec<_>>())), Err(vec![Invalid::BadValue("loras".into())]));
+    assert_eq!(bad(json!([{"id": "a", "weight": 0.85, "highNoise": false}])), Ok(()));
 }
 #[test] fn video_on_the_processor_is_judged_and_flagged_not_blocked() {      // gen_fit.rs
-    let r = gen_fit(&wan_entry(), GenSize::video(832, 480, 49), &Target::Cpu { free_bytes: 64 << 30 }, None);
+    let r = gen_fit(&wan_entry(), GenSize { width: 832, height: 480, frames: 49 }, &Target::Cpu { ram_free_bytes: 64 << 30 }, None);
     assert!(r.video_on_processor && r.not_for.is_none() && r.fit != GenFit::Red);
 }
-#[tokio::test] async fn a_model_that_does_not_fit_still_runs() {          // manager.rs
-    let t = lane_harness(red_fit()).await;
-    assert!(t.start_local(klein_request()).await.is_ok());
+#[tokio::test] async fn a_job_that_fits_nowhere_unloads_the_chat_model_and_runs() {      // gpu_lease.rs; replaces the DoesNotFit case at 857
+    let lease = lease_with_chat_loaded(8 << 30);
+    let need = StudioNeed { alongside: false, after_unload: false, processor_ok: false, ..need() };
+    let (grant, _hold) = lease.acquire_for_studio(&need, GpuPolicy::Unload, None, &CancellationToken::new(), &|_| {}).await.unwrap();
+    assert!(matches!(grant, Grant::AfterUnload { .. }));
+}
+#[tokio::test] async fn a_model_that_does_not_fit_still_runs() {          // manager_tests.rs, through the whole task path
+    let h = harness_with_local_and_chat(red_fit_everywhere()).await;   // the chat model loaded; the job fits nowhere, not even on the processor
+    let run = h.manager.start(h.local_req("a red fox"), false).await.unwrap();
+    h.wait_status(&run.id, "done").await;                              // the harness's own wait (manager_tests.rs:968)
+    assert_eq!(h.local.starts(), 1);                                    // the engine started: no does-not-fit ending
 }
 ```
-`an_01x_klein_picture_keeps_its_0_1_2_arguments` and `KLEIN_0_1_2_ARGS` were recorded from the unchanged 0.1.2 code in Task S2. Here they must stay green while `job_for` changes; only the call changes to the new signature, never the vector.
+The klein test and `KLEIN_0_1_2_ARGS` were recorded from the unchanged 0.1.2 code in Task S2. Here only the call changes to the new signature, never the vector.
 
 - [ ] **Step 2: Run them and see them fail.**
-  - Run: `cargo test -p app --lib studio:: && cargo test -p models --lib gen_fit:: && cargo test -p agent --lib media::spec`
+  - Run: `cargo test -p app --lib studio:: gpu_lease:: && cargo test -p models --lib gen_fit:: && cargo test -p agent --lib media::spec`
   - Expected: FAIL to compile.
 
 - [ ] **Step 3: Implement.** The lane's prompt check and every other refusal stay.
@@ -2955,8 +3215,8 @@ pub struct GenFitResult { /* … */ pub video_on_processor: bool }
 
 - [ ] **Step 5: Commit.**
 ```bash
-git add src-tauri crates/models/src/gen_fit.rs crates/agent/src/media/spec.rs src/components/studio/types.ts src/components/studio/LocalModels.test.tsx
-git commit -m "Studio: run any model from its recipe, with LoRAs; a model that may not fit is a warning, never a refusal"
+git add src-tauri crates/models/src/gen_fit.rs crates/agent/src/media src/components/studio/types.ts src/components/studio/LocalModels.test.tsx
+git commit -m "Studio: run any model from its recipe, with LoRAs and diffusers folders; a model that may not fit is a warning, never a refusal"
 ```
 
 ### Task S12: The webview's store actions, words and fixture
@@ -3002,8 +3262,9 @@ lorasFor(model: InstalledLocal): { fits: Lora[]; others: Lora[] };   // base ===
 ```
 - **`words.ts`:**
   - `LORAS`: "LoRAs", "Add", "Remove", "Strength", "High-noise part", "may not fit this model", "No LoRAs yet";
-  - `IMPORT`: "Add a model file", "Add a LoRA file", "Copy it into Studio's models folder", "Use it where it is", "Reading the file…", "Copying…";
-  - `SETUP`: "Model type", "Files", "Change", "untested set-up", "Set it up yourself", "Download file anyway";
+  - `IMPORT`: `addModel` "Add a model file", `addLora` "Add a LoRA file", `copy` "Copy it into Studio's models folder", `inPlace` "Use it where it is", `reading` "Reading the file…", `copying` "Copying…";
+  - `SETUP`: `modelType` "Model type", `files` "Files", `change` "Change", `untested` "untested set-up", `yourself` "Set it up yourself", `anyway` "Download file anyway";
+  - Phase U's groups reference these keys rather than repeating the words (preflight P46);
   - the run settings line's LoRA part: "LoRAs: pixel art ü 0.8, style 1";
   - `LOCAL_WARNING.mayNotFit(reason)` = "May not fit this computer: <reason>. It may fail or be very slow." and `LOCAL_WARNING.videoOnProcessor` = "Video on the processor is very slow". They are defined here because Phase U's model sheet, composer and cards use them; Task G2 removes the old refusal wording;
   - `INPUT_ROLE`: "Picture to change", "Mask", "Control picture" (beside the existing reference, start-frame and end-frame words), with the hints "A black-and-white picture: white areas are changed, black areas are kept." and "An edge map for Canny models, a depth map for Depth models.".
@@ -3041,7 +3302,7 @@ git commit -m "Studio: store actions and words for getting, importing and settin
 
 Inputs:
 - design 10;
-- the 2026-11-24 screenshot critique (session scratch, `studio-before/critique.md`), whose numbered defects and code causes are cited as "critique §n";
+- the 2026-11-24 screenshot critique, whose numbered defects and code causes are cited as "critique §n". It is at `.superpowers/sdd/plan/studio-before/critique.md` (coordinator ruling P31), and Task U1 commits it as `docs/dev/0.2.0/studio-critique.md`;
 - the "before" screenshots;
 - the preview harness.
 
@@ -3057,10 +3318,11 @@ The rules for every Phase U task:
 ### Task U1: The preview harness in the repo
 
 **Files:**
-- Create, from the scratch harness (`studio-preview-harness/`):
+- Create, from the harness at `.superpowers/sdd/plan/preview-harness/` (copied there from the session scratch; coordinator ruling P31):
   - `e2e/preview/README.md`, `index.html`, `main.tsx`, `vite.config.ts`;
   - `mock/ipc.ts`, `mock/data.ts`, `mock/pictures.ts`;
   - `shoot.mjs` (was `shoot.cjs`) and a new `pairs.mjs`.
+- Create `docs/dev/0.2.0/studio-critique.md`: the critique, from `.superpowers/sdd/plan/studio-before/critique.md`, unchanged except that its screenshot paths name `.cache/preview/before/`.
 - Modify:
   - `eslint.config.js`: a block `{ files: ["e2e/preview/**/*.mjs"], languageOptions: { globals: globals.node } }`;
   - `package.json` scripts only: `"preview:serve": "vite --config e2e/preview/vite.config.ts"`, `"preview:shoot": "node e2e/preview/shoot.mjs"`, `"preview:pairs": "node e2e/preview/pairs.mjs"`;
@@ -3086,10 +3348,10 @@ The rules for every Phase U task:
     - **body share**: the share of visible text characters set at 14 px or more.
   - It prints a table of these. With `--strict`, it exits 1 on an unanswered command, any sideways scroll, or a body share under 0.5 on a Studio screen (all but i, i2 and x1–x3). Design 10.4: "at least half of each screen's text is at body size"; 10.4: "the 900×650 narrow window must not scroll sideways".
 - **`pairs.mjs <before> <after> [--out .cache/preview/pairs.html]`** writes one page with each screen's before and after side by side, for both themes. It is for the owner's review (design 10.5).
-- **The before set.**
-  - At the start of Phase U, the task takes it with `--out .cache/preview/before`. Plan decision: that is 0.1.2's look with Phase S's data, so before and after differ only by Phase U.
-  - The 2026-11-24 capture stays in the session scratch as a reference.
-  - PNGs are never committed; `.cache/` is ignored.
+- **The before set** is the 2026-11-24 capture of 0.1.2 itself: 52 PNGs, 26 screens in both themes, at `.superpowers/sdd/plan/studio-before/`.
+  - U1 copies it to `.cache/preview/before/`, where `pairs.mjs` reads it (coordinator ruling P31).
+  - PNGs are never committed (26 MB); `.cache/` is ignored.
+  - The README says how to retake it if needed: a worktree of `e7dc878`, with the harness exactly as it is in `.superpowers/sdd/plan/preview-harness/`, whose mock answers 0.1.2's commands. The committed `e2e/preview/` mock answers Phase S's.
 
 **Steps**
 
@@ -3099,13 +3361,14 @@ The rules for every Phase U task:
   - Run: `npm run lint && npm run typecheck && npm run build && test ! -e dist/e2e`
   - Expected: PASS.
 
-- [ ] **Step 3: Take the before set.**
-  - Run: `npm run preview:serve &` then `npm run preview:shoot -- --out .cache/preview/before`
-  - Expected: 52 PNGs, no unanswered command. The table shows the current sideways scroll on `j` and the body shares (critique §5: about 30–40%).
+- [ ] **Step 3: Copy the before set, and take a first after set to check the harness.**
+  - Run: `mkdir -p .cache/preview/before && cp .superpowers/sdd/plan/studio-before/*.png .cache/preview/before/ && ls .cache/preview/before | wc -l`. Expected: `52`.
+  - Then: `npm run preview:serve &` then `npm run preview:shoot -- --out .cache/preview/after`.
+  - Expected: 52 PNGs and no unanswered command. The table shows sideways scroll on `j` and the body shares as the critique found them (critique §5: 60–70% of the text at 12 px).
 
 - [ ] **Step 4: Commit.**
 ```bash
-git add e2e/preview e2e/README.md eslint.config.js package.json
+git add e2e/preview e2e/README.md eslint.config.js package.json docs/dev/0.2.0/studio-critique.md
 git commit -m "Studio: the preview harness for before/after screenshots, in e2e/preview"
 ```
 
@@ -3123,7 +3386,11 @@ git commit -m "Studio: the preview harness for before/after screenshots, in e2e/
     - the type-scale utilities;
     - `.studio-page`;
   - `src/App.tsx`: one `Tooltip.Provider` at the root;
-  - `src/components/studio/styles.ts`: `CARD`, `ROW`, `CHIP` and `MENU_ITEM` move here, and the duplicate copies in `PromptDock`, `EmptyStates`, `RunCard`, `ModelPicker` and `ParamField` go (critique §5);
+  - `src/components/studio/styles.ts`: the local class constants move here (critique §5). The copies differ, so they keep their differences in their names (preflight P48):
+    - `SECONDARY_BUTTON`: EmptyStates.tsx:20's, with `disabled:`, used in place of PromptDock.tsx:37's, which differs only in `py-1`;
+    - `RUN_CARD` (RunCard.tsx:224, a flex column) and `NOTICE_CARD` (EmptyStates.tsx:18);
+    - `CHIP_PRESSED` (ModelPicker.tsx:257, `aria-pressed`) and `CHIP_CHECKED` (ParamField.tsx:60, `aria-checked`);
+    - `MENU_ITEM` (TopBar.tsx:28) and `ROW` (LocalModelRow.tsx:195);
   - `src/lib/words.ts` (`UI`).
 - Test: `src/components/ui/ui.test.tsx`
 
@@ -3324,8 +3591,8 @@ importOpen: "model" | "lora" | null; openImport(kind: "model" | "lora" | null): 
   5. progress (`importProgress`), then done, which selects the model.
   - A LoRA file is added with `importLora`. A pickle file shows "Studio can't read .ckpt files".
 - Words:
-  - `MODEL_SHEET`: `title` "Choose a model", `search` "Search models", `all`, `local` "On this computer", `cloud` "Cloud", `recent` "Recent", `priceUnknown` "price unknown", `canEdit`, `transparent`, `notes` "About this model", `getMore` "Get more models", `addFile` "Add a model file", `loraCount(n)`, `needsSetup` "Needs setting up", `untested` "untested set-up";
-  - `IMPORT_DIALOG`: `title`, `reading` "Reading the file…", `copy`, `inPlace`, `alsoDownloads(size)`, `add` "Add", `done` "Added".
+  - `MODEL_SHEET`: `title` "Choose a model", `search` "Search models", `all`, `local` "On this computer", `cloud` "Cloud", `recent` "Recent", `priceUnknown` "price unknown", `canEdit`, `transparent`, `notes` "About this model", `getMore` "Get more models", `loraCount(n)`, `needsSetup` "Needs setting up". *Add a model file* is `IMPORT.addModel` and "untested set-up" is `SETUP.untested` (Task S12);
+  - `IMPORT` (Task S12's group) gains `title` "Add a model file", `alsoDownloads(size)`, `add` "Add" and `done` "Added".
 
 **Steps**
 
@@ -3378,8 +3645,9 @@ git commit -m "Studio: the model sheet (search, recent, on this computer, cloud)
 - Modify:
   - `StudioView.tsx`: `localView` renders `GetModelsView` full width, with neither the composer nor the side panel, and resets the scroller to the top when it opens (critique §2 and §6: it opened at the bottom);
   - `TopBar.tsx` (Get models while open reads as pressed);
-  - `src/store/studioLocal.ts`: `searchFilter: SearchFilter` and `fitsOnly: boolean` replace `localTab` and `onlyFits`;
+  - `src/store/studioLocal.ts`: `searchFilter: SearchFilter` and `fitsOnly: boolean` (default **false**, coordinator ruling P35) replace `localTab` and `onlyFits` (0.1.2 default true);
   - `EngineLine.tsx` (shown in the header);
+  - `localOffers.ts`: `licenceBadge` and `activeDownload` move to `ModelCard.tsx` here, because `LocalModelRow.tsx` imported them (line 18) and Task U6 deletes `localOffers.ts` (preflight P39). Task U7 then moves `activeDownload` on to `DownloadState.tsx`;
   - `src/lib/words.ts`.
 - Delete: `LocalModels.tsx` and `LocalModelRow.tsx`. `LocalModels.test.tsx` becomes `GetModels.test.tsx`: its engine-line and notice cases are kept, and its list cases are replaced. `LocalSearch.tsx` stays only for its `RepoResult`, shown in a `SlideOver` when a result opens, until Task U6 replaces it.
 - Test: `GetModels.test.tsx`, `StudioView.test.tsx`
@@ -3399,15 +3667,15 @@ export function ResultCard(p: { hit: LocalSearchHit; onOpen(): void }): JSX.Elem
 - **The search** (design 10.3):
   - a large field labelled "Search Hugging Face", placeholder "Search Hugging Face: SDXL, Flux, Wan 2.2, or a repo name";
   - a `ChipGroup` with Pictures · Video · LoRAs, starting from the tab;
-  - a `SwitchField` *Fits this computer*, which hides results already opened (`repos[repo]`) with no `best` file. Results not yet opened stay.
+  - a `SwitchField` *Fits this computer*, **off by default**. When on, it hides catalog entries whose fit word is `notHere` and results already opened (`repos[repo]`) with no `best` file; results not yet opened stay.
 - **Without a query:**
-  - *Recommended for this computer* (`CatalogCard`s);
+  - *Recommended for this computer*: `CatalogCard`s for `local.recommended`, then, while *Fits this computer* is off, for `local.notHere` (`LocalModelsDto.not_here`, dto.rs:1340). Those show their fit word, and Task G2 adds the warning line; Download stays on them (design 9.2, coordinator ruling P35);
   - *Popular on Hugging Face*: `search("", filter)`, asked once each time the view opens. Task D1 documents this request;
   - *On this computer*: `InstalledCard`s (Delete, Repair) and `LoraCard`s (Delete);
   - all in a grid of 2–3 columns.
 - **Result cards:** name and author; downloads and likes; "updated <relative date>"; `VerdictBadge`.
 - Words:
-  - `GET_MODELS`: `title`, `back` "Back", `searchLabel`, `searchPlaceholder`, `pictures`, `video`, `loras`, `fitsOnly` "Fits this computer", `recommended` "Recommended for this computer", `popular` "Popular on Hugging Face", `here` "On this computer", `addModel`, `addLora`, `downloads(n)`, `likes(n)`, `updated(date)`, `gpu(name, gb)`, `ram(gb)`, `freeDisk(gb)`;
+  - `GET_MODELS`: `title`, `back` "Back", `searchLabel`, `searchPlaceholder`, `pictures`, `video`, `loras`, `fitsOnly` "Fits this computer", `recommended` "Recommended for this computer", `popular` "Popular on Hugging Face", `here` "On this computer", `downloads(n)`, `likes(n)`, `updated(date)`, `gpu(name, gb)`, `ram(gb)`, `freeDisk(gb)`;
   - `VERDICT`: `works(type)` "Works in Studio · SDXL", `lora(type)` "LoRA for FLUX.1", `cantRun(reason)` "Can't run: Lumina 2" (a short form per `CannotRunReason`), `unknown` "Open to check", `hint`.
 
 **Steps**
@@ -3421,7 +3689,8 @@ export function ResultCard(p: { hit: LocalSearchHit; onOpen(): void }): JSX.Elem
     - `the LoRAs chip searches LoRAs`;
     - `a result card shows author, downloads, likes, when it was updated and its verdict in words`: "Works in Studio · SDXL", "LoRA for FLUX.1", "Can't run: Lumina 2";
     - `a hint becomes exact once the result was opened`;
-    - `Fits this computer hides opened results that have no file for this computer`;
+    - `Fits this computer is off by default, so catalog models that may not fit are listed with Download`;
+    - `Fits this computer hides opened results that have no file for this computer, and catalog models that may not fit`;
     - `installed models and LoRAs offer Delete, and models offer Repair`;
     - the ported engine-line and notice cases.
   - `StudioView.test.tsx`: `the Get models button reads as pressed while the view is open`.
@@ -3452,7 +3721,10 @@ git commit -m "Studio: Get models as a full view: search with filters, verdict b
   - `GetModels.tsx`: result and catalog cards open `ModelDetail`;
   - `src/store/studioLocal.ts`: `detail` with `openDetail` and `closeDetail`; `offer`, `setOffer` and `downloadLocal` go;
   - `src/lib/words.ts`.
-- Delete: `LocalSearch.tsx`, `DownloadLocalModel.tsx` and `localOffers.ts`. `DownloadLocalModel.test.tsx` becomes `ModelDetail.test.tsx`: the licence-wording cases of `verdict()` are kept, and the dialog cases are replaced, because the panel is the confirmation. `LocalNotice.tsx` and its test are unchanged.
+- Delete: `LocalSearch.tsx`, `DownloadLocalModel.tsx` and `localOffers.ts`.
+  - `verdict(licences, kind)` (DownloadLocalModel.tsx:42) and its `STRICTNESS` table move into `ModelDetail.tsx`.
+  - `DownloadLocalModel.test.tsx` becomes `ModelDetail.test.tsx`: the `verdict()` licence-wording cases are kept, and the dialog cases are replaced. The panel is the pre-download review (spec correction 20; coordinator ruling P34).
+  - `LocalNotice.tsx` and its test are unchanged.
 - Test: `ModelDetail.test.tsx`
 
 **Interfaces:**
@@ -3476,13 +3748,13 @@ export function ModelDetail(): JSX.Element | null;                      // a Sli
   2. *Main file*: a radio group, one per quantisation or precision, each with its size and fit word. *Best for this computer* is marked and preselected; with none, the smallest is;
   3. *Model type*: a `SelectField`, when `plan.recipes` has more than one recipe;
   4. *Extra files Studio adds* (`PlanParts`): each with `SLOT_LABEL`, size, licence and "already on this computer". A missing part offers *Choose a file*;
-  5. the licence(s) and "Total to download: X";
+  5. **the licences, visible before Download:** each one's `LicenceBadge` and plain words (`Licence.plainWords`, with OpenRAIL's "Commercial use allowed, with use rules"), its link, and the `verdict()` line ("Pictures you make: free for any use, including commercial."), then "Total to download: X";
   6. one **Download**, off with the reason while a part is missing or a gated repo has no token, with the token's link;
   7. `OtherFiles`: files Studio can't run, each with its reason and a quiet *Download file anyway*; LoRA files, each with *Download LoRA*.
 - **Download.**
-  - Download calls `downloadSetup` directly. There is no second dialog; this keeps the four-click target.
+  - Download calls `downloadSetup` directly. There is no second dialog: the panel already shows every file, its role, size and licence, and the total (spec correction 20). This keeps the four-click target.
   - The first download still shows the local-model notice, as now.
-- Words: `MODEL_DETAIL`: `mainFile` "Main file", `best` "Best for this computer", `modelType` "Model type", `extras` "Extra files Studio adds", `alreadyHere` "already on this computer", `chooseFile` "Choose a file", `total(size)`, `download` "Download", `missingWhy` "Choose a file for each part first.", `needsToken`, `anyway` "Download file anyway", `downloadLora` "Download LoRA".
+- Words: `MODEL_DETAIL`: `mainFile` "Main file", `best` "Best for this computer", `extras` "Extra files Studio adds", `alreadyHere` "already on this computer", `chooseFile` "Choose a file", `total(size)`, `download` "Download", `missingWhy` "Choose a file for each part first.", `needsToken`, `downloadLora` "Download LoRA". *Download file anyway* is `SETUP.anyway`, and *Model type* `SETUP.modelType`.
 
 **Steps**
 
@@ -3496,6 +3768,7 @@ export function ModelDetail(): JSX.Element | null;                      // a Sli
   - `the first Download shows the local-model notice first`;
   - `a file Studio can't run shows its reason and a quiet Download file anyway`;
   - `an OpenRAIL licence reads amber "Commercial use allowed, with use rules" with a link`;
+  - `every file's role, size and licence, the licence wording and the total are visible before Download`: every `PlanParts` row, every licence's `plainWords` and the total are in the document while the Download button is.
   - `the panel traps focus, and Esc closes it with focus back on the card`;
   - the kept `verdict()` licence-wording cases.
 
@@ -3519,7 +3792,7 @@ git commit -m "Studio: a result's detail panel: one choice per quantisation, the
 
 **Files:**
 - Create in `src/components/studio/`:
-  - `DownloadState.tsx` (`DownloadState`, plus `useModelDownload` moved from `ModelCard.tsx`);
+  - `DownloadState.tsx` (`DownloadState`, plus `useModelDownload` and `activeDownload` moved from `ModelCard.tsx`);
   - `DownloadIndicator.tsx` (`DownloadIndicator`);
   - `DownloadState.test.tsx`;
   - `sizes.test.ts`.
@@ -3566,7 +3839,7 @@ export function DownloadIndicator(): JSX.Element | null;   // top bar; hidden wi
       It asserts `clicks <= 4`, the draft's model is the new one, `localView === false`, and the composer is shown (design 10.3).
     - **`a download finished elsewhere lists the model and offers Use it`** (Review Focus 3). With Get models closed and the results shown, `download-progress` completes a group with a `genModelId`. Then `refreshLocal` has run, the model is a row of the model sheet, and the indicator's popover offers *Use it*.
   - `StudioView.test.tsx`: `the top-bar indicator counts running downloads and lists them`.
-  - `sizes.test.ts`: `no Studio source uses amountGb`. It uses `import.meta.glob("./**/*.{ts,tsx}", { query: "?raw", eager: true })`, and `src/store/studio*.ts` the same way.
+  - `sizes.test.ts`: `no Studio source uses amountGb`. It uses `import.meta.glob("./**/*.{ts,tsx}", { query: "?raw", eager: true })`, and `src/store/studio*.ts` the same way. It skips its own path, and builds the searched name at run time (`["amount", "Gb"].join("")`), so it never matches itself (preflight P38).
 
 - [ ] **Step 2: Run them and see them fail.**
   - Run: `npx vitest run src/components/studio`
@@ -3628,7 +3901,7 @@ export function ModelFilesSection(p: { model: InstalledLocal }): JSX.Element;
 - Words:
   - `STUDIO_PANEL`: `title` "Settings", `setups` "My setups", `advanced` "Advanced", `loras` "LoRAs", `files` "Files";
   - `LORAS` additions: `strengthOf(name)`, `getLoras` "Get LoRAs", `lorasButton(n)` "LoRAs (1)";
-  - `FILES`: `change` "Change", `installedFile` "A file on this computer", `diskFile` "A file from disk…", `hubFile` "A file from Hugging Face…", `repoLabel` "Repository", `untested`, `needsSetup` "Choose the model type and its files to use this model.".
+  - `FILES`: `installedFile` "A file on this computer", `diskFile` "A file from disk…", `hubFile` "A file from Hugging Face…", `repoLabel` "Repository", `needsSetup` "Choose the model type and its files to use this model.". *Change*, *Model type* and "untested set-up" are `SETUP`'s.
 
 **Steps**
 
@@ -3810,7 +4083,14 @@ pub struct ConfirmRules { pub every_video: bool, pub at_usd: Option<f64>, pub un
     assert_eq!(confirm_reasons(&picture_estimate(Some(1.5)), &ConfirmRules { every_video: false, at_usd: Some(1.0), unknown_price: false }), [ConfirmReason::AtLeast]);
     assert_eq!(confirm_reasons(&picture_estimate(None), &ConfirmRules { every_video: false, at_usd: None, unknown_price: true }), [ConfirmReason::UnknownPrice]);
 }
-#[tokio::test] async fn a_cloud_video_starts_without_confirmation_when_the_switch_is_off() { /* manager.start with confirmed: false → Ok */ }
+#[tokio::test] async fn a_cloud_video_starts_without_confirmation_when_the_switch_is_off() {     // manager_tests.rs
+    let h = harness().await;                                            // new-install prefs: every switch off
+    let run = h.manager.start(h.video_req(), false).await.unwrap();
+    h.wait_status(&run.id, "done").await;
+    assert_eq!(h.provider.starts(), 1);
+}
+// The existing a_video_without_confirmation_is_refused (manager_tests.rs:1300) and
+// a_refused_unconfirmed_press_then_the_confirmed_one_makes_one_run (1448) first set confirm_every_video: true through h.set_prefs.
 ```
 In `StudioSettings.test.tsx`: `the four spending switches are off by default and turning one on shows its amount`. Turning *Daily limit* on shows "$10", and *Ask before runs of $X or more* shows "$1".
 
@@ -3844,8 +4124,7 @@ The backend side, removing the refusals and judging video on the processor, is T
   - `src/components/studio/ModelCard.tsx` and `ModelDetail.tsx` (Tasks U5 and U6; 0.1.2's were `LocalModelRow.tsx`, inventory S10 `200-235`, and `LocalModels.tsx`, inventory S10 `53-63, 203-216`);
   - `src/components/studio/TopBar.tsx`: the Video tab on processor-only computers (inventory S11);
   - `src/lib/words.ts`: remove inventory S10 `1157-1164, 1408-1414, 1880` and inventory S11 `1115-1117, 1230-1231`;
-  - `src-tauri/src/studio/errors.rs`: remove inventory S11/S12 `1226-1229`, the "video needs a graphics card" reasons.
-- Test: `Composer.test.tsx`, `GetModels.test.tsx`, `ModelDetail.test.tsx`, `StudioView.test.tsx`, and a new `src/lib/words.test.ts`
+- Test: `Composer.test.tsx`, `GetModels.test.tsx`, `ModelDetail.test.tsx`, `StudioView.test.tsx`, and the existing `src/lib/words.test.ts` (one more case)
 
 **Interfaces:**
 - Consumes:
@@ -3853,7 +4132,8 @@ The backend side, removing the refusals and judging video on the processor, is T
   - `LOCAL_WARNING` (Task S12).
 - Produces:
   - A warning line, `role="status"`, beside Create, under a card's fit and in the detail panel's plan. It is never a disabled state.
-  - The *Only what fits* filter, now Get models' *Fits this computer* switch, stays (inventory S21, not the owner's pick).
+  - The *Only what fits* filter is now Get models' *Fits this computer* switch, **off by default** (coordinator ruling P35; 0.1.2's was on, inventory S21). With it off, models that may not fit are shown with the warning, never hidden.
+  - The backend's `NotFor` arms in `errors.rs` already went in Task S11 (preflight P27).
 
 **Steps**
 
@@ -3873,20 +4153,23 @@ The backend side, removing the refusals and judging video on the processor, is T
 - [ ] **Step 3: Implement.**
 
 - [ ] **Step 4: Run them and see them pass.**
-  - Run: `npm run lint && npm run typecheck && npm test && cargo test -p app --lib studio::errors`
+  - Run: `npm run lint && npm run typecheck && npm test`
   - Expected: PASS.
   - Then: `npm run preview:shoot -- --only a,c,d2,k --out .cache/preview/after`. Expected: the warning lines show, with no sideways scroll.
 
 - [ ] **Step 5: Commit.**
 ```bash
-git add src/components/studio src/lib src-tauri/src/studio/errors.rs e2e/preview
+git add src/components/studio src/lib e2e/preview
 git commit -m "Studio: 'May not fit this computer' is a warning; Create, Download and Download again stay; video on the processor is offered"
 ```
 
 ### Task G3: One 1 MiB prompt bound, Create that finishes the price, and updates that stop the job
 
+The line numbers below are 0.1.2's. Tasks S11, S12, U3 and U7 move them, so each edit is found by its symbol (`PROMPT_MAX_CHARS`, `LOCAL_NEGATIVE_TOO_LONG`, `holding`, `refuse_while_studio_works`, `busy_for_update`).
+
 **Files:**
 - Modify:
+  - `crates/agent/Cargo.toml`: `runtime` moves from `[dev-dependencies]` (line 32) to `[dependencies]`. It is an internal crate, so this adds no package, and runtime does not depend on agent (preflight P28);
   - **The prompt bound (inventory S9):**
     - `crates/runtime/src/sd/args.rs` (`22-24, 336-337`);
     - `crates/agent/src/media/spec.rs` (`44-45, 434-435`);
@@ -3896,7 +4179,7 @@ git commit -m "Studio: 'May not fit this computer' is a warning; Create, Downloa
     - `src/store/studioRun.ts` (`276-302`);
     - `src/components/studio/Composer.tsx` (Task U3; 0.1.2's cap was at `PromptDock.tsx:107-110, 150-162`).
   - **Waiting for the price (inventory S49):** `src/store/studio.ts` (`216-236, 409-416, 470-480`) and `src/components/studio/Composer.tsx` (0.1.2: `PromptDock.tsx:114-115, 168`).
-  - **Updates while a local job runs (inventory S54):** `src-tauri/src/updates.rs` (`660-669, 675-677`), `src/components/UpdateBox.tsx` and their tests.
+  - **Updates while a local job runs (inventory S54):** `src-tauri/src/updates.rs` (`660-669, 675-677`), `src-tauri/src/studio/manager/lane.rs` (`stop_local`, 355), `src/components/UpdateBox.tsx`, and their tests (`manager_tests.rs:5488`).
   - `src/lib/words.ts`.
   - `ARCHITECTURE.md` §7.9: the 4,000-character sentence and "Installing an update is refused…".
   - `scripts/docs_test.py` (`test_7_9_states_the_local_rules_the_code_keeps`).
@@ -3907,10 +4190,13 @@ git commit -m "Studio: 'May not fit this computer' is a warning; Create, Downloa
 ```rust
 // crates/runtime/src/sd/args.rs (replaces PROMPT_MAX_CHARS)
 pub const PROMPT_MAX_BYTES: usize = 1_048_576;      // 1 MiB, a safety bound against pathological input; never shown as a limit
-// crates/agent/src/media/spec.rs: the cloud prompt and every Text field use runtime::sd::args::PROMPT_MAX_BYTES (bytes of UTF-8)
+// crates/agent/src/media/spec.rs: the cloud prompt is checked against runtime::sd::args::PROMPT_MAX_BYTES, in bytes of UTF-8 (prompt.len())
+// src-tauri/src/studio/manager/lane.rs
+pub async fn stop_local_for_update(&self);   // stops every local run, waiting ones first, as stop_local does, but leaves `quitting` false and keeps the
+                                             // chat-model reload; stop_local (the Quit path) sets quitting for good (lane.rs:356, 735) (preflight P29)
 ```
 - **The prompt bound:**
-  - The negative prompt's `ParamKind::Text { max_chars }` becomes 1,048,576.
+  - The negative prompt's `ParamKind::Text { max_chars }` becomes 262,144. Plan decision: that is the most characters that always fit in 1 MiB of UTF-8 (4 bytes each), so the unit stays characters and the 1 MiB bound holds.
   - The webview's "{n} left" counter shows only when fewer than 1,000 remain. Plan decision: it stays out of sight for any real prompt.
   - The one refusal copy, for local and cloud alike, is "This prompt is too long." / "Shorten it."
 - **Waiting for the price.**
@@ -3918,7 +4204,7 @@ pub const PROMPT_MAX_BYTES: usize = 1_048_576;      // 1 MiB, a safety bound aga
   - When it fails, it sends without the extra settings and shows "Sent without the extra settings: their price couldn't be read.".
   - Create is no longer disabled while it waits.
 - **Updates while a local job runs.**
-  - `refuse_while_studio_works` (`updates.rs:663`) becomes `pub(crate) async fn stop_studio_for_update(studio: Option<&StudioManager>)`. It awaits `studio.stop_local()` (`manager/lane.rs:355`) when `local_running()`, and returns, so the install goes ahead.
+  - `refuse_while_studio_works` (`updates.rs:663`) becomes `pub(crate) async fn stop_studio_for_update(studio: Option<&StudioManager>)`. It awaits `studio.stop_local_for_update()` when `local_running()`, and returns, so the install goes ahead. If the install then fails, local runs can start again.
   - `UpdateBox` shows "Installing stops the picture being made" (a `role="note"` line above the install button) while a local job runs.
   - The `busy_for_update` error and its copy (`errors.rs:1122-1130`) are removed.
 
@@ -3931,11 +4217,41 @@ pub const PROMPT_MAX_BYTES: usize = 1_048_576;      // 1 MiB, a safety bound aga
     j.prompt = "a".repeat(PROMPT_MAX_BYTES); assert!(build_args(&j).is_ok());
     j.prompt.push('a'); assert_eq!(build_args(&j), Err(ArgsError::PromptTooLong));
 }
-#[test] fn a_cloud_prompt_of_40000_characters_is_accepted() { /* spec.rs validate */ }
-#[tokio::test] async fn a_local_prompt_of_5000_characters_runs() { /* lane.rs start_local → Ok */ }
-#[tokio::test] async fn installing_while_a_local_job_runs_stops_it_and_installs() {   // updates.rs
-    let t = update_harness(local_job_running()).await;
-    assert!(t.install().await.is_ok()); assert_eq!(t.stop_local_calls(), 1);
+// spec.rs: validate_checks_the_prompt_the_picture_count_and_usability (spec.rs:1820) changes its prompt cases to:
+#[test] fn the_cloud_prompt_is_bounded_by_bytes_at_1_mib() {
+    let flare = image("openai/gpt-image-2.6-flare");
+    let p = |text: String| validate(&flare, &MediaRequest { prompt: text, ..request_p(json!({})) });
+    assert!(p("a".repeat(40_000)).is_ok());                                       // past 0.1.2's 32,000 characters
+    assert_eq!(p("a".repeat(PROMPT_MAX_BYTES + 1)), Err(vec![Invalid::PromptTooLong]));
+    assert!(p("é".repeat(PROMPT_MAX_BYTES / 2)).is_ok());                          // bytes now, not characters
+    assert_eq!(p("é".repeat(PROMPT_MAX_BYTES / 2 + 1)), Err(vec![Invalid::PromptTooLong]));
+}
+// manager_tests.rs: a_local_prompt_over_4000_characters_is_refused_before_anything_is_stored (5317) is replaced by:
+#[tokio::test] async fn a_local_prompt_of_5000_characters_runs() {
+    let h = harness_with_local().await;
+    let run = h.manager.start(h.local_req(&"a".repeat(5_000)), false).await.unwrap();
+    h.wait_status(&run.id, "done").await;
+    assert_eq!(h.local.starts(), 1);
+}
+#[tokio::test] async fn a_local_prompt_over_1_mib_is_refused_before_anything_is_stored() {
+    let h = harness_with_local().await;
+    let err = h.manager.start(h.local_req(&"a".repeat(1_048_577)), false).await.unwrap_err();
+    assert_eq!((err.message.as_str(), err.next_step.as_str()), ("This prompt is too long.", "Shorten it."));
+    assert!(h.store_runs().await.is_empty());
+}
+// manager_tests.rs: an_update_waits_for_a_local_job (5488) is replaced by:
+#[tokio::test] async fn an_update_stops_a_local_job_and_local_runs_still_start_afterwards() {
+    let h = harness_with_local().await;
+    h.local.hold();
+    let run = h.manager.start(h.local_req("x"), false).await.unwrap();
+    h.wait_status(&run.id, "running").await;
+    crate::updates::stop_studio_for_update(Some(&h.manager)).await;
+    h.wait_status(&run.id, "cancelled").await;
+    assert!(!h.manager.local_running());
+    h.local.release_all();
+    let again = h.manager.start(h.local_req("y"), false).await.unwrap();   // not quitting: a failed install leaves Studio usable
+    h.wait_status(&again.id, "done").await;
+    crate::updates::stop_studio_for_update(None).await;                     // no Studio: nothing to do
 }
 ```
 - `studio.test.ts`:
@@ -3969,6 +4285,7 @@ git commit -m "Studio: one hidden 1 MiB prompt bound, Create finishes a pending 
   - `src/components/AllowAllButton.tsx` (inventory C2 `10-13, 46-72, 155-196, 314-331, 412-420`; inventory C3 `74-88, 203-236`; inventory C5 `238-304`): `FullAccessStartCheck` and the confirm dialogs go;
   - `src/components/ApprovalCard.tsx` (inventory C2 `154-163, 181`) and `src/components/PermissionsSettings.tsx` (inventory C4 `154-160`);
   - the api wrappers of the two commands;
+  - `src/App.tsx`, which imports and mounts `FullAccessStartCheck` (lines 11 and 231);
   - `src/lib/words.ts`: the dialogs' copy;
   - `SECURITY.md`: C5's protection is removed by the owner's choice.
 - Test: inline in `approvals.rs`; `AllowAllButton.test.tsx`, `ApprovalCard.test.tsx`, `PermissionsSettings.test.tsx`
@@ -3983,11 +4300,18 @@ git commit -m "Studio: one hidden 1 MiB prompt bound, Create finishes a pending 
 - [ ] **Step 1: Write the failing tests.**
 ```rust
 #[tokio::test] async fn a_saved_full_access_default_applies_at_launch_without_asking() {
-    let (store, modes) = with_saved_default(ApprovalMode::FullAccess).await;
+    let store = store::Store::open_in_memory().unwrap();
+    save_default(&store, &ApprovalModes::default(), ApprovalMode::FullAccess).await.unwrap();
+    let modes = ApprovalModes::default();
     load_default_into(&store, &modes).await;
-    assert_eq!(modes.mode_for_new_chat(), ApprovalMode::FullAccess);
+    assert_eq!(modes.default_mode(), ApprovalMode::FullAccess);         // ApprovalModes::default_mode (approvals.rs:132)
 }
-#[tokio::test] async fn with_nothing_saved_chats_start_in_ask_first() { /* unchanged C1 */ }
+#[tokio::test] async fn with_nothing_saved_chats_start_in_ask_first() {
+    let store = store::Store::open_in_memory().unwrap();
+    let modes = ApprovalModes::default();
+    load_default_into(&store, &modes).await;
+    assert_eq!(modes.default_mode(), ApprovalMode::Ask);
+}
 ```
 - `AllowAllButton.test.tsx`: `switching to Allow all or Full access applies at once`. There is no `role="dialog"` after the click, and the mode command is called once.
 - `ApprovalCard.test.tsx`: `Allow all in this chat applies at once`.
@@ -4007,7 +4331,7 @@ git commit -m "Studio: one hidden 1 MiB prompt bound, Create finishes a pending 
 
 - [ ] **Step 5: Commit.**
 ```bash
-git add src-tauri src/components src/lib SECURITY.md
+git add src-tauri src/components src/lib src/App.tsx SECURITY.md
 git commit -m "Chat: switching to Allow all or Full access, and the saved start mode, no longer ask again"
 ```
 
@@ -4092,7 +4416,7 @@ git commit -m "Reverse engineering CI: the strace checker is a tested script; a 
 - Test: inline in `warmup.rs` and `process.rs`
 
 **Interfaces:**
-- Consumes: `RunConfig` and `run_config` (`env.rs:170`), `Flavor`, `Installed::rea_entry` (`install.rs:334`), the spawn helper that `process.rs` uses.
+- Consumes: `RunConfig` and `run_config` (`env.rs:170`), `Flavor`, `Installation::rea_entry` (`install.rs:326, 334`), the spawn helper that `process.rs` uses.
 - Produces:
 ```rust
 pub const HELPER_PREPARE_TIMEOUT: Duration = Duration::from_secs(180);
@@ -4221,7 +4545,7 @@ git commit -m "Runtime: read llama-server's last stderr lines to the end, both p
   - `ARCHITECTURE.md`;
   - `SECURITY.md` (557–559, 648–650);
   - `README.md` (first sentence, 49, 58);
-  - `CHANGELOG.md` (24, 49);
+  - `CHANGELOG.md` (36, 61: the 0.1.0 entry's sidecar sentence and its build-machine sentence; preflight P45);
   - `docs/dev/0.1.0/follow-ups.md`: items 1–8 and 11 are marked "Done in 0.2.0"; items 9 and 10 are done in Task D3;
   - `scripts/docs_test.py`.
 - Test: `scripts/docs_test.py`
@@ -4230,10 +4554,10 @@ git commit -m "Runtime: read llama-server's last stderr lines to the end, both p
 - What changes, item by item, from `follow-ups.md`:
   1. **ARCHITECTURE §4** gains an `sd-cli` row: one process per job, through the spawn helper. **§13.1** gains a Studio engine row, and its "Model files" row names `sd-cli` beside `llama-server`.
   2. **§13.6's Studio row** names `resume_interrupted` at launch: each cloud video still waiting or downloading is checked and fetched, with the endpoint's key.
-  3. **The accuracy statements** match the code. "The engine is given only its model files, its prompt file and the run's folder" adds "and the pictures added to the run". The other statements the 0.1.0 review listed are checked against `local.rs::job_for` and `runtime::sd::args` and corrected.
+  3. **The accuracy statements** match the code. "The engine is given only its model files, its prompt file and the run's folder" adds "the pictures added to the run, and, with LoRAs attached, Studio's LoRA folder (`--lora-model-dir`)". The other statements the 0.1.0 review listed are checked against `local.rs::job_for` and `runtime::sd::args` and corrected.
   4. **The sidecar.** SECURITY.md, README.md and CHANGELOG.md say each run's `.json` holds its settings **and its prompt**, next to "the prompt is never written into a local record". That sentence is about the AI label and the engine's metadata, which the docs say.
   5. **The "signed" claims.** SECURITY.md (648–650) and ARCHITECTURE.md (around 352) say `sd-cli` is signed and notarized with the app *once the Apple Developer ID exists*, as README.md (73) does.
-  6. **CHANGELOG.md line 49:** the internal sentence about the build machine is removed.
+  6. **CHANGELOG.md line 61** (follow-ups.md's "line 49" before 0.1.1 and 0.1.2 were added): the internal sentence about the build machine is removed.
   7. **README.md:** the first sentence names Studio beside chat, tools, skills and MCP, and "Versions 0.0.x are early test builds" goes.
   8. **ARCHITECTURE §7.1, the VC++ bullet:** llama.cpp needs the first three DLLs; the Studio engine also needs `msvcp140_codecvt_ids.dll` and `vcomp140.dll`.
   11. **`docs_test`** checks local-before-cloud in the 0.1.0 entry's `### Added` section, not its opening paragraph.
@@ -4409,7 +4733,14 @@ git commit -m "Release 0.2.0: changelog and version"
 **Interfaces:**
 - **`install_generic(con, models) -> str`** inserts:
   - a `gen_models` row: id `local:e2e0000000000000`, recipe `sdxl-checkpoint`, family `sdxl`, kind `image`, source `import`;
-  - one `model` part: a tiny `.safetensors` whose header holds `model.diffusion_model.input_blocks.0.0.weight`, `conditioner.embedders.1.model.token_embedding.weight` and `cond_stage_model.transformer.text_model.embeddings.token_embedding.weight` (shape `[49408, 768]`);
+  - one `model` part: a tiny `.safetensors` whose header detects as `sdxl` (Task R5's rows 36, 37, 40, 41, 43 and 48; preflight P36). It holds:
+    - `model.diffusion_model.input_blocks.0.0.weight` (`[320, 4, 3, 3]`);
+    - `model.diffusion_model.middle_block.1.proj_in.weight`;
+    - `model.diffusion_model.output_blocks.3.1.transformer_blocks.1.attn1.to_k.weight`;
+    - `conditioner.embedders.1.model.token_embedding.weight`;
+    - `conditioner.embedders.0.transformer.text_model.embeddings.token_embedding.weight` (`[49408, 768]`).
+
+    Without the middle-block and output-block names, row 48 would say `sdxl-vega`. Task S3's `check_main_file` accepts either, since both take `sdxl-checkpoint`.
   - a `gen_loras` row `local/e2e style ü` with its file under `<models>/@loras/local/`.
 - **The new scenario `c_generic_model_with_a_lora`:**
   1. Pick the model in the model switcher, attach the LoRA at strength 0.8, and press Create.
@@ -4453,7 +4784,7 @@ git commit -m "e2e: a generic SDXL model with a LoRA through the fake engine; sh
 | 5 Constraints | R1 (commit test), R2 and R3 (caps), S7 (pinned downloads), S10 (LoRA names), Global Constraints |
 | 6 Approaches | A: Phase R and S; B: S9 |
 | 7.1 Recipes | R1, R7 |
-| 7.2 Reading a file | R2, R4, R5, R6 |
+| 7.2 Reading a file (and SD diffusers folders, correction 9) | R2, R4, R5, R6; folders in S3–S7 and S11 |
 | 7.3 Before downloading | R3, S5, S6, U5 and U6 (labels on cards and in the detail panel) |
 | 7.4 Setting up | R8, S4, S6, S7, S1 (storage) |
 | 7.5 Set it up yourself | S9 (backend), U8 (Files) |
@@ -4473,3 +4804,64 @@ git commit -m "e2e: a generic SDXL model with a LoRA through the fake engine; sh
 | 11a Mask and control pictures | R7, S2, S3, S11, S12, U3 |
 | 11 | F1, F2, F3, F4 |
 | 12 Left to the builder | R5 module layout and "Plan decision:" notes throughout; R7 matching table; R8 defaults; S3 memory factors |
+
+## Preflight fixes
+
+These are the fixes for the 48 findings of `.superpowers/sdd/plan/preflight.md`. Each was checked against the repo at e8b7f7f, and where relevant against the engine at the pin.
+
+| Id | What changed |
+|---|---|
+| P1 | The header's order note: strictly R→S→U→G→F→D, one task at a time (ruling). G tasks target U's components. |
+| P2 | S1: the recipe-id literal follows the sorted ids (`flux2-klein-4b, flux3-klein, wan22-ti2v-5b, wan21-t2v, wan22-ti2v-5b, z-image-turbo`). |
+| P3 | S2: the bogus test is gone. `the_arguments_come_in_their_fixed_order` keeps its literal, its `memory_saving: true` becoming `vae_tiling: true, offload_to_cpu: true`. |
+| P4 | S2 records the klein vector through the 0.1.2 `LocalMediaProvider::job_for` method (`memory_saving: false`, `backend: Some("Vulkan0")`). S11 changes only the call. |
+| P5 | `companion_by_name`, `looks_like_lora` and the names table move to S4 (`sd/names.rs`). S5 consumes them. |
+| P6 | S4: an embedded optional slot is listed (`Embedded`, a plan decision), so sd15 plans `[(Model, Main), (Vae, Embedded)]`. |
+| P7 | S2: `SdJob.tiling_allowed`, and the retry tiles only where allowed. S11: `memory_flags` On gives `(tiling_allowed, true)`, and z-image-l2p is asserted `(false, true)`. |
+| P8 | S11: the GPU lease unloads the chat model and runs a job that fits nowhere. `Card::DoesNotFit` and `errors::does_not_fit` go, and a test covers the whole task path. |
+| P9 | S11: `job_for` stays a `LocalMediaProvider` method returning `Result<SdJob, MediaError>`. Tests assert the refusal's kind and message. |
+| P10 | S11: the new key is `DISTILLED_GUIDANCE` (`"guidance"`), and `GUIDANCE` stays `"cfg_scale"`. |
+| P11 | S11: the distilled-guidance range is 0.5–100, step 0.5, with a test against flux1-fill's default 30. |
+| P12 | `rename_all_fields = "camelCase"` on `SlotFile`, `FileKind`, `FileLabel` and `Verdict`. |
+| P13 | R1: `FrameRounding` derives `Serialize`. |
+| P14 | R2: `RawTensor` and its fields become `pub`. |
+| P15 | R2: `diffusion_gguf("klein4b-tensors.txt")`. |
+| P16 | R2: `TensorIndex.parameters_hint`, set by R4's `fixture()` and preferred by `parameters()`. |
+| P17 | R5: the companion/LoRA test expects the engine's answers (`as_model("clip-l") == sdxs-512-ds`; the XLabs LoRA reads FLUX). R6 now checks the LoRA format first. |
+| P18 | R6: a llama.cpp-names row (`token_embd.weight` + `blk.0.attn_q.weight` → `llm`), and R4's `gguf_txt_fixture` notes the fixtures have no metadata. |
+| P19 | R6: `MatchFacts` derives `Default`. |
+| P20 | R8: `companions` is a `BTreeMap<String, Value>`, and the test uses `get_mut("byVersion")`. |
+| P21 | R8 and S3: `.entries.values()` and `c.entries["flux2-klein-4b-q4"]`. |
+| P22 | S3: `check_parts(parts, licenses)`, with the rules for local parts (SHA required; repo, revision and licence may be empty) and `.json` for the tokenizer only. |
+| P23 | S3: a 0.1.x search row's family is read as a `GenFamily` first and keeps its 0.1.2 record entry, with a test. |
+| P24 | S1 lists every `NewGenModel`/`GenModel` literal file (hub.rs, studio/commands.rs, local.rs, local_cmd.rs, manager_tests.rs) and adds them to `git add`. |
+| P25 | S6 and S7 update `studioLocal.ts`, `RunCard.test.tsx`, `LocalModels.test.tsx` and `DownloadLocalModel.test.tsx` for the new API signatures. |
+| P26 | S6: `WithUseRules` goes after `Registration`, and `DownloadLocalModel.tsx`'s `STRICTNESS` and words.ts's two `satisfies` tables are listed. |
+| P27 | S11 removes errors.rs's `VideoNeedsGpu`/`VideoNotOnThisMac` arms, and G2 no longer claims them. |
+| P28 | G3: agent's `runtime` moves to `[dependencies]` (internal crate). The cloud prompt is checked in bytes, and the negative prompt's `max_chars` is 262,144, so the unit stays characters. |
+| P29 | G3: a new `stop_local_for_update` that leaves `quitting` false, with a test that local runs start again afterwards. |
+| P30 | G4 lists `src/App.tsx` (imports and mounts `FullAccessStartCheck`) and adds it to `git add`. |
+| P31 | U1 takes the harness from `.superpowers/sdd/plan/preview-harness/`, copies the before set from `.superpowers/sdd/plan/studio-before/`, and commits the critique as `docs/dev/0.2.0/studio-critique.md` (ruling). |
+| P32 | R4 notes that huggingface.co is reachable, and keeps a hand-built fallback (ruling). |
+| P33 | Diffusers folders are fully supported: R6 `Layout::Folder` and `inspect_local_folder`; S3 `GenPart.folder`; S4 `diffusers_folder` (fp16 chosen when the plain file is fp32) and the folder plan; S5 folder reads and labels; S6 one folder choice; S7 downloads under the engine's names (`@fp16` root); S11 runs `-m <root>`. Each has a test. Correction 9 is revised (ruling). |
+| P34 | U6's panel is the pre-download review, with licence wording visible before Download and a test. Recorded as spec correction 20 (ruling). |
+| P35 | U5 lists `notHere` catalog entries with Download, and *Fits this computer* is off by default, with a test. G2 says so (ruling). |
+| P36 | D3's header has the middle-block and output-block names, so it detects `sdxl`. S3's `check_main_file` accepts any version whose `recipes_for` has the recipe. |
+| P37 | Empty and comment-only tests get bodies (S1, S2 in `sd_cli.rs`, G1, G3 ×3, G4), and S6's empty test is replaced by a folder test. |
+| P38 | U7's `sizes.test.ts` skips itself and builds the searched name at run time. |
+| P39 | U5 moves `licenceBadge` and `activeDownload` from `localOffers.ts` into `ModelCard.tsx`, and U7 moves `activeDownload` on to `DownloadState.tsx`. |
+| P40 | R6: the base-hint markers match with `_` read as `.`, and the `lora_unet_` fallback comes after every DiT row. |
+| P41 | R3: GGUF reads double up to the 64 MiB cap (1, 2, 4, 8, 16 MiB…), with a test. `MAX_READS_PER_FILE` is gone (ruling). |
+| P42 | S5: the untagged Pictures/Video query drops `filter=gguf`, and untagged hits are kept only with a version, LoRA or can't-run hint. A plan decision, with a test (ruling). |
+| P43 | S11: an empty `input_counts` keeps 0.1.2's picture fields, with a test that klein keeps its reference field. |
+| P44 | S7 keeps the detected version word as `family`, and "untested" is derived. |
+| P45 | F4: CHANGELOG lines 36 and 61, and the engine sentence names `--lora-model-dir`. |
+| P46 | Deduplicated: one `CannotRunReason` (R6) used by R7 and S5; one input vocabulary (`GenInput`, extended in R7) that agent's `RefRole` mirrors; S2's `LORA_WEIGHT_*` constants feed S11; `ALLOWED_PART_EXTENSIONS = READ_EXTENSIONS`; one words group each for import and set-up. |
+| P47 | S5 never reads obvious companions, as Global Constraints and design 7.3 say. |
+| P48 | Names fixed: `MigrationError::TooNew`, `crate::sd::recipe`, `errors::cannot_run` declared, `RefRole` in agent/media/mod.rs, `validate` (not `validate_value`), `Target::Cpu { ram_free_bytes }`, `GenSize { … }`, `words.test.ts` exists, `default_mode`, `Installation::rea_entry`, R2 creates `sd/testing.rs`, S2 lists `sd_cli.rs`, `wan_a14b_job` sets `flow_shift`, and U2 names the real constant copies. |
+
+Also fixed while verifying:
+- Correction 9's claim that the engine never joins shards was wrong: it loads a `*.safetensors.index.json` (`model_loader.cpp:211-227`). Sharded models stay can't-run because their index has no SHA-256 to pin.
+- S2's sampler test now matches the help's bracketed lists instead of using `contains`.
+- S5 runs the chat download tests, because `quant_label` changes.
+- G3 edits by symbol, because earlier tasks move its line numbers.
