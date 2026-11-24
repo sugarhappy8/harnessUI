@@ -398,6 +398,15 @@ The model chip opens the **model sheet**: a large popover anchored to the chip, 
   - `docs/dev/0.1.0/follow-ups.md` lists the small items still open.
   - Update the docs for everything 0.2.0 changes.
 
+## 11a. Decisions made while planning (2026-11-24, not the owner's; the owner can overturn either)
+
+- **OpenRAIL licences** (`creativeml-openrail-m`, `openrail`, `openrail++`, `bigscience-openrail-m`) are what most SD 1.x and SDXL models carry. They read as **amber "Commercial use allowed, with use rules"**, with a link to the licence, not as red "Check the licence". These licences allow commercial use but forbid listed harmful uses.
+- **Inpainting, Fill and control-picture models are not dead ends.** The owner asked for no "not supported" dead ends. So recipes whose only missing piece is an input picture are offered, with Studio inputs:
+  - a **Mask** picture slot next to the picture to change, for inpainting and Fill (SD 1.x/2.x/XL inpainting, FLUX.1 Fill). It takes a black-and-white picture; painting a mask in the app is a later step;
+  - a **Control picture** slot, for FLUX.1 Canny/Depth and Flex.2.
+
+  Recipes that need an adapter **file** (ControlNet, IP-Adapter, PhotoMaker, PuLID, AnimateDiff) stay out, as in section 3.
+
 ## 12. Left to the builder
 
 - The exact matching table (version → recipes, name tokens), and the companion-table defaults per version, from the research data.
