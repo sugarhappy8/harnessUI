@@ -239,7 +239,151 @@ The engine's real limits stay as validation, because the engine refuses anything
 
 ## 10. Design: Studio's look, and switching and getting models
 
-*(To be completed from the screenshot critique.)*
+The owner's words: "not attractive looking, I care about appearance", and "I just don't really like the layout too much especially how you switch or download models".
+
+### 10.0 What's wrong today
+
+From the 2026-11-24 screenshots and critique of 0.1.2, light and dark at 1280×800:
+
+- **Model, settings, prompt and Create are spread across the far-right column and the bottom edge, with the results in between.** The model switcher is a dropdown in the right panel, the corner farthest from the prompt.
+- **The switcher list is cluttered:**
+  - a capability badge on every row ("Edit", "Refs 16", "Transparent", "GIF");
+  - most rows say "price shown when picked";
+  - "Recent" repeats rows;
+  - the "On this computer" chip in the top bar looks clickable but isn't.
+- **Getting a model is buried and cramped.**
+  - It lives under the ⋯ menu and opens in about 40% of the window, beside the settings panel and the prompt box.
+  - It opens scrolled to the bottom.
+  - Hugging Face search sits below the fold, and its results are bare links that only say what Studio can run once opened one by one.
+  - Download, then use, takes 7 clicks: 8 the first time.
+- **Download feedback stops at the row.**
+  - There's no Pause or Cancel here.
+  - Two size formats appear on one card ("6.2 GB" and "of 6.7 GB").
+  - A finished model isn't offered for use.
+- **There is no hierarchy.** About 60–70% of each screen is 12–14 px grey text, the page title is 14 px, and the stream, rail and dock share one background.
+- **The pictures aren't the hero:**
+  - 112 px thumbnails on text-first cards;
+  - a native checkbox on every grid tile;
+  - native selects, checkboxes and sliders beside custom chips;
+  - a doubled 2 px focus outline on the prompt.
+
+### 10.1 Layout
+
+Studio keeps the app's shell: the sidebar, the tokens in `src/styles.css`, Radix primitives, `lucide-react` icons and `clsx`. No new UI library is added. It is rearranged around one idea: **the results are the page, and everything needed to make the next one sits together in one composer at the bottom.**
+
+```
+┌ Studio  [Pictures | Video]                  🔍 Search   ☆ Starred   ▦ Grid   ⬇ Get models ─┐
+│                                                                                        │
+│   results: the card stream (or the grid), wide, with big pictures                      │
+│                                                                                        │
+│ ┌──────────────────────────────── composer ─────────────────────────────────────────┐  │
+│ │  [+ picture]  Describe the picture you want…                                        │  │
+│ │  ◉ FLUX.2 klein 4B ▾ · 1:1 ▾ · ×2 ▾ · LoRAs (1) ▾ · ⚙ Settings     ~2 min  [Create] │  │
+│ └────────────────────────────────────────────────────────────────────────────────────┘  │
+└────────────────────────────────────────────────────────────────────────────────────────┘
+```
+
+- **The composer** is one raised card (`surface`, rounded-2xl, soft shadow), styled like the chat composer.
+  - Its first row is the prompt, with the added pictures as small thumbnails in front of it.
+  - Its second row is a toolbar:
+    - the **model chip**: the model's name, with a dot for where it runs, on this computer or the cloud's company;
+    - shape and count as compact menus;
+    - **LoRAs** with a count, for local models that can take them;
+    - **⚙ Settings**, which opens the side panel;
+    - and, at the right, the time or price and **Create**.
+  - The privacy line ("On this computer: your prompt and pictures stay here") becomes a tooltip on the model chip's dot plus one quiet line under the composer.
+- **The side panel** becomes **Settings**: My setups, Advanced, LoRAs in full, and the model's files. It slides in from the right when asked for, and stays open on wide windows (at least 1400 px) if the person leaves it open. It is never needed for a basic run. Shape and count move to the composer.
+- **The top bar** holds:
+  - the title "Studio" at `text-lg` semibold;
+  - the Pictures/Video segmented control;
+  - Search, Starred and Grid;
+  - **Get models**, a button with the download icon, replacing the ⋯ menu entry.
+
+  The non-clickable "On this computer" chip goes. The day's spend shows only while a spending switch is on (section 9.1).
+
+### 10.2 Switching models
+
+The model chip opens the **model sheet**: a large popover anchored to the chip, about 640×560 px, or a full-height sheet on narrow windows.
+
+- **At the top:** a search field, focused on open, and a segmented filter: *All · On this computer · Cloud*. The kind follows the Pictures/Video tab.
+- **Recent:** up to four models as compact tiles across the top. They are not repeated in the lists below.
+- **On this computer:** each installed model is a row card with:
+  - its name;
+  - a plain type label, for example "SDXL · picture", "Wan 2.2 · video" or "FLUX.1 Kontext · picture edit";
+  - its size;
+  - a fit dot, with the warning wording from section 9.2 on hover;
+  - its LoRA count when LoRAs are attached.
+- **Cloud:** models are grouped by company. Each row shows its name and either its price or "price unknown" in one muted line. The capability badges are reduced to at most two small icons ("can change a picture", "transparent background"), each with an accessible label. The "Refs 16" style counts go.
+- **The footer** has two buttons, **Get more models** (primary) and **Add a model file**.
+- **Behaviour:**
+  - picking a model closes the sheet;
+  - the arrow keys, Enter and Esc work;
+  - focus returns to the chip.
+
+  The existing rules for unusable models (no key, no list) stay. They are shown as rows with their fix as a link, not as greyed rows.
+
+### 10.3 Getting models
+
+**Get models** is a **full Studio view**: the composer and side panel are hidden while it's open. It always opens scrolled to the top, and Back returns to the results.
+
+- **Header:**
+  - "Get models" at `text-xl` semibold;
+  - this computer as quiet chips: graphics card and memory, RAM and free disk;
+  - **Add a model file** and **Add a LoRA file**.
+- **Search** is a large field at the top: "Search Hugging Face: SDXL, Flux, Wan 2.2, or a repo name". Beside it:
+  - filter chips: *Pictures · Video · LoRAs*;
+  - a switch: *Fits this computer*.
+- **Without a query:**
+  - **Recommended for this computer**, from the catalog, as cards in a responsive grid (2–3 columns);
+  - **Popular on Hugging Face**, the top downloads for the current kind, read when the view opens;
+  - **On this computer**: installed models and LoRAs, with Delete and Repair.
+- **Results** are cards in the same grid. Each card shows:
+  - the repo's name and author;
+  - downloads and likes;
+  - when it was updated;
+  - a **Studio verdict** badge. The first is a quick hint from names; once the card's files have been read (section 7.3), it becomes exact: "Works in Studio · SDXL", "LoRA for FLUX.1", "Can't run: Lumina 2".
+- **Opening a result** shows a **detail panel** that slides over the right half:
+  - the repo's summary;
+  - the **main file**: one per quantisation or precision, each with size and fit, and **"Best for this computer"** marked on the largest that fits;
+  - the **extra files Studio adds**, each marked "already on this computer" where true;
+  - the licence and the total;
+  - one **Download** button.
+
+  A file Studio can't run shows its reason, with a quiet "Download file anyway".
+- **Downloads** show progress on the card and in the detail panel, with **Pause** and **Cancel**, in one size format throughout. A small download indicator joins the top bar, and its popover lists the running downloads. When a model finishes, its card shows **Use it**, which selects it and returns to the results with the composer.
+- **The click target:** from the results, using a new model takes at most **4 clicks**: Get models, open a result, Download, Use it. Typing the search is not a click.
+
+### 10.4 Results and polish
+
+- **Run cards** lead with the pictures:
+  - thumbnails up to 256 px, at the picture's own shape;
+  - the prompt as the title;
+  - settings and model as one quiet line;
+  - progress as a thin bar with one status line;
+  - failures as an inline alert with the message, the next step and their actions.
+- **The grid** has larger tiles (about 220 px), with actions on hover. A **Select** mode replaces the checkbox on every tile.
+- **Type scale:**
+  - view titles at `text-lg` or `text-xl` semibold;
+  - section headings at `text-sm` semibold;
+  - body text at `text-sm`;
+  - meta at `text-xs` muted.
+
+  At least half of each screen's text is at body size.
+- **Surfaces:**
+  - the page on `bg`;
+  - cards and composer on `surface`, with `border` and a soft shadow;
+  - one confident accent: the gradient on Create and on primary buttons only.
+
+  Light mode gets a clearer separation between page and cards: a slightly darker page or a stronger card border, within the existing tokens.
+- **Controls:** native selects, checkboxes and range inputs in Studio become Radix equivalents styled like the rest of the app: DropdownMenu, a Checkbox or a Switch, and a Slider. Tooltips use Radix Tooltip, already in the `radix-ui` package, instead of native `title` attributes where the text matters.
+- **Focus:** one focus ring, `ring-2` in the accent at 40%, replacing the doubled outline.
+- **Empty states:** an icon, one line and a primary action, for example "No models on this computer yet" with *Get models*.
+- **Accessibility:** both themes are checked, and the 900×650 narrow window must not scroll sideways.
+
+### 10.5 How the look is checked
+
+- The screenshot harness from 2026-11-24 renders the real `App.tsx` in Chromium with Tauri IPC mocked. It is kept in the repo under `e2e/preview/`, out of the app build, so "after" screenshots of the same 26 screens can be compared with the "before" set.
+- The owner is shown before/after pairs of the main view, the model sheet, Get models, a search result's detail panel and the grid.
 
 ## 11. Fixes along the way
 
