@@ -9,9 +9,12 @@
 //! `src/name_conversion.cpp:1741-1781`), and detects again. The second answer is the one it
 //! runs (`diffusion_engine.cpp:977`).
 //!
-//! Not ported: the renames `convert_tensor_name` makes once the version is known (diffusers
-//! names to the original ones, LoRA names, IP-Adapter names), so a diffusers-layout single
-//! file keeps its diffusers names in pass 2.
+//! Of `convert_tensor_name` the port emulates the two prefix maps and the one diffusers
+//! rename that reaches a detection row (SD 1 and SD 2's `up_blocks.2.attentions.1.`, for
+//! SDXS-09); it leaves out every other rename: the per-family diffusers-to-original names (so
+//! a diffusers-layout DiT keeps its diffusers names in pass 2), the text-encoder renames that
+//! run whatever the version (open_clip and llama.cpp names to Hugging Face ones,
+//! `name_conversion.cpp:155-243`), and the LoRA and IP-Adapter names.
 
 use std::collections::HashMap;
 
@@ -353,8 +356,9 @@ impl Catalog {
     }
 }
 
-/// `convert_tensor_name`'s prefix maps (`src/name_conversion.cpp:1741-1781`), for the first
-/// pass's answer `v1` (`None` is `VERSION_COUNT`).
+/// `convert_tensor_name`'s prefix maps (`src/name_conversion.cpp:1741-1781`) and its one
+/// rename that reaches detection, for the first pass's answer `v1` (`None` is
+/// `VERSION_COUNT`).
 fn convert(name: &str, v1: Option<SdVersion>) -> String {
     let is = |group: fn(SdVersion) -> bool| v1.is_some_and(group);
     // The connector map: the first match, in order (1742-1746).
@@ -418,14 +422,34 @@ fn convert(name: &str, v1: Option<SdVersion>) -> String {
     ];
     // The engine takes the first match of a `std::unordered_map`, whose order is
     // unspecified (1781); the plan's rule is the longest matching prefix.
-    match prefixes
+    let name = match prefixes
         .iter()
         .filter(|(old, _)| name.starts_with(old))
         .max_by_key(|(old, _)| old.len())
     {
         Some((old, new)) => format!("{new}{}", &name[old.len()..]),
         None => name,
+    };
+    // For SD 1 and SD 2, `convert_diffusion_model_name` turns diffusers UNet names into the
+    // original ones (1819-1826, 1122-1124). Of that map only `up_blocks.2.attentions.1.` →
+    // `output_blocks.7.1.` (327-336, found anywhere after the prefix: 377-382) reaches a
+    // detection row: row 42's SDXS-09 check, which reads the original name alone. Rows 36,
+    // 40, 42 and 44 list both forms; row 41 counts only under `is_xl`.
+    const DIT: &str = "model.diffusion_model.";
+    const DIFFUSERS: &str = "up_blocks.2.attentions.1.";
+    if matches!(
+        v1.and_then(SdVersion::unet_group),
+        Some(SdVersion::Sd1 | SdVersion::Sd2)
+    ) && let Some(rest) = name.strip_prefix(DIT)
+        && let Some(at) = rest.find(DIFFUSERS)
+    {
+        return format!(
+            "{DIT}{}output_blocks.7.1.{}",
+            &rest[..at],
+            &rest[at + DIFFUSERS.len()..]
+        );
     }
+    name
 }
 
 /// Token embeddings (row 43, `src/model_loader.cpp:659-664`).
@@ -1163,5 +1187,93 @@ mod tests {
             )]),
             None
         );
+    }
+
+    /// A safetensors index of `names`, shapes as written (outermost first).
+    fn safetensors_index(names: &[(&str, &[u64])]) -> TensorIndex {
+        TensorIndex {
+            format: FileFormat::Safetensors,
+            tensors: names
+                .iter()
+                .map(|(name, shape)| TensorInfo {
+                    name: name.to_string(),
+                    dtype: "F16".into(),
+                    shape: shape.to_vec(),
+                })
+                .collect(),
+            metadata: Default::default(),
+            parameters_hint: None,
+        }
+    }
+
+    #[test]
+    fn a_diffusers_sdxs_09_folder_is_sdxs_09_after_the_sd2_rename() {
+        // IDKiro/sdxs-512-0.9: no mid block, a 1024-wide attn1.to_k in up_blocks.2.attentions.1
+        // and SD 2's 1024-wide text encoder. Pass 1 says sd2-tiny-unet; pass 2's rename to
+        // output_blocks.7.1 lets row 42 see the 1024.
+        let te = safetensors_index(&[(
+            "text_model.embeddings.token_embedding.weight",
+            &[49408, 1024],
+        )]);
+        let folder = |to_k: &[u64]| {
+            let unet = safetensors_index(&[
+                ("down_blocks.0.resnets.0.conv1.weight", &[320, 320, 3, 3]),
+                (
+                    "up_blocks.2.attentions.1.transformer_blocks.0.attn1.to_k.weight",
+                    to_k,
+                ),
+            ]);
+            detect_folder(&[(FolderPart::Unet, &unet), (FolderPart::TextEncoder, &te)])
+        };
+        assert_eq!(folder(&[320, 1024]), Some(SdVersion::Sdxs09));
+        // bk-sdm-v2-tiny and -small: SD 2's 640-wide attention there, still the tiny UNet.
+        assert_eq!(folder(&[640, 640]), Some(SdVersion::Sd2TinyUnet));
+    }
+
+    #[test]
+    fn the_sd2_rename_leaves_the_other_small_unets_as_they_were() {
+        let te = |width: u64| {
+            safetensors_index(&[(
+                "text_model.embeddings.token_embedding.weight",
+                &[49408, width],
+            )])
+        };
+        let unet = |names: &[&str]| {
+            let mut tensors: Vec<(&str, &[u64])> =
+                vec![("down_blocks.0.resnets.0.conv1.weight", &[320, 320, 3, 3])];
+            tensors.extend(names.iter().map(|n| (*n, &[320u64, 1024][..])));
+            safetensors_index(&tensors)
+        };
+        // tiny-sd and sdxs-512-dreamshaper (SD 1, no mid block): row 51 never reads the
+        // 1024 check.
+        let up_2_1 = "up_blocks.2.attentions.1.transformer_blocks.0.attn1.to_k.weight";
+        let (te1, sd1_tiny, sd1_ds) = (te(768), unet(&[up_2_1]), unet(&[]));
+        for (u, want) in [
+            (&sd1_tiny, SdVersion::Sd1TinyUnet),
+            (&sd1_ds, SdVersion::Sdxs512Ds),
+        ] {
+            assert_eq!(
+                detect_folder(&[(FolderPart::Unet, u), (FolderPart::TextEncoder, &te1)]),
+                Some(want)
+            );
+        }
+        // SSD-1B and Segmind-Vega (SDXL, no mid block): not in the SD 1 or SD 2 group.
+        let add = "add_embedding.linear_1.weight";
+        let up_1_0_1 = "up_blocks.1.attentions.0.transformer_blocks.1.attn1.to_k.weight";
+        let (ssd1b, vega, te2) = (
+            unet(&[add, up_1_0_1, up_2_1]),
+            unet(&[add, up_2_1]),
+            te(1280),
+        );
+        for (u, want) in [(&ssd1b, SdVersion::SdxlSsd1b), (&vega, SdVersion::SdxlVega)] {
+            assert_eq!(
+                detect_folder(&[
+                    (FolderPart::Unet, u),
+                    (FolderPart::TextEncoder, &te1),
+                    (FolderPart::TextEncoder2, &te2),
+                ]),
+                Some(want)
+            );
+        }
     }
 }
