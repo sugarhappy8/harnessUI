@@ -15,7 +15,7 @@
 - `src-tauri/src/studio` gains a detection cache, a set-up plan command, import from disk, a *Set it up yourself* backend and LoRA commands.
 - `runtime::sd` builds engine arguments from the recipe's slots, defaults and constraints, with the pinned engine's full sampler and scheduler lists.
 - The six 0.1.x catalog families map onto recipes, and a 0.1.2 picture run keeps its exact arguments.
-- Phase U, the section 10 redesign, is planned after the screenshot critique. Phase S's DTOs and store actions are its interface.
+- Phase U rebuilds Studio's screens (section 10) on Phase S's DTOs and store actions: one composer, the model sheet, Get models with a detail panel, downloads with *Use it*, the Settings panel, and the results. A preview harness takes before/after screenshots.
 
 **Tech Stack:**
 - Rust: tokio, reqwest, rusqlite, serde, regex, sha2, Tauri 2.
@@ -34,7 +34,8 @@
 
 **Order:** Phase R → Phase S → Phase U → Phase G → Phase F → Phase D. Each phase, and each task, leaves the app building and working.
 - **Phase R** adds library code and catalog data only. Nothing in the app calls it yet.
-- **Phase S** switches Studio's local side onto it, keeping the 0.1.2 webview working with small adaptations; Phase U replaces those screens.
+- **Phase S** switches Studio's local side onto it, keeping the 0.1.2 webview working with small adaptations.
+- **Phase U** replaces those screens. Its click-count target (at most 4 clicks from the results to using a new model) is a test in Task U7.
 - **Phases G and F** do not depend on Phase U. They may run beside it.
 
 ---
@@ -101,6 +102,12 @@ Each is decided below in the task named. None is silently diverged from.
     - Detection alone cannot say this. Wan 2.2 A14B high- and low-noise files both detect as `WAN2`, like Wan 2.1 14B T2V.
     - The 2.2 and the part come from the file and folder name ("HighNoise", "low_noise"). Task R7.
 17. **The 10 MB floor for header reads (7.3) would skip most LoRAs**, many of which are 2–9 MB. Files whose name says LoRA are read at any size. Task S5.
+18. **Design 11a's Flex.2 control picture.**
+    - The `flex2` recipe lists no `control_image` feature, but the engine reads a control picture for Flex.2 (`src/pipeline/image.cpp:478-487`), and a mask and a picture to change too (`image.cpp:450-487`).
+    - Studio offers all three, each optional (Task R7).
+19. **Design 11a's "black-and-white" mask.**
+    - The engine resizes any mask to the output size and rounds each pixel to black or white (`image.cpp:262-264`), so a grey mask works too.
+    - Studio accepts any picture as a mask, and says white areas are the ones changed (Tasks R7 and S12).
 
 ## Global Constraints
 
@@ -155,10 +162,12 @@ Each is decided below in the task named. None is silently diverged from.
   - "Video on the processor is very slow"
   - "Installing stops the picture being made"
 - File labels: "Works in Studio", "LoRA for <type>", "Extra file", "Can't run in Studio".
+- OpenRAIL licences (design 11a): amber "Commercial use allowed, with use rules", with a link to the licence.
 - *Set it up yourself* runs carry an "untested set-up" note.
 
 **Kinds and kept rules**
-- **Studio kinds:** picture, picture edit (it takes a reference picture), video.
+- **Studio kinds:** picture, picture edit (it takes a picture: references, or a picture to change with its mask), video.
+- **Input pictures** (design 11a): reference, start frame, end frame, picture to change, mask, control picture. Adapter files (ControlNet, IP-Adapter, PhotoMaker, PuLID, AnimateDiff) stay out.
 - **Kept:**
   - the child-safety prompt check;
   - typed engine arguments with no shell;
@@ -203,14 +212,17 @@ Each is decided below in the task named. None is silently diverged from.
    - Test: `one_header_read_labels_every_quantisation_of_a_model` (Task S5).
 2. **A gated repo without a Hugging Face token.** Its files should say they need a token, and Download should be refused before any byte or any other part starts. Partial downloads of a set-up would leave companions nobody asked for.
    - Tests: `a_gated_repo_without_a_token_labels_files_not_read` (Task S5) and `a_gated_download_without_a_token_is_refused_before_anything_starts` (Task S7).
-3. **A host that ignores `Range`.** It sends the whole multi-gigabyte file. The read must stop at the cap and never buffer more.
-   - Test: `a_server_that_ignores_range_is_read_only_up_to_the_cap` (Task R3).
+3. **A model download that finishes after the person left Get models, or Studio.** The model should be in the model sheet and the card's *Use it* should work. 0.1.2 left it unlisted until Studio was shown again (screenshot critique §2.7 and §6), and the redesign's four-click path depends on *Use it*.
+   - Test: `a download finished elsewhere lists the model and offers Use it` (Task U7, vitest).
 4. **Windows paths and LoRA names with spaces or Unicode** ("pixel art ü.safetensors", "日本語 スタイル.safetensors"). The LoRA must keep its readable name, drop only `: < > |`, and reach the prompt file as UTF-8 that the engine's pattern matches.
    - Tests: `lora_names_keep_spaces_and_unicode_and_drop_colons_and_angles` (Task S10) and `lora_tags_reach_the_prompt_file_with_unicode_names` (Task S2).
 5. **Upgrading from 0.1.2** with installed klein and Wan models, and spending prefs still at the old defaults. Every row should survive with a recipe, a klein picture should get byte-identical arguments, and the prefs should move to off once while a changed value stays.
    - Tests: `v4_maps_each_01x_family_to_its_recipe_and_keeps_every_row` (Task S1), `an_01x_klein_picture_keeps_its_0_1_2_arguments` (recorded from the unchanged code in Task S2, kept green by Task S11) and `old_default_spending_prefs_move_to_off_once_and_changed_ones_stay` (Task G1).
 
-Companions shared between models, when one model is deleted, are covered by Task S7's `deleting_one_model_keeps_a_companion_a_generic_model_reuses`.
+Also pinned, though below these five:
+- a host that ignores `Range`: Task R3's `a_server_that_ignores_range_is_read_only_up_to_the_cap`;
+- companions shared between models, when one model is deleted: Task S7's `deleting_one_model_keeps_a_companion_a_generic_model_reuses`;
+- the narrow 900×650 window: Task U1's harness check that no screen scrolls sideways, made strict in Task U9.
 
 ## File structure
 
@@ -244,6 +256,15 @@ Companions shared between models, when one model is deleted, are covered by Task
 - `scripts/check_strace.py` and `scripts/check_strace_test.py`
 - `crates/reverse/src/warmup.rs`
 - `crates/runtime/tests/llama_tail.rs`
+- `e2e/preview/`: the screenshot harness (Task U1)
+- `src/components/ui/`: styled Radix controls (Task U2)
+- In `src/components/studio/` (Phase U):
+  - `Composer`, `ModelChip`, `ComposerMenus` and `InputZones`;
+  - `ModelSheet`, `modelSheet.ts` and `ImportDialog`;
+  - `GetModels`, `ModelSearch`, `ModelCard` and `ModelDetail`;
+  - `DownloadState` and `DownloadIndicator`;
+  - `LorasSection` and `ModelFilesSection`.
+- **Deleted in Phase U:** `PromptDock`, `ModelPicker`, `LocalModels`, `LocalModelRow`, `LocalSearch`, `DownloadLocalModel` and `localOffers`, each with its test replaced as its task says.
 
 **Changed**
 - `crates/models/src/{gguf,gen_catalog,gen_search,gen_fit,hf,files,lib}.rs`
@@ -254,7 +275,7 @@ Companions shared between models, when one model is deleted, are covered by Task
   - `studio/{local,local_models,local_cmd,manager,manager/lane,prefs,spend,errors,commands}.rs`;
   - `{downloads,dto,hub,approvals,updates,lib}.rs`;
   - `commands.list`, `capabilities/main.json`.
-- `src/components/studio/{types,api,LocalSearch,LocalModels,LocalModelRow,PromptDock,localOffers}.ts(x)`
+- `src/components/studio/{types,api,StudioView,TopBar,RefTray,SettingsPanel,AdvancedDrawer,ParamField,SettingField,RunCard,results,Grid,EmptyStates,Viewer,Working,styles}.ts(x)`
 - `src/store/{studio,studioLocal}.ts`
 - `src/components/{AllowAllButton,ApprovalCard,PermissionsSettings,settings/StudioSettings,UpdateBox}.tsx`
 - `src/lib/words.ts`
@@ -1114,7 +1135,7 @@ git add crates/models/src/sd
 git commit -m "Studio: say what a weights file is: model and layout, LoRA and base, extra file, or why it can't run"
 ```
 
-### Task R7: Version → recipe, kinds and the recipes left out
+### Task R7: Version → recipe, kinds, input pictures and the recipes left out
 
 **Files:**
 - Create: `crates/models/src/sd/matching.rs`
@@ -1127,7 +1148,10 @@ git commit -m "Studio: say what a weights file is: model and layout, LoRA and ba
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)] #[serde(rename_all = "camelCase")]
 pub enum RecipeKind { Picture, PictureEdit, Video }
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)] #[serde(rename_all = "camelCase")]
-pub enum OutOfScope { Adapter, NeedsMask, NeedsControl, NeedsControlFrames, NeedsAudio, Upscaler, FolderModel, NotThisEngine, Ltx2 }
+pub enum OutOfScope { Adapter, NeedsControlFrames, NeedsAudio, Upscaler, FolderModel, NotThisEngine, Ltx2 }
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)] #[serde(rename_all = "camelCase")]
+pub enum InputRole { Reference, StartFrame, EndFrame, Source, Mask, Control }   // Source: the picture to change (-i)
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)] #[serde(rename_all = "camelCase")] pub struct RecipeInput { pub role: InputRole, pub min: u32, pub max: u32 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)] #[serde(rename_all = "camelCase")]
 pub enum NoisePart { High, Low }
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1137,14 +1161,30 @@ pub fn match_recipe(version: SdVersion, facts: &MatchFacts, embeds: &[SlotId], n
 pub fn recipes_for(version: SdVersion) -> Vec<&'static str>;  // every in-scope recipe this version can take: the Model type menu
 pub fn kind_of(recipe_id: &str) -> RecipeKind;
 pub fn out_of_scope(recipe_id: &str) -> Option<OutOfScope>;
-pub fn in_scope_recipes() -> Vec<&'static str>;              // 88, sorted
+pub fn in_scope_recipes() -> Vec<&'static str>;              // 94, sorted
+pub fn inputs_of(recipe_id: &str) -> Vec<RecipeInput>;     // the input pictures a recipe takes, by the table below
 pub fn noise_part(name: &str) -> Option<NoisePart>;          // tokens high, highnoise, high-noise / low, lownoise, low-noise
 ```
 - **Tokens** are whole words of `tokens(name)`. Multi-word tokens (`high-noise`, `ltx-2`) match as substrings of the normalised text.
 - **Kinds:**
   - `Video` when `recipe(id).is_video()`;
-  - `PictureEdit` for: instruct-pix2pix, cosxl-edit, flux1-kontext, qwen-image-edit, qwen-image-edit-2509, qwen-image-edit-2511, qwen-image-layered, longcat-image-edit, mage-flow-edit, anima-edit, boogu-image-edit, fibo2-edit-turbo, krea2-raw-edit, krea2-turbo-edit, minimax-h3-image and p-h3-image;
-  - else `Picture`.
+  - `PictureEdit` for: instruct-pix2pix, cosxl-edit, flux1-kontext, qwen-image-edit, qwen-image-edit-2509, qwen-image-edit-2511, qwen-image-layered, longcat-image-edit, mage-flow-edit, anima-edit, boogu-image-edit, fibo2-edit-turbo, krea2-raw-edit, krea2-turbo-edit, minimax-h3-image and p-h3-image, and (design 11a) sd1-inpainting, sd2-inpainting, sdxl-inpainting and flux1-fill;
+  - else `Picture`. flux1-canny, flux1-depth and flex2 are pictures made from a prompt plus their input pictures.
+- **Input pictures (`inputs_of`).** Engine flags in brackets (`examples/common/common.cpp:1088-1107`):
+
+  | Recipes | Inputs (role min–max) |
+  |---|---|
+  | sd1-inpainting, sd2-inpainting, sdxl-inpainting, flux1-fill | Source 1–1 (`-i`), Mask 1–1 (`--mask`) |
+  | flux1-canny, flux1-depth | Control 1–1 (`--control-image`) |
+  | flex2 | Source 0–1, Mask 0–1, Control 0–1. A mask needs a source (`src/pipeline/image.cpp:274-281` repaints everything otherwise); the control picture is read at `image.cpp:478-487` |
+  | any other recipe with `feature("ref_images")` | Reference 1–4 for `PictureEdit` kinds, 0–4 otherwise (`-r`; 4 is 0.1.x's `MAX_REFERENCES`) |
+  | wan21-i2v, wan22-i2v, hunyuan-video-15-i2v | StartFrame 1–1 (`-i`) |
+  | wan21-flf2v | StartFrame 1–1, EndFrame 1–1 (`--end-img`) |
+  | any other video recipe with `feature("init_image")` / `feature("end_image")` | StartFrame 0–1 / EndFrame 0–1 |
+  | the rest | none |
+
+  - Plan decision: a Mask is any picture. The engine resizes it to the output size and rounds each pixel to black or white (`image.cpp:262-264`), and white areas are the ones changed.
+  - Painting a mask in the app is a later step (design 11a).
 
 **The matching table.** The first rule that matches wins. The part for Wan comes from `noise_part`.
 
@@ -1157,7 +1197,12 @@ pub fn noise_part(name: &str) -> Option<NoisePart>;          // tokens high, hig
 | sdxl, sdxl-vega, sdxl-ssd1b | sdxl-checkpoint | turbo → sdxl-turbo; nitro → nitrosd-realism |
 | sdxl-pix2pix | cosxl-edit | — |
 | sd3 | sd35-large | 24 blocks and embeds clip_l, clip_g, t5xxl → sd3-medium; 24 → sd35-medium; 38 → sd35-large; blocks unknown: medium → sd35-medium, large → sd35-large |
-| flux | flux1-dev | kontext → flux1-kontext; schnell → flux1-schnell |
+| flux | flux1-dev | kontext → flux1-kontext; schnell → flux1-schnell; fill → flux1-fill; canny → flux1-canny; depth → flux1-depth (diffusers-layout files, which the port reads as flux, Task R5) |
+| flux-fill | flux1-fill | — |
+| flux-controls | flux1-canny | depth → flux1-depth |
+| sd1-inpaint | sd1-inpainting | — |
+| sd2-inpaint | sd2-inpainting | — |
+| sdxl-inpaint | sdxl-inpainting | — |
 | flex-2 | flex2 | — |
 | chroma | chroma | — |
 | chroma-radiance | chroma-radiance | — |
@@ -1199,19 +1244,18 @@ pub fn noise_part(name: &str) -> Option<NoisePart>;          // tokens high, hig
 
 **Refusals by version:**
 - svd → NotThisEngine;
-- sd1-inpaint, sd2-inpaint, sdxl-inpaint and flux-fill → NeedsMask;
-- flux-controls → NeedsControl;
 - wan2.2-s2v → NeedsAudio;
 - pid → Upscaler;
 - sensenova-u1.5 → FolderModel.
 
-**Out-of-scope recipes**, 24, leaving 88 in scope. Plan decision: Studio has no mask, control, audio or adapter input, and section 3 rules out adapters, upscalers and audio-driven video.
+**Out-of-scope recipes**, 18, leaving 94 in scope.
+- Section 3 rules out adapter files, upscalers and audio-driven video.
+- Design 11a brings inpainting, Fill, Canny, Depth and Flex.2 in, with Mask and Control picture inputs.
+- Plan decision: VACE stays out. It needs a folder of control video frames, not a picture.
 
 | Reason | Recipes |
 |---|---|
 | Adapter | sd1-controlnet, sdxl-controlnet, sd1-ip-adapter, sdxl-ip-adapter, sdxl-photomaker, animatediff-sd15, flux1-pulid |
-| NeedsMask | sd1-inpainting, sd2-inpainting, sdxl-inpainting, flux1-fill |
-| NeedsControl | flux1-canny, flux1-depth |
 | NeedsControlFrames | wan21-vace |
 | NeedsAudio | wan22-s2v |
 | Upscaler | pid, pid-15, pid-sd3, pid-15-sd3, pid-flux2, pid-15-flux2, pid-qwen-image, pid-15-qwen-image |
@@ -1250,7 +1294,7 @@ fn m(v: SdVersion, name: &str) -> Match { match_recipe(v, &MatchFacts::default()
     assert_eq!(m(SdVersion::Ltxav, "Lightricks/LTX-2/ltx-2-19b-dev.safetensors"), Match::Refused(OutOfScope::Ltx2));
 }
 #[test] fn every_in_scope_recipe_is_reachable_and_exists() {
-    assert_eq!(in_scope_recipes().len(), 88);
+    assert_eq!(in_scope_recipes().len(), 94);
     let reached: BTreeSet<_> = SdVersion::ALL.iter().flat_map(|v| recipes_for(*v)).collect();
     assert_eq!(reached, in_scope_recipes().into_iter().collect());
     assert!(recipes().iter().all(|r| out_of_scope(&r.id).is_some() != in_scope_recipes().contains(&r.id.as_str())));
@@ -1258,6 +1302,19 @@ fn m(v: SdVersion, name: &str) -> Match { match_recipe(v, &MatchFacts::default()
 }
 #[test] fn kinds() {
     assert_eq!((kind_of("flux1-kontext"), kind_of("wan22-t2v"), kind_of("sdxl-checkpoint")), (RecipeKind::PictureEdit, RecipeKind::Video, RecipeKind::Picture));
+    assert_eq!((kind_of("sdxl-inpainting"), kind_of("flux1-fill"), kind_of("flux1-canny")), (RecipeKind::PictureEdit, RecipeKind::PictureEdit, RecipeKind::Picture));
+}
+#[test] fn inpainting_fill_and_control_recipes_are_offered_with_their_input_pictures() {
+    assert_eq!(m(SdVersion::SdxlInpaint, "o/r/sdxl-inpainting.safetensors"), Match::Recipe { id: "sdxl-inpainting", part: None });
+    assert_eq!(m(SdVersion::FluxFill, "o/r/flux1-fill-dev.safetensors"), Match::Recipe { id: "flux1-fill", part: None });
+    assert_eq!(m(SdVersion::FluxControls, "o/FLUX.1-Depth-dev/x.safetensors"), Match::Recipe { id: "flux1-depth", part: None });
+    let ins = |id| inputs_of(id).into_iter().map(|i| (i.role, i.min, i.max)).collect::<Vec<_>>();
+    assert_eq!(ins("sdxl-inpainting"), [(InputRole::Source, 1, 1), (InputRole::Mask, 1, 1)]);
+    assert_eq!(ins("flux1-canny"), [(InputRole::Control, 1, 1)]);
+    assert_eq!(ins("flex2"), [(InputRole::Source, 0, 1), (InputRole::Mask, 0, 1), (InputRole::Control, 0, 1)]);
+    assert_eq!(ins("flux1-kontext"), [(InputRole::Reference, 1, 4)]);
+    assert_eq!(ins("wan21-flf2v"), [(InputRole::StartFrame, 1, 1), (InputRole::EndFrame, 1, 1)]);
+    assert_eq!((out_of_scope("sd1-controlnet"), out_of_scope("flux1-fill")), (Some(OutOfScope::Adapter), None));
 }
 #[test] fn tokens_split_like_the_spec() {
     assert_eq!(tokens("Wan2.2_T2V-A14B HighNoise"), ["wan2.2", "t2v", "a14b", "highnoise"]);
@@ -1600,9 +1657,10 @@ pub struct SdJob {
     pub size_multiple: u32,                       // the recipe's (8 when omitted); replaces SIZE_MULTIPLE 16
     pub guidance: Option<f32>, pub img_cfg: Option<f32>, pub timestep_shift: Option<u32>, pub sigmas: Vec<f32>,
     pub high_noise: Option<HighNoise>, pub moe_boundary: Option<f32>, pub strength: Option<f32>, pub end_image: Option<PathBuf>,
+    pub mask_image: Option<PathBuf>, pub control_image: Option<PathBuf>,       // --mask, --control-image (design 11a)
     pub vae_format: Option<VaeFormat>, pub model_args: Option<String>, pub lora_dir: Option<PathBuf>, pub loras: Vec<LoraTag>,
 }
-pub enum ArgsError { /* as now, with */ BadSize { multiple: u32 }, BadLoraName(String), TooManyLoras, LorasWithoutFolder, BadModelArgs }
+pub enum ArgsError { /* as now, with */ BadSize { multiple: u32 }, BadLoraName(String), TooManyLoras, LorasWithoutFolder, BadModelArgs, MaskWithoutPicture }
 pub fn strip_lora_tags(prompt: &str) -> String;     // removes every span matching <lora:([^:>]+):([^>]+)>
 pub fn lora_tag(tag: &LoraTag) -> String;           // "<lora:NAME:W>" or "<lora:|high_noise|NAME:W>", W by `{}` of f32
 pub fn prompt_file_text(job: &SdJob) -> String;     // strip_lora_tags(prompt), then " " + lora_tag(t) for each LoRA
@@ -1614,7 +1672,7 @@ pub fn valid_lora_name(name: &str) -> bool;         // non-empty, relative, '/' 
   2. `-W`, `-H`, `--steps`, `--cfg-scale`;
   3. **`--guidance`, `--img-cfg-scale`**, `--flow-shift`, **`--timestep-shift`**, `--sampling-method`, `--scheduler`;
   4. **`--sigmas`** (comma-joined), **`--high-noise-steps`, `--high-noise-cfg-scale`, `--high-noise-sampling-method`, `--moe-boundary`, `--strength`**;
-  5. `--seed`, `--batch-count`, `--video-frames`, `--fps`, `-i`, **`--end-img`**, each `-r`;
+  5. `--seed`, `--batch-count`, `--video-frames`, `--fps`, `-i`, **`--end-img`, `--mask`, `--control-image`**, each `-r`;
   6. **`--vae-format`, `--model-args`, `--lora-model-dir`**;
   7. `--backend`, `--threads`, `--vae-tiling` (when `vae_tiling`), `--offload-to-cpu` (when `offload_to_cpu`), then `-o`, `--disable-image-metadata` and `--log-level info`.
 - `FLAGS` lists every flag in that order, so the contract tests check each against the pinned help.
@@ -1628,7 +1686,11 @@ pub fn valid_lora_name(name: &str) -> bool;         // non-empty, relative, '/' 
   - `vae_tiling` and `offload_to_cpu` both from `opts.memory_saving`;
   - `size_multiple: entry.limits.multiple_of`;
   - every new field empty.
+- A `mask_image` without an `init_image` is refused (`MaskWithoutPicture`): the engine would repaint the whole picture (`src/pipeline/image.cpp:274-281`). `--control-strength` is never sent; it is for ControlNet files, which stay out.
 - The full sampler and scheduler lists now reach `params_for` through `Sampler::ALL` and `Scheduler::ALL`. That is 7.6's change, and `local.rs`'s tests that count them are updated to 21 and 17.
+- `local.rs`'s `sampler_label` and `scheduler_label` need a plain label for each new word, so their matches stay exhaustive.
+  - samplers: "DPM++ 2S a", "iPNDM", "iPNDM v", "DDIM trailing", "TCD", "RES multistep", "RES 2S", "ER-SDE", "Euler CFG++", "Euler a CFG++", "Euler GE", "DPM++ 2M SDE", "DPM++ 2M SDE BT", "LMS";
+  - schedulers: "AYS", "GITS", "SGM uniform", "Smoothstep", "KL optimal", "LCM", "Bong tangent", "LTX-2", "Logit normal", "FLUX.2", "FLUX", "Beta", "LLaDA-Image".
 
 **Steps**
 
@@ -1665,6 +1727,12 @@ pub fn valid_lora_name(name: &str) -> bool;         // non-empty, relative, '/' 
     assert_eq!(prompt_file_text(&j), "a cat  on a mat <lora:local/pixel art ü:0.8>");
     assert_eq!(after(&strings(build_args(&j).unwrap()), "--lora-model-dir"), "/m/@loras");
 }
+#[test] fn mask_and_control_pictures_reach_their_flags() {
+    let mut j = klein_job(); j.init_image = Some("/r/in.png".into()); j.mask_image = Some("/r/mask.png".into()); j.control_image = Some("/r/edges.png".into());
+    let a = strings(build_args(&j).unwrap());
+    assert_eq!((after(&a, "-i"), after(&a, "--mask"), after(&a, "--control-image")), ("/r/in.png", "/r/mask.png", "/r/edges.png"));
+    j.init_image = None; assert_eq!(build_args(&j), Err(ArgsError::MaskWithoutPicture));
+}
 #[test] fn lora_names_the_engine_could_misread_are_refused() {
     for bad in ["", "C:/x", "a>b", "a<b", "|high_noise|x", "../x", "a\\b", "a/./b"] { assert!(!valid_lora_name(bad), "{bad}"); }
     for good in ["local/pixel art ü", "o/r/日本語 スタイル", "x"] { assert!(valid_lora_name(good), "{good}"); }
@@ -1687,7 +1755,7 @@ pub fn valid_lora_name(name: &str) -> bool;         // non-empty, relative, '/' 
 #[tokio::test] async fn the_out_of_memory_retry_turns_on_tiling_and_offload() { /* fake engine: first run OOM; the second's args hold --vae-tiling and --offload-to-cpu */ }
 ```
 In `sd_contract.rs`, which needs `SD_CLI_BIN` like its neighbours:
-- `the_pinned_engine_parses_recipe_arguments`: builds `wan_a14b_job()` with every new field set (a LoRA tag and a tiny `@loras` folder included) and runs the engine in metadata mode (`-M metadata --image png`) as `the_pinned_engine_parses_the_exact_arguments_studio_builds` does. It asserts exit 0, and no `unknown argument` or `invalid` line.
+- `the_pinned_engine_parses_recipe_arguments`: builds `wan_a14b_job()` with every new field set (a LoRA tag and a tiny `@loras` folder included), and a picture job with `-i`, `--mask` and `--control-image` (tiny PNGs). It runs the engine in metadata mode (`-M metadata --image png`) as `the_pinned_engine_parses_the_exact_arguments_studio_builds` does, and asserts exit 0 and no `unknown argument` or `invalid` line.
 - `the_pinned_engine_knows_every_flag_studio_sends` keeps covering the new `FLAGS` unchanged.
 
 `engine_lora_spans` is a test helper that applies the engine's pattern by hand (runtime has no `regex` dependency).
@@ -1754,10 +1822,7 @@ pub(crate) fn check_main_file(entry: &GenEntry, path: &Path) -> AppResult<()>;  
 ```
 **`generic_entry` rules:**
 - **kind:** `kind_of(recipe)`. Picture → `image`, PictureEdit → `image-edit`, Video → `video`.
-- **inputs:**
-  - `Reference` when `feature("ref_images")`;
-  - `StartFrame` when a video recipe has `feature("init_image")`;
-  - `EndFrame` when `feature("end_image")`.
+- **inputs:** one `GenInput` per `inputs_of(recipe)` row (Task R7). `GenInput` gains `Source`, `Mask` and `Control` (serde `source`, `mask`, `control`) beside `Reference`, `StartFrame` and `EndFrame`, and `GenEntry` gains `#[serde(default)] pub input_counts: Vec<RecipeInput>` with each row's min and max. Catalog entries keep their own `inputs`, with counts as in 0.1.2.
 - **defaults** come from the recipe, field for field:
   - `sampling_method` → `sampler`, `distilled_guidance` → `guidance`, `img_cfg_scale` → `img_cfg`;
   - `shifted_timestep` → `timestep_shift`, `custom_sigmas` → `sigmas`;
@@ -1803,6 +1868,10 @@ pub(crate) fn check_main_file(entry: &GenEntry, path: &Path) -> AppResult<()>;  
     assert_eq!(check_main_file(&klein, &write_gguf_txt_fixture("zimage")).unwrap_err().code, errors::NOT_THAT_MODEL);
 }
 #[test] fn every_slot_has_a_role_and_back() { for s in SlotId::RUNNABLE { assert_eq!(GenRole::from_slot(s).unwrap().slot(), s); } }
+#[test] fn an_inpainting_entry_takes_a_picture_to_change_and_a_mask() {
+    let e = generic_entry(spec(recipe("sdxl-inpainting").unwrap(), Some(SdVersion::SdxlInpaint), vec![part(GenRole::Model, "x.safetensors", 1)]));
+    assert_eq!((e.kind, e.inputs.clone()), (GenKind::ImageEdit, vec![GenInput::Source, GenInput::Mask]));
+}
 ```
 `studio_not_that_model` is the existing tensor-check refusal (`errors::NOT_THAT_MODEL`, inventory S25).
 
@@ -1964,7 +2033,7 @@ git commit -m "Studio: plan a model's set-up: main file, high/low sibling, insta
 ```rust
 // sd/mod.rs
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)] #[serde(rename_all = "camelCase")]
-pub enum CannotRunReason { Lumina2, LtxVideo09, HunyuanVideo1, Svd, UnknownWeights, Sharded, Pickle, NoSha, Adapter, NeedsMask, NeedsControl,
+pub enum CannotRunReason { Lumina2, LtxVideo09, HunyuanVideo1, Svd, UnknownWeights, Sharded, Pickle, NoSha, Adapter,
                            NeedsControlFrames, NeedsAudio, Upscaler, FolderModel, NotThisEngine, Ltx2 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)] #[serde(rename_all = "camelCase")]
 pub enum NotRead { NeedsToken, NeedsTerms, Budget, Failed }
@@ -2150,6 +2219,7 @@ git commit -m "Studio: read a repository's files when it opens (one read per qua
 
 **Files:**
 - Modify:
+  - `crates/models/src/gen_catalog.rs` (`Commercial::WithUseRules`) and `crates/models/src/gen_search.rs` (`KNOWN_LABELS`, `repo_licence`): the OpenRAIL licences (design 11a);
   - `src-tauri/src/dto.rs` (lines 1239–1421);
   - `src-tauri/src/studio/local_cmd.rs`: `repo_dto`, `local_search`, the new `studio_setup_plan`, `parts_dto`, `fit_dto`;
   - `src-tauri/src/studio/local_models.rs`: `LocalSource::Disk`; `entry_from_listing` is replaced by the plan;
@@ -2191,6 +2261,17 @@ pub enum LocalSource { Catalog { entry_id: String }, Search { repo: String, comm
 - **`best`** marks the largest whose fit word is `fits` or `afterUnload`. Plan decision: "fits this computer" means it runs on the device.
 - **`summary`** is the model card's first paragraph after the front matter, through `hf::uploader_text(text, 400)`. It is read with the listing, and `None` when that fails.
 - **`exact`** on a hit is true when `DetectService::verdict(repo)` exists. The hit's verdict is that one; otherwise `verdict_hint`.
+- **Licences of searched files** (design 11a). This task owns licence classification for searched files.
+  - `Commercial` gains `WithUseRules` (serde `withUseRules`), whose badge is `Badge::Amber`.
+  - `KNOWN_LABELS` gains four labels, each `Commercial::WithUseRules` with plain words "Commercial use allowed, with use rules":
+    - `creativeml-openrail-m` "CreativeML Open RAIL-M";
+    - `openrail` "Open RAIL";
+    - `openrail++` "Open RAIL++-M";
+    - `bigscience-openrail-m` "BigScience Open RAIL-M".
+  - `pub fn repo_licence(detail: &RepoDetail) -> GenLicence` replaces `searched_licence` for generic models, which have no family upstream: the repo's label, through `KNOWN_LABELS`.
+  - Its `url` is the repo's `LICENSE`, `LICENSE.md` or `LICENSE.txt` at the pinned commit when the listing has one, else the repo page at that commit. Plan decision: that is the licence text itself where the publisher ships it.
+  - Unknown labels stay red "Check the licence", as in 0.1.x.
+  - Companion files keep their table licence.
 - Produces, TypeScript (`types.ts`):
 ```ts
 export type SdVersion = "sd1" | "sd1-inpaint" | … ;                       // the 60 words of Task R5, written out
@@ -2199,7 +2280,7 @@ export type PartRole = "model" | "diffusion" | "high-noise-diffusion" | "uncond-
 export type RecipeKind = "picture" | "pictureEdit" | "video";
 export interface RecipeChoice { id: string; name: string; kind: RecipeKind }
 export type CannotRunReason = "lumina2" | "ltxVideo09" | "hunyuanVideo1" | "svd" | "unknownWeights" | "sharded" | "pickle" | "noSha" | "adapter"
-  | "needsMask" | "needsControl" | "needsControlFrames" | "needsAudio" | "upscaler" | "folderModel" | "notThisEngine" | "ltx2";
+  | "needsControlFrames" | "needsAudio" | "upscaler" | "folderModel" | "notThisEngine" | "ltx2";
 export type NotReadReason = "needsToken" | "needsTerms" | "budget" | "failed";
 export type FileLabel =
   | { works: { version: SdVersion; recipe: string; kind: RecipeKind; part: "high" | "low" | null; parameters: number } }
@@ -2210,6 +2291,7 @@ export type FileLabel =
 export type Verdict = { works: { version: SdVersion; kind: RecipeKind } } | { lora: { base: SdVersion | null } }
   | { cannotRun: { reason: CannotRunReason; version: SdVersion | null } } | "unknown";
 export interface Part { role: PartRole; repo: string; path: string; sizeBytes: number; licenceId: string; alreadyHere: boolean; local: boolean }
+// Licence.commercial gains "withUseRules" (amber).
 export type PartSource = "main" | "sibling" | "installed" | "repo" | "companion" | "chosen" | "embedded" | "missing";
 export interface PlannedSlot { role: PartRole; required: boolean; source: PartSource; part: Part | null }
 export interface SetupPlan { recipe: RecipeChoice; recipes: RecipeChoice[]; slots: PlannedSlot[]; licences: Licence[]; totalBytes: number;
@@ -2280,6 +2362,14 @@ export type LocalSource = { catalog: { entryId: string } } | { search: { repo: s
     assert_eq!(p.recipe.id, "flux1-dev");
     assert!(!p.untested);                                                   // flux1-dev is among the version's recipes
     assert_eq!(p.slots[2].source, PartSource::Chosen);
+}
+#[test] fn an_openrail_label_reads_amber_with_use_rules_and_links_its_licence() {      // gen_search.rs
+    for label in ["creativeml-openrail-m", "openrail", "openrail++", "bigscience-openrail-m"] {
+        let l = repo_licence(&detail_labelled(label, &["LICENSE.md", "v1-5-pruned-emaonly.safetensors"]));
+        assert_eq!((l.badge(), l.commercial_outputs, l.plain_words.as_str()), (Badge::Amber, Commercial::WithUseRules, "Commercial use allowed, with use rules"), "{label}");
+        assert!(l.url.ends_with(&format!("/blob/{COMMIT}/LICENSE.md")), "{label}");
+    }
+    assert_eq!(repo_licence(&detail_labelled("other", &[])).badge(), Badge::Red);
 }
 #[test] fn hits_carry_author_update_and_a_verdict() {
     let page = search_page(vec![summary("QuantStack/Wan2.2-T2V-A14B-GGUF", Some("text-to-video"), Some("2026-10-01T00:00:00.000Z"))], &DetectService::new());
@@ -2742,9 +2832,11 @@ git commit -m "Studio: LoRAs from Hugging Face or the computer, kept in one fold
 // agent/src/media/spec.rs
 pub enum ParamKind { /* … */ Loras { max: u32, high_noise: bool, weight_min: f64, weight_max: f64, weight_step: f64, weight_default: f64 } }
 // the value is [{"id": string, "weight": number, "highNoise": bool}], at most `max`; weight within [min, max]; highNoise only when `high_noise`
+pub enum RefRole { Reference, StartFrame, EndFrame, Source, Mask, Control }   // gains Source, Mask, Control (serde "source", "mask", "control"; design 11a)
 // local.rs
 pub mod key { /* … */ pub const GUIDANCE: &str = "guidance"; pub const IMG_CFG: &str = "img_cfg_scale"; pub const HIGH_NOISE_STEPS: &str = "high_noise_steps";
-              pub const HIGH_NOISE_CFG: &str = "high_noise_cfg_scale"; pub const LORAS: &str = "loras"; }
+              pub const HIGH_NOISE_CFG: &str = "high_noise_cfg_scale"; pub const LORAS: &str = "loras";
+              pub const SOURCE: &str = "source_picture"; pub const MASK: &str = "mask_picture"; pub const CONTROL: &str = "control_picture"; }
 pub const LORA_WEIGHT: (f64, f64, f64, f64) = (-1.0, 2.0, 0.05, 1.0);   // min, max, step, default
 pub struct LocalJobOptions { pub processor_only: bool, pub memory: MemoryChoice, pub threads: Option<u32>, pub device_description: Option<String> }
 pub fn job_for(entry: &GenEntry, model: &GenModel, req: &MediaRequest, opts: &LocalJobOptions, loras: &[GenLora], lora_dir: &Path,
@@ -2761,7 +2853,8 @@ pub struct GenFitResult { /* … */ pub video_on_processor: bool }
   - `GUIDANCE` (range 0.5–10, step 0.5) when the recipe has `feature("distilled_guidance")`;
   - `IMG_CFG` (range 1–20, step 0.5) for `feature("img_cfg")`;
   - `HIGH_NOISE_STEPS` (range −1–50; −1 reads "Automatic") and `HIGH_NOISE_CFG` (`GUIDANCE_RANGE`), both under Advanced, for `feature("high_noise")`;
-  - `LORAS` with `max` `MAX_LORAS` and `high_noise` from the recipe, for `feature("lora")`.
+  - `LORAS` with `max` `MAX_LORAS` and `high_noise` from the recipe, for `feature("lora")`;
+  - one `ParamKind::Images { min, max, role }` per `entry.input_counts` row (Task S3), so inpainting asks for a picture to change and a mask, Canny and Depth for a control picture, and Flex.2 offers all three.
   - Catalog entries keep their tested defaults and limits.
   - The guidance and negative prompt are hidden when the default cfg is 1, the 0.1.x rule (inventory S46).
 - **`job_for`:**
@@ -2769,6 +2862,9 @@ pub struct GenFitResult { /* … */ pub video_on_processor: bool }
   - the recipe's `custom_sigmas`, `shifted_timestep`, `strength`, `moe_boundary` and `context` (`vae_format`, `model_args`) are passed as given;
   - `guidance`, `img_cfg` and `high_noise` come from params over defaults;
   - `end_image` comes from the `endFrame` reference;
+  - `init_image` comes from `source` (or `startFrame` for video), `mask_image` from `mask`, and `control_image` from `control`;
+  - a mask without a picture to change is refused with `studio_mask_needs_picture` ("Add the picture to change before its mask." / "Add it, or remove the mask.");
+  - with a picture to change and no size chosen, the size follows the picture: its aspect, at the recipe default's pixel count, rounded to the multiple.
   - `size_multiple` comes from the limits.
   - **LoRAs:** each attached id is looked up in `gen_loras`. A missing row or file is refused with `studio_lora_missing` ("A LoRA's file is missing: <name>." / "Add it again, or remove it from the settings."). Otherwise `lora_dir = lora_folder(models_dir)` and `LoraTag { name: rel_name, weight, high_noise }`. With no LoRAs attached, `lora_dir` is `None`.
 - **`memory_flags`:**
@@ -2781,7 +2877,7 @@ pub struct GenFitResult { /* … */ pub video_on_processor: bool }
   - `NotFor::VideoNeedsGpu` and `NotFor::VideoNotOnThisMac` are removed. A video on `Target::Cpu` is judged by memory like a picture, and gets `video_on_processor: true`.
   - On Apple silicon, a video whose catalog entry says `runs_on_apple: false` is judged by memory too.
   - The fit word, reason and suggestion stay; they now only warn.
-- `LocalModelsDto.video_on_processor` is true when this computer runs models on the processor. `types.ts`: `LocalFit.videoOnProcessor: boolean`; `LocalModels.videoOnProcessor` replaces `videoPossible`.
+- `LocalModelsDto.video_on_processor` is true when this computer runs models on the processor. `types.ts`: `LocalFit.videoOnProcessor: boolean`; `LocalModels.videoOnProcessor` replaces `videoPossible`; `RefRole` gains `"source" | "mask" | "control"`; `ParamKind` gains `{ type: "loras"; max: number; highNoise: boolean; weightMin: number; weightMax: number; weightStep: number; weightDefault: number }`; and `export interface LoraUse { id: string; weight: number; highNoise: boolean }` is the value of the `loras` param.
 
 **Steps**
 
@@ -2813,6 +2909,16 @@ pub struct GenFitResult { /* … */ pub video_on_processor: bool }
     let gone = lora_row("local/x", PathBuf::from("/nope/x.safetensors"));
     assert_eq!(job_for(&generic("sdxl-checkpoint", SdVersion::Sdxl), &sdxl_row(), &req(json!({"loras": [{"id": gone.id, "weight": 1.0, "highNoise": false}]})),
                        &opts(MemoryChoice::Automatic), &[gone], LORAS, None, OUT, "r").unwrap_err().code, "studio_lora_missing");
+}
+#[test] fn a_mask_and_a_control_picture_reach_the_job() {
+    let inpaint = generic("sdxl-inpainting", SdVersion::SdxlInpaint);
+    assert!(matches!(spec(&params_for(&inpaint), key::MASK).kind, ParamKind::Images { min: 1, max: 1, role: RefRole::Mask }));
+    let job = job_for(&inpaint, &row(), &req_with_refs(&[(RefRole::Source, "in.png"), (RefRole::Mask, "mask.png")]), &opts(MemoryChoice::Automatic), &[], LORAS, None, OUT, "r").unwrap();
+    assert!(job.init_image.unwrap().ends_with("in.png") && job.mask_image.unwrap().ends_with("mask.png"));
+    let flex = generic("flex2", SdVersion::Flex2);
+    assert_eq!(job_for(&flex, &row(), &req_with_refs(&[(RefRole::Mask, "mask.png")]), &opts(MemoryChoice::Automatic), &[], LORAS, None, OUT, "r").unwrap_err().code, "studio_mask_needs_picture");
+    let canny = job_for(&generic("flux1-canny", SdVersion::FluxControls), &row(), &req_with_refs(&[(RefRole::Control, "edges.png")]), &opts(MemoryChoice::Automatic), &[], LORAS, None, OUT, "r").unwrap();
+    assert!(canny.control_image.unwrap().ends_with("edges.png"));
 }
 #[test] fn a_wan_a14b_model_offers_high_noise_settings_and_high_noise_loras() {
     let p = params_for(&generic("wan22-t2v", SdVersion::Wan2));
@@ -2898,7 +3004,9 @@ lorasFor(model: InstalledLocal): { fits: Lora[]; others: Lora[] };   // base ===
   - `LORAS`: "LoRAs", "Add", "Remove", "Strength", "High-noise part", "may not fit this model", "No LoRAs yet";
   - `IMPORT`: "Add a model file", "Add a LoRA file", "Copy it into Studio's models folder", "Use it where it is", "Reading the file…", "Copying…";
   - `SETUP`: "Model type", "Files", "Change", "untested set-up", "Set it up yourself", "Download file anyway";
-  - the run settings line's LoRA part: "LoRAs: pixel art ü 0.8, style 1".
+  - the run settings line's LoRA part: "LoRAs: pixel art ü 0.8, style 1";
+  - `LOCAL_WARNING.mayNotFit(reason)` = "May not fit this computer: <reason>. It may fail or be very slow." and `LOCAL_WARNING.videoOnProcessor` = "Video on the processor is very slow". They are defined here because Phase U's model sheet, composer and cards use them; Task G2 removes the old refusal wording;
+  - `INPUT_ROLE`: "Picture to change", "Mask", "Control picture" (beside the existing reference, start-frame and end-frame words), with the hints "A black-and-white picture: white areas are changed, black areas are kept." and "An edge map for Canny models, a depth map for Depth models.".
   - Every `SdVersion`, `PartRole`, `CannotRunReason` and `NotReadReason` has wording, enforced by `Record<…, string>` types.
 
 **Steps**
@@ -2931,7 +3039,699 @@ git commit -m "Studio: store actions and words for getting, importing and settin
 
 ## Phase U: Studio's look, switching and getting models (section 10)
 
-Tasks added after the screenshot critique
+Inputs:
+- design 10;
+- the 2026-11-24 screenshot critique (session scratch, `studio-before/critique.md`), whose numbered defects and code causes are cited as "critique §n";
+- the "before" screenshots;
+- the preview harness.
+
+The rules for every Phase U task:
+- **Stay inside the app's stack:**
+  - Tailwind 4 tokens in `src/styles.css` (`bg`, `bg-subtle`, `bg-muted`, `surface`, `fg`, `fg-muted`, `border`, `border-strong`, `accent`, `accent-2`, `warning`, `success`, `danger`, `focus`; `shadow-soft|float|pop`);
+  - Radix through the `radix-ui` package, which already exports Select, Switch, Checkbox, Slider, Tooltip, ToggleGroup, Popover, Dialog and DropdownMenu;
+  - `lucide-react` icons and `clsx`;
+  - no shadcn and no new package (design 10.1).
+- **Screenshots.** A task's last step takes the "after" screenshots of the screens it touches, with the harness from Task U1, in both themes. It keeps the file names of the "before" set so pairs line up, and adds a step to `e2e/preview/shoot.mjs` for each new screen.
+- **Wording** goes in `words.ts`, under the group each task names. Every control has an accessible name; dialogs, sheets and panels trap focus and close on Esc, with focus returning to their opener.
+
+### Task U1: The preview harness in the repo
+
+**Files:**
+- Create, from the scratch harness (`studio-preview-harness/`):
+  - `e2e/preview/README.md`, `index.html`, `main.tsx`, `vite.config.ts`;
+  - `mock/ipc.ts`, `mock/data.ts`, `mock/pictures.ts`;
+  - `shoot.mjs` (was `shoot.cjs`) and a new `pairs.mjs`.
+- Modify:
+  - `eslint.config.js`: a block `{ files: ["e2e/preview/**/*.mjs"], languageOptions: { globals: globals.node } }`;
+  - `package.json` scripts only: `"preview:serve": "vite --config e2e/preview/vite.config.ts"`, `"preview:shoot": "node e2e/preview/shoot.mjs"`, `"preview:pairs": "node e2e/preview/pairs.mjs"`;
+  - `e2e/README.md`: one line on the harness.
+- Test: the lint, typecheck and build gates, and a harness run
+
+**Interfaces:**
+- **Vite.** `vite.config.ts` has `root = new URL("../..", import.meta.url)`, the page `/e2e/preview/index.html` and port 5199 (`PREVIEW_PORT`).
+- **Out of the app build.** `tsconfig.json` (`include: ["src", "vite.config.ts"]`) and the app's `index.html` don't reach it, and vitest finds no test files in it.
+- **Playwright** is used as now: a global install, or `PLAYWRIGHT_PATH`. It is not a dependency.
+- **The mock** answers every Phase S command in its `case` list:
+  - `studio_local_search` (with `filter`), `studio_local_repo` (the new `LocalRepo`) and `studio_setup_plan`;
+  - `studio_import_inspect`, `studio_import_model`, `studio_model_files` and `studio_set_model_files`;
+  - `studio_loras`, `studio_lora_download`, `studio_lora_import` and `studio_lora_delete`;
+  - `plugin:dialog|open`, which returns `/home/me/Downloads/my model.safetensors`.
+  - Its records add a generic SDXL model, an untested model, a model needing set-up, an SDXL inpainting model, two LoRAs, an OpenRAIL repo, a Lumina 2 repo and a Wan 2.2 A14B repo with 15 quantisations.
+  - The records are built from `src/components/studio/fixtures/models.ts` (Task S12), so they follow the DTOs.
+- **`shoot.mjs [--only ids] [--themes light,dark] [--scale 2] [--out .cache/preview/after] [--strict]`:**
+  - It takes the 26 screens of the before set: a, b, b2, c0, c, c2, d, d2, d3, e0, e, e2, f, f2, g, g2, h, i, i2, j, k, z1, z2, x1, x2 and x3.
+  - After each screen it records:
+    - commands the mock did not answer;
+    - **sideways scroll** (`document.scrollingElement.scrollWidth > innerWidth`);
+    - **body share**: the share of visible text characters set at 14 px or more.
+  - It prints a table of these. With `--strict`, it exits 1 on an unanswered command, any sideways scroll, or a body share under 0.5 on a Studio screen (all but i, i2 and x1–x3). Design 10.4: "at least half of each screen's text is at body size"; 10.4: "the 900×650 narrow window must not scroll sideways".
+- **`pairs.mjs <before> <after> [--out .cache/preview/pairs.html]`** writes one page with each screen's before and after side by side, for both themes. It is for the owner's review (design 10.5).
+- **The before set.**
+  - At the start of Phase U, the task takes it with `--out .cache/preview/before`. Plan decision: that is 0.1.2's look with Phase S's data, so before and after differ only by Phase U.
+  - The 2026-11-24 capture stays in the session scratch as a reference.
+  - PNGs are never committed; `.cache/` is ignored.
+
+**Steps**
+
+- [ ] **Step 1: Move the harness and adapt the mock and the checks** as above.
+
+- [ ] **Step 2: Run the gates and see them pass.**
+  - Run: `npm run lint && npm run typecheck && npm run build && test ! -e dist/e2e`
+  - Expected: PASS.
+
+- [ ] **Step 3: Take the before set.**
+  - Run: `npm run preview:serve &` then `npm run preview:shoot -- --out .cache/preview/before`
+  - Expected: 52 PNGs, no unanswered command. The table shows the current sideways scroll on `j` and the body shares (critique §5: about 30–40%).
+
+- [ ] **Step 4: Commit.**
+```bash
+git add e2e/preview e2e/README.md eslint.config.js package.json
+git commit -m "Studio: the preview harness for before/after screenshots, in e2e/preview"
+```
+
+### Task U2: Shared controls, one focus ring and the type scale
+
+**Files:**
+- Create in `src/components/ui/`:
+  - `styles.ts`;
+  - `SelectField.tsx`, `MenuButton.tsx`, `SwitchField.tsx`, `CheckboxField.tsx`, `SliderField.tsx`;
+  - `Tip.tsx`, `ChipGroup.tsx`, `SlideOver.tsx`;
+  - `ui.test.tsx`.
+- Modify:
+  - `src/styles.css`:
+    - the global `:focus-visible` rule (134–137) moves into `@layer base`, so utilities can override it (critique §6: it beats Tailwind's `outline-none`);
+    - the type-scale utilities;
+    - `.studio-page`;
+  - `src/App.tsx`: one `Tooltip.Provider` at the root;
+  - `src/components/studio/styles.ts`: `CARD`, `ROW`, `CHIP` and `MENU_ITEM` move here, and the duplicate copies in `PromptDock`, `EmptyStates`, `RunCard`, `ModelPicker` and `ParamField` go (critique §5);
+  - `src/lib/words.ts` (`UI`).
+- Test: `src/components/ui/ui.test.tsx`
+
+**Interfaces:**
+- Produces:
+```ts
+// src/components/ui/styles.ts
+export const FOCUS_RING = "outline-none focus-visible:ring-2 focus-visible:ring-accent/40";   // the one focus ring (design 10.4)
+// type scale (@utility in styles.css): text-view-title = text-xl font-semibold; text-title = text-lg font-semibold;
+// text-section = text-sm font-semibold; text-body = text-sm; text-meta = text-xs text-fg-muted
+// .studio-page: background var(--bg-subtle) in light, var(--bg) in dark (design 10.4: clearer page/card separation in light, within the tokens)
+export function SelectField<T extends string>(p: { label: string; hideLabel?: boolean; value: T | null; placeholder?: string;
+  options: { value: T; label: string; hint?: string }[]; onChange(v: T): void; disabled?: boolean }): JSX.Element;      // Radix Select
+export function MenuButton(p: { label: string; trigger: ReactNode; align?: "start" | "end"; children: ReactNode }): JSX.Element;   // Radix DropdownMenu
+export function MenuItem(p: { onSelect(): void; disabled?: boolean; children: ReactNode }): JSX.Element;
+export function MenuRadio<T extends string>(p: { value: T; options: { value: T; label: string }[]; onChange(v: T): void }): JSX.Element;
+export function SwitchField(p: { label: string; description?: string; checked: boolean; onChange(v: boolean): void; disabled?: boolean }): JSX.Element;
+export function CheckboxField(p: { label: string; checked: boolean; onChange(v: boolean): void }): JSX.Element;
+export function SliderField(p: { label: string; min: number; max: number; step: number; value: number; onChange(v: number): void;
+  format?(v: number): string }): JSX.Element;                                  // Radix Slider, with the value as text beside it
+export function Tip(p: { content: string; side?: "top" | "right" | "bottom" | "left"; children: ReactElement }): JSX.Element;   // Radix Tooltip
+export function ChipGroup<T extends string>(p: { label: string; value: T; options: { value: T; label: string }[]; onChange(v: T): void }): JSX.Element;  // ToggleGroup, single
+export function SlideOver(p: { open: boolean; onOpenChange(open: boolean): void; title: string; width: "panel" | "half";
+  modal?: boolean; children: ReactNode }): JSX.Element;                       // Radix Dialog from the right; modal: true by default
+```
+- Words: `UI.close` = "Close".
+
+**Steps**
+
+- [ ] **Step 1: Write the failing tests** (`ui.test.tsx`, Testing Library with `fireEvent`):
+  - `SelectField is a combobox named by its label, and choosing an option calls onChange`;
+  - `SwitchField has role switch with aria-checked, and toggles on click and Space`;
+  - `SliderField moves by its step on arrow keys and shows its value as text`: min −1, max 2, step 0.05, value 1, ArrowRight gives 1.05;
+  - `Tip shows its content on keyboard focus`;
+  - `ChipGroup is a group of pressed buttons, one at a time`;
+  - `MenuButton opens a menu, and its radio items report the choice`;
+  - `SlideOver traps focus, closes on Esc and returns focus to its opener`.
+
+- [ ] **Step 2: Run them and see them fail.**
+  - Run: `npx vitest run src/components/ui`
+  - Expected: FAIL.
+
+- [ ] **Step 3: Implement**, with every control using `FOCUS_RING`.
+
+- [ ] **Step 4: Run them and see them pass, and take the screenshots.**
+  - Run: `npm run lint && npm run typecheck && npm test`. Expected: PASS.
+  - Then: `npm run preview:shoot -- --only a,b,d --out .cache/preview/after`. Expected: the prompt and search boxes no longer show the doubled 2 px outline.
+
+- [ ] **Step 5: Commit.**
+```bash
+git add src/components/ui src/styles.css src/App.tsx src/components/studio src/lib/words.ts
+git commit -m "UI: styled Radix select, menu, switch, checkbox, slider, tooltip and slide-over; one focus ring; a type scale"
+```
+
+### Task U3: The composer and the main layout
+
+**Files:**
+- Create in `src/components/studio/`:
+  - `Composer.tsx` (`Composer`);
+  - `ModelChip.tsx` (`ModelChip`);
+  - `ComposerMenus.tsx` (`ShapeMenu`, `CountMenu`);
+  - `InputZones.tsx` (`InputZones`, `InputZone`);
+  - `Composer.test.tsx`.
+- Modify:
+  - `StudioView.tsx`: the results take the page; the composer sits at the bottom of the results column; the side panel is closed by default;
+  - `TopBar.tsx`;
+  - `RefTray.tsx`: `RefThumb` and the role logic serve the composer's strip; `FrameDrop` is replaced by `InputZone`;
+  - `SettingsPanel.tsx`: shown only when open; its content is unchanged until Task U8;
+  - `src/store/studio.ts` and `src/components/studio/types.ts`;
+  - `src-tauri/src/studio/prefs.rs` (`settings_open: bool`, serde default false);
+  - `src/lib/words.ts`.
+- Delete: `PromptDock.tsx` and `PromptDock.test.tsx`. Its behaviours move into `Composer.test.tsx` deliberately: the refusal banner, the price and time line, Create's enabled states and the prompt check.
+- Test: `Composer.test.tsx`; `StudioView.test.tsx` (updated); `prefs.rs` (one test)
+
+**Interfaces:**
+- Consumes:
+  - draft state: `drafts[tab]` (prompt, values, refs), `setPrompt`, `setValue`, `addRef`, `removeRef`, `setRefRole`;
+  - the existing estimate and create actions; `prefs`;
+  - `local.installed: InstalledLocal[]` (Task S9), `MediaModel.params` (`ParamKind::Images` with roles `source`, `mask`, `control`, `startFrame`, `endFrame`; Task S11);
+  - `INPUT_ROLE` (Task S12).
+- Produces:
+```ts
+// store/studio.ts
+settingsOpen: boolean;                                                     // from prefs.settingsOpen at load
+settingsSection: "setups" | "advanced" | "loras" | "files" | null;
+setSettingsOpen(open: boolean, section?: "setups" | "advanced" | "loras" | "files"): void;   // saves prefs.settingsOpen
+// StudioPrefs (types.ts) gains settingsOpen: boolean
+export function Composer(p: { tab: StudioTab }): JSX.Element;
+export function ModelChip(p: { tab: StudioTab; onOpen(): void }): JSX.Element;   // opens the 0.1.x picker until Task U4
+export function InputZones(p: { tab: StudioTab; model: MediaModel }): JSX.Element | null;
+```
+- **The composer** is a `<section aria-label>` ("Make a picture" / "Make a video") with the existing `.composer` card style:
+  - Row 1: reference thumbnails with a Remove button each, *Add picture*, the input zones, then the prompt (`textarea` labelled "Prompt", placeholder "Describe the picture you want…").
+  - Row 2 is a `role="toolbar"`: `ModelChip`, `ShapeMenu`, `CountMenu`, *Settings*, then on the right the time or price and Create.
+  - Under it, one `text-meta` privacy line. The chip's dot carries the same line in a `Tip`.
+- **`InputZone`** is one per `Images` param whose role is `source`, `mask`, `control`, `startFrame` or `endFrame`:
+  - a labelled drop target and button, "Add the picture to change" for example;
+  - the thumbnail and Remove when set;
+  - its hint in a `Tip`;
+  - "required" when its min is 1.
+- **Create** is disabled only for: no model, an empty prompt, a required input picture missing, an invalid setting, or the prompt check. Never for fit (Task S11). The words say why.
+- **The top bar** (design 10.1):
+  - the title "Studio" at `text-title`;
+  - `KindTabs`;
+  - Search, Starred and Grid;
+  - **Get models**, a button with the `Download` icon, which calls `showLocalModels(true)`.
+  - The `PlaceMark` chip goes (critique §6: it looked clickable).
+  - The spend for today shows only while `prefs.dailyLimitUsd !== null`; Task G1 extends this to every spending switch.
+  - The ⋯ menu keeps *Update model lists* and loses *Get local models*.
+- **The side panel** opens from *Settings*. It stays docked on windows at least 1400 px wide while `settingsOpen`, and is a `SlideOver` (`width: "panel"`) below that.
+- Words:
+  - `STUDIO_COMPOSER`: `region(kind)`, `prompt` "Prompt", `placeholder(kind)`, `toolbar` "Picture settings", `shape` "Shape", `count` "How many", `settings` "Settings", `addPicture` "Add picture", `remove(name)`, `required` "required", `maskNeedsSource` "Add the picture to change before its mask.";
+  - `STUDIO_TOPBAR.getModels` "Get models".
+
+**Steps**
+
+- [ ] **Step 1: Write the failing tests.**
+  - `Composer.test.tsx`:
+    - `the composer is one region with the prompt, the model chip and Create`;
+    - `the model chip names the model and where it runs, and its dot's tooltip is the privacy line`;
+    - `shape and count are menus in the toolbar`: "Shape: 1:1" opens a menu of radio items, and choosing "16:9" sets `aspect_ratio`;
+    - `Create shows the time for a local model and the price for a cloud one`;
+    - `added pictures show as thumbnails before the prompt, each with a Remove button named after it`;
+    - `an inpainting model shows Picture to change and Mask zones, and Create stays off until both are added`;
+    - `Flex.2's zones are optional, and a mask without a picture to change says so`;
+    - `Settings opens the side panel and moves focus into it`;
+    - the refusal-banner, price-line and prompt-check cases ported from `PromptDock.test.tsx`.
+  - `StudioView.test.tsx`:
+    - `the results take the page and the side panel is closed by default`;
+    - `the panel stays docked on a 1400 px window when it was left open`;
+    - `Get models is a top-bar button and the place chip is gone`;
+    - `today's spend shows only while a daily limit is on`.
+  - `prefs.rs`: `settings_open_defaults_to_false_and_round_trips`.
+
+- [ ] **Step 2: Run them and see them fail.**
+  - Run: `npx vitest run src/components/studio && cargo test -p app --lib studio::prefs`
+  - Expected: FAIL.
+
+- [ ] **Step 3: Implement.**
+
+- [ ] **Step 4: Run them and see them pass, and take the screenshots.**
+  - Run: `npm run lint && npm run typecheck && npm test && cargo test -p app --lib studio::prefs`. Expected: PASS.
+  - Then: `npm run preview:shoot -- --only a,b2,c0,j,k,z1,o --out .cache/preview/after`, with a new screen `o-inpainting-inputs`: the SDXL inpainting model chosen, both zones visible. Expected: one composer at the bottom, and no sideways scroll on `j`.
+
+- [ ] **Step 5: Commit.**
+```bash
+git add src src-tauri/src/studio/prefs.rs e2e/preview
+git commit -m "Studio: one composer with the model chip, shape, count, input pictures, Settings and Create; the results take the page"
+```
+
+### Task U4: The model sheet, and *Add a model file*
+
+**Files:**
+- Create in `src/components/studio/`:
+  - `ModelSheet.tsx` (`ModelSheet`, `SheetRow`, `RecentTiles`, `SheetFooter`);
+  - `modelSheet.ts` (`sheetSections`, plus `pickerGroups`, `priceHint` and `localHint` moved unchanged from `ModelPicker.tsx`);
+  - `ImportDialog.tsx` (`ImportDialog`).
+- Modify:
+  - `ModelChip.tsx` (opens the sheet);
+  - `StudioView.tsx` (mounts `ImportDialog`);
+  - `src/store/studio.ts`: `sheetOpen` and `openSheet` replace `pickerOpen` and `openPicker`, and every caller moves; `importOpen` and `openImport`;
+  - `src/lib/words.ts`.
+- Delete: `ModelPicker.tsx`. `ModelPicker.test.tsx` becomes `ModelSheet.test.tsx`: its `pickerGroups`, `priceHint` and `localHint` cases are kept as they are, and its UI cases are replaced.
+- Test: `ModelSheet.test.tsx`, `ImportDialog.test.tsx`
+
+**Interfaces:**
+- Consumes:
+  - `local.installed: InstalledLocal[]` with `recipe`, `version`, `sizeBytes`, `fit`, `untested`, `needsSetup` and `takesLoras` (Task S9);
+  - `typeName(version, recipe)`, `KIND_WORD`, `LOCAL_WARNING.mayNotFit` (Tasks S6 and S12);
+  - the draft's `values.loras` (its length is the LoRA count);
+  - `recentRuns`, `endpoints`, `chooseModel(tab, target, id)`, `showLocalModels(true)`, `setSettingsOpen(true, "files")`;
+  - for importing: `chooseFile("model")`, `importInspect`, `importModel`, `importLora` and `importProgress` (Task S12), and `ImportInspection.lastMode` and `insideModels` (Task S8).
+- Produces:
+```ts
+export function sheetSections(s: Pick<StudioState, "local" | "endpoints" | "recentRuns" | "drafts">, tab: StudioTab, query: string,
+  filter: "all" | "local" | "cloud"): { recent: SheetModel[]; local: SheetModel[]; cloud: { company: string; rows: SheetModel[] }[] };   // recent ≤ 4, never repeated below
+export function ModelSheet(p: { tab: StudioTab; anchor: RefObject<HTMLElement> }): JSX.Element;
+export function ImportDialog(): JSX.Element | null;                   // driven by importOpen
+// store/studio.ts
+sheetOpen: boolean; openSheet(open: boolean): void;
+importOpen: "model" | "lora" | null; openImport(kind: "model" | "lora" | null): void;
+```
+- **The sheet** is a Radix Popover anchored to the chip, about 640×560 (`data-layout="popover"`). On windows narrower than 1000 px it is a full-height `SlideOver` (`data-layout="sheet"`).
+  - Plan decision: 1000 px is where 0.1.2's panel already narrows.
+  - **At the top:** a search field, focused on open, and a `ChipGroup` with All · On this computer · Cloud. The kind follows the tab.
+  - **Rows:**
+    - local: name; type label `${typeName} · ${KIND_WORD}` ("SDXL · picture"); size; a fit dot whose `Tip` is the warning; the LoRA count;
+    - "Needs setting up" and "untested set-up" where true;
+    - cloud: name and price or "price unknown"; at most two capability icons, each with an `aria-label` ("Can change a picture", "Transparent background"); model notes in a `Tip` on an info icon.
+  - **Unusable endpoints** (no key, no list) are rows with their fix as a link (design 10.2).
+  - **The footer** has *Get more models* (primary) and *Add a model file*.
+  - **Keys:** arrows move, Enter picks and closes, Esc closes; focus returns to the chip.
+- **`ImportDialog`** steps through:
+  1. choose the file;
+  2. read it: its label in words (`FILE_LABEL`);
+  3. *Copy it into Studio's models folder* or *Use it where it is* (a radio group), preselected from `lastMode`, and skipped when `insideModels`;
+  4. the plan's extra files and the total to download, if any;
+  5. progress (`importProgress`), then done, which selects the model.
+  - A LoRA file is added with `importLora`. A pickle file shows "Studio can't read .ckpt files".
+- Words:
+  - `MODEL_SHEET`: `title` "Choose a model", `search` "Search models", `all`, `local` "On this computer", `cloud` "Cloud", `recent` "Recent", `priceUnknown` "price unknown", `canEdit`, `transparent`, `notes` "About this model", `getMore` "Get more models", `addFile` "Add a model file", `loraCount(n)`, `needsSetup` "Needs setting up", `untested` "untested set-up";
+  - `IMPORT_DIALOG`: `title`, `reading` "Reading the file…", `copy`, `inPlace`, `alsoDownloads(size)`, `add` "Add", `done` "Added".
+
+**Steps**
+
+- [ ] **Step 1: Write the failing tests.**
+  - `ModelSheet.test.tsx`:
+    - `the sheet opens from the chip with its search focused, and Esc closes it with focus back on the chip`;
+    - `arrow keys move through rows and Enter picks the model and closes the sheet`;
+    - `recent models are at most four tiles and are not repeated below`;
+    - `an installed row says its type, size and fit, with the warning in its tooltip`: "SDXL · picture", "6.9 GB", and "May not fit this computer: …";
+    - `a model with LoRAs attached shows the count`;
+    - `cloud rows show a price or "price unknown" and at most two capability icons with accessible names`;
+    - `a model's notes are in a tooltip reachable by keyboard`;
+    - `the filter narrows the rows, and the kind follows the tab`;
+    - `an endpoint without a key is a row with its fix as a link`;
+    - `a model that needs setting up says so, and picking it opens Files`;
+    - `on a window narrower than 1000 px the sheet is full height`;
+    - `Get more models opens Get models, and Add a model file opens the import dialog`;
+    - the ported `pickerGroups`, `priceHint` and `localHint` cases.
+  - `ImportDialog.test.tsx`:
+    - `a picked file is read and its type shown, with Copy preselected from the last choice`;
+    - `a file inside the models folder skips the question`;
+    - `a LoRA file is added as a LoRA`;
+    - `a .ckpt file says Studio can't read .ckpt files`;
+    - `progress shows while the file is read, then the model is selected`.
+
+- [ ] **Step 2: Run them and see them fail.**
+  - Run: `npx vitest run src/components/studio/ModelSheet.test.tsx src/components/studio/ImportDialog.test.tsx`
+  - Expected: FAIL.
+
+- [ ] **Step 3: Implement.**
+
+- [ ] **Step 4: Run them and see them pass, and take the screenshots.**
+  - Run: `npm run lint && npm run typecheck && npm test`. Expected: PASS.
+  - Then: `npm run preview:shoot -- --only b,b2,z2,n,q --out .cache/preview/after`, with new screens `n-import-dialog` and `q-model-sheet-narrow` (900×650). Expected: one-line rows, no repeated Recent rows, and no sideways scroll.
+
+- [ ] **Step 5: Commit.**
+```bash
+git add src/components/studio src/store/studio.ts src/lib/words.ts e2e/preview
+git commit -m "Studio: the model sheet (search, recent, on this computer, cloud) and Add a model file"
+```
+
+### Task U5: The Get models view
+
+**Files:**
+- Create in `src/components/studio/`:
+  - `GetModels.tsx` (`GetModelsView`, `GetModelsHeader`, `HardwareChips`);
+  - `ModelSearch.tsx` (`ModelSearch`);
+  - `ModelCard.tsx` (`CatalogCard`, `ResultCard`, `InstalledCard`, `LoraCard`, `VerdictBadge`, plus `LicenceBadge`, `FitLine`, `TimeLine`, `useModelDownload` and `DownloadProgress` moved from `LocalModelRow.tsx`);
+  - `GetModels.test.tsx`.
+- Modify:
+  - `StudioView.tsx`: `localView` renders `GetModelsView` full width, with neither the composer nor the side panel, and resets the scroller to the top when it opens (critique §2 and §6: it opened at the bottom);
+  - `TopBar.tsx` (Get models while open reads as pressed);
+  - `src/store/studioLocal.ts`: `searchFilter: SearchFilter` and `fitsOnly: boolean` replace `localTab` and `onlyFits`;
+  - `EngineLine.tsx` (shown in the header);
+  - `src/lib/words.ts`.
+- Delete: `LocalModels.tsx` and `LocalModelRow.tsx`. `LocalModels.test.tsx` becomes `GetModels.test.tsx`: its engine-line and notice cases are kept, and its list cases are replaced. `LocalSearch.tsx` stays only for its `RepoResult`, shown in a `SlideOver` when a result opens, until Task U6 replaces it.
+- Test: `GetModels.test.tsx`, `StudioView.test.tsx`
+
+**Interfaces:**
+- Consumes:
+  - `LocalModels` (`hardware`, `engine`, `recommended: LocalEntry[]`, `installed`, `loras`);
+  - `search(text, filter)` and `localSearch.hits: LocalSearchHit[]` (`author`, `downloads`, `likes`, `updatedAt`, `verdict`, `exact`);
+  - `repos`, `openRepo`, `deleteLocal`, `repairLocal`, `deleteLora` and `openImport` (Tasks S12 and U4).
+- Produces:
+```ts
+export function GetModelsView(): JSX.Element;
+export function VerdictBadge(p: { verdict: Verdict; exact: boolean }): JSX.Element;   // words below; a hint is lighter, with Tip "From the name: opening it reads the files"
+export function ResultCard(p: { hit: LocalSearchHit; onOpen(): void }): JSX.Element;  // an <article> named by the repo; its open control is the card's heading button
+```
+- **The header:** "Get models" at `text-view-title`; this computer as `HardwareChips` (graphics card and memory, RAM, free disk); *Add a model file* and *Add a LoRA file*; Back.
+- **The search** (design 10.3):
+  - a large field labelled "Search Hugging Face", placeholder "Search Hugging Face: SDXL, Flux, Wan 2.2, or a repo name";
+  - a `ChipGroup` with Pictures · Video · LoRAs, starting from the tab;
+  - a `SwitchField` *Fits this computer*, which hides results already opened (`repos[repo]`) with no `best` file. Results not yet opened stay.
+- **Without a query:**
+  - *Recommended for this computer* (`CatalogCard`s);
+  - *Popular on Hugging Face*: `search("", filter)`, asked once each time the view opens. Task D1 documents this request;
+  - *On this computer*: `InstalledCard`s (Delete, Repair) and `LoraCard`s (Delete);
+  - all in a grid of 2–3 columns.
+- **Result cards:** name and author; downloads and likes; "updated <relative date>"; `VerdictBadge`.
+- Words:
+  - `GET_MODELS`: `title`, `back` "Back", `searchLabel`, `searchPlaceholder`, `pictures`, `video`, `loras`, `fitsOnly` "Fits this computer", `recommended` "Recommended for this computer", `popular` "Popular on Hugging Face", `here` "On this computer", `addModel`, `addLora`, `downloads(n)`, `likes(n)`, `updated(date)`, `gpu(name, gb)`, `ram(gb)`, `freeDisk(gb)`;
+  - `VERDICT`: `works(type)` "Works in Studio · SDXL", `lora(type)` "LoRA for FLUX.1", `cantRun(reason)` "Can't run: Lumina 2" (a short form per `CannotRunReason`), `unknown` "Open to check", `hint`.
+
+**Steps**
+
+- [ ] **Step 1: Write the failing tests.**
+  - `GetModels.test.tsx`:
+    - `Get models opens as a full view at its top, without the composer or the side panel`: the scroller's `scrollTop` is 0, and there is no "Prompt" textbox;
+    - `Back returns to the results and the composer`;
+    - `without a query it shows Recommended, Popular on Hugging Face and On this computer, and asks for the popular list once`: `search` is called with "" and "pictures";
+    - `the header shows this computer as chips`;
+    - `the LoRAs chip searches LoRAs`;
+    - `a result card shows author, downloads, likes, when it was updated and its verdict in words`: "Works in Studio · SDXL", "LoRA for FLUX.1", "Can't run: Lumina 2";
+    - `a hint becomes exact once the result was opened`;
+    - `Fits this computer hides opened results that have no file for this computer`;
+    - `installed models and LoRAs offer Delete, and models offer Repair`;
+    - the ported engine-line and notice cases.
+  - `StudioView.test.tsx`: `the Get models button reads as pressed while the view is open`.
+
+- [ ] **Step 2: Run them and see them fail.**
+  - Run: `npx vitest run src/components/studio/GetModels.test.tsx src/components/studio/StudioView.test.tsx`
+  - Expected: FAIL.
+
+- [ ] **Step 3: Implement.**
+
+- [ ] **Step 4: Run them and see them pass, and take the screenshots.**
+  - Run: `npm run lint && npm run typecheck && npm test`. Expected: PASS.
+  - Then: `npm run preview:shoot -- --only c0,c,c2,d --out .cache/preview/after`. Expected: `c` and `c2` are the same (opened at the top), and search and verdict badges are above the fold.
+
+- [ ] **Step 5: Commit.**
+```bash
+git add src/components/studio src/store/studioLocal.ts src/lib/words.ts e2e/preview
+git commit -m "Studio: Get models as a full view: search with filters, verdict badges, recommended, popular and installed"
+```
+
+### Task U6: A result's detail panel
+
+**Files:**
+- Create in `src/components/studio/`:
+  - `ModelDetail.tsx` (`ModelDetail`, `MainFileList`, `PlanParts`, `OtherFiles`);
+  - `ModelDetail.test.tsx`.
+- Modify:
+  - `GetModels.tsx`: result and catalog cards open `ModelDetail`;
+  - `src/store/studioLocal.ts`: `detail` with `openDetail` and `closeDetail`; `offer`, `setOffer` and `downloadLocal` go;
+  - `src/lib/words.ts`.
+- Delete: `LocalSearch.tsx`, `DownloadLocalModel.tsx` and `localOffers.ts`. `DownloadLocalModel.test.tsx` becomes `ModelDetail.test.tsx`: the licence-wording cases of `verdict()` are kept, and the dialog cases are replaced, because the panel is the confirmation. `LocalNotice.tsx` and its test are unchanged.
+- Test: `ModelDetail.test.tsx`
+
+**Interfaces:**
+- Consumes:
+  - `openRepo` → `LocalRepo`: `summary`, `files: LocalFileChoice[]` (`quant`, `label`, `plan`, `best`), `fileViews`, `loras`, `licence(s)` and `gate`;
+  - a catalog `LocalEntry` (`parts`, `licences`, `toFetchBytes`, `fit`);
+  - `setupPlan(source, choice)`, `downloadSetup(source, choice)` and `downloadLora`;
+  - `chooseFile("model")`, giving `SlotOverride { role, file: { disk: { path } } }`;
+  - `api.studioLocalDownloadFile` and `noticeOpen` (Task S12);
+  - `LicenceBadge`, with OpenRAIL in amber (Task S6).
+- Produces:
+```ts
+// store/studioLocal.ts
+detail: { repo: string } | { entryId: string } | null;
+openDetail(d: { repo: string } | { entryId: string }): Promise<void>;   // a repo is read with openRepo
+closeDetail(): void;
+export function ModelDetail(): JSX.Element | null;                      // a SlideOver, width "half", titled by the repo or model name
+```
+- **The panel** (design 10.3), top to bottom:
+  1. the summary;
+  2. *Main file*: a radio group, one per quantisation or precision, each with its size and fit word. *Best for this computer* is marked and preselected; with none, the smallest is;
+  3. *Model type*: a `SelectField`, when `plan.recipes` has more than one recipe;
+  4. *Extra files Studio adds* (`PlanParts`): each with `SLOT_LABEL`, size, licence and "already on this computer". A missing part offers *Choose a file*;
+  5. the licence(s) and "Total to download: X";
+  6. one **Download**, off with the reason while a part is missing or a gated repo has no token, with the token's link;
+  7. `OtherFiles`: files Studio can't run, each with its reason and a quiet *Download file anyway*; LoRA files, each with *Download LoRA*.
+- **Download.**
+  - Download calls `downloadSetup` directly. There is no second dialog; this keeps the four-click target.
+  - The first download still shows the local-model notice, as now.
+- Words: `MODEL_DETAIL`: `mainFile` "Main file", `best` "Best for this computer", `modelType` "Model type", `extras` "Extra files Studio adds", `alreadyHere` "already on this computer", `chooseFile` "Choose a file", `total(size)`, `download` "Download", `missingWhy` "Choose a file for each part first.", `needsToken`, `anyway` "Download file anyway", `downloadLora` "Download LoRA".
+
+**Steps**
+
+- [ ] **Step 1: Write the failing tests** (`ModelDetail.test.tsx`):
+  - `opening a result shows its summary, one choice per quantisation, and Best for this computer on the largest that fits`;
+  - `the best choice is preselected, and the plan lists each extra file in words with its size and "already on this computer"`;
+  - `the total counts only the files to download`;
+  - `changing the model type asks for a new plan`: `setupPlan` is called with `{ recipe: "flux1-dev", overrides: [] }`;
+  - `a missing part offers Choose a file, and Download says why it is off`;
+  - `Download starts the download with the choice, with no other dialog`: `downloadSetup` is called once;
+  - `the first Download shows the local-model notice first`;
+  - `a file Studio can't run shows its reason and a quiet Download file anyway`;
+  - `an OpenRAIL licence reads amber "Commercial use allowed, with use rules" with a link`;
+  - `the panel traps focus, and Esc closes it with focus back on the card`;
+  - the kept `verdict()` licence-wording cases.
+
+- [ ] **Step 2: Run them and see them fail.**
+  - Run: `npx vitest run src/components/studio/ModelDetail.test.tsx`
+  - Expected: FAIL.
+
+- [ ] **Step 3: Implement.**
+
+- [ ] **Step 4: Run them and see them pass, and take the screenshots.**
+  - Run: `npm run lint && npm run typecheck && npm test`. Expected: PASS.
+  - Then: `npm run preview:shoot -- --only d2,d3,e0,e --out .cache/preview/after`. Here `e` is the panel's plan, in place of the 0.1.2 dialog. Expected: one Download per result, and the best file marked.
+
+- [ ] **Step 5: Commit.**
+```bash
+git add src/components/studio src/store/studioLocal.ts src/lib/words.ts e2e/preview
+git commit -m "Studio: a result's detail panel: one choice per quantisation, the best for this computer, extra files, one Download"
+```
+
+### Task U7: Downloads: progress, Pause and Cancel, the top-bar indicator and *Use it*
+
+**Files:**
+- Create in `src/components/studio/`:
+  - `DownloadState.tsx` (`DownloadState`, plus `useModelDownload` moved from `ModelCard.tsx`);
+  - `DownloadIndicator.tsx` (`DownloadIndicator`);
+  - `DownloadState.test.tsx`;
+  - `sizes.test.ts`.
+- Modify:
+  - `ModelCard.tsx` and `ModelDetail.tsx` (show `DownloadState`);
+  - `TopBar.tsx` (the indicator);
+  - `src/store/studio.ts`: `pickNewModel`, and the download follower;
+  - every file under `src/components/studio/` and `src/store/studio*.ts` that uses `amountGb` (critique §2.7 and §6: two formats on one card);
+  - `src/lib/words.ts`.
+- Test: `DownloadState.test.tsx`, `GetModels.test.tsx`, `StudioView.test.tsx`, `sizes.test.ts`
+
+**Interfaces:**
+- Consumes:
+  - `useDownloads` groups (`DownloadGroup.genModelId`, `loraId` from Task S10, `bytesDone`, `bytesTotal`, `status`, `bytesPerSecond`);
+  - `ipc.pauseDownload`, `ipc.resumeDownload` and `ipc.cancelDownload` (`src/lib/ipc.ts:267-269`);
+  - `refreshLocal`, `loadLoras` and `chooseModel`.
+- Produces:
+```ts
+// store/studio.ts
+pickNewModel(genModelId: string): void;   // chooses the installed model for its kind (tab switched to it), closes Get models and the detail panel; not named use…, which the hooks lint rule reserves
+// the follower: subscribed to `download-progress` when Studio loads, not by a view; a group with genModelId or loraId that
+// reaches "completed" triggers refreshLocal() or loadLoras() (critique §6: 0.1.2 only re-read while Get local models was open)
+export function DownloadState(p: { group: DownloadGroup; name: string; onUse?(): void }): JSX.Element;   // bar, "2.4 GB of 6.7 GB · 2 min left", Pause/Resume, Cancel, Use it
+export function DownloadIndicator(): JSX.Element | null;   // top bar; hidden with no Studio download; a popover lists them, each a DownloadState
+```
+- **Sizes.** Studio shows sizes with `formatBytes` (decimal GB) only. Plan decision: it is what Hugging Face and the chat's Models dialog show (critique §5).
+- Words: `STUDIO_DOWNLOADS`: `indicator(n)` "2 downloading", `progress(done, total, left)`, `pause(name)`, `resume(name)`, `cancel(name)`, `useIt` "Use it", `ready` "Ready".
+
+**Steps**
+
+- [ ] **Step 1: Write the failing tests.**
+  - `DownloadState.test.tsx`:
+    - `progress reads in one size format`: "2.4 GB of 6.7 GB";
+    - `Pause and Cancel are buttons named for the model, and call the download commands`;
+    - `a finished download offers Use it`.
+  - `GetModels.test.tsx`:
+    - `a finished model's card offers Use it, which selects it and returns to the results`;
+    - **`using a new model takes at most 4 clicks`.** From the results, with the notice already accepted, it counts every `fireEvent.click`:
+      1. *Get models*;
+      2. a result card;
+      3. *Download* (then the test emits `download-progress` with status `completed` for its `genModelId`);
+      4. *Use it*.
+
+      It asserts `clicks <= 4`, the draft's model is the new one, `localView === false`, and the composer is shown (design 10.3).
+    - **`a download finished elsewhere lists the model and offers Use it`** (Review Focus 3). With Get models closed and the results shown, `download-progress` completes a group with a `genModelId`. Then `refreshLocal` has run, the model is a row of the model sheet, and the indicator's popover offers *Use it*.
+  - `StudioView.test.tsx`: `the top-bar indicator counts running downloads and lists them`.
+  - `sizes.test.ts`: `no Studio source uses amountGb`. It uses `import.meta.glob("./**/*.{ts,tsx}", { query: "?raw", eager: true })`, and `src/store/studio*.ts` the same way.
+
+- [ ] **Step 2: Run them and see them fail.**
+  - Run: `npx vitest run src/components/studio`
+  - Expected: FAIL.
+
+- [ ] **Step 3: Implement.**
+
+- [ ] **Step 4: Run them and see them pass, and take the screenshots.**
+  - Run: `npm run lint && npm run typecheck && npm test`. Expected: PASS.
+  - Then: `npm run preview:shoot -- --only e2,p --out .cache/preview/after`, with a new screen `p-download-indicator` (the popover open). Expected: Pause and Cancel on the card, and one size format.
+
+- [ ] **Step 5: Commit.**
+```bash
+git add src/components/studio src/store src/lib/words.ts e2e/preview
+git commit -m "Studio: downloads show progress with Pause and Cancel everywhere, a top-bar indicator, and Use it in four clicks"
+```
+
+### Task U8: The Settings panel: My setups, Advanced, LoRAs and Files
+
+**Files:**
+- Create in `src/components/studio/`:
+  - `LorasSection.tsx` (`LorasSection`, `LoraRow`) and `LorasSection.test.tsx`;
+  - `ModelFilesSection.tsx` (`ModelFilesSection`, `SlotRow`, `ChangeFileMenu`, `HubFileDialog`) and `ModelFilesSection.test.tsx`.
+- Modify:
+  - `SettingsPanel.tsx`: sections `MySetups`, `AdvancedSection`, `LorasSection` and `ModelFilesSection`; it scrolls to `settingsSection`;
+  - `AdvancedDrawer.tsx`, `ParamField.tsx` and `SettingField.tsx`:
+    - native `select`, range and checkbox become `SelectField`, `SliderField` and `CheckboxField`/`SwitchField` (critique §2.8);
+    - Sampler and Scheduler are both `SelectField`s;
+    - "Automatic" is the control's placeholder, not a second label (critique §4.f);
+  - `Composer.tsx`: a *LoRAs (n)* toolbar button for local models with `takesLoras`, which calls `setSettingsOpen(true, "loras")` (design 10.1);
+  - `src/lib/words.ts`.
+- Test:
+  - `SettingsPanel.test.tsx` (rewritten: its My setups cases are kept with the new select, and its Shape/How many cases move to `Composer.test.tsx` in Task U3);
+  - `AdvancedDrawer.test.tsx` and `ParamField.test.tsx` (updated for the Radix roles `combobox`, `slider` and `switch`, with the same behaviours);
+  - `LorasSection.test.tsx`, `ModelFilesSection.test.tsx`.
+
+**Interfaces:**
+- Consumes:
+  - `loras`, `lorasFor(model)`, `attachLora`, `setLoraWeight`, `setLoraHighNoise` and `detachLora`;
+  - the param `ParamKind` `loras` (`max`, `highNoise`, `weightMin`, `weightMax`, `weightStep`, `weightDefault`);
+  - `InstalledLocal.highNoise`, `takesLoras`, `loraBase`, `needsSetup`, `untested` and `recipe`;
+  - `modelFiles(id)` → `ModelFiles` (`slots: PlannedSlot[]`, `recipes`, `untested`, `canRun`), and `setModelFiles(id, choice)` → `SetModelFilesResult`;
+  - `chooseFile`, `openRepo` (for a Hugging Face file), `saveSetup`, `applySetup` and `openImport("lora")`.
+- Produces:
+```ts
+export function LorasSection(p: { tab: StudioTab; model: InstalledLocal }): JSX.Element;
+export function ModelFilesSection(p: { model: InstalledLocal }): JSX.Element;
+```
+- **LoRAs** (design 8):
+  - *Add* is a `MenuButton` listing `lorasFor(model).fits`, then `others`, each marked "may not fit this model".
+  - Each attached LoRA shows its name, a `SliderField` "Strength of <name>" (−1 to 2, step 0.05, default 1), the *High-noise part* `SwitchField` only when `model.highNoise`, and *Remove*.
+  - Under them: *Add a LoRA file* (`openImport("lora")`) and *Get LoRAs* (Get models with the LoRAs filter).
+- **Files** (design 7.5):
+  - The *Model type* `SelectField` (`recipes`), then one `SlotRow` per planned slot: `SLOT_LABEL`, the file name, size and "required".
+  - *Change* is a `ChangeFileMenu` with *A file on this computer*, *A file from disk…* and *A file from Hugging Face…*. The last is a small dialog: a repo name, then a file from its `fileViews`.
+  - "untested set-up" shows when `untested`.
+  - A model that `needsSetup` opens here, and Create stays off until `canRun`.
+- **The panel** never holds Shape or How many (design 10.1).
+- Words:
+  - `STUDIO_PANEL`: `title` "Settings", `setups` "My setups", `advanced` "Advanced", `loras` "LoRAs", `files` "Files";
+  - `LORAS` additions: `strengthOf(name)`, `getLoras` "Get LoRAs", `lorasButton(n)` "LoRAs (1)";
+  - `FILES`: `change` "Change", `installedFile` "A file on this computer", `diskFile` "A file from disk…", `hubFile` "A file from Hugging Face…", `repoLabel` "Repository", `untested`, `needsSetup` "Choose the model type and its files to use this model.".
+
+**Steps**
+
+- [ ] **Step 1: Write the failing tests.**
+  - `SettingsPanel.test.tsx`:
+    - `the panel holds My setups, Advanced, LoRAs and Files, and never Shape or How many`;
+    - `My setups is a select named "My setups", and applying one fills the draft`.
+  - `LorasSection.test.tsx`:
+    - `Add lists the LoRAs for this model first, and marks the others "may not fit this model"`;
+    - `a LoRA's strength slider goes from -1 to 2 in steps of 0.05, starts at 1, and is named after the LoRA`;
+    - `a Wan 2.2 A14B model shows the High-noise part switch, and others do not`;
+    - `the composer's LoRAs button shows the count and opens this section`.
+  - `ModelFilesSection.test.tsx`:
+    - `Files lists each part with its role in words, and Change offers installed, disk and Hugging Face files`;
+    - `choosing a disk file calls setModelFiles with a disk override`;
+    - `a model type the detection did not pick shows the untested set-up note`;
+    - `a model that needs setting up opens Files, and Create is off until it can run`.
+  - `AdvancedDrawer.test.tsx` and `ParamField.test.tsx`:
+    - `Sampler and Scheduler are selects listing every engine choice by its plain name`: 21 and 17 options;
+    - the existing cases, with the new roles.
+
+- [ ] **Step 2: Run them and see them fail.**
+  - Run: `npx vitest run src/components/studio`
+  - Expected: FAIL.
+
+- [ ] **Step 3: Implement.**
+
+- [ ] **Step 4: Run them and see them pass, and take the screenshots.**
+  - Run: `npm run lint && npm run typecheck && npm test`. Expected: PASS.
+  - Then: `npm run preview:shoot -- --only f,f2,l,m --out .cache/preview/after`, with new screens `l-loras` (two LoRAs attached) and `m-model-files` (the untested model). Expected: no native controls in the panel.
+
+- [ ] **Step 5: Commit.**
+```bash
+git add src/components/studio src/lib/words.ts e2e/preview
+git commit -m "Studio: the Settings panel with My setups, Advanced, LoRAs in full and the model's files"
+```
+
+### Task U9: Results and polish
+
+**Files:**
+- Modify in `src/components/studio/`:
+  - `RunCard.tsx`, `results.tsx` (`ResultTile`) and `Working.tsx`;
+  - `Grid.tsx`: a Select mode, with no checkbox on every tile;
+  - `EmptyStates.tsx`;
+  - `Viewer.tsx`: its native checkbox becomes `CheckboxField`, and help in `title` becomes `Tip`;
+  - `StudioView.tsx`: the grid opens at its top (critique §6, g2), and the page uses `.studio-page`.
+- Also modify `src/lib/words.ts`.
+- Test:
+  - `RunCard.test.tsx`, `Grid.test.tsx`, `Viewer.test.tsx` and `StudioView.test.tsx` (updated);
+  - `EmptyStates.test.tsx` (new);
+  - the strict harness run.
+
+**Interfaces:**
+- **Run cards** (design 10.4):
+  - thumbnails up to 256 px at the picture's own shape;
+  - the prompt as the card's heading (`h3`, `text-section`);
+  - settings and model as one `text-meta` line (`settingsLine.ts`, with the LoRA part from Task S12 and "untested set-up" when true);
+  - progress as a thin bar with one status line;
+  - a failure as an inline `role="alert"` with the message, the next step and its actions.
+- **The grid:**
+  - tiles of about 220 px, with actions on hover and focus, each named;
+  - *Select* turns on a mode with a `CheckboxField` per tile and a bar of actions on the selection.
+- **Empty states:** an icon, one line and a primary action.
+  - "No models on this computer yet" offers *Get models*.
+  - First use names the model that fits, as in 0.1.2, and its button opens that model's detail panel.
+- **Polish:**
+  - Light mode: the page is `bg-subtle`, and cards are `surface` with `border` and `shadow-soft`.
+  - The accent gradient is on Create and primary buttons only.
+- **The narrow window** (900×650): the composer toolbar wraps onto two lines, the side panel is an overlay, and nothing scrolls sideways.
+- Words: `STUDIO_RESULTS`: `select` "Select", `selected(n)`, `done` "Done", `noModels` "No models on this computer yet", `getModels` "Get models", `deleteSelected(n)`.
+
+**Steps**
+
+- [ ] **Step 1: Write the failing tests.**
+  - `RunCard.test.tsx`:
+    - `a finished card leads with its pictures at their own shape, up to 256 px`;
+    - `the prompt is the card's heading, and settings and model are one line`;
+    - `a failure is an inline alert with its message, next step and actions`.
+  - `Grid.test.tsx`:
+    - `tiles have no checkbox until Select, and Select mode picks tiles and offers actions on them`;
+    - `a tile's actions are buttons named for the picture, reachable by keyboard`.
+  - `StudioView.test.tsx`: `the grid opens at its top`.
+  - `EmptyStates.test.tsx`: `with no local models it says so and Get models opens Get models`.
+  - `Viewer.test.tsx`: `saving the settings as a .json file is a checkbox named for it`.
+
+- [ ] **Step 2: Run them and see them fail.**
+  - Run: `npx vitest run src/components/studio`
+  - Expected: FAIL.
+
+- [ ] **Step 3: Implement.**
+
+- [ ] **Step 4: Run them and see them pass, and take the after set and the pairs.**
+  - Run: `npm run lint && npm run typecheck && npm test`. Expected: PASS.
+  - Then:
+    - Run: `npm run preview:shoot -- --strict --out .cache/preview/after`
+    - Expected: every screen in both themes, no unanswered command, no sideways scroll (including `j` at 900×650), and a body share of at least 0.5 on every Studio screen.
+  - Then: `npm run preview:pairs -- .cache/preview/before .cache/preview/after`. Expected: `.cache/preview/pairs.html`, with the pairs design 10.5 names for the owner (main view `a`, model sheet `b`, Get models `c`, a result's detail panel `d2`, grid `g`).
+
+- [ ] **Step 5: Commit.**
+```bash
+git add src/components/studio src/styles.css src/lib/words.ts e2e/preview
+git commit -m "Studio: results lead with the pictures, a grid with a Select mode, empty states, and a window that fits at 900 px"
+```
 
 ## Phase G: fewer blocks (section 9)
 
@@ -2945,6 +3745,7 @@ The inventory ids (S3–S11, S49, S54, C2–C5) and their `file:line` are from t
   - `src-tauri/src/studio/spend.rs` (inventory S3 `38-54, 87-107`; inventory S5 `101-105`; inventory S7 `30-32, 210-217`);
   - `src-tauri/src/studio/manager.rs`: where `confirm_rules()` is used;
   - `src/components/settings/StudioSettings.tsx` (inventory S4 `28-30, 333-342`; inventory S6 `343-378`) and `src/components/settings/StudioSettings.test.tsx`;
+  - `src/components/studio/TopBar.tsx` (the spend for today);
   - `src/components/studio/types.ts` (`StudioPrefs`, `Estimate.confirmAtUsd`);
   - `src/lib/words.ts` (inventory S4 `1818-1821`, inventory S6 `1822-1826`);
   - `e2e/m12_studio.py`: `c_video` turns *Ask before every video* on first; `c_daily_limit` turns *Daily limit* on before setting $1;
@@ -2978,7 +3779,8 @@ pub struct ConfirmRules { pub every_video: bool, pub at_usd: Option<f64>, pub un
   - `UnknownPrice` only when `unknown_price`.
 - `check_limit` is unchanged: `Ok` when there is no limit, and the $5 reserve (`UNKNOWN_PRICE_RESERVE_USD`) only with a limit.
 - **The constants stay.** `CONFIRM_AT_USD` 1.0 and `DEFAULT_DAILY_LIMIT_USD` 10.0 are the amounts filled in when a switch is turned on. Plan decision: they are familiar starting amounts, and `docs_test` keeps pinning them.
-- **Settings → Studio → Spending** has four switches (`role="switch"`, each labelled), all off. Turning one on shows its amount field, with the same ranges as now: $1–$1,000 and $0.25–$100.
+- **Settings → Studio → Spending** has four `SwitchField`s (Task U2), each labelled and all off. Turning one on shows its amount field, with the same ranges as now: $1–$1,000 and $0.25–$100.
+- **The top bar's spend for today** shows while any of the four switches is on. Task U3 showed it for the daily limit only (design 10.1).
 
 **Steps**
 
@@ -3034,49 +3836,51 @@ git commit -m "Studio: spending guards are optional switches, off by default; ol
 
 ### Task G2: Local run blocks become warnings, in the webview
 
-The backend side, removing the refusals and judging video on the processor, is Task S11. This task is what the person sees.
+The backend side, removing the refusals and judging video on the processor, is Task S11. Phase U builds the new composer, cards and detail panel without any fit-based disabling, and the warning wording is defined in Task S12. This task adds the warning lines where the person decides, offers video on processor-only computers, and removes every old refusal (inventory S10, S11, S12).
 
 **Files:**
 - Modify:
-  - `src/components/studio/PromptDock.tsx` (inventory S10 `99-117, 188-191`) and its test;
-  - `src/components/studio/LocalModelRow.tsx` (inventory S10 `200-235`: Download at 210, `repair={!notHere}` at 235);
-  - `src/components/studio/LocalModels.tsx` (inventory S10 `53-63, 203-216`; S11) and its test;
-  - `src/lib/words.ts` (inventory S10 `1157-1164, 1408-1414, 1880`; inventory S11 `1115-1117, 1230-1231`).
-- Test: `PromptDock.test.tsx`, `LocalModels.test.tsx`
+  - `src/components/studio/Composer.tsx` and `Composer.test.tsx` (Task U3; 0.1.2's block was `PromptDock.tsx`, inventory S10 `99-117, 188-191`);
+  - `src/components/studio/ModelCard.tsx` and `ModelDetail.tsx` (Tasks U5 and U6; 0.1.2's were `LocalModelRow.tsx`, inventory S10 `200-235`, and `LocalModels.tsx`, inventory S10 `53-63, 203-216`);
+  - `src/components/studio/TopBar.tsx`: the Video tab on processor-only computers (inventory S11);
+  - `src/lib/words.ts`: remove inventory S10 `1157-1164, 1408-1414, 1880` and inventory S11 `1115-1117, 1230-1231`;
+  - `src-tauri/src/studio/errors.rs`: remove inventory S11/S12 `1226-1229`, the "video needs a graphics card" reasons.
+- Test: `Composer.test.tsx`, `GetModels.test.tsx`, `ModelDetail.test.tsx`, `StudioView.test.tsx`, and a new `src/lib/words.test.ts`
 
 **Interfaces:**
-- Consumes: `LocalFit.word`, `LocalFit.reason` and `LocalFit.videoOnProcessor`, and `LocalModels.videoOnProcessor` (Task S11).
+- Consumes:
+  - `LocalFit.word`, `LocalFit.reason` and `LocalFit.videoOnProcessor`, and `LocalModels.videoOnProcessor` (Task S11);
+  - `LOCAL_WARNING` (Task S12).
 - Produces:
-  - `words.ts`:
-    - `LOCAL_WARNING.mayNotFit(reason)` = "May not fit this computer: <reason>. It may fail or be very slow.";
-    - `LOCAL_WARNING.videoOnProcessor` = "Video on the processor is very slow".
-  - The old "Not for this computer" refusal strings and "Video on this computer needs a graphics card…" are removed.
-  - The *Only what fits* filter stays (inventory S21, not the owner's pick). Rows folded under it now show Download.
+  - A warning line, `role="status"`, beside Create, under a card's fit and in the detail panel's plan. It is never a disabled state.
+  - The *Only what fits* filter, now Get models' *Fits this computer* switch, stays (inventory S21, not the owner's pick).
 
 **Steps**
 
 - [ ] **Step 1: Write the failing tests.**
-  - `PromptDock.test.tsx`:
+  - `Composer.test.tsx`:
     - `a model that may not fit keeps Create enabled and shows the warning`: fit `{ word: "notHere", reason: "needs 6 GB of graphics memory" }` gives an enabled Create button and the text "May not fit this computer: needs 6 GB of graphics memory. It may fail or be very slow.".
     - `video on the processor shows its warning`.
-  - `LocalModels.test.tsx`:
-    - `a model that may not fit still offers Download and Download again`.
-    - `the video tab is offered on a computer that runs models on the processor`.
+  - `GetModels.test.tsx`: `a card that may not fit shows the warning and still offers Download and Download again`.
+  - `ModelDetail.test.tsx`: `a choice that may not fit shows the warning and Download stays on`.
+  - `StudioView.test.tsx`: `the Video tab is offered on a computer that runs models on the processor`.
+  - `words.test.ts`: `no wording says a model is not for this computer`. Every string reachable from `words.ts`'s exports contains neither "Not for this computer" nor "needs a graphics card or an Apple-silicon Mac".
 
 - [ ] **Step 2: Run them and see them fail.**
-  - Run: `npx vitest run src/components/studio/PromptDock.test.tsx src/components/studio/LocalModels.test.tsx`
+  - Run: `npx vitest run src/components/studio src/lib/words.test.ts`
   - Expected: FAIL.
 
-- [ ] **Step 3: Implement.** The warning is a `role="status"` line next to Create, never a disabled state.
+- [ ] **Step 3: Implement.**
 
 - [ ] **Step 4: Run them and see them pass.**
-  - Run: `npm run lint && npm run typecheck && npm test`
+  - Run: `npm run lint && npm run typecheck && npm test && cargo test -p app --lib studio::errors`
   - Expected: PASS.
+  - Then: `npm run preview:shoot -- --only a,c,d2,k --out .cache/preview/after`. Expected: the warning lines show, with no sideways scroll.
 
 - [ ] **Step 5: Commit.**
 ```bash
-git add src/components/studio src/lib/words.ts
-git commit -m "Studio: 'May not fit this computer' is a warning; Create, Download and Download again stay"
+git add src/components/studio src/lib src-tauri/src/studio/errors.rs e2e/preview
+git commit -m "Studio: 'May not fit this computer' is a warning; Create, Download and Download again stay; video on the processor is offered"
 ```
 
 ### Task G3: One 1 MiB prompt bound, Create that finishes the price, and updates that stop the job
@@ -3090,8 +3894,8 @@ git commit -m "Studio: 'May not fit this computer' is a warning; Create, Downloa
     - `src-tauri/src/studio/local.rs` (`714-716`);
     - `src-tauri/src/studio/errors.rs` (`365-366, 1086-1098, 1255-1257`);
     - `src/store/studioRun.ts` (`276-302`);
-    - `src/components/studio/PromptDock.tsx` (`107-110, 150-162`).
-  - **Waiting for the price (inventory S49):** `src/store/studio.ts` (`216-236, 409-416, 470-480`) and `src/components/studio/PromptDock.tsx` (`114-115, 168`).
+    - `src/components/studio/Composer.tsx` (Task U3; 0.1.2's cap was at `PromptDock.tsx:107-110, 150-162`).
+  - **Waiting for the price (inventory S49):** `src/store/studio.ts` (`216-236, 409-416, 470-480`) and `src/components/studio/Composer.tsx` (0.1.2: `PromptDock.tsx:114-115, 168`).
   - **Updates while a local job runs (inventory S54):** `src-tauri/src/updates.rs` (`660-669, 675-677`), `src/components/UpdateBox.tsx` and their tests.
   - `src/lib/words.ts`.
   - `ARCHITECTURE.md` §7.9: the 4,000-character sentence and "Installing an update is refused…".
@@ -3474,7 +4278,7 @@ git commit -m "Docs: the 0.1.x follow-ups: process and trust tables, the sidecar
   - the vendored recipes (`catalog/sd-recipes.json`, `scripts/vendor_sd_recipes.py`, the commit test);
   - header reads: Range on the revision-pinned resolve URL, the guarded fetcher, **100 MiB**, **64 MiB** and **24 files**, the 512-entry cache;
   - the detection port: two passes, the not-ported per-family renames, the guards for Lumina 2, LTX-Video 0.9 and HunyuanVideo v1;
-  - the matching table: 88 recipes in scope, and the reasons the other 24 are not;
+  - the matching table: 94 recipes in scope, and the reasons the other 18 are not; mask and control pictures as inputs;
   - the companion table in the signed catalog;
   - the set-up order;
   - import, copied or in place, never deleted outside the models folder;
@@ -3482,7 +4286,7 @@ git commit -m "Docs: the 0.1.x follow-ups: process and trust tables, the sidecar
   - LoRAs: the `@loras` folder, relative names, tags by prompt file, typed tags removed;
   - arguments from recipes, and the memory flags;
   - fit as a warning.
-- **§13.6, the "Studio on this computer" row:** file headers are read with Range requests when a result opens. If Phase U shipped it, the Popular list is read when Get models opens.
+- **§13.6, the "Studio on this computer" row:** file headers are read with Range requests when a result opens, and the Popular list is read each time Get models opens (Task U5).
 - **§13.1:** headers from Hugging Face and imported files are untrusted input, parsed with caps and never executed. Pickle files are never parsed.
 - **§16/§17:** the detection fixtures and the capture script, which is not run in CI.
 - **SECURITY.md:**
@@ -3541,7 +4345,9 @@ git commit -m "Docs: 0.2.0: any model the Studio engine can run, LoRAs, header r
   - *Add a model file*;
   - LoRAs;
   - *Set it up yourself*;
-  - the model type and the full sampler and scheduler lists.
+  - the model type and the full sampler and scheduler lists;
+  - inpainting and Fill models with a mask picture, and FLUX.1 Canny, Depth and Flex.2 with a control picture;
+  - OpenRAIL licences shown as "Commercial use allowed, with use rules".
 - **Changed:**
   - spending guards are off by default, as switches;
   - "May not fit this computer" is a warning;
@@ -3550,11 +4356,17 @@ git commit -m "Docs: 0.2.0: any model the Studio engine can run, LoRAs, header r
   - Create finishes a pending price;
   - installing an update stops a local job;
   - chat mode switches stop asking, and a saved start mode is not asked again;
-  - plus Phase U's redesign, described in user terms.
+  - plus Phase U's redesign, described in user terms:
+    - one composer with the model chip;
+    - the model sheet;
+    - Get models as a full view with search, verdicts and a detail panel;
+    - Pause, Cancel and *Use it* on downloads;
+    - bigger pictures.
 - **Fixed:** the scheduled Reverse engineering test (Linux and macOS), and Kuna on a slow Mac.
 - **Known limits:**
   - models the engine cannot run (Lumina 2, LTX-Video 0.9, HunyuanVideo v1, HiDream-I1, SVD), with "Can't run in Studio";
-  - inpainting, ControlNet, IP-Adapter, upscalers and audio-driven video are not offered;
+  - ControlNet, IP-Adapter, PhotoMaker and other adapter files, upscalers and audio-driven video are not offered;
+  - masks are added as black-and-white pictures; painting a mask in the app comes later;
   - pickle files are not read;
   - split (sharded) files can't run.
 - No internal notes: no task ids, file names or CI details.
@@ -3642,16 +4454,22 @@ git commit -m "e2e: a generic SDXL model with a LoRA through the fake engine; sh
 | 6 Approaches | A: Phase R and S; B: S9 |
 | 7.1 Recipes | R1, R7 |
 | 7.2 Reading a file | R2, R4, R5, R6 |
-| 7.3 Before downloading | R3, S5, S6 |
+| 7.3 Before downloading | R3, S5, S6, U5 and U6 (labels on cards and in the detail panel) |
 | 7.4 Setting up | R8, S4, S6, S7, S1 (storage) |
-| 7.5 Set it up yourself | S9 |
+| 7.5 Set it up yourself | S9 (backend), U8 (Files) |
 | 7.6 Running | S2, S11 |
 | 7.7 Fit and time | S3, S11 |
-| 7.8 Import | S8 |
-| 8 LoRAs | R6 (detection), S1 (store), S10, S11, S12 |
+| 7.8 Import | S8 (backend), U4 and U5 (*Add a model file* in the model sheet and Get models) |
+| 8 LoRAs | R6 (detection), S1 (store), S10, S11, S12, U8 (the LoRAs section) |
 | 9.1 | G1 |
-| 9.2 | S11 (backend), G2, G3 |
+| 9.2 | S11 (backend), S12 (wording), G2, G3 |
 | 9.3 | G4 |
-| 10 | Phase U; its data and actions come from S6–S12 |
+| 10.0–10.1 (layout, composer, top bar) | U2, U3 |
+| 10.2 Switching models | U4 |
+| 10.3 Getting models (view, detail panel, downloads, the 4-click target) | U5, U6, U7 |
+| 10.4 Results and polish (controls, focus, type scale, surfaces, empty states, narrow window) | U2, U8, U9 |
+| 10.5 How the look is checked | U1 (harness), every U task's screenshot step, U9 (strict run and pairs) |
+| 11a OpenRAIL licences | S6 |
+| 11a Mask and control pictures | R7, S2, S3, S11, S12, U3 |
 | 11 | F1, F2, F3, F4 |
 | 12 Left to the builder | R5 module layout and "Plan decision:" notes throughout; R7 matching table; R8 defaults; S3 memory factors |
