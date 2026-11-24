@@ -3,5 +3,6 @@
 
 pub mod index;
 pub mod recipes;
+pub mod remote;
 #[cfg(any(test, feature = "test-support"))]
 pub mod testing;
