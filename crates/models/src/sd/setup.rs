@@ -3,10 +3,12 @@
 //! table. The rules, in order:
 //!
 //! 0. a diffusers folder lists its own files;
-//! 1. the main file goes into `model`, the recipe's main slot, or the high-noise slot;
+//! 1. the main file goes into `model` for a checkpoint, `diffusion_model` for a diffusion
+//!    model alone, or the high-noise slot;
 //! 2. a high/low pair's other half comes from the same repo;
-//! 3. every other required slot, and `vae` for an unmet `required_any`, comes from the first
-//!    of: the main file's own parts, an installed file, the same repo, the companion table;
+//! 3. every other required slot, the text encoders and VAE the main file does not carry, and
+//!    `vae` for an unmet `required_any`, comes from the first of: the main file's own parts,
+//!    an installed file, the same repo, the companion table;
 //! 4. optional slots: the vision encoders by the same order for a recipe that takes an input
 //!    picture, the others only from the main file's own parts;
 //! 5. the person's own choices win.
@@ -50,7 +52,7 @@ pub enum PlannedFile {
 /// The licence a fetched file comes under.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum LicenceRef {
-    /// The main file's repo's licence.
+    /// The licence of the `PlannedFile`'s own `repo`.
     Repo,
     /// A licence id of the companion table.
     Companion(String),
@@ -83,8 +85,9 @@ pub enum PartSource {
 #[derive(Debug, Clone, PartialEq)]
 pub struct PlannedPart {
     pub slot: SlotId,
-    /// Whether the plan needs the slot: the recipe requires it, it fills an unmet
-    /// `required_any`, or it is a diffusers folder's text encoder.
+    /// Whether the plan needs the slot: the recipe requires it, it is a text encoder or VAE
+    /// the main file does not carry, it fills an unmet `required_any`, or it is a diffusers
+    /// folder's text encoder.
     pub required: bool,
     pub source: PartSource,
     /// `None` for `Embedded` and `Missing`.
@@ -95,8 +98,9 @@ pub struct PlannedPart {
 pub struct SetupPlan {
     pub recipe_id: String,
     /// In the recipe's slot order, the plan's slots only; a checkpoint's `model` takes the
-    /// place of the recipe's `diffusion_model`, and a folder's parts that are not slots of
-    /// the recipe come last (`vae`, `clip_l`, `clip_g`).
+    /// place of the recipe's `diffusion_model`, a diffusion model's `diffusion_model` that of
+    /// the recipe's `model`, and a folder's parts that are not slots of the recipe come last
+    /// (`vae`, `clip_l`, `clip_g`).
     pub parts: Vec<PlannedPart>,
     pub untested: bool,
 }
@@ -260,15 +264,22 @@ pub fn plan_setup(input: &SetupInput<'_>) -> SetupPlan {
     }
 
     // Rules 3 and 4: the recipe's other slots. A checkpoint in `model` fills the recipe's
-    // `diffusion_model`.
-    let in_place = main_slot == SlotId::Model && recipe.main_slot() == SlotId::DiffusionModel;
+    // `diffusion_model`, and a diffusion model in `diffusion_model` the recipe's `model`.
+    let stood_in = match (main_slot, recipe.main_slot()) {
+        (SlotId::Model, SlotId::DiffusionModel) => Some(SlotId::DiffusionModel),
+        (SlotId::DiffusionModel, SlotId::Model) => Some(SlotId::Model),
+        _ => None,
+    };
     let required_any = planner.unmet_required_any(&parts);
+    let needed = |s: SlotId| {
+        planner.recipe_requires(s) || planner.own_part_missing(s) || required_any.contains(&s)
+    };
     let takes_picture = recipe.feature("ref_images") || recipe.feature("init_image");
     for s in planner.recipe_slots() {
-        if parts.contains_key(&s) || (in_place && s == SlotId::DiffusionModel) {
+        if parts.contains_key(&s) || stood_in == Some(s) {
             continue;
         }
-        let required = planner.recipe_requires(s) || required_any.contains(&s);
+        let required = needed(s);
         let vision = matches!(s, SlotId::LlmVision | SlotId::ClipVision);
         let found = if required || (vision && takes_picture) {
             planner.fill(s)
@@ -285,15 +296,13 @@ pub fn plan_setup(input: &SetupInput<'_>) -> SetupPlan {
     // Rule 5: the person's own choices, a later one for a slot winning.
     for (s, choice) in input.overrides {
         let s = *s;
-        if in_place && s == SlotId::DiffusionModel {
+        if stood_in == Some(s) {
             // The choice is the main file, in the recipe's own slot.
-            parts.remove(&SlotId::Model);
+            parts.remove(&main_slot);
         }
         let required = match parts.get(&s) {
             Some(part) => part.required,
-            None if planner.recipe_slots().any(|r| r == s) => {
-                planner.recipe_requires(s) || required_any.contains(&s)
-            }
+            None if planner.recipe_slots().any(|r| r == s) => needed(s),
             // A slot neither the recipe nor the plan has.
             None => continue,
         };
@@ -336,13 +345,15 @@ impl Planner<'_, '_> {
         self.input.recipe.slot(slot).is_some_and(|s| s.required)
     }
 
-    /// The order parts are listed in: the recipe's slots, `model` just before a
-    /// `diffusion_model` it can take the place of, then a folder's parts.
+    /// The order parts are listed in: the recipe's slots, `model` and `diffusion_model`
+    /// each just before the other, which they can take the place of, then a folder's parts.
     fn order(&self) -> Vec<SlotId> {
         let mut order = Vec::new();
         for s in self.recipe_slots() {
-            if s == SlotId::DiffusionModel {
-                order.push(SlotId::Model);
+            match s {
+                SlotId::DiffusionModel => order.push(SlotId::Model),
+                SlotId::Model => order.push(SlotId::DiffusionModel),
+                _ => {}
             }
             order.push(s);
         }
@@ -357,7 +368,12 @@ impl Planner<'_, '_> {
     }
 
     /// Rule 1. A checkpoint takes `-m` for any version, so it fills `model`, in place of the
-    /// recipe's `diffusion_model` where the recipe has that.
+    /// recipe's `diffusion_model` where the recipe has that. A diffusion model alone takes
+    /// `--diffusion-model`, which loads it under `model.diffusion_model.` for any version:
+    /// `-m` loads with the prefix `""`, and the engine knows a diffusion model only by
+    /// `model.diffusion_model.` or `unet.` names (`src/model_loader.cpp:801`). So it fills
+    /// `diffusion_model`, in place of the recipe's `model` where the recipe has that
+    /// (ruling S4-diffusion-only).
     fn main_slot(&self) -> SlotId {
         let recipe = self.input.recipe;
         if matches!(self.input.main, MainFile::HubFolder { .. }) {
@@ -373,6 +389,10 @@ impl Planner<'_, '_> {
                 layout: Layout::Checkpoint,
                 ..
             } => SlotId::Model,
+            FileKind::Model {
+                layout: Layout::DiffusionOnly,
+                ..
+            } => SlotId::DiffusionModel,
             _ => recipe.main_slot(),
         }
     }
@@ -488,9 +508,33 @@ impl Planner<'_, '_> {
             .copied()
     }
 
+    /// Whether the main file carries this slot's part: a file's embedded part, or a
+    /// folder's own file.
+    fn carries(&self, slot: SlotId) -> bool {
+        match self.input.main {
+            MainFile::HubFolder { folder, .. } => match slot {
+                SlotId::Vae => folder.vae.is_some(),
+                SlotId::ClipL => folder.text_encoder.is_some(),
+                SlotId::ClipG => folder.text_encoder_2.is_some(),
+                _ => false,
+            },
+            _ => self.embedded(slot),
+        }
+    }
+
+    /// A text-encoder slot of the recipe that the main file does not carry, which the plan
+    /// then needs (ruling S4-diffusion-only). The VAE is needed the same way, as one of the
+    /// VAE/TAE pair ([`Planner::unmet_required_any`]).
+    fn own_part_missing(&self, slot: SlotId) -> bool {
+        TEXT_ENCODERS.contains(&slot)
+            && self.input.recipe.slot(slot).is_some()
+            && !self.carries(slot)
+    }
+
     /// The groups of `required_any` none of whose slots the main file, its folder, its
     /// sibling or the person's choices fill: their first slot is then required, as `vae`
-    /// is for `[vae, tae]`.
+    /// is for `[vae, tae]`. A main file that carries no VAE adds the group `[vae, tae]`
+    /// (those of its slots the recipe has); a full checkpoint's own VAE stays optional.
     fn unmet_required_any(&self, parts: &BTreeMap<SlotId, PlannedPart>) -> Vec<SlotId> {
         let filled = |s: &SlotId| {
             parts
@@ -504,10 +548,18 @@ impl Planner<'_, '_> {
                     .find(|(o, _)| o == s)
                     .is_some_and(|(o, choice)| self.chosen(*o, choice).is_some())
         };
-        self.input
-            .recipe
+        let recipe = self.input.recipe;
+        let own_vae =
+            (recipe.slot(SlotId::Vae).is_some() && !self.carries(SlotId::Vae)).then(|| {
+                [SlotId::Vae, SlotId::Tae]
+                    .into_iter()
+                    .filter(|s| recipe.slot(*s).is_some())
+                    .collect::<Vec<_>>()
+            });
+        recipe
             .required_any
             .iter()
+            .chain(own_vae.as_ref())
             .filter(|group| !group.iter().any(filled))
             .filter_map(|group| group.first().copied())
             .collect()
@@ -539,9 +591,11 @@ impl Planner<'_, '_> {
         companion.map(|c| (PartSource::Companion, Some(companion_file(c))))
     }
 
-    /// The main file carries the slot's part itself.
+    /// The main file carries the slot's part itself. A folder's parts are its own files
+    /// (`Folder`), never embedded.
     fn embedded(&self, slot: SlotId) -> bool {
-        matches!(&self.input.facts.kind, FileKind::Model { embeds, .. } if embeds.contains(&slot))
+        !matches!(self.input.main, MainFile::HubFolder { .. })
+            && matches!(&self.input.facts.kind, FileKind::Model { embeds, .. } if embeds.contains(&slot))
     }
 
     /// The companion rows with this SHA-256: `by_sha` gives only the first.
@@ -660,6 +714,9 @@ impl Planner<'_, '_> {
         }
     }
 }
+
+/// The text-encoder slots a recipe can have.
+const TEXT_ENCODERS: [SlotId; 4] = [SlotId::ClipL, SlotId::ClipG, SlotId::T5xxl, SlotId::Llm];
 
 fn companion_file(c: &Companion) -> PlannedFile {
     PlannedFile::Hub {
@@ -976,6 +1033,43 @@ mod tests {
         (folder, facts)
     }
 
+    /// A fixture's diffusion model alone, under its bare names, as a diffusion-only GGUF
+    /// holds it.
+    fn diffusion_only(name: &str) -> FileFacts {
+        let mut index = fixture(name);
+        index
+            .tensors
+            .retain(|t| t.name.starts_with("model.diffusion_model."));
+        for t in &mut index.tensors {
+            t.name = t.name["model.diffusion_model.".len()..].to_string();
+        }
+        inspect(&index)
+    }
+
+    /// An SDXL folder without its `vae/`.
+    fn sdxl_folder_without_vae() -> (DiffusersFolder, FileFacts) {
+        let folder = diffusers_folder(&[
+            rf(
+                "unet/diffusion_pytorch_model.fp16.safetensors",
+                5_135_149_760,
+            ),
+            rf("text_encoder/model.fp16.safetensors", 246_144_352),
+            rf("text_encoder_2/model.fp16.safetensors", 1_389_382_176),
+        ])
+        .unwrap();
+        let facts = FileFacts {
+            kind: FileKind::Model {
+                version: SdVersion::Sdxl,
+                layout: Layout::Folder,
+                embeds: vec![SlotId::ClipL, SlotId::ClipG],
+            },
+            facts: MatchFacts::default(),
+            parameters: 3_470_000_000,
+            format: FileFormat::Safetensors,
+        };
+        (folder, facts)
+    }
+
     #[test]
     fn a_flux_diffusion_file_gets_its_three_companions() {
         let p = plan(
@@ -1217,6 +1311,146 @@ mod tests {
                 (SlotId::Vae, PartSource::Companion)
             ]
         );
+    }
+
+    /// Ruling S4-diffusion-only: `-m` loads with the prefix `""` and the engine knows a
+    /// diffusion model only by `model.diffusion_model.` or `unet.` names
+    /// (`src/model_loader.cpp:801`), so a diffusion model alone always takes
+    /// `--diffusion-model`, also for a recipe whose main slot is `model`. As it carries no
+    /// encoder or VAE, the recipe's text encoders and its VAE (or the VAE/TAE pair) are
+    /// required.
+    #[test]
+    fn a_diffusion_only_file_goes_into_diffusion_model_and_needs_its_encoders_and_vae() {
+        let main = |facts| Main {
+            repo: "o/sd3.5-medium-GGUF".into(),
+            file: rf("sd3.5_medium-Q4_0.gguf", 2_500_000_000),
+            facts,
+            part: None,
+        };
+        let sd3 = diffusion_only("sd35-medium");
+        assert_eq!(
+            sd3.kind,
+            FileKind::Model {
+                version: SdVersion::Sd3,
+                layout: Layout::DiffusionOnly,
+                embeds: vec![]
+            }
+        );
+        // The table has SD3's encoders and no SD3 VAE.
+        let p = plan(main(sd3.clone()), "sd35-medium", &[], &[]);
+        assert_eq!(
+            sources(&p),
+            [
+                (SlotId::DiffusionModel, PartSource::Main),
+                (SlotId::ClipL, PartSource::Companion),
+                (SlotId::ClipG, PartSource::Companion),
+                (SlotId::T5xxl, PartSource::Companion),
+                (SlotId::Vae, PartSource::Missing)
+            ]
+        );
+        assert!(slot(&p, SlotId::Model).is_none() && !p.can_run());
+        assert!(p.parts.iter().all(|x| x.required));
+
+        // The repo's own files, a diffusers VAE among them.
+        let listing = [
+            rf("sd3.5_medium-Q4_0.gguf", 2_500_000_000),
+            rf("text_encoders/clip_l.safetensors", 246_144_152),
+            rf("text_encoders/clip_g.safetensors", 1_389_382_176),
+            rf("text_encoders/t5xxl_fp8_e4m3fn.safetensors", 4_893_934_904),
+            rf("vae/diffusion_pytorch_model.safetensors", 167_666_902),
+        ];
+        let p = plan(main(sd3.clone()), "sd35-medium", &listing, &[]);
+        assert_eq!(
+            sources(&p),
+            [
+                (SlotId::DiffusionModel, PartSource::Main),
+                (SlotId::ClipL, PartSource::Repo),
+                (SlotId::ClipG, PartSource::Repo),
+                (SlotId::T5xxl, PartSource::Repo),
+                (SlotId::Vae, PartSource::Repo)
+            ]
+        );
+        assert_eq!(
+            hub_path(&p, SlotId::Vae),
+            "vae/diffusion_pytorch_model.safetensors"
+        );
+        assert!(p.can_run());
+
+        // A chosen TAE meets the VAE/TAE pair; choosing the recipe's `model` replaces the
+        // diffusion model.
+        let local = |path: &str| SlotChoice::Local {
+            path: path.into(),
+            size: 1,
+            sha256: None,
+        };
+        let p = plan_given(
+            &main(sd3.clone()),
+            "sd35-medium",
+            With {
+                overrides: vec![(SlotId::Tae, local("/d/taesd3.safetensors"))],
+                ..With::default()
+            },
+        );
+        assert_eq!(source(&p, SlotId::Tae), PartSource::Chosen);
+        assert!(slot(&p, SlotId::Vae).is_none() && p.can_run());
+        let p = plan_given(
+            &main(sd3),
+            "sd35-medium",
+            With {
+                overrides: vec![(SlotId::Model, local("/d/sd3.5_medium.safetensors"))],
+                ..With::default()
+            },
+        );
+        assert_eq!(
+            sources(&p)[0],
+            (SlotId::Model, PartSource::Chosen),
+            "{:?}",
+            sources(&p)
+        );
+        assert!(slot(&p, SlotId::DiffusionModel).is_none());
+
+        // SDXL: no SDXL VAE in the table, so it is missing.
+        let sdxl = diffusion_only("sdxl");
+        assert!(matches!(
+            sdxl.kind,
+            FileKind::Model {
+                version: SdVersion::Sdxl,
+                layout: Layout::DiffusionOnly,
+                ..
+            }
+        ));
+        let p = plan(main(sdxl), "sdxl-checkpoint", &[], &[]);
+        assert_eq!(
+            sources(&p),
+            [
+                (SlotId::DiffusionModel, PartSource::Main),
+                (SlotId::Vae, PartSource::Missing)
+            ]
+        );
+    }
+
+    #[test]
+    fn an_sdxl_folder_without_a_vae_needs_one() {
+        let p = plan_folder("o/sdxl-base", &sdxl_folder_without_vae(), "sdxl-checkpoint");
+        assert_eq!(
+            sources(&p),
+            [
+                (SlotId::Model, PartSource::Main),
+                (SlotId::Vae, PartSource::Missing),
+                (SlotId::ClipL, PartSource::Folder),
+                (SlotId::ClipG, PartSource::Folder)
+            ]
+        );
+        assert!(slot(&p, SlotId::Vae).unwrap().required && !p.can_run());
+        // The folder's files decide, never facts that say it embeds a VAE.
+        let (folder, mut facts) = sdxl_folder_without_vae();
+        facts.kind = FileKind::Model {
+            version: SdVersion::Sdxl,
+            layout: Layout::Folder,
+            embeds: vec![SlotId::ClipL, SlotId::ClipG, SlotId::Vae],
+        };
+        let p = plan_folder("o/sdxl-base", &(folder, facts), "sdxl-checkpoint");
+        assert_eq!(source(&p, SlotId::Vae), PartSource::Missing);
     }
 
     #[test]
