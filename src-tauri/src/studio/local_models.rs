@@ -508,7 +508,10 @@ fn from_recipe(model: &store::GenModel) -> AppResult<GenEntry> {
 /// same way; "Check the licence" for a repo whose listing was not read (`unknown`); else its
 /// repository's label. An id a clash numbered (`other-2`, [`add_licence`](super::setup_plan::add_licence)) reads as its label
 /// when an earlier part has that label's id, as it did when the plan named them.
-fn rebuilt_licences(catalog: &GenCatalog, parts: &[GenPart]) -> BTreeMap<String, GenLicence> {
+pub(crate) fn rebuilt_licences(
+    catalog: &GenCatalog,
+    parts: &[GenPart],
+) -> BTreeMap<String, GenLicence> {
     let mut licenses: BTreeMap<String, GenLicence> = BTreeMap::new();
     for part in parts.iter().filter(|p| p.local.is_none()) {
         if licenses.contains_key(&part.license) {
@@ -582,6 +585,15 @@ fn catalog_licence(catalog: &GenCatalog, part: &GenPart, label: &str) -> Option<
 
 /// The family column of a model whose file's version was not detected.
 const UNKNOWN_FAMILY: &str = "unknown";
+
+/// The engine version an installed row's model file was detected as, from its family column:
+/// a 0.1.x family's version, else the version word it keeps; `None` for `unknown`.
+pub(crate) fn installed_version(model: &store::GenModel) -> Option<SdVersion> {
+    match serde_json::from_value::<GenFamily>(model.family.clone().into()) {
+        Ok(family) => Some(family.version()),
+        Err(_) => SdVersion::from_word(&model.family),
+    }
+}
 
 /// The family column an entry's installed row keeps: its 0.1.x family, else the engine
 /// version its model is, else `unknown`.
@@ -979,13 +991,16 @@ pub(crate) async fn delete_files_of(
         .delete_gen_model(id)
         .await?
         .ok_or_else(|| AppError::not_found("model"))?;
-    let imported = dunce::canonicalize(models_dir.join(super::import::IMPORTED_FOLDER)).ok();
-    let studios_copy = |file: &str| {
-        let real = dunce::canonicalize(file).ok();
-        real.zip(imported.as_ref())
-            .is_some_and(|(real, root)| crate::downloads::inside_folder(&real, root))
-    };
-    let files: Vec<PathBuf> = model
+    let files = removable_files(&model, models_dir);
+    remove_unused_files(store, models_dir, &files, busy).await
+}
+
+/// The files of installed model `model` Studio may remove once nothing uses them: every
+/// part's, except a file from this computer (a part with `local`), the person's own, unless
+/// it is Studio's copy under `<models>/@imported/` ([`is_studios_copy`]; ruling
+/// S7-local-delete).
+pub(crate) fn removable_files(model: &store::GenModel, models_dir: &Path) -> Vec<PathBuf> {
+    model
         .parts
         .as_array()
         .into_iter()
@@ -993,10 +1008,18 @@ pub(crate) async fn delete_files_of(
         .filter_map(|p| {
             let file = p.get("file")?.as_str()?;
             let local = p.get("local").is_some_and(|l| !l.is_null());
-            (!local || studios_copy(file)).then(|| PathBuf::from(file))
+            (!local || is_studios_copy(models_dir, Path::new(file))).then(|| PathBuf::from(file))
         })
-        .collect();
-    remove_unused_files(store, models_dir, &files, busy).await
+        .collect()
+}
+
+/// Whether `file` is a copy an import made under `<models_dir>/@imported/`
+/// (`import::IMPORTED_FOLDER`), which Studio made, rather than the person's own file.
+pub(crate) fn is_studios_copy(models_dir: &Path, file: &Path) -> bool {
+    let imported = dunce::canonicalize(models_dir.join(super::import::IMPORTED_FOLDER)).ok();
+    let real = dunce::canonicalize(file).ok();
+    real.zip(imported)
+        .is_some_and(|(real, root)| crate::downloads::inside_folder(&real, &root))
 }
 
 /// Removes each of `files` that no installed model uses (a chat model, or a part of a picture
@@ -2187,11 +2210,12 @@ pub(crate) mod tests {
 
     use crate::downloads::{DownloadManager, finish_gen_group};
     use crate::dto::{SetupPlanDto, SlotOverride};
+    use crate::studio::local_cmd::LocalCmdDeps;
     use crate::studio::local_cmd::tests::{
         COMMIT, KONTEXT, RepoHub, TestRepo, bundled, flux_kontext_repo, gpu, hub, repo_deps,
         sd14_diffusers_repo, search_source, wan_a14b_repo,
     };
-    use crate::studio::local_cmd::{LocalCmdDeps, setup_plan};
+    use crate::studio::setup_cmd::setup_plan;
     use models::sd::testing::{file_of, fixture, safetensors};
 
     /// Get local models asking a Hub on this computer that serves `repos` (its client has no
@@ -2807,7 +2831,13 @@ pub(crate) mod tests {
             )
             .await
             .unwrap_err();
-        assert_eq!(e.code, "studio_not_supported_yet");
+        assert_eq!(
+            (e.code.as_str(), e.message.as_str()),
+            (
+                "studio_cannot_run",
+                "Hugging Face publishes no checksum for this file, so Studio can't check it."
+            )
+        );
         assert!(t.groups().await.is_empty() && t.files_on_disk().is_empty());
 
         let ae = bundled()

@@ -1842,7 +1842,20 @@ export const LOCAL: LocalModels = {
         "notes": [],
         "usable": null,
         "created": 1794819600
-      }
+      },
+      "recipe": {
+        "id": "flux2-klein-4b",
+        "name": "FLUX.2 Klein 4B",
+        "kind": "picture"
+      },
+      "version": "flux2-klein",
+      "untested": false,
+      "needsSetup": false,
+      "highNoise": false,
+      "takesLoras": true,
+      "loraBase": "flux2-klein",
+      "source": "catalog",
+      "inPlace": false
     },
     {
       "id": "wan22-ti2v-5b-fast-q6",
@@ -2257,7 +2270,20 @@ export const LOCAL: LocalModels = {
         "notes": [],
         "usable": null,
         "created": 1794733200
-      }
+      },
+      "recipe": {
+        "id": "wan22-ti2v-5b",
+        "name": "Wan 2.2 TI2V 5B",
+        "kind": "video"
+      },
+      "version": "wan2.2-ti2v",
+      "untested": false,
+      "needsSetup": false,
+      "highNoise": false,
+      "takesLoras": true,
+      "loraBase": "wan2.2-ti2v",
+      "source": "catalog",
+      "inPlace": false
     }
   ],
   "recommended": [

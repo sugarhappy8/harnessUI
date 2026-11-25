@@ -10,8 +10,9 @@
 //!   from its name), and a repository's listing at its latest commit ([`local_repo`]): every
 //!   file's label, one choice per quantisation of each model that works with its set-up plan,
 //!   licences and fit, and the best for this computer marked.
-//! - **A set-up plan** ([`setup_plan`]) of a searched file or a file on this computer, with
-//!   another recipe or files the person chose.
+//! - **A set-up plan** ([`setup_plan_dto`], in the webview's words) of a searched file or a
+//!   file on this computer; the commands that ask for one, and *Set it up yourself*, are
+//!   [`super::setup_cmd`]'s.
 //! - **Adding a model file from this computer**: the commands over [`super::import`].
 //! - **A fit** ([`local_fit`]) at a size and a length in seconds, with no request for a
 //!   catalog or an installed model.
@@ -36,7 +37,8 @@ use models::gen_fit::{GenFit, GenSize};
 use models::gen_search::{repo_licence, verdict_hint};
 use models::hf::{HfClient, RepoSummary, uploader_text};
 use models::sd::candidates::candidates;
-use models::sd::matching::{kind_of, recipes_for};
+use models::sd::detect::SdVersion;
+use models::sd::matching::{RecipeKind, in_scope_recipes, kind_of, recipes_for};
 use models::sd::{FileLabel, Verdict, verdict_of};
 use tauri::{AppHandle, Manager, State};
 
@@ -53,11 +55,11 @@ use super::local::{
 };
 use super::local_models::{
     DownloadPlan, InstalledFiles, LocalSource, delete_local_model, entry_from_installed,
-    entry_with, plan_download, start_local_download, word,
+    entry_with, installed_version, is_studios_copy, plan_download, start_local_download, word,
 };
 use super::manager::{LocalVerdict, StudioManager, device_label, eta_dto, local_verdict, word_tag};
 use super::prefs::StudioPrefs;
-use super::setup_plan::{PlanDeps, Planned, ReadRepo, plan_file, plan_source};
+use super::setup_plan::{PlanDeps, Planned, ReadRepo, plan_file};
 use crate::commands::only_main_window;
 use crate::dto::{
     EngineStatusDto, GateDto, HardwareLineDto, InstalledLocalDto, LicenceDto, LocalEntryDto,
@@ -131,11 +133,12 @@ pub async fn local_models(deps: &LocalCmdDeps) -> AppResult<LocalModelsDto> {
                     "an installed model cannot be run by this version: {}",
                     e.details
                 );
-                installed.push(unreadable(row));
+                installed.push(unreadable(deps, row));
                 continue;
             }
         };
         let verdict = judge(deps, &entry, default_size(&entry)).await;
+        let (high_noise, takes_loras) = recipe_features(&entry.recipe);
         installed.push(InstalledLocalDto {
             id: row.id.clone(),
             name: entry.name.clone(),
@@ -143,6 +146,15 @@ pub async fn local_models(deps: &LocalCmdDeps) -> AppResult<LocalModelsDto> {
             size_bytes: row.size_bytes,
             fit: fit_dto(&entry, &verdict),
             model: media_model_dto(&media_model(row, &entry), None),
+            recipe: recipe_choice(&entry.recipe),
+            version: entry.version,
+            untested: entry.untested,
+            needs_setup: row.recipe_id.is_none(),
+            high_noise,
+            takes_loras,
+            lora_base: entry.version.map(SdVersion::lora_family),
+            source: row.source.as_str().to_owned(),
+            in_place: in_place(&deps.models_dir, row),
         });
     }
     let installed_ids: BTreeSet<&str> = rows
@@ -261,12 +273,21 @@ fn recommended_for(
 
 /// An installed model this build cannot read (`entry_from_installed` refuses it: its family
 /// record hidden by a newer signed catalog, a part's licence no longer known, a family this
-/// build does not know): its stored id, name and kind, its parts' sizes, and not for this
-/// computer, with why, so that *Delete* can still remove its files.
-fn unreadable(row: &store::GenModel) -> InstalledLocalDto {
+/// build does not know), or one with no recipe yet (`needs_setup`: *Set it up yourself*): its
+/// stored id, name and kind, its parts' sizes, what its row says it is set up as, and not for
+/// this computer, with why, so that *Delete* can still remove its files.
+fn unreadable(deps: &LocalCmdDeps, row: &store::GenModel) -> InstalledLocalDto {
     let kind = serde_json::from_value::<GenKind>(row.kind.clone().into())
         .map_or(MediaKind::Image, media_kind);
-    let reason = errors::NOT_RUN_BY_THIS_VERSION;
+    let needs_setup = row.recipe_id.is_none();
+    let reason = if needs_setup {
+        errors::NEEDS_SET_UP
+    } else {
+        errors::NOT_RUN_BY_THIS_VERSION
+    };
+    let recipe_id = row.recipe_id.as_deref().unwrap_or_default();
+    let version = installed_version(row);
+    let (high_noise, takes_loras) = recipe_features(recipe_id);
     let model = MediaModel {
         id: row.id.clone(),
         display_name: row.name.clone(),
@@ -294,7 +315,37 @@ fn unreadable(row: &store::GenModel) -> InstalledLocalDto {
             very_slow: gen_eta::very_slow(FitWord::NotHere, None),
         },
         model: media_model_dto(&model, None),
+        recipe: recipe_choice(recipe_id),
+        version,
+        untested: needs_setup || version.is_none_or(|v| !recipes_for(v).contains(&recipe_id)),
+        needs_setup,
+        high_noise,
+        takes_loras,
+        lora_base: version.map(SdVersion::lora_family),
+        source: row.source.as_str().to_owned(),
+        in_place: in_place(&deps.models_dir, row),
     }
+}
+
+/// Whether recipe `recipe_id` takes a high-noise part, and LoRAs; neither for a recipe the
+/// engine does not have.
+fn recipe_features(recipe_id: &str) -> (bool, bool) {
+    models::sd::recipes::recipe(recipe_id).map_or((false, false), |r| {
+        (r.feature("high_noise"), r.feature("lora"))
+    })
+}
+
+/// Whether installed model `row`'s model file is a file from this computer used where it is
+/// (an import in place), not Studio's copy under `<models>/@imported/`.
+fn in_place(models_dir: &Path, row: &store::GenModel) -> bool {
+    row.parts.as_array().into_iter().flatten().any(|p| {
+        let model = matches!(
+            p.get("role").and_then(serde_json::Value::as_str),
+            Some("diffusion" | "model")
+        );
+        let local = p.get("local").and_then(serde_json::Value::as_str);
+        model && local.is_some_and(|file| !is_studios_copy(models_dir, Path::new(file)))
+    })
 }
 
 /// An installed model's parts' sizes added up; its recorded total when no part gives one.
@@ -531,8 +582,8 @@ fn is_prose(line: &str) -> bool {
 /// What a repository offers, from what reading it found (`read`) and its model card: every
 /// file's label; for each main file that works (an A14B pair's low-noise half in its
 /// high-noise half's plan, a diffusers folder once) the set-up plan with nothing chosen,
-/// largest first, "best for this computer" on the largest whose fit word is `fits` or
-/// `afterUnload`; the licences; and the verdict: from its labels when a file works, it is a
+/// largest first, "best for this computer" on the largest whose plan can download and whose
+/// fit word is `fits` or `afterUnload`; the licences; and the verdict: from its labels when a file works, it is a
 /// LoRA or nothing went unread, else its name's hint. A file whose plan cannot be made is
 /// left out of the choices, still labelled.
 async fn repo_dto(deps: &LocalCmdDeps, read: &ReadRepo, card: Option<&str>) -> LocalRepoDto {
@@ -612,7 +663,7 @@ async fn repo_dto(deps: &LocalCmdDeps, read: &ReadRepo, card: Option<&str>) -> L
     });
     if let Some(best) = files
         .iter_mut()
-        .find(|f| matches!(f.plan.fit.word.as_str(), "fits" | "afterUnload"))
+        .find(|f| f.plan.can_download && matches!(f.plan.fit.word.as_str(), "fits" | "afterUnload"))
     {
         best.best = true;
     }
@@ -665,21 +716,8 @@ pub(crate) fn plan_deps<'a>(
     }
 }
 
-/// The set-up of the file `source` names (a searched file, at its repo's commit, or a file on
-/// this computer) with the person's `choice`: another recipe, files for some slots
-/// (`local_models::plan_source`).
-pub async fn setup_plan(
-    deps: &LocalCmdDeps,
-    source: &LocalSource,
-    choice: &SetupChoice,
-) -> AppResult<SetupPlanDto> {
-    let catalog = deps.catalog.gen_catalog().await;
-    let planned = plan_source(&plan_deps(deps, &catalog), source, choice).await?;
-    setup_plan_dto(deps, &planned).await
-}
-
 /// A recipe as the Model type menu offers it.
-fn recipe_choice(id: &str) -> Option<RecipeChoiceDto> {
+pub(crate) fn recipe_choice(id: &str) -> Option<RecipeChoiceDto> {
     let recipe = models::sd::recipes::recipe(id)?;
     Some(RecipeChoiceDto {
         id: recipe.id.clone(),
@@ -688,16 +726,36 @@ fn recipe_choice(id: &str) -> Option<RecipeChoiceDto> {
     })
 }
 
-/// A plan in the webview's words: each slot with its file, what its download takes here
-/// (`local_models::plan_download`) and its fit at the recipe's default size.
-pub(crate) async fn setup_plan_dto(
-    deps: &LocalCmdDeps,
-    planned: &Planned,
-) -> AppResult<SetupPlanDto> {
-    let download = plan(deps, planned.entry.clone(), Some(&planned.plan))?;
-    let verdict = judge(deps, &download.entry, default_size(&download.entry)).await;
-    let parts = parts_dto(&download);
-    let slots = planned
+/// The recipes the Model type menu offers a model of `version`: those its version runs, the
+/// default first; for an `untested` set-up, or a model of no known version, every recipe
+/// Studio runs, by kind (pictures, picture edits, video) and then name.
+pub(crate) fn recipe_choices(version: Option<SdVersion>, untested: bool) -> Vec<RecipeChoiceDto> {
+    match version {
+        Some(version) if !untested => recipes_for(version)
+            .into_iter()
+            .filter_map(recipe_choice)
+            .collect(),
+        _ => {
+            let rank = |kind: RecipeKind| match kind {
+                RecipeKind::Picture => 0,
+                RecipeKind::PictureEdit => 1,
+                RecipeKind::Video => 2,
+            };
+            let mut all: Vec<RecipeChoiceDto> = in_scope_recipes()
+                .into_iter()
+                .filter_map(recipe_choice)
+                .collect();
+            all.sort_by(|a, b| (rank(a.kind), &a.name, &a.id).cmp(&(rank(b.kind), &b.name, &b.id)));
+            all
+        }
+    }
+}
+
+/// Each slot of `planned` with its file, as `download` (what its download takes here) lists
+/// the parts: a part the main file carries, and a slot nothing fills, have none.
+pub(crate) fn slots_dto(planned: &Planned, download: &DownloadPlan) -> Vec<PlannedSlotDto> {
+    let parts = parts_dto(download);
+    planned
         .plan
         .parts
         .iter()
@@ -710,21 +768,24 @@ pub(crate) async fn setup_plan_dto(
                 part: at.and_then(|i| parts.get(i).cloned()),
             })
         })
-        .collect();
+        .collect()
+}
+
+/// A plan in the webview's words: each slot with its file, what its download takes here
+/// (`local_models::plan_download`), its fit at the recipe's default size, and the recipes the
+/// Model type menu offers ([`recipe_choices`]).
+pub(crate) async fn setup_plan_dto(
+    deps: &LocalCmdDeps,
+    planned: &Planned,
+) -> AppResult<SetupPlanDto> {
+    let download = plan(deps, planned.entry.clone(), Some(&planned.plan))?;
+    let verdict = judge(deps, &download.entry, default_size(&download.entry)).await;
     let recipe = recipe_choice(&planned.plan.recipe_id)
         .ok_or_else(|| AppError::internal("a plan with a recipe the engine does not have"))?;
-    let recipes = planned
-        .entry
-        .version
-        .map(recipes_for)
-        .unwrap_or_default()
-        .into_iter()
-        .filter_map(recipe_choice)
-        .collect();
     Ok(SetupPlanDto {
         recipe,
-        recipes,
-        slots,
+        recipes: recipe_choices(planned.entry.version, planned.plan.untested),
+        slots: slots_dto(planned, &download),
         licences: download.licences.iter().map(licence_dto).collect(),
         total_bytes: download.total_bytes,
         to_fetch_bytes: download.to_fetch_bytes,
@@ -741,7 +802,7 @@ pub(crate) async fn setup_plan_dto(
 /// What downloading `entry` (made by the set-up plan `setup`, if any) takes here
 /// (`local_models::plan_download`), never refused for the disk: a list says that with
 /// `low_disk`, and the download itself refuses it.
-fn plan(
+pub(crate) fn plan(
     deps: &LocalCmdDeps,
     entry: GenEntry,
     setup: Option<&models::sd::setup::SetupPlan>,
@@ -968,23 +1029,6 @@ pub async fn studio_local_fit(
     .await
 }
 
-/// The set-up of a searched file or a file on this computer, with the person's `choice`
-/// (another recipe, files for some slots). Asks Hugging Face for a searched file's listing
-/// (its headers come from the cache once its repo was opened) and for the listing of a file
-/// the person chose from another repo.
-#[tauri::command]
-pub async fn studio_setup_plan(
-    window: tauri::WebviewWindow,
-    app: AppHandle,
-    studio: State<'_, Arc<StudioManager>>,
-    source: LocalSource,
-    choice: SetupChoice,
-) -> AppResult<SetupPlanDto> {
-    only_main_window(window.label())?;
-    let hf = crate::hub::hf_client(&app).await?;
-    setup_plan(&app_deps(&app, &studio, Some(hf)).await, &source, &choice).await
-}
-
 /// Starts a checked download of the model and returns its download group: a searched file
 /// with the files its set-up plan lists, with the person's `choice` (none: the plan as it
 /// comes), registered with its recipe once every file is checked.
@@ -1098,6 +1142,7 @@ pub(crate) mod tests {
     use crate::studio::local_models::{LocalSource, delete_unless_in_use};
     use crate::studio::manager::{PollPlan, StudioDeps, StudioManager};
     use crate::studio::prefs::{self, StudioPrefs, StudioPrefsPatch};
+    use crate::studio::setup_cmd::setup_plan;
     use crate::studio::spend::day_start_in;
     use crate::studio::test_support::Scratch;
     use models::sd::CannotRunReason;
@@ -1912,10 +1957,12 @@ pub(crate) mod tests {
 
         let local = local_models(&deps).await.unwrap();
         assert_eq!(local.installed.len(), 3, "{:?}", local.installed);
-        for (id, name, size) in [
-            (KLEIN, KLEIN, klein().total_bytes()),
-            (ZIMAGE, ZIMAGE, zimage().total_bytes()),
-            (future_id, "A future model", 1_234_567),
+        // A family this build does not know has no recipe: it is listed as needing set-up
+        // (*Set it up yourself*), the others as not run by this version.
+        for (id, name, size, needs_setup) in [
+            (KLEIN, KLEIN, klein().total_bytes(), false),
+            (ZIMAGE, ZIMAGE, zimage().total_bytes(), false),
+            (future_id, "A future model", 1_234_567, true),
         ] {
             let row = local
                 .installed
@@ -1927,10 +1974,13 @@ pub(crate) mod tests {
             assert_eq!(row.size_bytes, size, "{id}");
             assert_eq!(row.fit.word, "notHere", "{id}");
             assert_eq!(row.fit.verdict, "red", "{id}");
-            assert_eq!(
-                row.fit.reason.as_deref(),
-                Some("This version of harnessUI cannot run this model.")
-            );
+            assert_eq!(row.needs_setup, needs_setup, "{id}");
+            let reason = if needs_setup {
+                "Choose this model's type and files first."
+            } else {
+                "This version of harnessUI cannot run this model."
+            };
+            assert_eq!(row.fit.reason.as_deref(), Some(reason));
             assert!(row.fit.very_slow);
             assert_eq!(row.fit.suggestion, None);
             assert_eq!(row.fit.eta, None);
@@ -2552,6 +2602,45 @@ pub(crate) mod tests {
         assert_eq!(r.licence.as_ref().map(|l| l.badge.as_str()), Some("red"));
     }
 
+    /// "Best for this computer" goes to a choice whose plan can download (S6 minor): the
+    /// largest that fits here, a Hunyuan Video 1.5 file with no text encoder anywhere, is
+    /// passed over for the next.
+    #[tokio::test]
+    async fn the_best_choice_is_one_whose_plan_can_download() {
+        let scratch = Scratch::new();
+        let mut hunyuan = fixture("hunyuan-video-15");
+        hunyuan.format = models::sd::index::FileFormat::Gguf;
+        let repo = TestRepo::new("someone/two-models")
+            .serving("h-Q4_0.gguf", 20_000_000_000, file_of(&hunyuan))
+            .file(
+                "flux1-kontext-dev-Q4_K_M.gguf",
+                6_931_817_760.0,
+                Some("flux1-kontext"),
+            );
+        let hub = hub(vec![repo]).await;
+        let r = local_repo(
+            &repo_deps(&hub, gpu(80, 128), &scratch),
+            "someone/two-models",
+        )
+        .await
+        .unwrap();
+        let first = &r.files[0];
+        assert_eq!(first.file, "h-Q4_0.gguf");
+        assert!(matches!(
+            first.plan.fit.word.as_str(),
+            "fits" | "afterUnload"
+        ));
+        assert!(!first.plan.can_download && !first.best);
+        assert_eq!(
+            r.files
+                .iter()
+                .filter(|f| f.best)
+                .map(|f| f.file.as_str())
+                .collect::<Vec<_>>(),
+            ["flux1-kontext-dev-Q4_K_M.gguf"]
+        );
+    }
+
     #[tokio::test]
     async fn a_file_studio_cant_run_is_listed_with_its_reason() {
         let scratch = Scratch::new();
@@ -3075,8 +3164,8 @@ pub(crate) mod tests {
         );
     }
 
-    /// A plan is for a searched file or a file on this computer; a file Studio does not run,
-    /// or one the repo does not list, has none.
+    /// A plan is for a searched file or a file on this computer; a file Studio can't run says
+    /// why in its label's words, and an extra part, or a file the repo does not list, has none.
     #[tokio::test]
     async fn a_plan_is_refused_for_a_file_studio_does_not_run() {
         let scratch = Scratch::new();
@@ -3086,7 +3175,7 @@ pub(crate) mod tests {
         for (file, code) in [
             (
                 "split_files/diffusion_models/lumina_2_model_bf16.safetensors",
-                "studio_not_supported_yet",
+                "studio_cannot_run",
             ),
             ("split_files/vae/ae.safetensors", "studio_not_supported_yet"),
             ("not-listed.safetensors", "not_found"),

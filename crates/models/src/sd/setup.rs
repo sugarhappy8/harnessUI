@@ -13,7 +13,11 @@
 //! 4. optional slots: the vision encoders by the same order for a recipe that takes an input
 //!    picture, the others only from the main file's own parts;
 //! 5. the person's own choices win. A choice that replaces the main file plans the other
-//!    slots as for a main file that carries nothing (ruling S4-main-override).
+//!    slots as for a main file that carries nothing (ruling S4-main-override). A slot the
+//!    plan needs reads required whoever fills it.
+//!
+//! Companions suit the recipe: a recipe the main file's version does not run (an untested
+//! set-up the person chose) takes the companions of a version that runs it.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -25,7 +29,7 @@ use crate::sd::FileFacts;
 use crate::sd::companions::{Companion, CompanionTable};
 use crate::sd::detect::SdVersion;
 use crate::sd::inspect::{FileKind, Layout};
-use crate::sd::matching::{NoisePart, noise_part, tokens};
+use crate::sd::matching::{NoisePart, noise_part, recipes_for, tokens};
 use crate::sd::names::{
     DiffusersFolder, FolderFile, companion_of, is_shard, is_weights, looks_like_lora,
 };
@@ -198,9 +202,11 @@ pub struct SetupInput<'a> {
 /// Plans a model's set-up by the rules of design section 7.4 (see the module's docs).
 pub fn plan_setup(input: &SetupInput<'_>) -> SetupPlan {
     let recipe = input.recipe;
+    let companion_version = companion_version(recipe, input.version);
     let main_slot = Planner {
         input,
         main_replaced: false,
+        companion_version,
     }
     .main_slot();
     // A checkpoint in `model` fills the recipe's `diffusion_model`, and a diffusion model in
@@ -212,6 +218,7 @@ pub fn plan_setup(input: &SetupInput<'_>) -> SetupPlan {
     };
     let planner = Planner {
         input,
+        companion_version,
         main_replaced: input
             .overrides
             .iter()
@@ -285,7 +292,7 @@ pub fn plan_setup(input: &SetupInput<'_>) -> SetupPlan {
     }
 
     // Rules 3 and 4: the recipe's other slots, `stood_in` filled by the main file.
-    let required_any = planner.unmet_required_any(&parts);
+    let required_any = planner.unmet_required_any(&parts, true);
     let needed = |s: SlotId| {
         planner.recipe_requires(s) || planner.own_part_missing(s) || required_any.contains(&s)
     };
@@ -322,7 +329,10 @@ pub fn plan_setup(input: &SetupInput<'_>) -> SetupPlan {
         }
     }
 
-    // Rule 5: the person's own choices, a later one for a slot winning.
+    // Rule 5: the person's own choices, a later one for a slot winning. A slot the plan
+    // needs without them (the first slot of a `required_any` group the main file, its folder
+    // and its sibling leave unmet) stays required when the person's file fills it.
+    let required_by_file = planner.unmet_required_any(&parts, false);
     for (s, choice) in input.overrides {
         let s = *s;
         if stood_in == Some(s) {
@@ -331,7 +341,9 @@ pub fn plan_setup(input: &SetupInput<'_>) -> SetupPlan {
         }
         let required = match parts.get(&s) {
             Some(part) => part.required,
-            None if planner.recipe_slots().any(|r| r == s) => needed(s),
+            None if planner.recipe_slots().any(|r| r == s) => {
+                needed(s) || (required_by_file.contains(&s) && planner.chosen(s, choice).is_some())
+            }
             // A slot neither the recipe nor the plan has.
             None => continue,
         };
@@ -355,12 +367,25 @@ pub fn plan_setup(input: &SetupInput<'_>) -> SetupPlan {
     }
 }
 
+/// The version whose companions suit `recipe`: the main file's `version` when it runs the
+/// recipe, else the first version that does (a recipe the person chose for a file of another
+/// version, or of none known), else the file's own.
+fn companion_version(recipe: &Recipe, version: Option<SdVersion>) -> Option<SdVersion> {
+    let runs = |v: &SdVersion| recipes_for(*v).contains(&recipe.id.as_str());
+    match version {
+        Some(v) if runs(&v) => Some(v),
+        _ => SdVersion::ALL.into_iter().find(runs).or(version),
+    }
+}
+
 struct Planner<'i, 'a> {
     input: &'i SetupInput<'a>,
     /// A choice replaces the main file, in its slot or the one it stands in for: the other
     /// slots are planned as for a main file that carries nothing, so no part is `Embedded`
     /// or a folder's own (ruling S4-main-override).
     main_replaced: bool,
+    /// The version companions are chosen for ([`companion_version`]).
+    companion_version: Option<SdVersion>,
 }
 
 impl Planner<'_, '_> {
@@ -589,21 +614,27 @@ impl Planner<'_, '_> {
     }
 
     /// The groups of `required_any` none of whose slots the main file, its folder, its
-    /// sibling or the person's choices fill: their first slot is then required, as `vae`
-    /// is for `[vae, tae]`. A main file that carries no VAE adds the group `[vae, tae]`
-    /// (those of its slots the recipe has); a full checkpoint's own VAE stays optional.
-    fn unmet_required_any(&self, parts: &BTreeMap<SlotId, PlannedPart>) -> Vec<SlotId> {
+    /// sibling or (with `choices`) the person's choices fill: their first slot is then
+    /// required, as `vae` is for `[vae, tae]`. A main file that carries no VAE adds the group
+    /// `[vae, tae]` (those of its slots the recipe has); a full checkpoint's own VAE stays
+    /// optional.
+    fn unmet_required_any(
+        &self,
+        parts: &BTreeMap<SlotId, PlannedPart>,
+        choices: bool,
+    ) -> Vec<SlotId> {
         let filled = |s: &SlotId| {
             parts
                 .get(s)
                 .is_some_and(|p| p.source != PartSource::Missing)
-                || self
-                    .input
-                    .overrides
-                    .iter()
-                    .rev()
-                    .find(|(o, _)| o == s)
-                    .is_some_and(|(o, choice)| self.chosen(*o, choice).is_some())
+                || choices
+                    && self
+                        .input
+                        .overrides
+                        .iter()
+                        .rev()
+                        .find(|(o, _)| o == s)
+                        .is_some_and(|(o, choice)| self.chosen(*o, choice).is_some())
         };
         let recipe = self.input.recipe;
         let own_vae =
@@ -665,13 +696,16 @@ impl Planner<'_, '_> {
             .filter(move |c| c.sha256.eq_ignore_ascii_case(sha256))
     }
 
-    /// A companion row of this slot that suits the version.
+    /// A companion row of this slot that suits the companions' version.
     fn suits(&self, c: &Companion, slot: SlotId) -> bool {
-        c.slot == slot && self.input.version.is_some_and(|v| c.versions.contains(&v))
+        c.slot == slot
+            && self
+                .companion_version
+                .is_some_and(|v| c.versions.contains(&v))
     }
 
     fn default_companion(&self, slot: SlotId) -> Option<&Companion> {
-        let version = self.input.version?;
+        let version = self.companion_version?;
         self.input
             .companions
             .default_for(&self.input.recipe.id, version, slot)
@@ -729,7 +763,7 @@ impl Planner<'_, '_> {
                     Some(facts) => facts.kind == FileKind::Extra { slot },
                     None => companion_of(f) == Some(slot),
                 };
-                let other_versions = self.input.version.is_some()
+                let other_versions = self.companion_version.is_some()
                     && self.rows_with_sha(sha).next().is_some()
                     && !self.rows_with_sha(sha).any(|c| self.suits(c, slot));
                 says && !other_versions && !self.is_own(&f.path) && !is_shard(&f.path)
@@ -2238,6 +2272,115 @@ mod tests {
             },
         );
         assert_eq!(sources(&p), [(SlotId::Model, PartSource::Main)]);
+    }
+
+    /// A slot the plan needs reads required whoever fills it: the vae of a diffusion model
+    /// alone, which fills `required_any [vae, tae]`, is required when the person's file fills
+    /// it too (S6/S4 minor). A decoder of the other kind that fills the group stays optional,
+    /// and an emptied vae beside it is not added.
+    #[test]
+    fn a_slot_the_plan_needs_reads_required_when_the_persons_file_fills_it() {
+        let file = |path: &str| SlotChoice::Local {
+            path: path.into(),
+            size: 1,
+            sha256: None,
+        };
+        let p = plan_overriding(SlotId::Vae, file("/d/my ae.safetensors"));
+        let vae = slot(&p, SlotId::Vae).unwrap();
+        assert_eq!(vae.source, PartSource::Chosen);
+        assert!(vae.required, "{vae:?}");
+        assert!(p.parts.iter().all(|x| x.required) && p.can_run());
+
+        let p = plan_given(
+            &main_hub("o/r", "flux1-kontext-dev-Q4_K_M.gguf", "flux1-kontext"),
+            "flux1-kontext",
+            With {
+                overrides: vec![
+                    (SlotId::Vae, SlotChoice::Empty),
+                    (SlotId::Tae, file("/d/taef1.safetensors")),
+                ],
+                ..With::default()
+            },
+        );
+        assert!(slot(&p, SlotId::Vae).is_none());
+        assert!(!slot(&p, SlotId::Tae).unwrap().required && p.can_run());
+    }
+
+    /// A recipe the person chose that the main file's version does not run (an untested
+    /// set-up) takes its own version's companions: a FLUX.1 file set up as Z-Image gets
+    /// Z-Image's Qwen3 encoder, and its decoder (one both versions use) from the table.
+    #[test]
+    fn a_recipe_of_another_version_takes_its_own_versions_companions() {
+        let main = main_hub("o/r", "flux1-kontext-dev-Q4_K_M.gguf", "flux1-kontext");
+        let companions = table();
+        let p = plan_setup(&SetupInput {
+            main: MainFile::Hub {
+                repo: &main.repo,
+                revision: REV,
+                file: &main.file,
+            },
+            facts: &main.facts,
+            recipe: recipe("z-image").unwrap(),
+            version: version_of(&main.facts),
+            part: None,
+            listing: &[],
+            listing_facts: &BTreeMap::new(),
+            installed: &[],
+            companions: &companions,
+            overrides: &[],
+            untested: true,
+        });
+        assert_eq!(
+            sources(&p),
+            [
+                (SlotId::DiffusionModel, PartSource::Main),
+                (SlotId::Llm, PartSource::Companion),
+                (SlotId::Vae, PartSource::Companion)
+            ]
+        );
+        assert_eq!(
+            hub_path(&p, SlotId::Llm),
+            companion("qwen3-4b-2507-q8").path
+        );
+        assert_eq!(hub_path(&p, SlotId::Vae), companion("ae-flux1").path);
+        assert!(p.can_run() && p.untested);
+
+        // A file of no known version, set up as SDXL: the table has no SDXL decoder, so the
+        // vae it needs comes from the person.
+        let unknown = FileFacts {
+            kind: FileKind::CannotRun {
+                reason: crate::sd::CannotRunReason::UnknownWeights,
+                version: None,
+            },
+            facts: MatchFacts::default(),
+            parameters: 0,
+            format: FileFormat::Safetensors,
+        };
+        let file = rf("mystery.safetensors", 6_000_000_000);
+        let p = plan_setup(&SetupInput {
+            main: MainFile::Hub {
+                repo: "o/r",
+                revision: REV,
+                file: &file,
+            },
+            facts: &unknown,
+            recipe: recipe("sdxl-checkpoint").unwrap(),
+            version: None,
+            part: None,
+            listing: &[],
+            listing_facts: &BTreeMap::new(),
+            installed: &[],
+            companions: &companions,
+            overrides: &[],
+            untested: true,
+        });
+        assert_eq!(
+            sources(&p),
+            [
+                (SlotId::Model, PartSource::Main),
+                (SlotId::Vae, PartSource::Missing)
+            ]
+        );
     }
 
     /// Ruling S4-main-override: a choice that replaces the main file (in its slot, or the

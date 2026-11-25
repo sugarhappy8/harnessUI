@@ -263,6 +263,8 @@
     "allow-studio-local-delete",
     "allow-studio-import-inspect",
     "allow-studio-import-model",
-    "allow-studio-accept-local-notice"
+    "allow-studio-accept-local-notice",
+    "allow-studio-model-files",
+    "allow-studio-set-model-files"
   ]
 }

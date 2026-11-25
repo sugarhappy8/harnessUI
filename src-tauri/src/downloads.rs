@@ -353,7 +353,8 @@ fn downloaded_entry(new: &store::NewGenModel, untested: bool) -> AppResult<GenEn
 /// of another model is refused: nothing is added, and the diffusion file and the files the
 /// group wrote itself ([`written_by`], as Cancel deletes only those) are removed when no
 /// installed model uses them and no other download writes them, with their emptied folders.
-/// A part the download found already in place stays.
+/// A part the download found already in place stays. A model installed already (downloaded
+/// again, or set up again: *Set it up yourself*) is replaced ([`insert_replacing`]).
 pub(crate) async fn register_gen_model(
     store: &store::Store,
     models_dir: &Path,
@@ -392,18 +393,20 @@ pub(crate) async fn register_gen_model(
         return Err(refused);
     }
     let id = new.id.clone();
-    store.insert_gen_model(new).await?;
+    insert_replacing(store, models_dir, new, Some(group)).await?;
     tracing::info!(model = %id, "picture or video model downloaded");
     Ok(())
 }
 
 /// 0.2.0 (Task S8): adds the picture or video model `meta` describes when every part of it is
 /// already on this computer ([`GenGroupPart::present`]: an imported file whose set-up fetches
-/// nothing), with no group or rows: each present file still whole ([`gen_model_from`]), then
-/// the model file's header ([`check_main_file`]). A refusal adds nothing and removes nothing.
-/// Returns the model's id.
+/// nothing, or an installed model set up again with its own files), with no group or rows:
+/// each present file still whole ([`gen_model_from`]), then the model file's header
+/// ([`check_main_file`]). A refusal adds nothing and removes nothing. A model installed
+/// already is replaced ([`insert_replacing`]). Returns the model's id.
 pub(crate) async fn register_present_gen_model(
     store: &store::Store,
+    models_dir: &Path,
     meta: &GroupMeta,
 ) -> AppResult<String> {
     let new = gen_model_from(meta, &[])?;
@@ -414,9 +417,40 @@ pub(crate) async fn register_present_gen_model(
         .ok_or_else(|| AppError::internal("a model added at once whose file is not here"))?;
     check_added(meta, &new, path).await??;
     let id = new.id.clone();
-    store.insert_gen_model(new).await?;
+    insert_replacing(store, models_dir, new, None).await?;
     tracing::info!(model = %id, "picture or video model added");
     Ok(id)
+}
+
+/// Adds `new` to Studio's installed models, replacing the row with its id (same id, `INSERT
+/// OR REPLACE`), then removes each file the replaced row used that nothing uses now and no
+/// download other than `group` writes (`local_models::remove_unused_files`: inside the models
+/// folder only; a file from this computer is the person's own and stays, unless it is
+/// Studio's copy of an import: `local_models::removable_files`). A file that cannot be removed
+/// (open on Windows) stays, logged, and does not fail the change.
+async fn insert_replacing(
+    store: &store::Store,
+    models_dir: &Path,
+    new: store::NewGenModel,
+    group: Option<&str>,
+) -> AppResult<()> {
+    let old = store.get_gen_model(&new.id).await?;
+    store.insert_gen_model(new).await?;
+    let Some(old) = old else {
+        return Ok(());
+    };
+    let files = crate::studio::local_models::removable_files(&old, models_dir);
+    let removed = match files_being_written(store, group).await {
+        Ok(writing) => {
+            let busy = |p: &Path| writing.contains(&p.display().to_string());
+            crate::studio::local_models::remove_unused_files(store, models_dir, &files, &busy).await
+        }
+        Err(e) => Err(e),
+    };
+    if let Err(e) = removed {
+        tracing::warn!(model = %old.id, code = %e.code, "the files a set-up no longer uses stayed");
+    }
+    Ok(())
 }
 
 /// The model part of the picture or video model `meta` downloads.

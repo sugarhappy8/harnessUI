@@ -350,7 +350,7 @@ pub fn run() {
             studio::local_cmd::studio_local_models,
             studio::local_cmd::studio_local_search,
             studio::local_cmd::studio_local_repo,
-            studio::local_cmd::studio_setup_plan,
+            studio::setup_cmd::studio_setup_plan,
             studio::local_cmd::studio_local_fit,
             studio::local_cmd::studio_local_download,
             studio::local_cmd::studio_local_download_file,
@@ -358,6 +358,8 @@ pub fn run() {
             studio::local_cmd::studio_import_inspect,
             studio::local_cmd::studio_import_model,
             studio::local_cmd::studio_accept_local_notice,
+            studio::setup_cmd::studio_model_files,
+            studio::setup_cmd::studio_set_model_files,
         ])
         .setup(|app| {
             let handle = app.handle().clone();

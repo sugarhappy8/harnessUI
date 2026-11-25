@@ -1517,10 +1517,13 @@ pub(crate) mod tests {
         "studio_local_download_file",
         "studio_local_delete",
         "studio_accept_local_notice",
+        // Set it up yourself (studio::setup_cmd).
+        "studio_model_files",
+        "studio_set_model_files",
     ];
 
     /// The modules Studio's commands live in.
-    const STUDIO_COMMAND_MODULES: &[&str] = &["commands", "engine_cmd", "local_cmd"];
+    const STUDIO_COMMAND_MODULES: &[&str] = &["commands", "engine_cmd", "local_cmd", "setup_cmd"];
 
     #[test]
     fn every_studio_command_is_listed_granted_and_registered() {

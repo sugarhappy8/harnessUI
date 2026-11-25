@@ -733,6 +733,25 @@ export interface InstalledLocal {
   fit: LocalFit;
   /** As Studio's picker offers it: free, with its controls. */
   model: MediaModel;
+  /** The recipe it runs with; `null` before it is set up (`needsSetup`). */
+  recipe: RecipeChoice | null;
+  /** The engine version its model file was detected as; `null` when none was. */
+  version: SdVersion | null;
+  /** Its recipe is not one its version runs, or its version is unknown (the person chose it):
+   *  a run's settings line says "untested set-up". */
+  untested: boolean;
+  /** It has no recipe yet: *Set it up yourself* first. */
+  needsSetup: boolean;
+  /** Its recipe takes a high-noise part (a two-model video). */
+  highNoise: boolean;
+  /** Its recipe takes LoRAs. */
+  takesLoras: boolean;
+  /** The family of LoRAs it takes, when its version is known. */
+  loraBase: SdVersion | null;
+  /** Where it came from. */
+  source: "catalog" | "search" | "import";
+  /** A file from this computer used where it is: the person's own, never deleted with it. */
+  inPlace: boolean;
 }
 
 /** Get local models. */
@@ -831,6 +850,30 @@ export interface SlotOverride {
 export interface SetupChoice {
   recipe: string | null;
   overrides: SlotOverride[];
+}
+
+/** An installed model's files (*Set it up yourself*): its recipe (`null` before it has one),
+ *  the recipes it can be set up as, and each slot with its file. */
+export interface ModelFiles {
+  genModelId: string;
+  recipe: RecipeChoice | null;
+  /** The recipes its version runs, the default first; for an untested set-up, or a model of no
+   *  recipe yet, every recipe Studio runs, by kind and then name. */
+  recipes: RecipeChoice[];
+  /** In the recipe's slot order: its model file `main`, its other files `installed`. */
+  slots: PlannedSlot[];
+  /** The recipe is not one its version runs, or its version is unknown. */
+  untested: boolean;
+  /** Every slot its recipe needs has a file. */
+  canRun: boolean;
+}
+
+/** What *Set it up yourself* did: the model's files as they are now, or as the download that
+ *  brings the missing ones makes them (`downloadGroup`; the model keeps its old set-up until it
+ *  is done). */
+export interface SetModelFilesResult {
+  files: ModelFiles;
+  downloadGroup: string | null;
 }
 
 /** The model a local download, fit or set-up plan is for. */

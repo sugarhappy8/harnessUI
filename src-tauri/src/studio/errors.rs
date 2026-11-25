@@ -9,6 +9,8 @@ use agent::media::{
 };
 use models::gen_catalog::GenRole;
 use models::gen_fit::{GenSize, NotFor};
+use models::sd::CannotRunReason;
+use models::sd::recipes::SlotId;
 use runtime::packs::PackError;
 use runtime::sd::args::ArgsError;
 use runtime::sd::failure::SdFailure;
@@ -1168,6 +1170,9 @@ pub fn model_in_use() -> AppError {
 pub const FAMILY_RECORD_MISSING: &str = "its family record is missing";
 /// The details of an installed model with no engine recipe yet (*Set it up yourself*).
 pub const NO_RECIPE_YET: &str = "it has no engine recipe yet";
+/// Why an installed model with no engine recipe yet is not for this computer until it is set
+/// up (*Set it up yourself*); it is listed, needing set-up.
+pub const NEEDS_SET_UP: &str = "Choose this model's type and files first.";
 
 /// Why an installed model that this build cannot read is not for this computer (its family
 /// record hidden by a newer signed catalog, a part's licence no longer known, a family this
@@ -1185,13 +1190,14 @@ pub const NOT_A_RUNNABLE_FILE: &str = "it is not a model file Studio runs";
 pub const A_DISK_FILE_IS_ADDED: &str = "a file on this computer is added, not downloaded";
 
 /// A searched file's download whose set-up has no file for a part it needs (`missing`, in the
-/// plan's order): nothing starts until each has one.
-pub fn setup_incomplete(missing: &[GenRole]) -> AppError {
+/// plan's order): nothing starts until each has one. Each is named by its part's word
+/// (`clip-l`), else by the slot's own (`control_net`), never left out.
+pub fn setup_incomplete(missing: &[SlotId]) -> AppError {
     let roles: Vec<String> = missing
         .iter()
-        .map(|r| match serde_json::to_value(r) {
-            Ok(serde_json::Value::String(word)) => word,
-            _ => format!("{r:?}"),
+        .map(|s| match GenRole::from_slot(*s).map(serde_json::to_value) {
+            Some(Ok(serde_json::Value::String(word))) => word,
+            _ => s.word().to_owned(),
         })
         .collect();
     AppError::new(
@@ -1200,6 +1206,66 @@ pub fn setup_incomplete(missing: &[GenRole]) -> AppError {
         "Open the model's files and pick the missing parts.",
         format!("no file for: {}", roles.join(", ")),
     )
+}
+
+/// A set-up asked for a file Studio can't run (its label, *Can't run in Studio*, says why):
+/// one the engine is known to refuse or misrun, a pickle or sharded file, one with no
+/// published SHA-256, an add-on file. Only weights the engine does not recognise, or a file
+/// whose header was not read, can be set up by hand, with a recipe the person chose. The
+/// message is the label's sentence (`FILE_LABEL.cannotRun`'s, a pickle file's with its default
+/// `.ckpt`); the details, the reason's word.
+pub fn cannot_run(reason: CannotRunReason) -> AppError {
+    let message = match reason {
+        CannotRunReason::Lumina2 => engine_cant_run("a Lumina 2"),
+        CannotRunReason::LtxVideo09 => engine_cant_run("an LTX-Video 0.9"),
+        CannotRunReason::HunyuanVideo1 => engine_cant_run("a HunyuanVideo 1"),
+        CannotRunReason::Svd => engine_cant_run("a Stable Video Diffusion"),
+        CannotRunReason::Ltx2 => engine_cant_run("an LTX-2"),
+        CannotRunReason::UnknownWeights => {
+            "The Studio engine doesn't recognise this model.".to_owned()
+        }
+        CannotRunReason::Sharded => {
+            "This model is split into several files, which Studio can't put back together."
+                .to_owned()
+        }
+        CannotRunReason::Pickle => "Studio can't read .ckpt files.".to_owned(),
+        CannotRunReason::NoSha => {
+            "Hugging Face publishes no checksum for this file, so Studio can't check it.".to_owned()
+        }
+        CannotRunReason::Adapter => "This is an add-on file (such as a ControlNet or an \
+             IP-Adapter), which Studio doesn't use."
+            .to_owned(),
+        CannotRunReason::NeedsControlFrames => {
+            "This model needs control video frames, which Studio can't give it.".to_owned()
+        }
+        CannotRunReason::NeedsAudio => {
+            "This model needs a sound file, which Studio can't give it.".to_owned()
+        }
+        CannotRunReason::Upscaler => {
+            "This is an upscaler, not a picture or video model.".to_owned()
+        }
+        CannotRunReason::FolderModel => {
+            "This model comes as a folder of parts, which the Studio engine can't load.".to_owned()
+        }
+        CannotRunReason::NotThisEngine => {
+            "The Studio engine can't run this kind of model.".to_owned()
+        }
+    };
+    let details = match serde_json::to_value(reason) {
+        Ok(serde_json::Value::String(word)) => word,
+        _ => format!("{reason:?}"),
+    };
+    AppError::new(
+        "studio_cannot_run",
+        message,
+        "Download the file anyway to use it elsewhere.",
+        details,
+    )
+}
+
+/// "This is <a model>, which the Studio engine can't run."
+fn engine_cant_run(a_model: &str) -> String {
+    format!("This is {a_model} model, which the Studio engine can't run.")
 }
 
 /// A set-up asked with a recipe the pinned engine does not have, or one Studio leaves out.
@@ -1810,7 +1876,8 @@ mod tests {
             cannot_read_file(".ckpt"),
             not_a_model_format(),
             no_published_checksum(),
-            setup_incomplete(&[GenRole::T5xxl, GenRole::Vae]),
+            setup_incomplete(&[SlotId::T5xxl, SlotId::Vae]),
+            cannot_run(CannotRunReason::Lumina2),
             import_is_lora(),
             import_file_changed(),
             import_failed("No space left on device"),
@@ -2211,6 +2278,41 @@ mod tests {
             fits_at(size(832, 480, 49), true),
             "Fits at 832×480, 49 frames"
         );
+    }
+
+    /// A set-up that misses a part names each, by its part's word, else by its slot's own;
+    /// a file Studio can't run says why in its label's words.
+    #[test]
+    fn set_up_refusals_say_what_is_missing_and_why() {
+        let e = setup_incomplete(&[SlotId::T5xxl, SlotId::ClipL, SlotId::ControlNet]);
+        assert_eq!(e.details, "no file for: t5xxl, clip-l, control_net");
+        let e = cannot_run(CannotRunReason::Lumina2);
+        assert_eq!(
+            (e.code.as_str(), e.message.as_str(), e.next_step.as_str()),
+            (
+                "studio_cannot_run",
+                "This is a Lumina 2 model, which the Studio engine can't run.",
+                "Download the file anyway to use it elsewhere."
+            )
+        );
+        assert_eq!(e.details, "lumina2");
+        for (reason, message) in [
+            (CannotRunReason::Pickle, "Studio can't read .ckpt files."),
+            (
+                CannotRunReason::Adapter,
+                "This is an add-on file (such as a ControlNet or an IP-Adapter), which Studio doesn't use.",
+            ),
+            (
+                CannotRunReason::UnknownWeights,
+                "The Studio engine doesn't recognise this model.",
+            ),
+            (
+                CannotRunReason::LtxVideo09,
+                "This is an LTX-Video 0.9 model, which the Studio engine can't run.",
+            ),
+        ] {
+            assert_eq!(cannot_run(reason).message, message);
+        }
     }
 
     #[test]

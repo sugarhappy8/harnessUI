@@ -9,6 +9,7 @@ use serde_json::{Map, Value};
 use store::{ChatId, MessageId, ProviderId};
 
 use models::gen_catalog::GenRole;
+use models::sd::detect::SdVersion;
 use models::sd::matching::RecipeKind;
 use models::sd::setup::PartSource;
 use models::sd::{FileLabel, Verdict};
@@ -1313,8 +1314,9 @@ pub struct LocalEntryDto {
 
 /// An installed picture or video model. One this build cannot read (its family record hidden
 /// by a newer signed catalog, a part's licence no longer known, a family this build does not
-/// know) is listed too, so it can be deleted: its fit `notHere` with why, and its `model`
-/// without controls, `usable` saying why.
+/// know), and one with no recipe yet (`needs_setup`), are listed too, so they can be deleted
+/// or set up: its fit `notHere` with why, and its `model` without controls, `usable` saying
+/// why.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct InstalledLocalDto {
@@ -1328,6 +1330,26 @@ pub struct InstalledLocalDto {
     pub fit: LocalFitDto,
     /// As Studio's picker offers it: free, with its controls.
     pub model: MediaModelDto,
+    /// The recipe it runs with (the Model type menu's words); `None` before it is set up.
+    pub recipe: Option<RecipeChoiceDto>,
+    /// The engine version its model file was detected as; `None` when none was.
+    pub version: Option<SdVersion>,
+    /// Its set-up is untested: its recipe is not one its version runs, or its version is
+    /// unknown (the person chose it): a run's settings line says "untested set-up".
+    pub untested: bool,
+    /// It has no recipe yet: *Set it up yourself* first.
+    pub needs_setup: bool,
+    /// Its recipe takes a high-noise part (a two-model video).
+    pub high_noise: bool,
+    /// Its recipe takes LoRAs.
+    pub takes_loras: bool,
+    /// The family of LoRAs it takes (its version's), when its version is known.
+    pub lora_base: Option<SdVersion>,
+    /// Where it came from: `catalog`, `search` or `import`.
+    pub source: String,
+    /// A file from this computer used where it is (not Studio's copy of it): the person's
+    /// own, which deleting the model never deletes.
+    pub in_place: bool,
 }
 
 /// Get local models (`studio_local_models`). Nothing in it comes from the network.
@@ -1404,6 +1426,37 @@ pub struct SetupPlanDto {
     pub needs_engine: bool,
     /// The recipe was never matched to the model (the person chose it).
     pub untested: bool,
+}
+
+/// An installed model's files (`studio_model_files`, *Set it up yourself*): its recipe, the
+/// recipes it can be set up as, and each slot with its file.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ModelFilesDto {
+    pub gen_model_id: String,
+    /// `None` for a model with no recipe yet.
+    pub recipe: Option<RecipeChoiceDto>,
+    /// The recipes its version runs, the default first; for an untested set-up, or a model of
+    /// no recipe yet, every recipe Studio runs, by kind and then name.
+    pub recipes: Vec<RecipeChoiceDto>,
+    /// In the recipe's slot order: its model file `main`, its other files `installed`, a
+    /// file the person chose `chosen`, one to fetch from where it comes. With no recipe yet,
+    /// its own files.
+    pub slots: Vec<PlannedSlotDto>,
+    /// The recipe is not one its version runs, or its version is unknown.
+    pub untested: bool,
+    /// Every slot its recipe needs has a file.
+    pub can_run: bool,
+}
+
+/// What *Set it up yourself* did (`studio_set_model_files`): the model's files as they are
+/// now, or as the download that brings the missing ones makes them (`download_group`; the
+/// model keeps its old set-up until it is done).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SetModelFilesDto {
+    pub files: ModelFilesDto,
+    pub download_group: Option<String>,
 }
 
 /// A file of a repository with what Studio found it is.

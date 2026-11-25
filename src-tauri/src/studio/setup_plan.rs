@@ -1,11 +1,15 @@
-//! Set-up plans (design section 7.4; Tasks S6 to S8): which file fills each slot of a searched
-//! file's or a file on this computer's recipe, and the generic entry the plan makes.
+//! Set-up plans (design section 7.4; Tasks S6 to S9): which file fills each slot of a searched
+//! file's, a file on this computer's or an installed model's recipe, and the generic entry the
+//! plan makes.
 //!
 //! - **Planning** ([`plan_source`]): a searched file of its repo at its commit
 //!   ([`plan_file`], the repo read through `DetectService`), or a file on this computer
 //!   ([`plan_disk`]: checked, then its header read), with the person's choices
 //!   ([`slot_choices`]: another recipe, a Hub file pinned by its SHA-256, an installed model's
-//!   file, a file on this computer), by `models::sd::setup::plan_setup`.
+//!   file, a file on this computer), by `models::sd::setup::plan_setup`. *Set it up
+//!   yourself*: a file Studio does not recognise, or one not read, with the recipe the person
+//!   chose (untested); an installed model planned again with its own files kept
+//!   ([`plan_installed`]).
 //! - **The entry it makes** (`plan_with`): one part per planned file, each fetched file under
 //!   its companion licence or its own repo's label (ruling S4-licence-ref), a file an
 //!   installed model uses as that model has it, and the main file from this computer the
@@ -26,19 +30,21 @@ use models::hf::{Gated, HfClient, HfError, RepoDetail};
 use models::sd::candidates::candidates;
 use models::sd::companions::CompanionTable;
 use models::sd::detect::SdVersion;
-use models::sd::index::{PICKLE_EXTENSIONS, READ_EXTENSIONS};
-use models::sd::inspect::inspect_local;
+use models::sd::index::{FileFormat, PICKLE_EXTENSIONS, READ_EXTENSIONS};
+use models::sd::inspect::{FileKind, MatchFacts, inspect_local};
 use models::sd::matching::{NoisePart, out_of_scope, recipes_for};
 use models::sd::recipes::{SlotId, recipe};
 use models::sd::setup::{
     InstalledFile, LicenceRef, MainFile, PartSource, PlannedFile, PlannedPart, SetupInput,
     SetupPlan, SlotChoice, plan_setup,
 };
-use models::sd::{FileFacts, FileLabel, NotRead, label_for};
+use models::sd::{CannotRunReason, FileFacts, FileLabel, NotRead, label_for};
 
 use super::detect::{DetectService, RepoReading};
 use super::errors;
-use super::local_models::{InstalledFiles, LocalSource, entry_from_installed};
+use super::local_models::{
+    InstalledFiles, LocalSource, entry_from_installed, installed_version, rebuilt_licences,
+};
 use crate::dto::{SetupChoice, SlotFile, SlotOverride};
 use crate::error::{AppError, AppResult};
 
@@ -116,8 +122,13 @@ pub(crate) async fn plan_source(
 }
 
 /// The set-up of `file` of the repo `read`, with `choice`. The file must be one Studio
-/// runs (labelled `Works`): a diffusers folder's UNet plans the folder; any other file not
-/// listed is `not_found`, and one Studio does not run `studio_not_supported_yet`.
+/// runs (labelled `Works`): a diffusers folder's UNet plans the folder. *Set it up yourself*:
+/// weights the engine does not recognise (`CannotRun { UnknownWeights }`), or a file whose
+/// header was not read (past the files read for one repo, or a read that failed), are planned
+/// with the recipe the person chose, untested, of no known version; never a pickle or
+/// sharded file. Any other file Studio can't run is `studio_cannot_run` with its label's
+/// sentence ([`errors::cannot_run`]); a file not listed is `not_found`, and another
+/// (a LoRA, an extra part, one not read without a recipe) `studio_not_supported_yet`.
 pub(crate) async fn plan_file(
     deps: &PlanDeps<'_>,
     read: &ReadRepo,
@@ -130,6 +141,10 @@ pub(crate) async fn plan_file(
         .iter()
         .find(|f| f.path == file)
         .ok_or_else(|| AppError::not_found("model file"))?;
+    let by_hand = || match &choice.recipe {
+        Some(recipe) => Ok((None, recipe.clone(), None, false)),
+        None => Err(errors::not_supported_yet(errors::NOT_A_RUNNABLE_FILE)),
+    };
     let (version, recipe_id, part, folder) = match read.reading.labels.get(file) {
         Some(FileLabel::Works {
             version,
@@ -137,7 +152,7 @@ pub(crate) async fn plan_file(
             part,
             folder,
             ..
-        }) => (*version, recipe.clone(), *part, *folder),
+        }) => (Some(*version), recipe.clone(), *part, *folder),
         // A gated repo's file that could not be read says what Hugging Face asks for.
         Some(FileLabel::NotRead {
             reason: NotRead::NeedsToken,
@@ -145,13 +160,24 @@ pub(crate) async fn plan_file(
         Some(FileLabel::NotRead {
             reason: NotRead::NeedsTerms,
         }) => return Err(crate::hub::hf_error(HfError::NeedsTerms)),
+        // Never a pickle or sharded file: those are labelled by their names, never read.
+        Some(FileLabel::NotRead {
+            reason: NotRead::Budget | NotRead::Failed,
+        }) => by_hand()?,
+        Some(FileLabel::CannotRun {
+            reason: CannotRunReason::UnknownWeights,
+            ..
+        }) if choice.recipe.is_some() => by_hand()?,
+        Some(FileLabel::CannotRun { reason, .. }) => return Err(errors::cannot_run(*reason)),
         _ => return Err(errors::not_supported_yet(errors::NOT_A_RUNNABLE_FILE)),
     };
-    let facts = read
-        .reading
-        .facts
-        .get(file)
-        .ok_or_else(|| AppError::internal("a file that works without its facts"))?;
+    // A file not read has no facts: planned as weights of no known kind.
+    let unread = unread_facts(file);
+    let facts = match read.reading.facts.get(file) {
+        Some(facts) => facts,
+        None if version.is_none() => &unread,
+        None => return Err(AppError::internal("a file that works without its facts")),
+    };
     let folder = if folder {
         let found = candidates(&detail.files)
             .folder
@@ -203,12 +229,149 @@ pub(crate) async fn plan_file(
             listing: &detail.files,
             listing_facts: &read.reading.facts,
             detail: Some(detail),
+            installed: false,
         },
         named,
         choice,
         &overrides,
         &others,
     )
+}
+
+/// What planning knows of a file whose header was not read: weights of no known kind, in
+/// the format its name says.
+fn unread_facts(file: &str) -> FileFacts {
+    FileFacts {
+        kind: FileKind::CannotRun {
+            reason: CannotRunReason::UnknownWeights,
+            version: None,
+        },
+        facts: MatchFacts::default(),
+        parameters: 0,
+        format: if file.to_lowercase().ends_with(".gguf") {
+            FileFormat::Gguf
+        } else {
+            FileFormat::Safetensors
+        },
+    }
+}
+
+/// The set-up of installed model `row` planned again (*Set it up yourself*): its recipe, or
+/// the one `choice` names; its model file (its part of role `diffusion` or `model`) as the
+/// main file, its header read here off the async runtime; each of its other parts' files for
+/// its slot; then `choice`'s files on top. The model's own files are used where they are and
+/// show as `Installed` (its model file `Main`); its model part stays the part it records (a
+/// file from this computer stays the person's own). Its version is the one its header says,
+/// else its family column's: a recipe that version does not run is untested. A model with no
+/// recipe, and none chosen, is `studio_not_supported_yet`, as is one whose model file's header
+/// does not read.
+pub(crate) async fn plan_installed(
+    deps: &PlanDeps<'_>,
+    row: &store::GenModel,
+    choice: &SetupChoice,
+) -> AppResult<Planned> {
+    let recipe_id = choice
+        .recipe
+        .clone()
+        .or_else(|| row.recipe_id.clone())
+        .ok_or_else(|| errors::not_supported_yet(errors::NO_RECIPE_YET))?;
+    let own = own_parts(row)?;
+    let is_main = |p: &GenPart| matches!(p.role, GenRole::Diffusion | GenRole::Model);
+    let mut mains = own.iter().filter(|(p, _)| is_main(p));
+    let (Some((main, main_file)), None) = (mains.next(), mains.next()) else {
+        return Err(AppError::internal(
+            "an installed model without exactly one model part",
+        ));
+    };
+    let read_from = main_file.clone();
+    let facts = tokio::task::spawn_blocking(move || inspect_local(&read_from))
+        .await
+        .map_err(|e| AppError::internal(format!("reading a file's header: {e}")))?
+        .map_err(|e| errors::not_supported_yet(format!("its model file does not read: {e}")))?;
+    let version = match &facts.kind {
+        FileKind::Model { version, .. } => Some(*version),
+        _ => installed_version(row),
+    };
+    // Its own row first, so each of its files is the part it records.
+    let mut installed = deps.installed.clone();
+    installed.gen_models.retain(|m| m.id != row.id);
+    installed.gen_models.insert(0, row.clone());
+    let deps = PlanDeps {
+        installed: &installed,
+        ..*deps
+    };
+    let mut overrides: Vec<(SlotId, SlotChoice)> = own
+        .iter()
+        .filter(|(p, _)| !is_main(p))
+        .map(|(p, file)| {
+            let choice = SlotChoice::Local {
+                path: file.clone(),
+                size: p.size,
+                sha256: Some(p.sha256.clone()).filter(|s| !s.is_empty()),
+            };
+            (p.role.slot(), choice)
+        })
+        .collect();
+    let mut others = OtherRepos::default();
+    overrides.extend(slot_choices(&deps, None, &choice.overrides, &mut others).await?);
+    let no_facts = BTreeMap::new();
+    let mut planned = plan_with(
+        &deps,
+        PlanMain {
+            main: MainFile::Local {
+                path: main_file,
+                size: main.size,
+                sha256: Some(main.sha256.as_str()).filter(|s| !s.is_empty()),
+            },
+            facts: &facts,
+            version,
+            recipe_id: &recipe_id,
+            part: None,
+            listing: &[],
+            listing_facts: &no_facts,
+            detail: None,
+            installed: true,
+        },
+        Named {
+            id: row.id.clone(),
+            name: row.name.clone(),
+            publisher: String::new(),
+            gate: GenGate {
+                mode: GateMode::None,
+                collects: Vec::new(),
+            },
+        },
+        choice,
+        &overrides,
+        &others,
+    )?;
+    // A slot the person did not choose for keeps the model's own file.
+    let chosen: BTreeSet<SlotId> = choice.overrides.iter().map(|o| o.role.slot()).collect();
+    for part in &mut planned.plan.parts {
+        if part.source == PartSource::Chosen && !chosen.contains(&part.slot) {
+            part.source = PartSource::Installed;
+        }
+    }
+    Ok(planned)
+}
+
+/// Each part of installed model `row` with its file on this computer.
+pub(crate) fn own_parts(row: &store::GenModel) -> AppResult<Vec<(GenPart, PathBuf)>> {
+    let bad = |e: String| AppError::internal(format!("an installed model's parts: {e}"));
+    row.parts
+        .as_array()
+        .ok_or_else(|| bad("not a list".into()))?
+        .iter()
+        .map(|p| {
+            let file = p
+                .get("file")
+                .and_then(serde_json::Value::as_str)
+                .ok_or_else(|| bad("a part without its file".into()))?;
+            let part: GenPart =
+                serde_json::from_value(p.clone()).map_err(|e| bad(e.to_string()))?;
+            Ok((part, PathBuf::from(file)))
+        })
+        .collect()
 }
 
 /// The set-up of the file at `path` on this computer (untrusted: [`checked_disk_file`]),
@@ -333,12 +496,13 @@ pub(crate) fn plan_disk_with(
                 sha256,
             },
             facts: &file.facts,
-            version: setup.version,
+            version: Some(setup.version),
             recipe_id: &setup.recipe_id,
             part: setup.part,
             listing: &[],
             listing_facts: &no_facts,
             detail: None,
+            installed: false,
         },
         named,
         choice,
@@ -351,7 +515,9 @@ pub(crate) fn plan_disk_with(
 struct PlanMain<'a> {
     main: MainFile<'a>,
     facts: &'a FileFacts,
-    version: SdVersion,
+    /// The engine version it was detected as; `None` for weights of no known kind (set up by
+    /// hand: untested).
+    version: Option<SdVersion>,
     /// The recipe its label gives.
     recipe_id: &'a str,
     part: Option<NoisePart>,
@@ -359,6 +525,10 @@ struct PlanMain<'a> {
     listing_facts: &'a BTreeMap<String, FileFacts>,
     /// Its repo's listing; `None` for a file on this computer.
     detail: Option<&'a RepoDetail>,
+    /// A file from this computer that is an installed model's own model file (planned again:
+    /// *Set it up yourself*): its part is the one that model records, never made the person's
+    /// own.
+    installed: bool,
 }
 
 /// How the entry a plan makes is known.
@@ -387,13 +557,15 @@ fn plan_with(
     let recipe = recipe(recipe_id)
         .filter(|r| out_of_scope(&r.id).is_none())
         .ok_or_else(errors::recipe_not_offered)?;
-    let untested = !recipes_for(m.version).contains(&recipe_id);
+    let untested = m
+        .version
+        .is_none_or(|v| !recipes_for(v).contains(&recipe_id));
     let installed = installed_files(deps.installed);
     let plan = plan_setup(&SetupInput {
         main: m.main,
         facts: m.facts,
         recipe,
-        version: Some(m.version),
+        version: m.version,
         part: m.part,
         listing: m.listing,
         listing_facts: m.listing_facts,
@@ -422,8 +594,11 @@ fn plan_with(
         }
         let part = match file {
             // The main file from this computer is the person's own, wherever it lies (an
-            // installed model's file included): it names no licence and is never deleted.
-            PlannedFile::Local { path, size, sha256 } if planned.source == PartSource::Main => {
+            // installed model's file included): it names no licence and is never deleted. An
+            // installed model planned again keeps its own model part.
+            PlannedFile::Local { path, size, sha256 }
+                if planned.source == PartSource::Main && !m.installed =>
+            {
                 local_part(role, path, *size, sha256.as_deref())
             }
             _ => gen_part(deps, m.detail, others, &mut licenses, role, file),
@@ -436,7 +611,7 @@ fn plan_with(
         name: named.name,
         publisher: named.publisher,
         recipe,
-        version: Some(m.version),
+        version: m.version,
         parts,
         licenses,
         gate: named.gate,
@@ -569,8 +744,9 @@ pub(crate) fn file_licence(
 }
 
 /// The licence of a file an installed model uses: a companion's, by its SHA-256; else the
-/// one that model records for it; else, for a file of the main repo, that repo's label;
-/// else "Check the licence".
+/// one that model records for it (worked out again from the part's repository, revision and
+/// licence id for a model that has no recipe yet: `local_models::rebuilt_licences`); else,
+/// for a file of the main repo, that repo's label; else "Check the licence".
 fn installed_licence(
     deps: &PlanDeps<'_>,
     main: Option<&RepoDetail>,
@@ -584,10 +760,14 @@ fn installed_licence(
     {
         return l.clone();
     }
-    if let Some(l) = entry_from_installed(row, deps.catalog)
-        .ok()
-        .and_then(|e| e.licenses.get(&part.license).cloned())
-    {
+    let recorded = match entry_from_installed(row, deps.catalog) {
+        Ok(entry) => entry.licenses.get(&part.license).cloned(),
+        Err(_) if row.recipe_id.is_none() => {
+            rebuilt_licences(deps.catalog, std::slice::from_ref(part)).remove(&part.license)
+        }
+        Err(_) => None,
+    };
+    if let Some(l) = recorded {
         return l;
     }
     match main.filter(|d| d.id == part.repo && d.commit == part.revision) {
@@ -835,13 +1015,7 @@ pub(crate) fn present_parts(
 /// own `hf_needs_token`.
 pub(crate) fn ready_to_fetch(planned: &Planned, hf: Option<&HfClient>) -> AppResult<()> {
     if !planned.plan.can_run() {
-        let missing: Vec<GenRole> = planned
-            .plan
-            .missing()
-            .into_iter()
-            .filter_map(GenRole::from_slot)
-            .collect();
-        return Err(errors::setup_incomplete(&missing));
+        return Err(errors::setup_incomplete(&planned.plan.missing()));
     }
     if !planned.gated.is_empty() && !hf.is_some_and(HfClient::has_token) {
         return Err(crate::hub::hf_error(HfError::NeedsToken));

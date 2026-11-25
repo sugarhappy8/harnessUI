@@ -269,7 +269,7 @@ pub(crate) async fn prepare_import(
     )?;
     let needs_engine = prepared.needs_engine;
     let added = if prepared.files.is_empty() {
-        Added::Now(register_present_gen_model(&deps.store, &prepared.meta).await?)
+        Added::Now(register_present_gen_model(&deps.store, &deps.models_dir, &prepared.meta).await?)
     } else {
         Added::Download(Box::new(prepared))
     };

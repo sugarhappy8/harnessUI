@@ -237,3 +237,5 @@ studio_local_delete
 studio_import_inspect
 studio_import_model
 studio_accept_local_notice
+studio_model_files
+studio_set_model_files

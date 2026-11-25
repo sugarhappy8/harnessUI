@@ -1,5 +1,5 @@
 // Studio's commands and events (0.1.0): one wrapper per command in src-tauri/src/studio/
-// {commands,engine_cmd,local_cmd}.rs, in their order there. Argument names are the Rust
+// {commands,engine_cmd,local_cmd,setup_cmd}.rs, in their order there. Argument names are the Rust
 // parameters' in camelCase, as Tauri reads them. Only the read commands' price and list
 // updates (`studioRefreshModels`, `studioModelPrice`) and Hugging Face (`studioLocalSearch`,
 // `studioLocalRepo`, `studioSetupPlan` and `studioLocalFit` for a searched file) send
@@ -20,7 +20,9 @@ import type {
   LocalRepo,
   LocalSearchPage,
   LocalSource,
+  ModelFiles,
   SearchFilter,
+  SetModelFilesResult,
   SetupChoice,
   SetupPlan,
   MediaModel,
@@ -148,6 +150,12 @@ export const studioImportModel = (path: string, mode: ImportMode, choice: SetupC
   invoke<ImportResult>("studio_import_model", { path, mode, choice });
 /** The note about local models, accepted. */
 export const studioAcceptLocalNotice = () => invoke<StudioPrefs>("studio_accept_local_notice");
+/** *Set it up yourself*: an installed model's files. Sends nothing. */
+export const studioModelFiles = (genModelId: string) => invoke<ModelFiles>("studio_model_files", { genModelId });
+/** *Set it up yourself*: an installed model set up with another recipe or other files, rewritten
+ *  at once or by the download it starts (`downloadGroup`). */
+export const studioSetModelFiles = (genModelId: string, choice: SetupChoice) =>
+  invoke<SetModelFilesResult>("studio_set_model_files", { genModelId, choice });
 
 // ---- events -------------------------------------------------------------------------------
 
