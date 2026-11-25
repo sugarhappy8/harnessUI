@@ -264,9 +264,7 @@ const CANNOT_RUN_WORDS: [(&[&str], CannotRunReason); 4] = [
 const WAN_WORDS: &[&str] = &["wan2.1", "wan2.2", "wan"];
 
 /// The version words: any of the first, with all of the second; the first match wins.
-/// `xl` comes last, after PixArt's own `XL`: SDXL repos named `…-xl`
-/// (`stable-diffusion-xl-base-1.0`, `pixel-art-xl-lora`).
-const VERSION_WORDS: [(&[&str], &[&str], SdVersion); 20] = [
+const VERSION_WORDS: [(&[&str], &[&str], SdVersion); 19] = [
     (&["sdxl"], &[], SdVersion::Sdxl),
     (&["sd1.5", "v1-5", "sd15"], &[], SdVersion::Sd1),
     (&["sd2", "v2-1"], &[], SdVersion::Sd2),
@@ -294,7 +292,14 @@ const VERSION_WORDS: [(&[&str], &[&str], SdVersion); 20] = [
     (&["longcat"], &[], SdVersion::Longcat),
     (&["pixart"], &[], SdVersion::Pixart),
     (&["anima"], &[], SdVersion::Anima),
-    (&["xl"], &[], SdVersion::Sdxl),
+];
+
+/// The pipeline tags of picture and video models, and the kind each says.
+const MEDIA_TAGS: [(&str, RecipeKind); 4] = [
+    ("text-to-image", RecipeKind::Picture),
+    ("image-to-image", RecipeKind::PictureEdit),
+    ("text-to-video", RecipeKind::Video),
+    ("image-to-video", RecipeKind::Video),
 ];
 
 fn version_of(name: &HintName) -> Option<SdVersion> {
@@ -304,14 +309,15 @@ fn version_of(name: &HintName) -> Option<SdVersion> {
         .map(|(.., version)| *version)
 }
 
-/// What a model of `version` named `name` makes: from its pipeline tag, else from the
-/// recipe its name picks ([`match_recipe`]), else from the version's default recipe.
+/// What a model of `version` named `name` makes: from its media pipeline tag
+/// ([`MEDIA_TAGS`]), else from the recipe its name picks ([`match_recipe`]), else from the
+/// version's default recipe.
 fn kind_hint(version: SdVersion, name: &str, pipeline_tag: Option<&str>) -> RecipeKind {
-    match pipeline_tag {
-        Some("text-to-image") => return RecipeKind::Picture,
-        Some("image-to-image") => return RecipeKind::PictureEdit,
-        Some("text-to-video" | "image-to-video") => return RecipeKind::Video,
-        _ => {}
+    if let Some((_, kind)) = MEDIA_TAGS
+        .iter()
+        .find(|(tag, _)| Some(*tag) == pipeline_tag)
+    {
+        return *kind;
     }
     match match_recipe(version, &MatchFacts::default(), &[], name) {
         Match::Recipe { id, .. } => kind_of(id),
@@ -323,14 +329,21 @@ fn kind_hint(version: SdVersion, name: &str, pipeline_tag: Option<&str>) -> Reci
 }
 
 /// What a search result offers, from its repo id and pipeline tag alone, before its files
-/// are read. The first match: `lora` (a LoRA, for the version its name says); a model
-/// Studio can't run ([`CANNOT_RUN_WORDS`]); a version ([`VERSION_WORDS`]), whose kind
-/// comes from the pipeline tag, else from the name; otherwise `Unknown`.
+/// are read. A pipeline tag that is not a picture or video model's ([`MEDIA_TAGS`]: a chat
+/// model's `text-generation`) is `Unknown`. Otherwise the first match: `lora` (a LoRA, for
+/// the version its name says, `xl` read as SDXL); a model Studio can't run
+/// ([`CANNOT_RUN_WORDS`]); a version ([`VERSION_WORDS`]), whose kind comes from the
+/// pipeline tag, else from the name; otherwise `Unknown`.
+///
+/// `xl` names an SDXL base only in a LoRA's name: `google/flan-t5-xl` is no SDXL model.
 pub fn verdict_hint(repo_id: &str, pipeline_tag: Option<&str>) -> Verdict {
+    if pipeline_tag.is_some_and(|tag| MEDIA_TAGS.iter().all(|(media, _)| *media != tag)) {
+        return Verdict::Unknown;
+    }
     let name = HintName::new(repo_id);
     if name.has("lora") {
         return Verdict::Lora {
-            base: version_of(&name),
+            base: version_of(&name).or_else(|| name.has("xl").then_some(SdVersion::Sdxl)),
         };
     }
     if let Some((_, reason)) = CANNOT_RUN_WORDS
@@ -1533,9 +1546,6 @@ mod tests {
             ("meituan-longcat/LongCat-Image", SdVersion::Longcat),
             ("PixArt-alpha/PixArt-Sigma-XL-2-1024-MS", SdVersion::Pixart),
             ("circlestone-labs/Anima", SdVersion::Anima),
-            // `xl` comes last: SDXL repos named `…-xl` (and PixArt's `XL` above is PixArt).
-            ("stabilityai/stable-diffusion-xl-base-1.0", SdVersion::Sdxl),
-            ("cagliostrolab/animagine-xl-3.1", SdVersion::Sdxl),
         ] {
             assert!(
                 matches!(hint(name), Verdict::Works { version: v, .. } if v == version),
@@ -1543,12 +1553,16 @@ mod tests {
                 hint(name)
             );
         }
-        // Chat models and words inside other words say nothing.
+        // Chat models and words inside other words say nothing; nor does `xl` outside a
+        // LoRA's name.
         for name in [
             "Qwen/Qwen3-8B",
             "unsloth/gemma-3-12b-it-GGUF",
             "someone/flora-wanderer",
             "someone/swan-song",
+            "google/flan-t5-xl",
+            "Rostlab/prot_t5_xl_uniref50",
+            "stabilityai/stable-diffusion-xl-base-1.0",
         ] {
             assert_eq!(hint(name), Verdict::Unknown, "{name}");
         }
@@ -1584,9 +1598,37 @@ mod tests {
             verdict_hint("Wan-AI/Wan2.1-VACE-14B", None),
             works(SdVersion::Wan2, RecipeKind::Video)
         );
+    }
+
+    /// A pipeline tag of another kind of model says what the repo is, whatever its name.
+    #[test]
+    fn a_tag_that_is_no_picture_or_video_models_says_nothing() {
+        for (name, tag) in [
+            ("meituan-longcat/LongCat-Flash-Chat", "text-generation"),
+            ("meituan-longcat/LongCat-Flash-Thinking", "text-generation"),
+            ("meituan-longcat/LongCat-2.5", "image-text-to-text"),
+            ("someone/llama-3-8b-lora", "text-generation"),
+            ("o/my-sdxl-merge", "other"),
+        ] {
+            assert_eq!(verdict_hint(name, Some(tag)), Verdict::Unknown, "{name}");
+        }
         assert_eq!(
-            verdict_hint("o/my-sdxl-merge", Some("other")),
-            works(SdVersion::Sdxl, RecipeKind::Picture)
+            verdict_hint("meituan-longcat/LongCat-Image", Some("text-to-image")),
+            works(SdVersion::Longcat, RecipeKind::Picture)
         );
+        // `xl` is SDXL in a LoRA's name, and only there.
+        assert_eq!(
+            verdict_hint("nerijs/pixel-art-xl-lora", Some("text-to-image")),
+            Verdict::Lora {
+                base: Some(SdVersion::Sdxl)
+            }
+        );
+        assert_eq!(
+            verdict_hint("nerijs/pixel-art-xl-lora", None),
+            Verdict::Lora {
+                base: Some(SdVersion::Sdxl)
+            }
+        );
+        assert_eq!(verdict_hint("google/flan-t5-xl", None), Verdict::Unknown);
     }
 }

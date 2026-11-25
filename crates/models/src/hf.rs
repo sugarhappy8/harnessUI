@@ -2179,6 +2179,32 @@ mod tests {
         );
     }
 
+    /// A "longcat" or "xl" search's untagged query also finds text models whose names hold
+    /// a version word: they are dropped, and the picture model is kept.
+    #[test]
+    fn text_models_named_like_picture_models_are_dropped() {
+        let ranked = rank_generator_searches(
+            vec![vec![], vec![]],
+            vec![
+                summary(
+                    "meituan-longcat/LongCat-Flash-Chat",
+                    Some("text-generation"),
+                ),
+                summary("meituan-longcat/LongCat-2.5", Some("image-text-to-text")),
+                summary("google/flan-t5-xl", None),
+                summary("Rostlab/prot_t5_xl_half_uniref50-enc", None),
+                summary("meituan-longcat/LongCat-Image", Some("text-to-image")),
+                summary("nerijs/pixel-art-xl-lora", None),
+            ],
+            GenSearchKind::Pictures,
+            "",
+        );
+        assert_eq!(
+            ranked.iter().map(|r| r.id.as_str()).collect::<Vec<_>>(),
+            ["meituan-longcat/LongCat-Image", "nerijs/pixel-art-xl-lora"]
+        );
+    }
+
     #[test]
     fn hits_are_ranked_by_what_their_names_say() {
         let mut hits = vec![

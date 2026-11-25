@@ -3,7 +3,9 @@
 //!
 //! A repo's diffusers folder is read as one model ([`Candidates::folder`]). Every other
 //! weights file, in this order:
-//! 1. in a diffusers folder model without a UNet (a `transformer/` model): `FolderModel`;
+//! 1. in a component folder (`transformer/`, `text_encoder/`, `vae/`, …, or any folder with a
+//!    `config.json`) of a diffusers folder model without a UNet: `FolderModel`. Other
+//!    folders beside it (SD 3.5's `text_encoders/`) take the rules below;
 //! 2. a pickle (`.ckpt`, `.pt`, `.pth`, `.bin`): `Pickle`;
 //! 3. a shard of a split file, and its `.index.json`: `Sharded`, its first shard read for the
 //!    version;
@@ -100,10 +102,31 @@ fn folder_under<'a>(root: &str, path: &'a str) -> Option<&'a str> {
     Some(dir)
 }
 
-/// The roots (`""` or `"<folder>/"`) of a diffusers folder model with no UNet: a
-/// `model_index.json` at the top or one folder down, and no `unet/` beside it.
-fn folder_model_roots(files: &[RepoFile]) -> Vec<&str> {
-    files
+/// Diffusers component folders by name, beside `transformer*/` and `text_encoder*/`.
+const COMPONENT_FOLDERS: [&str; 5] = [
+    "vae",
+    "image_encoder",
+    "audio_vae",
+    "safety_checker",
+    "controlnet",
+];
+
+/// Whether a folder's name is a diffusers component's: `transformer`, `text_encoder` (with a
+/// `_N` suffix or none: `text_encoders/` is Comfy's folder of companions), or
+/// [`COMPONENT_FOLDERS`].
+fn is_component(dir: &str) -> bool {
+    ["transformer", "text_encoder"].iter().any(|name| {
+        dir.strip_prefix(name)
+            .is_some_and(|rest| rest.is_empty() || rest.starts_with('_'))
+    }) || COMPONENT_FOLDERS.contains(&dir)
+}
+
+/// The component folders (`"<root><folder>/"`) of a diffusers folder model with no UNet: a
+/// `model_index.json` at the top or one folder down, no `unet/` beside it, and its folders
+/// named as components ([`is_component`]) or holding a `config.json`.
+fn folder_model_parts(files: &[RepoFile]) -> BTreeSet<String> {
+    let paths: BTreeSet<&str> = files.iter().map(|f| f.path.as_str()).collect();
+    let roots = files
         .iter()
         .filter_map(|f| f.path.strip_suffix("model_index.json"))
         .filter(|root| root.is_empty() || root.find('/') == Some(root.len() - 1))
@@ -111,8 +134,19 @@ fn folder_model_roots(files: &[RepoFile]) -> Vec<&str> {
             !files
                 .iter()
                 .any(|f| folder_under(root, &f.path) == Some("unet"))
-        })
-        .collect()
+        });
+    let mut parts = BTreeSet::new();
+    for root in roots {
+        for f in files {
+            if let Some(dir) = folder_under(root, &f.path)
+                && (is_component(dir)
+                    || paths.contains(format!("{root}{dir}/config.json").as_str()))
+            {
+                parts.insert(format!("{root}{dir}/"));
+            }
+        }
+    }
+    parts
 }
 
 /// Which files of `files` are read and how the rest are labelled (see the module's docs).
@@ -135,9 +169,9 @@ pub fn candidates(files: &[RepoFile]) -> Candidates {
             }
         }
     }
-    let folder_models = match folder {
-        Some(_) => Vec::new(),
-        None => folder_model_roots(files),
+    let folder_model_parts = match folder {
+        Some(_) => BTreeSet::new(),
+        None => folder_model_parts(files),
     };
 
     for f in files {
@@ -154,9 +188,9 @@ pub fn candidates(files: &[RepoFile]) -> Candidates {
         }
         let weights = is_weights(path);
         if (weights || is_index(path))
-            && folder_models
+            && folder_model_parts
                 .iter()
-                .any(|root| folder_under(root, path).is_some())
+                .any(|part| path.starts_with(part.as_str()))
         {
             by_name.insert(f.path.clone(), cannot_run(CannotRunReason::FolderModel));
             continue;
@@ -552,6 +586,95 @@ mod tests {
             FileLabel::Extra { role: GenRole::Vae }
         );
         assert_eq!(reads(&c), ["flux1-dev.safetensors"]);
+    }
+
+    /// stabilityai/stable-diffusion-3.5-large: a diffusers folder model without a UNet, a
+    /// checkpoint at the top, and Comfy's `text_encoders/` folder of its companions (no
+    /// `config.json` there, only a README).
+    #[test]
+    fn sd35_large_lists_its_text_encoders_as_extra_files() {
+        let c = candidates(&[
+            f("model_index.json", 706.0),
+            f("sd3.5_large.safetensors", 16_460_379_262.0),
+            f("scheduler/scheduler_config.json", 141.0),
+            f("text_encoder/config.json", 574.0),
+            f("text_encoder/model.safetensors", 247_323_896.0),
+            f("text_encoder_2/config.json", 570.0),
+            f("text_encoder_2/model.safetensors", 1_389_382_176.0),
+            f("text_encoder_3/config.json", 740.0),
+            f(
+                "text_encoder_3/model-00001-of-00002.safetensors",
+                4_994_582_104.0,
+            ),
+            f(
+                "text_encoder_3/model-00002-of-00002.safetensors",
+                4_530_066_248.0,
+            ),
+            f("text_encoder_3/model.safetensors.index.json", 19_885.0),
+            f("text_encoders/README.md", 1_046.0),
+            f("text_encoders/clip_g.safetensors", 1_389_382_176.0),
+            f("text_encoders/clip_l.safetensors", 246_144_152.0),
+            f("text_encoders/t5xxl_fp16.safetensors", 9_787_841_024.0),
+            f(
+                "text_encoders/t5xxl_fp8_e4m3fn.safetensors",
+                4_893_934_904.0,
+            ),
+            f("tokenizer/vocab.json", 1_059_962.0),
+            f("transformer/config.json", 427.0),
+            f(
+                "transformer/diffusion_pytorch_model-00001-of-00002.safetensors",
+                9_986_746_168.0,
+            ),
+            f(
+                "transformer/diffusion_pytorch_model-00002-of-00002.safetensors",
+                6_299_502_112.0,
+            ),
+            f(
+                "transformer/diffusion_pytorch_model.safetensors.index.json",
+                129_394.0,
+            ),
+            f("vae/config.json", 809.0),
+            f("vae/diffusion_pytorch_model.safetensors", 167_666_902.0),
+        ]);
+        for (path, role) in [
+            ("text_encoders/clip_g.safetensors", GenRole::ClipG),
+            ("text_encoders/clip_l.safetensors", GenRole::ClipL),
+            ("text_encoders/t5xxl_fp16.safetensors", GenRole::T5xxl),
+            ("text_encoders/t5xxl_fp8_e4m3fn.safetensors", GenRole::T5xxl),
+        ] {
+            assert_eq!(c.by_name[path], FileLabel::Extra { role }, "{path}");
+        }
+        let folder_model = FileLabel::CannotRun {
+            reason: CannotRunReason::FolderModel,
+            version: None,
+        };
+        for path in [
+            "text_encoder/model.safetensors",
+            "text_encoder_2/model.safetensors",
+            "text_encoder_3/model-00001-of-00002.safetensors",
+            "text_encoder_3/model.safetensors.index.json",
+            "transformer/diffusion_pytorch_model-00002-of-00002.safetensors",
+            "transformer/diffusion_pytorch_model.safetensors.index.json",
+            "vae/diffusion_pytorch_model.safetensors",
+        ] {
+            assert_eq!(c.by_name[path], folder_model, "{path}");
+        }
+        assert_eq!(reads(&c), ["sd3.5_large.safetensors"]);
+        // A folder with a `config.json` is a component whatever its name.
+        let c = candidates(&[
+            f("model_index.json", 500.0),
+            f("prior/config.json", 500.0),
+            f("prior/diffusion_pytorch_model.safetensors", 3e9),
+            f("split_files/diffusion_models/model.safetensors", 3e9),
+        ]);
+        assert_eq!(
+            c.by_name["prior/diffusion_pytorch_model.safetensors"],
+            folder_model
+        );
+        assert_eq!(
+            reads(&c),
+            ["split_files/diffusion_models/model.safetensors"]
+        );
     }
 
     #[test]

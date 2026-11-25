@@ -191,8 +191,10 @@ impl DetectService {
             .count();
         let all: Vec<FileLabel> = labels.values().cloned().collect();
         let verdict = verdict_of(&all);
-        // A reading that read nothing and named nothing leaves the search's hint alone.
-        if read > 0 || verdict != Verdict::Unknown {
+        // A verdict is kept only when no unread file could change it: a file that works or a
+        // LoRA, or every file labelled. Otherwise names alone (a gated FLUX.1-dev's folder
+        // model files) would stand in for the model nobody could read.
+        if matches!(verdict, Verdict::Works { .. } | Verdict::Lora { .. }) || unread == 0 {
             self.verdicts
                 .lock()
                 .unwrap_or_else(|e| e.into_inner())
@@ -206,8 +208,8 @@ impl DetectService {
         }
     }
 
-    /// The last [`DetectService::read_repo`]'s verdict for `repo`, when that reading read a
-    /// file or named one.
+    /// The last [`DetectService::read_repo`]'s verdict for `repo`, when that reading found a
+    /// file that works or a LoRA, or left no file `NotRead`.
     #[cfg_attr(not(test), expect(dead_code, reason = "Task S6's search calls it"))]
     pub fn verdict(&self, repo: &str) -> Option<Verdict> {
         self.verdicts
@@ -477,6 +479,61 @@ mod tests {
             .plain("README.md")
     }
 
+    /// black-forest-labs/FLUX.1-dev as Hugging Face lists it (gated): the checkpoint and its
+    /// VAE at the top, beside a diffusers folder model with no UNet.
+    fn real_flux_dev_listing() -> TestRepo {
+        TestRepo::new("black-forest-labs/FLUX.1-dev")
+            .plain(".gitattributes")
+            .plain("LICENSE.md")
+            .plain("README.md")
+            .file("ae.safetensors", 335_304_388.0, Some("ae-flux1"))
+            .file("dev_grid.jpg", 1_334_007.0, None)
+            .file("flux1-dev.safetensors", 23_802_932_552.0, Some("flux1-dev"))
+            .plain("model_index.json")
+            .plain("scheduler/scheduler_config.json")
+            .plain("text_encoder/config.json")
+            .file("text_encoder/model.safetensors", 246_144_352.0, None)
+            .plain("text_encoder_2/config.json")
+            .file(
+                "text_encoder_2/model-00001-of-00002.safetensors",
+                4_994_582_224.0,
+                None,
+            )
+            .file(
+                "text_encoder_2/model-00002-of-00002.safetensors",
+                4_530_066_360.0,
+                None,
+            )
+            .plain("text_encoder_2/model.safetensors.index.json")
+            .plain("tokenizer/merges.txt")
+            .plain("tokenizer/vocab.json")
+            .file("tokenizer_2/spiece.model", 791_656.0, None)
+            .plain("tokenizer_2/tokenizer.json")
+            .plain("transformer/config.json")
+            .file(
+                "transformer/diffusion_pytorch_model-00001-of-00003.safetensors",
+                9_983_040_304.0,
+                None,
+            )
+            .file(
+                "transformer/diffusion_pytorch_model-00002-of-00003.safetensors",
+                9_949_328_904.0,
+                None,
+            )
+            .file(
+                "transformer/diffusion_pytorch_model-00003-of-00003.safetensors",
+                3_870_584_832.0,
+                None,
+            )
+            .plain("transformer/diffusion_pytorch_model.safetensors.index.json")
+            .plain("vae/config.json")
+            .file(
+                "vae/diffusion_pytorch_model.safetensors",
+                167_666_902.0,
+                None,
+            )
+    }
+
     fn sdxl_repo() -> TestRepo {
         TestRepo::new("stabilityai/stable-diffusion-xl-base-1.0")
             .file("sd_xl_base_1.0.safetensors", 6.94e9, Some("sdxl"))
@@ -579,6 +636,44 @@ mod tests {
         assert_eq!(d.verdict("black-forest-labs/FLUX.1-dev"), None);
     }
 
+    /// The folder model's files say "can't run" by name, but the checkpoint Studio runs was
+    /// not read: no verdict is kept, so the search does not call FLUX.1-dev unrunnable.
+    #[tokio::test]
+    async fn the_real_flux_dev_listing_gated_without_a_token_keeps_no_verdict() {
+        let s = hub_server_with(gated(real_flux_dev_listing())).await;
+        let d = DetectService::new();
+        let r = d.read_repo(&s.client(), &s.detail()).await;
+        assert_eq!(s.requests(), 0);
+        assert_eq!(
+            r.labels["flux1-dev.safetensors"],
+            FileLabel::NotRead {
+                reason: NotRead::NeedsToken
+            }
+        );
+        assert_eq!(
+            r.labels["ae.safetensors"],
+            FileLabel::Extra { role: GenRole::Vae }
+        );
+        assert_eq!(
+            r.labels["transformer/diffusion_pytorch_model-00001-of-00003.safetensors"],
+            FileLabel::CannotRun {
+                reason: CannotRunReason::FolderModel,
+                version: None
+            }
+        );
+        assert_eq!(d.verdict("black-forest-labs/FLUX.1-dev"), None);
+        // With every file read the same listing keeps its verdict: the checkpoint works.
+        let s = hub_server_with(real_flux_dev_listing()).await;
+        d.read_repo(&s.client(), &s.detail()).await;
+        assert_eq!(
+            d.verdict("black-forest-labs/FLUX.1-dev"),
+            Some(Verdict::Works {
+                version: SdVersion::Flux,
+                kind: RecipeKind::Picture
+            })
+        );
+    }
+
     #[tokio::test]
     async fn a_file_read_once_is_not_read_again() {
         let s = hub_server_with(sdxl_repo()).await;
@@ -603,10 +698,14 @@ mod tests {
     #[tokio::test]
     async fn past_24_files_the_rest_are_labelled_not_read() {
         let s = hub_server_with(repo_of_distinct_models(30)).await;
-        let r = DetectService::new()
-            .read_repo(&s.client(), &s.detail())
-            .await;
+        let d = DetectService::new();
+        let r = d.read_repo(&s.client(), &s.detail()).await;
         assert_eq!((s.header_requests(), r.read, r.unread), (24, 24, 6));
+        // Files not read cannot take away a model that works.
+        assert!(matches!(
+            d.verdict("someone/merges"),
+            Some(Verdict::Works { .. })
+        ));
         assert_eq!(
             r.labels
                 .values()
