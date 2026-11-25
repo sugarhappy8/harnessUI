@@ -280,11 +280,16 @@ def studio_tab(s, label: str):
         """, label), 10, f"Studio tab {label!r} chosen")
 
 
+# 0.2.0 (Task U3): the composer at the foot of Studio's results holds the prompt, the model chip
+# (which opens the model picker), Shape, How many and a video's Length as menus, Settings and
+# Create; the side panel (Settings), with the model's other fields, is closed until Settings
+# opens it (a slide-over below 1400 px, docked beside the results from there).
+MODEL_CHIP = "return document.querySelector('[data-composer] [data-model-chip] button');"
+
+
 def pick_model(s, name: str):
-    """Opens the model picker and chooses the model named `name`."""
-    pointer_click_found(
-        s, "return document.querySelector('[data-model-picker] button[aria-haspopup]');", what="the model picker"
-    )
+    """Opens the model picker from the composer's model chip and chooses the model named `name`."""
+    pointer_click_found(s, MODEL_CHIP, what="the model chip")
     pointer_click_found(
         s,
         """
@@ -299,7 +304,31 @@ def pick_model(s, name: str):
                10, "the picker closed")
 
 
-# The chip (a radio) `arguments[1]` of the right panel's field labelled `arguments[0]`, as `chip`.
+def open_studio_settings(s):
+    """Studio's side panel, opened from the composer's Settings, once it shows."""
+    if not visible(s, "[data-settings-panel]"):
+        pointer_click_found(
+            s, "return document.querySelector('[data-composer] [data-settings-button]');", what="the composer's Settings"
+        )
+    s.wait_for(lambda: visible(s, "[data-settings-panel]"), 10, "Studio's side panel")
+
+
+def close_studio_settings(s):
+    """Studio's side panel closed with its own Close button (the slide-over's or the docked one's)."""
+    pointer_click_found(
+        s,
+        """
+        const panel = document.querySelector('[data-settings-panel]');
+        const box = panel && panel.closest('[role=dialog], aside');
+        return box ? box.querySelector('button[aria-label="Close"]') : null;
+        """,
+        what="the side panel's Close",
+    )
+    s.wait_for(lambda: s.execute("return !document.querySelector('[data-settings-panel]');"), 10,
+               "Studio's side panel closed")
+
+
+# The chip (a radio) `arguments[1]` of the side panel's field labelled `arguments[0]`, as `chip`.
 FIND_CHIP = """
     const [field, label] = arguments;
     const group = [...document.querySelectorAll('[data-settings-panel] [role=radiogroup]')].find(g => {
@@ -311,56 +340,55 @@ FIND_CHIP = """
 
 
 def choose_chip(s, field: str, chip: str):
-    """In the right panel, the chip `chip` of the field labelled `field`, once it is chosen."""
+    """In the side panel (opened for it, and closed again so the composer is in reach), the chip
+    `chip` of the field labelled `field`, once it is chosen."""
+    open_studio_settings(s)
     pointer_click_found(s, FIND_CHIP + "return chip || null;", field, chip, what=f"the {field!r} chip {chip!r}")
     s.wait_for(lambda: s.execute(FIND_CHIP + "return !!chip && chip.getAttribute('aria-checked') === 'true';",
                                  field, chip), 10, f"{chip!r} chosen")
+    close_studio_settings(s)
 
 
-# The select of the right panel's field labelled `arguments[0]`, as `select`.
-FIND_SELECT = """
+# The button of the composer's menu named `arguments[0]` ("Length: 4 s"), as `trigger`.
+FIND_MENU = """
     const field = arguments[0];
-    const select = [...document.querySelectorAll('[data-settings-panel] select')].find(e => {
-      const name = document.getElementById(e.getAttribute('aria-labelledby'));
-      return name && name.innerText.trim() === field;
-    });
+    const trigger = [...document.querySelectorAll('[data-composer] [role=toolbar] button')]
+      .find(b => (b.getAttribute('aria-label') || '').startsWith(field + ': '));
 """
 
 
-def chosen_option(s, field: str) -> str | None:
-    """The words of the option chosen in the right panel's list field labelled `field`."""
-    return s.execute(FIND_SELECT + "return select ? select.selectedOptions[0].innerText.trim() : null;", field)
+def menu_value(s, field: str) -> str | None:
+    """What the composer's menu `field` shows: "4 s" for the button named "Length: 4 s"."""
+    label = s.execute(FIND_MENU + "return trigger ? trigger.getAttribute('aria-label') : null;", field)
+    return label[len(field) + 2:] if label else None
 
 
-def choose_option(s, field: str, option: str):
-    """In the right panel, the option `option` of the list field labelled `field`, chosen as a
-    person would (React sees the change)."""
-    s.wait_for(lambda: s.execute(FIND_SELECT + "return !!select;", field), 10, f"the {field!r} list")
-    s.execute(
-        FIND_SELECT + """
-        const option = [...select.options].find(o => o.innerText.trim() === arguments[1]);
-        const set = Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype, 'value').set;
-        set.call(select, option.value);
-        select.dispatchEvent(new Event('change', {bubbles: true}));
-        """,
-        field,
-        option,
+def choose_menu(s, field: str, item: str):
+    """In the composer's menu `field` (Shape, How many, Length), the item `item`, once chosen."""
+    pointer_click_found(s, FIND_MENU + "return trigger || null;", field, what=f"the {field!r} menu")
+    pointer_click_found(
+        s,
+        "return [...document.querySelectorAll('[role=menu] [role=menuitemradio]')]"
+        ".find(i => i.innerText.trim() === arguments[0]) || null;",
+        item,
+        what=f"{item!r} in the {field!r} menu",
     )
-    s.wait_for(lambda: chosen_option(s, field) == option, 10, f"{option!r} chosen")
+    s.wait_for(lambda: menu_value(s, field) == item, 10, f"{item!r} chosen")
 
 
 def write_prompt(s, text: str):
-    type_into(s, "[data-prompt-dock] textarea", text)
+    type_into(s, "[data-composer] textarea", text)
 
 
 def dock_text(s) -> str:
-    return s.execute("const d = document.querySelector('[data-prompt-dock]'); return d ? d.innerText : '';")
+    """The composer's words with the privacy line under it (the card's parent holds both)."""
+    return s.execute("const d = document.querySelector('[data-composer]'); return d ? d.parentElement.innerText : '';")
 
 
 def create_button(s):
     return s.execute(
         """
-        return [...document.querySelectorAll('[data-prompt-dock] button')]
+        return [...document.querySelectorAll('[data-composer] button')]
           .find(b => b.innerText.trim() === 'Create') || null;
         """
     )
@@ -369,12 +397,12 @@ def create_button(s):
 def press_create(s):
     s.wait_for(lambda: s.execute(
         """
-        const b = [...document.querySelectorAll('[data-prompt-dock] button')].find(b => b.innerText.trim() === 'Create');
+        const b = [...document.querySelectorAll('[data-composer] button')].find(b => b.innerText.trim() === 'Create');
         return !!b && !b.disabled;
         """), 15, "Create enabled")
     pointer_click_found(
         s,
-        "return [...document.querySelectorAll('[data-prompt-dock] button')].find(b => b.innerText.trim() === 'Create') || null;",
+        "return [...document.querySelectorAll('[data-composer] button')].find(b => b.innerText.trim() === 'Create') || null;",
         what="Create",
     )
 
@@ -444,9 +472,7 @@ def c_first_open(c, notes):
     local = s.invoke("studio_local_models")
     fits = [e["name"] for e in local["recommended"] if e["kind"] == "image" and e["fit"]["word"] in ("fits", "afterUnload")]
     notes.append(f"this computer: {local['hardware']}; recommended picture models that fit: {fits}")
-    pointer_click_found(
-        s, "return document.querySelector('[data-model-picker] button[aria-haspopup]');", what="the model picker"
-    )
+    pointer_click_found(s, MODEL_CHIP, what="the model chip")
     first = s.wait_for(lambda: s.execute(
         """
         const pop = document.querySelector('[data-radix-popper-content-wrapper]');
@@ -523,8 +549,8 @@ def c_video(c, notes):
     s = c.s
     studio_tab(s, "Video")
     pick_model(s, "Grok Imagine Video 1.5 Lite")
-    # The shortest length of at least 4 s is the one Studio starts with.
-    assert chosen_option(s, "Length") == "4 s", chosen_option(s, "Length")
+    # The shortest length of at least 4 s is the one Studio starts with (the composer's Length).
+    assert menu_value(s, "Length") == "4 s", menu_value(s, "Length")
     write_prompt(s, VIDEO_PROMPT)
     press_create(s)
     s.wait_for(lambda: s.execute(
@@ -691,7 +717,7 @@ def c_daily_limit(c, notes):
     close_settings(s)
     studio_tab(s, "Video")
     choose_chip(s, "Resolution", "1080p")
-    choose_option(s, "Length", "8 s")
+    choose_menu(s, "Length", "8 s")
     write_prompt(s, LIMIT_PROMPT)
     s.wait_for(lambda: "Daily limit reached: $0.41 of $1 spent today" in dock_text(s), 15, "the daily limit line")
     assert create_button(s) is None, "Create is still there"

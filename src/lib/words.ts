@@ -1459,7 +1459,7 @@ const NEEDED_NOUNS: Record<RefRole, readonly [string, string]> = {
 };
 
 /** Studio's composer (0.2.0 Task U3, design 10.1): the prompt, the pictures in front of it, and
- *  the toolbar with the model chip, Shape, How many, Settings and Create. */
+ *  the toolbar with the model chip, Shape, How many, a video's Length, Settings and Create. */
 export const STUDIO_COMPOSER = {
   region: (kind: MediaKind) => (kind === "video" ? "Make a video" : "Make a picture"),
   prompt: "Prompt",
@@ -1467,6 +1467,7 @@ export const STUDIO_COMPOSER = {
   toolbar: "Picture settings",
   shape: "Shape",
   count: "How many",
+  length: "Length",
   settings: "Settings",
   addPicture: "Add picture",
   /** A picture's Remove button, named after it: "Remove picture 1", "Remove mask". */

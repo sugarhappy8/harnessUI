@@ -16,7 +16,7 @@ import { ErrorBanner } from "../ErrorBanner";
 import { FOCUS_RING } from "../ui/styles";
 import { Tip } from "../ui/Tip";
 import { ChipsRow } from "./AdvancedDrawer";
-import { CountMenu, ShapeMenu } from "./ComposerMenus";
+import { CountMenu, LengthMenu, ShapeMenu } from "./ComposerMenus";
 import { ConfirmRun } from "./ConfirmRun";
 import { cloudBackup, COST_TONE_CLASS, costTone, createLabel, limitLine, placeLine } from "./cost";
 import { etaText } from "./eta";
@@ -33,10 +33,10 @@ import type { MediaModel, RefItem, RefRole } from "./types";
 // Shift+Enter adds a line). Under it, what holds Create back and why a press was refused, the
 // note of what a model switch changed (while the side panel is closed: the panel shows it when
 // open), and the changed settings as chips (ChipsRow). Then a toolbar: the model chip, which
-// opens the model picker (ModelChip.tsx), Shape and How many as menus (ComposerMenus.tsx),
-// Settings, which opens the side panel, and at its end the price of the whole run (a cloud
-// model, its colour a second cue) or the time here (a local one) beside Create. Under the card,
-// one quiet line says where the prompt goes; the chip's dot says it too.
+// opens the model picker (ModelChip.tsx), Shape, How many and a video's Length as menus
+// (ComposerMenus.tsx), Settings, which opens the side panel, and at its end the price of the
+// whole run (a cloud model, its colour a second cue) or the time here (a local one) beside
+// Create. Under the card, one quiet line says where the prompt goes; the chip's dot says it too.
 //
 // The estimate is asked of the backend once the draft has stayed as it is for 150 ms (it sends
 // nothing anywhere); Create never waits for it. Create is held back only for no model, the
@@ -292,6 +292,7 @@ export function Composer(props: { tab: StudioTab }) {
           <ModelPicker tab={tab} anchor={(onPress) => <ModelChip tab={tab} onOpen={onPress} />} />
           <ShapeMenu tab={tab} />
           <CountMenu tab={tab} />
+          <LengthMenu tab={tab} />
           <Tip content={STUDIO_COMPOSER.settings}>
             <button
               type="button"

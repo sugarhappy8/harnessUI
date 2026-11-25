@@ -206,8 +206,8 @@ def studio_part(s, home: pathlib.Path, con_path: pathlib.Path):
     s.wait_for(lambda: s.execute("return !!document.querySelector('[data-studio-view]');"), 15, "Studio shown")
     studio_tab(s, "Video")
     studio_tab(s, "Pictures")
-    s.click_button("Studio menu")
-    s.click_menu_item("Get local models")
+    # 0.2.0 (Task U3): Get models is the top bar's own button (the ⋯ menu lost the item).
+    s.click_button("Get models")
     s.wait_for(lambda: s.execute("return !!document.querySelector('[data-local-models]');"), 15, "Get local models")
     s.wait_text("This computer:", 15)
     studio_tab(s, "Video")
@@ -228,7 +228,8 @@ def studio_part(s, home: pathlib.Path, con_path: pathlib.Path):
 
     # The picker leads with this computer, and the installed model is there; it is chosen by
     # hand, as on a computer with only a processor its fit word ("Slow here") does not make it
-    # the default.
+    # the default. It opens from the composer's model chip, which reads "Choose a model" while
+    # the tab has none.
     s.click_button("Choose a model")
     first = s.wait_for(
         lambda: s.execute(
@@ -249,7 +250,7 @@ def studio_part(s, home: pathlib.Path, con_path: pathlib.Path):
     s.wait_for(
         lambda: s.execute(
             """
-            const b = [...document.querySelectorAll('[data-prompt-dock] button')]
+            const b = [...document.querySelectorAll('[data-composer] button')]
               .find(b => b.innerText.trim() === 'Create');
             return !!b && !b.disabled;
             """

@@ -19,6 +19,7 @@ import type {
   InstalledLocal,
   LocalEstimate,
   LocalModels,
+  MediaModel,
   ParamSpec,
   RefItem,
   RefRole,
@@ -445,6 +446,86 @@ describe("Composer", () => {
     await show({ prefs: prefs({ lastModel: nano }) });
     expect(within(toolbar()).queryByRole("button", { name: /^How many/ })).toBeNull();
     within(toolbar()).getByRole("button", { name: /^Shape/ });
+  });
+
+  it("the Video tab shows a Length menu and choosing a length sets the value", async () => {
+    await show({ tab: "video", estimate: here() });
+    // After Shape (a video takes no How many).
+    const shape = within(toolbar()).getByRole("button", { name: /^Shape:/ });
+    const length = within(toolbar()).getByRole("button", { name: "Length: 2 s" });
+    expect(shape.compareDocumentPosition(length) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    await openMenu(length);
+    expect(screen.getAllByRole("menuitemradio").map((i) => i.textContent)).toEqual(["1 s", "2 s", "3 s", "4 s", "5 s"]);
+    await act(async () => {
+      fireEvent.click(screen.getByRole("menuitemradio", { name: "4 s" }));
+    });
+    expect(useStudio.getState().drafts.video.values.duration).toBe(4);
+    within(toolbar()).getByRole("button", { name: "Length: 4 s" });
+  });
+
+  it("a model whose longest is very long offers at most 16 choices, including its default and its longest", async () => {
+    // A generic video model whose recipe states no most frames: 1 to 170 s.
+    const wan = LOCAL.installed[1]!;
+    const lengths = Array.from({ length: 170 }, (_, i) => ({ value: i + 1, label: `${i + 1} s` }));
+    const long: InstalledLocal = {
+      ...wan,
+      id: "generic-video",
+      name: "generic video",
+      model: {
+        ...wan.model,
+        id: "generic-video",
+        displayName: "generic video",
+        params: wan.model.params.map((p) =>
+          p.canonical === "length" ? { ...p, initial: 3, kind: { type: "enum", values: lengths } } : p,
+        ),
+      },
+    };
+    await show({
+      tab: "video",
+      local: localWith(long),
+      prefs: prefs({ lastModel: { video: { target: "thisComputer", model: "generic-video" } } }),
+      estimate: here(),
+    });
+    await openMenu(within(toolbar()).getByRole("button", { name: "Length: 3 s" }));
+    const items = screen.getAllByRole("menuitemradio").map((i) => i.textContent);
+    expect(items.length).toBeLessThanOrEqual(16);
+    // Every second up to 10 s, then wider steps up to the longest, in order.
+    expect(items.slice(0, 10)).toEqual(Array.from({ length: 10 }, (_, i) => `${i + 1} s`));
+    expect(items.at(-1)).toBe("170 s");
+    const seconds = items.map((i) => Number.parseInt(i ?? "", 10));
+    expect(seconds).toEqual([...seconds].sort((a, b) => a - b));
+    await act(async () => {
+      fireEvent.click(screen.getByRole("menuitemradio", { name: "170 s" }));
+    });
+    expect(useStudio.getState().drafts.video.values.duration).toBe(170);
+    // A length set elsewhere (the side panel lists them all) is listed and named too.
+    act(() => useStudio.getState().setValue("video", "duration", 97));
+    await openMenu(within(toolbar()).getByRole("button", { name: "Length: 97 s" }));
+    const now = screen.getAllByRole("menuitemradio");
+    expect(now.length).toBeLessThanOrEqual(16);
+    expect(now.find((i) => i.textContent === "97 s")?.getAttribute("aria-checked")).toBe("true");
+    expect(now.map((i) => i.textContent)).toEqual(expect.arrayContaining(["3 s", "170 s"]));
+  });
+
+  it("the Pictures tab has no Length menu", async () => {
+    await show({ estimate: here() });
+    within(toolbar()).getByRole("button", { name: /^Shape:/ });
+    expect(within(toolbar()).queryByRole("button", { name: /^Length/ })).toBeNull();
+  });
+
+  it("a value the menu does not list still names its button", async () => {
+    // How many lists at most 16 numbers; a model taking up to 40 can hold 30 (set in the panel).
+    const flare = MODELS[0]!;
+    const many: MediaModel = {
+      ...flare,
+      params: flare.params.map((p) => (p.key === "n" && p.kind.type === "range" ? { ...p, kind: { ...p.kind, max: 40 } } : p)),
+    };
+    await show({
+      endpoints: [endpoint({ models: [many, ...MODELS.slice(1)] })],
+      prefs: prefs({ lastModel: CLOUD_LAST }),
+    });
+    act(() => useStudio.getState().setValue("image", "n", 30));
+    within(toolbar()).getByRole("button", { name: "How many: 30" });
   });
 
   it("Create shows the time for a local model and the price for a cloud one", async () => {
