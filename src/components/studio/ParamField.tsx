@@ -17,7 +17,18 @@ import type { Choice, ParamKind, ParamSpec, SizeRules } from "./types";
 // Which fields show, and the values that no longer apply, are worked out in canonical.ts.
 
 /** How a field is drawn. */
-export type Widget = "chips" | "segmented" | "select" | "slider" | "switch" | "seed" | "drop" | "size" | "text" | "json";
+export type Widget =
+  | "chips"
+  | "segmented"
+  | "select"
+  | "slider"
+  | "switch"
+  | "seed"
+  | "drop"
+  | "size"
+  | "text"
+  | "json"
+  | "loras";
 
 /** The most values a list shows as radios; a longer list is a select. */
 const SEGMENTED_MAX = 5;
@@ -48,6 +59,8 @@ export function widgetFor(spec: ParamSpec): Widget {
       return "text";
     case "extra":
       return "json";
+    case "loras":
+      return "loras";
   }
 }
 
@@ -83,7 +96,7 @@ export function ParamField(props: {
   const labelId = useId();
   const helpId = useId();
   const widget = widgetFor(spec);
-  if (widget === "drop" || widget === "json") return null;
+  if (widget === "drop" || widget === "json" || widget === "loras") return null;
   const set = isSet(value);
   const automatic = props.local ? STUDIO_FIELDS.automaticHere : STUDIO_FIELDS.automatic;
   // A select names Automatic as its own first choice, and an unset seed's box says Random

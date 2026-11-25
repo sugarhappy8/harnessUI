@@ -67,7 +67,8 @@
 //! - **Runs on this computer** (the local lane, [`lane`]): one at a time for the whole
 //!   computer, in a queue of their own beside the cloud queues; free, never asked about and
 //!   never refused for the daily limit. A run is recorded once the prompt check, the prompt's
-//!   length, the settings and the fit pass; its task waits for the graphics card (`queued`,
+//!   length and the settings pass (its fit only warns: a model that may not fit still runs);
+//!   its task waits for the graphics card (`queued`,
 //!   with what it waits for), runs one engine job checked every [`LOCAL_CHECK_EVERY`], labels
 //!   each result as AI-made and keeps it. Stop kills the engine; a run the app left is
 //!   `interrupted`, never charged. Without a local lane (`StudioDeps::local`), runs on this
@@ -94,7 +95,7 @@ use agent::media::{
     MediaRequest, ParamKind, RefImage, RequestPreview, Routing, SEED_MAX, Saved, Stage, Started,
     choice_for, estimate as estimate_usd, parse_image_endpoints, validate,
 };
-use models::gen_fit::{self, GenFitResult};
+use models::gen_fit::GenFitResult;
 use rand::Rng;
 use runtime::sd::args::processor_threads;
 use serde_json::{Map, Value, json};
@@ -2116,11 +2117,10 @@ impl Inner {
 /// What one run's engine job gets: the processor only from the grant (`UseProcessor`), the
 /// `run_on` field (a picture's: a clip runs on the graphics card only) or a run whose fit is
 /// on the processor (a processor-only computer, or a picture the graphics device cannot
-/// take), with `processor_threads`; memory saving from the `memory_saving` field,
-/// `Automatic` → `gen_fit::needs_memory_saving` of the fit it will run with (`running_fit`,
-/// the after-unload one when the grant unloaded the chat model; never on the processor, where
-/// nothing takes turns); the device description from `LocalHardware::target`, for a run on
-/// the device.
+/// take), with `processor_threads`; the `memory_saving` field as it is (the job reads it with
+/// its size and its recipe, `local::memory_flags`: the fit decides nothing, and Automatic
+/// leaves the weights to the engine's own auto-fit); the device description from
+/// `LocalHardware::target`, for a run on the device.
 pub fn job_options(
     grant: &Grant,
     fit: &GenFitResult,
@@ -2128,21 +2128,11 @@ pub fn job_options(
     device: Option<&str>,
     logical_cores: usize,
 ) -> LocalJobOptions {
-    let params = &req.params;
     let processor_only =
         matches!(grant, Grant::UseProcessor { .. }) || runs_on_processor(req) || fit.processor_only;
-    let running = match grant {
-        Grant::AfterUnload { .. } => fit.after_unload.unwrap_or(fit.fit),
-        Grant::Alongside | Grant::UseProcessor { .. } => fit.fit,
-    };
-    let memory_saving = match MemoryChoice::of(params) {
-        MemoryChoice::On => true,
-        MemoryChoice::Off => false,
-        MemoryChoice::Automatic => !processor_only && gen_fit::needs_memory_saving(running),
-    };
     LocalJobOptions {
         processor_only,
-        memory_saving,
+        memory: MemoryChoice::of(&req.params),
         threads: processor_only
             .then(|| processor_threads(logical_cores, cfg!(target_arch = "x86_64"))),
         device_description: device.filter(|_| !processor_only).map(str::to_owned),

@@ -209,7 +209,7 @@ pub async fn local_models(deps: &LocalCmdDeps) -> AppResult<LocalModelsDto> {
         recommended,
         not_here,
         notice_accepted: deps.notice_accepted,
-        video_possible: !matches!(device, Target::Cpu { .. }),
+        video_on_processor: matches!(device, Target::Cpu { .. }),
         installed_bytes: space_taken(&rows),
         more_fit: u32::try_from(more_fit).unwrap_or(u32::MAX),
         loras: super::loras::list_loras(&deps.store).await?,
@@ -317,6 +317,7 @@ fn unreadable(deps: &LocalCmdDeps, row: &store::GenModel) -> InstalledLocalDto {
             suggestion: None,
             eta: None,
             very_slow: gen_eta::very_slow(FitWord::NotHere, None),
+            video_on_processor: false,
         },
         model: media_model_dto(&model, None),
         recipe: recipe_choice(recipe_id),
@@ -484,6 +485,7 @@ fn fit_dto(entry: &GenEntry, verdict: &LocalVerdict) -> LocalFitDto {
             .map(|size| errors::fits_at(size, entry.kind == GenKind::Video)),
         eta: verdict.eta.as_ref().map(|eta| eta_dto(eta, None)),
         very_slow: gen_eta::very_slow(verdict.word, verdict.eta.as_ref()),
+        video_on_processor: verdict.fit.video_on_processor,
     }
 }
 
@@ -1602,7 +1604,7 @@ pub(crate) mod tests {
         assert!(marked.contains(&(ZIMAGE, MediaKind::Image)), "{marked:?}");
         assert!(marked.contains(&(WAN22, MediaKind::Video)), "{marked:?}");
         assert_eq!(local.more_fit, 3);
-        assert!(local.video_possible);
+        assert!(!local.video_on_processor);
         for e in &local.recommended {
             assert_eq!(e.fit.word, "fits", "{}", e.id);
             assert!(!e.installed && !e.needs_engine && !e.low_disk, "{}", e.id);
@@ -2112,20 +2114,39 @@ pub(crate) mod tests {
         assert_eq!(fit_size(&klein(), 512, 512, 7).frames, 1);
     }
 
-    /// On a computer that runs models on the processor, video is not offered.
+    /// On a computer that runs models on the processor, a video is judged by its memory like
+    /// a picture, and flagged: it runs there, very slowly (design 9.2).
     #[tokio::test]
-    async fn video_is_hidden_on_a_processor_only_computer() {
+    async fn video_on_a_processor_only_computer_is_judged_and_flagged() {
         let scratch = Scratch::new();
-        let local = local_models(&deps(cpu(16), &scratch)).await.unwrap();
-        assert!(!local.video_possible);
-        let wan = find(&local.not_here, WAN22);
+        let local = local_models(&deps(cpu(64), &scratch)).await.unwrap();
+        assert!(local.video_on_processor);
+        let wan = find(&local.recommended, WAN22);
         assert_eq!(
-            wan.fit.reason.as_deref(),
-            Some("video needs a graphics card or an Apple-silicon Mac")
+            (wan.fit.word.as_str(), wan.fit.reason.as_deref()),
+            ("slow", None)
         );
+        assert!(wan.fit.video_on_processor);
         // Pictures run there, slowly: listed, but none counted as more that fit.
-        assert_eq!(find(&local.recommended, KLEIN).fit.word, "slow");
+        let klein = find(&local.recommended, KLEIN);
+        assert_eq!(klein.fit.word, "slow");
+        assert!(!klein.fit.video_on_processor);
         assert_eq!(local.more_fit, 0);
+        // Too little memory for it: it may not fit, with the free memory it needs.
+        let local = local_models(&deps(cpu(4), &scratch)).await.unwrap();
+        let wan = find(&local.not_here, WAN22);
+        assert!(wan.fit.video_on_processor);
+        assert!(
+            wan.fit
+                .reason
+                .as_deref()
+                .is_some_and(|r| r.ends_with("GB of free memory")),
+            "{:?}",
+            wan.fit.reason
+        );
+        // A graphics card makes no video on the processor.
+        let local = local_models(&deps(gpu(8, 32), &scratch)).await.unwrap();
+        assert!(!local.video_on_processor);
     }
 
     // ---- a searched repository (Task S6) ---------------------------------------------------

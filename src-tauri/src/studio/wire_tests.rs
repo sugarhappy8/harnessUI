@@ -30,7 +30,7 @@ use super::deps::{
 };
 use super::label;
 use super::local::LocalMediaProvider;
-use super::local::tests::{Fixed, catalog, fake_engine, install};
+use super::local::tests::{Fixed, FixedFolder, catalog, fake_engine, install};
 use super::manager::{PollPlan, StudioDeps, StudioManager};
 use super::manager_tests::FixedHardware;
 use super::prefs::{self, RunTarget, StudioPrefs};
@@ -331,6 +331,18 @@ impl WireHarness {
     /// in `mode`, a 6 GB Vulkan card with 1 GB free beside a 5 GB chat model, and the app's
     /// lease over that chat model.
     async fn with_local(mock: &MockOpenRouter, mode: &str) -> Self {
+        Self::with_local_on(mock, mode, 1, 32, 5).await
+    }
+
+    /// [`Self::with_local`] on a Vulkan card with `free_gb` GB free beside a chat model of
+    /// `chat_gb` GB, and `ram_gb` GB of free memory.
+    async fn with_local_on(
+        mock: &MockOpenRouter,
+        mode: &str,
+        free_gb: u64,
+        ram_gb: u64,
+        chat_gb: u64,
+    ) -> Self {
         let scratch = Scratch::new();
         let store = store::Store::open_in_memory().unwrap();
         store
@@ -343,12 +355,16 @@ impl WireHarness {
             .unwrap();
         let record = scratch.path().join("record");
         std::fs::create_dir_all(&record).unwrap();
-        let provider =
-            LocalMediaProvider::new(store.clone(), Arc::new(Fixed(catalog())), Arc::new(|| None));
+        let provider = LocalMediaProvider::new(
+            store.clone(),
+            Arc::new(Fixed(catalog())),
+            Arc::new(|| None),
+            Arc::new(FixedFolder(scratch.path().join("models"))),
+        );
         provider.set_engine(Some(fake_engine(mode, &record)));
-        let chat = FakeChat::loaded(5 * GB);
-        let hardware = FixedHardware::gpu(1, 32);
-        hardware.set_chat(Some(5));
+        let chat = FakeChat::loaded(chat_gb * GB);
+        let hardware = FixedHardware::gpu(free_gb, ram_gb);
+        hardware.set_chat(Some(chat_gb));
         let lane = LocalLane {
             provider: Arc::new(provider),
             lease: Arc::new(AppLease(GpuLease::new(chat.clone()))),
@@ -851,6 +867,30 @@ async fn a_local_run_and_a_cloud_run_go_side_by_side_and_stop_works() {
     );
     assert_eq!(error.charged, Some(false));
     assert!(h.partial_is_empty());
+    assert_eq!(h.chat_unloads(), 1);
+}
+
+/// Design 9.2: a model that may not fit is a warning, never a refusal. A 2048 × 2048 FLUX.2
+/// klein picture fits nowhere here (not beside the 1 GB chat model on a card with nothing
+/// else free, not after its unload, not on the processor with 1 GB of memory): the app's
+/// lease unloads the chat model, and the engine runs it.
+#[tokio::test]
+async fn a_local_run_that_fits_nowhere_unloads_the_chat_model_and_runs() {
+    let mock = MockOpenRouter::start().await;
+    let h = WireHarness::with_local_on(&mock, "ok", 0, 1, 1).await;
+    let big = json!({"size": "2048x2048"});
+    let estimate = h
+        .manager
+        .estimate(&h.local(KLEIN, big.clone()))
+        .await
+        .unwrap();
+    let local = estimate.local.unwrap();
+    assert_eq!(local.fit, "notHere");
+    assert!(local.reason.is_some());
+    let run = h.manager.start(h.local(KLEIN, big), false).await.unwrap();
+    let done = h.wait(&run.id, "done").await;
+    assert_eq!(done.outputs.len(), 1);
+    assert!(done.error.is_none());
     assert_eq!(h.chat_unloads(), 1);
 }
 

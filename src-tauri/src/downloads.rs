@@ -274,7 +274,10 @@ pub(crate) fn check_main_file(entry: &GenEntry, path: &Path) -> AppResult<()> {
     };
     let facts = read.map_err(|e| studio_errors::not_that_model(format!("its header: {e}")))?;
     let refused = |is: String| {
-        studio_errors::not_that_model(format!("expected a model for {}, {is}", entry.recipe))
+        studio_errors::not_that_model(format!(
+            "expected a model for {}, {is}",
+            studio_errors::recipe_name(&entry.recipe)
+        ))
     };
     if entry.untested {
         return match facts.kind {
@@ -290,28 +293,45 @@ pub(crate) fn check_main_file(entry: &GenEntry, path: &Path) -> AppResult<()> {
             version, embeds, ..
         } => (*version, embeds),
         FileKind::Lora { .. } => return Err(refused("the file is a LoRA".into())),
-        FileKind::Extra { slot } => {
-            return Err(refused(format!("the file is a {} part", slot.word())));
+        FileKind::Extra { .. } => {
+            return Err(refused(
+                "the file is a part of a model, not the model itself".into(),
+            ));
         }
         FileKind::CannotRun { reason, .. } => {
-            return Err(refused(format!("Studio cannot run the file ({reason:?})")));
+            return Err(refused(cannot_run_words(*reason)));
         }
     };
     if !recipes_for(version).contains(&entry.recipe.as_str()) {
-        return Err(refused(format!("the file is a {} model", version.word())));
+        return Err(refused(format!(
+            "the file is a {} model",
+            studio_errors::version_name(version)
+        )));
     }
     if entry.family.is_some() {
         match match_recipe(version, &facts.facts, embeds, &entry.recipe) {
             Match::Recipe { id, .. } if id == entry.recipe => {}
             Match::Recipe { id, .. } => {
-                return Err(refused(format!("the file is one for {id}")));
+                return Err(refused(format!(
+                    "the file is one for {}",
+                    studio_errors::recipe_name(id)
+                )));
             }
             Match::Refused(reason) => {
-                return Err(refused(format!("Studio cannot run the file ({reason:?})")));
+                return Err(refused(cannot_run_words(reason)));
             }
         }
     }
     Ok(())
+}
+
+/// Why Studio cannot run a file, as [`check_main_file`]'s details say it: the label's own
+/// sentence (`errors::cannot_run`).
+fn cannot_run_words(reason: models::sd::CannotRunReason) -> String {
+    format!(
+        "Studio cannot run the file: {}",
+        studio_errors::cannot_run(reason).message
+    )
 }
 
 /// The root of the diffusers folder whose file `inside` (`unet/…`, the main part's engine
@@ -4614,6 +4634,20 @@ mod tests {
             let e = check_main_file(&sdxl, &write_gguf_txt_fixture(&dir, name)).unwrap_err();
             assert_eq!(e.code, studio_errors::NOT_THAT_MODEL, "{why}");
         }
+        // The details name the model type and the version by their names, never their ids.
+        let e = check_main_file(&sdxl, &write_gguf_txt_fixture(&dir, "klein4b")).unwrap_err();
+        assert_eq!(
+            e.details,
+            "expected a model for SDXL, the file is a FLUX.2 klein model"
+        );
+        let e = check_main_file(&klein, &write_gguf_txt_fixture(&dir, "klein9b")).unwrap_err();
+        assert!(
+            e.details
+                .starts_with("expected a model for FLUX.2 Klein 4B, the file is one for "),
+            "{}",
+            e.details
+        );
+        assert!(!e.details.contains("flux2-klein"), "{}", e.details);
     }
 
     /// The recorded table of a model of each 0.1.x family (0.1.x's signature fixtures).

@@ -1458,7 +1458,8 @@ export const LOCAL: LocalModels = {
           "measured": true,
           "leftMs": null
         },
-        "verySlow": false
+        "verySlow": false,
+        "videoOnProcessor": false
       },
       "model": {
         "id": "flux2-klein-4b-q4",
@@ -1568,6 +1569,24 @@ export const LOCAL: LocalModels = {
             },
             "companyDefault": 4,
             "initial": 4,
+            "affectsPrice": false,
+            "requires": null
+          },
+          {
+            "key": "img_cfg_scale",
+            "canonical": null,
+            "label": "Picture guidance",
+            "help": "How closely the result keeps to the pictures it is given.",
+            "layer": "advanced",
+            "kind": {
+              "type": "range",
+              "min": 1.0,
+              "max": 20.0,
+              "step": 0.5,
+              "unit": null
+            },
+            "companyDefault": null,
+            "initial": null,
             "affectsPrice": false,
             "requires": null
           },
@@ -1779,10 +1798,30 @@ export const LOCAL: LocalModels = {
             "requires": null
           },
           {
+            "key": "loras",
+            "canonical": null,
+            "label": "LoRAs",
+            "help": null,
+            "layer": "advanced",
+            "kind": {
+              "type": "loras",
+              "max": 8,
+              "highNoise": false,
+              "weightMin": -1.0,
+              "weightMax": 2.0,
+              "weightStep": 0.05,
+              "weightDefault": 1.0
+            },
+            "companyDefault": null,
+            "initial": null,
+            "affectsPrice": false,
+            "requires": null
+          },
+          {
             "key": "memory_saving",
             "canonical": null,
             "label": "Memory saving",
-            "help": "Slower, but needs less graphics memory. Automatic uses it when the model would not fit otherwise.",
+            "help": "Slower, but needs less graphics memory. Automatic lets the Studio engine fit the model, and decodes videos and large pictures in parts.",
             "layer": "advanced",
             "kind": {
               "type": "enum",
@@ -1868,7 +1907,8 @@ export const LOCAL: LocalModels = {
         "reason": null,
         "suggestion": null,
         "eta": null,
-        "verySlow": false
+        "verySlow": false,
+        "videoOnProcessor": false
       },
       "model": {
         "id": "wan22-ti2v-5b-fast-q6",
@@ -2231,10 +2271,30 @@ export const LOCAL: LocalModels = {
             "requires": null
           },
           {
+            "key": "loras",
+            "canonical": null,
+            "label": "LoRAs",
+            "help": null,
+            "layer": "advanced",
+            "kind": {
+              "type": "loras",
+              "max": 8,
+              "highNoise": false,
+              "weightMin": -1.0,
+              "weightMax": 2.0,
+              "weightStep": 0.05,
+              "weightDefault": 1.0
+            },
+            "companyDefault": null,
+            "initial": null,
+            "affectsPrice": false,
+            "requires": null
+          },
+          {
             "key": "memory_saving",
             "canonical": null,
             "label": "Memory saving",
-            "help": "Slower, but needs less graphics memory. Automatic uses it when the model would not fit otherwise.",
+            "help": "Slower, but needs less graphics memory. Automatic lets the Studio engine fit the model, and decodes videos and large pictures in parts.",
             "layer": "advanced",
             "kind": {
               "type": "enum",
@@ -2337,7 +2397,8 @@ export const LOCAL: LocalModels = {
           "measured": true,
           "leftMs": null
         },
-        "verySlow": false
+        "verySlow": false,
+        "videoOnProcessor": false
       },
       "recommended": false,
       "installed": true,
@@ -2419,7 +2480,8 @@ export const LOCAL: LocalModels = {
         "reason": null,
         "suggestion": null,
         "eta": null,
-        "verySlow": false
+        "verySlow": false,
+        "videoOnProcessor": false
       },
       "recommended": true,
       "installed": true,
@@ -2501,7 +2563,8 @@ export const LOCAL: LocalModels = {
         "reason": null,
         "suggestion": null,
         "eta": null,
-        "verySlow": false
+        "verySlow": false,
+        "videoOnProcessor": false
       },
       "recommended": true,
       "installed": false,
@@ -2541,7 +2604,7 @@ export const LOCAL: LocalModels = {
   ],
   "notHere": [],
   "noticeAccepted": true,
-  "videoPossible": true,
+  "videoOnProcessor": false,
   "installedBytes": 15059398204,
   "moreFit": 1,
   "loras": []

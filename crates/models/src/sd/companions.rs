@@ -323,7 +323,7 @@ impl CompanionTable {
                 .iter()
                 .any(|ext| path.ends_with(ext))
             {
-                "not a .gguf or .safetensors file"
+                "not a .safetensors, .sft or .gguf file"
             } else if !is_hex(&c.revision, 40) {
                 "the revision is not 40 hex"
             } else if !is_hex(&c.sha256, 64) {
@@ -621,7 +621,7 @@ mod tests {
             (
                 "path",
                 json!("clip_l.ckpt"),
-                "not a .gguf or .safetensors file",
+                "not a .safetensors, .sft or .gguf file",
             ),
             ("revision", json!("main"), "the revision is not 40 hex"),
             (

@@ -191,11 +191,29 @@ pub fn stored_extension(path: &str) -> &'static str {
 /// The file of the LoRA named `rel_name` saved with extension `ext`: `<models>/@loras/
 /// <rel_name><ext>`, one path component per part of the name.
 fn lora_file(models_dir: &Path, rel_name: &str, ext: &str) -> PathBuf {
-    let mut path = lora_folder(models_dir);
+    in_lora_folder(&lora_folder(models_dir), rel_name, ext)
+}
+
+/// `<lora_dir>/<rel_name><ext>`, one path component per part of the name.
+fn in_lora_folder(lora_dir: &Path, rel_name: &str, ext: &str) -> PathBuf {
+    let mut path = lora_dir.to_path_buf();
     path.extend(rel_name.split('/'));
     let mut file = path.into_os_string();
     file.push(ext);
     PathBuf::from(file)
+}
+
+/// The file the engine reads for the LoRA named `rel_name` in the LoRA folder `lora_dir`, as
+/// it looks for it (`extract_and_remove_lora`, `examples/common/common.cpp:2384-2399` at the
+/// pinned commit): the name itself when anything is there, else the name with the first of
+/// its extensions that is there; `None` when that is not a file (nothing at all, or a folder,
+/// which the engine would try to read).
+pub fn engine_lora_file(lora_dir: &Path, rel_name: &str) -> Option<PathBuf> {
+    std::iter::once("")
+        .chain(ENGINE_EXTENSIONS)
+        .map(|ext| in_lora_folder(lora_dir, rel_name, ext))
+        .find(|path| path.exists())
+        .filter(|path| path.is_file())
 }
 
 /// Whether the engine would read something else for the LoRA named `rel_name` saved with

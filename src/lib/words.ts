@@ -973,6 +973,9 @@ const PICTURE_NOUNS: Record<RefRole, readonly [string, string]> = {
   reference: ["added picture", "added pictures"],
   startFrame: ["start frame", "start frames"],
   endFrame: ["end frame", "end frames"],
+  source: ["picture to change", "pictures to change"],
+  mask: ["mask", "masks"],
+  control: ["control picture", "control pictures"],
 };
 
 /** How a setting and its value read inside Studio's sentences and chips (Tasks B4 and B6). */
@@ -1375,6 +1378,9 @@ export const STUDIO_REFS = {
     reference: "Reference",
     startFrame: "Start frame",
     endFrame: "End frame",
+    source: "Picture to change",
+    mask: "Mask",
+    control: "Control picture",
   } satisfies Record<RefRole, string>,
   roleMenu: "What this picture is for",
   picture: (n: number) => `Picture ${n}`,

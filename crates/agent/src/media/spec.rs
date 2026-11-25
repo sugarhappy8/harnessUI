@@ -203,6 +203,24 @@ pub enum ParamKind {
         /// The names the model takes.
         allowed_keys: Vec<String>,
     },
+    /// The LoRAs a local model's run attaches: `[{"id": string, "weight": number,
+    /// "highNoise": bool}]`, at most `max`, each id once per part, each weight from
+    /// `weight_min` to `weight_max` on `weight_step`, and `highNoise` only when `high_noise`
+    /// (a model with a high-noise part, which takes LoRAs of its own).
+    Loras {
+        /// The most LoRAs one run takes.
+        max: u32,
+        /// The model has a high-noise part.
+        high_noise: bool,
+        /// The weakest strength.
+        weight_min: f64,
+        /// The strongest strength.
+        weight_max: f64,
+        /// The strengths are `weight_min` plus whole steps of this.
+        weight_step: f64,
+        /// A LoRA's strength when it is attached.
+        weight_default: f64,
+    },
 }
 
 /// One company that runs an OpenRouter picture model: a record of the model's `/endpoints`
@@ -491,7 +509,7 @@ pub fn validate(model: &MediaModel, req: &MediaRequest) -> Result<(), Vec<Invali
             problems.push(problem);
         }
     }
-    for role in [RefRole::Reference, RefRole::StartFrame, RefRole::EndFrame] {
+    for role in RefRole::ALL {
         if !roles.contains(&role) && req.refs.iter().any(|r| r.role == role) {
             problems.push(Invalid::TooManyPictures { role, max: 0 });
         }
@@ -1118,6 +1136,32 @@ fn fits(kind: &ParamKind, value: &Value) -> bool {
         ParamKind::Text { max_chars } => value
             .as_str()
             .is_some_and(|text| text.chars().count() <= *max_chars as usize),
+        ParamKind::Loras {
+            max,
+            high_noise,
+            weight_min,
+            weight_max,
+            weight_step,
+            ..
+        } => value.as_array().is_some_and(|loras| {
+            let mut attached = std::collections::BTreeSet::new();
+            loras.len() <= *max as usize
+                && loras.iter().all(|lora| {
+                    let id = lora.get("id").and_then(Value::as_str);
+                    let weight = lora.get("weight").and_then(Value::as_f64);
+                    let high = lora.get("highNoise").and_then(Value::as_bool);
+                    match (id, weight, high) {
+                        (Some(id), Some(weight), Some(high)) => {
+                            !id.is_empty()
+                                && (*weight_min..=*weight_max).contains(&weight)
+                                && on_step(weight - weight_min, *weight_step)
+                                && (*high_noise || !high)
+                                && attached.insert((id, high))
+                        }
+                        _ => false,
+                    }
+                })
+        }),
         ParamKind::Images { .. } | ParamKind::Extra { .. } => false,
     }
 }
@@ -2001,5 +2045,126 @@ mod tests {
                 "{bad}"
             );
         }
+    }
+
+    /// A `loras` field with at most `max` LoRAs, high-noise ones when `high_noise`, at the
+    /// strength slider's range, step and default (design 8).
+    fn loras_spec(max: u32, high_noise: bool) -> ParamSpec {
+        field(
+            "loras",
+            ParamKind::Loras {
+                max,
+                high_noise,
+                weight_min: -1.0,
+                weight_max: 2.0,
+                weight_step: 0.05,
+                weight_default: 1.0,
+            },
+        )
+    }
+
+    #[test]
+    fn the_loras_value_is_validated() {
+        let m = hand_made(vec![loras_spec(8, false)]);
+        let bad = |v: Value| validate(&m, &request_p(json!({ "loras": v })));
+        let refused = Err(vec![Invalid::BadValue("loras".into())]);
+        // Outside the range, high-noise on a model without a high-noise part, more than 8.
+        assert_eq!(
+            bad(json!([{"id": "a", "weight": 2.5, "highNoise": false}])),
+            refused
+        );
+        assert_eq!(
+            bad(json!([{"id": "a", "weight": 1.0, "highNoise": true}])),
+            refused
+        );
+        assert_eq!(
+            bad(json!(
+                (0..9)
+                    .map(|i| json!({"id": i.to_string(), "weight": 1.0, "highNoise": false}))
+                    .collect::<Vec<_>>()
+            )),
+            refused
+        );
+        // Off the step, of another shape, or attached twice.
+        assert_eq!(
+            bad(json!([{"id": "a", "weight": 0.83, "highNoise": false}])),
+            refused
+        );
+        for shape in [
+            json!({"id": "a", "weight": 1.0, "highNoise": false}),
+            json!([{"id": 3, "weight": 1.0, "highNoise": false}]),
+            json!([{"id": "a", "weight": "1", "highNoise": false}]),
+            json!([{"id": "a", "weight": 1.0}]),
+            json!([{"id": "", "weight": 1.0, "highNoise": false}]),
+            json!([
+                {"id": "a", "weight": 1.0, "highNoise": false},
+                {"id": "a", "weight": 0.5, "highNoise": false}
+            ]),
+        ] {
+            assert_eq!(bad(shape.clone()), refused, "{shape}");
+        }
+        assert_eq!(
+            bad(json!([{"id": "a", "weight": 0.85, "highNoise": false}])),
+            Ok(())
+        );
+        assert_eq!(bad(json!([])), Ok(()));
+        assert_eq!(
+            bad(json!([
+                {"id": "a", "weight": -1, "highNoise": false},
+                {"id": "b", "weight": 2, "highNoise": false}
+            ])),
+            Ok(())
+        );
+        // A model with a high-noise part takes the same LoRA for either part.
+        let wan = hand_made(vec![loras_spec(8, true)]);
+        let two_parts = json!([
+            {"id": "a", "weight": 1.0, "highNoise": true},
+            {"id": "a", "weight": 1.0, "highNoise": false}
+        ]);
+        assert_eq!(
+            validate(&wan, &request_p(json!({ "loras": two_parts }))),
+            Ok(())
+        );
+    }
+
+    /// The pictures of the roles a local model's recipe takes (Task R7) are checked like the
+    /// others: a picture of a role the model does not offer is refused.
+    #[test]
+    fn a_picture_to_change_a_mask_and_a_control_picture_are_counted() {
+        let images = |key: &str, min, max, role| field(key, ParamKind::Images { min, max, role });
+        let m = hand_made(vec![
+            images("source_picture", 1, 1, RefRole::Source),
+            images("mask_picture", 1, 1, RefRole::Mask),
+        ]);
+        let with = |roles: &[RefRole]| {
+            roles.iter().fold(request_p(json!({})), |req, role| {
+                let mut more = with_refs(request_p(json!({})), *role, 1).refs;
+                MediaRequest {
+                    refs: [req.refs, std::mem::take(&mut more)].concat(),
+                    ..req
+                }
+            })
+        };
+        assert_eq!(
+            validate(&m, &with(&[RefRole::Source, RefRole::Mask])),
+            Ok(())
+        );
+        assert_eq!(
+            validate(&m, &with(&[RefRole::Source])),
+            Err(vec![Invalid::TooFewPictures {
+                role: RefRole::Mask,
+                min: 1
+            }])
+        );
+        assert_eq!(
+            validate(
+                &m,
+                &with(&[RefRole::Source, RefRole::Mask, RefRole::Control])
+            ),
+            Err(vec![Invalid::TooManyPictures {
+                role: RefRole::Control,
+                max: 0
+            }])
+        );
     }
 }

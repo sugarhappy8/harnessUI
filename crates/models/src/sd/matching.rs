@@ -414,8 +414,9 @@ const PICTURE_EDITS: [&str; 20] = [
     "flux1-fill",
 ];
 
-/// At most this many reference pictures (`-r`), as 0.1.x's `MAX_REFERENCES`.
-const MAX_REFERENCES: u32 = 4;
+/// At most this many reference pictures (`-r`): 0.1.x's limit, for every model Studio runs
+/// (a catalog entry's reference field too, `studio::local::LocalMediaProvider::params_for`).
+pub const MAX_REFERENCES: u32 = 4;
 
 const fn input(role: GenInput, min: u32, max: u32) -> RecipeInput {
     RecipeInput { role, min, max }

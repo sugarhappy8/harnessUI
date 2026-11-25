@@ -116,7 +116,7 @@ function EmptyStateCard(props: { tab: StudioTab; state: Exclude<EmptyState, null
   }
   const text =
     unusable ??
-    (tab === "video" && local !== null && !local.videoPossible ? STUDIO_EMPTY.noVideoHere : STUDIO_EMPTY.cloud[tab]);
+    (tab === "video" && local !== null && local.videoOnProcessor ? STUDIO_EMPTY.noVideoHere : STUDIO_EMPTY.cloud[tab]);
   return (
     <section className={CARD}>
       <p className="text-sm">{text}</p>

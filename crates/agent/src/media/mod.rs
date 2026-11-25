@@ -97,7 +97,8 @@ pub struct MediaModel {
     pub companies: Vec<EndpointCompany>,
 }
 
-/// What an added picture is for.
+/// What an added picture is for. The last three are the words of a local model's input
+/// pictures (`models::gen_catalog::GenInput`), which only a model on this computer takes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum RefRole {
@@ -107,6 +108,24 @@ pub enum RefRole {
     StartFrame,
     /// The last frame of a video.
     EndFrame,
+    /// The picture to change, for inpainting (the engine's `-i`).
+    Source,
+    /// Which part of the picture to change (`--mask`): the white areas change.
+    Mask,
+    /// A control picture (`--control-image`), such as edges or depth.
+    Control,
+}
+
+impl RefRole {
+    /// Every role, in declaration order.
+    pub const ALL: [RefRole; 6] = [
+        RefRole::Reference,
+        RefRole::StartFrame,
+        RefRole::EndFrame,
+        RefRole::Source,
+        RefRole::Mask,
+        RefRole::Control,
+    ];
 }
 
 /// A picture added to a request, as it is kept in the gallery.

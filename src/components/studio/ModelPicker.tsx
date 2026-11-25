@@ -138,7 +138,7 @@ function matches(model: MediaModel, query: string): boolean {
 /** The installed models of `kind` this computer can make (video needs a usable graphics card
  *  or an Apple-silicon Mac), those this version cannot read included. */
 function installedHere(local: LocalModels, kind: StudioTab): InstalledLocal[] {
-  return kind === "image" || local.videoPossible ? local.installed.filter((m) => m.kind === kind) : [];
+  return kind === "image" || !local.videoOnProcessor ? local.installed.filter((m) => m.kind === kind) : [];
 }
 
 /**
@@ -472,7 +472,7 @@ function LocalSection(props: {
   // the Video tab where it cannot make video: local needs other hardware. Otherwise only this
   // kind has none that fits.
   const nothingFits =
-    (tab === "video" && !local.videoPossible) ||
+    (tab === "video" && local.videoOnProcessor) ||
     (local.moreFit === 0 && !local.installed.some((m) => m.model.usable === null && FITTING.has(m.fit.word)));
 
   let after: ReactNode = (

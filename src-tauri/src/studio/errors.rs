@@ -11,6 +11,7 @@ use models::gen_catalog::GenRole;
 use models::gen_fit::{GenSize, NotFor};
 use models::hf::HfError;
 use models::sd::CannotRunReason;
+use models::sd::detect::SdVersion;
 use models::sd::recipes::SlotId;
 use runtime::packs::PackError;
 use runtime::sd::args::ArgsError;
@@ -418,6 +419,12 @@ fn pictures(role: RefRole, count: u32) -> &'static str {
         (RefRole::StartFrame, false) => "start frames",
         (RefRole::EndFrame, true) => "end frame",
         (RefRole::EndFrame, false) => "end frames",
+        (RefRole::Source, true) => "picture to change",
+        (RefRole::Source, false) => "pictures to change",
+        (RefRole::Mask, true) => "mask",
+        (RefRole::Mask, false) => "masks",
+        (RefRole::Control, true) => "control picture",
+        (RefRole::Control, false) => "control pictures",
     }
 }
 
@@ -1017,8 +1024,84 @@ fn gb_up(bytes: u64) -> String {
     format!("{}.{} GB", tenths / 10, tenths % 10)
 }
 
+/// A model version's name as people know it, never the engine's word for it, for a sentence
+/// the backend writes. The webview's own list is `VERSION_NAME` (src/lib/words.ts); the test
+/// `version_names_are_the_webviews` holds the two to one list.
+pub fn version_name(version: SdVersion) -> &'static str {
+    match version {
+        SdVersion::Sd1 => "SD 1.5",
+        SdVersion::Sd1Inpaint => "SD 1.5 Inpainting",
+        SdVersion::Sd1Pix2pix => "InstructPix2Pix",
+        SdVersion::Sd1TinyUnet => "SD 1.5 Tiny",
+        SdVersion::Sd2 => "SD 2.1",
+        SdVersion::Sd2Inpaint => "SD 2 Inpainting",
+        SdVersion::Sd2TinyUnet => "SD 2 Tiny",
+        SdVersion::Sdxs512Ds => "SDXS-512",
+        SdVersion::Sdxs09 => "SDXS-09",
+        SdVersion::Sdxl => "SDXL",
+        SdVersion::SdxlInpaint => "SDXL Inpainting",
+        SdVersion::SdxlPix2pix => "CosXL Edit",
+        SdVersion::SdxlVega => "Segmind Vega",
+        SdVersion::SdxlSsd1b => "Segmind SSD-1B",
+        SdVersion::Svd => "Stable Video Diffusion",
+        SdVersion::Sd3 => "SD 3.5",
+        SdVersion::Flux => "FLUX.1",
+        SdVersion::FluxFill => "FLUX.1 Fill",
+        SdVersion::FluxControls => "FLUX.1 Canny or Depth",
+        SdVersion::Flex2 => "Flex.2",
+        SdVersion::ChromaRadiance => "Chroma Radiance",
+        SdVersion::Wan2 => "Wan 2.1",
+        SdVersion::Wan22I2v => "Wan 2.2 Image-to-Video",
+        SdVersion::Wan22Ti2v => "Wan 2.2 5B",
+        SdVersion::Wan22S2v => "Wan 2.2 Speech-to-Video",
+        SdVersion::LingbotVideo => "LingBot-Video",
+        SdVersion::QwenImage => "Qwen-Image",
+        SdVersion::QwenImageLayered => "Qwen-Image Layered",
+        SdVersion::QwenImage21 => "Qwen-Image 2.1",
+        SdVersion::HunyuanVideo => "HunyuanVideo 1.5",
+        SdVersion::Anima => "Anima",
+        SdVersion::Flux2 => "FLUX.2",
+        SdVersion::Flux2Klein => "FLUX.2 klein",
+        SdVersion::Ltxav => "LTX-2.3",
+        SdVersion::MinimaxH3 => "MiniMax H3",
+        SdVersion::HidreamO1 => "HiDream-O1",
+        SdVersion::ZImage => "Z-Image",
+        SdVersion::BooguImage => "Boogu Image",
+        SdVersion::OvisImage => "Ovis-Image",
+        SdVersion::ErnieImage => "ERNIE-Image",
+        SdVersion::Lens => "Lens",
+        SdVersion::Minit2i => "MiniT2I",
+        SdVersion::Longcat => "LongCat-Image",
+        SdVersion::Pid => "PiD",
+        SdVersion::Ideogram4 => "Ideogram 4",
+        SdVersion::SefiImage => "SeFi-Image",
+        SdVersion::Krea2 => "Krea 2",
+        SdVersion::MageFlow => "MageFlow",
+        SdVersion::SensenovaU15 => "SenseNova U1.5",
+        SdVersion::LladaImage => "LLaDA-Image",
+        SdVersion::Pixart => "PixArt",
+        SdVersion::MingImage => "Ming-Image",
+        SdVersion::ZImageL2p => "Z-Image L2P",
+        SdVersion::Iris => "Iris",
+        SdVersion::Flux3 => "FLUX.3",
+        SdVersion::MossImage => "MOSS-Image",
+        SdVersion::Fibo2 => "FIBO 2",
+        SdVersion::Chroma => "Chroma",
+        SdVersion::PH3Image => "P-H3 Image",
+        SdVersion::MinimaxH3Image => "MiniMax H3 Image",
+    }
+}
+
+/// A model type's name as people know it: its recipe's own name ("FLUX.2 Klein 4B"), never
+/// its id; "this model type" for a recipe the engine does not have.
+pub fn recipe_name(id: &str) -> &'static str {
+    models::sd::recipes::recipe(id).map_or("this model type", |r| r.name.as_str())
+}
+
 /// A downloaded model file whose own header is not a model its entry runs (a FLUX.2 klein 9B
-/// named like the 4B, or a file whose name lies): it is not added, and its files go.
+/// named like the 4B, or a file whose name lies): it is not added, and its files go. The
+/// details name the model types and versions by their names ([`recipe_name`],
+/// [`version_name`]).
 pub fn not_that_model(details: impl Into<String>) -> AppError {
     AppError::new(
         NOT_THAT_MODEL,
@@ -1098,17 +1181,6 @@ pub fn prompt_too_long_here() -> AppError {
         PROMPT_TOO_LONG_HERE,
         "Shorten it, or choose a cloud model.",
         String::new(),
-    )
-}
-
-/// A local run that does not fit this computer even with the chat model unloaded (and is not
-/// a picture the processor can make), with why when it is known ([`not_here_reason`]).
-pub fn does_not_fit(reason: Option<String>) -> AppError {
-    AppError::new(
-        "studio_does_not_fit",
-        "This model does not fit this computer.",
-        "Choose a smaller size or a cloud model.",
-        reason.unwrap_or_default(),
     )
 }
 
@@ -1500,11 +1572,10 @@ pub fn fits_at(size: GenSize, clip: bool) -> String {
     }
 }
 
-/// Why a model is not for this computer, judged with the chat model's memory counted back:
+/// Why a model may not fit this computer, judged with the chat model's memory counted back:
 /// "needs 6 GB of graphics memory" (the need rounded up to whole GB; "of free memory" on a
 /// computer that runs models on the processor, `processor_only`), "needs a Mac with 32 GB or
-/// more", "video needs a graphics card or an Apple-silicon Mac", "local video needs a graphics
-/// card on this computer".
+/// more". It only warns: the run goes ahead.
 pub fn not_here_reason(not_for: NotFor, processor_only: bool) -> String {
     let gb = |bytes: u64| bytes.div_ceil(1_000_000_000);
     match not_for {
@@ -1513,10 +1584,6 @@ pub fn not_here_reason(not_for: NotFor, processor_only: bool) -> String {
         }
         NotFor::GraphicsMemory { needs } => format!("needs {} GB of graphics memory", gb(needs)),
         NotFor::MacMemory { needs } => format!("needs a Mac with {} GB or more", gb(needs)),
-        NotFor::VideoNeedsGpu => "video needs a graphics card or an Apple-silicon Mac".to_owned(),
-        NotFor::VideoNotOnThisMac => {
-            "local video needs a graphics card on this computer".to_owned()
-        }
     }
 }
 
@@ -1556,6 +1623,22 @@ pub const LOCAL_FOLDER_NUMBERED: &str = "The Studio folder's path holds % follow
 /// A file or folder the Studio engine is given has a path that is not valid Unicode
 /// (`ArgsError::NotUnicode`; the path itself is left out): [`from_local_failure`] says so.
 pub const LOCAL_PATH_NOT_UNICODE: &str = "A path the Studio engine is given is not valid Unicode.";
+/// A mask added without the picture it changes: the engine would redraw the whole picture.
+pub const MASK_NEEDS_PICTURE: &str = "Add the picture to change before its mask.";
+/// What a run says first of a LoRA it attaches whose file is gone ([`lora_missing`]).
+pub const LORA_MISSING: &str = "A LoRA's file is missing";
+/// What to do about a LoRA whose file is gone.
+const LORA_MISSING_NEXT: &str = "Add it again, or remove it from the settings.";
+/// The name a run gives a LoRA it attaches that was deleted, when its id holds no name (one
+/// added from this computer).
+pub const LORA_ADDED_HERE: &str = "a LoRA added from this computer";
+
+/// A run that attaches the LoRA `name` (its name as shown), whose file is gone: its row was
+/// deleted, or the engine finds no file under its name in the LoRA folder (a models folder
+/// moved since it was added leaves it behind).
+pub fn lora_missing(name: &str) -> String {
+    format!("{LORA_MISSING}: {name}. {LORA_MISSING_NEXT}")
+}
 
 /// A setting whose value the engine job cannot take (the check before the run refuses it
 /// first); the setting's key is named.
@@ -1563,20 +1646,66 @@ pub fn local_bad_value(key: &str) -> String {
     format!("The value of {key} is not one this model takes.")
 }
 
-/// The engine's arguments refused the job: their own sentence (the prompt's length, a size),
-/// or for a `%d` in the gallery folder's path and a path that is not valid Unicode, the
-/// sentence [`from_local_failure`] knows them by.
+/// The engine's arguments refused the job, in plain words: the prompt's length, a size, a
+/// number by what it is (never its field's name), a LoRA by its name as written; for a `%d`
+/// in the gallery folder's path, a path that is not valid Unicode and a mask without its
+/// picture, the sentence [`from_local_failure`] knows them by.
 pub fn local_args_refused(e: &ArgsError) -> String {
     match e {
-        ArgsError::PercentInOutputPath => return LOCAL_FOLDER_NUMBERED.to_owned(),
-        ArgsError::NotUnicode(_) => return LOCAL_PATH_NOT_UNICODE.to_owned(),
-        _ => {}
+        ArgsError::PercentInOutputPath => LOCAL_FOLDER_NUMBERED.to_owned(),
+        ArgsError::NotUnicode(_) => LOCAL_PATH_NOT_UNICODE.to_owned(),
+        ArgsError::MaskWithoutPicture => MASK_NEEDS_PICTURE.to_owned(),
+        ArgsError::EmptyPrompt => "The prompt is empty.".to_owned(),
+        ArgsError::PromptTooLong => LOCAL_PROMPT_TOO_LONG.to_owned(),
+        ArgsError::NoDiffusionPart => "The model has no main file.".to_owned(),
+        ArgsError::BadSize { multiple } => {
+            format!("The size is not a multiple of {multiple} from 64 to 2048.")
+        }
+        ArgsError::NumberOutOfRange(field) => {
+            format!(
+                "The {} is beyond what the Studio engine reads.",
+                number_name(field)
+            )
+        }
+        ArgsError::BadOutputStem => "The result's file name is not a plain name.".to_owned(),
+        ArgsError::BadLoraName(name) => {
+            format!("The Studio engine can't read a LoRA named {name}.")
+        }
+        ArgsError::TooManyLoras => format!(
+            "More than {} LoRAs are attached.",
+            runtime::sd::args::MAX_LORAS
+        ),
+        ArgsError::LorasWithoutFolder => "LoRAs are attached without their folder.".to_owned(),
+        ArgsError::BadModelArgs => "The model type's extra settings can't be read.".to_owned(),
+        ArgsError::TokenizerPath => {
+            "The tokenizer file's path holds both = and a comma, which the Studio engine \
+             can't read."
+                .to_owned()
+        }
     }
-    let text = e.to_string();
-    let mut chars = text.chars();
-    match chars.next() {
-        Some(first) => format!("{}{}.", first.to_uppercase(), chars.as_str()),
-        None => String::new(),
+}
+
+/// A number of the engine job, as [`ArgsError::NumberOutOfRange`] names its field, in plain
+/// words.
+fn number_name(field: &str) -> &'static str {
+    match field {
+        "steps" => "number of steps",
+        "batch" => "number of pictures",
+        "frames" => "number of frames",
+        "fps" => "number of frames a second",
+        "threads" => "number of processor threads",
+        "timestep_shift" => "timestep shift",
+        "seed" => "seed",
+        "cfg" => "guidance",
+        "guidance" => "distilled guidance",
+        "img_cfg" => "picture guidance",
+        "flow_shift" => "flow shift",
+        "high_noise_cfg" => "high-noise guidance",
+        "moe_boundary" => "high-noise hand-over point",
+        "strength" => "strength",
+        "sigmas" => "model type's noise schedule",
+        "lora weight" => "strength of a LoRA",
+        _ => "number",
     }
 }
 
@@ -1758,6 +1887,23 @@ pub fn from_local_failure(f: &MediaFailure, kind: MediaKind) -> AppError {
                 .to_owned(),
             next_step: "Choose another Studio folder in Settings → Studio, or rename the folder."
                 .to_owned(),
+            ..error
+        },
+        FailureKind::BadRequest if f.message == MASK_NEEDS_PICTURE => AppError {
+            code: "studio_mask_needs_picture".to_owned(),
+            message: MASK_NEEDS_PICTURE.to_owned(),
+            next_step: "Add a picture to change, or remove the mask.".to_owned(),
+            ..error
+        },
+        FailureKind::BadRequest if f.message.starts_with(LORA_MISSING) => AppError {
+            code: "studio_lora_missing".to_owned(),
+            message: f
+                .message
+                .strip_suffix(LORA_MISSING_NEXT)
+                .unwrap_or(&f.message)
+                .trim_end()
+                .to_owned(),
+            next_step: LORA_MISSING_NEXT.to_owned(),
             ..error
         },
         _ => error,
@@ -1994,8 +2140,6 @@ mod tests {
             model_incomplete(),
             wont_make(),
             prompt_too_long_here(),
-            does_not_fit(None),
-            does_not_fit(Some("needs 6 GB of graphics memory".into())),
             busy_for_update(),
             engine_in_use(),
             local_model_missing(),
@@ -2325,18 +2469,6 @@ mod tests {
             "Keep the prompt under 4,000 characters for local models."
         );
         assert_eq!(
-            words(does_not_fit(Some("needs 6 GB of graphics memory".into()))),
-            (
-                "studio_does_not_fit".into(),
-                "This model does not fit this computer.".into(),
-                "Choose a smaller size or a cloud model.".into()
-            )
-        );
-        assert_eq!(
-            does_not_fit(Some("needs 6 GB of graphics memory".into())).details,
-            "needs 6 GB of graphics memory"
-        );
-        assert_eq!(
             words(busy_for_update()),
             (
                 "studio_busy_for_update".into(),
@@ -2354,6 +2486,27 @@ mod tests {
                 "Stop the run, then delete it.".into()
             )
         );
+    }
+
+    /// The backend's version names are the webview's (`VERSION_NAME` in src/lib/words.ts),
+    /// one for every version.
+    #[test]
+    fn version_names_are_the_webviews() {
+        let words = include_str!("../../../src/lib/words.ts");
+        let start = words.find("export const VERSION_NAME").unwrap();
+        let list = &words[start..start + words[start..].find("};").unwrap()];
+        for version in SdVersion::ALL {
+            let word = version.word();
+            let quoted = format!("\"{word}\": \"{}\",", version_name(version));
+            let bare = format!("  {word}: \"{}\",", version_name(version));
+            assert!(
+                list.contains(&quoted) || list.contains(&bare),
+                "{word} is not \"{}\" in words.ts",
+                version_name(version)
+            );
+        }
+        assert_eq!(recipe_name("flux2-klein-4b"), "FLUX.2 Klein 4B");
+        assert_eq!(recipe_name("no-such-recipe"), "this model type");
     }
 
     /// Why a model is not offered here, as the estimate and Get local models say it.
@@ -2395,14 +2548,6 @@ mod tests {
                 false
             ),
             "needs a Mac with 31 GB or more"
-        );
-        assert_eq!(
-            not_here_reason(NotFor::VideoNeedsGpu, true),
-            "video needs a graphics card or an Apple-silicon Mac"
-        );
-        assert_eq!(
-            not_here_reason(NotFor::VideoNotOnThisMac, false),
-            "local video needs a graphics card on this computer"
         );
     }
 
@@ -2949,6 +3094,78 @@ mod tests {
         assert_eq!(
             local_args_refused(&ArgsError::NotUnicode("/a/b".into())),
             LOCAL_PATH_NOT_UNICODE
+        );
+        // A number by what it is, never its field's name; a LoRA by its name as written.
+        assert_eq!(
+            local_args_refused(&ArgsError::NumberOutOfRange("high_noise_cfg")),
+            "The high-noise guidance is beyond what the Studio engine reads."
+        );
+        assert_eq!(
+            local_args_refused(&ArgsError::NumberOutOfRange("lora weight")),
+            "The strength of a LoRA is beyond what the Studio engine reads."
+        );
+        assert_eq!(
+            local_args_refused(&ArgsError::BadLoraName("local/a:b".into())),
+            "The Studio engine can't read a LoRA named local/a:b."
+        );
+        assert_eq!(
+            local_args_refused(&ArgsError::MaskWithoutPicture),
+            MASK_NEEDS_PICTURE
+        );
+        for e in [
+            ArgsError::EmptyPrompt,
+            ArgsError::PromptTooLong,
+            ArgsError::NoDiffusionPart,
+            ArgsError::BadOutputStem,
+            ArgsError::TooManyLoras,
+            ArgsError::LorasWithoutFolder,
+            ArgsError::BadModelArgs,
+            ArgsError::TokenizerPath,
+            ArgsError::NumberOutOfRange("steps"),
+            ArgsError::NumberOutOfRange("sigmas"),
+            ArgsError::NumberOutOfRange("img_cfg"),
+        ] {
+            let text = local_args_refused(&e);
+            assert!(text.ends_with('.') && !text.contains('_'), "{e:?}: {text}");
+            assert!(!text.contains('"'), "{e:?}: {text}");
+        }
+    }
+
+    /// A mask without its picture, and a LoRA whose file is gone, say so on the card, with
+    /// what to do.
+    #[test]
+    fn a_mask_without_its_picture_and_a_missing_lora_say_what_to_do() {
+        let refused = |message: String| MediaFailure {
+            kind: FailureKind::BadRequest,
+            stage: None,
+            charged: Some(false),
+            company_code: None,
+            request_id: None,
+            status: None,
+            message,
+            retry_after: None,
+        };
+        let e = from_local_failure(&refused(MASK_NEEDS_PICTURE.into()), MediaKind::Image);
+        assert_eq!(
+            (e.code.as_str(), e.message.as_str(), e.next_step.as_str()),
+            (
+                "studio_mask_needs_picture",
+                "Add the picture to change before its mask.",
+                "Add a picture to change, or remove the mask."
+            )
+        );
+        assert_eq!(
+            lora_missing("pixel art ü"),
+            "A LoRA's file is missing: pixel art ü. Add it again, or remove it from the settings."
+        );
+        let e = from_local_failure(&refused(lora_missing("pixel art ü")), MediaKind::Image);
+        assert_eq!(
+            (e.code.as_str(), e.message.as_str(), e.next_step.as_str()),
+            (
+                "studio_lora_missing",
+                "A LoRA's file is missing: pixel art ü.",
+                "Add it again, or remove it from the settings."
+            )
         );
     }
 

@@ -160,7 +160,7 @@ function localFit(seconds: number, height: number): LocalFit {
   const minutes: Record<number, number> = { 1: 1.5, 2: 3, 3: 5, 4: 7, 5: 9 };
   const middle = (height >= 704 ? 10 : (minutes[seconds] ?? 1)) * 60_000;
   const eta: Eta = { lowMs: middle - 30_000, highMs: middle + 30_000, measured: true, leftMs: null };
-  return { word: "fits", verdict: "green", reason: null, suggestion: null, eta, verySlow: false };
+  return { word: "fits", verdict: "green", reason: null, suggestion: null, eta, verySlow: false, videoOnProcessor: false };
 }
 
 /** The exact request of a GPT Image 2.6 Flare picture, as `studio_preview` gives it. */

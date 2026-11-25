@@ -1278,6 +1278,8 @@ pub struct LocalFitDto {
     pub eta: Option<EtaDto>,
     /// Not here, or a run would take longer than 15 minutes: Studio offers a cloud model.
     pub very_slow: bool,
+    /// A video that would run on the processor (this computer runs models there): very slow.
+    pub video_on_processor: bool,
 }
 
 /// A model of the recommended list.
@@ -1363,12 +1365,13 @@ pub struct LocalModelsDto {
     pub installed: Vec<InstalledLocalDto>,
     /// The recommended list's entries that run on this computer.
     pub recommended: Vec<LocalEntryDto>,
-    /// "Not for this computer": the entries that do not, each with its reason.
+    /// The entries that may not fit this computer, each with its reason: shown with the
+    /// warning, never refused.
     pub not_here: Vec<LocalEntryDto>,
     /// The note about local models was accepted.
     pub notice_accepted: bool,
-    /// This computer has a graphics card or Apple silicon: video is offered.
-    pub video_possible: bool,
+    /// This computer runs models on the processor: a video is made there, very slowly.
+    pub video_on_processor: bool,
     /// The disk the installed picture and video models take, a shared file counted once.
     pub installed_bytes: u64,
     /// The entries of `recommended` not installed yet whose word is `fits` or `afterUnload`

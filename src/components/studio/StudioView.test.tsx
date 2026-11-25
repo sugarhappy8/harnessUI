@@ -183,7 +183,7 @@ describe("StudioView", () => {
 
   it("each empty state follows one ordered rule", () => {
     const none = { ...LOCAL, installed: [] };
-    const nothingFits = { ...none, recommended: [], notHere: LOCAL.recommended, videoPossible: false };
+    const nothingFits = { ...none, recommended: [], notHere: LOCAL.recommended, videoOnProcessor: true };
     expect(emptyState("image", LOCAL, [])).toBeNull(); // klein is installed
     expect(emptyState("image", none, [])).toBe("getLocal");
     expect(emptyState("image", nothingFits, [])).toBe("cloudBackup");
@@ -195,7 +195,7 @@ describe("StudioView", () => {
     // cloudBackup
     await show({
       endpoints: [],
-      local: { ...LOCAL, installed: [], recommended: [], notHere: LOCAL.recommended, videoPossible: false },
+      local: { ...LOCAL, installed: [], recommended: [], notHere: LOCAL.recommended, videoOnProcessor: true },
     });
     screen.getByText(
       "This computer cannot run local models well. Cloud models run on a company's computers instead: add OpenRouter or OpenAI.",
@@ -253,7 +253,7 @@ describe("StudioView", () => {
   it("an endpoint without a key offers no model to use", async () => {
     const keyless = endpoint({ hasKey: false });
     const none = { ...LOCAL, installed: [] };
-    const nothingFits = { ...none, recommended: [], notHere: LOCAL.recommended, videoPossible: false };
+    const nothingFits = { ...none, recommended: [], notHere: LOCAL.recommended, videoOnProcessor: true };
     const openai = endpoint({ providerId: 2, company: "openai" });
     expect(defaultModel("image", none, [keyless])).toBeNull();
     expect(defaultModel("image", none, [keyless, openai])).toEqual({ target: { endpoint: 2 }, model: "gpt-image-2.6-flare" });
@@ -492,7 +492,7 @@ describe("StudioView", () => {
 
   it("on a computer without a usable graphics card, the Video tab is cloud only", async () => {
     // addEndpoint
-    await show({ endpoints: [endpoint({ company: "openai" })], local: { ...LOCAL, videoPossible: false } });
+    await show({ endpoints: [endpoint({ company: "openai" })], local: { ...LOCAL, videoOnProcessor: true } });
     await click(screen.getByRole("tab", { name: "Video" }));
     screen.getByText(
       "Video on this computer needs a graphics card or an Apple-silicon Mac. OpenRouter makes videos in the cloud: add it in Settings → Endpoints.",
@@ -500,7 +500,7 @@ describe("StudioView", () => {
   });
 
   describe("what is saved, read again", () => {
-    const nothingFits = { ...LOCAL, installed: [], recommended: [], notHere: LOCAL.recommended, videoPossible: false };
+    const nothingFits = { ...LOCAL, installed: [], recommended: [], notHere: LOCAL.recommended, videoOnProcessor: true };
     const cloudBackup =
       "This computer cannot run local models well. Cloud models run on a company's computers instead: add OpenRouter or OpenAI.";
     const SAVED_READS = [api.studioModels, api.studioLocalModels, api.studioGetPrefs, api.studioUsage];

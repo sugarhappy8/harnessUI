@@ -10,11 +10,12 @@
 //!   the provider's list), its settings checked (`spec::validate`) and a seed picked when
 //!   none is set; the run's fit and time ([`local_verdict`](super::local_verdict)), the time
 //!   where the lease would run it (on the processor rather than after an unload, as Create
-//!   estimates it). One that does not fit even with the chat model unloaded, and is not a
-//!   picture the processor can make, is refused (`studio_does_not_fit`). A local run is free
-//!   (`Price::Free`): it never asks and never meets the daily limit. Only then, under the
-//!   same `starting` lock as a cloud start (the hardware is asked before it, so a cloud
-//!   start never waits for a probe), is the press checked again, each added picture found
+//!   estimates it). The fit only warns (design 9.2): one that may not fit even with the chat
+//!   model unloaded still runs, the lease unloading the chat model and the engine's auto-fit
+//!   spreading the weights. A local run is free (`Price::Free`): it never asks and never
+//!   meets the daily limit. Only then, under the same `starting` lock as a cloud start (the
+//!   hardware is asked before it, so a cloud start never waits for a probe), is the press
+//!   checked again, each added picture found
 //!   still there (a delete may have removed it meanwhile: `studio_ref_missing`), and the run
 //!   recorded (`queued`, $0, "This computer", the installed model and the engine's build),
 //!   with its audit row (the prompt's length, never the prompt), and queued.
@@ -72,7 +73,7 @@ use crate::studio::deps::{Endpoint, LocalLane};
 use crate::studio::errors;
 use crate::studio::gallery::io_error;
 use crate::studio::label::{AiLabel, label_file};
-use crate::studio::local::{LocalRunStatus, RunShape, run_shape, runs_on_processor};
+use crate::studio::local::{LocalRunStatus, RunShape, key, run_shape, runs_on_processor};
 use crate::studio::prompt_check;
 use crate::studio::spend;
 
@@ -104,17 +105,13 @@ impl LocalStep {
     }
 }
 
-/// The key of a local run's LoRAs among its request's values: Task S11's `key::LORAS`
-/// (`studio::local`), the same word.
-const LORAS_KEY: &str = "loras";
-
-/// The ids of the LoRAs `request` attaches: its `loras` value, `[{"id": …, "weight": …,
-/// "highNoise": …}, …]` (Task S11's `LoraUse`). A value of another shape attaches none, and
-/// the run's own check refuses it.
+/// The ids of the LoRAs `request` attaches: its `loras` value (`local::key::LORAS`),
+/// `[{"id": …, "weight": …, "highNoise": …}, …]` (`LoraUse`). A value of another shape
+/// attaches none, and the run's own check refuses it.
 fn lora_ids(request: &MediaRequest) -> Vec<String> {
     request
         .params
-        .get(LORAS_KEY)
+        .get(key::LORAS)
         .and_then(Value::as_array)
         .into_iter()
         .flatten()
@@ -166,7 +163,6 @@ struct LocalPrepared {
 /// How the graphics card was asked for.
 enum Card {
     Granted(Grant, Box<dyn Any + Send + Sync>),
-    DoesNotFit,
     /// Asked "Unload the chat model?", the person answered "Keep the chat model", and the run
     /// cannot use the processor instead.
     KeptChat,
@@ -458,13 +454,11 @@ impl StudioManager {
             ));
         }
         let shape = prepared.shape.clone()?;
+        // Its fit only warns: one that may not fit still runs.
         let verdict = prepared
             .verdict
             .clone()
             .ok_or_else(|| AppError::internal("a local run without its fit"))?;
-        if verdict.word == FitWord::NotHere {
-            return Err(errors::does_not_fit(verdict.reason));
-        }
         // The time its card shows until the grant: where the lease would run it.
         let eta = inner
             .processor_instead(&verdict, &prepared.entry, shape, &lane)
@@ -831,11 +825,8 @@ impl Inner {
                 .await
                 .map_or(verdict.eta, |there| there.eta);
             self.with_live(&job.run_id, |live| live.eta = eta);
-            if verdict.word == FitWord::NotHere {
-                let ending = Ending::failed(errors::does_not_fit(verdict.reason), Some(false));
-                self.end_run(job, ending, None).await;
-                return;
-            }
+            // Its fit only warns: one that may not fit still asks for the card, and the lease
+            // unloads the chat model for it when nothing else would make room.
             let card = self.take_card(t, lane, &verdict.need, &row).await;
             // It no longer waits for anything, however that ended.
             self.with_live(&job.run_id, |live| live.waiting_for = None);
@@ -844,11 +835,6 @@ impl Inner {
                 // The chat model on the card changed while it waited: judged again, on the
                 // card as it is now, and asked again.
                 Card::JudgeAgain => {}
-                Card::DoesNotFit => {
-                    let ending = Ending::failed(errors::does_not_fit(verdict.reason), Some(false));
-                    self.end_run(job, ending, None).await;
-                    return;
-                }
                 Card::KeptChat => {
                     let ending = Ending::failed(errors::chat_model_kept(), Some(false));
                     self.end_run(job, ending, None).await;
@@ -1005,9 +991,9 @@ impl Inner {
             match asked {
                 Ok((grant, hold)) => return Card::Granted(grant, hold),
                 // Kept, for a run that cannot use the processor (any video): it does not fit
-                // because the person chose so, not because of this computer.
-                Err(Refused::DoesNotFit) if answered == Some(false) => return Card::KeptChat,
-                Err(Refused::DoesNotFit) => return Card::DoesNotFit,
+                // because the person chose so, not because of this computer. The lease gives
+                // no other refusal of the kind: a run that fits nowhere unloads the chat model.
+                Err(Refused::DoesNotFit) => return Card::KeptChat,
                 Err(Refused::JudgeAgain) => return Card::JudgeAgain,
                 Err(Refused::Cancelled) if self.root.is_cancelled() => return Card::Shutdown,
                 Err(Refused::Cancelled) if t.token.is_cancelled() => return Card::Stopped,

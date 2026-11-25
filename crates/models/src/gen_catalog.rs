@@ -141,7 +141,7 @@ pub enum GenRole {
 
 impl GenRole {
     /// Whether the part is the model itself (an entry has exactly one).
-    fn is_model(self) -> bool {
+    pub fn is_model(self) -> bool {
         matches!(self, Self::Diffusion | Self::Model)
     }
 
@@ -693,7 +693,8 @@ pub const BUNDLED_LICENCE_TEXTS: &[(&str, &str)] = &[(
 
 const UNKNOWN: &str = "unknown family, role, input, kind or quirk";
 const NEWER_ENGINE: &str = "needs a newer Studio engine";
-const NOT_ALLOWED_FILE: &str = "not a .gguf or .safetensors file";
+/// Every file type a part may be ([`ALLOWED_PART_EXTENSIONS`], and a tokenizer's `.json`).
+const NOT_ALLOWED_FILE: &str = "not a .safetensors, .sft or .gguf file, or a tokenizer's .json";
 const NOT_PINNED: &str = "a part is not pinned";
 const NO_LICENCE: &str = "a part has no licence";
 const TEXT_MISMATCH: &str = "licence text does not match";
@@ -1309,7 +1310,7 @@ mod tests {
         }
         assert_eq!(
             reason(&g, "sample-image").as_deref(),
-            Some("not a .gguf or .safetensors file")
+            Some("not a .safetensors, .sft or .gguf file, or a tokenizer's .json")
         );
         true
     }
@@ -2266,11 +2267,11 @@ mod tests {
         let refused = |p: GenPart| check_parts(&[p], &l).unwrap_err();
         assert_eq!(
             refused(local_part(GenRole::Model, "/home/me/m.ckpt", SHA)),
-            "not a .gguf or .safetensors file"
+            "not a .safetensors, .sft or .gguf file, or a tokenizer's .json"
         );
         assert_eq!(
             refused(local_part(GenRole::Vae, "/home/me/vae.json", SHA)),
-            "not a .gguf or .safetensors file"
+            "not a .safetensors, .sft or .gguf file, or a tokenizer's .json"
         );
         assert!(
             check_parts(
@@ -2410,7 +2411,7 @@ mod tests {
         );
         assert_eq!(
             family(|f| f["companions"][1]["path"] = json!("vae.pt")),
-            "not a .gguf or .safetensors file"
+            "not a .safetensors, .sft or .gguf file, or a tokenizer's .json"
         );
         assert_eq!(
             family(|f| f["upstreamLicense"] = json!("mit")),

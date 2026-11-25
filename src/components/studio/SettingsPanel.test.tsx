@@ -138,7 +138,7 @@ function localFit(seconds: number, height: number, firstGuess = false): LocalFit
   const minutes: Record<number, number> = { 1: 1.5, 2: 3, 3: 5, 4: 7, 5: 9 };
   const middle = (height >= 704 ? 10 : (minutes[seconds] ?? 1)) * 60_000;
   const eta: Eta = { lowMs: middle - 30_000, highMs: middle + 30_000, measured: !firstGuess, leftMs: null };
-  return { word: "fits", verdict: "green", reason: null, suggestion: null, eta, verySlow: false };
+  return { word: "fits", verdict: "green", reason: null, suggestion: null, eta, verySlow: false, videoOnProcessor: false };
 }
 
 beforeEach(() => {

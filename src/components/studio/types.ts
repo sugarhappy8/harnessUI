@@ -17,8 +17,10 @@ export type MediaKind = "image" | "video";
 /** Who makes the pictures and video. */
 export type Company = "openrouter" | "openai" | "local";
 
-/** What an added picture is for. */
-export type RefRole = "reference" | "startFrame" | "endFrame";
+/** What an added picture is for. The last three only a model on this computer takes: the
+ *  picture to change (inpainting), its mask (its white areas change) and a control picture
+ *  (edges or depth). */
+export type RefRole = "reference" | "startFrame" | "endFrame" | "source" | "mask" | "control";
 
 /** One value of a list field: the value sent (as the company lists it) and its name. */
 export interface Choice {
@@ -45,7 +47,28 @@ export type ParamKind =
   | { type: "images"; min: number; max: number; role: RefRole }
   | { type: "size"; rules: SizeRules; values: Choice[] }
   | { type: "text"; maxChars: number }
-  | { type: "extra"; allowedKeys: string[] };
+  | { type: "extra"; allowedKeys: string[] }
+  /** The LoRAs a local model's run attaches (its value is a `LoraUse[]`): at most `max`, each
+   *  strength from `weightMin` to `weightMax` by `weightStep`, `highNoise` only when the model
+   *  has a high-noise part. */
+  | {
+      type: "loras";
+      max: number;
+      highNoise: boolean;
+      weightMin: number;
+      weightMax: number;
+      weightStep: number;
+      weightDefault: number;
+    };
+
+/** One LoRA a local run attaches: the value of its `loras` field is a list of these. */
+export interface LoraUse {
+  /** The LoRA's id (`Lora.id`). */
+  id: string;
+  weight: number;
+  /** For the high-noise part of a model that has one. */
+  highNoise: boolean;
+}
 
 /** What a field means on any model, so a value can be carried to another model. */
 export type Canonical =
@@ -700,6 +723,8 @@ export interface LocalFit {
   eta: Eta | null;
   /** Studio offers a cloud model. */
   verySlow: boolean;
+  /** A video that would run on the processor (this computer runs models there): very slow. */
+  videoOnProcessor: boolean;
 }
 
 /** A model of the recommended list. */
@@ -761,9 +786,11 @@ export interface LocalModels {
   /** Newest first. */
   installed: InstalledLocal[];
   recommended: LocalEntry[];
+  /** The entries that may not fit this computer: shown with the warning, never refused. */
   notHere: LocalEntry[];
   noticeAccepted: boolean;
-  videoPossible: boolean;
+  /** This computer runs models on the processor: a video is made there, very slowly. */
+  videoOnProcessor: boolean;
   installedBytes: number;
   moreFit: number;
   /** The LoRAs, newest first. */

@@ -320,6 +320,9 @@ pub enum VaeFormat {
 }
 
 impl VaeFormat {
+    /// Every format Studio sends.
+    pub const ALL: [Self; 4] = [Self::Flux, Self::Sd3, Self::Flux2, Self::Wan];
+
     /// The CLI's word for this format.
     pub fn as_str(self) -> &'static str {
         match self {
@@ -328,6 +331,12 @@ impl VaeFormat {
             Self::Flux2 => "flux2",
             Self::Wan => "wan",
         }
+    }
+
+    /// The format whose CLI word (a recipe's `context.vae_format`) is exactly `word`; `None`
+    /// for any other word, the engine's own `auto` included, which leaves it to the engine.
+    pub fn from_cli(word: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|f| f.as_str() == word)
     }
 }
 
@@ -519,6 +528,10 @@ pub enum ArgsError {
     /// A mask without a picture to change: the engine would redraw the whole picture.
     #[error("a mask needs a picture to change")]
     MaskWithoutPicture,
+    /// The tokenizer's path holds both `=` and `,`: the engine reads a `--tokenizer` value with
+    /// `=` as `slot=FILE` assignments split at `,`, so no value names that file.
+    #[error("the tokenizer's path holds both = and ,")]
+    TokenizerPath,
 }
 
 /// Every flag [`build_args`] can emit, in its order. The contract tests check each against the
@@ -603,8 +616,9 @@ pub const FLAGS: &[&str] = &[
 /// ([`ArgsError::NumberOutOfRange`]), extra model arguments that are not `key=value` pairs
 /// ([`ArgsError::BadModelArgs`]), a mask without a picture to change
 /// ([`ArgsError::MaskWithoutPicture`]), LoRAs without the LoRA folder, more than
-/// [`MAX_LORAS`] or with a name the tag cannot carry, and an `out_stem` that is not one plain
-/// file name ([`ArgsError::BadOutputStem`]).
+/// [`MAX_LORAS`] or with a name the tag cannot carry, a tokenizer path the engine cannot
+/// read back ([`ArgsError::TokenizerPath`]; one with `=` goes as `main=<path>`), and an
+/// `out_stem` that is not one plain file name ([`ArgsError::BadOutputStem`]).
 pub fn build_args(job: &SdJob) -> Result<Vec<OsString>, ArgsError> {
     if strip_prompt_markers(&job.prompt).trim().is_empty() {
         return Err(ArgsError::EmptyPrompt);
@@ -648,7 +662,12 @@ pub fn build_args(job: &SdJob) -> Result<Vec<OsString>, ArgsError> {
     let mut args: Vec<String> = Vec::new();
     let mut push = |flag: &str, value: String| args.extend([flag.to_owned(), value]);
     for (role, path) in &job.parts {
-        push(flag_for(*role), unicode(path)?.to_owned());
+        let path = unicode(path)?;
+        let value = match role {
+            PartRole::Tokenizer => tokenizer_value(path)?,
+            _ => path.to_owned(),
+        };
+        push(flag_for(*role), value);
     }
     if job.frames.is_some() {
         push("-M", "vid_gen".to_owned());
@@ -892,6 +911,19 @@ fn help_options(help: &str) -> Vec<HelpOption<'_>> {
         }
     }
     options
+}
+
+/// The `--tokenizer` value for the tokenizer file at `path`. The engine reads a value
+/// without `=` as the main slot's one path, `,` and all, and a value with `=` as `slot=FILE`
+/// assignments split at `,` (`TokenizerConfig`, `src/tokenizers/tokenizer_config.cpp:13` at
+/// the pinned commit). So a path with `=` goes as `main=<path>`, which it splits at its first
+/// `=`; one with both `=` and `,` cannot be named: [`ArgsError::TokenizerPath`].
+fn tokenizer_value(path: &str) -> Result<String, ArgsError> {
+    match (path.contains('='), path.contains(',')) {
+        (false, _) => Ok(path.to_owned()),
+        (true, false) => Ok(format!("main={path}")),
+        (true, true) => Err(ArgsError::TokenizerPath),
+    }
 }
 
 /// Whether `side` is a multiple of `multiple` (never of 0) within [`SIZE_RANGE`].
@@ -2321,5 +2353,53 @@ mod tests {
             }
             assert!(build_args(&with(0.5)).is_ok(), "{field}");
         }
+    }
+
+    /// A recipe's `vae_format` word reads back as its format; the engine's own `auto` and any
+    /// other word as none, which leaves the format to the engine.
+    #[test]
+    fn a_recipes_vae_format_word_reads_back() {
+        for format in [
+            VaeFormat::Flux,
+            VaeFormat::Sd3,
+            VaeFormat::Flux2,
+            VaeFormat::Wan,
+        ] {
+            assert_eq!(VaeFormat::from_cli(format.as_str()), Some(format));
+        }
+        assert_eq!(VaeFormat::from_cli("auto"), None);
+        assert_eq!(VaeFormat::from_cli("Flux"), None);
+    }
+
+    /// The engine reads a `--tokenizer` value that holds `=` as `slot=FILE` assignments split
+    /// at `,` (`src/tokenizers/tokenizer_config.cpp:13` at the pinned commit): a path with `=`
+    /// goes as the main slot's assignment, and one that also holds `,` is refused.
+    #[test]
+    fn a_tokenizer_path_with_an_equals_sign_is_passed_as_the_main_slot() {
+        let tokenizer = |path: &str| {
+            let mut job = klein_job();
+            job.parts.push((PartRole::Tokenizer, p(path)));
+            job
+        };
+        let a = strings(build_args(&tokenizer("/m/tokenizer.json")).unwrap());
+        assert_eq!(after(&a, "--tokenizer"), "/m/tokenizer.json");
+        // A comma alone is read as part of the one path.
+        let a = strings(build_args(&tokenizer("/m/a,b/tokenizer.json")).unwrap());
+        assert_eq!(after(&a, "--tokenizer"), "/m/a,b/tokenizer.json");
+        let a = strings(build_args(&tokenizer("/m/size=4/tokenizer.json")).unwrap());
+        assert_eq!(after(&a, "--tokenizer"), "main=/m/size=4/tokenizer.json");
+        assert_eq!(
+            build_args(&tokenizer("/m/a=1,b/tokenizer.json")),
+            Err(ArgsError::TokenizerPath)
+        );
+        // Only the tokenizer: another part's path is passed as it is.
+        let a = strings(
+            build_args(&job_with(vec![
+                (PartRole::Diffusion, p("/m/x=1,y/d.gguf")),
+                (PartRole::Llm, p("/m/q.gguf")),
+            ]))
+            .unwrap(),
+        );
+        assert_eq!(after(&a, "--diffusion-model"), "/m/x=1,y/d.gguf");
     }
 }

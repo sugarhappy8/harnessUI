@@ -40,7 +40,9 @@ use super::deps::{
     CardLease, Clock, Endpoint, ForeignFetch, LocalHardware, LocalLane, ProviderSource, StudioSink,
 };
 use super::label::read_label;
-use super::local::{LocalJobOptions, LocalMediaProvider, LocalProvider, LocalRunStatus};
+use super::local::{
+    LocalJobOptions, LocalMediaProvider, LocalProvider, LocalRunStatus, MemoryChoice,
+};
 use super::manager::{
     EARLIER_GALLERIES_KEY, LOCAL_CHECK_EVERY, LocalVerdict, PICTURES_AT_ONCE, PollPlan, StudioDeps,
     StudioManager, VIDEOS_AT_ONCE, audit_settings, job_options, local_verdict,
@@ -4351,7 +4353,7 @@ impl LocalProvider for FakeLocal {
             body: json!({
                 "prompt": req.prompt,
                 "processorOnly": opts.processor_only,
-                "memorySaving": opts.memory_saving,
+                "memory": format!("{:?}", opts.memory),
                 "device": opts.device_description,
                 "listedFor": listed_for,
             }),
@@ -4987,7 +4989,8 @@ async fn the_grant_and_the_fit_reach_the_engine_job() {
     assert!(h.running_cards(&run.id).iter().any(|l| l.on_processor));
     assert_eq!(done.local.unwrap().device.as_deref(), Some("Processor"));
 
-    // One part at a time beside the chat model: memory saving (Automatic), the card's device.
+    // One part at a time beside the chat model: the card's device, and memory saving as
+    // the request has it (Automatic): the fit decides nothing (`local::memory_flags`).
     h.set_prefs(json!({"gpuPolicy": "unload"})).await;
     h.hardware.set_gpu(6, 32);
     h.hardware.set_chat(Some(5));
@@ -4998,7 +5001,7 @@ async fn the_grant_and_the_fit_reach_the_engine_job() {
         .unwrap();
     h.wait_status(&run.id, "done").await;
     let opts = h.local.last_options();
-    assert!(opts.memory_saving);
+    assert_eq!(opts.memory, MemoryChoice::Automatic);
     assert!(!opts.processor_only);
     assert_eq!(opts.threads, None);
     assert_eq!(opts.device_description.as_deref(), Some(RX_7600));
@@ -5008,14 +5011,16 @@ async fn the_grant_and_the_fit_reach_the_engine_job() {
         "{cards:?}"
     );
 
-    // Memory saving off in the request wins, whatever the fit.
-    let mut req = h.local_req_for(ZIMAGE, "x");
-    req.params.insert("memory_saving".into(), json!("off"));
-    let run = h.manager.start(req, false).await.unwrap();
-    h.wait_status(&run.id, "done").await;
-    assert!(!h.local.last_options().memory_saving);
+    // Memory saving in the request goes as it is, whatever the fit.
+    for (word, choice) in [("off", MemoryChoice::Off), ("on", MemoryChoice::On)] {
+        let mut req = h.local_req_for(ZIMAGE, "x");
+        req.params.insert("memory_saving".into(), json!(word));
+        let run = h.manager.start(req, false).await.unwrap();
+        h.wait_status(&run.id, "done").await;
+        assert_eq!(h.local.last_options().memory, choice);
+    }
 
-    // After an unload, the fit it runs with is the one after the unload (Green here).
+    // After an unload too.
     h.lease.then(LeaseStep::Grant(Grant::AfterUnload {
         unloaded: Some(CHAT.into()),
     }));
@@ -5026,7 +5031,7 @@ async fn the_grant_and_the_fit_reach_the_engine_job() {
         .await
         .unwrap();
     h.wait_status(&run.id, "done").await;
-    assert!(!h.local.last_options().memory_saving);
+    assert_eq!(h.local.last_options().memory, MemoryChoice::Automatic);
 }
 
 /// "See the exact command" for a run on this computer has the engine list its devices first,
@@ -5041,6 +5046,7 @@ async fn a_local_preview_lists_the_engines_devices_before_it_shows_the_command()
         .await
         .unwrap();
     assert_eq!(preview.body["device"], json!(RX_7600));
+    assert_eq!(preview.body["memory"], json!("Automatic"));
     // Listed before the command was built, for the device the command names.
     assert_eq!(preview.body["listedFor"], json!(RX_7600));
     let listings = h.local.listings.lock().unwrap().clone();
@@ -5048,7 +5054,7 @@ async fn a_local_preview_lists_the_engines_devices_before_it_shows_the_command()
         listings,
         [LocalJobOptions {
             processor_only: false,
-            memory_saving: preview.body["memorySaving"].as_bool().unwrap(),
+            memory: MemoryChoice::Automatic,
             threads: None,
             device_description: Some(RX_7600.into()),
         }]
@@ -5067,6 +5073,7 @@ fn a_processor_sent_with_a_local_video_is_ignored() {
         available_bytes: 0,
         memory_saving: false,
         processor_only: false,
+        video_on_processor: false,
         not_for: None,
         suggestion: None,
     };
@@ -5176,33 +5183,64 @@ async fn the_chat_model_reloads_once_when_the_queue_empties() {
     assert_eq!(h.lease.reloads(), [CHAT]);
 }
 
+/// Design 9.2: a model that may not fit is a warning, never a refusal. Klein fits nowhere
+/// here (not beside the 5 GB chat model on a card with 1 GB free, not after its unload, not on
+/// the processor with 1 GB of memory): the run is recorded and asks the lease, which unloads
+/// the chat model (`GpuLease`'s own rule), and the engine starts.
 #[tokio::test]
-async fn a_job_that_does_not_fit_even_after_an_unload_is_refused() {
+async fn a_model_that_does_not_fit_still_runs() {
     let h = harness_with_local().await;
-    h.hardware.set_cpu(16);
-    let err = h
+    h.hardware.set_gpu(0, 1);
+    h.hardware.set_chat(Some(1));
+    let e = h.manager.estimate(&h.local_req("a red fox")).await.unwrap();
+    let local = e.local.unwrap();
+    assert_eq!(local.fit, "notHere");
+    assert!(local.reason.is_some());
+    h.lease.then(LeaseStep::Grant(Grant::AfterUnload {
+        unloaded: Some(CHAT.into()),
+    }));
+    let run = h
         .manager
-        .start(h.local_video_req(), false)
+        .start(h.local_req("a red fox"), false)
         .await
-        .unwrap_err();
-    assert_eq!(err.code, "studio_does_not_fit");
-    assert_eq!(err.message, "This model does not fit this computer.");
-    assert_eq!(err.next_step, "Choose a smaller size or a cloud model.");
-    assert!(h.store_runs().await.is_empty());
-    assert!(h.audit_rows().await.is_empty());
-    assert_eq!(h.local.starts(), 0);
-
-    // The lease's own refusal ends the run the same way, never charged.
-    h.hardware.set_gpu(8, 32);
-    h.lease.then(LeaseStep::Refuse(Refused::DoesNotFit));
-    let run = h.manager.start(h.local_req("x"), false).await.unwrap();
-    let failed = h.wait_status(&run.id, "failed").await;
-    let error = failed.error.unwrap();
-    assert_eq!(
-        (error.code.as_str(), error.charged),
-        ("studio_does_not_fit", Some(false))
+        .unwrap();
+    let done = h.wait_status(&run.id, "done").await;
+    // The engine started: no does-not-fit ending.
+    assert_eq!(h.local.starts(), 1);
+    let need = h.lease.needs()[0];
+    assert!(
+        !need.alongside && !need.after_unload && !need.processor_ok,
+        "{need:?}"
     );
-    assert_eq!(h.local.starts(), 0);
+    assert!(done.error.is_none());
+    assert!(
+        h.running_cards(&run.id)
+            .iter()
+            .any(|l| l.unloaded_chat.as_deref() == Some(CHAT)),
+        "the card names the unloaded chat model"
+    );
+}
+
+/// A video on a computer that runs models on the processor is judged by memory and runs
+/// there, on the processor; one too big for its memory still runs.
+#[tokio::test]
+async fn a_video_on_a_processor_only_computer_runs_on_the_processor() {
+    let h = harness_with_local().await;
+    h.hardware.set_cpu(64);
+    let e = h.manager.estimate(&h.local_video_req()).await.unwrap();
+    assert_eq!(e.local.unwrap().fit, "slow");
+    let run = h.manager.start(h.local_video_req(), false).await.unwrap();
+    let done = h.wait_status(&run.id, "done").await;
+    let opts = h.local.last_options();
+    assert!(opts.processor_only && opts.threads.is_some());
+    assert_eq!(done.local.unwrap().device.as_deref(), Some("Processor"));
+    // Too big for the computer's memory: it may not fit, and it runs all the same.
+    h.hardware.set_cpu(2);
+    let e = h.manager.estimate(&h.local_video_req()).await.unwrap();
+    assert_eq!(e.local.unwrap().fit, "notHere");
+    let run = h.manager.start(h.local_video_req(), false).await.unwrap();
+    h.wait_status(&run.id, "done").await;
+    assert_eq!(h.local.starts(), 2);
 }
 
 #[tokio::test]
@@ -5475,15 +5513,20 @@ async fn the_estimate_for_a_local_run_is_a_time_not_a_price() {
         .unwrap();
     assert!(local.very_slow && local.over_15_min, "{local:?}");
 
-    // Not here: very slow (Studio offers a cloud model), but no time, and why.
-    h.hardware.set_cpu(16);
+    // Not here: very slow (Studio offers a cloud model), but no time, and why: a video on a
+    // computer with too little memory for it.
+    h.hardware.set_cpu(2);
     let e = h.manager.estimate(&h.local_video_req()).await.unwrap();
     let local = e.local.unwrap();
     assert_eq!(local.fit, "notHere");
     assert!(local.very_slow && !local.over_15_min);
-    assert_eq!(
-        local.reason.as_deref(),
-        Some("video needs a graphics card or an Apple-silicon Mac")
+    assert!(
+        local
+            .reason
+            .as_deref()
+            .is_some_and(|r| r.starts_with("needs ") && r.ends_with(" GB of free memory")),
+        "{:?}",
+        local.reason
     );
     assert!(e.eta.is_none());
 }

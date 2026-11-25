@@ -409,6 +409,7 @@ pub fn run() {
                     let handle = handle.clone();
                     Arc::new(move || studio::engine_cmd::current_engine(&handle))
                 },
+                Arc::new(studio::local::AppModelsFolder(handle.clone())),
             ));
             app.manage(local_provider.engine_use());
             // 0.1.0: Studio's runs, holding Settings → Studio as saved.

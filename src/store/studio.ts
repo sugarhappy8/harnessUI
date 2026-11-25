@@ -1039,7 +1039,7 @@ const PREFERRED: Record<MediaKind, readonly string[]> = {
 /** `local` when this computer can make `tab`'s kind at all (video needs a usable graphics
  *  card or an Apple-silicon Mac, and is hidden otherwise); `null` too until it is read. */
 function localFor(tab: StudioTab, local: LocalModels | null): LocalModels | null {
-  return local && (tab === "image" || local.videoPossible) ? local : null;
+  return local && (tab === "image" || !local.videoOnProcessor) ? local : null;
 }
 
 /** The installed local models `tab` can use: this version can run them, and this computer

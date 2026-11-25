@@ -189,7 +189,7 @@ describe("pickerGroups", () => {
 
   it("lists local video only where this computer can make it", () => {
     expect(pickerGroups(LOCAL, [], "video", "", [], [])[0]!.models.map((m) => m.id)).toEqual(["wan22-ti2v-5b-fast-q6"]);
-    expect(pickerGroups({ ...LOCAL, videoPossible: false }, [], "video", "", [], [])[0]!.models).toEqual([]);
+    expect(pickerGroups({ ...LOCAL, videoOnProcessor: true }, [], "video", "", [], [])[0]!.models).toEqual([]);
   });
 
   it("never offers an Auto model", () => {
@@ -341,7 +341,7 @@ describe("ModelPicker", () => {
 
   it("where this computer cannot make video, the Video tab says local models need a graphics card", async () => {
     // A picture model fits, but video needs a usable graphics card or an Apple-silicon Mac.
-    await load({ local: { ...LOCAL, videoPossible: false } });
+    await load({ local: { ...LOCAL, videoOnProcessor: true } });
     await renderPicker("video");
     await openPicker();
     screen.getByText(graphicsCard);
