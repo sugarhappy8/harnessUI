@@ -128,14 +128,16 @@ describe("the content notice", () => {
     expect(api.studioAcceptLocalNotice).not.toHaveBeenCalled();
   });
 
-  it("Cancel on the notice before a first download puts the offer away", async () => {
+  it("Cancel on the notice before a first download downloads nothing", async () => {
     await showLocal({ ...LOCAL, noticeAccepted: false });
+    // Since 0.2.0 (Task U6) the card's Download opens the detail panel, whose Download shows
+    // the notice first.
     await click(within(screen.getByRole("article", { name: "Z-Image Turbo" })).getByRole("button", { name: "Download" }));
+    await click(within(screen.getByRole("dialog", { name: "Z-Image Turbo" })).getByRole("button", { name: "Download" }));
     screen.getByText("Local models run only on your computer.");
     await click(screen.getByRole("button", { name: "Cancel" }));
     expect(screen.queryByText("Local models run only on your computer.")).toBeNull();
-    expect(screen.queryByText("Download Z-Image Turbo?")).toBeNull();
-    expect(useStudio.getState().offer).toBeNull();
+    expect(api.studioLocalDownload).not.toHaveBeenCalled();
     expect(api.studioAcceptLocalNotice).not.toHaveBeenCalled();
   });
 });

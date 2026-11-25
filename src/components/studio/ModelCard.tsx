@@ -1,4 +1,4 @@
-import { useState, type ReactNode } from "react";
+import { useEffect, useState, type ReactNode } from "react";
 import clsx from "clsx";
 import {
   CircleCheck,
@@ -13,6 +13,7 @@ import {
   Wrench,
 } from "lucide-react";
 import { formatBytes } from "../../lib/format";
+import * as ipc from "../../lib/ipc";
 import type { DownloadGroup, ErrorInfo } from "../../lib/types";
 import {
   downloadProgressWords,
@@ -40,7 +41,6 @@ import { FOCUS_RING } from "../ui/styles";
 import { BrowserLink, modelPage } from "./BrowserLink";
 import { ConfirmDialog } from "./ConfirmDialog";
 import { etaText } from "./eta";
-import { offerForEntry } from "./localOffers";
 import { sizeWords, typeLabel } from "./sheetModels";
 import { CARD_BUTTON, MODEL_CARD, PRIMARY_BUTTON } from "./styles";
 import type {
@@ -48,7 +48,6 @@ import type {
   Licence,
   LocalEntry,
   LocalFit,
-  LocalModels,
   LocalRepo,
   LocalSearchHit,
   Lora,
@@ -59,17 +58,20 @@ import type {
 // The cards of Get models (Task U5, design 10.3), each an <article> named by its model:
 // - CatalogCard: a model of Studio's list, with what it is good at, its size, licence, fit and
 //   time here, and Download (on a model that may not fit too: a warning, never a refusal, design
-//   9.2); installed, it says so and offers no Download, also once the person set it up again as
-//   their own (ruling S9-edited-catalog-generic: the backend counts it installed by its row's
-//   id, and the card keeps the catalog's name). A gated model with no Hugging Face token saved
-//   says what to do in place of a Download that would only fail (ruling S7).
+//   9.2), which opens the detail panel (ModelDetail.tsx, Task U6: the review before the
+//   download); installed, it says so and offers no Download, also once the person set it up
+//   again as their own (ruling S9-edited-catalog-generic: the backend counts it installed by its
+//   row's id, and the card keeps the catalog's name). A gated model with no Hugging Face token
+//   saved says what to do in place of a Download that would only fail (ruling S7).
 // - ResultCard: a Hugging Face result, its name, author, downloads, likes, when it was updated
 //   and its Studio verdict (VerdictBadge): a hint from its name until it is opened, exact once
-//   its files were read; opened, a gated one says it needs a token or the model's terms.
+//   its files were read; opened, a gated one says it needs a token or the model's terms. Its
+//   heading button opens the detail panel.
 // - InstalledCard: a model on this computer, its type, size and fit, with Repair and Delete.
 // - LoraCard: a LoRA on this computer, what it is for, with Delete.
-// Also here, for these cards and the opened result (LocalSearch.tsx until Task U6): the licence
-// badge, the fit line, the time line, a model's download while it runs and its progress.
+// Also here, for these cards and the detail panel: the licence badge, the fit line, the time
+// line, a gated model's line, whether a Hugging Face token is saved, a model's download while it
+// runs and its progress.
 
 /** A licence's badge: its colour (as the backend judged it) and what it allows for what you
  *  make, in plain words. A kind this version does not know reads "Check the licence". */
@@ -122,7 +124,31 @@ export function gateProblem(repo: LocalRepo): "hf_needs_token" | "hf_needs_terms
   return null;
 }
 
-const TONE_DOT: Record<"green" | "amber" | "red", string> = {
+/** Whether a Hugging Face token is saved, read while `needed` (a gated catalog model is listed,
+ *  or shown in the detail panel), and again when Settings closes, where it is saved; `null`
+ *  while not known or not needed. */
+export function useTokenSaved(needed: boolean): boolean | null {
+  const [saved, setSaved] = useState<boolean | null>(null);
+  useEffect(() => {
+    if (!needed || !ipc.isTauri()) return;
+    let alive = true;
+    const read = () =>
+      ipc.hubTokenStatus().then(
+        (t) => alive && setSaved(t.saved),
+        (e: unknown) => console.warn("Studio: whether a Hugging Face token is saved could not be read", e),
+      );
+    void read();
+    window.addEventListener("app:settings-closed", read);
+    return () => {
+      alive = false;
+      window.removeEventListener("app:settings-closed", read);
+    };
+  }, [needed]);
+  return saved;
+}
+
+/** A licence badge's or a fit's colour, as a dot. */
+export const TONE_DOT: Record<"green" | "amber" | "red", string> = {
   green: "bg-success",
   amber: "bg-warning",
   red: "bg-danger",
@@ -130,7 +156,7 @@ const TONE_DOT: Record<"green" | "amber" | "red", string> = {
 
 /** A fit word's colour: green only for "Fits" (critique §6: "Fits" beside an amber dot read as
  *  a contradiction), amber for a condition, red when it may not fit. */
-const FIT_DOT: Record<LocalFit["word"], string> = {
+export const FIT_DOT: Record<LocalFit["word"], string> = {
   fits: TONE_DOT.green,
   afterUnload: TONE_DOT.amber,
   slow: TONE_DOT.amber,
@@ -277,11 +303,18 @@ export function VerdictBadge(props: { verdict: Verdict; exact: boolean }) {
 }
 
 /** A gated model's problem in SETUP's words, and its next step: Settings → Hugging Face for a
- *  token, or the model's page for its terms. Shown in place of a Download that would fail. */
-function GateLine(props: { problem: "hf_needs_token" | "hf_needs_terms"; repo: string | null }) {
+ *  token, or the model's page for its terms. Shown in place of a Download that would fail (on a
+ *  card, at `xs`; in the detail panel, at body size). */
+export function GateLine(props: { problem: "hf_needs_token" | "hf_needs_terms"; repo: string | null; size?: "xs" | "sm" }) {
   const [error, setError] = useState<ErrorInfo | null>(null);
   return (
-    <div data-gate={props.problem} className="relative z-10 flex flex-col gap-1.5 rounded-xl bg-warning/10 px-3 py-2 text-xs">
+    <div
+      data-gate={props.problem}
+      className={clsx(
+        "relative z-10 flex flex-col gap-1.5 rounded-xl bg-warning/10 px-3 py-2",
+        props.size === "sm" ? "text-sm" : "text-xs",
+      )}
+    >
       <p className="flex items-start gap-1.5 text-fg">
         <LockKeyhole size={13} aria-hidden className="mt-0.5 shrink-0 text-warning" />
         <span>{SETUP.problem[props.problem]}</span>
@@ -344,11 +377,12 @@ function InstalledMark() {
 }
 
 /** A model of Studio's list: name, publisher, what it is good at, fit and time, licence, size,
- *  and Download (or how far its download got, "Installed", or what a gated model needs first).
+ *  and Download, which opens its detail panel (or how far its download got, "Installed", or
+ *  what a gated model needs first).
  *  `tokenSaved`: whether a Hugging Face token is saved (`null` while not known). */
-export function CatalogCard(props: { entry: LocalEntry; local: LocalModels; tokenSaved: boolean | null }) {
-  const { entry, local } = props;
-  const setOffer = useStudio((s) => s.setOffer);
+export function CatalogCard(props: { entry: LocalEntry; tokenSaved: boolean | null }) {
+  const { entry } = props;
+  const openDetail = useStudio((s) => s.openDetail);
   const download = useModelDownload(entry.id);
   // Gated: Hugging Face refuses the files without a token (ruling S7).
   const gated = entry.gate.mode !== "none" && props.tokenSaved === false && !entry.installed;
@@ -375,7 +409,17 @@ export function CatalogCard(props: { entry: LocalEntry; local: LocalModels; toke
             {entry.installed ? (
               <InstalledMark />
             ) : gated ? null : (
-              <button type="button" className={PRIMARY} onClick={() => setOffer(offerForEntry(entry, local))}>
+              <button
+                type="button"
+                aria-haspopup="dialog"
+                className={PRIMARY}
+                onClick={(e) => {
+                  // Focused first (WebKit does not focus a pressed button), so focus returns
+                  // here as the detail panel closes.
+                  e.currentTarget.focus();
+                  void openDetail({ entryId: entry.id });
+                }}
+              >
                 <Download size={14} aria-hidden />
                 {GET_MODELS.download}
               </button>

@@ -649,7 +649,11 @@ export function repoFor(repo: string): LocalRepo {
       works: { version: "sdxl", recipe: "sdxl-checkpoint", kind: "picture", part: null, parameters: 3.5e9, folder: false },
     };
     const file = "sd_xl_base_1.0.safetensors";
-    const plan = planOf(recipe("sdxl-checkpoint", "SDXL"), [[part("model", repo, file, 6.46, "openrail++"), "main"]], [OPENRAIL]);
+    // Two recipes its version runs, so the panel offers Model type.
+    const sdxl = recipe("sdxl-checkpoint", "SDXL");
+    const plan = planOf(sdxl, [[part("model", repo, file, 6.46, "openrail++"), "main"]], [OPENRAIL], {
+      recipes: [sdxl, recipe("sdxl-turbo", "SDXL Turbo")],
+    });
     return {
       ...base,
       summary: "SDXL 1.0 base: a general picture model, 1024 px.",

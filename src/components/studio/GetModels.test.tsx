@@ -3,8 +3,8 @@
 // Hugging Face with Pictures · Video · LoRAs and *Fits this computer* (off by default), and
 // without a query lists Recommended for this computer, Popular on Hugging Face (asked once as it
 // opens) and On this computer; result cards say what Studio can do with each in plain words.
-// The engine's line and the content notice are ported from 0.1.x's view. Download only sets
-// the offer (Task B14's dialog is tested in DownloadLocalModel.test.tsx).
+// The engine's line and the content notice are ported from 0.1.x's view. A result card, or a
+// catalog card's Download, opens the detail panel (Task U6, tested in ModelDetail.test.tsx).
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { act, cleanup, fireEvent, screen, waitFor, within } from "@testing-library/react";
 import { formatBytes } from "../../lib/format";
@@ -40,7 +40,6 @@ const { click, flush, showLocal } = await import("./testing/local");
 const { useDownloads } = await import("../../store/downloads");
 const { catalogShown, hardwareChips, resultShown } = await import("./GetModels");
 const { activeDownload, gateProblem, licenceBadge } = await import("./ModelCard");
-const { offerForEntry, offerForFile } = await import("./localOffers");
 const { useStudio } = await import("../../store/studio");
 
 const INITIAL = useStudio.getState();
@@ -284,11 +283,6 @@ describe("the pieces", () => {
     expect(gateProblem(supported())).toBeNull();
   });
 
-  it("the engine's download comes with a model that needs it", () => {
-    const local = { ...LOCAL, engine: { ...LOCAL.engine, state: "notInstalled" as const, downloadBytes: 30_303_000 } };
-    expect(offerForEntry({ ...zimage, needsEngine: true }, local)).toMatchObject({ needsEngine: true, engineBytes: 30_303_000 });
-    expect(offerForEntry(zimage, local)).toMatchObject({ needsEngine: false, engineBytes: 0 });
-  });
 });
 
 describe("Get models", () => {
@@ -583,8 +577,12 @@ describe("Get models", () => {
     const z = within(section("Recommended for this computer")).getByRole("article", { name: "Z-Image Turbo" });
     within(z).getByText("Not for this computer");
     within(z).getByText("needs 8 GB of graphics memory");
+    // Download opens its detail panel, the warning said there too, Download kept (design 9.2).
     await click(within(z).getByRole("button", { name: "Download" }));
-    expect(useStudio.getState().offer).toEqual(offerForEntry(tooBig(zimage), LOCAL));
+    expect(useStudio.getState().detail).toEqual({ entryId: zimage.id });
+    const panel = screen.getByRole("dialog", { name: "Z-Image Turbo" });
+    within(panel).getByText("May not fit this computer: needs 8 GB of graphics memory. It may fail or be very slow.");
+    expect(within(panel).getByRole<HTMLButtonElement>("button", { name: "Download" }).disabled).toBe(false);
   });
 
   it("Fits this computer hides opened results that have no file for this computer, and catalog models that may not fit", async () => {
@@ -689,8 +687,10 @@ describe("Get models", () => {
     within(z).getByText("Free for any use, including commercial");
     within(z).getByText("Fits");
     within(z).getByText("Time shown after your first run here");
+    // Download opens the detail panel, the review before the download; nothing starts yet.
     await click(within(z).getByRole("button", { name: "Download" }));
-    expect(useStudio.getState().offer).toEqual(offerForEntry(zimage, LOCAL));
+    expect(useStudio.getState().detail).toEqual({ entryId: zimage.id });
+    screen.getByRole("dialog", { name: "Z-Image Turbo" });
     expect(api.studioLocalDownload).not.toHaveBeenCalled();
   });
 
@@ -749,9 +749,9 @@ describe("Get models", () => {
     await showLocal();
     const panel = await openResult("black-forest-labs/FLUX.1-Kontext-dev", unread("needsToken"));
     within(panel).getByText("This model is gated. Add a Hugging Face token in Settings → Hugging Face first.");
-    within(panel).getByText("Add a Hugging Face token in Settings to read this file");
+    within(panel).getByRole("button", { name: "Open Settings" });
     expect(within(panel).queryByRole("button", { name: "Download file anyway" })).toBeNull();
-    expect(within(panel).queryByRole("button", { name: "Download" })).toBeNull();
+    expect(within(panel).getByRole<HTMLButtonElement>("button", { name: "Download" }).disabled).toBe(true);
     await click(within(panel).getByRole("button", { name: "Close" }));
     const result = card("black-forest-labs/FLUX.1-Kontext-dev");
     within(result).getByText("This model is gated. Add a Hugging Face token in Settings → Hugging Face first.");
@@ -792,54 +792,6 @@ describe("Get models", () => {
     within(section("Found on Hugging Face")).getByText("Hugging Face found no picture models for that.");
   });
 
-  it("an opened result shows each file with its parts, total size, licence and fit, and Download offers that file", async () => {
-    await showLocal();
-    const panel = await openResult("someone/Z-Image-Turbo-GGUF");
-    within(panel).getByText("z-image-turbo-Q5_K_M.gguf");
-    within(panel).getByText("3 parts · 7.1 GB in all · 4.6 GB to download");
-    within(panel).getByText("Text encoder (language model) · 2.5 GB · already on this computer");
-    within(panel).getByText("Best for this computer");
-    within(panel).getByText("Free for any use, including commercial");
-    within(panel).getByText("Fits");
-    await click(within(panel).getByRole("button", { name: "Download" }));
-    const repo = supported();
-    expect(useStudio.getState().offer).toEqual(offerForFile(repo, repo.files[0]!, LOCAL, "image"));
-  });
-
-  it("an opened file Studio can't run offers the plain download", async () => {
-    await showLocal();
-    const lumina = { cannotRun: { reason: "lumina2", version: "z-image" } } as const;
-    const panel = await openResult("Comfy-Org/Lumina-Image-2", {
-      ...supported({ repo: "Comfy-Org/Lumina-Image-2" }),
-      verdict: lumina,
-      files: [],
-      licences: [],
-      fileViews: [
-        { path: "split_files/diffusion_models/lumina_2.safetensors", sizeBytes: 5_219_585_680, quant: null, label: lumina },
-      ],
-    });
-    within(panel).getByText("Can't run in Studio: This is a Lumina 2 model, which the Studio engine can't run");
-    within(panel).getByText(LOCAL_MODELS.noLocalSetup);
-    await click(within(panel).getByRole("button", { name: "Download file anyway" }));
-    expect(api.studioLocalDownloadFile).toHaveBeenCalledWith(
-      "Comfy-Org/Lumina-Image-2",
-      "c".repeat(40),
-      "split_files/diffusion_models/lumina_2.safetensors",
-    );
-    expect(api.studioLocalDownload).not.toHaveBeenCalled();
-  });
-
-  it("a searched file's name stays as it came in the offer, and shows with invisible characters as codes", async () => {
-    await showLocal();
-    const file = "z-image‮turbo.gguf";
-    const repo = supported({ files: supported().files.map((f) => ({ ...f, file })) });
-    const panel = await openResult("someone/Z-Image-Turbo-GGUF", repo);
-    within(panel).getByText("z-image\\u{202E}turbo.gguf");
-    await click(within(panel).getByRole("button", { name: "Download" }));
-    expect(useStudio.getState().offer).toMatchObject({ name: file, source: { search: { file } } });
-    expect(new XMLSerializer().serializeToString(document.body)).not.toContain("‮");
-  });
-
   it("the header shows the engine, and the footer the content notice", async () => {
     await showLocal();
     const header = screen.getByRole("heading", { level: 2, name: "Get models" }).closest<HTMLElement>("[data-get-models-header]")!;
@@ -859,11 +811,16 @@ describe("Get models", () => {
 });
 
 describe("a model downloading", () => {
-  it("after Accept, its card shows how far the download got in one size format, and no Download", async () => {
+  it("after Download in its panel, its card shows how far the download got in one size format, and no Download", async () => {
     await showLocal();
     await click(within(card("Z-Image Turbo")).getByRole("button", { name: "Download" }));
     ipc.listDownloads.mockResolvedValue([group({ bytesDone: 0, status: "queued" })]);
-    await click(within(screen.getByRole("alertdialog")).getByRole("button", { name: "Download" }));
+    const panel = screen.getByRole("dialog", { name: "Z-Image Turbo" });
+    await click(within(panel).getByRole("button", { name: "Download" }));
+    // The panel shows it too, in place of its Download.
+    within(panel).getByText("0 B of 6.4 GB · queued");
+    expect(within(panel).queryByRole("button", { name: "Download" })).toBeNull();
+    fireEvent.keyDown(panel, { key: "Escape" });
     const z = card("Z-Image Turbo");
     expect(within(z).queryByRole("button", { name: "Download" })).toBeNull();
     within(z).getByText("0 B of 6.4 GB · queued");

@@ -103,6 +103,45 @@ describe("search", () => {
   });
 });
 
+describe("the detail panel (Task U6)", () => {
+  it("openDetail shows a catalog model at once, and reads a repository with openRepo; closeDetail closes it", async () => {
+    await useStudio.getState().openDetail({ entryId: "z-image-turbo-q4" });
+    expect(useStudio.getState().detail).toEqual({ entryId: "z-image-turbo-q4" });
+    expect(api.studioLocalRepo).not.toHaveBeenCalled();
+    const repo = { repo: "someone/sdxl-GGUF", commit: "c".repeat(40), verdict: "unknown" } as unknown as LocalRepo;
+    vi.mocked(api.studioLocalRepo).mockResolvedValue(repo);
+    const opening = useStudio.getState().openDetail({ repo: "someone/sdxl-GGUF" });
+    // The panel opens before the repository is read.
+    expect(useStudio.getState().detail).toEqual({ repo: "someone/sdxl-GGUF" });
+    await opening;
+    expect(api.studioLocalRepo).toHaveBeenCalledWith("someone/sdxl-GGUF");
+    expect(useStudio.getState().repos["someone/sdxl-GGUF"]).toBe(repo);
+    useStudio.getState().closeDetail();
+    expect(useStudio.getState()).toMatchObject({ detail: null, detailError: null });
+  });
+
+  it("a repository that could not be read is said in the panel, never as a rejection; leaving Get models closes it", async () => {
+    const offline = { code: "hf_unreachable", message: "Hugging Face could not be reached.", nextStep: "Try again.", details: "" };
+    vi.mocked(api.studioLocalRepo).mockRejectedValue(offline);
+    await expect(useStudio.getState().openDetail({ repo: "someone/gone" })).resolves.toBeUndefined();
+    expect(useStudio.getState()).toMatchObject({ detail: { repo: "someone/gone" }, detailError: offline });
+    // Another opened since: a late failure is not said there.
+    let fail: (e: unknown) => void = () => undefined;
+    vi.mocked(api.studioLocalRepo).mockReturnValue(new Promise((_, reject) => (fail = reject)));
+    const late = useStudio.getState().openDetail({ repo: "someone/slow" });
+    expect(useStudio.getState().detailError).toBeNull();
+    await useStudio.getState().openDetail({ entryId: "z-image-turbo-q4" });
+    fail(offline);
+    await late;
+    expect(useStudio.getState()).toMatchObject({ detail: { entryId: "z-image-turbo-q4" }, detailError: null });
+    useStudio.getState().showLocalModels(true);
+    expect(useStudio.getState().detail).toBeNull();
+    await useStudio.getState().openDetail({ entryId: "z-image-turbo-q4" });
+    useStudio.getState().showLocalModels(false);
+    expect(useStudio.getState().detail).toBeNull();
+  });
+});
+
 describe("setting a model up", () => {
   const source = { search: { repo: "someone/Flux-GGUF", commit: "c".repeat(40), file: "flux.gguf" } };
   const choice: SetupChoice = { recipe: "flux1-dev", overrides: [] };

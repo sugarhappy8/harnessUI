@@ -28,8 +28,8 @@
 // Task B10: the Studio engine's state read again (Settings → Studio's engine line), and Delete
 // stopped and failed runs (in ./studioResults). Task B11: a picture attached in a chat opened
 // in Studio's Pictures tab, and Send to chat (in ./studioResults). Task B13: Get local models'
-// tabs, hardware filter, Hugging Face search, download confirmation, repairs and the local
-// model notice are in ./studioLocal. Task U3 (0.2.0): whether the side panel (Settings) is open,
+// tabs, hardware filter, Hugging Face search, download confirmation (since Task U6, the detail
+// panel), repairs and the local model notice are in ./studioLocal. Task U3 (0.2.0): whether the side panel (Settings) is open,
 // saved in the preferences. Task U4: whether the model sheet (on which filter) and *Add a model
 // file* are open, and a pick of an installed model that needs setting up.
 import { create, type StoreApi, type UseBoundStore } from "zustand";

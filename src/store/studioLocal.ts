@@ -2,7 +2,6 @@
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import type { StoreApi } from "zustand";
 import * as api from "../components/studio/api";
-import type { DownloadOffer } from "../components/studio/localOffers";
 import type {
   ImportInspection,
   ImportMode,
@@ -18,7 +17,9 @@ import type {
   SetupChoice,
   SetupPlan,
 } from "../components/studio/types";
+import type { ErrorInfo } from "../lib/types";
 import { IMPORT } from "../lib/words";
+import { toErrorInfo } from "./app";
 import { useDownloads } from "./downloads";
 import type { StudioState, StudioTab } from "./studio";
 
@@ -90,19 +91,22 @@ export interface StudioLocalState {
   deleteLocal(genModelId: string): Promise<void>;
   /** Checks the installed model and starts a download of any missing or damaged files. */
   repairLocal(genModelId: string): Promise<void>;
-  /** What a Download button offers, every part and licence (Task B14's dialog shows it, or the
-   *  note about local models first while that was never accepted); `null` while none is. */
-  offer: DownloadOffer | null;
-  setOffer(offer: DownloadOffer | null): void;
-  /** Starts the confirmed download (with the set-up choice its plan was made with) and
-   *  refreshes both model and download lists. */
-  downloadLocal(offer: DownloadOffer): Promise<void>;
+  /** The model Get models' detail panel shows (Task U6): a Hugging Face result by its repository,
+   *  or a catalog model by its entry; `null` while the panel is closed. */
+  detail: { repo: string } | { entryId: string } | null;
+  /** Why the repository the panel shows could not be read; `null` otherwise. */
+  detailError: ErrorInfo | null;
+  /** Opens the detail panel on `d`. A repository is read with `openRepo` (what was read of it
+   *  this session shows while it is read again); a read that fails is kept in `detailError`
+   *  for the panel to say, so this never rejects. */
+  openDetail(d: { repo: string } | { entryId: string }): Promise<void>;
+  closeDetail(): void;
   /** *I understand* on the note about local models: the backend records it (local downloads
    *  are refused until then), and the local models and preferences say so. */
   acceptNotice(): Promise<void>;
   /** The note about local models read again, read only, from Get models' footer
-   *  (`"read"`); `null` while it is closed. (Before a first download it shows in place of the
-   *  download confirmation, from `offer`.) */
+   *  (`"read"`); `null` while it is closed. (Before a first download the detail panel shows it
+   *  itself, to accept.) */
   noticeOpen: "read" | null;
   setNoticeOpen(mode: "read" | null): void;
 }
@@ -160,8 +164,13 @@ export function createLocal(
 ): StudioLocalState {
   return {
     localView: false,
+    // The detail panel belongs to the view: it never outlives it, nor shows again as it opens.
     showLocalModels: (show) =>
-      set((s) => (show ? { localView: true, searchFilter: FILTER_OF_TAB[s.tab] } : { localView: false })),
+      set((s) =>
+        show
+          ? { localView: true, searchFilter: FILTER_OF_TAB[s.tab], detail: null, detailError: null }
+          : { localView: false, detail: null, detailError: null },
+      ),
     searchFilter: "pictures",
     setSearchFilter: (searchFilter) => set({ searchFilter }),
     fitsOnly: false,
@@ -254,13 +263,19 @@ export function createLocal(
     repairLocal: async (genModelId) => {
       await api.studioLocalDownload({ installed: { genModelId } }, null);
     },
-    offer: null,
-    setOffer: (offer) => set({ offer }),
-    downloadLocal: async (offer) => {
-      await api.studioLocalDownload(offer.source, offer.choice);
-      set((s) => (s.offer === offer ? { offer: null } : {}));
-      await refreshAfterDownload(get);
+    detail: null,
+    detailError: null,
+    openDetail: async (d) => {
+      set({ detail: d, detailError: null });
+      if (!("repo" in d)) return;
+      try {
+        await get().openRepo(d.repo);
+      } catch (e) {
+        // Said in the panel, while it still shows this repository.
+        set((s) => (s.detail === d ? { detailError: toErrorInfo(e) } : {}));
+      }
     },
+    closeDetail: () => set({ detail: null, detailError: null }),
     acceptNotice: async () => {
       const prefs = await api.studioAcceptLocalNotice();
       set((s) => ({ prefs, local: s.local ? { ...s.local, noticeAccepted: true } : null }));

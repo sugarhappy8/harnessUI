@@ -1916,9 +1916,9 @@ export function revenueLimit(usd: number): string {
   return `$${usd}`;
 }
 
-/** Get models' cards and an opened Hugging Face result (Task B13; the view's own words are
- *  `GET_MODELS`, Task U5): a model's time, its download and its deletion, an opened result's
- *  files, and the footer's notice. */
+/** Get models' cards (Task B13; the view's own words are `GET_MODELS`, Task U5, and the detail
+ *  panel's `MODEL_DETAIL`, Task U6): a model's time, its download and its deletion, and the
+ *  footer's notice. */
 export const LOCAL_MODELS = {
   download: "Download",
   /** A time line without an estimate (nothing measured here, no first guess). */
@@ -1931,29 +1931,7 @@ export const LOCAL_MODELS = {
   deleteBody:
     "Its files are removed from this computer, except parts another model still uses. Pictures and videos you made stay in the gallery.",
   cancel: "Cancel",
-  opening: "Reading the repository on huggingface.co…",
-  /** A searched file: "3 parts · 7.1 GB in all · 4.6 GB to download" (the last part only when
-   *  some of it is already here). */
-  fileLine(parts: number, total: number, toFetch: number): string {
-    const line = `${parts === 1 ? "1 part" : `${parts} parts`} · ${amountGb(total)} in all`;
-    return toFetch < total ? `${line} · ${amountGb(toFetch)} to download` : line;
-  },
-  /** One part of a searched file: "reads your prompt · 2.5 GB · already on this computer". */
-  part: (label: string, bytes: number, here: boolean) =>
-    `${label} · ${amountGb(bytes)}${here ? " · already on this computer" : ""}`,
-  noLocalSetup: "Individual files can be used in a compatible app. Studio has no local generation setup for this repository.",
-  browserDownload: "Download file in browser",
-  /** A file's plain download, without a set-up (0.1.2's): for any file of a repository. */
-  downloadAnyway: "Download file anyway",
-  /** The largest choice of a repository whose fit word is "Fits" or "Fits after the chat
-   *  model is unloaded". */
-  best: "Best for this computer",
-  /** The list of a repository's files with what Studio found each is. */
-  repoFiles: "Files in this repository",
-  openFiles: "View files on Hugging Face",
   showInFolder: "Show in folder",
-  queuedFile: "Queued in Models → Downloads.",
-  otherFiles: "Other repository files",
   notice: "Local models run only on this computer; no company checks prompts or results.",
   whatThatMeans: "What that means",
 } as const;
@@ -2156,30 +2134,20 @@ function andList(items: readonly string[]): string {
   return items.length <= 1 ? (items[0] ?? "") : `${items.slice(0, -1).join(", ")} and ${items[items.length - 1]}`;
 }
 
-/** Whose files the download dialog's verdict is about, by the model's kind. */
+/** Whose files a download's licence verdict is about, by the model's kind. */
 const VERDICT_LEAD = { image: "Pictures you make", video: "Videos you make" } as const satisfies Record<MediaKind, string>;
 
-/** The download confirmation of a local model (Task B14, local addendum Wireframe L3): every
- *  part with its size and licence, what you make may be used for, the Studio engine, a gated
- *  repository, an amber licence's condition, low disk space and the licences to read. */
-
+/** What the review before a local download says (0.1.0 Task B14's confirmation; since 0.2.0
+ *  Task U6, the detail panel, whose own words are `MODEL_DETAIL`): a part already here, what
+ *  you make may be used for, the Studio engine, a gated repository, an excluded region, low
+ *  disk space, and a page the browser did not open. */
 export const DOWNLOAD_LOCAL = {
-  title: (name: string) => `Download ${name}?`,
-  /** "3 files, 6.2 GB in all, from Hugging Face (huggingface.co)"; with some of it here
-   *  already, "…, 3.9 GB to download, from …". Amounts are `amountGb`'s. */
-  summary(files: number, total: number, toFetch: number): string {
-    const count = files === 1 ? "1 file" : `${files} files`;
-    const fetch = toFetch < total ? `, ${amountGb(toFetch)} to download` : "";
-    return `${count}, ${amountGb(total)} in all${fetch}, from Hugging Face (huggingface.co)`;
-  },
   /** A part another model brought already: checked, not downloaded again. */
   alreadyHere: "already on this computer",
-  /** What the pictures or videos you make may be used for, by the strictest licence
-   *  (`verdict`): "Pictures you make: free for any use, including commercial.", "Videos you
-   *  make: …" for a video model. */
-  verdictLead: VERDICT_LEAD,
   /** The verdict as one line: "Pictures you make: you may use them commercially". */
   verdictLine: (kind: MediaKind, allowed: string) => `${VERDICT_LEAD[kind]}: ${allowed}`,
+  /** What the pictures or videos you make may be used for, by the strictest licence (the
+   *  detail panel's `verdict`): "Pictures you make: free for any use, including commercial." */
   verdict: {
     yes: "free for any use, including commercial.",
     underRevenue: (limit: string | null) =>
@@ -2201,30 +2169,11 @@ export const DOWNLOAD_LOCAL = {
   /** What the publisher of a gated repository receives: "username and email". */
   collects: (what: readonly string[]) => `The publisher receives your Hugging Face ${andList(what)}.`,
   openModelPage: "Open the model page",
-  /** An amber licence's condition, then each duty it asks of you ("Review pictures before you
-   *  share them." reads "The licence asks you to review pictures before you share them."). */
-  amber(licence: Licence): string {
-    const condition =
-      licence.commercial === "registration"
-        ? "Commercial use only after registering with the publisher."
-        : licence.commercial === "withUseRules"
-          ? "Commercial use allowed, with use rules: the licence lists uses it forbids."
-          : licence.revenueLimitUsd === null
-            ? "Commercial use only if your organisation earns less than the licence's limit."
-            : `Commercial use only if your organisation earns less than ${revenueLimit(licence.revenueLimitUsd)} a year.`;
-    const duties = licence.obligations.map((o) => `The licence asks you to ${SETTING_WORDS.midSentence(o)}`);
-    return [condition, ...duties].join(" ");
-  },
   lowDisk: "This leaves less than 10 GB free on this disk.",
-  /** The link to a licence's text; with several licences, each says which it opens (by its
-   *  name, the Studio engine's by its short word: "Read the licences (MIT)"). */
-  readLicences: (name: string | null) => (name === null ? "Read the licences" : `Read the licences (${name})`),
   /** A licence or model page the browser did not open, and where to find it instead. */
   notOpened: "The page could not be opened in your browser.",
   goTo: (url: string) => `Go to ${url} in your browser.`,
   excludedRegions: (licence: string, regions: string[]) => `${licence} excludes ${andList(regions)}.`,
-  cancel: "Cancel",
-  download: "Download",
 } as const;
 
 /** LoRAs, in the composer's LoRA section and in Get local models (Phase U). */
@@ -2301,6 +2250,12 @@ export const SETUP = {
     missing: "no file yet",
   } satisfies Record<PartSource, string>,
 } as const;
+
+/** The set-up problem a refusal's `code` names, so it is said in `SETUP.problem`'s words; `null`
+ *  for any other code. Only the group's own keys count ("toString" is not one). */
+export function setupProblem(code: string | null | undefined): SetupProblem | null {
+  return typeof code === "string" && Object.hasOwn(SETUP.problem, code) ? (code as SetupProblem) : null;
+}
 
 /** A model that may not run well here: a warning, never a refusal (Phase U's sheet, composer
  *  and cards). */
@@ -2428,6 +2383,49 @@ export const VERDICT = {
   notRecognised: "Not recognised",
   /** A hint's tooltip. */
   hint: "From the name: opening it reads the files",
+} as const;
+
+/** A result's or a catalog model's detail panel in Get models (Task U6, design 10.3): the review
+ *  before a download, with its main file (one per quantisation, the best for this computer
+ *  marked), the extra files Studio adds, the licences, the total and one Download; then the
+ *  files Studio can't run and the LoRAs. */
+export const MODEL_DETAIL = {
+  mainFile: "Main file",
+  best: "Best for this computer",
+  extras: "Extra files Studio adds",
+  alreadyHere: "already on this computer",
+  chooseFile: "Choose a file",
+  /** "Total to download: 4.6 GB": the files not on this computer yet (and the Studio engine
+   *  when it comes with the model). */
+  total: (size: string) => `Total to download: ${size}`,
+  download: "Download",
+  /** Why Download is off while a part has no file. */
+  missingWhy: SETUP.problem.studio_setup_incomplete,
+  /** Why Download is off for a gated model while no Hugging Face token is saved. */
+  needsToken: SETUP.problem.hf_needs_token,
+  downloadLora: "Download LoRA",
+  /** While the repository is read on opening. */
+  reading: "Reading the repository on huggingface.co…",
+  /** Who published a result: "by leejet". */
+  by: (author: string) => `by ${author}`,
+  licences: "Licences",
+  /** A part with no file yet. */
+  noFile: "No file yet",
+  /** A part the person chose from this computer: "Chosen by you · t5xxl.safetensors". */
+  chosen: (name: string) => `Chosen by you · ${name}`,
+  /** A repository with no model Studio can set up (its files are listed below). */
+  noSetup: "Studio can't set this repository up. Its files can still be downloaded one at a time, for another app.",
+  otherFiles: "Other files in this repository",
+  openFiles: "View files on Hugging Face",
+  /** A file with no published checksum: the browser downloads it instead. */
+  browserDownload: "Download file in browser",
+  queued: "Queued in Models → Downloads.",
+  installed: GET_MODELS.installed,
+  /** An amber licence's duty: "Pass the use restrictions on." reads "The licence asks you to
+   *  pass the use restrictions on." */
+  duty: (obligation: string) => `The licence asks you to ${SETTING_WORDS.midSentence(obligation)}`,
+  /** While a new plan is asked for, after a change of model type or a file chosen. */
+  planning: "Updating the files…",
 } as const;
 
 /** A result's verdict badge in words: exact (`exact`) or its name's hint. */

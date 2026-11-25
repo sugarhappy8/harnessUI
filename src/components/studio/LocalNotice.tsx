@@ -7,9 +7,9 @@ import { useStudio } from "../../store/studio";
 import { ErrorBanner } from "../ErrorBanner";
 
 // The note about local models (0.1.0 Task B14, local addendum L1), word for word: once before
-// the first local download, where *I understand* records it with the backend (which refuses
-// local downloads until then) and *Cancel* downloads nothing; and read only, with *Close*,
-// from Get local models' footer and Settings → Studio. While *I understand* is on its way,
+// the first local download (from the detail panel, ModelDetail.tsx), where *I understand*
+// records it with the backend (which refuses local downloads until then) and *Cancel* downloads
+// nothing; and read only, with *Close*, from Get models' footer and Settings → Studio. While *I understand* is on its way,
 // Cancel and Esc wait for it, so its refusal shows.
 
 /** The note; `onAccepted` follows *I understand* once the backend recorded it. Cancel, Close
@@ -20,8 +20,9 @@ export function LocalNotice(props: { open: boolean; readOnly?: boolean; onAccept
   return (
     <AlertDialog.Root open={open} onOpenChange={(o) => !o && !busy && onClose()}>
       <AlertDialog.Portal>
-        <AlertDialog.Overlay className="dialog-overlay fixed inset-0" />
-        <AlertDialog.Content className="fixed top-1/2 left-1/2 w-[30rem] max-w-[92vw] -translate-x-1/2 -translate-y-1/2 rounded-2xl border border-border bg-surface p-5 text-sm shadow-pop">
+        {/* Over the detail panel (a z-50 slide-over) too, where a first download shows it. */}
+        <AlertDialog.Overlay className="dialog-overlay fixed inset-0 z-50" />
+        <AlertDialog.Content className="fixed top-1/2 z-50 left-1/2 w-[30rem] max-w-[92vw] -translate-x-1/2 -translate-y-1/2 rounded-2xl border border-border bg-surface p-5 text-sm shadow-pop">
           <Notice readOnly={props.readOnly ?? false} busy={busy} setBusy={setBusy} onAccepted={props.onAccepted} />
         </AlertDialog.Content>
       </AlertDialog.Portal>

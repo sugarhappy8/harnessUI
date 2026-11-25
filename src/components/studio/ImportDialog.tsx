@@ -10,9 +10,9 @@ import {
   IMPORT,
   LOCAL_WARNING,
   SETUP,
+  setupProblem,
   SLOT_LABEL,
   UI,
-  type SetupProblem,
 } from "../../lib/words";
 import { toErrorInfo } from "../../store/app";
 import { useStudio } from "../../store/studio";
@@ -56,8 +56,8 @@ type Step =
 /** A refusal in plain words: a set-up's problem in `SETUP.problem`'s words (which say what to
  *  do), else the backend's message and next step. */
 function problemWords(error: ErrorInfo): { message: string; nextStep: string | null } {
-  const plain = (SETUP.problem as Record<string, string>)[error.code];
-  if (plain !== undefined) return { message: plain, nextStep: null };
+  const problem = setupProblem(error.code);
+  if (problem !== null) return { message: SETUP.problem[problem], nextStep: null };
   return { message: error.message, nextStep: error.nextStep || null };
 }
 
@@ -228,7 +228,7 @@ export function ImportDialog() {
                 {file.plan && <PlanPart plan={file.plan} problem={step.problem} />}
               </>
             )}
-            {step.at === "read" && step.problem && !(works && file.plan && step.problem.code in SETUP.problem) && (
+            {step.at === "read" && step.problem && !(works && file.plan && setupProblem(step.problem.code) !== null) && (
               <Problem error={step.problem} />
             )}
             {step.at === "adding" && <Adding total={file?.sizeBytes ?? 0} />}
@@ -372,10 +372,10 @@ function PlanPart(props: { plan: SetupPlan; problem: ErrorInfo | null }) {
   const { plan } = props;
   const id = useId();
   const extras = plan.slots.filter((s) => s.part !== null && s.source !== "main");
-  const code = props.problem?.code;
+  const known = setupProblem(props.problem?.code);
   const problem =
-    code !== undefined && code in SETUP.problem
-      ? SETUP.problem[code as SetupProblem]
+    known !== null
+      ? SETUP.problem[known]
       : !plan.canDownload
         ? SETUP.problem.studio_setup_incomplete
         : null;

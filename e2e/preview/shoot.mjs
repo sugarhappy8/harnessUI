@@ -92,10 +92,16 @@ async function search(page, words) {
   await settle(page, 700);
 }
 
-/** A result opened from its card's heading button: it shows in a slide-over (Task U5; Task U6
- *  makes it the detail panel). */
+/** A result opened from its card's heading button: its detail panel slides over the right half
+ *  (Task U6). */
 async function openResult(page, repo) {
   await page.getByRole("article", { name: repo, exact: true }).getByRole("button", { name: repo, exact: true }).click();
+  await settle(page, 900);
+}
+
+/** A catalog model's detail panel, opened from its card's Download (Task U6). */
+async function openCatalogPanel(page, name) {
+  await page.getByRole("article", { name }).getByRole("button", { name: "Download" }).click();
   await settle(page, 900);
 }
 
@@ -212,22 +218,26 @@ const SCREENS = [
     id: "e0",
     name: "e0-local-notice-before-first-download",
     run: async (page) => {
+      // The catalog card's Download opens its detail panel (Task U6); the panel's Download shows
+      // the note first, over the panel.
       await open(page, "view=studio&notice=0");
       await openLocalModels(page);
       await mainToTop(page);
-      await page.getByRole("article", { name: "Z-Image Turbo" }).getByRole("button", { name: "Download" }).click();
+      await openCatalogPanel(page, "Z-Image Turbo");
+      await page.getByRole("dialog", { name: "Z-Image Turbo" }).getByRole("button", { name: "Download" }).click();
       await settle(page, 700);
     },
   },
   {
     id: "e",
+    // The file name stays so the pair lines up: since Task U6 the review before a download is
+    // the detail panel (here Z-Image Turbo's, the model 0.1.2's confirmation was shot for).
     name: "e-download-dialog",
     run: async (page) => {
       await open(page);
       await openLocalModels(page);
       await mainToTop(page);
-      await page.getByRole("article", { name: "Z-Image Turbo" }).getByRole("button", { name: "Download" }).click();
-      await settle(page, 700);
+      await openCatalogPanel(page, "Z-Image Turbo");
     },
   },
   {
@@ -237,12 +247,49 @@ const SCREENS = [
       await open(page);
       await openLocalModels(page);
       await mainToTop(page);
-      await page.getByRole("article", { name: "Z-Image Turbo" }).getByRole("button", { name: "Download" }).click();
-      await settle(page, 600);
-      await page.getByRole("alertdialog").getByRole("button", { name: "Download" }).click();
+      await openCatalogPanel(page, "Z-Image Turbo");
+      await page.getByRole("dialog", { name: "Z-Image Turbo" }).getByRole("button", { name: "Download" }).click();
       await settle(page, 900);
+      // The panel shows the download too; closed, the card does.
+      await page.keyboard.press("Escape");
+      await settle(page, 500);
       await mainToTop(page);
       await settle(page, 300);
+    },
+  },
+  {
+    id: "e3",
+    name: "e3-detail-many-quantisations",
+    run: async (page) => {
+      // Wan 2.2 A14B: 15 quantisations of a high-noise and a low-noise model.
+      await open(page);
+      await openLocalModels(page);
+      await page.getByRole("group", { name: "Show" }).getByRole("button", { name: "Video" }).click();
+      await settle(page, 500);
+      await search(page, "wan 2.2");
+      await openResult(page, "QuantStack/Wan2.2-T2V-A14B-GGUF");
+    },
+  },
+  {
+    id: "e4",
+    name: "e4-detail-openrail-model-type",
+    run: async (page) => {
+      // SDXL: one file, an OpenRAIL licence (amber) and two model types.
+      await open(page);
+      await openLocalModels(page);
+      await search(page, "sdxl");
+      await openResult(page, "stabilityai/stable-diffusion-xl-base-1.0");
+    },
+  },
+  {
+    id: "e5",
+    name: "e5-detail-narrow-900x650",
+    viewport: { width: 900, height: 650 },
+    run: async (page) => {
+      await open(page);
+      await openLocalModels(page);
+      await search(page, "z-image");
+      await openResult(page, "leejet/Z-Image-Turbo-GGUF");
     },
   },
   {

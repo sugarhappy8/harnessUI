@@ -36,7 +36,7 @@ From the repo, with `node_modules` installed:
 
 ```bash
 npm run preview:serve &                       # http://127.0.0.1:5199/e2e/preview/index.html
-npm run preview:shoot                         # -> .cache/preview/after/ (62 PNGs) and a table
+npm run preview:shoot                         # -> .cache/preview/after/ (68 PNGs) and a table
 npm run preview:pairs -- .cache/preview/before .cache/preview/after   # -> .cache/preview/pairs.html
 pkill -f "e2e/preview/vite.config.ts"
 ```
@@ -74,9 +74,12 @@ before 0.2.0) · `b2` after switching to a cloud model (with the "what changed" 
 models, the full view (Get local models before 0.2.0; scrolled to its top) · `c2` Get models as
 it opens (the same since Task U5: it opens at its top) · `l` Get models at 900x650 · `m` Get
 models on its LoRAs chip · `d` Hugging Face results (cards with verdict badges) · `d2` a
-supported result opened (a slide-over until Task U6) · `d3` an unsupported result opened ·
-`e0` the local-model notice before a first download · `e` the download dialog · `e2` the card
-while downloading ·
+supported result opened in its detail panel (Task U6) · `d3` an unsupported result opened ·
+`e0` the local-model notice before a first download, over the panel · `e` the review before a
+download (the download dialog before Task U6; now Z-Image Turbo's detail panel) · `e2` the card
+while downloading · `e3` the detail panel of a result with 15 quantisations (Wan 2.2 A14B) ·
+`e4` the detail panel of an OpenRAIL model with two model types (SDXL) · `e5` a detail panel at
+900x650 ·
 `f` Advanced open (the side panel, from Settings) · `f2` the whole side panel, docked (tall
 1440 px viewport) · `g` gallery grid (top) · `g2` grid as it opens · `h` viewer · `i`, `i2`
 Settings -> Studio · `j` main view at 900x650 · `k` Video tab · `o` the SDXL inpainting model

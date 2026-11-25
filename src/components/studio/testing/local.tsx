@@ -1,5 +1,5 @@
-// What the tests of Get models, the download confirmation and the content notice share (0.1.0
-// Tasks B13 and B14, 0.2.0 Task U5): the preferences and usage Studio reads, a few steps to let
+// What the tests of Get models, the detail panel and the content notice share (0.1.0 Tasks
+// B13 and B14, 0.2.0 Tasks U5 and U6): the preferences and usage Studio reads, a few steps to let
 // promises settle, and Studio shown on Get models. vi.mock works per test file, so each file
 // mocks "../../lib/ipc" and "./api" itself before it imports this module.
 import { act, fireEvent, render } from "@testing-library/react";

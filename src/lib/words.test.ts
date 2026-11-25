@@ -1216,3 +1216,35 @@ describe("Studio's words for LoRAs, importing and set-up (Task S12)", () => {
     expect(Object.keys(w.SETUP.source)).toHaveLength(9);
   });
 });
+
+describe("the detail panel's words (Task U6)", () => {
+  it("keep the briefed wording", async () => {
+    const w = await import("./words");
+    expect(w.MODEL_DETAIL).toMatchObject({
+      mainFile: "Main file",
+      best: "Best for this computer",
+      extras: "Extra files Studio adds",
+      alreadyHere: "already on this computer",
+      chooseFile: "Choose a file",
+      download: "Download",
+      missingWhy: "Choose a file for each part first.",
+      needsToken: w.SETUP.problem.hf_needs_token,
+      downloadLora: "Download LoRA",
+    });
+    expect(w.MODEL_DETAIL.total("4.6 GB")).toBe("Total to download: 4.6 GB");
+    expect(w.MODEL_DETAIL.duty("Keep the licence with the files.")).toBe("The licence asks you to keep the licence with the files.");
+    expect(w.SETUP.anyway).toBe("Download file anyway");
+    expect(w.SETUP.modelType).toBe("Model type");
+  });
+
+  it("a set-up problem is found by its own code only", async () => {
+    const { setupProblem } = await import("./words");
+    expect(setupProblem("hf_needs_token")).toBe("hf_needs_token");
+    expect(setupProblem("hf_needs_terms")).toBe("hf_needs_terms");
+    expect(setupProblem("studio_setup_incomplete")).toBe("studio_setup_incomplete");
+    // Not a set-up problem, nor a key every object has.
+    for (const code of ["studio_disk_too_small", "toString", "constructor", "__proto__", "", null, undefined]) {
+      expect(setupProblem(code)).toBeNull();
+    }
+  });
+});
