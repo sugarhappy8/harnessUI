@@ -880,17 +880,29 @@ fn write_head_size_80_model(path: &Path) {
     std::fs::write(path, file).expect("write the test model");
 }
 
-/// The lifecycle states and typed stages, in the order the app receives them.
+/// The lifecycle states and typed stages, in the order the app receives them, with a start
+/// on a new port counted once.
+///
+/// A port is picked free a moment before llama-server binds it ([`free_loopback_port`]),
+/// and something can take it in between: the server then fails to bind it, and the
+/// supervisor starts again on a new port, which only shows as a second `Starting` in a
+/// row. Every other retry sends its stage or step-down first, so that is the only
+/// `Starting` that follows another, and it does not retry the load.
 fn states_and_stages(events: &[ServerEvent]) -> Vec<&ServerEvent> {
-    events
-        .iter()
-        .filter(|e| {
-            matches!(
-                e,
-                ServerEvent::State(_) | ServerEvent::Stage(_) | ServerEvent::SteppedDown { .. }
-            )
-        })
-        .collect()
+    let starting = ServerEvent::State(ServerState::Starting);
+    let mut kept: Vec<&ServerEvent> = Vec::new();
+    for event in events.iter().filter(|e| {
+        matches!(
+            e,
+            ServerEvent::State(_) | ServerEvent::Stage(_) | ServerEvent::SteppedDown { .. }
+        )
+    }) {
+        if *event == starting && kept.last() == Some(&&starting) {
+            continue;
+        }
+        kept.push(event);
+    }
+    kept
 }
 
 /// The log lines of a run, for a failure message.
@@ -1004,7 +1016,8 @@ async fn a_model_that_refuses_save_memory_is_retried_once_without_it() {
                 &ServerEvent::State(ServerState::Stopping),
                 &ServerEvent::State(ServerState::Stopped),
             ],
-            "{kind}"
+            "{kind}: {}",
+            log_lines(&events)
         );
     }
 }
@@ -1094,7 +1107,8 @@ async fn a_plain_memory_failure_without_a_graphics_card_is_not_retried() {
                 &ServerEvent::State(ServerState::Starting),
                 &ServerEvent::State(ServerState::Failed(LoadFailure::ContextTooLarge)),
             ],
-            "{kind}: one start, no retry, no step-down, one failure"
+            "{kind}: one start, no retry, no step-down, one failure: {}",
+            log_lines(&events)
         );
     }
 }
@@ -1468,6 +1482,8 @@ async fn a_broken_image_file_is_classified_and_the_model_loads_without_it() {
             &ServerEvent::State(ServerState::Ready),
             &ServerEvent::State(ServerState::Stopping),
             &ServerEvent::State(ServerState::Stopped),
-        ]
+        ],
+        "{}",
+        log_lines(&events)
     );
 }
