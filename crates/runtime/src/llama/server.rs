@@ -14,15 +14,17 @@ mod supervisor;
 
 use std::io;
 use std::path::Path;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
 use reqwest::StatusCode;
 use serde::Serialize;
+use tokio::io::AsyncRead;
 use tokio::process::ChildStdin;
 use tokio::sync::mpsc::UnboundedSender;
 use tokio::task::JoinHandle;
+use tokio::time::Instant;
 
 pub use supervisor::{
     Candidate, LocalStarter, RestartPolicy, Starter, Supervised, Supervisor, SupervisorExit,
@@ -51,8 +53,12 @@ const LOOPBACK_REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
 #[cfg(unix)]
 const GRACEFUL_STOP: Duration = Duration::from_secs(3);
 
-/// How long to wait for the output readers to drain after the process exited.
-const READER_DRAIN: Duration = Duration::from_secs(2);
+/// After the process exited, no new line from either output reader for this long ends the
+/// wait for its output ([`RunningServer::drain_to_end`]).
+const READER_IDLE: Duration = Duration::from_secs(2);
+
+/// The most an exit waits for the process's output ([`RunningServer::drain_to_end`]).
+const READER_DRAIN_CAP: Duration = Duration::from_secs(10);
 
 /// Largest `/props` body accepted (it carries the chat template).
 const MAX_PROPS_BYTES: usize = 8 * 1024 * 1024;
@@ -296,12 +302,14 @@ async fn start_inner(
     let tail = Arc::new(Mutex::new(Tail::new(STDERR_TAIL_LINES)));
     let log = Arc::new(Mutex::new(LogInfo::default()));
     let image_file_loading = Arc::new(AtomicBool::new(false));
+    let last_line = LastLine::new();
     let mut readers = Vec::with_capacity(2);
     if let Some(stdout) = child.take_stdout() {
         readers.push(tokio::spawn(read_stdout(
             stdout,
             events.clone(),
             image_file_loading.clone(),
+            last_line.clone(),
         )));
     }
     if let Some(stderr) = child.take_stderr() {
@@ -310,6 +318,7 @@ async fn start_inner(
             tail.clone(),
             log.clone(),
             events.clone(),
+            last_line.clone(),
         )));
     }
 
@@ -324,6 +333,7 @@ async fn start_inner(
         tail,
         log,
         readers,
+        last_line,
         events,
         exit: None,
     };
@@ -509,15 +519,45 @@ fn parse_props(body: &[u8]) -> Result<Props, String> {
     Ok(props)
 }
 
+/// When either output reader last read a line, for [`RunningServer::drain_to_end`]: both
+/// bump the milliseconds since the server started.
+#[derive(Clone, Debug)]
+struct LastLine {
+    started: Instant,
+    millis: Arc<AtomicU64>,
+}
+
+impl LastLine {
+    fn new() -> Self {
+        Self {
+            started: Instant::now(),
+            millis: Arc::new(AtomicU64::new(0)),
+        }
+    }
+
+    /// A reader read a line now.
+    fn bump(&self) {
+        let millis = u64::try_from(self.started.elapsed().as_millis()).unwrap_or(u64::MAX);
+        self.millis.fetch_max(millis, Ordering::Relaxed);
+    }
+
+    /// When the last line was read (the start, before any line).
+    fn at(&self) -> Instant {
+        self.started + Duration::from_millis(self.millis.load(Ordering::Relaxed))
+    }
+}
+
 /// Reads the managed-child protocol. `image_file_loading` follows the stage the server last
 /// named: whether it is loading the image file (`mmproj_model`, 0.0.7).
 async fn read_stdout(
-    stdout: tokio::process::ChildStdout,
+    stdout: impl AsyncRead + Unpin,
     events: UnboundedSender<ServerEvent>,
     image_file_loading: Arc<AtomicBool>,
+    last_line: LastLine,
 ) {
     let mut reader = LineReader::new(stdout);
     while let Some(line) = reader.next_line().await {
+        last_line.bump();
         let event = match parse_child_line(&line) {
             Some(ChildState::Loading {
                 current, progress, ..
@@ -544,13 +584,15 @@ async fn read_stdout(
 }
 
 async fn read_stderr(
-    stderr: tokio::process::ChildStderr,
+    stderr: impl AsyncRead + Unpin,
     tail: Arc<Mutex<Tail>>,
     log: Arc<Mutex<LogInfo>>,
     events: UnboundedSender<ServerEvent>,
+    last_line: LastLine,
 ) {
     let mut reader = LineReader::new(stderr);
     while let Some(line) = reader.next_line().await {
+        last_line.bump();
         let event = log
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
@@ -581,6 +623,8 @@ pub struct RunningServer {
     tail: Arc<Mutex<Tail>>,
     log: Arc<Mutex<LogInfo>>,
     readers: Vec<JoinHandle<()>>,
+    /// When the readers last read a line.
+    last_line: LastLine,
     events: UnboundedSender<ServerEvent>,
     /// Set once the exit was observed: the exit code (or `None` for a signal).
     exit: Option<Option<i32>>,
@@ -683,13 +727,14 @@ impl RunningServer {
         let _ = self.events.send(ServerEvent::State(ServerState::Stopped));
     }
 
-    /// The exit was observed: close stdin, let the readers drain, emit the event once and
-    /// return the stderr tail.
+    /// The exit was observed: close stdin, read the output to the end
+    /// ([`drain_to_end`](Self::drain_to_end)), emit the event once and return the stderr
+    /// tail.
     async fn finish_after_exit(&mut self, code: Option<i32>) -> Vec<String> {
         if self.exit.is_none() {
             self.exit = Some(code);
             self.stdin = None;
-            self.drain_readers().await;
+            self.drain_to_end().await;
             let _ = self.events.send(ServerEvent::Exited { code });
         }
         self.stderr_tail()
@@ -706,16 +751,40 @@ impl RunningServer {
         self.finish_after_exit(code).await
     }
 
-    async fn drain_readers(&mut self) {
-        for reader in &mut self.readers {
-            if tokio::time::timeout(READER_DRAIN, &mut *reader)
-                .await
-                .is_err()
-            {
-                reader.abort();
+    /// Waits for both output readers together until each reaches end-of-file, until
+    /// [`READER_IDLE`] passes with no new line from either (counted from this call at the
+    /// earliest, so lines still in the pipes get read), or until [`READER_DRAIN_CAP`]
+    /// passes; then aborts what is left.
+    ///
+    /// The tail and its classification depend on the last lines, which a loaded machine
+    /// can take more than a moment to read. A pipe that never ends (another process still
+    /// holds it open) must not cut short the other one.
+    async fn drain_to_end(&mut self) {
+        let start = Instant::now();
+        let cap = start + READER_DRAIN_CAP;
+        let mut readers = std::mem::take(&mut self.readers);
+        {
+            let ended = async {
+                for reader in &mut readers {
+                    let _ = reader.await;
+                }
+            };
+            tokio::pin!(ended);
+            loop {
+                let quiet_until = self.last_line.at().max(start) + READER_IDLE;
+                let now = Instant::now();
+                if now >= cap || now >= quiet_until {
+                    break;
+                }
+                tokio::select! {
+                    () = &mut ended => break,
+                    () = tokio::time::sleep_until(quiet_until.min(cap)) => {}
+                }
             }
         }
-        self.readers.clear();
+        for reader in &readers {
+            reader.abort();
+        }
     }
 }
 
@@ -878,6 +947,120 @@ mod tests {
                 LoadFailure::Unknown
             )))
         );
+    }
+
+    /// The read end of an output pipe as the readers get it.
+    type Pipe = tokio::io::DuplexStream;
+
+    /// A stdout that has already ended.
+    fn stdout_done() -> Pipe {
+        tokio::io::duplex(64).0
+    }
+
+    /// A stdout that never ends: a pipe some other process still holds open.
+    fn stdout_never_ends() -> Pipe {
+        let (read, write) = tokio::io::duplex(64);
+        tokio::spawn(async move {
+            let _held = write;
+            std::future::pending::<()>().await;
+        });
+        read
+    }
+
+    /// A stderr that writes `lines`, each `every` after the one before, then ends.
+    fn stderr_lines_every(every: Duration, lines: &[&str]) -> Pipe {
+        use tokio::io::AsyncWriteExt as _;
+
+        let (read, mut write) = tokio::io::duplex(4096);
+        let lines: Vec<String> = lines.iter().map(|line| format!("{line}\n")).collect();
+        tokio::spawn(async move {
+            for line in lines {
+                tokio::time::sleep(every).await;
+                if write.write_all(line.as_bytes()).await.is_err() {
+                    return;
+                }
+            }
+        });
+        read
+    }
+
+    /// A server whose readers read `stdout` and `stderr`. Its process is this test program
+    /// listing no test, which ends at once and has nothing to do with them.
+    fn server_with_readers(stdout: Pipe, stderr: Pipe) -> RunningServer {
+        let program = std::env::current_exe().expect("this test program");
+        let child = spawn::spawn(
+            SpawnSpec::new(program, std::env::temp_dir())
+                .args(["--list", "--exact", "no such test"])
+                .stdout(StdioMode::Null)
+                .stderr(StdioMode::Null),
+        )
+        .expect("spawn");
+        let (events, _) = tokio::sync::mpsc::unbounded_channel();
+        let tail = Arc::new(Mutex::new(Tail::new(STDERR_TAIL_LINES)));
+        let log = Arc::new(Mutex::new(LogInfo::default()));
+        let last_line = LastLine::new();
+        let readers = vec![
+            tokio::spawn(read_stdout(
+                stdout,
+                events.clone(),
+                Arc::new(AtomicBool::new(false)),
+                last_line.clone(),
+            )),
+            tokio::spawn(read_stderr(
+                stderr,
+                tail.clone(),
+                log.clone(),
+                events.clone(),
+                last_line.clone(),
+            )),
+        ];
+        let dir = std::env::temp_dir();
+        RunningServer {
+            child,
+            stdin: None,
+            port: 40000,
+            base_url: "http://127.0.0.1:40000".into(),
+            api_key: "key".into(),
+            props: Props::default(),
+            backend: Backend {
+                kind: BackendKind::Cpu,
+                server: dir.join("llama-server"),
+                dir,
+                fit_params: None,
+                build: "test".into(),
+                source: BackendSource::DevOverride,
+            },
+            tail,
+            log,
+            readers,
+            last_line,
+            events,
+            exit: None,
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn the_drain_waits_while_lines_keep_coming() {
+        // a stderr reader that writes its three last lines 1.5 s apart (4.5 s in all): the old 2 s cut lost them
+        let mut s = server_with_readers(
+            stdout_done(),
+            stderr_lines_every(Duration::from_millis(1500), &["a", "b", "last"]),
+        );
+        s.drain_to_end().await;
+        assert_eq!(s.stderr_tail().last().map(String::as_str), Some("last"));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn the_drain_reads_both_readers_together() {
+        // stdout never ends (a pipe some other process holds); stderr ends at once: drain returns after READER_IDLE, stderr complete
+        let mut s = server_with_readers(
+            stdout_never_ends(),
+            stderr_lines_every(Duration::ZERO, &["x", "last"]),
+        );
+        let t0 = Instant::now();
+        s.drain_to_end().await;
+        assert!(t0.elapsed() <= READER_IDLE + Duration::from_millis(200));
+        assert_eq!(s.stderr_tail().last().map(String::as_str), Some("last"));
     }
 
     #[test]
