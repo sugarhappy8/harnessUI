@@ -271,6 +271,9 @@ struct Running {
     /// The installed model a run on this computer makes it with (`None` for a cloud run):
     /// *Delete* refuses that model while it runs.
     local_model: Option<String>,
+    /// 0.2.0 (Task S10): the LoRAs a run on this computer attaches, by id (none for a cloud
+    /// run): *Delete* refuses each while it runs.
+    local_loras: Vec<String>,
 }
 
 /// A recorded run and what its task needs to send it or follow its job. Never cloned: a copy
@@ -311,6 +314,15 @@ impl Job {
         match &self.step {
             Step::Local(step) => Some(step.model()),
             Step::Send(_) | Step::Follow { .. } => None,
+        }
+    }
+
+    /// 0.2.0 (Task S10): the LoRAs a run on this computer attaches, by id; none for a cloud
+    /// run.
+    fn local_loras(&self) -> Vec<String> {
+        match &self.step {
+            Step::Local(step) => step.loras(),
+            Step::Send(_) | Step::Follow { .. } => Vec::new(),
         }
     }
 
@@ -402,6 +414,7 @@ impl Lanes {
                 ended: ended.clone(),
                 lane: job.lane,
                 local_model: job.local_model().map(str::to_owned),
+                local_loras: job.local_loras(),
             },
         );
         (job, token, ended)

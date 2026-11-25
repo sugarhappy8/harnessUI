@@ -133,22 +133,25 @@ pub struct InstalledFiles {
     pub chat: Vec<UsedFile>,
     /// The installed picture and video models.
     pub gen_models: Vec<store::GenModel>,
+    /// 0.2.0 (Task S10): the LoRAs.
+    pub loras: Vec<store::GenLora>,
 }
 
 impl InstalledFiles {
-    /// The installed models in `store` and their files.
+    /// The installed models in `store` and their files, and the LoRAs.
     pub async fn read(store: &store::Store) -> AppResult<Self> {
         Ok(Self {
             chat: chat_files_used(&store.list_models().await?),
             gen_models: store.list_gen_models().await?,
+            loras: store.list_gen_loras().await?,
         })
     }
 
     /// The files models other than picture or video model `id` (the one being downloaded,
-    /// perhaps again) use.
+    /// perhaps again) and the LoRAs use.
     pub fn except(&self, id: &str) -> Vec<UsedFile> {
         let mut used = self.chat.clone();
-        used.extend(gen_files_used(&self.gen_models, Some(id)));
+        used.extend(gen_files_used(&self.gen_models, &self.loras, Some(id)));
         used
     }
 }
@@ -770,6 +773,7 @@ pub async fn download_weight_file(
         image_file_for: None,
         image_files: None,
         generator: None,
+        lora: None,
     };
     app.state::<Arc<DownloadManager>>()
         .inner()
@@ -884,6 +888,7 @@ pub(crate) fn prepared_download(
         image_files: None,
         file_only: false,
         generator: Some(gen_group(&plan.entry, catalog_id, origin, &plan.present)),
+        lora: None,
     };
     Ok(PreparedDownload {
         meta,

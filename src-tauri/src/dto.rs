@@ -10,6 +10,7 @@ use store::{ChatId, MessageId, ProviderId};
 
 use models::gen_catalog::GenRole;
 use models::sd::detect::SdVersion;
+use models::sd::inspect::LoraFormat;
 use models::sd::matching::RecipeKind;
 use models::sd::setup::PartSource;
 use models::sd::{FileLabel, Verdict};
@@ -1373,6 +1374,31 @@ pub struct LocalModelsDto {
     /// The entries of `recommended` not installed yet whose word is `fits` or `afterUnload`
     /// ("2 more fit this computer"); one that is only `slow` is not counted.
     pub more_fit: u32,
+    /// 0.2.0 (Task S10): the LoRAs, newest first.
+    pub loras: Vec<LoraDto>,
+}
+
+/// 0.2.0 (Task S10): a LoRA Studio's engine can apply (`studio::loras`), as Get local models
+/// and the LoRA picker list it.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LoraDto {
+    /// `hf:<owner>/<repo>:<path>` for a downloaded LoRA, `local:<SHA-256>` for an imported
+    /// one: what a draft attaches.
+    pub id: String,
+    /// Its file's stem, as written (spaces and any Unicode kept).
+    pub name: String,
+    /// The version of the models it was most likely made for, from its header; `None` when
+    /// that cannot be told.
+    pub base: Option<SdVersion>,
+    pub format: LoraFormat,
+    pub size_bytes: u64,
+    /// `search` (downloaded from Hugging Face) or `import` (added from this computer).
+    pub source: String,
+    /// The Hugging Face repository it was downloaded from; `None` when imported.
+    pub repo: Option<String>,
+    /// Its file is gone.
+    pub missing: bool,
 }
 
 /// A recipe a model can run with, as the Model type menu offers it.

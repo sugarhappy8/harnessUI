@@ -97,6 +97,30 @@ impl LocalStep {
     pub(super) fn model(&self) -> &str {
         &self.request.model
     }
+
+    /// The LoRAs the run attaches, by id ([`lora_ids`]).
+    pub(super) fn loras(&self) -> Vec<String> {
+        lora_ids(&self.request)
+    }
+}
+
+/// The key of a local run's LoRAs among its request's values: Task S11's `key::LORAS`
+/// (`studio::local`), the same word.
+const LORAS_KEY: &str = "loras";
+
+/// The ids of the LoRAs `request` attaches: its `loras` value, `[{"id": …, "weight": …,
+/// "highNoise": …}, …]` (Task S11's `LoraUse`). A value of another shape attaches none, and
+/// the run's own check refuses it.
+fn lora_ids(request: &MediaRequest) -> Vec<String> {
+    request
+        .params
+        .get(LORAS_KEY)
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|lora| lora.get("id").and_then(Value::as_str))
+        .map(str::to_owned)
+        .collect()
 }
 
 /// What a local run's card shows beyond its row while Studio follows it, and the answer to
@@ -332,6 +356,23 @@ impl StudioManager {
                 .into_iter()
                 .flatten()
                 .any(|job| job.local_model() == Some(model))
+    }
+
+    /// 0.2.0 (Task S10): whether a local run that attaches LoRA `id` is queued or running:
+    /// the engine opens its file, so *Delete* refuses the LoRA while one is
+    /// (`studio_lora_in_use`).
+    pub fn local_uses_lora(&self, id: &str) -> bool {
+        let lanes = self.inner.lanes();
+        lanes
+            .running
+            .values()
+            .any(|r| r.local_loras.iter().any(|l| l == id))
+            || lanes
+                .queues
+                .get(&LaneKey::Local)
+                .into_iter()
+                .flatten()
+                .any(|job| job.local_loras().iter().any(|l| l == id))
     }
 
     /// The answer to "Unload the chat model?" for local run `run_id` under

@@ -212,6 +212,7 @@ pub async fn local_models(deps: &LocalCmdDeps) -> AppResult<LocalModelsDto> {
         video_possible: !matches!(device, Target::Cpu { .. }),
         installed_bytes: space_taken(&rows),
         more_fit: u32::try_from(more_fit).unwrap_or(u32::MAX),
+        loras: super::loras::list_loras(&deps.store).await?,
     })
 }
 
@@ -2821,7 +2822,7 @@ pub(crate) mod tests {
         );
     }
 
-    fn sdxl_repo() -> TestRepo {
+    pub(crate) fn sdxl_repo() -> TestRepo {
         TestRepo::new("stabilityai/stable-diffusion-xl-base-1.0")
             .tagged("text-to-image")
             .file("sd_xl_base_1.0.safetensors", 6_938_078_334.0, Some("sdxl"))
@@ -3505,6 +3506,7 @@ pub(crate) mod tests {
                     sha256: None,
                 }],
                 gen_models: Vec::new(),
+                loras: Vec::new(),
             })
         };
         for files_use in [FilesUse::Show, FilesUse::Write] {

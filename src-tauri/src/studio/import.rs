@@ -334,22 +334,37 @@ pub async fn import_model(
 }
 
 /// Copies the file at `src` (`size` bytes) into `<models_dir>/@imported/<SHA-256, 16
-/// characters>/<its name>`, hashing it on the way: written to a `.partial` file, then renamed
-/// into place. A file already there with the same SHA-256 (read through to tell) is reused and
-/// the partial file removed; any other file there is replaced. Returns where the copy is and
-/// the SHA-256.
+/// characters>/<its name>`, hashing it on the way ([`copy_to_partial`], then
+/// [`place_partial`]): a file already there with the same SHA-256 is reused, any other file
+/// there is replaced. Returns where the copy is and the SHA-256.
 fn copy_in(
     src: &Path,
     size: u64,
     models_dir: &Path,
     report: &mut Report,
 ) -> AppResult<(PathBuf, String)> {
-    let failed = |e: std::io::Error| errors::import_failed(e.to_string());
     let name = src
         .file_name()
         .ok_or_else(|| errors::import_failed("a file without a name"))?;
     let folder = models_dir.join(IMPORTED_FOLDER);
-    std::fs::create_dir_all(&folder).map_err(failed)?;
+    let (partial, sha256) = copy_to_partial(src, size, &folder, report)?;
+    let dest = folder.join(&sha256[..16]).join(name);
+    place_partial(&partial, &dest, size, &sha256, report)?;
+    Ok((dest, sha256))
+}
+
+/// Copies the file at `src` (`size` bytes) into a new `<uuid>.partial` file in `folder`
+/// (made when missing), hashing it on the way with progress to `report` (`Copying`). Returns
+/// the partial file and the SHA-256; on any failure the partial file is removed. Task S10's
+/// LoRA import copies through it too (`loras::import_lora_file`).
+pub(crate) fn copy_to_partial(
+    src: &Path,
+    size: u64,
+    folder: &Path,
+    report: &mut Report,
+) -> AppResult<(PathBuf, String)> {
+    let failed = |e: std::io::Error| errors::import_failed(e.to_string());
+    std::fs::create_dir_all(folder).map_err(failed)?;
     let partial = folder.join(format!("{}.partial", uuid::Uuid::new_v4()));
     let copied = std::fs::File::create(&partial)
         .map_err(failed)
@@ -358,22 +373,37 @@ fn copy_in(
             out.sync_all().map_err(failed)?;
             Ok(sha256)
         });
-    let placed = copied.and_then(|sha256| {
-        let dest = folder.join(&sha256[..16]).join(name);
-        let there = std::fs::metadata(&dest).is_ok_and(|m| m.is_file() && m.len() == size)
-            && read_through(&dest, size, None, ImportStage::Hashing, report)
-                .is_ok_and(|s| s == sha256);
-        if there {
-            let _ = std::fs::remove_file(&partial);
-            return Ok((dest, sha256));
-        }
-        let parent = dest.parent().unwrap_or(&folder);
-        std::fs::create_dir_all(parent).map_err(failed)?;
-        std::fs::rename(&partial, &dest).map_err(failed)?;
-        Ok((dest, sha256))
-    });
-    if placed.is_err() {
+    if copied.is_err() {
         let _ = std::fs::remove_file(&partial);
+    }
+    copied.map(|sha256| (partial, sha256))
+}
+
+/// Puts the partial file [`copy_to_partial`] made (`size` bytes, SHA-256 `sha256`) at `dest`
+/// by renaming it there (its folder made when missing). A file already at `dest` with the same
+/// size and SHA-256 (read through to tell, `Hashing`) is kept and the partial file removed;
+/// any other file there is replaced. On failure the partial file is removed.
+pub(crate) fn place_partial(
+    partial: &Path,
+    dest: &Path,
+    size: u64,
+    sha256: &str,
+    report: &mut Report,
+) -> AppResult<()> {
+    let failed = |e: std::io::Error| errors::import_failed(e.to_string());
+    let there = std::fs::metadata(dest).is_ok_and(|m| m.is_file() && m.len() == size)
+        && read_through(dest, size, None, ImportStage::Hashing, report).is_ok_and(|s| s == sha256);
+    if there {
+        let _ = std::fs::remove_file(partial);
+        return Ok(());
+    }
+    let placed = dest
+        .parent()
+        .map_or(Ok(()), std::fs::create_dir_all)
+        .and_then(|()| std::fs::rename(partial, dest))
+        .map_err(failed);
+    if placed.is_err() {
+        let _ = std::fs::remove_file(partial);
     }
     placed
 }
@@ -419,14 +449,14 @@ fn read_through(
 
 /// The progress of one import: its file as the webview named it, where events go, and when
 /// the last went.
-struct Report {
+pub(crate) struct Report {
     path: String,
     sink: ProgressSink,
     throttle: Throttle,
 }
 
 impl Report {
-    fn new(path: String, sink: ProgressSink) -> Self {
+    pub(crate) fn new(path: String, sink: ProgressSink) -> Self {
         Self {
             path,
             sink,

@@ -4046,6 +4046,8 @@ struct FakeLocal {
     cancels: AtomicUsize,
     /// The options of each device listing asked for.
     listings: Mutex<Vec<LocalJobOptions>>,
+    /// Controls every installed model offers besides its own.
+    offered: Mutex<Vec<agent::media::ParamSpec>>,
 }
 
 /// An installed model's row for a catalog `entry`.
@@ -4096,7 +4098,13 @@ impl FakeLocal {
             releases: AtomicUsize::new(0),
             cancels: AtomicUsize::new(0),
             listings: Mutex::new(Vec::new()),
+            offered: Mutex::new(Vec::new()),
         }
+    }
+
+    /// Every installed model offers `spec` too.
+    fn offer(&self, spec: agent::media::ParamSpec) {
+        self.offered.lock().unwrap().push(spec);
     }
 
     fn starts(&self) -> usize {
@@ -4171,7 +4179,8 @@ impl MediaProvider for FakeLocal {
             .unwrap()
             .iter()
             .map(|(row, entry)| {
-                let params = LocalMediaProvider::params_for(entry);
+                let mut params = LocalMediaProvider::params_for(entry);
+                params.extend(self.offered.lock().unwrap().iter().cloned());
                 MediaModel {
                     id: row.id.clone(),
                     display_name: entry.name.clone(),
@@ -5682,6 +5691,60 @@ async fn a_model_a_local_run_waits_for_or_uses_is_not_deleted() {
     assert!(!h.manager.local_uses_model(KLEIN));
     assert_eq!(delete(KLEIN).await.unwrap(), [files[0].clone()]);
     assert!(h.store.get_gen_model(KLEIN).await.unwrap().is_none());
+}
+
+/// 0.2.0 (Task S10): a local run holds the LoRAs it attaches (its `loras` value, by id) from
+/// when it is queued until it ends: the engine opens their files, so *Delete* refuses them
+/// meanwhile. A run that attaches none, or another run's LoRA, holds nothing.
+#[tokio::test]
+async fn the_loras_a_local_run_waits_for_or_uses_are_in_use() {
+    let h = harness_with_local().await;
+    let attached = json!([
+        {"id": "local:aa", "weight": 0.8, "highNoise": false},
+        {"id": "hf:o/r:x.safetensors", "weight": 1.0, "highNoise": false},
+    ]);
+    // Until Task S11 offers its own LoRA control, the attached list is one value offered.
+    let entry = h.local.entry_of(KLEIN).await.unwrap().1;
+    let mut loras = LocalMediaProvider::params_for(&entry)[0].clone();
+    loras.key = "loras".into();
+    loras.company_default = None;
+    loras.requires = None;
+    loras.kind = ParamKind::Enum {
+        values: vec![agent::media::Choice {
+            value: attached.clone(),
+            label: "Two LoRAs".into(),
+        }],
+    };
+    h.local.offer(loras);
+    let with_loras = |prompt: &str| {
+        let mut req = h.local_req(prompt);
+        req.params.insert("loras".into(), attached.clone());
+        req
+    };
+
+    h.local.hold();
+    let other = h
+        .manager
+        .start(h.local_req_for(ZIMAGE, "other"), false)
+        .await
+        .unwrap();
+    h.wait_status(&other.id, "running").await;
+    assert!(!h.manager.local_uses_lora("local:aa"));
+    let first = h.manager.start(with_loras("one"), false).await.unwrap();
+    assert_eq!(h.run_dto(&first.id).await.status, "queued");
+    assert!(h.manager.local_uses_lora("local:aa"));
+    assert!(h.manager.local_uses_lora("hf:o/r:x.safetensors"));
+    assert!(!h.manager.local_uses_lora("local:bb"));
+
+    h.local.release_one();
+    h.wait_status(&other.id, "done").await;
+    h.wait_status(&first.id, "running").await;
+    assert!(h.manager.local_uses_lora("local:aa"));
+
+    h.local.release_all();
+    h.wait_status(&first.id, "done").await;
+    assert!(!h.manager.local_uses_lora("local:aa"));
+    assert!(!h.manager.local_uses_lora("hf:o/r:x.safetensors"));
 }
 
 #[tokio::test]

@@ -66,6 +66,7 @@ pub mod label;
 pub mod local;
 pub mod local_cmd;
 pub mod local_models;
+pub mod loras;
 pub mod manager;
 #[cfg(test)]
 mod manager_tests;

@@ -1520,10 +1520,16 @@ pub(crate) mod tests {
         // Set it up yourself (studio::setup_cmd).
         "studio_model_files",
         "studio_set_model_files",
+        // LoRAs (studio::loras).
+        "studio_loras",
+        "studio_lora_download",
+        "studio_lora_import",
+        "studio_lora_delete",
     ];
 
     /// The modules Studio's commands live in.
-    const STUDIO_COMMAND_MODULES: &[&str] = &["commands", "engine_cmd", "local_cmd", "setup_cmd"];
+    const STUDIO_COMMAND_MODULES: &[&str] =
+        &["commands", "engine_cmd", "local_cmd", "setup_cmd", "loras"];
 
     #[test]
     fn every_studio_command_is_listed_granted_and_registered() {

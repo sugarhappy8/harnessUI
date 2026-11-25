@@ -529,7 +529,11 @@ async fn start_group(
     // 0.1.0: a file there that an installed picture or video model uses at another revision
     // is never replaced: this file then goes to a place of its own.
     let state = app.state::<AppState>();
-    let used = gen_files_used(&state.store.list_gen_models().await?, None);
+    let used = gen_files_used(
+        &state.store.list_gen_models().await?,
+        &state.store.list_gen_loras().await?,
+        None,
+    );
     let mut files = Vec::new();
     for f in model_files.iter().chain(projector) {
         let dest = download_destination(&dir, repo, &f.path, commit, f.sha256.as_deref(), &used)
@@ -549,6 +553,7 @@ async fn start_group(
         image_files,
         generator: None,
         file_only: false,
+        lora: None,
     };
     let manager = app.state::<Arc<DownloadManager>>().inner().clone();
     manager.start(app, meta, files).await
@@ -1473,9 +1478,14 @@ pub(crate) fn chat_files_used(models: &[store::ModelRecord]) -> Vec<UsedFile> {
 }
 
 /// 0.1.0: the part files of the installed picture and video models, other than model
-/// `except` (the one being downloaded again), each with the SHA-256 its part records.
-pub(crate) fn gen_files_used(models: &[store::GenModel], except: Option<&str>) -> Vec<UsedFile> {
-    models
+/// `except` (the one being downloaded again), each with the SHA-256 its part records; and
+/// (0.2.0, Task S10) every LoRA's file with its SHA-256, so no download is renamed over one.
+pub(crate) fn gen_files_used(
+    models: &[store::GenModel],
+    loras: &[store::GenLora],
+    except: Option<&str>,
+) -> Vec<UsedFile> {
+    let parts = models
         .iter()
         .filter(|m| Some(m.id.as_str()) != except)
         .flat_map(|m| m.parts.as_array().cloned().unwrap_or_default())
@@ -1487,8 +1497,12 @@ pub(crate) fn gen_files_used(models: &[store::GenModel], except: Option<&str>) -
                     .and_then(serde_json::Value::as_str)
                     .map(str::to_owned),
             })
-        })
-        .collect()
+        });
+    let lora_files = loras.iter().map(|l| UsedFile {
+        path: l.file.clone(),
+        sha256: Some(l.sha256.clone()),
+    });
+    parts.chain(lora_files).collect()
 }
 
 /// 0.1.0: where a download of `repo`'s file `path` at revision `commit`, pinned to SHA-256
@@ -2495,7 +2509,7 @@ mod tests {
             source: store::GenSource::Catalog,
             added_at: 1,
         };
-        let used = gen_files_used(std::slice::from_ref(&klein), None);
+        let used = gen_files_used(std::slice::from_ref(&klein), &[], None);
         assert_eq!(
             used,
             [UsedFile {
@@ -2523,7 +2537,40 @@ mod tests {
             download_destination(&models, repo, file, commit, Some(&old), &used).unwrap(),
             shared
         );
-        assert!(gen_files_used(std::slice::from_ref(&klein), Some(&klein.id)).is_empty());
+        assert!(gen_files_used(std::slice::from_ref(&klein), &[], Some(&klein.id)).is_empty());
+        // 0.2.0 (Task S10): a LoRA's file counts too, with its SHA-256, whichever model is
+        // downloaded again.
+        let lora = store::GenLora {
+            id: "local:cd".into(),
+            name: "pixel art ü".into(),
+            file: models
+                .join("@loras")
+                .join("local")
+                .join("pixel art ü.safetensors")
+                .display()
+                .to_string(),
+            rel_name: "local/pixel art ü".into(),
+            repo: None,
+            revision: None,
+            path: None,
+            size_bytes: 4,
+            sha256: "c".repeat(64),
+            base_hint: Some("sdxl".into()),
+            format: store::LoraFileFormat::Kohya,
+            source: store::LoraSource::Import,
+            added_at: 1,
+        };
+        assert_eq!(
+            gen_files_used(
+                std::slice::from_ref(&klein),
+                std::slice::from_ref(&lora),
+                Some(&klein.id)
+            ),
+            [UsedFile {
+                path: lora.file.clone(),
+                sha256: Some("c".repeat(64))
+            }]
+        );
         assert_eq!(
             download_destination(&models, repo, file, commit, Some(&new), &[]).unwrap(),
             shared

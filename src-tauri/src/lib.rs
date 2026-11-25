@@ -360,6 +360,10 @@ pub fn run() {
             studio::local_cmd::studio_accept_local_notice,
             studio::setup_cmd::studio_model_files,
             studio::setup_cmd::studio_set_model_files,
+            studio::loras::studio_loras,
+            studio::loras::studio_lora_download,
+            studio::loras::studio_lora_import,
+            studio::loras::studio_lora_delete,
         ])
         .setup(|app| {
             let handle = app.handle().clone();

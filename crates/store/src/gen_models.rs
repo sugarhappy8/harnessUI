@@ -10,9 +10,10 @@
 //!   id in `catalog/sd-recipes.json`), or none when it still needs *Set it up yourself*.
 //! - **Shared files.** One file can serve several models: two picture models with the same
 //!   text encoder, or a chat model whose GGUF is also a picture model's encoder.
-//!   [`Store::file_uses`] counts every use in both tables, so a delete removes a file only
-//!   when nothing else uses it. [`Store::gen_model_files`] also counts every LoRA's file
-//!   (`gen_loras`), so a model delete never removes a LoRA's file.
+//!   [`Store::file_uses`] counts every use in both tables and (0.2.0) every LoRA's file
+//!   (`gen_loras`), so a delete removes a file only when nothing else uses it.
+//!   [`Store::gen_model_files`] also counts every LoRA's file, so a model delete never removes
+//!   a LoRA's file.
 //! - A **licence acceptance** is kept once per licence text (its SHA-256), whichever model
 //!   it was accepted for. These rows record downloads made with Studio 0.1.0.
 
@@ -206,7 +207,8 @@ fn delete_gen_model(conn: &mut Connection, id: &str) -> Result<Option<GenModel>,
 fn file_uses(conn: &Connection, path: &str) -> Result<u32, StoreError> {
     let sql = format!(
         "SELECT (SELECT count(*) FROM models WHERE path = ?1) \
-         + (SELECT count(*) FROM ({PART_FILES}) WHERE file = ?1)"
+         + (SELECT count(*) FROM ({PART_FILES}) WHERE file = ?1) \
+         + (SELECT count(*) FROM gen_loras WHERE file = ?1)"
     );
     Ok(conn.query_row(&sql, [path], |r| r.get(0))?)
 }
@@ -257,8 +259,9 @@ impl Store {
         self.call(move |c| delete_gen_model(c, &id)).await
     }
 
-    /// How many installed models use the file at `path`: chat models (`models.path`) and
-    /// every part of every picture or video model. The path is compared exactly, as stored.
+    /// How many installed models use the file at `path`: chat models (`models.path`), every
+    /// part of every picture or video model, and (0.2.0) every LoRA (`gen_loras.file`). The
+    /// path is compared exactly, as stored.
     pub async fn file_uses(&self, path: &str) -> Result<u32, StoreError> {
         let path = path.to_owned();
         self.call(move |c| file_uses(c, &path)).await

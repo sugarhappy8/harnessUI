@@ -239,3 +239,7 @@ studio_import_model
 studio_accept_local_notice
 studio_model_files
 studio_set_model_files
+studio_loras
+studio_lora_download
+studio_lora_import
+studio_lora_delete

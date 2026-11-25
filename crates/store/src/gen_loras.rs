@@ -108,7 +108,9 @@ const GEN_LORA_COLUMNS: &str = "id, name, file, rel_name, repo, revision, path, 
 /// Characters the engine's `<lora:NAME:W>` tag cannot carry in a name (correction 14).
 /// `runtime::sd::args::valid_lora_name` is the authority on LoRA names (it also refuses `\`,
 /// control characters, an absolute name and `.` or `..` parts) and checks every name again
-/// before a run; keep these four in step with it.
+/// before a run; keep these four in step with it, and with the app's
+/// `studio::loras::sanitize_lora_component`, which makes the names. (This crate does not
+/// depend on `runtime`, so it cannot call it.)
 const NOT_IN_A_NAME: [char; 4] = [':', '<', '>', '|'];
 
 fn gen_lora_from_row(r: &Row<'_>) -> rusqlite::Result<GenLora> {
@@ -424,6 +426,12 @@ mod tests {
                 .unwrap()
                 .contains("/m/@loras/local/x.safetensors")
         );
+        // `file_uses` counts it as a use too (S1 minor), compared exactly as stored.
+        assert_eq!(
+            s.file_uses("/m/@loras/local/x.safetensors").await.unwrap(),
+            1
+        );
+        assert_eq!(s.file_uses("/m/@loras/local/x").await.unwrap(), 0);
 
         // With a model's part files, each once; a deleted LoRA's file no longer counts.
         s.insert_gen_model(NewGenModel {
@@ -449,6 +457,10 @@ mod tests {
         assert_eq!(
             s.gen_model_files().await.unwrap(),
             ["/m/a.safetensors".to_owned()].into()
+        );
+        assert_eq!(
+            s.file_uses("/m/@loras/local/x.safetensors").await.unwrap(),
+            0
         );
     }
 }

@@ -1352,6 +1352,32 @@ pub fn import_failed(details: impl Into<String>) -> AppError {
     )
 }
 
+/// The code of [`not_a_lora`].
+pub const NOT_A_LORA: &str = "studio_not_a_lora";
+
+/// *Add a LoRA file*, or a LoRA's download, on a file whose header is not a LoRA's
+/// (`details`: what it is instead). A download whose file turns out not to be one is not
+/// added, and its file goes.
+pub fn not_a_lora(details: impl Into<String>) -> AppError {
+    AppError::new(
+        NOT_A_LORA,
+        "This file isn't a LoRA.",
+        "Choose a LoRA file.",
+        details,
+    )
+}
+
+/// *Delete* on a LoRA while a run on this computer waits for it or uses it: deleting a file
+/// the Studio engine has open fails half-way on Windows.
+pub fn lora_in_use() -> AppError {
+    AppError::new(
+        "studio_lora_in_use",
+        "A run on this computer is using this LoRA.",
+        "Stop the run, then delete it.",
+        String::new(),
+    )
+}
+
 /// A file from this computer that is not a model file Studio reads.
 pub fn not_a_model_format() -> AppError {
     AppError::new(
@@ -1900,6 +1926,8 @@ mod tests {
             import_is_lora(),
             import_file_changed(),
             import_failed("No space left on device"),
+            not_a_lora("a model for sdxl"),
+            lora_in_use(),
         ];
         all.extend(every_pack_error().iter().map(engine_not_installed));
         for to in [PictureUse::Chat, PictureUse::Prompt] {

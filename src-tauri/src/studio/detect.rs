@@ -250,13 +250,25 @@ impl DetectService {
         detail: &RepoDetail,
         file: &RepoFile,
     ) -> Result<FileFacts, NotRead> {
+        self.read_one(hf, detail, file)
+            .await
+            .map_err(|e| not_read(&e))
+    }
+
+    /// The facts of `detail`'s listed `file`, from the cache or its header (one bounded read,
+    /// `read_remote`), with the read's own error: Task S10 reads a LoRA's header before its
+    /// download starts. Kept in the cache like a repo's reading.
+    pub(crate) async fn read_one(
+        &self,
+        hf: &HfClient,
+        detail: &RepoDetail,
+        file: &RepoFile,
+    ) -> Result<FileFacts, RemoteError> {
         let key = Self::key(detail, file);
         if let Some(found) = key.as_ref().and_then(|k| self.cache().get(k)) {
             return Ok(found);
         }
-        let index = read_remote(hf, &detail.id, &detail.commit, &file.path, file.size)
-            .await
-            .map_err(|e| not_read(&e))?;
+        let index = read_remote(hf, &detail.id, &detail.commit, &file.path, file.size).await?;
         let found = inspect(&index);
         if let Some(key) = key {
             self.cache().put(key, found.clone());

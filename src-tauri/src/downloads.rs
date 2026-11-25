@@ -5,7 +5,8 @@
 //! 0.1.0 Studio: a picture or video model is one group too ([`GenGroup`]): its parts come
 //! from several repositories, each at its own revision ([`row_commit`]), and once every part
 //! is checked it joins Studio's installed models instead of the chat list
-//! ([`register_gen_model`]).
+//! ([`register_gen_model`]). 0.2.0: a LoRA is a group of one file, which joins Studio's LoRAs
+//! once it is checked ([`register_lora`]).
 
 use std::collections::{BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
@@ -86,6 +87,27 @@ pub struct GenGroupPart {
     pub present: Option<String>,
 }
 
+/// 0.2.0 (Task S10): the LoRA a group downloads (its saved metadata's [`GroupMeta::lora`]),
+/// as its row will be (`studio::loras`). Its one file is the group's one row.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LoraGroup {
+    /// The LoRA's id: `hf:<owner>/<repo>:<path>`.
+    pub id: String,
+    /// Its name as shown: its file's stem.
+    pub name: String,
+    /// Its name relative to the LoRA folder (`studio::loras::lora_folder`), with `/`
+    /// separators and no extension: the name its engine tag carries.
+    pub rel_name: String,
+    pub repo: String,
+    /// The 40-hex commit it is downloaded at.
+    pub revision: String,
+    /// Its path inside the repository.
+    pub path: String,
+    pub size: u64,
+    pub sha256: String,
+}
+
 /// What a group is for, kept beside its rows.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -129,6 +151,11 @@ pub struct GroupMeta {
     /// Save a verified Hub file without registering an installed chat or Studio model.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub file_only: bool,
+    /// 0.2.0 (Task S10): the LoRA this group downloads (`model_files` is empty, and `repo` and
+    /// `commit` are its file's). When it is done it joins Studio's LoRAs ([`register_lora`]).
+    /// Absent in every other group.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lora: Option<LoraGroup>,
 }
 
 /// The commit `file` of `repo` is downloaded at. The `downloads` table has no commit column:
@@ -511,10 +538,78 @@ async fn check_added(
         .map_err(|e| AppError::internal(format!("the model file's check stopped: {e}")))
 }
 
+/// 0.2.0 (Task S10): adds the LoRA `group` downloaded ([`GroupMeta::lora`]) to Studio's LoRAs
+/// once its file is checked (its row `Verifying` or done, with the pinned SHA-256 and size):
+/// its header, read again here, gives its format and base (`studio::loras::read_lora_file`).
+/// A file whose header is not a LoRA's is refused (`studio_not_a_lora`): nothing is added, and
+/// the file goes when the group wrote it itself and nothing else uses or writes it. The same
+/// LoRA downloaded again replaces its row: the same id, name and file.
+pub(crate) async fn register_lora(
+    store: &store::Store,
+    models_dir: &Path,
+    group: &str,
+    meta: &GroupMeta,
+) -> AppResult<()> {
+    let Some(lora) = &meta.lora else {
+        return Err(AppError::internal("a download without a LoRA"));
+    };
+    let rows = store.list_downloads(Some(group.to_string())).await?;
+    let row = rows
+        .iter()
+        .find(|r| r.repo == lora.repo && r.file == lora.path)
+        .filter(|r| {
+            matches!(
+                r.status,
+                DownloadStatus::Verifying | DownloadStatus::Completed
+            )
+        })
+        .filter(|r| r.sha256.eq_ignore_ascii_case(&lora.sha256) && r.size_bytes == lora.size)
+        .ok_or_else(|| AppError::internal("a LoRA's file is not checked"))?;
+    let path = PathBuf::from(&row.dest_path);
+    let (format, base) = match crate::studio::loras::read_lora_file(&path).await {
+        Ok(read) => read,
+        Err(refused) if refused.code == studio_errors::NOT_A_LORA => {
+            // Only a file the group wrote itself: a file already here is never removed.
+            if written_by(store, group).await.contains(&row.dest_path) {
+                let writing = files_being_written(store, Some(group)).await?;
+                let busy = |p: &Path| writing.contains(&p.display().to_string());
+                crate::studio::local_models::remove_unused_files(store, models_dir, &[path], &busy)
+                    .await?;
+            }
+            tracing::warn!(
+                lora = %lora.id,
+                "a downloaded LoRA file is not a LoRA: {}",
+                refused.details
+            );
+            return Err(refused);
+        }
+        Err(e) => return Err(e),
+    };
+    store
+        .insert_gen_lora(store::NewGenLora {
+            id: lora.id.clone(),
+            name: lora.name.clone(),
+            file: row.dest_path.clone(),
+            rel_name: lora.rel_name.clone(),
+            repo: Some(lora.repo.clone()),
+            revision: Some(lora.revision.clone()),
+            path: Some(lora.path.clone()),
+            size_bytes: lora.size,
+            sha256: lora.sha256.clone(),
+            base_hint: base.map(|b| b.word().to_owned()),
+            format: crate::studio::loras::file_format(format),
+            source: store::LoraSource::Search,
+        })
+        .await?;
+    tracing::info!(lora = %lora.id, "LoRA downloaded");
+    Ok(())
+}
+
 /// What a picture or video model's group's task does once every file is fetched and checked
 /// (`DownloadManager::run_group`), for tests that put the files in place themselves: each row
 /// checked (`Verifying`) and its file noted as one the group wrote, the model added
-/// ([`register_gen_model`]), then every row done and the note dropped.
+/// ([`register_gen_model`]; 0.2.0: a LoRA's group adds its LoRA, [`register_lora`]), then every
+/// row done and the note dropped.
 #[cfg(test)]
 pub(crate) async fn finish_gen_group(
     store: &store::Store,
@@ -550,7 +645,11 @@ pub(crate) async fn finish_gen_group_while(
             )
             .await?;
     }
-    register_gen_model(store, models_dir, group, &meta, in_use).await?;
+    if meta.lora.is_some() {
+        register_lora(store, models_dir, group, &meta).await?;
+    } else {
+        register_gen_model(store, models_dir, group, &meta, in_use).await?;
+    }
     for row in &rows {
         store
             .update_download(
@@ -641,6 +740,9 @@ pub struct DownloadGroupDto {
     /// ([`GenGroup::gen_model_id`]), so Get local models shows its progress on that model's
     /// row; `None` for a chat model's group.
     pub gen_model_id: Option<String>,
+    /// 0.2.0 (Task S10): the id of the LoRA this group downloads ([`LoraGroup::id`]), so a
+    /// finished LoRA download can be offered for use; `None` for any other group.
+    pub lora_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub saved_file: Option<SavedFileDto>,
 }
@@ -1038,6 +1140,7 @@ fn plan_start(
         m.file_only == new.file_only
             && m.image_file_for == new.image_file_for
             && generator_id(&m) == generator_id(new)
+            && lora_id(&m) == lora_id(new)
     });
     if !(one_group && all_there && same_kind) {
         return Start::Busy {
@@ -1059,6 +1162,12 @@ fn plan_start(
 /// The picture or video model a group downloads, if any.
 fn generator_id(meta: &GroupMeta) -> Option<&str> {
     meta.generator.as_ref().map(|g| g.gen_model_id.as_str())
+}
+
+/// 0.2.0: the LoRA a group downloads, if any. Two LoRAs whose names meet in one file (a
+/// repo's `x.safetensors` and `x.sft`) never join: the second waits for the first.
+fn lora_id(meta: &GroupMeta) -> Option<&str> {
+    meta.lora.as_ref().map(|l| l.id.as_str())
 }
 
 /// A new download refused because another download writes some of its files
@@ -1178,6 +1287,8 @@ fn last_step_error(meta: &GroupMeta, e: &AppError) -> AppError {
         "The image file was downloaded, but it could not be added to its model."
     } else if meta.generator.is_some() {
         "The model was downloaded, but it could not be added to Studio."
+    } else if meta.lora.is_some() {
+        "The LoRA was downloaded, but it could not be added to Studio."
     } else {
         "The model was downloaded, but it could not be added to Installed."
     };
@@ -1471,6 +1582,10 @@ impl DownloadManager {
                 .as_ref()
                 .and_then(|m| m.generator.as_ref())
                 .map(|g| g.gen_model_id.clone()),
+            lora_id: meta
+                .as_ref()
+                .and_then(|m| m.lora.as_ref())
+                .map(|l| l.id.clone()),
         }))
     }
 
@@ -1806,12 +1921,14 @@ impl DownloadManager {
             // (and starting again at every start of the app). Its files stay: Resume tries
             // this step again without downloading them. 0.1.0 Studio: a picture or video
             // model whose diffusion file is another model says so in its own words; its files
-            // are gone, so Resume would download them again.
-            let err = if e.code == studio_errors::NOT_THAT_MODEL {
-                e
-            } else {
-                last_step_error(&meta, &e)
-            };
+            // are gone, so Resume would download them again. 0.2.0: so does a LoRA's file that
+            // is not a LoRA.
+            let err =
+                if e.code == studio_errors::NOT_THAT_MODEL || e.code == studio_errors::NOT_A_LORA {
+                    e
+                } else {
+                    last_step_error(&meta, &e)
+                };
             mark_failed(&state.store, group, &err).await?;
             return Err(err);
         }
@@ -1879,7 +1996,7 @@ impl DownloadManager {
     }
 
     /// Adds the finished model to the installed list; a picture or video model joins Studio's
-    /// instead ([`register_gen_model`]).
+    /// instead ([`register_gen_model`]), and (0.2.0) a LoRA Studio's LoRAs ([`register_lora`]).
     async fn register_model(
         &self,
         app: &AppHandle,
@@ -1887,6 +2004,10 @@ impl DownloadManager {
         meta: &GroupMeta,
     ) -> AppResult<()> {
         let state = app.state::<AppState>();
+        if meta.lora.is_some() {
+            let models_dir = crate::hub::models_dir(app).await;
+            return register_lora(&state.store, &models_dir, group, meta).await;
+        }
         if meta.generator.is_some() {
             let models_dir = crate::hub::models_dir(app).await;
             // A run on this computer may hold the model a set-up change or *Download again*
@@ -2691,6 +2812,7 @@ mod tests {
             image_files: None,
             generator: None,
             file_only: false,
+            lora: None,
         }
     }
 
@@ -4105,6 +4227,73 @@ mod tests {
         assert_eq!(saved.path, path.display().to_string());
         assert_eq!(group.status, "done");
         assert!(group.generator_kind.is_none() && group.gen_model_id.is_none());
+    }
+
+    /// 0.2.0 (Task S10): a LoRA's group says which LoRA it downloads, so a finished LoRA
+    /// download can be offered for use; any other group says none. A second download of the
+    /// same LoRA joins the first; another LoRA whose name meets the first's file never does.
+    #[tokio::test]
+    async fn a_lora_group_says_which_lora_it_downloads() {
+        let dir = Scratch::new();
+        let store = store::Store::open_in_memory().unwrap();
+        let manager = DownloadManager::default();
+        let file = dir.path().join("@loras/o/r/x.safetensors");
+        recorded(&store, "lora", &file, 100, S::Downloading).await;
+        recorded(
+            &store,
+            "chat",
+            &dir.path().join("m.gguf"),
+            100,
+            S::Downloading,
+        )
+        .await;
+        let lora = GroupMeta {
+            lora: Some(LoraGroup {
+                id: "hf:o/r:x.safetensors".into(),
+                name: "x".into(),
+                rel_name: "o/r/x".into(),
+                repo: "o/r".into(),
+                revision: "4".repeat(40),
+                path: "x.safetensors".into(),
+                size: 100,
+                sha256: "ab".repeat(32),
+            }),
+            ..meta()
+        };
+        store.set_setting(&meta_key("lora"), &lora).await.unwrap();
+        store.set_setting(&meta_key("chat"), &meta()).await.unwrap();
+        let shown = manager.group_dto(&store, "lora").await.unwrap().unwrap();
+        let chat = manager.group_dto(&store, "chat").await.unwrap().unwrap();
+        assert_eq!(shown.lora_id.as_deref(), Some("hf:o/r:x.safetensors"));
+        assert_eq!(
+            serde_json::to_value(&shown).unwrap()["loraId"],
+            "hf:o/r:x.safetensors"
+        );
+        assert!(shown.gen_model_id.is_none() && shown.generator_kind.is_none());
+        assert_eq!(chat.lora_id, None);
+        assert_eq!(
+            serde_json::to_value(&chat).unwrap()["loraId"],
+            serde_json::Value::Null
+        );
+
+        let rows = store.list_downloads(Some("lora".into())).await.unwrap();
+        let metas = [("lora", lora.clone())];
+        assert_eq!(
+            plan(&lora, &[&file], &rows, &metas, &["lora"]),
+            Start::Join("lora".into())
+        );
+        let sft = GroupMeta {
+            lora: lora.lora.clone().map(|l| LoraGroup {
+                id: "hf:o/r:x.sft".into(),
+                path: "x.sft".into(),
+                ..l
+            }),
+            ..meta()
+        };
+        assert_eq!(
+            plan(&sft, &[&file], &rows, &metas, &["lora"]),
+            Start::Busy { running: true }
+        );
     }
 
     /// No recommended model's download is refused as another model: each recommended entry

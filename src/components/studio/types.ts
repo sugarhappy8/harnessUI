@@ -766,6 +766,29 @@ export interface LocalModels {
   videoPossible: boolean;
   installedBytes: number;
   moreFit: number;
+  /** The LoRAs, newest first. */
+  loras: Lora[];
+}
+
+/** How a LoRA file stores its weights (the backend's `LoraFormat`): never shown. */
+export type LoraFormat = "kohya" | "peft" | "lycoris" | "diff";
+
+/** A LoRA Studio's engine can apply: downloaded from Hugging Face or added from this
+ *  computer, kept in Studio's LoRA folder. */
+export interface Lora {
+  /** `hf:<owner>/<repo>:<path>` or `local:<SHA-256>`: what a draft attaches. Never shown. */
+  id: string;
+  /** Its file's name without the extension, as written. */
+  name: string;
+  /** The version of the models it was most likely made for; `null` when that cannot be told. */
+  base: SdVersion | null;
+  format: LoraFormat;
+  sizeBytes: number;
+  source: "search" | "import";
+  /** The Hugging Face repository it was downloaded from; `null` when added from this computer. */
+  repo: string | null;
+  /** Its file is gone. */
+  missing: boolean;
 }
 
 /** What a Hugging Face search looks for. */

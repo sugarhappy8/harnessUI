@@ -20,6 +20,7 @@ import type {
   LocalRepo,
   LocalSearchPage,
   LocalSource,
+  Lora,
   ModelFiles,
   SearchFilter,
   SetModelFilesResult,
@@ -156,6 +157,20 @@ export const studioModelFiles = (genModelId: string) => invoke<ModelFiles>("stud
  *  at once or by the download it starts (`downloadGroup`). */
 export const studioSetModelFiles = (genModelId: string, choice: SetupChoice) =>
   invoke<SetModelFilesResult>("studio_set_model_files", { genModelId, choice });
+
+// ---- LoRAs --------------------------------------------------------------------------------
+
+/** The LoRAs, newest first. Sends nothing. */
+export const studioLoras = () => invoke<Lora[]>("studio_loras");
+/** Downloads a searched repository's LoRA file and returns its download group ID; the LoRA is
+ *  added once its file is checked (`DownloadGroup.loraId`). */
+export const studioLoraDownload = (repo: string, commit: string, file: string) =>
+  invoke<string>("studio_lora_download", { repo, commit, file });
+/** *Add a LoRA file*: the file copied into Studio's LoRA folder, with progress
+ *  (`onImportProgress`). The same file added again gives the same LoRA. */
+export const studioLoraImport = (path: string) => invoke<Lora>("studio_lora_import", { path });
+/** Deletes a LoRA and its file, unless a run on this computer uses it. */
+export const studioLoraDelete = (id: string) => invoke<void>("studio_lora_delete", { id });
 
 // ---- events -------------------------------------------------------------------------------
 

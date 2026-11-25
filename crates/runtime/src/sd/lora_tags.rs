@@ -62,7 +62,9 @@ pub fn lora_tag(tag: &LoraTag) -> String {
 ///
 /// This is the authority on LoRA names. The store's `NOT_IN_A_NAME`
 /// (`crates/store/src/gen_loras.rs`) refuses `:` `<` `>` `|` and an empty name when a LoRA is
-/// saved; keep the two in step.
+/// saved, and Studio makes each name from parts that `sanitize_lora_component`
+/// (`src-tauri/src/studio/loras.rs`) has stripped of these five and of control characters;
+/// keep the three in step.
 pub fn valid_lora_name(name: &str) -> bool {
     const NOT_IN_A_NAME: [char; 5] = [':', '<', '>', '|', '\\'];
     !name.is_empty()

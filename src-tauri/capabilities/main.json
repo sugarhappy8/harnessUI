@@ -265,6 +265,10 @@
     "allow-studio-import-model",
     "allow-studio-accept-local-notice",
     "allow-studio-model-files",
-    "allow-studio-set-model-files"
+    "allow-studio-set-model-files",
+    "allow-studio-loras",
+    "allow-studio-lora-download",
+    "allow-studio-lora-import",
+    "allow-studio-lora-delete"
   ]
 }

@@ -2543,7 +2543,8 @@ export const LOCAL: LocalModels = {
   "noticeAccepted": true,
   "videoPossible": true,
   "installedBytes": 15059398204,
-  "moreFit": 1
+  "moreFit": 1,
+  "loras": []
 };
 
 export const LOCAL_RUN: Run = {

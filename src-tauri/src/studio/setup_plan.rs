@@ -965,15 +965,24 @@ pub(crate) fn checked_disk_file(path: impl AsRef<Path>) -> AppResult<(PathBuf, u
     }
     let name = real
         .file_name()
-        .map(|n| n.to_string_lossy().to_lowercase())
+        .map(|n| n.to_string_lossy().into_owned())
         .unwrap_or_default();
+    readable_file_name(&name)?;
+    Ok((real, meta.len()))
+}
+
+/// Refuses a file name of a format Studio does not read: a pickle file by its extension, in
+/// any case ("Studio can't read .ckpt files"), and any other name not ending in
+/// `.safetensors`, `.sft` or `.gguf`. Task S10 checks a LoRA's name in a repo with it too.
+pub(crate) fn readable_file_name(name: &str) -> AppResult<()> {
+    let name = name.to_lowercase();
     if let Some(ext) = pickle_extension(&name) {
         return Err(errors::cannot_read_file(ext));
     }
     if !READ_EXTENSIONS.iter().any(|ext| name.ends_with(ext)) {
         return Err(errors::not_a_model_format());
     }
-    Ok((real, meta.len()))
+    Ok(())
 }
 
 /// The pickle extension (`.ckpt`, `.pt`, `.pth`, `.bin`) a file name ends with, in any case.

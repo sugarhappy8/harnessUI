@@ -1,0 +1,1270 @@
+//! LoRAs (design 8, Task S10): Studio's LoRAs, each a row of `gen_loras` whose file is in one
+//! folder, `<models>/@loras` ([`lora_folder`]), so the engine reads every LoRA by its name
+//! relative to that folder (`--lora-model-dir`): the engine's LoRA name cannot hold `:`, so
+//! never a full Windows path (correction 14).
+//!
+//! - **Its name** (`rel_name`, the name its engine tag carries): `<owner>/<repo>/<path without
+//!   its extension>` for a LoRA downloaded from a Hugging Face search
+//!   ([`rel_name_for_download`]), `local/<its file's stem>` for one added from this computer
+//!   ([`rel_name_for_import`]), each part without what the engine's tag cannot carry
+//!   ([`sanitize_lora_component`]). A name another LoRA has (in any case: one file on Windows
+//!   and macOS), or one the engine would read another file for, is followed by " (2)", " (3)",
+//!   …. Its file is `<models>/@loras/<rel_name>` with `.safetensors` for a `.safetensors` or
+//!   `.sft` file and `.gguf` for a `.gguf` one ([`stored_extension`]): the engine tries only
+//!   `.gguf`, `.safetensors`, `.pt` and `.ckpt` after a name.
+//! - **What is shown** ([`LoraDto`]): its file's stem as written, spaces and any Unicode kept;
+//!   the base version its header says; whether its file is gone.
+//! - **Downloading one** ([`prepare_lora_download`]): its repo's listing at the commit read
+//!   again; a file Studio cannot read, one with no published SHA-256, and one whose header
+//!   (one bounded read, kept in the `DetectService`'s cache) is not a LoRA's
+//!   (`studio_not_a_lora`) are refused before anything starts. Then one download group of its
+//!   one file, pinned by repository, commit, path, size and SHA-256 and checked against it;
+//!   once checked it is added (`downloads::register_lora`) as `hf:<owner>/<repo>:<path>`.
+//! - **Adding one from this computer** ([`import_lora_file`]): the path is untrusted input,
+//!   checked as a model file's is (`setup_plan::read_disk_file`); its header is read where it
+//!   is, and a file that is not a LoRA is refused before anything is copied. It is always
+//!   copied (the engine's names are relative to one folder) into `<models>/@loras/local/`
+//!   through a `.partial` file, hashed on the way with `studio-import-progress` events, as a
+//!   model file's import is (`import::copy_to_partial`). Its id is `local:<SHA-256>`, so the
+//!   same file added again is the same row, with one file. A copy no row owns after a failure
+//!   is removed.
+//! - **Deleting one** ([`delete_lora_files`]): refused while a run on this computer waits for
+//!   it or uses it (`studio_lora_in_use`); else its row goes, then its file unless something
+//!   else uses it or a download not finished yet writes it (`local_models::remove_unused_files`,
+//!   inside the models folder only).
+//!
+//! Each command is a thin wrapper over a plain function taking what it reads
+//! ([`LocalCmdDeps`]), as Get local models' are.
+
+use std::collections::BTreeSet;
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, LazyLock};
+
+use models::download::FileSpec;
+use models::hf::HfError;
+use models::sd::FileFacts;
+use models::sd::detect::SdVersion;
+use models::sd::inspect::{FileKind, LoraFormat, inspect_local};
+use models::sd::remote::RemoteError;
+use tauri::{AppHandle, Emitter, Manager, State};
+
+use super::errors;
+use super::import::{IMPORT_PROGRESS_EVENT, ProgressSink, Report, copy_to_partial, place_partial};
+use super::local_cmd::{LocalCmdDeps, app_deps_for_writing};
+use super::local_models::remove_unused_files;
+use super::manager::StudioManager;
+use super::setup_plan::{DiskFile, read_disk_file, readable_file_name};
+use crate::commands::only_main_window;
+use crate::downloads::{DownloadManager, GroupMeta, LoraGroup, files_being_written};
+use crate::dto::LoraDto;
+use crate::error::{AppError, AppResult};
+use crate::state::AppState;
+
+/// The models folder's folder of LoRAs. Not a Hugging Face owner name, so never a model's
+/// place.
+pub const LORA_FOLDER: &str = "@loras";
+
+/// The LoRA folder's folder of the LoRAs added from this computer: the first part of their
+/// names.
+const IMPORTED: &str = "local";
+
+/// The name of a part with nothing of its own left.
+const NO_NAME: &str = "lora";
+
+/// The extensions the engine tries after a LoRA's name, in its order, when no file has the
+/// name itself (`extract_and_remove_lora`, `examples/common/common.cpp:2357` at the pinned
+/// commit).
+const ENGINE_EXTENSIONS: [&str; 4] = [".gguf", ".safetensors", ".pt", ".ckpt"];
+
+/// Studio's LoRA folder in the models folder `models_dir`: the engine's `--lora-model-dir`.
+pub fn lora_folder(models_dir: &Path) -> PathBuf {
+    models_dir.join(LORA_FOLDER)
+}
+
+/// One part of a LoRA's name: `s` without `:` `<` `>` `|` `\` and control characters (what
+/// the engine's tag cannot carry, `runtime::sd::args::valid_lora_name`), with spaces and dots
+/// trimmed at both ends (so never `.` or `..`, and no name Windows would trim); "lora" when
+/// nothing is left. Spaces inside and any other Unicode are kept.
+pub fn sanitize_lora_component(s: &str) -> String {
+    let kept: String = s
+        .chars()
+        .filter(|c| !matches!(c, ':' | '<' | '>' | '|' | '\\') && !c.is_control())
+        .collect();
+    match kept.trim_matches([' ', '.']) {
+        "" => NO_NAME.to_owned(),
+        trimmed => trimmed.to_owned(),
+    }
+}
+
+/// A file name without its last extension (`pixel art ü.safetensors` → `pixel art ü`).
+fn stem(file_name: &str) -> &str {
+    file_name
+        .rsplit_once('.')
+        .map_or(file_name, |(stem, _)| stem)
+}
+
+/// The name a LoRA from the file `file_name` is shown with: its stem as written, or the whole
+/// name when that is empty.
+fn shown_name(file_name: &str) -> String {
+    match stem(file_name) {
+        "" => file_name.to_owned(),
+        stem => stem.to_owned(),
+    }
+}
+
+/// The name of the LoRA downloaded from `repo`'s file `path`: `<owner>/<repo>/<path without
+/// its extension>`, each part sanitised ([`sanitize_lora_component`]).
+pub fn rel_name_for_download(repo: &str, path: &str) -> String {
+    let mut parts: Vec<&str> = path.split('/').collect();
+    if let Some(last) = parts.last_mut() {
+        *last = stem(last);
+    }
+    repo.split('/')
+        .chain(parts)
+        .map(sanitize_lora_component)
+        .collect::<Vec<_>>()
+        .join("/")
+}
+
+/// The name of a LoRA added from the file `file_name` on this computer: `local/<its stem,
+/// sanitised>`, followed by " (2)", " (3)", … while `taken` has that name in any case (two
+/// names that differ only in case are one file on Windows and macOS).
+pub fn rel_name_for_import(file_name: &str, taken: &BTreeSet<String>) -> String {
+    let base = format!("{IMPORTED}/{}", sanitize_lora_component(stem(file_name)));
+    let taken: BTreeSet<String> = taken.iter().map(|t| t.to_lowercase()).collect();
+    free_name(&base, |name| taken.contains(&name.to_lowercase()))
+}
+
+/// `base`, or the first of `base (2)`, `base (3)`, … that is not `taken`.
+fn free_name(base: &str, taken: impl Fn(&str) -> bool) -> String {
+    let mut name = base.to_owned();
+    let mut n = 1u32;
+    while taken(&name) {
+        n += 1;
+        name = format!("{base} ({n})");
+    }
+    name
+}
+
+/// The extension a LoRA's file is saved with, from its file's name: `.gguf` for a `.gguf`
+/// file, else `.safetensors` (a `.safetensors` or `.sft` file: the only other names Studio
+/// reads, `setup_plan::readable_file_name`). The engine finds a `.sft` file under no name.
+pub fn stored_extension(path: &str) -> &'static str {
+    if path.to_lowercase().ends_with(".gguf") {
+        ".gguf"
+    } else {
+        ".safetensors"
+    }
+}
+
+/// The file of the LoRA named `rel_name` saved with extension `ext`: `<models>/@loras/
+/// <rel_name><ext>`, one path component per part of the name.
+fn lora_file(models_dir: &Path, rel_name: &str, ext: &str) -> PathBuf {
+    let mut path = lora_folder(models_dir);
+    path.extend(rel_name.split('/'));
+    let mut file = path.into_os_string();
+    file.push(ext);
+    PathBuf::from(file)
+}
+
+/// Whether the engine would read something else for the LoRA named `rel_name` saved with
+/// `ext`: anything at the name itself (it looks there first: a folder of other LoRAs), or a
+/// file of the name with another extension it tries.
+fn shadowed(models_dir: &Path, rel_name: &str, ext: &str) -> bool {
+    lora_file(models_dir, rel_name, "").exists()
+        || ENGINE_EXTENSIONS
+            .iter()
+            .filter(|e| **e != ext)
+            .any(|e| lora_file(models_dir, rel_name, e).exists())
+}
+
+/// The names the entries of the imported LoRAs' folder `dir` take: each one's own name and its
+/// name without its last extension, after `local/`. A name the engine would read one of them
+/// for is not given to a new file.
+fn names_in(dir: &Path) -> BTreeSet<String> {
+    let mut names = BTreeSet::new();
+    for entry in std::fs::read_dir(dir).into_iter().flatten().flatten() {
+        let name = entry.file_name().to_string_lossy().into_owned();
+        names.insert(format!("{IMPORTED}/{}", stem(&name)));
+        names.insert(format!("{IMPORTED}/{name}"));
+    }
+    names
+}
+
+/// The store's word for a LoRA's format.
+pub(crate) fn file_format(format: LoraFormat) -> store::LoraFileFormat {
+    match format {
+        LoraFormat::Kohya => store::LoraFileFormat::Kohya,
+        LoraFormat::Peft => store::LoraFileFormat::Peft,
+        LoraFormat::Lycoris => store::LoraFileFormat::Lycoris,
+        LoraFormat::Diff => store::LoraFileFormat::Diff,
+    }
+}
+
+/// A LoRA's format, from the store's word.
+fn lora_format(format: store::LoraFileFormat) -> LoraFormat {
+    match format {
+        store::LoraFileFormat::Kohya => LoraFormat::Kohya,
+        store::LoraFileFormat::Peft => LoraFormat::Peft,
+        store::LoraFileFormat::Lycoris => LoraFormat::Lycoris,
+        store::LoraFileFormat::Diff => LoraFormat::Diff,
+    }
+}
+
+/// LoRA `row` as the webview gets it.
+pub(crate) fn lora_dto(row: &store::GenLora) -> LoraDto {
+    LoraDto {
+        id: row.id.clone(),
+        name: row.name.clone(),
+        base: row.base_hint.as_deref().and_then(SdVersion::from_word),
+        format: lora_format(row.format),
+        size_bytes: row.size_bytes,
+        source: row.source.as_str().to_owned(),
+        repo: row.repo.clone(),
+        missing: !Path::new(&row.file).is_file(),
+    }
+}
+
+/// Every LoRA, newest first, each saying whether its file is gone.
+pub async fn list_loras(store: &store::Store) -> AppResult<Vec<LoraDto>> {
+    Ok(store.list_gen_loras().await?.iter().map(lora_dto).collect())
+}
+
+/// The format and base version of the LoRA whose header says `facts`; any other file is
+/// `studio_not_a_lora`, its details saying what it is.
+fn lora_of(facts: &FileFacts) -> AppResult<(LoraFormat, Option<SdVersion>)> {
+    let is = match &facts.kind {
+        FileKind::Lora { format, base } => return Ok((*format, *base)),
+        FileKind::Model { version, .. } => format!("a model for {}", version.word()),
+        FileKind::Extra { slot } => format!("a {} part", slot.word()),
+        FileKind::CannotRun { reason, .. } => format!("a file Studio cannot run ({reason:?})"),
+    };
+    Err(errors::not_a_lora(format!("the file is {is}")))
+}
+
+/// The format and base version of the LoRA file at `path`, from its header (read off the
+/// async runtime); a file whose header does not read, or is not a LoRA's, is
+/// `studio_not_a_lora`. A downloaded LoRA is checked with it before it is added.
+pub(crate) async fn read_lora_file(path: &Path) -> AppResult<(LoraFormat, Option<SdVersion>)> {
+    let read_from = path.to_path_buf();
+    let facts = tokio::task::spawn_blocking(move || inspect_local(&read_from))
+        .await
+        .map_err(|e| AppError::internal(format!("reading a LoRA's header: {e}")))?
+        .map_err(|e| errors::not_a_lora(format!("its header does not read: {e}")))?;
+    lora_of(&facts)
+}
+
+// ---- downloading one ------------------------------------------------------------------------
+
+/// A LoRA's download ready to start: its group's metadata and its one file, with where it
+/// goes.
+pub(crate) struct PreparedLora {
+    pub meta: GroupMeta,
+    pub files: Vec<(FileSpec, PathBuf)>,
+}
+
+/// A header read that failed: Hugging Face's own refusal (a gated file with no token is
+/// `hf_needs_token`), or a header that does not read, which is no LoRA's.
+fn header_error(e: RemoteError) -> AppError {
+    match e {
+        RemoteError::Hf(e) => crate::hub::hf_error(e),
+        RemoteError::Index(e) => errors::not_a_lora(format!("its header does not read: {e}")),
+    }
+}
+
+/// Download on the LoRA file `file` of `repo` at `commit` (a Hugging Face search's), nothing
+/// started yet: the listing at that commit read again (`deps.hf`); a file not listed, one of a
+/// format Studio cannot read (a pickle file: "Studio can't read .ckpt files"), one with no
+/// published SHA-256 (`studio_no_checksum`) and one whose header is not a LoRA's
+/// (`studio_not_a_lora`) refused; then its name ([`rel_name_for_download`]; the same LoRA
+/// downloaded again keeps its own, and another's name is never taken) and its file, which
+/// must fit on the disk (`studio_disk_too_small`). A file already there with its pinned size
+/// is checked instead of fetched.
+pub(crate) async fn prepare_lora_download(
+    deps: &LocalCmdDeps,
+    repo: &str,
+    commit: &str,
+    file: &str,
+) -> AppResult<PreparedLora> {
+    let hf = deps
+        .hf
+        .as_ref()
+        .ok_or_else(|| AppError::internal("a LoRA download without Hugging Face"))?;
+    let pinned = |c: &str| c.len() == 40 && c.bytes().all(|b| b.is_ascii_hexdigit());
+    let wrong_revision =
+        || AppError::bad_request("The repository revision does not match this download.");
+    if !pinned(commit) {
+        return Err(wrong_revision());
+    }
+    let detail = hf
+        .repo(repo, Some(commit))
+        .await
+        .map_err(crate::hub::hf_error)?;
+    if detail.commit != commit {
+        return Err(wrong_revision());
+    }
+    let listed = detail
+        .files
+        .iter()
+        .find(|f| f.path == file)
+        .ok_or_else(|| crate::hub::hf_error(HfError::FileNotFound))?;
+    readable_file_name(&listed.path)?;
+    let Some(sha256) = listed.sha256.clone() else {
+        return Err(errors::no_published_checksum());
+    };
+    let facts = deps
+        .detect
+        .read_one(hf, &detail, listed)
+        .await
+        .map_err(header_error)?;
+    lora_of(&facts)?;
+
+    let id = format!("hf:{}:{}", detail.id, listed.path);
+    let ext = stored_extension(&listed.path);
+    let loras = deps.store.list_gen_loras().await?;
+    let rel_name = match loras.iter().find(|l| l.id == id) {
+        Some(again) => again.rel_name.clone(),
+        None => {
+            let others: BTreeSet<String> =
+                loras.iter().map(|l| l.rel_name.to_lowercase()).collect();
+            free_name(&rel_name_for_download(&detail.id, &listed.path), |name| {
+                others.contains(&name.to_lowercase()) || shadowed(&deps.models_dir, name, ext)
+            })
+        }
+    };
+    let dest = lora_file(&deps.models_dir, &rel_name, ext);
+    let spec = FileSpec {
+        repo: detail.id.clone(),
+        commit: detail.commit.clone(),
+        path: listed.path.clone(),
+        size: listed.size,
+        sha256: Some(sha256.clone()),
+    };
+    let here = std::fs::metadata(&dest).is_ok_and(|m| m.is_file() && m.len() == listed.size);
+    let to_fetch = if here {
+        0
+    } else {
+        listed
+            .size
+            .saturating_sub(models::download::resumable_bytes(&dest, &spec))
+    };
+    if deps.free_disk_bytes.is_some_and(|free| to_fetch > free) {
+        return Err(errors::disk_too_small(to_fetch));
+    }
+    let name = shown_name(listed.path.rsplit('/').next().unwrap_or(&listed.path));
+    let meta = GroupMeta {
+        repo: detail.id.clone(),
+        commit: detail.commit.clone(),
+        label: name.clone(),
+        model_files: Vec::new(),
+        projector: None,
+        catalog_id: None,
+        hub: None,
+        parameters: None,
+        image_file_for: None,
+        image_files: None,
+        generator: None,
+        file_only: false,
+        lora: Some(LoraGroup {
+            id,
+            name,
+            rel_name,
+            repo: detail.id.clone(),
+            revision: detail.commit.clone(),
+            path: listed.path.clone(),
+            size: listed.size,
+            sha256,
+        }),
+    };
+    Ok(PreparedLora {
+        meta,
+        files: vec![(spec, dest)],
+    })
+}
+
+// ---- adding one from this computer ----------------------------------------------------------
+
+/// One import at a time names its LoRA, places its file and records it, so two never take one
+/// name or one file.
+static PLACING: LazyLock<tokio::sync::Mutex<()>> = LazyLock::new(|| tokio::sync::Mutex::new(()));
+
+/// *Add a LoRA file* on the file at `path` (untrusted; as the webview named it, which the
+/// progress events carry):
+/// 1. the file is checked and its header read where it is (`setup_plan::read_disk_file`): a
+///    pickle file is refused by its name, and a file that is not a LoRA is `studio_not_a_lora`,
+///    before anything is copied; a file larger than the free space is `studio_disk_too_small`;
+/// 2. it is copied into `<models>/@loras/local/` through a `.partial` file, hashed on the way
+///    (`import::copy_to_partial`, progress to `progress`);
+/// 3. one import at a time: its id is `local:<SHA-256>`. The same file added before is that
+///    row: its file, still whole with the same SHA-256, is kept and the copy removed (a file
+///    gone or damaged is put back from the copy). Else it takes the first free name
+///    ([`rel_name_for_import`]: another LoRA's, or one the engine would read another file in
+///    the folder for, is taken), its copy is renamed into place and it is recorded. A copy no
+///    row owns after a failure is removed.
+pub(crate) async fn import_lora_file(
+    deps: &LocalCmdDeps,
+    path: &Path,
+    progress: &ProgressSink,
+) -> AppResult<LoraDto> {
+    let file = read_disk_file(path).await?;
+    let (format, base) = lora_of(&file.facts)?;
+    if deps.free_disk_bytes.is_some_and(|free| file.size > free) {
+        return Err(errors::disk_too_small(file.size));
+    }
+    let mut report = Report::new(path.display().to_string(), progress.clone());
+    let into = lora_folder(&deps.models_dir).join(IMPORTED);
+    let (src, size) = (file.path.clone(), file.size);
+    let (partial, sha256, report) = tokio::task::spawn_blocking(move || {
+        copy_to_partial(&src, size, &into, &mut report).map(|(p, sha)| (p, sha, report))
+    })
+    .await
+    .map_err(|e| errors::import_failed(format!("copying the file stopped: {e}")))??;
+    let added = place_and_record(deps, &file, &partial, sha256, (format, base), report).await;
+    if added.is_err() {
+        // Renamed into place, or removed, already when the failure came after.
+        let _ = tokio::fs::remove_file(&partial).await;
+    }
+    added
+}
+
+/// Step 3 of [`import_lora_file`]: the copy at `partial` of `file` (SHA-256 `sha256`, a LoRA
+/// of `lora`'s format and base) placed and recorded, one import at a time.
+async fn place_and_record(
+    deps: &LocalCmdDeps,
+    file: &DiskFile,
+    partial: &Path,
+    sha256: String,
+    lora: (LoraFormat, Option<SdVersion>),
+    mut report: Report,
+) -> AppResult<LoraDto> {
+    let _one = PLACING.lock().await;
+    let id = format!("local:{sha256}");
+    let ext = stored_extension(&file.name);
+    let loras = deps.store.list_gen_loras().await?;
+    let before = loras.iter().find(|l| l.id == id);
+    let rel_name = match before {
+        Some(row) => row.rel_name.clone(),
+        None => {
+            let mut taken: BTreeSet<String> = loras.iter().map(|l| l.rel_name.clone()).collect();
+            taken.extend(names_in(&lora_folder(&deps.models_dir).join(IMPORTED)));
+            rel_name_for_import(&file.name, &taken)
+        }
+    };
+    let dest = lora_file(&deps.models_dir, &rel_name, ext);
+    let (from, to, size, sha) = (
+        partial.to_path_buf(),
+        dest.clone(),
+        file.size,
+        sha256.clone(),
+    );
+    tokio::task::spawn_blocking(move || place_partial(&from, &to, size, &sha, &mut report))
+        .await
+        .map_err(|e| errors::import_failed(format!("placing the copy stopped: {e}")))??;
+    if let Some(row) = before
+        && Path::new(&row.file) == dest
+    {
+        return Ok(lora_dto(row));
+    }
+    let new = store::NewGenLora {
+        id,
+        name: before.map_or_else(|| shown_name(&file.name), |row| row.name.clone()),
+        file: dest.display().to_string(),
+        rel_name,
+        repo: None,
+        revision: None,
+        path: None,
+        size_bytes: file.size,
+        sha256,
+        base_hint: lora.1.map(|b| b.word().to_owned()),
+        format: file_format(lora.0),
+        source: store::LoraSource::Import,
+    };
+    match deps.store.insert_gen_lora(new).await {
+        Ok(row) => Ok(lora_dto(&row)),
+        Err(e) => {
+            // No row owns the file placed here.
+            let _ = tokio::fs::remove_file(&dest).await;
+            Err(e.into())
+        }
+    }
+}
+
+// ---- deleting one ---------------------------------------------------------------------------
+
+/// *Delete* on LoRA `id`: refused with `studio_lora_in_use` while a run on this computer waits
+/// for it or uses it (`in_use`), deleting nothing; else its row goes, then its file unless an
+/// installed model or another LoRA uses it, a download not finished yet writes it (`busy`), or
+/// it is outside the models folder (`local_models::remove_unused_files`), then the folders that
+/// leaves empty. Returns the files removed. A LoRA not there is `not_found`.
+pub(crate) async fn delete_lora_files(
+    store: &store::Store,
+    models_dir: &Path,
+    id: &str,
+    in_use: &(dyn Fn(&str) -> bool + Sync),
+    busy: &(dyn Fn(&Path) -> bool + Sync),
+) -> AppResult<Vec<PathBuf>> {
+    if in_use(id) {
+        return Err(errors::lora_in_use());
+    }
+    let lora = store
+        .delete_gen_lora(id)
+        .await?
+        .ok_or_else(|| AppError::not_found("LoRA"))?;
+    remove_unused_files(store, models_dir, &[PathBuf::from(&lora.file)], busy).await
+}
+
+// ---- commands -------------------------------------------------------------------------------
+
+/// The LoRAs, newest first. Sends nothing.
+#[tauri::command]
+pub async fn studio_loras(window: tauri::WebviewWindow, app: AppHandle) -> AppResult<Vec<LoraDto>> {
+    only_main_window(window.label())?;
+    list_loras(&app.state::<AppState>().store).await
+}
+
+/// Download on a Hugging Face search's LoRA file `file` of `repo` at `commit`: its download
+/// group, which adds the LoRA once its file is checked ([`prepare_lora_download`]).
+#[tauri::command]
+pub async fn studio_lora_download(
+    window: tauri::WebviewWindow,
+    app: AppHandle,
+    repo: String,
+    commit: String,
+    file: String,
+) -> AppResult<String> {
+    only_main_window(window.label())?;
+    let studio = app.state::<Arc<StudioManager>>();
+    let hf = crate::hub::hf_client(&app).await?;
+    // Strict: what is installed guards what a download writes.
+    let deps = app_deps_for_writing(&app, &studio, Some(hf)).await?;
+    let prepared = prepare_lora_download(&deps, &repo, &commit, &file).await?;
+    let downloads = app.state::<Arc<DownloadManager>>().inner().clone();
+    downloads.start(&app, prepared.meta, prepared.files).await
+}
+
+/// *Add a LoRA file* on the file at `path`, copied into Studio's LoRA folder with progress to
+/// the main window ([`import_lora_file`]).
+#[tauri::command]
+pub async fn studio_lora_import(
+    window: tauri::WebviewWindow,
+    app: AppHandle,
+    path: String,
+) -> AppResult<LoraDto> {
+    only_main_window(window.label())?;
+    let studio = app.state::<Arc<StudioManager>>();
+    let deps = app_deps_for_writing(&app, &studio, None).await?;
+    let to = app.clone();
+    let progress: ProgressSink = Arc::new(move |p| {
+        let _ = to.emit_to(crate::MAIN_WINDOW, IMPORT_PROGRESS_EVENT, p);
+    });
+    import_lora_file(&deps, Path::new(&path), &progress).await
+}
+
+/// *Delete* on LoRA `id`, unless a run on this computer waits for it or uses it
+/// ([`delete_lora_files`]).
+#[tauri::command]
+pub async fn studio_lora_delete(
+    window: tauri::WebviewWindow,
+    app: AppHandle,
+    studio: State<'_, Arc<StudioManager>>,
+    id: String,
+) -> AppResult<()> {
+    only_main_window(window.label())?;
+    let deps = app_deps_for_writing(&app, &studio, None).await?;
+    let writing = files_being_written(&deps.store, None).await?;
+    let busy = |p: &Path| writing.contains(&p.display().to_string());
+    let in_use = |id: &str| studio.local_uses_lora(id);
+    delete_lora_files(&deps.store, &deps.models_dir, &id, &in_use, &busy).await?;
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::BTreeSet;
+    use std::path::{Path, PathBuf};
+    use std::sync::{Arc, Mutex};
+
+    use models::sd::detect::SdVersion;
+    use models::sd::inspect::LoraFormat;
+    use models::sd::testing::{file_of, fixture};
+
+    use super::*;
+    use crate::downloads::{DownloadManager, GroupMeta, files_being_written, finish_gen_group};
+    use crate::error::AppResult;
+    use crate::studio::import::{ImportProgress, ProgressSink};
+    use crate::studio::local_cmd::LocalCmdDeps;
+    use crate::studio::local_cmd::tests::{
+        COMMIT, RepoHub, TestRepo, gpu, hub, repo_deps, sdxl_repo,
+    };
+    use crate::studio::test_support::Scratch;
+
+    /// The SDXL base repo's commit in the test Hub.
+    const SDXL_REV: &str = COMMIT;
+    const XLABS: &str = "XLabs-AI/flux-lora-collection";
+    const REALISM: &str = "realism_lora_comfy_converted.safetensors";
+
+    /// A file whose header is the detection fixture `name`'s tensor list, with no tensor data:
+    /// detection reads only the header.
+    fn fixture_bytes(name: &str) -> Vec<u8> {
+        file_of(&fixture(name))
+    }
+
+    /// XLabs' FLUX.1 LoRA collection, serving the realism LoRA's header as its whole file.
+    fn xlabs_repo() -> TestRepo {
+        let bytes = fixture_bytes("flux-lora-realism");
+        TestRepo::new(XLABS)
+            .serving(REALISM, bytes.len() as u64, bytes.clone())
+            .serving("realism_lora.sft", bytes.len() as u64, bytes)
+            .serving(
+                "realism_lora.ckpt",
+                1_000,
+                fixture_bytes("flux-lora-realism"),
+            )
+            .unpinned("unpinned_lora.safetensors", 1_000, "flux-lora-realism")
+    }
+
+    /// What the LoRA commands read in the app: Get local models' dependencies (a models folder
+    /// of its own, 500 GB free), a download manager that records groups without running them,
+    /// the runs on this computer (the LoRAs one holds) and the progress events kept.
+    struct TestApp {
+        deps: LocalCmdDeps,
+        downloads: DownloadManager,
+        held: Mutex<BTreeSet<String>>,
+        events: Arc<Mutex<Vec<ImportProgress>>>,
+    }
+
+    impl TestApp {
+        fn sink(&self) -> ProgressSink {
+            let events = self.events.clone();
+            Arc::new(move |p| events.lock().unwrap().push(p))
+        }
+
+        fn store(&self) -> &store::Store {
+            &self.deps.store
+        }
+    }
+
+    struct T {
+        app: TestApp,
+        models_dir: PathBuf,
+        scratch: Scratch,
+        _hub: RepoHub,
+    }
+
+    async fn harness() -> T {
+        harness_with(Vec::new()).await
+    }
+
+    async fn harness_with(repos: Vec<TestRepo>) -> T {
+        let scratch = Scratch::new();
+        let served = hub(repos).await;
+        let deps = repo_deps(&served, gpu(24, 64), &scratch);
+        T {
+            models_dir: deps.models_dir.clone(),
+            app: TestApp {
+                deps,
+                downloads: DownloadManager::default(),
+                held: Mutex::new(BTreeSet::new()),
+                events: Arc::new(Mutex::new(Vec::new())),
+            },
+            scratch,
+            _hub: served,
+        }
+    }
+
+    impl T {
+        fn write(path: &Path, bytes: Vec<u8>) -> PathBuf {
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, bytes).unwrap();
+            dunce::canonicalize(path).unwrap()
+        }
+
+        /// A file outside the models folder, at `rel` (made canonical, as the webview's picker
+        /// gives it).
+        fn outside_file(&self, rel: &str, bytes: Vec<u8>) -> PathBuf {
+            Self::write(&self.scratch.path().join("outside").join(rel), bytes)
+        }
+
+        /// A run on this computer holds LoRA `id`, queued or running.
+        fn hold_run_with_lora(&self, id: &str) {
+            self.app.held.lock().unwrap().insert(id.to_owned());
+        }
+
+        /// The runs on this computer ended.
+        fn end_run(&self) {
+            self.app.held.lock().unwrap().clear();
+        }
+
+        /// Every file under `<models>/@loras`, anywhere under it.
+        fn lora_files(&self) -> Vec<PathBuf> {
+            fn walk(dir: &Path, out: &mut Vec<PathBuf>) {
+                for entry in std::fs::read_dir(dir).into_iter().flatten().flatten() {
+                    let path = entry.path();
+                    if path.is_dir() {
+                        walk(&path, out);
+                    } else {
+                        out.push(path);
+                    }
+                }
+            }
+            let mut out = Vec::new();
+            walk(&lora_folder(&self.models_dir), &mut out);
+            out.sort();
+            out
+        }
+
+        async fn meta(&self, group: &str) -> GroupMeta {
+            self.app
+                .store()
+                .get_setting(&format!("downloadGroup:{group}"))
+                .await
+                .unwrap()
+                .unwrap()
+        }
+
+        /// Puts the file `group` fetches in place (what the test Hub serves for it) and
+        /// finishes the group as its task does.
+        async fn complete(&self, group: &str, bytes: &[u8]) {
+            for row in self
+                .app
+                .store()
+                .list_downloads(Some(group.to_owned()))
+                .await
+                .unwrap()
+            {
+                T::write(Path::new(&row.dest_path), bytes.to_vec());
+            }
+            finish_gen_group(self.app.store(), &self.models_dir, group)
+                .await
+                .unwrap();
+        }
+    }
+
+    /// *Add a LoRA file* on the file at `src`, as `studio_lora_import` does.
+    async fn import_lora(app: &TestApp, src: &Path) -> AppResult<LoraDto> {
+        import_lora_file(&app.deps, src, &app.sink()).await
+    }
+
+    /// Download on `repo`'s LoRA `file` at `commit`, as `studio_lora_download` does: its group
+    /// recorded, not run.
+    async fn download_lora(
+        app: &TestApp,
+        repo: &str,
+        commit: &str,
+        file: &str,
+    ) -> AppResult<String> {
+        let prepared = prepare_lora_download(&app.deps, repo, commit, file).await?;
+        app.downloads
+            .record_group(app.store(), &prepared.meta, &prepared.files)
+            .await
+    }
+
+    /// Delete on LoRA `id`, as `studio_lora_delete` does.
+    async fn delete_lora(app: &TestApp, id: &str) -> AppResult<Vec<PathBuf>> {
+        let writing = files_being_written(app.store(), None).await?;
+        let busy = |p: &Path| writing.contains(&p.display().to_string());
+        let held = app.held.lock().unwrap().clone();
+        let in_use = |id: &str| held.contains(id);
+        delete_lora_files(app.store(), &app.deps.models_dir, id, &in_use, &busy).await
+    }
+
+    // ---- the brief's tests ------------------------------------------------------------------
+
+    #[test]
+    fn lora_names_keep_spaces_and_unicode_and_drop_colons_and_angles() {
+        let none = BTreeSet::new();
+        assert_eq!(
+            rel_name_for_import("pixel art ü.safetensors", &none),
+            "local/pixel art ü"
+        );
+        assert_eq!(
+            rel_name_for_import("日本語 スタイル.safetensors", &none),
+            "local/日本語 スタイル"
+        );
+        assert_eq!(
+            rel_name_for_import("a:b<c>d|e.safetensors", &none),
+            "local/abcde"
+        );
+        assert_eq!(rel_name_for_import(" . .safetensors", &none), "local/lora");
+        assert_eq!(
+            rel_name_for_download(
+                "XLabs-AI/flux-lora-collection",
+                "realism_lora_comfy_converted.safetensors"
+            ),
+            "XLabs-AI/flux-lora-collection/realism_lora_comfy_converted"
+        );
+        for n in [
+            rel_name_for_import("a:b<c>d|e.safetensors", &none),
+            rel_name_for_download("o/r", "dir/x y.sft"),
+        ] {
+            assert!(runtime::sd::args::valid_lora_name(&n), "{n}");
+        }
+    }
+
+    #[test]
+    fn two_imports_with_the_same_name_get_distinct_names() {
+        assert_eq!(
+            rel_name_for_import(
+                "style.safetensors",
+                &BTreeSet::from(["local/style".to_string()])
+            ),
+            "local/style (2)"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_imported_lora_is_copied_into_the_lora_folder_and_registered_with_its_base() {
+        let t = harness().await;
+        let src = t.outside_file(
+            "Ü dir/pixel art xl.safetensors",
+            fixture_bytes("sdxl-lora-pixel-art"),
+        );
+        let l = import_lora(&t.app, &src).await.unwrap();
+        assert_eq!(
+            (l.name.as_str(), l.base, l.format),
+            ("pixel art xl", Some(SdVersion::Sdxl), LoraFormat::Kohya)
+        );
+        assert!(
+            t.models_dir
+                .join("@loras/local/pixel art xl.safetensors")
+                .exists()
+                && src.exists()
+        );
+    }
+
+    #[tokio::test]
+    async fn a_sft_lora_is_saved_as_safetensors_so_the_engine_finds_it() {
+        let t = harness().await;
+        import_lora(
+            &t.app,
+            &t.outside_file("s.sft", fixture_bytes("flux-lora-realism")),
+        )
+        .await
+        .unwrap();
+        assert!(t.models_dir.join("@loras/local/s.safetensors").exists());
+    }
+
+    #[tokio::test]
+    async fn a_lora_download_is_refused_for_a_file_that_is_not_a_lora() {
+        let t = harness_with(vec![sdxl_repo()]).await;
+        assert_eq!(
+            download_lora(
+                &t.app,
+                "stabilityai/stable-diffusion-xl-base-1.0",
+                SDXL_REV,
+                "sd_xl_base_1.0.safetensors"
+            )
+            .await
+            .unwrap_err()
+            .code,
+            "studio_not_a_lora"
+        );
+    }
+
+    #[tokio::test]
+    async fn deleting_a_lora_in_use_is_refused_and_otherwise_removes_its_file() {
+        let t = harness().await;
+        let l = import_lora(
+            &t.app,
+            &t.outside_file("s.safetensors", fixture_bytes("flux-lora-realism")),
+        )
+        .await
+        .unwrap();
+        t.hold_run_with_lora(&l.id);
+        assert_eq!(
+            delete_lora(&t.app, &l.id).await.unwrap_err().code,
+            "studio_lora_in_use"
+        );
+        t.end_run();
+        delete_lora(&t.app, &l.id).await.unwrap();
+        assert!(!t.models_dir.join("@loras/local/s.safetensors").exists());
+    }
+
+    // ---- the rulings carried from S8 and S1 --------------------------------------------------
+
+    /// A file whose header is not a LoRA is refused from its header at the source, before
+    /// anything is copied: nothing lands in `@loras` and no progress is sent.
+    #[tokio::test]
+    async fn a_file_that_is_not_a_lora_is_refused_before_anything_is_copied() {
+        let t = harness().await;
+        let model = t.outside_file("my sd15.safetensors", fixture_bytes("sd15"));
+        let e = import_lora(&t.app, &model).await.unwrap_err();
+        assert_eq!(
+            (e.code.as_str(), e.message.as_str()),
+            ("studio_not_a_lora", "This file isn't a LoRA.")
+        );
+        assert!(t.lora_files().is_empty(), "{:?}", t.lora_files());
+        assert!(t.app.events.lock().unwrap().is_empty());
+        assert!(t.app.store().list_gen_loras().await.unwrap().is_empty());
+        // A pickle file is refused by its name, never opened.
+        let pickle = t.outside_file("old.ckpt", b"not read".to_vec());
+        assert_eq!(
+            import_lora(&t.app, &pickle).await.unwrap_err().message,
+            "Studio can't read .ckpt files"
+        );
+        assert!(t.lora_files().is_empty());
+    }
+
+    /// The same file imported again (from another place, under another name) is the same
+    /// row, with one file on disk: the second copy is removed once its SHA-256 matches.
+    #[tokio::test]
+    async fn importing_the_same_file_again_gives_the_same_row_and_one_file() {
+        let t = harness().await;
+        let bytes = fixture_bytes("sdxl-lora-pixel-art");
+        let first = import_lora(
+            &t.app,
+            &t.outside_file("a/pixel.safetensors", bytes.clone()),
+        )
+        .await
+        .unwrap();
+        let sha =
+            models::download::sha256_file(&t.models_dir.join("@loras/local/pixel.safetensors"))
+                .await
+                .unwrap();
+        assert_eq!(first.id, format!("local:{sha}"));
+        let again = import_lora(
+            &t.app,
+            &t.outside_file("b/another name.safetensors", bytes.clone()),
+        )
+        .await
+        .unwrap();
+        assert_eq!(again, first);
+        assert_eq!(
+            t.lora_files(),
+            [t.models_dir.join("@loras/local/pixel.safetensors")]
+        );
+        assert_eq!(t.app.store().list_gen_loras().await.unwrap().len(), 1);
+        // The copy is checked by reading it through, then kept.
+        let events = t.app.events.lock().unwrap().clone();
+        assert!(
+            events
+                .iter()
+                .any(|e| e.stage == crate::studio::import::ImportStage::Hashing)
+        );
+        assert!(events.iter().all(|e| e.total_bytes == bytes.len() as u64));
+
+        // Its file gone, the same file imported again puts it back under its own name.
+        std::fs::remove_file(t.models_dir.join("@loras/local/pixel.safetensors")).unwrap();
+        assert!(list_loras(t.app.store()).await.unwrap()[0].missing);
+        let back = import_lora(&t.app, &t.outside_file("c/x.safetensors", bytes))
+            .await
+            .unwrap();
+        assert_eq!((back.id.as_str(), back.missing), (first.id.as_str(), false));
+        assert_eq!(
+            t.lora_files(),
+            [t.models_dir.join("@loras/local/pixel.safetensors")]
+        );
+    }
+
+    /// Two different files with the same name, imported at once, each get a name of their own
+    /// and a file of their own: the name is chosen and the file placed one import at a time.
+    #[tokio::test]
+    async fn two_files_with_one_name_imported_at_once_get_names_of_their_own() {
+        let t = harness().await;
+        let a = t.outside_file("a/style.safetensors", fixture_bytes("sdxl-lora-pixel-art"));
+        let b = t.outside_file("b/style.safetensors", fixture_bytes("flux-lora-realism"));
+        let (one, two) = tokio::join!(import_lora(&t.app, &a), import_lora(&t.app, &b));
+        let (one, two) = (one.unwrap(), two.unwrap());
+        assert_ne!(one.id, two.id);
+        assert_eq!((one.name.as_str(), two.name.as_str()), ("style", "style"));
+        let rel: BTreeSet<String> = t
+            .app
+            .store()
+            .list_gen_loras()
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|l| l.rel_name)
+            .collect();
+        assert_eq!(
+            rel,
+            BTreeSet::from(["local/style".to_owned(), "local/style (2)".to_owned()])
+        );
+        assert_eq!(
+            t.lora_files(),
+            [
+                t.models_dir.join("@loras/local/style (2).safetensors"),
+                t.models_dir.join("@loras/local/style.safetensors"),
+            ]
+        );
+    }
+
+    /// A name is taken by a LoRA's row, and by anything in the folder the engine would find
+    /// for it first: the name itself (a folder), or a file of it with any extension.
+    #[test]
+    fn a_name_is_taken_by_a_row_or_by_what_the_engine_would_find_for_it() {
+        let taken = BTreeSet::from(["local/Style".to_owned()]);
+        assert_eq!(
+            rel_name_for_import("style.safetensors", &taken),
+            "local/style (2)",
+            "a name in another case is the same file on Windows and macOS"
+        );
+        assert_eq!(
+            rel_name_for_import(
+                "STYLE.safetensors",
+                &BTreeSet::from(["local/style".to_owned()])
+            ),
+            "local/STYLE (2)",
+            "whichever side has the capitals"
+        );
+        let taken = BTreeSet::from(["local/x".to_owned(), "local/x (2)".to_owned()]);
+        assert_eq!(rel_name_for_import("x.gguf", &taken), "local/x (3)");
+        assert_eq!(stored_extension("a/b.SFT"), ".safetensors");
+        assert_eq!(stored_extension("b.safetensors"), ".safetensors");
+        assert_eq!(stored_extension("b.Q4.gguf"), ".gguf");
+        assert_eq!(sanitize_lora_component(" ..a\\b\u{7}c.. "), "abc");
+        assert_eq!(sanitize_lora_component(".."), "lora");
+    }
+
+    /// A file left in the LoRA folder that no row owns keeps its name: the engine would read
+    /// it for that name (it tries `.gguf` before `.safetensors`), so a new LoRA, downloaded or
+    /// imported, takes the next name instead.
+    #[tokio::test]
+    async fn a_name_the_engine_would_read_another_file_for_is_not_given() {
+        let t = harness_with(vec![xlabs_repo()]).await;
+        let left = |rel: &str| {
+            T::write(
+                &lora_folder(&t.models_dir).join(rel),
+                b"left behind".to_vec(),
+            );
+        };
+        left("local/style.gguf");
+        left("XLabs-AI/flux-lora-collection/realism_lora.gguf");
+        let l = import_lora(
+            &t.app,
+            &t.outside_file("style.safetensors", fixture_bytes("sdxl-lora-pixel-art")),
+        )
+        .await
+        .unwrap();
+        let row = t.app.store().get_gen_lora(&l.id).await.unwrap().unwrap();
+        assert_eq!(row.rel_name, "local/style (2)");
+        let group = download_lora(&t.app, XLABS, COMMIT, "realism_lora.sft")
+            .await
+            .unwrap();
+        assert_eq!(
+            t.meta(&group).await.lora.unwrap().rel_name,
+            "XLabs-AI/flux-lora-collection/realism_lora (2)"
+        );
+    }
+
+    // ---- downloads ----------------------------------------------------------------------------
+
+    /// A LoRA from a Hugging Face search downloads like a model: pinned by its repository,
+    /// commit, path, size and SHA-256, to `<models>/@loras/<owner>/<repo>/<path without its
+    /// extension>.safetensors`, and it is added once its file is checked, with its header's
+    /// base and format. Downloaded again, it keeps its name and file.
+    #[tokio::test]
+    async fn a_lora_download_lands_in_the_lora_folder_and_is_added_once_checked() {
+        let t = harness_with(vec![xlabs_repo()]).await;
+        let group = download_lora(&t.app, XLABS, COMMIT, REALISM).await.unwrap();
+        let meta = t.meta(&group).await;
+        let lora = meta.lora.clone().unwrap();
+        let id = format!("hf:{XLABS}:{REALISM}");
+        assert_eq!(
+            (lora.id.as_str(), lora.name.as_str(), lora.rel_name.as_str()),
+            (
+                id.as_str(),
+                "realism_lora_comfy_converted",
+                "XLabs-AI/flux-lora-collection/realism_lora_comfy_converted"
+            )
+        );
+        assert!(meta.generator.is_none() && !meta.file_only);
+        let rows = t
+            .app
+            .store()
+            .list_downloads(Some(group.clone()))
+            .await
+            .unwrap();
+        let dest = t
+            .models_dir
+            .join("@loras/XLabs-AI/flux-lora-collection/realism_lora_comfy_converted.safetensors");
+        assert_eq!(rows.len(), 1);
+        assert_eq!(Path::new(&rows[0].dest_path), dest);
+        assert_eq!(rows[0].sha256, lora.sha256);
+        assert!(
+            list_loras(t.app.store()).await.unwrap().is_empty(),
+            "not yet"
+        );
+
+        let bytes = fixture_bytes("flux-lora-realism");
+        t.complete(&group, &bytes).await;
+        let listed = list_loras(t.app.store()).await.unwrap();
+        assert_eq!(
+            listed,
+            [LoraDto {
+                id: id.clone(),
+                name: "realism_lora_comfy_converted".into(),
+                base: Some(SdVersion::Flux),
+                format: LoraFormat::Kohya,
+                size_bytes: bytes.len() as u64,
+                source: "search".into(),
+                repo: Some(XLABS.into()),
+                missing: false,
+            }]
+        );
+        let row = t.app.store().get_gen_lora(&id).await.unwrap().unwrap();
+        assert_eq!(
+            (
+                row.revision.as_deref(),
+                row.path.as_deref(),
+                Path::new(&row.file)
+            ),
+            (Some(COMMIT), Some(REALISM), dest.as_path())
+        );
+
+        // Downloaded again: the same name and file, checked in place.
+        let again = download_lora(&t.app, XLABS, COMMIT, REALISM).await.unwrap();
+        assert_eq!(t.meta(&again).await.lora.unwrap().rel_name, lora.rel_name);
+        t.complete(&again, &bytes).await;
+        assert_eq!(list_loras(t.app.store()).await.unwrap().len(), 1);
+        assert_eq!(t.lora_files(), [dest]);
+    }
+
+    /// A `.sft` file is saved as `.safetensors` (the engine tries `.gguf`, `.safetensors`,
+    /// `.pt` and `.ckpt` only); a name another LoRA has is followed by " (2)".
+    #[tokio::test]
+    async fn a_downloaded_lora_whose_name_another_has_gets_its_own() {
+        let bytes = fixture_bytes("flux-lora-realism");
+        let repo = xlabs_repo().serving(
+            "realism_lora.safetensors",
+            bytes.len() as u64,
+            bytes.clone(),
+        );
+        let t = harness_with(vec![repo]).await;
+        let first = download_lora(&t.app, XLABS, COMMIT, "realism_lora.safetensors")
+            .await
+            .unwrap();
+        t.complete(&first, &bytes).await;
+        let second = download_lora(&t.app, XLABS, COMMIT, "realism_lora.sft")
+            .await
+            .unwrap();
+        let meta = t.meta(&second).await;
+        assert_eq!(
+            meta.lora.unwrap().rel_name,
+            "XLabs-AI/flux-lora-collection/realism_lora (2)"
+        );
+        t.complete(&second, &bytes).await;
+        assert_eq!(
+            t.lora_files(),
+            [
+                t.models_dir
+                    .join("@loras/XLabs-AI/flux-lora-collection/realism_lora (2).safetensors"),
+                t.models_dir
+                    .join("@loras/XLabs-AI/flux-lora-collection/realism_lora.safetensors"),
+            ]
+        );
+        assert_eq!(list_loras(t.app.store()).await.unwrap().len(), 2);
+    }
+
+    /// Before anything starts: a pickle file is refused by its name (Studio can't read its
+    /// header), and a file with no published SHA-256 is never downloaded.
+    #[tokio::test]
+    async fn a_lora_download_is_refused_for_a_pickle_or_an_unpinned_file() {
+        let t = harness_with(vec![xlabs_repo()]).await;
+        let pickle = download_lora(&t.app, XLABS, COMMIT, "realism_lora.ckpt")
+            .await
+            .unwrap_err();
+        assert_eq!(pickle.message, "Studio can't read .ckpt files");
+        let unpinned = download_lora(&t.app, XLABS, COMMIT, "unpinned_lora.safetensors")
+            .await
+            .unwrap_err();
+        assert_eq!(unpinned.code, "studio_no_checksum");
+        let other = download_lora(&t.app, XLABS, &"1".repeat(40), REALISM)
+            .await
+            .unwrap_err();
+        assert_eq!(other.code, "hf_not_found");
+        assert!(t.app.store().list_downloads(None).await.unwrap().is_empty());
+    }
+
+    /// A downloaded file whose own header is not a LoRA is not added, and the file the
+    /// download wrote goes.
+    #[tokio::test]
+    async fn a_downloaded_file_that_is_not_a_lora_is_not_added_and_goes() {
+        let t = harness_with(vec![xlabs_repo()]).await;
+        let group = download_lora(&t.app, XLABS, COMMIT, REALISM).await.unwrap();
+        let len = fixture_bytes("flux-lora-realism").len();
+        let rows = t
+            .app
+            .store()
+            .list_downloads(Some(group.clone()))
+            .await
+            .unwrap();
+        T::write(Path::new(&rows[0].dest_path), vec![0u8; len]);
+        let e = finish_gen_group(t.app.store(), &t.models_dir, &group)
+            .await
+            .unwrap_err();
+        assert_eq!(e.code, "studio_not_a_lora");
+        assert!(t.lora_files().is_empty());
+        assert!(list_loras(t.app.store()).await.unwrap().is_empty());
+    }
+
+    // ---- the list -----------------------------------------------------------------------------
+
+    /// Get local models lists the LoRAs, newest first, each saying whether its file is gone.
+    #[tokio::test]
+    async fn get_local_models_lists_the_loras_and_says_which_file_is_gone() {
+        let t = harness().await;
+        let pixel = import_lora(
+            &t.app,
+            &t.outside_file(
+                "pixel art ü.safetensors",
+                fixture_bytes("sdxl-lora-pixel-art"),
+            ),
+        )
+        .await
+        .unwrap();
+        let realism = import_lora(
+            &t.app,
+            &t.outside_file("realism.safetensors", fixture_bytes("flux-lora-realism")),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            (pixel.source.as_str(), pixel.repo.as_deref(), pixel.missing),
+            ("import", None, false)
+        );
+        std::fs::remove_file(t.models_dir.join("@loras/local/realism.safetensors")).unwrap();
+        let listed = crate::studio::local_cmd::local_models(&t.app.deps)
+            .await
+            .unwrap()
+            .loras;
+        assert_eq!(
+            listed
+                .iter()
+                .map(|l| (l.id.as_str(), l.missing))
+                .collect::<Vec<_>>(),
+            [(realism.id.as_str(), true), (pixel.id.as_str(), false)]
+        );
+        let wire = serde_json::to_value(&listed[1]).unwrap();
+        assert_eq!(
+            wire,
+            serde_json::json!({
+                "id": pixel.id, "name": "pixel art ü", "base": "sdxl", "format": "kohya",
+                "sizeBytes": fixture_bytes("sdxl-lora-pixel-art").len(), "source": "import",
+                "repo": null, "missing": false,
+            })
+        );
+    }
+
+    /// A LoRA's file is kept while a download not finished yet writes it; the row goes.
+    #[tokio::test]
+    async fn deleting_a_lora_keeps_a_file_a_download_writes() {
+        let t = harness_with(vec![xlabs_repo()]).await;
+        let bytes = fixture_bytes("flux-lora-realism");
+        let group = download_lora(&t.app, XLABS, COMMIT, REALISM).await.unwrap();
+        t.complete(&group, &bytes).await;
+        let id = format!("hf:{XLABS}:{REALISM}");
+        // Downloaded again, not finished yet.
+        let _again = download_lora(&t.app, XLABS, COMMIT, REALISM).await.unwrap();
+        assert_eq!(
+            delete_lora(&t.app, &id).await.unwrap(),
+            Vec::<PathBuf>::new()
+        );
+        assert!(t.app.store().get_gen_lora(&id).await.unwrap().is_none());
+        assert_eq!(t.lora_files().len(), 1);
+        assert_eq!(
+            delete_lora(&t.app, &id).await.unwrap_err().code,
+            "not_found"
+        );
+    }
+}
