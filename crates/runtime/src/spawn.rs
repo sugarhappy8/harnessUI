@@ -483,22 +483,28 @@ pub fn spawn_with_fds(spec: SpawnSpec, fds: Vec<InheritedFd>) -> io::Result<Mana
         .collect();
 
     init_parent_error_mode();
-    let mut wrap = build(&spec, Options::CHILD);
-    // SAFETY: the closure runs in the forked child before exec. It only calls dup2, which
-    // is async-signal-safe, and reads `pairs`, which was allocated before the fork; it
-    // allocates nothing. dup2 clears close-on-exec on the new descriptor, so exactly the
-    // target numbers survive the exec.
-    unsafe {
-        wrap.command_mut().pre_exec(move || {
-            for &(source, target) in &pairs {
-                if libc::dup2(source, target) < 0 {
-                    return Err(io::Error::last_os_error());
+    // The app's copies (`moved`) stay open across attempts; a failed attempt leaves no
+    // child, so each retry builds a new command over the same descriptors.
+    let inner = retry_busy(|| {
+        let mut wrap = build(&spec, Options::CHILD);
+        let pairs = pairs.clone();
+        // SAFETY: the closure runs in the forked child before exec. It only calls dup2,
+        // which is async-signal-safe, and reads `pairs`, which was allocated before the
+        // fork; it allocates nothing. dup2 clears close-on-exec on the new descriptor, so
+        // exactly the target numbers survive the exec.
+        unsafe {
+            wrap.command_mut().pre_exec(move || {
+                for &(source, target) in &pairs {
+                    if libc::dup2(source, target) < 0 {
+                        return Err(io::Error::last_os_error());
+                    }
                 }
-            }
-            Ok(())
-        });
-    }
-    let child = finish_spawn(wrap.spawn()?, Options::CHILD);
+                Ok(())
+            });
+        }
+        wrap.spawn()
+    })?;
+    let child = finish_spawn(inner, Options::CHILD);
     // The app's copies of the child's ends close here.
     drop(moved);
     Ok(child)
@@ -666,8 +672,51 @@ mod inherit_gate {
 
 fn spawn_with(spec: &SpawnSpec, options: Options) -> io::Result<ManagedChild> {
     init_parent_error_mode();
-    let inner = build(spec, options).spawn()?;
+    // A fresh command per attempt; nothing is registered until an attempt has succeeded.
+    let inner = retry_busy(|| build(spec, options).spawn())?;
     Ok(finish_spawn(inner, options))
+}
+
+/// How many more times a spawn that fails with "text file busy" is tried.
+const BUSY_RETRIES: u32 = 5;
+/// The wait between two such tries.
+const BUSY_WAIT: std::time::Duration = std::time::Duration::from_millis(20);
+
+/// Whether `error` is ETXTBSY: the program file is still open for writing somewhere.
+/// Windows has no such error.
+fn is_busy(error: &io::Error) -> bool {
+    #[cfg(unix)]
+    {
+        error.kind() == io::ErrorKind::ExecutableFileBusy
+            || error.raw_os_error() == Some(libc::ETXTBSY)
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = error;
+        false
+    }
+}
+
+/// Runs `attempt` (one spawn), and runs it again up to [`BUSY_RETRIES`] more times,
+/// [`BUSY_WAIT`] apart, while it fails with ETXTBSY; any other error, or the last ETXTBSY,
+/// is returned as it is.
+///
+/// The race: a program file that was just written (an engine the app downloaded) is
+/// busy to exec for as long as any process holds a write descriptor to it, and a child
+/// forked meanwhile by another thread holds a copy until its own exec, a few
+/// milliseconds. The wait is a plain `std::thread::sleep`: the spawn is synchronous
+/// anyway and the window is short.
+fn retry_busy<T>(mut attempt: impl FnMut() -> io::Result<T>) -> io::Result<T> {
+    let mut retries = 0;
+    loop {
+        match attempt() {
+            Err(error) if is_busy(&error) && retries < BUSY_RETRIES => {
+                retries += 1;
+                std::thread::sleep(BUSY_WAIT);
+            }
+            other => return other,
+        }
+    }
 }
 
 /// Wraps a freshly started child and registers it with the reaper when asked to.
@@ -1319,5 +1368,73 @@ mod tests {
         assert!(!group_alive(0));
         assert!(!group_alive(1));
         assert!(!group_alive(u32::MAX));
+    }
+
+    #[cfg(unix)]
+    fn busy() -> io::Error {
+        io::Error::from_raw_os_error(libc::ETXTBSY)
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_busy_spawn_is_tried_again_until_it_works() {
+        let mut calls = 0;
+        let result = retry_busy(|| {
+            calls += 1;
+            if calls <= 2 { Err(busy()) } else { Ok(calls) }
+        });
+        assert_eq!(result.expect("third try works"), 3);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_spawn_that_stays_busy_is_tried_six_times_then_fails() {
+        let mut calls = 0;
+        let started = std::time::Instant::now();
+        let error = retry_busy::<()>(|| {
+            calls += 1;
+            Err(busy())
+        })
+        .expect_err("still busy");
+        assert_eq!(calls, 1 + BUSY_RETRIES);
+        assert!(is_busy(&error));
+        assert!(started.elapsed() >= BUSY_WAIT * BUSY_RETRIES);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn other_spawn_errors_are_not_tried_again() {
+        let mut calls = 0;
+        let error = retry_busy::<()>(|| {
+            calls += 1;
+            Err(io::Error::from(io::ErrorKind::NotFound))
+        })
+        .expect_err("not found");
+        assert_eq!(calls, 1);
+        assert_eq!(error.kind(), io::ErrorKind::NotFound);
+    }
+
+    /// The test holds the script open for writing, which makes exec fail with ETXTBSY,
+    /// and lets go after 30 ms: the spawn waits it out.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn spawn_waits_for_a_program_still_open_for_writing() {
+        use std::io::Write;
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().expect("tempdir");
+        let script = dir.path().join("engine.sh");
+        let mut file = std::fs::File::create(&script).expect("create");
+        file.write_all(b"#!/bin/sh\nexit 4\n").expect("write");
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+        let closer = std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(30));
+            drop(file);
+        });
+        let spec = SpawnSpec::new(&script, dir.path())
+            .stdout(StdioMode::Null)
+            .stderr(StdioMode::Null);
+        let status = spawn(spec).expect("spawn").wait().await.expect("wait");
+        assert_eq!(status.code(), Some(4));
+        closer.join().expect("closer");
     }
 }
