@@ -894,6 +894,49 @@ async fn a_local_run_that_fits_nowhere_unloads_the_chat_model_and_runs() {
     assert_eq!(h.chat_unloads(), 1);
 }
 
+/// Ruling S11-ask-honoured: under "Ask before unloading", a run that fits nowhere asks like
+/// any other unload, through the app's lease. While the question waits the run still holds
+/// its model (*Delete* and a set-up change are refused). Keep: the chat model stays and the
+/// run ends with "the chat model stays loaded", never charged. Unload: it runs.
+#[tokio::test]
+async fn under_ask_a_local_run_that_fits_nowhere_asks_first() {
+    let mock = MockOpenRouter::start().await;
+    let h = WireHarness::with_local_on(&mock, "ok", 0, 1, 1).await;
+    let ask: prefs::StudioPrefsPatch = serde_json::from_value(json!({"gpuPolicy": "ask"})).unwrap();
+    h.manager.set_prefs(ask).await.unwrap();
+    let big = json!({"size": "2048x2048"});
+    let asking =
+        |run: &RunDto| run.local.as_ref().and_then(|l| l.waiting_for.as_deref()) == Some("answer");
+
+    let run = h
+        .manager
+        .start(h.local(KLEIN, big.clone()), false)
+        .await
+        .unwrap();
+    let waiting = h.wait_for(&run.id, "asking", asking).await;
+    assert_eq!(waiting.status, "queued");
+    assert!(h.manager.local_uses_model(KLEIN));
+    assert_eq!(h.chat_unloads(), 0);
+    h.manager.answer_unload(&run.id, false).await.unwrap();
+    let kept = h.wait(&run.id, "failed").await;
+    let error = kept.error.unwrap();
+    assert_eq!(
+        (error.code.as_str(), error.charged),
+        ("studio_chat_model_kept", Some(false))
+    );
+    assert!(!h.manager.local_uses_model(KLEIN));
+    assert_eq!(h.chat_unloads(), 0);
+
+    let run = h.manager.start(h.local(KLEIN, big), false).await.unwrap();
+    h.wait_for(&run.id, "asking", asking).await;
+    assert!(h.manager.local_uses_model(KLEIN));
+    h.manager.answer_unload(&run.id, true).await.unwrap();
+    let done = h.wait(&run.id, "done").await;
+    assert_eq!(done.outputs.len(), 1);
+    assert_eq!(h.chat_unloads(), 1);
+    assert!(!h.manager.local_uses_model(KLEIN));
+}
+
 #[tokio::test]
 async fn export_then_delete_leaves_the_audit_rows_and_the_spending() {
     let mock = MockOpenRouter::start().await;

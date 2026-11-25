@@ -260,8 +260,10 @@ fn lora_format(format: store::LoraFileFormat) -> LoraFormat {
     }
 }
 
-/// LoRA `row` as the webview gets it.
-pub(crate) fn lora_dto(row: &store::GenLora) -> LoraDto {
+/// LoRA `row` as the webview gets it, the models folder being `models_dir`: missing when the
+/// engine would find no file for it there ([`engine_lora_file`], the check a run makes),
+/// whatever path its row was saved at (ruling S11-lora-list-path).
+pub(crate) fn lora_dto(row: &store::GenLora, models_dir: &Path) -> LoraDto {
     LoraDto {
         id: row.id.clone(),
         name: row.name.clone(),
@@ -270,13 +272,19 @@ pub(crate) fn lora_dto(row: &store::GenLora) -> LoraDto {
         size_bytes: row.size_bytes,
         source: row.source.as_str().to_owned(),
         repo: row.repo.clone(),
-        missing: !Path::new(&row.file).is_file(),
+        missing: engine_lora_file(&lora_folder(models_dir), &row.rel_name).is_none(),
     }
 }
 
-/// Every LoRA, newest first, each saying whether its file is gone.
-pub async fn list_loras(store: &store::Store) -> AppResult<Vec<LoraDto>> {
-    Ok(store.list_gen_loras().await?.iter().map(lora_dto).collect())
+/// Every LoRA, newest first, each saying whether its file is gone, the models folder being
+/// `models_dir`.
+pub async fn list_loras(store: &store::Store, models_dir: &Path) -> AppResult<Vec<LoraDto>> {
+    Ok(store
+        .list_gen_loras()
+        .await?
+        .iter()
+        .map(|row| lora_dto(row, models_dir))
+        .collect())
 }
 
 /// The format and base version of the LoRA whose header says `facts`; any other file is
@@ -557,7 +565,7 @@ async fn place_and_record(
     if let Some(row) = before
         && owns(row)
     {
-        return Ok(lora_dto(row));
+        return Ok(lora_dto(row, &deps.models_dir));
     }
     let new = store::NewGenLora {
         id,
@@ -574,7 +582,7 @@ async fn place_and_record(
         source: store::LoraSource::Import,
     };
     match deps.store.insert_gen_lora(new).await {
-        Ok(row) => Ok(lora_dto(&row)),
+        Ok(row) => Ok(lora_dto(&row, &deps.models_dir)),
         Err(e) => {
             // The file placed here goes only when no row owns it, under any spelling.
             if !loras.iter().any(owns) {
@@ -615,7 +623,8 @@ pub(crate) async fn delete_lora_files(
 #[tauri::command]
 pub async fn studio_loras(window: tauri::WebviewWindow, app: AppHandle) -> AppResult<Vec<LoraDto>> {
     only_main_window(window.label())?;
-    list_loras(&app.state::<AppState>().store).await
+    let models_dir = crate::hub::models_dir(&app).await;
+    list_loras(&app.state::<AppState>().store, &models_dir).await
 }
 
 /// Download on a Hugging Face search's LoRA file `file` of `repo` at `commit`: its download
@@ -872,6 +881,55 @@ mod tests {
 
     // ---- the brief's tests ------------------------------------------------------------------
 
+    /// Ruling S11-lora-list-path: the LoRA list says a LoRA is missing as a run would find it
+    /// (`job_for`'s check, `engine_lora_file`): by its name in the current models folder's
+    /// `@loras`, in the engine's extension order, never by the path its row was saved at.
+    #[tokio::test]
+    async fn the_list_finds_a_lora_where_the_engine_reads_it() {
+        let t = harness().await;
+        let saved = |rel_name: &str, file: &Path| store::NewGenLora {
+            id: format!("local:{}", rel_name.len()),
+            name: rel_name.rsplit('/').next().unwrap().to_owned(),
+            file: file.display().to_string(),
+            rel_name: rel_name.to_owned(),
+            repo: None,
+            revision: None,
+            path: None,
+            size_bytes: 3,
+            sha256: "c".repeat(64),
+            base_hint: None,
+            format: store::LoraFileFormat::Kohya,
+            source: store::LoraSource::Import,
+        };
+        // Saved while the models folder was elsewhere: the old file is still there.
+        let old = T::write(
+            &t.scratch
+                .path()
+                .join("old models/@loras/local/ink.safetensors"),
+            b"abc".to_vec(),
+        );
+        t.app
+            .store()
+            .insert_gen_lora(saved("local/ink", &old))
+            .await
+            .unwrap();
+        // In the current folder, under its name with the engine's `.gguf`.
+        let here = T::write(
+            &t.models_dir.join("@loras/local/pixel art ü.gguf"),
+            b"abc".to_vec(),
+        );
+        t.app
+            .store()
+            .insert_gen_lora(saved("local/pixel art ü", &here))
+            .await
+            .unwrap();
+        let listed = list_loras(t.app.store(), &t.models_dir).await.unwrap();
+        let missing = |name: &str| listed.iter().find(|l| l.name == name).unwrap().missing;
+        assert!(old.is_file());
+        assert!(missing("ink"), "its file is not in the current @loras");
+        assert!(!missing("pixel art ü"));
+    }
+
     #[test]
     fn lora_names_keep_spaces_and_unicode_and_drop_colons_and_angles() {
         let none = BTreeSet::new();
@@ -1047,7 +1105,7 @@ mod tests {
 
         // Its file gone, the same file imported again puts it back under its own name.
         std::fs::remove_file(t.models_dir.join("@loras/local/pixel.safetensors")).unwrap();
-        assert!(list_loras(t.app.store()).await.unwrap()[0].missing);
+        assert!(list_loras(t.app.store(), &t.models_dir).await.unwrap()[0].missing);
         let back = import_lora(&t.app, &t.outside_file("c/x.safetensors", bytes))
             .await
             .unwrap();
@@ -1184,13 +1242,16 @@ mod tests {
         assert_eq!(Path::new(&rows[0].dest_path), dest);
         assert_eq!(rows[0].sha256, lora.sha256);
         assert!(
-            list_loras(t.app.store()).await.unwrap().is_empty(),
+            list_loras(t.app.store(), &t.models_dir)
+                .await
+                .unwrap()
+                .is_empty(),
             "not yet"
         );
 
         let bytes = fixture_bytes("flux-lora-realism");
         t.complete(&group, &bytes).await;
-        let listed = list_loras(t.app.store()).await.unwrap();
+        let listed = list_loras(t.app.store(), &t.models_dir).await.unwrap();
         assert_eq!(
             listed,
             [LoraDto {
@@ -1218,7 +1279,13 @@ mod tests {
         let again = download_lora(&t.app, XLABS, COMMIT, REALISM).await.unwrap();
         assert_eq!(t.meta(&again).await.lora.unwrap().rel_name, lora.rel_name);
         t.complete(&again, &bytes).await;
-        assert_eq!(list_loras(t.app.store()).await.unwrap().len(), 1);
+        assert_eq!(
+            list_loras(t.app.store(), &t.models_dir)
+                .await
+                .unwrap()
+                .len(),
+            1
+        );
         assert_eq!(t.lora_files(), [dest]);
     }
 
@@ -1255,7 +1322,13 @@ mod tests {
                     .join("@loras/XLabs-AI/flux-lora-collection/realism_lora.safetensors"),
             ]
         );
-        assert_eq!(list_loras(t.app.store()).await.unwrap().len(), 2);
+        assert_eq!(
+            list_loras(t.app.store(), &t.models_dir)
+                .await
+                .unwrap()
+                .len(),
+            2
+        );
     }
 
     /// Before anything starts: a pickle file is refused by its name (Studio can't read its
@@ -1297,7 +1370,12 @@ mod tests {
             .unwrap_err();
         assert_eq!(e.code, "studio_not_a_lora");
         assert!(t.lora_files().is_empty());
-        assert!(list_loras(t.app.store()).await.unwrap().is_empty());
+        assert!(
+            list_loras(t.app.store(), &t.models_dir)
+                .await
+                .unwrap()
+                .is_empty()
+        );
     }
 
     // ---- the list -----------------------------------------------------------------------------
@@ -1640,7 +1718,13 @@ mod tests {
         finish_gen_group(t.app.store(), &t.models_dir, &again)
             .await
             .unwrap();
-        assert_eq!(list_loras(t.app.store()).await.unwrap().len(), 1);
+        assert_eq!(
+            list_loras(t.app.store(), &t.models_dir)
+                .await
+                .unwrap()
+                .len(),
+            1
+        );
     }
 
     /// Ruling S10-windows-names: a name never has a character Windows refuses in a file name

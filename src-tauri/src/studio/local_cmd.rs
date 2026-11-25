@@ -212,7 +212,7 @@ pub async fn local_models(deps: &LocalCmdDeps) -> AppResult<LocalModelsDto> {
         video_on_processor: matches!(device, Target::Cpu { .. }),
         installed_bytes: space_taken(&rows),
         more_fit: u32::try_from(more_fit).unwrap_or(u32::MAX),
-        loras: super::loras::list_loras(&deps.store).await?,
+        loras: super::loras::list_loras(&deps.store, &deps.models_dir).await?,
     })
 }
 
