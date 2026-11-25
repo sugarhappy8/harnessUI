@@ -394,11 +394,13 @@ export interface StudioPrefs {
   suggestionDismissed: boolean;
   /** Set only by `studio_accept_local_notice`. */
   localNoticeAcceptedAt: number | null;
+  /** How the last model file from this computer was added; set only by `studio_import_model`. */
+  lastImportMode: ImportMode | null;
 }
 
 /** A change to the preferences: only the fields sent change (`null` turns the limit off, or
  *  goes back to the default gallery folder). */
-export type StudioPrefsPatch = Partial<Omit<StudioPrefs, "localNoticeAcceptedAt">>;
+export type StudioPrefsPatch = Partial<Omit<StudioPrefs, "localNoticeAcceptedAt" | "lastImportMode">>;
 
 /** Today's spending and the gallery's size. */
 export interface Usage {
@@ -837,3 +839,42 @@ export type LocalSource =
   | { search: { repo: string; commit: string; file: string } }
   | { installed: { genModelId: string } }
   | { disk: { path: string } };
+
+// ---- adding a model file from this computer (Task S8) ----------------------------------------
+
+/** How a model file from outside the models folder is added: copied into it, or used where it
+ *  is. It is never moved. */
+export type ImportMode = "copy" | "inPlace";
+
+/** A model file from this computer, read (its header only) before it is added. */
+export interface ImportInspection {
+  /** Its canonical path, which `studioImportModel` takes. */
+  path: string;
+  name: string;
+  sizeBytes: number;
+  /** What it is (`FILE_LABEL` words it): a LoRA is added as one instead. */
+  label: FileLabel;
+  /** Its set-up when it works in Studio: its main file already here, and what it fetches. */
+  plan: SetupPlan | null;
+  /** The mode to offer first: the last one chosen, else copying. */
+  lastMode: ImportMode;
+  /** Inside the models folder: used where it is, without asking. */
+  insideModels: boolean;
+}
+
+/** What an import did: the model added, or the download group that adds it once its other
+ *  files are fetched. */
+export interface ImportResult {
+  genModelId: string | null;
+  downloadGroup: string | null;
+}
+
+/** How far an import of the file at `path` is, at most every 250 ms and once at the end
+ *  (`doneBytes === totalBytes`). */
+export interface ImportProgress {
+  path: string;
+  /** Reading it through for its SHA-256, or copying it into the models folder. */
+  stage: "hashing" | "copying";
+  doneBytes: number;
+  totalBytes: number;
+}

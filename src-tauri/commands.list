@@ -234,4 +234,6 @@ studio_local_fit
 studio_local_download
 studio_local_download_file
 studio_local_delete
+studio_import_inspect
+studio_import_model
 studio_accept_local_notice

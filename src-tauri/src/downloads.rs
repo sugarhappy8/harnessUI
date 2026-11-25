@@ -31,7 +31,8 @@ use crate::studio::errors as studio_errors;
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct GenGroup {
-    /// The installed model's id: the catalog id, or `hf:<owner>/<repo>:<file>`.
+    /// The installed model's id: the catalog id, `hf:<owner>/<repo>:<file>`, or (0.2.0) for a
+    /// file imported from this computer `local:<its SHA-256, 16 characters>`.
     pub gen_model_id: String,
     /// The signed catalog's entry; `None` for a searched model.
     pub catalog_id: Option<String>,
@@ -40,7 +41,7 @@ pub struct GenGroup {
     pub kind: String,
     /// Its family's key in the known-good family table (`flux2-klein-4b`).
     pub family: String,
-    /// `catalog` or `search`.
+    /// `catalog`, `search` or (0.2.0) `import`.
     pub source: String,
     /// Every part, in the entry's order.
     pub parts: Vec<GenGroupPart>,
@@ -79,8 +80,8 @@ pub struct GenGroupPart {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub local: Option<PathBuf>,
     /// 0.2.0: the file already on this computer the part uses (another installed model's, or
-    /// a file from this computer): it has no row, nothing fetches or checks it, and the model's
-    /// row records it as the part's file.
+    /// a file from this computer: an imported file's main part): it has no row, nothing
+    /// fetches or checks it, and the model's row records it as the part's file.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub present: Option<String>,
 }
@@ -361,14 +362,7 @@ pub(crate) async fn register_gen_model(
 ) -> AppResult<()> {
     let rows = store.list_downloads(Some(group.to_string())).await?;
     let new = gen_model_from(meta, &rows)?;
-    let untested = meta.generator.as_ref().is_some_and(|g| g.untested);
-    let entry = downloaded_entry(&new, untested)?;
-    let main = meta
-        .generator
-        .iter()
-        .flat_map(|g| &g.parts)
-        .find(|p| matches!(p.role.as_str(), "diffusion" | "model"))
-        .ok_or_else(|| AppError::internal("a picture or video model without its model part"))?;
+    let main = main_part(meta)?;
     // The model file: the row's, or the file already here (a file from this computer).
     let (path, fetched) = match &main.present {
         Some(present) => (PathBuf::from(present), None),
@@ -379,10 +373,7 @@ pub(crate) async fn register_gen_model(
             (PathBuf::from(&row.dest_path), Some(row.dest_path.clone()))
         }
     };
-    let checked = tokio::task::spawn_blocking(move || check_main_file(&entry, &path))
-        .await
-        .map_err(|e| AppError::internal(format!("the model file's check stopped: {e}")))?;
-    if let Err(refused) = checked {
+    if let Err(refused) = check_added(meta, &new, path).await? {
         let writing = files_being_written(store, Some(group)).await?;
         let written = written_by(store, group).await;
         // Only the group's own rows: a file already here is never removed.
@@ -404,6 +395,52 @@ pub(crate) async fn register_gen_model(
     store.insert_gen_model(new).await?;
     tracing::info!(model = %id, "picture or video model downloaded");
     Ok(())
+}
+
+/// 0.2.0 (Task S8): adds the picture or video model `meta` describes when every part of it is
+/// already on this computer ([`GenGroupPart::present`]: an imported file whose set-up fetches
+/// nothing), with no group or rows: each present file still whole ([`gen_model_from`]), then
+/// the model file's header ([`check_main_file`]). A refusal adds nothing and removes nothing.
+/// Returns the model's id.
+pub(crate) async fn register_present_gen_model(
+    store: &store::Store,
+    meta: &GroupMeta,
+) -> AppResult<String> {
+    let new = gen_model_from(meta, &[])?;
+    let path = main_part(meta)?
+        .present
+        .as_ref()
+        .map(PathBuf::from)
+        .ok_or_else(|| AppError::internal("a model added at once whose file is not here"))?;
+    check_added(meta, &new, path).await??;
+    let id = new.id.clone();
+    store.insert_gen_model(new).await?;
+    tracing::info!(model = %id, "picture or video model added");
+    Ok(id)
+}
+
+/// The model part of the picture or video model `meta` downloads.
+fn main_part(meta: &GroupMeta) -> AppResult<&GenGroupPart> {
+    meta.generator
+        .iter()
+        .flat_map(|g| &g.parts)
+        .find(|p| matches!(p.role.as_str(), "diffusion" | "model"))
+        .ok_or_else(|| AppError::internal("a picture or video model without its model part"))
+}
+
+/// Whether the model file at `path` of `new` (the row `meta`'s group makes) is a model its
+/// recipe runs ([`check_main_file`], read off the async runtime): the outer error is the
+/// check's own failure, the inner one its refusal.
+async fn check_added(
+    meta: &GroupMeta,
+    new: &store::NewGenModel,
+    path: PathBuf,
+) -> AppResult<AppResult<()>> {
+    let untested = meta.generator.as_ref().is_some_and(|g| g.untested);
+    let entry = downloaded_entry(new, untested)?;
+    tokio::task::spawn_blocking(move || check_main_file(&entry, &path))
+        .await
+        .map_err(|e| AppError::internal(format!("the model file's check stopped: {e}")))
 }
 
 /// What a picture or video model's group's task does once every file is fetched and checked
@@ -453,7 +490,8 @@ pub(crate) async fn finish_gen_group(
 /// The files a download not finished yet writes (a paused, failed or cancelled one too: it
 /// can go on), other than group `except`'s, and the files such a picture or video model's
 /// download found already here and will use ([`GenGroupPart::present`]): nothing deletes
-/// them meanwhile.
+/// them meanwhile. A group's metadata that cannot be read is an error, never taken for a
+/// group that uses nothing: what this returns guards deleting.
 pub(crate) async fn files_being_written(
     store: &store::Store,
     except: Option<&str>,
@@ -467,7 +505,7 @@ pub(crate) async fn files_being_written(
         }
     }
     for group in groups {
-        let meta: Option<GroupMeta> = store.get_setting(&meta_key(&group)).await.ok().flatten();
+        let meta: Option<GroupMeta> = store.get_setting(&meta_key(&group)).await?;
         let present = meta
             .into_iter()
             .flat_map(|m| m.generator)
@@ -4563,6 +4601,35 @@ mod tests {
         );
         set_all(&store, &g, S::Completed).await;
         assert!(files_being_written(&store, None).await.unwrap().is_empty());
+    }
+
+    /// What `files_being_written` gives guards deleting, so an unfinished group whose
+    /// metadata does not read is an error, never a group that uses nothing; a group with no
+    /// metadata at all (a chat download from before) uses only its rows' files.
+    #[tokio::test]
+    async fn a_group_whose_metadata_does_not_read_keeps_deleting_from_guessing() {
+        let store = store::Store::open_in_memory().unwrap();
+        let (spec, dest) = file(Path::new("/m/a/b.gguf"), 10);
+        let g = insert_group(&store, &meta(), &[(spec, dest)])
+            .await
+            .unwrap();
+        store
+            .set_setting(&meta_key(&g), &serde_json::json!({"not": "a group"}))
+            .await
+            .unwrap();
+        assert!(files_being_written(&store, None).await.is_err());
+        // Not asked about that group: its metadata is not read.
+        assert!(
+            files_being_written(&store, Some(&g))
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        store.delete_setting(&meta_key(&g)).await.unwrap();
+        assert_eq!(
+            files_being_written(&store, None).await.unwrap(),
+            BTreeSet::from(["/m/a/b.gguf".to_owned()])
+        );
     }
 
     /// A finished download of a family this build does not know adds nothing.

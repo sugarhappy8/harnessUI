@@ -30,6 +30,8 @@
 //!   models and the recommended list, each with its fit, licences and parts), Hugging Face
 //!   search and a repository's files, a fit at a size, download, delete and the note about
 //!   local models.
+//! - [`import`]: adding a model file from this computer, copied into the models folder or used
+//!   where it is, and set up as a download is.
 //! - [`local_models`]: downloading a picture or video model to this computer, part by part,
 //!   after the user acknowledges the local model notice (with the
 //!   Windows engine pack on first use), and deleting one with the part files nothing else uses.
@@ -53,6 +55,7 @@ pub mod dropped;
 pub mod engine_cmd;
 pub mod errors;
 pub mod gallery;
+pub mod import;
 pub mod label;
 pub mod local;
 pub mod local_cmd;

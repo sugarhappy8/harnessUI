@@ -2264,6 +2264,7 @@ pub(crate) mod tests {
             engine_need: EngineNeed::Found,
             notice_accepted: true,
             installed_files: crate::studio::local_models::InstalledFiles::default(),
+            last_import_mode: None,
         };
         let mut local = local_models(&deps).await.unwrap();
         // The store dates an install by its own clock: fixed here.

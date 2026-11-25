@@ -77,6 +77,7 @@ function prefs(patch: Partial<StudioPrefs> = {}): StudioPrefs {
     reloadChatAfter: false,
     suggestionDismissed: true,
     localNoticeAcceptedAt: null,
+    lastImportMode: null,
     ...patch,
   };
 }

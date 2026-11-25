@@ -30,6 +30,7 @@ export const PREFS: StudioPrefs = {
   reloadChatAfter: false,
   suggestionDismissed: true,
   localNoticeAcceptedAt: null,
+  lastImportMode: null,
 };
 
 /** Nothing spent and nothing made yet. */

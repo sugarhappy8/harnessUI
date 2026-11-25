@@ -56,6 +56,7 @@ function prefs(): StudioPrefs {
     reloadChatAfter: false,
     suggestionDismissed: true,
     localNoticeAcceptedAt: null,
+    lastImportMode: null,
   };
 }
 

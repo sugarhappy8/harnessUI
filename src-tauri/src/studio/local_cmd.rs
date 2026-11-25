@@ -12,6 +12,7 @@
 //!   licences and fit, and the best for this computer marked.
 //! - **A set-up plan** ([`setup_plan`]) of a searched file or a file on this computer, with
 //!   another recipe or files the person chose.
+//! - **Adding a model file from this computer**: the commands over [`super::import`].
 //! - **A fit** ([`local_fit`]) at a size and a length in seconds, with no request for a
 //!   catalog or an installed model.
 //! - **Download, delete and the note about local models**: `local_models`'
@@ -24,7 +25,7 @@
 //! it.
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use agent::media::{MediaKind, MediaModel, Price};
@@ -43,6 +44,9 @@ use super::deps::{AppHardware, LocalHardware, with_device_free};
 use super::detect::DetectService;
 use super::engine_cmd::{self, EngineNeed};
 use super::errors;
+use super::import::{
+    ImportInspectionDto, ImportMode, ImportResultDto, import_model, inspect_import,
+};
 use super::local::{
     AppGenCatalog, GenCatalogSource, default_frames, frames_for, longest_side, media_kind,
     media_model,
@@ -94,6 +98,9 @@ pub struct LocalCmdDeps {
     /// The files the installed models use: a part's place is shown as its download would
     /// have it (`local_models::plan_download`).
     pub installed_files: InstalledFiles,
+    /// How the last model file from this computer was added (the manager's held
+    /// preferences): offered first by the next import.
+    pub last_import_mode: Option<ImportMode>,
 }
 
 // ---- the list ---------------------------------------------------------------------------------
@@ -646,7 +653,7 @@ async fn repo_dto(deps: &LocalCmdDeps, read: &ReadRepo, card: Option<&str>) -> L
 
 /// What planning reads in Get local models: its Hub client, readings, catalog and installed
 /// files.
-fn plan_deps<'a>(
+pub(crate) fn plan_deps<'a>(
     deps: &'a LocalCmdDeps,
     catalog: &'a models::gen_catalog::GenCatalog,
 ) -> PlanDeps<'a> {
@@ -683,7 +690,10 @@ fn recipe_choice(id: &str) -> Option<RecipeChoiceDto> {
 
 /// A plan in the webview's words: each slot with its file, what its download takes here
 /// (`local_models::plan_download`) and its fit at the recipe's default size.
-async fn setup_plan_dto(deps: &LocalCmdDeps, planned: &Planned) -> AppResult<SetupPlanDto> {
+pub(crate) async fn setup_plan_dto(
+    deps: &LocalCmdDeps,
+    planned: &Planned,
+) -> AppResult<SetupPlanDto> {
     let download = plan(deps, planned.entry.clone(), Some(&planned.plan))?;
     let verdict = judge(deps, &download.entry, default_size(&download.entry)).await;
     let parts = parts_dto(&download);
@@ -811,7 +821,11 @@ fn gate_dto(gate: &GenGate) -> GateDto {
 /// What the commands read in the app: its store, the signed catalog, this computer, the
 /// models folder and its disk, the engine and the note as the manager holds it; `hf` only for
 /// a command that asks Hugging Face.
-async fn app_deps(app: &AppHandle, studio: &StudioManager, hf: Option<HfClient>) -> LocalCmdDeps {
+pub(crate) async fn app_deps(
+    app: &AppHandle,
+    studio: &StudioManager,
+    hf: Option<HfClient>,
+) -> LocalCmdDeps {
     let models_dir = crate::hub::models_dir(app).await;
     let store = app.state::<AppState>().store.clone();
     let installed_files = InstalledFiles::read(&store)
@@ -833,6 +847,7 @@ async fn app_deps(app: &AppHandle, studio: &StudioManager, hf: Option<HfClient>)
         engine_need: engine_cmd::engine_need(app),
         notice_accepted: studio.prefs().local_notice_accepted_at.is_some(),
         installed_files,
+        last_import_mode: studio.prefs().last_import_mode,
     }
 }
 
@@ -957,6 +972,36 @@ pub async fn studio_local_delete(
 ) -> AppResult<()> {
     only_main_window(window.label())?;
     delete_local_model(&app, &gen_model_id).await
+}
+
+/// *Add a model file*, once the file is chosen: what it is, read from its header (its set-up
+/// plan when it works in Studio, whether it is inside the models folder, and the mode to offer
+/// first). Sends nothing.
+#[tauri::command]
+pub async fn studio_import_inspect(
+    window: tauri::WebviewWindow,
+    app: AppHandle,
+    studio: State<'_, Arc<StudioManager>>,
+    path: String,
+) -> AppResult<ImportInspectionDto> {
+    only_main_window(window.label())?;
+    inspect_import(&app_deps(&app, &studio, None).await, Path::new(&path)).await
+}
+
+/// *Add*: the model file at `path` copied into the models folder or used where it is
+/// (`mode`; a file inside the folder always where it is), set up as a download is with the
+/// person's `choice` (none: the plan as it comes). Gives the model added, or the download
+/// group that adds it once its companions are fetched.
+#[tauri::command]
+pub async fn studio_import_model(
+    window: tauri::WebviewWindow,
+    app: AppHandle,
+    path: String,
+    mode: ImportMode,
+    choice: Option<SetupChoice>,
+) -> AppResult<ImportResultDto> {
+    only_main_window(window.label())?;
+    import_model(&app, Path::new(&path), mode, choice).await
 }
 
 /// *I understand* on the note about local models: records when, and gives the preferences.
@@ -1404,6 +1449,7 @@ pub(crate) mod tests {
             engine_need: EngineNeed::Found,
             notice_accepted: false,
             installed_files: InstalledFiles::default(),
+            last_import_mode: None,
         }
     }
 
@@ -3293,5 +3339,34 @@ pub(crate) mod tests {
             prefs::load(&store).await.local_notice_accepted_at,
             Some(1000)
         );
+    }
+
+    /// The mode an import was added with is saved and held, so the next import offers it
+    /// first, and a later Settings change keeps it.
+    #[tokio::test]
+    async fn the_last_import_mode_is_saved_and_a_settings_change_keeps_it() {
+        let scratch = Scratch::new();
+        let store = store::Store::open_in_memory().unwrap();
+        let manager = idle_manager(&store, &scratch);
+        let prefs = manager.note_import_mode(ImportMode::InPlace).await.unwrap();
+        assert_eq!(prefs.last_import_mode, Some(ImportMode::InPlace));
+        assert_eq!(manager.prefs().last_import_mode, Some(ImportMode::InPlace));
+        assert_eq!(
+            prefs::load(&store).await.last_import_mode,
+            Some(ImportMode::InPlace)
+        );
+        manager
+            .set_prefs(StudioPrefsPatch {
+                advanced_open: Some(true),
+                ..StudioPrefsPatch::default()
+            })
+            .await
+            .unwrap();
+        assert_eq!(
+            prefs::load(&store).await.last_import_mode,
+            Some(ImportMode::InPlace)
+        );
+        manager.note_import_mode(ImportMode::Copy).await.unwrap();
+        assert_eq!(manager.prefs().last_import_mode, Some(ImportMode::Copy));
     }
 }

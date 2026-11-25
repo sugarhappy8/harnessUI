@@ -355,6 +355,8 @@ pub fn run() {
             studio::local_cmd::studio_local_download,
             studio::local_cmd::studio_local_download_file,
             studio::local_cmd::studio_local_delete,
+            studio::local_cmd::studio_import_inspect,
+            studio::local_cmd::studio_import_model,
             studio::local_cmd::studio_accept_local_notice,
         ])
         .setup(|app| {

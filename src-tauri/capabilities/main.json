@@ -261,6 +261,8 @@
     "allow-studio-local-download",
     "allow-studio-local-download-file",
     "allow-studio-local-delete",
+    "allow-studio-import-inspect",
+    "allow-studio-import-model",
     "allow-studio-accept-local-notice"
   ]
 }

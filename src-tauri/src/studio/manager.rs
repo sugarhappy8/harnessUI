@@ -1046,6 +1046,18 @@ impl StudioManager {
         self.hold_prefs(next).await
     }
 
+    /// Records how the person chose to add a model file from this computer (Task S8), so the
+    /// next import offers it first; gives the preferences.
+    pub async fn note_import_mode(
+        &self,
+        mode: super::import::ImportMode,
+    ) -> AppResult<StudioPrefs> {
+        let _one_at_a_time = self.inner.prefs_writes.lock().await;
+        let mut next = self.inner.prefs();
+        next.last_import_mode = Some(mode);
+        self.hold_prefs(next).await
+    }
+
     /// Saves `next` and holds it. The caller holds `prefs_writes`.
     async fn hold_prefs(&self, next: StudioPrefs) -> AppResult<StudioPrefs> {
         prefs::save(&self.inner.deps.store, &next).await?;

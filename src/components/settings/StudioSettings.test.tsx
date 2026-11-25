@@ -32,6 +32,7 @@ const PREFS: StudioPrefs = {
   reloadChatAfter: false,
   suggestionDismissed: false,
   localNoticeAcceptedAt: null,
+  lastImportMode: null,
 };
 
 const USAGE: Usage = {

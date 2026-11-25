@@ -361,6 +361,7 @@ describe("Open in Studio", () => {
       reloadChatAfter: false,
       suggestionDismissed: true,
       localNoticeAcceptedAt: null,
+      lastImportMode: null,
     });
     vi.mocked(studioApi.studioUsage).mockResolvedValue({
       spentTodayUsd: 0,

@@ -1234,6 +1234,41 @@ pub fn no_published_checksum() -> AppError {
     )
 }
 
+/// The code of [`import_is_lora`]: the webview adds such a file as a LoRA instead.
+pub const IMPORT_IS_LORA: &str = "studio_import_is_lora";
+
+/// *Add a model file* on a LoRA: a LoRA is added with *Add a LoRA file*.
+pub fn import_is_lora() -> AppError {
+    AppError::new(
+        IMPORT_IS_LORA,
+        "This file is a LoRA, not a model.",
+        "Add it as a LoRA instead.",
+        String::new(),
+    )
+}
+
+/// A model file from this computer whose size changed while Studio read it (something still
+/// writes it): its SHA-256 would not be the file's.
+pub fn import_file_changed() -> AppError {
+    AppError::new(
+        "studio_import_changed",
+        "The file changed while Studio was reading it.",
+        "Wait until nothing is writing to it, then add it again.",
+        String::new(),
+    )
+}
+
+/// A model file from this computer that could not be read through, or copied into the models
+/// folder (`details`: why).
+pub fn import_failed(details: impl Into<String>) -> AppError {
+    AppError::new(
+        "studio_import_failed",
+        "Studio could not read or copy the file.",
+        "Check the file and the free space on the disk, then try again.",
+        details,
+    )
+}
+
 /// A file from this computer that is not a model file Studio reads.
 pub fn not_a_model_format() -> AppError {
     AppError::new(
@@ -1776,6 +1811,9 @@ mod tests {
             not_a_model_format(),
             no_published_checksum(),
             setup_incomplete(&[GenRole::T5xxl, GenRole::Vae]),
+            import_is_lora(),
+            import_file_changed(),
+            import_failed("No space left on device"),
         ];
         all.extend(every_pack_error().iter().map(engine_not_installed));
         for to in [PictureUse::Chat, PictureUse::Prompt] {

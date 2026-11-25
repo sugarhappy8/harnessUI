@@ -11,6 +11,10 @@ import type {
   EngineStatus,
   Estimate,
   ImageInput,
+  ImportInspection,
+  ImportMode,
+  ImportProgress,
+  ImportResult,
   LocalFit,
   LocalModels,
   LocalRepo,
@@ -136,6 +140,12 @@ export const studioLocalDownload = (source: LocalSource, choice: SetupChoice | n
 export const studioLocalDownloadFile = (repo: string, commit: string, file: string) =>
   invoke<string>("studio_local_download_file", { repo, commit, file });
 export const studioLocalDelete = (genModelId: string) => invoke<void>("studio_local_delete", { genModelId });
+/** *Add a model file*, once chosen: what it is, from its header. Sends nothing. */
+export const studioImportInspect = (path: string) => invoke<ImportInspection>("studio_import_inspect", { path });
+/** *Add*: the file copied into the models folder or used where it is, set up as a download is
+ *  with the person's `choice` (`null`: the plan as it comes). */
+export const studioImportModel = (path: string, mode: ImportMode, choice: SetupChoice | null) =>
+  invoke<ImportResult>("studio_import_model", { path, mode, choice });
 /** The note about local models, accepted. */
 export const studioAcceptLocalNotice = () => invoke<StudioPrefs>("studio_accept_local_notice");
 
@@ -148,6 +158,10 @@ export function onStudioProgress(handler: (run: Run) => void): Promise<UnlistenF
 /** The Windows engine pack's download, at most every 300 ms, then once finished. */
 export function onEngineProgress(handler: (p: EngineProgress) => void): Promise<UnlistenFn> {
   return listen<EngineProgress>("studio-engine-progress", (e) => handler(e.payload));
+}
+/** A model file's import, at most every 250 ms while it is read or copied, then once finished. */
+export function onImportProgress(handler: (p: ImportProgress) => void): Promise<UnlistenFn> {
+  return listen<ImportProgress>("studio-import-progress", (e) => handler(e.payload));
 }
 /** Files dropped on the window (Tauri's native drop): how many, and where, in CSS pixels from
  *  the webview's top left corner. */

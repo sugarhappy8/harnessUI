@@ -17,7 +17,7 @@
 //! - **Changes** ([`StudioPrefs::apply`]): only the fields a [`StudioPrefsPatch`] sends
 //!   change; `null` turns the limit off or puts the gallery back in its default place. No
 //!   patch sets when the note about local models was accepted (`studio_accept_local_notice`
-//!   records it).
+//!   records it), or how the last model file was added (`studio_import_model` records it).
 
 use std::collections::BTreeMap;
 use std::ops::RangeInclusive;
@@ -29,6 +29,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
 use super::errors;
+use super::import::ImportMode;
 use super::spend::{CONFIRM_AT_USD, ConfirmRules, DEFAULT_DAILY_LIMIT_USD};
 use crate::error::{AppError, AppResult};
 use crate::hub::check_writable_folder;
@@ -124,6 +125,11 @@ pub struct StudioPrefs {
     /// When the note about local models was accepted, in Unix ms. Set only by
     /// `studio_accept_local_notice`, never by a patch.
     pub local_notice_accepted_at: Option<i64>,
+    /// 0.2.0: how the last model file from this computer was added (copied into the models
+    /// folder, or used where it is), preselected the next time. Set only by
+    /// `studio_import_model`, never by a patch.
+    #[serde(default)]
+    pub last_import_mode: Option<ImportMode>,
 }
 
 impl Default for StudioPrefs {
@@ -140,6 +146,7 @@ impl Default for StudioPrefs {
             reload_chat_after: false,
             suggestion_dismissed: false,
             local_notice_accepted_at: None,
+            last_import_mode: None,
         }
     }
 }
@@ -231,6 +238,7 @@ impl StudioPrefs {
             reload_chat_after: reload_chat_after.unwrap_or(self.reload_chat_after),
             suggestion_dismissed: suggestion_dismissed.unwrap_or(self.suggestion_dismissed),
             local_notice_accepted_at: self.local_notice_accepted_at,
+            last_import_mode: self.last_import_mode,
         };
         next.validate()?;
         Ok(next)
@@ -438,6 +446,34 @@ mod tests {
                 .local_notice_accepted_at,
             Some(7)
         );
+    }
+
+    /// The last import's mode reads as the webview writes it, is none in prefs saved before
+    /// 0.2.0, and no patch sets or clears it.
+    #[test]
+    fn the_last_import_mode_is_kept_and_no_patch_changes_it() {
+        assert_eq!(StudioPrefs::default().last_import_mode, None);
+        let copied = StudioPrefs {
+            last_import_mode: Some(ImportMode::Copy),
+            ..Default::default()
+        };
+        let v = serde_json::to_value(&copied).unwrap();
+        assert_eq!(v["lastImportMode"], json!("copy"));
+        assert_eq!(serde_json::from_value::<StudioPrefs>(v).unwrap(), copied);
+        let in_place: StudioPrefs =
+            serde_json::from_value(json!({"lastImportMode": "inPlace"})).unwrap();
+        assert_eq!(in_place.last_import_mode, Some(ImportMode::InPlace));
+        let before: StudioPrefs = serde_json::from_value(json!({"advancedOpen": true})).unwrap();
+        assert_eq!(before.last_import_mode, None);
+        for sent in [
+            json!({"lastImportMode": "inPlace"}),
+            json!({"lastImportMode": null}),
+        ] {
+            assert_eq!(
+                copied.apply(patch(sent)).unwrap().last_import_mode,
+                Some(ImportMode::Copy)
+            );
+        }
     }
 
     #[test]

@@ -31,7 +31,8 @@
 //! - **Deleting** ([`delete_local_model`]): refused while a run on this computer waits for the
 //!   model or uses it; else the row goes, then each part file nothing else uses (a chat model,
 //!   another picture or video model, a download not finished yet), then the folders that
-//!   leaves empty.
+//!   leaves empty. A file from this computer is the person's own and stays, the models folder
+//!   included; only an import's copy under `<models>/@imported/` goes with its model.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
@@ -55,7 +56,8 @@ use models::sd::inspect::inspect_local;
 use models::sd::matching::{NoisePart, out_of_scope, recipes_for};
 use models::sd::recipes::{SlotId, recipe};
 use models::sd::setup::{
-    InstalledFile, LicenceRef, MainFile, PlannedFile, SetupInput, SetupPlan, SlotChoice, plan_setup,
+    InstalledFile, LicenceRef, MainFile, PartSource, PlannedFile, PlannedPart, SetupInput,
+    SetupPlan, SlotChoice, plan_setup,
 };
 use models::sd::{FileFacts, FileLabel, NotRead, label_for};
 use serde::{Deserialize, Serialize};
@@ -260,23 +262,37 @@ pub fn plan_download(
 /// this computer's own (`local`), and with the set-up plan that made the entry, each part the
 /// plan takes from this computer (`PlannedFile::Local`: an installed model's file, or the
 /// person's). The entry's parts are the plan's files that fill a slot, in its order
-/// (`plan_with`); a plan that does not match is an internal error.
+/// (`plan_with`): each pair of the same role, and a file from this computer at the part's own
+/// path or with its SHA-256 (when the plan knows none, a file an installed model uses, whose
+/// part has one). A plan that does not match is an internal error.
 fn present_parts(entry: &GenEntry, setup: Option<&SetupPlan>) -> AppResult<Vec<Option<PathBuf>>> {
     let mut present: Vec<Option<PathBuf>> = entry.parts.iter().map(|p| p.local.clone()).collect();
     let Some(setup) = setup else {
         return Ok(present);
     };
-    let files: Vec<&PlannedFile> = setup
+    let files: Vec<(&PlannedPart, &PlannedFile)> = setup
         .parts
         .iter()
         .filter(|p| GenRole::from_slot(p.slot).is_some())
-        .filter_map(|p| p.file.as_ref())
+        .filter_map(|p| Some((p, p.file.as_ref()?)))
         .collect();
+    let not_its = || AppError::internal("a set-up plan that is not its entry's");
     if files.len() != present.len() {
-        return Err(AppError::internal("a set-up plan that is not its entry's"));
+        return Err(not_its());
     }
-    for (here, file) in present.iter_mut().zip(files) {
-        if let PlannedFile::Local { path, .. } = file {
+    for ((here, part), (planned, file)) in present.iter_mut().zip(&entry.parts).zip(files) {
+        if GenRole::from_slot(planned.slot) != Some(part.role) {
+            return Err(not_its());
+        }
+        if let PlannedFile::Local { path, sha256, .. } = file {
+            let same_path = part.local.as_ref() == Some(path);
+            let same_sha = match sha256 {
+                Some(sha) => sha.eq_ignore_ascii_case(&part.sha256),
+                None => part.local.is_none() && !part.sha256.is_empty(),
+            };
+            if !(same_path || same_sha) {
+                return Err(not_its());
+            }
             *here = Some(path.clone());
         }
     }
@@ -627,6 +643,34 @@ pub(crate) async fn plan_disk(
     path: &str,
     choice: &SetupChoice,
 ) -> AppResult<Planned> {
+    let file = read_disk_file(path).await?;
+    let setup = disk_setup(deps, &file, choice).await?;
+    let id = format!("local:{}", file.path.display());
+    plan_disk_with(deps, &file, &setup, (&file.path, None, id), choice)
+}
+
+/// A model file on this computer the webview named, checked ([`checked_disk_file`]) and its
+/// header read.
+pub(crate) struct DiskFile {
+    /// Its canonical path.
+    pub path: PathBuf,
+    pub size: u64,
+    /// Its file name.
+    pub name: String,
+    pub facts: FileFacts,
+}
+
+impl DiskFile {
+    /// Its label, by its header and its file name.
+    pub(crate) fn label(&self) -> FileLabel {
+        label_for(&self.facts, &self.name)
+    }
+}
+
+/// The file at `path` on this computer (untrusted): checked ([`checked_disk_file`]: never
+/// opened when it is a pickle file), then its header read off the async runtime. A header
+/// that does not read is `studio_not_supported_yet`.
+pub(crate) async fn read_disk_file(path: impl AsRef<Path>) -> AppResult<DiskFile> {
     let (path, size) = checked_disk_file(path)?;
     let read_from = path.clone();
     let facts = tokio::task::spawn_blocking(move || inspect_local(&read_from))
@@ -637,20 +681,66 @@ pub(crate) async fn plan_disk(
         .file_name()
         .map(|n| n.to_string_lossy().into_owned())
         .unwrap_or_default();
-    let (version, recipe_id, part) = match label_for(&facts, &name) {
-        FileLabel::Works {
-            version,
-            recipe,
-            part,
-            ..
-        } => (version, recipe, part),
-        _ => return Err(errors::not_supported_yet(errors::NOT_A_RUNNABLE_FILE)),
+    Ok(DiskFile {
+        path,
+        size,
+        name,
+        facts,
+    })
+}
+
+/// What planning a file on this computer takes besides where it is: the recipe its label
+/// gives, and the person's choices for its slots, read once ([`slot_choices`]: a chosen file
+/// of another repo asks for that repo's listing).
+pub(crate) struct DiskSetup {
+    version: SdVersion,
+    recipe_id: String,
+    part: Option<NoisePart>,
+    overrides: Vec<(SlotId, SlotChoice)>,
+    others: OtherRepos,
+}
+
+/// [`DiskSetup`] for `file` with `choice`. A file Studio does not run (its label is not
+/// *Works in Studio*) is `studio_not_supported_yet`.
+pub(crate) async fn disk_setup(
+    deps: &PlanDeps<'_>,
+    file: &DiskFile,
+    choice: &SetupChoice,
+) -> AppResult<DiskSetup> {
+    let FileLabel::Works {
+        version,
+        recipe,
+        part,
+        ..
+    } = file.label()
+    else {
+        return Err(errors::not_supported_yet(errors::NOT_A_RUNNABLE_FILE));
     };
     let mut others = OtherRepos::default();
     let overrides = slot_choices(deps, None, &choice.overrides, &mut others).await?;
+    Ok(DiskSetup {
+        version,
+        recipe_id: recipe,
+        part,
+        overrides,
+        others,
+    })
+}
+
+/// The set-up of `file` with `setup` and `choice`, its main file at `at`: `(path, its
+/// SHA-256 when known, the entry's id)`. The path is the file's own, or a copy of it (an
+/// imported file copied into the models folder, which has its name and header).
+pub(crate) fn plan_disk_with(
+    deps: &PlanDeps<'_>,
+    file: &DiskFile,
+    setup: &DiskSetup,
+    at: (&Path, Option<&str>, String),
+    choice: &SetupChoice,
+) -> AppResult<Planned> {
+    let (path, sha256, id) = at;
     let named = Named {
-        id: format!("local:{}", path.display()),
-        name,
+        id,
+        name: file.name.clone(),
         publisher: String::new(),
         gate: GenGate {
             mode: GateMode::None,
@@ -662,22 +752,22 @@ pub(crate) async fn plan_disk(
         deps,
         PlanMain {
             main: MainFile::Local {
-                path: &path,
-                size,
-                sha256: None,
+                path,
+                size: file.size,
+                sha256,
             },
-            facts: &facts,
-            version,
-            recipe_id: &recipe_id,
-            part,
+            facts: &file.facts,
+            version: setup.version,
+            recipe_id: &setup.recipe_id,
+            part: setup.part,
             listing: &[],
             listing_facts: &no_facts,
             detail: None,
         },
         named,
         choice,
-        &overrides,
-        &others,
+        &setup.overrides,
+        &setup.others,
     )
 }
 
@@ -754,7 +844,14 @@ fn plan_with(
                 gated.insert(repo.clone());
             }
         }
-        let part = gen_part(deps, m.detail, others, &mut licenses, role, file);
+        let part = match file {
+            // The main file from this computer is the person's own, wherever it lies (an
+            // installed model's file included): it names no licence and is never deleted.
+            PlannedFile::Local { path, size, sha256 } if planned.source == PartSource::Main => {
+                local_part(role, path, *size, sha256.as_deref())
+            }
+            _ => gen_part(deps, m.detail, others, &mut licenses, role, file),
+        };
         part_of.push(Some(parts.len()));
         parts.push(part);
     }
@@ -836,22 +933,28 @@ fn gen_part(
                     part.license = add_licence(licenses, licence);
                     part
                 }
-                _ => GenPart {
-                    role,
-                    repo: String::new(),
-                    revision: String::new(),
-                    path: path
-                        .file_name()
-                        .map(|n| n.to_string_lossy().into_owned())
-                        .unwrap_or_default(),
-                    size: *size,
-                    sha256: sha256.clone().unwrap_or_default(),
-                    license: String::new(),
-                    local: Some(path.clone()),
-                    folder: None,
-                },
+                _ => local_part(role, path, *size, sha256.as_deref()),
             }
         }
+    }
+}
+
+/// The part a file of this computer makes, the person's own: no repository, revision or
+/// licence, its file name as its path, used where it is (`local`).
+fn local_part(role: GenRole, path: &Path, size: u64, sha256: Option<&str>) -> GenPart {
+    GenPart {
+        role,
+        repo: String::new(),
+        revision: String::new(),
+        path: path
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default(),
+        size,
+        sha256: sha256.unwrap_or_default().to_owned(),
+        license: String::new(),
+        local: Some(path.to_path_buf()),
+        folder: None,
     }
 }
 
@@ -1085,7 +1188,7 @@ async fn slot_choices(
 /// A file on this computer the webview names (untrusted): made canonical, a regular file,
 /// of a format Studio reads; with its size. A pickle file is refused by its extension
 /// ("Studio can't read .ckpt files"), never opened.
-pub(crate) fn checked_disk_file(path: &str) -> AppResult<(PathBuf, u64)> {
+pub(crate) fn checked_disk_file(path: impl AsRef<Path>) -> AppResult<(PathBuf, u64)> {
     let real = dunce::canonicalize(path).map_err(|_| AppError::not_found("file"))?;
     let meta = std::fs::metadata(&real).map_err(|_| AppError::not_found("file"))?;
     if !meta.is_file() {
@@ -1485,9 +1588,10 @@ pub(crate) struct PreparedDownload {
 /// - a catalog entry or an installed model (*Download again*), as 0.1.2 did: every Hub part
 ///   checked, and fetched when it is missing or damaged. A `choice` other than none is for a
 ///   searched file only: `studio_not_supported_yet`;
-/// - a file on this computer is added, never downloaded: `studio_not_supported_yet`.
+/// - a file on this computer is added, never downloaded: `studio_not_supported_yet`
+///   (`import::prepare_import` adds it, with this group machinery for its companions).
 ///
-/// Then what it takes here ([`plan_download`]: `studio_no_checksum`, `studio_disk_too_small`).
+/// Then what it takes here ([`prepared_download`]).
 pub(crate) async fn prepare_download(
     deps: &DownloadDeps<'_>,
     source: &LocalSource,
@@ -1505,18 +1609,7 @@ pub(crate) async fn prepare_download(
                 choice.unwrap_or(&SetupChoice::default()),
             )
             .await?;
-            if !planned.plan.can_run() {
-                let missing: Vec<GenRole> = planned
-                    .plan
-                    .missing()
-                    .into_iter()
-                    .filter_map(GenRole::from_slot)
-                    .collect();
-                return Err(errors::setup_incomplete(&missing));
-            }
-            if !planned.gated.is_empty() && !deps.plan.hf.is_some_and(HfClient::has_token) {
-                return Err(crate::hub::hf_error(HfError::NeedsToken));
-            }
+            ready_to_fetch(&planned, deps.plan.hf)?;
             (
                 planned.entry,
                 Some(planned.plan),
@@ -1532,11 +1625,46 @@ pub(crate) async fn prepare_download(
             (resolved.entry, None, resolved.catalog_id, resolved.source)
         }
     };
+    prepared_download(deps, entry, setup.as_ref(), catalog_id, origin)
+}
+
+/// A planned set-up that can be fetched: one that misses a part is `studio_setup_incomplete`,
+/// and one that fetches a gated repository's file with no Hugging Face token (`hf`) the Hub's
+/// own `hf_needs_token`.
+pub(crate) fn ready_to_fetch(planned: &Planned, hf: Option<&HfClient>) -> AppResult<()> {
+    if !planned.plan.can_run() {
+        let missing: Vec<GenRole> = planned
+            .plan
+            .missing()
+            .into_iter()
+            .filter_map(GenRole::from_slot)
+            .collect();
+        return Err(errors::setup_incomplete(&missing));
+    }
+    if !planned.gated.is_empty() && !hf.is_some_and(HfClient::has_token) {
+        return Err(crate::hub::hf_error(HfError::NeedsToken));
+    }
+    Ok(())
+}
+
+/// The download group of `entry` (made by the set-up plan `setup`, if any; recorded as from
+/// `origin`, with its catalog id): what it takes here ([`plan_download`]:
+/// `studio_no_checksum`, `studio_disk_too_small`), each part's file, a part already on this
+/// computer (`present`) with none, and the group's metadata, nothing started. A group whose
+/// parts are all present has no files: its model is added at once
+/// (`downloads::register_present_gen_model`).
+pub(crate) fn prepared_download(
+    deps: &DownloadDeps<'_>,
+    entry: GenEntry,
+    setup: Option<&SetupPlan>,
+    catalog_id: Option<String>,
+    origin: store::GenSource,
+) -> AppResult<PreparedDownload> {
     // The files the other installed models use, which no part is renamed over.
     let used = deps.plan.installed.except(&entry.id);
     let plan = plan_download(
         entry,
-        setup.as_ref(),
+        setup,
         deps.models_dir,
         deps.engine,
         deps.free_bytes,
@@ -1648,7 +1776,11 @@ pub(crate) async fn delete_unless_in_use(
 
 /// Deletes the row `id`, then each part file no installed model (chat, picture or video) uses
 /// any more and no unfinished download writes (`busy`), then empty folders up to `models_dir`;
-/// returns the files removed. A model not installed is `not_found`.
+/// returns the files removed. A file from this computer (a part with `local`) is the
+/// person's own and is never deleted, wherever it lies, the models folder included (ruling
+/// S7-local-delete); the one exception is the copy an import made under
+/// `<models>/@imported/` (`import::IMPORTED_FOLDER`), which Studio made. A model not
+/// installed is `not_found`.
 pub(crate) async fn delete_files_of(
     store: &store::Store,
     models_dir: &Path,
@@ -1659,13 +1791,22 @@ pub(crate) async fn delete_files_of(
         .delete_gen_model(id)
         .await?
         .ok_or_else(|| AppError::not_found("model"))?;
+    let imported = dunce::canonicalize(models_dir.join(super::import::IMPORTED_FOLDER)).ok();
+    let studios_copy = |file: &str| {
+        let real = dunce::canonicalize(file).ok();
+        real.zip(imported.as_ref())
+            .is_some_and(|(real, root)| crate::downloads::inside_folder(&real, root))
+    };
     let files: Vec<PathBuf> = model
         .parts
         .as_array()
         .into_iter()
         .flatten()
-        .filter_map(|p| p.get("file")?.as_str())
-        .map(PathBuf::from)
+        .filter_map(|p| {
+            let file = p.get("file")?.as_str()?;
+            let local = p.get("local").is_some_and(|l| !l.is_null());
+            (!local || studios_copy(file)).then(|| PathBuf::from(file))
+        })
         .collect();
     remove_unused_files(store, models_dir, &files, busy).await
 }
@@ -1720,7 +1861,7 @@ fn remove_empty_folders(file: &Path, root: &Path) {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use models::catalog::Catalog;
     use models::download::destination;
     use models::gen_catalog::{Badge, Commercial};
@@ -1952,6 +2093,87 @@ mod tests {
         let plan = plan_download(e, None, &dir.0, &EngineNeed::Found, None, &[]).unwrap();
         assert!(plan.already_here.is_empty());
         assert_eq!(plan.to_fetch_bytes, 6_300);
+    }
+
+    /// A set-up plan's files are its entry's parts, pair by pair: a file the plan takes from
+    /// this computer is used where it is when it is the part's (its SHA-256 here); a plan of
+    /// other roles, another file, or another count of files is an internal error, never a
+    /// download of the wrong file.
+    #[test]
+    fn a_set_up_plan_that_is_not_its_entrys_is_refused() {
+        let dir = Scratch::new();
+        let e = entry();
+        let hub = |p: &GenPart| PlannedFile::Hub {
+            repo: p.repo.clone(),
+            revision: p.revision.clone(),
+            path: p.path.clone(),
+            size: p.size,
+            sha256: p.sha256.clone(),
+            licence: LicenceRef::Repo,
+            save_as: None,
+        };
+        let here = dir.0.join("elsewhere").join("encoder.gguf");
+        let local = |sha256: &str| PlannedFile::Local {
+            path: here.clone(),
+            size: 2_000,
+            sha256: Some(sha256.to_owned()),
+        };
+        let plan = |files: Vec<(GenRole, PlannedFile)>| SetupPlan {
+            recipe_id: e.recipe.clone(),
+            parts: files
+                .into_iter()
+                .map(|(role, file)| PlannedPart {
+                    slot: role.slot(),
+                    required: true,
+                    source: PartSource::Repo,
+                    file: Some(file),
+                })
+                .collect(),
+            untested: false,
+        };
+        let [diffusion, encoder, vae] = [&e.parts[0], &e.parts[1], &e.parts[2]];
+        let download = |setup: SetupPlan| {
+            plan_download(
+                e.clone(),
+                Some(&setup),
+                &dir.0,
+                &EngineNeed::Found,
+                None,
+                &[],
+            )
+        };
+        // The encoder another model has here, by its SHA-256: used where it is.
+        let matching = plan(vec![
+            (diffusion.role, hub(diffusion)),
+            (encoder.role, local(&encoder.sha256.to_uppercase())),
+            (vae.role, hub(vae)),
+        ]);
+        let ok = download(matching).unwrap();
+        assert_eq!(ok.present, [None, Some(here.clone()), None]);
+        assert_eq!(ok.files.len(), 2);
+        let refused = [
+            // Another file in the encoder's place.
+            plan(vec![
+                (diffusion.role, hub(diffusion)),
+                (encoder.role, local(&"f".repeat(64))),
+                (vae.role, hub(vae)),
+            ]),
+            // The right count, in another order of roles.
+            plan(vec![
+                (diffusion.role, hub(diffusion)),
+                (vae.role, hub(vae)),
+                (encoder.role, hub(encoder)),
+            ]),
+            // A file short.
+            plan(vec![(diffusion.role, hub(diffusion)), (vae.role, hub(vae))]),
+        ];
+        for setup in refused {
+            let e = download(setup).unwrap_err();
+            assert_eq!(
+                (e.code.as_str(), e.details.as_str()),
+                ("internal", "a set-up plan that is not its entry's")
+            );
+        }
     }
 
     /// Finding local-shared-path-revision-overwrite: a part whose place holds a file an
@@ -2913,36 +3135,9 @@ mod tests {
                 .unwrap();
         }
 
-        /// Installs catalog entry `id` as its download would: each part at its place, at its
-        /// pinned size (sparse files), and its row.
+        /// Installs catalog entry `id` ([`install_catalog_entry`]).
         async fn install_catalog(&self, id: &str) {
-            let entry = bundled().entries.remove(id).unwrap();
-            let mut parts = Vec::new();
-            for part in &entry.parts {
-                let file = dest(self.models(), part);
-                std::fs::create_dir_all(file.parent().unwrap()).unwrap();
-                std::fs::File::create(&file)
-                    .unwrap()
-                    .set_len(part.size)
-                    .unwrap();
-                let mut saved = serde_json::to_value(part).unwrap();
-                saved["file"] = file.display().to_string().into();
-                parts.push(saved);
-            }
-            self.store()
-                .insert_gen_model(store::NewGenModel {
-                    id: entry.id.clone(),
-                    catalog_id: Some(entry.id.clone()),
-                    name: entry.name.clone(),
-                    kind: word(&entry.kind),
-                    family: family_word(&entry),
-                    recipe_id: Some(entry.recipe.clone()),
-                    parts: Value::Array(parts),
-                    size_bytes: entry.total_bytes(),
-                    source: store::GenSource::Catalog,
-                })
-                .await
-                .unwrap();
+            install_catalog_entry(self.store(), self.models(), id).await;
         }
 
         /// Delete on installed model `id`, as `delete_local_model` does.
@@ -2953,8 +3148,40 @@ mod tests {
         }
     }
 
+    /// Installs the bundled catalog's entry `id` in `models` as its download would: each part
+    /// at its place, at its pinned size (sparse files), and its row in `store`.
+    pub(crate) async fn install_catalog_entry(store: &store::Store, models: &Path, id: &str) {
+        let entry = bundled().entries.remove(id).unwrap();
+        let mut parts = Vec::new();
+        for part in &entry.parts {
+            let file = dest(models, part);
+            std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+            std::fs::File::create(&file)
+                .unwrap()
+                .set_len(part.size)
+                .unwrap();
+            let mut saved = serde_json::to_value(part).unwrap();
+            saved["file"] = file.display().to_string().into();
+            parts.push(saved);
+        }
+        store
+            .insert_gen_model(store::NewGenModel {
+                id: entry.id.clone(),
+                catalog_id: Some(entry.id.clone()),
+                name: entry.name.clone(),
+                kind: word(&entry.kind),
+                family: family_word(&entry),
+                recipe_id: Some(entry.recipe.clone()),
+                parts: Value::Array(parts),
+                size_bytes: entry.total_bytes(),
+                source: store::GenSource::Catalog,
+            })
+            .await
+            .unwrap();
+    }
+
     /// A small safetensors file, for a fetched file no check reads.
-    fn small_weights() -> Vec<u8> {
+    pub(crate) fn small_weights() -> Vec<u8> {
         safetensors(&json!({"w": {"dtype": "F16", "shape": [1], "data_offsets": [0, 2]}}))
     }
 
