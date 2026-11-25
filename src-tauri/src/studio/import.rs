@@ -38,11 +38,9 @@ use tauri::{AppHandle, Emitter, Manager};
 
 use super::errors;
 use super::local_cmd::{LocalCmdDeps, app_deps_for_writing, plan_deps, setup_plan_dto};
-use super::local_models::{
-    DiskFile, DownloadDeps, PreparedDownload, disk_setup, plan_disk_with, plan_download,
-    prepared_download, read_disk_file, ready_to_fetch,
-};
+use super::local_models::{DownloadDeps, PreparedDownload, plan_download, prepared_download};
 use super::manager::StudioManager;
+use super::setup_plan::{DiskFile, disk_setup, plan_disk_with, read_disk_file, ready_to_fetch};
 use crate::downloads::{DownloadManager, inside_folder, register_present_gen_model};
 use crate::dto::{SetupChoice, SetupPlanDto};
 use crate::error::AppResult;

@@ -32,6 +32,8 @@
 //!   local models.
 //! - [`import`]: adding a model file from this computer, copied into the models folder or used
 //!   where it is, and set up as a download is.
+//! - [`setup_plan`]: a searched file's or a file on this computer's set-up: the file for each
+//!   slot of its recipe, with the person's choices, and the generic entry it makes.
 //! - [`local_models`]: downloading a picture or video model to this computer, part by part,
 //!   after the user acknowledges the local model notice (with the
 //!   Windows engine pack on first use), and deleting one with the part files nothing else uses.
@@ -66,6 +68,7 @@ mod manager_tests;
 pub mod prefs;
 pub mod prompt_check;
 pub mod quit;
+pub mod setup_plan;
 pub mod spend;
 #[cfg(test)]
 pub(crate) mod test_support;

@@ -52,12 +52,12 @@ use super::local::{
     media_model,
 };
 use super::local_models::{
-    DownloadPlan, InstalledFiles, LocalSource, PlanDeps, Planned, ReadRepo, delete_local_model,
-    entry_from_installed, entry_with, plan_download, plan_file, plan_source, start_local_download,
-    word,
+    DownloadPlan, InstalledFiles, LocalSource, delete_local_model, entry_from_installed,
+    entry_with, plan_download, start_local_download, word,
 };
 use super::manager::{LocalVerdict, StudioManager, device_label, eta_dto, local_verdict, word_tag};
 use super::prefs::StudioPrefs;
+use super::setup_plan::{PlanDeps, Planned, ReadRepo, plan_file, plan_source};
 use crate::commands::only_main_window;
 use crate::dto::{
     EngineStatusDto, GateDto, HardwareLineDto, InstalledLocalDto, LicenceDto, LocalEntryDto,
