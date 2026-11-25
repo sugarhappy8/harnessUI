@@ -758,15 +758,24 @@ pub fn build_args(job: &SdJob) -> Result<Vec<OsString>, ArgsError> {
 }
 
 /// Where `run_job` writes the prompt (and the negative prompt, when there is one) before the
-/// engine starts: inside `out_dir`, as `prompt.txt` and `negative.txt`. A blank negative
-/// prompt has no file.
+/// engine starts: inside `out_dir`, as `prompt.txt` and `negative.txt`. A negative prompt
+/// that is blank once its markers are removed ([`negative_file_text`]) has no file.
 pub fn prompt_files(job: &SdJob) -> (PathBuf, Option<PathBuf>) {
-    let negative = job
-        .negative
-        .as_deref()
-        .filter(|negative| !negative.trim().is_empty())
-        .map(|_| job.out_dir.join(NEGATIVE_FILE));
+    let negative = negative_file_text(job).map(|_| job.out_dir.join(NEGATIVE_FILE));
     (job.out_dir.join(PROMPT_FILE), negative)
+}
+
+/// What `run_job` writes to the negative prompt's file: the negative prompt without the image
+/// markers and LoRA tags typed into it ([`strip_prompt_markers`], ruling
+/// S2-negative-markers), or `None` when that is blank. The engine reads image markers in the
+/// negative prompt as it does in the prompt (`src/pipeline/image.cpp:613-620`,
+/// `video.cpp:1239-1241`), so a typed one would load any file it names, or throw when left
+/// open. It reads no LoRA tag there, so removing one changes nothing.
+pub fn negative_file_text(job: &SdJob) -> Option<String> {
+    job.negative
+        .as_deref()
+        .map(strip_prompt_markers)
+        .filter(|negative| !negative.trim().is_empty())
 }
 
 /// What `run_job` writes to the prompt's file: the prompt without the LoRA tags typed into

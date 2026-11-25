@@ -14,7 +14,7 @@ use std::time::Duration;
 
 use runtime::sd::args::{
     FLAGS, HighNoise, LoraTag, OutputFormat, PartRole, Sampler, Scheduler, SdJob, VaeFormat,
-    build_args, missing_from_help, prompt_file_text, prompt_files,
+    build_args, missing_from_help, negative_file_text, prompt_file_text, prompt_files,
 };
 use runtime::sd::devices::parse_list_devices;
 use runtime::{SpawnSpec, spawn};
@@ -181,7 +181,7 @@ async fn parses_in_metadata_mode(bin: &Path, job: &SdJob, picture: &Path) {
     std::fs::create_dir_all(&job.out_dir).unwrap();
     let (prompt_file, negative_file) = prompt_files(job);
     std::fs::write(&prompt_file, prompt_file_text(job)).unwrap();
-    if let (Some(file), Some(negative)) = (&negative_file, &job.negative) {
+    if let (Some(file), Some(negative)) = (&negative_file, negative_file_text(job)) {
         std::fs::write(file, negative).unwrap();
     }
     let mut args = build_args(job).unwrap();

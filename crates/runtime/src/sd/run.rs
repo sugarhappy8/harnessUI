@@ -19,7 +19,9 @@ use tokio::sync::mpsc;
 use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 
-use super::args::{PartRole, SdJob, build_args, prompt_file_text, prompt_files};
+use super::args::{
+    PartRole, SdJob, build_args, negative_file_text, prompt_file_text, prompt_files,
+};
 use super::devices::{SdDevice, parse_list_devices};
 use super::engine::Engine;
 use super::failure::{SdFailure, classify};
@@ -423,7 +425,8 @@ async fn stop(child: &mut ManagedChild) {
 
 /// Writes the prompt files into the run's folder, creating it: exactly the files of
 /// [`prompt_files`], the paths [`build_args`] passes, so a blank negative prompt has none. The
-/// prompt's file holds [`prompt_file_text`], UTF-8 with no newline added.
+/// prompt's file holds [`prompt_file_text`] and the negative prompt's [`negative_file_text`],
+/// UTF-8 with no newline added.
 async fn write_prompt_files(job: &SdJob) -> Result<(), SdFailure> {
     let failed = |error: io::Error| SdFailure::Io(format!("writing the run's folder: {error}"));
     tokio::fs::create_dir_all(&job.out_dir)
@@ -433,7 +436,7 @@ async fn write_prompt_files(job: &SdJob) -> Result<(), SdFailure> {
     tokio::fs::write(&prompt, prompt_file_text(job).as_bytes())
         .await
         .map_err(failed)?;
-    if let (Some(path), Some(text)) = (negative, job.negative.as_deref()) {
+    if let (Some(path), Some(text)) = (negative, negative_file_text(job)) {
         tokio::fs::write(&path, text.as_bytes())
             .await
             .map_err(failed)?;
@@ -831,6 +834,34 @@ mod tests {
         let text = std::fs::read_to_string(dir.path().join("prompt.txt")).unwrap();
         assert_eq!(text, "a fox  in snow x <lora:style:1>");
         assert!(!text.contains("<image:"));
+    }
+
+    /// The negative prompt goes through the same marker removal (ruling S2-negative-markers):
+    /// its image markers never reach its file, and one that holds only markers has no file.
+    #[tokio::test]
+    async fn typed_image_markers_never_reach_the_negative_prompt_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let j = SdJob {
+            negative: Some("blurry <image:/home/user/secret.png>, <image:".into()),
+            ..job(dir.path())
+        };
+        write_prompt_files(&j).await.unwrap();
+        let text = std::fs::read_to_string(dir.path().join("negative.txt")).unwrap();
+        assert_eq!(text, "blurry , ");
+        assert!(!text.contains("<image:"));
+        let only_markers = SdJob {
+            negative: Some(" <image:/x> <lora:a:1>".into()),
+            ..job(&dir.path().join("second"))
+        };
+        assert_eq!(prompt_files(&only_markers).1, None);
+        write_prompt_files(&only_markers).await.unwrap();
+        assert!(!dir.path().join("second").join("negative.txt").exists());
+        let a: Vec<String> = build_args(&only_markers)
+            .unwrap()
+            .into_iter()
+            .map(|arg| arg.into_string().unwrap())
+            .collect();
+        assert!(!a.contains(&"--negative-prompt-file".to_owned()));
     }
 
     #[tokio::test]

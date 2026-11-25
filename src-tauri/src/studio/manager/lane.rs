@@ -3,9 +3,10 @@
 //! documentation; in more detail:
 //!
 //! - **Starting** ([`StudioManager::start`] with `RunTarget::ThisComputer`): the same press
-//!   sent twice gives the run it made; the prompt check (`studio_wont_make`), then the
-//!   prompt's length (at most `runtime::sd::args::PROMPT_MAX_CHARS`,
-//!   `studio_prompt_too_long_here`); the model among the installed ones (`parse_catalog` of
+//!   sent twice gives the run it made; the prompt's length (at most
+//!   `runtime::sd::args::PROMPT_MAX_CHARS`, `studio_prompt_too_long_here`), then the prompt
+//!   check (`studio_wont_make`), which reads a prompt of at most that length in full (ruling
+//!   S2-attention-2); the model among the installed ones (`parse_catalog` of
 //!   the provider's list), its settings checked (`spec::validate`) and a seed picked when
 //!   none is set; the run's fit and time ([`local_verdict`](super::local_verdict)), the time
 //!   where the lease would run it (on the processor rather than after an unload, as Create
@@ -399,11 +400,14 @@ impl StudioManager {
         if let Some(run) = inner.known_press(&req.client_token).await? {
             return Ok(inner.dto_of(&run, seq));
         }
-        if prompt_check::refuses(&req.prompt) {
-            return Err(errors::wont_make());
-        }
+        // The length first: the prompt check reads the engine's weighting of a prompt of at
+        // most PROMPT_MAX_CHARS characters, and that reading grows with the square of the
+        // brackets.
         if req.prompt.chars().count() > PROMPT_MAX_CHARS {
             return Err(errors::prompt_too_long_here());
+        }
+        if prompt_check::refuses(&req.prompt) {
+            return Err(errors::wont_make());
         }
         let prepared = inner.prepare_local(&req, &lane).await?;
         if !prepared.problems.is_empty() {

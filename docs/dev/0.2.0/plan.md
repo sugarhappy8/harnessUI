@@ -1717,9 +1717,9 @@ pub struct SdJob {
     pub vae_format: Option<VaeFormat>, pub model_args: Option<String>, pub lora_dir: Option<PathBuf>, pub loras: Vec<LoraTag>,
 }
 pub enum ArgsError { /* as now, with */ BadSize { multiple: u32 }, BadLoraName(String), TooManyLoras, LorasWithoutFolder, BadModelArgs, MaskWithoutPicture }
-pub fn strip_lora_tags(prompt: &str) -> String;     // removes every span matching <lora:([^:>]+):([^>]+)>
+pub fn strip_prompt_markers(prompt: &str) -> String; // removes every <lora:…> tag and <image:…> marker, whole or left open
 pub fn lora_tag(tag: &LoraTag) -> String;           // "<lora:NAME:W>" or "<lora:|high_noise|NAME:W>", W by `{}` of f32
-pub fn prompt_file_text(job: &SdJob) -> String;     // strip_lora_tags(prompt), then " " + lora_tag(t) for each LoRA
+pub fn prompt_file_text(job: &SdJob) -> String;     // strip_prompt_markers(prompt), then " " + lora_tag(t) for each LoRA
 pub fn valid_lora_name(name: &str) -> bool;         // non-empty, relative, '/' separators only, no ':' '<' '>' '|' '\\', no control
                                                     // characters, no "." or ".." component
 ```
