@@ -9,16 +9,14 @@ import {
   type EmptyState,
   type StudioTab,
 } from "../../store/studio";
+import { NOTICE_CARD, SECONDARY_BUTTON } from "./styles";
 import type { StudioEndpoint } from "./types";
 
 // What Studio shows above the card stream (0.1.0 Task B2): *Get the list* for an endpoint
 // whose lists are not saved yet, the tab's empty state, local first, and the one-time
 // suggestion of local models.
 
-const CARD = "enter rounded-xl border border-border bg-surface p-3.5 shadow-soft";
 const PRIMARY = "btn-primary rounded-lg px-3 py-1.5 text-sm font-medium";
-const SECONDARY =
-  "rounded-lg border border-border bg-bg px-2.5 py-1.5 text-sm hover:border-border-strong hover:bg-bg-muted disabled:opacity-60";
 
 /** Settings on its Endpoints page, where OpenRouter and OpenAI are added. */
 function openEndpoints() {
@@ -55,12 +53,12 @@ function GetTheList(props: { endpoint: StudioEndpoint; onError: (e: unknown) => 
   const [busy, setBusy] = useState(false);
   const { endpoint } = props;
   return (
-    <section className={`${CARD} flex flex-wrap items-center justify-between gap-2`}>
+    <section className={`${NOTICE_CARD} flex flex-wrap items-center justify-between gap-2`}>
       <p className="text-sm">{getListWords(endpoint.name, endpoint.company)}</p>
       <button
         type="button"
         disabled={busy}
-        className={SECONDARY}
+        className={SECONDARY_BUTTON}
         onClick={() => {
           setBusy(true);
           refreshModels(endpoint.providerId)
@@ -99,7 +97,7 @@ function EmptyStateCard(props: { tab: StudioTab; state: Exclude<EmptyState, null
     // (*Get the list* says so).
     const second = unusable ?? (endpoints.some((e) => makesKind(e, tab)) ? null : STUDIO_EMPTY.backup[tab]);
     return (
-      <section className={CARD}>
+      <section className={NOTICE_CARD}>
         <p className="text-sm font-medium">{STUDIO_EMPTY.getLocal}</p>
         <p className="mt-1 text-sm">{fitsThisComputer(entry.name, entry.sizeBytes)}</p>
         <button type="button" className={`${PRIMARY} mt-3`} onClick={() => showLocalModels(true)}>
@@ -118,7 +116,7 @@ function EmptyStateCard(props: { tab: StudioTab; state: Exclude<EmptyState, null
     unusable ??
     (tab === "video" && local !== null && local.videoOnProcessor ? STUDIO_EMPTY.noVideoHere : STUDIO_EMPTY.cloud[tab]);
   return (
-    <section className={CARD}>
+    <section className={NOTICE_CARD}>
       <p className="text-sm">{text}</p>
       <div className="mt-3">
         <OpenEndpoints />
@@ -129,7 +127,7 @@ function EmptyStateCard(props: { tab: StudioTab; state: Exclude<EmptyState, null
 
 function OpenEndpoints() {
   return (
-    <button type="button" className={SECONDARY} onClick={openEndpoints}>
+    <button type="button" className={SECONDARY_BUTTON} onClick={openEndpoints}>
       {STUDIO_ACTIONS.openEndpoints}
     </button>
   );
@@ -140,7 +138,7 @@ function Suggestion(props: { name: string; sizeBytes: number; onError: (e: unkno
   const showLocalModels = useStudio((s) => s.showLocalModels);
   const setPrefs = useStudio((s) => s.setPrefs);
   return (
-    <section className={CARD}>
+    <section className={NOTICE_CARD}>
       <p className="text-sm font-medium">{STUDIO_SUGGESTION.text(props.name)}</p>
       <p className="mt-1 text-xs text-fg-muted">{STUDIO_SUGGESTION.size(props.sizeBytes)}</p>
       <div className="mt-3 flex flex-wrap gap-2">
@@ -149,7 +147,7 @@ function Suggestion(props: { name: string; sizeBytes: number; onError: (e: unkno
         </button>
         <button
           type="button"
-          className={SECONDARY}
+          className={SECONDARY_BUTTON}
           onClick={() => void setPrefs({ suggestionDismissed: true }).catch(props.onError)}
         >
           {STUDIO_ACTIONS.notNow}

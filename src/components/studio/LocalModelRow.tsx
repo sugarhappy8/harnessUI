@@ -16,7 +16,7 @@ import { visiblePath } from "../FolderChip";
 import { ConfirmDialog } from "./ConfirmDialog";
 import { etaText } from "./eta";
 import { activeDownload, licenceBadge, offerForEntry } from "./localOffers";
-import { CARD_BUTTON, PRIMARY_BUTTON } from "./styles";
+import { CARD_BUTTON, PRIMARY_BUTTON, ROW } from "./styles";
 import type { InstalledLocal, Licence, LocalEntry, LocalFit, LocalModels, MediaKind } from "./types";
 
 // One model in Get local models (0.1.0 Task B13, local addendum Wireframe L2): a recommended
@@ -191,8 +191,6 @@ function InstalledActions(props: {
     </>
   );
 }
-
-const ROW = "flex flex-col gap-1.5 rounded-xl border border-border bg-surface p-3.5 shadow-soft";
 
 /** A recommended entry, or one that does not fit this computer (`notHere`: no *Download*, and
  *  when installed no *Download again*, only *Delete*). While it downloads, how far that got in

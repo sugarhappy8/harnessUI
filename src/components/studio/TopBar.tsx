@@ -12,6 +12,7 @@ import {
 import { useStudio } from "../../store/studio";
 import { PlaceMark } from "../PlaceMark";
 import { formatUsd } from "./cost";
+import { MENU_ITEM } from "./styles";
 import { KindTabs } from "./KindTabs";
 import { LocalMark } from "./LocalMark";
 
@@ -25,8 +26,6 @@ import { LocalMark } from "./LocalMark";
 /** How long the search box waits after the last key before it asks for the gallery. */
 const SEARCH_DELAY_MS = 250;
 
-const MENU_ITEM =
-  "flex cursor-default items-center gap-2 rounded-lg px-2.5 py-1.5 text-sm outline-none data-[disabled]:text-fg-muted data-[highlighted]:bg-bg-muted";
 const TOGGLE =
   "flex shrink-0 items-center gap-1.5 rounded-lg px-2 py-1.5 text-sm whitespace-nowrap hover:bg-bg-muted aria-pressed:text-accent";
 
@@ -108,7 +107,7 @@ function SearchBox(props: { onError: (e: unknown) => void }) {
   }, []);
 
   return (
-    <label className="flex min-w-32 items-center gap-1.5 rounded-lg border border-border bg-bg px-2 py-1 text-sm focus-within:border-border-strong">
+    <label className="flex min-w-32 items-center gap-1.5 rounded-lg border border-border bg-bg px-2 py-1 text-sm focus-within:border-border-strong focus-within:ring-2 focus-within:ring-accent/40">
       <Search size={14} aria-hidden className="text-fg-muted" />
       <input
         type="search"

@@ -171,7 +171,7 @@ export function Sidebar(props: {
           <Plus size={16} aria-hidden />
           New chat
         </button>
-        <label className="flex items-center gap-2 rounded-lg border border-border bg-bg px-2.5 py-1.5 focus-within:border-border-strong">
+        <label className="flex items-center gap-2 rounded-lg border border-border bg-bg px-2.5 py-1.5 focus-within:border-border-strong focus-within:ring-2 focus-within:ring-accent/40">
           <Search size={14} className="text-fg-muted" aria-hidden />
           <span className="sr-only">Search chats</span>
           <input

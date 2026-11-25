@@ -15,6 +15,7 @@ import { ErrorBanner } from "../ErrorBanner";
 import { ChipsRow } from "./AdvancedDrawer";
 import { ConfirmRun } from "./ConfirmRun";
 import { cloudBackup, COST_TONE_CLASS, costTone, createLabel, limitLine, placeLine } from "./cost";
+import { SECONDARY_BUTTON } from "./styles";
 import { etaText } from "./eta";
 import { RefTray } from "./RefTray";
 
@@ -34,8 +35,6 @@ import { RefTray } from "./RefTray";
 // offered as the backup when it is very slow (Studio never moves the draft by itself). Other
 // screens put the cursor in the prompt with the window event `app:focus-studio-prompt`.
 
-const SECONDARY =
-  "rounded-lg border border-border bg-bg px-2.5 py-1 text-sm hover:border-border-strong hover:bg-bg-muted";
 
 /** Settings on one of its pages. */
 function openSettings(page: "endpoints" | "studio") {
@@ -145,7 +144,7 @@ export function PromptDock(props: { tab: StudioTab }) {
           }
         }}
         rows={2}
-        className="w-full resize-none rounded-xl border border-border bg-bg px-3 py-2 text-sm outline-none focus:border-border-strong"
+        className="w-full resize-none rounded-xl border border-border bg-bg px-3 py-2 text-sm focus:border-border-strong focus-visible:ring-2 focus-visible:ring-accent/40 outline-none"
       />
       {promptRefused.length > 0 && (
         // Each refused press puts it in again, so it is read out again.
@@ -179,7 +178,7 @@ export function PromptDock(props: { tab: StudioTab }) {
           {overLimit ? (
             <div className="flex flex-wrap items-center gap-2">
               <p className="text-sm text-warning">{limitLine(known.limit)}</p>
-              <button type="button" className={SECONDARY} onClick={() => openSettings("studio")}>
+              <button type="button" className={SECONDARY_BUTTON} onClick={() => openSettings("studio")}>
                 {STUDIO_DOCK.raiseLimit}
               </button>
             </div>
@@ -215,7 +214,7 @@ export function PromptDock(props: { tab: StudioTab }) {
       {backup === "useCloud" && (
         <div className="flex flex-wrap items-center gap-2 text-xs text-fg-muted">
           <p>{notHere ? STUDIO_DOCK.cloudInstead : STUDIO_DOCK.tooSlow}</p>
-          <button type="button" className={SECONDARY} onClick={() => openPicker("cloud")}>
+          <button type="button" className={SECONDARY_BUTTON} onClick={() => openPicker("cloud")}>
             {STUDIO_DOCK.chooseCloud}
           </button>
         </div>
@@ -223,7 +222,7 @@ export function PromptDock(props: { tab: StudioTab }) {
       {backup === "addEndpoint" && (
         <div className="flex flex-wrap items-center gap-2 text-xs text-fg-muted">
           <p>{STUDIO_DOCK.addEndpoint[tab]}</p>
-          <button type="button" className={SECONDARY} onClick={() => openSettings("endpoints")}>
+          <button type="button" className={SECONDARY_BUTTON} onClick={() => openSettings("endpoints")}>
             {STUDIO_ACTIONS.openEndpoints}
           </button>
         </div>

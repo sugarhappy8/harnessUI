@@ -78,7 +78,7 @@ export function LocalSearch(props: { tab: StudioTab }) {
   return (
     <section className="flex flex-col gap-2 pt-2">
       <div className="flex flex-wrap items-center gap-2">
-        <label className="flex min-w-32 flex-1 items-center gap-1.5 rounded-lg border border-border bg-bg px-2 py-1 text-sm focus-within:border-border-strong">
+        <label className="flex min-w-32 flex-1 items-center gap-1.5 rounded-lg border border-border bg-bg px-2 py-1 text-sm focus-within:border-border-strong focus-within:ring-2 focus-within:ring-accent/40">
           <Search size={14} aria-hidden className="text-fg-muted" />
           <input
             type="search"

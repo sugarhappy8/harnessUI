@@ -17,6 +17,7 @@ import { etaText, timeWords } from "./eta";
 import { ResultTile, resultsOf } from "./results";
 import { settingsParts } from "./settingsLine";
 import { CARD_BUTTON } from "./styles";
+import { RUN_CARD } from "./styles";
 import type { Run } from "./types";
 import { Working } from "./Working";
 
@@ -221,7 +222,6 @@ function useNow(active: boolean): number {
   return now;
 }
 
-const CARD = "enter flex flex-col gap-1.5 rounded-xl border border-border bg-surface p-3.5 shadow-soft";
 const LINK = "shrink-0 text-xs underline hover:text-fg disabled:opacity-60";
 
 /** One run's card. */
@@ -317,7 +317,7 @@ export function RunCard(props: { run: Run }) {
   const forChat = run.kind === "image" && run.status === "done" && run.outputs.length === 1 ? run.outputs[0] : null;
 
   return (
-    <article data-run-card={run.id} className={CARD}>
+    <article data-run-card={run.id} className={RUN_CARD}>
       {run.prompt && <p className="text-sm break-words">{STUDIO_CARD.prompt(run.prompt)}</p>}
       <div className="flex flex-wrap items-baseline gap-x-3 text-xs text-fg-muted">
         <p className="min-w-0 flex-1">

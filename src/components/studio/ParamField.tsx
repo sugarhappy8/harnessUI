@@ -2,7 +2,7 @@ import { useEffect, useEffectEvent, useId, useState, type ReactNode } from "reac
 import { DropdownMenu } from "radix-ui";
 import { Check, ChevronDown, CircleHelp, Dices, Plus, RotateCcw } from "lucide-react";
 import { STUDIO_FIELDS } from "../../lib/words";
-import { BOX } from "./styles";
+import { BOX, CHIP_CHECKED } from "./styles";
 import type { Choice, ParamKind, ParamSpec, SizeRules } from "./types";
 
 // One of Studio's controls (0.1.0 Task B5; design 3, "Widgets"): every field is drawn from the
@@ -70,8 +70,6 @@ function isSet(value: unknown): boolean {
 
 // ---- the field ------------------------------------------------------------------------------
 
-const CHIP =
-  "rounded-full border border-border px-2 py-0.5 text-xs whitespace-nowrap hover:border-border-strong aria-checked:border-accent aria-checked:text-accent aria-expanded:border-border-strong";
 
 /**
  * One field: its label (with its help as a tooltip), "Automatic" while it is unset or its reset
@@ -306,7 +304,7 @@ function Radios(props: {
           role="radio"
           aria-checked={choice.value === props.value}
           onClick={() => props.onChange(choice.value)}
-          className={CHIP}
+          className={CHIP_CHECKED}
         >
           {chipWords(choice, props.timeOf)}
         </button>
@@ -331,7 +329,7 @@ function ShapeChips(props: { labelId: string; choices: Choice[]; value: unknown;
               type="button"
               aria-label={STUDIO_FIELDS.moreShapes}
               title={STUDIO_FIELDS.moreShapes}
-              className={`${CHIP} flex items-center gap-0.5 ${chosen >= 0 ? "border-accent text-accent" : ""}`}
+              className={`${CHIP_CHECKED} flex items-center gap-0.5 ${chosen >= 0 ? "border-accent text-accent" : ""}`}
             >
               {chosen >= 0 ? rest[chosen]?.label : <Plus size={12} aria-hidden />}
               <ChevronDown size={12} aria-hidden />
@@ -413,7 +411,7 @@ function CountChips(props: {
             title={STUDIO_FIELDS.more}
             aria-expanded={open}
             onClick={() => setMore(!open)}
-            className={CHIP}
+            className={CHIP_CHECKED}
           >
             <Plus size={12} aria-hidden />
           </button>

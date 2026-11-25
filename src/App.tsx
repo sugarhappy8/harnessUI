@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { Tooltip } from "radix-ui";
 import { Sidebar } from "./components/Sidebar";
 import { ChatView } from "./components/ChatView";
 import { Workbench } from "./components/Workbench";
@@ -16,7 +17,6 @@ import { followApprovals, followRunningTurn, turnChatId, useApp, toErrorInfo } f
 import { followStudio, useStudio } from "./store/studio";
 import * as ipc from "./lib/ipc";
 import { listenInEffect } from "./lib/listen";
-
 
 /** Puts the cursor in Studio's prompt once Studio is shown (the next frame): the chat's message
  *  box it may have been in is hidden now, and the focus would fall to the page. */
@@ -62,8 +62,8 @@ export default function App() {
   useEffect(() => {
     if (!ipc.isTauri()) return;
     const unlisten = listenInEffect(() => ipc.onRuntimeStatus(setRuntime));
-    Promise.all([refreshChats(), refreshModelOptions(), ipc.runtimeStatus().then(setRuntime)]).catch(
-      (err) => showError(toErrorInfo(err)),
+    Promise.all([refreshChats(), refreshModelOptions(), ipc.runtimeStatus().then(setRuntime)]).catch((err) =>
+      showError(toErrorInfo(err)),
     );
     ipc
       .firstRunInfo()
@@ -202,33 +202,35 @@ export default function App() {
   }
 
   return (
-    <div className="flex h-full flex-col">
-      {notices(sidebarOpen ? "sidebar" : "below-header")}
-      <div className="flex min-h-0 flex-1">
-        {sidebarOpen && (
-          <Sidebar
-            onOpenSettings={() => {
-              setSettingsTab(undefined);
-              setSettingsOpen(true);
-            }}
-            onOpenModels={() => setModelsOpen(true)}
-          />
-        )}
-        <div className="relative flex min-w-0 flex-1" hidden={studioShown}>
-          <ChatView />
-          <Workbench />
-          {/* A video that finished while the chat was shown. */}
-          <StudioNotice />
-        </div>
-        {studioMounted && (
-          <div className="flex min-w-0 flex-1" hidden={!studioShown}>
-            <StudioView />
+    <Tooltip.Provider delayDuration={300}>
+      <div className="flex h-full flex-col">
+        {notices(sidebarOpen ? "sidebar" : "below-header")}
+        <div className="flex min-h-0 flex-1">
+          {sidebarOpen && (
+            <Sidebar
+              onOpenSettings={() => {
+                setSettingsTab(undefined);
+                setSettingsOpen(true);
+              }}
+              onOpenModels={() => setModelsOpen(true)}
+            />
+          )}
+          <div className="relative flex min-w-0 flex-1" hidden={studioShown}>
+            <ChatView />
+            <Workbench />
+            {/* A video that finished while the chat was shown. */}
+            <StudioNotice />
           </div>
-        )}
+          {studioMounted && (
+            <div className="flex min-w-0 flex-1" hidden={!studioShown}>
+              <StudioView />
+            </div>
+          )}
+        </div>
+        {dialogs}
+        {/* Only with the main window on screen, after first run: it asks about chats. */}
+        {ipc.isTauri() && <FullAccessStartCheck />}
       </div>
-      {dialogs}
-      {/* Only with the main window on screen, after first run: it asks about chats. */}
-      {ipc.isTauri() && <FullAccessStartCheck />}
-    </div>
+    </Tooltip.Provider>
   );
 }

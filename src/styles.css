@@ -131,9 +131,60 @@ body {
   background: color-mix(in srgb, var(--accent) 30%, transparent);
 }
 
-:focus-visible {
-  outline: 2px solid var(--focus);
-  outline-offset: 2px;
+/* In the base layer, so a utility (`outline-none`, the ring of FOCUS_RING in
+   components/ui/styles.ts) overrides it. Unlayered, it beat them and drew a second outline
+   around fields that already show their own focus. */
+@layer base {
+  :focus-visible {
+    outline: 2px solid var(--focus);
+    outline-offset: 2px;
+  }
+}
+
+/* The type scale (design 10.4). */
+@utility text-view-title {
+  font-size: var(--text-xl);
+  line-height: var(--text-xl--line-height);
+  font-weight: 600;
+}
+
+@utility text-title {
+  font-size: var(--text-lg);
+  line-height: var(--text-lg--line-height);
+  font-weight: 600;
+}
+
+@utility text-section {
+  font-size: var(--text-sm);
+  line-height: var(--text-sm--line-height);
+  font-weight: 600;
+}
+
+@utility text-body {
+  font-size: var(--text-sm);
+  line-height: var(--text-sm--line-height);
+}
+
+@utility text-meta {
+  font-size: var(--text-xs);
+  line-height: var(--text-xs--line-height);
+  color: var(--fg-muted);
+}
+
+/* Studio's page: in light a quiet grey behind white cards, so cards and page separate; in
+   dark the page is the darkest layer. */
+.studio-page {
+  background: var(--bg-subtle);
+}
+
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) .studio-page {
+    background: var(--bg);
+  }
+}
+
+:root[data-theme="dark"] .studio-page {
+  background: var(--bg);
 }
 
 /* Thin scrollbars in the theme's colours, instead of the system's wide grey ones. */

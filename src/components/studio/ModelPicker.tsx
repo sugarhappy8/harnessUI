@@ -28,6 +28,7 @@ import { FitDot } from "../FitBadge";
 import { PlaceMark } from "../PlaceMark";
 import { formatUsd } from "./cost";
 import { etaText } from "./eta";
+import { CHIP_PRESSED } from "./styles";
 import { LocalMark } from "./LocalMark";
 import type {
   Canonical,
@@ -254,8 +255,6 @@ function chosenKey(chosen: Chosen | null): string {
   return `${targetKey(chosen.endpoint ? { endpoint: chosen.endpoint.providerId } : "thisComputer")} ${chosen.model.id}`;
 }
 
-const CHIP =
-  "rounded-full border border-border px-2 py-0.5 text-xs hover:border-border-strong aria-pressed:border-accent aria-pressed:text-accent";
 const LINK_BUTTON = "rounded-lg px-2.5 py-1.5 text-left text-sm text-accent hover:bg-bg-muted";
 
 /** The Model field: the chosen model, its price or time, and the picker it opens. */
@@ -372,7 +371,7 @@ export function ModelPicker(props: { tab: StudioTab }) {
             className="z-50 flex max-h-[var(--radix-popover-content-available-height)] w-[26rem] max-w-[calc(100vw-1rem)] flex-col rounded-xl border border-border bg-surface shadow-pop"
           >
             <div className="flex flex-col gap-2 border-b border-border p-2">
-              <label className="flex items-center gap-1.5 rounded-lg border border-border bg-bg px-2 py-1 text-sm focus-within:border-border-strong">
+              <label className="flex items-center gap-1.5 rounded-lg border border-border bg-bg px-2 py-1 text-sm focus-within:border-border-strong focus-within:ring-2 focus-within:ring-accent/40">
                 <Search size={14} aria-hidden className="text-fg-muted" />
                 <input
                   ref={searchRef}
@@ -386,7 +385,7 @@ export function ModelPicker(props: { tab: StudioTab }) {
               </label>
               <div role="group" aria-label={STUDIO_PICKER.filters} className="flex flex-wrap gap-1">
                 {chips.map((f) => (
-                  <button key={f} type="button" aria-pressed={active.includes(f)} onClick={() => toggle(f)} className={CHIP}>
+                  <button key={f} type="button" aria-pressed={active.includes(f)} onClick={() => toggle(f)} className={CHIP_PRESSED}>
                     {FILTER_WORDS[f]}
                   </button>
                 ))}

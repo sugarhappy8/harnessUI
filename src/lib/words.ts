@@ -2356,3 +2356,8 @@ export function abilitiesWords(media: { image: boolean; video: boolean } | undef
   if (media?.video) parts.push(STUDIO_TABS.video);
   return parts.join(" · ");
 }
+
+/** The shared controls in `src/components/ui`. */
+export const UI = {
+  close: "Close",
+} as const;

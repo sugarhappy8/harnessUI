@@ -16,3 +16,28 @@ export const CARD_BUTTON =
 
 /** The main action of a row: *Download* in Get local models' rows and search results. */
 export const PRIMARY_BUTTON = "btn-primary rounded-lg px-3 py-1 text-sm font-medium";
+
+/** A secondary button: *Get the list*, *Open Settings*, the model notices' actions. */
+export const SECONDARY_BUTTON =
+  "rounded-lg border border-border bg-bg px-2.5 py-1.5 text-sm hover:border-border-strong hover:bg-bg-muted disabled:opacity-60";
+
+/** A run's card: a flex column. */
+export const RUN_CARD = "enter flex flex-col gap-1.5 rounded-xl border border-border bg-surface p-3.5 shadow-soft";
+
+/** A notice's card above the card stream. */
+export const NOTICE_CARD = "enter rounded-xl border border-border bg-surface p-3.5 shadow-soft";
+
+/** A chip that is pressed or not (`aria-pressed`): the model picker's filters. */
+export const CHIP_PRESSED =
+  "rounded-full border border-border px-2 py-0.5 text-xs hover:border-border-strong aria-pressed:border-accent aria-pressed:text-accent";
+
+/** A chip that is checked or not (`aria-checked`): a setting's choices. */
+export const CHIP_CHECKED =
+  "rounded-full border border-border px-2 py-0.5 text-xs whitespace-nowrap hover:border-border-strong aria-checked:border-accent aria-checked:text-accent aria-expanded:border-border-strong";
+
+/** A row of a menu. */
+export const MENU_ITEM =
+  "flex cursor-default items-center gap-2 rounded-lg px-2.5 py-1.5 text-sm outline-none data-[disabled]:text-fg-muted data-[highlighted]:bg-bg-muted";
+
+/** A model's row card in Get local models. */
+export const ROW = "flex flex-col gap-1.5 rounded-xl border border-border bg-surface p-3.5 shadow-soft";
