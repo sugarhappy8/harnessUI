@@ -958,6 +958,16 @@ async fn slot_choices(
 /// of a format Studio reads; with its size. A pickle file is refused by its extension
 /// ("Studio can't read .ckpt files"), never opened.
 pub(crate) fn checked_disk_file(path: impl AsRef<Path>) -> AppResult<(PathBuf, u64)> {
+    checked_disk_file_with(path, errors::not_a_model_format)
+}
+
+/// [`checked_disk_file`] with the refusal of a name of another format, `unreadable`: Task
+/// S10's LoRA import says "This is not a LoRA file Studio can read."
+/// (`errors::not_a_lora_format`).
+pub(crate) fn checked_disk_file_with(
+    path: impl AsRef<Path>,
+    unreadable: fn() -> AppError,
+) -> AppResult<(PathBuf, u64)> {
     let real = dunce::canonicalize(path).map_err(|_| AppError::not_found("file"))?;
     let meta = std::fs::metadata(&real).map_err(|_| AppError::not_found("file"))?;
     if !meta.is_file() {
@@ -967,20 +977,21 @@ pub(crate) fn checked_disk_file(path: impl AsRef<Path>) -> AppResult<(PathBuf, u
         .file_name()
         .map(|n| n.to_string_lossy().into_owned())
         .unwrap_or_default();
-    readable_file_name(&name)?;
+    readable_file_name_with(&name, unreadable)?;
     Ok((real, meta.len()))
 }
 
 /// Refuses a file name of a format Studio does not read: a pickle file by its extension, in
 /// any case ("Studio can't read .ckpt files"), and any other name not ending in
-/// `.safetensors`, `.sft` or `.gguf`. Task S10 checks a LoRA's name in a repo with it too.
-pub(crate) fn readable_file_name(name: &str) -> AppResult<()> {
+/// `.safetensors`, `.sft` or `.gguf` with `unreadable` (a model's or, Task S10, a LoRA's
+/// words).
+pub(crate) fn readable_file_name_with(name: &str, unreadable: fn() -> AppError) -> AppResult<()> {
     let name = name.to_lowercase();
     if let Some(ext) = pickle_extension(&name) {
         return Err(errors::cannot_read_file(ext));
     }
     if !READ_EXTENSIONS.iter().any(|ext| name.ends_with(ext)) {
-        return Err(errors::not_a_model_format());
+        return Err(unreadable());
     }
     Ok(())
 }

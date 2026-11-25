@@ -543,16 +543,22 @@ async fn check_added(
 /// its header, read again here, gives its format and base (`studio::loras::read_lora_file`).
 /// A file whose header is not a LoRA's is refused (`studio_not_a_lora`): nothing is added, and
 /// the file goes when the group wrote it itself and nothing else uses or writes it. The same
-/// LoRA downloaded again replaces its row: the same id, name and file.
+/// LoRA downloaded again replaces its row: the same id, name and file; while a run on this
+/// computer holds it (`in_use`, ruling S10-lora-in-use) that is refused
+/// (`studio_lora_in_use`), its row and file left as they are, and Resume tries again.
 pub(crate) async fn register_lora(
     store: &store::Store,
     models_dir: &Path,
     group: &str,
     meta: &GroupMeta,
+    in_use: &(dyn Fn(&str) -> bool + Sync),
 ) -> AppResult<()> {
     let Some(lora) = &meta.lora else {
         return Err(AppError::internal("a download without a LoRA"));
     };
+    if in_use(&lora.id) {
+        return Err(studio_errors::lora_in_use_for_download());
+    }
     let rows = store.list_downloads(Some(group.to_string())).await?;
     let row = rows
         .iter()
@@ -619,7 +625,8 @@ pub(crate) async fn finish_gen_group(
     finish_gen_group_while(store, models_dir, group, &|_| false).await
 }
 
-/// [`finish_gen_group`] while `in_use` says which models a run on this computer holds.
+/// [`finish_gen_group`] while `in_use` says which models (or LoRAs) a run on this computer
+/// holds.
 #[cfg(test)]
 pub(crate) async fn finish_gen_group_while(
     store: &store::Store,
@@ -646,7 +653,7 @@ pub(crate) async fn finish_gen_group_while(
             .await?;
     }
     if meta.lora.is_some() {
-        register_lora(store, models_dir, group, &meta).await?;
+        register_lora(store, models_dir, group, &meta, in_use).await?;
     } else {
         register_gen_model(store, models_dir, group, &meta, in_use).await?;
     }
@@ -994,6 +1001,31 @@ fn download_error_to_app(e: &models::download::DownloadError) -> AppError {
     }
 }
 
+/// [`download_error_to_app`] for a download of `what`: a LoRA's (ruling S10-lora-words) is
+/// never called a model: a gated repo, its terms, and a file that changed upstream.
+fn download_error_for(e: &models::download::DownloadError, what: Fetching) -> AppError {
+    let err = download_error_to_app(e);
+    if what != Fetching::Lora {
+        return err;
+    }
+    let (message, next_step) = match err.code.as_str() {
+        "hf_needs_token" => (
+            studio_errors::LORA_GATED,
+            "Add a Hugging Face token in Settings → Models, then resume the download.",
+        ),
+        "hf_needs_terms" => (
+            studio_errors::LORA_TERMS,
+            "Open its page on Hugging Face, accept its terms, then resume the download.",
+        ),
+        "changed_upstream" => (
+            "The file changed on Hugging Face after it was listed.",
+            "Open the repository again and start a new download.",
+        ),
+        _ => return err,
+    };
+    AppError::new(&err.code, message, next_step, err.details)
+}
+
 // ---- 0.0.7 (P6): what a group's rows mean -------------------------------------------
 
 /// Whether the file at `dest` is whole: `size` bytes at its final name. A download gets its
@@ -1170,26 +1202,56 @@ fn lora_id(meta: &GroupMeta) -> Option<&str> {
     meta.lora.as_ref().map(|l| l.id.as_str())
 }
 
+/// What a download fetches, for the words of its refusals: a model's files, the image file
+/// for an installed model, or (0.2.0, ruling S10-lora-words) a LoRA's file.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Fetching {
+    Model,
+    ImageFile,
+    Lora,
+}
+
+impl Fetching {
+    /// What the download `meta` describes fetches.
+    fn of(meta: &GroupMeta) -> Self {
+        if meta.lora.is_some() {
+            Fetching::Lora
+        } else if meta.image_file_for.is_some() {
+            Fetching::ImageFile
+        } else {
+            Fetching::Model
+        }
+    }
+}
+
 /// A new download refused because another download writes some of its files
 /// ([`Start::Busy`]). An image file for an installed model is written next to that model, so
 /// once the other download is done the model finds it there and uses it. `running`: that
 /// download runs (else it is paused or failed).
-fn busy_error(image_file: bool, running: bool) -> AppError {
-    let (message, next_step) = match (image_file, running) {
-        (true, true) => (
+fn busy_error(what: Fetching, running: bool) -> AppError {
+    let (message, next_step) = match (what, running) {
+        (Fetching::ImageFile, true) => (
             "This image file is already being downloaded with another model. This model uses it too once that download is done.",
             "See Models → Downloads.",
         ),
-        (true, false) => (
+        (Fetching::ImageFile, false) => (
             "This image file is part of another model's download, which has stopped. This model uses it too once that download is done.",
             "Resume that download in Models → Downloads, or cancel it there and try again.",
         ),
-        (false, true) => (
+        (Fetching::Model, true) => (
             "One of this model's files is already being downloaded.",
             "Let that download finish, or cancel it in Downloads, then try again.",
         ),
-        (false, false) => (
+        (Fetching::Model, false) => (
             "One of this model's files is part of another download, which has stopped.",
+            "Resume or cancel that download in Downloads, then try again.",
+        ),
+        (Fetching::Lora, true) => (
+            "This LoRA's file is already being downloaded.",
+            "Let that download finish, or cancel it in Downloads, then try again.",
+        ),
+        (Fetching::Lora, false) => (
+            "This LoRA's file is part of another download, which has stopped.",
             "Resume or cancel that download in Downloads, then try again.",
         ),
     };
@@ -1198,11 +1260,13 @@ fn busy_error(image_file: bool, running: bool) -> AppError {
 
 /// A new download refused because a download of some of its files is being cancelled
 /// ([`Start::Cancelling`]).
-fn cancelling_error(image_file: bool) -> AppError {
-    let message = if image_file {
-        "This image file is part of a download that is being cancelled."
-    } else {
-        "One of this model's files is part of a download that is being cancelled."
+fn cancelling_error(what: Fetching) -> AppError {
+    let message = match what {
+        Fetching::ImageFile => "This image file is part of a download that is being cancelled.",
+        Fetching::Model => {
+            "One of this model's files is part of a download that is being cancelled."
+        }
+        Fetching::Lora => "This LoRA's file is part of a download that is being cancelled.",
     };
     AppError::new(
         "download_cancelling",
@@ -1717,8 +1781,8 @@ impl DownloadManager {
                 }
                 Ok(Recorded::Replaced { new, old })
             }
-            Start::Busy { running } => Err(busy_error(meta.image_file_for.is_some(), running)),
-            Start::Cancelling => Err(cancelling_error(meta.image_file_for.is_some())),
+            Start::Busy { running } => Err(busy_error(Fetching::of(meta), running)),
+            Start::Cancelling => Err(cancelling_error(Fetching::of(meta))),
         }
     }
 
@@ -1889,7 +1953,7 @@ impl DownloadManager {
                     return Ok(());
                 }
                 Err(e) => {
-                    let err = download_error_to_app(&e);
+                    let err = download_error_for(&e, Fetching::of(&meta));
                     tracing::warn!(file = %row.file, code = %err.code, "download failed");
                     state
                         .store
@@ -2006,7 +2070,12 @@ impl DownloadManager {
         let state = app.state::<AppState>();
         if meta.lora.is_some() {
             let models_dir = crate::hub::models_dir(app).await;
-            return register_lora(&state.store, &models_dir, group, meta).await;
+            // A run on this computer may hold the LoRA downloaded again.
+            let studio = app
+                .try_state::<Arc<crate::studio::manager::StudioManager>>()
+                .map(|s| s.inner().clone());
+            let in_use = move |id: &str| studio.as_ref().is_some_and(|s| s.local_uses_lora(id));
+            return register_lora(&state.store, &models_dir, group, meta, &in_use).await;
         }
         if meta.generator.is_some() {
             let models_dir = crate::hub::models_dir(app).await;
@@ -2158,14 +2227,14 @@ impl DownloadManager {
             .filter(|r| mine.contains(&r.dest_path.as_str()))
             .collect();
         if !others.is_empty() {
-            let image_file = store
+            let what = store
                 .get_setting::<GroupMeta>(&meta_key(group))
                 .await
                 .ok()
                 .flatten()
-                .is_some_and(|m| m.image_file_for.is_some());
+                .map_or(Fetching::Model, |m| Fetching::of(&m));
             let running = others.iter().any(|r| self.is_running(&r.group_id));
-            return Err(busy_error(image_file, running));
+            return Err(busy_error(what, running));
         }
         requeue(store, group).await
     }
@@ -3016,20 +3085,20 @@ mod tests {
             Start::Busy { running: false }
         );
 
-        let err = busy_error(false, true);
+        let err = busy_error(Fetching::Model, true);
         assert_eq!(err.code, "already_downloading");
         assert_eq!(
             err.message,
             "One of this model's files is already being downloaded."
         );
         assert!(err.next_step.contains("Downloads"));
-        let err = busy_error(true, true);
+        let err = busy_error(Fetching::ImageFile, true);
         assert_eq!(
             err.message,
             "This image file is already being downloaded with another model. This model uses it too once that download is done."
         );
         // P6b review nit: a download that is paused or failed is not "being downloaded".
-        let err = busy_error(false, false);
+        let err = busy_error(Fetching::Model, false);
         assert_eq!(
             err.message,
             "One of this model's files is part of another download, which has stopped."
@@ -3038,12 +3107,29 @@ mod tests {
             err.next_step,
             "Resume or cancel that download in Downloads, then try again."
         );
-        let err = busy_error(true, false);
+        let err = busy_error(Fetching::ImageFile, false);
         assert_eq!(
             err.message,
             "This image file is part of another model's download, which has stopped. This model uses it too once that download is done."
         );
         assert!(!err.message.contains("being downloaded"));
+        // 0.2.0 (ruling S10-lora-words): a LoRA's file is never called a model's.
+        let err = busy_error(Fetching::Lora, true);
+        assert_eq!(
+            (err.code.as_str(), err.message.as_str()),
+            (
+                "already_downloading",
+                "This LoRA's file is already being downloaded."
+            )
+        );
+        let err = busy_error(Fetching::Lora, false);
+        assert_eq!(
+            (err.message.as_str(), err.next_step.as_str()),
+            (
+                "This LoRA's file is part of another download, which has stopped.",
+                "Resume or cancel that download in Downloads, then try again."
+            )
+        );
     }
 
     /// Checking and recording are one step: two starts at once (a double click on Download)
@@ -3523,7 +3609,7 @@ mod tests {
                 Start::Cancelling
             );
         }
-        let err = cancelling_error(false);
+        let err = cancelling_error(Fetching::Model);
         assert_eq!(err.code, "download_cancelling");
         assert_eq!(
             err.message,
@@ -3531,8 +3617,12 @@ mod tests {
         );
         assert_eq!(err.next_step, "Wait a moment, then try again.");
         assert_eq!(
-            cancelling_error(true).message,
+            cancelling_error(Fetching::ImageFile).message,
             "This image file is part of a download that is being cancelled."
+        );
+        assert_eq!(
+            cancelling_error(Fetching::Lora).message,
+            "This LoRA's file is part of a download that is being cancelled."
         );
     }
 
@@ -4294,6 +4384,59 @@ mod tests {
             plan(&sft, &[&file], &rows, &metas, &["lora"]),
             Start::Busy { running: true }
         );
+
+        // Its refusals and its download's failures call it a LoRA (ruling S10-lora-words).
+        assert_eq!(Fetching::of(&lora), Fetching::Lora);
+        assert_eq!(Fetching::of(&meta()), Fetching::Model);
+        assert_eq!(
+            Fetching::of(&group_meta(Some(dir.path()))),
+            Fetching::ImageFile
+        );
+        use models::download::DownloadError as D;
+        use models::hf::HfError as H;
+        let shown = |e: &D, what| {
+            let e = download_error_for(e, what);
+            (e.code, e.message, e.next_step)
+        };
+        assert_eq!(
+            shown(&D::Hub(H::NeedsToken), Fetching::Lora),
+            (
+                "hf_needs_token".into(),
+                "This LoRA is gated.".into(),
+                "Add a Hugging Face token in Settings → Models, then resume the download.".into()
+            )
+        );
+        assert_eq!(
+            shown(&D::Hub(H::NeedsTerms), Fetching::Lora).1,
+            "You have not accepted this LoRA's terms."
+        );
+        assert_eq!(
+            shown(&D::ChangedUpstream, Fetching::Lora).2,
+            "Open the repository again and start a new download."
+        );
+        for e in [
+            D::Hub(H::NeedsToken),
+            D::Hub(H::NeedsTerms),
+            D::ChangedUpstream,
+            D::DiskFull,
+        ] {
+            let (_, message, next_step) = shown(&e, Fetching::Lora);
+            for text in [message, next_step] {
+                let text = text
+                    .to_lowercase()
+                    .replace("settings → models", "")
+                    .replace("models folder", "");
+                assert!(!text.contains("model"), "{e:?}: {text}");
+            }
+            assert_eq!(
+                shown(&e, Fetching::Model),
+                {
+                    let e = download_error_to_app(&e);
+                    (e.code, e.message, e.next_step)
+                },
+                "a model's download keeps its words"
+            );
+        }
     }
 
     /// No recommended model's download is refused as another model: each recommended entry

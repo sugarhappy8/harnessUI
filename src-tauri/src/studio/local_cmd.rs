@@ -2305,7 +2305,7 @@ pub(crate) mod tests {
         }
 
         /// The ranged `GET`s: one per header read.
-        fn header_reads(&self) -> usize {
+        pub(crate) fn header_reads(&self) -> usize {
             self.requests()
                 .iter()
                 .filter(|l| l.starts_with("GET") && l.contains("/resolve/"))

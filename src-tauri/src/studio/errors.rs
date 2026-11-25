@@ -9,6 +9,7 @@ use agent::media::{
 };
 use models::gen_catalog::GenRole;
 use models::gen_fit::{GenSize, NotFor};
+use models::hf::HfError;
 use models::sd::CannotRunReason;
 use models::sd::recipes::SlotId;
 use runtime::packs::PackError;
@@ -1367,16 +1368,101 @@ pub fn not_a_lora(details: impl Into<String>) -> AppError {
     )
 }
 
+/// The code of [`lora_in_use`] and [`lora_in_use_for_download`].
+pub const LORA_IN_USE: &str = "studio_lora_in_use";
+
+/// What [`lora_in_use`] and [`lora_in_use_for_download`] say.
+const LORA_IN_USE_MESSAGE: &str = "A run on this computer is using this LoRA.";
+
 /// *Delete* on a LoRA while a run on this computer waits for it or uses it: deleting a file
 /// the Studio engine has open fails half-way on Windows.
 pub fn lora_in_use() -> AppError {
     AppError::new(
-        "studio_lora_in_use",
-        "A run on this computer is using this LoRA.",
+        LORA_IN_USE,
+        LORA_IN_USE_MESSAGE,
         "Stop the run, then delete it.",
         String::new(),
     )
 }
+
+/// A LoRA downloaded again while a run on this computer waits for it or uses it: a damaged
+/// file would be replaced while the Studio engine has it open (ruling S10-lora-in-use).
+/// Refused when the download is asked for and again when it would be added.
+pub fn lora_in_use_for_download() -> AppError {
+    AppError::new(
+        LORA_IN_USE,
+        LORA_IN_USE_MESSAGE,
+        "Stop the run, then download it again.",
+        String::new(),
+    )
+}
+
+/// A LoRA's download that needs more than the free space on the models folder's disk, or a
+/// LoRA from this computer larger than it; `needed` is what it would take.
+pub fn lora_disk_too_small(needed: u64) -> AppError {
+    AppError::new(
+        "studio_disk_too_small",
+        "There is not enough free space for this LoRA.",
+        format!(
+            "It needs {}; free up space or choose another models folder.",
+            gb_up(needed)
+        ),
+        String::new(),
+    )
+}
+
+/// A LoRA file Hugging Face publishes no SHA-256 for: it cannot be checked, so it is never
+/// downloaded.
+pub fn lora_no_checksum() -> AppError {
+    AppError::new(
+        "studio_no_checksum",
+        "Hugging Face publishes no checksum for this file, so Studio can't check it.",
+        "Choose another LoRA file.",
+        String::new(),
+    )
+}
+
+/// A LoRA file whose name is not of a format Studio reads (`.safetensors`, `.sft`, `.gguf`).
+/// A pickle file has its own words ([`cannot_read_file`]).
+pub fn not_a_lora_format() -> AppError {
+    AppError::new(
+        "bad_request",
+        "This is not a LoRA file Studio can read.",
+        "Choose a .safetensors, .sft or .gguf file.",
+        String::new(),
+    )
+}
+
+/// Hugging Face's refusal of a LoRA's listing or header: `hub::hf_error`, in a LoRA's words
+/// where that names a model (a gated repo, its terms, a file not listed).
+pub fn lora_hub_error(e: HfError) -> AppError {
+    let (code, message, next_step) = match &e {
+        HfError::NeedsToken => (
+            "hf_needs_token",
+            LORA_GATED,
+            "Add a Hugging Face token in Settings → Models.",
+        ),
+        HfError::NeedsTerms => (
+            "hf_needs_terms",
+            LORA_TERMS,
+            "Open its page on Hugging Face and accept its terms.",
+        ),
+        HfError::FileNotFound => (
+            "hf_file_not_found",
+            "That file is not in the repository.",
+            "Open the repository again.",
+        ),
+        _ => return crate::hub::hf_error(e),
+    };
+    AppError::new(code, message, next_step, e.to_string())
+}
+
+/// A LoRA from a gated repository with no Hugging Face token ([`lora_hub_error`], and its
+/// download's own failure in `downloads`).
+pub const LORA_GATED: &str = "This LoRA is gated.";
+
+/// A LoRA whose repository's terms are not accepted.
+pub const LORA_TERMS: &str = "You have not accepted this LoRA's terms.";
 
 /// A file from this computer that is not a model file Studio reads.
 pub fn not_a_model_format() -> AppError {
@@ -1928,6 +2014,13 @@ mod tests {
             import_failed("No space left on device"),
             not_a_lora("a model for sdxl"),
             lora_in_use(),
+            lora_in_use_for_download(),
+            lora_disk_too_small(5_000_000_000),
+            lora_no_checksum(),
+            not_a_lora_format(),
+            lora_hub_error(HfError::NeedsToken),
+            lora_hub_error(HfError::NeedsTerms),
+            lora_hub_error(HfError::FileNotFound),
         ];
         all.extend(every_pack_error().iter().map(engine_not_installed));
         for to in [PictureUse::Chat, PictureUse::Prompt] {
@@ -2370,6 +2463,84 @@ mod tests {
         ] {
             assert_eq!(cannot_run(reason).message, message);
         }
+    }
+
+    /// Ruling S10-lora-words: what a LoRA's refusals say never names a model or a part (the
+    /// models folder and Settings → Models are places, not models). Hub refusals that name no
+    /// model keep `hub::hf_error`'s words.
+    #[test]
+    fn a_loras_refusals_never_name_a_model() {
+        let all = [
+            not_a_lora("a model for sdxl"),
+            lora_in_use(),
+            lora_in_use_for_download(),
+            lora_disk_too_small(5_000_000_000),
+            lora_no_checksum(),
+            not_a_lora_format(),
+            lora_hub_error(HfError::NeedsToken),
+            lora_hub_error(HfError::NeedsTerms),
+            lora_hub_error(HfError::FileNotFound),
+            lora_hub_error(HfError::NotFound),
+            lora_hub_error(HfError::RateLimited(30)),
+        ];
+        for e in &all {
+            for text in [&e.message, &e.next_step] {
+                let places = text
+                    .to_lowercase()
+                    .replace("models folder", "")
+                    .replace("settings → models", "");
+                assert!(
+                    !places.contains("model") && !places.contains("this part"),
+                    "{e:?} says {text:?}"
+                );
+            }
+        }
+        let shown = |e: AppError| (e.code, e.message, e.next_step);
+        assert_eq!(
+            shown(lora_hub_error(HfError::NeedsToken)),
+            (
+                "hf_needs_token".into(),
+                "This LoRA is gated.".into(),
+                "Add a Hugging Face token in Settings → Models.".into()
+            )
+        );
+        assert_eq!(
+            shown(lora_hub_error(HfError::NeedsTerms)).1,
+            "You have not accepted this LoRA's terms."
+        );
+        assert_eq!(
+            shown(lora_hub_error(HfError::FileNotFound)).2,
+            "Open the repository again."
+        );
+        assert_eq!(
+            shown(lora_hub_error(HfError::NotFound)),
+            shown(crate::hub::hf_error(HfError::NotFound))
+        );
+        assert_eq!(
+            shown(lora_disk_too_small(5_000_000_000)),
+            (
+                "studio_disk_too_small".into(),
+                "There is not enough free space for this LoRA.".into(),
+                "It needs 5.0 GB; free up space or choose another models folder.".into()
+            )
+        );
+        assert_eq!(lora_no_checksum().code, no_published_checksum().code);
+        assert_eq!(lora_no_checksum().next_step, "Choose another LoRA file.");
+        assert_eq!(
+            (not_a_lora_format().code, not_a_lora_format().message),
+            (
+                "bad_request".into(),
+                "This is not a LoRA file Studio can read.".into()
+            )
+        );
+        assert_eq!(
+            shown(lora_in_use_for_download()),
+            (
+                "studio_lora_in_use".into(),
+                "A run on this computer is using this LoRA.".into(),
+                "Stop the run, then download it again.".into()
+            )
+        );
     }
 
     #[test]
