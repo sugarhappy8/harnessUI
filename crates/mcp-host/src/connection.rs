@@ -95,14 +95,26 @@ pub(crate) struct ConnShared {
     log: Arc<StderrLog>,
 }
 
+/// What a call does with the server's progress notifications.
+#[derive(Clone)]
+pub(crate) enum OnProgress {
+    /// Shows each as a line on the tool card. The SDK hands each notification to its own
+    /// task, so they can arrive out of order: a line whose progress is lower than one
+    /// already shown for the call is dropped, and the card never steps backwards.
+    Show(ProgressFn),
+    /// Counts each as a sign of life, whatever its value: a managed call's idle timer. A
+    /// server that breaks the rule that progress only goes up is still alive.
+    KeepAlive(ProgressFn),
+}
+
 /// The calls in flight and where their progress goes. One lock covers both, so a
 /// progress callback is never left in place while a second call is running.
 #[derive(Default)]
 struct Calls {
     in_flight: usize,
-    progress: Option<ProgressFn>,
-    /// The progress value of the last line shown for the call in flight, so a line that
-    /// arrives late never steps the tool card backwards.
+    progress: Option<OnProgress>,
+    /// The progress value of the last line shown for the call in flight
+    /// ([`OnProgress::Show`]).
     last_shown: Option<f64>,
 }
 
@@ -122,7 +134,7 @@ impl ConnShared {
     /// Marks a call as running. Progress notifications go to `progress` while it is the
     /// only call in flight on this connection: the SDK's call helper does not expose the
     /// request's progress token, so with several calls they could not be told apart.
-    pub(crate) fn begin_call(&self, progress: Option<ProgressFn>) -> CallGuard<'_> {
+    pub(crate) fn begin_call(&self, progress: Option<OnProgress>) -> CallGuard<'_> {
         let mut calls = self.calls();
         calls.in_flight += 1;
         calls.progress = if calls.in_flight == 1 { progress } else { None };
@@ -132,25 +144,27 @@ impl ConnShared {
 
     /// Where progress goes now, if anywhere.
     #[cfg(test)]
-    fn progress(&self) -> Option<ProgressFn> {
+    fn progress(&self) -> Option<OnProgress> {
         self.calls().progress.clone()
     }
 
-    /// Shows `line`, the server's report of `progress`, for the call in flight, unless an
-    /// earlier line of this call showed more. The SDK hands each notification to its own
-    /// task, so they can arrive out of order; the tool card never steps backwards. The
-    /// check and the callback run under the lock, so two late lines cannot pass each other
-    /// either.
-    fn show_progress(&self, progress: f64, line: String) {
+    /// Passes `line`, the server's report of `progress`, to the call in flight
+    /// ([`OnProgress`]): always to a keep-alive, and to a shown call unless an earlier line
+    /// of it showed more. The check and the callback run under the lock, so two late lines
+    /// cannot pass each other either.
+    fn handle_progress(&self, progress: f64, line: String) {
         let mut calls = self.calls();
-        let Some(show) = calls.progress.clone() else {
-            return;
-        };
-        if calls.last_shown.is_some_and(|last| progress < last) {
-            return;
+        match calls.progress.clone() {
+            None => {}
+            Some(OnProgress::KeepAlive(alive)) => alive(line),
+            Some(OnProgress::Show(show)) => {
+                if calls.last_shown.is_some_and(|last| progress < last) {
+                    return;
+                }
+                calls.last_shown = Some(progress);
+                show(line);
+            }
         }
-        calls.last_shown = Some(progress);
-        show(line);
     }
 }
 
@@ -201,7 +215,7 @@ impl ClientHandler for HostClient {
             }
             None => amount,
         };
-        self.shared.show_progress(params.progress, line);
+        self.shared.handle_progress(params.progress, line);
     }
 
     async fn on_logging_message(
@@ -817,10 +831,10 @@ mod tests {
         let sink = seen.clone();
         let progress: ProgressFn = Arc::new(move |line| sink.lock().unwrap().push(line));
         {
-            let _one = shared.begin_call(Some(progress.clone()));
+            let _one = shared.begin_call(Some(OnProgress::Show(progress.clone())));
             assert!(shared.progress().is_some());
             {
-                let _two = shared.begin_call(Some(progress.clone()));
+                let _two = shared.begin_call(Some(OnProgress::Show(progress.clone())));
                 assert!(shared.progress().is_none());
             }
             // The first call does not get progress back: it could not be told apart.
@@ -829,7 +843,7 @@ mod tests {
         assert!(shared.progress().is_none());
         assert_eq!(shared.calls().in_flight, 0);
         // A later call on its own gets progress again.
-        let _three = shared.begin_call(Some(progress));
+        let _three = shared.begin_call(Some(OnProgress::Show(progress)));
         assert!(shared.progress().is_some());
     }
 
@@ -840,18 +854,41 @@ mod tests {
         let sink = seen.clone();
         let progress: ProgressFn = Arc::new(move |line| sink.lock().unwrap().push(line));
         {
-            let _call = shared.begin_call(Some(progress.clone()));
+            let _call = shared.begin_call(Some(OnProgress::Show(progress.clone())));
             for step in [2.0, 1.0, 3.0] {
-                shared.show_progress(step, format!("step {step}"));
+                shared.handle_progress(step, format!("step {step}"));
             }
         }
         assert_eq!(*seen.lock().unwrap(), ["step 2", "step 3"]);
         // The next call starts from nothing: its first step is shown.
-        let _call = shared.begin_call(Some(progress));
-        shared.show_progress(1.0, "next call, step 1".into());
+        let _call = shared.begin_call(Some(OnProgress::Show(progress)));
+        shared.handle_progress(1.0, "next call, step 1".into());
         assert_eq!(
             seen.lock().unwrap().last().map(String::as_str),
             Some("next call, step 1")
         );
+    }
+
+    #[test]
+    fn a_lower_value_still_keeps_a_call_alive() {
+        let shared = ConnShared::new(Arc::new(StderrLog::new("s", None)));
+        // A managed call's idle timer: every notification is a sign of life.
+        let ticks = Arc::new(Mutex::new(0));
+        let counter = ticks.clone();
+        let tick: ProgressFn = Arc::new(move |_| *counter.lock().unwrap() += 1);
+        {
+            let _call = shared.begin_call(Some(OnProgress::KeepAlive(tick)));
+            shared.handle_progress(2.0, "step 2".into());
+            shared.handle_progress(1.0, "step 1".into());
+        }
+        assert_eq!(*ticks.lock().unwrap(), 2, "the 1 reached the tick too");
+        // A shown call drops the same 1.
+        let seen = Arc::new(Mutex::new(Vec::<String>::new()));
+        let sink = seen.clone();
+        let show: ProgressFn = Arc::new(move |line| sink.lock().unwrap().push(line));
+        let _call = shared.begin_call(Some(OnProgress::Show(show)));
+        shared.handle_progress(2.0, "step 2".into());
+        shared.handle_progress(1.0, "step 1".into());
+        assert_eq!(*seen.lock().unwrap(), ["step 2"]);
     }
 }

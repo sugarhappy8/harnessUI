@@ -52,7 +52,7 @@ use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 
 use crate::builtin::{ProgressFn, ToolOutput};
-use crate::connection::{self, Closed, Connection, Lifecycle, Target};
+use crate::connection::{self, Closed, Connection, Lifecycle, OnProgress, Target};
 use crate::error::HostError;
 use crate::result::map_call_result;
 use crate::stderr::StderrLog;
@@ -531,8 +531,11 @@ impl Call {
         let alive = Arc::new(Notify::new());
         let signal = alive.clone();
         // The host's handler formats the server's progress into a line; it is dropped here.
+        // Every notification counts as alive, whatever its value.
         let tick: ProgressFn = Arc::new(move |_server_text: String| signal.notify_one());
-        let _call = connection.shared.begin_call(Some(tick));
+        let _call = connection
+            .shared
+            .begin_call(Some(OnProgress::KeepAlive(tick)));
         let request = ClientRequest::CallToolRequest(CallToolRequest::new(
             CallToolRequestParams::new(self.name.clone()).with_arguments(args),
         ));

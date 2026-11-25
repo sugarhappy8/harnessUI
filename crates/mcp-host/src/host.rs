@@ -22,7 +22,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::builtin::{BuiltinServer, CallContext, ChatContext, Described, ToolDef, ToolOutput};
 use crate::config::ServerConfig;
-use crate::connection::{self, Connection, Lifecycle, Target};
+use crate::connection::{self, Connection, Lifecycle, OnProgress, Target};
 use crate::describe::{self, ExternalTool, ToolPrefs};
 use crate::error::HostError;
 use crate::names::exposed_name;
@@ -773,7 +773,9 @@ impl Host {
             CallToolRequestParams::new(found.original.clone()).with_arguments(args.clone());
         let timeout = self.inner.opts.call_timeout;
         let outcome = {
-            let _call = connection.shared.begin_call(ctx.progress.clone());
+            let _call = connection
+                .shared
+                .begin_call(ctx.progress.clone().map(OnProgress::Show));
             tokio::select! {
                 biased;
                 _ = ctx.cancel.cancelled() => Outcome::Cancelled,
