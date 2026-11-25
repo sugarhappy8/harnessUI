@@ -7,8 +7,8 @@
 //! flags, so a signed catalog or a recipe cannot add a flag. The prompt never reaches argv:
 //! `run_job` writes [`prompt_file_text`] to the files [`prompt_files`] names and the engine
 //! reads them (`--prompt-file`). The LoRAs go in that file too, as `<lora:NAME:W>` tags the
-//! engine reads relative to `--lora-model-dir`; the tags typed into the prompt are removed
-//! first. The pinned parser matches only `arg == name`, so it has no `--prompt=<text>` form;
+//! engine reads relative to `--lora-model-dir`; the LoRA tags and image markers typed into
+//! the prompt are removed first. The pinned parser matches only `arg == name`, so it has no `--prompt=<text>` form;
 //! a string option takes the next argument as its value whatever it starts with, and
 //! `--prompt-file` reads the whole file as bytes.
 //!
@@ -23,8 +23,9 @@ use std::path::{Component, Path, PathBuf};
 
 pub use super::lora_tags::{
     LORA_WEIGHT_DEFAULT, LORA_WEIGHT_RANGE, LORA_WEIGHT_STEP, LoraTag, MAX_LORAS, lora_tag,
-    strip_lora_tags, valid_lora_name,
+    valid_lora_name,
 };
+pub use super::prompt_view::{attention_text, parse_prompt_attention, strip_prompt_markers};
 
 /// The longest local prompt, in characters: a sanity cap, as the prompt goes by file and
 /// never in argv.
@@ -467,7 +468,8 @@ pub struct SdJob {
 /// Why [`build_args`] refused a job.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum ArgsError {
-    /// The prompt, without the LoRA tags typed into it, is empty or only white space.
+    /// The prompt, without the LoRA tags and image markers typed into it, is empty or only
+    /// white space.
     #[error("the prompt is empty")]
     EmptyPrompt,
     /// The prompt is longer than [`PROMPT_MAX_CHARS`] characters.
@@ -604,7 +606,7 @@ pub const FLAGS: &[&str] = &[
 /// [`MAX_LORAS`] or with a name the tag cannot carry, and an `out_stem` that is not one plain
 /// file name ([`ArgsError::BadOutputStem`]).
 pub fn build_args(job: &SdJob) -> Result<Vec<OsString>, ArgsError> {
-    if strip_lora_tags(&job.prompt).trim().is_empty() {
+    if strip_prompt_markers(&job.prompt).trim().is_empty() {
         return Err(ArgsError::EmptyPrompt);
     }
     if job.prompt.chars().count() > PROMPT_MAX_CHARS {
@@ -768,9 +770,10 @@ pub fn prompt_files(job: &SdJob) -> (PathBuf, Option<PathBuf>) {
 }
 
 /// What `run_job` writes to the prompt's file: the prompt without the LoRA tags typed into
-/// it ([`strip_lora_tags`]), then a space and [`lora_tag`] for each attached LoRA, in order.
+/// it, nor any image marker ([`strip_prompt_markers`]), then a space and [`lora_tag`] for each
+/// attached LoRA, in order.
 pub fn prompt_file_text(job: &SdJob) -> String {
-    let mut text = strip_lora_tags(&job.prompt);
+    let mut text = strip_prompt_markers(&job.prompt);
     for tag in &job.loras {
         text.push(' ');
         text.push_str(&lora_tag(tag));

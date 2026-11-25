@@ -1,7 +1,7 @@
 //! LoRAs in the Studio engine's prompt file (docs/dev/0.2.0/design.md 8): the tag the engine
-//! reads each from, the names it reads back, and the removal of the tags typed into a
-//! prompt. Re-exported from [`super::args`], whose `prompt_file_text` and `build_args` use
-//! them.
+//! reads each from, the names it reads back, and the search for the tags typed into a prompt
+//! that [`super::prompt_view::strip_prompt_markers`] removes. Re-exported from
+//! [`super::args`], whose `prompt_file_text` and `build_args` use them.
 //!
 //! The engine finds a LoRA in the prompt with the pattern `<lora:([^:>]+):([^>]+)>`, the name
 //! taken relative to `--lora-model-dir` and `|high_noise|` before it naming the high-noise
@@ -25,7 +25,7 @@ pub const LORA_WEIGHT_DEFAULT: f32 = 1.0;
 
 /// The start of the engine's LoRA tag, `<lora:([^:>]+):([^>]+)>` (`extract_and_remove_lora`,
 /// `examples/common/common.cpp` at the pinned commit).
-const LORA_TAG_OPEN: &str = "<lora:";
+pub(super) const LORA_TAG_OPEN: &str = "<lora:";
 
 /// The prefix a tag's name takes for the high-noise part of a two-model video family.
 const HIGH_NOISE_PREFIX: &str = "|high_noise|";
@@ -54,25 +54,6 @@ pub fn lora_tag(tag: &LoraTag) -> String {
     format!("{LORA_TAG_OPEN}{prefix}{}:{}>", tag.name, tag.weight)
 }
 
-/// `prompt` without any LoRA tag: every span the engine's pattern
-/// `<lora:([^:>]+):([^>]+)>` matches is removed, as the engine finds them, and then every
-/// `<lora:` left, including one that removing another joins together (`<lo<lora:ra:`). A
-/// `<lora:` left over would make a tag with what follows it: with the tags
-/// [`prompt_file_text`](super::args::prompt_file_text) appends (`<lora:b:3` and
-/// ` <lora:x:1>` read as `b` at 3), or with the rest of a tag a span removed
-/// (`<lo<lora:a:1>ra:b:3>`). The text that comes back holds no `<lora:` at all, so the engine
-/// finds only the tags Studio appends. Both passes are linear in the prompt's length.
-pub fn strip_lora_tags(prompt: &str) -> String {
-    let mut kept = String::with_capacity(prompt.len());
-    for c in remove_lora_spans(prompt).chars() {
-        kept.push(c);
-        if kept.ends_with(LORA_TAG_OPEN) {
-            kept.truncate(kept.len() - LORA_TAG_OPEN.len());
-        }
-    }
-    kept
-}
-
 /// Whether the engine reads `name` back from `<lora:NAME:W>` as the file `name` names under
 /// the LoRA folder: not empty; relative (no leading `/`, and no `:`, so no Windows drive);
 /// `/` its only separator; none of `:` `<` `>` `|` `\`, nor a control character; and no
@@ -96,7 +77,7 @@ pub fn valid_lora_name(name: &str) -> bool {
 /// finds them: the leftmost first, then on after it. No span ends after the last `>`, so the
 /// search stops there; before it, a name stops at the next `<lora:`'s colon at the latest and
 /// a weight at a `>`, so each byte is read a bounded number of times.
-fn remove_lora_spans(text: &str) -> String {
+pub(super) fn remove_lora_spans(text: &str) -> String {
     let Some(last_close) = text.rfind('>') else {
         return text.to_owned();
     };
@@ -156,50 +137,5 @@ mod tests {
             (LORA_WEIGHT_RANGE, LORA_WEIGHT_STEP, LORA_WEIGHT_DEFAULT),
             (-1.0..=2.0, 0.05, 1.0)
         );
-    }
-
-    /// The engine finds every span its pattern matches, so no `<lora:` the person typed may
-    /// be left, alone or joined with what is around it or with the tags Studio appends.
-    #[test]
-    fn no_typed_lora_tag_survives_the_strip() {
-        for (typed, kept) in [
-            ("<lora:a:1>", ""),
-            ("x <lora:a:1><lora:b:2> y", "x  y"),
-            // a span removed joins its two sides into a new opener
-            ("<lo<lora:a:1>ra:evil:3>", "evil:3>"),
-            ("<lo<lora:ra:x", "x"),
-            ("<lo<lora:ra:x:1>", "<lo"),
-            ("<lora:<lora:a:1>b:1>", "b:1>"),
-            // openers without a whole tag: an appended tag would close them
-            ("a fox <lora:evil:3", "a fox evil:3"),
-            ("a fox <lora:evil", "a fox evil"),
-            ("<lora:>x", ">x"),
-            ("<lora::1>", ":1>"),
-            // the weight may hold anything but `>`, a line break too
-            ("<lora:a:\n1>z", "z"),
-            ("<LORA:a:1>", "<LORA:a:1>"),
-            ("風 <lora:日本:1> 景", "風  景"),
-        ] {
-            let stripped = strip_lora_tags(typed);
-            assert_eq!(stripped, kept, "{typed:?}");
-            assert!(!stripped.contains("<lora:"), "{typed:?}");
-        }
-    }
-
-    /// A prompt built to make a repeat-until-stable strip, or a scan to the end for each
-    /// `<lora:`, take quadratic time is stripped in one pass each (a few milliseconds here;
-    /// minutes if either came back).
-    #[test]
-    fn a_pathological_prompt_strips_in_linear_time() {
-        let n = 100_000;
-        // openers that never close, each name ended by the next opener's colon
-        let open = "<lora:a:".repeat(n);
-        assert_eq!(strip_lora_tags(&open), "a:".repeat(n));
-        // openers with empty names, one `>` at the very end
-        let empty = format!("{}>", "<lora::".repeat(n));
-        assert_eq!(strip_lora_tags(&empty), format!("{}>", ":".repeat(n)));
-        // nested joins, each removal making a new opener
-        let nested = format!("{}<lora:a:1>{}", "<lo".repeat(n), "ra:".repeat(n));
-        assert_eq!(strip_lora_tags(&nested), "");
     }
 }

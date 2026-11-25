@@ -812,6 +812,27 @@ mod tests {
         spans
     }
 
+    /// A typed image marker would make the engine load any file it names, and one left open
+    /// makes it throw (ruling S2-image-markers): neither reaches the prompt's file.
+    #[tokio::test]
+    async fn typed_image_markers_never_reach_the_prompt_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut j = SdJob {
+            prompt: "a fox <image:/etc/passwd> in snow <image:x".into(),
+            ..job(dir.path())
+        };
+        j.lora_dir = Some(dir.path().join("@loras"));
+        j.loras = vec![LoraTag {
+            name: "style".into(),
+            weight: 1.0,
+            high_noise: false,
+        }];
+        write_prompt_files(&j).await.unwrap();
+        let text = std::fs::read_to_string(dir.path().join("prompt.txt")).unwrap();
+        assert_eq!(text, "a fox  in snow x <lora:style:1>");
+        assert!(!text.contains("<image:"));
+    }
+
     #[tokio::test]
     async fn lora_tags_reach_the_prompt_file_with_unicode_names() {
         let dir = tempfile::tempdir().unwrap();

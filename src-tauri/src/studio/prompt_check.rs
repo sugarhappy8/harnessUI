@@ -13,11 +13,18 @@
 //! word ("Essex" holds no sexual word). A few words name a sexualised child by themselves, so
 //! they are in both lists and refused alone.
 //!
-//! The check reads the prompt twice: as typed, and as the engine receives it, with the LoRA
-//! tags removed (`runtime::sd::args::strip_lora_tags`, ruling S2-safety). Removing a tag joins
-//! the text on either side of it, so `se<lora:a:1>xy` reaches the engine as "sexy", and a tag
-//! between two words breaks a pair rule (`little <lora:a:1> girl`). The rules themselves are
-//! the same for both readings.
+//! The check reads the prompt three times, with the same rules each time (rulings S2-safety
+//! and S2-attention):
+//!
+//! 1. as typed;
+//! 2. as the engine receives it, with the LoRA tags and image markers removed
+//!    (`runtime::sd::args::strip_prompt_markers`). Removing a tag joins the text on either side
+//!    of it, so `se<lora:a:1>xy` reaches the engine as "sexy", and a tag between two words
+//!    breaks a pair rule (`little <lora:a:1> girl`);
+//! 3. as the model reads that text through the engine's weighting syntax
+//!    (`runtime::sd::args::attention_text`): brackets and `:<number>)` go and the pieces
+//!    join, so `se()xy`, `se[]xy`, `se:1)xy` and `(se)(xy)` all read "sexy". The pieces are
+//!    joined across weights too, which refuses more only for text built to trick the check.
 //!
 //! The lists trade misses against harmless prompts refused. Bare "baby" and "minor" are left
 //! out of [`MINOR`] because they refuse too much that is harmless ("a sexy baby-blue dress",
@@ -33,7 +40,7 @@
 
 use std::collections::BTreeSet;
 
-use runtime::sd::args::strip_lora_tags;
+use runtime::sd::args::{attention_text, strip_prompt_markers};
 
 /// Sexual words, as they read after folding (see the module's notes).
 const SEXUAL: &[&str] = &[
@@ -194,10 +201,11 @@ const LOOK_ALIKES: [(&str, char); 25] = [
     ("źżžᴢ", 'z'),
 ];
 
-/// Whether `prompt` pairs a sexual word with a word for children, as typed or as the engine
-/// receives it ([`strip_lora_tags`]).
+/// Whether `prompt` pairs a sexual word with a word for children, as typed, as the engine
+/// receives it ([`strip_prompt_markers`]), or as the model reads that ([`attention_text`]).
 pub fn refuses(prompt: &str) -> bool {
-    pairs(prompt) || pairs(&strip_lora_tags(prompt))
+    let received = strip_prompt_markers(prompt);
+    pairs(prompt) || pairs(&received) || pairs(&attention_text(&received))
 }
 
 /// Whether `text` pairs a sexual word with a word for children: the rules of the module's
@@ -382,7 +390,7 @@ mod tests {
                 tokens(&folded(prompt)).len() > 1 && !pairs(prompt),
                 "the rules alone pass it: {prompt:?}"
             );
-            assert!(pairs(&strip_lora_tags(prompt)), "{prompt:?}");
+            assert!(pairs(&strip_prompt_markers(prompt)), "{prompt:?}");
             assert!(refuses(prompt), "should be refused: {prompt:?}");
         }
         // a harmless prompt with a tag still passes
@@ -391,6 +399,56 @@ mod tests {
             "children <lora:watercolour:1> reading in a library",
         ] {
             assert!(!refuses(prompt), "should pass: {prompt:?}");
+        }
+    }
+
+    /// The model reads the prompt through the engine's weighting syntax, which drops brackets
+    /// and `:<number>)` and joins the pieces (ruling S2-attention); an image marker joins the
+    /// text around it as a LoRA tag does (ruling S2-image-markers).
+    #[test]
+    fn the_weighting_syntax_cannot_hide_what_the_model_reads() {
+        for prompt in [
+            "se()xy chil()dren",
+            "se[]xy chil[]dren",
+            "se:1)xy chil:1)dren",
+            "se(xy:1) chil(dren:1)",
+            "nu[]de kids",
+            "naked t()ee()n",
+            "erotic tod()dler",
+            "sexy little(:1) girl",
+            "(se)(xy) (chil)(dren)",
+            "se<lora:a:1>(xy) chil[]dren",
+        ] {
+            assert!(
+                !pairs(prompt) && !pairs(&strip_prompt_markers(prompt)),
+                "the first two readings alone pass it: {prompt:?}"
+            );
+            assert!(refuses(prompt), "should be refused: {prompt:?}");
+        }
+        // an image marker is removed as a LoRA tag is: the second reading joins the text
+        for prompt in ["se<image:x>xy children", "se<image:x xy chil<image:dren"] {
+            assert!(!pairs(prompt), "the rules alone pass it: {prompt:?}");
+            assert!(refuses(prompt), "should be refused: {prompt:?}");
+        }
+        // ordinary weighting stays ordinary
+        for prompt in [
+            "a (red:1.2) car on a [wet] road",
+            "portrait, (soft light), BREAK, city at night",
+            "children (playing:1.3) in a [sunny] park",
+            "a (sexy:1.2) red sports car, BREAK, studio lighting",
+            "(masterpiece), kids' (birthday party:1.1), [balloons]",
+        ] {
+            assert!(!refuses(prompt), "should pass: {prompt:?}");
+        }
+    }
+
+    /// The model's reading turns each `BREAK` into a space, where the engine may keep a run
+    /// of them as text (`BREAK:1)BREAK`). That can hide no listed word only while no listed
+    /// word holds "break".
+    #[test]
+    fn no_listed_word_holds_break() {
+        for word in SEXUAL.iter().chain(MINOR) {
+            assert!(!word.contains("break"), "{word}");
         }
     }
 
