@@ -1975,20 +1975,44 @@ async fn switching_on_starts_from_zero_even_when_the_kept_port_is_taken() {
     sharing.shutdown().await;
 }
 
+/// Ports only [`a_kept_port_freed_within_the_tries_is_bound`] binds: below every system's
+/// ephemeral range (Linux hands out 32768 and up, macOS and Windows 49152 and up) and
+/// outside [`PORT_RANGE`], so no other test can be handed one by the system or pick one at
+/// random while it is free.
+const PORTS_ONLY_ONE_TEST_BINDS: RangeInclusive<u16> = 23_000..=23_999;
+
 /// A kept port still held a moment after it was let go (sharing switched off and on at
-/// once) is tried again; the holder here lets go just before the last try.
+/// once) is tried again; the holder here lets go between the last two tries.
+///
+/// The holder lets go a whole [`KEPT_PORT_WAIT`] before the last try, not at it: a child
+/// that another test is starting holds a copy of every socket of this process from its
+/// fork until its own program starts, so a port let go at the instant of a try can still
+/// be held then. The port is one no other test can be given meanwhile.
 #[tokio::test]
 async fn a_kept_port_freed_within_the_tries_is_bound() {
-    let held = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let port = held.local_addr().unwrap().port();
+    let mut held = None;
+    for port in PORTS_ONLY_ONE_TEST_BINDS {
+        if let Ok(listener) = TcpListener::bind(("127.0.0.1", port)).await {
+            held = Some((listener, port));
+            break;
+        }
+    }
+    let (held, port) = held.expect("a free port among the ones only this test binds");
     let mut held = Some(held);
     let mut tries = 0;
     let listener = bind_retrying(|| {
         tries += 1;
-        if tries == KEPT_PORT_TRIES {
-            drop(held.take());
+        let let_go = if tries == KEPT_PORT_TRIES - 1 {
+            held.take()
+        } else {
+            None
+        };
+        async move {
+            let bound = proxy::bind(port).await;
+            // After this try failed, so the last try comes a wait after the port was let go.
+            drop(let_go);
+            bound
         }
-        proxy::bind(port)
     })
     .await
     .unwrap();
