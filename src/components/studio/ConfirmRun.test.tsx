@@ -20,6 +20,7 @@ vi.mock("./api");
 
 const api = await import("./api");
 const { StudioView } = await import("./StudioView");
+const { UiProviders } = await import("../ui/UiProviders");
 const { useStudio } = await import("../../store/studio");
 
 const INITIAL = useStudio.getState();
@@ -46,6 +47,7 @@ function prefs(patch: Partial<StudioPrefs> = {}): StudioPrefs {
       video: { target: { endpoint: 1 }, model: "google/veo-3.1" },
     },
     advancedOpen: false,
+    settingsOpen: false,
     confirmEveryVideo: true,
     confirmAtUsd: 1,
     dailyLimitUsd: 10,
@@ -102,7 +104,11 @@ async function show(tab: StudioTab, estimate: Estimate, p: StudioPrefs = prefs()
   );
   useStudio.getState().showStudio(tab);
   await act(async () => {
-    render(<StudioView />);
+    render(
+      <UiProviders>
+        <StudioView />
+      </UiProviders>,
+    );
   });
   await flush();
   fireEvent.change(screen.getByRole("textbox", { name: "Prompt" }), { target: { value: "slow drone push" } });

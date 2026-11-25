@@ -20,7 +20,7 @@ import type { EndpointCompany, MediaModel, ParamSpec, RequestPreview, Routing, S
 // the key removed. For a model on this computer there is no routing and no Extra fields (they
 // would become the engine's arguments), and the button is *See the exact command*. Whether the
 // drawer is open is kept in the preferences. Each change also shows as a chip under the prompt
-// (`ChipsRow`, which the prompt dock mounts), and the chip removes it.
+// (`ChipsRow`, which the composer mounts), and the chip removes it.
 
 // ---- the chips ----------------------------------------------------------------------------
 
@@ -65,7 +65,7 @@ export function chipsFor(model: MediaModel, values: Values, extra: Values): { ke
 }
 
 /** The chips of `tab`'s changed Advanced settings, each with the button that removes it (back to
- *  Automatic, or out of the Extra fields); nothing while none is changed. The prompt dock shows
+ *  Automatic, or out of the Extra fields); nothing while none is changed. The composer shows
  *  them under the prompt. */
 export function ChipsRow(props: { tab: StudioTab }) {
   const { tab } = props;

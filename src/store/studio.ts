@@ -29,7 +29,8 @@
 // stopped and failed runs (in ./studioResults). Task B11: a picture attached in a chat opened
 // in Studio's Pictures tab, and Send to chat (in ./studioResults). Task B13: Get local models'
 // tabs, hardware filter, Hugging Face search, download confirmation, repairs and the local
-// model notice are in ./studioLocal.
+// model notice are in ./studioLocal. Task U3 (0.2.0): whether the side panel (Settings) is open,
+// saved in the preferences.
 import { create, type StoreApi, type UseBoundStore } from "zustand";
 import * as api from "../components/studio/api";
 import { carry, closestModel, defaultsFor, dropUnmet, familyOf, type Values } from "../components/studio/canonical";
@@ -326,7 +327,22 @@ export interface StudioState extends StudioRunState, StudioResultsState, StudioL
    *  cloud model*); `null` once it closes. */
   pickerOpen: "cloud" | null;
   openPicker(place: "cloud" | null): void;
+
+  /** Task U3: Studio's side panel (Settings) is open: from `prefs.settingsOpen` when Studio
+   *  first reads what is saved, then as it is opened and closed. */
+  settingsOpen: boolean;
+  /** The part of the panel it was opened on, if any (Task U8 scrolls to it). */
+  settingsSection: SettingsSection | null;
+  /** Opens or closes the side panel (on `section`, if given), and saves whether it is open. */
+  setSettingsOpen(open: boolean, section?: SettingsSection): void;
 }
+
+/** The parts of Studio's side panel. */
+export type SettingsSection = "setups" | "advanced" | "loras" | "files";
+
+/** The narrowest window Studio's side panel is docked on; below it, it slides over the
+ *  results (design 10.1). */
+export const DOCK_MIN_WIDTH = 1400;
 
 const EMPTY_DRAFT: Draft = {
   target: null,
@@ -730,6 +746,10 @@ export const useStudio: UseBoundStore<StoreApi<StudioState>> = create<StudioStat
             local,
             prefs,
             usage,
+            // A panel left open is docked on a wide window; on a narrower one it would slide
+            // over the results before anything was asked, so it starts closed there (the choice
+            // saved for wide windows stays).
+            settingsOpen: prefs.settingsOpen && window.innerWidth >= DOCK_MIN_WIDTH,
             loaded: true,
             // Runs heard of while reading stay.
             recentRuns: newestRuns([...(newest ?? page).runs, ...s.recentRuns]),
@@ -1056,6 +1076,16 @@ export const useStudio: UseBoundStore<StoreApi<StudioState>> = create<StudioStat
     ...createLocal(set, get),
     pickerOpen: null,
     openPicker: (place) => set({ pickerOpen: place }),
+    settingsOpen: false,
+    settingsSection: null,
+    setSettingsOpen: (open, section) => {
+      set({ settingsOpen: open, settingsSection: open ? (section ?? null) : null });
+      if (get().prefs?.settingsOpen === open) return;
+      get()
+        .setPrefs({ settingsOpen: open })
+        // It opens or closes all the same, for now; the failure leaves a trace.
+        .catch((e: unknown) => console.warn("Studio: whether Settings is open could not be saved", e));
+    },
   };
 });
 

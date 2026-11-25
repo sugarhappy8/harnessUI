@@ -3,11 +3,18 @@ import { DropdownMenu } from "radix-ui";
 import { Check } from "lucide-react";
 import { FIELD, OPTION, POPUP } from "./styles";
 
-/** A button that opens a menu (Radix DropdownMenu); `trigger` is what the button shows. */
-export function MenuButton(props: { label: string; trigger: ReactNode; align?: "start" | "end"; children: ReactNode }) {
+/** A button that opens a menu (Radix DropdownMenu); `trigger` is what the button shows.
+ *  `className` draws the button in place of the field look (a toolbar's chip). */
+export function MenuButton(props: {
+  label: string;
+  trigger: ReactNode;
+  align?: "start" | "end";
+  className?: string;
+  children: ReactNode;
+}) {
   return (
     <DropdownMenu.Root>
-      <DropdownMenu.Trigger aria-label={props.label} className={FIELD}>
+      <DropdownMenu.Trigger aria-label={props.label} className={props.className ?? FIELD}>
         {props.trigger}
       </DropdownMenu.Trigger>
       <DropdownMenu.Portal>

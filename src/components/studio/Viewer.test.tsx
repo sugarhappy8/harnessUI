@@ -33,6 +33,7 @@ const api = await import("./api");
 const dialog = await import("@tauri-apps/plugin-dialog");
 const { Viewer, capturePoster } = await import("./Viewer");
 const { StudioView } = await import("./StudioView");
+const { UiProviders } = await import("../ui/UiProviders");
 const { useStudio } = await import("../../store/studio");
 const { useApp } = await import("../../store/app");
 
@@ -56,6 +57,7 @@ function prefs(patch: Partial<StudioPrefs> = {}): StudioPrefs {
   return {
     lastModel: {},
     advancedOpen: false,
+    settingsOpen: false,
     confirmEveryVideo: true,
     confirmAtUsd: 1,
     dailyLimitUsd: 10,
@@ -1061,7 +1063,11 @@ async function showStudio() {
   vi.mocked(api.studioRefFromOutput).mockResolvedValue(KEPT);
   useStudio.getState().showStudio();
   await act(async () => {
-    render(<StudioView />);
+    render(
+      <UiProviders>
+        <StudioView />
+      </UiProviders>,
+    );
   });
   await flush();
 }

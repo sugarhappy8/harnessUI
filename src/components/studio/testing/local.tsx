@@ -8,6 +8,7 @@ import { useStudio } from "../../../store/studio";
 import * as api from "../api";
 import { LOCAL } from "../fixtures/models";
 import { StudioView } from "../StudioView";
+import { UiProviders } from "../../ui/UiProviders";
 import type { LocalModels, StudioPrefs, Usage } from "../types";
 
 // Radix positions menus with ResizeObserver, which jsdom does not have.
@@ -21,6 +22,7 @@ globalThis.ResizeObserver ??= class {
 export const PREFS: StudioPrefs = {
   lastModel: {},
   advancedOpen: false,
+  settingsOpen: false,
   confirmEveryVideo: true,
   confirmAtUsd: 1,
   dailyLimitUsd: 10,
@@ -86,7 +88,11 @@ export async function showLocal(local: LocalModels = LOCAL) {
   useStudio.getState().showStudio();
   useStudio.getState().showLocalModels(true);
   await act(async () => {
-    render(<StudioView />);
+    render(
+      <UiProviders>
+        <StudioView />
+      </UiProviders>,
+    );
   });
   await flush();
 }

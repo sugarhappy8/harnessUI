@@ -1,9 +1,10 @@
-// Studio's right panel (0.1.0 Task B5): the Model field and where the model runs, the simple
-// fields in the model's order (Shape and How many as chips, a video's length and resolution at
-// their cheap defaults, a local video's chips each with its own time here), the Start frame
-// drop zone, and the Advanced toggle with its change count.
+// Studio's side panel (0.1.0 Task B5; shown only when asked for since Task U3): the Model field
+// and where the model runs, the simple fields in the model's order (a video's length and
+// resolution at their cheap defaults, a local video's chips each with its own time here), and
+// the Advanced toggle with its change count. Shape and How many's menus and the picture zones
+// are the composer's (Composer.test.tsx).
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, within } from "@testing-library/react";
 import type { StudioTab } from "../../store/studio";
 import type { Values } from "./canonical";
 import { LOCAL, MODELS } from "./fixtures/models";
@@ -55,6 +56,7 @@ function prefs(patch: Partial<StudioPrefs> = {}): StudioPrefs {
   return {
     lastModel: {},
     advancedOpen: false,
+    settingsOpen: false,
     confirmEveryVideo: true,
     confirmAtUsd: 1,
     dailyLimitUsd: 10,
@@ -125,13 +127,6 @@ function checked(radio: HTMLElement): boolean {
   return radio.getAttribute("aria-checked") === "true";
 }
 
-/** Opens a Radix menu from its trigger, as a pointer press does. */
-async function openMenu(trigger: HTMLElement) {
-  await act(async () => {
-    fireEvent.pointerDown(trigger, { button: 0, ctrlKey: false });
-  });
-}
-
 /** How long a clip takes here, by its length and the number of lines (a measured time unless
  *  `firstGuess`): 2 s at 480p about 3 min, 5 s about 9 min, 2 s at 720p about 10 min. */
 function localFit(seconds: number, height: number, firstGuess = false): LocalFit {
@@ -166,43 +161,6 @@ describe("SettingsPanel", () => {
     within(field("Shape")).getByText("Automatic (company default)");
     within(field("How many")).getByText("Automatic (company default)");
     expect((within(field("Quality")).getByRole("combobox") as HTMLSelectElement).value).toBe("");
-  });
-
-  it("shows five shapes and the rest under +", async () => {
-    await renderPanel(flare);
-    expect(within(field("Shape")).getAllByRole("radio")).toHaveLength(5);
-    await openMenu(within(field("Shape")).getByRole("button", { name: "More shapes" }));
-    expect(screen.getAllByRole("menuitemradio")).toHaveLength(6);
-    await act(async () => {
-      fireEvent.click(screen.getByRole("menuitemradio", { name: "21:9" }));
-    });
-    expect(useStudio.getState().drafts.image.values.aspect_ratio).toBe("21:9");
-    expect(within(field("Shape")).getAllByRole("radio").some(checked)).toBe(false);
-    expect(within(field("Shape")).getByRole("button", { name: "More shapes" }).textContent).toContain("21:9");
-  });
-
-  it("choosing a shape chip sets it", async () => {
-    await renderPanel(flare);
-    fireEvent.click(within(field("Shape")).getByRole("radio", { name: "3:2" }));
-    expect(useStudio.getState().drafts.image.values.aspect_ratio).toBe("3:2");
-    expect(checked(within(field("Shape")).getByRole("radio", { name: "3:2" }))).toBe(true);
-  });
-
-  it("How many offers 1, 2 and 4, and more under + up to the model's maximum", async () => {
-    await renderPanel(flare);
-    expect(within(field("How many")).getAllByRole("radio").map((r) => r.textContent)).toEqual(["1", "2", "4"]);
-    fireEvent.click(within(field("How many")).getByRole("button", { name: "More" }));
-    const box = screen.getByRole("spinbutton", { name: "How many" });
-    expect(box.getAttribute("max")).toBe("10");
-    fireEvent.change(box, { target: { value: "7" } });
-    fireEvent.keyDown(box, { key: "Enter" });
-    expect(useStudio.getState().drafts.image.values.n).toBe(7);
-  });
-
-  it("How many shows its number box at once when the number set is not a chip", async () => {
-    await renderPanel(flare, { values: { n: 7 } });
-    expect((screen.getByRole("spinbutton", { name: "How many" }) as HTMLInputElement).value).toBe("7");
-    expect(within(field("How many")).getAllByRole("radio").some(checked)).toBe(false);
   });
 
   it("starts a video at the shortest length of at least 4 s and 720p", async () => {
@@ -321,29 +279,10 @@ describe("SettingsPanel", () => {
     expect(screen.queryByText(/On this computer/)).toBeNull();
   });
 
-  it("a start frame drop zone appears only when the model takes one", async () => {
+  it("holds no picture zones: the composer has them", async () => {
     await renderPanel(veo);
-    screen.getByText("Start frame");
-    cleanup();
-    useStudio.setState(INITIAL, true);
-    await renderPanel({ ...veo, params: veo.params.filter((p) => p.key !== "first_frame") });
     expect(screen.queryByText("Start frame")).toBeNull();
-  });
-
-  it("a picture dropped on the start frame zone becomes the start frame, and another replaces it", async () => {
-    await renderPanel(veo);
-    const first = { sha256: "a".repeat(64), mime: "image/png", sizeBytes: 1200, role: null };
-    const second = { ...first, sha256: "b".repeat(64) };
-    vi.mocked(api.studioAddRef).mockResolvedValueOnce(first).mockResolvedValueOnce(second);
-    const png = () => new File([new Uint8Array([137, 80, 78, 71])], "frame.png", { type: "image/png" });
-    fireEvent.drop(within(field("Start frame")).getByRole("button"), { dataTransfer: { files: [png()], types: ["Files"] } });
-    await waitFor(() => expect(useStudio.getState().drafts.video.refs).toEqual([{ ...first, role: "startFrame" }]));
-    fireEvent.drop(within(field("Start frame")).getByRole("button", { name: "Start frame: change the picture" }), {
-      dataTransfer: { files: [png()], types: ["Files"] },
-    });
-    await waitFor(() => expect(useStudio.getState().drafts.video.refs).toEqual([{ ...second, role: "startFrame" }]));
-    fireEvent.click(within(field("Start frame")).getByRole("button", { name: "Remove start frame" }));
-    expect(useStudio.getState().drafts.video.refs).toEqual([]);
+    expect(screen.queryByRole("button", { name: /Add the start frame/ })).toBeNull();
   });
 
   it("the Advanced toggle counts the changes and opens the Advanced fields", async () => {

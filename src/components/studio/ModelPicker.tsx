@@ -51,8 +51,9 @@ import type {
 // hide where the prompt goes. Picking an OpenRouter picture model asks for its price once
 // (`chooseModel`); a model restored when Studio opens is asked only on *Get the price*. An
 // endpoint of the tab's kind whose lists are not saved yet has a *Get the list* row in place of
-// its models. The prompt dock's *Choose a cloud model* opens it from the store (`pickerOpen`),
-// on its first cloud group (Task B7).
+// its models. The composer's *Choose a cloud model* opens it from the store (`pickerOpen`),
+// on its first cloud group (Task B7). Since Task U3 it opens from the composer's model chip; the
+// side panel keeps its Model field until Task U4 replaces both with the model sheet.
 
 /** What the filter chips select: models that take added pictures (Edit, References), a
  *  start or end frame, that make sound, or a transparent background. */
@@ -257,8 +258,11 @@ function chosenKey(chosen: Chosen | null): string {
 
 const LINK_BUTTON = "rounded-lg px-2.5 py-1.5 text-left text-sm text-accent hover:bg-bg-muted";
 
-/** The Model field: the chosen model, its price or time, and the picker it opens. */
-export function ModelPicker(props: { tab: StudioTab }) {
+/** The Model field: the chosen model, its price or time, and the picker it opens. With
+ *  `anchor` (the composer's model chip, Task U3), the picker opens from what `anchor` draws
+ *  instead, given the press that opens or closes it, and only this picker follows the store's
+ *  `pickerOpen` (*Choose a cloud model*). */
+export function ModelPicker(props: { tab: StudioTab; anchor?: (onPress: () => void) => ReactNode }) {
   const { tab } = props;
   const draft = useStudio((s) => s.drafts[tab]);
   const endpoints = useStudio((s) => s.endpoints);
@@ -268,9 +272,9 @@ export function ModelPicker(props: { tab: StudioTab }) {
   const showLocalModels = useStudio((s) => s.showLocalModels);
   const pickerOpen = useStudio((s) => s.pickerOpen);
   const openPicker = useStudio((s) => s.openPicker);
-  // Opened from its trigger here, or from elsewhere through the store.
+  // Opened from its trigger here, or (the composer's) from elsewhere through the store.
   const [openedHere, setOpenedHere] = useState(false);
-  const open = openedHere || pickerOpen !== null;
+  const open = openedHere || (props.anchor !== undefined && pickerOpen !== null);
   const [query, setQuery] = useState("");
   const [filters, setFilters] = useState<PickerFilter[]>([]);
   // Opened from elsewhere, it starts with every model shown, so its cloud groups are there.
@@ -284,6 +288,10 @@ export function ModelPicker(props: { tab: StudioTab }) {
   }
   const searchRef = useRef<HTMLInputElement>(null);
   const listRef = useRef<HTMLDivElement>(null);
+  const anchorRef = useRef<HTMLDivElement>(null);
+  // Whether the anchored picker closed because something outside it was pressed: focus then
+  // stays there rather than going back to the chip.
+  const pressedOutside = useRef(false);
   const labelId = useId();
   const nameId = useId();
 
@@ -325,6 +333,138 @@ export function ModelPicker(props: { tab: StudioTab }) {
     else options[at - 1]?.focus();
   };
 
+  const popover = (
+    <Popover.Portal>
+      <Popover.Content
+        align="start"
+        sideOffset={4}
+        collisionPadding={8}
+        aria-label={STUDIO_PICKER.choose}
+        onOpenAutoFocus={(e) => {
+          e.preventDefault();
+          pressedOutside.current = false;
+          // Asked for its cloud models: the first cloud model Studio can use, in the first
+          // cloud group that has one, else the first endpoint's *Get the list* (else the
+          // search box, as always).
+          const list = pickerOpen === "cloud" ? listRef.current : null;
+          const cloud =
+            list?.querySelector<HTMLElement>(
+              '[data-picker-place="cloud"] [role="option"]:not([aria-disabled="true"])',
+            ) ?? list?.querySelector<HTMLElement>("[data-picker-get-list] button");
+          (cloud ?? searchRef.current)?.focus();
+        }}
+        onInteractOutside={(e) => {
+          // A press of the chip itself opens or closes the picker from the chip.
+          if (props.anchor && anchorRef.current?.contains(e.target as Node)) e.preventDefault();
+          else pressedOutside.current = true;
+        }}
+        onCloseAutoFocus={(e) => {
+          if (!props.anchor) return;
+          // Back to the chip, as Radix does for a trigger: it has none here.
+          e.preventDefault();
+          if (!pressedOutside.current) anchorRef.current?.querySelector<HTMLElement>("button")?.focus();
+        }}
+        onKeyDown={onKeyDown}
+        className="z-50 flex max-h-[var(--radix-popover-content-available-height)] w-[26rem] max-w-[calc(100vw-1rem)] flex-col rounded-xl border border-border bg-surface shadow-pop"
+      >
+        <div className="flex flex-col gap-2 border-b border-border p-2">
+          <label className="flex items-center gap-1.5 rounded-lg border border-border bg-bg px-2 py-1 text-sm focus-within:border-border-strong focus-within:ring-2 focus-within:ring-accent/40">
+            <Search size={14} aria-hidden className="text-fg-muted" />
+            <input
+              ref={searchRef}
+              type="search"
+              aria-label={STUDIO_PICKER.search}
+              placeholder={STUDIO_PICKER.searchPlaceholder}
+              value={query}
+              onChange={(e) => setQuery(e.target.value)}
+              className="min-w-0 flex-1 bg-transparent outline-none placeholder:text-fg-muted"
+            />
+          </label>
+          <div role="group" aria-label={STUDIO_PICKER.filters} className="flex flex-wrap gap-1">
+            {chips.map((f) => (
+              <button key={f} type="button" aria-pressed={active.includes(f)} onClick={() => toggle(f)} className={CHIP_PRESSED}>
+                {FILTER_WORDS[f]}
+              </button>
+            ))}
+          </div>
+        </div>
+        <div ref={listRef} className="min-h-0 overflow-y-auto p-1.5">
+          {local && localGroup && (
+            <LocalSection
+              tab={tab}
+              local={local}
+              group={localGroup}
+              isSelected={isSelected}
+              onChoose={choose}
+              onGetLocal={getLocal}
+            />
+          )}
+          {recentGroup && (
+            <section data-picker-place="cloud" className="pt-2">
+              <h3 className="px-2 pb-1 text-xs font-semibold text-fg-muted">{STUDIO_PICKER.recent}</h3>
+              <div role="listbox" aria-label={STUDIO_PICKER.recent}>
+                {recentGroup.models.map((model, i) => {
+                  const endpoint = recentGroup.via?.[i];
+                  return endpoint ? (
+                    <CloudRow
+                      key={`${endpoint.providerId} ${model.id}`}
+                      endpoint={endpoint}
+                      model={model}
+                      inRecent
+                      selected={isSelected({ endpoint: endpoint.providerId }, model)}
+                      onChoose={() => choose({ endpoint: endpoint.providerId }, model)}
+                    />
+                  ) : null;
+                })}
+              </div>
+            </section>
+          )}
+          {endpoints.map((endpoint) => {
+            const families = groups.filter((g) => g.endpoint === endpoint);
+            if (families.length > 0) {
+              return (
+                <EndpointSection
+                  key={endpoint.providerId}
+                  endpoint={endpoint}
+                  families={families}
+                  isSelected={isSelected}
+                  onChoose={choose}
+                />
+              );
+            }
+            return listsNotSaved(endpoint, tab) ? (
+              <GetListRow key={endpoint.providerId} endpoint={endpoint} />
+            ) : null;
+          })}
+          {nothing && <p className="px-2 py-3 text-sm text-fg-muted">{STUDIO_PICKER.nothingMatches}</p>}
+        </div>
+      </Popover.Content>
+    </Popover.Portal>
+  );
+
+  if (props.anchor) {
+    const anchor = props.anchor;
+    return (
+      <div data-model-picker className="min-w-0">
+        <Popover.Root
+          open={open}
+          onOpenChange={(o) => {
+            if (o) setQuery("");
+            setOpen(o);
+          }}
+        >
+          <Popover.Anchor ref={anchorRef} className="flex min-w-0">
+            {anchor(() => {
+              if (!open) setQuery("");
+              setOpen(!open);
+            })}
+          </Popover.Anchor>
+          {popover}
+        </Popover.Root>
+      </div>
+    );
+  }
+
   return (
     <div data-model-picker className="flex flex-col gap-1">
       <span id={labelId} className="text-xs font-medium text-fg-muted">
@@ -349,100 +489,7 @@ export function ModelPicker(props: { tab: StudioTab }) {
             <ChevronDown size={14} aria-hidden className="shrink-0 text-fg-muted" />
           </button>
         </Popover.Trigger>
-        <Popover.Portal>
-          <Popover.Content
-            align="start"
-            sideOffset={4}
-            collisionPadding={8}
-            aria-label={STUDIO_PICKER.choose}
-            onOpenAutoFocus={(e) => {
-              e.preventDefault();
-              // Asked for its cloud models: the first cloud model Studio can use, in the first
-              // cloud group that has one, else the first endpoint's *Get the list* (else the
-              // search box, as always).
-              const list = pickerOpen === "cloud" ? listRef.current : null;
-              const cloud =
-                list?.querySelector<HTMLElement>(
-                  '[data-picker-place="cloud"] [role="option"]:not([aria-disabled="true"])',
-                ) ?? list?.querySelector<HTMLElement>("[data-picker-get-list] button");
-              (cloud ?? searchRef.current)?.focus();
-            }}
-            onKeyDown={onKeyDown}
-            className="z-50 flex max-h-[var(--radix-popover-content-available-height)] w-[26rem] max-w-[calc(100vw-1rem)] flex-col rounded-xl border border-border bg-surface shadow-pop"
-          >
-            <div className="flex flex-col gap-2 border-b border-border p-2">
-              <label className="flex items-center gap-1.5 rounded-lg border border-border bg-bg px-2 py-1 text-sm focus-within:border-border-strong focus-within:ring-2 focus-within:ring-accent/40">
-                <Search size={14} aria-hidden className="text-fg-muted" />
-                <input
-                  ref={searchRef}
-                  type="search"
-                  aria-label={STUDIO_PICKER.search}
-                  placeholder={STUDIO_PICKER.searchPlaceholder}
-                  value={query}
-                  onChange={(e) => setQuery(e.target.value)}
-                  className="min-w-0 flex-1 bg-transparent outline-none placeholder:text-fg-muted"
-                />
-              </label>
-              <div role="group" aria-label={STUDIO_PICKER.filters} className="flex flex-wrap gap-1">
-                {chips.map((f) => (
-                  <button key={f} type="button" aria-pressed={active.includes(f)} onClick={() => toggle(f)} className={CHIP_PRESSED}>
-                    {FILTER_WORDS[f]}
-                  </button>
-                ))}
-              </div>
-            </div>
-            <div ref={listRef} className="min-h-0 overflow-y-auto p-1.5">
-              {local && localGroup && (
-                <LocalSection
-                  tab={tab}
-                  local={local}
-                  group={localGroup}
-                  isSelected={isSelected}
-                  onChoose={choose}
-                  onGetLocal={getLocal}
-                />
-              )}
-              {recentGroup && (
-                <section data-picker-place="cloud" className="pt-2">
-                  <h3 className="px-2 pb-1 text-xs font-semibold text-fg-muted">{STUDIO_PICKER.recent}</h3>
-                  <div role="listbox" aria-label={STUDIO_PICKER.recent}>
-                    {recentGroup.models.map((model, i) => {
-                      const endpoint = recentGroup.via?.[i];
-                      return endpoint ? (
-                        <CloudRow
-                          key={`${endpoint.providerId} ${model.id}`}
-                          endpoint={endpoint}
-                          model={model}
-                          inRecent
-                          selected={isSelected({ endpoint: endpoint.providerId }, model)}
-                          onChoose={() => choose({ endpoint: endpoint.providerId }, model)}
-                        />
-                      ) : null;
-                    })}
-                  </div>
-                </section>
-              )}
-              {endpoints.map((endpoint) => {
-                const families = groups.filter((g) => g.endpoint === endpoint);
-                if (families.length > 0) {
-                  return (
-                    <EndpointSection
-                      key={endpoint.providerId}
-                      endpoint={endpoint}
-                      families={families}
-                      isSelected={isSelected}
-                      onChoose={choose}
-                    />
-                  );
-                }
-                return listsNotSaved(endpoint, tab) ? (
-                  <GetListRow key={endpoint.providerId} endpoint={endpoint} />
-                ) : null;
-              })}
-              {nothing && <p className="px-2 py-3 text-sm text-fg-muted">{STUDIO_PICKER.nothingMatches}</p>}
-            </div>
-          </Popover.Content>
-        </Popover.Portal>
+        {popover}
       </Popover.Root>
       {/* Its state (a request on its way) belongs to the model it was for. */}
       <ChosenLine key={chosenKey(chosen)} tab={tab} chosen={chosen} />
@@ -577,7 +624,7 @@ function EndpointSection(props: {
 }
 
 /** Whether `endpoint` is a cloud endpoint whose company makes `tab`'s kind and whose lists are
- *  not saved yet (the dock's cloud backup counts it, `cloudBackup`). */
+ *  not saved yet (the composer's cloud backup counts it, `cloudBackup`). */
 function listsNotSaved(endpoint: StudioEndpoint, tab: StudioTab): boolean {
   return endpoint.cloud && endpoint.fetchedAt === null && makesKind(endpoint, tab);
 }

@@ -352,6 +352,7 @@ describe("Open in Studio", () => {
     vi.mocked(studioApi.studioGetPrefs).mockResolvedValue({
       lastModel: { image: { target: { endpoint: 1 }, model: flare.id } },
       advancedOpen: false,
+      settingsOpen: false,
       confirmEveryVideo: true,
       confirmAtUsd: 1,
       dailyLimitUsd: 10,

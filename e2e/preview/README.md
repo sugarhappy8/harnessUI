@@ -74,10 +74,11 @@ to a cloud model (with the "what changed" note) · `c0` the Studio menu · `c` G
 models (scrolled to its top) · `c2` Get local models as it opens · `d` Hugging Face results ·
 `d2` a supported result opened · `d3` an unsupported result opened · `e0` the local-model
 notice before a first download · `e` the download dialog · `e2` the row while downloading ·
-`f` Advanced open · `f2` the whole right panel (tall viewport) · `g` gallery grid (top) · `g2`
-grid as it opens · `h` viewer · `i`, `i2` Settings -> Studio · `j` main view at 900x650 · `k`
-Video tab · `z1`, `z2` first use (empty, picker) · `x1` chat, `x2` chat model menu, `x3`
-Models dialog (for comparison).
+`f` Advanced open (the side panel, from Settings) · `f2` the whole side panel, docked (tall
+1440 px viewport) · `g` gallery grid (top) · `g2` grid as it opens · `h` viewer · `i`, `i2`
+Settings -> Studio · `j` main view at 900x650 · `k` Video tab · `o` the SDXL inpainting model
+chosen, with its Picture to change and Mask zones · `z1`, `z2` first use (empty, picker) ·
+`x1` chat, `x2` chat model menu, `x3` Models dialog (for comparison).
 
 ## Updating it for a redesign
 

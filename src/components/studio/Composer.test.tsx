@@ -1,18 +1,27 @@
-// Studio's prompt dock (0.1.0 Task B7): Create with the price of the whole run (cloud) or its
-// time (local), where the prompt goes, Enter to create, one start per press, the confirmation
-// a cloud run may need, the daily limit (cloud only), cloud as the backup for a local run that
-// does not fit or is very slow, and what a refused start says.
+// Studio's composer (0.2.0 Task U3, design 10.1): one card at the foot of the results with the
+// prompt and the pictures in front of it, then a toolbar with the model chip, Shape and How
+// many as menus, Settings, and the time or price beside Create; the privacy line under it.
+// Ported deliberately from the prompt dock's tests (0.1.0 Task B7): Create with the price of
+// the whole run (cloud) or its time (local), where the prompt goes, Enter to create, one start
+// per press, the confirmation a cloud run may need, the daily limit (cloud only), cloud as the
+// backup for a very slow local run, what a refused start says, and the prompt's own checks.
+// A model that may not fit this computer never greys Create out (Task S11; Task G2 adds the
+// warning line).
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
-import { STUDIO_DOCK, STUDIO_REUSE } from "../../lib/words";
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { INPUT_ROLE, STUDIO_DOCK, STUDIO_REUSE } from "../../lib/words";
 import type { StudioTab } from "../../store/studio";
 import { LOCAL, MODELS, RUN } from "./fixtures/models";
 import type {
   Estimate,
+  InstalledLocal,
   LocalEstimate,
   LocalModels,
+  ParamSpec,
+  RefItem,
+  RefRole,
   Run,
   StartRequest,
   StudioEndpoint,
@@ -20,18 +29,23 @@ import type {
   Usage,
 } from "./types";
 
-// Radix positions popovers with ResizeObserver, which jsdom does not have.
+// Radix positions popovers with ResizeObserver, and its menus and tooltips use pointer capture
+// and scrollIntoView, none of which jsdom has.
 globalThis.ResizeObserver ??= class {
   observe() {}
   unobserve() {}
   disconnect() {}
 } as unknown as typeof ResizeObserver;
+Element.prototype.hasPointerCapture ??= () => false;
+Element.prototype.setPointerCapture ??= () => {};
+Element.prototype.releasePointerCapture ??= () => {};
 
 vi.mock("../../lib/ipc", () => ({ isTauri: () => true }));
 vi.mock("./api");
 
 const api = await import("./api");
 const { StudioView } = await import("./StudioView");
+const { UiProviders } = await import("../ui/UiProviders");
 const { cloudBackup } = await import("./cost");
 const { PROMPT_MAX_CHARS, promptProblems, settingsProblems, useStudio } = await import("../../store/studio");
 
@@ -58,6 +72,7 @@ function prefs(patch: Partial<StudioPrefs> = {}): StudioPrefs {
   return {
     lastModel: {},
     advancedOpen: false,
+    settingsOpen: false,
     confirmEveryVideo: true,
     confirmAtUsd: 1,
     dailyLimitUsd: 10,
@@ -172,9 +187,15 @@ async function show(
   vi.mocked(api.studioLocalFit).mockResolvedValue(LOCAL.installed[1]!.fit);
   vi.mocked(api.studioEstimate).mockResolvedValue(saved.estimate ?? est());
   vi.mocked(api.studioStart).mockImplementation(async (req) => accepted(req));
+  // A model picked at OpenRouter asks for its price once: the fixture's, as listed.
+  vi.mocked(api.studioModelPrice).mockImplementation(async (_, id) => MODELS.find((m) => m.id === id)!);
   useStudio.getState().showStudio(saved.tab ?? "image");
   await act(async () => {
-    render(<StudioView />);
+    render(
+      <UiProviders>
+        <StudioView />
+      </UiProviders>,
+    );
   });
   await flush();
   if (saved.settle ?? true) await estimated();
@@ -198,6 +219,84 @@ function typePrompt(text: string) {
 function createButton(): HTMLButtonElement {
   return screen.getByRole("button", { name: /Create/ }) as HTMLButtonElement;
 }
+
+/** The composer's toolbar: the model chip, Shape, How many, Settings and Create. */
+function toolbar(): HTMLElement {
+  return screen.getByRole("toolbar", { name: "Picture settings" });
+}
+
+/** Opens a Radix menu from its trigger, as a pointer press does. */
+async function openMenu(trigger: HTMLElement) {
+  await act(async () => {
+    fireEvent.pointerDown(trigger, { button: 0, ctrlKey: false });
+  });
+}
+
+/** The tooltip `el` shows once it has keyboard focus. */
+async function tipOf(el: HTMLElement): Promise<string> {
+  await act(async () => {
+    el.focus();
+  });
+  return (await screen.findByRole("tooltip")).textContent ?? "";
+}
+
+/** A picture file, as dropped from the file manager. */
+function png(name = "a.png"): File {
+  return new File([new Uint8Array([137, 80, 78, 71, 13, 10, 26, 10])], name, { type: "image/png" });
+}
+
+function dropOn(el: HTMLElement, file: File = png()) {
+  fireEvent.drop(el, { dataTransfer: { files: [file], types: ["Files"] } });
+}
+
+/** The backend's answer for an added picture: kept, with no role yet. */
+function kept(n: number): RefItem {
+  return { sha256: String(n).repeat(64).slice(0, 64), mime: "image/png", sizeBytes: 1200, role: null };
+}
+
+/** The Pictures draft's added pictures, by role. */
+const rolesNow = (tab: StudioTab = "image") => useStudio.getState().drafts[tab].refs.map((r) => r.role);
+
+/** A picture field of a model on this computer, as the backend builds one (`picture_field`). */
+function pictureField(key: string, label: string, role: RefRole, min: number): ParamSpec {
+  return {
+    key,
+    canonical: null,
+    label,
+    help: null,
+    layer: "simple",
+    kind: { type: "images", min, max: 1, role },
+    companyDefault: null,
+    initial: null,
+    affectsPrice: false,
+    requires: null,
+  };
+}
+
+/** FLUX.2 klein's row as another installed model on this computer, with `pictures` in place of
+ *  its reference pictures: an SDXL inpainting model, or Flex.2. */
+function installedWith(id: string, name: string, pictures: ParamSpec[]): InstalledLocal {
+  const klein = LOCAL.installed[0]!;
+  const params = klein.model.params.filter((p) => p.kind.type !== "images");
+  return { ...klein, id, name, model: { ...klein.model, id, displayName: name, params: [...params, ...pictures] } };
+}
+const inpainting = installedWith("sdxl-inpainting", "sd_xl_inpainting_0.1", [
+  pictureField("source_picture", "Picture to change", "source", 1),
+  pictureField("mask_picture", "Mask", "mask", 1),
+]);
+const flex2 = installedWith("flex-2", "Flex.2 preview", [
+  pictureField("source_picture", "Picture to change", "source", 0),
+  pictureField("mask_picture", "Mask", "mask", 0),
+  pictureField("control_picture", "Control picture", "control", 0),
+]);
+
+/** Studio's local models with `extra` installed too. */
+function localWith(...extra: InstalledLocal[]): LocalModels {
+  return { ...LOCAL, installed: [...LOCAL.installed, ...extra] };
+}
+
+/** The Pictures tab set to installed model `m` on this computer. */
+const usedLast = (m: InstalledLocal) => ({ image: { target: "thisComputer" as const, model: m.model.id } });
 
 /** The request each `studio_start` got. */
 function started(): StartRequest[] {
@@ -245,7 +344,252 @@ afterEach(() => {
   window.removeEventListener("app:open-settings", onOpenSettings);
 });
 
-describe("PromptDock", () => {
+describe("Composer", () => {
+  it("the composer is one region with the prompt, the model chip and Create", async () => {
+    await show({ estimate: here() });
+    const region = screen.getByRole("region", { name: "Make a picture" });
+    const prompt = within(region).getByRole("textbox", { name: "Prompt" });
+    expect(prompt.getAttribute("placeholder")).toBe("Describe the picture you want…");
+    const bar = within(region).getByRole("toolbar", { name: "Picture settings" });
+    within(bar).getByRole("button", { name: /FLUX\.2 klein 4B/ });
+    within(bar).getByRole("button", { name: "Create" });
+    // One prompt box in all of Studio, and no old dock.
+    expect(screen.getAllByRole("textbox", { name: "Prompt" })).toHaveLength(1);
+    expect(document.querySelector("[data-prompt-dock]")).toBeNull();
+    // The prompt comes before the toolbar.
+    expect(prompt.compareDocumentPosition(bar) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    await click(screen.getByRole("tab", { name: "Video" }));
+    within(screen.getByRole("region", { name: "Make a video" })).getByRole("textbox", { name: "Prompt" });
+    expect(promptBox().getAttribute("placeholder")).toBe("Describe the video you want…");
+  });
+
+  it("the model chip names the model and where it runs, and its dot's tooltip is the privacy line", async () => {
+    await show({ estimate: here() });
+    const chip = within(toolbar()).getByRole("button", { name: /FLUX\.2 klein 4B/ });
+    expect(chip.textContent).toContain("This computer");
+    const dot = within(toolbar()).getByRole("img", { name: "Where your prompt goes" });
+    expect(await tipOf(dot)).toContain("On this computer: your prompt and pictures stay here");
+    // The chip opens the model picker, anchored to it.
+    await click(chip);
+    screen.getByRole("listbox", { name: "On this computer" });
+    await click(within(screen.getByRole("listbox", { name: "via OpenRouter" })).getByRole("option", { name: /GPT Image 2\.6 Flare/ }));
+    const cloudChip = within(toolbar()).getByRole("button", { name: /GPT Image 2\.6 Flare/ });
+    expect(cloudChip.textContent).toContain("OpenRouter");
+    // The picker closed with the pick, and gave focus back to the chip.
+    expect(screen.queryByRole("listbox", { name: "On this computer" })).toBeNull();
+    await waitFor(() => expect(document.activeElement).toBe(cloudChip));
+    cleanup();
+    useStudio.setState(INITIAL, true);
+    await show({ prefs: prefs({ lastModel: CLOUD_LAST }) });
+    const cloudDot = within(toolbar()).getByRole("img", { name: "Where your prompt goes" });
+    expect(await tipOf(cloudDot)).toContain("Cloud: your prompt and added pictures go to openrouter.ai");
+  });
+
+  it("with no model, the chip asks for one and Create is off", async () => {
+    await show({ endpoints: [], local: { ...LOCAL, installed: [] } });
+    within(toolbar()).getByRole("button", { name: /Choose a model/ });
+    expect(within(toolbar()).queryByRole("img", { name: "Where your prompt goes" })).toBeNull();
+    typePrompt("a fox");
+    expect(createButton().disabled).toBe(true);
+  });
+
+  it("shape and count are menus in the toolbar", async () => {
+    await show({ estimate: here() });
+    await openMenu(within(toolbar()).getByRole("button", { name: "Shape: 1:1" }));
+    expect(screen.getAllByRole("menuitemradio").map((i) => i.textContent)).toEqual(["1:1", "4:3", "3:4", "16:9", "9:16"]);
+    await act(async () => {
+      fireEvent.click(screen.getByRole("menuitemradio", { name: "16:9" }));
+    });
+    expect(useStudio.getState().drafts.image.values.aspect_ratio).toBe("16:9");
+    within(toolbar()).getByRole("button", { name: "Shape: 16:9" });
+    await openMenu(within(toolbar()).getByRole("button", { name: "How many: 1" }));
+    expect(screen.getAllByRole("menuitemradio").map((i) => i.textContent)).toEqual(["1", "2", "3", "4"]);
+    await act(async () => {
+      fireEvent.click(screen.getByRole("menuitemradio", { name: "2" }));
+    });
+    expect(useStudio.getState().drafts.image.values.n).toBe(2);
+    within(toolbar()).getByRole("button", { name: "How many: 2" });
+  });
+
+  it("a cloud model's Shape lists every shape, and Automatic while the company picks", async () => {
+    // Moved from the right panel's tests: its five chips and More shapes are one menu here.
+    await show({ prefs: prefs({ lastModel: CLOUD_LAST }) });
+    await openMenu(within(toolbar()).getByRole("button", { name: "Shape: Automatic" }));
+    const items = screen.getAllByRole("menuitemradio");
+    expect(items).toHaveLength(12);
+    expect(items[0]!.textContent).toBe("Automatic (company default)");
+    expect(items[0]!.getAttribute("aria-checked")).toBe("true");
+    await act(async () => {
+      fireEvent.click(screen.getByRole("menuitemradio", { name: "21:9" }));
+    });
+    expect(useStudio.getState().drafts.image.values.aspect_ratio).toBe("21:9");
+    await openMenu(within(toolbar()).getByRole("button", { name: "Shape: 21:9" }));
+    await act(async () => {
+      fireEvent.click(screen.getByRole("menuitemradio", { name: "Automatic (company default)" }));
+    });
+    expect(useStudio.getState().drafts.image.values).not.toHaveProperty("aspect_ratio");
+    // How many goes up to the model's most.
+    await openMenu(within(toolbar()).getByRole("button", { name: "How many: Automatic" }));
+    expect(screen.getAllByRole("menuitemradio").map((i) => i.textContent)).toEqual([
+      "Automatic (company default)",
+      ...Array.from({ length: 10 }, (_, i) => String(i + 1)),
+    ]);
+    await act(async () => {
+      fireEvent.click(screen.getByRole("menuitemradio", { name: "7" }));
+    });
+    expect(useStudio.getState().drafts.image.values.n).toBe(7);
+  });
+
+  it("a model without How many has no How many menu", async () => {
+    const nano = { image: { target: { endpoint: 1 }, model: "google/gemini-nano-banana-2.1" } } as const;
+    await show({ prefs: prefs({ lastModel: nano }) });
+    expect(within(toolbar()).queryByRole("button", { name: /^How many/ })).toBeNull();
+    within(toolbar()).getByRole("button", { name: /^Shape/ });
+  });
+
+  it("Create shows the time for a local model and the price for a cloud one", async () => {
+    await show({ estimate: here() });
+    expect(within(toolbar()).getByText("about 4 min")).toBeTruthy();
+    cleanup();
+    useStudio.setState(INITIAL, true);
+    await show({ prefs: prefs({ lastModel: CLOUD_LAST }) });
+    expect(within(toolbar()).getByText("~ $0.16")).toBeTruthy();
+  });
+
+  it("added pictures show as thumbnails before the prompt, each with a Remove button named after it", async () => {
+    await show({ estimate: here() });
+    const two = [1, 2].map((n) => ({ ...kept(n), role: "reference" as const }));
+    act(() => useStudio.setState((s) => ({ drafts: { ...s.drafts, image: { ...s.drafts.image, refs: two } } })));
+    const region = screen.getByRole("region", { name: "Make a picture" });
+    const thumbs = within(region).getAllByRole("img", { name: /^Picture \d$/ });
+    expect(thumbs.map((t) => t.getAttribute("aria-label") ?? t.getAttribute("alt"))).toEqual(["Picture 1", "Picture 2"]);
+    for (const thumb of thumbs) {
+      expect(thumb.compareDocumentPosition(promptBox()) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    }
+    within(region).getByRole("button", { name: "Add picture" });
+    await click(within(region).getByRole("button", { name: "Remove picture 1" }));
+    expect(useStudio.getState().drafts.image.refs.map((r) => r.sha256)).toEqual([kept(2).sha256]);
+    within(region).getByRole("button", { name: "Remove picture 1" });
+    expect(within(region).queryByRole("button", { name: "Remove picture 2" })).toBeNull();
+  });
+
+  it("an inpainting model shows Picture to change and Mask zones, and Create stays off until both are added", async () => {
+    await show({ local: localWith(inpainting), prefs: prefs({ lastModel: usedLast(inpainting) }), estimate: here() });
+    const region = screen.getByRole("region", { name: "Make a picture" });
+    const source = within(region).getByRole("group", { name: "Picture to change" });
+    const mask = within(region).getByRole("group", { name: "Mask" });
+    within(source).getByText("required");
+    within(mask).getByText("required");
+    // No reference pictures: the zones are where pictures go.
+    expect(within(region).queryByRole("button", { name: "Add picture" })).toBeNull();
+    // The mask's hint is its tooltip.
+    expect(await tipOf(within(mask).getByRole("button", { name: "Add the mask" }))).toContain(INPUT_ROLE.hint.mask);
+    typePrompt("a red door");
+    expect(createButton().disabled).toBe(true);
+    screen.getByText("This model needs at least 1 picture to change.");
+    vi.mocked(api.studioAddRef).mockResolvedValueOnce(kept(1)).mockResolvedValueOnce(kept(2));
+    dropOn(within(source).getByRole("button", { name: "Add the picture to change" }));
+    await waitFor(() => expect(rolesNow()).toEqual(["source"]));
+    expect(createButton().disabled).toBe(true);
+    screen.getByText("This model needs at least 1 mask.");
+    dropOn(within(mask).getByRole("button", { name: "Add the mask" }));
+    await waitFor(() => expect(rolesNow()).toEqual(["source", "mask"]));
+    expect(createButton().disabled).toBe(false);
+    expect(screen.queryByText(/This model needs at least/)).toBeNull();
+    // A set zone shows its picture with Remove.
+    await click(within(mask).getByRole("button", { name: "Remove mask" }));
+    expect(rolesNow()).toEqual(["source"]);
+    expect(createButton().disabled).toBe(true);
+  });
+
+  it("Flex.2's zones are optional, and a mask without a picture to change says so", async () => {
+    await show({ local: localWith(flex2), prefs: prefs({ lastModel: usedLast(flex2) }), estimate: here() });
+    const region = screen.getByRole("region", { name: "Make a picture" });
+    const control = within(region).getByRole("group", { name: "Control picture" });
+    expect(within(region).queryByText("required")).toBeNull();
+    expect(await tipOf(within(control).getByRole("button", { name: "Add the control picture" }))).toContain(
+      INPUT_ROLE.hint.control,
+    );
+    typePrompt("a red door");
+    expect(createButton().disabled).toBe(false);
+    vi.mocked(api.studioAddRef).mockResolvedValueOnce(kept(1)).mockResolvedValueOnce(kept(2));
+    dropOn(within(within(region).getByRole("group", { name: "Mask" })).getByRole("button", { name: "Add the mask" }));
+    await waitFor(() => expect(rolesNow()).toEqual(["mask"]));
+    screen.getByText("Add the picture to change before its mask.");
+    expect(createButton().disabled).toBe(true);
+    dropOn(
+      within(within(region).getByRole("group", { name: "Picture to change" })).getByRole("button", {
+        name: "Add the picture to change",
+      }),
+    );
+    await waitFor(() => expect(rolesNow()).toEqual(["mask", "source"]));
+    expect(screen.queryByText("Add the picture to change before its mask.")).toBeNull();
+    expect(createButton().disabled).toBe(false);
+  });
+
+  it("a start frame zone appears only when the model takes one, and a new picture replaces the one there", async () => {
+    // Moved from the right panel, whose frame drop zone the composer's zones replace.
+    await show({ tab: "video", prefs: prefs({ lastModel: CLOUD_LAST }) });
+    const zone = within(screen.getByRole("region", { name: "Make a video" })).getByRole("group", { name: "Start frame" });
+    vi.mocked(api.studioAddRef).mockResolvedValueOnce(kept(1)).mockResolvedValueOnce(kept(2));
+    dropOn(within(zone).getByRole("button", { name: "Add the start frame" }));
+    await waitFor(() => expect(useStudio.getState().drafts.video.refs).toEqual([{ ...kept(1), role: "startFrame" }]));
+    dropOn(within(zone).getByRole("button", { name: "Start frame: change the picture" }));
+    await waitFor(() => expect(useStudio.getState().drafts.video.refs).toEqual([{ ...kept(2), role: "startFrame" }]));
+    await click(within(zone).getByRole("button", { name: "Remove start frame" }));
+    expect(useStudio.getState().drafts.video.refs).toEqual([]);
+    // Grok Imagine Video takes a start frame and no end frame.
+    act(() => useStudio.getState().chooseModel("video", { endpoint: 1 }, "x-ai/grok-imagine-video-1.5-lite"));
+    await flush();
+    screen.getByRole("group", { name: "Start frame" });
+    expect(screen.queryByRole("group", { name: "End frame" })).toBeNull();
+  });
+
+  it("Settings opens the side panel and moves focus into it", async () => {
+    await show({ estimate: here() });
+    const settings = within(toolbar()).getByRole("button", { name: "Settings" });
+    expect(settings.getAttribute("aria-expanded")).toBe("false");
+    expect(screen.queryByRole("dialog", { name: "Settings" })).toBeNull();
+    await click(settings);
+    // On a window under 1400 px the panel slides over the results.
+    const panel = screen.getByRole("dialog", { name: "Settings" });
+    expect(panel.contains(document.activeElement)).toBe(true);
+    within(panel).getByText("My setups");
+    expect(api.studioSetPrefs).toHaveBeenLastCalledWith({ settingsOpen: true });
+    expect(useStudio.getState().settingsOpen).toBe(true);
+    // Esc closes it, and focus goes back to Settings.
+    await act(async () => {
+      fireEvent.keyDown(panel, { key: "Escape" });
+    });
+    await flush();
+    expect(screen.queryByRole("dialog", { name: "Settings" })).toBeNull();
+    await waitFor(() => expect(document.activeElement).toBe(settings));
+    expect(api.studioSetPrefs).toHaveBeenLastCalledWith({ settingsOpen: false });
+  });
+
+  it("the note of what changed after a model switch shows in the composer while the panel is closed", async () => {
+    await show({ estimate: here() });
+    act(() => useStudio.getState().setValue("image", "n", 3));
+    act(() => useStudio.getState().chooseModel("image", { endpoint: 1 }, "google/gemini-nano-banana-2.1"));
+    await flush();
+    const region = screen.getByRole("region", { name: "Make a picture" });
+    const note = within(region).getByRole("status");
+    expect(note.textContent).toContain("Nano Banana 2.1 has no how many setting, so it was removed.");
+    await click(within(note).getByRole("button", { name: "Put the note away" }));
+    expect(useStudio.getState().drafts.image.note).toBeNull();
+  });
+
+  it("a model that may not fit this computer never greys Create out", async () => {
+    await show({ estimate: here({ fit: "notHere", reason: "needs 6 GB of graphics memory" }, { eta: null }) });
+    typePrompt("a fox");
+    await estimated();
+    expect(createButton().disabled).toBe(false);
+    expect(screen.queryByText(/Not for this computer/)).toBeNull();
+    expect(screen.queryByText("A cloud model can make this instead.")).toBeNull();
+    await click(createButton());
+    expect(api.studioStart).toHaveBeenCalledTimes(1);
+  });
+
   describe("a cloud model", () => {
     it("Create shows the price for the whole run", async () => {
       await show({ prefs: prefs({ lastModel: CLOUD_LAST }) });
@@ -454,8 +798,9 @@ describe("PromptDock", () => {
     it("an empty prompt says so quietly until a press is refused for it, then aloud", async () => {
       await show({ prefs: prefs({ lastModel: CLOUD_LAST }) });
       const sentence = () => screen.getByText("Write a prompt first.").parentElement!;
-      // Nothing was done yet: not a fault.
-      expect(sentence().className).toContain("text-fg-muted");
+      // Nothing was done yet: not a fault, and not shown (critique §6: it stood under every
+      // empty prompt); the prompt box still says it to a screen reader.
+      expect(sentence().className).toContain("sr-only");
       expect(sentence().className).not.toContain("text-danger");
       expect(sentence().getAttribute("role")).toBeNull();
       // The prompt box is described by it.
@@ -463,6 +808,7 @@ describe("PromptDock", () => {
       fireEvent.keyDown(promptBox(), { key: "Enter" });
       expect(api.studioStart).not.toHaveBeenCalled();
       expect(sentence().className).toContain("text-danger");
+      expect(sentence().className).not.toContain("sr-only");
       expect(sentence().getAttribute("role")).toBe("alert");
       expect(promptBox().getAttribute("aria-describedby")).toBe(sentence().id);
     });
@@ -589,7 +935,7 @@ describe("PromptDock", () => {
       expect(screen.queryByText(/\$/)).toBeNull();
     });
 
-    it("the line above Create says the prompt stays here, and when the chat model will be unloaded", async () => {
+    it("the privacy line under the composer says the prompt stays here, and when the chat model will be unloaded", async () => {
       await show({ estimate: here({ fit: "afterUnload", unloadChat: true }) });
       screen.getByText(
         "On this computer: your prompt and pictures stay here · the chat model will be unloaded to make room",
@@ -663,59 +1009,6 @@ describe("PromptDock", () => {
       screen.getByText("Add OpenRouter in Settings → Endpoints to use a cloud model instead.");
       screen.getByRole("button", { name: "Open Endpoints" });
       expect(screen.queryByText(/OpenAI/)).toBeNull();
-    });
-
-    it("a local model that does not fit here offers cloud instead of Create", async () => {
-      await show({ estimate: here({ fit: "notHere", reason: "needs 6 GB of graphics memory" }, { eta: null }) });
-      expect(createButton().disabled).toBe(true);
-      screen.getByText("Not for this computer: needs 6 GB of graphics memory");
-      // It cannot run here at all: not "too slow".
-      screen.getByText("A cloud model can make this instead.");
-      expect(screen.queryByText(/Too slow here\?/)).toBeNull();
-      await click(screen.getByRole("button", { name: "Choose a cloud model" }));
-      screen.getByRole("listbox", { name: "via OpenRouter" });
-      expect(useStudio.getState().drafts.image.target).toBe("thisComputer");
-    });
-
-    it("a local model that does not fit here, without an endpoint for this kind, points to Settings → Endpoints", async () => {
-      await show({
-        endpoints: [],
-        estimate: here({ fit: "notHere", reason: "needs 6 GB of graphics memory" }, { eta: null }),
-      });
-      screen.getByText("Not for this computer: needs 6 GB of graphics memory");
-      screen.getByText("Add OpenRouter or OpenAI in Settings → Endpoints to use a cloud model instead.");
-      expect(screen.queryByText(/Too slow here\?/)).toBeNull();
-      await click(screen.getByRole("button", { name: "Open Endpoints" }));
-      expect(opened).toEqual(["endpoints"]);
-    });
-
-    it("typing on a model that does not fit here never enables Create", async () => {
-      await show({ estimate: here({ fit: "notHere", reason: "needs 6 GB of graphics memory" }, { eta: null }) });
-      vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
-      for (const text of ["a", "a f", "a fo", "a fox"]) {
-        typePrompt(text);
-        expect(createButton().disabled).toBe(true);
-        fireEvent.keyDown(promptBox(), { key: "Enter" });
-        act(() => vi.advanceTimersByTime(100));
-        expect(createButton().disabled).toBe(true);
-      }
-      // The answer for the draft as it is now comes back the same.
-      await act(async () => {
-        vi.advanceTimersByTime(150);
-      });
-      await flush();
-      expect(api.studioEstimate).toHaveBeenLastCalledWith(expect.objectContaining({ prompt: "a fox" }));
-      expect(createButton().disabled).toBe(true);
-      expect(api.studioStart).not.toHaveBeenCalled();
-      // An answer that never comes leaves the one shown, for this model and place, in charge.
-      vi.mocked(api.studioEstimate).mockReturnValue(new Promise<Estimate>(() => undefined));
-      typePrompt("a fox in deep snow");
-      expect(createButton().disabled).toBe(true);
-      await pauseEnds();
-      expect(createButton().disabled).toBe(true);
-      fireEvent.keyDown(promptBox(), { key: "Enter" });
-      expect(api.studioStart).not.toHaveBeenCalled();
-      screen.getByText("Not for this computer: needs 6 GB of graphics memory");
     });
 
     it("a local model that fits once the chat model is unloaded can be created", async () => {

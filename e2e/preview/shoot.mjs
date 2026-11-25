@@ -65,10 +65,14 @@ const mainToTop = (page) =>
 const typePrompt = (page) => page.getByRole("textbox", { name: "Prompt" }).fill(PROMPT);
 
 async function openLocalModels(page) {
-  await page.getByRole("button", { name: "Studio menu" }).click();
-  await settle(page, 300);
-  await page.getByRole("menuitem", { name: "Get local models" }).click();
+  await page.getByRole("button", { name: "Get models" }).click();
   await settle(page, 700);
+}
+
+/** The side panel, opened from the composer's Settings. */
+async function openSettings(page) {
+  await page.getByRole("button", { name: "Settings", exact: true }).last().click();
+  await settle(page, 500);
 }
 
 async function search(page, words) {
@@ -116,7 +120,10 @@ const SCREENS = [
       await open(page);
       await typePrompt(page);
       // A setting changed first, so the switch has something to say about it.
-      await page.getByRole("radiogroup", { name: "How many" }).getByRole("radio", { name: "2" }).click();
+      await page.getByRole("button", { name: /^How many/ }).click();
+      await settle(page, 300);
+      await page.getByRole("menuitemradio", { name: "2", exact: true }).click();
+      await settle(page, 300);
       await page.locator("[data-model-picker] button").first().click();
       await settle(page, 500);
       await page
@@ -224,6 +231,7 @@ const SCREENS = [
     name: "f-advanced-panel",
     run: async (page) => {
       await open(page);
+      await openSettings(page);
       await page.getByRole("button", { name: /^Advanced/ }).click();
       await settle(page, 500);
     },
@@ -231,10 +239,12 @@ const SCREENS = [
   {
     id: "f2",
     name: "f2-advanced-panel-full-height",
-    viewport: { width: 1280, height: 1640 },
+    // Wide enough for the side panel to be docked (from 1400 px), so it can be shot whole.
+    viewport: { width: 1440, height: 1640 },
     element: "[data-studio-panel]",
     run: async (page) => {
       await open(page);
+      await openSettings(page);
       await page.getByRole("button", { name: /^Advanced/ }).click();
       await settle(page, 500);
     },
@@ -315,6 +325,20 @@ const SCREENS = [
       await open(page);
       await page.getByRole("tab", { name: "Video" }).click();
       await settle(page, 1200);
+    },
+  },
+  {
+    id: "o",
+    name: "o-inpainting-inputs",
+    run: async (page) => {
+      await open(page);
+      // The SDXL inpainting model, picked from the composer's model chip: its zones show.
+      await page.locator("[data-model-picker] button").first().click();
+      await settle(page, 500);
+      await page.getByRole("option", { name: /^sd_xl_inpainting_0\.1/ }).click();
+      await settle(page, 500);
+      await page.getByRole("textbox", { name: "Prompt" }).fill("A red door in a whitewashed wall");
+      await settle(page, 600);
     },
   },
   {

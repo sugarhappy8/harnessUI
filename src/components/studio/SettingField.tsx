@@ -2,13 +2,12 @@ import { draftModel, localFitKey, useStudio, type StudioTab } from "../../store/
 import type { Values } from "./canonical";
 import { etaText } from "./eta";
 import { ParamField } from "./ParamField";
-import { FrameDrop } from "./RefTray";
 import type { Canonical, LocalFit, MediaModel, ParamSpec } from "./types";
 
 // One field of Studio's right panel, whichever layer draws it (0.1.0 Tasks B5 and B6): the
 // simple fields (SettingsPanel.tsx) and the Advanced drawer (AdvancedDrawer.tsx) both draw each
-// field here, so a field looks and works the same in either. A frame is its drop zone (reference
-// pictures are added in the tray beside the prompt); anything else goes through ParamField with
+// field here, so a field looks and works the same in either. Pictures are added in the composer
+// (its strip and input zones, Task U3), so they draw nothing here; anything else goes through ParamField with
 // its reset, the seed with its dice and *Keep it*, and on this computer each Length and
 // Resolution chip of a clip with its own time here. Those times are asked for by the panel
 // (`clipAsks`, asked once per chip and size; nothing is sent) and read here.
@@ -135,10 +134,8 @@ export function SettingField(props: { tab: StudioTab; spec: ParamSpec }) {
   const newSeed = useStudio((s) => s.newSeed);
   const lockSeed = useStudio((s) => s.lockSeed);
   const setInvalid = useStudio((s) => s.setInvalid);
-  if (spec.kind.type === "images") {
-    // Reference pictures are added in the tray beside the prompt.
-    return spec.kind.role === "reference" ? null : <FrameDrop tab={tab} spec={spec} />;
-  }
+  // Pictures, of every role, are added in the composer (its strip and input zones).
+  if (spec.kind.type === "images") return null;
   const here = draft.target === "thisComputer";
   const localClip = here && model?.kind === "video";
   return (

@@ -1,6 +1,7 @@
 import { Tabs } from "radix-ui";
 import { STUDIO_BAR, STUDIO_TABS } from "../../lib/words";
 import type { StudioTab } from "../../store/studio";
+import { FOCUS_RING } from "../ui/styles";
 
 // Studio's [Pictures | Video] (0.1.0 Tasks B2 and B13): the top bar's, bound to the tab, and
 // Get local models' own, bound to its tab, look and behave alike. Each sits in the Radix
@@ -9,7 +10,8 @@ import type { StudioTab } from "../../store/studio";
 const TABS: readonly StudioTab[] = ["image", "video"];
 
 const TAB_CLASS =
-  "rounded-md px-3 py-1 text-sm data-[state=active]:bg-surface data-[state=active]:font-medium data-[state=active]:shadow-soft hover:text-fg";
+  "rounded-md px-3 py-1 text-sm data-[state=active]:bg-surface data-[state=active]:font-medium data-[state=active]:shadow-soft hover:text-fg " +
+  FOCUS_RING;
 
 /** [Pictures | Video]; `onSelect` is told the tab picked. */
 export function KindTabs(props: { onSelect: (tab: StudioTab) => void }) {

@@ -21,6 +21,7 @@ import type {
   MediaModel,
   ModelFiles,
   Output,
+  ParamSpec,
   Part,
   PartRole,
   PartSource,
@@ -121,7 +122,25 @@ export function priced(model: MediaModel): MediaModel {
 
 const sdxl = LOCAL.installed.find((m) => m.version === "sdxl")!;
 
-/** An SDXL inpainting model, installed from a search: a picture-edit model. */
+/** A picture field of a model on this computer, as the backend builds one (`picture_field` in
+ *  src-tauri/src/studio/local.rs): one picture of `role`, required. */
+function pictureField(key: string, label: string, role: "source" | "mask", help: string | null): ParamSpec {
+  return {
+    key,
+    canonical: null,
+    label,
+    help,
+    layer: "simple",
+    kind: { type: "images", min: 1, max: 1, role },
+    companyDefault: null,
+    initial: null,
+    affectsPrice: false,
+    requires: null,
+  };
+}
+
+/** An SDXL inpainting model, installed from a search: a picture-edit model, which asks for the
+ *  picture to change and its mask (its recipe's `input_counts`). */
 const SDXL_INPAINT: InstalledLocal = {
   ...sdxl,
   id: "hf:diffusers/stable-diffusion-xl-1.0-inpainting-0.1:sd_xl_inpainting_0.1.safetensors",
@@ -129,7 +148,16 @@ const SDXL_INPAINT: InstalledLocal = {
   sizeBytes: 5_140_000_000,
   recipe: { id: "sdxl-inpaint", name: "SDXL inpainting", kind: "pictureEdit" },
   version: "sdxl-inpaint",
-  model: { ...sdxl.model, id: "sd_xl_inpainting_0.1", displayName: "sd_xl_inpainting_0.1" },
+  model: {
+    ...sdxl.model,
+    id: "sd_xl_inpainting_0.1",
+    displayName: "sd_xl_inpainting_0.1",
+    params: [
+      ...sdxl.model.params.filter((p) => p.kind.type !== "images"),
+      pictureField("source_picture", "Picture to change", "source", null),
+      pictureField("mask_picture", "Mask", "mask", "Any picture: its white areas are the ones changed."),
+    ],
+  },
 };
 
 /** A second LoRA, downloaded from Hugging Face (the fixture's is added from this computer). */
@@ -334,6 +362,7 @@ export const PREFS: StudioPrefs = {
     video: { target: "thisComputer", model: "wan22-ti2v-5b-fast-q6" },
   },
   advancedOpen: false,
+  settingsOpen: false,
   confirmEveryVideo: true,
   confirmAtUsd: 1,
   dailyLimitUsd: 10,

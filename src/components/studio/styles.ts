@@ -42,3 +42,14 @@ export const MENU_ITEM =
 
 /** A model's row card in Get local models. */
 export const ROW = "flex flex-col gap-1.5 rounded-xl border border-border bg-surface p-3.5 shadow-soft";
+
+/** A control in the composer's toolbar (Task U3): the model chip, Shape, How many and
+ *  Settings, as soft pills on the composer's card. */
+export const COMPOSER_CHIP =
+  "inline-flex h-8 min-w-0 shrink-0 items-center gap-1.5 rounded-full bg-bg-muted/70 px-2.5 text-sm text-fg " +
+  "hover:bg-bg-muted aria-expanded:bg-bg-muted data-[state=open]:bg-bg-muted disabled:opacity-60 " +
+  FOCUS_RING;
+
+/** A tile in the composer's picture strip (Task U3): an added picture, *Add picture*, or an
+ *  input picture's zone. */
+export const PICTURE_TILE = "flex h-12 shrink-0 items-center gap-2 rounded-xl border text-sm";

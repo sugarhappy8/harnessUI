@@ -405,6 +405,8 @@ export interface Setup {
 export interface StudioPrefs {
   lastModel: Partial<Record<MediaKind, ModelChoice>>;
   advancedOpen: boolean;
+  /** Studio's side panel (Settings) was left open: it stays docked on a wide window. */
+  settingsOpen: boolean;
   confirmEveryVideo: boolean;
   confirmAtUsd: number;
   /** `null` when the limit is off. */

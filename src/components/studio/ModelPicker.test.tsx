@@ -68,6 +68,7 @@ function prefs(patch: Partial<StudioPrefs> = {}): StudioPrefs {
   return {
     lastModel: {},
     advancedOpen: false,
+    settingsOpen: false,
     confirmEveryVideo: true,
     confirmAtUsd: 1,
     dailyLimitUsd: 10,

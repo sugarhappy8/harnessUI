@@ -1,6 +1,8 @@
-// Studio's tray of added pictures (0.1.0 Task B5): a picture dropped, pasted or chosen is read
-// as the composer reads one and kept by the backend (`studio_add_ref`), then shows with a role
-// chip from the model's own picture fields; the tray refuses a picture past the model's limit.
+// Studio's tray of added pictures (0.1.0 Task B5; the composer's strip since Task U3): a picture
+// dropped, pasted or chosen is read as the chat composer reads one and kept by the backend
+// (`studio_add_ref`), then shows as a thumbnail with its Remove button, and a role chip when the
+// model takes more than one role; the tray refuses a picture past the model's limit. Pictures
+// of the other roles show in their own zones (InputZones.tsx).
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { LOCAL, MODELS } from "./fixtures/models";
@@ -17,7 +19,9 @@ vi.mock("../../lib/ipc", () => ({ isTauri: () => true }));
 vi.mock("./api");
 
 const api = await import("./api");
-const { FrameDrop, RefTray, useNativePictureDrops, NATIVE_DROP_SETTLE_MS } = await import("./RefTray");
+const { RefTray, useNativePictureDrops, NATIVE_DROP_SETTLE_MS } = await import("./RefTray");
+const { InputZone } = await import("./InputZones");
+const { UiProviders } = await import("../ui/UiProviders");
 const { useStudio } = await import("../../store/studio");
 
 const INITIAL = useStudio.getState();
@@ -29,6 +33,14 @@ function model(id: string): MediaModel {
 }
 const flare = model("openai/gpt-image-2.6-flare");
 const veo = model("google/veo-3.1");
+/** GPT Image 2.6 Flare taking a start frame too: a model with two roles. */
+const flareFramed: MediaModel = {
+  ...flare,
+  params: [
+    ...flare.params,
+    { ...veo.params.find((p) => p.kind.type === "images" && p.kind.role === "startFrame")! },
+  ],
+};
 /** GPT Image 2.6 Flare taking at most one reference picture. */
 const flareOne: MediaModel = {
   ...flare,
@@ -41,6 +53,7 @@ function prefs(patch: Partial<StudioPrefs> = {}): StudioPrefs {
   return {
     lastModel: {},
     advancedOpen: false,
+    settingsOpen: false,
     confirmEveryVideo: true,
     confirmAtUsd: 1,
     dailyLimitUsd: 10,
@@ -118,6 +131,11 @@ function kept(n: number): RefItem {
   return { sha256: String(n).repeat(64).slice(0, 64), mime: "image/png", sizeBytes: 1200, role: null };
 }
 
+/** The strip's *Add picture* button. */
+function addButton(): HTMLElement {
+  return screen.getByRole("button", { name: "Add picture" });
+}
+
 function refs(tab: "image" | "video" = "image"): RefItem[] {
   return useStudio.getState().drafts[tab].refs;
 }
@@ -132,22 +150,25 @@ afterEach(() => {
 });
 
 describe("RefTray", () => {
-  it("an added picture goes to studioAddRef and shows a role chip", async () => {
+  it("an added picture goes to studioAddRef and shows as a thumbnail with its Remove button", async () => {
     await renderTray(flare);
     vi.mocked(api.studioAddRef).mockResolvedValue({ sha256: "a".repeat(64), mime: "image/png", sizeBytes: 1200, role: null });
-    dropFile(screen.getByText("+ Add picture"), pngFile());
+    dropFile(addButton(), pngFile());
     await waitFor(() => expect(api.studioAddRef).toHaveBeenCalledTimes(1));
     expect(api.studioAddRef).toHaveBeenCalledWith({ mime: "image/png", fileName: "a.png", data: "iVBORw0KGgo=" });
-    await screen.findByRole("button", { name: "Reference" }); // the role chip
+    await screen.findByRole("button", { name: "Remove picture 1" });
+    screen.getByRole("img", { name: "Picture 1" });
+    // Flare takes only reference pictures: no role to choose.
+    expect(screen.queryByRole("button", { name: "Reference" })).toBeNull();
     expect(refs()).toEqual([{ sha256: "a".repeat(64), mime: "image/png", sizeBytes: 1200, role: "reference" }]);
   });
 
   it("the tray refuses a picture past the model's limit", async () => {
     await renderTray(flareOne);
     vi.mocked(api.studioAddRef).mockResolvedValueOnce(kept(1)).mockResolvedValueOnce(kept(2));
-    dropFile(screen.getByText("+ Add picture"), pngFile());
-    await screen.findByRole("button", { name: "Reference" });
-    dropFile(screen.getByText("+ Add picture"), pngFile("b.png"));
+    dropFile(addButton(), pngFile());
+    await screen.findByRole("button", { name: "Remove picture 1" });
+    dropFile(addButton(), pngFile("b.png"));
     await screen.findByText("This model takes 1 added picture.");
     // Refused before the picture was kept.
     expect(api.studioAddRef).toHaveBeenCalledTimes(1);
@@ -157,37 +178,40 @@ describe("RefTray", () => {
   it("several pictures at once are added in order, up to the limit", async () => {
     await renderTray(veo);
     vi.mocked(api.studioAddRef).mockResolvedValueOnce(kept(1)).mockResolvedValueOnce(kept(2));
-    dropFile(screen.getByText("+ Add picture"), pngFile("a.png"), pngFile("b.png"), pngFile("c.png"));
+    // Veo takes no reference pictures (no Add picture), but a paste still finds its frames.
+    expect(screen.queryByRole("button", { name: "Add picture" })).toBeNull();
+    fireEvent.paste(screen.getByRole("textbox", { name: "Prompt" }), {
+      clipboardData: { files: [pngFile("a.png"), pngFile("b.png"), pngFile("c.png")] },
+    });
     await screen.findByText("This model takes 2 added pictures.");
     // A video's pictures go to its frames in the model's order: the start frame, then the end.
     expect(refs("video").map((r) => r.role)).toEqual(["startFrame", "endFrame"]);
     expect(api.studioAddRef).toHaveBeenCalledTimes(2);
   });
 
-  it("the role chip moves a picture to another role the model takes", async () => {
-    await renderTray(veo);
+  it("the role chip moves a picture to another role the model takes, and out of the strip into its zone", async () => {
+    await renderTray(flareFramed);
     vi.mocked(api.studioAddRef).mockResolvedValue(kept(1));
-    dropFile(screen.getByText("+ Add picture"), pngFile());
-    const chip = await screen.findByRole("button", { name: "Start frame" });
+    dropFile(addButton(), pngFile());
+    const chip = await screen.findByRole("button", { name: "Reference" });
     await act(async () => {
       fireEvent.pointerDown(chip, { button: 0, ctrlKey: false });
     });
-    expect(screen.getAllByRole("menuitemradio").map((i) => i.textContent)).toEqual(["Start frame", "End frame"]);
+    expect(screen.getAllByRole("menuitemradio").map((i) => i.textContent)).toEqual(["Reference", "Start frame"]);
     await act(async () => {
-      fireEvent.click(screen.getByRole("menuitemradio", { name: "End frame" }));
+      fireEvent.click(screen.getByRole("menuitemradio", { name: "Start frame" }));
     });
-    expect(refs("video").map((r) => r.role)).toEqual(["endFrame"]);
-    screen.getByRole("button", { name: "End frame" });
+    expect(refs().map((r) => r.role)).toEqual(["startFrame"]);
+    expect(screen.queryByRole("button", { name: "Remove picture 1" })).toBeNull();
   });
 
   it("an added picture can be removed", async () => {
     await renderTray(flare);
     vi.mocked(api.studioAddRef).mockResolvedValue(kept(1));
-    dropFile(screen.getByText("+ Add picture"), pngFile());
-    await screen.findByRole("button", { name: "Reference" });
-    fireEvent.click(screen.getByRole("button", { name: "Remove picture 1" }));
+    dropFile(addButton(), pngFile());
+    fireEvent.click(await screen.findByRole("button", { name: "Remove picture 1" }));
     expect(refs()).toEqual([]);
-    expect(screen.queryByRole("button", { name: "Reference" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Remove picture 1" })).toBeNull();
   });
 
   it("a picture pasted in Studio is added; one pasted elsewhere is not", async () => {
@@ -215,7 +239,7 @@ describe("RefTray", () => {
 
   it("a file that is not a picture says so and is not sent", async () => {
     await renderTray(flare);
-    dropFile(screen.getByText("+ Add picture"), new File(["hello"], "notes.txt", { type: "text/plain" }));
+    dropFile(addButton(), new File(["hello"], "notes.txt", { type: "text/plain" }));
     await screen.findByText("notes.txt is not a PNG, JPEG, GIF or WebP image.");
     expect(api.studioAddRef).not.toHaveBeenCalled();
   });
@@ -228,7 +252,7 @@ describe("RefTray", () => {
       nextStep: "Free up space.",
       details: "",
     });
-    dropFile(screen.getByText("+ Add picture"), pngFile());
+    dropFile(addButton(), pngFile());
     await screen.findByText("The disk is full.");
     // With what to do about it.
     screen.getByText("Free up space.");
@@ -247,9 +271,10 @@ describe("RefTray", () => {
       await renderTray(flare);
       vi.mocked(api.studioAddRef).mockResolvedValue(kept(1));
       vi.mocked(api.studioRefBytes).mockResolvedValue(new Uint8Array([1, 2, 3]).buffer);
-      dropFile(screen.getByText("+ Add picture"), pngFile());
-      const img = await screen.findByRole("img", { name: "Picture 1" });
-      await waitFor(() => expect(img.getAttribute("src")).toBe("blob:thumb"));
+      dropFile(addButton(), pngFile());
+      // Named as a picture from the start; its bytes, once read, are the picture.
+      await screen.findByRole("img", { name: "Picture 1" });
+      await waitFor(() => expect(screen.getByRole("img", { name: "Picture 1" }).getAttribute("src")).toBe("blob:thumb"));
       expect(api.studioRefBytes).toHaveBeenCalledWith(kept(1).sha256);
       fireEvent.click(screen.getByRole("button", { name: "Remove picture 1" }));
       expect(revokeObjectURL).toHaveBeenCalledWith("blob:thumb");
@@ -263,7 +288,7 @@ describe("RefTray", () => {
     await renderTray(flareOne);
     vi.mocked(api.studioAddRef).mockResolvedValue(kept(1));
     fireEvent.paste(screen.getByRole("textbox", { name: "Prompt" }), { clipboardData: { files: [pngFile()] } });
-    await screen.findByRole("button", { name: "Reference" });
+    await screen.findByRole("button", { name: "Remove picture 1" });
     fireEvent.paste(screen.getByRole("textbox", { name: "Prompt" }), { clipboardData: { files: [pngFile("b.png")] } });
     expect((await screen.findByRole("alert")).textContent).toBe("This model takes 1 added picture.");
     expect(api.studioAddRef).toHaveBeenCalledTimes(1);
@@ -278,7 +303,7 @@ describe("RefTray", () => {
     // Meanwhile the model became one that takes no pictures: the tray has nothing else to show.
     const none = { ...flare, params: flare.params.filter((p) => p.kind.type !== "images") };
     act(() => useStudio.setState({ endpoints: [endpoint([none, ...MODELS.filter((x) => x.id !== flare.id)])] }));
-    expect(screen.queryByText("+ Add picture")).toBeNull();
+    expect(screen.queryByRole("button", { name: "Add picture" })).toBeNull();
     await act(async () => keep(kept(1)));
     expect((await screen.findByRole("alert")).textContent).toBe("This model takes no added pictures.");
     expect(refs()).toEqual([]);
@@ -326,23 +351,22 @@ describe("RefTray", () => {
     URL.createObjectURL = vi.fn(() => "blob:thumb");
     URL.revokeObjectURL = vi.fn();
     try {
-      await renderTray(veo);
+      await renderTray(flare);
       vi.mocked(api.studioRefBytes).mockResolvedValue(new Uint8Array([1, 2, 3]).buffer);
-      // One picture as both frames, for a loop.
-      const loop = [
-        { ...kept(1), role: "startFrame" as const },
-        { ...kept(1), role: "endFrame" as const },
+      const twice = [
+        { ...kept(1), role: "reference" as const },
+        { ...kept(1), role: "reference" as const },
       ];
       act(() => {
-        useStudio.setState((s) => ({ drafts: { ...s.drafts, video: { ...s.drafts.video, refs: loop } } }));
+        useStudio.setState((s) => ({ drafts: { ...s.drafts, image: { ...s.drafts.image, refs: twice } } }));
       });
       await waitFor(() => expect(api.studioRefBytes).toHaveBeenCalledTimes(2));
       await flush();
       fireEvent.click(screen.getByRole("button", { name: "Remove picture 1" }));
       await flush();
-      expect(refs("video").map((r) => r.role)).toEqual(["endFrame"]);
-      screen.getByRole("button", { name: "End frame" });
+      expect(refs()).toHaveLength(1);
       screen.getByRole("img", { name: "Picture 1" });
+      expect(api.studioRefBytes).toHaveBeenCalledTimes(2);
     } finally {
       URL.createObjectURL = original.create;
       URL.revokeObjectURL = original.revoke;
@@ -351,14 +375,14 @@ describe("RefTray", () => {
 
   it("a model that takes no pictures has no tray", async () => {
     await renderTray({ ...flare, params: flare.params.filter((p) => p.kind.type !== "images") });
-    expect(screen.queryByText("+ Add picture")).toBeNull();
+    expect(screen.queryByRole("button", { name: "Add picture" })).toBeNull();
     expect(useStudio.getState().addRef("image", kept(1))).toBe("This model takes no added pictures.");
   });
 });
 
 // On Windows the window keeps Tauri's drag-and-drop, and the webview's own drop carries no
 // files: a picture dropped from the file manager comes as Tauri's native drop, which goes to
-// the tray or frame zone under it; the backend keeps the files from the paths it recorded
+// the tray or input zone under it; the backend keeps the files from the paths it recorded
 // (`studio_add_dropped`, by their place in the drop). On macOS and Linux both drops come, and
 // the webview's own takes them.
 describe("a native drop (Windows)", () => {
@@ -373,13 +397,15 @@ describe("a native drop (Windows)", () => {
       return m?.params.find((p) => p.kind.type === "images" && p.kind.role === "startFrame") ?? null;
     });
     return (
-      <div data-studio-view>
-        <div data-prompt-dock>
-          <RefTray tab={props.tab} />
-          <textarea aria-label="Prompt" />
+      <UiProviders>
+        <div data-studio-view>
+          <section data-composer>
+            <RefTray tab={props.tab} />
+            {spec && <InputZone tab={props.tab} spec={spec} />}
+            <textarea aria-label="Prompt" />
+          </section>
         </div>
-        {spec && <FrameDrop tab={props.tab} spec={spec} />}
-      </div>
+      </UiProviders>
     );
   }
 
@@ -429,7 +455,7 @@ describe("a native drop (Windows)", () => {
   it("a file dropped on the start frame zone becomes the start frame", async () => {
     await follow(veo);
     vi.mocked(api.studioAddDropped).mockResolvedValue(kept(3));
-    await nativeDrop(screen.getByText("Drop a picture here, or choose one"), 2);
+    await nativeDrop(screen.getByRole("button", { name: "Add the start frame" }), 2);
     expect(api.studioAddDropped).toHaveBeenCalledTimes(1);
     expect(refs("video")).toEqual([{ ...kept(3), role: "startFrame" }]);
   });
@@ -437,7 +463,7 @@ describe("a native drop (Windows)", () => {
   it("past the model's limit it is refused before anything is kept, and a refusal says why", async () => {
     await follow(flareOne);
     vi.mocked(api.studioAddDropped).mockResolvedValueOnce(kept(1));
-    await nativeDrop(screen.getByText("+ Add picture"), 2);
+    await nativeDrop(addButton(), 2);
     screen.getByText("This model takes 1 added picture.");
     expect(api.studioAddDropped).toHaveBeenCalledTimes(1);
   });
@@ -445,7 +471,7 @@ describe("a native drop (Windows)", () => {
   it("a drop the webview's own drop took (macOS, Linux) is not added twice", async () => {
     await follow(flare);
     vi.mocked(api.studioAddRef).mockResolvedValue(kept(1));
-    const tray = screen.getByText("+ Add picture");
+    const tray = addButton();
     dropFile(tray, pngFile());
     await nativeDrop(tray, 1);
     // The webview's own drop reads its file meanwhile.

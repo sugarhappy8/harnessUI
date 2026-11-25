@@ -24,6 +24,7 @@ const api = await import("./api");
 const dialog = await import("@tauri-apps/plugin-dialog");
 const { Grid } = await import("./Grid");
 const { StudioView } = await import("./StudioView");
+const { UiProviders } = await import("../ui/UiProviders");
 const { useStudio } = await import("../../store/studio");
 
 const INITIAL = useStudio.getState();
@@ -43,6 +44,7 @@ function prefs(): StudioPrefs {
   return {
     lastModel: {},
     advancedOpen: false,
+    settingsOpen: false,
     confirmEveryVideo: true,
     confirmAtUsd: 1,
     dailyLimitUsd: 10,
@@ -178,7 +180,11 @@ async function showGrid(runs: Run[] = [RUN, LOCAL_RUN, GIF, VIDEO], next: RunsCu
   });
   useStudio.getState().showStudio();
   await act(async () => {
-    render(<StudioView />);
+    render(
+      <UiProviders>
+        <StudioView />
+      </UiProviders>,
+    );
   });
   await flush();
   await click(screen.getByRole("button", { name: "Grid" }));

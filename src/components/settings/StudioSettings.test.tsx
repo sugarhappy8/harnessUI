@@ -23,6 +23,7 @@ const INITIAL = useStudio.getState();
 const PREFS: StudioPrefs = {
   lastModel: {},
   advancedOpen: false,
+  settingsOpen: false,
   confirmEveryVideo: true,
   confirmAtUsd: 1,
   dailyLimitUsd: 10,

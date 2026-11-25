@@ -1,28 +1,32 @@
-import { useCallback, useEffect, useEffectEvent, useId, useRef, useState, type DragEvent, type RefObject } from "react";
+import { useCallback, useEffect, useEffectEvent, useRef, useState, type DragEvent, type RefObject } from "react";
 import { DropdownMenu } from "radix-ui";
-import { Check, ChevronDown, Image as ImageIcon, X } from "lucide-react";
+import { Check, ChevronDown, Image as ImageIcon, ImagePlus, X } from "lucide-react";
 import * as ipc from "../../lib/ipc";
-import { STUDIO_REFS } from "../../lib/words";
+import { STUDIO_COMPOSER, STUDIO_REFS } from "../../lib/words";
 import { toErrorInfo } from "../../store/app";
 import { draftModel, pictureRoles, placeRef, useStudio, type StudioTab } from "../../store/studio";
 import { readImage } from "../Composer";
+import { FOCUS_RING } from "../ui/styles";
 import * as api from "./api";
-import type { ParamSpec, RefItem, RefRole } from "./types";
+import { PICTURE_TILE } from "./styles";
+import type { RefItem, RefRole } from "./types";
 
-// Added pictures (0.1.0 Task B5; design 3, "The tray"): the tray beside the prompt takes a
-// picture dropped on it, pasted anywhere in Studio, or chosen as a file; each is read as the
-// composer reads one (`readImage`), kept in the gallery folder by the backend
-// (`studio_add_ref`) and shown with its role chip (Reference, Start frame, End frame: the
-// roles of the model's own picture fields). A picture past the model's limit is refused before
-// it is kept. The right panel's frame drop zones (`FrameDrop`) take one picture for their role.
-// A picture dropped from the file manager comes through the webview's own drop where it carries
-// files (macOS, Linux) and through Tauri's native drop on Windows, where the window keeps
-// Tauri's drag-and-drop and the webview's drop has no files (`useNativePictureDrops`, which
-// hands the tray or frame zone under the drop the number of files dropped: the backend keeps
-// them from the paths it recorded, `studio_add_dropped`).
+// Added pictures (0.1.0 Task B5; design 3, "The tray"; the composer's strip since 0.2.0 Task U3):
+// the tray in front of the prompt takes a picture dropped on it, pasted anywhere in Studio, or
+// chosen as a file; each is read as the chat composer reads one (`readImage`), kept in the
+// gallery folder by the backend (`studio_add_ref`) and placed in the first of the model's
+// picture roles with room. The strip shows the reference pictures as thumbnails, each with its
+// Remove button and, when the model takes more than one role, its role chip; a picture of any
+// other role shows in its own zone (InputZones.tsx, which shares the adding and dropping here).
+// A picture past the model's limit is refused before it is kept. A picture dropped from the
+// file manager comes through the webview's own drop where it carries files (macOS, Linux) and
+// through Tauri's native drop on Windows, where the window keeps Tauri's drag-and-drop and the
+// webview's drop has no files (`useNativePictureDrops`, which hands the tray or input zone under
+// the drop the number of files dropped: the backend keeps them from the paths it recorded,
+// `studio_add_dropped`).
 
 /** The picture types the file chooser offers (`readImage` checks each file again). */
-const PICTURE_TYPES = "image/png,image/jpeg,image/gif,image/webp";
+export const PICTURE_TYPES = "image/png,image/jpeg,image/gif,image/webp";
 
 /** Why a picture was not added, and what to do about it when there is a next step. */
 interface Refusal {
@@ -41,7 +45,7 @@ function failureWords(e: unknown): Refusal {
 const refusal = (message: string): Refusal => ({ message, nextStep: "" });
 
 /** `error`'s words, with its next step in a quieter colour. */
-function RefusalWords(props: { error: Refusal }) {
+export function RefusalWords(props: { error: Refusal }) {
   return (
     <>
       {props.error.message}
@@ -55,12 +59,12 @@ function RefusalWords(props: { error: Refusal }) {
 type Source = () => Promise<RefItem>;
 
 /** `files` as pictures to add: each read as the composer reads one, then kept. */
-function fromFiles(files: File[]): Source[] {
+export function fromFiles(files: File[]): Source[] {
   return files.map((file) => async () => api.studioAddRef(await readImage(file)));
 }
 
 /** The first `count` files of the native drop just made, as pictures to add. */
-function fromDrop(count: number): Source[] {
+export function fromDrop(count: number): Source[] {
   return Array.from({ length: count }, (_, index) => () => api.studioAddDropped(index, null));
 }
 
@@ -96,7 +100,7 @@ async function addPictures(tab: StudioTab, sources: Source[], role: RefRole | nu
 }
 
 /** Adding pictures to `tab`'s draft: `add`, and why the last attempt stopped, if it did. */
-function useAdding(tab: StudioTab) {
+export function useAdding(tab: StudioTab) {
   const [error, setError] = useState<Refusal | null>(null);
   const add = useCallback(
     (sources: Source[], role: RefRole | null, replace = false) => {
@@ -114,7 +118,7 @@ function useAdding(tab: StudioTab) {
 let htmlDropAt = 0;
 
 /** The handlers that take files dropped on an element (the webview's own drop). */
-function dropTarget(take: (files: File[]) => void) {
+export function dropTarget(take: (files: File[]) => void) {
   return {
     onDragOver: (e: DragEvent) => {
       if (e.dataTransfer.types.includes("Files")) e.preventDefault();
@@ -129,7 +133,7 @@ function dropTarget(take: (files: File[]) => void) {
   };
 }
 
-/** The event a tray or frame zone gets for a native drop on it: `detail` is how many files. */
+/** The event a tray or input zone gets for a native drop on it: `detail` is how many files. */
 const NATIVE_DROP = "studio:native-drop";
 
 /** How long a native drop waits for the webview's own drop of the same files, and how close
@@ -138,7 +142,7 @@ export const NATIVE_DROP_SETTLE_MS = 300;
 const SAME_DROP_MS = 1500;
 
 /** Calls `take` with the number of files of each native drop on `zone`. */
-function useNativeDropOn(zone: RefObject<HTMLElement | null>, take: (count: number) => void) {
+export function useNativeDropOn(zone: RefObject<HTMLElement | null>, take: (count: number) => void) {
   const onDrop = useEffectEvent((count: number) => take(count));
   useEffect(() => {
     const el = zone.current;
@@ -149,17 +153,17 @@ function useNativeDropOn(zone: RefObject<HTMLElement | null>, take: (count: numb
   });
 }
 
-/** The tray or frame zone at `x`, `y` (CSS pixels): a frame zone, the tray, or the tray of the
- *  prompt dock dropped on (the prompt box takes a picture as the chat's message box does). */
+/** The tray or input zone at `x`, `y` (CSS pixels): an input zone, the tray, or the tray of the
+ *  composer dropped on (the prompt box takes a picture as the chat's message box does). */
 function zoneAt(x: number, y: number): HTMLElement | null {
-  const hit = document.elementFromPoint?.(x, y)?.closest<HTMLElement>("[data-frame-drop], [data-ref-tray], [data-prompt-dock]");
-  if (!hit || hit.matches("[data-frame-drop], [data-ref-tray]")) return hit ?? null;
+  const hit = document.elementFromPoint?.(x, y)?.closest<HTMLElement>("[data-input-zone], [data-ref-tray], [data-composer]");
+  if (!hit || hit.matches("[data-input-zone], [data-ref-tray]")) return hit ?? null;
   return hit.querySelector<HTMLElement>("[data-ref-tray]");
 }
 
 /**
- * While `active` (Studio is shown): each native drop of files on the tray, a frame zone or the
- * prompt dock goes to that zone, which adds the files as it adds a picture dropped on it. A
+ * While `active` (Studio is shown): each native drop of files on the tray, an input zone or the
+ * composer goes to that zone, which adds the files as it adds a picture dropped on it. A
  * moment later, so a drop the webview's own drop already took (macOS, Linux) is not added
  * twice. Outside the app it does nothing.
  */
@@ -213,8 +217,10 @@ export function RefThumb(props: { sha256: string; mime: string; alt: string; cla
     };
   }, [sha256, mime]);
   if (!src) {
+    // Named as the picture will be, so a screen reader meets it before its bytes are read.
+    const named = props.alt ? { role: "img", "aria-label": props.alt } : { "aria-hidden": true };
     return (
-      <span className={`flex items-center justify-center bg-bg-muted text-fg-muted ${props.className}`}>
+      <span {...named} className={`flex items-center justify-center bg-bg-muted text-fg-muted ${props.className}`}>
         <ImageIcon size={16} aria-hidden />
       </span>
     );
@@ -241,7 +247,7 @@ function RoleChip(props: {
         <button
           type="button"
           title={STUDIO_REFS.roleMenu}
-          className="flex items-center gap-0.5 rounded-full border border-border px-1.5 text-xs hover:border-border-strong"
+          className={`flex items-center gap-0.5 rounded-full border border-border px-1.5 text-xs hover:border-border-strong ${FOCUS_RING}`}
         >
           {STUDIO_REFS.role[role]}
           <ChevronDown size={12} aria-hidden />
@@ -292,8 +298,11 @@ function refKey(refs: RefItem[], index: number): string {
   return `${sha256} ${same}`;
 }
 
-/** The added pictures of `tab`'s draft, each with its role chip, and *+ Add picture* while the
- *  model takes pictures. A picture pasted anywhere in Studio's view comes here too. */
+/** The reference pictures of `tab`'s draft as thumbnails, each with its Remove button (and its
+ *  role chip while the model takes more than one role), then *Add picture* while the model
+ *  takes reference pictures. Its children sit in the composer's row in front of the prompt. A
+ *  picture pasted anywhere in Studio's view comes here, and so does one dropped on the composer
+ *  (to the first of the model's roles with room). */
 export function RefTray(props: { tab: StudioTab }) {
   const { tab } = props;
   const refs = useStudio((s) => s.drafts[tab].refs);
@@ -303,6 +312,9 @@ export function RefTray(props: { tab: StudioTab }) {
   const fileInput = useRef<HTMLInputElement>(null);
   const tray = useRef<HTMLDivElement>(null);
   const roles = pictureRoles(model);
+  const takesReferences = roles.some((r) => r.role === "reference");
+  // The strip's pictures, with where each is in the draft; the other roles have their zones.
+  const strip = refs.flatMap((item, index) => ((item.role ?? "reference") === "reference" ? [{ item, index }] : []));
   useNativeDropOn(tray, (count) => add(fromDrop(count), null));
 
   // A paste goes to the focused element, so the tray listens on the document for one in
@@ -321,31 +333,37 @@ export function RefTray(props: { tab: StudioTab }) {
     return () => document.removeEventListener("paste", onPaste);
   }, [add, tab]);
 
-  if (roles.length === 0 && refs.length === 0 && !error) return null;
+  if (roles.length === 0 && strip.length === 0 && !error) return null;
   return (
-    <div ref={tray} data-ref-tray className="flex flex-wrap items-center gap-2" {...dropTarget((files) => add(fromFiles(files), null))}>
-      {refs.map((item, i) => (
-        <div key={refKey(refs, i)} className="flex items-center gap-1.5 rounded-lg border border-border p-1 pr-1.5">
-          <RefThumb sha256={item.sha256} mime={item.mime} alt={STUDIO_REFS.picture(i + 1)} className="h-8 w-8 rounded" />
-          <RoleChip tab={tab} index={i} item={item} roles={roles} refs={refs} onRefused={(why) => setError(refusal(why))} />
-          <button
-            type="button"
-            aria-label={STUDIO_REFS.remove(i + 1)}
-            title={STUDIO_REFS.remove(i + 1)}
-            onClick={() => removeRef(tab, i)}
-            className="rounded p-0.5 text-fg-muted hover:bg-bg-muted hover:text-fg"
-          >
-            <X size={12} aria-hidden />
-          </button>
-        </div>
-      ))}
-      {roles.length > 0 && (
+    // `contents`: its tiles are items of the composer's row; it stays the drop target.
+    <div ref={tray} data-ref-tray className="contents" {...dropTarget((files) => add(fromFiles(files), null))}>
+      {strip.map(({ item, index }, n) => {
+        const name = STUDIO_REFS.picture(n + 1);
+        return (
+          <div key={refKey(refs, index)} className={`${PICTURE_TILE} border-border bg-surface p-1 pr-1.5`}>
+            <RefThumb sha256={item.sha256} mime={item.mime} alt={name} className="size-10 rounded-lg" />
+            {roles.length > 1 && (
+              <RoleChip tab={tab} index={index} item={item} roles={roles} refs={refs} onRefused={(why) => setError(refusal(why))} />
+            )}
+            <button
+              type="button"
+              aria-label={STUDIO_COMPOSER.remove(name)}
+              onClick={() => removeRef(tab, index)}
+              className={`rounded-full p-1 text-fg-muted hover:bg-bg-muted hover:text-fg ${FOCUS_RING}`}
+            >
+              <X size={14} aria-hidden />
+            </button>
+          </div>
+        );
+      })}
+      {takesReferences && (
         <button
           type="button"
           onClick={() => fileInput.current?.click()}
-          className="rounded-lg border border-dashed border-border px-2.5 py-1 text-sm text-fg-muted hover:border-border-strong hover:text-fg"
+          className={`${PICTURE_TILE} border-dashed border-border-strong px-3 text-fg-muted hover:border-accent hover:text-fg ${FOCUS_RING}`}
         >
-          {STUDIO_REFS.add}
+          <ImagePlus size={16} aria-hidden />
+          {STUDIO_COMPOSER.addPicture}
         </button>
       )}
       <input
@@ -361,72 +379,7 @@ export function RefTray(props: { tab: StudioTab }) {
         }}
       />
       {error && (
-        <span role="alert" className="text-xs text-danger">
-          <RefusalWords error={error} />
-        </span>
-      )}
-    </div>
-  );
-}
-
-/** A frame field in the right panel (Start frame, End frame): a drop zone that takes one
- *  picture for its role, dropped or chosen, a new one taking the place of the one there. */
-export function FrameDrop(props: { tab: StudioTab; spec: ParamSpec }) {
-  const { tab, spec } = props;
-  const role: RefRole = spec.kind.type === "images" ? spec.kind.role : "startFrame";
-  const refs = useStudio((s) => s.drafts[tab].refs);
-  const removeRef = useStudio((s) => s.removeRef);
-  const { add, error } = useAdding(tab);
-  const fileInput = useRef<HTMLInputElement>(null);
-  const labelId = useId();
-  const index = refs.findIndex((r) => (r.role ?? "reference") === role);
-  const item = index >= 0 ? refs[index] : undefined;
-  const take = (files: File[]) => add(fromFiles(files.slice(0, 1)), role, true);
-  const zone = useRef<HTMLButtonElement>(null);
-  useNativeDropOn(zone, () => add(fromDrop(1), role, true));
-
-  return (
-    <div role="group" aria-labelledby={labelId} data-param={spec.key} className="flex flex-col gap-1.5">
-      <span id={labelId} className="text-xs font-medium text-fg-muted">
-        {spec.label}
-      </span>
-      <div className="flex items-start gap-1.5">
-        <button
-          ref={zone}
-          type="button"
-          data-frame-drop
-          aria-label={item ? STUDIO_REFS.change(spec.label) : undefined}
-          onClick={() => fileInput.current?.click()}
-          className="flex h-20 min-w-0 flex-1 items-center justify-center overflow-hidden rounded-lg border border-dashed border-border px-2 text-center text-xs text-fg-muted hover:border-border-strong hover:text-fg"
-          {...dropTarget(take)}
-        >
-          {item ? <RefThumb sha256={item.sha256} mime={item.mime} alt={spec.label} className="h-full w-full" /> : STUDIO_REFS.dropHere}
-        </button>
-        {item && (
-          <button
-            type="button"
-            aria-label={STUDIO_REFS.removeFrame(spec.label)}
-            title={STUDIO_REFS.removeFrame(spec.label)}
-            onClick={() => removeRef(tab, index)}
-            className="rounded p-0.5 text-fg-muted hover:bg-bg-muted hover:text-fg"
-          >
-            <X size={12} aria-hidden />
-          </button>
-        )}
-      </div>
-      <input
-        ref={fileInput}
-        type="file"
-        accept={PICTURE_TYPES}
-        hidden
-        aria-label={STUDIO_REFS.chooseFor(spec.label)}
-        onChange={(e) => {
-          if (e.target.files) take([...e.target.files]);
-          e.target.value = "";
-        }}
-      />
-      {error && (
-        <p role="alert" className="text-xs text-danger">
+        <p role="alert" className="basis-full text-xs text-danger">
           <RefusalWords error={error} />
         </p>
       )}

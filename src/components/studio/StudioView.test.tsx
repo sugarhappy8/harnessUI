@@ -1,7 +1,8 @@
-// Studio's view (0.1.0 Task B2): the frame (top bar, card stream, panel and dock slots), the
-// empty states and the default model, local first, and the saved lists, read without a fetch.
+// Studio's view (0.1.0 Task B2; 0.2.0 Task U3): the frame (the top bar, the results with the
+// composer at their foot, and the side panel, closed until asked for), the empty states and the
+// default model, local first, and the saved lists, read without a fetch.
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, within } from "@testing-library/react";
 import { amountGb } from "../../lib/words";
 import { LOCAL, MODELS, RUN } from "./fixtures/models";
 import type { LocalModels, Run, StudioEndpoint, StudioPrefs, Usage } from "./types";
@@ -18,6 +19,7 @@ vi.mock("./api");
 
 const api = await import("./api");
 const { StudioView } = await import("./StudioView");
+const { UiProviders } = await import("../ui/UiProviders");
 const { defaultModel, emptyState, useStudio } = await import("../../store/studio");
 
 const INITIAL = useStudio.getState();
@@ -46,6 +48,7 @@ function prefs(patch: Partial<StudioPrefs> = {}): StudioPrefs {
   return {
     lastModel: {},
     advancedOpen: false,
+    settingsOpen: false,
     confirmEveryVideo: true,
     confirmAtUsd: 1,
     dailyLimitUsd: 10,
@@ -114,7 +117,11 @@ async function show(
   });
   useStudio.getState().showStudio();
   await act(async () => {
-    render(<StudioView />);
+    render(
+      <UiProviders>
+        <StudioView />
+      </UiProviders>,
+    );
   });
   await flush();
 }
@@ -301,19 +308,106 @@ describe("StudioView", () => {
     expect(api.studioRefreshModels).toHaveBeenCalledWith(1);
   });
 
-  it("the top bar shows Pictures and Video, where the chosen model runs, and cloud spending", async () => {
-    await show({ usage: usage({ spentTodayUsd: 0.84 }) }); // the default: a local model
-    screen.getByRole("tab", { name: "Pictures" });
-    screen.getByRole("tab", { name: "Video" });
-    screen.getByText("$0.84 today");
-    expect(document.querySelector("[data-local-mark]")).not.toBeNull();
-    expect(document.querySelector("[data-cloud-mark]")).toBeNull();
+  it("the top bar shows the title, Pictures and Video, the gallery's controls and the menu", async () => {
+    await show();
+    const bar = screen.getByRole("banner");
+    expect(within(bar).getByRole("heading", { name: "Studio" }).className).toContain("text-title");
+    within(bar).getByRole("tab", { name: "Pictures" });
+    within(bar).getByRole("tab", { name: "Video" });
+    within(bar).getByRole("searchbox", { name: "Search" });
+    within(bar).getByRole("button", { name: "Starred" });
+    within(bar).getByRole("button", { name: "Grid" });
+    within(bar).getByRole("button", { name: "Studio menu" });
+  });
+
+  it("Get models is a top-bar button and the place chip is gone", async () => {
+    await show();
+    const bar = screen.getByRole("banner");
+    // Critique §6: the chip looked clickable and was not.
+    expect(bar.querySelector("[data-local-mark], [data-cloud-mark]")).toBeNull();
     act(() =>
       useStudio.setState((s) => ({
         drafts: { ...s.drafts, image: { ...s.drafts.image, target: { endpoint: 1 }, model: "openai/gpt-image-2.6-flare" } },
       })),
     );
-    expect(document.querySelector("[data-cloud-mark]")).not.toBeNull();
+    expect(bar.querySelector("[data-local-mark], [data-cloud-mark]")).toBeNull();
+    // The menu keeps Update model lists; Get models has its own button.
+    await openMenu();
+    screen.getByRole("menuitem", { name: "Update model lists" });
+    expect(screen.queryByRole("menuitem", { name: /Get local models/ })).toBeNull();
+    await act(async () => {
+      fireEvent.keyDown(document.activeElement ?? document.body, { key: "Escape" });
+    });
+    await click(within(bar).getByRole("button", { name: "Get models" }));
+    expect(useStudio.getState().localView).toBe(true);
+  });
+
+  it("today's spend shows only while a daily limit is on", async () => {
+    await show({ usage: usage({ spentTodayUsd: 0.84 }), prefs: prefs({ dailyLimitUsd: 10 }) });
+    within(screen.getByRole("banner")).getByText("$0.84 today");
+    cleanup();
+    useStudio.setState(INITIAL, true);
+    await show({ usage: usage({ spentTodayUsd: 0.84 }), prefs: prefs({ dailyLimitUsd: null }) });
+    expect(screen.queryByText("$0.84 today")).toBeNull();
+  });
+
+  it("the results take the page and the side panel is closed by default", async () => {
+    await show({ runs: [RUN] });
+    const results = document.querySelector<HTMLElement>("[data-results]")!;
+    // The card stream and the composer at its foot share one column; nothing sits beside it.
+    expect(results.contains(document.querySelector("main"))).toBe(true);
+    expect(results.contains(screen.getByRole("region", { name: "Make a picture" }))).toBe(true);
+    expect(
+      document.querySelector("main")!.compareDocumentPosition(screen.getByRole("region", { name: "Make a picture" })) &
+        Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy();
+    expect(screen.queryByRole("complementary", { name: "Settings" })).toBeNull();
+    expect(screen.queryByRole("dialog", { name: "Settings" })).toBeNull();
+    expect(document.querySelector("[data-settings-panel]")).toBeNull();
+    expect(screen.getByRole("button", { name: "Settings" }).getAttribute("aria-expanded")).toBe("false");
+    expect(useStudio.getState().settingsOpen).toBe(false);
+  });
+
+  describe("on a wide window", () => {
+    const width = Object.getOwnPropertyDescriptor(window, "innerWidth");
+    function windowWidth(px: number) {
+      Object.defineProperty(window, "innerWidth", { configurable: true, value: px });
+      window.dispatchEvent(new Event("resize"));
+    }
+    afterEach(() => {
+      if (width) Object.defineProperty(window, "innerWidth", width);
+    });
+
+    it("the panel stays docked on a 1400 px window when it was left open", async () => {
+      windowWidth(1400);
+      await show({ prefs: prefs({ settingsOpen: true }) });
+      const panel = screen.getByRole("complementary", { name: "Settings" });
+      within(panel).getByText("My setups");
+      // Docked beside the results, not over them.
+      expect(screen.queryByRole("dialog", { name: "Settings" })).toBeNull();
+      expect(document.querySelector("[data-results]")!.contains(panel)).toBe(false);
+      expect(screen.getByRole("button", { name: "Settings" }).getAttribute("aria-expanded")).toBe("true");
+      // Closing it is saved, and Settings opens it again, docked.
+      await click(within(panel).getByRole("button", { name: "Close" }));
+      expect(screen.queryByRole("complementary", { name: "Settings" })).toBeNull();
+      expect(api.studioSetPrefs).toHaveBeenLastCalledWith({ settingsOpen: false });
+      await click(screen.getByRole("button", { name: "Settings" }));
+      expect(screen.getByRole("complementary", { name: "Settings" }).contains(document.activeElement)).toBe(true);
+      // Narrower, the same open panel slides over the results.
+      act(() => windowWidth(1399));
+      await flush();
+      expect(screen.queryByRole("complementary", { name: "Settings" })).toBeNull();
+      screen.getByRole("dialog", { name: "Settings" });
+    });
+
+    it("a panel left open does not cover the results when Studio opens on a narrower window", async () => {
+      windowWidth(1200);
+      await show({ prefs: prefs({ settingsOpen: true }) });
+      expect(screen.queryByRole("dialog", { name: "Settings" })).toBeNull();
+      expect(useStudio.getState().settingsOpen).toBe(false);
+      // The choice saved for wide windows is kept.
+      expect(api.studioSetPrefs).not.toHaveBeenCalled();
+    });
   });
 
   it("each tab keeps its own draft", async () => {
@@ -428,12 +522,8 @@ describe("StudioView", () => {
     }
   });
 
-  it("at the window's smallest the middle column keeps room: a narrower panel, and a chat list toggle", async () => {
+  it("at the window's smallest the chat list can be hidden from the top bar", async () => {
     await show();
-    // jsdom lays nothing out: the classes are the layout (288 px from 1000 px, 240 px below).
-    const panel = (document.querySelector("[data-studio-panel]")?.getAttribute("class") ?? "").split(/\s+/);
-    expect(panel).toEqual(expect.arrayContaining(["w-60", "min-[1000px]:w-72"]));
-    expect(panel).not.toContain("w-72");
     const toggled = vi.fn();
     window.addEventListener("app:toggle-sidebar", toggled);
     try {
@@ -453,7 +543,7 @@ describe("StudioView", () => {
     expect(api.studioRuns).toHaveBeenCalledWith({ kind: "video" }, null, 60);
   });
 
-  it("the card stream shows the tab's runs, oldest first and newest above the dock, over the queue strip of this session's runs", async () => {
+  it("the card stream shows the tab's runs, oldest first and newest above the composer, over the queue strip of this session's runs", async () => {
     const older: Run = { ...RUN, id: "older", createdAt: RUN.createdAt - 1000, prompt: "An older picture" };
     const making: Run = {
       ...RUN,

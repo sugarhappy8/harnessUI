@@ -1017,7 +1017,7 @@ export const CARRY_WORDS = {
 /** Studio's tabs. */
 export const STUDIO_TABS: Record<MediaKind, string> = { image: "Pictures", video: "Video" };
 
-/** Studio's top bar, its menu and the prompt box (Task B2). */
+/** Studio's top bar and its menu (Task B2; the prompt box's words are `STUDIO_COMPOSER`'s). */
 export const STUDIO_BAR = {
   /** The button beside Studio's name that shows or hides the chat list (Ctrl/⌘ B too). */
   chatList: "Show or hide the chat list",
@@ -1032,11 +1032,6 @@ export const STUDIO_BAR = {
   /** Cloud spending today, after the amount ("$0.84 today"). */
   spentToday: (amount: string) => `${amount} today`,
   spentTitle: "Spent on cloud models today. Runs on this computer are free.",
-  prompt: "Prompt",
-  promptPlaceholder: {
-    image: "Describe the picture you want…",
-    video: "Describe the video you want…",
-  } satisfies Record<MediaKind, string>,
 } as const;
 
 /** The mark for a model that runs on this computer. */
@@ -1366,10 +1361,9 @@ export const STUDIO_PLACE = {
   cloud: (name: string) => `via ${name} · Cloud`,
 } as const;
 
-/** The tray's and frame zones' file chooser. */
+/** The strip's and input zones' file chooser. */
 const CHOOSE_PICTURE = "Choose a picture";
 
-/** Added pictures: the tray, the frame drop zones and their role chips (Task B5). */
 /** What a picture added to the prompt is for, and what the two files that need explaining
  *  are (Task S12): the role menu and the picture zones of Phase U's screens. */
 export const INPUT_ROLE = {
@@ -1387,20 +1381,17 @@ export const INPUT_ROLE = {
   },
 } as const;
 
+/** Added pictures: the composer's strip, its input zones and the role chips (Task B5; the
+ *  composer's own words are `STUDIO_COMPOSER`'s). */
 export const STUDIO_REFS = {
-  add: "+ Add picture",
   choose: CHOOSE_PICTURE,
-  /** The file chooser of a frame zone, named by its field: "Start frame: Choose a picture". */
+  /** The file chooser of an input zone, named by its field: "Start frame: Choose a picture". */
   chooseFor: (label: string) => `${label}: ${CHOOSE_PICTURE}`,
   role: INPUT_ROLE.label,
   roleMenu: "What this picture is for",
   picture: (n: number) => `Picture ${n}`,
-  remove: (n: number) => `Remove picture ${n}`,
-  /** A frame's drop zone, empty. */
-  dropHere: "Drop a picture here, or choose one",
-  /** A frame's drop zone with its picture, which another replaces. */
+  /** An input zone with its picture, which another replaces. */
   change: (label: string) => `${label}: change the picture`,
-  removeFrame: (label: string) => `Remove ${label.charAt(0).toLowerCase()}${label.slice(1)}`,
   /** The most pictures of `role` the model takes (`null`: of any role, together). */
   takes(max: number, role: RefRole | null): string {
     const [one, many] = PICTURE_NOUNS[role ?? "reference"];
@@ -1416,8 +1407,8 @@ export const STUDIO_COMPANY: Record<Company, string> = {
   local: "This computer",
 };
 
-/** The prompt dock (Task B7, design Wireframe 1 and local addendum Wireframe L4): the line
- *  above Create, the price or time on it, the daily limit, and cloud as the backup. */
+/** Create and what goes with it (the prompt dock of Task B7, the composer's since Task U3):
+ *  the privacy line, the price or time on Create, the daily limit, and cloud as the backup. */
 export const STUDIO_DOCK = {
   create: "Create",
   /** Under the prompt, judged on it as it is: the backend's own words for the same checks
@@ -1427,22 +1418,17 @@ export const STUDIO_DOCK = {
   promptTooLongHere: "Keep the prompt under 4,000 characters for local models.",
   /** A cloud run's estimate for the whole run, on Create: "~ $0.16". */
   estimate: (usd: string) => `~ ${usd}`,
-  /** The line above Create for a model on this computer. */
+  /** The privacy line under the composer, for a model on this computer. */
   here: "On this computer: your prompt and pictures stay here",
   /** After `here`, when the chat model is unloaded to make room for the run. */
   unloadChat: "the chat model will be unloaded to make room",
-  /** Joins the parts of the line above Create. */
+  /** Joins the parts of the privacy line. */
   joiner: " · ",
   /** Under Create, in amber, for a local run that takes more than 15 minutes. */
   over15: (time: string) =>
     `This will take ${time} and keep the graphics card busy. On a MacBook it will get warm.`,
-  /** Beside the greyed-out Create of a local model that does not fit this computer, with why
-   *  ("needs 6 GB of graphics memory"). */
-  notHere: (reason: string | null) => (reason ? `Not for this computer: ${reason}` : "Not for this computer"),
   /** A local run that is very slow here, while an endpoint can make it. */
   tooSlow: "Too slow here? A cloud model makes this in minutes, for a price you see first.",
-  /** A local model that cannot run on this computer at all, while an endpoint can make it. */
-  cloudInstead: "A cloud model can make this instead.",
   chooseCloud: "Choose a cloud model",
   /** The same, while no saved endpoint can make the tab's kind (OpenAI makes no video). */
   addEndpoint: {
@@ -1463,6 +1449,49 @@ export const STUDIO_DOCK = {
     failed
       ? "Your extra settings wait for this model's price, which could not be got. Press Get the price to ask again."
       : "Your extra settings wait for this model's price, which says which ones it takes.",
+} as const;
+
+/** The backend's names for added pictures in its refusals (`errors::pictures`): as
+ *  `PICTURE_NOUNS`, but a reference is a "reference picture". */
+const NEEDED_NOUNS: Record<RefRole, readonly [string, string]> = {
+  ...PICTURE_NOUNS,
+  reference: ["reference picture", "reference pictures"],
+};
+
+/** Studio's composer (0.2.0 Task U3, design 10.1): the prompt, the pictures in front of it, and
+ *  the toolbar with the model chip, Shape, How many, Settings and Create. */
+export const STUDIO_COMPOSER = {
+  region: (kind: MediaKind) => (kind === "video" ? "Make a video" : "Make a picture"),
+  prompt: "Prompt",
+  placeholder: (kind: MediaKind) => (kind === "video" ? "Describe the video you want…" : "Describe the picture you want…"),
+  toolbar: "Picture settings",
+  shape: "Shape",
+  count: "How many",
+  settings: "Settings",
+  addPicture: "Add picture",
+  /** A picture's Remove button, named after it: "Remove picture 1", "Remove mask". */
+  remove: (name: string) => `Remove ${SETTING_WORDS.midSentence(name)}`,
+  required: "required",
+  maskNeedsSource: "Add the picture to change before its mask.",
+  /** An input picture's empty zone: "Add the picture to change", "Add the mask". */
+  addInput: (label: string) => `Add the ${SETTING_WORDS.midSentence(label)}`,
+  /** Why Create waits for a required picture, in the backend's words
+   *  (`errors::invalid_sentences`): "This model needs at least 1 picture to change." */
+  needsPictures(role: RefRole, min: number): string {
+    const [one, many] = NEEDED_NOUNS[role];
+    return `This model needs at least ${min} ${min === 1 ? one : many}.`;
+  },
+  /** The model chip's dot, whose tooltip says where the prompt and pictures go. */
+  privacy: "Where your prompt goes",
+  /** A menu's trigger, named with its value: "Shape: 1:1", "How many: 2". */
+  menuValue: (name: string, value: string) => `${name}: ${value}`,
+  /** How many, on its trigger: "×2". */
+  times: (n: string) => `×${n}`,
+} as const;
+
+/** Studio's top bar (0.2.0 Task U3). */
+export const STUDIO_TOPBAR = {
+  getModels: "Get models",
 } as const;
 
 /** The confirmation before a cloud run (Task B7, design Wireframe 3). */

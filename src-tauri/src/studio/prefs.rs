@@ -106,6 +106,9 @@ pub struct StudioPrefs {
     pub last_model: BTreeMap<MediaKind, ModelChoice>,
     /// The advanced settings are open.
     pub advanced_open: bool,
+    /// 0.2.0: Studio's side panel (Settings) was left open; it stays docked on a wide window.
+    #[serde(default)]
+    pub settings_open: bool,
     /// Every cloud video asks before it is sent.
     pub confirm_every_video: bool,
     /// A cloud run estimated at this many US dollars or more asks before it is sent.
@@ -137,6 +140,7 @@ impl Default for StudioPrefs {
         Self {
             last_model: BTreeMap::new(),
             advanced_open: false,
+            settings_open: false,
             confirm_every_video: true,
             confirm_at_usd: CONFIRM_AT_USD,
             daily_limit_usd: Some(DEFAULT_DAILY_LIMIT_USD),
@@ -161,6 +165,8 @@ pub struct StudioPrefsPatch {
     pub last_model: Option<BTreeMap<MediaKind, ModelChoice>>,
     /// See [`StudioPrefs::advanced_open`].
     pub advanced_open: Option<bool>,
+    /// See [`StudioPrefs::settings_open`].
+    pub settings_open: Option<bool>,
     /// See [`StudioPrefs::confirm_every_video`].
     pub confirm_every_video: Option<bool>,
     /// See [`StudioPrefs::confirm_at_usd`].
@@ -217,6 +223,7 @@ impl StudioPrefs {
         let StudioPrefsPatch {
             last_model,
             advanced_open,
+            settings_open,
             confirm_every_video,
             confirm_at_usd,
             daily_limit_usd,
@@ -229,6 +236,7 @@ impl StudioPrefs {
         let next = StudioPrefs {
             last_model: last_model.unwrap_or_else(|| self.last_model.clone()),
             advanced_open: advanced_open.unwrap_or(self.advanced_open),
+            settings_open: settings_open.unwrap_or(self.settings_open),
             confirm_every_video: confirm_every_video.unwrap_or(self.confirm_every_video),
             confirm_at_usd: confirm_at_usd.unwrap_or(self.confirm_at_usd),
             daily_limit_usd: daily_limit_usd.unwrap_or(self.daily_limit_usd),
@@ -587,6 +595,21 @@ mod tests {
         assert!(q.reload_chat_after && q.suggestion_dismissed);
         let cleared = q.apply(patch(json!({"galleryDir": null}))).unwrap();
         assert_eq!(cleared.gallery_dir, None);
+    }
+
+    #[test]
+    fn settings_open_defaults_to_false_and_round_trips() {
+        assert!(!StudioPrefs::default().settings_open);
+        // Saved before 0.2.0, without the field: the side panel starts closed.
+        let old: StudioPrefs = serde_json::from_value(json!({"advancedOpen": true})).unwrap();
+        assert!(!old.settings_open && old.advanced_open);
+        // A patch that names it sets it, and one that does not keeps it.
+        let open = old.apply(patch(json!({"settingsOpen": true}))).unwrap();
+        assert!(open.settings_open);
+        assert!(open.apply(patch(json!({}))).unwrap().settings_open);
+        let v = serde_json::to_value(&open).unwrap();
+        assert_eq!(v["settingsOpen"], json!(true));
+        assert_eq!(serde_json::from_value::<StudioPrefs>(v).unwrap(), open);
     }
 
     #[test]
