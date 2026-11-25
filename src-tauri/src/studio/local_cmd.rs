@@ -818,22 +818,71 @@ fn gate_dto(gate: &GenGate) -> GateDto {
 
 // ---- commands ---------------------------------------------------------------------------------
 
-/// What the commands read in the app: its store, the signed catalog, this computer, the
-/// models folder and its disk, the engine and the note as the manager holds it; `hf` only for
-/// a command that asks Hugging Face.
+/// Why a command reads the installed models' files ([`installed_files_for`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum FilesUse {
+    /// To show something: the list, a repo, a fit, a set-up plan before anything is done.
+    Show,
+    /// To write, rename or delete files (an import): the files guard what it does.
+    Write,
+}
+
+/// The installed models' files a command works with, from its `read` of them. A command that
+/// only shows something takes a failed read as no files (logged), so its view still opens. One
+/// that writes, renames or deletes files is refused with the read's error, never planned
+/// against an empty list: the files decide which companions are reused, and which places a
+/// part is never renamed over (`local_models::plan_download`'s `used`).
+pub(crate) fn installed_files_for(
+    read: AppResult<InstalledFiles>,
+    files_use: FilesUse,
+) -> AppResult<InstalledFiles> {
+    match (read, files_use) {
+        (Ok(files), _) => Ok(files),
+        (Err(e), FilesUse::Write) => Err(e),
+        (Err(e), FilesUse::Show) => {
+            tracing::warn!(code = %e.code, "the installed models' files were not read");
+            Ok(InstalledFiles::default())
+        }
+    }
+}
+
+/// What the commands that show something read in the app: its store, the signed catalog, this
+/// computer, the models folder and its disk, the engine and the note as the manager holds it;
+/// `hf` only for a command that asks Hugging Face. A failed read of the installed models'
+/// files reads as none ([`FilesUse::Show`]).
 pub(crate) async fn app_deps(
     app: &AppHandle,
     studio: &StudioManager,
     hf: Option<HfClient>,
 ) -> LocalCmdDeps {
-    let models_dir = crate::hub::models_dir(app).await;
     let store = app.state::<AppState>().store.clone();
-    let installed_files = InstalledFiles::read(&store)
-        .await
-        .inspect_err(
-            |e| tracing::warn!(code = %e.code, "the installed models' files were not read"),
-        )
-        .unwrap_or_default();
+    let read = InstalledFiles::read(&store).await;
+    let installed_files = installed_files_for(read, FilesUse::Show).unwrap_or_default();
+    deps_of(app, studio, hf, store, installed_files).await
+}
+
+/// [`app_deps`] for a command that writes, renames or deletes files (an import): a failed read
+/// of the installed models' files refuses it ([`FilesUse::Write`]) before it does anything.
+pub(crate) async fn app_deps_for_writing(
+    app: &AppHandle,
+    studio: &StudioManager,
+    hf: Option<HfClient>,
+) -> AppResult<LocalCmdDeps> {
+    let store = app.state::<AppState>().store.clone();
+    let read = InstalledFiles::read(&store).await;
+    let installed_files = installed_files_for(read, FilesUse::Write)?;
+    Ok(deps_of(app, studio, hf, store, installed_files).await)
+}
+
+/// The commands' dependencies in the app, with the installed models' files as read.
+async fn deps_of(
+    app: &AppHandle,
+    studio: &StudioManager,
+    hf: Option<HfClient>,
+    store: store::Store,
+    installed_files: InstalledFiles,
+) -> LocalCmdDeps {
+    let models_dir = crate::hub::models_dir(app).await;
     LocalCmdDeps {
         store,
         catalog: Arc::new(AppGenCatalog(app.clone())),
@@ -3339,6 +3388,37 @@ pub(crate) mod tests {
             prefs::load(&store).await.local_notice_accepted_at,
             Some(1000)
         );
+    }
+
+    /// A failed read of the installed models' files refuses a command that writes files (an
+    /// import, through `app_deps_for_writing`) with the read's own error, and reads as no
+    /// files for one that only shows something. The store gives the app crate no way to make
+    /// that read fail, so the rule is tested here, on the read's result.
+    #[test]
+    fn a_failed_read_of_the_installed_files_refuses_a_write_and_shows_none() {
+        let failed = || -> AppResult<InstalledFiles> { Err(store::StoreError::Closed.into()) };
+        let refused = installed_files_for(failed(), FilesUse::Write).unwrap_err();
+        let closed = AppError::from(store::StoreError::Closed);
+        assert_eq!(
+            (refused.code, refused.details),
+            (closed.code, closed.details)
+        );
+        let shown = installed_files_for(failed(), FilesUse::Show).unwrap();
+        assert!(shown.chat.is_empty() && shown.gen_models.is_empty());
+        // A read that worked is the same for both.
+        let read = || -> AppResult<InstalledFiles> {
+            Ok(InstalledFiles {
+                chat: vec![crate::hub::UsedFile {
+                    path: "/m/a.gguf".into(),
+                    sha256: None,
+                }],
+                gen_models: Vec::new(),
+            })
+        };
+        for files_use in [FilesUse::Show, FilesUse::Write] {
+            let files = installed_files_for(read(), files_use).unwrap();
+            assert_eq!(files.chat.len(), 1, "{files_use:?}");
+        }
     }
 
     /// The mode an import was added with is saved and held, so the next import offers it

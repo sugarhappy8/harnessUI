@@ -37,7 +37,7 @@ use sha2::{Digest, Sha256};
 use tauri::{AppHandle, Emitter, Manager};
 
 use super::errors;
-use super::local_cmd::{LocalCmdDeps, app_deps, plan_deps, setup_plan_dto};
+use super::local_cmd::{LocalCmdDeps, app_deps_for_writing, plan_deps, setup_plan_dto};
 use super::local_models::{
     DiskFile, DownloadDeps, PreparedDownload, disk_setup, plan_disk_with, plan_download,
     prepared_download, read_disk_file, ready_to_fetch,
@@ -284,7 +284,8 @@ pub(crate) async fn prepare_import(
 
 /// *Add* in the app ([`prepare_import`], progress to the main window): the model added, or its
 /// download started (the Studio engine's pack with it where it is needed); the mode the
-/// person chose is kept for next time.
+/// person chose is kept for next time. A failed read of the installed models' files refuses
+/// it before anything is read through, copied or started (`local_cmd::app_deps_for_writing`).
 pub async fn import_model(
     app: &AppHandle,
     path: &Path,
@@ -293,7 +294,8 @@ pub async fn import_model(
 ) -> AppResult<ImportResultDto> {
     let studio = app.state::<Arc<StudioManager>>();
     let hf = crate::hub::hf_client(app).await?;
-    let deps = app_deps(app, &studio, Some(hf)).await;
+    // Strict: the installed models' files guard what the import writes.
+    let deps = app_deps_for_writing(app, &studio, Some(hf)).await?;
     let to = app.clone();
     let progress: ProgressSink = Arc::new(move |p| {
         let _ = to.emit_to(crate::MAIN_WINDOW, IMPORT_PROGRESS_EVENT, p);
