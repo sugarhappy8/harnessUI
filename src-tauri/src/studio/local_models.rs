@@ -3500,7 +3500,9 @@ pub(crate) mod tests {
             .find(|p| p["role"] == "vae")
             .unwrap()
             .clone();
-        assert_eq!(vae["file"], ae.display().to_string().as_str());
+        // As paths: on Windows `ae` keeps the forward slashes `join` was given, while the
+        // stored file has the system's separators, and `Path` equality takes both alike.
+        assert_eq!(Path::new(vae["file"].as_str().unwrap()), ae);
         t.delete("z-image-turbo-q4").await.unwrap();
         assert!(ae.exists());
         t.delete(chroma).await.unwrap();
