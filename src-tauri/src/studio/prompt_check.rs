@@ -13,6 +13,12 @@
 //! word ("Essex" holds no sexual word). A few words name a sexualised child by themselves, so
 //! they are in both lists and refused alone.
 //!
+//! The check reads the prompt twice: as typed, and as the engine receives it, with the LoRA
+//! tags removed (`runtime::sd::args::strip_lora_tags`, ruling S2-safety). Removing a tag joins
+//! the text on either side of it, so `se<lora:a:1>xy` reaches the engine as "sexy", and a tag
+//! between two words breaks a pair rule (`little <lora:a:1> girl`). The rules themselves are
+//! the same for both readings.
+//!
 //! The lists trade misses against harmless prompts refused. Bare "baby" and "minor" are left
 //! out of [`MINOR`] because they refuse too much that is harmless ("a sexy baby-blue dress",
 //! "baby doll lingerie", "a sexy saxophone solo in A minor", "sexy dress, minor alterations"),
@@ -26,6 +32,8 @@
 //! - "the naked emperor in a children's book".
 
 use std::collections::BTreeSet;
+
+use runtime::sd::args::strip_lora_tags;
 
 /// Sexual words, as they read after folding (see the module's notes).
 const SEXUAL: &[&str] = &[
@@ -186,9 +194,16 @@ const LOOK_ALIKES: [(&str, char); 25] = [
     ("źżžᴢ", 'z'),
 ];
 
-/// Whether `prompt` pairs a sexual word with a word for children.
+/// Whether `prompt` pairs a sexual word with a word for children, as typed or as the engine
+/// receives it ([`strip_lora_tags`]).
 pub fn refuses(prompt: &str) -> bool {
-    let tokens = tokens(&folded(prompt));
+    pairs(prompt) || pairs(&strip_lora_tags(prompt))
+}
+
+/// Whether `text` pairs a sexual word with a word for children: the rules of the module's
+/// notes, on one reading of the prompt.
+fn pairs(text: &str) -> bool {
+    let tokens = tokens(&folded(text));
     let mut words: BTreeSet<String> = tokens.windows(2).map(|pair| pair.join(" ")).collect();
     words.extend(spelled_out(&tokens));
     words.extend(tokens);
@@ -350,6 +365,31 @@ mod tests {
             assert!(refuses(prompt), "should be refused: {prompt:?}");
         }
         for prompt in passed {
+            assert!(!refuses(prompt), "should pass: {prompt:?}");
+        }
+    }
+
+    /// The engine receives the prompt without its LoRA tags, and removing one joins the text
+    /// around it: what it receives is checked too (ruling S2-safety).
+    #[test]
+    fn a_lora_tag_cannot_hide_what_the_engine_receives() {
+        for prompt in [
+            "se<lora:xy chil<lora:dren",
+            "se<lora:a:1>xy chi<lora:b:1>ldren",
+            "sexy little <lora:a:1> girl",
+        ] {
+            assert!(
+                tokens(&folded(prompt)).len() > 1 && !pairs(prompt),
+                "the rules alone pass it: {prompt:?}"
+            );
+            assert!(pairs(&strip_lora_tags(prompt)), "{prompt:?}");
+            assert!(refuses(prompt), "should be refused: {prompt:?}");
+        }
+        // a harmless prompt with a tag still passes
+        for prompt in [
+            "a fox in the snow <lora:style:0.8>",
+            "children <lora:watercolour:1> reading in a library",
+        ] {
             assert!(!refuses(prompt), "should pass: {prompt:?}");
         }
     }

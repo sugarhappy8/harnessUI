@@ -467,13 +467,14 @@ pub struct SdJob {
     pub loras: Vec<LoraTag>,
     /// The device from [`super::devices::match_llama_device`]; `None` lets the engine choose.
     pub backend: Option<String>,
-    /// Decode in tiles (`--vae-tiling`).
+    /// Decode in tiles (`--vae-tiling`), where `tiling_allowed`.
     pub vae_tiling: bool,
     /// Keep the weights in memory until needed (`--offload-to-cpu`): only with Memory saving
     /// or on the out-of-memory retry.
     pub offload_to_cpu: bool,
     /// Whether the recipe lets the decoder tile: false for the four that disable
-    /// `vae_tiling`, and then the out-of-memory retry does not tile either.
+    /// `vae_tiling`, and then nothing tiles, `vae_tiling` or the out-of-memory retry
+    /// (ruling S2-tiling-gate).
     pub tiling_allowed: bool,
     /// Run on the processor (`--backend cpu`), whatever `backend` says.
     pub processor_only: bool,
@@ -615,8 +616,9 @@ pub const FLAGS: &[&str] = &[
 /// 5. `--seed`, `--batch-count`, then `--video-frames`, `--fps`, `-i`, `--end-img`, `--mask`,
 ///    `--control-image` and each `-r`, each when set;
 /// 6. `--vae-format`, `--model-args` and `--lora-model-dir`, each when set;
-/// 7. `--backend` (`cpu` when `processor_only`), `--threads` when set, `--vae-tiling` and
-///    `--offload-to-cpu` when asked for, `-o <out_dir>/<out_stem>.<png|webm|webp>`,
+/// 7. `--backend` (`cpu` when `processor_only`), `--threads` when set, `--vae-tiling` when
+///    asked for and the recipe allows it (`vae_tiling && tiling_allowed`), `--offload-to-cpu`
+///    when asked for, `-o <out_dir>/<out_stem>.<png|webm|webp>`,
 ///    `--disable-image-metadata` (the engine's own record holds the prompt) and
 ///    `--log-level info` (the progress reader reads the info lines).
 ///
@@ -761,7 +763,7 @@ pub fn build_args(job: &SdJob) -> Result<Vec<OsString>, ArgsError> {
     if let Some(threads) = job.threads {
         push("--threads", threads.to_string());
     }
-    if job.vae_tiling {
+    if job.vae_tiling && job.tiling_allowed {
         args.push("--vae-tiling".to_owned());
     }
     if job.offload_to_cpu {
@@ -1640,6 +1642,25 @@ mod tests {
             (processor_threads(1, false), processor_threads(0, true)),
             (1, 1)
         );
+    }
+
+    /// The four recipes that disable `vae_tiling` are never tiled, whatever built the job
+    /// (ruling S2-tiling-gate).
+    #[test]
+    fn a_recipe_that_disables_tiling_is_never_tiled() {
+        for offload_to_cpu in [false, true] {
+            let a = strings(
+                build_args(&SdJob {
+                    vae_tiling: true,
+                    offload_to_cpu,
+                    tiling_allowed: false,
+                    ..klein_job()
+                })
+                .unwrap(),
+            );
+            assert!(!a.contains(&"--vae-tiling".into()), "{a:?}");
+            assert_eq!(a.contains(&"--offload-to-cpu".into()), offload_to_cpu);
+        }
     }
 
     #[test]
