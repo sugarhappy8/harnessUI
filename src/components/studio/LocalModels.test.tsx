@@ -623,11 +623,11 @@ describe("Get local models", () => {
     vi.mocked(api.studioLocalSearch)
       .mockImplementationOnce(() => new Promise((resolve) => (answerFirst = resolve)))
       .mockResolvedValueOnce({ items: [hit("someone/video-GGUF")] });
-    const first = useStudio.getState().search("klein", "image");
+    const first = useStudio.getState().search("klein", "pictures");
     await useStudio.getState().search("wan", "video");
     answerFirst({ items: [hit("someone/picture-GGUF")] });
     await first;
-    expect(useStudio.getState().localSearch).toEqual({ text: "wan", tab: "video", hits: [hit("someone/video-GGUF")] });
+    expect(useStudio.getState().localSearch).toEqual({ text: "wan", filter: "video", hits: [hit("someone/video-GGUF")] });
   });
 
   it("Back leaves the tab as it was, and opening again starts on the tab shown", async () => {

@@ -39,12 +39,13 @@ export function LocalSearch(props: { tab: StudioTab }) {
   const found = useStudio((s) => s.localSearch);
   const search = useStudio((s) => s.search);
   const openRepo = useStudio((s) => s.openRepo);
-  const [text, setText] = useState(found !== null && found.tab === tab ? found.text : "");
+  const filter = tab === "image" ? "pictures" : "video";
+  const [text, setText] = useState(found !== null && found.filter === filter ? found.text : "");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<ErrorInfo | null>(null);
   const [opened, setOpened] = useState<Opened | null>(null);
   const sendsId = useId();
-  const hits = found !== null && found.tab === tab ? found.hits : null;
+  const hits = found !== null && found.filter === filter ? found.hits : null;
 
   function ask() {
     const words = text.trim();
@@ -52,7 +53,7 @@ export function LocalSearch(props: { tab: StudioTab }) {
     setBusy(true);
     setError(null);
     setOpened(null);
-    search(words, tab)
+    search(words, filter)
       .catch((e: unknown) => setError(toErrorInfo(e)))
       .finally(() => setBusy(false));
   }

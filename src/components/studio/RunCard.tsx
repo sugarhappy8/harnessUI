@@ -232,6 +232,7 @@ export function RunCard(props: { run: Run }) {
     listedModel(local ? "thisComputer" : { endpoint: run.providerId ?? -1 }, run.model, s.local, s.endpoints),
   );
   const engine = useStudio((s) => s.local?.engine ?? null);
+  const loras = useStudio((s) => s.loras);
   const usual = useStudio((s) =>
     run.kind === "video" && !local ? (usualTimesOf(s).get(run.model) ?? null) : null,
   );
@@ -299,7 +300,7 @@ export function RunCard(props: { run: Run }) {
     window.dispatchEvent(new Event("app:focus-studio-prompt"));
   };
 
-  const settings = [run.modelLabel, local ? STUDIO_CARD.here : run.providerName, ...settingsParts(run, model)].join(
+  const settings = [run.modelLabel, local ? STUDIO_CARD.here : run.providerName, ...settingsParts(run, model, loras)].join(
     STUDIO_CARD.joiner,
   );
   const figure = figureOf(run);

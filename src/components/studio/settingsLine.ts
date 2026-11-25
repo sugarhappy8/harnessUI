@@ -1,17 +1,43 @@
 import { STUDIO_CARD, STUDIO_CONFIRM, STUDIO_TIME } from "../../lib/words";
 import { valueWords } from "./canonical";
-import type { Canonical, MediaModel, Run } from "./types";
+import type { Canonical, Lora, LoraUse, MediaModel, Run } from "./types";
 
 // The settings line of a run's card (0.1.0 Task B8; design Wireframe 3, local addendum
 // Wireframe L4), built only from the run's own settings: "Veo 3.1 Fast · OpenRouter · 8 s ·
 // 16:9 · 720p · sound on · start frame", or for a local run "FLUX.2 klein 4B · on this
 // computer · 1024×1024 · ×2 · seed 81723". RunCard puts the model and where it ran first.
 
+/** How a strength reads: 0.8, 1, -0.25 (never 0.8000000000000002). */
+function strengthWords(weight: number): string {
+  return String(Math.round(weight * 1000) / 1000);
+}
+
+/** The LoRAs a run attached, "LoRAs: pixel art ü 0.8, style 1", each by its name in `loras`
+ *  (a LoRA whose row is gone by its file's name in its id, else "a removed LoRA"); `null` when
+ *  it attached none. */
+function loraPart(run: Run, model: MediaModel | null, loras: readonly Lora[]): string | null {
+  const key = model?.params.find((p) => p.kind.type === "loras")?.key ?? "loras";
+  const used = run.params[key];
+  if (!Array.isArray(used) || used.length === 0) return null;
+  const nameOf = (id: string) => {
+    const known = loras.find((l) => l.id === id);
+    if (known) return known.name;
+    const file = id.startsWith("hf:") ? (id.split("/").pop() ?? "") : "";
+    const name = file.replace(/\.[^./]+$/, "");
+    return name === "" ? STUDIO_CARD.loraGone : name;
+  };
+  const words = (used as LoraUse[])
+    .filter((u) => typeof u?.id === "string" && typeof u.weight === "number")
+    .map((u) => STUDIO_CARD.loraUse(nameOf(u.id), strengthWords(u.weight)));
+  return words.length === 0 ? null : STUDIO_CARD.loras(words);
+}
+
 /** The settings line after the model and where it ran, from the run's own settings (the model
  *  as listed names their fields, else their usual keys): a cloud run's length, shape,
  *  resolution, size, sound, count, seed and added pictures; a local run's exact size (else its
- *  results', else its shape), length, resolution, count, seed and added pictures. */
-export function settingsParts(run: Run, model: MediaModel | null): string[] {
+ *  results', else its shape), length, resolution, count, seed, LoRAs (named from `loras`) and
+ *  added pictures. */
+export function settingsParts(run: Run, model: MediaModel | null, loras: readonly Lora[] = []): string[] {
   const field = (canonical: Canonical) => model?.params.find((p) => p.canonical === canonical);
   const value = (canonical: Canonical, key: string): unknown => {
     const v = run.params[field(canonical)?.key ?? key];
@@ -61,6 +87,7 @@ export function settingsParts(run: Run, model: MediaModel | null): string[] {
     ...shown,
     typeof count === "number" && count > 1 ? STUDIO_CARD.count(count) : null,
     seed === null ? null : STUDIO_CARD.seed(String(seed)),
+    run.runsOn === "local" ? loraPart(run, model, loras) : null,
     ...refs,
   ].filter((p): p is string => p !== null);
 }

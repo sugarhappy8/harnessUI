@@ -148,7 +148,17 @@ describe("pickerGroups", () => {
     expect(g[0]).toMatchObject({
       place: "local",
       family: "On this computer",
-      models: [expect.objectContaining({ id: "flux2-klein-4b-q4" })],
+      // Klein, then the files added from Hugging Face, newest first (the last needs its model
+      // type chosen: listed, with why it cannot be used).
+      models: [
+        expect.objectContaining({ id: "flux2-klein-4b-q4" }),
+        expect.objectContaining({ id: "hf:stabilityai/stable-diffusion-xl-base-1.0:sd_xl_base_1.0.safetensors" }),
+        expect.objectContaining({ id: "hf:someone/flux-dev-copy:flux-dev-copy.safetensors" }),
+        expect.objectContaining({
+          id: "hf:someone/mystery-model:mystery.safetensors",
+          usable: "Choose this model's type and files first.",
+        }),
+      ],
     });
     expect(g[1]).toMatchObject({
       family: "Recent",
@@ -184,7 +194,7 @@ describe("pickerGroups", () => {
       pickerGroups(LOCAL, [openrouter], "image", query, [], []).flatMap((g) => g.models.map((m) => m.id));
     expect(ids("BANANA")).toEqual(["google/gemini-nano-banana-2.1"]);
     expect(ids(" krea/ ")).toEqual(["krea/k3-edit"]);
-    expect(ids("flux")).toEqual(["flux2-klein-4b-q4"]);
+    expect(ids("flux")).toEqual(["flux2-klein-4b-q4", "hf:someone/flux-dev-copy:flux-dev-copy.safetensors"]);
   });
 
   it("lists local video only where this computer can make it", () => {

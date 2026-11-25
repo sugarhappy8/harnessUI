@@ -2,7 +2,8 @@
 // reports them, and the notice for a video that finished while the chat was shown.
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { LOCAL, LOCAL_RUN, MODELS, RUN } from "../components/studio/fixtures/models";
-import type { Run, StudioEndpoint, StudioPrefs } from "../components/studio/types";
+import { settingsParts } from "../components/studio/settingsLine";
+import type { Lora, Run, StudioEndpoint, StudioPrefs } from "../components/studio/types";
 
 vi.mock("../lib/ipc", () => ({ isTauri: () => true }));
 vi.mock("../components/studio/api");
@@ -751,5 +752,122 @@ describe("the gallery's results (Task B9)", () => {
     answer({ runs: [LOCAL_RUN], next: null });
     await more;
     expect(useStudio.getState().runs).toEqual([]);
+  });
+});
+
+describe("LoRAs in the draft", () => {
+  const sdxl = LOCAL.installed.find((m) => m.loraBase === "sdxl")!;
+  const field = sdxl.model.params.find((p) => p.kind.type === "loras")!;
+  const lora = (id: string, name: string, base: Lora["base"]): Lora => ({
+    id,
+    name,
+    base,
+    format: "kohya",
+    sizeBytes: 3,
+    source: "import",
+    repo: null,
+    missing: false,
+  });
+  const attached = () => useStudio.getState().drafts.image.values[field.key];
+
+  beforeEach(() => {
+    useStudio.setState({ local: LOCAL, loras: [lora("a", "pixel art ü", "sdxl"), lora("b", "style", "sdxl")] });
+    useStudio.getState().chooseModel("image", "thisComputer", sdxl.model.id);
+  });
+
+  it("attachLora adds weight 1 and setLoraWeight clamps to -1..2 in steps of 0.05", () => {
+    const { attachLora, setLoraWeight } = useStudio.getState();
+    attachLora("a");
+    expect(attached()).toEqual([{ id: "a", weight: 1, highNoise: false }]);
+    // The same LoRA is not attached twice.
+    attachLora("a");
+    expect(attached()).toHaveLength(1);
+    setLoraWeight("a", 2.37);
+    expect(attached()).toEqual([{ id: "a", weight: 2, highNoise: false }]);
+    setLoraWeight("a", 0.83);
+    expect(attached()).toEqual([{ id: "a", weight: 0.85, highNoise: false }]);
+    setLoraWeight("a", -7);
+    expect((attached() as { weight: number }[])[0]!.weight).toBe(-1);
+  });
+
+  it("the bounds are the field's own, and no more than its max are attached", () => {
+    if (field.kind.type !== "loras") throw new Error("not a LoRA field");
+    const max = field.kind.max;
+    for (let i = 0; i < max + 2; i++) useStudio.getState().attachLora(`l${i}`);
+    expect(attached()).toHaveLength(max);
+  });
+
+  it("high-noise is kept only for a model with a high-noise part; detaching the last one unsets the value", () => {
+    const { attachLora, setLoraHighNoise, detachLora } = useStudio.getState();
+    attachLora("a");
+    attachLora("b");
+    // SDXL has no high-noise part.
+    setLoraHighNoise("a", true);
+    expect(attached()).toEqual([
+      { id: "a", weight: 1, highNoise: false },
+      { id: "b", weight: 1, highNoise: false },
+    ]);
+    detachLora("a");
+    expect(attached()).toEqual([{ id: "b", weight: 1, highNoise: false }]);
+    detachLora("b");
+    expect(field.key in useStudio.getState().drafts.image.values).toBe(false);
+  });
+
+  it("a draft without a model leaves its values alone", () => {
+    const s = useStudio.getState();
+    useStudio.setState({ drafts: { ...s.drafts, image: { ...s.drafts.image, target: null, model: null } } });
+    const before = useStudio.getState().drafts.image.values;
+    useStudio.getState().attachLora("a");
+    expect(useStudio.getState().drafts.image.values).toBe(before);
+  });
+
+  it("lorasFor lists LoRAs for the model's base first", () => {
+    useStudio.setState({
+      loras: [
+        lora("other", "other", "flux"),
+        lora("fit", "fit", "sdxl"),
+        lora("unk", "unk", null),
+        lora("fit2", "fit2", "sdxl"),
+      ],
+    });
+    const ids = (list: Lora[]) => list.map((l) => l.id);
+    const groups = useStudio.getState().lorasFor(sdxl);
+    expect({ fits: ids(groups.fits), unknown: ids(groups.unknown), others: ids(groups.others) }).toEqual({
+      fits: ["fit", "fit2"],
+      unknown: ["unk"],
+      others: ["other"],
+    });
+    // A model of no known type judges none of them.
+    const blind = useStudio.getState().lorasFor({ ...sdxl, loraBase: null });
+    expect({ fits: blind.fits, others: blind.others, unknown: ids(blind.unknown) }).toEqual({
+      fits: [],
+      others: [],
+      unknown: ["other", "fit", "unk", "fit2"],
+    });
+  });
+});
+
+describe("the settings line", () => {
+  it("the settings line names attached LoRAs", () => {
+    const model = LOCAL.installed.find((m) => m.loraBase === "sdxl")!.model;
+    const key = model.params.find((p) => p.kind.type === "loras")!.key;
+    const loras: Lora[] = [
+      { id: "local:a", name: "pixel art ü", base: "sdxl", format: "kohya", sizeBytes: 3, source: "import", repo: null, missing: false },
+    ];
+    const used = run({
+      ...LOCAL_RUN,
+      params: {
+        ...LOCAL_RUN.params,
+        [key]: [
+          { id: "local:a", weight: 0.8, highNoise: false },
+          { id: "hf:o/r:styles/style.safetensors", weight: 1, highNoise: false },
+          { id: "local:gone", weight: 0.30000000000000004, highNoise: false },
+        ],
+      },
+    });
+    expect(settingsParts(used, model, loras)).toContain("LoRAs: pixel art ü 0.8, style 1, a removed LoRA 0.3");
+    // A run with none says nothing about them; nor does a cloud run.
+    expect(settingsParts(LOCAL_RUN, model, loras).some((p) => p.startsWith("LoRAs"))).toBe(false);
+    expect(settingsParts({ ...used, runsOn: "cloud" }, null, loras).some((p) => p.startsWith("LoRAs"))).toBe(false);
   });
 });

@@ -1144,3 +1144,35 @@ describe("a repository's file labels (Task S6)", () => {
     expect(parameterWords(860_000_000)).toBe("860M");
   });
 });
+
+describe("Studio's words for LoRAs, importing and set-up (Task S12)", () => {
+  it("keep the briefed wording", async () => {
+    const w = await import("./words");
+    expect(w.LORAS).toMatchObject({
+      title: "LoRAs",
+      add: "Add",
+      remove: "Remove",
+      strength: "Strength",
+      highNoise: "High-noise part",
+      mayNotFit: "may not fit this model",
+      none: "No LoRAs yet",
+      unknownType: "LoRA for an unknown model type",
+    });
+    expect(w.IMPORT.copy).toBe("Copy it into Studio's models folder");
+    expect(w.SETUP.untested).toBe("untested set-up");
+    expect(w.LOCAL_WARNING.mayNotFit("it needs 24 GB")).toBe(
+      "May not fit this computer: it needs 24 GB. It may fail or be very slow.",
+    );
+    expect(w.INPUT_ROLE.label).toMatchObject({ source: "Picture to change", mask: "Mask", control: "Control picture" });
+    expect(w.STUDIO_REFS.role).toBe(w.INPUT_ROLE.label);
+  });
+
+  it("word every reason a set-up can meet, none as its code", async () => {
+    const w = await import("./words");
+    for (const text of [...Object.values(w.SETUP.problem), ...Object.values(w.SETUP.source)]) {
+      expect(text).not.toMatch(/hf_|studio_|^[a-z]+-[a-z]+$/);
+    }
+    expect(Object.keys(w.SETUP.problem).sort()).toEqual(["hf_needs_terms", "hf_needs_token", "studio_setup_incomplete"]);
+    expect(Object.keys(w.SETUP.source)).toHaveLength(9);
+  });
+});

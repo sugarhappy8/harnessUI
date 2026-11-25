@@ -2344,6 +2344,943 @@ export const LOCAL: LocalModels = {
       "loraBase": "wan2.2-ti2v",
       "source": "catalog",
       "inPlace": false
+    },
+    {
+      "id": "hf:stabilityai/stable-diffusion-xl-base-1.0:sd_xl_base_1.0.safetensors",
+      "name": "sd_xl_base_1.0",
+      "kind": "image",
+      "sizeBytes": 6938078334,
+      "fit": {
+        "word": "slow",
+        "verdict": "yellow",
+        "reason": null,
+        "suggestion": null,
+        "eta": null,
+        "verySlow": false,
+        "videoOnProcessor": false
+      },
+      "model": {
+        "id": "hf:stabilityai/stable-diffusion-xl-base-1.0:sd_xl_base_1.0.safetensors",
+        "displayName": "sd_xl_base_1.0",
+        "family": "sdxl",
+        "kind": "image",
+        "acceptsImages": false,
+        "params": [
+          {
+            "key": "aspect_ratio",
+            "canonical": "shape",
+            "label": "Shape",
+            "help": null,
+            "layer": "simple",
+            "kind": {
+              "type": "enum",
+              "values": [
+                {
+                  "value": "1:1",
+                  "label": "1:1"
+                },
+                {
+                  "value": "4:3",
+                  "label": "4:3"
+                },
+                {
+                  "value": "3:4",
+                  "label": "3:4"
+                },
+                {
+                  "value": "16:9",
+                  "label": "16:9"
+                },
+                {
+                  "value": "9:16",
+                  "label": "9:16"
+                }
+              ]
+            },
+            "companyDefault": "1:1",
+            "initial": null,
+            "affectsPrice": false,
+            "requires": null
+          },
+          {
+            "key": "n",
+            "canonical": "count",
+            "label": "How many",
+            "help": null,
+            "layer": "simple",
+            "kind": {
+              "type": "range",
+              "min": 1.0,
+              "max": 4.0,
+              "step": 1.0,
+              "unit": null
+            },
+            "companyDefault": 1,
+            "initial": null,
+            "affectsPrice": false,
+            "requires": null
+          },
+          {
+            "key": "seed",
+            "canonical": "seed",
+            "label": "Seed",
+            "help": "A seed is not a saved copy; the same seed on another model or version gives a different picture. The same seed on another graphics card, or on the processor, can give a slightly different picture.",
+            "layer": "advanced",
+            "kind": {
+              "type": "seed",
+              "max": 2147483647
+            },
+            "companyDefault": null,
+            "initial": null,
+            "affectsPrice": false,
+            "requires": null
+          },
+          {
+            "key": "steps",
+            "canonical": null,
+            "label": "Steps",
+            "help": null,
+            "layer": "advanced",
+            "kind": {
+              "type": "range",
+              "min": 1.0,
+              "max": 50.0,
+              "step": 1.0,
+              "unit": null
+            },
+            "companyDefault": 20,
+            "initial": 20,
+            "affectsPrice": false,
+            "requires": null
+          },
+          {
+            "key": "cfg_scale",
+            "canonical": null,
+            "label": "Guidance",
+            "help": null,
+            "layer": "advanced",
+            "kind": {
+              "type": "range",
+              "min": 1.0,
+              "max": 20.0,
+              "step": 0.5,
+              "unit": null
+            },
+            "companyDefault": 5.0,
+            "initial": null,
+            "affectsPrice": false,
+            "requires": null
+          },
+          {
+            "key": "sampler",
+            "canonical": null,
+            "label": "Sampler",
+            "help": null,
+            "layer": "advanced",
+            "kind": {
+              "type": "enum",
+              "values": [
+                {
+                  "value": "euler",
+                  "label": "Euler"
+                },
+                {
+                  "value": "euler_a",
+                  "label": "Euler a"
+                },
+                {
+                  "value": "heun",
+                  "label": "Heun"
+                },
+                {
+                  "value": "dpm2",
+                  "label": "DPM2"
+                },
+                {
+                  "value": "dpm++2s_a",
+                  "label": "DPM++ 2S a"
+                },
+                {
+                  "value": "dpm++2m",
+                  "label": "DPM++ 2M"
+                },
+                {
+                  "value": "dpm++2mv2",
+                  "label": "DPM++ 2M v2"
+                },
+                {
+                  "value": "ipndm",
+                  "label": "iPNDM"
+                },
+                {
+                  "value": "ipndm_v",
+                  "label": "iPNDM v"
+                },
+                {
+                  "value": "lcm",
+                  "label": "LCM"
+                },
+                {
+                  "value": "ddim_trailing",
+                  "label": "DDIM trailing"
+                },
+                {
+                  "value": "tcd",
+                  "label": "TCD"
+                },
+                {
+                  "value": "res_multistep",
+                  "label": "RES multistep"
+                },
+                {
+                  "value": "res_2s",
+                  "label": "RES 2S"
+                },
+                {
+                  "value": "er_sde",
+                  "label": "ER-SDE"
+                },
+                {
+                  "value": "euler_cfg_pp",
+                  "label": "Euler CFG++"
+                },
+                {
+                  "value": "euler_a_cfg_pp",
+                  "label": "Euler a CFG++"
+                },
+                {
+                  "value": "euler_ge",
+                  "label": "Euler GE"
+                },
+                {
+                  "value": "dpm++2m_sde",
+                  "label": "DPM++ 2M SDE"
+                },
+                {
+                  "value": "dpm++2m_sde_bt",
+                  "label": "DPM++ 2M SDE BT"
+                },
+                {
+                  "value": "lms",
+                  "label": "LMS"
+                }
+              ]
+            },
+            "companyDefault": null,
+            "initial": null,
+            "affectsPrice": false,
+            "requires": null
+          },
+          {
+            "key": "scheduler",
+            "canonical": null,
+            "label": "Scheduler",
+            "help": null,
+            "layer": "advanced",
+            "kind": {
+              "type": "enum",
+              "values": [
+                {
+                  "value": "discrete",
+                  "label": "Discrete"
+                },
+                {
+                  "value": "karras",
+                  "label": "Karras"
+                },
+                {
+                  "value": "exponential",
+                  "label": "Exponential"
+                },
+                {
+                  "value": "ays",
+                  "label": "AYS"
+                },
+                {
+                  "value": "gits",
+                  "label": "GITS"
+                },
+                {
+                  "value": "sgm_uniform",
+                  "label": "SGM uniform"
+                },
+                {
+                  "value": "simple",
+                  "label": "Simple"
+                },
+                {
+                  "value": "smoothstep",
+                  "label": "Smoothstep"
+                },
+                {
+                  "value": "kl_optimal",
+                  "label": "KL optimal"
+                },
+                {
+                  "value": "lcm",
+                  "label": "LCM"
+                },
+                {
+                  "value": "bong_tangent",
+                  "label": "Bong tangent"
+                },
+                {
+                  "value": "ltx2",
+                  "label": "LTX-2"
+                },
+                {
+                  "value": "logit_normal",
+                  "label": "Logit normal"
+                },
+                {
+                  "value": "flux2",
+                  "label": "FLUX.2"
+                },
+                {
+                  "value": "flux",
+                  "label": "FLUX"
+                },
+                {
+                  "value": "beta",
+                  "label": "Beta"
+                },
+                {
+                  "value": "llada_image",
+                  "label": "LLaDA-Image"
+                }
+              ]
+            },
+            "companyDefault": null,
+            "initial": null,
+            "affectsPrice": false,
+            "requires": null
+          },
+          {
+            "key": "size",
+            "canonical": "size",
+            "label": "Exact size",
+            "help": "When set, Shape is not used.",
+            "layer": "advanced",
+            "kind": {
+              "type": "size",
+              "rules": {
+                "multipleOf": 64,
+                "minRatio": 0.25,
+                "maxRatio": 4.0,
+                "maxSide": 2048,
+                "minPixels": 16384,
+                "maxPixels": 4194304
+              },
+              "values": []
+            },
+            "companyDefault": null,
+            "initial": null,
+            "affectsPrice": false,
+            "requires": null
+          },
+          {
+            "key": "negative_prompt",
+            "canonical": null,
+            "label": "Negative prompt",
+            "help": "What the picture should not show.",
+            "layer": "advanced",
+            "kind": {
+              "type": "text",
+              "maxChars": 4000
+            },
+            "companyDefault": null,
+            "initial": null,
+            "affectsPrice": false,
+            "requires": null
+          },
+          {
+            "key": "loras",
+            "canonical": null,
+            "label": "LoRAs",
+            "help": null,
+            "layer": "advanced",
+            "kind": {
+              "type": "loras",
+              "max": 8,
+              "highNoise": false,
+              "weightMin": -1.0,
+              "weightMax": 2.0,
+              "weightStep": 0.05,
+              "weightDefault": 1.0
+            },
+            "companyDefault": null,
+            "initial": null,
+            "affectsPrice": false,
+            "requires": null
+          },
+          {
+            "key": "memory_saving",
+            "canonical": null,
+            "label": "Memory saving",
+            "help": "Slower, but needs less graphics memory. Automatic lets the Studio engine fit the model, and decodes videos and large pictures in parts.",
+            "layer": "advanced",
+            "kind": {
+              "type": "enum",
+              "values": [
+                {
+                  "value": "automatic",
+                  "label": "Automatic"
+                },
+                {
+                  "value": "off",
+                  "label": "Off"
+                },
+                {
+                  "value": "on",
+                  "label": "On"
+                }
+              ]
+            },
+            "companyDefault": "automatic",
+            "initial": null,
+            "affectsPrice": false,
+            "requires": null
+          },
+          {
+            "key": "run_on",
+            "canonical": null,
+            "label": "Run on",
+            "help": "The processor is much slower, and needs no graphics card.",
+            "layer": "advanced",
+            "kind": {
+              "type": "enum",
+              "values": [
+                {
+                  "value": "graphicsCard",
+                  "label": "Graphics card"
+                },
+                {
+                  "value": "processor",
+                  "label": "Processor"
+                }
+              ]
+            },
+            "companyDefault": "graphicsCard",
+            "initial": null,
+            "affectsPrice": false,
+            "requires": null
+          }
+        ],
+        "price": {
+          "unit": "free",
+          "low": 0.0,
+          "high": 0.0
+        },
+        "priceKnown": true,
+        "priceFetchedAt": null,
+        "companies": [],
+        "notes": [],
+        "usable": null,
+        "created": 1794646800
+      },
+      "recipe": {
+        "id": "sdxl-checkpoint",
+        "name": "SDXL",
+        "kind": "picture"
+      },
+      "version": "sdxl",
+      "untested": false,
+      "needsSetup": false,
+      "highNoise": false,
+      "takesLoras": true,
+      "loraBase": "sdxl",
+      "source": "search",
+      "inPlace": false
+    },
+    {
+      "id": "hf:someone/flux-dev-copy:flux-dev-copy.safetensors",
+      "name": "flux-dev-copy",
+      "kind": "image",
+      "sizeBytes": 6938078334,
+      "fit": {
+        "word": "slow",
+        "verdict": "yellow",
+        "reason": null,
+        "suggestion": null,
+        "eta": null,
+        "verySlow": false,
+        "videoOnProcessor": false
+      },
+      "model": {
+        "id": "hf:someone/flux-dev-copy:flux-dev-copy.safetensors",
+        "displayName": "flux-dev-copy",
+        "family": "unknown",
+        "kind": "image",
+        "acceptsImages": false,
+        "params": [
+          {
+            "key": "aspect_ratio",
+            "canonical": "shape",
+            "label": "Shape",
+            "help": null,
+            "layer": "simple",
+            "kind": {
+              "type": "enum",
+              "values": [
+                {
+                  "value": "1:1",
+                  "label": "1:1"
+                },
+                {
+                  "value": "4:3",
+                  "label": "4:3"
+                },
+                {
+                  "value": "3:4",
+                  "label": "3:4"
+                },
+                {
+                  "value": "16:9",
+                  "label": "16:9"
+                },
+                {
+                  "value": "9:16",
+                  "label": "9:16"
+                }
+              ]
+            },
+            "companyDefault": "1:1",
+            "initial": null,
+            "affectsPrice": false,
+            "requires": null
+          },
+          {
+            "key": "n",
+            "canonical": "count",
+            "label": "How many",
+            "help": null,
+            "layer": "simple",
+            "kind": {
+              "type": "range",
+              "min": 1.0,
+              "max": 4.0,
+              "step": 1.0,
+              "unit": null
+            },
+            "companyDefault": 1,
+            "initial": null,
+            "affectsPrice": false,
+            "requires": null
+          },
+          {
+            "key": "seed",
+            "canonical": "seed",
+            "label": "Seed",
+            "help": "A seed is not a saved copy; the same seed on another model or version gives a different picture. The same seed on another graphics card, or on the processor, can give a slightly different picture.",
+            "layer": "advanced",
+            "kind": {
+              "type": "seed",
+              "max": 2147483647
+            },
+            "companyDefault": null,
+            "initial": null,
+            "affectsPrice": false,
+            "requires": null
+          },
+          {
+            "key": "steps",
+            "canonical": null,
+            "label": "Steps",
+            "help": null,
+            "layer": "advanced",
+            "kind": {
+              "type": "range",
+              "min": 1.0,
+              "max": 50.0,
+              "step": 1.0,
+              "unit": null
+            },
+            "companyDefault": 20,
+            "initial": 20,
+            "affectsPrice": false,
+            "requires": null
+          },
+          {
+            "key": "cfg_scale",
+            "canonical": null,
+            "label": "Guidance",
+            "help": null,
+            "layer": "advanced",
+            "kind": {
+              "type": "range",
+              "min": 1.0,
+              "max": 20.0,
+              "step": 0.5,
+              "unit": null
+            },
+            "companyDefault": 5.0,
+            "initial": null,
+            "affectsPrice": false,
+            "requires": null
+          },
+          {
+            "key": "sampler",
+            "canonical": null,
+            "label": "Sampler",
+            "help": null,
+            "layer": "advanced",
+            "kind": {
+              "type": "enum",
+              "values": [
+                {
+                  "value": "euler",
+                  "label": "Euler"
+                },
+                {
+                  "value": "euler_a",
+                  "label": "Euler a"
+                },
+                {
+                  "value": "heun",
+                  "label": "Heun"
+                },
+                {
+                  "value": "dpm2",
+                  "label": "DPM2"
+                },
+                {
+                  "value": "dpm++2s_a",
+                  "label": "DPM++ 2S a"
+                },
+                {
+                  "value": "dpm++2m",
+                  "label": "DPM++ 2M"
+                },
+                {
+                  "value": "dpm++2mv2",
+                  "label": "DPM++ 2M v2"
+                },
+                {
+                  "value": "ipndm",
+                  "label": "iPNDM"
+                },
+                {
+                  "value": "ipndm_v",
+                  "label": "iPNDM v"
+                },
+                {
+                  "value": "lcm",
+                  "label": "LCM"
+                },
+                {
+                  "value": "ddim_trailing",
+                  "label": "DDIM trailing"
+                },
+                {
+                  "value": "tcd",
+                  "label": "TCD"
+                },
+                {
+                  "value": "res_multistep",
+                  "label": "RES multistep"
+                },
+                {
+                  "value": "res_2s",
+                  "label": "RES 2S"
+                },
+                {
+                  "value": "er_sde",
+                  "label": "ER-SDE"
+                },
+                {
+                  "value": "euler_cfg_pp",
+                  "label": "Euler CFG++"
+                },
+                {
+                  "value": "euler_a_cfg_pp",
+                  "label": "Euler a CFG++"
+                },
+                {
+                  "value": "euler_ge",
+                  "label": "Euler GE"
+                },
+                {
+                  "value": "dpm++2m_sde",
+                  "label": "DPM++ 2M SDE"
+                },
+                {
+                  "value": "dpm++2m_sde_bt",
+                  "label": "DPM++ 2M SDE BT"
+                },
+                {
+                  "value": "lms",
+                  "label": "LMS"
+                }
+              ]
+            },
+            "companyDefault": null,
+            "initial": null,
+            "affectsPrice": false,
+            "requires": null
+          },
+          {
+            "key": "scheduler",
+            "canonical": null,
+            "label": "Scheduler",
+            "help": null,
+            "layer": "advanced",
+            "kind": {
+              "type": "enum",
+              "values": [
+                {
+                  "value": "discrete",
+                  "label": "Discrete"
+                },
+                {
+                  "value": "karras",
+                  "label": "Karras"
+                },
+                {
+                  "value": "exponential",
+                  "label": "Exponential"
+                },
+                {
+                  "value": "ays",
+                  "label": "AYS"
+                },
+                {
+                  "value": "gits",
+                  "label": "GITS"
+                },
+                {
+                  "value": "sgm_uniform",
+                  "label": "SGM uniform"
+                },
+                {
+                  "value": "simple",
+                  "label": "Simple"
+                },
+                {
+                  "value": "smoothstep",
+                  "label": "Smoothstep"
+                },
+                {
+                  "value": "kl_optimal",
+                  "label": "KL optimal"
+                },
+                {
+                  "value": "lcm",
+                  "label": "LCM"
+                },
+                {
+                  "value": "bong_tangent",
+                  "label": "Bong tangent"
+                },
+                {
+                  "value": "ltx2",
+                  "label": "LTX-2"
+                },
+                {
+                  "value": "logit_normal",
+                  "label": "Logit normal"
+                },
+                {
+                  "value": "flux2",
+                  "label": "FLUX.2"
+                },
+                {
+                  "value": "flux",
+                  "label": "FLUX"
+                },
+                {
+                  "value": "beta",
+                  "label": "Beta"
+                },
+                {
+                  "value": "llada_image",
+                  "label": "LLaDA-Image"
+                }
+              ]
+            },
+            "companyDefault": null,
+            "initial": null,
+            "affectsPrice": false,
+            "requires": null
+          },
+          {
+            "key": "size",
+            "canonical": "size",
+            "label": "Exact size",
+            "help": "When set, Shape is not used.",
+            "layer": "advanced",
+            "kind": {
+              "type": "size",
+              "rules": {
+                "multipleOf": 64,
+                "minRatio": 0.25,
+                "maxRatio": 4.0,
+                "maxSide": 2048,
+                "minPixels": 16384,
+                "maxPixels": 4194304
+              },
+              "values": []
+            },
+            "companyDefault": null,
+            "initial": null,
+            "affectsPrice": false,
+            "requires": null
+          },
+          {
+            "key": "negative_prompt",
+            "canonical": null,
+            "label": "Negative prompt",
+            "help": "What the picture should not show.",
+            "layer": "advanced",
+            "kind": {
+              "type": "text",
+              "maxChars": 4000
+            },
+            "companyDefault": null,
+            "initial": null,
+            "affectsPrice": false,
+            "requires": null
+          },
+          {
+            "key": "loras",
+            "canonical": null,
+            "label": "LoRAs",
+            "help": null,
+            "layer": "advanced",
+            "kind": {
+              "type": "loras",
+              "max": 8,
+              "highNoise": false,
+              "weightMin": -1.0,
+              "weightMax": 2.0,
+              "weightStep": 0.05,
+              "weightDefault": 1.0
+            },
+            "companyDefault": null,
+            "initial": null,
+            "affectsPrice": false,
+            "requires": null
+          },
+          {
+            "key": "memory_saving",
+            "canonical": null,
+            "label": "Memory saving",
+            "help": "Slower, but needs less graphics memory. Automatic lets the Studio engine fit the model, and decodes videos and large pictures in parts.",
+            "layer": "advanced",
+            "kind": {
+              "type": "enum",
+              "values": [
+                {
+                  "value": "automatic",
+                  "label": "Automatic"
+                },
+                {
+                  "value": "off",
+                  "label": "Off"
+                },
+                {
+                  "value": "on",
+                  "label": "On"
+                }
+              ]
+            },
+            "companyDefault": "automatic",
+            "initial": null,
+            "affectsPrice": false,
+            "requires": null
+          },
+          {
+            "key": "run_on",
+            "canonical": null,
+            "label": "Run on",
+            "help": "The processor is much slower, and needs no graphics card.",
+            "layer": "advanced",
+            "kind": {
+              "type": "enum",
+              "values": [
+                {
+                  "value": "graphicsCard",
+                  "label": "Graphics card"
+                },
+                {
+                  "value": "processor",
+                  "label": "Processor"
+                }
+              ]
+            },
+            "companyDefault": "graphicsCard",
+            "initial": null,
+            "affectsPrice": false,
+            "requires": null
+          }
+        ],
+        "price": {
+          "unit": "free",
+          "low": 0.0,
+          "high": 0.0
+        },
+        "priceKnown": true,
+        "priceFetchedAt": null,
+        "companies": [],
+        "notes": [],
+        "usable": null,
+        "created": 1794560400
+      },
+      "recipe": {
+        "id": "sdxl-checkpoint",
+        "name": "SDXL",
+        "kind": "picture"
+      },
+      "version": null,
+      "untested": true,
+      "needsSetup": false,
+      "highNoise": false,
+      "takesLoras": true,
+      "loraBase": null,
+      "source": "search",
+      "inPlace": false
+    },
+    {
+      "id": "hf:someone/mystery-model:mystery.safetensors",
+      "name": "mystery",
+      "kind": "image",
+      "sizeBytes": 6938078334,
+      "fit": {
+        "word": "notHere",
+        "verdict": "red",
+        "reason": "Choose this model's type and files first.",
+        "suggestion": null,
+        "eta": null,
+        "verySlow": true,
+        "videoOnProcessor": false
+      },
+      "model": {
+        "id": "hf:someone/mystery-model:mystery.safetensors",
+        "displayName": "mystery",
+        "family": "unknown",
+        "kind": "image",
+        "acceptsImages": false,
+        "params": [],
+        "price": {
+          "unit": "free",
+          "low": 0.0,
+          "high": 0.0
+        },
+        "priceKnown": true,
+        "priceFetchedAt": null,
+        "companies": [],
+        "notes": [],
+        "usable": "Choose this model's type and files first.",
+        "created": 1794474000
+      },
+      "recipe": null,
+      "version": null,
+      "untested": true,
+      "needsSetup": true,
+      "highNoise": false,
+      "takesLoras": false,
+      "loraBase": null,
+      "source": "search",
+      "inPlace": false
     }
   ],
   "recommended": [
@@ -2605,9 +3542,20 @@ export const LOCAL: LocalModels = {
   "notHere": [],
   "noticeAccepted": true,
   "videoOnProcessor": false,
-  "installedBytes": 15059398204,
+  "installedBytes": 35873633206,
   "moreFit": 1,
-  "loras": []
+  "loras": [
+    {
+      "id": "local:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+      "name": "pixel-art-xl",
+      "base": "sdxl",
+      "format": "kohya",
+      "sizeBytes": 170000000,
+      "source": "import",
+      "repo": null,
+      "missing": false
+    }
+  ]
 };
 
 export const LOCAL_RUN: Run = {

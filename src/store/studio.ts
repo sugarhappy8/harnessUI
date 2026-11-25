@@ -40,9 +40,12 @@ import type {
   LocalEntry,
   LocalFit,
   LocalModels,
+  Lora,
+  LoraUse,
   MediaKind,
   MediaModel,
   ModelChoice,
+  ParamKind,
   RefItem,
   RefRole,
   Routing,
@@ -242,6 +245,22 @@ export interface StudioState extends StudioRunState, StudioResultsState, StudioL
   /** Unsets field `key` (back to Automatic, so it is not sent), and with it every value whose
    *  field no longer applies. */
   resetValue(tab: StudioTab, key: string): void;
+  /** *Add* on a LoRA, in the current tab's draft: attached at the model's usual strength with
+   *  no high-noise part, when the model takes LoRAs, has room (its `max`) and the LoRA is not
+   *  attached yet. The draft's `loras` value is the `LoraUse[]` the backend reads. */
+  attachLora(id: string): void;
+  /** The strength of attached LoRA `id`: kept between the model's `weightMin` and `weightMax`
+   *  and on its `weightStep`. */
+  setLoraWeight(id: string, weight: number): void;
+  /** Whether attached LoRA `id` goes to the model's high-noise part (a model that has one). */
+  setLoraHighNoise(id: string, on: boolean): void;
+  /** *Remove* on an attached LoRA; with none left the value leaves the draft. */
+  detachLora(id: string): void;
+  /** The LoRAs for installed model `model`, in groups: those made for its model type
+   *  (`loraBase`) first, those whose type is not known (`unknown`: not judged), and the others,
+   *  which "may not fit this model". A model of no known type judges none: every LoRA is
+   *  `unknown`. */
+  lorasFor(model: InstalledLocal): { fits: Lora[]; unknown: Lora[]; others: Lora[] };
   /** Adds a picture kept by `studio_add_ref` to `tab`'s draft, as `ref.role` or, without one,
    *  as the first role of the model's picture fields with room. Returns why it was not added
    *  (the model takes no more), or `null`. */
@@ -854,6 +873,28 @@ export const useStudio: UseBoundStore<StoreApi<StudioState>> = create<StudioStat
         const values = Object.fromEntries(Object.entries(draft.values).filter(([k]) => k !== key));
         return { drafts: { ...s.drafts, [tab]: { ...draft, values: model ? dropUnmet(model, values) : values } } };
       }),
+    attachLora: (id) =>
+      changeLoras(set, get, (uses, field) => {
+        if (uses.length >= field.max || uses.some((u) => u.id === id)) return uses;
+        return [...uses, { id, weight: field.weightDefault, highNoise: false }];
+      }),
+    setLoraWeight: (id, weight) =>
+      changeLoras(set, get, (uses, field) =>
+        uses.map((u) => (u.id === id ? { ...u, weight: steppedWeight(weight, field) } : u)),
+      ),
+    setLoraHighNoise: (id, on) =>
+      changeLoras(set, get, (uses, field) =>
+        field.highNoise ? uses.map((u) => (u.id === id ? { ...u, highNoise: on } : u)) : uses,
+      ),
+    detachLora: (id) => changeLoras(set, get, (uses) => uses.filter((u) => u.id !== id)),
+    lorasFor: (model) => {
+      const groups = { fits: [] as Lora[], unknown: [] as Lora[], others: [] as Lora[] };
+      for (const lora of get().loras) {
+        if (lora.base === null || model.loraBase === null) groups.unknown.push(lora);
+        else (lora.base === model.loraBase ? groups.fits : groups.others).push(lora);
+      }
+      return groups;
+    },
     addRef: (tab, ref) => {
       const s = get();
       const draft = s.drafts[tab];
@@ -1239,6 +1280,39 @@ export function followStudio(): () => void {
 }
 
 // ---- settings and added pictures ----------------------------------------------------------
+
+type LorasField = Extract<ParamKind, { type: "loras" }>;
+
+/** `weight` kept in the field's range and on its step ("2.37" → 2, "0.83" → 0.85 at 0.05). */
+function steppedWeight(weight: number, field: LorasField): number {
+  const kept = Math.min(field.weightMax, Math.max(field.weightMin, weight));
+  const steps = Math.round((kept - field.weightMin) / field.weightStep);
+  const stepped = Math.min(field.weightMax, field.weightMin + steps * field.weightStep);
+  // 0.05 steps are not exact in binary: cut what the arithmetic added.
+  return Number(stepped.toFixed(6));
+}
+
+/** Changes the current tab's draft LoRAs with `change` (given the attached ones and the
+ *  model's LoRA field); nothing when the draft's model takes none. No LoRAs left removes the
+ *  value. */
+function changeLoras(
+  set: StoreApi<StudioState>["setState"],
+  get: StoreApi<StudioState>["getState"],
+  change: (uses: LoraUse[], field: LorasField) => LoraUse[],
+): void {
+  const s = get();
+  const tab = s.tab;
+  const draft = s.drafts[tab];
+  const found = draftModel(s, tab)?.params.find((p) => p.kind.type === "loras");
+  if (!found || found.kind.type !== "loras") return;
+  const held = draft.values[found.key];
+  const before = Array.isArray(held) ? (held as LoraUse[]) : [];
+  const after = change(before, found.kind);
+  if (after === before) return;
+  const rest = Object.fromEntries(Object.entries(draft.values).filter(([k]) => k !== found.key));
+  const values = after.length === 0 ? rest : { ...rest, [found.key]: after };
+  set({ drafts: { ...s.drafts, [tab]: { ...draft, values } } });
+}
 
 /** The file types a transparent background can have, in the order Studio picks them. */
 const TRANSPARENT_TYPES = ["png", "webp"];

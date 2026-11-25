@@ -12,6 +12,7 @@ import type {
   MediaKind,
   NotReadReason,
   PartRole,
+  PartSource,
   RecipeKind,
   RefRole,
   SdVersion,
@@ -1369,12 +1370,10 @@ export const STUDIO_PLACE = {
 const CHOOSE_PICTURE = "Choose a picture";
 
 /** Added pictures: the tray, the frame drop zones and their role chips (Task B5). */
-export const STUDIO_REFS = {
-  add: "+ Add picture",
-  choose: CHOOSE_PICTURE,
-  /** The file chooser of a frame zone, named by its field: "Start frame: Choose a picture". */
-  chooseFor: (label: string) => `${label}: ${CHOOSE_PICTURE}`,
-  role: {
+/** What a picture added to the prompt is for, and what the two files that need explaining
+ *  are (Task S12): the role menu and the picture zones of Phase U's screens. */
+export const INPUT_ROLE = {
+  label: {
     reference: "Reference",
     startFrame: "Start frame",
     endFrame: "End frame",
@@ -1382,6 +1381,18 @@ export const STUDIO_REFS = {
     mask: "Mask",
     control: "Control picture",
   } satisfies Record<RefRole, string>,
+  hint: {
+    mask: "A black-and-white picture: white areas are changed, black areas are kept.",
+    control: "An edge map for Canny models, a depth map for Depth models.",
+  },
+} as const;
+
+export const STUDIO_REFS = {
+  add: "+ Add picture",
+  choose: CHOOSE_PICTURE,
+  /** The file chooser of a frame zone, named by its field: "Start frame: Choose a picture". */
+  chooseFor: (label: string) => `${label}: ${CHOOSE_PICTURE}`,
+  role: INPUT_ROLE.label,
   roleMenu: "What this picture is for",
   picture: (n: number) => `Picture ${n}`,
   remove: (n: number) => `Remove picture ${n}`,
@@ -1497,6 +1508,11 @@ export const STUDIO_CARD = {
   addedPictures: (n: number) => (n === 1 ? "1 added picture" : `${n} added pictures`),
   startFrame: "start frame",
   endFrame: "end frame",
+  /** The LoRAs a local run attached: "LoRAs: pixel art ü 0.8, style 1" (each `loraUse`). */
+  loras: (uses: readonly string[]) => `LoRAs: ${uses.join(", ")}`,
+  loraUse: (name: string, weight: string) => `${name} ${weight}`,
+  /** A LoRA whose row is gone, named by nothing else. */
+  loraGone: "a removed LoRA",
   /** How long a finished local run took ("took 3 min 48 s"). */
   took: (time: string) => `took ${time}`,
   /** A run waiting for its place in the queue (from 1). */
@@ -2091,6 +2107,14 @@ const CANNOT_RUN_WORDS: Record<CannotRunReason, (ext: string) => string> = {
   ltx2: () => "This is an LTX-2 model, which the Studio engine can't run",
 };
 
+/** Why a file of a repository was not read, as one sentence. */
+const NOT_READ_WORDS: Record<NotReadReason, string> = {
+  needsToken: "Add a Hugging Face token in Settings to read this file",
+  needsTerms: "Accept the model's terms on Hugging Face first",
+  budget: "Not read: Studio reads 24 files per repository",
+  failed: "Couldn't read this file",
+};
+
 /** What a file of a repository is, as its row says it (design 7.3). */
 export const FILE_LABEL = {
   /** "Works in Studio · SDXL picture model", "Works in Studio · Wan 2.2 video model, 14B,
@@ -2108,13 +2132,7 @@ export const FILE_LABEL = {
    *  file). */
   cannotRun: (reason: CannotRunReason, ext = ".ckpt") =>
     `Can't run in Studio: ${(CANNOT_RUN_WORDS[reason] ?? CANNOT_RUN_WORDS.unknownWeights)(ext)}`,
-  notRead: (reason: NotReadReason) =>
-    ({
-      needsToken: "Add a Hugging Face token in Settings to read this file",
-      needsTerms: "Accept the model's terms on Hugging Face first",
-      budget: "Not read: Studio reads 24 files per repository",
-      failed: "Couldn't read this file",
-    })[reason] ?? "Couldn't read this file",
+  notRead: (reason: NotReadReason) => NOT_READ_WORDS[reason] ?? NOT_READ_WORDS.failed,
 } as const;
 
 /** A pickle file's extension, from its path ("model.CKPT" → ".ckpt"). */
@@ -2218,6 +2236,67 @@ export const DOWNLOAD_LOCAL = {
   excludedRegions: (licence: string, regions: string[]) => `${licence} excludes ${andList(regions)}.`,
   cancel: "Cancel",
   download: "Download",
+} as const;
+
+/** LoRAs, in the composer's LoRA section and in Get local models (Phase U). */
+export const LORAS = {
+  title: "LoRAs",
+  add: "Add",
+  remove: "Remove",
+  strength: "Strength",
+  highNoise: "High-noise part",
+  mayNotFit: "may not fit this model",
+  none: "No LoRAs yet",
+  /** The heading over the LoRAs whose model type is not known: they are not judged. */
+  unknownType: "LoRA for an unknown model type",
+} as const;
+
+/** Adding a model or LoRA file from this computer (Phase U's dialog). */
+export const IMPORT = {
+  addModel: "Add a model file",
+  addLora: "Add a LoRA file",
+  copy: "Copy it into Studio's models folder",
+  inPlace: "Use it where it is",
+  reading: "Reading the file…",
+  copying: "Copying…",
+} as const;
+
+/** The codes of what can stop a set-up (`studio_setup_plan`, a download, *Add*): plain words
+ *  for each, so none shows as its code. */
+export type SetupProblem = "hf_needs_token" | "hf_needs_terms" | "studio_setup_incomplete";
+
+/** A model's set-up: its labels and the problems it can meet (Phase U's set-up sheet). */
+export const SETUP = {
+  modelType: "Model type",
+  files: "Files",
+  change: "Change",
+  untested: "untested set-up",
+  yourself: "Set it up yourself",
+  anyway: "Download file anyway",
+  problem: {
+    hf_needs_token: "This model is gated. Add a Hugging Face token in Settings → Models first.",
+    hf_needs_terms: "Accept this model's terms on its Hugging Face page first.",
+    studio_setup_incomplete: "Choose a file for each part first.",
+  } satisfies Record<SetupProblem, string>,
+  /** Where a slot's file comes from, in the set-up's list. */
+  source: {
+    main: "the model file",
+    sibling: "next to the model file",
+    installed: "from a model already installed",
+    repo: "from the repository",
+    companion: "the usual one for this model type",
+    chosen: "chosen by you",
+    embedded: "inside the model file",
+    folder: "in the model's folder",
+    missing: "no file yet",
+  } satisfies Record<PartSource, string>,
+} as const;
+
+/** A model that may not run well here: a warning, never a refusal (Phase U's sheet, composer
+ *  and cards). */
+export const LOCAL_WARNING = {
+  mayNotFit: (reason: string) => `May not fit this computer: ${reason}. It may fail or be very slow.`,
+  videoOnProcessor: "Video on the processor is very slow",
 } as const;
 
 /** The one-time note about local models (Task B14, local addendum L1), word for word: shown
