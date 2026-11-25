@@ -305,8 +305,10 @@ jobs:
   intel-mac:
     name: Intel Mac smoke test
     needs: build
-    # Also when only the Windows build failed; without a disk image the download fails.
-    if: ${{ !cancelled() }}
+    # Also when only the Windows build failed (the matrix's result is then a failure, and
+    # the disk image exists). Not when the builds were skipped because the checks failed:
+    # there is no disk image to download then.
+    if: ${{ !cancelled() && needs.build.result != 'skipped' }}
     runs-on: macos-15-intel
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
