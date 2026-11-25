@@ -18,6 +18,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::files::RepoFile;
 use crate::gen_search;
+use crate::sd::Verdict;
+use crate::sd::matching::RecipeKind;
 
 pub const OFFICIAL_ENDPOINT: &str = "https://huggingface.co";
 /// Model cards larger than this are cut.
@@ -198,6 +200,8 @@ pub struct RepoDetail {
 pub enum GenSearchKind {
     Pictures,
     Video,
+    /// LoRA repositories (tagged `lora`), for pictures and video.
+    Loras,
 }
 
 impl GenSearchKind {
@@ -206,6 +210,44 @@ impl GenSearchKind {
         match self {
             Self::Pictures => ["text-to-image", "image-to-image"],
             Self::Video => ["text-to-video", "image-to-video"],
+            Self::Loras => ["text-to-image", "image-to-video"],
+        }
+    }
+
+    /// The tag every request of this kind also asks for.
+    fn filter(self) -> Option<&'static str> {
+        match self {
+            Self::Loras => Some("lora"),
+            Self::Pictures | Self::Video => None,
+        }
+    }
+
+    /// Whether an untagged search hit is kept, by what its name says
+    /// ([`gen_search::verdict_hint`]): a model of this kind, a LoRA or a model Studio can't
+    /// run; never a name that says nothing (a chat model).
+    fn keeps(self, hint: &Verdict) -> bool {
+        match hint {
+            Verdict::Works { kind, .. } => match self {
+                Self::Pictures => *kind != RecipeKind::Video,
+                Self::Video => *kind == RecipeKind::Video,
+                Self::Loras => true,
+            },
+            Verdict::Lora { .. } | Verdict::CannotRun { .. } => true,
+            Verdict::Unknown => false,
+        }
+    }
+
+    /// A hit's place by what its name says: a model of this kind that works (a LoRA, for
+    /// the LoRA search), then a LoRA (a model), then a name that says nothing, then a model
+    /// Studio can't run.
+    fn rank(self, hint: &Verdict) -> u8 {
+        match (self, hint) {
+            (Self::Loras, Verdict::Lora { .. }) => 0,
+            (Self::Loras, Verdict::Works { .. }) => 1,
+            (_, Verdict::Works { .. }) if self.keeps(hint) => 0,
+            (_, Verdict::Lora { .. }) => 1,
+            (_, Verdict::Works { .. } | Verdict::Unknown) => 2,
+            (_, Verdict::CannotRun { .. }) => 3,
         }
     }
 }
@@ -810,8 +852,9 @@ impl HfClient {
         self.search_url(url).await
     }
 
-    /// Search both media pipeline tags across formats, plus GGUF repositories without a tag.
-    /// An exact owner/repository query can also find an untagged weight repository.
+    /// Search both media pipeline tags across formats, plus repositories without a tag whose
+    /// names say what they are ([`gen_search::verdict_hint`]); the LoRA search asks for the
+    /// `lora` tag in all three. An exact owner/repository query is answered by its listing.
     pub async fn search_generators(
         &self,
         text: &str,
@@ -852,7 +895,7 @@ impl HfClient {
     }
 
     /// The three addresses [`HfClient::search_generators`] asks: the two pipeline tags of
-    /// `kind`, then none.
+    /// `kind`, then none; each with `kind`'s filter, if any.
     fn generator_search_urls(&self, text: &str, kind: GenSearchKind) -> [Url; 3] {
         let [first, second] = kind.pipeline_tags();
         [Some(first), Some(second), None].map(|tag| {
@@ -861,8 +904,9 @@ impl HfClient {
                 let mut p = url.query_pairs_mut();
                 if let Some(tag) = tag {
                     p.append_pair("pipeline_tag", tag);
-                } else if validate_repo_id(text.trim()).is_err() {
-                    p.append_pair("filter", "gguf");
+                }
+                if let Some(filter) = kind.filter() {
+                    p.append_pair("filter", filter);
                 }
                 let text = text.trim();
                 if !text.is_empty() {
@@ -1158,30 +1202,23 @@ pub fn merge_generator_searches(
     rank_generator_searches(tagged, untagged, kind, "")
 }
 
-/// Search results by exact repository name, then matching GGUF families, then popularity.
+/// Search results: the exact repository first, then by what their names say
+/// ([`GenSearchKind::rank`]), then by popularity. An untagged hit is kept only when it is the
+/// exact repository or its name says what it is ([`GenSearchKind::keeps`]).
 fn rank_generator_searches(
     tagged: Vec<Vec<RepoSummary>>,
     untagged: Vec<RepoSummary>,
     kind: GenSearchKind,
     query: &str,
 ) -> Vec<RepoSummary> {
-    let of_kind = |item: &RepoSummary| match gen_search::family_of_name(
-        item.id.rsplit('/').next().unwrap_or(&item.id),
-    ) {
-        gen_search::NameMatch::Family(f) => gen_search::search_kind(f) == kind,
-        _ => false,
-    };
+    let hint =
+        |item: &RepoSummary| gen_search::verdict_hint(&item.id, item.pipeline_tag.as_deref());
     let exact = |item: &RepoSummary| item.id.eq_ignore_ascii_case(query);
-    let matching: std::collections::BTreeSet<_> = untagged
-        .iter()
-        .filter(|i| of_kind(i))
-        .map(|i| i.id.clone())
-        .collect();
     let mut by_id: BTreeMap<String, RepoSummary> = BTreeMap::new();
     let all = tagged.into_iter().flatten().chain(
         untagged
             .into_iter()
-            .filter(|i| matching.contains(&i.id) || exact(i)),
+            .filter(|i| exact(i) || kind.keeps(&hint(i))),
     );
     for item in all {
         by_id.entry(item.id.clone()).or_insert(item);
@@ -1190,8 +1227,7 @@ fn rank_generator_searches(
     out.sort_by_cached_key(|item| {
         (
             !exact(item),
-            !(matching.contains(&item.id)
-                || (item.id.to_ascii_lowercase().contains("gguf") && of_kind(item))),
+            kind.rank(&hint(item)),
             std::cmp::Reverse(item.downloads),
             item.id.clone(),
         )
@@ -1911,11 +1947,8 @@ mod tests {
                         .filter(|(k, _)| k == "filter")
                         .map(|(_, v)| v.as_str())
                         .collect();
-                    if q.iter().any(|(k, _)| k == "pipeline_tag") {
-                        assert!(filters.is_empty(), "also find safetensors: {u}");
-                    } else {
-                        assert_eq!(filters, ["gguf"]);
-                    }
+                    // Every query finds safetensors repos too, the untagged one included.
+                    assert!(filters.is_empty(), "{u}");
                     for (k, v) in [
                         ("search", "wan2.2 5b"),
                         ("sort", "downloads"),
@@ -1974,7 +2007,12 @@ mod tests {
         let ids: BTreeSet<&str> = m.iter().map(|i| i.id.as_str()).collect();
         assert_eq!(ids.len(), m.len());
         assert_eq!(m[0].id, "QuantStack/Wan2.2-TI2V-5B-GGUF");
-        assert_eq!(m.len(), items(GEN_IMAGE_TO_VIDEO).len() + 6);
+        // 0.2.0 runs any Wan 2.2 5B, so an untagged Turbo distillation is kept too.
+        assert!(
+            m.iter()
+                .any(|i| i.id == "jc-builds/Wan2.2-TI2V-5B-Turbo-iOS")
+        );
+        assert_eq!(m.len(), items(GEN_IMAGE_TO_VIDEO).len() + 7);
         // A picture search keeps none of the video names.
         let p = rank_generator_searches(vec![], items(GEN_UNTAGGED), GenSearchKind::Pictures, "");
         assert!(p.is_empty(), "{p:?}");
@@ -2067,7 +2105,136 @@ mod tests {
                 .iter()
                 .any(|i| i.id == "Green-Sky/FastWan2.2-TI2V-5B-FullAttn-GGUF")
         );
-        assert_eq!(found.len(), items(GEN_IMAGE_TO_VIDEO).len() + 6);
+        assert_eq!(found.len(), items(GEN_IMAGE_TO_VIDEO).len() + 7);
+    }
+
+    fn client() -> HfClient {
+        HfClient::new(HfConfig::default()).unwrap()
+    }
+
+    fn summary(id: &str, pipeline_tag: Option<&str>) -> RepoSummary {
+        RepoSummary {
+            id: id.into(),
+            downloads: 0,
+            likes: 0,
+            gated: Gated::No,
+            license: None,
+            last_modified: None,
+            pipeline_tag: pipeline_tag.map(str::to_string),
+            not_for_all_audiences: false,
+        }
+    }
+
+    #[test]
+    fn the_lora_search_asks_for_lora_repositories() {
+        let urls = client().generator_search_urls("style", GenSearchKind::Loras);
+        assert!(
+            urls.iter()
+                .all(|u| u.query().unwrap().contains("filter=lora"))
+        );
+        let tags: Vec<Option<String>> = urls
+            .iter()
+            .map(|u| {
+                u.query_pairs()
+                    .find(|(k, _)| k == "pipeline_tag")
+                    .map(|(_, v)| v.into_owned())
+            })
+            .collect();
+        assert_eq!(
+            tags,
+            [
+                Some("text-to-image".to_string()),
+                Some("image-to-video".to_string()),
+                None
+            ]
+        );
+        assert!(urls.iter().all(|u| {
+            let q = query(u);
+            q.contains(&("search".into(), "style".into()))
+                && q.contains(&("sort".into(), "downloads".into()))
+                && q.contains(&("limit".into(), "30".into()))
+        }));
+    }
+
+    #[test]
+    fn the_untagged_query_finds_safetensors_repos_and_drops_unknown_names() {
+        let [_, _, untagged] = client().generator_search_urls("sdxl", GenSearchKind::Pictures);
+        // Every search asks for `expand[]=pipeline_tag`, so the tag is looked for as a key.
+        assert!(
+            !untagged.query().unwrap().contains("filter=gguf")
+                && !untagged.query_pairs().any(|(k, _)| k == "pipeline_tag")
+        );
+        let ranked = rank_generator_searches(
+            vec![vec![], vec![]],
+            vec![
+                summary("o/my-sdxl-merge", None),
+                summary("Qwen/Qwen3-8B", None),
+            ],
+            GenSearchKind::Pictures,
+            "",
+        );
+        assert_eq!(
+            ranked.iter().map(|r| r.id.as_str()).collect::<Vec<_>>(),
+            ["o/my-sdxl-merge"]
+        );
+    }
+
+    #[test]
+    fn hits_are_ranked_by_what_their_names_say() {
+        let mut hits = vec![
+            summary("a/flux-killer-pickle", Some("text-to-image")),
+            summary("b/Lumina-Image-2.0", Some("text-to-image")),
+            summary("c/my-sdxl-lora", Some("text-to-image")),
+            summary("d/FLUX.1-dev", Some("text-to-image")),
+        ];
+        for (i, h) in hits.iter_mut().enumerate() {
+            h.downloads = 10 * (i as u64 + 1);
+        }
+        let order = |kind| {
+            rank_generator_searches(vec![hits.clone()], vec![], kind, "")
+                .into_iter()
+                .map(|r| r.id)
+                .collect::<Vec<_>>()
+        };
+        // A model that works, a LoRA, a name that says nothing, a model Studio can't run.
+        assert_eq!(
+            order(GenSearchKind::Pictures),
+            [
+                "d/FLUX.1-dev",
+                "c/my-sdxl-lora",
+                "a/flux-killer-pickle",
+                "b/Lumina-Image-2.0"
+            ]
+        );
+        // The LoRA search puts LoRAs first.
+        assert_eq!(order(GenSearchKind::Loras)[0], "c/my-sdxl-lora");
+        // An untagged picture model is no video search's, nor a video model a picture one's.
+        let untagged = vec![
+            summary("o/my-sdxl-merge", None),
+            summary("o/Wan2.1-T2V-14B-merge", None),
+            summary("o/some-style-lora", None),
+        ];
+        let kept = |kind| {
+            rank_generator_searches(vec![], untagged.clone(), kind, "")
+                .into_iter()
+                .map(|r| r.id)
+                .collect::<BTreeSet<_>>()
+        };
+        assert_eq!(
+            kept(GenSearchKind::Pictures),
+            BTreeSet::from([
+                "o/my-sdxl-merge".to_string(),
+                "o/some-style-lora".to_string()
+            ])
+        );
+        assert_eq!(
+            kept(GenSearchKind::Video),
+            BTreeSet::from([
+                "o/Wan2.1-T2V-14B-merge".to_string(),
+                "o/some-style-lora".to_string()
+            ])
+        );
+        assert_eq!(kept(GenSearchKind::Loras).len(), 3);
     }
 
     #[test]

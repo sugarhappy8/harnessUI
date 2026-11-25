@@ -93,29 +93,49 @@ fn is_helper(path: &str) -> bool {
 
 /// The quantization label in a file name, upper-cased (`UD-Q4_K_XL`, `Q8_0`…).
 pub fn quant_label(path: &str) -> Option<String> {
-    let name = file_name(path);
-    let stem = name
-        .strip_suffix(".gguf")
-        .or_else(|| name.strip_suffix(".GGUF"))
-        .unwrap_or(name);
-    let stem = SHARD
-        .captures(name)
-        .and_then(|c| c.name("base").map(|m| m.as_str()))
-        .unwrap_or(stem);
-    // Last match wins: "Llama-3-8B-Q4_K_M" has the quant at the end. Fall back to
-    // the whole path for "Q4_K_M/model-00001-of-00003.gguf".
-    let last = last_quant(stem).or_else(|| {
-        let dir = path.rsplit_once('/').map(|(d, _)| d)?;
-        last_quant(dir)
-    });
-    last.map(|q| match q.as_str() {
+    let (start, end) = quant_span(path)?;
+    let q = path[start..end].to_ascii_uppercase();
+    Some(match q.as_str() {
         "FP16" => "F16".to_string(),
         "FP32" => "F32".to_string(),
         _ => q,
     })
 }
 
-fn last_quant(text: &str) -> Option<String> {
+/// The extensions a file name sheds before its label is read.
+const LABEL_EXTENSIONS: [&str; 3] = [".gguf", ".safetensors", ".sft"];
+
+/// Where [`quant_label`]'s label is in `path`, as a byte range. The name is read without
+/// its extension (`.gguf`, `.safetensors` or `.sft`, in any case) and a split file's shard
+/// number; the last match wins ("Llama-3-8B-Q4_K_M" has the quant at the end), and the
+/// folders are read when the name has none ("Q4_K_M/model-00001-of-00003.gguf").
+pub(crate) fn quant_span(path: &str) -> Option<(usize, usize)> {
+    let name = file_name(path);
+    let at = path.len() - name.len();
+    let stem = SHARD
+        .captures(name)
+        .and_then(|c| c.name("base").map(|m| m.as_str()))
+        .unwrap_or_else(|| {
+            LABEL_EXTENSIONS
+                .iter()
+                .find_map(|ext| {
+                    let cut = name.len().checked_sub(ext.len())?;
+                    name.get(cut..)
+                        .filter(|end| end.eq_ignore_ascii_case(ext))
+                        .and_then(|_| name.get(..cut))
+                })
+                .unwrap_or(name)
+        });
+    last_quant(stem)
+        .map(|(start, end)| (at + start, at + end))
+        .or_else(|| {
+            let dir = path.rsplit_once('/').map(|(d, _)| d)?;
+            last_quant(dir)
+        })
+}
+
+/// The byte range of the last quantization token in `text`.
+fn last_quant(text: &str) -> Option<(usize, usize)> {
     let mut last = None;
     let mut start = 0;
     while start < text.len() {
@@ -123,7 +143,7 @@ fn last_quant(text: &str) -> Option<String> {
             break;
         };
         let q = m.name("q").expect("group q always participates");
-        last = Some(q.as_str().to_ascii_uppercase());
+        last = Some((q.start(), q.end()));
         // The trailing separator may start the next match.
         start = q.end();
     }
@@ -321,6 +341,29 @@ mod tests {
         assert_eq!(quant_label("plain-model.gguf"), None);
         // "Q4" alone is not a label; neither is a substring inside a word.
         assert_eq!(quant_label("AQ4_K_MX.gguf"), None);
+        // Picture models (0.2.0): safetensors names too.
+        assert_eq!(
+            quant_label("flux1-dev-Q8_0.safetensors").as_deref(),
+            Some("Q8_0")
+        );
+        assert_eq!(
+            quant_label("wan2.1_t2v_1.3B_fp16.SafeTensors").as_deref(),
+            Some("F16")
+        );
+        assert_eq!(quant_label("model-bf16.sft").as_deref(), Some("BF16"));
+        assert_eq!(quant_label("flux1-dev.safetensors"), None);
+    }
+
+    #[test]
+    fn the_label_is_found_where_it_is_written() {
+        fn span(path: &str) -> Option<&str> {
+            quant_span(path).map(|(s, e)| &path[s..e])
+        }
+        assert_eq!(span("HighNoise/Wan-HighNoise-Q4_K_M.gguf"), Some("Q4_K_M"));
+        assert_eq!(span("Q6_K/Model-00001-of-00002.gguf"), Some("Q6_K"));
+        assert_eq!(span("dir/model.fp16.safetensors"), Some("fp16"));
+        assert_eq!(span("ünï/model-Q8_0.gguf"), Some("Q8_0"));
+        assert_eq!(span("model.safetensors"), None);
     }
 
     #[test]

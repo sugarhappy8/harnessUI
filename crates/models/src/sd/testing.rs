@@ -282,6 +282,138 @@ impl From<Body> for BodyArg {
     }
 }
 
+// ---- A repository's files on a Hub (Task S5) --------------------------------------------
+
+/// A file whose header is `index`: a safetensors header (no tensor data), or a GGUF table
+/// with its metadata as strings and 32 bytes of data a tensor ([`Writer::shaped_tensor`]).
+/// Read back, it gives the same names, shapes and metadata; GGUF dtypes read as `I8`.
+///
+/// [`Writer::shaped_tensor`]: crate::gguf::testing::Writer::shaped_tensor
+pub fn file_of(index: &crate::sd::index::TensorIndex) -> Vec<u8> {
+    match index.format {
+        crate::sd::index::FileFormat::Safetensors => {
+            let mut header = serde_json::Map::new();
+            for t in &index.tensors {
+                header.insert(
+                    t.name.clone(),
+                    json!({"dtype": t.dtype, "shape": t.shape, "data_offsets": [0, 0]}),
+                );
+            }
+            if !index.metadata.is_empty() {
+                header.insert("__metadata__".into(), json!(index.metadata));
+            }
+            safetensors(&Value::Object(header))
+        }
+        crate::sd::index::FileFormat::Gguf => {
+            let mut w = crate::gguf::testing::Writer::new();
+            for (k, v) in &index.metadata {
+                w = w.str(k, v);
+            }
+            for t in &index.tensors {
+                w = w.shaped_tensor(&t.name, &t.shape);
+            }
+            w.build()
+        }
+    }
+}
+
+/// What a [`hub_server`] answers for one file.
+#[derive(Clone)]
+pub enum Served {
+    Bytes(Vec<u8>),
+    /// Refused with this status and the gated-repo error code (401: needs a token; 403:
+    /// needs the terms accepted).
+    Gated(u16),
+}
+
+/// A Hub on this computer serving files by path, for any repo at any commit: `HEAD` and
+/// ranged `GET` on `/<owner>/<name>/resolve/<commit>/<path>`. A path it does not have is
+/// 404 `EntryNotFound`. It counts every request, and the `GET`s that read a header.
+pub struct HubServer {
+    url: String,
+    requests: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    header_requests: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+}
+
+impl HubServer {
+    pub fn client(&self) -> crate::hf::HfClient {
+        crate::hf::HfClient::for_test(&self.url)
+    }
+    /// Every request so far, `HEAD` and `GET`.
+    pub fn requests(&self) -> usize {
+        self.requests.load(std::sync::atomic::Ordering::SeqCst)
+    }
+    /// The ranged `GET`s so far: one per header read of a small header.
+    pub fn header_requests(&self) -> usize {
+        self.header_requests
+            .load(std::sync::atomic::Ordering::SeqCst)
+    }
+}
+
+/// A [`HubServer`] for `files`, by path in the repo.
+pub async fn hub_server(files: std::collections::BTreeMap<String, Served>) -> HubServer {
+    use std::sync::atomic::Ordering::SeqCst;
+    let requests = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let header_requests = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let (all, ranged) = (requests.clone(), header_requests.clone());
+    let url = serve(move |line, headers| {
+        all.fetch_add(1, SeqCst);
+        let head = line.starts_with("HEAD");
+        // `<method> /<owner>/<name>/resolve/<commit>/<path> HTTP/1.1`
+        let path = line
+            .split_whitespace()
+            .nth(1)
+            .and_then(|target| target.split_once("/resolve/"))
+            .and_then(|(_, rest)| rest.split_once('/'))
+            .map(|(_, path)| path.to_string())
+            .unwrap_or_default();
+        let bytes = match files.get(&path) {
+            Some(Served::Bytes(bytes)) => bytes,
+            Some(Served::Gated(status)) => {
+                return format!(
+                    "HTTP/1.1 {status} X\r\nx-error-code: GatedRepo\r\nconnection: close\r\ncontent-length: 0\r\n\r\n"
+                )
+                .into_bytes();
+            }
+            None => {
+                return b"HTTP/1.1 404 X\r\nx-error-code: EntryNotFound\r\nconnection: close\r\ncontent-length: 0\r\n\r\n"
+                    .to_vec();
+            }
+        };
+        if head {
+            return format!("HTTP/1.1 200 OK\r\nconnection: close\r\ncontent-length: {}\r\n\r\n", bytes.len())
+                .into_bytes();
+        }
+        let last = headers
+            .iter()
+            .find_map(|h| {
+                h.to_ascii_lowercase()
+                    .strip_prefix("range: bytes=0-")
+                    .map(str::to_string)
+            })
+            .and_then(|n| n.parse::<usize>().ok());
+        let Some(last) = last else {
+            return b"HTTP/1.1 400 X\r\nconnection: close\r\ncontent-length: 0\r\n\r\n".to_vec();
+        };
+        ranged.fetch_add(1, SeqCst);
+        let end = (last + 1).min(bytes.len());
+        let mut out = format!(
+            "HTTP/1.1 206 Partial Content\r\nconnection: close\r\ncontent-length: {end}\r\ncontent-range: bytes 0-{}/{}\r\n\r\n",
+            end.saturating_sub(1),
+            bytes.len()
+        )
+        .into_bytes();
+        out.extend_from_slice(&bytes[..end]);
+        out
+    })
+    .await;
+    HubServer {
+        url,
+        requests,
+        header_requests,
+    }
+}
+
 // ---- Detection fixtures (Task R4) -------------------------------------------------------
 
 /// Where a fixture's tensor table was read: the pinned file it is a trimmed copy of.

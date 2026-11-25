@@ -23,6 +23,9 @@
 //!   prompt can add as pictures, the webview never sending a path.
 //! - [`engine_cmd`]: the Studio engine's state on this computer, and the Windows engine pack's
 //!   download (with the first local model, or from its own button), cancel and remove.
+//! - [`detect`]: reading a Hugging Face repo's files when it opens (one header read per group
+//!   of quantisations, at most 24 a repo, kept in a small cache), each file's label and the
+//!   repo's verdict.
 //! - [`local_cmd`]: Get local models' commands: what this computer can run (the installed
 //!   models and the recommended list, each with its fit, licences and parts), Hugging Face
 //!   search and a repository's files, a fit at a size, download, delete and the note about
@@ -45,6 +48,7 @@ pub mod actions;
 pub mod catalog;
 pub mod commands;
 pub mod deps;
+pub mod detect;
 pub mod dropped;
 pub mod engine_cmd;
 pub mod errors;

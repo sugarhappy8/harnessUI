@@ -3,9 +3,13 @@
 
 use serde::{Deserialize, Serialize};
 
+use crate::gen_catalog::GenRole;
+use crate::sd::detect::SdVersion;
 use crate::sd::index::FileFormat;
-use crate::sd::inspect::{FileKind, MatchFacts};
+use crate::sd::inspect::{FileKind, Layout, MatchFacts};
+use crate::sd::matching::{Match, NoisePart, RecipeKind, kind_of, match_recipe};
 
+pub mod candidates;
 pub mod companions;
 pub mod detect;
 pub mod index;
@@ -55,4 +59,156 @@ pub struct FileFacts {
     /// Means nothing for `CannotRun { Pickle }`: a pickle file is never read, so the kind is
     /// what counts.
     pub format: FileFormat,
+}
+
+/// Why a file of a repo was not read when the repo opened (Task S5).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum NotRead {
+    /// The repo is gated and there is no Hugging Face token.
+    NeedsToken,
+    /// The repo is gated and its terms are not accepted.
+    NeedsTerms,
+    /// Past the files read for one repo ([`remote::MAX_FILES_PER_REPO`]).
+    Budget,
+    /// The read failed.
+    Failed,
+}
+
+/// What a file of a repo is, as its row says (design section 7.3).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", rename_all_fields = "camelCase")]
+pub enum FileLabel {
+    /// A model Studio runs with `recipe`. `part`: the half of a high/low pair its name says;
+    /// `folder`: the UNet of an SD 1.x, 2.x or XL diffusers folder, run as the folder.
+    Works {
+        version: SdVersion,
+        recipe: String,
+        kind: RecipeKind,
+        part: Option<NoisePart>,
+        parameters: u64,
+        folder: bool,
+    },
+    Lora {
+        base: Option<SdVersion>,
+    },
+    /// A part a recipe's slot takes.
+    Extra {
+        role: GenRole,
+    },
+    CannotRun {
+        reason: CannotRunReason,
+        version: Option<SdVersion>,
+    },
+    NotRead {
+        reason: NotRead,
+    },
+}
+
+/// What a repo offers, from its files' labels ([`verdict_of`]) or its name alone
+/// ([`crate::gen_search::verdict_hint`]).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", rename_all_fields = "camelCase")]
+pub enum Verdict {
+    Works {
+        version: SdVersion,
+        kind: RecipeKind,
+    },
+    Lora {
+        base: Option<SdVersion>,
+    },
+    CannotRun {
+        reason: CannotRunReason,
+        version: Option<SdVersion>,
+    },
+    Unknown,
+}
+
+/// The label of a file whose header says `facts`, by its name (`"<repo>/<path>"`), which
+/// picks the recipe ([`match_recipe`]) and the high or low part. A diffusers folder's UNet
+/// works only as an SD 1.x, 2.x or XL folder; another version is `FolderModel`. A part for
+/// an adapter slot is `Adapter`.
+pub fn label_for(facts: &FileFacts, name: &str) -> FileLabel {
+    match &facts.kind {
+        FileKind::Model {
+            version,
+            layout,
+            embeds,
+        } => {
+            let folder = *layout == Layout::Folder;
+            if folder && !version.is_unet() {
+                return FileLabel::CannotRun {
+                    reason: CannotRunReason::FolderModel,
+                    version: Some(*version),
+                };
+            }
+            match match_recipe(*version, &facts.facts, embeds, name) {
+                Match::Recipe { id, part } => FileLabel::Works {
+                    version: *version,
+                    recipe: id.to_string(),
+                    kind: kind_of(id),
+                    part,
+                    parameters: facts.parameters,
+                    folder,
+                },
+                Match::Refused(reason) => FileLabel::CannotRun {
+                    reason,
+                    version: Some(*version),
+                },
+            }
+        }
+        FileKind::Lora { base, .. } => FileLabel::Lora { base: *base },
+        FileKind::Extra { slot } => match GenRole::from_slot(*slot) {
+            Some(role) => FileLabel::Extra { role },
+            None => FileLabel::CannotRun {
+                reason: CannotRunReason::Adapter,
+                version: None,
+            },
+        },
+        FileKind::CannotRun { reason, version } => FileLabel::CannotRun {
+            reason: *reason,
+            version: *version,
+        },
+    }
+}
+
+/// A repo's verdict from its files' labels: the `Works` label with the most parameters (the
+/// first of equals); else the first LoRA; else the first `CannotRun`; else `Unknown`.
+pub fn verdict_of(labels: &[FileLabel]) -> Verdict {
+    let mut best: Option<(u64, Verdict)> = None;
+    for label in labels {
+        if let FileLabel::Works {
+            version,
+            kind,
+            parameters,
+            ..
+        } = label
+            && best.as_ref().is_none_or(|(most, _)| parameters > most)
+        {
+            best = Some((
+                *parameters,
+                Verdict::Works {
+                    version: *version,
+                    kind: *kind,
+                },
+            ));
+        }
+    }
+    if let Some((_, works)) = best {
+        return works;
+    }
+    let lora = labels.iter().find_map(|l| match l {
+        FileLabel::Lora { base } => Some(Verdict::Lora { base: *base }),
+        _ => None,
+    });
+    let cannot_run = || {
+        labels.iter().find_map(|l| match l {
+            FileLabel::CannotRun { reason, version } => Some(Verdict::CannotRun {
+                reason: *reason,
+                version: *version,
+            }),
+            _ => None,
+        })
+    };
+    lora.or_else(cannot_run).unwrap_or(Verdict::Unknown)
 }

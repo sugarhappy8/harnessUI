@@ -441,6 +441,8 @@ pub fn run() {
                 tauri::async_runtime::block_on(studio::prefs::load(&store)),
             ));
             app.manage(studio.clone());
+            // 0.2.0: the headers of the Hugging Face files Studio read, and each repo's verdict.
+            app.manage(studio::detect::DetectService::new());
             let skills = Arc::new(tools::SkillsServer::new());
             let pass_through: Vec<String> =
                 tauri::async_runtime::block_on(store.get_setting(toolset::TERMINAL_PASS_THROUGH))

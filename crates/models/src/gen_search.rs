@@ -10,6 +10,10 @@
 //! A name never proves what a file holds: [`recognise`] decides what a repository offers
 //! from its listing, and the engine's detection on the downloaded file's own header
 //! (`downloads::check_main_file` in the app) decides whether it is added and run.
+//!
+//! 0.2.0: [`verdict_hint`] says what a search result offers from its name alone, until the
+//! repo is opened and its files' headers are read (`sd::candidates`). [`recognise`] stays
+//! only for the 0.1.x repo view, which Task S6 replaces.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::iter;
@@ -21,7 +25,13 @@ use crate::gen_catalog::{
     GenLicence, GenPart, GenRole, check_licences, check_parts, sha256_hex, strictness,
 };
 use crate::gguf::TensorShape;
-use crate::hf::{GenSearchKind, OFFICIAL_ENDPOINT, RepoDetail, uploader_text};
+use crate::hf::{OFFICIAL_ENDPOINT, RepoDetail, uploader_text};
+use crate::sd::detect::SdVersion;
+use crate::sd::inspect::MatchFacts;
+use crate::sd::matching::{
+    Match, RecipeKind, kind_of, match_recipe, normalise as name_text, recipes_for, tokens,
+};
+use crate::sd::{CannotRunReason, Verdict};
 
 /// What a repository's listing offers in Studio.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -38,7 +48,7 @@ pub enum Recognition {
 
 /// What a name says about its family ([`family_of_name`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum NameMatch {
+enum NameMatch {
     /// One family's name.
     Family(GenFamily),
     /// A related checkpoint that requires another inference recipe.
@@ -83,18 +93,6 @@ const SEVERAL_KINDS: &str = "This repository holds several kinds of model.";
 const OTHER_SIZE: &str = "This file is a different size of model than its name says.";
 const NO_CHECKSUM: &str = "No file here has a published checksum.";
 
-/// What sort of search finds a family's repositories.
-pub fn search_kind(family: GenFamily) -> GenSearchKind {
-    match family {
-        GenFamily::Flux2Klein4b | GenFamily::Flux3ImageKlein | GenFamily::ZImageTurbo => {
-            GenSearchKind::Pictures
-        }
-        GenFamily::Wan22Ti2v5b | GenFamily::Wan22Ti2v5bFast | GenFamily::Wan21T2v1_3b => {
-            GenSearchKind::Video
-        }
-    }
-}
-
 /// Lower case, with `_` and spaces read as `-`.
 fn normalise(name: &str) -> String {
     name.chars()
@@ -106,8 +104,8 @@ fn normalise(name: &str) -> String {
 }
 
 /// The family `name` (a repository id or a file name) names, by the family tokens only:
-/// what the untagged search keeps and what [`recognise`] starts from.
-pub fn family_of_name(name: &str) -> NameMatch {
+/// what [`recognise`] starts from.
+fn family_of_name(name: &str) -> NameMatch {
     let name = normalise(name);
     let words: Vec<_> = name.split(|c: char| !c.is_ascii_alphanumeric()).collect();
     let mut found = None;
@@ -220,6 +218,137 @@ pub fn recognise(detail: &RepoDetail, families: &BTreeMap<GenFamily, FamilyRecor
         return not_yet(NO_CHECKSUM);
     }
     Recognition::Supported { family, files }
+}
+
+// ---- search verdicts from names (0.2.0) --------------------------------------------------
+
+/// A repo name read for [`verdict_hint`]'s words.
+struct HintName {
+    /// Lower case, `_` and spaces read as `-` ([`crate::sd::matching::normalise`]).
+    text: String,
+    words: Vec<String>,
+}
+
+impl HintName {
+    fn new(name: &str) -> Self {
+        HintName {
+            text: name_text(name),
+            words: tokens(name),
+        }
+    }
+
+    /// Whether the name has `word`: a whole word ([`tokens`]), or, for a word with `-` or
+    /// `.`, a part of the whole name. R7's words keep a `.` only between digits, so
+    /// `flux.1` is two words there and is read in the whole name.
+    fn has(&self, word: &str) -> bool {
+        if word.contains(['-', '.']) {
+            self.text.contains(word)
+        } else {
+            self.words.iter().any(|w| w == word)
+        }
+    }
+
+    fn has_any(&self, words: &[&str]) -> bool {
+        words.iter().any(|w| self.has(w))
+    }
+}
+
+/// Names of models Studio can't run, after `lora`; the first match wins.
+const CANNOT_RUN_WORDS: [(&[&str], CannotRunReason); 4] = [
+    (&["lumina", "neta"], CannotRunReason::Lumina2),
+    (&["ltx-video", "ltxv"], CannotRunReason::LtxVideo09),
+    (&["hidream-i1"], CannotRunReason::UnknownWeights),
+    (&["svd", "stable-video"], CannotRunReason::Svd),
+];
+
+const WAN_WORDS: &[&str] = &["wan2.1", "wan2.2", "wan"];
+
+/// The version words: any of the first, with all of the second; the first match wins.
+/// `xl` comes last, after PixArt's own `XL`: SDXL repos named `…-xl`
+/// (`stable-diffusion-xl-base-1.0`, `pixel-art-xl-lora`).
+const VERSION_WORDS: [(&[&str], &[&str], SdVersion); 20] = [
+    (&["sdxl"], &[], SdVersion::Sdxl),
+    (&["sd1.5", "v1-5", "sd15"], &[], SdVersion::Sd1),
+    (&["sd2", "v2-1"], &[], SdVersion::Sd2),
+    (&["sd3", "sd3.5"], &[], SdVersion::Sd3),
+    (
+        &["flux.1", "flux1", "kontext", "schnell"],
+        &[],
+        SdVersion::Flux,
+    ),
+    (&["flux.2"], &["klein"], SdVersion::Flux2Klein),
+    (&["flux.2"], &[], SdVersion::Flux2),
+    (&["flux.3"], &[], SdVersion::Flux3),
+    (&["chroma"], &[], SdVersion::Chroma),
+    (&["qwen-image"], &[], SdVersion::QwenImage),
+    (&["z-image"], &[], SdVersion::ZImage),
+    (WAN_WORDS, &["ti2v"], SdVersion::Wan22Ti2v),
+    (WAN_WORDS, &[], SdVersion::Wan2),
+    (
+        &["hunyuanvideo-1.5", "hunyuan-video-1.5"],
+        &[],
+        SdVersion::HunyuanVideo,
+    ),
+    (&["ltx-2.3", "ltx-2.5"], &[], SdVersion::Ltxav),
+    (&["ovis"], &[], SdVersion::OvisImage),
+    (&["longcat"], &[], SdVersion::Longcat),
+    (&["pixart"], &[], SdVersion::Pixart),
+    (&["anima"], &[], SdVersion::Anima),
+    (&["xl"], &[], SdVersion::Sdxl),
+];
+
+fn version_of(name: &HintName) -> Option<SdVersion> {
+    VERSION_WORDS
+        .iter()
+        .find(|(any, all, _)| name.has_any(any) && all.iter().all(|w| name.has(w)))
+        .map(|(.., version)| *version)
+}
+
+/// What a model of `version` named `name` makes: from its pipeline tag, else from the
+/// recipe its name picks ([`match_recipe`]), else from the version's default recipe.
+fn kind_hint(version: SdVersion, name: &str, pipeline_tag: Option<&str>) -> RecipeKind {
+    match pipeline_tag {
+        Some("text-to-image") => return RecipeKind::Picture,
+        Some("image-to-image") => return RecipeKind::PictureEdit,
+        Some("text-to-video" | "image-to-video") => return RecipeKind::Video,
+        _ => {}
+    }
+    match match_recipe(version, &MatchFacts::default(), &[], name) {
+        Match::Recipe { id, .. } => kind_of(id),
+        // A name the table refuses (VACE, LTX-2) is still its version's kind.
+        Match::Refused(_) => recipes_for(version)
+            .first()
+            .map_or(RecipeKind::Picture, |id| kind_of(id)),
+    }
+}
+
+/// What a search result offers, from its repo id and pipeline tag alone, before its files
+/// are read. The first match: `lora` (a LoRA, for the version its name says); a model
+/// Studio can't run ([`CANNOT_RUN_WORDS`]); a version ([`VERSION_WORDS`]), whose kind
+/// comes from the pipeline tag, else from the name; otherwise `Unknown`.
+pub fn verdict_hint(repo_id: &str, pipeline_tag: Option<&str>) -> Verdict {
+    let name = HintName::new(repo_id);
+    if name.has("lora") {
+        return Verdict::Lora {
+            base: version_of(&name),
+        };
+    }
+    if let Some((_, reason)) = CANNOT_RUN_WORDS
+        .iter()
+        .find(|(words, _)| name.has_any(words))
+    {
+        return Verdict::CannotRun {
+            reason: *reason,
+            version: None,
+        };
+    }
+    match version_of(&name) {
+        Some(version) => Verdict::Works {
+            version,
+            kind: kind_hint(version, repo_id, pipeline_tag),
+        },
+        None => Verdict::Unknown,
+    }
 }
 
 // ---- tensor tables ------------------------------------------------------------------------
@@ -568,7 +697,6 @@ mod tests {
     };
     use crate::gguf::{TensorShape, read_tensor_shapes, testing};
     use crate::hf::{OFFICIAL_ENDPOINT, RepoDetail, parse_repo_detail};
-    use crate::sd::detect::SdVersion;
 
     /// The Studio engine build the app pins (`runtime::sd::lock`, which this crate cannot
     /// depend on).
@@ -1285,5 +1413,180 @@ mod tests {
         assert_eq!(odd.licence.badge(), Badge::Red);
         let sentence = odd.label_mismatch.unwrap();
         assert!(!sentence.contains('\u{202E}'), "{sentence}");
+    }
+
+    // ---- search verdicts from names (0.2.0) ----------------------------------------------
+
+    fn works(version: SdVersion, kind: RecipeKind) -> Verdict {
+        Verdict::Works { version, kind }
+    }
+
+    #[test]
+    fn search_hints_from_names() {
+        assert_eq!(
+            verdict_hint("nerijs/pixel-art-xl-lora", Some("text-to-image")),
+            Verdict::Lora {
+                base: Some(SdVersion::Sdxl)
+            }
+        );
+        assert_eq!(
+            verdict_hint("Alpha-VLLM/Lumina-Image-2.0", Some("text-to-image")),
+            Verdict::CannotRun {
+                reason: CannotRunReason::Lumina2,
+                version: None
+            }
+        );
+        assert_eq!(
+            verdict_hint("QuantStack/Wan2.2-T2V-A14B-GGUF", Some("text-to-video")),
+            works(SdVersion::Wan2, RecipeKind::Video)
+        );
+    }
+
+    /// R7's words keep a `.` only between digits, so `flux.1` is two words there: the FLUX
+    /// names are read in the whole name.
+    #[test]
+    fn flux_names_with_a_dot_are_read() {
+        assert_eq!(
+            verdict_hint("black-forest-labs/FLUX.1-dev", Some("text-to-image")),
+            works(SdVersion::Flux, RecipeKind::Picture)
+        );
+        assert_eq!(
+            verdict_hint("black-forest-labs/FLUX.2-klein-4B", Some("text-to-image")),
+            works(SdVersion::Flux2Klein, RecipeKind::Picture)
+        );
+        assert_eq!(
+            verdict_hint("unsloth/FLUX.2-klein-base-9B-GGUF", None),
+            works(SdVersion::Flux2Klein, RecipeKind::Picture)
+        );
+        assert_eq!(
+            verdict_hint("black-forest-labs/FLUX.2-dev", Some("text-to-image")),
+            works(SdVersion::Flux2, RecipeKind::Picture)
+        );
+        assert_eq!(
+            verdict_hint(
+                "webmp3/Sakura-FLUX.3-Image-Klein-GGUF",
+                Some("text-to-image")
+            ),
+            works(SdVersion::Flux3, RecipeKind::Picture)
+        );
+        assert_eq!(
+            verdict_hint("city96/FLUX.1-schnell-gguf", None),
+            works(SdVersion::Flux, RecipeKind::Picture)
+        );
+    }
+
+    #[test]
+    fn search_hints_take_the_first_row_that_matches() {
+        let hint = |name| verdict_hint(name, None);
+        // `lora` first, then the reasons Studio can't run a repo, then the versions.
+        assert_eq!(
+            hint("XLabs-AI/flux-lora-collection"),
+            Verdict::Lora { base: None }
+        );
+        assert_eq!(
+            hint("Kijai/Wan2.2_lightx2v_lora"),
+            Verdict::Lora {
+                base: Some(SdVersion::Wan2)
+            }
+        );
+        for (name, reason) in [
+            ("neta-art/Neta-Lumina", CannotRunReason::Lumina2),
+            ("Lightricks/LTX-Video", CannotRunReason::LtxVideo09),
+            ("Lightricks/ltxv-13b-0.9.7-dev", CannotRunReason::LtxVideo09),
+            (
+                "HiDream-ai/HiDream-I1-Full",
+                CannotRunReason::UnknownWeights,
+            ),
+            (
+                "stabilityai/stable-video-diffusion-img2vid-xt",
+                CannotRunReason::Svd,
+            ),
+            ("second-state/svd-xt-GGUF", CannotRunReason::Svd),
+        ] {
+            assert_eq!(
+                hint(name),
+                Verdict::CannotRun {
+                    reason,
+                    version: None
+                },
+                "{name}"
+            );
+        }
+        for (name, version) in [
+            ("stabilityai/sdxl-turbo", SdVersion::Sdxl),
+            ("runwayml/stable-diffusion-v1-5", SdVersion::Sd1),
+            ("someone/sd15-anime", SdVersion::Sd1),
+            ("someone/my_sd1.5_merge", SdVersion::Sd1),
+            ("someone/sd2-768-merge", SdVersion::Sd2),
+            ("someone/stable-diffusion-v2-1-base", SdVersion::Sd2),
+            ("someone/sd3-medium-merge", SdVersion::Sd3),
+            ("someone/sd3.5_large_turbo", SdVersion::Sd3),
+            ("black-forest-labs/FLUX.1-Kontext-dev", SdVersion::Flux),
+            ("lodestones/Chroma", SdVersion::Chroma),
+            ("Qwen/Qwen-Image", SdVersion::QwenImage),
+            ("Tongyi-MAI/Z-Image-Turbo", SdVersion::ZImage),
+            ("Wan-AI/Wan2.1-T2V-1.3B", SdVersion::Wan2),
+            ("Wan-AI/Wan2.2-TI2V-5B", SdVersion::Wan22Ti2v),
+            ("tencent/HunyuanVideo-1.5", SdVersion::HunyuanVideo),
+            ("Lightricks/LTX-2.3", SdVersion::Ltxav),
+            ("AIDC-AI/Ovis-Image-7B", SdVersion::OvisImage),
+            ("meituan-longcat/LongCat-Image", SdVersion::Longcat),
+            ("PixArt-alpha/PixArt-Sigma-XL-2-1024-MS", SdVersion::Pixart),
+            ("circlestone-labs/Anima", SdVersion::Anima),
+            // `xl` comes last: SDXL repos named `…-xl` (and PixArt's `XL` above is PixArt).
+            ("stabilityai/stable-diffusion-xl-base-1.0", SdVersion::Sdxl),
+            ("cagliostrolab/animagine-xl-3.1", SdVersion::Sdxl),
+        ] {
+            assert!(
+                matches!(hint(name), Verdict::Works { version: v, .. } if v == version),
+                "{name}: {:?}",
+                hint(name)
+            );
+        }
+        // Chat models and words inside other words say nothing.
+        for name in [
+            "Qwen/Qwen3-8B",
+            "unsloth/gemma-3-12b-it-GGUF",
+            "someone/flora-wanderer",
+            "someone/swan-song",
+        ] {
+            assert_eq!(hint(name), Verdict::Unknown, "{name}");
+        }
+    }
+
+    #[test]
+    fn the_kind_comes_from_the_tag_and_else_from_the_name() {
+        assert_eq!(
+            verdict_hint(
+                "black-forest-labs/FLUX.1-Kontext-dev",
+                Some("image-to-image")
+            ),
+            works(SdVersion::Flux, RecipeKind::PictureEdit)
+        );
+        assert_eq!(
+            verdict_hint("black-forest-labs/FLUX.1-Kontext-dev", None),
+            works(SdVersion::Flux, RecipeKind::PictureEdit)
+        );
+        assert_eq!(
+            verdict_hint("Qwen/Qwen-Image-Edit-2509", None),
+            works(SdVersion::QwenImage, RecipeKind::PictureEdit)
+        );
+        assert_eq!(
+            verdict_hint("Wan-AI/Wan2.2-TI2V-5B", Some("image-to-video")),
+            works(SdVersion::Wan22Ti2v, RecipeKind::Video)
+        );
+        assert_eq!(
+            verdict_hint("Wan-AI/Wan2.1-T2V-1.3B", None),
+            works(SdVersion::Wan2, RecipeKind::Video)
+        );
+        // A name the matching table refuses (VACE) is still a video model's.
+        assert_eq!(
+            verdict_hint("Wan-AI/Wan2.1-VACE-14B", None),
+            works(SdVersion::Wan2, RecipeKind::Video)
+        );
+        assert_eq!(
+            verdict_hint("o/my-sdxl-merge", Some("other")),
+            works(SdVersion::Sdxl, RecipeKind::Picture)
+        );
     }
 }
