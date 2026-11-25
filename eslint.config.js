@@ -6,6 +6,11 @@ import tseslint from "typescript-eslint";
 export default tseslint.config(
   { ignores: ["dist", "src-tauri", "crates", "target", "node_modules", ".cache", ".superpowers"] },
   {
+    // The preview harness's scripts run in Node (e2e/preview/README.md).
+    files: ["e2e/preview/**/*.mjs"],
+    languageOptions: { globals: globals.node },
+  },
+  {
     extends: [js.configs.recommended, ...tseslint.configs.recommended],
     files: ["**/*.{ts,tsx}"],
     languageOptions: { ecmaVersion: 2022, globals: globals.browser },

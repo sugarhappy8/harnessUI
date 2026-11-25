@@ -105,3 +105,6 @@ vision model in `TEST_VISION_GGUF` and is skipped without one):
 
 The scenarios with a model use Qwen3 0.6B, which sometimes answers without calling the
 tool it was asked to use; those steps ask again up to three times.
+
+Studio's before/after screenshots come from a separate browser harness, not these tests: see
+[`preview/README.md`](preview/README.md).
