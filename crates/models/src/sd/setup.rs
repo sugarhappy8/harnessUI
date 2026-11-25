@@ -6,7 +6,8 @@
 //! 1. the main file goes into `model` for a checkpoint, `diffusion_model` for a diffusion
 //!    model alone, or the high-noise slot;
 //! 2. a high/low pair's other half comes from the same repo;
-//! 3. every other required slot, the text encoders and VAE the main file does not carry, and
+//! 3. every other required slot, the text encoders and VAE the main file does not carry
+//!    (with SD 1.x, 2.x and XL's CLIP encoders, which their recipes have no slot for), and
 //!    `vae` for an unmet `required_any`, comes from the first of: the main file's own parts,
 //!    an installed file, the same repo, the companion table;
 //! 4. optional slots: the vision encoders by the same order for a recipe that takes an input
@@ -86,8 +87,8 @@ pub enum PartSource {
 pub struct PlannedPart {
     pub slot: SlotId,
     /// Whether the plan needs the slot: the recipe requires it, it is a text encoder or VAE
-    /// the main file does not carry, it fills an unmet `required_any`, or it is a diffusers
-    /// folder's text encoder.
+    /// the main file does not carry (SD 1.x, 2.x and XL's CLIP encoders among them), it
+    /// fills an unmet `required_any`, or it is a diffusers folder's text encoder.
     pub required: bool,
     pub source: PartSource,
     /// `None` for `Embedded` and `Missing`.
@@ -99,8 +100,8 @@ pub struct SetupPlan {
     pub recipe_id: String,
     /// In the recipe's slot order, the plan's slots only; a checkpoint's `model` takes the
     /// place of the recipe's `diffusion_model`, a diffusion model's `diffusion_model` that of
-    /// the recipe's `model`, and a folder's parts that are not slots of the recipe come last
-    /// (`vae`, `clip_l`, `clip_g`).
+    /// the recipe's `model`, and parts that are not slots of the recipe (a folder's, or SD
+    /// 1.x, 2.x and XL's CLIP encoders) come last (`vae`, `clip_l`, `clip_g`).
     pub parts: Vec<PlannedPart>,
     pub untested: bool,
 }
@@ -293,6 +294,20 @@ pub fn plan_setup(input: &SetupInput<'_>) -> SetupPlan {
         }
     }
 
+    // The CLIP encoders an SD 1.x, 2.x or XL main file does not carry, which its recipe has
+    // no slot for (ruling S4-unet-encoders).
+    for s in planner.text_encoder_slots() {
+        if parts.contains_key(&s) || planner.recipe_slots().any(|r| r == s) {
+            continue;
+        }
+        if planner.own_part_missing(s) {
+            match planner.fill(s) {
+                Some((source, file)) => put(&mut parts, s, true, source, file),
+                None => put(&mut parts, s, true, PartSource::Missing, None),
+            }
+        }
+    }
+
     // Rule 5: the person's own choices, a later one for a slot winning.
     for (s, choice) in input.overrides {
         let s = *s;
@@ -346,7 +361,8 @@ impl Planner<'_, '_> {
     }
 
     /// The order parts are listed in: the recipe's slots, `model` and `diffusion_model`
-    /// each just before the other, which they can take the place of, then a folder's parts.
+    /// each just before the other, which they can take the place of, then the parts that
+    /// are not slots of the recipe.
     fn order(&self) -> Vec<SlotId> {
         let mut order = Vec::new();
         for s in self.recipe_slots() {
@@ -522,13 +538,33 @@ impl Planner<'_, '_> {
         }
     }
 
-    /// A text-encoder slot of the recipe that the main file does not carry, which the plan
-    /// then needs (ruling S4-diffusion-only). The VAE is needed the same way, as one of the
-    /// VAE/TAE pair ([`Planner::unmet_required_any`]).
+    /// The text-encoder slots the main file's version reads: the recipe's own, and for SD
+    /// 1.x and 2.x `clip_l`, for SDXL `clip_l` and `clip_g`, which their checkpoint recipes
+    /// have no slot for. The engine loads `--clip_l` and `--clip_g` under `clip_l.` and
+    /// `clip_g.` (`src/pipeline/diffusion_engine.cpp:719`) and maps those onto a
+    /// checkpoint's `cond_stage_model.` names for these versions
+    /// (`src/name_conversion.cpp:1773-1775`; ruling S4-unet-encoders).
+    fn text_encoder_slots(&self) -> Vec<SlotId> {
+        let version = self.input.version;
+        TEXT_ENCODERS
+            .into_iter()
+            .filter(|s| {
+                self.input.recipe.slot(*s).is_some()
+                    || match s {
+                        SlotId::ClipL => version.is_some_and(SdVersion::is_unet),
+                        SlotId::ClipG => version.is_some_and(SdVersion::is_sdxl),
+                        _ => false,
+                    }
+            })
+            .collect()
+    }
+
+    /// A text-encoder slot the main file's version reads ([`Planner::text_encoder_slots`])
+    /// but the file does not carry, which the plan then needs (rulings S4-diffusion-only and
+    /// S4-unet-encoders). The VAE is needed the same way, as one of the VAE/TAE pair
+    /// ([`Planner::unmet_required_any`]).
     fn own_part_missing(&self, slot: SlotId) -> bool {
-        TEXT_ENCODERS.contains(&slot)
-            && self.input.recipe.slot(slot).is_some()
-            && !self.carries(slot)
+        self.text_encoder_slots().contains(&slot) && !self.carries(slot)
     }
 
     /// The groups of `required_any` none of whose slots the main file, its folder, its
@@ -1408,25 +1444,148 @@ mod tests {
             sources(&p)
         );
         assert!(slot(&p, SlotId::DiffusionModel).is_none());
+    }
 
-        // SDXL: no SDXL VAE in the table, so it is missing.
-        let sdxl = diffusion_only("sdxl");
+    /// Ruling S4-unet-encoders: the SD 1.x, 2.x and XL checkpoint recipes have no CLIP
+    /// slots, but the engine loads `--clip_l` and `--clip_g` under names it maps onto a
+    /// checkpoint's for those versions (`src/pipeline/diffusion_engine.cpp:719`,
+    /// `src/name_conversion.cpp:1773-1775`). A main file that carries none needs them.
+    #[test]
+    fn a_diffusion_only_sd_file_needs_its_clip_encoders() {
+        let main = |name: &str| Main {
+            repo: "o/sdxl-unet-GGUF".into(),
+            file: rf("sdxl-unet-Q8_0.gguf", 2_600_000_000),
+            facts: diffusion_only(name),
+            part: None,
+        };
         assert!(matches!(
-            sdxl.kind,
+            main("sdxl").facts.kind,
             FileKind::Model {
                 version: SdVersion::Sdxl,
                 layout: Layout::DiffusionOnly,
                 ..
             }
         ));
-        let p = plan(main(sdxl), "sdxl-checkpoint", &[], &[]);
+        // The table has no SDXL encoders or VAE: all three are missing.
+        let p = plan(main("sdxl"), "sdxl-checkpoint", &[], &[]);
         assert_eq!(
             sources(&p),
             [
                 (SlotId::DiffusionModel, PartSource::Main),
-                (SlotId::Vae, PartSource::Missing)
+                (SlotId::Vae, PartSource::Missing),
+                (SlotId::ClipL, PartSource::Missing),
+                (SlotId::ClipG, PartSource::Missing)
             ]
         );
+        assert!(p.parts.iter().all(|x| x.required));
+
+        // A chosen VAE alone does not make it runnable; its encoders too do.
+        let local = |path: &str| SlotChoice::Local {
+            path: path.into(),
+            size: 1,
+            sha256: None,
+        };
+        let vae = (SlotId::Vae, local("/d/sdxl_vae.safetensors"));
+        let p = plan_given(
+            &main("sdxl"),
+            "sdxl-checkpoint",
+            With {
+                overrides: vec![vae.clone()],
+                ..With::default()
+            },
+        );
+        assert_eq!(p.missing(), [SlotId::ClipL, SlotId::ClipG]);
+        assert!(!p.can_run());
+        let p = plan_given(
+            &main("sdxl"),
+            "sdxl-checkpoint",
+            With {
+                overrides: vec![
+                    vae,
+                    (SlotId::ClipL, local("/d/clip_l.safetensors")),
+                    (SlotId::ClipG, local("/d/clip_g.safetensors")),
+                ],
+                ..With::default()
+            },
+        );
+        assert_eq!(
+            (source(&p, SlotId::ClipL), source(&p, SlotId::ClipG)),
+            (PartSource::Chosen, PartSource::Chosen)
+        );
+        assert!(p.can_run());
+        // Emptying one leaves it missing.
+        let p = plan_given(
+            &main("sdxl"),
+            "sdxl-checkpoint",
+            With {
+                overrides: vec![(SlotId::ClipG, SlotChoice::Empty)],
+                ..With::default()
+            },
+        );
+        assert_eq!(p.missing(), [SlotId::Vae, SlotId::ClipL, SlotId::ClipG]);
+
+        // From the same repo, by name.
+        let listing = [
+            rf("sdxl-unet-Q8_0.gguf", 2_600_000_000),
+            rf("clip_l.safetensors", 246_144_152),
+            rf("clip_g.safetensors", 1_389_382_176),
+            rf("sdxl_vae.safetensors", 334_643_268),
+        ];
+        let p = plan(main("sdxl"), "sdxl-checkpoint", &listing, &[]);
+        assert_eq!(
+            sources(&p),
+            [
+                (SlotId::DiffusionModel, PartSource::Main),
+                (SlotId::Vae, PartSource::Repo),
+                (SlotId::ClipL, PartSource::Repo),
+                (SlotId::ClipG, PartSource::Repo)
+            ]
+        );
+        assert!(p.can_run());
+
+        // SD 1.x takes `clip_l` alone. Without its text encoder the engine does not name a
+        // bare SD 1.x UNet's version, so these facts are built (as an untested set-up's).
+        let sd1 = Main {
+            facts: FileFacts {
+                kind: FileKind::Model {
+                    version: SdVersion::Sd1,
+                    layout: Layout::DiffusionOnly,
+                    embeds: vec![],
+                },
+                facts: MatchFacts::default(),
+                parameters: 859_520_964,
+                format: FileFormat::Gguf,
+            },
+            ..main("sdxl")
+        };
+        assert_eq!(
+            sources(&plan(sd1, "sd1-checkpoint", &[], &[])),
+            [
+                (SlotId::DiffusionModel, PartSource::Main),
+                (SlotId::Vae, PartSource::Missing),
+                (SlotId::ClipL, PartSource::Missing)
+            ]
+        );
+
+        // A full SDXL checkpoint carries its own: no CLIP parts.
+        let p = plan(
+            main_hub(
+                "stabilityai/stable-diffusion-xl-base-1.0",
+                "sd_xl_base_1.0.safetensors",
+                "sdxl",
+            ),
+            "sdxl-checkpoint",
+            &[],
+            &[],
+        );
+        assert_eq!(
+            sources(&p),
+            [
+                (SlotId::Model, PartSource::Main),
+                (SlotId::Vae, PartSource::Embedded)
+            ]
+        );
+        assert!(p.can_run());
     }
 
     #[test]
