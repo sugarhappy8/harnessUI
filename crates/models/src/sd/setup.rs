@@ -12,7 +12,8 @@
 //!    an installed file, the same repo, the companion table;
 //! 4. optional slots: the vision encoders by the same order for a recipe that takes an input
 //!    picture, the others only from the main file's own parts;
-//! 5. the person's own choices win.
+//! 5. the person's own choices win. A choice that replaces the main file plans the other
+//!    slots as for a main file that carries nothing (ruling S4-main-override).
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -196,8 +197,26 @@ pub struct SetupInput<'a> {
 
 /// Plans a model's set-up by the rules of design section 7.4 (see the module's docs).
 pub fn plan_setup(input: &SetupInput<'_>) -> SetupPlan {
-    let planner = Planner { input };
     let recipe = input.recipe;
+    let main_slot = Planner {
+        input,
+        main_replaced: false,
+    }
+    .main_slot();
+    // A checkpoint in `model` fills the recipe's `diffusion_model`, and a diffusion model in
+    // `diffusion_model` the recipe's `model`.
+    let stood_in = match (main_slot, recipe.main_slot()) {
+        (SlotId::Model, SlotId::DiffusionModel) => Some(SlotId::DiffusionModel),
+        (SlotId::DiffusionModel, SlotId::Model) => Some(SlotId::Model),
+        _ => None,
+    };
+    let planner = Planner {
+        input,
+        main_replaced: input
+            .overrides
+            .iter()
+            .any(|(s, _)| *s == main_slot || stood_in == Some(*s)),
+    };
     let mut parts: BTreeMap<SlotId, PlannedPart> = BTreeMap::new();
     let put = |parts: &mut BTreeMap<SlotId, PlannedPart>, slot, required, source, file| {
         parts.insert(
@@ -211,8 +230,7 @@ pub fn plan_setup(input: &SetupInput<'_>) -> SetupPlan {
         );
     };
 
-    // Rules 0 and 1: the main file, and a folder's own files.
-    let main_slot = planner.main_slot();
+    // Rules 0 and 1: the main file, and a folder's own files unless a choice replaces it.
     put(
         &mut parts,
         main_slot,
@@ -220,7 +238,9 @@ pub fn plan_setup(input: &SetupInput<'_>) -> SetupPlan {
         PartSource::Main,
         Some(planner.main_file()),
     );
-    if let MainFile::HubFolder { folder, .. } = input.main {
+    if let MainFile::HubFolder { folder, .. } = input.main
+        && !planner.main_replaced
+    {
         let sdxl = input.version.is_some_and(SdVersion::is_sdxl);
         for (slot, file, required) in [
             (
@@ -264,13 +284,7 @@ pub fn plan_setup(input: &SetupInput<'_>) -> SetupPlan {
         }
     }
 
-    // Rules 3 and 4: the recipe's other slots. A checkpoint in `model` fills the recipe's
-    // `diffusion_model`, and a diffusion model in `diffusion_model` the recipe's `model`.
-    let stood_in = match (main_slot, recipe.main_slot()) {
-        (SlotId::Model, SlotId::DiffusionModel) => Some(SlotId::DiffusionModel),
-        (SlotId::DiffusionModel, SlotId::Model) => Some(SlotId::Model),
-        _ => None,
-    };
+    // Rules 3 and 4: the recipe's other slots, `stood_in` filled by the main file.
     let required_any = planner.unmet_required_any(&parts);
     let needed = |s: SlotId| {
         planner.recipe_requires(s) || planner.own_part_missing(s) || required_any.contains(&s)
@@ -343,6 +357,10 @@ pub fn plan_setup(input: &SetupInput<'_>) -> SetupPlan {
 
 struct Planner<'i, 'a> {
     input: &'i SetupInput<'a>,
+    /// A choice replaces the main file, in its slot or the one it stands in for: the other
+    /// slots are planned as for a main file that carries nothing, so no part is `Embedded`
+    /// or a folder's own (ruling S4-main-override).
+    main_replaced: bool,
 }
 
 impl Planner<'_, '_> {
@@ -525,8 +543,11 @@ impl Planner<'_, '_> {
     }
 
     /// Whether the main file carries this slot's part: a file's embedded part, or a
-    /// folder's own file.
+    /// folder's own file; nothing once a choice replaces the main file.
     fn carries(&self, slot: SlotId) -> bool {
+        if self.main_replaced {
+            return false;
+        }
         match self.input.main {
             MainFile::HubFolder { folder, .. } => match slot {
                 SlotId::Vae => folder.vae.is_some(),
@@ -628,9 +649,10 @@ impl Planner<'_, '_> {
     }
 
     /// The main file carries the slot's part itself. A folder's parts are its own files
-    /// (`Folder`), never embedded.
+    /// (`Folder`), never embedded, and a main file a choice replaces embeds nothing.
     fn embedded(&self, slot: SlotId) -> bool {
-        !matches!(self.input.main, MainFile::HubFolder { .. })
+        !self.main_replaced
+            && !matches!(self.input.main, MainFile::HubFolder { .. })
             && matches!(&self.input.facts.kind, FileKind::Model { embeds, .. } if embeds.contains(&slot))
     }
 
@@ -904,6 +926,15 @@ mod tests {
         folder: &(DiffusersFolder, FileFacts),
         recipe_id: &str,
     ) -> SetupPlan {
+        plan_folder_overriding(repo, folder, recipe_id, &[])
+    }
+
+    fn plan_folder_overriding(
+        repo: &str,
+        folder: &(DiffusersFolder, FileFacts),
+        recipe_id: &str,
+        overrides: &[(SlotId, SlotChoice)],
+    ) -> SetupPlan {
         let (folder, facts) = folder;
         plan_setup(&SetupInput {
             main: MainFile::HubFolder {
@@ -919,7 +950,7 @@ mod tests {
             listing_facts: &BTreeMap::new(),
             installed: &[],
             companions: &table(),
-            overrides: &[],
+            overrides,
             untested: false,
         })
     }
@@ -2207,6 +2238,120 @@ mod tests {
             },
         );
         assert_eq!(sources(&p), [(SlotId::Model, PartSource::Main)]);
+    }
+
+    /// Ruling S4-main-override: a choice that replaces the main file (in its slot, or the
+    /// slot it stands in for) plans the other slots again as for a main file that carries
+    /// nothing: no part stays `Embedded` or `Folder`, and what that main would need is
+    /// required.
+    #[test]
+    fn replacing_the_main_file_plans_the_other_slots_as_for_one_that_carries_nothing() {
+        let local = |path: &str| SlotChoice::Local {
+            path: path.into(),
+            size: 1,
+            sha256: None,
+        };
+        let overriding = |main: &Main, recipe_id: &str, slot: SlotId| {
+            plan_given(
+                main,
+                recipe_id,
+                With {
+                    overrides: vec![(slot, local("/d/unet-Q8_0.gguf"))],
+                    ..With::default()
+                },
+            )
+        };
+        let embedded = |p: &SetupPlan| {
+            p.parts
+                .iter()
+                .filter(|x| matches!(x.source, PartSource::Embedded | PartSource::Folder))
+                .count()
+        };
+
+        // A full SDXL checkpoint, its `model` replaced by a diffusion model alone: the empty
+        // table has no SDXL VAE or encoders.
+        let sdxl = main_hub(
+            "stabilityai/stable-diffusion-xl-base-1.0",
+            "sd_xl_base_1.0.safetensors",
+            "sdxl",
+        );
+        assert_eq!(
+            sources(&plan_given(&sdxl, "sdxl-checkpoint", With::default())),
+            [
+                (SlotId::Model, PartSource::Main),
+                (SlotId::Vae, PartSource::Embedded)
+            ]
+        );
+        let p = overriding(&sdxl, "sdxl-checkpoint", SlotId::Model);
+        assert_eq!(
+            sources(&p),
+            [
+                (SlotId::Model, PartSource::Chosen),
+                (SlotId::Vae, PartSource::Missing),
+                (SlotId::ClipL, PartSource::Missing),
+                (SlotId::ClipG, PartSource::Missing)
+            ]
+        );
+        assert!(p.parts.iter().all(|x| x.required) && !p.can_run());
+
+        // A FLUX checkpoint with its encoders and VAE, replaced in the recipe's own
+        // `diffusion_model`: they come from the table.
+        let flux = Main {
+            repo: "o/flux1-dev-checkpoint".into(),
+            file: rf("flux1-dev-fp8-full.safetensors", 17_200_000_000),
+            facts: FileFacts {
+                kind: FileKind::Model {
+                    version: SdVersion::Flux,
+                    layout: Layout::Checkpoint,
+                    embeds: vec![SlotId::ClipL, SlotId::T5xxl, SlotId::Vae],
+                },
+                facts: MatchFacts::default(),
+                parameters: 17_000_000_000,
+                format: FileFormat::Safetensors,
+            },
+            part: None,
+        };
+        assert_eq!(
+            sources(&plan_given(&flux, "flux1-dev", With::default())),
+            [
+                (SlotId::Model, PartSource::Main),
+                (SlotId::ClipL, PartSource::Embedded),
+                (SlotId::T5xxl, PartSource::Embedded),
+                (SlotId::Vae, PartSource::Embedded)
+            ]
+        );
+        let p = overriding(&flux, "flux1-dev", SlotId::DiffusionModel);
+        assert_eq!(
+            sources(&p),
+            [
+                (SlotId::DiffusionModel, PartSource::Chosen),
+                (SlotId::ClipL, PartSource::Companion),
+                (SlotId::T5xxl, PartSource::Companion),
+                (SlotId::Vae, PartSource::Companion)
+            ]
+        );
+        assert_eq!(embedded(&p), 0);
+        assert!(p.can_run());
+
+        // A folder's own files go with it.
+        let p = plan_folder_overriding(
+            "CompVis/stable-diffusion-v1-4",
+            &sd14_folder(),
+            "sd1-checkpoint",
+            &[(SlotId::Model, local("/d/sd14-unet.gguf"))],
+        );
+        assert_eq!(
+            sources(&p),
+            [
+                (SlotId::Model, PartSource::Chosen),
+                (SlotId::Vae, PartSource::Missing),
+                (SlotId::ClipL, PartSource::Missing)
+            ]
+        );
+
+        // A choice for another slot keeps the main file's own parts.
+        let p = overriding(&flux, "flux1-dev", SlotId::Tae);
+        assert_eq!(embedded(&p), 3);
     }
 
     #[test]
