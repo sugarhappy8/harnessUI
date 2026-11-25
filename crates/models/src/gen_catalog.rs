@@ -1508,6 +1508,20 @@ mod tests {
                 crate::sd::matching::recipes_for(f.version()).contains(&f.recipe_id()),
                 "{f:?}: a file of its version can take its recipe"
             );
+            // The name rules agree with the family's recipe: read under the recipe's own id,
+            // only a file's facts can pick another (`check_main_file` in the app).
+            assert!(
+                matches!(
+                    crate::sd::matching::match_recipe(
+                        f.version(),
+                        &crate::sd::inspect::MatchFacts::default(),
+                        &[],
+                        f.recipe_id()
+                    ),
+                    crate::sd::matching::Match::Recipe { id, .. } if id == f.recipe_id()
+                ),
+                "{f:?}: its recipe's id names its recipe"
+            );
         }
     }
 

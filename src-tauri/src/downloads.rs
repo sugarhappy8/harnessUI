@@ -184,9 +184,12 @@ fn row_of<'a>(rows: &'a [store::Download], part: &GenGroupPart) -> Option<&'a st
 /// - the file is a model of a version that takes the entry's recipe
 ///   (`sd::matching::recipes_for`): an SDXL Vega or SSD-1B checkpoint takes
 ///   `sdxl-checkpoint`;
-/// - for a 0.1.x family's entry, the recipe the file's own facts pick under the entry's file
-///   name is the entry's, as 0.1.x's tensor signatures told sizes apart: a FLUX.2 klein 9B
-///   named like the 4B is refused;
+/// - for a 0.1.x family's entry, the recipe the file's own facts pick is the entry's, as
+///   0.1.x's tensor signatures told sizes apart: a FLUX.2 klein 9B named like the 4B is
+///   refused. The name the matching reads is the entry's recipe, never the file's: the
+///   family decided the recipe (schema 4 maps it by family alone), so only the file's facts
+///   can disagree, and a file whose repository and name never say `turbo` (found by its
+///   `base_model` tag) is still Z-Image Turbo;
 /// - an untested set-up takes any weights that read;
 /// - a diffusers folder's entry (parts with a `folder` name) is checked by its folder.
 ///
@@ -229,9 +232,8 @@ pub(crate) fn check_main_file(entry: &GenEntry, path: &Path) -> AppResult<()> {
     if !recipes_for(version).contains(&entry.recipe.as_str()) {
         return Err(refused(format!("the file is a {} model", version.word())));
     }
-    if let (Some(_), Some(main)) = (entry.family, main) {
-        let name = format!("{}/{}", main.repo, main.path);
-        match match_recipe(version, &facts.facts, embeds, &name) {
+    if entry.family.is_some() {
+        match match_recipe(version, &facts.facts, embeds, &entry.recipe) {
             Match::Recipe { id, .. } if id == entry.recipe => {}
             Match::Recipe { id, .. } => {
                 return Err(refused(format!("the file is one for {id}")));
@@ -4009,6 +4011,186 @@ mod tests {
             let e = check_main_file(&sdxl, &write_gguf_txt_fixture(&dir, name)).unwrap_err();
             assert_eq!(e.code, studio_errors::NOT_THAT_MODEL, "{why}");
         }
+    }
+
+    /// The recorded table of a model of each 0.1.x family (0.1.x's signature fixtures).
+    fn recorded_table(family: GenFamily) -> &'static str {
+        match family {
+            GenFamily::Flux2Klein4b => "klein4b",
+            GenFamily::Flux3ImageKlein => "flux3-klein",
+            GenFamily::ZImageTurbo => "zimage",
+            GenFamily::Wan22Ti2v5b | GenFamily::Wan22Ti2v5bFast => "wan22-ti2v-5b",
+            GenFamily::Wan21T2v1_3b => "wan21-t2v-1.3b",
+        }
+    }
+
+    /// A searched file of `family` whose repository and name say nothing of it (found by its
+    /// `base_model` tag): its row as 0.1.2 installed it (schema 4's recipe by family) and the
+    /// finished download that makes it, its diffusion part beside the family's companions.
+    fn neutral_search(family: GenFamily) -> (store::GenModel, store::NewGenModel) {
+        let catalog = models::gen_catalog::gen_catalog(
+            &models::catalog::Catalog::bundled(),
+            runtime::sd::lock::embedded().sd_cpp.build,
+        );
+        let record = &catalog.families[&family];
+        let diffusion = serde_json::json!({
+            "role": "diffusion", "repo": "someone/my-quants", "revision": "c".repeat(40),
+            "path": "weights.gguf", "file": "/models/someone/my-quants/weights.gguf",
+            "size": 4096, "sha256": "d".repeat(64), "license": record.upstream_license,
+        });
+        let companions = record.companions.iter().map(|p| {
+            let mut v = serde_json::to_value(p).unwrap();
+            v["file"] = format!("/models/{}/{}", p.repo, p.path).into();
+            v
+        });
+        let parts =
+            serde_json::Value::Array(std::iter::once(diffusion).chain(companions).collect());
+        let family_word = serde_json::to_value(family)
+            .unwrap()
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let new = store::NewGenModel {
+            id: "hf:someone/my-quants:weights.gguf".into(),
+            catalog_id: None,
+            name: record.name.clone(),
+            kind: "image".into(),
+            family: family_word,
+            recipe_id: Some(family.recipe_id().into()),
+            parts,
+            size_bytes: 4096,
+            source: store::GenSource::Search,
+        };
+        let row = store::GenModel {
+            id: new.id.clone(),
+            catalog_id: None,
+            name: new.name.clone(),
+            kind: new.kind.clone(),
+            family: new.family.clone(),
+            recipe_id: new.recipe_id.clone(),
+            parts: new.parts.clone(),
+            size_bytes: new.size_bytes,
+            source: new.source,
+            added_at: 1,
+        };
+        (row, new)
+    }
+
+    /// Every 0.1.x family's model passes the check under a name that says nothing of it, both
+    /// as a finished download (`register_gen_model`'s entry) and as an installed row (each
+    /// run's): the name the matching reads is the family's recipe, so only the file's own facts
+    /// can disagree. A 9B klein is still refused for the 4B.
+    #[test]
+    fn every_01x_family_passes_with_its_recorded_table_under_a_neutral_name() {
+        let dir = Scratch::new();
+        let catalog = models::gen_catalog::gen_catalog(
+            &models::catalog::Catalog::bundled(),
+            runtime::sd::lock::embedded().sd_cpp.build,
+        );
+        for family in GenFamily::ALL {
+            let file = write_gguf_txt_fixture(&dir, recorded_table(family));
+            let (row, new) = neutral_search(family);
+            let installed =
+                crate::studio::local_models::entry_from_installed(&row, &catalog).unwrap();
+            let downloaded = downloaded_entry(&new).unwrap();
+            for entry in [&installed, &downloaded] {
+                assert_eq!(
+                    (entry.family, entry.recipe.as_str()),
+                    (Some(family), family.recipe_id()),
+                    "{family:?}"
+                );
+                assert_eq!(entry.diffusion().path, "weights.gguf");
+                check_main_file(entry, &file).unwrap_or_else(|e| panic!("{family:?}: {e:?}"));
+            }
+        }
+        let (row, new) = neutral_search(GenFamily::Flux2Klein4b);
+        let klein9b = write_gguf_txt_fixture(&dir, "klein9b");
+        for entry in [
+            crate::studio::local_models::entry_from_installed(&row, &catalog).unwrap(),
+            downloaded_entry(&new).unwrap(),
+        ] {
+            assert_eq!(
+                check_main_file(&entry, &klein9b).unwrap_err().code,
+                studio_errors::NOT_THAT_MODEL
+            );
+        }
+    }
+
+    /// A Z-Image Turbo file from a repository that never says `turbo` (0.1.x recognised it by
+    /// its `base_model` tag) is still Z-Image Turbo: its download is added, and its 0.1.2 row
+    /// runs. Z-Image's default recipe is the base model's, and only the name tells them apart.
+    #[tokio::test]
+    async fn a_turbo_file_found_by_its_base_model_tag_is_z_image_turbo() {
+        use models::gguf::testing::diffusion_gguf;
+        let dir = Scratch::new();
+        let zimage = write_gguf_txt_fixture(&dir, "zimage");
+        let (row, _) = neutral_search(GenFamily::ZImageTurbo);
+        let catalog = models::gen_catalog::gen_catalog(
+            &models::catalog::Catalog::bundled(),
+            runtime::sd::lock::embedded().sd_cpp.build,
+        );
+        let entry = crate::studio::local_models::entry_from_installed(&row, &catalog).unwrap();
+        check_main_file(&entry, &zimage).unwrap();
+
+        // Downloaded and registered: added, its files kept.
+        let models = dir.path().join("models");
+        let group = GenGroup {
+            gen_model_id: "hf:someone/my-quants:weights.gguf".into(),
+            catalog_id: None,
+            name: "Z-Image Turbo".into(),
+            kind: "image".into(),
+            family: "z-image-turbo".into(),
+            source: "search".into(),
+            parts: vec![GenGroupPart {
+                role: "diffusion".into(),
+                repo: "someone/my-quants".into(),
+                revision: "c".repeat(40),
+                path: "weights.gguf".into(),
+                size: 4096,
+                sha256: "d".repeat(64),
+                license: "apache-2.0".into(),
+            }],
+        };
+        let meta = GroupMeta {
+            generator: Some(group.clone()),
+            ..meta()
+        };
+        let part = &group.parts[0];
+        let dest = models::download::destination(&models, &part.repo, &part.path).unwrap();
+        std::fs::create_dir_all(dest.parent().unwrap()).unwrap();
+        std::fs::write(&dest, diffusion_gguf("zimage-tensors.txt")).unwrap();
+        let store = store::Store::open_in_memory().unwrap();
+        let id = store
+            .insert_download(NewDownload {
+                group_id: "g".into(),
+                repo: part.repo.clone(),
+                file: part.path.clone(),
+                url: String::new(),
+                dest_path: dest.display().to_string(),
+                size_bytes: part.size,
+                sha256: part.sha256.clone(),
+            })
+            .await
+            .unwrap();
+        store
+            .update_download(
+                id,
+                DownloadPatch {
+                    status: Some(S::Verifying),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        register_gen_model(&store, &models, "g", &meta)
+            .await
+            .unwrap();
+        let added = store.list_gen_models().await.unwrap();
+        assert_eq!(
+            (added.len(), added[0].recipe_id.as_deref()),
+            (1, Some("z-image-turbo"))
+        );
+        assert!(dest.exists());
     }
 
     /// An untested set-up takes any weights that read, never a pickle file or one that does
