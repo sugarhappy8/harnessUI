@@ -3,7 +3,8 @@
 //!
 //! The pinned build lives in [`lock`]; [`engine`] finds `sd-cli` on this computer and
 //! installs the Windows engine pack; [`devices`] reads its devices and finds llama.cpp's
-//! graphics card among them; [`args`] builds its arguments from typed fields only;
+//! graphics card among them; [`args`] builds its arguments from typed fields only, with the
+//! LoRA tags of its prompt file from `lora_tags` (re-exported from [`args`]);
 //! [`progress`] reads its progress bar and stages from its output; [`failure`] names why
 //! a run failed; [`run`] runs one job, with Stop, the out-of-memory retry and the stall, and
 //! lists the engine's devices. `testing` is the fake engine the tests start. Every assumption
@@ -15,6 +16,7 @@ pub mod devices;
 pub mod engine;
 pub mod failure;
 pub mod lock;
+mod lora_tags;
 pub mod progress;
 pub mod run;
 #[doc(hidden)]
