@@ -577,6 +577,16 @@ impl StudioManager {
 }
 
 impl Inner {
+    /// Why installed model `id` is not offered to a local run: a row with no engine recipe
+    /// yet needs setting up (ruling U4-needs-setup-create); without a row, or one that cannot
+    /// be read, it is not installed (any more).
+    async fn not_offered(&self, id: &str) -> AppError {
+        match self.deps.store.get_gen_model(id).await {
+            Ok(Some(row)) if row.recipe_id.is_none() => errors::needs_set_up(),
+            _ => errors::local_model_missing(),
+        }
+    }
+
     /// `req` checked against its installed model: the model from the provider's list (it
     /// reads the store, never the network), the seed added, the settings checked, the job's
     /// shape and its verdict.
@@ -590,18 +600,18 @@ impl Inner {
             .fetch_catalog()
             .await
             .map_err(|e| local_ending(&e, req.kind, self.cap_of(req.kind)).error)?;
-        let model = parse_catalog(Company::Local, &raw, &BTreeMap::new())
+        let Some(model) = parse_catalog(Company::Local, &raw, &BTreeMap::new())
             .into_iter()
             .find(|m| m.id == req.model)
-            .ok_or_else(errors::local_model_missing)?;
+        else {
+            return Err(self.not_offered(&req.model).await);
+        };
         if req.kind != model.kind {
             return Err(errors::wrong_kind(model.kind));
         }
-        let (row, entry) = lane
-            .provider
-            .entry_of(&model.id)
-            .await
-            .ok_or_else(errors::local_model_missing)?;
+        let Some((row, entry)) = lane.provider.entry_of(&model.id).await else {
+            return Err(self.not_offered(&model.id).await);
+        };
         let mut params = req.params.clone();
         let seed = pick_seed(&model, &mut params);
         let request = MediaRequest {

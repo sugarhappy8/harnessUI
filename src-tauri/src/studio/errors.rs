@@ -1225,6 +1225,19 @@ pub fn local_model_missing() -> AppError {
     )
 }
 
+/// A local run of an installed model with no engine recipe yet (*Set it up yourself*): it is
+/// on this computer, but its type and files are not chosen (ruling U4-needs-setup-create). The
+/// code is a set-up's that lacks files, so the webview words it as one; never
+/// [`local_model_missing`], which is for a model that is not installed.
+pub fn needs_set_up() -> AppError {
+    AppError::new(
+        "studio_setup_incomplete",
+        "This model's files need setting up first.",
+        "Open Settings → Files to choose its type and files.",
+        NO_RECIPE_YET,
+    )
+}
+
 // ---- Get local models ------------------------------------------------------------------------
 
 /// *Set it up yourself* on a model a download not finished yet adds or replaces (an earlier

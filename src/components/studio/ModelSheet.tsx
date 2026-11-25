@@ -203,6 +203,8 @@ function SheetBody(props: {
       // Its files are chosen in Settings → Files: the draft goes to it, and the panel opens
       // there, giving focus back to the chip as it closes.
       chooseModel(tab, "thisComputer", row.model.id);
+      // The panel takes focus (and gives it back to the chip): the sheet does not take it back.
+      onHandOff();
       onClose();
       chipButton()?.focus();
       setSettingsOpen(true, "files");

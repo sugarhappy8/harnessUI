@@ -5449,6 +5449,49 @@ async fn the_weighting_syntax_cannot_carry_a_refused_prompt_past_the_check() {
     assert_eq!(h.local.starts(), 0);
 }
 
+/// Ruling U4-needs-setup-create: a local run of an installed model with no engine recipe yet
+/// (*Set it up yourself*) is refused as needing setting up, with Settings → Files as the next
+/// step, never as not installed; a model with no row at all is not installed. Nothing is
+/// stored or started either way.
+#[tokio::test]
+async fn a_local_run_of_a_model_that_needs_setting_up_is_never_called_not_installed() {
+    let h = harness_with_local().await;
+    let row = installed_row(&h.local.entry_of(KLEIN).await.unwrap().1);
+    h.store
+        .insert_gen_model(store::NewGenModel {
+            id: "local:0123456789abcdef".into(),
+            catalog_id: None,
+            name: "mystery".into(),
+            kind: row.kind,
+            family: row.family,
+            recipe_id: None,
+            parts: json!([{"role": "model", "file": "/home/me/mystery.safetensors", "size": 4}]),
+            size_bytes: 4,
+            source: store::GenSource::Import,
+        })
+        .await
+        .unwrap();
+    let err = h
+        .manager
+        .start(h.local_req_for("local:0123456789abcdef", "a fox"), false)
+        .await
+        .unwrap_err();
+    assert_eq!(err.code, "studio_setup_incomplete");
+    assert_eq!(err.message, "This model's files need setting up first.");
+    assert_eq!(
+        err.next_step,
+        "Open Settings → Files to choose its type and files."
+    );
+    let gone = h
+        .manager
+        .start(h.local_req_for("local:fedcba9876543210", "a fox"), false)
+        .await
+        .unwrap_err();
+    assert_eq!(gone.code, "studio_local_model_missing");
+    assert!(h.store_runs().await.is_empty());
+    assert_eq!(h.local.starts(), 0);
+}
+
 #[tokio::test]
 async fn a_local_prompt_over_4000_characters_is_refused_before_anything_is_stored() {
     let h = harness_with_local().await;

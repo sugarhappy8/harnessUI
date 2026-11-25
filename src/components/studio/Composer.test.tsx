@@ -671,6 +671,51 @@ describe("Composer", () => {
     expect(api.studioStart).toHaveBeenCalledTimes(1);
   });
 
+  it("a model that needs setting up holds Create back, says why, and its control opens Files", async () => {
+    const mystery = LOCAL.installed.find((m) => m.needsSetup)!;
+    await show({ estimate: here() });
+    typePrompt("a fox");
+    await estimated();
+    expect(createButton().disabled).toBe(false);
+    vi.mocked(api.studioEstimate).mockClear();
+    // Picked in the model sheet (Task U4): the draft goes to it.
+    await act(async () => {
+      useStudio.getState().chooseModel("image", "thisComputer", mystery.model.id);
+    });
+    await estimated();
+    expect(useStudio.getState().drafts.image.model).toBe(mystery.model.id);
+    expect(createButton().disabled).toBe(true);
+    // Its own reason, read out with Create; nothing is asked of the backend for it.
+    const why = screen.getByText("Choose this model's type and files first.");
+    expect(createButton().getAttribute("aria-describedby")).toContain(why.parentElement!.id);
+    expect(api.studioEstimate).not.toHaveBeenCalled();
+    fireEvent.keyDown(promptBox(), { key: "Enter" });
+    await flush();
+    expect(api.studioStart).not.toHaveBeenCalled();
+    await click(screen.getByRole("button", { name: "Set it up yourself" }));
+    expect(useStudio.getState()).toMatchObject({ settingsOpen: true, settingsSection: "files" });
+  });
+
+  it("a model that may not fit keeps Create on, and is not held back as needing set-up", async () => {
+    const sdxl = LOCAL.installed.find((m) => m.version === "sdxl" && !m.untested)!;
+    const tight: InstalledLocal = {
+      ...sdxl,
+      fit: { ...sdxl.fit, word: "notHere", verdict: "red", reason: "needs 9 GB of graphics memory" },
+    };
+    await show({
+      local: { ...LOCAL, installed: LOCAL.installed.map((m) => (m === sdxl ? tight : m)) },
+      prefs: prefs({ lastModel: { image: { target: "thisComputer", model: sdxl.model.id } } }),
+      estimate: here({ fit: "notHere", reason: "needs 9 GB of graphics memory" }, { eta: null }),
+    });
+    expect(useStudio.getState().drafts.image.model).toBe(sdxl.model.id);
+    typePrompt("a fox");
+    await estimated();
+    expect(createButton().disabled).toBe(false);
+    expect(screen.queryByRole("button", { name: "Set it up yourself" })).toBeNull();
+    await click(createButton());
+    expect(api.studioStart).toHaveBeenCalledTimes(1);
+  });
+
   describe("a cloud model", () => {
     it("Create shows the price for the whole run", async () => {
       await show({ prefs: prefs({ lastModel: CLOUD_LAST }) });

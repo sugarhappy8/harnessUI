@@ -1,6 +1,6 @@
 import { useEffect, useId, useMemo, useRef, useState, type KeyboardEvent } from "react";
 import { SlidersHorizontal, X } from "lucide-react";
-import { STUDIO_ACTIONS, STUDIO_COMPOSER, STUDIO_DOCK, STUDIO_FIELDS } from "../../lib/words";
+import { SETUP, STUDIO_ACTIONS, STUDIO_COMPOSER, STUDIO_DOCK, STUDIO_FIELDS } from "../../lib/words";
 import {
   draftModel,
   endpointOf,
@@ -38,7 +38,8 @@ import type { MediaModel, RefItem, RefRole } from "./types";
 // Create. Under the card, one quiet line says where the prompt goes; the chip's dot says it too.
 //
 // The estimate is asked of the backend once the draft has stayed as it is for 150 ms (it sends
-// nothing anywhere); Create never waits for it. Create is held back only for no model, the
+// nothing anywhere); Create never waits for it. Create is held back only for no model (or one
+// that needs setting up, which says so with *Set it up yourself*: Settings → Files), the
 // prompt's own checks (judged here on the prompt as it is), a required input picture missing,
 // a mask without its picture to change, a setting the model refuses (from the answer shown, for
 // this model and place, or a field holding what cannot be sent), extra settings held for the
@@ -113,10 +114,18 @@ export function Composer(props: { tab: StudioTab }) {
   const dismissRefusal = useStudio((s) => s.dismissRefusal);
   const dismissNote = useStudio((s) => s.dismissNote);
   const openSheet = useStudio((s) => s.openSheet);
+  // An installed model whose type and files are not chosen yet (picked in the model sheet,
+  // Task U4): its files are set in Settings → Files.
+  const needsSetup = useStudio(
+    (s) =>
+      s.drafts[tab].target === "thisComputer" &&
+      (s.local?.installed.some((m) => m.needsSetup && m.model.id === s.drafts[tab].model) ?? false),
+  );
   const promptRef = useRef<HTMLTextAreaElement>(null);
   // What Create would cost or take, and what holds it back, read out with it.
   const aboutId = useId();
   const whyId = useId();
+  const unusableId = useId();
   // What the prompt itself lacks, read out with the prompt box.
   const promptAboutId = useId();
   // Whether the prompt was typed in (so an empty one was emptied on purpose), and each press
@@ -132,9 +141,13 @@ export function Composer(props: { tab: StudioTab }) {
     const req = startRequestOf(tab, draft, "");
     return req ? requestKey(req) : null;
   }, [tab, draft]);
+  // Why the draft's model cannot be used as it is (it needs setting up): nothing to estimate,
+  // and Create waits, as without a model (ruling U4-needs-setup-create). A model that may not
+  // fit this computer is usable: Create stays on for it.
+  const unusable = model?.usable ?? null;
   useEffect(() => {
-    if (key !== null) void estimate(tab);
-  }, [tab, key, model, prefs, usage, estimate]);
+    if (key !== null && unusable === null) void estimate(tab);
+  }, [tab, key, unusable, model, prefs, usage, estimate]);
 
   // Edit prompt, on a card or in the viewer, puts the cursor here.
   useEffect(() => {
@@ -162,7 +175,8 @@ export function Composer(props: { tab: StudioTab }) {
   // The daily limit has taken Create's place (Enter included).
   const overLimit = !here && known !== null && !known.limit.wouldPass;
   // Extra settings held aside until the model's price says which it takes: Create waits for it.
-  const disabled = model === null || key === null || starting || blocked || overLimit || holding;
+  const disabled =
+    model === null || unusable !== null || key === null || starting || blocked || overLimit || holding;
   const longRun = local?.over15Min ? etaText(known?.eta ?? null) : null;
   // Cloud as the backup for a very slow local run (not for one that may not fit: Task G2).
   const backup = here && local?.verySlow ? cloudBackup(tab, known, endpoints) : null;
@@ -170,6 +184,7 @@ export function Composer(props: { tab: StudioTab }) {
   // Create is described by its time or price, and by what holds it back.
   const describedBy = [
     time ? aboutId : "",
+    unusable !== null ? unusableId : "",
     promptRefused.length > 0 ? promptAboutId : "",
     inputsRefused.length > 0 || settingsRefused.length > 0 ? whyId : "",
   ]
@@ -229,6 +244,24 @@ export function Composer(props: { tab: StudioTab }) {
               ))}
             </div>
           )}
+          {unusable !== null && (
+            <div id={unusableId} className="flex flex-wrap items-center gap-x-2 gap-y-1 text-xs">
+              <p className="text-warning">{unusable}</p>
+              {needsSetup && (
+                <button
+                  type="button"
+                  onClick={(e) => {
+                    // Focused first (WebKit), so the panel gives focus back here as it closes.
+                    e.currentTarget.focus();
+                    setSettingsOpen(true, "files");
+                  }}
+                  className={`${SECONDARY_BUTTON} ${FOCUS_RING}`}
+                >
+                  {SETUP.yourself}
+                </button>
+              )}
+            </div>
+          )}
           {(inputsRefused.length > 0 || settingsRefused.length > 0) && (
             <div id={whyId} className="flex flex-col gap-0.5 text-xs">
               {inputsRefused.map((sentence) => (
@@ -244,7 +277,7 @@ export function Composer(props: { tab: StudioTab }) {
             </div>
           )}
           {holding && <p className="text-xs text-fg-muted">{STUDIO_DOCK.holdingExtra(priceFailed)}</p>}
-          {shown?.error && (
+          {shown?.error && unusable === null && (
             <p className="text-xs text-fg-muted">
               {shown.error.message} {shown.error.nextStep}
             </p>
