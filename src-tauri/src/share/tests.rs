@@ -1866,9 +1866,19 @@ async fn choosing_another_port() {
     );
     assert_eq!(sharing.status(&env).await.port, Some(free));
     assert!(port_open(free).await);
-    // A free one moves the proxy there.
+    // A free one moves the proxy there. Asked over a few tries, as the app takes a kept port
+    // back: a child another test is starting may hold a copy of `taken` for a moment.
     drop(taken);
-    let moved = sharing.set_port(&env, taken_port).await.unwrap();
+    let mut tries = 1;
+    let moved = loop {
+        match sharing.set_port(&env, taken_port).await {
+            Err(e) if e.code == "share_port_taken" && tries < KEPT_PORT_TRIES => {
+                tries += 1;
+                tokio::time::sleep(KEPT_PORT_WAIT).await;
+            }
+            moved => break moved.unwrap(),
+        }
+    };
     assert_eq!(moved.port, Some(taken_port));
     assert!(moved.listening);
     assert!(port_open(taken_port).await);
