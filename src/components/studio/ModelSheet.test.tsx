@@ -13,7 +13,7 @@ import { amountGb } from "../../lib/words";
 import type { StudioTab } from "../../store/studio";
 import { UiProviders } from "../ui/UiProviders";
 import { LOCAL, MODELS, RUN } from "./fixtures/models";
-import type { PickerFilter } from "./modelSheet";
+import type { PickerFilter } from "./sheetModels";
 import type { InstalledLocal, LocalModels, MediaModel, Run, StudioEndpoint, StudioPrefs } from "./types";
 
 // Radix positions popovers with ResizeObserver, which jsdom does not have.
@@ -27,7 +27,7 @@ vi.mock("../../lib/ipc", () => ({ isTauri: () => true }));
 vi.mock("./api");
 
 const api = await import("./api");
-const { localHint, pickerGroups, priceHint, sheetSections } = await import("./modelSheet");
+const { localHint, pickerGroups, priceHint, sheetSections } = await import("./sheetModels");
 const { ModelChip } = await import("./ModelChip");
 const { recentChoices, recentModels, useStudio } = await import("../../store/studio");
 

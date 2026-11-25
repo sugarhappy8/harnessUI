@@ -36,7 +36,7 @@ import {
   warns,
   type SheetCloudGroup,
   type SheetModel,
-} from "./modelSheet";
+} from "./sheetModels";
 import { SECONDARY_BUTTON } from "./styles";
 import type { InstalledLocal } from "./types";
 
@@ -50,7 +50,7 @@ import type { InstalledLocal } from "./types";
 // its notes behind an info icon, and its price). An endpoint without a key, or without its lists,
 // is one row with its fix. Its foot has *Add a model file* and *Get more models*. The arrow keys
 // move through the models, Enter picks one (the sheet closes), Esc closes it, and focus goes back
-// to the chip. What it lists is worked out in modelSheet.ts.
+// to the chip. What it lists is worked out in sheetModels.ts.
 
 /** Below this window width the sheet slides in at full height (0.1.2's panel narrows here). */
 export const SHEET_MIN_WIDTH = 1000;

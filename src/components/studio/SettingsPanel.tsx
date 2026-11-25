@@ -6,7 +6,7 @@ import { draftModel, endpointOf, priceNotAsked, useStudio, type Draft, type Stud
 import { ErrorBanner } from "../ErrorBanner";
 import { AdvancedDrawer } from "./AdvancedDrawer";
 import { visibleFields } from "./canonical";
-import { localHint, priceHint } from "./modelSheet";
+import { localHint, priceHint } from "./sheetModels";
 import { clipAsks, SettingField } from "./SettingField";
 import { BOX, SMALL_BUTTON } from "./styles";
 import type { Setup } from "./types";
