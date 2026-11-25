@@ -1,17 +1,19 @@
-import { useRef, type ReactNode } from "react";
+import { useRef, type ReactNode, type RefObject } from "react";
 import { Dialog } from "radix-ui";
 import { X } from "lucide-react";
 import { UI } from "../../lib/words";
 import { FOCUS_RING } from "./styles";
 
 /** A panel that slides in from the right. Modal by default: focus stays inside, Esc closes it
- *  and focus returns to what opened it. `modal: false` leaves the page behind it usable. */
+ *  and focus returns to what opened it. `modal: false` leaves the page behind it usable. Focus
+ *  goes to `initialFocus` as it opens, when given (a search box), else to its first control. */
 export function SlideOver(props: {
   open: boolean;
   onOpenChange(open: boolean): void;
   title: string;
   width: "panel" | "half";
   modal?: boolean;
+  initialFocus?: RefObject<HTMLElement | null>;
   children: ReactNode;
 }) {
   const modal = props.modal ?? true;
@@ -24,8 +26,13 @@ export function SlideOver(props: {
         {modal && <Dialog.Overlay className="fixed inset-0 z-40 bg-fg/30" />}
         <Dialog.Content
           aria-describedby={undefined}
-          onOpenAutoFocus={() => {
+          onOpenAutoFocus={(e) => {
             opener.current = document.activeElement;
+            const first = props.initialFocus?.current;
+            if (first) {
+              e.preventDefault();
+              first.focus();
+            }
           }}
           onCloseAutoFocus={(e) => {
             e.preventDefault();

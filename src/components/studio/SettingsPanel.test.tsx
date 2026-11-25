@@ -1,7 +1,8 @@
-// Studio's side panel (0.1.0 Task B5; shown only when asked for since Task U3): the Model field
-// and where the model runs, the simple fields in the model's order (a video's length and
-// resolution at their cheap defaults, a local video's chips each with its own time here), and
-// the Advanced toggle with its change count. Shape and How many's menus and the picture zones
+// Studio's side panel (0.1.0 Task B5; shown only when asked for since Task U3): the model's name
+// and where it runs, its price with *Get the price* (the model picker's until Task U4), the
+// simple fields in the model's order (a video's length and resolution at their cheap defaults, a
+// local video's chips each with its own time here), and the Advanced toggle with its change
+// count. Shape and How many's menus and the picture zones
 // are the composer's (Composer.test.tsx).
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { act, cleanup, fireEvent, render, screen, within } from "@testing-library/react";
@@ -350,6 +351,112 @@ describe("SettingsPanel", () => {
 
 // The same five cases are pinned on the backend's side by `size_of_matches_the_webviews_local_clip_size`
 // in src-tauri/src/studio/local.rs: a change to either rule shows in both tests.
+describe("the price line (moved from the model picker, Task U4)", () => {
+  const k3 = model("krea/k3-edit");
+  /** A price request that could not reach OpenRouter. */
+  const unreachable = {
+    code: "network",
+    message: "OpenRouter could not be reached.",
+    nextStep: "Check the connection and try again.",
+    details: "",
+  };
+  async function click(el: HTMLElement) {
+    await act(async () => {
+      fireEvent.click(el);
+    });
+    await flush();
+  }
+  async function pick(m: MediaModel, target: RunTarget = { endpoint: 1 }) {
+    await act(async () => {
+      useStudio.getState().chooseModel(m.kind, target, m.id);
+    });
+    await flush();
+  }
+
+  it("names the model, and a local model's time here", async () => {
+    await renderPanel(klein, { target: "thisComputer" });
+    screen.getByText("FLUX.2 klein 4B");
+    screen.getByText("about 2 min a picture");
+  });
+
+  it("a restored model fetches no price when Studio opens", async () => {
+    const unpriced = { ...flare, priceFetchedAt: null };
+    await load({
+      endpoints: [endpoint([unpriced, nano, k3])],
+      prefs: prefs({ lastModel: { image: { target: { endpoint: 1 }, model: unpriced.id } } }),
+    });
+    await act(async () => {
+      render(<SettingsPanel tab="image" />);
+    });
+    expect(api.studioModelPrice).not.toHaveBeenCalled();
+    expect(api.studioRefreshModels).not.toHaveBeenCalled();
+    screen.getByText("price shown when picked");
+    vi.mocked(api.studioModelPrice).mockResolvedValue(flare);
+    await click(screen.getByRole("button", { name: "Get the price" }));
+    expect(api.studioModelPrice).toHaveBeenCalledTimes(1);
+    expect(api.studioModelPrice).toHaveBeenCalledWith(1, unpriced.id);
+    // Priced per token, as the answer says.
+    screen.getByText("price unknown");
+    expect(screen.queryByRole("button", { name: "Get the price" })).toBeNull();
+  });
+
+  it("a price that could not be got when picked says so, and Get the price asks again", async () => {
+    await load();
+    await act(async () => {
+      render(<SettingsPanel tab="image" />);
+    });
+    vi.mocked(api.studioModelPrice).mockRejectedValueOnce(unreachable);
+    await pick(nano);
+    expect(api.studioModelPrice).toHaveBeenCalledTimes(1);
+    expect(screen.getByRole("alert").textContent).toContain("OpenRouter could not be reached.");
+    screen.getByText("price shown when picked");
+    vi.mocked(api.studioModelPrice).mockResolvedValue({
+      ...nano,
+      priceFetchedAt: 1794909600000,
+      price: { unit: "image", low: 0.04, high: 0.04 },
+    });
+    await click(screen.getByRole("button", { name: "Get the price" }));
+    expect(api.studioModelPrice).toHaveBeenCalledTimes(2);
+    expect(screen.queryByRole("alert")).toBeNull();
+    screen.getByText("$0.04 a picture");
+  });
+
+  it("a price error, or a price on its way, stays with its model", async () => {
+    const unpriced = { ...flare, priceFetchedAt: null };
+    await load({
+      endpoints: [endpoint([unpriced, nano, k3])],
+      prefs: prefs({ lastModel: { image: { target: { endpoint: 1 }, model: unpriced.id } } }),
+    });
+    await act(async () => {
+      render(<SettingsPanel tab="image" />);
+    });
+    vi.mocked(api.studioModelPrice).mockRejectedValueOnce(unreachable);
+    await click(screen.getByRole("button", { name: "Get the price" }));
+    screen.getByRole("alert");
+    // Another model: the error was for the one before.
+    await pick(klein, "thisComputer");
+    expect(screen.queryByRole("alert")).toBeNull();
+    expect(useStudio.getState().priceError.image).toBeNull();
+    // A price on its way for GPT Image 2.6 Flare while another model is picked.
+    let fail: (e: unknown) => void = () => undefined;
+    vi.mocked(api.studioModelPrice).mockReturnValue(new Promise((_, reject) => (fail = reject)));
+    await pick(nano);
+    expect(screen.queryByRole("alert")).toBeNull();
+    await pick(unpriced);
+    const asking = screen.getByRole("button", { name: "Get the price" }) as HTMLButtonElement;
+    await click(asking);
+    expect(asking.disabled).toBe(true);
+    await pick(nano);
+    expect((screen.getByRole("button", { name: "Get the price" }) as HTMLButtonElement).disabled).toBe(false);
+    // Both requests fail: only the one for the model shown is said, once.
+    await act(async () => {
+      fail(unreachable);
+    });
+    await flush();
+    expect(screen.getAllByRole("alert")).toHaveLength(1);
+  });
+});
+
 describe("localClipSize", () => {
   it("follows the shape and resolution on the model's multiple and longest side", () => {
     expect(localClipSize(wan, { resolution: "480p" })).toEqual({ w: 832, h: 480 });

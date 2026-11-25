@@ -22,7 +22,6 @@ import { cloudBackup, COST_TONE_CLASS, costTone, createLabel, limitLine, placeLi
 import { etaText } from "./eta";
 import { InputZones } from "./InputZones";
 import { ModelChip } from "./ModelChip";
-import { ModelPicker } from "./ModelPicker";
 import { RefTray } from "./RefTray";
 import { COMPOSER_CHIP, SECONDARY_BUTTON } from "./styles";
 import type { MediaModel, RefItem, RefRole } from "./types";
@@ -33,7 +32,7 @@ import type { MediaModel, RefItem, RefRole } from "./types";
 // Shift+Enter adds a line). Under it, what holds Create back and why a press was refused, the
 // note of what a model switch changed (while the side panel is closed: the panel shows it when
 // open), and the changed settings as chips (ChipsRow). Then a toolbar: the model chip, which
-// opens the model picker (ModelChip.tsx), Shape, How many and a video's Length as menus
+// opens the model sheet (ModelChip.tsx), Shape, How many and a video's Length as menus
 // (ComposerMenus.tsx), Settings, which opens the side panel, and at its end the price of the
 // whole run (a cloud model, its colour a second cue) or the time here (a local one) beside
 // Create. Under the card, one quiet line says where the prompt goes; the chip's dot says it too.
@@ -113,7 +112,7 @@ export function Composer(props: { tab: StudioTab }) {
   const cancelStart = useStudio((s) => s.cancelStart);
   const dismissRefusal = useStudio((s) => s.dismissRefusal);
   const dismissNote = useStudio((s) => s.dismissNote);
-  const openPicker = useStudio((s) => s.openPicker);
+  const openSheet = useStudio((s) => s.openSheet);
   const promptRef = useRef<HTMLTextAreaElement>(null);
   // What Create would cost or take, and what holds it back, read out with it.
   const aboutId = useId();
@@ -269,7 +268,7 @@ export function Composer(props: { tab: StudioTab }) {
           {backup === "useCloud" && (
             <div className="flex flex-wrap items-center gap-2 text-xs text-fg-muted">
               <p>{STUDIO_DOCK.tooSlow}</p>
-              <button type="button" className={SECONDARY_BUTTON} onClick={() => openPicker("cloud")}>
+              <button type="button" className={SECONDARY_BUTTON} onClick={() => openSheet(true, "cloud")}>
                 {STUDIO_DOCK.chooseCloud}
               </button>
             </div>
@@ -289,7 +288,7 @@ export function Composer(props: { tab: StudioTab }) {
           onKeyDown={toolbarArrows}
           className="flex flex-wrap items-center gap-1.5"
         >
-          <ModelPicker tab={tab} anchor={(onPress) => <ModelChip tab={tab} onOpen={onPress} />} />
+          <ModelChip tab={tab} />
           <ShapeMenu tab={tab} />
           <CountMenu tab={tab} />
           <LengthMenu tab={tab} />

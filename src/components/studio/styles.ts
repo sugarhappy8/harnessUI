@@ -28,10 +28,6 @@ export const RUN_CARD = "enter flex flex-col gap-1.5 rounded-xl border border-bo
 /** A notice's card above the card stream. */
 export const NOTICE_CARD = "enter rounded-xl border border-border bg-surface p-3.5 shadow-soft";
 
-/** A chip that is pressed or not (`aria-pressed`): the model picker's filters. */
-export const CHIP_PRESSED =
-  "rounded-full border border-border px-2 py-0.5 text-xs hover:border-border-strong aria-pressed:border-accent aria-pressed:text-accent";
-
 /** A chip that is checked or not (`aria-checked`): a setting's choices. */
 export const CHIP_CHECKED =
   "rounded-full border border-border px-2 py-0.5 text-xs whitespace-nowrap hover:border-border-strong aria-checked:border-accent aria-checked:text-accent aria-expanded:border-border-strong";

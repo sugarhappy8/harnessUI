@@ -64,6 +64,15 @@ const mainToTop = (page) =>
 
 const typePrompt = (page) => page.getByRole("textbox", { name: "Prompt" }).fill(PROMPT);
 
+/** The model sheet, opened from the composer's model chip. */
+async function openSheet(page) {
+  await page.locator("[data-model-chip] button").click();
+  await settle(page, 600);
+}
+
+/** A model's row or Recent tile in the open model sheet. */
+const sheetRow = (page, name) => page.getByRole("dialog", { name: "Choose a model" }).getByRole("button", { name }).first();
+
 async function openLocalModels(page) {
   await page.getByRole("button", { name: "Get models" }).click();
   await settle(page, 700);
@@ -109,8 +118,7 @@ const SCREENS = [
     name: "b-model-picker-open",
     run: async (page) => {
       await open(page);
-      await page.locator("[data-model-picker] button").first().click();
-      await settle(page, 600);
+      await openSheet(page);
     },
   },
   {
@@ -124,12 +132,8 @@ const SCREENS = [
       await settle(page, 300);
       await page.getByRole("menuitemradio", { name: "2", exact: true }).click();
       await settle(page, 300);
-      await page.locator("[data-model-picker] button").first().click();
-      await settle(page, 500);
-      await page
-        .getByRole("listbox", { name: "via OpenRouter" })
-        .getByRole("option", { name: /^Nano Banana 2\.1\s*Edit/ })
-        .click();
+      await openSheet(page);
+      await sheetRow(page, /^Nano Banana 2\.1(?! Pro)/).click();
       await settle(page, 900);
     },
   },
@@ -333,9 +337,8 @@ const SCREENS = [
     run: async (page) => {
       await open(page);
       // The SDXL inpainting model, picked from the composer's model chip: its zones show.
-      await page.locator("[data-model-picker] button").first().click();
-      await settle(page, 500);
-      await page.getByRole("option", { name: /^sd_xl_inpainting_0\.1/ }).click();
+      await openSheet(page);
+      await sheetRow(page, /^sd_xl_inpainting_0\.1/).click();
       await settle(page, 500);
       await page.getByRole("textbox", { name: "Prompt" }).fill("A red door in a whitewashed wall");
       await settle(page, 600);
@@ -353,8 +356,27 @@ const SCREENS = [
     name: "z2-first-use-model-picker",
     run: async (page) => {
       await open(page, "view=studio&empty=1");
-      await page.locator("[data-model-picker] button").first().click();
-      await settle(page, 600);
+      await openSheet(page);
+    },
+  },
+  {
+    id: "n",
+    name: "n-import-dialog",
+    run: async (page) => {
+      // Add a model file from the model sheet's foot; the mocked file chooser answers at once.
+      await open(page);
+      await openSheet(page);
+      await page.getByRole("dialog", { name: "Choose a model" }).getByRole("button", { name: "Add a model file" }).click();
+      await settle(page, 900);
+    },
+  },
+  {
+    id: "q",
+    name: "q-model-sheet-narrow",
+    viewport: { width: 900, height: 650 },
+    run: async (page) => {
+      await open(page);
+      await openSheet(page);
     },
   },
   {

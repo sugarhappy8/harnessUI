@@ -69,23 +69,24 @@ worktree and run it there. The tag and the harness are in the 0.2.0 plan notes u
 
 ## Screens taken (`shoot.mjs`)
 
-`a` main view with results and a typed prompt · `b` model picker open · `b2` after switching
-to a cloud model (with the "what changed" note) · `c0` the Studio menu · `c` Get local
+`a` main view with results and a typed prompt · `b` the model sheet open (the model picker
+before 0.2.0) · `b2` after switching to a cloud model (with the "what changed" note) · `c0` the Studio menu · `c` Get local
 models (scrolled to its top) · `c2` Get local models as it opens · `d` Hugging Face results ·
 `d2` a supported result opened · `d3` an unsupported result opened · `e0` the local-model
 notice before a first download · `e` the download dialog · `e2` the row while downloading ·
 `f` Advanced open (the side panel, from Settings) · `f2` the whole side panel, docked (tall
 1440 px viewport) · `g` gallery grid (top) · `g2` grid as it opens · `h` viewer · `i`, `i2`
 Settings -> Studio · `j` main view at 900x650 · `k` Video tab · `o` the SDXL inpainting model
-chosen, with its Picture to change and Mask zones · `z1`, `z2` first use (empty, picker) ·
-`x1` chat, `x2` chat model menu, `x3` Models dialog (for comparison).
+chosen, with its Picture to change and Mask zones · `n` *Add a model file*, from the model
+sheet's foot, with the file read · `q` the model sheet at 900x650 (a full-height sheet) ·
+`z1`, `z2` first use (empty, the model sheet) · `x1` chat, `x2` chat model menu, `x3` Models dialog (for comparison).
 
 ## Updating it for a redesign
 
 - New or renamed commands: add a `case` in `mock/ipc.ts`; the table's "unanswered commands"
   column names any command a screen called that the mock does not answer.
 - New labels or layout: the selectors in `shoot.mjs` use roles and visible names
-  (`getByRole("button", { name: "Studio menu" })`, `[data-model-picker]`, `[data-studio-view] main`);
+  (`getByRole("button", { name: "Studio menu" })`, `[data-model-chip] button`, `[data-studio-view] main`);
   change the step for a screen whose control moved, keep the file names so before/after pairs
   line up.
 - Fonts: the app's stack names Segoe UI / SF; on Linux fontconfig resolves it to Inter.

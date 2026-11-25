@@ -281,27 +281,27 @@ def studio_tab(s, label: str):
 
 
 # 0.2.0 (Task U3): the composer at the foot of Studio's results holds the prompt, the model chip
-# (which opens the model picker), Shape, How many and a video's Length as menus, Settings and
+# (which opens the model sheet, Task U4), Shape, How many and a video's Length as menus, Settings and
 # Create; the side panel (Settings), with the model's other fields, is closed until Settings
 # opens it (a slide-over below 1400 px, docked beside the results from there).
 MODEL_CHIP = "return document.querySelector('[data-composer] [data-model-chip] button');"
 
 
 def pick_model(s, name: str):
-    """Opens the model picker from the composer's model chip and chooses the model named `name`."""
+    """Opens the model sheet from the composer's model chip and chooses the model named `name`
+    (its row, or its Recent tile)."""
     pointer_click_found(s, MODEL_CHIP, what="the model chip")
     pointer_click_found(
         s,
         """
-        return [...document.querySelectorAll('[data-radix-popper-content-wrapper] [role=option]')]
-          .find(o => o.querySelector('span').innerText.trim() === arguments[0]
+        return [...document.querySelectorAll('[data-model-sheet] [data-sheet-pick]')]
+          .find(o => o.querySelector('[data-sheet-name]').innerText.trim() === arguments[0]
                      && o.getAttribute('aria-disabled') !== 'true') || null;
         """,
         name,
-        what=f"the model {name!r} in the picker",
+        what=f"the model {name!r} in the model sheet",
     )
-    s.wait_for(lambda: s.execute("return !document.querySelector('[data-radix-popper-content-wrapper] [role=option]');"),
-               10, "the picker closed")
+    s.wait_for(lambda: s.execute("return !document.querySelector('[data-model-sheet]');"), 10, "the model sheet closed")
 
 
 def open_studio_settings(s):
@@ -475,14 +475,14 @@ def c_first_open(c, notes):
     pointer_click_found(s, MODEL_CHIP, what="the model chip")
     first = s.wait_for(lambda: s.execute(
         """
-        const pop = document.querySelector('[data-radix-popper-content-wrapper]');
-        const section = pop && pop.querySelector('section');
-        return section ? section.innerText : null;
-        """), 10, "the picker's first group")
-    assert first.startswith("On this computer"), f"the picker's first group: {first!r}"
+        const sheet = document.querySelector('[data-model-sheet]');
+        const heading = sheet && sheet.querySelector('section h3');
+        return heading ? heading.innerText.trim() : null;
+        """), 10, "the model sheet's first section")
+    assert first == "On this computer", f"the model sheet's first section: {first!r}"
     s.execute("document.dispatchEvent(new KeyboardEvent('keydown', {key: 'Escape', bubbles: true}));")
-    s.wait_for(lambda: s.execute("return !document.querySelector('[data-radix-popper-content-wrapper]');"), 10,
-               "the picker closed")
+    s.wait_for(lambda: s.execute("return !document.querySelector('[data-model-sheet]');"), 10,
+               "the model sheet closed")
     main = s.execute("return document.querySelector('[data-studio-view] main').innerText;")
     if fits:
         assert "Make pictures and videos on this computer: free, and nothing is sent." in main, main

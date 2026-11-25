@@ -1204,41 +1204,14 @@ export const STUDIO_PRICE = {
   free: "free",
 } as const;
 
-/** Studio's model picker (Task B3). */
+/** Studio's model picker (Task B3), as the model sheet and the side panel's price line keep
+ *  it (Task U4). */
 export const STUDIO_PICKER = {
-  label: "Model",
   choose: "Choose a model",
-  search: "Search models",
-  searchPlaceholder: "Search models…",
-  filters: "Show only",
-  filter: {
-    edit: "Edit",
-    references: "References",
-    startFrame: "Start frame",
-    endFrame: "End frame",
-    sound: "Sound",
-    transparent: "Transparent",
-  },
-  /** What a model takes or makes, beside its name. */
-  badge: {
-    edit: "Edit",
-    refs: (n: number) => `Refs ${n}`,
-    startFrame: "Start frame",
-    endFrame: "End frame",
-    sound: "Sound",
-    transparent: "Transparent",
-    gif: "GIF",
-    svg: "SVG",
-  },
-  recent: "Recent",
   localTag: "free · private · nothing is sent",
-  /** An endpoint's group: "via OpenRouter". */
-  via: (name: string) => `via ${name}`,
-  /** The Cloud mark's tooltip on an endpoint's group. */
+  /** Where an endpoint's prompt goes, on its group in the model sheet. */
   goesTo: (host: string) => `Your prompt and added pictures go to ${host}.`,
   noKey: "Add a key in Settings → Endpoints",
-  /** The local group's last line while more recommended models that fit are not installed. */
-  getMoreLocal: (n: number) => `+ ${STUDIO_ACTIONS.getLocalModels} (${n} more fit this computer)`,
   noLocalYet: (name: string, bytes: number) => `No local models yet. ${fitsThisComputer(name, bytes)}`,
   /** No local model of either kind fits this computer, or the Video tab where it cannot make video. */
   noLocalHere: "Local models need a graphics card or an Apple-silicon Mac; the cloud models below are the backup.",
@@ -1251,6 +1224,26 @@ export const STUDIO_PICKER = {
   getPrice: "Get the price",
   /** An endpoint of the tab's kind whose lists are not saved yet: "OpenRouter: Get the list". */
   getList: (name: string) => `${name}: ${STUDIO_ACTIONS.getTheList}`,
+} as const;
+
+/** The model sheet (Task U4, design 10.2): the composer's model chip opens it. */
+export const MODEL_SHEET = {
+  title: "Choose a model",
+  search: "Search models",
+  /** The name of the All · On this computer · Cloud chips. */
+  filters: "Show",
+  all: "All",
+  local: "On this computer",
+  cloud: "Cloud",
+  recent: "Recent",
+  priceUnknown: "price unknown",
+  canEdit: "Can change a picture",
+  transparent: "Transparent background",
+  notes: "About this model",
+  getMore: "Get more models",
+  /** The LoRAs the draft attaches to the model: "1 LoRA", "2 LoRAs". */
+  loraCount: (n: number) => (n === 1 ? "1 LoRA" : `${n} LoRAs`),
+  needsSetup: "Needs setting up",
 } as const;
 
 /** Studio's right panel and its fields (Task B5). */
@@ -2281,7 +2274,7 @@ export const LORAS = {
   unknownType: "LoRA for an unknown model type",
 } as const;
 
-/** Adding a model or LoRA file from this computer (Phase U's dialog). */
+/** Adding a model or LoRA file from this computer (Phase U's dialog, Task U4). */
 export const IMPORT = {
   addModel: "Add a model file",
   addLora: "Add a LoRA file",
@@ -2289,6 +2282,27 @@ export const IMPORT = {
   inPlace: "Use it where it is",
   reading: "Reading the file…",
   copying: "Copying…",
+  title: "Add a model file",
+  /** The extra files a model file's set-up fetches: "Also downloads 335 MB from Hugging Face". */
+  alsoDownloads: (size: string) => `Also downloads ${size} from Hugging Face`,
+  add: "Add",
+  done: "Added",
+  /** The button that closes the dialog once the file is added. */
+  finish: "Done",
+  /** Before the file chooser answers. */
+  choose: "Choose a .safetensors, .sft or .gguf file.",
+  chooseAnother: "Choose another file",
+  /** The question of how a file from outside the models folder is added. */
+  mode: "How to add it",
+  /** The extra files of a model file's set-up, under this heading. */
+  extraFiles: "Extra files",
+  /** A LoRA file, whichever button chose it. */
+  asLora: "It is added to your LoRAs.",
+  /** How far adding it is: "1.2 GB of 6.9 GB". */
+  amount: (done: string, total: string) => `${done} of ${total}`,
+  /** Added, while the files its set-up fetches download. */
+  fetching: "Its extra files are downloading; the model is ready when they finish.",
+  cancel: "Cancel",
 } as const;
 
 /** The codes of what can stop a set-up (`studio_setup_plan`, a download, *Add*): plain words

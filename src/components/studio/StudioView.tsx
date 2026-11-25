@@ -12,6 +12,7 @@ import { FOCUS_RING } from "../ui/styles";
 import { Composer } from "./Composer";
 import { Notices } from "./EmptyStates";
 import { Grid } from "./Grid";
+import { ImportDialog } from "./ImportDialog";
 import { LocalModels } from "./LocalModels";
 import { useNativePictureDrops } from "./RefTray";
 import { queueSummary, RunCard } from "./RunCard";
@@ -40,7 +41,8 @@ import { Viewer } from "./Viewer";
 // grid takes the stream's place (B9), and a result opened from a card, a tile or the chat's
 // notice shows in the viewer over the whole view. While `localView` is on, Get local models
 // (B13, LocalModels.tsx) takes the stream's place, notices and empty states included, and the
-// top bar hides its tabs and the gallery's controls; Back brings them all back.
+// top bar hides its tabs and the gallery's controls; Back brings them all back. *Add a model
+// file* (ImportDialog.tsx, Task U4) opens over the view from the model sheet or Get models.
 
 /** Whether the window is at least `DOCK_MIN_WIDTH` wide, followed as it is resized. */
 function useWideWindow(): boolean {
@@ -219,6 +221,7 @@ export function StudioView() {
         </SlideOver>
       )}
       {viewer !== null && <Viewer outputId={viewer} onClose={() => openViewer(null)} />}
+      <ImportDialog />
     </Tabs.Root>
   );
 }

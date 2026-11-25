@@ -1,18 +1,20 @@
 import { useEffect, useId, useState } from "react";
 import { X } from "lucide-react";
-import { LOCAL_MARK, STUDIO_FIELDS, STUDIO_PLACE, STUDIO_SETUPS } from "../../lib/words";
+import { LOCAL_MARK, STUDIO_FIELDS, STUDIO_PICKER, STUDIO_PLACE, STUDIO_SETUPS } from "../../lib/words";
 import { toErrorInfo } from "../../store/app";
-import { draftModel, endpointOf, useStudio, type Draft, type StudioTab } from "../../store/studio";
+import { draftModel, endpointOf, priceNotAsked, useStudio, type Draft, type StudioTab } from "../../store/studio";
+import { ErrorBanner } from "../ErrorBanner";
 import { AdvancedDrawer } from "./AdvancedDrawer";
 import { visibleFields } from "./canonical";
-import { ModelPicker } from "./ModelPicker";
+import { localHint, priceHint } from "./modelSheet";
 import { clipAsks, SettingField } from "./SettingField";
 import { BOX, SMALL_BUTTON } from "./styles";
 import type { Setup } from "./types";
 
 // Studio's right panel (0.1.0 Task B5; design Wireframe 1, local addendum "Right panel"): the
-// Model field (ModelPicker.tsx) with where the model runs ("On this computer · <device>" or
-// "via <endpoint> · Cloud"), the note of what changed, the model's simple fields in its own
+// model's name with where it runs ("On this computer · <device>" or "via <endpoint> · Cloud")
+// and its price or time here, with *Get the price* (the model sheet, from the composer's model
+// chip, switches models since Task U4), the note of what changed, the model's simple fields in its own
 // order (a frame as a drop zone; reference pictures go in the tray), My setups and the Advanced
 // drawer with its change count (Task B6, AdvancedDrawer.tsx). Each field, in either layer, is
 // drawn by SettingField.tsx. On this computer, each Length and Resolution chip of a video shows
@@ -47,7 +49,7 @@ export function SettingsPanel(props: { tab: StudioTab }) {
   if (!model) {
     return (
       <div data-settings-panel className="flex flex-col gap-4 p-3">
-        <ModelPicker tab={tab} />
+        <p className="text-sm text-fg-muted">{STUDIO_PICKER.choose}</p>
       </div>
     );
   }
@@ -63,8 +65,10 @@ export function SettingsPanel(props: { tab: StudioTab }) {
   return (
     <div data-settings-panel className="flex flex-col gap-4 p-3">
       <div className="flex flex-col gap-1">
-        <ModelPicker tab={tab} />
+        <p className="text-sm font-medium">{model.displayName}</p>
         {place && <p className="text-xs text-fg-muted">{place}</p>}
+        {/* Its state (a request on its way) belongs to the model it was for. */}
+        <ChosenLine key={`${here ? "here" : JSON.stringify(draft.target)} ${model.id}`} tab={tab} />
       </div>
       {draft.note && (
         <div role="status" className="flex items-start gap-1.5 rounded-lg bg-bg-muted px-2 py-1.5 text-xs">
@@ -93,6 +97,52 @@ export function SettingsPanel(props: { tab: StudioTab }) {
       />
       <AdvancedDrawer tab={tab} />
     </div>
+  );
+}
+
+/** Under the model's name: its price hint, with *Get the price* while an OpenRouter picture's
+ *  price was never asked for (and why the last request failed, kept by the store for the tab's
+ *  model), or a local model's time here. */
+function ChosenLine(props: { tab: StudioTab }) {
+  const { tab } = props;
+  const target = useStudio((s) => s.drafts[tab].target);
+  const model = useStudio((s) => draftModel(s, tab));
+  const local = useStudio((s) => s.local);
+  const endpoint = useStudio((s) => endpointOf(s.drafts[tab].target, s.endpoints));
+  const fetchPrice = useStudio((s) => s.fetchPrice);
+  const error = useStudio((s) => s.priceError[tab]);
+  const dismissPriceError = useStudio((s) => s.dismissPriceError);
+  const [busy, setBusy] = useState(false);
+  if (!model) return null;
+  if (target === "thisComputer") {
+    const installed = local?.installed.find((m) => m.model.id === model.id);
+    return installed ? <p className="text-xs text-fg-muted">{localHint(installed, tab)}</p> : null;
+  }
+  if (!endpoint) return null;
+
+  const getPrice = () => {
+    setBusy(true);
+    // A failure goes to the store's `priceError`.
+    void fetchPrice(tab).finally(() => setBusy(false));
+  };
+
+  return (
+    <>
+      <p className="flex flex-wrap items-center gap-x-2 gap-y-1 text-xs text-fg-muted">
+        <span>{priceHint(model, endpoint.company)}</span>
+        {priceNotAsked(model, endpoint.company) && (
+          <button
+            type="button"
+            disabled={busy}
+            onClick={getPrice}
+            className="rounded-md border border-border bg-bg px-1.5 py-0.5 text-fg hover:border-border-strong hover:bg-bg-muted disabled:opacity-60"
+          >
+            {STUDIO_PICKER.getPrice}
+          </button>
+        )}
+      </p>
+      {error && <ErrorBanner error={error} onDismiss={() => dismissPriceError(tab)} />}
+    </>
   );
 }
 

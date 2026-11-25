@@ -760,8 +760,10 @@ export function planFor(installed: InstalledLocal[], source: LocalSource, choice
       { recipes: files.recipes, fit: fitFor(6.46), toFetchBytes: 0 },
     );
   } else {
+    // A model file from this computer: the file itself, and SDXL's usual decoder to download.
     const main: Part = { ...part("model", "", source.disk.path, 6.46, "", true), local: true };
-    plan = planOf(recipe("sdxl-checkpoint", "SDXL"), [[main, "main"]], [], { fit: fitFor(6.46), toFetchBytes: 0 });
+    const vae = part("vae", "madebyollin/sdxl-vae-fp16-fix", "sdxl_vae.safetensors", 0.31, "mit");
+    plan = planOf(recipe("sdxl-checkpoint", "SDXL"), [[main, "main"], [vae, "companion"]], [], { fit: fitFor(6.46) });
   }
   const picked = choice?.recipe ? RECIPES.find((r) => r.id === choice.recipe) : undefined;
   return picked ? { ...plan, recipe: picked, recipes: RECIPES, untested: true } : plan;

@@ -370,14 +370,14 @@ describe("Composer", () => {
     expect(chip.textContent).toContain("This computer");
     const dot = within(toolbar()).getByRole("img", { name: "Where your prompt goes" });
     expect(await tipOf(dot)).toContain("On this computer: your prompt and pictures stay here");
-    // The chip opens the model picker, anchored to it.
+    // The chip opens the model sheet, anchored to it.
     await click(chip);
-    screen.getByRole("listbox", { name: "On this computer" });
-    await click(within(screen.getByRole("listbox", { name: "via OpenRouter" })).getByRole("option", { name: /GPT Image 2\.6 Flare/ }));
+    const sheet = screen.getByRole("dialog", { name: "Choose a model" });
+    await click(within(within(sheet).getByRole("region", { name: "OpenRouter" })).getByRole("button", { name: /GPT Image 2\.6 Flare/ }));
     const cloudChip = within(toolbar()).getByRole("button", { name: /GPT Image 2\.6 Flare/ });
     expect(cloudChip.textContent).toContain("OpenRouter");
-    // The picker closed with the pick, and gave focus back to the chip.
-    expect(screen.queryByRole("listbox", { name: "On this computer" })).toBeNull();
+    // The sheet closed with the pick, and gave focus back to the chip.
+    expect(screen.queryByRole("dialog", { name: "Choose a model" })).toBeNull();
     await waitFor(() => expect(document.activeElement).toBe(cloudChip));
     cleanup();
     useStudio.setState(INITIAL, true);
@@ -1047,27 +1047,28 @@ describe("Composer", () => {
       expect(cloudBackup("image", slow, [openrouter])).toBe("useCloud");
       screen.getByText("Too slow here? A cloud model makes this in minutes, for a price you see first.");
       await click(screen.getByRole("button", { name: "Choose a cloud model" }));
-      // The picker opens on the first cloud group; the draft stays where it was.
-      screen.getByRole("listbox", { name: "via OpenRouter" });
-      expect(document.activeElement?.textContent).toContain("GPT Image 2.6 Flare");
+      // The model sheet opens on Cloud; the draft stays where it was.
+      const sheet = screen.getByRole("dialog", { name: "Choose a model" });
+      expect(within(sheet).getByRole("button", { name: "Cloud" }).getAttribute("aria-pressed")).toBe("true");
+      within(within(sheet).getByRole("region", { name: "OpenRouter" })).getByRole("button", { name: /GPT Image 2\.6 Flare/ });
+      expect(within(sheet).queryByRole("region", { name: "On this computer" })).toBeNull();
       expect(useStudio.getState().drafts.image.target).toBe("thisComputer");
-      expect(useStudio.getState().pickerOpen).toBe("cloud");
+      expect(useStudio.getState()).toMatchObject({ sheetOpen: true, sheetFilter: "cloud" });
     });
 
-    it("an endpoint whose lists are not saved yet is the backup, and the picker gets its list", async () => {
+    it("an endpoint whose lists are not saved yet is the backup, and the model sheet gets its list", async () => {
       const unsaved = endpoint({ fetchedAt: null, models: [] });
       const slow = here({ fit: "slow", verySlow: true });
       await show({ endpoints: [unsaved], estimate: slow });
       expect(cloudBackup("image", slow, [unsaved])).toBe("useCloud");
       vi.mocked(api.studioRefreshModels).mockResolvedValue({ endpoints: [openrouter] });
       await click(screen.getByRole("button", { name: "Choose a cloud model" }));
-      // The picker has a row for it, and starts there: it has no model to show yet.
+      // The sheet has a row for it, on Cloud: it has no model to show yet.
       const getList = screen.getByRole("button", { name: "OpenRouter: Get the list" });
-      expect(document.activeElement).toBe(getList);
       await click(getList);
       expect(api.studioRefreshModels).toHaveBeenCalledTimes(1);
       expect(api.studioRefreshModels).toHaveBeenCalledWith(1);
-      screen.getByRole("listbox", { name: "via OpenRouter" });
+      within(screen.getByRole("region", { name: "OpenRouter" })).getByRole("button", { name: /GPT Image 2\.6 Flare/ });
       expect(screen.queryByRole("button", { name: "OpenRouter: Get the list" })).toBeNull();
       expect(useStudio.getState().drafts.image.target).toBe("thisComputer");
     });

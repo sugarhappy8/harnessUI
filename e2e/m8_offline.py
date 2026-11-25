@@ -201,7 +201,7 @@ def studio_tab(s, label: str):
 def studio_part(s, home: pathlib.Path, con_path: pathlib.Path):
     """Studio offline: opened from the sidebar, both tabs, Get local models, Settings →
     Studio again; then FLUX.2 klein 4B installed (as a download leaves it), chosen in the
-    picker under "On this computer", and one picture made by the stand-in engine."""
+    model sheet under "On this computer", and one picture made by the stand-in engine."""
     s.click_button("Studio")
     s.wait_for(lambda: s.execute("return !!document.querySelector('[data-studio-view]');"), 15, "Studio shown")
     studio_tab(s, "Video")
@@ -226,23 +226,23 @@ def studio_part(s, home: pathlib.Path, con_path: pathlib.Path):
     time.sleep(1)
     close_settings(s)
 
-    # The picker leads with this computer, and the installed model is there; it is chosen by
-    # hand, as on a computer with only a processor its fit word ("Slow here") does not make it
+    # The model sheet leads with this computer, and the installed model is there; it is chosen
+    # by hand, as on a computer with only a processor its fit word ("Slow here") does not make it
     # the default. It opens from the composer's model chip, which reads "Choose a model" while
     # the tab has none.
     s.click_button("Choose a model")
     first = s.wait_for(
         lambda: s.execute(
             """
-            const pop = document.querySelector('[data-radix-popper-content-wrapper]');
-            const box = pop && pop.querySelector('[role=listbox]');
-            return box ? box.getAttribute('aria-label') : null;
+            const sheet = document.querySelector('[data-model-sheet]');
+            const heading = sheet && sheet.querySelector('section h3');
+            return heading ? heading.innerText.trim() : null;
             """
         ),
         10,
-        "the picker's groups",
+        "the model sheet's sections",
     )
-    assert first == "On this computer", f"the picker's first group is {first!r}"
+    assert first == "On this computer", f"the model sheet's first section is {first!r}"
     s.click_button(name)
     s.wait_text("On this computer: your prompt and pictures stay here", 10)
     box = s.find("textarea[aria-label=Prompt]")

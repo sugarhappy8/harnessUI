@@ -30,7 +30,8 @@
 // in Studio's Pictures tab, and Send to chat (in ./studioResults). Task B13: Get local models'
 // tabs, hardware filter, Hugging Face search, download confirmation, repairs and the local
 // model notice are in ./studioLocal. Task U3 (0.2.0): whether the side panel (Settings) is open,
-// saved in the preferences.
+// saved in the preferences. Task U4: whether the model sheet (on which filter) and *Add a model
+// file* are open, and a pick of an installed model that needs setting up.
 import { create, type StoreApi, type UseBoundStore } from "zustand";
 import * as api from "../components/studio/api";
 import { carry, closestModel, defaultsFor, dropUnmet, familyOf, type Values } from "../components/studio/canonical";
@@ -217,13 +218,14 @@ export interface StudioState extends StudioRunState, StudioResultsState, StudioL
   /** Sets `tab`'s draft to the model used last when it is still offered, else to
    *  `defaultModel`, at that model's starting values. Fetches nothing (not even a price). */
   selectInitialModel(tab: StudioTab): void;
-  /** The user's pick in the model picker: `tab`'s draft goes to model `modelId` at `target`,
+  /** The user's pick in the model sheet: `tab`'s draft goes to model `modelId` at `target`,
    *  its settings carried there (`carry`) with a note of what changed. An OpenRouter picture
    *  model whose price was never fetched is asked for it, once; a local model never is. Its
    *  Extra field comes with that answer, so the draft's extra settings are held aside until
    *  then (`holding`) and carried to the model as it comes back (kept held when the request
    *  fails, until *Get the price* brings the answer; as listed, dropped with the note, when
-   *  another model is picked first). A model `tab` cannot use is ignored. */
+   *  another model is picked first). A model `tab` cannot use is ignored, except an installed
+   *  one that needs setting up (Task U4): the draft goes to it, so its files can be chosen. */
   chooseModel(tab: StudioTab, target: RunTarget, modelId: string): void;
   /** *Get the price*: asks for the price of `tab`'s model (a model restored when Studio opened
    *  is never asked by itself); extra settings held for it are carried to it as it comes back.
@@ -323,10 +325,17 @@ export interface StudioState extends StudioRunState, StudioResultsState, StudioL
   /** Changes only the preferences `patch` names. */
   setPrefs(patch: StudioPrefsPatch): Promise<void>;
 
-  /** The model picker opened from elsewhere: `"cloud"` on its first cloud group (*Choose a
-   *  cloud model*); `null` once it closes. */
-  pickerOpen: "cloud" | null;
-  openPicker(place: "cloud" | null): void;
+  /** Task U4: the model sheet is open, from the composer's model chip or from *Choose a cloud
+   *  model*. */
+  sheetOpen: boolean;
+  /** What the sheet shows as it opens: Cloud from *Choose a cloud model*, else All. */
+  sheetFilter: SheetFilter;
+  /** Opens the model sheet (on `filter`, All when not given) or closes it. */
+  openSheet(open: boolean, filter?: SheetFilter): void;
+  /** Task U4: *Add a model file* or *Add a LoRA file* is open, for that kind of file; `null`
+   *  while it is closed. */
+  importOpen: "model" | "lora" | null;
+  openImport(kind: "model" | "lora" | null): void;
 
   /** Task U3: Studio's side panel (Settings) is open: from `prefs.settingsOpen` when Studio
    *  first reads what is saved, then as it is opened and closed. */
@@ -339,6 +348,9 @@ export interface StudioState extends StudioRunState, StudioResultsState, StudioL
 
 /** The parts of Studio's side panel. */
 export type SettingsSection = "setups" | "advanced" | "loras" | "files";
+
+/** Which models the model sheet shows: every one, those on this computer, or the cloud's. */
+export type SheetFilter = "all" | "local" | "cloud";
 
 /** The narrowest window Studio's side panel is docked on; below it, it slides over the
  *  results (design 10.1). */
@@ -815,7 +827,9 @@ export const useStudio: UseBoundStore<StoreApi<StudioState>> = create<StudioStat
     },
     chooseModel: (tab, target, modelId) => {
       const s = get();
-      const to = offeredModel(tab, target, modelId, s.local, s.endpoints);
+      const to =
+        offeredModel(tab, target, modelId, s.local, s.endpoints) ??
+        (target === "thisComputer" ? toSetUp(tab, modelId, s.local) : null);
       if (!to) return;
       const endpoint = target === "thisComputer" ? null : s.endpoints.find((e) => e.providerId === target.endpoint);
       const unpriced = endpoint ? priceNotAsked(to, endpoint.company) : false;
@@ -1074,8 +1088,11 @@ export const useStudio: UseBoundStore<StoreApi<StudioState>> = create<StudioStat
     ...createRun(set, get, rereadUsage),
     ...createResults(set, get, { fillDraft, rereadUsage }),
     ...createLocal(set, get),
-    pickerOpen: null,
-    openPicker: (place) => set({ pickerOpen: place }),
+    sheetOpen: false,
+    sheetFilter: "all",
+    openSheet: (open, filter = "all") => set(open ? { sheetOpen: true, sheetFilter: filter } : { sheetOpen: false }),
+    importOpen: null,
+    openImport: (importOpen) => set({ importOpen }),
     settingsOpen: false,
     settingsSection: null,
     setSettingsOpen: (open, section) => {
@@ -1117,6 +1134,12 @@ function localFor(tab: StudioTab, local: LocalModels | null): LocalModels | null
  *  can make the kind. */
 export function localModelsFor(tab: StudioTab, local: LocalModels | null): InstalledLocal[] {
   return localFor(tab, local)?.installed.filter((m) => m.kind === tab && m.model.usable === null) ?? [];
+}
+
+/** The installed model `id` of `tab`'s kind that needs setting up (no recipe yet), where this
+ *  computer can make the kind; `null` for any other. */
+function toSetUp(tab: StudioTab, id: string, local: LocalModels | null): MediaModel | null {
+  return localFor(tab, local)?.installed.find((m) => m.kind === tab && m.needsSetup && m.model.id === id)?.model ?? null;
 }
 
 /** An "Auto" model, which picks a model for you: Studio never offers one, as it would hide
