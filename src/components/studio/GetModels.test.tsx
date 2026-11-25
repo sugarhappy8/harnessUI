@@ -411,6 +411,87 @@ describe("Get models", () => {
     within(section("Popular on Hugging Face")).getByRole("article", { name: "QuantStack/Wan2.2-TI2V-5B-GGUF" });
   });
 
+  describe("the popular list always ends in its list, its error with Try again, or a request on its way", () => {
+    const offline = {
+      code: "hf_offline",
+      message: "Hugging Face could not be reached.",
+      nextStep: "Check your connection.",
+      details: "",
+    };
+
+    /** "Searching…" in the Popular section: shown only while its request is on its way. */
+    function searching(): HTMLElement | null {
+      return within(section("Popular on Hugging Face")).queryByRole("status");
+    }
+
+    it("(a) a failure dismissed asks again, rather than reading Searching… with nothing asked", async () => {
+      await showLocal(LOCAL, { open: false });
+      vi.mocked(api.studioLocalSearch).mockRejectedValueOnce(offline);
+      await click(within(screen.getByRole("banner")).getByRole("button", { name: "Get models" }));
+      within(section("Popular on Hugging Face")).getByText("Hugging Face could not be reached.");
+      expect(api.studioLocalSearch).toHaveBeenCalledTimes(1);
+      let answer: (page: { items: LocalSearchHit[] }) => void = () => undefined;
+      vi.mocked(api.studioLocalSearch).mockImplementationOnce(() => new Promise((resolve) => (answer = resolve)));
+      await click(within(section("Popular on Hugging Face")).getByRole("button", { name: "Dismiss" }));
+      // Searching… is true now: a request for the list is on its way.
+      expect(api.studioLocalSearch).toHaveBeenCalledTimes(2);
+      expect(api.studioLocalSearch).toHaveBeenLastCalledWith("", "pictures");
+      expect(searching()?.textContent).toBe("Searching…");
+      await act(async () => answer({ items: [sdxlHit] }));
+      await flush();
+      expect(searching()).toBeNull();
+      within(section("Popular on Hugging Face")).getByRole("article", { name: sdxlHit.repo });
+    });
+
+    it("(b) offline, each filter keeps its own failure with Try again, and going back asks nothing more", async () => {
+      await showLocal(LOCAL, { open: false });
+      vi.mocked(api.studioLocalSearch).mockRejectedValue(offline);
+      await click(within(screen.getByRole("banner")).getByRole("button", { name: "Get models" }));
+      within(section("Popular on Hugging Face")).getByRole("button", { name: "Try again" });
+      await click(screen.getByRole("button", { name: "Video" }));
+      within(section("Popular on Hugging Face")).getByRole("button", { name: "Try again" });
+      await click(screen.getByRole("button", { name: "Pictures" }));
+      expect(searching()).toBeNull();
+      within(section("Popular on Hugging Face")).getByText("Hugging Face could not be reached.");
+      within(section("Popular on Hugging Face")).getByRole("button", { name: "Try again" });
+      // Asked once per filter while the view is open: Pictures, then Video.
+      expect(vi.mocked(api.studioLocalSearch).mock.calls).toEqual([
+        ["", "pictures"],
+        ["", "video"],
+      ]);
+      // Back online, Try again gets the list.
+      vi.mocked(api.studioLocalSearch).mockResolvedValue({ items: [sdxlHit] });
+      await click(within(section("Popular on Hugging Face")).getByRole("button", { name: "Try again" }));
+      within(section("Popular on Hugging Face")).getByRole("article", { name: sdxlHit.repo });
+      await click(screen.getByRole("button", { name: "Video" }));
+      within(section("Popular on Hugging Face")).getByRole("button", { name: "Try again" });
+    });
+
+    it("(c) a slow list whose answer is dropped for a search, after the field was emptied, is asked again", async () => {
+      await showLocal(LOCAL, { open: false });
+      let answerPopular: (page: { items: LocalSearchHit[] }) => void = () => undefined;
+      vi.mocked(api.studioLocalSearch).mockImplementationOnce(() => new Promise((resolve) => (answerPopular = resolve)));
+      await click(within(screen.getByRole("banner")).getByRole("button", { name: "Get models" }));
+      expect(searching()?.textContent).toBe("Searching…");
+      // A search asked meanwhile, then the field emptied again.
+      await searchFor("x", [loraHit]);
+      expect(api.studioLocalSearch).toHaveBeenLastCalledWith("x", "pictures");
+      typeIn(searchBox(), "");
+      await flush();
+      // The slow list answers now: the store drops it, as a search was asked after it.
+      vi.mocked(api.studioLocalSearch).mockResolvedValue({ items: [sdxlHit] });
+      await act(async () => answerPopular({ items: [luminaHit] }));
+      await flush();
+      expect(vi.mocked(api.studioLocalSearch).mock.calls).toEqual([
+        ["", "pictures"],
+        ["x", "pictures"],
+        ["", "pictures"],
+      ]);
+      expect(searching()).toBeNull();
+      within(section("Popular on Hugging Face")).getByRole("article", { name: sdxlHit.repo });
+    });
+  });
+
   it("the header shows this computer as chips", async () => {
     await showLocal();
     const header = screen.getByRole("heading", { level: 2, name: "Get models" }).closest<HTMLElement>("[data-get-models-header]")!;

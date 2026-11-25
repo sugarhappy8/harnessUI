@@ -48,6 +48,18 @@ import type {
 /** How many of the Popular list show before *Show all*: two rows of three. */
 const POPULAR_SHOWN = 6;
 
+/** A filter's Popular list while the view is open: what Hugging Face answered, or why it could
+ *  not be read. No entry: not asked yet, or its request is on its way ("Searching…"); one is
+ *  asked as soon as the list is shown without an entry. */
+type Popular = { hits: LocalSearchHit[] } | { error: ErrorInfo };
+
+/** `popular` without `filter`'s entry: its list is asked for again once it is shown. */
+function forget(popular: Partial<Record<SearchFilter, Popular>>, filter: SearchFilter) {
+  const next = { ...popular };
+  delete next[filter];
+  return next;
+}
+
 /** The kind of model each filter is for; LoRAs are for models of either kind. */
 const KIND_OF: Record<SearchFilter, MediaKind | null> = { pictures: "image", video: "video", loras: null };
 
@@ -127,11 +139,11 @@ export function GetModelsView() {
   // The words asked for ("" without a query) and what asking them gave.
   const [query, setQuery] = useState("");
   const [queryError, setQueryError] = useState<ErrorInfo | null>(null);
-  // The Popular list of each filter, as asked while the view is open.
-  const [popular, setPopular] = useState<Partial<Record<SearchFilter, LocalSearchHit[]>>>({});
-  const [popularError, setPopularError] = useState<{ filter: SearchFilter; info: ErrorInfo } | null>(null);
+  // The Popular list of each filter, as asked while the view is open, and the filters whose
+  // request is on its way (so one is never asked twice at once).
+  const [popular, setPopular] = useState<Partial<Record<SearchFilter, Popular>>>({});
   const [allPopular, setAllPopular] = useState(false);
-  const asked = useRef(new Set<SearchFilter>());
+  const asking = useRef(new Set<SearchFilter>());
   const [opened, setOpened] = useState<{ repo: string; error: ErrorInfo | null } | null>(null);
   const [error, setError] = useState<ErrorInfo | null>(null);
   const fail = (e: unknown) => setError(toErrorInfo(e));
@@ -153,21 +165,28 @@ export function GetModelsView() {
     [],
   );
 
-  // The Popular list of the filter, once while the view is open (each opening mounts it): asked
-  // again only when an answer was dropped for a search asked after it, or it failed (Try again).
+  // The Popular list of the filter, once per filter while the view is open (each opening mounts
+  // it). Each filter keeps its own list or failure. An answer the store dropped (a search was
+  // asked after it), a failure dismissed and *Try again* forget the entry, which asks again as
+  // soon as the list is shown: it always ends in its list, its failure with *Try again*, or a
+  // request on its way.
   useEffect(() => {
-    if (query !== "" || popular[filter] !== undefined || asked.current.has(filter)) return;
-    asked.current.add(filter);
+    if (query !== "" || popular[filter] !== undefined || asking.current.has(filter)) return;
     const f = filter;
+    asking.current.add(f);
     search("", f).then(
       () => {
+        asking.current.delete(f);
         const now = useStudio.getState().localSearch;
-        if (now !== null && now.text === "" && now.filter === f) setPopular((p) => ({ ...p, [f]: now.hits }));
-        else asked.current.delete(f);
+        if (now !== null && now.text === "" && now.filter === f) setPopular((p) => ({ ...p, [f]: { hits: now.hits } }));
+        else setPopular((p) => forget(p, f));
       },
-      (e: unknown) => setPopularError({ filter: f, info: toErrorInfo(e) }),
+      (e: unknown) => {
+        asking.current.delete(f);
+        setPopular((p) => ({ ...p, [f]: { error: toErrorInfo(e) } }));
+      },
     );
-  }, [filter, query, popular, popularError, search]);
+  }, [filter, query, popular, search]);
 
   function ask(text: string, f: SearchFilter) {
     setQueryError(null);
@@ -186,9 +205,9 @@ export function GetModelsView() {
     if (query !== "") ask(query, f);
   }
 
+  /** *Try again*, or the failure dismissed: the list is asked for again. */
   function retryPopular() {
-    asked.current.delete(filter);
-    setPopularError(null);
+    setPopular((p) => forget(p, filter));
   }
 
   /** Opens result `repo` in the slide-over: what was read of it this session shows at once,
@@ -201,7 +220,8 @@ export function GetModelsView() {
   }
 
   const results = query !== "" && found !== null && found.text === query && found.filter === filter ? found.hits : null;
-  const popularHits = popular[filter]?.filter((h) => resultShown(h, repos, fitsOnly)) ?? null;
+  const shownPopular = popular[filter];
+  const popularHits = shownPopular && "hits" in shownPopular ? shownPopular.hits.filter((h) => resultShown(h, repos, fitsOnly)) : null;
   const openedRepo = opened ? (repos[opened.repo] ?? null) : null;
 
   return (
@@ -244,9 +264,9 @@ export function GetModelsView() {
               )
             }
           >
-            {popularError?.filter === filter ? (
+            {shownPopular && "error" in shownPopular ? (
               <div className="flex flex-col items-start gap-2">
-                <ErrorBanner error={popularError.info} onDismiss={() => setPopularError(null)} />
+                <ErrorBanner error={shownPopular.error} onDismiss={retryPopular} />
                 <button type="button" className={`${SECONDARY_BUTTON} ${FOCUS_RING}`} onClick={retryPopular}>
                   {GET_MODELS.retry}
                 </button>
