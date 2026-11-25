@@ -6,11 +6,12 @@ import { installMocks } from "./mock/ipc";
 
 installMocks();
 
-const [{ StrictMode, createElement }, { createRoot }, { default: App }, theme, app, studioStore, appStore] =
+const [{ StrictMode, createElement }, { createRoot }, { default: App }, { UiProviders }, theme, app, studioStore, appStore] =
   await Promise.all([
     import("react"),
     import("react-dom/client"),
     import("../../src/App"),
+    import("../../src/components/ui/UiProviders"),
     import("../../src/lib/theme"),
     import("../../src/lib/app"),
     import("../../src/store/studio"),
@@ -29,4 +30,4 @@ const params = new URLSearchParams(location.search);
 if (params.get("view") === "studio") studioStore.useStudio.getState().showStudio("image");
 
 const root = document.getElementById("root");
-if (root) createRoot(root).render(createElement(StrictMode, null, createElement(App)));
+if (root) createRoot(root).render(createElement(StrictMode, null, createElement(UiProviders, null, createElement(App))));

@@ -9,6 +9,9 @@ import { Tip } from "./Tip";
 import { ChipGroup } from "./ChipGroup";
 import { MenuButton, MenuRadio } from "./MenuButton";
 import { SlideOver } from "./SlideOver";
+import { UiProviders } from "./UiProviders";
+import { BOX } from "../studio/styles";
+import { FOCUS_RING } from "./styles";
 
 // jsdom has none of what Radix Select, Slider and the menus measure and capture with.
 globalThis.ResizeObserver ??= class {
@@ -179,5 +182,25 @@ describe("shared controls", () => {
     fireEvent.keyDown(dialog, { key: "Escape" });
     expect(screen.queryByRole("dialog")).toBeNull();
     await waitFor(() => expect(document.activeElement).toBe(opener));
+  });
+
+  it("UiProviders lets a Tip render inside a dialog with no other provider, as App's first-run branch does", async () => {
+    render(
+      <UiProviders>
+        <SlideOver open onOpenChange={() => {}} title="Welcome" width="panel">
+          <Tip content="Why">
+            <button type="button">Help</button>
+          </Tip>
+        </SlideOver>
+      </UiProviders>,
+    );
+    await act(async () => {
+      screen.getByRole("button", { name: "Help" }).focus();
+    });
+    expect((await screen.findByRole("tooltip")).textContent).toContain("Why");
+  });
+
+  it("Studio's text boxes carry the shared focus ring", () => {
+    for (const cls of FOCUS_RING.split(" ")) expect(BOX.split(" ")).toContain(cls);
   });
 });

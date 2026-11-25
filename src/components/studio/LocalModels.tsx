@@ -118,7 +118,7 @@ export function LocalModels() {
                 {LOCAL_MODELS.onlyFits}
               </label>
             </div>
-            <Tabs.Content value={localTab} className="flex flex-col gap-3 outline-none">
+            <Tabs.Content value={localTab} className="flex flex-col gap-3 outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-accent/40">
               {/* Keyed by tab: "Not for this computer" starts folded on each. */}
               <TabModels key={`models-${localTab}`} local={local} tab={localTab} onlyFits={onlyFits} onError={fail} />
               {/* Each tab searches for its own kind. The store keeps only the last search, so its

@@ -3,9 +3,10 @@
 // buttons alike, and a card's buttons look the same wherever on the card they are drawn; and
 // the one primary button Get local models' rows and search results share (Task B13).
 
+import { FOCUS_RING } from "../ui/styles";
+
 /** A text box, number box, select or text area. */
-export const BOX =
-  "rounded-md border border-border bg-bg px-2 py-1 text-sm outline-none focus:border-border-strong disabled:opacity-60";
+export const BOX = `rounded-md border border-border bg-bg px-2 py-1 text-sm focus:border-border-strong disabled:opacity-60 ${FOCUS_RING}`;
 
 /** A small text button: *Reset all*, *Edit JSON*, *Save as setup…*, *Cancel*. */
 export const SMALL_BUTTON = "rounded-md px-1.5 py-0.5 text-xs text-fg-muted hover:bg-bg-muted hover:text-fg";

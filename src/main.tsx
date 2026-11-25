@@ -2,6 +2,7 @@ import "./lib/freeze";
 import { StrictMode } from "react";
 import { createRoot } from "react-dom/client";
 import App from "./App";
+import { UiProviders } from "./components/ui/UiProviders";
 import { applyTheme, loadTheme } from "./lib/theme";
 import { APP_NAME } from "./lib/app";
 import "./styles.css";
@@ -13,7 +14,9 @@ const root = document.getElementById("root");
 if (root) {
   createRoot(root).render(
     <StrictMode>
-      <App />
+      <UiProviders>
+        <App />
+      </UiProviders>
     </StrictMode>,
   );
 }

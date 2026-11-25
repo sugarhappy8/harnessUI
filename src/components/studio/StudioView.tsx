@@ -149,7 +149,7 @@ export function StudioView() {
       data-studio-view
     >
       <TopBar onError={fail} />
-      <Tabs.Content value={tab} className="flex min-h-0 flex-1 flex-col outline-none">
+      <Tabs.Content value={tab} className="flex min-h-0 flex-1 flex-col outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-accent/40">
         <div className="flex min-h-0 flex-1">
           <main ref={scroller} className="min-w-0 flex-1 overflow-y-auto">
             <div className="mx-auto flex min-h-full max-w-3xl flex-col gap-3 px-4 py-4">
