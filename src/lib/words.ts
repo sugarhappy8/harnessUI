@@ -20,12 +20,13 @@ import type {
   Verdict as StudioVerdict,
 } from "../components/studio/types";
 import { APP_NAME } from "./app";
-import { formatCount, formatEta } from "./format";
+import { formatBytes, formatCount, formatEta } from "./format";
 import type {
   BackendKind,
   ContextSource,
   DeviceOption,
   DownloadGroup,
+  DownloadStatus,
   FitDevice,
   FitResult,
   GpuUse,
@@ -373,14 +374,6 @@ export function amountNumber(bytes: number): string {
 /** An amount in use or needed (binary gigabytes, I6-10): "11.7 GB", "12 GB". */
 export function amountGb(bytes: number): string {
   return `${amountNumber(bytes)} GB`;
-}
-
-const MIB = 1024 * 1024;
-
-/** A download's size in the same binary units (0.1.0 Studio): whole megabytes, rounded up as
- *  the backend counts the Studio engine's pack, under 1 GB ("29 MB"), else `amountGb`. */
-export function downloadAmount(bytes: number): string {
-  return Number.isFinite(bytes) && bytes > 0 && bytes < GIB ? `${Math.ceil(bytes / MIB)} MB` : amountGb(bytes);
 }
 
 /** A licence line's short name (0.1.0 Studio): the last word of its first part, so
@@ -1066,13 +1059,14 @@ export const STUDIO_ACTIONS = {
   downloadAgain: "Download again",
 } as const;
 
-/** The Studio engine's download size and the short name of its licence: "29 MB, MIT". */
+/** The Studio engine's download size and the short name of its licence: "30 MB, MIT". The
+ *  size is `formatBytes`'s, as every size Studio shows (Task U7). */
 export function engineSizeWords(bytes: number, licenseName: string): string {
-  return `${downloadAmount(bytes)}, ${licenceWord(licenseName)}`;
+  return `${formatBytes(bytes)}, ${licenceWord(licenseName)}`;
 }
 
 /** The Studio engine's download, where it is missing (Tasks B8, B10 and B13): its size and the
- *  short name of its licence, "Download the Studio engine (29 MB, MIT)". */
+ *  short name of its licence, "Download the Studio engine (30 MB, MIT)". */
 export function engineDownloadWords(bytes: number, licenseName: string): string {
   return `Download the Studio engine (${engineSizeWords(bytes, licenseName)})`;
 }
@@ -1082,12 +1076,12 @@ export function engineDownloadWords(bytes: number, licenseName: string): string 
  *  downloads or is installed. */
 export const ENGINE_LINE = {
   builtIn: "Studio engine: built in",
-  /** No local model yet: the pack downloads with the first one ("29 MB, MIT"). */
+  /** No local model yet: the pack downloads with the first one ("30 MB, MIT"). */
   withFirstModel: (size: string) => `Studio engine: comes with your first model (${size})`,
   missing: "Studio engine: missing",
   partial: "Studio engine: partly downloaded",
   installed: (build: string) => `Studio engine: installed · build ${build}`,
-  /** How much of the pack is here; amounts are `downloadAmount`'s ("12 MB of 29 MB"). */
+  /** How much of the pack is here; amounts are `formatBytes`'s ("13 MB of 30 MB"). */
   downloading: (done: string | null, total: string | null) =>
     done !== null && total !== null ? `Studio engine: downloading · ${done} of ${total}` : "Studio engine: downloading…",
   unpacking: "Studio engine: unpacking…",
@@ -1097,7 +1091,7 @@ export const ENGINE_LINE = {
   separator: "·",
   remove: "Remove",
   removeTitle: "Remove the Studio engine?",
-  /** Under the question; `size` is its download ("29 MB"). */
+  /** Under the question; `size` is its download ("30 MB"). */
   removeBody: (size: string) =>
     `Pictures and videos cannot be made on this computer until it is downloaded again (${size}). Your models and results stay.`,
   cancel: "Cancel",
@@ -1106,7 +1100,7 @@ export const ENGINE_LINE = {
 /** A recommended local model that fits, and its whole download: "FLUX.2 klein 4B fits this
  *  computer (5.3 GB)." */
 export function fitsThisComputer(name: string, bytes: number): string {
-  return `${name} fits this computer (${amountGb(bytes)}).`;
+  return `${name} fits this computer (${formatBytes(bytes)}).`;
 }
 
 /** Studio's empty states (Task B2), local first; the backup and cloud lines name the companies
@@ -1138,7 +1132,7 @@ export const STUDIO_EMPTY = {
 /** The one-time suggestion while nothing is installed locally. */
 export const STUDIO_SUGGESTION = {
   text: (name: string) => `Studio works on this computer. ${name} fits here: free and private.`,
-  size: (bytes: number) => `One download of ${amountGb(bytes)}.`,
+  size: (bytes: number) => `One download of ${formatBytes(bytes)}.`,
 } as const;
 
 /** An endpoint whose lists are not saved yet ("Get OpenRouter's picture and video models"). */
@@ -1838,9 +1832,9 @@ export const STUDIO_VIEWER_KEYS = {
  *  the cloud model lists. */
 export const STUDIO_SETTINGS = {
   local: LOCAL_MARK.name,
-  /** The picture and video models installed here and the disk they take ("14 GB"). */
+  /** The picture and video models installed here and the disk they take ("14.2 GB"). */
   models: (count: number, bytes: number) =>
-    count === 0 ? "Picture and video models: none yet" : `Picture and video models: ${count} (${amountGb(bytes)})`,
+    count === 0 ? "Picture and video models: none yet" : `Picture and video models: ${count} (${formatBytes(bytes)})`,
   gpu: "When a local job needs the graphics card",
   gpuHelp: "When a local job fits beside the chat model, both run. When it does not:",
   gpuChoice: {
@@ -1853,10 +1847,10 @@ export const STUDIO_SETTINGS = {
   /** Opens the note about local models, read only (Task B14). */
   whatLocalMeans: "What local models mean",
   results: "Results",
-  /** What the gallery holds and where: "Studio uses 1.2 GB in ~/harnessUI/studio (312
-   *  pictures, 14 videos)". Sizes in the same binary units as `amountGb`. */
+  /** What the gallery holds and where: "Studio uses 1.3 GB in ~/harnessUI/studio (312
+   *  pictures, 14 videos)". Sizes are `formatBytes`'s, as every size Studio shows. */
   usage(bytes: number, folder: string, pictures: number, videos: number): string {
-    const size = bytes > 0 ? downloadAmount(bytes) : "0 MB";
+    const size = bytes > 0 ? formatBytes(bytes) : "0 MB";
     const count = (n: number, one: string) => `${n} ${one}${n === 1 ? "" : "s"}`;
     return `Studio uses ${size} in ${folder} (${count(pictures, "picture")}, ${count(videos, "video")})`;
   },
@@ -1926,7 +1920,7 @@ export const LOCAL_MODELS = {
   /** The bar of a model's download on its card, while it runs. */
   downloading: (name: string) => `Downloading ${name}`,
   /** After *Repair*: what happens now. */
-  repairing: "Its files are being checked; anything missing or damaged downloads again (Models → Downloads).",
+  repairing: "Its files are being checked; anything missing or damaged downloads again, with its progress here.",
   deleteTitle: (name: string) => `Delete ${name}?`,
   deleteBody:
     "Its files are removed from this computer, except parts another model still uses. Pictures and videos you made stay in the gallery.",
@@ -2157,7 +2151,7 @@ export const DOWNLOAD_LOCAL = {
     unclear: "check the licence before any commercial use.",
     no: "non-commercial use only.",
   } as const satisfies Record<Licence["commercial"], string | ((limit: string | null) => string)>,
-  /** The Studio engine comes with the model (Windows): "(29 MB, MIT licence)", from
+  /** The Studio engine comes with the model (Windows): "(30 MB, MIT licence)", from
    *  `engineSizeWords`. */
   engine: (size: string) => `Also downloads the Studio engine (${size} licence).`,
   /** Which form a gated repository's publisher shows on Hugging Face. */
@@ -2430,6 +2424,50 @@ export const MODEL_DETAIL = {
   planning: "Updating the files…",
 } as const;
 
+/** Studio's downloads (Task U7, design 10.3): a model's or a LoRA's download on its card, in the
+ *  detail panel and in the top bar's indicator, with Pause or Resume and Cancel, and *Use it*
+ *  once a model is ready. Every size is `formatBytes`'s. */
+export const STUDIO_DOWNLOADS = {
+  /** The top bar's indicator while downloads run: "2 downloading". */
+  indicator: (n: number) => `${n} downloading`,
+  /** The indicator once none runs, while finished ones are listed: "1 ready". */
+  indicatorReady: (n: number) => `${n} ready`,
+  /** The indicator's list. */
+  title: "Downloads",
+  /** Takes the finished downloads off the indicator's list. */
+  clear: "Clear finished",
+  /** How far a download got: "2.4 GB of 6.7 GB · 2 min left"; `left` is the time left, or
+   *  what the download is doing ("Paused"), or nothing. */
+  progress: (done: string, total: string, left: string | null) =>
+    left === null ? `${done} of ${total}` : `${done} of ${total} · ${left}`,
+  /** What a download that is not simply downloading is doing, after its sizes. */
+  status: {
+    queued: "Waiting",
+    downloading: null,
+    paused: "Paused",
+    verifying: "Checking the files…",
+    done: "Ready",
+    error: "Stopped",
+    cancelled: "Cancelled",
+    cancelling: "Cancelling…",
+  } satisfies Record<DownloadStatus, string | null>,
+  /** A file already on this computer, read through before the rest downloads. */
+  checking: "Checking the file…",
+  /** A file without a published checksum is part of it. */
+  unverified: "no published checksum",
+  /** The buttons, named for the model or LoRA. */
+  pause: (name: string) => `Pause downloading ${name}`,
+  resume: (name: string) => `Resume downloading ${name}`,
+  cancel: (name: string) => `Cancel downloading ${name}`,
+  /** Their tooltips. */
+  tip: { pause: "Pause", resume: "Resume", cancel: "Cancel" },
+  /** A finished model chosen in the composer: its tab, back at the results. */
+  useIt: "Use it",
+  ready: "Ready",
+  /** What a download in the indicator's list is. */
+  lora: "LoRA",
+} as const;
+
 /** A result's verdict badge in words: exact (`exact`) or its name's hint. */
 export function verdictBadgeWords(verdict: StudioVerdict, exact: boolean): string {
   if (verdict === "unknown") return exact ? VERDICT.notRecognised : VERDICT.unknown;
@@ -2457,11 +2495,10 @@ function downloadStatusWords(g: DownloadGroup): string {
   return g.status;
 }
 
-/** A download's progress as Models → Downloads says it, also on a picture or video model's row
- *  in Get local models (0.1.0 Task B14): "1.2 GB of 6.6 GB · downloading · 3 min left", with
- *  " · no published checksum" when a file has none. `amount` writes the sizes (Models:
- *  `formatBytes`; Studio: `amountGb`, as its model sizes are written). 0.0.7 (P6b review m5): no
- *  time left while a file is checked. */
+/** A download's progress as Models → Downloads says it: "1.2 GB of 6.6 GB · downloading · 3 min
+ *  left", with " · no published checksum" when a file has none. `amount` writes the sizes
+ *  (`formatBytes`). 0.0.7 (P6b review m5): no time left while a file is checked. Studio says
+ *  its downloads in its own words since 0.2.0 Task U7 (`STUDIO_DOWNLOADS`). */
 export function downloadProgressWords(g: DownloadGroup, amount: (bytes: number) => string): string {
   const checking = g.status === "downloading" && g.checking === true;
   const eta = g.status === "downloading" && !checking ? formatEta(g.bytesTotal - g.bytesDone, g.bytesPerSecond) : null;

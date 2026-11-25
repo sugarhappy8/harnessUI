@@ -7,7 +7,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { LOCAL } from "../studio/fixtures/models";
 import type { EngineProgress, EngineStatus, LocalModels, StudioEndpoint, StudioPrefs, Usage } from "../studio/types";
-import { amountGb } from "../../lib/words";
+import { formatBytes } from "../../lib/format";
 
 vi.mock("../../lib/ipc", () => ({ isTauri: () => true }));
 vi.mock("../studio/api");
@@ -58,7 +58,7 @@ const OPENROUTER: StudioEndpoint = {
   models: [],
 };
 
-/** The Windows engine pack: 29 MB to download. */
+/** The Windows engine pack: 30 MB to download. */
 const PACK = 30_303_000;
 
 function engine(patch: Partial<EngineStatus>): EngineStatus {
@@ -130,7 +130,7 @@ afterEach(() => cleanup());
 describe("Settings → Studio", () => {
   it("says how much Studio holds and where", async () => {
     await show();
-    screen.getByText("Studio uses 1.2 GB in ~/harnessUI/studio (312 pictures, 14 videos)");
+    screen.getByText("Studio uses 1.3 GB in ~/harnessUI/studio (312 pictures, 14 videos)");
     vi.mocked(api.studioOpenFolder).mockResolvedValue(undefined);
     await click(button("Open folder"));
     expect(api.studioOpenFolder).toHaveBeenCalledTimes(1);
@@ -156,7 +156,7 @@ describe("Settings → Studio", () => {
     const headings = screen.getAllByRole("heading").map((h) => h.textContent);
     expect(headings.indexOf("On this computer")).toBeGreaterThanOrEqual(0);
     expect(headings.indexOf("On this computer")).toBeLessThan(headings.indexOf("Cloud spending"));
-    screen.getByText(`Picture and video models: ${LOCAL.installed.length} (${amountGb(LOCAL.installedBytes)})`);
+    screen.getByText(`Picture and video models: ${LOCAL.installed.length} (${formatBytes(LOCAL.installedBytes)})`);
     button("Get models");
     screen.getByText("Studio engine: built in"); // LOCAL.engine.state "builtIn" (a Mac)
     expect(screen.queryByRole("button", { name: "Remove" })).toBeNull();
@@ -219,7 +219,7 @@ describe("Settings → Studio", () => {
     expect(api.studioEngineStatus).toHaveBeenCalledTimes(1);
     expect(useStudio.getState().local?.engine.state).toBe("notInstalled");
     // A model is still installed, so the engine is offered again.
-    button("Download the Studio engine (29 MB, MIT)");
+    button("Download the Studio engine (30 MB, MIT)");
   });
 
   it("a refused removal says why, and the engine is read again", async () => {
@@ -250,7 +250,7 @@ describe("Settings → Studio", () => {
   it("a missing engine on Windows offers its download, and shows how it goes", async () => {
     await show(withEngine({ state: "notInstalled" }));
     screen.getByText("Studio engine: missing");
-    const download = button("Download the Studio engine (29 MB, MIT)");
+    const download = button("Download the Studio engine (30 MB, MIT)");
     expect(download.getAttribute("title")).toBe(LOCAL.engine.licenseName);
     vi.mocked(api.studioEngineDownload).mockResolvedValue(undefined);
     vi.mocked(api.studioEngineStatus).mockResolvedValue(engine({ state: "downloading", bytesDone: 0 }));
@@ -260,7 +260,7 @@ describe("Settings → Studio", () => {
     screen.getByText("Studio engine: downloading…");
     expect(screen.queryByRole("button", { name: /Download the Studio engine/ })).toBeNull();
     await act(async () => progress?.({ done: 12 * 1024 * 1024, total: PACK, unpacking: false, finished: false, error: null }));
-    screen.getByText("Studio engine: downloading · 12 MB of 29 MB");
+    screen.getByText("Studio engine: downloading · 13 MB of 30 MB");
     await act(async () => progress?.({ done: PACK, total: PACK, unpacking: true, finished: false, error: null }));
     screen.getByText("Studio engine: unpacking…");
     vi.mocked(api.studioEngineStatus).mockResolvedValue(engine({ state: "installed" }));
@@ -272,10 +272,10 @@ describe("Settings → Studio", () => {
   it("a partly downloaded engine is offered again; with no model it comes with the first one", async () => {
     await show(withEngine({ state: "partial" }));
     screen.getByText("Studio engine: partly downloaded");
-    button("Download the Studio engine (29 MB, MIT)");
+    button("Download the Studio engine (30 MB, MIT)");
     cleanup();
     await show(withEngine({ state: "notInstalled" }, { installed: [], installedBytes: 0 }));
-    const line = screen.getByText("Studio engine: comes with your first model (29 MB, MIT)");
+    const line = screen.getByText("Studio engine: comes with your first model (30 MB, MIT)");
     expect(line.getAttribute("title")).toBe(LOCAL.engine.licenseName);
     expect(screen.queryByRole("button", { name: /Download the Studio engine/ })).toBeNull();
   });
@@ -289,7 +289,7 @@ describe("Settings → Studio", () => {
       details: "",
     });
     vi.mocked(api.studioEngineStatus).mockResolvedValue(engine({ state: "notInstalled" }));
-    await click(button("Download the Studio engine (29 MB, MIT)"));
+    await click(button("Download the Studio engine (30 MB, MIT)"));
     await flush();
     screen.getByText("The Studio engine could not be downloaded.");
     // It never started, so no `finished` event comes: the engine is read again.

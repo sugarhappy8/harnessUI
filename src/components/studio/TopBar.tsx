@@ -6,6 +6,7 @@ import { useStudio } from "../../store/studio";
 import { FOCUS_RING } from "../ui/styles";
 import { Tip } from "../ui/Tip";
 import { formatUsd } from "./cost";
+import { DownloadIndicator } from "./DownloadIndicator";
 import { MENU_ITEM } from "./styles";
 import { KindTabs } from "./KindTabs";
 
@@ -17,8 +18,10 @@ import { KindTabs } from "./KindTabs";
 // Pictures and Video choose what it shows, and [Pictures | Video] is hidden (Task B9). While
 // Get models is shown, its own Pictures · Video · LoRAs stand in for these, the gallery's
 // search, Starred and Grid, which act on the hidden cards, are hidden (Task B13), and *Get
-// models* reads as pressed (Task U5; pressed again, it goes back). On a narrow Studio, Starred
-// and Grid keep their icons and tooltips, and the search box narrows.
+// models* reads as pressed (Task U5; pressed again, it goes back). Beside *Get models*, while a
+// Studio download runs or has just finished, the download indicator (Task U7,
+// DownloadIndicator.tsx) lists them. On a narrow Studio, Starred, Grid and the indicator keep
+// their icons (Starred and Grid their tooltips), and the search box narrows.
 
 /** How long the search box waits after the last key before it asks for the gallery. */
 const SEARCH_DELAY_MS = 250;
@@ -29,8 +32,8 @@ const TOGGLE =
   FOCUS_RING;
 
 /** Title, [Pictures | Video] (not while the grid or Get models is open), search, Starred and
- *  Grid (not while Get models is open), *Get models*, cloud spending today while a limit is on,
- *  and the menu. */
+ *  Grid (not while Get models is open), the download indicator, *Get models*, cloud spending
+ *  today while a limit is on, and the menu. */
 export function TopBar(props: { onError: (e: unknown) => void }) {
   const setTab = useStudio((s) => s.setTab);
   const starred = useStudio((s) => s.filter.starred ?? false);
@@ -80,6 +83,7 @@ export function TopBar(props: { onError: (e: unknown) => void }) {
             </Tip>
           </>
         )}
+        <DownloadIndicator />
         <GetModels />
         <Spending />
         <StudioMenu onError={props.onError} />

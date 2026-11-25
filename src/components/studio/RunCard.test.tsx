@@ -711,7 +711,7 @@ describe("RunCard", () => {
       const failed = (code: string, message: string) =>
         localRun({ status: "failed", outputs: [], error: err({ code, message, company: "local", charged: false }) });
       await show(failed("studio_engine_missing", "The Studio engine is missing or was blocked."));
-      const download = button("Download the Studio engine (29 MB, MIT)");
+      const download = button("Download the Studio engine (30 MB, MIT)");
       expect(download.getAttribute("title")).toBe(LOCAL.engine.licenseName);
       await click(download);
       expect(api.studioEngineDownload).toHaveBeenCalledWith(true);

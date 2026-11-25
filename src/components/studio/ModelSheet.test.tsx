@@ -9,7 +9,7 @@
 // itself: the price asked for once, the settings carried.
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
-import { amountGb } from "../../lib/words";
+import { formatBytes } from "../../lib/format";
 import type { StudioTab } from "../../store/studio";
 import { UiProviders } from "../ui/UiProviders";
 import { LOCAL, MODELS, RUN } from "./fixtures/models";
@@ -660,7 +660,7 @@ describe("ModelSheet", () => {
     expect(old.getAttribute("aria-disabled")).toBe("true");
     expect(old.textContent).toContain(reason);
     // Nothing this computer can run is installed: the section names one that fits.
-    within(sheet()).getByText(`No local models yet. ${klein.name} fits this computer (${amountGb(klein.sizeBytes)}).`);
+    within(sheet()).getByText(`No local models yet. ${klein.name} fits this computer (${formatBytes(klein.sizeBytes)}).`);
     const before = useStudio.getState().drafts.image;
     await click(old);
     expect(useStudio.getState().drafts.image).toBe(before);

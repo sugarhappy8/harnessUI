@@ -1,6 +1,7 @@
-import { useEffect, useState, type ReactNode } from "react";
+import { useEffect, useId, useState, type ReactNode } from "react";
 import clsx from "clsx";
 import {
+  ArrowRight,
   CircleCheck,
   CircleHelp,
   CircleSlash,
@@ -14,9 +15,8 @@ import {
 } from "lucide-react";
 import { formatBytes } from "../../lib/format";
 import * as ipc from "../../lib/ipc";
-import type { DownloadGroup, ErrorInfo } from "../../lib/types";
+import type { ErrorInfo } from "../../lib/types";
 import {
-  downloadProgressWords,
   DOWNLOAD_LOCAL,
   FILE_LABEL,
   GET_MODELS,
@@ -27,19 +27,20 @@ import {
   REGIONAL_USE,
   revenueLimit,
   SETUP,
+  STUDIO_DOWNLOADS,
   STUDIO_TIME,
   typeName,
   updatedWhen,
   VERDICT,
   verdictBadgeWords,
 } from "../../lib/words";
-import { useDownloads } from "../../store/downloads";
-import { useStudio } from "../../store/studio";
+import { canPick, useStudio } from "../../store/studio";
 import { visiblePath } from "../FolderChip";
 import { Tip } from "../ui/Tip";
 import { FOCUS_RING } from "../ui/styles";
 import { BrowserLink, modelPage } from "./BrowserLink";
 import { ConfirmDialog } from "./ConfirmDialog";
+import { DownloadState, pickNewModelAndFocus, useModelDownload, useShownDownload } from "./DownloadState";
 import { etaText } from "./eta";
 import { sizeWords, typeLabel } from "./sheetModels";
 import { CARD_BUTTON, MODEL_CARD, PRIMARY_BUTTON } from "./styles";
@@ -59,19 +60,22 @@ import type {
 // - CatalogCard: a model of Studio's list, with what it is good at, its size, licence, fit and
 //   time here, and Download (on a model that may not fit too: a warning, never a refusal, design
 //   9.2), which opens the detail panel (ModelDetail.tsx, Task U6: the review before the
-//   download); installed, it says so and offers no Download, also once the person set it up
-//   again as their own (ruling S9-edited-catalog-generic: the backend counts it installed by its
-//   row's id, and the card keeps the catalog's name). A gated model with no Hugging Face token
-//   saved says what to do in place of a Download that would only fail (ruling S7).
+//   download); installed, it says so and offers *Use it* in place of Download, also once the
+//   person set it up again as their own (ruling S9-edited-catalog-generic: the backend counts it
+//   installed by its row's id, and the card keeps the catalog's name). A gated model with no
+//   Hugging Face token saved says what to do in place of a Download that would only fail (ruling
+//   S7).
 // - ResultCard: a Hugging Face result, its name, author, downloads, likes, when it was updated
 //   and its Studio verdict (VerdictBadge): a hint from its name until it is opened, exact once
 //   its files were read; opened, a gated one says it needs a token or the model's terms. Its
 //   heading button opens the detail panel.
 // - InstalledCard: a model on this computer, its type, size and fit, with Repair and Delete.
 // - LoraCard: a LoRA on this computer, what it is for, with Delete.
-// Also here, for these cards and the detail panel: the licence badge, the fit line, the time
-// line, a gated model's line, whether a Hugging Face token is saved, a model's download while it
-// runs and its progress.
+// While a model downloads, its card shows the download (DownloadState.tsx, Task U7) with Pause
+// and Cancel, and once it is done "Ready" with *Use it*, which chooses it in the composer, back
+// at the results (a result's card for any of its files). Also here, for these cards and the
+// detail panel: the licence badge, the fit line, the time line, a gated model's line, and
+// whether a Hugging Face token is saved.
 
 /** A licence's badge: its colour (as the backend judged it) and what it allows for what you
  *  make, in plain words. A kind this version does not know reads "Check the licence". */
@@ -102,15 +106,6 @@ export function licenceBadge(l: Licence): { tone: "green" | "amber" | "red"; tex
       text = LICENCE_BADGE.unclear;
   }
   return { tone: l.badge, text };
-}
-
-/** The download of local model `genModelId` while it runs (queued, downloading, paused,
- *  checking, failed and waiting for Resume, or being cancelled), from the app's download
- *  groups; `null` when none is (never started, done or cancelled). */
-export function activeDownload(groups: readonly DownloadGroup[], genModelId: string): DownloadGroup | null {
-  return (
-    groups.find((g) => g.genModelId === genModelId && g.status !== "done" && g.status !== "cancelled") ?? null
-  );
 }
 
 /** What stops an opened repository's download before it starts: none of its files could be
@@ -215,40 +210,6 @@ function timeWords(fit: LocalFit, kind: MediaKind): string | null {
 export function TimeLine(props: { fit: LocalFit; kind: MediaKind }) {
   const words = timeWords(props.fit, props.kind);
   return words === null ? null : <p className="text-xs text-fg-muted">{words}</p>;
-}
-
-/** The download of local model `genModelId` while it runs, from the app's download groups
- *  (followed while Get models is open); `null` when none is. */
-export function useModelDownload(genModelId: string): DownloadGroup | null {
-  return useDownloads((s) => activeDownload(s.groups, genModelId));
-}
-
-/** A model's download while it runs (Pause and Cancel are in Models → Downloads until Task
- *  U7): how far it got, in Models → Downloads' words and sizes (the same download reads the
- *  same in both, and as the card's size), its bar, and why it stopped. */
-export function DownloadProgress(props: { group: DownloadGroup; name: string }) {
-  const { group: g } = props;
-  const pct = g.bytesTotal > 0 ? Math.min(100, (g.bytesDone / g.bytesTotal) * 100) : 0;
-  return (
-    <div className="flex w-full flex-col gap-1">
-      <p className="text-xs text-fg-muted">{downloadProgressWords(g, formatBytes)}</p>
-      <div
-        className="h-1.5 overflow-hidden rounded-full bg-bg-muted"
-        role="progressbar"
-        aria-label={LOCAL_MODELS.downloading(props.name)}
-        aria-valuenow={Math.round(pct)}
-        aria-valuemin={0}
-        aria-valuemax={100}
-      >
-        <div className="brand-gradient h-full" style={{ width: `${pct}%` }} />
-      </div>
-      {g.error && (
-        <p className="text-xs text-danger">
-          {g.error.message} {g.error.nextStep}
-        </p>
-      )}
-    </div>
-  );
 }
 
 /** What a verdict is, for its badge's colour and icon. */
@@ -376,21 +337,40 @@ function InstalledMark() {
   );
 }
 
+/** *Use it* on an installed model's card: chosen in its tab's composer, back at the results. */
+function UseItButton(props: { genModelId: string; nameId: string }) {
+  return (
+    <button
+      type="button"
+      aria-describedby={props.nameId}
+      className={PRIMARY}
+      onClick={() => pickNewModelAndFocus(props.genModelId)}
+    >
+      {STUDIO_DOWNLOADS.useIt}
+      <ArrowRight size={14} aria-hidden />
+    </button>
+  );
+}
+
 /** A model of Studio's list: name, publisher, what it is good at, fit and time, licence, size,
- *  and Download, which opens its detail panel (or how far its download got, "Installed", or
- *  what a gated model needs first).
+ *  and Download, which opens its detail panel (or how far its download got, "Ready" or
+ *  "Installed" with *Use it*, or what a gated model needs first).
  *  `tokenSaved`: whether a Hugging Face token is saved (`null` while not known). */
 export function CatalogCard(props: { entry: LocalEntry; tokenSaved: boolean | null }) {
   const { entry } = props;
   const openDetail = useStudio((s) => s.openDetail);
-  const download = useModelDownload(entry.id);
+  const pickable = useStudio((s) => canPick(s.local, entry.id));
+  const download = useShownDownload((id) => id === entry.id);
+  const nameId = useId();
   // Gated: Hugging Face refuses the files without a token (ruling S7).
   const gated = entry.gate.mode !== "none" && props.tokenSaved === false && !entry.installed;
   return (
     <article aria-label={entry.name} data-catalog-card={entry.id} className={MODEL_CARD}>
       <div className="flex items-start gap-2">
         <div className="min-w-0 flex-1">
-          <h3 className="text-[15px] leading-snug font-semibold">{entry.name}</h3>
+          <h3 id={nameId} className="text-[15px] leading-snug font-semibold">
+            {entry.name}
+          </h3>
           <p className="text-meta">{entry.publisher}</p>
         </div>
         {entry.recommended && <Pill tone="accent">{GET_MODELS.topPick}</Pill>}
@@ -402,13 +382,23 @@ export function CatalogCard(props: { entry: LocalEntry; tokenSaved: boolean | nu
       </div>
       <div className="mt-auto flex min-h-8 flex-wrap items-center justify-between gap-2 pt-1">
         {download ? (
-          <DownloadProgress group={download} name={entry.name} />
+          <DownloadState
+            group={download}
+            name={entry.name}
+            onUse={pickable ? () => pickNewModelAndFocus(entry.id) : undefined}
+          />
+        ) : entry.installed ? (
+          <>
+            <span className="inline-flex items-center gap-3">
+              <span className="text-sm text-fg-muted tabular-nums">{formatBytes(entry.sizeBytes)}</span>
+              <InstalledMark />
+            </span>
+            {pickable && <UseItButton genModelId={entry.id} nameId={nameId} />}
+          </>
         ) : (
           <>
             <span className="text-sm text-fg-muted tabular-nums">{formatBytes(entry.sizeBytes)}</span>
-            {entry.installed ? (
-              <InstalledMark />
-            ) : gated ? null : (
+            {gated ? null : (
               <button
                 type="button"
                 aria-haspopup="dialog"
@@ -438,6 +428,10 @@ export function CatalogCard(props: { entry: LocalEntry; tokenSaved: boolean | nu
 export function ResultCard(props: { hit: LocalSearchHit; onOpen(): void }) {
   const { hit } = props;
   const opened = useStudio((s) => s.repos[hit.repo] ?? null);
+  // A download of one of its files (`hf:<repo>:<file>`), running or just finished.
+  const download = useShownDownload((id) => id.startsWith(`hf:${hit.repo}:`));
+  const downloadedId = download?.genModelId ?? null;
+  const pickable = useStudio((s) => downloadedId !== null && canPick(s.local, downloadedId));
   const verdict = opened ? opened.verdict : hit.verdict;
   const exact = opened !== null || hit.exact;
   const gate = opened ? gateProblem(opened) : null;
@@ -495,6 +489,16 @@ export function ResultCard(props: { hit: LocalSearchHit; onOpen(): void }) {
         )}
       </p>
       {gate && <GateLine problem={gate} repo={hit.repo} />}
+      {download && (
+        // Above the heading button's area, so its buttons can be pressed.
+        <div className="relative z-10 border-t border-border pt-2.5">
+          <DownloadState
+            group={download}
+            name={name}
+            onUse={pickable && downloadedId !== null ? () => pickNewModelAndFocus(downloadedId) : undefined}
+          />
+        </div>
+      )}
     </article>
   );
 }
@@ -588,7 +592,7 @@ export function InstalledCard(props: { row: InstalledLocal; onError: (e: unknown
       {usable !== null && (row.needsSetup || usable !== row.fit.reason) && <p className="text-xs text-fg-muted">{usable}</p>}
       <div className="mt-auto flex flex-wrap items-center gap-2 pt-1">
         {download ? (
-          <DownloadProgress group={download} name={name} />
+          <DownloadState group={download} name={name} />
         ) : (
           usable === null && <RepairButton id={row.id} onError={props.onError} />
         )}

@@ -5,7 +5,7 @@ import * as ipc from "../../lib/ipc";
 import type { ErrorInfo } from "../../lib/types";
 import { STUDIO_COMPOSER, STUDIO_GRID, UI } from "../../lib/words";
 import { toErrorInfo } from "../../store/app";
-import { DOCK_MIN_WIDTH, useStudio, type StudioTab } from "../../store/studio";
+import { DOCK_MIN_WIDTH, followStudioDownloads, useStudio, type StudioTab } from "../../store/studio";
 import { ErrorBanner } from "../ErrorBanner";
 import { SlideOver } from "../ui/SlideOver";
 import { FOCUS_RING } from "../ui/styles";
@@ -44,7 +44,9 @@ import { Viewer } from "./Viewer";
 // composer or the side panel, and opens at its top (critique §2 and §6: it kept the stream's
 // scroll and opened at its bottom); the top bar hides its tabs and the gallery's controls; Back
 // brings them all back, the stream at its newest card. *Add a model file* (ImportDialog.tsx,
-// Task U4) opens over the view from the model sheet or Get models.
+// Task U4) opens over the view from the model sheet or Get models. From the moment Studio first
+// opens it follows the app's downloads (Task U7), so a model done while Get models is closed, or
+// while the chat is shown, is listed at once, and the top bar's indicator offers *Use it*.
 
 /** Whether the window is at least `DOCK_MIN_WIDTH` wide, followed as it is resized. */
 function useWideWindow(): boolean {
@@ -126,6 +128,11 @@ export function StudioView() {
     window.addEventListener("app:settings-closed", read);
     return () => window.removeEventListener("app:settings-closed", read);
   }, [shown]);
+
+  // Studio's downloads, followed from the moment Studio first opens for as long as the app runs
+  // (App keeps this view mounted), whatever it shows: a model or LoRA that is done is read again,
+  // and the cards, the detail panel and the top bar's indicator show how far each got (Task U7).
+  useEffect(() => followStudioDownloads(), []);
 
   // The cards read the tab's own gallery: a tab changed (by its tab, Reuse, Animate, a viewer's
   // Again) reads its first page. The grid has its own filters.

@@ -1,7 +1,8 @@
-// The download groups as the app's download manager reports them (0.1.0 Task B14): what Get
-// local models reads to show a picture or video model's download on its row while it runs
-// (Models → Downloads keeps its own list, with Pause and Cancel). Followed only while a view
-// that shows them is open; reading them sends nothing anywhere.
+// The download groups as the app's download manager reports them (0.1.0 Task B14): what Studio
+// reads to show a picture or video model's, or a LoRA's, download on its card, in the detail
+// panel and in the top bar's indicator, with Pause and Cancel (0.2.0 Task U7; Models → Downloads
+// keeps its own list). Followed while Studio is mounted (`followStudioDownloads`); reading them
+// sends nothing anywhere.
 import { create } from "zustand";
 import * as ipc from "../lib/ipc";
 import { listenInEffect } from "../lib/listen";

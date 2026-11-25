@@ -351,7 +351,7 @@ describe("a result's detail panel", () => {
     const engine = supported({ files: [{ ...Q4, best: true, plan: { ...Q4.plan, needsEngine: true } }] });
     const withEngine = await openRepo(engine, local);
     within(withEngine).getByText(`Total to download: ${formatBytes(3_600_000_000 + 335_000_000 + 30_303_000)}`);
-    within(withEngine).getByText("Also downloads the Studio engine (29 MB, MIT licence).");
+    within(withEngine).getByText("Also downloads the Studio engine (30 MB, MIT licence).");
   });
 
   it("changing the model type asks for a new plan", async () => {
@@ -633,7 +633,7 @@ describe("a result's detail panel", () => {
     ]);
     const panel = await openRepo();
     expect(within(panel).queryByRole("button", { name: "Download" })).toBeNull();
-    within(panel).getByText("1.0 GB of 4.6 GB · downloading");
+    within(panel).getByText("1.0 GB of 4.6 GB");
     within(panel).getByRole("progressbar", { name: `Downloading ${Q5.file}` });
     // Another file is not that download.
     await click(radio(panel, "Q4_K"));
@@ -947,7 +947,7 @@ describe("a catalog model's detail panel", () => {
     const panel = await openEntry(entry, local);
     within(panel).getByText("May not fit this computer: it needs 8 GB of graphics memory. It may fail or be very slow.");
     within(panel).getByText("This leaves less than 10 GB free on this disk.");
-    within(panel).getByText("Also downloads the Studio engine (29 MB, MIT licence).");
+    within(panel).getByText("Also downloads the Studio engine (30 MB, MIT licence).");
     within(panel).getByText(`Total to download: ${formatBytes(950_000_000 + 30_303_000)}`);
     within(panel).getByText("Example Community Licence excludes EU.");
     within(panel).getByText("Pictures you make: commercial use only under $5M revenue.");

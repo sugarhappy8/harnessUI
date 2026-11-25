@@ -2,8 +2,9 @@
 // composer at their foot, and the side panel, closed until asked for), the empty states and the
 // default model, local first, and the saved lists, read without a fetch.
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { act, cleanup, fireEvent, render, screen, within } from "@testing-library/react";
-import { amountGb } from "../../lib/words";
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { formatBytes } from "../../lib/format";
+import type { DownloadGroup } from "../../lib/types";
 import { LOCAL, MODELS, RUN } from "./fixtures/models";
 import type { LocalModels, Run, StudioEndpoint, StudioPrefs, Usage } from "./types";
 
@@ -14,13 +15,22 @@ globalThis.ResizeObserver ??= class {
   disconnect() {}
 } as unknown as typeof ResizeObserver;
 
-vi.mock("../../lib/ipc", () => ({ isTauri: () => true }));
+const ipc = vi.hoisted(() => ({
+  isTauri: () => true,
+  listDownloads: vi.fn<() => Promise<DownloadGroup[]>>(),
+  onDownloadProgress: vi.fn<(handler: (g: DownloadGroup) => void) => Promise<() => void>>(),
+  pauseDownload: vi.fn<(groupId: string) => Promise<void>>(),
+  resumeDownload: vi.fn<(groupId: string) => Promise<void>>(),
+  cancelDownload: vi.fn<(groupId: string) => Promise<void>>(),
+}));
+vi.mock("../../lib/ipc", () => ipc);
 vi.mock("./api");
 
 const api = await import("./api");
 const { StudioView } = await import("./StudioView");
 const { UiProviders } = await import("../ui/UiProviders");
 const { defaultModel, emptyState, useStudio } = await import("../../store/studio");
+const { useDownloads } = await import("../../store/downloads");
 
 const INITIAL = useStudio.getState();
 /** The first recommended entry: FLUX.2 klein 4B, about 5.3 GB. */
@@ -151,9 +161,18 @@ function typePrompt(text: string) {
 let opened: unknown[] = [];
 const onOpenSettings = (e: Event) => opened.push((e as CustomEvent<unknown>).detail);
 
+/** What the download manager's `download-progress` event tells Studio, once it listens. */
+let progress: (g: DownloadGroup) => void = () => undefined;
+
 beforeEach(() => {
   vi.clearAllMocks();
   useStudio.setState(INITIAL, true);
+  useDownloads.setState({ groups: [] });
+  ipc.listDownloads.mockResolvedValue([]);
+  ipc.onDownloadProgress.mockImplementation((handler) => {
+    progress = handler;
+    return Promise.resolve(() => undefined);
+  });
   opened = [];
   window.addEventListener("app:open-settings", onOpenSettings);
 });
@@ -178,7 +197,7 @@ describe("StudioView", () => {
     // getLocal
     await show({ endpoints: [], local: { ...LOCAL, installed: [] } });
     screen.getByText("Make pictures and videos on this computer: free, and nothing is sent.");
-    screen.getByText(`${klein.name} fits this computer (${amountGb(klein.sizeBytes)}).`);
+    screen.getByText(`${klein.name} fits this computer (${formatBytes(klein.sizeBytes)}).`);
     screen.getByText("No good graphics card? Cloud models are the backup: OpenRouter or OpenAI."); // second, smaller
     await click(screen.getByRole("button", { name: "Open Endpoints" }));
     expect(opened).toEqual(["endpoints"]); // app:open-settings detail
@@ -298,7 +317,7 @@ describe("StudioView", () => {
 
   it("with a local model to get, the card's second line says why a saved endpoint is not used", async () => {
     await show({ endpoints: [endpoint({ hasKey: false })], local: { ...LOCAL, installed: [] } });
-    screen.getByText(`${klein.name} fits this computer (${amountGb(klein.sizeBytes)}).`);
+    screen.getByText(`${klein.name} fits this computer (${formatBytes(klein.sizeBytes)}).`);
     screen.getByText("OpenRouter has no key, so Studio cannot use its models. Add a key in Settings → Endpoints.");
     expect(screen.queryByText("No good graphics card? Cloud models are the backup: OpenRouter or OpenAI.")).toBeNull();
   });
@@ -362,6 +381,70 @@ describe("StudioView", () => {
     expect(useStudio.getState().localView).toBe(false);
     expect(getModels.getAttribute("aria-pressed")).toBe("false");
     screen.getByRole("textbox", { name: "Prompt" });
+  });
+
+  it("the top-bar indicator counts running downloads and lists them", async () => {
+    const GB = 1_000_000_000;
+    const download = (patch: Partial<DownloadGroup>): DownloadGroup => ({
+      id: "g",
+      repo: "leejet/Z-Image-Turbo-GGUF",
+      label: "Z-Image Turbo",
+      fileCount: 3,
+      bytesDone: 2.4 * GB,
+      bytesTotal: 6.7 * GB,
+      status: "downloading",
+      error: null,
+      bytesPerSecond: null,
+      unverified: false,
+      generatorKind: "image",
+      genModelId: "z-image-turbo-q4",
+      ...patch,
+    });
+    // No Studio download: no indicator.
+    await show();
+    expect(document.querySelector("[data-download-indicator]")).toBeNull();
+    cleanup();
+    ipc.listDownloads.mockResolvedValue([
+      download({ id: "zimage" }),
+      download({ id: "wan", label: "Wan 2.2 TI2V 5B", genModelId: "wan22-ti2v-5b-fast-q6", generatorKind: "video", status: "paused", bytesDone: 1.2 * GB, bytesTotal: 3.6 * GB }),
+      download({ id: "lora", label: "pixel-art-xl", genModelId: null, generatorKind: null, loraId: "hf:nerijs/pixel-art-xl:pixel-art-xl.safetensors", bytesDone: 60_000_000, bytesTotal: 170_000_000 }),
+      // Neither listed: one done before (not while Studio followed it), and a chat model's.
+      download({ id: "old", label: "FLUX.2 klein 4B", genModelId: "flux2-klein-4b-q4", status: "done", bytesDone: 6.7 * GB }),
+      download({ id: "chat", label: "qwen3-8b-q4_k_m.gguf", genModelId: null, generatorKind: null }),
+    ]);
+    await show();
+    const indicator = within(screen.getByRole("banner")).getByRole("button", { name: "3 downloading" });
+    expect(indicator.getAttribute("aria-haspopup")).toBe("dialog");
+    // Beside Get models.
+    expect(indicator.nextElementSibling).toBe(within(screen.getByRole("banner")).getByRole("button", { name: "Get models" }));
+    await click(indicator);
+    const list = screen.getByRole("dialog", { name: "Downloads" });
+    const rows = [...list.querySelectorAll<HTMLElement>("[data-download-row]")];
+    expect(rows.map((r) => r.dataset.downloadRow)).toEqual(["zimage", "wan", "lora"]);
+    within(rows[0]!).getByText("Z-Image Turbo");
+    within(rows[0]!).getByText("Picture model");
+    within(rows[0]!).getByText("2.4 GB of 6.7 GB");
+    within(rows[0]!).getByRole("button", { name: "Pause downloading Z-Image Turbo" });
+    within(rows[1]!).getByText("Video model");
+    within(rows[1]!).getByText("1.2 GB of 3.6 GB · Paused");
+    within(rows[1]!).getByRole("button", { name: "Resume downloading Wan 2.2 TI2V 5B" });
+    within(rows[2]!).getByText("LoRA");
+    within(rows[2]!).getByText("60 MB of 170 MB");
+    ipc.cancelDownload.mockResolvedValue(undefined);
+    await click(within(rows[2]!).getByRole("button", { name: "Cancel downloading pixel-art-xl" }));
+    expect(ipc.cancelDownload).toHaveBeenCalledWith("lora");
+    // As they move on, the count follows: one cancelled, one done.
+    act(() => progress(download({ id: "lora", label: "pixel-art-xl", genModelId: null, generatorKind: null, loraId: "x", status: "cancelled" })));
+    act(() => progress(download({ id: "zimage", status: "done", bytesDone: 6.7 * GB })));
+    await flush();
+    expect(indicator.textContent).toBe("1 downloading");
+    expect([...screen.getByRole("dialog", { name: "Downloads" }).querySelectorAll<HTMLElement>("[data-download-row]")].map((r) => r.dataset.downloadRow)).toEqual(["zimage", "wan"]);
+    // Esc closes the list, and focus goes back to the indicator.
+    fireEvent.keyDown(screen.getByRole("dialog", { name: "Downloads" }), { key: "Escape" });
+    await flush();
+    expect(screen.queryByRole("dialog", { name: "Downloads" })).toBeNull();
+    // Radix gives focus back on the next task.
+    await waitFor(() => expect(document.activeElement).toBe(indicator));
   });
 
   it("today's spend shows only while a daily limit is on", async () => {
@@ -598,7 +681,7 @@ describe("StudioView", () => {
     await show({ endpoints: [endpoint({ company: "openai" })], local: { ...LOCAL, installed: [] } });
     await click(screen.getByRole("tab", { name: "Video" }));
     const video = LOCAL.recommended.find((e) => e.kind === "video")!; // "Wan 2.2 5B, fast" unless the benchmark chose Wan 2.1
-    screen.getByText(`${video.name} fits this computer (${amountGb(video.sizeBytes)}).`);
+    screen.getByText(`${video.name} fits this computer (${formatBytes(video.sizeBytes)}).`);
     screen.getByText("Or make videos with OpenRouter: add it in Settings → Endpoints.");
   });
 

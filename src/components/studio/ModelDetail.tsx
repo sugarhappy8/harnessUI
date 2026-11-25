@@ -1,7 +1,17 @@
 import { useEffect, useId, useRef, useState, type ReactNode } from "react";
 import { RadioGroup } from "radix-ui";
 import clsx from "clsx";
-import { AlertTriangle, CircleCheck, CircleSlash, Download, ExternalLink, Layers, LockKeyhole, Sparkles } from "lucide-react";
+import {
+  AlertTriangle,
+  ArrowRight,
+  CircleCheck,
+  CircleSlash,
+  Download,
+  ExternalLink,
+  Layers,
+  LockKeyhole,
+  Sparkles,
+} from "lucide-react";
 import { formatBytes } from "../../lib/format";
 import type { DownloadGroup, ErrorInfo } from "../../lib/types";
 import {
@@ -20,11 +30,12 @@ import {
   SETUP,
   setupProblem,
   SLOT_LABEL,
+  STUDIO_DOWNLOADS,
   VERDICT,
 } from "../../lib/words";
 import { toErrorInfo } from "../../store/app";
 import { useDownloads } from "../../store/downloads";
-import { useStudio } from "../../store/studio";
+import { canPick, useStudio } from "../../store/studio";
 import { ErrorBanner } from "../ErrorBanner";
 import { visiblePath } from "../FolderChip";
 import { SelectField } from "../ui/SelectField";
@@ -33,17 +44,8 @@ import { FOCUS_RING } from "../ui/styles";
 import * as api from "./api";
 import { BrowserLink, modelPage } from "./BrowserLink";
 import { LocalNotice } from "./LocalNotice";
-import {
-  DownloadProgress,
-  FIT_DOT,
-  GateLine,
-  gateProblem,
-  licenceBadge,
-  TONE_DOT,
-  useModelDownload,
-  useTokenSaved,
-  VerdictBadge,
-} from "./ModelCard";
+import { DownloadState, pickNewModelAndFocus, useShownDownload } from "./DownloadState";
+import { FIT_DOT, GateLine, gateProblem, licenceBadge, TONE_DOT, useTokenSaved, VerdictBadge } from "./ModelCard";
 import { CARD_BUTTON } from "./styles";
 import type {
   Gate,
@@ -79,7 +81,10 @@ import type {
 //    coordinator ruling P34). The note about local models still comes first while it was never
 //    accepted. Download is off, with the reason, while a part has no file or a gated repository
 //    could not be read (with the next step: Settings → Hugging Face for a token, the model's
-//    page for its terms, ruling S7). While it downloads, the panel shows how far it got;
+//    page for its terms, ruling S7). While it downloads, the panel shows how far it got, with
+//    Pause and Cancel (DownloadState.tsx, Task U7); once done, "Ready" and *Use it*, which
+//    chooses the model in the composer, back at the results; an installed model offers *Use it*
+//    too;
 // 7. OtherFiles: the LoRAs, each with *Download LoRA*, and the files Studio can't run (or only
 //    adds to a model), each with what it is and a quiet *Download file anyway* (0.1.2's plain
 //    download).
@@ -277,7 +282,9 @@ function RepoReview(props: { repo: LocalRepo; local: LocalModels }) {
   const plan = current?.plan ?? chosen?.plan ?? null;
   const choice = current?.choice ?? null;
   const gate = gateProblem(repo);
-  const group = useModelDownload(chosen ? searchedModelId(repo.repo, chosen.file) : "");
+  const chosenId = chosen ? searchedModelId(repo.repo, chosen.file) : "";
+  const group = useShownDownload((id) => id === chosenId);
+  const pickable = useStudio((s) => chosenId !== "" && canPick(s.local, chosenId));
 
   // Settings closed (a token may have been saved there): a refusal is said no more, and a
   // repository that could not be read for want of a token is read again.
@@ -450,6 +457,7 @@ function RepoReview(props: { repo: LocalRepo; local: LocalModels }) {
             installed={installed}
             group={group}
             name={visiblePath(nameOf(chosen.file))}
+            onUse={pickable ? () => pickNewModelAndFocus(chosenId) : undefined}
             error={refused === null ? problem : null}
             onDismiss={() => setProblem(null)}
             onDownload={download}
@@ -503,7 +511,8 @@ function EntryReview(props: { entry: LocalEntry; local: LocalModels }) {
   const [starting, setStarting] = useState(false);
   const { run, notice } = useNoticeFirst(local.noticeAccepted);
   const tokenSaved = useTokenSaved(entry.gate.mode !== "none" && !entry.installed);
-  const group = useModelDownload(entry.id);
+  const group = useShownDownload((id) => id === entry.id);
+  const pickable = useStudio((s) => canPick(s.local, entry.id));
   const mainIndex = Math.max(
     0,
     entry.parts.findIndex((p) => MAKES_THE_PICTURE.has(p.role)),
@@ -585,6 +594,7 @@ function EntryReview(props: { entry: LocalEntry; local: LocalModels }) {
         installed={entry.installed}
         group={group}
         name={entry.name}
+        onUse={pickable ? () => pickNewModelAndFocus(entry.id) : undefined}
         error={refused === null ? problem : null}
         onDismiss={() => setProblem(null)}
         onDownload={download}
@@ -946,7 +956,8 @@ function Why(props: { children: ReactNode }) {
 
 /** The panel's foot, kept in view at the bottom while the panel scrolls: the warnings, the
  *  total and Download (off, with `why`, while it would fail; "Installed" for a model already
- *  here), or how far its download got. */
+ *  here, with *Use it* given `onUse`), or how far its download got, with Pause and Cancel, and
+ *  once it is done, "Ready" with *Use it*. */
 function ActionBar(props: {
   total: number | null;
   warnings: string[];
@@ -957,6 +968,7 @@ function ActionBar(props: {
   installed: boolean;
   group: DownloadGroup | null;
   name: string;
+  onUse?(): void;
   error: ErrorInfo | null;
   onDismiss(): void;
   onDownload(): void;
@@ -975,17 +987,29 @@ function ActionBar(props: {
       ))}
       {props.error && <ErrorBanner error={props.error} onDismiss={props.onDismiss} />}
       {props.group ? (
-        <DownloadProgress group={props.group} name={props.name} />
+        <DownloadState group={props.group} name={props.name} onUse={props.onUse} size="md" />
       ) : (
         <div className="flex flex-wrap items-center justify-between gap-x-4 gap-y-2">
           {props.total !== null && !props.installed && (
             <p className="text-sm font-semibold tabular-nums">{MODEL_DETAIL.total(formatBytes(props.total))}</p>
           )}
           {props.installed ? (
-            <span className="ml-auto inline-flex items-center gap-1.5 text-sm font-medium text-success">
-              <CircleCheck size={16} aria-hidden />
-              {MODEL_DETAIL.installed}
-            </span>
+            <>
+              <span className="inline-flex items-center gap-1.5 text-sm font-medium text-success">
+                <CircleCheck size={16} aria-hidden />
+                {MODEL_DETAIL.installed}
+              </span>
+              {props.onUse && (
+                <button
+                  type="button"
+                  onClick={props.onUse}
+                  className={`btn-primary ml-auto inline-flex h-9 items-center gap-2 rounded-xl px-4 text-sm font-semibold ${FOCUS_RING}`}
+                >
+                  {STUDIO_DOWNLOADS.useIt}
+                  <ArrowRight size={16} aria-hidden />
+                </button>
+              )}
+            </>
           ) : (
             <button
               type="button"
@@ -1105,8 +1129,8 @@ function LoraRow(props: { repo: LocalRepo; file: RepoFileView; run(action: () =>
     <li className="flex items-center gap-3 px-3 py-2.5">
       <FileWords file={f} nameId={nameId} />
       {group && group.status !== "done" ? (
-        <div className="w-40 shrink-0">
-          <DownloadProgress group={group} name={visiblePath(nameOf(f.path))} />
+        <div className="w-52 shrink-0">
+          <DownloadState group={group} name={visiblePath(nameOf(f.path))} />
         </div>
       ) : group ? (
         <span className="inline-flex shrink-0 items-center gap-1 text-sm text-success">
@@ -1178,7 +1202,7 @@ function FileRow(props: { repo: LocalRepo; file: RepoFileView; onError(e: ErrorI
         )}
       </div>
       {group && group.status !== "cancelled" && group.status !== "done" && (
-        <DownloadProgress group={group} name={visiblePath(nameOf(f.path))} />
+        <DownloadState group={group} name={visiblePath(nameOf(f.path))} />
       )}
       {group?.status === "done" && group.savedFile && (
         <p className="truncate text-xs text-fg-muted">

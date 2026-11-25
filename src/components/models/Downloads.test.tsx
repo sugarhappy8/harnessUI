@@ -122,4 +122,33 @@ describe("Models → Downloads", () => {
     within(rowOf("edit")).getByText("Picture model");
     expect(within(rowOf("chat")).queryByText(/model$/)).toBeNull();
   });
+
+  it("a Studio import shows its name like a downloaded model, with no empty repository before it", async () => {
+    // A model file added from this computer whose set-up downloads its extra files: the group
+    // has no repository of its own (the backend's import group), only the model's name.
+    ipcMock.listDownloads.mockResolvedValue([
+      {
+        id: "imported",
+        repo: "",
+        label: "chroma.gguf",
+        fileCount: 2,
+        bytesDone: 0,
+        bytesTotal: 5_000_000_000,
+        status: "queued",
+        error: null,
+        bytesPerSecond: null,
+        unverified: false,
+        generatorKind: "image",
+        genModelId: "local:" + "d".repeat(64),
+      },
+    ]);
+    await act(async () => {
+      render(<Downloads />);
+    });
+    const name = screen.getByText("chroma.gguf");
+    expect(name.tagName).toBe("BDI");
+    expect(name.textContent).toBe("chroma.gguf");
+    expect(screen.queryByText(/^\s*·/)).toBeNull();
+    within(name.closest("li") as HTMLElement).getByText("Picture model");
+  });
 });

@@ -236,6 +236,17 @@ async function handle(cmd: string, args: Args): Promise<unknown> {
       return null;
     case "list_downloads":
       return state.downloads;
+    // Pause, Resume and Cancel on a download (Task U7): its new state, as the download manager
+    // would send it.
+    case "download_pause":
+    case "download_resume":
+    case "download_cancel": {
+      const status = cmd === "download_pause" ? "paused" : cmd === "download_resume" ? "downloading" : "cancelled";
+      state.downloads = state.downloads.map((g) => (g.id === a.groupId ? { ...g, status } : g));
+      const changed = state.downloads.find((g) => g.id === a.groupId);
+      if (changed) void emit("download-progress", changed);
+      return null;
+    }
     case "list_installed_models":
       return INSTALLED_CHAT_MODELS;
     case "disk_usage":

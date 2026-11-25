@@ -31,7 +31,9 @@
 // tabs, hardware filter, Hugging Face search, download confirmation (since Task U6, the detail
 // panel), repairs and the local model notice are in ./studioLocal. Task U3 (0.2.0): whether the side panel (Settings) is open,
 // saved in the preferences. Task U4: whether the model sheet (on which filter) and *Add a model
-// file* are open, and a pick of an installed model that needs setting up.
+// file* are open, and a pick of an installed model that needs setting up. Task U7: the follower
+// of Studio's downloads (a model or LoRA that is done is read again, whatever Studio shows), the
+// downloads that finished meanwhile, and *Use it* (`pickNewModel`).
 import { create, type StoreApi, type UseBoundStore } from "zustand";
 import * as api from "../components/studio/api";
 import { carry, closestModel, defaultsFor, dropUnmet, familyOf, type Values } from "../components/studio/canonical";
@@ -67,6 +69,7 @@ import { listenInEffect } from "../lib/listen";
 import type { ErrorInfo } from "../lib/types";
 import { STUDIO_CHAT_LINK, STUDIO_EMPTY, STUDIO_FIELDS, STUDIO_REFS, STUDIO_SETUPS } from "../lib/words";
 import { toErrorInfo } from "./app";
+import { followDownloads, useDownloads } from "./downloads";
 import { createLocal, type StudioLocalState } from "./studioLocal";
 import { createResults, type StudioResultsState } from "./studioResults";
 import { createRun, targetOf, type StudioRunState } from "./studioRun";
@@ -344,6 +347,21 @@ export interface StudioState extends StudioRunState, StudioResultsState, StudioL
   settingsSection: SettingsSection | null;
   /** Opens or closes the side panel (on `section`, if given), and saves whether it is open. */
   setSettingsOpen(open: boolean, section?: SettingsSection): void;
+
+  /** Task U7: the Studio downloads (a picture or video model's, or a LoRA's) that finished while
+   *  Studio followed them (`followStudioDownloads`), by download group ID, newest first. The top
+   *  bar's indicator lists them, a model's with *Use it*, and a model's card and detail panel
+   *  show it ready, until it is used or the list is cleared. */
+  doneDownloads: string[];
+  /** *Clear finished* in the indicator's list. */
+  clearDoneDownloads(): void;
+  /** *Use it* on an installed model, a new one most often (Task U7, design 10.3): its kind's tab
+   *  is shown with the model chosen (`chooseModel`, whatever its fit: a warning, never a
+   *  refusal), Get models and its detail panel close, back at the results and the composer, and
+   *  its finished downloads leave the indicator's list. A model that is not installed, or that
+   *  its tab cannot use (`canPick`), is ignored. Not named use…, which the hooks lint rule
+   *  reserves. */
+  pickNewModel(genModelId: string): void;
 }
 
 /** The parts of Studio's side panel. */
@@ -1103,6 +1121,20 @@ export const useStudio: UseBoundStore<StoreApi<StudioState>> = create<StudioStat
         // It opens or closes all the same, for now; the failure leaves a trace.
         .catch((e: unknown) => console.warn("Studio: whether Settings is open could not be saved", e));
     },
+
+    doneDownloads: [],
+    clearDoneDownloads: () => set({ doneDownloads: [] }),
+    pickNewModel: (genModelId) => {
+      const s = get();
+      const row = s.local?.installed.find((m) => m.id === genModelId);
+      if (!row || !canPick(s.local, genModelId)) return;
+      const tab = row.kind;
+      const its = new Set(useDownloads.getState().groups.filter((g) => g.genModelId === genModelId).map((g) => g.id));
+      set((st) => ({ tab, sheetOpen: false, doneDownloads: st.doneDownloads.filter((id) => !its.has(id)) }));
+      get().chooseModel(tab, "thisComputer", row.model.id);
+      // Get models closes with its detail panel: back at the results, with the composer.
+      get().showLocalModels(false);
+    },
   };
 });
 
@@ -1134,6 +1166,17 @@ function localFor(tab: StudioTab, local: LocalModels | null): LocalModels | null
  *  can make the kind. */
 export function localModelsFor(tab: StudioTab, local: LocalModels | null): InstalledLocal[] {
   return localFor(tab, local)?.installed.filter((m) => m.kind === tab && m.model.usable === null) ?? [];
+}
+
+/** Whether *Use it* can choose installed model `genModelId` (`pickNewModel`): it is installed,
+ *  and its kind's tab can use it, whatever its fit (a warning, never a refusal), or it needs
+ *  setting up (its files are chosen there). */
+export function canPick(local: LocalModels | null, genModelId: string): boolean {
+  const row = local?.installed.find((m) => m.id === genModelId);
+  if (!row) return false;
+  return (
+    localModelsFor(row.kind, local).some((m) => m.id === genModelId) || toSetUp(row.kind, row.model.id, local) !== null
+  );
 }
 
 /** The installed model `id` of `tab`'s kind that needs setting up (no recipe yet), where this
@@ -1330,6 +1373,27 @@ export function followStudio(): () => void {
     stopped = true;
     stopListening();
   };
+}
+
+/** Follows the app's downloads for Studio (Task U7): each `download-progress` event keeps the
+ *  download groups up, which a model's card, the detail panel and the top bar's indicator read,
+ *  and a picture or video model's, or a LoRA's, download that is done joins `doneDownloads` and
+ *  reads the local models (`refreshLocal`) or the LoRAs (`loadLoras`) again. StudioView starts
+ *  it as Studio first opens and keeps it while the app runs (App keeps Studio mounted), whatever
+ *  Studio shows: 0.1.2 read the local models again only while Get local models was open, so a
+ *  model finished after Back was not listed (critique §2.7 and §6). Before Studio has read
+ *  what is saved, that first read lists a model that is done. Returns the function that stops
+ *  following; outside the app it follows nothing. */
+export function followStudioDownloads(): () => void {
+  return followDownloads((group) => {
+    if (group.status !== "done" || !(group.genModelId || group.loraId)) return;
+    const s = useStudio.getState();
+    if (!s.doneDownloads.includes(group.id)) useStudio.setState({ doneDownloads: [group.id, ...s.doneDownloads] });
+    if (group.genModelId && s.loaded) {
+      s.refreshLocal().catch((e: unknown) => console.warn("Studio: the local models could not be read again", e));
+    }
+    if (group.loraId) s.loadLoras().catch((e: unknown) => console.warn("Studio: the LoRAs could not be read again", e));
+  });
 }
 
 // ---- settings and added pictures ----------------------------------------------------------

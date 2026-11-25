@@ -1,6 +1,7 @@
 import { useEffect, useState, type ReactNode } from "react";
 import type { ErrorInfo } from "../../lib/types";
-import { downloadAmount, engineDownloadWords, engineSizeWords, ENGINE_LINE } from "../../lib/words";
+import { formatBytes } from "../../lib/format";
+import { engineDownloadWords, engineSizeWords, ENGINE_LINE } from "../../lib/words";
 import { listenInEffect } from "../../lib/listen";
 import { toErrorInfo } from "../../store/app";
 import { useStudio } from "../../store/studio";
@@ -12,7 +13,7 @@ import type { EngineProgress, EngineStatus } from "./types";
 
 // [0.1.0 Studio, Task B10] The Studio engine's line, in Settings → Studio and in Get models'
 // header (Task B13; since Task U5 a quiet line beside this computer's chips): built in on a Mac; on Windows the pack that comes with the first
-// local model, the pack missing or partly there (*Download the Studio engine (29 MB, MIT)* once
+// local model, the pack missing or partly there (*Download the Studio engine (30 MB, MIT)* once
 // a local model is installed: antivirus quarantine, *Remove*, or a failed engine download while
 // the model finished), its download as `studio-engine-progress` says it goes, or installed with
 // *Remove* (which asks first). Every download goes through the store's `downloadEngine`. The
@@ -28,7 +29,7 @@ function downloadingWords(engine: EngineStatus, progress: EngineProgress | null)
   const done = progress ? progress.done : (engine.bytesDone ?? 0);
   const total = progress ? progress.total : engine.downloadBytes;
   return done > 0 && total > 0
-    ? ENGINE_LINE.downloading(downloadAmount(done), downloadAmount(total))
+    ? ENGINE_LINE.downloading(formatBytes(done), formatBytes(total))
     : ENGINE_LINE.downloading(null, null);
 }
 
@@ -145,7 +146,7 @@ export function EngineLine(props: { engine: EngineStatus; hasModel: boolean; rem
         open={asking}
         onOpenChange={setAsking}
         title={ENGINE_LINE.removeTitle}
-        body={ENGINE_LINE.removeBody(downloadAmount(engine.downloadBytes))}
+        body={ENGINE_LINE.removeBody(formatBytes(engine.downloadBytes))}
         cancelLabel={ENGINE_LINE.cancel}
         actionLabel={ENGINE_LINE.remove}
         destructive

@@ -258,6 +258,56 @@ const SCREENS = [
     },
   },
   {
+    id: "p",
+    name: "p-download-indicator",
+    run: async (page) => {
+      // Z-Image Turbo's download started from its detail panel, then Back to the results.
+      await open(page);
+      await openLocalModels(page);
+      await mainToTop(page);
+      await openCatalogPanel(page, "Z-Image Turbo");
+      await page.getByRole("dialog", { name: "Z-Image Turbo" }).getByRole("button", { name: "Download" }).click();
+      await settle(page, 700);
+      await page.keyboard.press("Escape");
+      await settle(page, 400);
+      await page.getByRole("button", { name: "Back" }).click();
+      await settle(page, 500);
+      // Not through the UI: the backend's `download-progress` events for two more of Studio's
+      // downloads, an SDXL model that has just finished and a LoRA still downloading.
+      await page.evaluate(async () => {
+        const base = { fileCount: 1, error: null, unverified: false, checking: false };
+        await window.__preview.emit("download-progress", {
+          ...base,
+          id: "group-sdxl",
+          repo: "stabilityai/stable-diffusion-xl-base-1.0",
+          label: "sd_xl_base_1.0",
+          bytesDone: 6_938_078_334,
+          bytesTotal: 6_938_078_334,
+          status: "done",
+          bytesPerSecond: null,
+          generatorKind: "image",
+          genModelId: "hf:stabilityai/stable-diffusion-xl-base-1.0:sd_xl_base_1.0.safetensors",
+        });
+        await window.__preview.emit("download-progress", {
+          ...base,
+          id: "group-lora",
+          repo: "nerijs/pixel-art-xl",
+          label: "pixel-art-xl-lcm",
+          bytesDone: 61_000_000,
+          bytesTotal: 170_000_000,
+          status: "downloading",
+          bytesPerSecond: 9_500_000,
+          generatorKind: null,
+          genModelId: null,
+          loraId: "hf:nerijs/pixel-art-xl:pixel-art-xl-lcm.safetensors",
+        });
+      });
+      await settle(page, 600);
+      await page.locator("[data-download-indicator]").click();
+      await settle(page, 600);
+    },
+  },
+  {
     id: "e3",
     name: "e3-detail-many-quantisations",
     run: async (page) => {

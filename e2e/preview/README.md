@@ -36,7 +36,7 @@ From the repo, with `node_modules` installed:
 
 ```bash
 npm run preview:serve &                       # http://127.0.0.1:5199/e2e/preview/index.html
-npm run preview:shoot                         # -> .cache/preview/after/ (68 PNGs) and a table
+npm run preview:shoot                         # -> .cache/preview/after/ (70 PNGs) and a table
 npm run preview:pairs -- .cache/preview/before .cache/preview/after   # -> .cache/preview/pairs.html
 pkill -f "e2e/preview/vite.config.ts"
 ```
@@ -77,7 +77,8 @@ models on its LoRAs chip · `d` Hugging Face results (cards with verdict badges)
 supported result opened in its detail panel (Task U6) · `d3` an unsupported result opened ·
 `e0` the local-model notice before a first download, over the panel · `e` the review before a
 download (the download dialog before Task U6; now Z-Image Turbo's detail panel) · `e2` the card
-while downloading · `e3` the detail panel of a result with 15 quantisations (Wan 2.2 A14B) ·
+while downloading (with Pause and Cancel since Task U7) · `p` the top bar's download indicator
+open, listing a model downloading, a LoRA downloading and a model ready to use (Task U7) · `e3` the detail panel of a result with 15 quantisations (Wan 2.2 A14B) ·
 `e4` the detail panel of an OpenRAIL model with two model types (SDXL) · `e5` a detail panel at
 900x650 ·
 `f` Advanced open (the side panel, from Settings) · `f2` the whole side panel, docked (tall

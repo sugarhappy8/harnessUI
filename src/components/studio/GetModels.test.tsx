@@ -31,6 +31,9 @@ const ipc = vi.hoisted(() => ({
   listDownloads: vi.fn<() => Promise<DownloadGroup[]>>(),
   onDownloadProgress: vi.fn<(handler: (g: DownloadGroup) => void) => Promise<() => void>>(),
   hubTokenStatus: vi.fn<() => Promise<{ saved: boolean; account: string | null }>>(),
+  pauseDownload: vi.fn<(groupId: string) => Promise<void>>(),
+  resumeDownload: vi.fn<(groupId: string) => Promise<void>>(),
+  cancelDownload: vi.fn<(groupId: string) => Promise<void>>(),
 }));
 vi.mock("../../lib/ipc", () => ipc);
 vi.mock("./api");
@@ -39,7 +42,8 @@ const api = await import("./api");
 const { click, flush, showLocal } = await import("./testing/local");
 const { useDownloads } = await import("../../store/downloads");
 const { catalogShown, hardwareChips, resultShown } = await import("./GetModels");
-const { activeDownload, gateProblem, licenceBadge } = await import("./ModelCard");
+const { gateProblem, licenceBadge } = await import("./ModelCard");
+const { activeDownload } = await import("./DownloadState");
 const { useStudio } = await import("../../store/studio");
 
 const INITIAL = useStudio.getState();
@@ -217,15 +221,17 @@ afterEach(cleanup);
 
 describe("the pieces", () => {
   it("this computer as chips: the graphics card and its memory, the computer's memory, free disk", () => {
+    // Memory as the computer counts it (and the fit's reason says it); the free disk in the
+    // cards' size format, since downloads fill it (412 GiB is 442.4 GB).
     expect(hardwareChips(LOCAL.hardware).map((c) => c.text)).toEqual([
       "Radeon RX 7600 · 8 GB graphics memory",
       "32 GB memory",
-      "412 GB free",
+      "442.4 GB free",
     ]);
-    const mac = { device: "Apple M5", graphicsBytes: Math.round(10.7 * GIB), sharedMemory: true, ramBytes: 16 * GIB, freeDiskBytes: 180 * GIB };
+    const mac = { device: "Apple M5", graphicsBytes: Math.round(10.7 * GIB), sharedMemory: true, ramBytes: 16 * GIB, freeDiskBytes: 180e9 };
     // On shared memory, the computer's memory and never the graphics working set.
-    expect(hardwareChips(mac).map((c) => c.text)).toEqual(["Apple M5 · 16 GB shared memory", "180 GB free"]);
-    expect(hardwareChips({ ...mac, ramBytes: null }).map((c) => c.text)).toEqual(["Apple M5", "180 GB free"]);
+    expect(hardwareChips(mac).map((c) => c.text)).toEqual(["Apple M5 · 16 GB shared memory", "180.0 GB free"]);
+    expect(hardwareChips({ ...mac, ramBytes: null }).map((c) => c.text)).toEqual(["Apple M5", "180.0 GB free"]);
     const cpu = { device: "Processor", graphicsBytes: null, sharedMemory: false, ramBytes: 16 * GIB, freeDiskBytes: null };
     expect(hardwareChips(cpu).map((c) => c.text)).toEqual(["Processor only", "16 GB memory"]);
   });
@@ -493,7 +499,7 @@ describe("Get models", () => {
     expect(within(chips).getAllByRole("listitem").map((c) => c.textContent)).toEqual([
       "Radeon RX 7600 · 8 GB graphics memory",
       "32 GB memory",
-      "412 GB free",
+      "442.4 GB free",
     ]);
     within(header).getByRole("button", { name: "Add a model file" });
     within(header).getByRole("button", { name: "Add a LoRA file" });
@@ -805,7 +811,7 @@ describe("Get models", () => {
     // klein is installed
     await showLocal({ ...LOCAL, engine: { ...LOCAL.engine, state: "notInstalled", downloadBytes: 30_303_000 } });
     const header = screen.getByRole("heading", { level: 2, name: "Get models" }).closest<HTMLElement>("[data-get-models-header]")!;
-    await click(within(header).getByRole("button", { name: "Download the Studio engine (29 MB, MIT)" }));
+    await click(within(header).getByRole("button", { name: "Download the Studio engine (30 MB, MIT)" }));
     expect(api.studioEngineDownload).toHaveBeenCalledWith(true);
   });
 });
@@ -817,25 +823,40 @@ describe("a model downloading", () => {
     ipc.listDownloads.mockResolvedValue([group({ bytesDone: 0, status: "queued" })]);
     const panel = screen.getByRole("dialog", { name: "Z-Image Turbo" });
     await click(within(panel).getByRole("button", { name: "Download" }));
-    // The panel shows it too, in place of its Download.
-    within(panel).getByText("0 B of 6.4 GB · queued");
+    // The panel shows it too, in place of its Download, with Pause and Cancel.
+    within(panel).getByText("0 B of 6.4 GB · Waiting");
     expect(within(panel).queryByRole("button", { name: "Download" })).toBeNull();
+    within(panel).getByRole("button", { name: "Pause downloading Z-Image Turbo" });
+    within(panel).getByRole("button", { name: "Cancel downloading Z-Image Turbo" });
     fireEvent.keyDown(panel, { key: "Escape" });
     const z = card("Z-Image Turbo");
     expect(within(z).queryByRole("button", { name: "Download" })).toBeNull();
-    within(z).getByText("0 B of 6.4 GB · queued");
+    within(z).getByText("0 B of 6.4 GB · Waiting");
     const bar = within(z).getByRole("progressbar", { name: "Downloading Z-Image Turbo" });
     expect(bar.getAttribute("aria-valuenow")).toBe("0");
     act(() => progress(group({ bytesDone: 3 * GIB, bytesPerSecond: 64 * 1024 * 1024 })));
-    within(z).getByText("3.2 GB of 6.4 GB · downloading · 48 s left");
+    // One size format on the card: the progress's sizes are written as its size was.
+    within(z).getByText(`${formatBytes(3 * GIB)} of ${formatBytes(6 * GIB)} · 48 s left`);
     expect(bar.getAttribute("aria-valuenow")).toBe("50");
+    // Pause and Cancel on the card too.
+    ipc.pauseDownload.mockResolvedValue(undefined);
+    await click(within(z).getByRole("button", { name: "Pause downloading Z-Image Turbo" }));
+    expect(ipc.pauseDownload).toHaveBeenCalledWith("group-1");
+    act(() => progress(group({ bytesDone: 3 * GIB, status: "paused" })));
+    within(z).getByText("3.2 GB of 6.4 GB · Paused");
+    within(z).getByRole("button", { name: "Resume downloading Z-Image Turbo" });
+    ipc.cancelDownload.mockResolvedValue(undefined);
+    await click(within(z).getByRole("button", { name: "Cancel downloading Z-Image Turbo" }));
+    expect(ipc.cancelDownload).toHaveBeenCalledWith("group-1");
+    act(() => progress(group({ bytesDone: 0, status: "cancelled" })));
+    within(card("Z-Image Turbo")).getByRole("button", { name: "Download" });
   });
 
-  it("a download already running when the view opens shows, and once done the model is installed", async () => {
+  it("a download already running when the view opens shows, and once done the model is installed and ready to use", async () => {
     ipc.listDownloads.mockResolvedValue([group()]);
     await showLocal();
     const z = card("Z-Image Turbo");
-    within(z).getByText("2.1 GB of 6.4 GB · downloading");
+    within(z).getByText("2.1 GB of 6.4 GB");
     const installed: LocalModels = {
       ...LOCAL,
       recommended: LOCAL.recommended.map((e) => (e.id === zimage.id ? { ...e, installed: true } : e)),
@@ -846,7 +867,10 @@ describe("a model downloading", () => {
     act(() => progress(group({ status: "done", bytesDone: 6 * GIB })));
     await flush();
     expect(vi.mocked(api.studioLocalModels).mock.calls.length).toBe(reads + 1);
-    within(within(section("Recommended for this computer")).getByRole("article", { name: "Z-Image Turbo" })).getByText("Installed");
+    const done = within(section("Recommended for this computer")).getByRole("article", { name: "Z-Image Turbo" });
+    within(done).getByText("Ready");
+    within(done).getByRole("button", { name: "Use it" });
+    expect(within(done).queryByRole("progressbar")).toBeNull();
     within(section("On this computer")).getByRole("article", { name: "Z-Image Turbo" });
   });
 
@@ -856,7 +880,9 @@ describe("a model downloading", () => {
     ]);
     await showLocal();
     const k = within(section("On this computer")).getByRole("article", { name: "FLUX.2 klein 4B" });
-    within(k).getByText("2.1 GB of 6.4 GB · paused");
+    within(k).getByText("2.1 GB of 6.4 GB · Paused");
+    within(k).getByRole("button", { name: "Resume downloading FLUX.2 klein 4B" });
+    within(k).getByRole("button", { name: "Cancel downloading FLUX.2 klein 4B" });
     expect(within(k).queryByRole("button", { name: "Repair" })).toBeNull();
     within(k).getByRole("button", { name: "Delete" });
   });
@@ -872,7 +898,152 @@ describe("a model downloading", () => {
     await showLocal();
     const panel = await openResult("someone/Z-Image-Turbo-GGUF");
     expect(within(panel).queryByRole("button", { name: "Download" })).toBeNull();
-    within(panel).getByText("2.1 GB of 6.4 GB · error");
+    within(panel).getByText("2.1 GB of 6.4 GB · Stopped");
     within(panel).getByText("The download stopped. Resume it in Models → Downloads.");
+    within(panel).getByRole("button", { name: "Resume downloading z-image-turbo-Q5_K_M.gguf" });
+  });
+});
+
+/** `local` with model `id` installed (named `name`, of `kind`, with `fit`), as the backend lists
+ *  it once its download is done; a catalog entry of that id reads installed too. */
+function withInstalled(local: LocalModels, id: string, name: string, fit: InstalledLocal["fit"] = LOCAL.installed[0]!.fit): LocalModels {
+  const row = LOCAL.installed[0]!;
+  const added: InstalledLocal = { ...row, id, name, fit, model: { ...row.model, id, displayName: name } };
+  return {
+    ...local,
+    recommended: local.recommended.map((e) => (e.id === id ? { ...e, installed: true } : e)),
+    installed: [added, ...local.installed],
+  };
+}
+
+describe("Use it (Task U7)", () => {
+  it("a finished model's card offers Use it, which selects it and returns to the results", async () => {
+    ipc.listDownloads.mockResolvedValue([group()]);
+    await showLocal();
+    expect(useStudio.getState().drafts.image.model).toBe("flux2-klein-4b-q4");
+    // Done: the backend lists it now. It may not fit this computer: a warning, never a refusal.
+    vi.mocked(api.studioLocalModels).mockResolvedValue(withInstalled(LOCAL, zimage.id, zimage.name, tooBig(zimage).fit));
+    act(() => progress(group({ status: "done", bytesDone: 6 * GIB })));
+    await flush();
+    const z = within(section("Recommended for this computer")).getByRole("article", { name: "Z-Image Turbo" });
+    within(z).getByText("Ready");
+    await click(within(z).getByRole("button", { name: "Use it" }));
+    expect(useStudio.getState()).toMatchObject({ localView: false, tab: "image", detail: null, doneDownloads: [] });
+    expect(useStudio.getState().drafts.image).toMatchObject({ target: "thisComputer", model: zimage.id });
+    screen.getByRole("textbox", { name: "Prompt" });
+    expect(screen.queryByRole("region", { name: "Recommended for this computer" })).toBeNull();
+    // Used: no longer listed as finished, so the top bar has no indicator left.
+    expect(document.querySelector("[data-download-indicator]")).toBeNull();
+    // Back in Get models, the installed card still offers it.
+    await click(within(screen.getByRole("banner")).getByRole("button", { name: "Get models" }));
+    const again = within(section("Recommended for this computer")).getByRole("article", { name: "Z-Image Turbo" });
+    within(again).getByText("Installed");
+    within(again).getByRole("button", { name: "Use it" });
+  });
+
+  it("using a new model takes at most 4 clicks", async () => {
+    const repo = "someone/Z-Image-Turbo-GGUF";
+    const id = `hf:${repo}:z-image-turbo-Q5_K_M.gguf`;
+    vi.mocked(api.studioLocalRepo).mockResolvedValue(supported({ repo }));
+    // From the results, with the content notice already accepted.
+    await showLocal({ ...LOCAL, noticeAccepted: true }, { open: false, popular: [hit(repo, { works: { version: "z-image", kind: "picture" } })] });
+    screen.getByRole("textbox", { name: "Prompt" });
+    let clicks = 0;
+    const press = async (el: HTMLElement) => {
+      clicks++;
+      await click(el);
+    };
+    // 1. Get models.
+    await press(within(screen.getByRole("banner")).getByRole("button", { name: "Get models" }));
+    // 2. A result card (Popular on Hugging Face: no typing needed).
+    await press(within(section("Popular on Hugging Face")).getByRole("button", { name: repo }));
+    const panel = screen.getByRole("dialog", { name: repo });
+    // 3. Download.
+    ipc.listDownloads.mockResolvedValue([group({ genModelId: id, label: "Z-Image Turbo", bytesDone: 0, status: "queued" })]);
+    await press(within(panel).getByRole("button", { name: "Download" }));
+    expect(api.studioLocalDownload).toHaveBeenCalledWith({ search: { repo, commit: "c".repeat(40), file: "z-image-turbo-Q5_K_M.gguf" } }, null);
+    // The download finishes; the backend lists the model.
+    vi.mocked(api.studioLocalModels).mockResolvedValue(withInstalled(LOCAL, id, "z-image-turbo-Q5_K_M"));
+    act(() => progress(group({ genModelId: id, label: "Z-Image Turbo", status: "done", bytesDone: 6 * GIB })));
+    await flush();
+    within(panel).getByText("Ready");
+    // 4. Use it.
+    await press(within(panel).getByRole("button", { name: "Use it" }));
+    expect(clicks).toBeLessThanOrEqual(4);
+    expect(useStudio.getState().drafts.image).toMatchObject({ target: "thisComputer", model: id });
+    expect(useStudio.getState().localView).toBe(false);
+    screen.getByRole("textbox", { name: "Prompt" });
+    expect(screen.queryByRole("dialog", { name: repo })).toBeNull();
+  });
+
+  it("a download finished elsewhere lists the model and offers Use it", async () => {
+    // Review Focus 3: Get models closed, the results shown.
+    await showLocal(LOCAL, { open: false });
+    expect(document.querySelector("[data-get-models]")).toBeNull();
+    act(() => progress(group()));
+    within(screen.getByRole("banner")).getByRole("button", { name: "1 downloading" });
+    const reads = vi.mocked(api.studioLocalModels).mock.calls.length;
+    vi.mocked(api.studioLocalModels).mockResolvedValue(withInstalled(LOCAL, zimage.id, zimage.name));
+    act(() => progress(group({ status: "done", bytesDone: 6 * GIB })));
+    await flush();
+    // The local models were read again, so the model sheet lists it.
+    expect(vi.mocked(api.studioLocalModels).mock.calls.length).toBe(reads + 1);
+    const chip = document.querySelector<HTMLElement>("[data-model-chip] button")!;
+    await click(chip);
+    const sheet = screen.getByRole("dialog", { name: "Choose a model" });
+    within(within(sheet).getByRole("region", { name: "On this computer" })).getByRole("button", { name: /^Z-Image Turbo/ });
+    fireEvent.keyDown(sheet, { key: "Escape" });
+    // Focus goes back to the chip once the sheet has gone (Radix does it on the next task).
+    await waitFor(() => expect(document.activeElement).toBe(chip));
+    // The top bar's indicator lists it, ready, with Use it.
+    await click(within(screen.getByRole("banner")).getByRole("button", { name: "1 ready" }));
+    const list = screen.getByRole("dialog", { name: "Downloads" });
+    const row = list.querySelector<HTMLElement>('[data-download-row="group-1"]')!;
+    expect(row.querySelector("p")?.textContent).toBe("Z-Image Turbo");
+    within(row).getByText("Ready");
+    await click(within(row).getByRole("button", { name: "Use it" }));
+    expect(useStudio.getState().drafts.image).toMatchObject({ target: "thisComputer", model: zimage.id });
+    expect(screen.queryByRole("dialog", { name: "Downloads" })).toBeNull();
+    expect(document.querySelector("[data-download-indicator]")).toBeNull();
+  });
+
+  it("a LoRA's download shows in the indicator, and once done the LoRAs are read again, with no Use it", async () => {
+    const lora: Lora = { ...LOCAL.loras[0]!, id: "hf:XLabs-AI/flux-lora-collection:anime.safetensors", name: "anime", repo: "XLabs-AI/flux-lora-collection", source: "search" };
+    const loraGroup = group({
+      id: "group-lora",
+      repo: "XLabs-AI/flux-lora-collection",
+      label: "anime",
+      bytesDone: 50_000_000,
+      bytesTotal: 170_000_000,
+      generatorKind: null,
+      genModelId: null,
+      loraId: lora.id,
+    });
+    ipc.listDownloads.mockResolvedValue([loraGroup]);
+    await showLocal();
+    await click(within(screen.getByRole("banner")).getByRole("button", { name: "1 downloading" }));
+    let list = screen.getByRole("dialog", { name: "Downloads" });
+    const row = list.querySelector<HTMLElement>('[data-download-row="group-lora"]')!;
+    within(row).getByText("anime");
+    within(row).getByText("LoRA");
+    within(row).getByText("50 MB of 170 MB");
+    within(row).getByRole("button", { name: "Pause downloading anime" });
+    within(row).getByRole("button", { name: "Cancel downloading anime" });
+    vi.mocked(api.studioLoras).mockResolvedValue([lora, ...LOCAL.loras]);
+    const localReads = vi.mocked(api.studioLocalModels).mock.calls.length;
+    act(() => progress({ ...loraGroup, status: "done", bytesDone: 170_000_000 }));
+    await flush();
+    expect(api.studioLoras).toHaveBeenCalledTimes(1);
+    expect(vi.mocked(api.studioLocalModels).mock.calls.length).toBe(localReads);
+    expect(useStudio.getState().loras.map((l) => l.id)).toContain(lora.id);
+    // Get models' On this computer lists it.
+    within(section("On this computer")).getByRole("article", { name: "anime" });
+    list = screen.getByRole("dialog", { name: "Downloads" });
+    within(list).getByText("Ready");
+    // A LoRA is attached in Settings, not chosen as a model.
+    expect(within(list).queryByRole("button", { name: "Use it" })).toBeNull();
+    await click(within(list).getByRole("button", { name: "Clear finished" }));
+    expect(useStudio.getState().doneDownloads).toEqual([]);
+    expect(document.querySelector("[data-download-indicator]")).toBeNull();
   });
 });

@@ -3,13 +3,20 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { LOCAL, LOCAL_RUN, MODELS, RUN } from "../components/studio/fixtures/models";
 import { settingsParts } from "../components/studio/settingsLine";
-import type { Lora, Run, StudioEndpoint, StudioPrefs } from "../components/studio/types";
+import type { InstalledLocal, LocalModels, Lora, Run, StudioEndpoint, StudioPrefs } from "../components/studio/types";
+import type { DownloadGroup } from "../lib/types";
 
-vi.mock("../lib/ipc", () => ({ isTauri: () => true }));
+const ipc = vi.hoisted(() => ({
+  isTauri: () => true,
+  listDownloads: vi.fn<() => Promise<DownloadGroup[]>>(),
+  onDownloadProgress: vi.fn<(handler: (g: DownloadGroup) => void) => Promise<() => void>>(),
+}));
+vi.mock("../lib/ipc", () => ipc);
 vi.mock("../components/studio/api");
 
 const api = await import("../components/studio/api");
-const { followStudio, runningCount, useStudio } = await import("./studio");
+const { canPick, followStudio, followStudioDownloads, runningCount, useStudio } = await import("./studio");
+const { useDownloads } = await import("./downloads");
 
 const INITIAL = useStudio.getState();
 
@@ -171,6 +178,116 @@ describe("following the backend", () => {
     expect(useStudio.getState().live.a?.status).toBe("downloading");
     expect(useStudio.getState().live.b?.status).toBe("queued");
     stop();
+  });
+});
+
+describe("Studio's downloads (Task U7)", () => {
+  /** A download group as the download manager reports it. */
+  function download(patch: Partial<DownloadGroup>): DownloadGroup {
+    return {
+      id: "g1",
+      repo: "leejet/Z-Image-Turbo-GGUF",
+      label: "Z-Image Turbo",
+      fileCount: 3,
+      bytesDone: 0,
+      bytesTotal: 6e9,
+      status: "downloading",
+      error: null,
+      bytesPerSecond: null,
+      unverified: false,
+      ...patch,
+    };
+  }
+
+  /** `LOCAL` with a picture model `id` installed (and `patch` on its row). */
+  function installed(id: string, patch: Partial<InstalledLocal> = {}): LocalModels {
+    const row = LOCAL.installed[0]!;
+    return { ...LOCAL, installed: [{ ...row, id, name: id, model: { ...row.model, id, displayName: id }, ...patch }, ...LOCAL.installed] };
+  }
+
+  let heard: (g: DownloadGroup) => void = () => undefined;
+  beforeEach(() => {
+    useDownloads.setState({ groups: [] });
+    ipc.listDownloads.mockResolvedValue([]);
+    ipc.onDownloadProgress.mockImplementation(async (handler) => {
+      heard = handler;
+      return () => undefined;
+    });
+  });
+
+  it("a model's download that is done reads the local models again and is listed as finished; a LoRA's reads the LoRAs", async () => {
+    useStudio.setState({ local: LOCAL, loaded: true });
+    const stop = followStudioDownloads();
+    await flush();
+    expect(ipc.listDownloads).toHaveBeenCalledTimes(1);
+    vi.mocked(api.studioLocalModels).mockResolvedValue(installed("z-image-turbo-q4"));
+    heard(download({ genModelId: "z-image-turbo-q4", generatorKind: "image" }));
+    // Running: kept, nothing read again.
+    expect(useDownloads.getState().groups).toHaveLength(1);
+    expect(api.studioLocalModels).not.toHaveBeenCalled();
+    heard(download({ genModelId: "z-image-turbo-q4", generatorKind: "image", status: "done" }));
+    await flush();
+    expect(api.studioLocalModels).toHaveBeenCalledTimes(1);
+    expect(useStudio.getState().local?.installed[0]?.id).toBe("z-image-turbo-q4");
+    expect(useStudio.getState().doneDownloads).toEqual(["g1"]);
+    // The same event again lists it once.
+    heard(download({ genModelId: "z-image-turbo-q4", generatorKind: "image", status: "done" }));
+    expect(useStudio.getState().doneDownloads).toEqual(["g1"]);
+    // A LoRA's: the LoRAs, Get models' copy too, and not the local models.
+    const lora: Lora = { ...LOCAL.loras[0]!, id: "hf:o/r:anime.safetensors", name: "anime" };
+    vi.mocked(api.studioLoras).mockResolvedValue([lora]);
+    vi.mocked(api.studioLocalModels).mockClear();
+    heard(download({ id: "g2", loraId: lora.id, status: "done" }));
+    await flush();
+    expect(api.studioLoras).toHaveBeenCalledTimes(1);
+    expect(api.studioLocalModels).not.toHaveBeenCalled();
+    expect(useStudio.getState().loras).toEqual([lora]);
+    expect(useStudio.getState().local?.loras).toEqual([lora]);
+    expect(useStudio.getState().doneDownloads).toEqual(["g2", "g1"]);
+    // A chat model's download is not Studio's.
+    heard(download({ id: "g3", status: "done" }));
+    expect(useStudio.getState().doneDownloads).toEqual(["g2", "g1"]);
+    useStudio.getState().clearDoneDownloads();
+    expect(useStudio.getState().doneDownloads).toEqual([]);
+    stop();
+  });
+
+  it("before Studio has read what is saved, a model that is done is left to that first read", async () => {
+    const stop = followStudioDownloads();
+    await flush();
+    heard(download({ genModelId: "z-image-turbo-q4", status: "done" }));
+    await flush();
+    expect(api.studioLocalModels).not.toHaveBeenCalled();
+    expect(useStudio.getState().doneDownloads).toEqual(["g1"]);
+    stop();
+  });
+
+  it("Use it picks the model on its kind's tab, whatever its fit, and closes Get models and its panel", () => {
+    const wan = LOCAL.installed.find((m) => m.kind === "video")!;
+    useStudio.setState({ local: { ...LOCAL, installed: LOCAL.installed.map((m) => (m.id === wan.id ? { ...m, fit: { ...m.fit, word: "notHere" as const } } : m)) }, loaded: true, doneDownloads: ["g1", "g2"] });
+    useDownloads.setState({ groups: [download({ id: "g1", genModelId: wan.id, status: "done" }), download({ id: "g2", loraId: "x", status: "done" })] });
+    useStudio.getState().showLocalModels(true);
+    void useStudio.getState().openDetail({ entryId: "x" });
+    expect(canPick(useStudio.getState().local, wan.id)).toBe(true);
+    useStudio.getState().pickNewModel(wan.id);
+    expect(useStudio.getState()).toMatchObject({ tab: "video", localView: false, detail: null, doneDownloads: ["g2"] });
+    expect(useStudio.getState().drafts.video).toMatchObject({ target: "thisComputer", model: wan.model.id });
+  });
+
+  it("Use it is not offered for a model that is not installed, or that its tab cannot use", () => {
+    expect(canPick(LOCAL, "nothing-here")).toBe(false);
+    const unreadable = installed("old", { model: { ...LOCAL.installed[0]!.model, id: "old", usable: "This version cannot read it." } });
+    expect(canPick(unreadable, "old")).toBe(false);
+    // One that needs setting up can be chosen: its files are chosen there.
+    const mystery = LOCAL.installed.find((m) => m.needsSetup)!;
+    expect(canPick(LOCAL, mystery.id)).toBe(true);
+    // Video on a computer that cannot make it.
+    const wan = LOCAL.installed.find((m) => m.kind === "video")!;
+    expect(canPick({ ...LOCAL, videoOnProcessor: true }, wan.id)).toBe(false);
+    useStudio.setState({ local: LOCAL, tab: "image" });
+    const before = useStudio.getState().drafts;
+    useStudio.getState().pickNewModel("nothing-here");
+    expect(useStudio.getState().drafts).toBe(before);
   });
 });
 

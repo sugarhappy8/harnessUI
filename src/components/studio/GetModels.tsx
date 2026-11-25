@@ -1,9 +1,9 @@
 import { useEffect, useId, useRef, useState, type ReactNode } from "react";
 import { ArrowLeft, FilePlus2, Gpu, HardDrive, Layers, MemoryStick, Monitor, Sparkles, TrendingUp, type LucideIcon } from "lucide-react";
 import type { ErrorInfo } from "../../lib/types";
-import { amountGb, GET_MODELS, LOCAL_MODELS } from "../../lib/words";
+import { formatBytes } from "../../lib/format";
+import { capacityGb, GET_MODELS, LOCAL_MODELS } from "../../lib/words";
 import { toErrorInfo } from "../../store/app";
-import { followDownloads } from "../../store/downloads";
 import { useStudio } from "../../store/studio";
 import { ErrorBanner } from "../ErrorBanner";
 import { FOCUS_RING } from "../ui/styles";
@@ -36,9 +36,10 @@ import type {
 // found. All are cards in one grid of two or three columns (ModelCard.tsx). A result, or a
 // catalog model's *Download*, opens the detail panel (ModelDetail.tsx, Task U6): the review
 // before a download, with one Download (the content notice comes first while it was never
-// accepted); the footer's *What that means* shows the notice again, read only. While it is open
-// it follows the app's downloads, so a card and the panel show how far a model got, and once
-// one is done the local models are read again.
+// accepted); the footer's *What that means* shows the notice again, read only. A card and the
+// panel show how far a model got, with Pause and Cancel, and *Use it* once it is done (Task U7):
+// Studio follows the app's downloads whatever it shows (`followStudioDownloads`), so a model
+// done after Back is listed too.
 
 /** How many of the Popular list show before *Show all*: two rows of three. */
 const POPULAR_SHOWN = 6;
@@ -61,20 +62,22 @@ const KIND_OF: Record<SearchFilter, MediaKind | null> = { pictures: "image", vid
 /** This computer as the header's chips: the graphics card and its memory (on shared memory,
  *  the computer's memory with it, never the graphics working set; without one, "Processor
  *  only"), the computer's memory, and the models folder's free disk. A figure not known is left
- *  out. */
+ *  out. Memory is a capacity, counted as the computer counts it and as the fit's reason says
+ *  it ("8 GB graphics memory", "needs 6 GB of graphics memory"): `capacityGb`. The free disk is
+ *  what a download fills, so it is in the cards' size format (Task U7): `formatBytes`. */
 export function hardwareChips(h: HardwareLine): { icon: LucideIcon; text: string }[] {
   const chips: { icon: LucideIcon; text: string }[] = [];
   if (h.sharedMemory) {
-    chips.push({ icon: Gpu, text: h.ramBytes === null ? h.device : GET_MODELS.shared(h.device, amountGb(h.ramBytes)) });
+    chips.push({ icon: Gpu, text: h.ramBytes === null ? h.device : GET_MODELS.shared(h.device, capacityGb(h.ramBytes)) });
   } else {
     chips.push(
       h.graphicsBytes === null
         ? { icon: Monitor, text: GET_MODELS.processorOnly }
-        : { icon: Gpu, text: GET_MODELS.gpu(h.device, amountGb(h.graphicsBytes)) },
+        : { icon: Gpu, text: GET_MODELS.gpu(h.device, capacityGb(h.graphicsBytes)) },
     );
-    if (h.ramBytes !== null) chips.push({ icon: MemoryStick, text: GET_MODELS.ram(amountGb(h.ramBytes)) });
+    if (h.ramBytes !== null) chips.push({ icon: MemoryStick, text: GET_MODELS.ram(capacityGb(h.ramBytes)) });
   }
-  if (h.freeDiskBytes !== null) chips.push({ icon: HardDrive, text: GET_MODELS.freeDisk(amountGb(h.freeDiskBytes)) });
+  if (h.freeDiskBytes !== null) chips.push({ icon: HardDrive, text: GET_MODELS.freeDisk(formatBytes(h.freeDiskBytes)) });
   return chips;
 }
 
@@ -120,20 +123,6 @@ export function GetModelsView() {
   const kind = KIND_OF[filter];
   const gated = local !== null && [...local.recommended, ...local.notHere].some((e) => e.gate.mode !== "none" && !e.installed);
   const tokenSaved = useTokenSaved(gated);
-
-  useEffect(
-    () =>
-      followDownloads((group) => {
-        // A picture or video model that finished downloading is installed now.
-        if (group.genModelId && group.status === "done") {
-          useStudio
-            .getState()
-            .refreshLocal()
-            .catch((e: unknown) => console.warn("Studio: the local models could not be read again", e));
-        }
-      }),
-    [],
-  );
 
   // The Popular list of the filter, once per filter while the view is open (each opening mounts
   // it). Each filter keeps its own list or failure. An answer the store dropped (a search was

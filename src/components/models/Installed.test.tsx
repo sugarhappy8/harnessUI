@@ -4,7 +4,7 @@ import type { DownloadGroup, ImageFileOffer, InstalledModel, ModelBusy, ModelLoa
 import { FINE_LAUNCH_NONE, fineFacts, processorPicture } from "../fine.fixtures";
 import type { LocalModels } from "../studio/types";
 import { LOCAL } from "../studio/fixtures/models";
-import { amountGb } from "../../lib/words";
+import { formatBytes } from "../../lib/format";
 
 const ipcMock = vi.hoisted(() => ({
   isTauri: () => false,
@@ -477,7 +477,7 @@ describe("Models → Installed", () => {
       const onClose = await show();
       const line = screen.getByText(/^Picture and video models:/);
       expect(line.textContent).toBe(
-        `Picture and video models: ${LOCAL.installed.length} (${amountGb(LOCAL.installedBytes)}) · Manage in Studio`,
+        `Picture and video models: ${LOCAL.installed.length} (${formatBytes(LOCAL.installedBytes)}) · Manage in Studio`,
       );
       // The list never offers Use for them: its rows are the chat models.
       expect(useButtons()).toHaveLength(2);

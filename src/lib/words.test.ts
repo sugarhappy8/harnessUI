@@ -1248,3 +1248,22 @@ describe("the detail panel's words (Task U6)", () => {
     }
   });
 });
+
+describe("Studio's download words (Task U7)", () => {
+  it("keep the briefed wording", async () => {
+    const { STUDIO_DOWNLOADS: d } = await import("./words");
+    expect(d.indicator(2)).toBe("2 downloading");
+    expect(d.indicatorReady(1)).toBe("1 ready");
+    expect(d.progress("2.4 GB", "6.7 GB", "2 min left")).toBe("2.4 GB of 6.7 GB · 2 min left");
+    expect(d.progress("2.4 GB", "6.7 GB", null)).toBe("2.4 GB of 6.7 GB");
+    expect(d.pause("Z-Image Turbo")).toBe("Pause downloading Z-Image Turbo");
+    expect(d.resume("Z-Image Turbo")).toBe("Resume downloading Z-Image Turbo");
+    expect(d.cancel("Z-Image Turbo")).toBe("Cancel downloading Z-Image Turbo");
+    expect(d.useIt).toBe("Use it");
+    expect(d.ready).toBe("Ready");
+    // Every state a download can be in has its words, or (downloading) the time left instead.
+    expect(Object.keys(d.status).sort()).toEqual(
+      ["cancelled", "cancelling", "done", "downloading", "error", "paused", "queued", "verifying"],
+    );
+  });
+});
