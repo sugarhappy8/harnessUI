@@ -7,7 +7,7 @@ http://127.0.0.1:<port>/api/v1 that answers as openrouter.ai does, from the reco
 
 The checks, each PASS or FAIL (the run goes on; the exit code is 1 if any failed):
 - Studio opens with "On this computer" first, and the empty state this computer gets
-  (*Get local models* when a recommended picture model fits here, else cloud as the backup);
+  (*Get models* when a recommended picture model fits here, else cloud as the backup);
 - an OpenRouter endpoint at the mock, added in Settings → Endpoints: Test fetches the lists;
 - Ctrl+G opens Studio; picking FLUX 3 Image fetches its price; a 1K picture ($0.05) is made
   without a question and one tile appears;
@@ -488,8 +488,8 @@ def c_first_open(c, notes):
         assert "Make pictures and videos on this computer: free, and nothing is sent." in main, main
         assert s.execute(
             "return [...document.querySelectorAll('[data-studio-view] main button')]"
-            ".some(b => b.innerText.trim() === 'Get local models');"
-        ), "no Get local models button"
+            ".some(b => b.innerText.trim() === 'Get models');"
+        ), "no Get models button"
     else:
         assert "This computer cannot run local models well." in main, main
         assert "Open Endpoints" in main, main

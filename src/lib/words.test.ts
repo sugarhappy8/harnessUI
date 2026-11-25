@@ -37,7 +37,10 @@ import {
   STUDIO_DELETE,
   STUDIO_TILE,
   STUDIO_REFS,
-  LOCAL_MODELS,
+  GET_MODELS,
+  VERDICT,
+  verdictBadgeWords,
+  updatedWhen,
   DOWNLOAD_LOCAL,
   INSTALLED_STUDIO_LINE,
   amountNumber,
@@ -1055,9 +1058,7 @@ describe("0.1.0 Studio: the viewer and the gallery in plain words", () => {
   });
 
   it("puts the pieces components join together in words, here and not in the components", () => {
-    expect(LOCAL_MODELS.deviceWith("Radeon RX 7600", LOCAL_MODELS.graphicsMemory("8 GB"))).toBe(
-      "Radeon RX 7600, 8 GB graphics memory",
-    );
+    expect(GET_MODELS.gpu("Radeon RX 7600", "8 GB")).toBe("Radeon RX 7600 · 8 GB graphics memory");
     expect(DOWNLOAD_LOCAL.verdictLine("video", "you may use them commercially")).toBe(
       "Videos you make: you may use them commercially",
     );
@@ -1142,6 +1143,45 @@ describe("a repository's file labels (Task S6)", () => {
     expect(parameterWords(14_288_000_000)).toBe("14B");
     expect(parameterWords(2_567_000_000)).toBe("2.6B");
     expect(parameterWords(860_000_000)).toBe("860M");
+  });
+});
+
+describe("Get models' words (Task U5)", () => {
+  it("a result's verdict badge says what Studio can do with it, in short, never the engine's words", () => {
+    expect(verdictBadgeWords({ works: { version: "sdxl", kind: "picture" } }, true)).toBe("Works in Studio · SDXL");
+    expect(verdictBadgeWords({ lora: { base: "flux" } }, false)).toBe("LoRA for FLUX.1");
+    expect(verdictBadgeWords({ lora: { base: null } }, true)).toBe("LoRA for an unknown model type");
+    expect(verdictBadgeWords({ cannotRun: { reason: "lumina2", version: null } }, true)).toBe("Can't run: Lumina 2");
+    expect(verdictBadgeWords("unknown", false)).toBe("Open to check");
+    expect(verdictBadgeWords("unknown", true)).toBe("Not recognised");
+    const reasons = [
+      "lumina2", "ltxVideo09", "hunyuanVideo1", "svd", "unknownWeights", "sharded", "pickle", "noSha", "adapter",
+      "needsControlFrames", "needsAudio", "upscaler", "folderModel", "notThisEngine", "ltx2",
+    ] as const;
+    for (const reason of reasons) {
+      const words = VERDICT.cantRun(reason);
+      expect(words).toMatch(/^Can't run: \S/);
+      // No engine identifier: none of the camelCase reason words.
+      if (/[A-Z]/.test(reason)) expect(words, reason).not.toContain(reason);
+      expect(words.length, reason).toBeLessThanOrEqual(36);
+    }
+  });
+
+  it("says when a result was updated, from today to years ago", () => {
+    const now = new Date(2026, 10, 25, 12).getTime();
+    const day = 86_400_000;
+    expect(updatedWhen(now - 3_600_000, now)).toBe("today");
+    expect(updatedWhen(now + 3_600_000, now)).toBe("today");
+    expect(updatedWhen(now - day, now)).toBe("yesterday");
+    expect(updatedWhen(now - 3 * day, now)).toBe("3 days ago");
+    expect(updatedWhen(now - 8 * day, now)).toBe("a week ago");
+    expect(updatedWhen(now - 26 * day, now)).toBe("3 weeks ago");
+    expect(updatedWhen(now - 40 * day, now)).toBe("a month ago");
+    expect(updatedWhen(now - 200 * day, now)).toBe("6 months ago");
+    expect(updatedWhen(now - 800 * day, now)).toBe("2 years ago");
+    expect(GET_MODELS.updated(updatedWhen(now - 3 * day, now))).toBe("updated 3 days ago");
+    expect(GET_MODELS.downloads(48_213)).toBe("48.2k downloads");
+    expect(GET_MODELS.likes(1)).toBe("1 like");
   });
 });
 

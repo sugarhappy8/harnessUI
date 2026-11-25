@@ -84,23 +84,19 @@ async function openSettings(page) {
   await settle(page, 500);
 }
 
+/** Hugging Face searched from Get models' field, at the top of the view (Task U5). */
 async function search(page, words) {
   const box = page.getByRole("searchbox", { name: "Search Hugging Face" });
   await box.fill(words);
   await box.press("Enter");
   await settle(page, 700);
-  // The search sits under the recommended list: bring it to the top of the column.
-  await box.evaluate((el) => el.closest("section").scrollIntoView({ block: "start" }));
-  await settle(page, 300);
 }
 
+/** A result opened from its card's heading button: it shows in a slide-over (Task U5; Task U6
+ *  makes it the detail panel). */
 async function openResult(page, repo) {
-  await page.getByRole("button", { name: repo, exact: true }).click();
-  await settle(page, 800);
-  await page
-    .getByRole("button", { name: repo, exact: true })
-    .evaluate((el) => el.closest("li").scrollIntoView({ block: "start" }));
-  await settle(page, 300);
+  await page.getByRole("article", { name: repo, exact: true }).getByRole("button", { name: repo, exact: true }).click();
+  await settle(page, 900);
 }
 
 const SCREENS = [
@@ -162,6 +158,25 @@ const SCREENS = [
     run: async (page) => {
       await open(page);
       await openLocalModels(page);
+    },
+  },
+  {
+    id: "l",
+    name: "l-get-models-narrow-900x650",
+    viewport: { width: 900, height: 650 },
+    run: async (page) => {
+      await open(page);
+      await openLocalModels(page);
+    },
+  },
+  {
+    id: "m",
+    name: "m-get-models-loras",
+    run: async (page) => {
+      await open(page);
+      await openLocalModels(page);
+      await page.getByRole("group", { name: "Show" }).getByRole("button", { name: "LoRAs" }).click();
+      await settle(page, 700);
     },
   },
   {

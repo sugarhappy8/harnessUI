@@ -6,11 +6,12 @@ import { toErrorInfo } from "../../store/app";
 import { useStudio } from "../../store/studio";
 import { ErrorBanner } from "../ErrorBanner";
 import * as api from "./api";
+import { FOCUS_RING } from "../ui/styles";
 import { ConfirmDialog } from "./ConfirmDialog";
 import type { EngineProgress, EngineStatus } from "./types";
 
-// [0.1.0 Studio, Task B10] The Studio engine's line, in Settings → Studio and in Get local
-// models' footer (Task B13): built in on a Mac; on Windows the pack that comes with the first
+// [0.1.0 Studio, Task B10] The Studio engine's line, in Settings → Studio and in Get models'
+// header (Task B13; since Task U5 a quiet line beside this computer's chips): built in on a Mac; on Windows the pack that comes with the first
 // local model, the pack missing or partly there (*Download the Studio engine (29 MB, MIT)* once
 // a local model is installed: antivirus quarantine, *Remove*, or a failed engine download while
 // the model finished), its download as `studio-engine-progress` says it goes, or installed with
@@ -18,7 +19,7 @@ import type { EngineProgress, EngineStatus } from "./types";
 // engine is read again after a removal (no `finished` event follows one), when a download
 // finishes, and when one could not start.
 
-const LINK = "text-sm underline hover:text-fg disabled:opacity-60";
+const LINK = "underline hover:text-fg disabled:opacity-60";
 
 /** What the line says while the pack downloads: how far `progress` got, else what the engine's
  *  state says is on disk. */
@@ -33,9 +34,11 @@ function downloadingWords(engine: EngineStatus, progress: EngineProgress | null)
 
 /** The Studio engine on this computer. `hasModel`: a local model is installed (a missing pack
  *  is then offered for download; else it comes with the first model). `removable`: an
- *  installed pack offers *Remove*. */
-export function EngineLine(props: { engine: EngineStatus; hasModel: boolean; removable: boolean }) {
-  const { engine, hasModel, removable } = props;
+ *  installed pack offers *Remove*. `compact`: the quiet line of Get models' header, muted, its
+ *  download a small pill. */
+export function EngineLine(props: { engine: EngineStatus; hasModel: boolean; removable: boolean; compact?: boolean }) {
+  const { engine, hasModel, removable, compact = false } = props;
+  const link = `${LINK} text-sm ${FOCUS_RING}`;
   const [progress, setProgress] = useState<EngineProgress | null>(null);
   const [busy, setBusy] = useState(false);
   const [asking, setAsking] = useState(false);
@@ -100,7 +103,7 @@ export function EngineLine(props: { engine: EngineStatus; hasModel: boolean; rem
         {removable && (
           <>
             <span aria-hidden>{ENGINE_LINE.separator}</span>
-            <button type="button" className={LINK} disabled={busy} onClick={() => setAsking(true)}>
+            <button type="button" className={link} disabled={busy} onClick={() => setAsking(true)}>
               {ENGINE_LINE.remove}
             </button>
           </>
@@ -116,7 +119,11 @@ export function EngineLine(props: { engine: EngineStatus; hasModel: boolean; rem
           title={engine.licenseName}
           disabled={busy}
           onClick={() => void download()}
-          className="rounded-md border border-border px-3 py-1 text-sm hover:bg-bg-muted disabled:opacity-60"
+          className={
+            compact
+              ? "rounded-full border border-border bg-surface px-2.5 py-0.5 text-sm text-fg hover:bg-bg-muted disabled:opacity-60"
+              : "rounded-md border border-border px-3 py-1 text-sm hover:bg-bg-muted disabled:opacity-60"
+          }
         >
           {engineDownloadWords(engine.downloadBytes, engine.licenseName)}
         </button>
@@ -130,7 +137,9 @@ export function EngineLine(props: { engine: EngineStatus; hasModel: boolean; rem
 
   return (
     <div className="space-y-2">
-      <div className="flex flex-wrap items-center gap-2 text-sm">{line}</div>
+      <div className={compact ? "flex flex-wrap items-center gap-1.5 text-sm text-fg-muted" : "flex flex-wrap items-center gap-2 text-sm"}>
+        {line}
+      </div>
       {error && <ErrorBanner error={error} onDismiss={() => setError(null)} />}
       <ConfirmDialog
         open={asking}

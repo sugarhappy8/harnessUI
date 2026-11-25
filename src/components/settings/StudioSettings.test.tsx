@@ -157,7 +157,7 @@ describe("Settings → Studio", () => {
     expect(headings.indexOf("On this computer")).toBeGreaterThanOrEqual(0);
     expect(headings.indexOf("On this computer")).toBeLessThan(headings.indexOf("Cloud spending"));
     screen.getByText(`Picture and video models: ${LOCAL.installed.length} (${amountGb(LOCAL.installedBytes)})`);
-    button("Get local models");
+    button("Get models");
     screen.getByText("Studio engine: built in"); // LOCAL.engine.state "builtIn" (a Mac)
     expect(screen.queryByRole("button", { name: "Remove" })).toBeNull();
     const unload = screen.getByRole("radio", { name: "Unload the chat model" }) as HTMLInputElement;
@@ -172,13 +172,13 @@ describe("Settings → Studio", () => {
     expect(api.studioSetPrefs).toHaveBeenLastCalledWith({ reloadChatAfter: true });
   });
 
-  it("Get local models opens Studio's own view", async () => {
+  it("Get models opens Studio's own view", async () => {
     await show();
     const opened: unknown[] = [];
     const onOpen = (e: Event) => opened.push((e as CustomEvent<unknown>).detail);
     window.addEventListener("app:open-studio", onOpen);
     try {
-      await click(button("Get local models"));
+      await click(button("Get models"));
     } finally {
       window.removeEventListener("app:open-studio", onOpen);
     }
@@ -200,7 +200,7 @@ describe("Settings → Studio", () => {
   it("with no local model yet the line says so", async () => {
     await show({ ...LOCAL, installed: [], installedBytes: 0 });
     screen.getByText("Picture and video models: none yet");
-    button("Get local models");
+    button("Get models");
   });
 
   it("removing the Windows engine asks first, then reads the engine again", async () => {

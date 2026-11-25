@@ -45,6 +45,23 @@ beforeEach(() => {
   vi.mocked(api.studioLocalModels).mockResolvedValue(LOCAL);
 });
 
+describe("Get models' filter and Fits this computer (Task U5)", () => {
+  it("the filter starts from the tab each time the view opens; Fits this computer is off by default", () => {
+    expect(useStudio.getState()).toMatchObject({ searchFilter: "pictures", fitsOnly: false });
+    useStudio.getState().setTab("video");
+    useStudio.getState().showLocalModels(true);
+    expect(useStudio.getState()).toMatchObject({ localView: true, searchFilter: "video" });
+    useStudio.getState().setSearchFilter("loras");
+    useStudio.getState().setFitsOnly(true);
+    useStudio.getState().showLocalModels(false);
+    // The tab stays as it was, and the switch as it was left.
+    expect(useStudio.getState()).toMatchObject({ localView: false, tab: "video", fitsOnly: true });
+    useStudio.getState().setTab("image");
+    useStudio.getState().showLocalModels(true);
+    expect(useStudio.getState().searchFilter).toBe("pictures");
+  });
+});
+
 describe("search", () => {
   it("search with a filter keeps only the last answer", async () => {
     let answerFirst: (page: LocalSearchPage) => void = () => undefined;
@@ -203,17 +220,21 @@ describe("LoRAs", () => {
     expect(useStudio.getState().loras.map((l) => l.id)).toEqual(["a", "b"]);
     vi.mocked(api.onImportProgress).mockResolvedValue(() => undefined);
     vi.mocked(api.studioLoraImport).mockResolvedValue(lora("b", "b"));
+    useStudio.setState({ local: { ...LOCAL, loras: [lora("a", "a")] } });
     await useStudio.getState().importLora("/l/b.safetensors");
     expect(useStudio.getState().loras.map((l) => l.id)).toEqual(["b", "a"]);
+    expect(useStudio.getState().local?.loras.map((l) => l.id)).toEqual(["b", "a"]);
     expect(useStudio.getState().importProgress).toBeNull();
   });
 
   it("deleteLora removes it; downloadLora gives the group and reads the downloads", async () => {
-    useStudio.setState({ loras: [lora("a", "a"), lora("b", "b")] });
+    useStudio.setState({ loras: [lora("a", "a"), lora("b", "b")], local: { ...LOCAL, loras: [lora("a", "a"), lora("b", "b")] } });
     vi.mocked(api.studioLoraDelete).mockResolvedValue(undefined);
     await useStudio.getState().deleteLora("a");
     expect(api.studioLoraDelete).toHaveBeenCalledWith("a");
     expect(useStudio.getState().loras.map((l) => l.id)).toEqual(["b"]);
+    // Get models lists the local models' own copy: it goes there too.
+    expect(useStudio.getState().local?.loras.map((l) => l.id)).toEqual(["b"]);
     vi.mocked(api.studioLoraDownload).mockResolvedValue("g");
     await expect(useStudio.getState().downloadLora("o/r", "c".repeat(40), "x.safetensors")).resolves.toBe("g");
     expect(ipc.listDownloads).toHaveBeenCalledTimes(1);

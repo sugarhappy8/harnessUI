@@ -1,7 +1,7 @@
-// What the tests of Get local models, the download confirmation and the content notice share
-// (0.1.0 Tasks B13 and B14): the preferences and usage Studio reads, a few steps to let
-// promises settle, and Studio shown on Get local models. vi.mock works per test file, so each
-// file mocks "../../lib/ipc" and "./api" itself before it imports this module.
+// What the tests of Get models, the download confirmation and the content notice share (0.1.0
+// Tasks B13 and B14, 0.2.0 Task U5): the preferences and usage Studio reads, a few steps to let
+// promises settle, and Studio shown on Get models. vi.mock works per test file, so each file
+// mocks "../../lib/ipc" and "./api" itself before it imports this module.
 import { act, fireEvent, render } from "@testing-library/react";
 import { vi } from "vitest";
 import { useStudio } from "../../../store/studio";
@@ -9,7 +9,7 @@ import * as api from "../api";
 import { LOCAL } from "../fixtures/models";
 import { StudioView } from "../StudioView";
 import { UiProviders } from "../../ui/UiProviders";
-import type { LocalModels, StudioPrefs, Usage } from "../types";
+import type { LocalModels, LocalSearchHit, StudioPrefs, Usage } from "../types";
 
 // Radix positions menus with ResizeObserver, which jsdom does not have.
 globalThis.ResizeObserver ??= class {
@@ -61,9 +61,15 @@ export async function click(el: HTMLElement) {
   await flush();
 }
 
-/** Studio shown on Get local models, with `local` as the backend reads it (the preferences say
- *  the note was accepted when `local` does). */
-export async function showLocal(local: LocalModels = LOCAL) {
+/** Studio shown on Get models, with `local` as the backend reads it (the preferences say the
+ *  note was accepted when `local` does), and `popular` as Hugging Face's most downloaded (none
+ *  by default; Get models asks for them as it opens). `open: false` shows Studio's results
+ *  instead, with Get models closed. */
+export async function showLocal(
+  local: LocalModels = LOCAL,
+  opts: { popular?: LocalSearchHit[]; open?: boolean } = {},
+) {
+  vi.mocked(api.studioLocalSearch).mockResolvedValue({ items: opts.popular ?? [] });
   vi.mocked(api.studioModels).mockResolvedValue({ endpoints: [] });
   vi.mocked(api.studioLocalModels).mockResolvedValue(local);
   vi.mocked(api.studioRuns).mockResolvedValue({ runs: [], next: null });
@@ -86,7 +92,7 @@ export async function showLocal(local: LocalModels = LOCAL) {
   vi.mocked(api.studioLocalDelete).mockResolvedValue(undefined);
   useStudio.setState({ local, loaded: true });
   useStudio.getState().showStudio();
-  useStudio.getState().showLocalModels(true);
+  if (opts.open ?? true) useStudio.getState().showLocalModels(true);
   await act(async () => {
     render(
       <UiProviders>

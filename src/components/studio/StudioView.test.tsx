@@ -182,8 +182,10 @@ describe("StudioView", () => {
     screen.getByText("No good graphics card? Cloud models are the backup: OpenRouter or OpenAI."); // second, smaller
     await click(screen.getByRole("button", { name: "Open Endpoints" }));
     expect(opened).toEqual(["endpoints"]); // app:open-settings detail
-    // Get local models takes the empty state's place (Task B13).
-    await click(screen.getByRole("button", { name: "Get local models" }));
+    // Get models takes the empty state's place (Task B13), worded as the top bar's button (U5).
+    vi.mocked(api.studioLocalSearch).mockResolvedValue({ items: [] });
+    const main = screen.getByRole("main");
+    await click(within(main).getByRole("button", { name: "Get models" }));
     expect(useStudio.getState().localView).toBe(true);
     expect(screen.queryByText("Make pictures and videos on this computer: free, and nothing is sent.")).toBeNull();
   });
@@ -208,7 +210,7 @@ describe("StudioView", () => {
       "This computer cannot run local models well. Cloud models run on a company's computers instead: add OpenRouter or OpenAI.",
     );
     screen.getByRole("button", { name: "Open Endpoints" });
-    expect(screen.queryByRole("button", { name: "Get local models" })).toBeNull();
+    expect(within(screen.getByRole("main")).queryByRole("button", { name: "Get models" })).toBeNull();
   });
 
   it("the first-run suggestion leads with local models and can be put away", async () => {
@@ -338,8 +340,28 @@ describe("StudioView", () => {
     await act(async () => {
       fireEvent.keyDown(document.activeElement ?? document.body, { key: "Escape" });
     });
+    vi.mocked(api.studioLocalSearch).mockResolvedValue({ items: [] });
     await click(within(bar).getByRole("button", { name: "Get models" }));
     expect(useStudio.getState().localView).toBe(true);
+  });
+
+  it("the Get models button reads as pressed while the view is open", async () => {
+    await show();
+    vi.mocked(api.studioLocalSearch).mockResolvedValue({ items: [] });
+    const getModels = within(screen.getByRole("banner")).getByRole("button", { name: "Get models" });
+    expect(getModels.getAttribute("aria-pressed")).toBe("false");
+    await click(getModels);
+    expect(useStudio.getState().localView).toBe(true);
+    expect(getModels.getAttribute("aria-pressed")).toBe("true");
+    expect(getModels.className).toContain("aria-pressed:bg-accent/10");
+    // The view's own filter stands in for the tabs, and the gallery's controls go.
+    expect(within(screen.getByRole("banner")).queryByRole("tab", { name: "Pictures" })).toBeNull();
+    expect(within(screen.getByRole("banner")).queryByRole("button", { name: "Grid" })).toBeNull();
+    // Pressed again, it goes back to the results.
+    await click(getModels);
+    expect(useStudio.getState().localView).toBe(false);
+    expect(getModels.getAttribute("aria-pressed")).toBe("false");
+    screen.getByRole("textbox", { name: "Prompt" });
   });
 
   it("today's spend shows only while a daily limit is on", async () => {

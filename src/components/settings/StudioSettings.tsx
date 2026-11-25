@@ -2,7 +2,7 @@ import { useEffect, useState } from "react";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import * as ipc from "../../lib/ipc";
 import type { ErrorInfo } from "../../lib/types";
-import { STUDIO_ACTIONS, STUDIO_DELETE, STUDIO_SETTINGS } from "../../lib/words";
+import { STUDIO_ACTIONS, STUDIO_DELETE, STUDIO_SETTINGS, STUDIO_TOPBAR } from "../../lib/words";
 import { toErrorInfo } from "../../store/app";
 import { useStudio } from "../../store/studio";
 import { ErrorBanner } from "../ErrorBanner";
@@ -111,10 +111,10 @@ function OnThisComputer(props: { local: LocalModels | null; prefs: StudioPrefs |
             <button
               type="button"
               className={BUTTON}
-              // Studio opens on Get local models; Settings closes as it does.
+              // Studio opens on Get models; Settings closes as it does.
               onClick={() => window.dispatchEvent(new CustomEvent("app:open-studio", { detail: "local" }))}
             >
-              {STUDIO_ACTIONS.getLocalModels}
+              {STUDIO_TOPBAR.getModels}
             </button>
           </div>
           <EngineLine engine={local.engine} hasModel={local.installed.length > 0} removable />

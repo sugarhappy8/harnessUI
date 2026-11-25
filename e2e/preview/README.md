@@ -36,7 +36,7 @@ From the repo, with `node_modules` installed:
 
 ```bash
 npm run preview:serve &                       # http://127.0.0.1:5199/e2e/preview/index.html
-npm run preview:shoot                         # -> .cache/preview/after/ (52 PNGs) and a table
+npm run preview:shoot                         # -> .cache/preview/after/ (62 PNGs) and a table
 npm run preview:pairs -- .cache/preview/before .cache/preview/after   # -> .cache/preview/pairs.html
 pkill -f "e2e/preview/vite.config.ts"
 ```
@@ -70,10 +70,13 @@ worktree and run it there. The tag and the harness are in the 0.2.0 plan notes u
 ## Screens taken (`shoot.mjs`)
 
 `a` main view with results and a typed prompt · `b` the model sheet open (the model picker
-before 0.2.0) · `b2` after switching to a cloud model (with the "what changed" note) · `c0` the Studio menu · `c` Get local
-models (scrolled to its top) · `c2` Get local models as it opens · `d` Hugging Face results ·
-`d2` a supported result opened · `d3` an unsupported result opened · `e0` the local-model
-notice before a first download · `e` the download dialog · `e2` the row while downloading ·
+before 0.2.0) · `b2` after switching to a cloud model (with the "what changed" note) · `c0` the Studio menu · `c` Get
+models, the full view (Get local models before 0.2.0; scrolled to its top) · `c2` Get models as
+it opens (the same since Task U5: it opens at its top) · `l` Get models at 900x650 · `m` Get
+models on its LoRAs chip · `d` Hugging Face results (cards with verdict badges) · `d2` a
+supported result opened (a slide-over until Task U6) · `d3` an unsupported result opened ·
+`e0` the local-model notice before a first download · `e` the download dialog · `e2` the card
+while downloading ·
 `f` Advanced open (the side panel, from Settings) · `f2` the whole side panel, docked (tall
 1440 px viewport) · `g` gallery grid (top) · `g2` grid as it opens · `h` viewer · `i`, `i2`
 Settings -> Studio · `j` main view at 900x650 · `k` Video tab · `o` the SDXL inpainting model

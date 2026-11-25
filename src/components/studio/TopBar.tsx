@@ -15,9 +15,10 @@ import { KindTabs } from "./KindTabs";
 // model lists*. Where the chosen model runs is the composer's model chip now: the place chip
 // here looked clickable and was not (critique §6). While the grid is open, its own All,
 // Pictures and Video choose what it shows, and [Pictures | Video] is hidden (Task B9). While
-// Get local models is shown, its own [Pictures | Video] stand in for these, and the gallery's
-// search, Starred and Grid, which act on the hidden cards, are hidden (Task B13). On a narrow
-// Studio, Starred and Grid keep their icons and tooltips, and the search box narrows.
+// Get models is shown, its own Pictures · Video · LoRAs stand in for these, the gallery's
+// search, Starred and Grid, which act on the hidden cards, are hidden (Task B13), and *Get
+// models* reads as pressed (Task U5; pressed again, it goes back). On a narrow Studio, Starred
+// and Grid keep their icons and tooltips, and the search box narrows.
 
 /** How long the search box waits after the last key before it asks for the gallery. */
 const SEARCH_DELAY_MS = 250;
@@ -27,9 +28,9 @@ const TOGGLE =
   "aria-pressed:bg-accent/10 aria-pressed:text-accent " +
   FOCUS_RING;
 
-/** Title, [Pictures | Video] (not while the grid or Get local models is open), search, Starred
- *  and Grid (not while Get local models is open), *Get models*, cloud spending today while a
- *  limit is on, and the menu. */
+/** Title, [Pictures | Video] (not while the grid or Get models is open), search, Starred and
+ *  Grid (not while Get models is open), *Get models*, cloud spending today while a limit is on,
+ *  and the menu. */
 export function TopBar(props: { onError: (e: unknown) => void }) {
   const setTab = useStudio((s) => s.setTab);
   const starred = useStudio((s) => s.filter.starred ?? false);
@@ -51,7 +52,7 @@ export function TopBar(props: { onError: (e: unknown) => void }) {
         <PanelLeft size={16} aria-hidden />
       </button>
       <h1 className="mr-1 text-title">{STUDIO_NAV.name}</h1>
-      {/* The grid's own kind toggles, or Get local models' own tabs, stand in for these. */}
+      {/* The grid's own kind toggles, or Get models' own filter, stand in for these. */}
       {!grid && !localView && <KindTabs onSelect={setTab} />}
       <div className="ml-auto flex min-w-0 items-center gap-1">
         {!localView && (
@@ -87,14 +88,18 @@ export function TopBar(props: { onError: (e: unknown) => void }) {
   );
 }
 
-/** *Get models*: the view to find, download and manage models on this computer. */
+/** *Get models*: the view to find, download and manage models on this computer; pressed while
+ *  it is open, and pressed again it goes back to the results. */
 function GetModels() {
   const showLocalModels = useStudio((s) => s.showLocalModels);
+  const open = useStudio((s) => s.localView);
   return (
     <button
       type="button"
-      onClick={() => showLocalModels(true)}
-      className={`ml-1 flex h-8 shrink-0 items-center gap-1.5 rounded-lg border border-border bg-surface px-2.5 text-sm font-medium whitespace-nowrap shadow-soft hover:border-border-strong hover:bg-bg-muted ${FOCUS_RING}`}
+      data-get-models-button
+      aria-pressed={open}
+      onClick={() => showLocalModels(!open)}
+      className={`ml-1 flex h-8 shrink-0 items-center gap-1.5 rounded-lg border border-border bg-surface px-2.5 text-sm font-medium whitespace-nowrap shadow-soft hover:border-border-strong hover:bg-bg-muted aria-pressed:border-accent/40 aria-pressed:bg-accent/10 aria-pressed:text-accent aria-pressed:shadow-none ${FOCUS_RING}`}
     >
       <Download size={15} aria-hidden className="text-accent" />
       {STUDIO_TOPBAR.getModels}

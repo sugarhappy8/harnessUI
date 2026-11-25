@@ -2,9 +2,10 @@
 """Offline gate (ARCHITECTURE.md 17): the app, with every proxy variable pointing at a
 recording proxy that refuses everything, starts, loads a local model, answers a chat,
 opens Models → Installed with a model that has a Hugging Face repository, opens every
-settings page, opens Studio (both tabs, Get local models and Settings → Studio again) and
-makes a picture on this computer with the stand-in engine (e2e/fake_sd/sd-cli) from an
-installed FLUX.2 klein 4B of tiny files, without a single outbound request.
+settings page, opens Studio (both tabs, Get models and Settings → Studio again) and makes a
+picture on this computer with the stand-in engine (e2e/fake_sd/sd-cli) from an installed
+FLUX.2 klein 4B of tiny files, without a single outbound request other than Get models'
+Popular list, which the proxy refuses.
 
 Loopback is exempt (NO_PROXY): the UI is served from the dev server and llama-server
 listens on 127.0.0.1. The app's loopback client never uses a proxy anyway.
@@ -170,8 +171,8 @@ def close_settings(s):
 
 
 def studio_tab(s, label: str):
-    """Studio's [Pictures | Video] tab `label` (the top bar's, or Get local models' own), with
-    a real pointer click, once it is chosen."""
+    """Studio's [Pictures | Video] tab `label` (the top bar's), with a real pointer click, once
+    it is chosen."""
 
     def find():
         el = s.execute(
@@ -199,22 +200,33 @@ def studio_tab(s, label: str):
 
 
 def studio_part(s, home: pathlib.Path, con_path: pathlib.Path):
-    """Studio offline: opened from the sidebar, both tabs, Get local models, Settings →
-    Studio again; then FLUX.2 klein 4B installed (as a download leaves it), chosen in the
-    model sheet under "On this computer", and one picture made by the stand-in engine."""
+    """Studio offline: opened from the sidebar, both tabs, Get models, Settings → Studio
+    again; then FLUX.2 klein 4B installed (as a download leaves it), chosen in the model sheet
+    under "On this computer", and one picture made by the stand-in engine."""
     s.click_button("Studio")
     s.wait_for(lambda: s.execute("return !!document.querySelector('[data-studio-view]');"), 15, "Studio shown")
     studio_tab(s, "Video")
     studio_tab(s, "Pictures")
-    # 0.2.0 (Task U3): Get models is the top bar's own button (the ⋯ menu lost the item).
+    # 0.2.0 (Task U3): Get models is the top bar's own button (the ⋯ menu lost the item). Since
+    # Task U5 opening it asks Hugging Face for its Popular list (design 10.3, ARCHITECTURE
+    # §13.6), as does each of its filter chips the first time: the only requests this gate
+    # expects, each a CONNECT to huggingface.co that the proxy refuses (the list says so).
+    asked_before = len(SEEN)
     s.click_button("Get models")
-    s.wait_for(lambda: s.execute("return !!document.querySelector('[data-local-models]');"), 15, "Get local models")
-    s.wait_text("This computer:", 15)
-    studio_tab(s, "Video")
-    studio_tab(s, "Pictures")
+    s.wait_for(lambda: s.execute("return !!document.querySelector('[data-local-models]');"), 15, "Get models")
+    s.wait_for(
+        lambda: s.execute("return !!document.querySelector('[data-local-models] [aria-label=\"This computer\"]');"),
+        15,
+        "this computer's chips",
+    )
+    s.click_button("Video")
+    s.click_button("Pictures")
     time.sleep(1)
     s.click_button("Back")
     s.wait_for(lambda: s.execute("return !document.querySelector('[data-local-models]');"), 10, "Back to the cards")
+    popular = SEEN[asked_before:]
+    assert all(r == "CONNECT huggingface.co:443" for r in popular), popular
+    del SEEN[asked_before:]
 
     con = sqlite3.connect(con_path)
     name = install_klein(con, home / "studio-models")

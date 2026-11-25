@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { fitsThisComputer, getListWords, STUDIO_ACTIONS, STUDIO_EMPTY, STUDIO_SUGGESTION } from "../../lib/words";
+import { fitsThisComputer, getListWords, STUDIO_ACTIONS, STUDIO_EMPTY, STUDIO_SUGGESTION, STUDIO_TOPBAR } from "../../lib/words";
 import {
   emptyState,
   fittingEntry,
@@ -101,7 +101,7 @@ function EmptyStateCard(props: { tab: StudioTab; state: Exclude<EmptyState, null
         <p className="text-sm font-medium">{STUDIO_EMPTY.getLocal}</p>
         <p className="mt-1 text-sm">{fitsThisComputer(entry.name, entry.sizeBytes)}</p>
         <button type="button" className={`${PRIMARY} mt-3`} onClick={() => showLocalModels(true)}>
-          {STUDIO_ACTIONS.getLocalModels}
+          {STUDIO_TOPBAR.getModels}
         </button>
         {second && (
           <div className="mt-3 flex flex-wrap items-center gap-2 border-t border-border pt-3 text-xs text-fg-muted">
@@ -143,7 +143,7 @@ function Suggestion(props: { name: string; sizeBytes: number; onError: (e: unkno
       <p className="mt-1 text-xs text-fg-muted">{STUDIO_SUGGESTION.size(props.sizeBytes)}</p>
       <div className="mt-3 flex flex-wrap gap-2">
         <button type="button" className={PRIMARY} onClick={() => showLocalModels(true)}>
-          {STUDIO_ACTIONS.getLocalModels}
+          {STUDIO_TOPBAR.getModels}
         </button>
         <button
           type="button"

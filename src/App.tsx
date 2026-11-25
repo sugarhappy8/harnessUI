@@ -81,7 +81,7 @@ export default function App() {
       setSettingsOpen(true);
     };
     // Studio, on the tab the detail names ("image" or "video"), else on the one shown last;
-    // "local" opens it on Get local models (Settings → Studio, Models → Installed).
+    // "local" opens it on Get models (Settings → Studio, Models → Installed).
     const onOpenStudio = (event: Event) => {
       const tab: unknown = (event as CustomEvent<unknown>).detail;
       const studio = useStudio.getState();

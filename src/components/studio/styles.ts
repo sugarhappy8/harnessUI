@@ -1,7 +1,7 @@
 // The class strings Studio's right panel and run cards share (0.1.0 Tasks B5, B6 and B8), in
 // one place so the panel's fields, Advanced drawer and My setups draw their boxes and small
 // buttons alike, and a card's buttons look the same wherever on the card they are drawn; and
-// the one primary button Get local models' rows and search results share (Task B13).
+// the one primary button Get models' cards and an opened result share (Task B13).
 
 import { FOCUS_RING } from "../ui/styles";
 
@@ -15,7 +15,7 @@ export const SMALL_BUTTON = "rounded-md px-1.5 py-0.5 text-xs text-fg-muted hove
 export const CARD_BUTTON =
   "rounded-lg border border-border bg-bg px-2.5 py-1 text-sm hover:border-border-strong hover:bg-bg-muted disabled:opacity-60";
 
-/** The main action of a row: *Download* in Get local models' rows and search results. */
+/** The main action of a card: *Download* in Get models' cards and an opened result. */
 export const PRIMARY_BUTTON = "btn-primary rounded-lg px-3 py-1 text-sm font-medium";
 
 /** A secondary button: *Get the list*, *Open Settings*, the model notices' actions. */
@@ -36,8 +36,12 @@ export const CHIP_CHECKED =
 export const MENU_ITEM =
   "flex cursor-default items-center gap-2 rounded-lg px-2.5 py-1.5 text-sm outline-none data-[disabled]:text-fg-muted data-[highlighted]:bg-bg-muted";
 
-/** A model's row card in Get local models. */
-export const ROW = "flex flex-col gap-1.5 rounded-xl border border-border bg-surface p-3.5 shadow-soft";
+/** A card of Get models (Task U5): a catalog model, a Hugging Face result, a model or LoRA on
+ *  this computer. */
+export const MODEL_CARD = "flex min-w-0 flex-col gap-2.5 rounded-2xl border border-border bg-surface p-4 shadow-soft";
+
+/** Get models' grid of cards: two or three columns in its width, one on the narrowest. */
+export const MODEL_GRID = "grid grid-cols-[repeat(auto-fill,minmax(min(100%,17rem),1fr))] gap-3";
 
 /** A control in the composer's toolbar (Task U3): the model chip, Shape, How many and
  *  Settings, as soft pills on the composer's card. */

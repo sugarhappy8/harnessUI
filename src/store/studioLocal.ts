@@ -24,23 +24,24 @@ import type { StudioState, StudioTab } from "./studio";
 
 /** The part of Studio's state this module keeps. */
 export interface StudioLocalState {
-  /** Get local models in place of the card stream. */
+  /** Get models, Studio's full view, in place of the results, the composer and the side panel. */
   localView: boolean;
-  /** Get local models in place of the card stream (its own tabs start on `tab`), or the
-   *  cards again (`tab` stays as it was). */
+  /** Get models in place of the results (its filter starts on `tab`'s kind), or the results
+   *  again (`tab` stays as it was). */
   showLocalModels(show: boolean): void;
-  /** Get local models' own tab, Pictures or Video: set from `tab` each time the view opens;
+  /** Get models' filter, Pictures, Video or LoRAs: set from `tab` each time the view opens;
    *  changing it leaves `tab` as it is. */
-  localTab: StudioTab;
-  setLocalTab(tab: StudioTab): void;
-  /** *Only what fits* (on by default): the models that do not fit this computer are folded
-   *  away under "Not for this computer". */
-  onlyFits: boolean;
-  setOnlyFits(on: boolean): void;
+  searchFilter: SearchFilter;
+  setSearchFilter(filter: SearchFilter): void;
+  /** *Fits this computer* (off by default, coordinator ruling P35): on, the catalog models that
+   *  may not fit, and the opened results with no file for this computer, are hidden. */
+  fitsOnly: boolean;
+  setFitsOnly(on: boolean): void;
   /** The last Hugging Face search: its words, the filter it was for and what it found; `null`
    *  before the first. */
   localSearch: { text: string; filter: SearchFilter; hits: LocalSearchHit[] } | null;
-  /** Search or Enter in Get local models (never as typing goes): asks Hugging Face for
+  /** Search or Enter in Get models (never as typing goes), and its Popular list as it opens:
+   *  asks Hugging Face for
    *  `filter`'s kind of repositories matching `text`; empty `text` lists the most downloaded
    *  (Popular). An answer to a search asked before the last one is dropped. Rejects when
    *  Hugging Face could not be asked. */
@@ -71,7 +72,8 @@ export interface StudioLocalState {
   /** Sets an installed model up with `choice`, then reads the local models and downloads
    *  again. */
   setModelFiles(genModelId: string, choice: SetupChoice): Promise<SetModelFilesResult>;
-  /** The LoRAs, newest first; read by `loadLoras` and kept up by the actions below. */
+  /** The LoRAs, newest first; read by `loadLoras` and kept up by the actions below (which keep
+   *  `local.loras`, Get models' list, up too). */
   loras: Lora[];
   loadLoras(): Promise<void>;
   /** Downloads a searched LoRA file; returns the download group's ID (the LoRA joins `loras`
@@ -98,12 +100,15 @@ export interface StudioLocalState {
   /** *I understand* on the note about local models: the backend records it (local downloads
    *  are refused until then), and the local models and preferences say so. */
   acceptNotice(): Promise<void>;
-  /** The note about local models read again, read only, from Get local models' footer
+  /** The note about local models read again, read only, from Get models' footer
    *  (`"read"`); `null` while it is closed. (Before a first download it shows in place of the
    *  download confirmation, from `offer`.) */
   noticeOpen: "read" | null;
   setNoticeOpen(mode: "read" | null): void;
 }
+
+/** The filter Get models opens on, from the tab shown. */
+const FILTER_OF_TAB: Record<StudioTab, SearchFilter> = { image: "pictures", video: "video" };
 
 /** Counts Hugging Face searches as they are asked, so only the last one's answer is kept. */
 let searchTick = 0;
@@ -148,18 +153,19 @@ async function followingImport<T>(set: StoreApi<StudioState>["setState"], run: (
   }
 }
 
-/** Get local models' state and actions, for `useStudio`. */
+/** Get models' state and actions, for `useStudio`. */
 export function createLocal(
   set: StoreApi<StudioState>["setState"],
   get: StoreApi<StudioState>["getState"],
 ): StudioLocalState {
   return {
     localView: false,
-    showLocalModels: (show) => set((s) => (show ? { localView: true, localTab: s.tab } : { localView: false })),
-    localTab: "image",
-    setLocalTab: (localTab) => set({ localTab }),
-    onlyFits: true,
-    setOnlyFits: (onlyFits) => set({ onlyFits }),
+    showLocalModels: (show) =>
+      set((s) => (show ? { localView: true, searchFilter: FILTER_OF_TAB[s.tab] } : { localView: false })),
+    searchFilter: "pictures",
+    setSearchFilter: (searchFilter) => set({ searchFilter }),
+    fitsOnly: false,
+    setFitsOnly: (fitsOnly) => set({ fitsOnly }),
     localSearch: null,
     search: async (text, filter) => {
       const mine = ++searchTick;
@@ -224,13 +230,16 @@ export function createLocal(
     },
     importLora: async (path) => {
       const lora = await followingImport(set, () => api.studioLoraImport(path));
-      // The same file added again is the same LoRA: it keeps its place.
-      set((s) => ({ loras: [lora, ...s.loras.filter((l) => l.id !== lora.id)] }));
+      // The same file added again is the same LoRA: it keeps its place. Get models lists the
+      // local models' own copy, so it gains it too.
+      const add = (list: Lora[]) => [lora, ...list.filter((l) => l.id !== lora.id)];
+      set((s) => ({ loras: add(s.loras), local: s.local ? { ...s.local, loras: add(s.local.loras) } : null }));
       return lora;
     },
     deleteLora: async (id) => {
       await api.studioLoraDelete(id);
-      set((s) => ({ loras: s.loras.filter((l) => l.id !== id) }));
+      const drop = (list: Lora[]) => list.filter((l) => l.id !== id);
+      set((s) => ({ loras: drop(s.loras), local: s.local ? { ...s.local, loras: drop(s.local.loras) } : null }));
     },
     deleteLocal: async (genModelId) => {
       await api.studioLocalDelete(genModelId);

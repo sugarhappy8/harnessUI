@@ -279,7 +279,7 @@ describe("ImportDialog", () => {
     await openFor("model");
     await click(within(theDialog()).getByRole("button", { name: "Add" }));
     const extra = within(theDialog()).getByRole("region", { name: "Extra files" });
-    within(extra).getByText("This model is gated. Add a Hugging Face token in Settings → Models first.");
+    within(extra).getByText("This model is gated. Add a Hugging Face token in Settings → Hugging Face first.");
     expect(within(extra).queryByText(/^Also downloads/)).toBeNull();
     // The code itself never shows.
     expect(theDialog().textContent).not.toContain("hf_needs_token");

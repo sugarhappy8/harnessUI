@@ -16,10 +16,11 @@ import type {
   RecipeKind,
   RefRole,
   SdVersion,
+  SearchFilter,
   Verdict as StudioVerdict,
 } from "../components/studio/types";
 import { APP_NAME } from "./app";
-import { formatEta } from "./format";
+import { formatCount, formatEta } from "./format";
 import type {
   BackendKind,
   ContextSource,
@@ -1058,7 +1059,6 @@ export function placeMarkSpoken(title: string): string {
 
 /** Buttons that more than one Studio screen shows. */
 export const STUDIO_ACTIONS = {
-  getLocalModels: "Get local models",
   openEndpoints: "Open Endpoints",
   getTheList: "Get the list",
   notNow: "Not now",
@@ -1916,55 +1916,21 @@ export function revenueLimit(usd: number): string {
   return `$${usd}`;
 }
 
-/** Get local models, Studio's own view (Task B13, local addendum Wireframe L2): the header,
- *  the filters, each model's row, Hugging Face search and the footer. */
+/** Get models' cards and an opened Hugging Face result (Task B13; the view's own words are
+ *  `GET_MODELS`, Task U5): a model's time, its download and its deletion, an opened result's
+ *  files, and the footer's notice. */
 export const LOCAL_MODELS = {
-  title: STUDIO_ACTIONS.getLocalModels,
-  back: "Back",
-  /** The header's parts: "This computer: Radeon RX 7600, 8 GB graphics memory · 32 GB
-   *  memory · 412 GB free"; amounts are `amountGb`'s. */
-  thisComputer: (what: string) => `This computer: ${what}`,
-  processorOnly: "processor only",
-  graphicsMemory: (amount: string) => `${amount} graphics memory`,
-  sharedMemory: (amount: string) => `${amount} shared memory`,
-  /** The device with its memory, in the header: "Radeon RX 7600, 8 GB graphics memory". */
-  deviceWith: (device: string, memory: string) => `${device}, ${memory}`,
-  memory: (amount: string) => `${amount} memory`,
-  freeDisk: (amount: string) => `${amount} free`,
-  onlyFits: "Only what fits",
-  recommended: "Recommended for this computer",
-  installed: "Installed",
   download: "Download",
-  delete: "Delete",
-  /** The folded list of models that do not fit this computer. */
-  notHere: (n: number) => `Not for this computer (${n})`,
-  /** The tab has no model that fits this computer. */
-  noneFit: {
-    image: "No picture model fits this computer.",
-    video: "No video model fits this computer.",
-  } satisfies Record<MediaKind, string>,
-  videoNote: "Local video is slower and simpler than cloud video, but free and private.",
   /** A time line without an estimate (nothing measured here, no first guess). */
   noTime: STUDIO_TIME.notYet.charAt(0).toUpperCase() + STUDIO_TIME.notYet.slice(1),
-  /** The bar of a model's download on its row, while it runs. */
+  /** The bar of a model's download on its card, while it runs. */
   downloading: (name: string) => `Downloading ${name}`,
-  /** After *Download again*: what happens now. */
+  /** After *Repair*: what happens now. */
   repairing: "Its files are being checked; anything missing or damaged downloads again (Models → Downloads).",
   deleteTitle: (name: string) => `Delete ${name}?`,
   deleteBody:
     "Its files are removed from this computer, except parts another model still uses. Pictures and videos you made stay in the gallery.",
   cancel: "Cancel",
-  search: "Search Hugging Face",
-  searchPlaceholder: "Search Hugging Face for picture and video models…",
-  searchButton: "Search",
-  searchSends: "Searching sends your words to huggingface.co.",
-  searching: "Searching…",
-  results: "Found on Hugging Face",
-  noResults: "Hugging Face found no picture or video models for that.",
-  /** A search hit's downloads, as `formatCount` gives them ("12.3k"). */
-  downloads: (count: string) => `${count} downloads`,
-  /** A search hit's licence, as its repository labels it. */
-  labelled: (label: string) => `labelled ${label}`,
   opening: "Reading the repository on huggingface.co…",
   /** A searched file: "3 parts · 7.1 GB in all · 4.6 GB to download" (the last part only when
    *  some of it is already here). */
@@ -2318,7 +2284,7 @@ export const SETUP = {
   yourself: "Set it up yourself",
   anyway: "Download file anyway",
   problem: {
-    hf_needs_token: "This model is gated. Add a Hugging Face token in Settings → Models first.",
+    hf_needs_token: "This model is gated. Add a Hugging Face token in Settings → Hugging Face first.",
     hf_needs_terms: "Accept this model's terms on its Hugging Face page first.",
     studio_setup_incomplete: "Choose a file for each part first.",
   } satisfies Record<SetupProblem, string>,
@@ -2342,6 +2308,135 @@ export const LOCAL_WARNING = {
   mayNotFit: (reason: string) => `May not fit this computer: ${reason}. It may fail or be very slow.`,
   videoOnProcessor: "Video on the processor is very slow",
 } as const;
+
+/** When a Hugging Face repository was last updated, as a result card says it: "today",
+ *  "yesterday", "3 days ago", "2 weeks ago", "4 months ago", "a year ago". A time not yet come
+ *  (a clock running behind) reads "today". */
+export function updatedWhen(at: number, now: number = Date.now()): string {
+  const days = Math.floor(Math.max(0, now - at) / 86_400_000);
+  if (days < 1) return "today";
+  if (days === 1) return "yesterday";
+  if (days < 7) return `${days} days ago`;
+  const ago = (n: number, unit: string) => (n === 1 ? `a ${unit} ago` : `${n} ${unit}s ago`);
+  if (days < 30) return ago(Math.floor(days / 7), "week");
+  if (days < 365) return ago(Math.floor(days / 30), "month");
+  return ago(Math.floor(days / 365), "year");
+}
+
+/** Get models, Studio's full view (Task U5, design 10.3): its header with this computer's
+ *  chips, the Hugging Face search with its filters, and the sections without a query. */
+export const GET_MODELS = {
+  title: STUDIO_TOPBAR.getModels,
+  subtitle: "Picture and video models that run on this computer: free, and private.",
+  back: "Back",
+  /** The name of the header's chips. */
+  thisComputer: "This computer",
+  /** The graphics card and its memory: "Radeon RX 7600 · 8 GB graphics memory". */
+  gpu: (name: string, gb: string) => `${name} · ${gb} graphics memory`,
+  /** Apple silicon, whose memory is shared: "Apple M5 · 16 GB shared memory". */
+  shared: (name: string, gb: string) => `${name} · ${gb} shared memory`,
+  processorOnly: "Processor only",
+  ram: (gb: string) => `${gb} memory`,
+  freeDisk: (gb: string) => `${gb} free`,
+  addModel: IMPORT.addModel,
+  addLora: IMPORT.addLora,
+  searchLabel: "Search Hugging Face",
+  searchPlaceholder: "Search Hugging Face: SDXL, Flux, Wan 2.2, or a repo name",
+  search: "Search",
+  searchSends: "Searching sends your words to huggingface.co.",
+  /** The name of the Pictures · Video · LoRAs chips. */
+  filters: MODEL_SHEET.filters,
+  pictures: STUDIO_TABS.image,
+  video: STUDIO_TABS.video,
+  loras: LORAS.title,
+  fitsOnly: "Fits this computer",
+  recommended: "Recommended for this computer",
+  popular: "Popular on Hugging Face",
+  here: "On this computer",
+  results: "Found on Hugging Face",
+  searching: "Searching…",
+  noResults: {
+    pictures: "Hugging Face found no picture models for that.",
+    video: "Hugging Face found no video models for that.",
+    loras: "Hugging Face found no LoRAs for that.",
+  } satisfies Record<SearchFilter, string>,
+  /** Without a query, no catalog model of the kind is left (*Fits this computer* hid them). */
+  noneFit: {
+    image: "No picture model in Studio's list fits this computer.",
+    video: "No video model in Studio's list fits this computer.",
+  } satisfies Record<MediaKind, string>,
+  videoNote: "Local video is slower and simpler than cloud video, but free and private.",
+  nothingHere: "No models on this computer yet",
+  noLorasHere: LORAS.none,
+  retry: "Try again",
+  /** More of the Popular list than its first row or two. */
+  showAll: (n: number) => `Show all ${n}`,
+  showFewer: "Show fewer",
+  /** The catalog's pick for this computer, on its card. */
+  topPick: "Top pick",
+  installed: "Installed",
+  download: LOCAL_MODELS.download,
+  repair: "Repair",
+  repairHint: "Checks its files and downloads again anything missing or damaged.",
+  delete: "Delete",
+  /** A result card's figures: "48.2k downloads", "312 likes". */
+  downloads: (n: number) => (n === 1 ? "1 download" : `${formatCount(n)} downloads`),
+  likes: (n: number) => (n === 1 ? "1 like" : `${formatCount(n)} likes`),
+  /** "updated 3 weeks ago", from `updatedWhen`. */
+  updated: (date: string) => `updated ${date}`,
+  /** A gated model's next step: Settings → Hugging Face, where the token goes. */
+  openSettings: "Open Settings",
+  /** Where a LoRA came from. */
+  loraFrom: (repo: string) => `From ${repo}`,
+  loraAdded: "Added from this computer",
+  loraMissing: "Its file is gone from this computer.",
+  deleteLoraTitle: (name: string) => `Delete ${name}?`,
+  deleteLoraBody: "Its file is removed from this computer. Pictures and videos you made with it stay in the gallery.",
+} as const;
+
+/** What Studio can do with a model it does not run, as a badge says it in short. */
+const CANT_RUN_SHORT: Record<CannotRunReason, string> = {
+  lumina2: "Lumina 2",
+  ltxVideo09: "LTX-Video 0.9",
+  hunyuanVideo1: "HunyuanVideo 1",
+  svd: "Stable Video Diffusion",
+  unknownWeights: "unknown model",
+  sharded: "split files",
+  pickle: "unreadable files",
+  noSha: "no checksum",
+  adapter: "add-on file",
+  needsControlFrames: "needs control video",
+  needsAudio: "needs sound",
+  upscaler: "upscaler",
+  folderModel: "folder of parts",
+  notThisEngine: "unsupported type",
+  ltx2: "LTX-2",
+};
+
+/** A Hugging Face result's Studio verdict, as its badge says it (Task U5, design 10.3): from
+ *  its name until it is opened (`hint`), exact once its files were read. */
+export const VERDICT = {
+  /** "Works in Studio · SDXL". */
+  works: (type: string) => `Works in Studio · ${type}`,
+  /** "LoRA for FLUX.1"; without a known model type, "LoRA for an unknown model type". */
+  lora: (type: string | null) => (type === null ? LORAS.unknownType : `LoRA for ${type}`),
+  /** "Can't run: Lumina 2", in short; its badge's tooltip has the whole sentence. */
+  cantRun: (reason: CannotRunReason) => `Can't run: ${CANT_RUN_SHORT[reason] ?? CANT_RUN_SHORT.unknownWeights}`,
+  /** Its name says nothing Studio knows: opening it reads its files. */
+  unknown: "Open to check",
+  /** Opened, and none of its files is one Studio knows. */
+  notRecognised: "Not recognised",
+  /** A hint's tooltip. */
+  hint: "From the name: opening it reads the files",
+} as const;
+
+/** A result's verdict badge in words: exact (`exact`) or its name's hint. */
+export function verdictBadgeWords(verdict: StudioVerdict, exact: boolean): string {
+  if (verdict === "unknown") return exact ? VERDICT.notRecognised : VERDICT.unknown;
+  if ("works" in verdict) return VERDICT.works(typeName(verdict.works.version, null));
+  if ("lora" in verdict) return VERDICT.lora(verdict.lora.base === null ? null : typeName(verdict.lora.base, null));
+  return VERDICT.cantRun(verdict.cannotRun.reason);
+}
 
 /** The one-time note about local models (Task B14, local addendum L1), word for word: shown
  *  before the first local download, and again from Get local models' footer and Settings →

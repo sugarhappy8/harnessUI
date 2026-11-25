@@ -1,5 +1,3 @@
-import type { DownloadGroup } from "../../lib/types";
-import { LICENCE_BADGE, REGIONAL_USE, revenueLimit } from "../../lib/words";
 import type {
   Gate,
   Licence,
@@ -14,43 +12,12 @@ import type {
   SetupPlan,
 } from "./types";
 
-// What Get local models offers to download, a licence's badge, and a model's download while it
-// runs (0.1.0 Tasks B13 and B14), as plain functions with no React: the rows
-// (LocalModelRow.tsx), Hugging Face search (LocalSearch.tsx), the download confirmation
-// (DownloadLocalModel.tsx) and the store use them.
+// What Get models offers to download (0.1.0 Tasks B13 and B14), as plain functions with no
+// React: the cards (ModelCard.tsx), an opened result (LocalSearch.tsx), the download
+// confirmation (DownloadLocalModel.tsx) and the store use them. The licence badge and a model's
+// download while it runs moved to ModelCard.tsx with Task U5 (Task U6 removes this file).
 // An offer keeps names as they came (a searched file's path can hold any character); whatever
 // shows one escapes it there (`visiblePath`).
-
-/** A licence's badge: its colour (as the backend judged it) and what it allows for what you
- *  make, in plain words. A kind this version does not know reads "Check the licence". */
-export function licenceBadge(l: Licence): { tone: "green" | "amber" | "red"; text: string } {
-  if (l.commercial === "yes" && l.excludedRegions?.length) return { tone: "amber", text: REGIONAL_USE };
-  let text: string;
-  switch (l.commercial) {
-    case "yes":
-      text = LICENCE_BADGE.yes;
-      break;
-    case "underRevenue":
-      text = LICENCE_BADGE.underRevenue(l.revenueLimitUsd === null ? null : revenueLimit(l.revenueLimitUsd));
-      break;
-    case "registration":
-      text = LICENCE_BADGE.registration;
-      break;
-    case "withUseRules":
-      text = LICENCE_BADGE.withUseRules;
-      break;
-    case "unclear":
-      text = LICENCE_BADGE.unclear;
-      break;
-    case "no":
-      text = LICENCE_BADGE.no;
-      break;
-    default:
-      // The backend sends it as a string: a kind this version does not know is not trusted.
-      text = LICENCE_BADGE.unclear;
-  }
-  return { tone: l.badge, text };
-}
 
 /** The id of the Studio engine's licence among a download's licences (the backend's
  *  `engine_cmd::ENGINE_LICENCE_ID`): listed when the engine comes with the model. */
@@ -140,13 +107,4 @@ export function planParts(plan: SetupPlan): Part[] {
  *  plan's entry): its download group carries it while it downloads. */
 export function searchedModelId(repo: string, file: string): string {
   return `hf:${repo}:${file}`;
-}
-
-/** The download of local model `genModelId` while it runs (queued, downloading, paused,
- *  checking, failed and waiting for Resume, or being cancelled), from the app's download
- *  groups; `null` when none is (never started, done or cancelled). */
-export function activeDownload(groups: readonly DownloadGroup[], genModelId: string): DownloadGroup | null {
-  return (
-    groups.find((g) => g.genModelId === genModelId && g.status !== "done" && g.status !== "cancelled") ?? null
-  );
 }

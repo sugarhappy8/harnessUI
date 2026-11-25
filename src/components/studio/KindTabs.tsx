@@ -3,9 +3,9 @@ import { STUDIO_BAR, STUDIO_TABS } from "../../lib/words";
 import type { StudioTab } from "../../store/studio";
 import { FOCUS_RING } from "../ui/styles";
 
-// Studio's [Pictures | Video] (0.1.0 Tasks B2 and B13): the top bar's, bound to the tab, and
-// Get local models' own, bound to its tab, look and behave alike. Each sits in the Radix
-// `Tabs.Root` that holds its value.
+// Studio's [Pictures | Video] (0.1.0 Task B2): the top bar's, bound to the tab. It sits in the
+// Radix `Tabs.Root` that holds its value. (Get models has its own Pictures · Video · LoRAs chips
+// since Task U5.)
 
 const TABS: readonly StudioTab[] = ["image", "video"];
 

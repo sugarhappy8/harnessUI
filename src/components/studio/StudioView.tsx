@@ -11,9 +11,9 @@ import { SlideOver } from "../ui/SlideOver";
 import { FOCUS_RING } from "../ui/styles";
 import { Composer } from "./Composer";
 import { Notices } from "./EmptyStates";
+import { GetModelsView } from "./GetModels";
 import { Grid } from "./Grid";
 import { ImportDialog } from "./ImportDialog";
-import { LocalModels } from "./LocalModels";
 import { useNativePictureDrops } from "./RefTray";
 import { queueSummary, RunCard } from "./RunCard";
 import { SettingsPanel } from "./SettingsPanel";
@@ -39,10 +39,12 @@ import { Viewer } from "./Viewer";
 // runs of the tab by state. The stream opens at its newest card, and a press accepted from
 // Studio (Create, Again, Run again) brings its new card into view. With Grid on, the gallery's
 // grid takes the stream's place (B9), and a result opened from a card, a tile or the chat's
-// notice shows in the viewer over the whole view. While `localView` is on, Get local models
-// (B13, LocalModels.tsx) takes the stream's place, notices and empty states included, and the
-// top bar hides its tabs and the gallery's controls; Back brings them all back. *Add a model
-// file* (ImportDialog.tsx, Task U4) opens over the view from the model sheet or Get models.
+// notice shows in the viewer over the whole view. While `localView` is on, Get models (Task U5,
+// GetModels.tsx) is a full view: it takes the whole page beside the top bar, without the
+// composer or the side panel, and opens at its top (critique §2 and §6: it kept the stream's
+// scroll and opened at its bottom); the top bar hides its tabs and the gallery's controls; Back
+// brings them all back, the stream at its newest card. *Add a model file* (ImportDialog.tsx,
+// Task U4) opens over the view from the model sheet or Get models.
 
 /** Whether the window is at least `DOCK_MIN_WIDTH` wide, followed as it is resized. */
 function useWideWindow(): boolean {
@@ -98,11 +100,12 @@ export function StudioView() {
   const docked = wide && settingsOpen;
   // Whether the docked panel was opened here (focus goes into it), not left open last time and
   // shown as Studio read what is saved (focus stays where it is).
-  const [seenPanel, setSeenPanel] = useState({ open: settingsOpen, loaded });
+  // Back from Get models, a panel left open is shown again where it was, without taking focus.
+  const [seenPanel, setSeenPanel] = useState({ open: settingsOpen, loaded, localView });
   const [panelOpenedHere, setPanelOpenedHere] = useState(false);
-  if (seenPanel.open !== settingsOpen || seenPanel.loaded !== loaded) {
+  if (seenPanel.open !== settingsOpen || seenPanel.loaded !== loaded || seenPanel.localView !== localView) {
     setPanelOpenedHere(settingsOpen && !seenPanel.open && seenPanel.loaded);
-    setSeenPanel({ open: settingsOpen, loaded });
+    setSeenPanel({ open: settingsOpen, loaded, localView });
   }
 
   // What is saved, each time Studio is shown (App keeps it mounted while the chat is shown)
@@ -134,11 +137,16 @@ export function StudioView() {
 
   const cards = !localView && !grid;
   // The stream opens at its newest card, just above the composer, as a chat does: when Studio has
-  // read what is saved, on another tab, and back from the grid or Get local models.
+  // read what is saved, on another tab, and back from the grid or Get models.
   useLayoutEffect(() => {
     const el = scroller.current;
     if (el && cards && loaded) el.scrollTop = el.scrollHeight;
   }, [cards, loaded, tab, shown]);
+  // Get models opens at its top, whatever the stream's scroll was.
+  useLayoutEffect(() => {
+    const el = scroller.current;
+    if (el && localView) el.scrollTop = 0;
+  }, [localView]);
 
   // A press accepted from Studio brings its new card into view (once each).
   const scrolledTo = useRef<string | null>(null);
@@ -182,40 +190,52 @@ export function StudioView() {
       <Tabs.Content value={tab} className="flex min-h-0 flex-1 outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-accent/40">
         <div data-results className="flex min-w-0 flex-1 flex-col">
           <main ref={scroller} className="min-h-0 flex-1 overflow-y-auto">
-            <div className="mx-auto flex min-h-full max-w-4xl flex-col gap-3 px-4 pt-4 pb-3">
-              {error && <ErrorBanner error={error.info} onDismiss={() => setError(null)} />}
-              {!localView && loaded && <Notices tab={tab} onError={fail} />}
-              {localView ? (
-                <LocalModels />
-              ) : grid ? (
-                <Grid onOpen={openViewer} />
-              ) : (
-                // The cards sit just above the composer, however few there are.
-                <div data-card-stream className="mt-auto flex flex-col gap-3">
-                  {more && (
-                    <button type="button" className={`${CARD_BUTTON} self-center`} onClick={loadMore}>
-                      {STUDIO_GRID.loadMore}
-                    </button>
-                  )}
-                  {stream.map((run) => (
-                    <RunCard key={run.id} run={run} />
-                  ))}
-                  {queue && (
-                    <p data-queue-strip className="text-xs text-fg-muted" aria-live="polite">
-                      {queue}
-                    </p>
-                  )}
-                </div>
-              )}
-            </div>
+            {localView ? (
+              <>
+                {error && (
+                  <div className="mx-auto max-w-5xl px-6 pt-4 max-sm:px-4">
+                    <ErrorBanner error={error.info} onDismiss={() => setError(null)} />
+                  </div>
+                )}
+                <GetModelsView />
+              </>
+            ) : (
+              <div className="mx-auto flex min-h-full max-w-4xl flex-col gap-3 px-4 pt-4 pb-3">
+                {error && <ErrorBanner error={error.info} onDismiss={() => setError(null)} />}
+                {loaded && <Notices tab={tab} onError={fail} />}
+                {grid ? (
+                  <Grid onOpen={openViewer} />
+                ) : (
+                  // The cards sit just above the composer, however few there are.
+                  <div data-card-stream className="mt-auto flex flex-col gap-3">
+                    {more && (
+                      <button type="button" className={`${CARD_BUTTON} self-center`} onClick={loadMore}>
+                        {STUDIO_GRID.loadMore}
+                      </button>
+                    )}
+                    {stream.map((run) => (
+                      <RunCard key={run.id} run={run} />
+                    ))}
+                    {queue && (
+                      <p data-queue-strip className="text-xs text-fg-muted" aria-live="polite">
+                        {queue}
+                      </p>
+                    )}
+                  </div>
+                )}
+              </div>
+            )}
           </main>
-          <div className="shrink-0 px-4 pt-1 pb-3">
-            <Composer tab={tab} />
-          </div>
+          {/* Get models is a full view: no composer, and no side panel below. */}
+          {!localView && (
+            <div className="shrink-0 px-4 pt-1 pb-3">
+              <Composer tab={tab} />
+            </div>
+          )}
         </div>
-        {docked && <DockedPanel tab={tab} focusIn={panelOpenedHere} onClose={() => setSettingsOpen(false)} />}
+        {docked && !localView && <DockedPanel tab={tab} focusIn={panelOpenedHere} onClose={() => setSettingsOpen(false)} />}
       </Tabs.Content>
-      {!wide && (
+      {!wide && !localView && (
         <SlideOver open={settingsOpen} onOpenChange={setSettingsOpen} title={STUDIO_COMPOSER.settings} width="panel">
           <SettingsPanel tab={tab} />
         </SlideOver>
