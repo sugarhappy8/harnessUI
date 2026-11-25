@@ -759,19 +759,23 @@ impl RunningServer {
     /// The tail and its classification depend on the last lines, which a loaded machine
     /// can take more than a moment to read. A pipe that never ends (another process still
     /// holds it open) must not cut short the other one.
+    ///
+    /// The readers stay in `self` while it waits, so if this future is dropped half-way (a
+    /// Stop while a crashed server's output is read), dropping the server still aborts them.
     async fn drain_to_end(&mut self) {
         let start = Instant::now();
         let cap = start + READER_DRAIN_CAP;
-        let mut readers = std::mem::take(&mut self.readers);
         {
+            let readers = &mut self.readers;
+            let last_line = &self.last_line;
             let ended = async {
-                for reader in &mut readers {
+                for reader in readers.iter_mut() {
                     let _ = reader.await;
                 }
             };
             tokio::pin!(ended);
             loop {
-                let quiet_until = self.last_line.at().max(start) + READER_IDLE;
+                let quiet_until = last_line.at().max(start) + READER_IDLE;
                 let now = Instant::now();
                 if now >= cap || now >= quiet_until {
                     break;
@@ -782,9 +786,10 @@ impl RunningServer {
                 }
             }
         }
-        for reader in &readers {
+        for reader in &self.readers {
             reader.abort();
         }
+        self.readers.clear();
     }
 }
 
@@ -1061,6 +1066,27 @@ mod tests {
         s.drain_to_end().await;
         assert!(t0.elapsed() <= READER_IDLE + Duration::from_millis(200));
         assert_eq!(s.stderr_tail().last().map(String::as_str), Some("last"));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_drain_given_up_midway_still_lets_the_server_abort_its_readers() {
+        use tokio::io::AsyncWriteExt as _;
+
+        // stdout stays open, so the drain waits; it is given up after a second, as a Stop
+        // pressed while a crashed server's output is read drops the wait for its exit
+        let (stdout, mut stdout_writer) = tokio::io::duplex(64);
+        let mut s = server_with_readers(stdout, stderr_lines_every(Duration::ZERO, &["x"]));
+        assert!(
+            tokio::time::timeout(Duration::from_secs(1), s.drain_to_end())
+                .await
+                .is_err()
+        );
+        drop(s);
+        for _ in 0..10 {
+            tokio::task::yield_now().await;
+        }
+        // the stdout reader was aborted with the server, so nothing reads its pipe any more
+        assert!(stdout_writer.write_all(b"after\n").await.is_err());
     }
 
     #[test]
