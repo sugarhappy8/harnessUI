@@ -325,7 +325,7 @@ fn entry_dto(
     verdict: &LocalVerdict,
     installed: bool,
 ) -> AppResult<LocalEntryDto> {
-    let plan = plan(deps, entry.clone())?;
+    let plan = plan(deps, entry.clone(), None)?;
     Ok(LocalEntryDto {
         id: entry.id.clone(),
         name: entry.name.clone(),
@@ -684,7 +684,7 @@ fn recipe_choice(id: &str) -> Option<RecipeChoiceDto> {
 /// A plan in the webview's words: each slot with its file, what its download takes here
 /// (`local_models::plan_download`) and its fit at the recipe's default size.
 async fn setup_plan_dto(deps: &LocalCmdDeps, planned: &Planned) -> AppResult<SetupPlanDto> {
-    let download = plan(deps, planned.entry.clone())?;
+    let download = plan(deps, planned.entry.clone(), Some(&planned.plan))?;
     let verdict = judge(deps, &download.entry, default_size(&download.entry)).await;
     let parts = parts_dto(&download);
     let slots = planned
@@ -728,26 +728,41 @@ async fn setup_plan_dto(deps: &LocalCmdDeps, planned: &Planned) -> AppResult<Set
 
 // ---- the words of a download ------------------------------------------------------------------
 
-/// What downloading `entry` takes here (`local_models::plan_download`), never refused for the
-/// disk: a list says that with `low_disk`, and the download itself refuses it.
-fn plan(deps: &LocalCmdDeps, entry: GenEntry) -> AppResult<DownloadPlan> {
+/// What downloading `entry` (made by the set-up plan `setup`, if any) takes here
+/// (`local_models::plan_download`), never refused for the disk: a list says that with
+/// `low_disk`, and the download itself refuses it.
+fn plan(
+    deps: &LocalCmdDeps,
+    entry: GenEntry,
+    setup: Option<&models::sd::setup::SetupPlan>,
+) -> AppResult<DownloadPlan> {
     let used = deps.installed_files.except(&entry.id);
-    let mut plan = plan_download(entry, &deps.models_dir, &deps.engine_need, None, &used)?;
+    let mut plan = plan_download(
+        entry,
+        setup,
+        &deps.models_dir,
+        &deps.engine_need,
+        None,
+        &used,
+    )?;
     plan.free_bytes = deps.free_disk_bytes;
     Ok(plan)
 }
 
 /// Each part of a plan, in the entry's order, as the download dialog lists it: a Hub part
-/// already here when its place has its pinned size, a file from this computer always.
+/// already here when its place has its pinned size, a part used where it is on this computer
+/// always (a file from this computer by its path).
 fn parts_dto(plan: &DownloadPlan) -> Vec<PartDto> {
     let mut places = plan.files.iter().map(|(_, dest)| dest);
     plan.entry
         .parts
         .iter()
-        .map(|part| {
-            let (path, already_here) = match &part.local {
-                Some(local) => (local.display().to_string(), true),
-                None => (
+        .zip(&plan.present)
+        .map(|(part, here)| {
+            let (path, already_here) = match (&part.local, here) {
+                (Some(local), _) => (local.display().to_string(), true),
+                (None, Some(_)) => (part.path.clone(), true),
+                (None, None) => (
                     part.path.clone(),
                     places
                         .next()
@@ -906,15 +921,18 @@ pub async fn studio_setup_plan(
     setup_plan(&app_deps(&app, &studio, Some(hf)).await, &source, &choice).await
 }
 
-/// Starts a checked download of the model and returns its download group.
+/// Starts a checked download of the model and returns its download group: a searched file
+/// with the files its set-up plan lists, with the person's `choice` (none: the plan as it
+/// comes), registered with its recipe once every file is checked.
 #[tauri::command]
 pub async fn studio_local_download(
     window: tauri::WebviewWindow,
     app: AppHandle,
     source: LocalSource,
+    choice: Option<SetupChoice>,
 ) -> AppResult<String> {
     only_main_window(window.label())?;
-    start_local_download(&app, source).await
+    start_local_download(&app, source, choice).await
 }
 
 /// Download an individual weight file even when Studio has no matching generation recipe.
@@ -952,7 +970,7 @@ pub async fn studio_accept_local_notice(
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use std::collections::BTreeMap;
     use std::path::{Path, PathBuf};
     use std::sync::{Arc, Mutex};
@@ -1007,7 +1025,7 @@ mod tests {
     // as literals, so each fit expectation follows from the formulas and a re-tuned or longer
     // bundled catalog (Task L17) never moves it.
 
-    fn bundled() -> GenCatalog {
+    pub(crate) fn bundled() -> GenCatalog {
         gen_catalog(
             &Catalog::bundled(),
             runtime::sd::lock::embedded().sd_cpp.build,
@@ -1216,7 +1234,7 @@ mod tests {
 
     // ---- this computer --------------------------------------------------------------------
 
-    struct Fixed {
+    pub(crate) struct Fixed {
         target: Target,
         backend: &'static str,
         chat: Option<u64>,
@@ -1225,7 +1243,7 @@ mod tests {
 
     /// A Vulkan card with `free_gb` GB free, and `ram_gb` GB of free memory; its probe gives
     /// no total.
-    fn gpu(free_gb: u64, ram_gb: u64) -> Fixed {
+    pub(crate) fn gpu(free_gb: u64, ram_gb: u64) -> Fixed {
         Fixed {
             target: Target::Gpu {
                 name: CARD.into(),
@@ -1964,11 +1982,11 @@ mod tests {
     // ---- a searched repository (Task S6) ---------------------------------------------------
 
     /// The commit every test repo is listed at.
-    const COMMIT: &str = "0123456789abcdef0123456789abcdef01234567";
+    pub(crate) const COMMIT: &str = "0123456789abcdef0123456789abcdef01234567";
 
     /// A repo as the test Hub lists it, and what the Hub serves for its files.
     #[derive(Clone)]
-    struct TestRepo {
+    pub(crate) struct TestRepo {
         id: String,
         commit: String,
         label: Option<String>,
@@ -1980,7 +1998,7 @@ mod tests {
     }
 
     impl TestRepo {
-        fn new(id: &str) -> Self {
+        pub(crate) fn new(id: &str) -> Self {
             TestRepo {
                 id: id.into(),
                 commit: COMMIT.into(),
@@ -1993,17 +2011,17 @@ mod tests {
             }
         }
 
-        fn label(mut self, label: &str) -> Self {
+        pub(crate) fn label(mut self, label: &str) -> Self {
             self.label = Some(label.into());
             self
         }
 
-        fn at(mut self, commit: &str) -> Self {
+        pub(crate) fn at(mut self, commit: &str) -> Self {
             self.commit = commit.into();
             self
         }
 
-        fn tagged(mut self, tag: &str) -> Self {
+        pub(crate) fn tagged(mut self, tag: &str) -> Self {
             self.pipeline_tag = Some(tag.into());
             self
         }
@@ -2015,7 +2033,7 @@ mod tests {
 
         /// Lists `path` (`size` bytes, with a SHA-256 made from the repo and the path) and
         /// serves the header of the detection fixture `header`, if any.
-        fn file(self, path: &str, size: f64, header: Option<&str>) -> Self {
+        pub(crate) fn file(self, path: &str, size: f64, header: Option<&str>) -> Self {
             use std::hash::{DefaultHasher, Hash, Hasher};
             let mut h = DefaultHasher::new();
             (&self.id, path).hash(&mut h);
@@ -2035,6 +2053,53 @@ mod tests {
                     .insert(path.into(), Served::Bytes(file_of(&fixture(name))));
             }
             self
+        }
+
+        /// Gated (`auto`): Hugging Face serves its files only with a token.
+        pub(crate) fn gated(mut self) -> Self {
+            self.gated = true;
+            self
+        }
+
+        /// Lists `path` (`size` bytes, with a SHA-256 made from the repo and the path) and
+        /// serves `bytes` as its start.
+        pub(crate) fn serving(mut self, path: &str, size: u64, bytes: Vec<u8>) -> Self {
+            self = self.file(path, size as f64, None);
+            self.served.insert(path.into(), Served::Bytes(bytes));
+            self
+        }
+
+        /// No longer lists or serves `path`.
+        pub(crate) fn without(mut self, path: &str) -> Self {
+            self.files.retain(|f| f.path != path);
+            self.served.remove(path);
+            self
+        }
+
+        /// Lists `path` with no SHA-256 (not stored with LFS), serving the header of the
+        /// detection fixture `header`.
+        pub(crate) fn unpinned(mut self, path: &str, size: u64, header: &str) -> Self {
+            self.files.push(models::files::RepoFile {
+                path: path.into(),
+                size,
+                sha256: None,
+            });
+            self.served
+                .insert(path.into(), Served::Bytes(file_of(&fixture(header))));
+            self
+        }
+
+        /// The repo's id.
+        pub(crate) fn id(&self) -> &str {
+            &self.id
+        }
+
+        /// What it serves for `path`, if anything.
+        pub(crate) fn served(&self, path: &str) -> Option<&[u8]> {
+            match self.served.get(path) {
+                Some(Served::Bytes(bytes)) => Some(bytes),
+                _ => None,
+            }
         }
 
         /// Lists a file that is not stored with LFS (no SHA-256).
@@ -2076,7 +2141,7 @@ mod tests {
     /// A Hub on this computer for `repos`: each one's listing (at its latest commit, or at its
     /// own commit by revision), the headers of its files (`HEAD` and ranged `GET` on
     /// `resolve`), and its model card; anything else is 404. It keeps every request line.
-    struct RepoHub {
+    pub(crate) struct RepoHub {
         url: String,
         seen: Arc<Mutex<Vec<String>>>,
     }
@@ -2114,7 +2179,7 @@ mod tests {
         out
     }
 
-    async fn hub(repos: Vec<TestRepo>) -> RepoHub {
+    pub(crate) async fn hub(repos: Vec<TestRepo>) -> RepoHub {
         let seen = Arc::new(Mutex::new(Vec::new()));
         let lines = seen.clone();
         let url = serve(move |line, headers| {
@@ -2199,11 +2264,11 @@ mod tests {
 
     /// Get local models on `hardware` asking `hub`, with the bundled catalog (its companion
     /// table) and nothing installed.
-    fn repo_deps(hub: &RepoHub, hardware: Fixed, scratch: &Scratch) -> LocalCmdDeps {
+    pub(crate) fn repo_deps(hub: &RepoHub, hardware: Fixed, scratch: &Scratch) -> LocalCmdDeps {
         deps_with(bundled(), hardware, scratch, Some(hub.client()))
     }
 
-    fn search_source(repo: &str, file: &str) -> LocalSource {
+    pub(crate) fn search_source(repo: &str, file: &str) -> LocalSource {
         LocalSource::Search {
             repo: repo.into(),
             commit: COMMIT.into(),
@@ -2221,11 +2286,11 @@ mod tests {
             .unwrap()
     }
 
-    const KONTEXT: &str = "QuantStack/FLUX.1-Kontext-dev-GGUF";
+    pub(crate) const KONTEXT: &str = "QuantStack/FLUX.1-Kontext-dev-GGUF";
 
     /// QuantStack's FLUX.1 Kontext GGUFs at their real sizes, each serving the Q4_K_M file's
     /// header.
-    fn flux_kontext_repo(quants: &[&str]) -> TestRepo {
+    pub(crate) fn flux_kontext_repo(quants: &[&str]) -> TestRepo {
         quants.iter().fold(
             TestRepo::new(KONTEXT)
                 .plain("README.md")
@@ -2259,7 +2324,7 @@ mod tests {
 
     /// CompVis/stable-diffusion-v1-4 as a diffusers folder: plain and fp16 files, the UNet
     /// and text encoder serving the sd14 fixtures' headers, and its other folders.
-    fn sd14_diffusers_repo() -> TestRepo {
+    pub(crate) fn sd14_diffusers_repo() -> TestRepo {
         let unet = Some("sd14-diffusers-unet");
         let text_encoder = Some("sd14-diffusers-text-encoder");
         TestRepo::new("CompVis/stable-diffusion-v1-4")
@@ -2302,7 +2367,7 @@ mod tests {
 
     /// QuantStack's Wan 2.2 T2V A14B: each quantisation of the high-noise and the low-noise
     /// part, each serving its part's header.
-    fn wan_a14b_repo(quants: &[&str]) -> TestRepo {
+    pub(crate) fn wan_a14b_repo(quants: &[&str]) -> TestRepo {
         quants.iter().enumerate().fold(
             TestRepo::new("QuantStack/Wan2.2-T2V-A14B-GGUF").tagged("text-to-video"),
             |repo, (i, q)| {

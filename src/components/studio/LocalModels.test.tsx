@@ -534,9 +534,10 @@ describe("Get local models", () => {
     within(result).getByText(badge);
     await click(within(result).getByRole("button", { name: "Download" }));
     await click(within(screen.getByRole("alertdialog")).getByRole("button", { name: "Download" }));
-    expect(api.studioLocalDownload).toHaveBeenCalledWith({
-      search: { repo: red.repo, commit: red.commit, file: red.files[0]!.file },
-    });
+    expect(api.studioLocalDownload).toHaveBeenCalledWith(
+      { search: { repo: red.repo, commit: red.commit, file: red.files[0]!.file } },
+      null,
+    );
   });
 
   it("the footer shows the engine and the content notice", async () => {
@@ -578,7 +579,7 @@ describe("Get local models", () => {
     within(k).getByText("Installed");
     expect(within(k).queryByRole("button", { name: "Download" })).toBeNull();
     await click(within(k).getByRole("button", { name: "Download again" }));
-    expect(api.studioLocalDownload).toHaveBeenCalledWith({ installed: { genModelId: "flux2-klein-4b-q4" } });
+    expect(api.studioLocalDownload).toHaveBeenCalledWith({ installed: { genModelId: "flux2-klein-4b-q4" } }, null);
   });
 
   it("an installed model can be deleted, and Back returns to the cards", async () => {
@@ -656,7 +657,7 @@ describe("Get local models", () => {
       within(r).getByText(amountGb(base.sizeBytes));
       within(r).getByText("Fits");
       await click(within(r).getByRole("button", { name: "Download again" }));
-      expect(api.studioLocalDownload).toHaveBeenCalledWith({ installed: { genModelId: id } });
+      expect(api.studioLocalDownload).toHaveBeenCalledWith({ installed: { genModelId: id } }, null);
       await click(within(r).getByRole("button", { name: "Delete" }));
       await click(within(screen.getByRole("alertdialog")).getByRole("button", { name: "Delete" }));
       expect(api.studioLocalDelete).toHaveBeenCalledWith(id);

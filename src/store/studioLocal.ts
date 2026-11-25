@@ -42,7 +42,8 @@ export interface StudioLocalState {
    *  note about local models first while that was never accepted); `null` while none is. */
   offer: DownloadOffer | null;
   setOffer(offer: DownloadOffer | null): void;
-  /** Starts the confirmed download and refreshes both model and download lists. */
+  /** Starts the confirmed download (with the set-up choice its plan was made with) and
+   *  refreshes both model and download lists. */
   downloadLocal(offer: DownloadOffer): Promise<void>;
   /** *I understand* on the note about local models: the backend records it (local downloads
    *  are refused until then), and the local models and preferences say so. */
@@ -87,12 +88,12 @@ export function createLocal(
         .catch((e: unknown) => console.warn("Studio: the local models could not be read again", e));
     },
     repairLocal: async (genModelId) => {
-      await api.studioLocalDownload({ installed: { genModelId } });
+      await api.studioLocalDownload({ installed: { genModelId } }, null);
     },
     offer: null,
     setOffer: (offer) => set({ offer }),
     downloadLocal: async (offer) => {
-      await api.studioLocalDownload(offer.source);
+      await api.studioLocalDownload(offer.source, offer.choice);
       set((s) => (s.offer === offer ? { offer: null } : {}));
       await useDownloads
         .getState()

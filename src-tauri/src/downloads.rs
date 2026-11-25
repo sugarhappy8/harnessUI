@@ -14,6 +14,7 @@ use std::time::{Duration, Instant};
 
 use models::download::{FileSpec, Progress, download_file_checked, resumable_bytes};
 use models::gen_catalog::{GateMode, GenEntry, GenFamily, GenGate, GenPart, GenRole, GenericSpec};
+use models::sd::detect::SdVersion;
 use models::sd::inspect::{FileKind, inspect_local, inspect_local_folder};
 use models::sd::matching::{Match, match_recipe, recipes_for};
 use serde::{Deserialize, Serialize};
@@ -43,6 +44,15 @@ pub struct GenGroup {
     pub source: String,
     /// Every part, in the entry's order.
     pub parts: Vec<GenGroupPart>,
+    /// 0.2.0: the engine recipe it runs with (a searched file's from its set-up plan, else
+    /// its entry's). Absent in a group saved before, whose family gives it.
+    #[serde(default)]
+    pub recipe_id: Option<String>,
+    /// 0.2.0: its set-up is untested: the recipe is not among those of the version its file
+    /// was detected as (or no version was), so the downloaded file is checked only for being
+    /// weights that read ([`check_main_file`]).
+    #[serde(default)]
+    pub untested: bool,
 }
 
 /// One part of a [`GenGroup`], pinned as its catalog entry or search result gave it.
@@ -60,6 +70,19 @@ pub struct GenGroupPart {
     pub sha256: String,
     /// Its licence's id.
     pub license: String,
+    /// 0.2.0: a diffusers folder's part: its engine name in the folder, under which it is
+    /// saved (`unet/diffusion_pytorch_model.safetensors`, …).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub folder: Option<String>,
+    /// 0.2.0: a file from this computer, used where it is (its repository and revision are
+    /// empty); always [`present`](Self::present) there.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub local: Option<PathBuf>,
+    /// 0.2.0: the file already on this computer the part uses (another installed model's, or
+    /// a file from this computer): it has no row, nothing fetches or checks it, and the model's
+    /// row records it as the part's file.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub present: Option<String>,
 }
 
 /// What a group is for, kept beside its rows.
@@ -120,8 +143,10 @@ pub(crate) fn row_commit(meta: &GroupMeta, repo: &str, file: &str) -> String {
 /// The installed row a picture or video model's group makes once every part completed with
 /// its pinned SHA-256 (its row checked, `Verifying`, or done), each part with its own file on
 /// disk. A row is its part's when it is of the part's repository and path: two repositories
-/// may hold files of the same name, and each part's file is the row's own destination. A
-/// part missing, unfinished or unchecked is `studio_model_incomplete` (Resume finishes it).
+/// may hold files of the same name, and each part's file is the row's own destination. A part
+/// already on this computer ([`GenGroupPart::present`]) has no row: its file is that one,
+/// still there with its size. A part missing, unfinished or unchecked is
+/// `studio_model_incomplete` (Resume finishes it).
 pub(crate) fn gen_model_from(
     meta: &GroupMeta,
     rows: &[store::Download],
@@ -133,32 +158,47 @@ pub(crate) fn gen_model_from(
     };
     let mut parts = Vec::with_capacity(generator.parts.len());
     for part in &generator.parts {
-        let row = row_of(rows, part)
-            .filter(|r| {
-                matches!(
-                    r.status,
-                    DownloadStatus::Verifying | DownloadStatus::Completed
-                )
-            })
-            .filter(|r| {
-                !r.sha256.is_empty()
-                    && r.sha256.eq_ignore_ascii_case(&part.sha256)
-                    && r.size_bytes == part.size
-            })
-            .ok_or_else(studio_errors::model_incomplete)?;
+        let file = match &part.present {
+            Some(present) => {
+                if !file_whole(Path::new(present), part.size) {
+                    return Err(studio_errors::model_incomplete());
+                }
+                present.clone()
+            }
+            None => row_of(rows, part)
+                .filter(|r| {
+                    matches!(
+                        r.status,
+                        DownloadStatus::Verifying | DownloadStatus::Completed
+                    )
+                })
+                .filter(|r| {
+                    !r.sha256.is_empty()
+                        && r.sha256.eq_ignore_ascii_case(&part.sha256)
+                        && r.size_bytes == part.size
+                })
+                .ok_or_else(studio_errors::model_incomplete)?
+                .dest_path
+                .clone(),
+        };
         let mut saved = serde_json::to_value(part).map_err(AppError::internal)?;
-        saved["file"] = row.dest_path.clone().into();
+        if let Some(saved) = saved.as_object_mut() {
+            saved.remove("present");
+        }
+        saved["file"] = file.into();
         parts.push(saved);
     }
     let source = generator
         .source
         .parse::<store::GenSource>()
         .map_err(AppError::internal)?;
-    // 0.2.0: the engine recipe its family runs with. A family this build does not know has
-    // none; `register_gen_model` refuses it.
-    let recipe_id = serde_json::from_value::<GenFamily>(generator.family.clone().into())
-        .ok()
-        .map(|f| f.recipe_id().to_owned());
+    // 0.2.0: the engine recipe it runs with. A group saved before has none: its family's. A
+    // family this build does not know has none; `register_gen_model` refuses it.
+    let recipe_id = generator.recipe_id.clone().or_else(|| {
+        serde_json::from_value::<GenFamily>(generator.family.clone().into())
+            .ok()
+            .map(|f| f.recipe_id().to_owned())
+    });
     Ok(store::NewGenModel {
         id: generator.gen_model_id.clone(),
         catalog_id: generator.catalog_id.clone(),
@@ -200,7 +240,7 @@ pub(crate) fn check_main_file(entry: &GenEntry, path: &Path) -> AppResult<()> {
         .iter()
         .find(|p| matches!(p.role, GenRole::Diffusion | GenRole::Model));
     let read = if entry.parts.iter().any(|p| p.folder.is_some()) {
-        inspect_local_folder(&folder_root(path, main.and_then(|p| p.folder.as_deref())))
+        inspect_local_folder(&folder_root(path, main.and_then(|p| p.folder.as_deref()))?)
     } else {
         inspect_local(path)
     };
@@ -246,24 +286,43 @@ pub(crate) fn check_main_file(entry: &GenEntry, path: &Path) -> AppResult<()> {
     Ok(())
 }
 
-/// The root of the diffusers folder whose file `inside` (`unet/…`, the main part's folder
-/// name) is at `path`; `path` itself when it is the folder.
-fn folder_root(path: &Path, inside: Option<&str>) -> PathBuf {
+/// The root of the diffusers folder whose file `inside` (`unet/…`, the main part's engine
+/// name in it) is at `path`; `path` itself when it is the folder. A file that is not at that
+/// name (saved under its name in the repository, `…fp16.safetensors`) is in no folder the
+/// engine reads: an internal error, never a guess at a parent folder.
+fn folder_root(path: &Path, inside: Option<&str>) -> AppResult<PathBuf> {
     if path.is_dir() {
-        return path.to_path_buf();
+        return Ok(path.to_path_buf());
     }
-    let depth = inside.map_or(0, |f| Path::new(f).components().count());
-    path.ancestors().nth(depth).unwrap_or(path).to_path_buf()
+    let inside = inside.map(Path::new).unwrap_or(Path::new(""));
+    let depth = inside.components().count();
+    match path.ancestors().nth(depth) {
+        Some(root) if depth > 0 && path.ends_with(inside) => Ok(root.to_path_buf()),
+        _ => Err(AppError::internal(format!(
+            "a folder model's file is not at {} in its folder",
+            inside.display()
+        ))),
+    }
 }
 
 /// The entry the finished download `new` is checked as ([`check_main_file`]): its parts, with
-/// its family's recipe and version. A family this build does not know is
+/// its recipe: a 0.1.x family's (as 0.1.2 checked it), else the recipe the group recorded,
+/// with the version its family column names and whether its set-up is `untested`. A model
+/// with no recipe (a family this build does not know, in a group saved before) is
 /// `studio_not_supported_yet`.
-fn downloaded_entry(new: &store::NewGenModel) -> AppResult<GenEntry> {
-    let family: GenFamily = serde_json::from_value(new.family.clone().into())
-        .map_err(|e| studio_errors::not_supported_yet(e.to_string()))?;
-    let recipe = models::sd::recipes::recipe(family.recipe_id())
-        .ok_or_else(|| AppError::internal("a family's recipe is not among the engine's"))?;
+fn downloaded_entry(new: &store::NewGenModel, untested: bool) -> AppResult<GenEntry> {
+    let family = serde_json::from_value::<GenFamily>(new.family.clone().into()).ok();
+    let recipe_id = match (family, new.recipe_id.as_deref()) {
+        (Some(family), _) => family.recipe_id(),
+        (None, Some(recipe_id)) => recipe_id,
+        (None, None) => {
+            return Err(studio_errors::not_supported_yet(
+                studio_errors::NO_RECIPE_YET,
+            ));
+        }
+    };
+    let recipe = models::sd::recipes::recipe(recipe_id)
+        .ok_or_else(|| studio_errors::not_supported_yet(format!("no engine recipe {recipe_id}")))?;
     let parts: Vec<GenPart> = serde_json::from_value(new.parts.clone())
         .map_err(|e| AppError::internal(format!("a downloaded model's parts: {e}")))?;
     let mut entry = models::gen_catalog::generic_entry(GenericSpec {
@@ -271,16 +330,19 @@ fn downloaded_entry(new: &store::NewGenModel) -> AppResult<GenEntry> {
         name: new.name.clone(),
         publisher: String::new(),
         recipe,
-        version: Some(family.version()),
+        version: match family {
+            Some(family) => Some(family.version()),
+            None => SdVersion::from_word(&new.family),
+        },
         parts,
         licenses: Default::default(),
         gate: GenGate {
             mode: GateMode::None,
             collects: Vec::new(),
         },
-        untested: false,
+        untested: family.is_none() && untested,
     });
-    entry.family = Some(family);
+    entry.family = family;
     Ok(entry)
 }
 
@@ -299,24 +361,34 @@ pub(crate) async fn register_gen_model(
 ) -> AppResult<()> {
     let rows = store.list_downloads(Some(group.to_string())).await?;
     let new = gen_model_from(meta, &rows)?;
-    let entry = downloaded_entry(&new)?;
-    let diffusion = meta
+    let untested = meta.generator.as_ref().is_some_and(|g| g.untested);
+    let entry = downloaded_entry(&new, untested)?;
+    let main = meta
         .generator
         .iter()
         .flat_map(|g| &g.parts)
         .find(|p| matches!(p.role.as_str(), "diffusion" | "model"))
-        .and_then(|p| row_of(&rows, p))
         .ok_or_else(|| AppError::internal("a picture or video model without its model part"))?;
-    let path = PathBuf::from(&diffusion.dest_path);
+    // The model file: the row's, or the file already here (a file from this computer).
+    let (path, fetched) = match &main.present {
+        Some(present) => (PathBuf::from(present), None),
+        None => {
+            let row = row_of(&rows, main).ok_or_else(|| {
+                AppError::internal("a picture or video model without its model part")
+            })?;
+            (PathBuf::from(&row.dest_path), Some(row.dest_path.clone()))
+        }
+    };
     let checked = tokio::task::spawn_blocking(move || check_main_file(&entry, &path))
         .await
         .map_err(|e| AppError::internal(format!("the model file's check stopped: {e}")))?;
     if let Err(refused) = checked {
         let writing = files_being_written(store, Some(group)).await?;
         let written = written_by(store, group).await;
+        // Only the group's own rows: a file already here is never removed.
         let files: Vec<PathBuf> = rows
             .iter()
-            .filter(|r| r.dest_path == diffusion.dest_path || written.contains(&r.dest_path))
+            .filter(|r| fetched.as_ref() == Some(&r.dest_path) || written.contains(&r.dest_path))
             .map(|r| PathBuf::from(&r.dest_path))
             .collect();
         let busy = |p: &Path| writing.contains(&p.display().to_string());
@@ -334,19 +406,76 @@ pub(crate) async fn register_gen_model(
     Ok(())
 }
 
+/// What a picture or video model's group's task does once every file is fetched and checked
+/// (`DownloadManager::run_group`), for tests that put the files in place themselves: each row
+/// checked (`Verifying`) and its file noted as one the group wrote, the model added
+/// ([`register_gen_model`]), then every row done and the note dropped.
+#[cfg(test)]
+pub(crate) async fn finish_gen_group(
+    store: &store::Store,
+    models_dir: &Path,
+    group: &str,
+) -> AppResult<()> {
+    let meta: GroupMeta = store
+        .get_setting(&meta_key(group))
+        .await?
+        .ok_or_else(|| AppError::internal("download group without metadata"))?;
+    let rows = store.list_downloads(Some(group.to_string())).await?;
+    for row in &rows {
+        note_written(store, group, &row.dest_path).await?;
+        store
+            .update_download(
+                row.id,
+                DownloadPatch {
+                    status: Some(DownloadStatus::Verifying),
+                    bytes_done: Some(row.size_bytes),
+                    ..Default::default()
+                },
+            )
+            .await?;
+    }
+    register_gen_model(store, models_dir, group, &meta).await?;
+    for row in &rows {
+        store
+            .update_download(
+                row.id,
+                DownloadPatch {
+                    status: Some(DownloadStatus::Completed),
+                    ..Default::default()
+                },
+            )
+            .await?;
+    }
+    let _ = store.delete_setting(&written_key(group)).await;
+    Ok(())
+}
+
 /// The files a download not finished yet writes (a paused, failed or cancelled one too: it
-/// can go on), other than group `except`'s: nothing deletes them meanwhile.
+/// can go on), other than group `except`'s, and the files such a picture or video model's
+/// download found already here and will use ([`GenGroupPart::present`]): nothing deletes
+/// them meanwhile.
 pub(crate) async fn files_being_written(
     store: &store::Store,
     except: Option<&str>,
 ) -> AppResult<BTreeSet<String>> {
-    Ok(store
-        .list_downloads(None)
-        .await?
-        .into_iter()
-        .filter(|r| r.status != DownloadStatus::Completed && Some(r.group_id.as_str()) != except)
-        .map(|r| r.dest_path)
-        .collect())
+    let mut files = BTreeSet::new();
+    let mut groups = BTreeSet::new();
+    for row in store.list_downloads(None).await? {
+        if row.status != DownloadStatus::Completed && Some(row.group_id.as_str()) != except {
+            files.insert(row.dest_path);
+            groups.insert(row.group_id);
+        }
+    }
+    for group in groups {
+        let meta: Option<GroupMeta> = store.get_setting(&meta_key(&group)).await.ok().flatten();
+        let present = meta
+            .into_iter()
+            .flat_map(|m| m.generator)
+            .flat_map(|g| g.parts)
+            .filter_map(|p| p.present);
+        files.extend(present);
+    }
+    Ok(files)
 }
 
 fn meta_key(group: &str) -> String {
@@ -1283,6 +1412,20 @@ impl DownloadManager {
     ) -> AppResult<Recorded> {
         let _starting = self.starting.lock().await;
         self.record_locked(store, meta, files).await
+    }
+
+    /// The group [`Self::record`] gives: a new one, or the one it joins, resumes or replaces.
+    #[cfg(test)]
+    pub(crate) async fn record_group(
+        &self,
+        store: &store::Store,
+        meta: &GroupMeta,
+        files: &[(FileSpec, PathBuf)],
+    ) -> AppResult<String> {
+        Ok(match self.record(store, meta, files).await? {
+            Recorded::New(group) | Recorded::Join(group) | Recorded::Resume(group) => group,
+            Recorded::Replaced { new, .. } => new,
+        })
     }
 
     /// 0.0.7 (P6): checks a new download against the downloads not finished yet
@@ -3513,8 +3656,13 @@ mod tests {
                     size: 1_000 * n,
                     sha256: format!("{n:x}").repeat(64),
                     license: "apache-2.0".into(),
+                    folder: None,
+                    local: None,
+                    present: None,
                 })
                 .collect(),
+            recipe_id: None,
+            untested: false,
         }
     }
 
@@ -4092,7 +4240,7 @@ mod tests {
             let (row, new) = neutral_search(family);
             let installed =
                 crate::studio::local_models::entry_from_installed(&row, &catalog).unwrap();
-            let downloaded = downloaded_entry(&new).unwrap();
+            let downloaded = downloaded_entry(&new, false).unwrap();
             for entry in [&installed, &downloaded] {
                 assert_eq!(
                     (entry.family, entry.recipe.as_str()),
@@ -4107,7 +4255,7 @@ mod tests {
         let klein9b = write_gguf_txt_fixture(&dir, "klein9b");
         for entry in [
             crate::studio::local_models::entry_from_installed(&row, &catalog).unwrap(),
-            downloaded_entry(&new).unwrap(),
+            downloaded_entry(&new, false).unwrap(),
         ] {
             assert_eq!(
                 check_main_file(&entry, &klein9b).unwrap_err().code,
@@ -4149,7 +4297,12 @@ mod tests {
                 size: 4096,
                 sha256: "d".repeat(64),
                 license: "apache-2.0".into(),
+                folder: None,
+                local: None,
+                present: None,
             }],
+            recipe_id: None,
+            untested: false,
         };
         let meta = GroupMeta {
             generator: Some(group.clone()),
@@ -4259,6 +4412,33 @@ mod tests {
         unet.folder = None;
         sd1.parts = vec![unet];
         assert!(check_main_file(&sd1, &unet_file).is_err());
+        // Ledger S3 minor: a file not at its engine name in the folder (saved under its name
+        // in the repository) is in no folder the engine reads: an error, never a guess at a
+        // parent folder.
+        let mut half = sd1.clone();
+        half.parts[0].folder = Some("unet/diffusion_pytorch_model.safetensors".into());
+        let fp16_name = root
+            .join("unet")
+            .join("diffusion_pytorch_model.fp16.safetensors");
+        std::fs::copy(&unet_file, &fp16_name).unwrap();
+        assert_eq!(
+            check_main_file(&half, &fp16_name).unwrap_err().code,
+            "internal"
+        );
+        let outside = dir.path().join("diffusion_pytorch_model.safetensors");
+        std::fs::copy(&unet_file, &outside).unwrap();
+        assert_eq!(
+            check_main_file(&half, &outside).unwrap_err().code,
+            "internal"
+        );
+        assert_eq!(
+            folder_root(&unet_file, Some("unet/diffusion_pytorch_model.safetensors")).unwrap(),
+            root
+        );
+        assert!(
+            folder_root(&unet_file, None).is_err(),
+            "a file with no folder name"
+        );
         let sdxl = generic("sdxl-checkpoint", None);
         let mut sdxl_folder = sdxl.clone();
         sdxl_folder.parts = sd1.parts.clone();
@@ -4267,6 +4447,122 @@ mod tests {
             check_main_file(&sdxl_folder, &unet_file).is_err(),
             "SD 1 is not SDXL"
         );
+    }
+
+    /// 0.2.0: a part already on this computer has no row: the model's row records the file it
+    /// found, as long as that file is still there with its size; a group saved before 0.2.0
+    /// (no recipe, no such parts) still reads, and a generic group's recipe is its own.
+    #[test]
+    fn a_part_already_here_is_recorded_without_a_row() {
+        let dir = Scratch::new();
+        let models = dir.path().join("models");
+        let mut group = klein();
+        let present = dir.path().join("another model's vae.safetensors");
+        std::fs::write(&present, vec![0u8; 3_000]).unwrap();
+        group.parts[2].present = Some(present.display().to_string());
+        group.recipe_id = Some("flux2-klein-4b".into());
+        group.family = "flux2-klein".into();
+        group.untested = true;
+        let meta = GroupMeta {
+            generator: Some(group.clone()),
+            ..meta()
+        };
+        let rows: Vec<store::Download> = group.parts[..2]
+            .iter()
+            .map(|p| part_row(&models, p, S::Verifying))
+            .collect();
+        let new = gen_model_from(&meta, &rows).unwrap();
+        let parts = new.parts.as_array().unwrap();
+        assert_eq!(parts[2]["file"], present.display().to_string().as_str());
+        assert!(parts.iter().all(|p| p.get("present").is_none()));
+        assert_eq!(
+            (new.recipe_id.as_deref(), new.family.as_str()),
+            (Some("flux2-klein-4b"), "flux2-klein")
+        );
+        let entry = downloaded_entry(&new, true).unwrap();
+        assert_eq!(
+            (entry.family, entry.recipe.as_str(), entry.untested),
+            (None, "flux2-klein-4b", true)
+        );
+        assert_eq!(
+            entry.version,
+            Some(models::sd::detect::SdVersion::Flux2Klein)
+        );
+        // Gone, or of another size, meanwhile: the model is not complete.
+        std::fs::write(&present, vec![0u8; 2_999]).unwrap();
+        assert_eq!(
+            gen_model_from(&meta, &rows).unwrap_err().code,
+            "studio_model_incomplete"
+        );
+        std::fs::remove_file(&present).unwrap();
+        assert_eq!(
+            gen_model_from(&meta, &rows).unwrap_err().code,
+            "studio_model_incomplete"
+        );
+
+        // A group 0.1.2 saved: no recipe, no folder, file or present field.
+        let old: GenGroup = serde_json::from_value(serde_json::json!({
+            "genModelId": "flux2-klein-4b-q4", "catalogId": "flux2-klein-4b-q4",
+            "name": "FLUX.2 klein 4B", "kind": "image", "family": "flux2-klein-4b",
+            "source": "catalog",
+            "parts": [{"role": "diffusion", "repo": "o/r", "revision": "a".repeat(40),
+                       "path": "f.gguf", "size": 1, "sha256": "b".repeat(64),
+                       "license": "apache-2.0"}],
+        }))
+        .unwrap();
+        assert_eq!((old.recipe_id, old.untested), (None, false));
+        assert_eq!(
+            (
+                &old.parts[0].folder,
+                &old.parts[0].local,
+                &old.parts[0].present
+            ),
+            (&None, &None, &None)
+        );
+        let written = serde_json::to_value(&old.parts[0]).unwrap();
+        for absent in ["folder", "local", "present"] {
+            assert!(written.get(absent).is_none(), "{absent}");
+        }
+    }
+
+    /// A file a picture or video model's download not finished yet found here and will use
+    /// is kept from deletion as the files it writes are; once it is done, neither is.
+    #[tokio::test]
+    async fn a_file_an_unfinished_download_will_use_counts_as_being_written() {
+        let store = store::Store::open_in_memory().unwrap();
+        let models = Path::new("/m");
+        let mut group = klein();
+        group.parts[2].present = Some("/m/elsewhere/vae.safetensors".into());
+        let meta = GroupMeta {
+            generator: Some(group.clone()),
+            ..meta()
+        };
+        let files: Vec<(FileSpec, PathBuf)> = group.parts[..2]
+            .iter()
+            .map(|p| {
+                let dest = models::download::destination(models, &p.repo, &p.path).unwrap();
+                let spec = FileSpec {
+                    repo: p.repo.clone(),
+                    commit: p.revision.clone(),
+                    path: p.path.clone(),
+                    size: p.size,
+                    sha256: Some(p.sha256.clone()),
+                };
+                (spec, dest)
+            })
+            .collect();
+        let g = insert_group(&store, &meta, &files).await.unwrap();
+        let writing = files_being_written(&store, None).await.unwrap();
+        assert!(writing.contains("/m/elsewhere/vae.safetensors"));
+        assert_eq!(writing.len(), 3);
+        assert!(
+            files_being_written(&store, Some(&g))
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        set_all(&store, &g, S::Completed).await;
+        assert!(files_being_written(&store, None).await.unwrap().is_empty());
     }
 
     /// A finished download of a family this build does not know adds nothing.
@@ -4284,7 +4580,7 @@ mod tests {
             source: store::GenSource::Search,
         };
         assert_eq!(
-            downloaded_entry(&new).unwrap_err().code,
+            downloaded_entry(&new, false).unwrap_err().code,
             "studio_not_supported_yet"
         );
     }
@@ -4336,17 +4632,20 @@ mod tests {
         };
 
         let diffusion = &dests[0];
-        let entry = downloaded_entry(&store::NewGenModel {
-            id: group.gen_model_id.clone(),
-            catalog_id: None,
-            name: group.name.clone(),
-            kind: group.kind.clone(),
-            family: group.family.clone(),
-            recipe_id: Some("flux2-klein-4b".into()),
-            parts: serde_json::to_value(&group.parts).unwrap(),
-            size_bytes: 0,
-            source: store::GenSource::Search,
-        })
+        let entry = downloaded_entry(
+            &store::NewGenModel {
+                id: group.gen_model_id.clone(),
+                catalog_id: None,
+                name: group.name.clone(),
+                kind: group.kind.clone(),
+                family: group.family.clone(),
+                recipe_id: Some("flux2-klein-4b".into()),
+                parts: serde_json::to_value(&group.parts).unwrap(),
+                size_bytes: 0,
+                source: store::GenSource::Search,
+            },
+            false,
+        )
         .unwrap();
         assert_eq!(
             (entry.family, entry.recipe.as_str(), entry.untested),

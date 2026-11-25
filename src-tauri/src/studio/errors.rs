@@ -7,6 +7,7 @@
 use agent::media::{
     Company, FailureKind, Invalid, LocalIo, MediaFailure, MediaKind, MediaModel, RefRole, Stage,
 };
+use models::gen_catalog::GenRole;
 use models::gen_fit::{GenSize, NotFor};
 use runtime::packs::PackError;
 use runtime::sd::args::ArgsError;
@@ -1182,9 +1183,24 @@ pub const PLAN_FOR_A_FILE_ONLY: &str =
 pub const NOT_A_RUNNABLE_FILE: &str = "it is not a model file Studio runs";
 /// The details of a download asked for a file on this computer: it is added, not downloaded.
 pub const A_DISK_FILE_IS_ADDED: &str = "a file on this computer is added, not downloaded";
-/// The details of a searched file's download whose set-up misses a part it needs, or uses a
-/// file from this computer.
-pub const SETUP_NOT_COMPLETE: &str = "its set-up is not complete";
+
+/// A searched file's download whose set-up has no file for a part it needs (`missing`, in the
+/// plan's order): nothing starts until each has one.
+pub fn setup_incomplete(missing: &[GenRole]) -> AppError {
+    let roles: Vec<String> = missing
+        .iter()
+        .map(|r| match serde_json::to_value(r) {
+            Ok(serde_json::Value::String(word)) => word,
+            _ => format!("{r:?}"),
+        })
+        .collect();
+    AppError::new(
+        "studio_setup_incomplete",
+        "Choose a file for each part first.",
+        "Open the model's files and pick the missing parts.",
+        format!("no file for: {}", roles.join(", ")),
+    )
+}
 
 /// A set-up asked with a recipe the pinned engine does not have, or one Studio leaves out.
 pub fn recipe_not_offered() -> AppError {
@@ -1759,6 +1775,7 @@ mod tests {
             cannot_read_file(".ckpt"),
             not_a_model_format(),
             no_published_checksum(),
+            setup_incomplete(&[GenRole::T5xxl, GenRole::Vae]),
         ];
         all.extend(every_pack_error().iter().map(engine_not_installed));
         for to in [PictureUse::Chat, PictureUse::Prompt] {

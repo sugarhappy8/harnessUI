@@ -193,11 +193,23 @@ describe("the download confirmation", () => {
   it("Download starts the transfer with the pinned source", async () => {
     const dialog = renderDialog(offer());
     fireEvent.click(within(dialog).getByRole("button", { name: "Download" }));
-    expect(api.studioLocalDownload).toHaveBeenCalledWith({ catalog: { entryId: "z-image-turbo-q4" } });
+    expect(api.studioLocalDownload).toHaveBeenCalledWith({ catalog: { entryId: "z-image-turbo-q4" } }, null);
     await flush();
     // The offer is put away and the local models are read again.
     expect(useStudio.getState().offer).toBeNull();
     expect(api.studioLocalModels).toHaveBeenCalledTimes(1);
+  });
+
+  it("Download sends the set-up choice a searched file's plan was made with", async () => {
+    const source = { search: { repo: "someone/Flux-GGUF", commit: "c".repeat(40), file: "flux.gguf" } };
+    const choice = {
+      recipe: "flux1-dev",
+      overrides: [{ role: "t5xxl" as const, file: { disk: { path: "/m/t5xxl.safetensors" } } }],
+    };
+    const dialog = renderDialog(offer({ source, choice }));
+    fireEvent.click(within(dialog).getByRole("button", { name: "Download" }));
+    expect(api.studioLocalDownload).toHaveBeenCalledWith(source, choice);
+    await flush();
   });
 
   it("from Get local models, Download closes the dialog", async () => {
@@ -205,7 +217,7 @@ describe("the download confirmation", () => {
     await clickDownload("Z-Image Turbo");
     const reads = vi.mocked(api.studioLocalModels).mock.calls.length;
     await click(within(screen.getByRole("alertdialog")).getByRole("button", { name: "Download" }));
-    expect(api.studioLocalDownload).toHaveBeenCalledWith({ catalog: { entryId: "z-image-turbo-q4" } });
+    expect(api.studioLocalDownload).toHaveBeenCalledWith({ catalog: { entryId: "z-image-turbo-q4" } }, null);
     expect(screen.queryByText("Download Z-Image Turbo?")).toBeNull();
     expect(useStudio.getState().offer).toBeNull();
     expect(vi.mocked(api.studioLocalModels).mock.calls.length).toBe(reads + 1);
@@ -226,7 +238,7 @@ describe("the download confirmation", () => {
     ]);
     within(dialog).getByText("Pictures you make: commercial use only under $5M revenue.");
     await click(within(dialog).getByRole("button", { name: "Download" }));
-    expect(api.studioLocalDownload).toHaveBeenCalledWith({ catalog: { entryId: "z-image-turbo-q4" } });
+    expect(api.studioLocalDownload).toHaveBeenCalledWith({ catalog: { entryId: "z-image-turbo-q4" } }, null);
   });
 
   it("Cancel downloads nothing", async () => {
@@ -317,7 +329,7 @@ describe("the download confirmation", () => {
     ]);
     expect(links.map((a) => a.getAttribute("title"))).toEqual([kommunity.name, LOCAL.engine.licenseName]);
     await click(within(dialog).getByRole("button", { name: "Download" }));
-    expect(api.studioLocalDownload).toHaveBeenCalledWith(expect.anything());
+    expect(api.studioLocalDownload).toHaveBeenCalledWith(expect.anything(), null);
   });
 
   it("a part already here, a gated part, an amber licence and low disk space each say so", async () => {

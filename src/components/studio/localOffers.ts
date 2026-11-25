@@ -10,6 +10,7 @@ import type {
   LocalSource,
   MediaKind,
   Part,
+  SetupChoice,
   SetupPlan,
 } from "./types";
 
@@ -64,6 +65,9 @@ export interface DownloadOffer {
    *  for. */
   kind: MediaKind;
   source: LocalSource;
+  /** The person's set-up choice the parts were planned with (a searched file only); `null`:
+   *  the plan as it comes. The backend plans it again with this before downloading. */
+  choice: SetupChoice | null;
   parts: Part[];
   /** Every distinct licence of its parts: all are shown. */
   licences: Licence[];
@@ -85,6 +89,7 @@ export function offerForEntry(e: LocalEntry, local: LocalModels): DownloadOffer 
     name: e.name,
     kind: e.kind,
     source: { catalog: { entryId: e.id } },
+    choice: null,
     parts: e.parts,
     licences: e.licences,
     totalBytes: e.sizeBytes,
@@ -97,20 +102,23 @@ export function offerForEntry(e: LocalEntry, local: LocalModels): DownloadOffer 
 }
 
 /** A searched repository's file and the files its set-up `plan` lists (its own plan unless
- *  another is given), at the commit it was read at (the backend plans it there again before
- *  downloading), found on the `kind` tab (a search finds only that kind's repositories). Its
- *  name is the file's path as Hugging Face gave it. */
+ *  another is given, with the `setup` choice that made it), at the commit it was read at (the
+ *  backend plans it there again, with that choice, before downloading), found on the `kind`
+ *  tab (a search finds only that kind's repositories). Its name is the file's path as Hugging
+ *  Face gave it. */
 export function offerForFile(
   repo: LocalRepo,
   choice: LocalFileChoice,
   local: LocalModels,
   kind: MediaKind,
   plan: SetupPlan = choice.plan,
+  setup: SetupChoice | null = null,
 ): DownloadOffer {
   return {
     name: choice.file,
     kind,
     source: { search: { repo: repo.repo, commit: repo.commit, file: choice.file } },
+    choice: setup,
     parts: planParts(plan),
     licences: plan.licences,
     totalBytes: plan.totalBytes,

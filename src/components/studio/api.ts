@@ -129,9 +129,10 @@ export const studioSetupPlan = (source: LocalSource, choice: SetupChoice) =>
 /** A fit at a size and, for a clip, a length in seconds (0 for a picture). */
 export const studioLocalFit = (source: LocalSource, width: number, height: number, seconds: number) =>
   invoke<LocalFit>("studio_local_fit", { source, width, height, seconds });
-/** Downloads a model and returns its download group ID. */
-export const studioLocalDownload = (source: LocalSource) =>
-  invoke<string>("studio_local_download", { source });
+/** Downloads a model and returns its download group ID: a searched file with the files its
+ *  set-up plan lists, with the person's `choice` (`null`: the plan as it comes). */
+export const studioLocalDownload = (source: LocalSource, choice: SetupChoice | null) =>
+  invoke<string>("studio_local_download", { source, choice });
 export const studioLocalDownloadFile = (repo: string, commit: string, file: string) =>
   invoke<string>("studio_local_download_file", { repo, commit, file });
 export const studioLocalDelete = (genModelId: string) => invoke<void>("studio_local_delete", { genModelId });

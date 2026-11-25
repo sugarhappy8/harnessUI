@@ -723,7 +723,7 @@ describe("RunCard", () => {
       cleanup();
       await show(failed("studio_model_file_bad", "A model file is damaged."));
       await click(button("Download again"));
-      expect(api.studioLocalDownload).toHaveBeenCalledWith({ installed: { genModelId: LOCAL_RUN.model } });
+      expect(api.studioLocalDownload).toHaveBeenCalledWith({ installed: { genModelId: LOCAL_RUN.model } }, null);
     });
 
     it("a refused repair says why on the card", async () => {
