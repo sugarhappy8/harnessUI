@@ -256,6 +256,7 @@
     "allow-studio-local-models",
     "allow-studio-local-search",
     "allow-studio-local-repo",
+    "allow-studio-setup-plan",
     "allow-studio-local-fit",
     "allow-studio-local-download",
     "allow-studio-local-download-file",

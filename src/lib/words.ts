@@ -2,7 +2,21 @@
 // a raw identifier such as "vulkan", "Vulkan0" or "text_model". Every phrase of the model
 // loading screens lives here, so the wording stays the same wherever it appears; the test
 // walks every value of the contract's enums.
-import type { Company, GpuPolicy, Licence, LocalFit, MediaKind, RefRole } from "../components/studio/types";
+import type {
+  CannotRunReason,
+  Company,
+  FileLabel,
+  GpuPolicy,
+  Licence,
+  LocalFit,
+  MediaKind,
+  NotReadReason,
+  PartRole,
+  RecipeKind,
+  RefRole,
+  SdVersion,
+  Verdict as StudioVerdict,
+} from "../components/studio/types";
 import { APP_NAME } from "./app";
 import { formatEta } from "./format";
 import type {
@@ -1838,6 +1852,7 @@ export const LICENCE_BADGE = {
   underRevenue: (limit: string | null) =>
     limit === null ? "Commercial use only under a revenue limit" : `Commercial use only under ${limit} revenue`,
   registration: "Commercial use only after registering with the publisher",
+  withUseRules: "Commercial use allowed, with use rules",
   unclear: "Check the licence",
   no: "Non-commercial",
 } as const satisfies Record<Licence["commercial"], string | ((limit: string | null) => string)>;
@@ -1917,8 +1932,13 @@ export const LOCAL_MODELS = {
     `${label} · ${amountGb(bytes)}${here ? " · already on this computer" : ""}`,
   noLocalSetup: "Individual files can be used in a compatible app. Studio has no local generation setup for this repository.",
   browserDownload: "Download file in browser",
-  weightFile: "Repository file",
-  saveWeight: "Download file",
+  /** A file's plain download, without a set-up (0.1.2's): for any file of a repository. */
+  downloadAnyway: "Download file anyway",
+  /** The largest choice of a repository whose fit word is "Fits" or "Fits after the chat
+   *  model is unloaded". */
+  best: "Best for this computer",
+  /** The list of a repository's files with what Studio found each is. */
+  repoFiles: "Files in this repository",
   openFiles: "View files on Hugging Face",
   showInFolder: "Show in folder",
   queuedFile: "Queued in Models → Downloads.",
@@ -1926,6 +1946,197 @@ export const LOCAL_MODELS = {
   notice: "Local models run only on this computer; no company checks prompts or results.",
   whatThatMeans: "What that means",
 } as const;
+
+/** A model version's name as people know it (Task S6), never the engine's word for it. */
+export const VERSION_NAME: Record<SdVersion, string> = {
+  sd1: "SD 1.5",
+  "sd1-inpaint": "SD 1.5 Inpainting",
+  "sd1-pix2pix": "InstructPix2Pix",
+  "sd1-tiny-unet": "SD 1.5 Tiny",
+  sd2: "SD 2.1",
+  "sd2-inpaint": "SD 2 Inpainting",
+  "sd2-tiny-unet": "SD 2 Tiny",
+  "sdxs-512-ds": "SDXS-512",
+  "sdxs-09": "SDXS-09",
+  sdxl: "SDXL",
+  "sdxl-inpaint": "SDXL Inpainting",
+  "sdxl-pix2pix": "CosXL Edit",
+  "sdxl-vega": "Segmind Vega",
+  "sdxl-ssd1b": "Segmind SSD-1B",
+  svd: "Stable Video Diffusion",
+  sd3: "SD 3.5",
+  flux: "FLUX.1",
+  "flux-fill": "FLUX.1 Fill",
+  "flux-controls": "FLUX.1 Canny or Depth",
+  "flex-2": "Flex.2",
+  "chroma-radiance": "Chroma Radiance",
+  wan2: "Wan 2.1",
+  "wan2.2-i2v": "Wan 2.2 Image-to-Video",
+  "wan2.2-ti2v": "Wan 2.2 5B",
+  "wan2.2-s2v": "Wan 2.2 Speech-to-Video",
+  "lingbot-video": "LingBot-Video",
+  "qwen-image": "Qwen-Image",
+  "qwen-image-layered": "Qwen-Image Layered",
+  "qwen-image-2.1": "Qwen-Image 2.1",
+  "hunyuan-video": "HunyuanVideo 1.5",
+  anima: "Anima",
+  flux2: "FLUX.2",
+  "flux2-klein": "FLUX.2 klein",
+  ltxav: "LTX-2.3",
+  "minimax-h3": "MiniMax H3",
+  "hidream-o1": "HiDream-O1",
+  "z-image": "Z-Image",
+  "boogu-image": "Boogu Image",
+  "ovis-image": "Ovis-Image",
+  "ernie-image": "ERNIE-Image",
+  lens: "Lens",
+  minit2i: "MiniT2I",
+  longcat: "LongCat-Image",
+  pid: "PiD",
+  ideogram4: "Ideogram 4",
+  "sefi-image": "SeFi-Image",
+  krea2: "Krea 2",
+  "mage-flow": "MageFlow",
+  "sensenova-u1.5": "SenseNova U1.5",
+  "llada-image": "LLaDA-Image",
+  pixart: "PixArt",
+  "ming-image": "Ming-Image",
+  "z-image-l2p": "Z-Image L2P",
+  iris: "Iris",
+  flux3: "FLUX.3",
+  "moss-image": "MOSS-Image",
+  fibo2: "FIBO 2",
+  chroma: "Chroma",
+  "p-h3-image": "P-H3 Image",
+  "minimax-h3-image": "MiniMax H3 Image",
+};
+
+/** The model type of the recipes whose type is not their version's name. */
+export const RECIPE_TYPE_NAME: Record<string, string> = {
+  "wan22-t2v": "Wan 2.2",
+  "wan22-i2v": "Wan 2.2",
+  "flux1-kontext": "FLUX.1 Kontext",
+  "qwen-image-edit": "Qwen-Image Edit",
+  "qwen-image-edit-2509": "Qwen-Image Edit",
+  "qwen-image-edit-2511": "Qwen-Image Edit",
+  "ltx25-dev": "LTX-2.5",
+};
+
+/** A model's type in words: its recipe's own type where it has one, else its version's name
+ *  ("Wan 2.2" for the A14B recipe, though the engine reads it as Wan 2.1). A version this
+ *  build has no name for (a newer backend's) reads "Unknown". */
+export function typeName(version: SdVersion, recipe: string | null): string {
+  return (recipe === null ? undefined : RECIPE_TYPE_NAME[recipe]) ?? VERSION_NAME[version] ?? "Unknown";
+}
+
+/** What a model makes, as a file's label says it ("SDXL picture model"). */
+export const KIND_WORD: Record<RecipeKind, string> = {
+  picture: "picture",
+  pictureEdit: "picture edit",
+  video: "video",
+};
+
+/** What a file does in a model's set-up, as its plan lists it (design 7.4). */
+export const SLOT_LABEL: Record<PartRole, string> = {
+  model: "Model",
+  diffusion: "Diffusion model",
+  "high-noise-diffusion": "Diffusion model (high-noise part)",
+  "uncond-diffusion": "Diffusion model (unconditional)",
+  "clip-l": "Text encoder (CLIP-L)",
+  "clip-g": "Text encoder (CLIP-G)",
+  t5xxl: "Text encoder (T5-XXL)",
+  llm: "Text encoder (language model)",
+  "llm-vision": "Picture encoder (language model)",
+  "clip-vision": "Picture encoder (CLIP vision)",
+  tokenizer: "Tokenizer",
+  vae: "Decoder (VAE)",
+  tae: "Tiny decoder (TAE)",
+  "audio-vae": "Sound decoder",
+  "audio-encoder": "Sound encoder",
+  "embeddings-connectors": "Embeddings connectors",
+};
+
+/** A model's parameters as a label says them: "14B", "2.6B", "860M". */
+export function parameterWords(parameters: number): string {
+  if (parameters >= 1e9) {
+    const billions = parameters / 1e9;
+    return `${billions >= 10 ? Math.round(billions) : Math.round(billions * 10) / 10}B`;
+  }
+  if (parameters >= 1e6) return `${Math.round(parameters / 1e6)}M`;
+  return String(parameters);
+}
+
+/** Why Studio can't run a file, as one sentence; `ext` names a pickle file's extension. */
+const CANNOT_RUN_WORDS: Record<CannotRunReason, (ext: string) => string> = {
+  lumina2: () => "This is a Lumina 2 model, which the Studio engine can't run",
+  ltxVideo09: () => "This is an LTX-Video 0.9 model, which the Studio engine can't run",
+  hunyuanVideo1: () => "This is a HunyuanVideo 1 model, which the Studio engine can't run",
+  svd: () => "This is a Stable Video Diffusion model, which the Studio engine can't run",
+  unknownWeights: () => "The Studio engine doesn't recognise this model",
+  sharded: () => "This model is split into several files, which Studio can't put back together",
+  pickle: (ext) => `Studio can't read ${ext} files`,
+  noSha: () => "Hugging Face publishes no checksum for this file, so Studio can't check it",
+  adapter: () => "This is an add-on file (such as a ControlNet or an IP-Adapter), which Studio doesn't use",
+  needsControlFrames: () => "This model needs control video frames, which Studio can't give it",
+  needsAudio: () => "This model needs a sound file, which Studio can't give it",
+  upscaler: () => "This is an upscaler, not a picture or video model",
+  folderModel: () => "This model comes as a folder of parts, which the Studio engine can't load",
+  notThisEngine: () => "The Studio engine can't run this kind of model",
+  ltx2: () => "This is an LTX-2 model, which the Studio engine can't run",
+};
+
+/** What a file of a repository is, as its row says it (design 7.3). */
+export const FILE_LABEL = {
+  /** "Works in Studio · SDXL picture model", "Works in Studio · Wan 2.2 video model, 14B,
+   *  high-noise part" (`parameters` 0 says no size). */
+  works(type: string, kind: RecipeKind, part: "high" | "low" | null, parameters: number): string {
+    const details = [parameters > 0 ? parameterWords(parameters) : null, part === null ? null : `${part}-noise part`];
+    const more = details.filter((d) => d !== null).map((d) => `, ${d}`);
+    return `Works in Studio · ${type} ${KIND_WORD[kind] ?? KIND_WORD.picture} model${more.join("")}`;
+  },
+  /** "LoRA for FLUX.1"; without a known base, "LoRA for an unknown model type". */
+  lora: (type: string | null) => (type === null ? "LoRA for an unknown model type" : `LoRA for ${type}`),
+  /** "Extra file · Decoder (VAE)". */
+  extra: (role: PartRole) => `Extra file · ${SLOT_LABEL[role] ?? "another part"}`,
+  /** "Can't run in Studio: Studio can't read .ckpt files" (`ext`, with its dot, for a pickle
+   *  file). */
+  cannotRun: (reason: CannotRunReason, ext = ".ckpt") =>
+    `Can't run in Studio: ${(CANNOT_RUN_WORDS[reason] ?? CANNOT_RUN_WORDS.unknownWeights)(ext)}`,
+  notRead: (reason: NotReadReason) =>
+    ({
+      needsToken: "Add a Hugging Face token in Settings to read this file",
+      needsTerms: "Accept the model's terms on Hugging Face first",
+      budget: "Not read: Studio reads 24 files per repository",
+      failed: "Couldn't read this file",
+    })[reason] ?? "Couldn't read this file",
+} as const;
+
+/** A pickle file's extension, from its path ("model.CKPT" → ".ckpt"). */
+function extensionOf(path: string): string {
+  const name = path.split("/").pop() ?? path;
+  const dot = name.lastIndexOf(".");
+  return dot < 0 ? ".ckpt" : name.slice(dot).toLowerCase();
+}
+
+/** A file's label in words, for its row (`path` names a pickle file's extension). */
+export function fileLabelWords(label: FileLabel, path: string): string {
+  if ("works" in label) {
+    const w = label.works;
+    return FILE_LABEL.works(typeName(w.version, w.recipe), w.kind, w.part, w.parameters);
+  }
+  if ("lora" in label) return FILE_LABEL.lora(label.lora.base === null ? null : typeName(label.lora.base, null));
+  if ("extra" in label) return FILE_LABEL.extra(label.extra.role);
+  if ("cannotRun" in label) return FILE_LABEL.cannotRun(label.cannotRun.reason, extensionOf(path));
+  return FILE_LABEL.notRead(label.notRead.reason);
+}
+
+/** What a search result offers, in words; `null` when its name says nothing Studio knows. */
+export function verdictWords(verdict: StudioVerdict): string | null {
+  if (verdict === "unknown") return null;
+  if ("works" in verdict) return FILE_LABEL.works(typeName(verdict.works.version, null), verdict.works.kind, null, 0);
+  if ("lora" in verdict) return FILE_LABEL.lora(verdict.lora.base === null ? null : typeName(verdict.lora.base, null));
+  return FILE_LABEL.cannotRun(verdict.cannotRun.reason);
+}
 
 /** "username and email", "username, email and company". */
 function andList(items: readonly string[]): string {
@@ -1961,6 +2172,7 @@ export const DOWNLOAD_LOCAL = {
     underRevenue: (limit: string | null) =>
       limit === null ? "commercial use only under a revenue limit." : `commercial use only under ${limit} revenue.`,
     registration: "commercial use only after registering with the publisher.",
+    withUseRules: "commercial use allowed, with the licence's use rules.",
     unclear: "check the licence before any commercial use.",
     no: "non-commercial use only.",
   } as const satisfies Record<Licence["commercial"], string | ((limit: string | null) => string)>,
@@ -1982,9 +2194,11 @@ export const DOWNLOAD_LOCAL = {
     const condition =
       licence.commercial === "registration"
         ? "Commercial use only after registering with the publisher."
-        : licence.revenueLimitUsd === null
-          ? "Commercial use only if your organisation earns less than the licence's limit."
-          : `Commercial use only if your organisation earns less than ${revenueLimit(licence.revenueLimitUsd)} a year.`;
+        : licence.commercial === "withUseRules"
+          ? "Commercial use allowed, with use rules: the licence lists uses it forbids."
+          : licence.revenueLimitUsd === null
+            ? "Commercial use only if your organisation earns less than the licence's limit."
+            : `Commercial use only if your organisation earns less than ${revenueLimit(licence.revenueLimitUsd)} a year.`;
     const duties = licence.obligations.map((o) => `The licence asks you to ${SETTING_WORDS.midSentence(o)}`);
     return [condition, ...duties].join(" ");
   },

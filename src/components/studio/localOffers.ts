@@ -10,6 +10,7 @@ import type {
   LocalSource,
   MediaKind,
   Part,
+  SetupPlan,
 } from "./types";
 
 // What Get local models offers to download, a licence's badge, and a model's download while it
@@ -33,6 +34,9 @@ export function licenceBadge(l: Licence): { tone: "green" | "amber" | "red"; tex
       break;
     case "registration":
       text = LICENCE_BADGE.registration;
+      break;
+    case "withUseRules":
+      text = LICENCE_BADGE.withUseRules;
       break;
     case "unclear":
       text = LICENCE_BADGE.unclear;
@@ -92,28 +96,40 @@ export function offerForEntry(e: LocalEntry, local: LocalModels): DownloadOffer 
   };
 }
 
-/** A searched repository's file and the parts it needs beside it, at the commit it was read
- *  at (the backend recognises it there again before downloading), found on the `kind` tab (a
- *  search finds only that kind's repositories). Its name is the file's path as Hugging Face
- *  gave it. */
-export function offerForFile(repo: LocalRepo, f: LocalFileChoice, local: LocalModels, kind: MediaKind): DownloadOffer {
+/** A searched repository's file and the files its set-up `plan` lists (its own plan unless
+ *  another is given), at the commit it was read at (the backend plans it there again before
+ *  downloading), found on the `kind` tab (a search finds only that kind's repositories). Its
+ *  name is the file's path as Hugging Face gave it. */
+export function offerForFile(
+  repo: LocalRepo,
+  choice: LocalFileChoice,
+  local: LocalModels,
+  kind: MediaKind,
+  plan: SetupPlan = choice.plan,
+): DownloadOffer {
   return {
-    name: f.file,
+    name: choice.file,
     kind,
-    source: { search: { repo: repo.repo, commit: repo.commit, file: f.file } },
-    parts: f.parts,
-    licences: f.licences,
-    totalBytes: f.totalBytes,
-    toFetchBytes: f.toFetchBytes,
-    needsEngine: f.needsEngine,
-    engineBytes: f.needsEngine ? local.engine.downloadBytes : 0,
-    lowDisk: f.lowDisk,
+    source: { search: { repo: repo.repo, commit: repo.commit, file: choice.file } },
+    parts: planParts(plan),
+    licences: plan.licences,
+    totalBytes: plan.totalBytes,
+    toFetchBytes: plan.toFetchBytes,
+    needsEngine: plan.needsEngine,
+    engineBytes: plan.needsEngine ? local.engine.downloadBytes : 0,
+    lowDisk: plan.lowDisk,
     gate: repo.gate,
   };
 }
 
-/** The installed id a searched repository's file gets (the backend's `gen_search::entry_for`):
- *  its download group carries it while it downloads. */
+/** The files a set-up plan lists, in its slots' order: none for a part the main file carries
+ *  or that nothing fills. */
+export function planParts(plan: SetupPlan): Part[] {
+  return plan.slots.flatMap((s) => (s.part === null ? [] : [s.part]));
+}
+
+/** The installed id a searched repository's file gets (`hf:<repo>:<file>`, the backend's set-up
+ *  plan's entry): its download group carries it while it downloads. */
 export function searchedModelId(repo: string, file: string): string {
   return `hf:${repo}:${file}`;
 }

@@ -22,6 +22,7 @@ use sha2::{Digest, Sha256};
 
 use crate::catalog::{Catalog, is_hex};
 use crate::hf::{Gated, validate_repo_id, validate_repo_path};
+use crate::sd::companions::CompanionTable;
 use crate::sd::detect::SdVersion;
 use crate::sd::matching::{RecipeInput, RecipeKind, inputs_of, kind_of};
 use crate::sd::recipes::{FrameRounding, Recipe, SlotId, VideoRule};
@@ -236,6 +237,9 @@ pub enum Commercial {
     UnderRevenue,
     /// Commercial use after registering with the publisher.
     Registration,
+    /// Commercial use allowed, with use rules: the OpenRAIL licences most SD 1.x and SDXL
+    /// models carry, which forbid listed harmful uses (design 11a).
+    WithUseRules,
     /// The licence does not say clearly.
     Unclear,
     /// Non-commercial.
@@ -314,12 +318,14 @@ pub struct GenLicence {
 }
 
 impl GenLicence {
-    /// Green when outputs are free for any use; amber with a condition (a revenue limit
-    /// or a registration); red when non-commercial or unclear.
+    /// Green when outputs are free for any use; amber with a condition (a revenue limit,
+    /// a registration or use rules); red when non-commercial or unclear.
     pub fn badge(&self) -> Badge {
         match self.commercial_outputs {
             Commercial::Yes => Badge::Green,
-            Commercial::UnderRevenue | Commercial::Registration => Badge::Amber,
+            Commercial::UnderRevenue | Commercial::Registration | Commercial::WithUseRules => {
+                Badge::Amber
+            }
             Commercial::Unclear | Commercial::No => Badge::Red,
         }
     }
@@ -665,6 +671,9 @@ pub struct GenCatalog {
     pub families: BTreeMap<GenFamily, FamilyRecord>,
     pub tiers: GenTiers,
     pub hidden: Vec<Hidden>,
+    /// 0.2.0: the companion table a generic model's set-up takes its shared files from
+    /// ([`CompanionTable::from_catalog`]); empty when it does not read.
+    pub companions: CompanionTable,
 }
 
 /// The only file types a part may be (`.ckpt`, `.pt`, `.pth` and other pickle files can
@@ -807,11 +816,16 @@ pub fn gen_catalog(catalog: &Catalog, engine_build: u32) -> GenCatalog {
         }
     }
     let tiers = read_tiers(&catalog.generator_tiers, &entries, &mut hidden);
+    let companions = CompanionTable::from_catalog(catalog).unwrap_or_else(|reason| {
+        tracing::warn!(%reason, "the companion table is not used");
+        CompanionTable::default()
+    });
     GenCatalog {
         entries,
         families,
         tiers,
         hidden,
+        companions,
     }
 }
 
@@ -1326,6 +1340,7 @@ mod tests {
             licence("kommunity", Commercial::UnderRevenue, Some(5_000_000)),
             licence("tiny-revenue", Commercial::UnderRevenue, Some(1_000_000)),
             licence("sign-up", Commercial::Registration, None),
+            licence("openrail", Commercial::WithUseRules, None),
             licence("unclear", Commercial::Unclear, None),
             licence("flux-nc", Commercial::No, None),
         ];
@@ -1460,6 +1475,7 @@ mod tests {
             (json!(Quirk::VideoWebpOnMac), "video-webp-on-mac"),
             (json!(Commercial::UnderRevenue), "underRevenue"),
             (json!(Commercial::Registration), "registration"),
+            (json!(Commercial::WithUseRules), "withUseRules"),
             (json!(Badge::Amber), "amber"),
             (json!(GateMode::Manual), "manual"),
             (json!(FrameRule::FourNPlusOne), "4n+1"),
@@ -1641,6 +1657,9 @@ mod tests {
             "sign-up"
         );
         assert_eq!(strictest(&["unclear", "sign-up"]), "unclear");
+        // Use rules are stricter than a registration and laxer than an unclear licence.
+        assert_eq!(strictest(&["sign-up", "openrail"]), "openrail");
+        assert_eq!(strictest(&["openrail", "unclear"]), "unclear");
         assert_eq!(strictest(&["unclear", "flux-nc"]), "flux-nc");
         assert_eq!(strictest(&["apache-2.0"]), "apache-2.0");
     }
@@ -1651,6 +1670,7 @@ mod tests {
             (Commercial::Yes, Badge::Green),
             (Commercial::UnderRevenue, Badge::Amber),
             (Commercial::Registration, Badge::Amber),
+            (Commercial::WithUseRules, Badge::Amber),
             (Commercial::Unclear, Badge::Red),
             (Commercial::No, Badge::Red),
         ] {

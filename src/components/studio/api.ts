@@ -2,7 +2,8 @@
 // {commands,engine_cmd,local_cmd}.rs, in their order there. Argument names are the Rust
 // parameters' in camelCase, as Tauri reads them. Only the read commands' price and list
 // updates (`studioRefreshModels`, `studioModelPrice`) and Hugging Face (`studioLocalSearch`,
-// `studioLocalRepo`, `studioLocalFit` for a searched file) send anything anywhere.
+// `studioLocalRepo`, `studioSetupPlan` and `studioLocalFit` for a searched file) send
+// anything anywhere.
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import type {
@@ -15,7 +16,9 @@ import type {
   LocalRepo,
   LocalSearchPage,
   LocalSource,
-  MediaKind,
+  SearchFilter,
+  SetupChoice,
+  SetupPlan,
   MediaModel,
   Output,
   RefItem,
@@ -114,11 +117,15 @@ export const studioEngineRemove = () => invoke<void>("studio_engine_remove");
 
 /** What this computer can run. Sends nothing. */
 export const studioLocalModels = () => invoke<LocalModels>("studio_local_models");
-/** A Hugging Face search, on Search or Enter. */
-export const studioLocalSearch = (text: string, kind: MediaKind) =>
-  invoke<LocalSearchPage>("studio_local_search", { text, kind });
+/** A Hugging Face search for pictures, video or LoRAs, on Search or Enter. */
+export const studioLocalSearch = (text: string, filter: SearchFilter) =>
+  invoke<LocalSearchPage>("studio_local_search", { text, filter });
 /** A searched repository's files at its latest commit, when one result is opened. */
 export const studioLocalRepo = (repo: string) => invoke<LocalRepo>("studio_local_repo", { repo });
+/** A searched file's (or a file on this computer's) set-up with another recipe or files the
+ *  person chose. */
+export const studioSetupPlan = (source: LocalSource, choice: SetupChoice) =>
+  invoke<SetupPlan>("studio_setup_plan", { source, choice });
 /** A fit at a size and, for a clip, a length in seconds (0 for a picture). */
 export const studioLocalFit = (source: LocalSource, width: number, height: number, seconds: number) =>
   invoke<LocalFit>("studio_local_fit", { source, width, height, seconds });

@@ -4,7 +4,8 @@
 //! stays in a small cache. Every listed file gets a label, and the repo a verdict the search
 //! shows in place of its name's hint.
 //!
-//! The app keeps one [`DetectService`] in its state, beside the `StudioManager` (`lib.rs`).
+//! The app keeps one [`DetectService`] in its state (an `Arc`), beside the `StudioManager`
+//! (`lib.rs`).
 
 use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::sync::Mutex;
@@ -35,7 +36,6 @@ pub struct CacheKey {
 
 /// What reading a repo found.
 #[derive(Debug, Clone, PartialEq)]
-#[cfg_attr(not(test), expect(dead_code, reason = "Task S6's repo view reads it"))]
 pub struct RepoReading {
     /// Every listed file Studio shows, by path; files it does not list are absent.
     pub labels: BTreeMap<String, FileLabel>,
@@ -126,7 +126,6 @@ impl DetectService {
     /// time, each through the cache first. Each member of a group gets the label of the
     /// file read, with its own name's part. A gated repo and no token reads nothing: every
     /// file that would be read is `NotRead { NeedsToken }`.
-    #[cfg_attr(not(test), expect(dead_code, reason = "Task S6's repo view calls it"))]
     pub async fn read_repo(&self, hf: &HfClient, detail: &RepoDetail) -> RepoReading {
         let c = candidates(&detail.files);
         let name = |path: &str| format!("{}/{}", detail.id, path);
@@ -210,7 +209,6 @@ impl DetectService {
 
     /// The last [`DetectService::read_repo`]'s verdict for `repo`, when that reading found a
     /// file that works or a LoRA, or left no file `NotRead`.
-    #[cfg_attr(not(test), expect(dead_code, reason = "Task S6's search calls it"))]
     pub fn verdict(&self, repo: &str) -> Option<Verdict> {
         self.verdicts
             .lock()

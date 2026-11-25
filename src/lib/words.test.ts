@@ -73,6 +73,14 @@ import {
   usageIcons,
   usageLine,
   wontFitQuestion,
+  FILE_LABEL,
+  fileLabelWords,
+  KIND_WORD,
+  parameterWords,
+  SLOT_LABEL,
+  typeName,
+  verdictWords,
+  VERSION_NAME,
 } from "./words";
 import { computerBar, gb, graphicsBar, picture, placement, usage } from "../components/fine.fixtures";
 
@@ -1071,5 +1079,68 @@ describe("0.1.0 Studio: the viewer and the gallery in plain words", () => {
     const emoji = "🌊".repeat(100);
     expect(STUDIO_TILE.open("image", 1, 1, emoji)).toBe(`Open picture: ${"🌊".repeat(72)}…`);
     expect(STUDIO_TILE.open("image", 1, 1, "  ")).toBe("Open picture");
+  });
+});
+
+describe("a repository's file labels (Task S6)", () => {
+  it("says what each file is, with the model type and never the engine's words", () => {
+    expect(FILE_LABEL.works("SDXL", "picture", null, 0)).toBe("Works in Studio · SDXL picture model");
+    expect(FILE_LABEL.works(typeName("wan2", "wan22-t2v"), "video", "high", 14_288_000_000)).toBe(
+      "Works in Studio · Wan 2.2 video model, 14B, high-noise part",
+    );
+    expect(FILE_LABEL.lora("FLUX.1")).toBe("LoRA for FLUX.1");
+    expect(FILE_LABEL.lora(null)).toBe("LoRA for an unknown model type");
+    expect(FILE_LABEL.extra("vae")).toBe("Extra file · Decoder (VAE)");
+    expect(FILE_LABEL.cannotRun("lumina2")).toBe(
+      "Can't run in Studio: This is a Lumina 2 model, which the Studio engine can't run",
+    );
+    expect(FILE_LABEL.cannotRun("pickle")).toBe("Can't run in Studio: Studio can't read .ckpt files");
+    expect(FILE_LABEL.notRead("needsToken")).toBe("Add a Hugging Face token in Settings to read this file");
+    expect(FILE_LABEL.notRead("needsTerms")).toBe("Accept the model's terms on Hugging Face first");
+    expect(FILE_LABEL.notRead("budget")).toBe("Not read: Studio reads 24 files per repository");
+    expect(FILE_LABEL.notRead("failed")).toBe("Couldn't read this file");
+  });
+
+  it("names a pickle file's own extension, and a file's type by its recipe first", () => {
+    expect(fileLabelWords({ cannotRun: { reason: "pickle", version: null } }, "weights/model.PTH")).toBe(
+      "Can't run in Studio: Studio can't read .pth files",
+    );
+    const kontext = {
+      works: { version: "flux", recipe: "flux1-kontext", kind: "pictureEdit", part: null, parameters: 0, folder: false },
+    } as const;
+    expect(fileLabelWords(kontext, "k.gguf")).toBe("Works in Studio · FLUX.1 Kontext picture edit model");
+    expect(fileLabelWords({ lora: { base: "sdxl" } }, "x.safetensors")).toBe("LoRA for SDXL");
+    expect(typeName("qwen-image", "qwen-image-edit-2509")).toBe("Qwen-Image Edit");
+    expect(typeName("ltxav", "ltx25-dev")).toBe("LTX-2.5");
+    expect(typeName("ltxav", "ltx23-dev")).toBe("LTX-2.3");
+    expect(typeName("wan2.2-ti2v", null)).toBe("Wan 2.2 5B");
+  });
+
+  it("a search hit's verdict reads as a file's label; a name that says nothing, nothing", () => {
+    expect(verdictWords({ works: { version: "sdxl", kind: "picture" } })).toBe("Works in Studio · SDXL picture model");
+    expect(verdictWords({ lora: { base: null } })).toBe("LoRA for an unknown model type");
+    expect(verdictWords({ cannotRun: { reason: "svd", version: null } })).toBe(
+      "Can't run in Studio: This is a Stable Video Diffusion model, which the Studio engine can't run",
+    );
+    expect(verdictWords("unknown")).toBeNull();
+  });
+
+  it("every version, kind and slot has its words, none an engine identifier", () => {
+    for (const [word, name] of Object.entries(VERSION_NAME)) {
+      expect(name, word).not.toBe("");
+      expect(name, word).not.toBe(word);
+    }
+    expect(Object.keys(VERSION_NAME)).toHaveLength(60);
+    expect(Object.values(KIND_WORD)).toEqual(["picture", "picture edit", "video"]);
+    expect(Object.keys(SLOT_LABEL)).toHaveLength(16);
+    expect(SLOT_LABEL.t5xxl).toBe("Text encoder (T5-XXL)");
+    expect(SLOT_LABEL.llm).toBe("Text encoder (language model)");
+    expect(SLOT_LABEL.tokenizer).toBe("Tokenizer");
+  });
+
+  it("writes a model's parameters as people read them", () => {
+    expect(parameterWords(14_288_000_000)).toBe("14B");
+    expect(parameterWords(2_567_000_000)).toBe("2.6B");
+    expect(parameterWords(860_000_000)).toBe("860M");
   });
 });

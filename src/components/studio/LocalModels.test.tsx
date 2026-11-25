@@ -10,13 +10,18 @@ import type { DownloadGroup } from "../../lib/types";
 import { amountGb, LOCAL_MODELS } from "../../lib/words";
 import { LOCAL } from "./fixtures/models";
 import type {
+  FileLabel,
   InstalledLocal,
   Licence,
   LocalEntry,
   LocalModels,
   LocalRepo,
+  LocalSearchHit,
   LocalSearchPage,
   Part,
+  PlannedSlot,
+  SetupPlan,
+  Verdict,
 } from "./types";
 
 const ipc = vi.hoisted(() => ({
@@ -64,32 +69,72 @@ const parts: Part[] = [
   { ...zimage.parts[2]!, sizeBytes: Math.round(0.3 * GIB) },
 ];
 
+/** Each part in its slot: the model file the main one, the prompt reader already installed,
+ *  the decoder from the companion table. */
+const slots: PlannedSlot[] = parts.map((part, i) => ({
+  role: part.role,
+  required: true,
+  source: i === 0 ? "main" : part.alreadyHere ? "installed" : "companion",
+  part,
+}));
+
+/** The searched file's set-up with nothing chosen. */
+function plan(patch: Partial<SetupPlan> = {}): SetupPlan {
+  return {
+    recipe: { id: "z-image-turbo", name: "Z-Image Turbo", kind: "picture" },
+    recipes: [
+      { id: "z-image", name: "Z-Image", kind: "picture" },
+      { id: "z-image-turbo", name: "Z-Image Turbo", kind: "picture" },
+    ],
+    slots,
+    licences: [apache],
+    totalBytes: parts.reduce((n, p) => n + p.sizeBytes, 0),
+    toFetchBytes: parts[0]!.sizeBytes + parts[2]!.sizeBytes,
+    fit: { ...zimage.fit, verdict: "green" },
+    canDownload: true,
+    lowDisk: false,
+    needsEngine: false,
+    untested: false,
+    ...patch,
+  };
+}
+
+const works: FileLabel = {
+  works: { version: "z-image", recipe: "z-image-turbo", kind: "picture", part: null, parameters: 6_150_000_000, folder: false },
+};
+
 function supported(patch: Partial<LocalRepo> = {}): LocalRepo {
   return {
     repo: "someone/Z-Image-Turbo-GGUF",
     commit: "c".repeat(40),
-    status: "supported",
-    reason: null,
-    standaloneFiles: [],
-    family: "Z-Image Turbo",
-    files: [
-      {
-        file: "z-image-turbo-Q5_K_M.gguf",
-        quant: "Q5_K_M",
-        parts,
-        licences: [apache],
-        totalBytes: parts.reduce((n, p) => n + p.sizeBytes, 0),
-        toFetchBytes: parts[0]!.sizeBytes + parts[2]!.sizeBytes,
-        fit: { ...zimage.fit, verdict: "green" },
-        needsEngine: false,
-        lowDisk: false,
-      },
-    ],
+    author: "someone",
+    summary: null,
+    verdict: { works: { version: "z-image", kind: "picture" } },
+    files: [{ file: "z-image-turbo-Q5_K_M.gguf", quant: "Q5_K_M", label: works, plan: plan(), best: true }],
+    loras: [],
+    fileViews: [],
     licence: apache,
     licences: [apache],
     labelMismatch: null,
     gate: { mode: "none", collects: [] },
+    readFiles: 1,
+    unreadFiles: 0,
     ...patch,
+  };
+}
+
+/** A search result for `repo`, offering what `verdict` says. */
+function hit(repo: string, verdict: Verdict = "unknown"): LocalSearchHit {
+  return {
+    repo,
+    author: repo.split("/")[0]!,
+    downloads: 12_345,
+    likes: 10,
+    updatedAt: null,
+    gated: "none",
+    licenseLabel: "apache-2.0",
+    verdict,
+    exact: false,
   };
 }
 
@@ -104,9 +149,7 @@ function searchBox(): HTMLElement {
 /** Searches Hugging Face for `repo`'s name, finds it, and opens it (`studioLocalRepo` gives
  *  `result`). Returns the opened result. */
 async function openResult(repo: string, result: LocalRepo = supported({ repo })) {
-  vi.mocked(api.studioLocalSearch).mockResolvedValue({
-    items: [{ repo, downloads: 12_345, likes: 10, gated: "none", licenseLabel: "apache-2.0" }],
-  });
+  vi.mocked(api.studioLocalSearch).mockResolvedValue({ items: [hit(repo)] });
   vi.mocked(api.studioLocalRepo).mockResolvedValue(result);
   typeIn(searchBox(), repo.split("/")[1]!);
   await act(async () => {
@@ -197,6 +240,10 @@ describe("licenceBadge", () => {
     expect(licenceBadge({ ...apache, excludedRegions: ["EU"] })).toEqual({ tone: "amber", text: "Commercial use in permitted regions" });
     expect(licenceBadge(nonCommercial)).toEqual({ tone: "red", text: "Non-commercial" });
     expect(licenceBadge(licence({ badge: "red", commercial: "unclear" }))).toEqual({ tone: "red", text: "Check the licence" });
+    expect(licenceBadge(licence({ badge: "amber", commercial: "withUseRules" }))).toEqual({
+      tone: "amber",
+      text: "Commercial use allowed, with use rules",
+    });
   });
 
   it("a kind of licence this version does not know reads Check the licence", () => {
@@ -244,7 +291,7 @@ describe("Get local models", () => {
     await act(async () => {
       fireEvent.keyDown(searchBox(), { key: "Enter" });
     });
-    expect(api.studioLocalSearch).toHaveBeenCalledWith("klein", "image");
+    expect(api.studioLocalSearch).toHaveBeenCalledWith("klein", "pictures");
     screen.getByText("Searching sends your words to huggingface.co.");
     // The Search button asks too.
     await click(screen.getByRole("button", { name: "Search" }));
@@ -353,7 +400,8 @@ describe("Get local models", () => {
     const result = await openResult("someone/Z-Image-Turbo-GGUF");
     within(result).getByText("z-image-turbo-Q5_K_M.gguf");
     within(result).getByText("3 parts · 7.1 GB in all · 4.6 GB to download");
-    within(result).getByText("reads your prompt · 2.5 GB · already on this computer");
+    within(result).getByText("Text encoder (language model) · 2.5 GB · already on this computer");
+    within(result).getByText("Best for this computer");
     within(result).getByText("Free for any use, including commercial");
     within(result).getByText("Fits");
     within(result).getByRole("button", { name: "Download" });
@@ -369,14 +417,14 @@ describe("Get local models", () => {
       source: { search: { repo: "someone/Z-Image-Turbo-GGUF", commit: "c".repeat(40), file: "z-image-turbo-Q5_K_M.gguf" } },
       parts,
       licences: [apache],
-      toFetchBytes: repo.files[0]!.toFetchBytes,
+      toFetchBytes: repo.files[0]!.plan.toFetchBytes,
     });
   });
 
   it("keeps Download available when a recognised file exceeds the hardware estimate", async () => {
     await showLocal();
     const repo = supported();
-    repo.files[0]!.fit = { ...zimage.fit, word: "notHere", verdict: "red", reason: "needs more memory" };
+    repo.files[0]!.plan.fit = { ...zimage.fit, word: "notHere", verdict: "red", reason: "needs more memory" };
     const result = await openResult(repo.repo, repo);
     within(result).getByText(/needs more memory/);
     await click(within(result).getByRole("button", { name: "Download" }));
@@ -395,30 +443,74 @@ describe("Get local models", () => {
     expect(new XMLSerializer().serializeToString(document.body)).not.toContain("‮");
   });
 
-  it("an unknown family offers a pinned standalone download and its Hub files", async () => {
+  it("a search result shows its verdict in words", async () => {
     await showLocal();
-    const result = await openResult("someone/Mystery-Diffusion-GGUF", {
-      ...supported({ repo: "someone/Mystery-Diffusion-GGUF" }),
-      status: "notSupportedYet",
-      standaloneFiles: [
-        { path: "weights/Q4.gguf", size: 4000, sha256: "b".repeat(64) },
-        { path: "extra files/config #1.json", size: 50, sha256: null },
+    vi.mocked(api.studioLocalSearch).mockResolvedValue({
+      items: [
+        hit("stabilityai/stable-diffusion-xl-base-1.0", { works: { version: "sdxl", kind: "picture" } }),
+        hit("XLabs-AI/flux-lora-collection", { lora: { base: "flux" } }),
+        hit("Comfy-Org/Lumina-Image-2", { cannotRun: { reason: "lumina2", version: null } }),
       ],
-      reason: "harnessUI does not know this kind of model yet.",
-      files: [],
-      licence: null,
-      licences: [],
     });
-    within(result).getByText(LOCAL_MODELS.noLocalSetup);
+    typeIn(searchBox(), "sdxl");
+    await act(async () => {
+      fireEvent.keyDown(searchBox(), { key: "Enter" });
+    });
+    await flush();
+    screen.getByText("Works in Studio · SDXL picture model");
+    screen.getByText("LoRA for FLUX.1");
+    screen.getByText("Can't run in Studio: This is a Lumina 2 model, which the Studio engine can't run");
+  });
 
-    await click(within(result).getByRole("button", { name: LOCAL_MODELS.saveWeight }));
-    expect(api.studioLocalDownloadFile).toHaveBeenCalledWith("someone/Mystery-Diffusion-GGUF", "c".repeat(40), "weights/Q4.gguf");
-    expect(api.studioLocalDownload).not.toHaveBeenCalled();
-    expect(within(result).getByRole("link").getAttribute("href")).toBe(`https://huggingface.co/someone/Mystery-Diffusion-GGUF/tree/${"c".repeat(40)}`);
-    fireEvent.change(within(result).getByRole("combobox"), { target: { value: "extra files/config #1.json" } });
-    expect(within(result).getByRole("link", { name: LOCAL_MODELS.browserDownload }).getAttribute("href")).toBe(
-      `https://huggingface.co/someone/Mystery-Diffusion-GGUF/resolve/${"c".repeat(40)}/extra%20files/config%20%231.json?download=true`
+  it("a file Studio can't run offers the plain download", async () => {
+    await showLocal();
+    const lumina = { cannotRun: { reason: "lumina2", version: "z-image" } } as const;
+    const result = await openResult("Comfy-Org/Lumina-Image-2", {
+      ...supported({ repo: "Comfy-Org/Lumina-Image-2" }),
+      verdict: lumina,
+      files: [],
+      licences: [],
+      fileViews: [
+        { path: "split_files/diffusion_models/lumina_2.safetensors", sizeBytes: 5_219_585_680, quant: null, label: lumina },
+        { path: "extra files/config #1.safetensors", sizeBytes: 50, quant: null, label: { cannotRun: { reason: "noSha", version: null } } },
+      ],
+    });
+    within(result).getByText("Can't run in Studio: This is a Lumina 2 model, which the Studio engine can't run");
+    within(result).getByText(LOCAL_MODELS.noLocalSetup);
+    await click(within(result).getByRole("button", { name: "Download file anyway" }));
+    expect(api.studioLocalDownloadFile).toHaveBeenCalledWith(
+      "Comfy-Org/Lumina-Image-2",
+      "c".repeat(40),
+      "split_files/diffusion_models/lumina_2.safetensors",
     );
+    expect(api.studioLocalDownload).not.toHaveBeenCalled();
+    // A file with no published checksum is offered in the browser.
+    expect(within(result).getByRole("link", { name: LOCAL_MODELS.browserDownload }).getAttribute("href")).toBe(
+      `https://huggingface.co/Comfy-Org/Lumina-Image-2/resolve/${"c".repeat(40)}/extra%20files/config%20%231.safetensors?download=true`,
+    );
+    expect(within(result).getByRole("link", { name: LOCAL_MODELS.openFiles }).getAttribute("href")).toBe(
+      `https://huggingface.co/Comfy-Org/Lumina-Image-2/tree/${"c".repeat(40)}`,
+    );
+  });
+
+  it("every file Studio labelled is listed with what it is, also beside a model that works", async () => {
+    await showLocal();
+    const result = await openResult(
+      "someone/Z-Image-Turbo-GGUF",
+      supported({
+        fileViews: [
+          { path: "z-image-turbo-Q5_K_M.gguf", sizeBytes: 4_600_000_000, quant: "Q5_K_M", label: works },
+          { path: "ae.safetensors", sizeBytes: 335_304_388, quant: null, label: { extra: { role: "vae" } } },
+          { path: "model.ckpt", sizeBytes: 4_000_000_000, quant: null, label: { cannotRun: { reason: "pickle", version: null } } },
+          { path: "big.gguf", sizeBytes: 9_000_000_000, quant: null, label: { notRead: { reason: "budget" } } },
+        ],
+      }),
+    );
+    within(result).getByText("Works in Studio · Z-Image picture model, 6.2B");
+    within(result).getByText("Extra file · Decoder (VAE)");
+    within(result).getByText("Can't run in Studio: Studio can't read .ckpt files");
+    within(result).getByText("Not read: Studio reads 24 files per repository");
+    expect(within(result).getAllByRole("button", { name: "Download file anyway" })).toHaveLength(4);
   });
 
   it("a label that differs from the family's licence is pointed out", async () => {
@@ -436,7 +528,7 @@ describe("Get local models", () => {
     const red = supported({
       licence: terms,
       licences: [terms],
-      files: supported().files.map((f) => ({ ...f, licences: [terms] })),
+      files: supported().files.map((f) => ({ ...f, plan: { ...f.plan, licences: [terms] } })),
     });
     const result = await openResult(red.repo, red);
     within(result).getByText(badge);
@@ -526,7 +618,6 @@ describe("Get local models", () => {
   });
 
   it("only the last search's answer is kept", async () => {
-    const hit = (repo: string) => ({ repo, downloads: 1, likes: 0, gated: "none" as const, licenseLabel: null });
     let answerFirst: (page: LocalSearchPage) => void = () => undefined;
     vi.mocked(api.studioLocalSearch)
       .mockImplementationOnce(() => new Promise((resolve) => (answerFirst = resolve)))

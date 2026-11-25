@@ -2318,30 +2318,30 @@ export const LOCAL: LocalModels = {
       "parts": [
         {
           "role": "diffusion",
-          "label": "makes the picture",
           "repo": "leejet/FLUX.2-klein-4B-GGUF",
           "path": "flux-2-klein-4b-Q4_0.gguf",
           "sizeBytes": 2460378560,
           "licenceId": "apache-2.0",
-          "alreadyHere": false
+          "alreadyHere": false,
+          "local": false
         },
         {
           "role": "llm",
-          "label": "reads your prompt",
           "repo": "unsloth/Qwen3-4B-GGUF",
           "path": "Qwen3-4B-Q4_K_M.gguf",
           "sizeBytes": 2497281312,
           "licenceId": "apache-2.0",
-          "alreadyHere": false
+          "alreadyHere": false,
+          "local": false
         },
         {
           "role": "vae",
-          "label": "picture decoder",
           "repo": "Comfy-Org/Flux-2-Klein-4B",
           "path": "split_files/vae/flux2-vae.safetensors",
           "sizeBytes": 336211292,
           "licenceId": "apache-2.0",
-          "alreadyHere": false
+          "alreadyHere": false,
+          "local": false
         }
       ],
       "toFetchBytes": 5293871164,
@@ -2400,30 +2400,30 @@ export const LOCAL: LocalModels = {
       "parts": [
         {
           "role": "diffusion",
-          "label": "makes the picture",
           "repo": "Green-Sky/FastWan2.2-TI2V-5B-FullAttn-GGUF",
           "path": "FastWan2.2-TI2V-5B-q6_k.gguf",
           "sizeBytes": 4210247200,
           "licenceId": "apache-2.0",
-          "alreadyHere": false
+          "alreadyHere": false,
+          "local": false
         },
         {
           "role": "t5xxl",
-          "label": "reads your prompt",
           "repo": "city96/umt5-xxl-encoder-gguf",
           "path": "umt5-xxl-encoder-Q5_K_M.gguf",
           "sizeBytes": 4145878880,
           "licenceId": "apache-2.0",
-          "alreadyHere": false
+          "alreadyHere": false,
+          "local": false
         },
         {
           "role": "vae",
-          "label": "picture decoder",
           "repo": "QuantStack/Wan2.2-TI2V-5B-GGUF",
           "path": "VAE/Wan2.2_VAE.safetensors",
           "sizeBytes": 1409400960,
           "licenceId": "apache-2.0",
-          "alreadyHere": false
+          "alreadyHere": false,
+          "local": false
         }
       ],
       "toFetchBytes": 9765527040,
@@ -2482,30 +2482,30 @@ export const LOCAL: LocalModels = {
       "parts": [
         {
           "role": "diffusion",
-          "label": "makes the picture",
           "repo": "leejet/Z-Image-Turbo-GGUF",
           "path": "z_image_turbo-Q4_K.gguf",
           "sizeBytes": 3864250304,
           "licenceId": "apache-2.0",
-          "alreadyHere": false
+          "alreadyHere": false,
+          "local": false
         },
         {
           "role": "llm",
-          "label": "reads your prompt",
           "repo": "unsloth/Qwen3-4B-Instruct-2507-GGUF",
           "path": "Qwen3-4B-Instruct-2507-Q4_K_M.gguf",
           "sizeBytes": 2497281120,
           "licenceId": "apache-2.0",
-          "alreadyHere": false
+          "alreadyHere": false,
+          "local": false
         },
         {
           "role": "vae",
-          "label": "picture decoder",
           "repo": "Comfy-Org/Z-Image-Turbo",
           "path": "split_files/vae/ae.safetensors",
           "sizeBytes": 335304388,
           "licenceId": "apache-2.0",
-          "alreadyHere": false
+          "alreadyHere": false,
+          "local": false
         }
       ],
       "toFetchBytes": 6696835812,

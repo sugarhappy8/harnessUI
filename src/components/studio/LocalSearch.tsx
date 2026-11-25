@@ -2,7 +2,7 @@ import { useId, useState } from "react";
 import { Search } from "lucide-react";
 import { formatBytes, formatCount } from "../../lib/format";
 import type { ErrorInfo } from "../../lib/types";
-import { LOCAL_MODELS } from "../../lib/words";
+import { LOCAL_MODELS, SLOT_LABEL, fileLabelWords, verdictWords } from "../../lib/words";
 import { toErrorInfo } from "../../store/app";
 import { useStudio, type StudioTab } from "../../store/studio";
 import { useDownloads } from "../../store/downloads";
@@ -13,15 +13,17 @@ import { visiblePath } from "../FolderChip";
 import { DownloadProgress, FitLine, LicenceBadge, TimeLine, useModelDownload } from "./LocalModelRow";
 import { offerForFile, searchedModelId } from "./localOffers";
 import { CARD_BUTTON, PRIMARY_BUTTON } from "./styles";
-import type { LocalFileChoice, LocalModels, LocalRepo } from "./types";
+import type { LocalFileChoice, LocalModels, LocalRepo, RepoFileView } from "./types";
 
-// Hugging Face search in Get local models (0.1.0 Task B13): Hugging Face is asked only on
-// Search or Enter (never as typing goes) and when one result is opened, and the box says first
-// that the words go to huggingface.co. A hit shows its downloads and the repository's own
-// licence label; opened, it is read at its latest commit and shows each file Studio recognises
-// with its parts, total size, licence and fit, and *Download* (how far its download got while
-// it runs), or why the engine cannot run it. Names from Hugging Face are shown with
-// invisible characters as codes.
+// Hugging Face search in Get local models (0.1.0 Task B13, 0.2.0 Task S6): Hugging Face is
+// asked only on Search or Enter (never as typing goes) and when one result is opened, and the
+// box says first that the words go to huggingface.co. A hit shows its downloads, the
+// repository's own licence label and what it offers (from its name until it is opened);
+// opened, it is read at its latest commit and shows each main file that works with its set-up
+// plan (each part, total size, licence and fit) and *Download* (how far its download got while
+// it runs), then every file Studio labelled with what it is and a plain *Download file
+// anyway*. Names from Hugging Face are shown with invisible characters as codes. (Phase U
+// replaces this view.)
 
 /** An opened search result: the repository's name, and what reading it gave (`null` while it
  *  is being read). */
@@ -126,6 +128,7 @@ export function LocalSearch(props: { tab: StudioTab }) {
                   {hit.licenseLabel && (
                     <span className="text-xs text-fg-muted">{LOCAL_MODELS.labelled(visiblePath(hit.licenseLabel))}</span>
                   )}
+                  {verdictWords(hit.verdict) && <span className="text-xs">{verdictWords(hit.verdict)}</span>}
                 </div>
                 {open && local && (
                   <section aria-label={name} className="ml-3 flex flex-col gap-2 border-l border-border pl-3">
@@ -147,12 +150,13 @@ export function LocalSearch(props: { tab: StudioTab }) {
   );
 }
 
-/** What an opened result holds: its files to download, or why there are none. */
+/** What an opened result holds: its main files to download with their set-up, or that Studio
+ *  has none, then every file it labelled with a plain download. */
 function RepoResult(props: { repo: LocalRepo; local: LocalModels; tab: StudioTab }) {
   const { repo, local, tab } = props;
   const [error, setError] = useState<ErrorInfo | null>(null);
-  const canRun = repo.status === "supported";
-  const standalone = repo.standaloneFiles.length > 0 && <StandaloneFile repo={repo} onError={setError} />;
+  const canRun = repo.files.length > 0;
+  const views = repo.fileViews.length > 0 && <FileViews repo={repo} onError={setError} />;
   return (
     <div className="flex flex-col gap-2">
       {repo.licence && (
@@ -162,12 +166,12 @@ function RepoResult(props: { repo: LocalRepo; local: LocalModels; tab: StudioTab
       )}
       {repo.labelMismatch && <p className="text-xs text-fg-muted">{repo.labelMismatch}</p>}
       {repo.files.map((f) => <FileChoice key={f.file} repo={repo} file={f} local={local} tab={tab} />)}
-      {standalone && canRun ? (
+      {views && canRun ? (
         <details className="text-sm">
           <summary>{LOCAL_MODELS.otherFiles}</summary>
-          {standalone}
+          {views}
         </details>
-      ) : standalone}
+      ) : views}
       {!canRun && (
         <div className="text-xs text-fg-muted">
           <p>{LOCAL_MODELS.noLocalSetup}</p>
@@ -181,21 +185,35 @@ function RepoResult(props: { repo: LocalRepo; local: LocalModels; tab: StudioTab
   );
 }
 
-/** Save one set of weights, without installing an inference recipe or any companions. */
-function StandaloneFile({ repo, onError }: { repo: LocalRepo; onError: (error: ErrorInfo) => void }) {
-  const [path, setPath] = useState(repo.standaloneFiles[0]!.path);
-  const file = repo.standaloneFiles.find((f) => f.path === path)!;
-  const browserUrl = `${modelPage(repo.repo)}/resolve/${repo.commit}/${file.path.split("/").map(encodeURIComponent).join("/")}?download=true`;
+/** Every file Studio labelled, each with what it is and its plain download (0.1.2's: the file
+ *  alone, without a set-up or any companion). */
+function FileViews({ repo, onError }: { repo: LocalRepo; onError: (error: ErrorInfo) => void }) {
+  return (
+    <ul aria-label={LOCAL_MODELS.repoFiles} className="flex flex-col gap-1.5 text-sm">
+      {repo.fileViews.map((f) => (
+        <FileView key={f.path} repo={repo} file={f} onError={onError} />
+      ))}
+    </ul>
+  );
+}
+
+/** One labelled file: its name, size and label, and *Download file anyway* (a file with no
+ *  published checksum is offered in the browser instead), or how far its download got. */
+function FileView(props: { repo: LocalRepo; file: RepoFileView; onError: (error: ErrorInfo) => void }) {
+  const { repo, file: f, onError } = props;
+  const nameId = useId();
   const [starting, setStarting] = useState(false);
-  const [queued, setQueued] = useState<string | null>(null);
-  const group = useDownloads((s) => s.groups.find((g) =>
-    g.repo === repo.repo && g.savedFile?.commit === repo.commit && g.label === path
-  ));
+  const [queued, setQueued] = useState(false);
+  const group = useDownloads((s) =>
+    s.groups.find((g) => g.repo === repo.repo && g.savedFile?.commit === repo.commit && g.label === f.path),
+  );
+  const noChecksum = "cannotRun" in f.label && f.label.cannotRun.reason === "noSha";
+  const browserUrl = `${modelPage(repo.repo)}/resolve/${repo.commit}/${f.path.split("/").map(encodeURIComponent).join("/")}?download=true`;
   async function download() {
     setStarting(true);
     try {
-      await studioLocalDownloadFile(repo.repo, repo.commit, path);
-      setQueued(path);
+      await studioLocalDownloadFile(repo.repo, repo.commit, f.path);
+      setQueued(true);
     } catch (e) {
       onError(toErrorInfo(e));
     } finally {
@@ -203,53 +221,55 @@ function StandaloneFile({ repo, onError }: { repo: LocalRepo; onError: (error: E
     }
   }
   return (
-    <div className="flex flex-col items-start gap-1.5 text-sm">
-      <select
-        aria-label={LOCAL_MODELS.weightFile}
-        className="max-w-full rounded border border-border bg-bg p-1"
-        value={path}
-        disabled={starting}
-        onChange={(e) => setPath(e.target.value)}
-      >
-        {repo.standaloneFiles.map((file) => (
-          <option key={file.path} value={file.path}>{visiblePath(file.path)} · {formatBytes(file.size)}</option>
-        ))}
-      </select>
-      {!file.sha256 || file.size === 0 ? (
+    <li className="flex flex-col items-start gap-1">
+      <p id={nameId} className="max-w-full break-all">
+        <bdi dir="ltr">{visiblePath(f.path)}</bdi> · {formatBytes(f.sizeBytes)}
+      </p>
+      <p className="text-xs text-fg-muted">{fileLabelWords(f.label, f.path)}</p>
+      {noChecksum ? (
         <BrowserLink href={browserUrl} onError={onError}>{LOCAL_MODELS.browserDownload}</BrowserLink>
       ) : group && group.status !== "cancelled" && group.status !== "done" ? (
-        <div className="w-full"><DownloadProgress group={group} name={visiblePath(path)} /></div>
+        <div className="w-full"><DownloadProgress group={group} name={visiblePath(f.path)} /></div>
       ) : (
-        <button type="button" className={PRIMARY_BUTTON} disabled={starting} onClick={() => void download()}>
-          {LOCAL_MODELS.saveWeight}
+        <button
+          type="button"
+          className={CARD_BUTTON}
+          aria-describedby={nameId}
+          disabled={starting}
+          onClick={() => void download()}
+        >
+          {LOCAL_MODELS.downloadAnyway}
         </button>
       )}
       {group?.status === "done" && group.savedFile && (
         <p className="max-w-full break-all text-xs"><bdi dir="ltr">{visiblePath(group.savedFile.path)}</bdi></p>
       )}
-      {queued === path && !group && <p role="status">{LOCAL_MODELS.queuedFile}</p>}
-    </div>
+      {queued && !group && <p role="status" className="text-xs">{LOCAL_MODELS.queuedFile}</p>}
+    </li>
   );
 }
 
-/** One file of a searched repository, with the parts it needs beside it. */
+/** One main file of a searched repository, with the files its set-up plan lists. */
 function FileChoice(props: { repo: LocalRepo; file: LocalFileChoice; local: LocalModels; tab: StudioTab }) {
   const { repo, file: f, local, tab } = props;
   const setOffer = useStudio((s) => s.setOffer);
   const download = useModelDownload(searchedModelId(repo.repo, f.file));
+  const plan = f.plan;
+  const parts = plan.slots.flatMap((s) => (s.part === null ? [] : [{ role: s.role, part: s.part }]));
   return (
     <div className="flex flex-col gap-1 rounded-lg border border-border p-2.5">
       <p className="text-sm font-medium">
         <bdi dir="ltr">{visiblePath(f.file)}</bdi>
       </p>
-      <p className="text-xs">{LOCAL_MODELS.fileLine(f.parts.length, f.totalBytes, f.toFetchBytes)}</p>
+      {f.best && <p className="text-xs font-medium">{LOCAL_MODELS.best}</p>}
+      <p className="text-xs">{LOCAL_MODELS.fileLine(parts.length, plan.totalBytes, plan.toFetchBytes)}</p>
       <ul className="text-xs text-fg-muted">
-        {f.parts.map((p) => (
-          <li key={`${p.repo}/${p.path}`}>{LOCAL_MODELS.part(p.label, p.sizeBytes, p.alreadyHere)}</li>
+        {parts.map(({ role, part: p }) => (
+          <li key={`${role}:${p.repo}/${p.path}`}>{LOCAL_MODELS.part(SLOT_LABEL[role], p.sizeBytes, p.alreadyHere)}</li>
         ))}
       </ul>
-      <FitLine fit={f.fit} />
-      <TimeLine fit={f.fit} kind={tab} />
+      <FitLine fit={plan.fit} />
+      <TimeLine fit={plan.fit} kind={tab} />
       {download ? (
         <div className="pt-1">
           <DownloadProgress group={download} name={visiblePath(f.file)} />

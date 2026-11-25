@@ -2,7 +2,15 @@ import { useState } from "react";
 import { AlertDialog } from "radix-ui";
 import { BrowserLink, modelPage } from "./BrowserLink";
 import type { ErrorInfo } from "../../lib/types";
-import { amountGb, DOWNLOAD_LOCAL, REGIONAL_USE, engineSizeWords, licenceWord, revenueLimit } from "../../lib/words";
+import {
+  amountGb,
+  DOWNLOAD_LOCAL,
+  REGIONAL_USE,
+  SLOT_LABEL,
+  engineSizeWords,
+  licenceWord,
+  revenueLimit,
+} from "../../lib/words";
 import { toErrorInfo } from "../../store/app";
 import { useStudio } from "../../store/studio";
 import { ErrorBanner } from "../ErrorBanner";
@@ -11,8 +19,8 @@ import { ENGINE_LICENCE_ID, type DownloadOffer } from "./localOffers";
 import type { Licence, MediaKind, Part } from "./types";
 
 // The download confirmation of a local model (0.1.0 Task B14, local addendum Wireframe L3),
-// shown for the store's `offer` before anything is fetched: every part with what it does, its
-// size and its licence; what the pictures (or videos) you make may be used for (the strictest
+// shown for the store's `offer` before anything is fetched: every part with what it does (its
+// slot, in `SLOT_LABEL`'s words), its size and its licence; what the pictures (or videos) you make may be used for (the strictest
 // licence); the Studio engine when it comes with the model; a gated repository's form, what its
 // publisher receives and *Open the model page*; an amber licence's condition; low disk space;
 // Licence links are informational. Download confirms the file transfer.
@@ -23,8 +31,9 @@ const STRICTNESS: Record<Licence["commercial"], number> = {
   yes: 0,
   underRevenue: 1,
   registration: 2,
-  unclear: 3,
-  no: 4,
+  withUseRules: 3,
+  unclear: 4,
+  no: 5,
 };
 
 /** `l` is stricter than `than`: a stricter kind, or under a lower revenue limit (an unknown
@@ -124,7 +133,7 @@ function Confirm(props: { offer: DownloadOffer; busy: boolean; setBusy(busy: boo
                   return (
                     <li key={`${part.repo}/${part.path}`} className="flex flex-wrap items-baseline gap-x-3">
                       <span className="min-w-0 flex-1">
-                        <span>{part.label}</span>
+                        <span>{SLOT_LABEL[part.role]}</span>
                         {part.alreadyHere && (
                           <span className={MUTED}>
                             <span aria-hidden> · </span>

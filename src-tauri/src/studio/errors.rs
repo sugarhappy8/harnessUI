@@ -1168,27 +1168,54 @@ pub const FAMILY_RECORD_MISSING: &str = "its family record is missing";
 /// The details of an installed model with no engine recipe yet (*Set it up yourself*).
 pub const NO_RECIPE_YET: &str = "it has no engine recipe yet";
 
-/// Why a recognised repository offers no file: each of its model files was refused when its
-/// entry or its download was worked out (a part not pinned, a licence not known).
-pub const NO_FILE_OFFERED: &str = "Studio could not assemble the files needed to run this model.";
-
 /// Why an installed model that this build cannot read is not for this computer (its family
 /// record hidden by a newer signed catalog, a part's licence no longer known, a family this
 /// build does not know); it is still listed, so it can be deleted.
 pub const NOT_RUN_BY_THIS_VERSION: &str = "This version of harnessUI cannot run this model.";
 
-/// What the part that makes the picture (or the clip) is, in the download dialog.
-pub const PART_MAKES_THE_PICTURE: &str = "makes the picture";
-/// What a text encoder is, in the download dialog.
-pub const PART_READS_THE_PROMPT: &str = "reads your prompt";
-/// What a CLIP-vision encoder is, in the download dialog: it reads an added picture.
-pub const PART_READS_THE_PICTURE: &str = "reads the picture you add";
-/// What the decoder is, in the download dialog.
-pub const PART_PICTURE_DECODER: &str = "picture decoder";
-/// What an audio decoder is, in the download dialog.
-pub const PART_SOUND_DECODER: &str = "sound decoder";
-/// What an audio encoder is, in the download dialog: it reads added sound.
-pub const PART_READS_THE_SOUND: &str = "reads the sound you add";
+/// The details of a set-up plan asked for a catalog or installed model, whose parts are set
+/// already: a plan is for a searched file or a file on this computer.
+pub const PLAN_FOR_A_FILE_ONLY: &str =
+    "a set-up plan is for a searched file or a file on this computer";
+/// The details of a set-up plan or a download asked for a file Studio does not run (its
+/// label is not *Works in Studio*).
+pub const NOT_A_RUNNABLE_FILE: &str = "it is not a model file Studio runs";
+/// The details of a download asked for a file on this computer: it is added, not downloaded.
+pub const A_DISK_FILE_IS_ADDED: &str = "a file on this computer is added, not downloaded";
+/// The details of a searched file's download whose set-up misses a part it needs, or uses a
+/// file from this computer.
+pub const SETUP_NOT_COMPLETE: &str = "its set-up is not complete";
+
+/// A set-up asked with a recipe the pinned engine does not have, or one Studio leaves out.
+pub fn recipe_not_offered() -> AppError {
+    AppError::new(
+        "bad_request",
+        "Studio does not run models of that type.",
+        "Choose one of the model types offered.",
+        String::new(),
+    )
+}
+
+/// A file from this computer in a pickle format (`.ckpt`, `.pt`, `.pth`, `.bin`): never
+/// opened. `ext` is its extension, with its dot.
+pub fn cannot_read_file(ext: &str) -> AppError {
+    AppError::new(
+        "bad_request",
+        format!("Studio can't read {ext} files"),
+        "Choose a .safetensors, .sft or .gguf file.",
+        String::new(),
+    )
+}
+
+/// A file from this computer that is not a model file Studio reads.
+pub fn not_a_model_format() -> AppError {
+    AppError::new(
+        "bad_request",
+        "This is not a model file Studio can read.",
+        "Choose a .safetensors, .sft or .gguf file.",
+        String::new(),
+    )
+}
 
 /// A fit asked at a size the model is never made at (a side of 0, or longer than its
 /// longest).
@@ -1717,6 +1744,9 @@ mod tests {
             local_model_missing(),
             size_not_offered(),
             model_in_use(),
+            recipe_not_offered(),
+            cannot_read_file(".ckpt"),
+            not_a_model_format(),
         ];
         all.extend(every_pack_error().iter().map(engine_not_installed));
         for to in [PictureUse::Chat, PictureUse::Prompt] {

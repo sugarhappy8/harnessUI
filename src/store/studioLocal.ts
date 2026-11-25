@@ -72,7 +72,7 @@ export function createLocal(
     localSearch: null,
     search: async (text, tab) => {
       const mine = ++searchTick;
-      const page = await api.studioLocalSearch(text, tab);
+      const page = await api.studioLocalSearch(text, tab === "image" ? "pictures" : "video");
       if (mine === searchTick) set({ localSearch: { text, tab, hits: page.items } });
     },
     openRepo: (repo) => api.studioLocalRepo(repo),

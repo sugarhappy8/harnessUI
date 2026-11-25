@@ -126,8 +126,9 @@ impl RangeServer {
     }
 }
 
-/// Runs `answer` for each connection's request line and headers; it returns what to send.
-async fn serve<F>(handler: F) -> String
+/// A server on this computer that runs `handler` for each connection's request line and
+/// headers; it returns the whole response to send. Its address, `http://127.0.0.1:<port>`.
+pub async fn serve<F>(handler: F) -> String
 where
     F: Fn(String, Vec<String>) -> Vec<u8> + Send + Sync + 'static,
 {

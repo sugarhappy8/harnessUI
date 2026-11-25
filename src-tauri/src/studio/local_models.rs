@@ -2,9 +2,14 @@
 //! models"; 0.1.0 Task L11).
 //!
 //! - **Which model.** A source ([`LocalSource`]) names an entry of the signed catalog's
-//!   recommended list, a file of a Hugging Face repository at a commit (recognised again here
-//!   from the repository's listing: the webview's word is never taken for it), or an installed
-//!   model (its saved parts, with no request).
+//!   recommended list, a file of a Hugging Face repository at a commit (its listing read again
+//!   here and its set-up planned, the webview's word never taken for it), a file on this
+//!   computer (planned from its header), or an installed model (its saved parts, with no
+//!   request).
+//! - **A set-up plan** ([`plan_source`], Task S6): a searched or local file's recipe and the
+//!   file for each slot (`models::sd::setup::plan_setup`), with the person's choices, as the
+//!   generic entry it makes. Each fetched file is under its companion licence or its own
+//!   repo's label (ruling S4-licence-ref).
 //! - **What it takes** ([`plan_download`]): every part, pinned by repository, revision, size
 //!   and SHA-256, lands at `<models>/<owner>/<repo>/<path>`, so a part already there (a shared
 //!   text encoder) is checked instead of fetched; where another installed model uses another
@@ -29,27 +34,39 @@ use std::sync::Arc;
 use models::download::FileSpec;
 
 use crate::hub::{UsedFile, chat_files_used, download_destination, gen_files_used};
+use models::files::{RepoFile, quant_label};
 use models::gen_catalog::{
     FamilyRecord, GateMode, GenCatalog, GenEntry, GenFamily, GenGate, GenLicence, GenPart, GenRole,
     GenericSpec, gen_catalog, generic_entry,
 };
-use models::gen_search::{Recognition, entry_for, recognise, searched_licence};
+use models::gen_search::{repo_licence, searched_licence, unread_licence};
 use models::hf::{Gated, HfClient, HubInfo, RepoDetail};
+use models::sd::candidates::candidates;
+use models::sd::companions::CompanionTable;
 use models::sd::detect::SdVersion;
-use models::sd::matching::recipes_for;
+use models::sd::index::{PICKLE_EXTENSIONS, READ_EXTENSIONS};
+use models::sd::inspect::inspect_local;
+use models::sd::matching::{NoisePart, out_of_scope, recipes_for};
+use models::sd::recipes::{SlotId, recipe};
+use models::sd::setup::{
+    InstalledFile, LicenceRef, MainFile, PlannedFile, SetupInput, SetupPlan, SlotChoice, plan_setup,
+};
+use models::sd::{FileFacts, FileLabel, label_for};
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Manager};
 
+use super::detect::{DetectService, RepoReading};
 use super::engine_cmd::EngineNeed;
 use super::errors;
 use super::manager::StudioManager;
 use crate::downloads::{DownloadManager, GenGroup, GenGroupPart, GroupMeta, files_being_written};
+use crate::dto::{SetupChoice, SlotFile, SlotOverride};
 use crate::error::{AppError, AppResult};
 use crate::state::AppState;
 
-/// The model a local download or fit is for, as the webview names it:
-/// `{"catalog":{"entryId":…}}`, `{"search":{"repo":…,"commit":…,"file":…}}` or
-/// `{"installed":{"genModelId":…}}`.
+/// The model a local download, fit or set-up plan is for, as the webview names it:
+/// `{"catalog":{"entryId":…}}`, `{"search":{"repo":…,"commit":…,"file":…}}`,
+/// `{"installed":{"genModelId":…}}` or `{"disk":{"path":…}}`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", rename_all_fields = "camelCase")]
 pub enum LocalSource {
@@ -64,14 +81,18 @@ pub enum LocalSource {
     /// An installed model: its saved parts, with no request (its fit, and *Download again*,
     /// which checks every part and fetches what is missing or damaged).
     Installed { gen_model_id: String },
+    /// A model file on this computer (untrusted: checked before it is read), set up as a
+    /// download is; it is added, never downloaded.
+    Disk { path: String },
 }
 
 /// What downloading an entry takes on this computer.
 #[derive(Debug, Clone)]
 pub struct DownloadPlan {
     pub entry: GenEntry,
-    /// Every part's pinned file and where it goes, a part already here included: the download
-    /// checks that one against its SHA-256 instead of fetching it.
+    /// Every Hub part's pinned file and where it goes, in the parts' order, a part already
+    /// here included: the download checks that one against its SHA-256 instead of fetching
+    /// it. A part from this computer (`local`) has none.
     pub files: Vec<(FileSpec, PathBuf)>,
     /// The parts whose file is already in place with its pinned size.
     pub already_here: Vec<PathBuf>,
@@ -130,7 +151,8 @@ impl InstalledFiles {
 }
 
 /// What downloading `entry` into `models_dir` takes: one pinned file per part (`commit` the
-/// part's revision), each at `<models>/<owner>/<repo>/<path>` unless a file there that
+/// part's revision; a part from this computer, `local`, is used where it is and names no
+/// licence), each at `<models>/<owner>/<repo>/<path>` unless a file there that
 /// another installed model uses (`used`: chat models, and picture and video models other than
 /// this one) is another revision's (`hub::download_destination`: the part then has a place
 /// of its own, never renamed over that file), a part whose destination already has its
@@ -150,7 +172,9 @@ pub fn plan_download(
     let mut files = Vec::with_capacity(entry.parts.len());
     let mut already_here = Vec::new();
     let mut to_fetch_bytes = 0;
-    for part in &entry.parts {
+    // A file from this computer is used where it is: nothing to fetch, no licence.
+    let hub_parts = || entry.parts.iter().filter(|p| p.local.is_none());
+    for part in hub_parts() {
         let dest = download_destination(
             models_dir,
             &part.repo,
@@ -178,7 +202,7 @@ pub fn plan_download(
         return Err(errors::disk_too_small(to_fetch_bytes));
     }
     let mut licences: Vec<GenLicence> = Vec::new();
-    for part in &entry.parts {
+    for part in hub_parts() {
         let licence = entry.licenses.get(&part.license).ok_or_else(|| {
             AppError::internal(format!("a part's licence {} is not listed", part.license))
         })?;
@@ -220,31 +244,46 @@ struct Resolved {
     entry: GenEntry,
     catalog_id: Option<String>,
     source: store::GenSource,
+    /// A searched file's set-up misses a part it needs, or uses a file from this computer:
+    /// it cannot be downloaded as one model yet.
+    incomplete: bool,
 }
 
-/// [`resolve_with`] with this app's store and catalog, and its Hub client for a search source
-/// only.
+/// [`resolve_with`] with this app's store, catalog and installed files, its readings of
+/// repos, and its Hub client for a search source only.
 async fn resolve(app: &AppHandle, source: &LocalSource) -> AppResult<Resolved> {
     let catalog = current_gen_catalog(app).await;
     let hf = match source {
         LocalSource::Search { .. } => Some(crate::hub::hf_client(app).await?),
-        LocalSource::Catalog { .. } | LocalSource::Installed { .. } => None,
+        LocalSource::Catalog { .. } | LocalSource::Installed { .. } | LocalSource::Disk { .. } => {
+            None
+        }
     };
     let state = app.state::<AppState>();
-    resolve_with(&state.store, &catalog, hf.as_ref(), source).await
+    let installed = InstalledFiles::read(&state.store).await?;
+    let detect = app.state::<Arc<DetectService>>();
+    let deps = PlanDeps {
+        hf: hf.as_ref(),
+        detect: &detect,
+        catalog: &catalog,
+        installed: &installed,
+    };
+    resolve_with(&state.store, &deps, source).await
 }
 
 /// The entry `source` names, with the catalog id and the origin its installed row records:
-/// from `catalog` (an entry it hides is `studio_not_supported_yet`); for a search source from
-/// the repository's listing at that commit, asked of `hf` and recognised again here (the
-/// webview's word is never taken for it); for an installed model from its saved parts in
-/// `store` and its family record. Only a search source sends a request.
+/// from the catalog (an entry it hides is `studio_not_supported_yet`); for a searched file
+/// the generic entry its set-up plan makes, with nothing chosen ([`plan_source`]: the
+/// repository's listing at that commit, read again here, so the webview's word is never
+/// taken for it); for a file on this computer the same from its header; for an installed
+/// model from its saved parts in `store` and its family record. Only a search source sends a
+/// request.
 async fn resolve_with(
     store: &store::Store,
-    catalog: &GenCatalog,
-    hf: Option<&HfClient>,
+    deps: &PlanDeps<'_>,
     source: &LocalSource,
 ) -> AppResult<Resolved> {
+    let catalog = deps.catalog;
     match source {
         LocalSource::Catalog { entry_id } => {
             let entry = match catalog.entries.get(entry_id) {
@@ -260,19 +299,21 @@ async fn resolve_with(
                 entry,
                 catalog_id: Some(entry_id.clone()),
                 source: store::GenSource::Catalog,
+                incomplete: false,
             })
         }
-        LocalSource::Search { repo, commit, file } => {
-            let client =
-                hf.ok_or_else(|| AppError::internal("a search source without a Hub client"))?;
-            let detail = client
-                .repo(repo, Some(commit))
-                .await
-                .map_err(crate::hub::hf_error)?;
+        LocalSource::Search { .. } | LocalSource::Disk { .. } => {
+            let planned = plan_source(deps, source, &SetupChoice::default()).await?;
+            let incomplete =
+                !planned.plan.can_run() || planned.entry.parts.iter().any(|p| p.local.is_some());
             Ok(Resolved {
-                entry: entry_from_listing(&detail, file, &catalog.families)?,
+                entry: planned.entry,
                 catalog_id: None,
-                source: store::GenSource::Search,
+                source: match source {
+                    LocalSource::Disk { .. } => store::GenSource::Import,
+                    _ => store::GenSource::Search,
+                },
+                incomplete,
             })
         }
         LocalSource::Installed { gen_model_id } => {
@@ -284,43 +325,639 @@ async fn resolve_with(
                 entry: entry_from_installed(&model, catalog)?,
                 catalog_id: model.catalog_id.clone(),
                 source: model.source,
+                incomplete: false,
             })
         }
     }
 }
 
 /// The entry `source` names ([`resolve_with`]): a request only for a search source's
-/// listing, asked of `hf`.
+/// listing.
 pub(crate) async fn entry_with(
     store: &store::Store,
-    catalog: &GenCatalog,
-    hf: Option<&HfClient>,
+    deps: &PlanDeps<'_>,
     source: &LocalSource,
 ) -> AppResult<GenEntry> {
-    Ok(resolve_with(store, catalog, hf, source).await?.entry)
+    Ok(resolve_with(store, deps, source).await?.entry)
 }
 
-/// The entry `file` of the listing `detail` makes, recognised from the listing
-/// (`gen_search::recognise`): a family harnessUI does not run is `studio_not_supported_yet`, and a file that is not one of the
-/// repository's diffusion files with a published SHA-256 `not_found`.
-pub fn entry_from_listing(
-    detail: &RepoDetail,
-    file: &str,
-    families: &BTreeMap<GenFamily, FamilyRecord>,
-) -> AppResult<GenEntry> {
-    match recognise(detail, families) {
-        Recognition::Supported { family, files } => {
-            let found = files
-                .iter()
-                .find(|f| f.path == file)
-                .ok_or_else(|| AppError::not_found("model file"))?;
-            let record = families
-                .get(&family)
-                .ok_or_else(|| errors::not_supported_yet(errors::FAMILY_RECORD_MISSING))?;
-            entry_for(detail, found, record).map_err(errors::not_supported_yet)
-        }
-        Recognition::NotSupportedYet(why) => Err(errors::not_supported_yet(why)),
+// ---- set-up plans (design section 7.4) --------------------------------------------------------
+
+/// What planning a searched or local file's set-up reads beside the file: the Hub (a
+/// searched file's repo, a chosen file of another repo), the repos read so far, the
+/// catalog's companion table, and the files the installed models use.
+pub(crate) struct PlanDeps<'a> {
+    pub hf: Option<&'a HfClient>,
+    pub detect: &'a DetectService,
+    pub catalog: &'a GenCatalog,
+    pub installed: &'a InstalledFiles,
+}
+
+/// A searched repo's listing at a commit, and what reading its files found
+/// ([`DetectService::read_repo`]).
+pub(crate) struct ReadRepo {
+    pub detail: RepoDetail,
+    pub reading: RepoReading,
+}
+
+impl ReadRepo {
+    /// `repo` at `commit` (its latest when `None`), its files read through `detect` (each
+    /// once while it stays in the cache).
+    pub(crate) async fn read(
+        hf: &HfClient,
+        detect: &DetectService,
+        repo: &str,
+        commit: Option<&str>,
+    ) -> AppResult<Self> {
+        let detail = hf.repo(repo, commit).await.map_err(crate::hub::hf_error)?;
+        Ok(Self::of(detect, hf, detail).await)
     }
+
+    /// `detail`'s files read through `detect`.
+    pub(crate) async fn of(detect: &DetectService, hf: &HfClient, detail: RepoDetail) -> Self {
+        let reading = detect.read_repo(hf, &detail).await;
+        Self { detail, reading }
+    }
+}
+
+/// A set-up planned for one file, and the generic entry it makes.
+pub(crate) struct Planned {
+    pub plan: SetupPlan,
+    /// Its recipe, and one part per planned file, in the plan's order.
+    pub entry: GenEntry,
+    /// For each of `plan.parts`, its part's index in `entry.parts`: `None` for a part the
+    /// main file carries and for one nothing fills.
+    pub part_of: Vec<Option<usize>>,
+}
+
+/// The set-up of the file `source` names, with the person's `choice`: a searched file of
+/// its repo at its commit ([`plan_file`]), or a file on this computer ([`plan_disk`]). A
+/// catalog or installed model has its parts already: `studio_not_supported_yet`.
+pub(crate) async fn plan_source(
+    deps: &PlanDeps<'_>,
+    source: &LocalSource,
+    choice: &SetupChoice,
+) -> AppResult<Planned> {
+    match source {
+        LocalSource::Search { repo, commit, file } => {
+            let hf = deps
+                .hf
+                .ok_or_else(|| AppError::internal("a search source without a Hub client"))?;
+            let read = ReadRepo::read(hf, deps.detect, repo, Some(commit)).await?;
+            plan_file(deps, &read, file, choice).await
+        }
+        LocalSource::Disk { path } => plan_disk(deps, path, choice).await,
+        LocalSource::Catalog { .. } | LocalSource::Installed { .. } => {
+            Err(errors::not_supported_yet(errors::PLAN_FOR_A_FILE_ONLY))
+        }
+    }
+}
+
+/// The set-up of `file` of the repo `read`, with `choice`. The file must be one Studio
+/// runs (labelled `Works`): a diffusers folder's UNet plans the folder; any other file not
+/// listed is `not_found`, and one Studio does not run `studio_not_supported_yet`.
+pub(crate) async fn plan_file(
+    deps: &PlanDeps<'_>,
+    read: &ReadRepo,
+    file: &str,
+    choice: &SetupChoice,
+) -> AppResult<Planned> {
+    let detail = &read.detail;
+    let listed = detail
+        .files
+        .iter()
+        .find(|f| f.path == file)
+        .ok_or_else(|| AppError::not_found("model file"))?;
+    let (version, recipe_id, part, folder) = match read.reading.labels.get(file) {
+        Some(FileLabel::Works {
+            version,
+            recipe,
+            part,
+            folder,
+            ..
+        }) => (*version, recipe.clone(), *part, *folder),
+        _ => return Err(errors::not_supported_yet(errors::NOT_A_RUNNABLE_FILE)),
+    };
+    let facts = read
+        .reading
+        .facts
+        .get(file)
+        .ok_or_else(|| AppError::internal("a file that works without its facts"))?;
+    let folder = if folder {
+        let found = candidates(&detail.files)
+            .folder
+            .filter(|f| f.unet.file.path == file)
+            .ok_or_else(|| AppError::internal("a folder model without its folder"))?;
+        Some(found)
+    } else {
+        None
+    };
+    let main = match &folder {
+        Some(folder) => MainFile::HubFolder {
+            repo: &detail.id,
+            revision: &detail.commit,
+            folder,
+        },
+        None => MainFile::Hub {
+            repo: &detail.id,
+            revision: &detail.commit,
+            file: listed,
+        },
+    };
+    let mut others = OtherRepos::default();
+    let overrides = slot_choices(deps, Some(detail), &choice.overrides, &mut others).await?;
+    let quant = match &folder {
+        Some(folder) => Some(if folder.fp16 { "fp16" } else { "fp32" }.to_owned()),
+        None => quant_label(file),
+    };
+    let repo_name = detail.id.rsplit('/').next().unwrap_or(&detail.id);
+    let named = Named {
+        id: format!("hf:{}:{}", detail.id, file),
+        name: match quant {
+            Some(quant) => format!("{repo_name} ({quant})"),
+            None => repo_name.to_owned(),
+        },
+        publisher: detail.id.split('/').next().unwrap_or_default().to_owned(),
+        gate: GenGate {
+            mode: GateMode::from(detail.gated),
+            collects: Vec::new(),
+        },
+    };
+    plan_with(
+        deps,
+        PlanMain {
+            main,
+            facts,
+            version,
+            recipe_id: &recipe_id,
+            part,
+            listing: &detail.files,
+            listing_facts: &read.reading.facts,
+            detail: Some(detail),
+        },
+        named,
+        choice,
+        &overrides,
+        &others,
+    )
+}
+
+/// The set-up of the file at `path` on this computer (untrusted: [`checked_disk_file`]),
+/// read from its header, with `choice`. A file Studio does not run is
+/// `studio_not_supported_yet`.
+pub(crate) async fn plan_disk(
+    deps: &PlanDeps<'_>,
+    path: &str,
+    choice: &SetupChoice,
+) -> AppResult<Planned> {
+    let (path, size) = checked_disk_file(path)?;
+    let read_from = path.clone();
+    let facts = tokio::task::spawn_blocking(move || inspect_local(&read_from))
+        .await
+        .map_err(|e| AppError::internal(format!("reading a file's header: {e}")))?
+        .map_err(|e| errors::not_supported_yet(format!("its header does not read: {e}")))?;
+    let name = path
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let (version, recipe_id, part) = match label_for(&facts, &name) {
+        FileLabel::Works {
+            version,
+            recipe,
+            part,
+            ..
+        } => (version, recipe, part),
+        _ => return Err(errors::not_supported_yet(errors::NOT_A_RUNNABLE_FILE)),
+    };
+    let mut others = OtherRepos::default();
+    let overrides = slot_choices(deps, None, &choice.overrides, &mut others).await?;
+    let named = Named {
+        id: format!("local:{}", path.display()),
+        name,
+        publisher: String::new(),
+        gate: GenGate {
+            mode: GateMode::None,
+            collects: Vec::new(),
+        },
+    };
+    let no_facts = BTreeMap::new();
+    plan_with(
+        deps,
+        PlanMain {
+            main: MainFile::Local {
+                path: &path,
+                size,
+                sha256: None,
+            },
+            facts: &facts,
+            version,
+            recipe_id: &recipe_id,
+            part,
+            listing: &[],
+            listing_facts: &no_facts,
+            detail: None,
+        },
+        named,
+        choice,
+        &overrides,
+        &others,
+    )
+}
+
+/// The main file of a plan and what was read about it.
+struct PlanMain<'a> {
+    main: MainFile<'a>,
+    facts: &'a FileFacts,
+    version: SdVersion,
+    /// The recipe its label gives.
+    recipe_id: &'a str,
+    part: Option<NoisePart>,
+    listing: &'a [RepoFile],
+    listing_facts: &'a BTreeMap<String, FileFacts>,
+    /// Its repo's listing; `None` for a file on this computer.
+    detail: Option<&'a RepoDetail>,
+}
+
+/// How the entry a plan makes is known.
+struct Named {
+    id: String,
+    name: String,
+    publisher: String,
+    gate: GenGate,
+}
+
+/// The listings of other repos a choice names, by repo and commit: `None` when the read
+/// failed.
+type OtherRepos = BTreeMap<(String, String), Option<RepoDetail>>;
+
+/// Plans `main` with `choice`'s recipe (an in-scope recipe; untested when its version's
+/// recipes do not include it) and `overrides`, and makes its entry.
+fn plan_with(
+    deps: &PlanDeps<'_>,
+    m: PlanMain<'_>,
+    named: Named,
+    choice: &SetupChoice,
+    overrides: &[(SlotId, SlotChoice)],
+    others: &OtherRepos,
+) -> AppResult<Planned> {
+    let recipe_id = choice.recipe.as_deref().unwrap_or(m.recipe_id);
+    let recipe = recipe(recipe_id)
+        .filter(|r| out_of_scope(&r.id).is_none())
+        .ok_or_else(errors::recipe_not_offered)?;
+    let untested = !recipes_for(m.version).contains(&recipe_id);
+    let installed = installed_files(deps.installed);
+    let plan = plan_setup(&SetupInput {
+        main: m.main,
+        facts: m.facts,
+        recipe,
+        version: Some(m.version),
+        part: m.part,
+        listing: m.listing,
+        listing_facts: m.listing_facts,
+        installed: &installed,
+        companions: &deps.catalog.companions,
+        overrides,
+        untested,
+    });
+    let mut licenses = BTreeMap::new();
+    let mut parts = Vec::new();
+    let mut part_of = Vec::with_capacity(plan.parts.len());
+    for planned in &plan.parts {
+        let (Some(file), Some(role)) = (&planned.file, GenRole::from_slot(planned.slot)) else {
+            part_of.push(None);
+            continue;
+        };
+        let part = gen_part(deps, m.detail, others, &mut licenses, role, file);
+        part_of.push(Some(parts.len()));
+        parts.push(part);
+    }
+    let entry = generic_entry(GenericSpec {
+        id: named.id,
+        name: named.name,
+        publisher: named.publisher,
+        recipe,
+        version: Some(m.version),
+        parts,
+        licenses,
+        gate: named.gate,
+        untested,
+    });
+    Ok(Planned {
+        plan,
+        entry,
+        part_of,
+    })
+}
+
+/// The part a planned `file` makes for `role`, its licence added to `licenses`: a Hub file
+/// under its companion licence or its own repo's ([`file_licence`]); a file an installed
+/// model uses, as that model has it (so it is checked in place, not fetched); else a file
+/// of this computer, the person's own, which names no licence.
+fn gen_part(
+    deps: &PlanDeps<'_>,
+    main: Option<&RepoDetail>,
+    others: &OtherRepos,
+    licenses: &mut BTreeMap<String, GenLicence>,
+    role: GenRole,
+    file: &PlannedFile,
+) -> GenPart {
+    match file {
+        PlannedFile::Hub {
+            repo,
+            revision,
+            path,
+            size,
+            sha256,
+            licence,
+            save_as,
+        } => {
+            let licence = file_licence(
+                &deps.catalog.companions,
+                main,
+                others,
+                repo,
+                revision,
+                licence,
+            );
+            GenPart {
+                role,
+                repo: repo.clone(),
+                revision: revision.clone(),
+                path: path.clone(),
+                size: *size,
+                sha256: sha256.clone(),
+                license: add_licence(licenses, licence),
+                local: None,
+                folder: save_as.clone(),
+            }
+        }
+        PlannedFile::Local { path, size, sha256 } => {
+            let spelled = path.display().to_string();
+            let installed = deps.installed.gen_models.iter().find_map(|row| {
+                let part = row.parts.as_array()?.iter().find(|p| {
+                    p.get("file")
+                        .and_then(serde_json::Value::as_str)
+                        .is_some_and(|f| crate::model_options::same_file(f, &spelled))
+                })?;
+                Some((row, serde_json::from_value::<GenPart>(part.clone()).ok()?))
+            });
+            match installed {
+                Some((row, mut part)) if part.local.is_none() => {
+                    let licence = installed_licence(deps, main, row, &part);
+                    part.role = role;
+                    part.license = add_licence(licenses, licence);
+                    part
+                }
+                _ => GenPart {
+                    role,
+                    repo: String::new(),
+                    revision: String::new(),
+                    path: path
+                        .file_name()
+                        .map(|n| n.to_string_lossy().into_owned())
+                        .unwrap_or_default(),
+                    size: *size,
+                    sha256: sha256.clone().unwrap_or_default(),
+                    license: String::new(),
+                    local: Some(path.clone()),
+                    folder: None,
+                },
+            }
+        }
+    }
+}
+
+/// The licence of a Hub file a plan fetches (ruling S4-licence-ref): a companion's, from the
+/// table; else its own repo's label ([`repo_licence`]): the main repo's listing for a file
+/// of the main repo, the chosen repo's listing at its commit for a file the person chose,
+/// and "Check the licence" (red) when that listing could not be read. A file of another
+/// repo never shows the main repo's licence.
+fn file_licence(
+    companions: &CompanionTable,
+    main: Option<&RepoDetail>,
+    others: &OtherRepos,
+    repo: &str,
+    revision: &str,
+    licence: &LicenceRef,
+) -> GenLicence {
+    match licence {
+        LicenceRef::Companion(id) => match companions.licence(id) {
+            Some(l) => l.clone(),
+            None => unread_licence(repo, revision),
+        },
+        LicenceRef::Repo => {
+            let listing = main
+                .filter(|d| d.id == repo && d.commit == revision)
+                .or_else(|| {
+                    others
+                        .get(&(repo.to_owned(), revision.to_owned()))?
+                        .as_ref()
+                });
+            match listing {
+                Some(detail) => repo_licence(detail),
+                None => unread_licence(repo, revision),
+            }
+        }
+    }
+}
+
+/// The licence of a file an installed model uses: a companion's, by its SHA-256; else the
+/// one that model records for it; else, for a file of the main repo, that repo's label;
+/// else "Check the licence".
+fn installed_licence(
+    deps: &PlanDeps<'_>,
+    main: Option<&RepoDetail>,
+    row: &store::GenModel,
+    part: &GenPart,
+) -> GenLicence {
+    let companions = &deps.catalog.companions;
+    if let Some(l) = companions
+        .by_sha(&part.sha256)
+        .and_then(|c| companions.licence(&c.license))
+    {
+        return l.clone();
+    }
+    if let Some(l) = entry_from_installed(row, deps.catalog)
+        .ok()
+        .and_then(|e| e.licenses.get(&part.license).cloned())
+    {
+        return l;
+    }
+    match main.filter(|d| d.id == part.repo && d.commit == part.revision) {
+        Some(detail) => repo_licence(detail),
+        None => unread_licence(&part.repo, &part.revision),
+    }
+}
+
+/// Adds `licence` to `licenses` and gives the id its parts name: the id of the same licence
+/// (by SHA-256) when it is there already; its own id when that is free; else its id with a
+/// number, so two repos' different licences with one label never share an id.
+fn add_licence(licenses: &mut BTreeMap<String, GenLicence>, mut licence: GenLicence) -> String {
+    if let Some((id, _)) = licenses.iter().find(|(_, l)| l.sha256 == licence.sha256) {
+        return id.clone();
+    }
+    let id = (1..)
+        .map(|n| match n {
+            1 => licence.id.clone(),
+            n => format!("{}-{n}", licence.id),
+        })
+        .find(|id| !licenses.contains_key(id))
+        .unwrap_or_default();
+    licence.id.clone_from(&id);
+    licenses.insert(id.clone(), licence);
+    id
+}
+
+/// The files the installed picture and video models use that are on this computer with
+/// their recorded size, each once: what a plan takes before fetching anything.
+fn installed_files(installed: &InstalledFiles) -> Vec<InstalledFile> {
+    let mut seen = std::collections::BTreeSet::new();
+    let mut files = Vec::new();
+    for row in &installed.gen_models {
+        for part in row.parts.as_array().into_iter().flatten() {
+            let (Some(file), Ok(part)) = (
+                part.get("file").and_then(serde_json::Value::as_str),
+                serde_json::from_value::<GenPart>(part.clone()),
+            ) else {
+                continue;
+            };
+            let path = PathBuf::from(file);
+            let here = std::fs::metadata(&path).is_ok_and(|m| m.is_file() && m.len() == part.size);
+            if here && !part.sha256.is_empty() && seen.insert(file.to_owned()) {
+                files.push(InstalledFile {
+                    slot: part.role.slot(),
+                    path,
+                    sha256: part.sha256,
+                    size: part.size,
+                });
+            }
+        }
+    }
+    files
+}
+
+/// What `overrides` give each slot: a Hub file (of the main repo `main`, else of its own
+/// repo at its commit, whose listing is read once into `others`, else a companion's row); a
+/// file an installed model uses; a file on this computer ([`checked_disk_file`]); or none. A
+/// Hub file whose listing was read without it is `not_found`; one whose listing could not
+/// be read and that no companion row names cannot be pinned, so its slot stays empty.
+async fn slot_choices(
+    deps: &PlanDeps<'_>,
+    main: Option<&RepoDetail>,
+    overrides: &[SlotOverride],
+    others: &mut OtherRepos,
+) -> AppResult<Vec<(SlotId, SlotChoice)>> {
+    let mut choices = Vec::with_capacity(overrides.len());
+    for o in overrides {
+        let choice = match &o.file {
+            SlotFile::Hub { repo, commit, path } => {
+                let listing = match main.filter(|d| d.id == *repo && d.commit == *commit) {
+                    Some(detail) => Some(detail),
+                    None => {
+                        let key = (repo.clone(), commit.clone());
+                        if !others.contains_key(&key) {
+                            let read = match deps.hf {
+                                Some(hf) => hf
+                                    .repo(repo, Some(commit))
+                                    .await
+                                    .inspect_err(|e| {
+                                        tracing::warn!(%repo, "a chosen file's listing was not read: {e}");
+                                    })
+                                    .ok(),
+                                None => None,
+                            };
+                            others.insert(key.clone(), read);
+                        }
+                        others.get(&key).and_then(Option::as_ref)
+                    }
+                };
+                let file = match listing {
+                    Some(detail) => detail
+                        .files
+                        .iter()
+                        .find(|f| f.path == *path)
+                        .cloned()
+                        .ok_or_else(|| AppError::not_found("model file"))?,
+                    None => deps
+                        .catalog
+                        .companions
+                        .files
+                        .iter()
+                        .find(|c| c.repo == *repo && c.revision == *commit && c.path == *path)
+                        .map_or_else(
+                            || RepoFile {
+                                path: path.clone(),
+                                size: 0,
+                                sha256: None,
+                            },
+                            |c| RepoFile {
+                                path: c.path.clone(),
+                                size: c.size,
+                                sha256: Some(c.sha256.clone()),
+                            },
+                        ),
+                };
+                SlotChoice::Hub {
+                    repo: repo.clone(),
+                    revision: commit.clone(),
+                    file,
+                }
+            }
+            SlotFile::Installed { gen_model_id, role } => {
+                let part = deps
+                    .installed
+                    .gen_models
+                    .iter()
+                    .find(|row| row.id == *gen_model_id)
+                    .and_then(|row| {
+                        row.parts.as_array()?.iter().find_map(|p| {
+                            let part: GenPart = serde_json::from_value(p.clone()).ok()?;
+                            let file = p.get("file")?.as_str()?.to_owned();
+                            (part.role == *role).then_some((part, file))
+                        })
+                    })
+                    .ok_or_else(|| AppError::not_found("model file"))?;
+                SlotChoice::Local {
+                    path: PathBuf::from(part.1),
+                    size: part.0.size,
+                    sha256: Some(part.0.sha256).filter(|s| !s.is_empty()),
+                }
+            }
+            SlotFile::Disk { path } => {
+                let (path, size) = checked_disk_file(path)?;
+                SlotChoice::Local {
+                    path,
+                    size,
+                    sha256: None,
+                }
+            }
+            SlotFile::None => SlotChoice::Empty,
+        };
+        choices.push((o.role.slot(), choice));
+    }
+    Ok(choices)
+}
+
+/// A file on this computer the webview names (untrusted): made canonical, a regular file,
+/// of a format Studio reads; with its size. A pickle file is refused by its extension
+/// ("Studio can't read .ckpt files"), never opened.
+pub(crate) fn checked_disk_file(path: &str) -> AppResult<(PathBuf, u64)> {
+    let real = dunce::canonicalize(path).map_err(|_| AppError::not_found("file"))?;
+    let meta = std::fs::metadata(&real).map_err(|_| AppError::not_found("file"))?;
+    if !meta.is_file() {
+        return Err(AppError::not_found("file"));
+    }
+    let name = real
+        .file_name()
+        .map(|n| n.to_string_lossy().to_lowercase())
+        .unwrap_or_default();
+    if let Some(ext) = PICKLE_EXTENSIONS.iter().find(|ext| name.ends_with(*ext)) {
+        return Err(errors::cannot_read_file(ext));
+    }
+    if !READ_EXTENSIONS.iter().any(|ext| name.ends_with(ext)) {
+        return Err(errors::not_a_model_format());
+    }
+    Ok((real, meta.len()))
 }
 
 /// The entry an installed model is, without a request: its saved parts (the revisions and
@@ -589,11 +1226,18 @@ pub async fn start_local_download(app: &AppHandle, source: LocalSource) -> AppRe
     {
         return Err(errors::notice_needed());
     }
+    if matches!(source, LocalSource::Disk { .. }) {
+        return Err(errors::not_supported_yet(errors::A_DISK_FILE_IS_ADDED));
+    }
     let Resolved {
         entry,
         catalog_id,
         source: origin,
+        incomplete,
     } = resolve(app, &source).await?;
+    if incomplete {
+        return Err(errors::not_supported_yet(errors::SETUP_NOT_COMPLETE));
+    }
     let models_dir = crate::hub::models_dir(app).await;
     let free = reverse::diskspace::free_bytes(&models_dir);
     let engine = super::engine_cmd::engine_need(app);
@@ -883,6 +1527,51 @@ mod tests {
                 gen_model_id: "hf:someone/Z-Image-Turbo-GGUF:z.gguf".into()
             }
         );
+        assert_eq!(
+            read(json!({"disk": {"path": "C:\\models\\my model.gguf"}})),
+            LocalSource::Disk {
+                path: "C:\\models\\my model.gguf".into()
+            }
+        );
+    }
+
+    /// A set-up choice reads as the webview writes it, a slot file of each kind field for
+    /// field (`SlotFile`'s TypeScript type).
+    #[test]
+    fn a_setup_choice_reads_as_the_webview_writes_it() {
+        let choice: SetupChoice = serde_json::from_value(json!({
+            "recipe": "flux1-dev",
+            "overrides": [
+                {"role": "t5xxl", "file": {"hub": {"repo": "o/r", "commit": "c".repeat(40), "path": "t5.safetensors"}}},
+                {"role": "vae", "file": {"installed": {"genModelId": "hf:o/r:f.gguf", "role": "vae"}}},
+                {"role": "clip-l", "file": {"disk": {"path": "/m/clip.safetensors"}}},
+                {"role": "llm-vision", "file": "none"},
+            ],
+        }))
+        .unwrap();
+        assert_eq!(choice.recipe.as_deref(), Some("flux1-dev"));
+        assert_eq!(
+            choice.overrides.iter().map(|o| &o.file).collect::<Vec<_>>(),
+            [
+                &SlotFile::Hub {
+                    repo: "o/r".into(),
+                    commit: "c".repeat(40),
+                    path: "t5.safetensors".into()
+                },
+                &SlotFile::Installed {
+                    gen_model_id: "hf:o/r:f.gguf".into(),
+                    role: GenRole::Vae
+                },
+                &SlotFile::Disk {
+                    path: "/m/clip.safetensors".into()
+                },
+                &SlotFile::None,
+            ]
+        );
+        assert_eq!(choice.overrides[2].role, GenRole::ClipL);
+        // Overrides may be left out.
+        let bare: SetupChoice = serde_json::from_value(json!({"recipe": null})).unwrap();
+        assert_eq!(bare, SetupChoice::default());
     }
 
     /// A part already in its place (FLUX.2 klein's text encoder, a common chat download) is
@@ -1081,40 +1770,77 @@ mod tests {
         assert_eq!(missing.licences, model_licences);
     }
 
-    /// The backend recognises a searched file again: the webview's word is never taken for
-    /// it.
+    /// Ruling S4-licence-ref: a fetched file's licence is its companion row's, else its own
+    /// repo's label: the main repo's listing for a file of the main repo, the chosen repo's
+    /// listing at its commit for a file of another, and "Check the licence" when that listing
+    /// could not be read. Never the main repo's for a file of another repo.
     #[test]
-    fn an_unsupported_search_source_is_refused_by_the_backend() {
-        let d = detail("repo-unknown-diffusion.json");
-        assert_eq!(
-            entry_from_listing(&d, &d.files[0].path, &families())
-                .unwrap_err()
-                .code,
-            "studio_not_supported_yet"
+    fn a_files_licence_is_its_own_repos() {
+        let table = catalog().companions;
+        let labelled = |id: &str, commit: &str, label: &str| RepoDetail {
+            id: id.into(),
+            commit: commit.into(),
+            license: Some(label.into()),
+            ..detail("repo-z-image-turbo-gguf.json")
+        };
+        let main = labelled(
+            "someone/sd15-merge",
+            &"a".repeat(40),
+            "creativeml-openrail-m",
         );
-        let d = detail("repo-z-image-turbo-gguf.json");
+        let other = labelled("someone/vae", &"b".repeat(40), "mit");
+        let mut others = OtherRepos::new();
+        let of = |others: &OtherRepos, repo: &str, revision: &str, licence: &LicenceRef| {
+            file_licence(&table, Some(&main), others, repo, revision, licence)
+        };
+        let from_main = of(&others, &main.id, &main.commit, &LicenceRef::Repo);
+        assert_eq!(from_main.commercial_outputs, Commercial::WithUseRules);
+        // Another repo whose listing could not be read: red, never the main repo's.
+        let unread = of(&others, &other.id, &other.commit, &LicenceRef::Repo);
+        assert_eq!(unread.badge(), Badge::Red);
+        assert!(unread.url.contains("someone/vae"), "{}", unread.url);
+        others.insert((other.id.clone(), other.commit.clone()), None);
         assert_eq!(
-            entry_from_listing(&d, "not-in-the-listing.gguf", &families())
-                .unwrap_err()
-                .code,
-            "not_found"
+            of(&others, &other.id, &other.commit, &LicenceRef::Repo).badge(),
+            Badge::Red
         );
+        // Read at its commit: its own label.
+        others.insert(
+            (other.id.clone(), other.commit.clone()),
+            Some(other.clone()),
+        );
+        let read = of(&others, &other.id, &other.commit, &LicenceRef::Repo);
+        assert_eq!((read.id.as_str(), read.badge()), ("mit", Badge::Green));
+        // The main repo at another commit is another listing.
         assert_eq!(
-            entry_from_listing(&d, "README.md", &families())
-                .unwrap_err()
-                .code,
-            "not_found",
-            "a file of the listing that is not a model file"
+            of(&others, &main.id, &"c".repeat(40), &LicenceRef::Repo).badge(),
+            Badge::Red
         );
-        let e = entry_from_listing(&d, "z_image_turbo-Q4_K.gguf", &families()).unwrap();
-        assert_eq!(e.id, "hf:leejet/Z-Image-Turbo-GGUF:z_image_turbo-Q4_K.gguf");
-        assert_eq!(e.family, Some(GenFamily::ZImageTurbo));
-        assert_eq!(e.diffusion().revision, d.commit);
-        let d = detail("repo-uncensored.json");
-        let file = "z_image_turbo_uncensored-Q4_K.gguf";
-        let entry = entry_from_listing(&d, file, &families()).unwrap();
-        assert_eq!(entry.diffusion().path, file);
-        assert_eq!(entry.diffusion().revision, d.commit);
+        // A companion's licence comes from the table.
+        let apache = of(
+            &others,
+            "comfyanonymous/flux_text_encoders",
+            &"d".repeat(40),
+            &LicenceRef::Companion("apache-2.0".into()),
+        );
+        assert_eq!(apache.sha256, apache_sha());
+    }
+
+    /// Two repos' different licences under one label keep their own ids; the same licence is
+    /// listed once.
+    #[test]
+    fn a_licence_is_listed_once_and_ids_never_clash() {
+        let mut licenses = BTreeMap::new();
+        let mit = |sha: &str| GenLicence {
+            id: "mit".into(),
+            sha256: sha.into(),
+            ..two_licences().licenses["apache-2.0"].clone()
+        };
+        assert_eq!(add_licence(&mut licenses, mit(&"1".repeat(64))), "mit");
+        assert_eq!(add_licence(&mut licenses, mit(&"1".repeat(64))), "mit");
+        assert_eq!(add_licence(&mut licenses, mit(&"2".repeat(64))), "mit-2");
+        assert_eq!(licenses.len(), 2);
+        assert_eq!(licenses["mit-2"].id, "mit-2");
     }
 
     /// An installed model whose parts are the files at `files`, each `(role, path)`.
@@ -1255,6 +1981,40 @@ mod tests {
         }
     }
 
+    /// The entry 0.1.2 made for `file` of the searched repo `listed` of `record`'s family
+    /// (its `gen_search::entry_for`): the diffusion part under the stricter of the family's
+    /// licence and the repo's label, then the family's companions.
+    fn searched_01x(
+        catalog: &GenCatalog,
+        listed: &RepoDetail,
+        file: &RepoFile,
+        record: &FamilyRecord,
+    ) -> GenEntry {
+        let licence = searched_licence(listed, record).licence;
+        let diffusion = GenPart {
+            role: GenRole::Diffusion,
+            repo: listed.id.clone(),
+            revision: listed.commit.clone(),
+            path: file.path.clone(),
+            size: file.size,
+            sha256: file.sha256.clone().unwrap(),
+            license: licence.id.clone(),
+            local: None,
+            folder: None,
+        };
+        let mut licenses = record.licenses.clone();
+        licenses.insert(licence.id.clone(), licence);
+        GenEntry {
+            id: format!("hf:{}:{}", listed.id, file.path),
+            name: format!("{} (Q4_K)", record.name),
+            parts: std::iter::once(diffusion)
+                .chain(record.companions.iter().cloned())
+                .collect(),
+            licenses,
+            ..catalog.entries["z-image-turbo-q4"].clone()
+        }
+    }
+
     /// An installed model is rebuilt from its saved parts, at their saved revisions, and its
     /// family record, without a request; a searched file's licence is the one it was
     /// downloaded under, so *Download again* asks nothing that was accepted.
@@ -1272,7 +2032,7 @@ mod tests {
         let mut listed = d.clone();
         listed.id = "someone/Z-Image-Turbo-GGUF".into();
         listed.license = Some("cc-by-nc-4.0".into());
-        let searched = models::gen_search::entry_for(&listed, file, record).unwrap();
+        let searched = searched_01x(&catalog, &listed, file, record);
         assert_eq!(
             searched.id,
             "hf:someone/Z-Image-Turbo-GGUF:z_image_turbo-Q4_K.gguf"

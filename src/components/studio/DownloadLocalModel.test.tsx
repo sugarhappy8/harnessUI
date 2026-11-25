@@ -98,6 +98,14 @@ describe("verdict", () => {
     expect(verdict([apache, { ...nonCommercial, commercial: "unclear" }], "image")).toBe(
       "Pictures you make: check the licence before any commercial use.",
     );
+    // Use rules (OpenRAIL) are stricter than a registration and laxer than an unclear licence.
+    const openrail: Licence = { ...kommunity, id: "openrail", commercial: "withUseRules", revenueLimitUsd: null };
+    expect(verdict([{ ...kommunity, commercial: "registration", revenueLimitUsd: null }, openrail], "image")).toBe(
+      "Pictures you make: commercial use allowed, with the licence's use rules.",
+    );
+    expect(verdict([openrail, { ...nonCommercial, commercial: "unclear" }], "image")).toBe(
+      "Pictures you make: check the licence before any commercial use.",
+    );
     expect(verdict([kommunity, nonCommercial, { ...nonCommercial, commercial: "unclear" }], "image")).toBe(
       "Pictures you make: non-commercial use only.",
     );
@@ -154,9 +162,9 @@ describe("the download confirmation", () => {
     const dialog = renderDialog(offer());
     within(dialog).getByText("Download Z-Image Turbo?");
     within(dialog).getByText(`3 files, ${amountGb(zimage.sizeBytes)} in all, from Hugging Face (huggingface.co)`);
-    within(dialog).getByText("makes the picture");
-    within(dialog).getByText("reads your prompt");
-    within(dialog).getByText("picture decoder");
+    within(dialog).getByText("Diffusion model");
+    within(dialog).getByText("Text encoder (language model)");
+    within(dialog).getByText("Decoder (VAE)");
     for (const part of zimage.parts) within(dialog).getByText(amountGb(part.sizeBytes));
     expect(within(dialog).getAllByText("Apache License 2.0")).toHaveLength(3);
     within(dialog).getByText("Pictures you make: free for any use, including commercial.");
@@ -357,5 +365,25 @@ describe("the download confirmation", () => {
     const signUp: Licence = { ...kommunity, id: "sign-up", commercial: "registration", revenueLimitUsd: null, obligations: [] };
     const dialog = renderDialog(offer({ licences: [apache, signUp] }));
     within(dialog).getByText("Commercial use only after registering with the publisher.");
+  });
+
+  it("an OpenRAIL licence says commercial use is allowed with use rules, with its link", () => {
+    const openrail: Licence = {
+      ...kommunity,
+      id: "creativeml-openrail-m",
+      name: "CreativeML Open RAIL-M",
+      url: "https://huggingface.co/someone/sd15/blob/0123/LICENSE.md",
+      badge: "amber",
+      commercial: "withUseRules",
+      revenueLimitUsd: null,
+      obligations: [],
+      plainWords: "Commercial use allowed, with use rules",
+    };
+    const dialog = renderDialog(offer({ licences: [apache, openrail] }));
+    within(dialog).getByText("Commercial use allowed, with use rules: the licence lists uses it forbids.");
+    within(dialog).getByText("Pictures you make: commercial use allowed, with the licence's use rules.");
+    expect(within(dialog).getByRole("link", { name: "Read the licences (CreativeML Open RAIL-M)" }).getAttribute("href")).toBe(
+      openrail.url,
+    );
   });
 });
