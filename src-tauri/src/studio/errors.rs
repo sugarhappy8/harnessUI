@@ -2506,7 +2506,7 @@ mod tests {
             "The Studio engine could not load a library it needs: vulkan-1.dll."
         );
         assert_eq!(
-            local_args_refused(&ArgsError::BadSize),
+            local_args_refused(&ArgsError::BadSize { multiple: 16 }),
             "The size is not a multiple of 16 from 64 to 2048."
         );
         assert_eq!(

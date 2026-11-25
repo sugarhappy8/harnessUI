@@ -1,14 +1,16 @@
 //! The Studio engine's arguments, only from typed fields (docs/dev/0.1.0/studio-local-design.md,
-//! "Arguments come only from typed fields").
+//! "Arguments come only from typed fields"; docs/dev/0.2.0/design.md 7.6 and 8).
 //!
-//! [`build_args`] gives each model part's role one fixed flag ([`flag_for`]), then numbers,
-//! then whitelisted words ([`Sampler`], [`Scheduler`], the probed device or `cpu`,
-//! `--vae-tiling`, `--offload-to-cpu`), then `-o` and the fixed flags, so a signed catalog
-//! cannot add a flag. The prompt never reaches argv: `run_job` writes it to the files
-//! [`prompt_files`] names and the engine reads them (`--prompt-file`). The pinned parser
-//! matches only `arg == name`, so it has no `--prompt=<text>` form; a string option takes the
-//! next argument as its value whatever it starts with, and `--prompt-file` reads the whole
-//! file as bytes.
+//! [`build_args`] gives each model part's role one fixed flag ([`flag_for`], design 7.1's
+//! table), then numbers, then whitelisted words ([`Sampler`], [`Scheduler`], [`VaeFormat`],
+//! the probed device or `cpu`, `--vae-tiling`, `--offload-to-cpu`), then `-o` and the fixed
+//! flags, so a signed catalog or a recipe cannot add a flag. The prompt never reaches argv:
+//! `run_job` writes [`prompt_file_text`] to the files [`prompt_files`] names and the engine
+//! reads them (`--prompt-file`). The LoRAs go in that file too, as `<lora:NAME:W>` tags the
+//! engine reads relative to `--lora-model-dir`; the tags typed into the prompt are removed
+//! first. The pinned parser matches only `arg == name`, so it has no `--prompt=<text>` form;
+//! a string option takes the next argument as its value whatever it starts with, and
+//! `--prompt-file` reads the whole file as bytes.
 //!
 //! [`FLAGS`] lists every flag [`build_args`] can emit; [`missing_from_help`] checks them, and
 //! the sampler and scheduler words, against `sd-cli -h`: the unit tests on the pinned build's
@@ -22,9 +24,6 @@ use std::path::{Component, Path, PathBuf};
 /// The longest local prompt, in characters: a sanity cap, as the prompt goes by file and
 /// never in argv.
 pub const PROMPT_MAX_CHARS: usize = 4_000;
-
-/// Picture and video sides are a multiple of this many pixels.
-const SIZE_MULTIPLE: u32 = 16;
 
 /// The sides the engine is given, in pixels.
 const SIZE_RANGE: RangeInclusive<u32> = 64..=2048;
@@ -42,7 +41,27 @@ const INT_MAX: u32 = i32::MAX.unsigned_abs();
 /// The largest seed the engine reads (`std::stoll`, which throws on a larger one).
 const SEED_MAX: u64 = i64::MAX.unsigned_abs();
 
-/// What a model part is to the engine, from the catalog's part role.
+/// The most LoRAs one run takes: a bound against pathological drafts, well above any real use.
+pub const MAX_LORAS: usize = 8;
+
+/// A LoRA's strength: the slider's range (Task S11's `ParamKind::Loras` reads these three
+/// constants, one source).
+pub const LORA_WEIGHT_RANGE: RangeInclusive<f32> = -1.0..=2.0;
+
+/// A LoRA's strength slider's step.
+pub const LORA_WEIGHT_STEP: f32 = 0.05;
+
+/// A LoRA's strength when it is attached.
+pub const LORA_WEIGHT_DEFAULT: f32 = 1.0;
+
+/// The start of the engine's LoRA tag, `<lora:([^:>]+):([^>]+)>` (`extract_and_remove_lora`,
+/// `examples/common/common.cpp` at the pinned commit).
+const LORA_TAG_OPEN: &str = "<lora:";
+
+/// The prefix a tag's name takes for the high-noise part of a two-model video family.
+const HIGH_NOISE_PREFIX: &str = "|high_noise|";
+
+/// What a model part is to the engine: a recipe's slot (design 7.1), or 0.1.x's catalog role.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PartRole {
     /// The diffusion model on its own (`--diffusion-model`).
@@ -50,36 +69,60 @@ pub enum PartRole {
     /// The high-noise diffusion model of a two-model video family
     /// (`--high-noise-diffusion-model`).
     HighNoiseDiffusion,
+    /// The unconditional diffusion model of a family that guides with one
+    /// (`--uncond-diffusion-model`).
+    UncondDiffusion,
     /// A language model used as the text encoder (`--llm`).
     Llm,
+    /// The vision encoder of that language model (`--llm_vision`).
+    LlmVision,
     /// The T5-XXL text encoder (`--t5xxl`).
     T5xxl,
     /// The CLIP-L text encoder (`--clip_l`).
     ClipL,
+    /// The CLIP-G text encoder (`--clip_g`).
+    ClipG,
     /// The CLIP vision encoder (`--clip_vision`).
     ClipVision,
+    /// The tokenizer file (`--tokenizer`).
+    Tokenizer,
     /// The decoder (`--vae`).
     Vae,
+    /// The tiny decoder (`--tae`).
+    Tae,
+    /// The audio decoder (`--audio-vae`).
+    AudioVae,
+    /// The audio encoder (`--audio-encoder`).
+    AudioEncoder,
+    /// The embeddings connectors (`--embeddings-connectors`).
+    EmbeddingsConnectors,
     /// One file holding the whole model (`-m`).
     Single,
 }
 
-/// The one flag the engine takes a part of `role` with.
+/// The one flag the engine takes a part of `role` with (design 7.1's table).
 pub fn flag_for(role: PartRole) -> &'static str {
     match role {
         PartRole::Diffusion => "--diffusion-model",
         PartRole::HighNoiseDiffusion => "--high-noise-diffusion-model",
+        PartRole::UncondDiffusion => "--uncond-diffusion-model",
         PartRole::Llm => "--llm",
+        PartRole::LlmVision => "--llm_vision",
         PartRole::T5xxl => "--t5xxl",
         PartRole::ClipL => "--clip_l",
+        PartRole::ClipG => "--clip_g",
         PartRole::ClipVision => "--clip_vision",
+        PartRole::Tokenizer => "--tokenizer",
         PartRole::Vae => "--vae",
+        PartRole::Tae => "--tae",
+        PartRole::AudioVae => "--audio-vae",
+        PartRole::AudioEncoder => "--audio-encoder",
+        PartRole::EmbeddingsConnectors => "--embeddings-connectors",
         PartRole::Single => "-m",
     }
 }
 
-/// The sampling methods Studio offers, a whitelist of the pinned CLI's
-/// `--sampling-method` words.
+/// The sampling methods Studio offers: every `--sampling-method` word of the pinned CLI.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Sampler {
     /// `euler`.
@@ -90,12 +133,40 @@ pub enum Sampler {
     Heun,
     /// `dpm2`.
     Dpm2,
+    /// `dpm++2s_a`.
+    DpmPp2sA,
     /// `dpm++2m`.
     DpmPp2m,
     /// `dpm++2mv2`.
     DpmPp2mV2,
+    /// `ipndm`.
+    Ipndm,
+    /// `ipndm_v`.
+    IpndmV,
     /// `lcm`.
     Lcm,
+    /// `ddim_trailing`.
+    DdimTrailing,
+    /// `tcd`.
+    Tcd,
+    /// `res_multistep`.
+    ResMultistep,
+    /// `res_2s`.
+    Res2s,
+    /// `er_sde`.
+    ErSde,
+    /// `euler_cfg_pp`.
+    EulerCfgPp,
+    /// `euler_a_cfg_pp`.
+    EulerACfgPp,
+    /// `euler_ge`.
+    EulerGe,
+    /// `dpm++2m_sde`.
+    DpmPp2mSde,
+    /// `dpm++2m_sde_bt`.
+    DpmPp2mSdeBt,
+    /// `lms`.
+    Lms,
 }
 
 impl Sampler {
@@ -105,9 +176,23 @@ impl Sampler {
         Self::EulerA,
         Self::Heun,
         Self::Dpm2,
+        Self::DpmPp2sA,
         Self::DpmPp2m,
         Self::DpmPp2mV2,
+        Self::Ipndm,
+        Self::IpndmV,
         Self::Lcm,
+        Self::DdimTrailing,
+        Self::Tcd,
+        Self::ResMultistep,
+        Self::Res2s,
+        Self::ErSde,
+        Self::EulerCfgPp,
+        Self::EulerACfgPp,
+        Self::EulerGe,
+        Self::DpmPp2mSde,
+        Self::DpmPp2mSdeBt,
+        Self::Lms,
     ];
 
     /// The CLI's word for this sampler.
@@ -117,9 +202,23 @@ impl Sampler {
             Self::EulerA => "euler_a",
             Self::Heun => "heun",
             Self::Dpm2 => "dpm2",
+            Self::DpmPp2sA => "dpm++2s_a",
             Self::DpmPp2m => "dpm++2m",
             Self::DpmPp2mV2 => "dpm++2mv2",
+            Self::Ipndm => "ipndm",
+            Self::IpndmV => "ipndm_v",
             Self::Lcm => "lcm",
+            Self::DdimTrailing => "ddim_trailing",
+            Self::Tcd => "tcd",
+            Self::ResMultistep => "res_multistep",
+            Self::Res2s => "res_2s",
+            Self::ErSde => "er_sde",
+            Self::EulerCfgPp => "euler_cfg_pp",
+            Self::EulerACfgPp => "euler_a_cfg_pp",
+            Self::EulerGe => "euler_ge",
+            Self::DpmPp2mSde => "dpm++2m_sde",
+            Self::DpmPp2mSdeBt => "dpm++2m_sde_bt",
+            Self::Lms => "lms",
         }
     }
 
@@ -129,8 +228,8 @@ impl Sampler {
     }
 }
 
-/// The schedulers Studio offers, a whitelist of the pinned CLI's `--scheduler` words.
-/// No scheduler (`None` in [`SdJob`]) leaves the engine its model-specific default.
+/// The schedulers Studio offers: every `--scheduler` word of the pinned CLI. No scheduler
+/// (`None` in [`SdJob`]) leaves the engine its model-specific default.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Scheduler {
     /// `discrete`.
@@ -139,8 +238,34 @@ pub enum Scheduler {
     Karras,
     /// `exponential`.
     Exponential,
+    /// `ays`.
+    Ays,
+    /// `gits`.
+    Gits,
+    /// `sgm_uniform`.
+    SgmUniform,
     /// `simple`.
     Simple,
+    /// `smoothstep`.
+    Smoothstep,
+    /// `kl_optimal`.
+    KlOptimal,
+    /// `lcm`.
+    Lcm,
+    /// `bong_tangent`.
+    BongTangent,
+    /// `ltx2`.
+    Ltx2,
+    /// `logit_normal`.
+    LogitNormal,
+    /// `flux2`.
+    Flux2,
+    /// `flux`.
+    Flux,
+    /// `beta`.
+    Beta,
+    /// `llada_image`.
+    LladaImage,
 }
 
 impl Scheduler {
@@ -149,7 +274,20 @@ impl Scheduler {
         Self::Discrete,
         Self::Karras,
         Self::Exponential,
+        Self::Ays,
+        Self::Gits,
+        Self::SgmUniform,
         Self::Simple,
+        Self::Smoothstep,
+        Self::KlOptimal,
+        Self::Lcm,
+        Self::BongTangent,
+        Self::Ltx2,
+        Self::LogitNormal,
+        Self::Flux2,
+        Self::Flux,
+        Self::Beta,
+        Self::LladaImage,
     ];
 
     /// The CLI's word for this scheduler.
@@ -158,7 +296,20 @@ impl Scheduler {
             Self::Discrete => "discrete",
             Self::Karras => "karras",
             Self::Exponential => "exponential",
+            Self::Ays => "ays",
+            Self::Gits => "gits",
+            Self::SgmUniform => "sgm_uniform",
             Self::Simple => "simple",
+            Self::Smoothstep => "smoothstep",
+            Self::KlOptimal => "kl_optimal",
+            Self::Lcm => "lcm",
+            Self::BongTangent => "bong_tangent",
+            Self::Ltx2 => "ltx2",
+            Self::LogitNormal => "logit_normal",
+            Self::Flux2 => "flux2",
+            Self::Flux => "flux",
+            Self::Beta => "beta",
+            Self::LladaImage => "llada_image",
         }
     }
 
@@ -166,6 +317,56 @@ impl Scheduler {
     pub fn from_cli(word: &str) -> Option<Self> {
         Self::ALL.iter().copied().find(|s| s.as_str() == word)
     }
+}
+
+/// A recipe's VAE latent format (`--vae-format`). The engine's own `auto` is never sent: no
+/// format (`None` in [`SdJob`]) leaves it to the engine.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum VaeFormat {
+    /// `flux`.
+    Flux,
+    /// `sd3`.
+    Sd3,
+    /// `flux2`.
+    Flux2,
+    /// `wan`.
+    Wan,
+}
+
+impl VaeFormat {
+    /// The CLI's word for this format.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Flux => "flux",
+            Self::Sd3 => "sd3",
+            Self::Flux2 => "flux2",
+            Self::Wan => "wan",
+        }
+    }
+}
+
+/// The high-noise part's own sampling, for a two-model video family (Wan 2.2 A14B).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct HighNoise {
+    /// Its steps (`--high-noise-steps`); -1 lets the engine split the steps at the MoE
+    /// boundary.
+    pub steps: i32,
+    /// Its guidance scale (`--high-noise-cfg-scale`).
+    pub cfg: f32,
+    /// Its sampling method (`--high-noise-sampling-method`); `None` lets the engine choose.
+    pub sampler: Option<Sampler>,
+}
+
+/// One attached LoRA, as its tag in the prompt file names it.
+#[derive(Debug, Clone, PartialEq)]
+pub struct LoraTag {
+    /// Its file's name relative to the LoRA folder (`--lora-model-dir`), with or without its
+    /// extension: [`valid_lora_name`].
+    pub name: String,
+    /// Its strength, in [`LORA_WEIGHT_RANGE`].
+    pub weight: f32,
+    /// For the high-noise part of a two-model video family (`<lora:|high_noise|NAME:W>`).
+    pub high_noise: bool,
 }
 
 /// The file the engine writes: a PNG picture, or a WebM (VP8) or animated WebP video.
@@ -189,31 +390,53 @@ impl OutputFormat {
     }
 }
 
-/// One local run, in typed fields only. The numbers come checked against the catalog's
-/// ranges (the engine reads them as 32-bit integers, the seed as a 64-bit one);
+/// One local run, in typed fields only. The numbers come checked against the catalog's or
+/// the recipe's ranges (the engine reads them as 32-bit integers, the seed as a 64-bit one);
 /// [`build_args`] still refuses one the engine cannot read.
 #[derive(Debug, Clone, PartialEq)]
 pub struct SdJob {
     /// The model's files, each with its role, in the catalog's order.
     pub parts: Vec<(PartRole, PathBuf)>,
-    /// The prompt, written to its file by `run_job` exactly as given.
+    /// The prompt, written to its file by `run_job` as [`prompt_file_text`] gives it.
     pub prompt: String,
     /// The negative prompt; a blank one is none.
     pub negative: Option<String>,
-    /// Width in pixels: a multiple of 16 from 64 to 2048.
+    /// Width in pixels: a multiple of `size_multiple` from 64 to 2048.
     pub width: u32,
-    /// Height in pixels: a multiple of 16 from 64 to 2048.
+    /// Height in pixels: a multiple of `size_multiple` from 64 to 2048.
     pub height: u32,
+    /// What the sides are a multiple of: the recipe's `size_multiple` (8 when the recipe
+    /// leaves it out), or 0.1.x's catalog's `multiple_of`.
+    pub size_multiple: u32,
     /// Sampling steps.
     pub steps: u32,
     /// Guidance scale.
     pub cfg: f32,
+    /// The distilled guidance of models with a guidance input (`--guidance`); `None` lets
+    /// the engine choose.
+    pub guidance: Option<f32>,
+    /// The image guidance scale of edit and inpainting models (`--img-cfg-scale`); `None`
+    /// lets the engine choose.
+    pub img_cfg: Option<f32>,
     /// The flow shift of flow models; `None` lets the engine choose.
     pub flow_shift: Option<f32>,
+    /// The timestep shift of NitroFusion models (`--timestep-shift`); `None` lets the engine
+    /// choose.
+    pub timestep_shift: Option<u32>,
     /// The sampling method; `None` lets the engine choose.
     pub sampler: Option<Sampler>,
     /// The scheduler; `None` lets the engine choose.
     pub scheduler: Option<Scheduler>,
+    /// The recipe's own sigmas (`--sigmas`, comma-joined); empty lets the scheduler choose.
+    pub sigmas: Vec<f32>,
+    /// The high-noise part's sampling; `None` lets the engine choose.
+    pub high_noise: Option<HighNoise>,
+    /// The timestep at which a two-model video family moves to its low-noise part
+    /// (`--moe-boundary`); `None` lets the engine choose.
+    pub moe_boundary: Option<f32>,
+    /// How much of the picture to change is redrawn (`--strength`); `None` lets the engine
+    /// choose.
+    pub strength: Option<f32>,
     /// The seed Studio picked.
     pub seed: u64,
     /// How many pictures, one after another.
@@ -222,15 +445,36 @@ pub struct SdJob {
     pub frames: Option<u32>,
     /// Frames a second of a video.
     pub fps: Option<u32>,
-    /// The start frame of a video, or the picture a picture starts from.
+    /// The start frame of a video, or the picture a picture starts from (`-i`).
     pub init_image: Option<PathBuf>,
+    /// The end frame of a video (`--end-img`).
+    pub end_image: Option<PathBuf>,
+    /// The mask of the picture to change (`--mask`): only with `init_image`.
+    pub mask_image: Option<PathBuf>,
+    /// The control picture of a control model, FLUX.1 Canny or Depth (`--control-image`).
+    /// `--control-strength` is never sent: it is for ControlNet files, which Studio does not
+    /// run.
+    pub control_image: Option<PathBuf>,
     /// Reference pictures, each passed with its own `-r`.
     pub ref_images: Vec<PathBuf>,
+    /// The recipe's VAE latent format; `None` lets the engine choose.
+    pub vae_format: Option<VaeFormat>,
+    /// The recipe's extra model arguments (`--model-args`): `key=value` pairs joined by `,`.
+    pub model_args: Option<String>,
+    /// The Studio LoRA folder (`--lora-model-dir`), which the LoRAs' names are relative to.
+    pub lora_dir: Option<PathBuf>,
+    /// The attached LoRAs, at most [`MAX_LORAS`], each a tag appended to the prompt file.
+    pub loras: Vec<LoraTag>,
     /// The device from [`super::devices::match_llama_device`]; `None` lets the engine choose.
     pub backend: Option<String>,
-    /// Decode in tiles and keep the weights in memory until needed (`--vae-tiling
-    /// --offload-to-cpu`).
-    pub memory_saving: bool,
+    /// Decode in tiles (`--vae-tiling`).
+    pub vae_tiling: bool,
+    /// Keep the weights in memory until needed (`--offload-to-cpu`): only with Memory saving
+    /// or on the out-of-memory retry.
+    pub offload_to_cpu: bool,
+    /// Whether the recipe lets the decoder tile: false for the four that disable
+    /// `vae_tiling`, and then the out-of-memory retry does not tile either.
+    pub tiling_allowed: bool,
     /// Run on the processor (`--backend cpu`), whatever `backend` says.
     pub processor_only: bool,
     /// Processor threads ([`processor_threads`]); `None` lets the engine choose.
@@ -249,7 +493,7 @@ pub struct SdJob {
 /// Why [`build_args`] refused a job.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum ArgsError {
-    /// The prompt is empty or only white space.
+    /// The prompt, without the LoRA tags typed into it, is empty or only white space.
     #[error("the prompt is empty")]
     EmptyPrompt,
     /// The prompt is longer than [`PROMPT_MAX_CHARS`] characters.
@@ -261,23 +505,44 @@ pub enum ArgsError {
     /// No part is a diffusion model (`--diffusion-model` or `-m`).
     #[error("no part is a diffusion model")]
     NoDiffusionPart,
-    /// The width or height is not a multiple of 16 from 64 to 2048.
-    #[error("the size is not a multiple of 16 from 64 to 2048")]
-    BadSize,
+    /// The width or height is not a multiple of `multiple` (the job's `size_multiple`) from
+    /// 64 to 2048, or `multiple` is 0.
+    #[error("the size is not a multiple of {multiple} from 64 to 2048")]
+    BadSize {
+        /// The job's `size_multiple`.
+        multiple: u32,
+    },
     /// The output path holds a numbering template ([`is_numbering_template`]).
     #[error("the output path holds a %d numbering template")]
     PercentInOutputPath,
     /// A number the engine cannot read, named by its [`SdJob`] field: an integer above
-    /// `i32::MAX`, a seed above `i64::MAX`, or a guidance scale or flow shift that is not
-    /// finite, or is subnormal (not 0, and nearer 0 than `f32::MIN_POSITIVE`). The engine
-    /// aborts on an integer out of range and on a subnormal float (its `std::stof` reports
-    /// ERANGE); NaN and infinity it would read, but they mean nothing as either.
+    /// `i32::MAX`, a seed above `i64::MAX`, or a float (a guidance scale, the flow shift, a
+    /// sigma, …) that is not finite, or is subnormal (not 0, and nearer 0 than
+    /// `f32::MIN_POSITIVE`). The engine aborts on an integer out of range and on a subnormal
+    /// float (its `std::stof` reports ERANGE); NaN and infinity it would read, but they mean
+    /// nothing as either. A LoRA's weight outside [`LORA_WEIGHT_RANGE`] is `"lora weight"`.
     #[error("the {0} is out of the engine's range")]
     NumberOutOfRange(&'static str),
     /// The output's name is not one plain file name: it is empty or absolute, or holds a
     /// separator, `.` or `..`, so `-o` would leave the run's folder.
     #[error("the output's name is not one plain file name")]
     BadOutputStem,
+    /// A LoRA's name is not one the engine's tag reads back ([`valid_lora_name`]).
+    #[error("the LoRA name {0:?} cannot go in the engine's LoRA tag")]
+    BadLoraName(String),
+    /// More than [`MAX_LORAS`] LoRAs are attached.
+    #[error("more than {MAX_LORAS} LoRAs are attached")]
+    TooManyLoras,
+    /// LoRAs are attached without the folder their names are relative to.
+    #[error("LoRAs are attached without the LoRA folder")]
+    LorasWithoutFolder,
+    /// The extra model arguments are not `key=value` pairs joined by `,` (each key of
+    /// `[a-z0-9_]`, each value of `[A-Za-z0-9_.]`).
+    #[error("the model's extra arguments are not key=value pairs")]
+    BadModelArgs,
+    /// A mask without a picture to change: the engine would redraw the whole picture.
+    #[error("a mask needs a picture to change")]
+    MaskWithoutPicture,
 }
 
 /// Every flag [`build_args`] can emit, in its order. The contract tests check each against the
@@ -285,11 +550,19 @@ pub enum ArgsError {
 pub const FLAGS: &[&str] = &[
     "--diffusion-model",
     "--high-noise-diffusion-model",
+    "--uncond-diffusion-model",
     "--llm",
+    "--llm_vision",
     "--t5xxl",
     "--clip_l",
+    "--clip_g",
     "--clip_vision",
+    "--tokenizer",
     "--vae",
+    "--tae",
+    "--audio-vae",
+    "--audio-encoder",
+    "--embeddings-connectors",
     "-m",
     "-M",
     "--prompt-file",
@@ -298,15 +571,30 @@ pub const FLAGS: &[&str] = &[
     "-H",
     "--steps",
     "--cfg-scale",
+    "--guidance",
+    "--img-cfg-scale",
     "--flow-shift",
+    "--timestep-shift",
     "--sampling-method",
     "--scheduler",
+    "--sigmas",
+    "--high-noise-steps",
+    "--high-noise-cfg-scale",
+    "--high-noise-sampling-method",
+    "--moe-boundary",
+    "--strength",
     "--seed",
     "--batch-count",
     "--video-frames",
     "--fps",
     "-i",
+    "--end-img",
+    "--mask",
+    "--control-image",
     "-r",
+    "--vae-format",
+    "--model-args",
+    "--lora-model-dir",
     "--backend",
     "--threads",
     "--vae-tiling",
@@ -316,21 +604,32 @@ pub const FLAGS: &[&str] = &[
     "--log-level",
 ];
 
-/// The engine's arguments for `job`, in a fixed order: the parts (one fixed flag each),
-/// `-M vid_gen` for a video, `--prompt-file` and `--negative-prompt-file` (when there is a
-/// negative prompt), `-W`, `-H`, `--steps`, `--cfg-scale`, then `--flow-shift`,
-/// `--sampling-method` and `--scheduler` when set, `--seed`, `--batch-count`, then
-/// `--video-frames`, `--fps`, `-i` and each `-r` when set, `--backend` (`cpu` when
-/// `processor_only`), `--threads` when set, `--vae-tiling --offload-to-cpu` for memory
-/// saving, `-o <out_dir>/<out_stem>.<png|webm|webp>`, `--disable-image-metadata` (the
-/// engine's own record holds the prompt) and `--log-level info` (the progress reader reads
-/// the info lines).
+/// The engine's arguments for `job`, in a fixed order:
+/// 1. the parts (one fixed flag each), `-M vid_gen` for a video, `--prompt-file` and
+///    `--negative-prompt-file` (when there is a negative prompt);
+/// 2. `-W`, `-H`, `--steps`, `--cfg-scale`;
+/// 3. `--guidance`, `--img-cfg-scale`, `--flow-shift`, `--timestep-shift`,
+///    `--sampling-method` and `--scheduler`, each when set;
+/// 4. `--sigmas` (comma-joined), `--high-noise-steps`, `--high-noise-cfg-scale`,
+///    `--high-noise-sampling-method`, `--moe-boundary` and `--strength`, each when set;
+/// 5. `--seed`, `--batch-count`, then `--video-frames`, `--fps`, `-i`, `--end-img`, `--mask`,
+///    `--control-image` and each `-r`, each when set;
+/// 6. `--vae-format`, `--model-args` and `--lora-model-dir`, each when set;
+/// 7. `--backend` (`cpu` when `processor_only`), `--threads` when set, `--vae-tiling` and
+///    `--offload-to-cpu` when asked for, `-o <out_dir>/<out_stem>.<png|webm|webp>`,
+///    `--disable-image-metadata` (the engine's own record holds the prompt) and
+///    `--log-level info` (the progress reader reads the info lines).
 ///
-/// The prompt is trimmed only to check it is not empty, and never reaches argv. A number the
-/// engine cannot read ([`ArgsError::NumberOutOfRange`]) and an `out_stem` that is not one
-/// plain file name ([`ArgsError::BadOutputStem`]) are refused, whatever checked them before.
+/// The prompt is checked not to be empty without its typed LoRA tags, and never reaches
+/// argv. Refused, whatever checked them before: a size that is not a multiple of
+/// `size_multiple` ([`ArgsError::BadSize`]), a number the engine cannot read
+/// ([`ArgsError::NumberOutOfRange`]), extra model arguments that are not `key=value` pairs
+/// ([`ArgsError::BadModelArgs`]), a mask without a picture to change
+/// ([`ArgsError::MaskWithoutPicture`]), LoRAs without the LoRA folder, more than
+/// [`MAX_LORAS`] or with a name the tag cannot carry, and an `out_stem` that is not one plain
+/// file name ([`ArgsError::BadOutputStem`]).
 pub fn build_args(job: &SdJob) -> Result<Vec<OsString>, ArgsError> {
-    if job.prompt.trim().is_empty() {
+    if strip_lora_tags(&job.prompt).trim().is_empty() {
         return Err(ArgsError::EmptyPrompt);
     }
     if job.prompt.chars().count() > PROMPT_MAX_CHARS {
@@ -343,10 +642,19 @@ pub fn build_args(job: &SdJob) -> Result<Vec<OsString>, ArgsError> {
     {
         return Err(ArgsError::NoDiffusionPart);
     }
-    if !(fits(job.width) && fits(job.height)) {
-        return Err(ArgsError::BadSize);
+    if !(fits(job.width, job.size_multiple) && fits(job.height, job.size_multiple)) {
+        return Err(ArgsError::BadSize {
+            multiple: job.size_multiple,
+        });
     }
     readable_numbers(job)?;
+    if job.model_args.as_deref().is_some_and(|a| !is_model_args(a)) {
+        return Err(ArgsError::BadModelArgs);
+    }
+    if job.mask_image.is_some() && job.init_image.is_none() {
+        return Err(ArgsError::MaskWithoutPicture);
+    }
+    checked_loras(job)?;
     unicode(&job.out_dir)?;
     if !is_one_name(&job.out_stem) {
         return Err(ArgsError::BadOutputStem);
@@ -376,14 +684,40 @@ pub fn build_args(job: &SdJob) -> Result<Vec<OsString>, ArgsError> {
     push("-H", job.height.to_string());
     push("--steps", job.steps.to_string());
     push("--cfg-scale", job.cfg.to_string());
+    if let Some(guidance) = job.guidance {
+        push("--guidance", guidance.to_string());
+    }
+    if let Some(img_cfg) = job.img_cfg {
+        push("--img-cfg-scale", img_cfg.to_string());
+    }
     if let Some(shift) = job.flow_shift {
         push("--flow-shift", shift.to_string());
+    }
+    if let Some(shift) = job.timestep_shift {
+        push("--timestep-shift", shift.to_string());
     }
     if let Some(sampler) = job.sampler {
         push("--sampling-method", sampler.as_str().to_owned());
     }
     if let Some(scheduler) = job.scheduler {
         push("--scheduler", scheduler.as_str().to_owned());
+    }
+    if !job.sigmas.is_empty() {
+        let sigmas: Vec<String> = job.sigmas.iter().map(f32::to_string).collect();
+        push("--sigmas", sigmas.join(","));
+    }
+    if let Some(high) = &job.high_noise {
+        push("--high-noise-steps", high.steps.to_string());
+        push("--high-noise-cfg-scale", high.cfg.to_string());
+        if let Some(sampler) = high.sampler {
+            push("--high-noise-sampling-method", sampler.as_str().to_owned());
+        }
+    }
+    if let Some(boundary) = job.moe_boundary {
+        push("--moe-boundary", boundary.to_string());
+    }
+    if let Some(strength) = job.strength {
+        push("--strength", strength.to_string());
     }
     push("--seed", job.seed.to_string());
     push("--batch-count", job.batch.to_string());
@@ -393,11 +727,28 @@ pub fn build_args(job: &SdJob) -> Result<Vec<OsString>, ArgsError> {
     if let Some(fps) = job.fps {
         push("--fps", fps.to_string());
     }
-    if let Some(init) = &job.init_image {
-        push("-i", unicode(init)?.to_owned());
+    let pictures = [
+        ("-i", &job.init_image),
+        ("--end-img", &job.end_image),
+        ("--mask", &job.mask_image),
+        ("--control-image", &job.control_image),
+    ];
+    for (flag, picture) in pictures {
+        if let Some(path) = picture {
+            push(flag, unicode(path)?.to_owned());
+        }
     }
     for reference in &job.ref_images {
         push("-r", unicode(reference)?.to_owned());
+    }
+    if let Some(format) = job.vae_format {
+        push("--vae-format", format.as_str().to_owned());
+    }
+    if let Some(model_args) = &job.model_args {
+        push("--model-args", model_args.clone());
+    }
+    if let Some(dir) = &job.lora_dir {
+        push("--lora-model-dir", unicode(dir)?.to_owned());
     }
     let device = if job.processor_only {
         Some("cpu")
@@ -410,8 +761,11 @@ pub fn build_args(job: &SdJob) -> Result<Vec<OsString>, ArgsError> {
     if let Some(threads) = job.threads {
         push("--threads", threads.to_string());
     }
-    if job.memory_saving {
-        args.extend(["--vae-tiling", "--offload-to-cpu"].map(str::to_owned));
+    if job.vae_tiling {
+        args.push("--vae-tiling".to_owned());
+    }
+    if job.offload_to_cpu {
+        args.push("--offload-to-cpu".to_owned());
     }
     args.extend(
         [
@@ -436,6 +790,67 @@ pub fn prompt_files(job: &SdJob) -> (PathBuf, Option<PathBuf>) {
         .filter(|negative| !negative.trim().is_empty())
         .map(|_| job.out_dir.join(NEGATIVE_FILE));
     (job.out_dir.join(PROMPT_FILE), negative)
+}
+
+/// What `run_job` writes to the prompt's file: the prompt without the LoRA tags typed into
+/// it ([`strip_lora_tags`]), then a space and [`lora_tag`] for each attached LoRA, in order.
+pub fn prompt_file_text(job: &SdJob) -> String {
+    let mut text = strip_lora_tags(&job.prompt);
+    for tag in &job.loras {
+        text.push(' ');
+        text.push_str(&lora_tag(tag));
+    }
+    text
+}
+
+/// The tag the engine reads `tag` from: `<lora:NAME:W>`, or `<lora:|high_noise|NAME:W>` for
+/// the high-noise part, with W as Rust prints the `f32` (`0.8`, `1`, `-0.25`), which the
+/// engine's `std::stof` reads back.
+pub fn lora_tag(tag: &LoraTag) -> String {
+    let prefix = if tag.high_noise {
+        HIGH_NOISE_PREFIX
+    } else {
+        ""
+    };
+    format!("{LORA_TAG_OPEN}{prefix}{}:{}>", tag.name, tag.weight)
+}
+
+/// `prompt` without any LoRA tag: every span the engine's pattern
+/// `<lora:([^:>]+):([^>]+)>` matches is removed, as the engine finds them, and then every
+/// `<lora:` left, including one that removing another joins together (`<lo<lora:ra:`). A
+/// `<lora:` left over would make a tag with what follows it: with the tags
+/// [`prompt_file_text`] appends (`<lora:b:3` and ` <lora:x:1>` read as `b` at 3), or with the
+/// rest of a tag a span removed (`<lo<lora:a:1>ra:b:3>`). The text that comes back holds no
+/// `<lora:` at all, so the engine finds only the tags Studio appends. Both passes are linear
+/// in the prompt's length.
+pub fn strip_lora_tags(prompt: &str) -> String {
+    let mut kept = String::with_capacity(prompt.len());
+    for c in remove_lora_spans(prompt).chars() {
+        kept.push(c);
+        if kept.ends_with(LORA_TAG_OPEN) {
+            kept.truncate(kept.len() - LORA_TAG_OPEN.len());
+        }
+    }
+    kept
+}
+
+/// Whether the engine reads `name` back from `<lora:NAME:W>` as the file `name` names under
+/// the LoRA folder: not empty; relative (no leading `/`, and no `:`, so no Windows drive);
+/// `/` its only separator; none of `:` `<` `>` `|` `\`, nor a control character; and no
+/// empty, `.` or `..` component, so it stays in the folder. Spaces and any other Unicode are
+/// kept.
+///
+/// This is the authority on LoRA names. The store's `NOT_IN_A_NAME`
+/// (`crates/store/src/gen_loras.rs`) refuses `:` `<` `>` `|` and an empty name when a LoRA is
+/// saved; keep the two in step.
+pub fn valid_lora_name(name: &str) -> bool {
+    const NOT_IN_A_NAME: [char; 5] = [':', '<', '>', '|', '\\'];
+    !name.is_empty()
+        && !name.contains(NOT_IN_A_NAME)
+        && !name.chars().any(char::is_control)
+        && name
+            .split('/')
+            .all(|component| !matches!(component, "" | "." | ".."))
 }
 
 /// Threads for a processor-only run: physical cores minus one, at least 1; physical cores
@@ -542,8 +957,9 @@ fn help_options(help: &str) -> Vec<HelpOption<'_>> {
     options
 }
 
-fn fits(side: u32) -> bool {
-    side.is_multiple_of(SIZE_MULTIPLE) && SIZE_RANGE.contains(&side)
+/// Whether `side` is a multiple of `multiple` (never of 0) within [`SIZE_RANGE`].
+fn fits(side: u32, multiple: u32) -> bool {
+    multiple != 0 && side.is_multiple_of(multiple) && SIZE_RANGE.contains(&side)
 }
 
 /// Refuses the first number in `job` the engine cannot read, naming its field.
@@ -554,6 +970,7 @@ fn readable_numbers(job: &SdJob) -> Result<(), ArgsError> {
         ("frames", job.frames),
         ("fps", job.fps),
         ("threads", job.threads),
+        ("timestep_shift", job.timestep_shift),
     ];
     for (field, value) in ints {
         if value.is_some_and(|n| n > INT_MAX) {
@@ -563,12 +980,106 @@ fn readable_numbers(job: &SdJob) -> Result<(), ArgsError> {
     if job.seed > SEED_MAX {
         return Err(ArgsError::NumberOutOfRange("seed"));
     }
-    for (field, value) in [("cfg", Some(job.cfg)), ("flow_shift", job.flow_shift)] {
+    let floats = [
+        ("cfg", Some(job.cfg)),
+        ("guidance", job.guidance),
+        ("img_cfg", job.img_cfg),
+        ("flow_shift", job.flow_shift),
+        ("high_noise_cfg", job.high_noise.map(|high| high.cfg)),
+        ("moe_boundary", job.moe_boundary),
+        ("strength", job.strength),
+    ];
+    for (field, value) in floats {
         if value.is_some_and(|x| !readable_float(x)) {
             return Err(ArgsError::NumberOutOfRange(field));
         }
     }
+    if !job.sigmas.iter().copied().all(readable_float) {
+        return Err(ArgsError::NumberOutOfRange("sigmas"));
+    }
     Ok(())
+}
+
+/// Refuses LoRAs without the LoRA folder, more than [`MAX_LORAS`], a name the tag cannot
+/// carry ([`valid_lora_name`]) and a weight outside [`LORA_WEIGHT_RANGE`] or one the engine
+/// cannot read.
+fn checked_loras(job: &SdJob) -> Result<(), ArgsError> {
+    if job.loras.is_empty() {
+        return Ok(());
+    }
+    if job.lora_dir.is_none() {
+        return Err(ArgsError::LorasWithoutFolder);
+    }
+    if job.loras.len() > MAX_LORAS {
+        return Err(ArgsError::TooManyLoras);
+    }
+    for tag in &job.loras {
+        if !valid_lora_name(&tag.name) {
+            return Err(ArgsError::BadLoraName(tag.name.clone()));
+        }
+        if !(readable_float(tag.weight) && LORA_WEIGHT_RANGE.contains(&tag.weight)) {
+            return Err(ArgsError::NumberOutOfRange("lora weight"));
+        }
+    }
+    Ok(())
+}
+
+/// Whether `args` is `key=value` pairs joined by `,`, each matching
+/// `[a-z0-9_]+=[A-Za-z0-9_.]+`.
+fn is_model_args(args: &str) -> bool {
+    args.split(',').all(|pair| {
+        pair.split_once('=').is_some_and(|(key, value)| {
+            !key.is_empty()
+                && key
+                    .bytes()
+                    .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_')
+                && !value.is_empty()
+                && value
+                    .bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'.')
+        })
+    })
+}
+
+/// `text` without the spans the engine's LoRA pattern matches, found as `std::regex_search`
+/// finds them: the leftmost first, then on after it. No span ends after the last `>`, so the
+/// search stops there; before it, a name stops at the next `<lora:`'s colon at the latest and
+/// a weight at a `>`, so each byte is read a bounded number of times.
+fn remove_lora_spans(text: &str) -> String {
+    let Some(last_close) = text.rfind('>') else {
+        return text.to_owned();
+    };
+    let mut kept = String::with_capacity(text.len());
+    let (mut copied, mut from) = (0, 0);
+    while let Some(found) = text
+        .get(from..last_close)
+        .and_then(|before| before.find(LORA_TAG_OPEN))
+    {
+        let at = from + found;
+        match lora_span_end(&text[at..]) {
+            Some(end) => {
+                kept.push_str(&text[copied..at]);
+                copied = at + end;
+                from = copied;
+            }
+            None => from = at + LORA_TAG_OPEN.len(),
+        }
+    }
+    kept.push_str(&text[copied..]);
+    kept
+}
+
+/// The length of the tag `<lora:([^:>]+):([^>]+)>` at the start of `text`, if one is there.
+/// Every byte the pattern stops at is ASCII, so the length falls on a character boundary.
+fn lora_span_end(text: &str) -> Option<usize> {
+    let after_open = text.strip_prefix(LORA_TAG_OPEN)?;
+    let name_len = after_open.find([':', '>'])?;
+    let after_name = &after_open[name_len..];
+    if name_len == 0 || !after_name.starts_with(':') {
+        return None;
+    }
+    let weight_len = after_name[1..].find('>')?;
+    (weight_len > 0).then(|| LORA_TAG_OPEN.len() + name_len + 1 + weight_len + 1)
 }
 
 /// A float option the engine reads back as given: finite, and 0 or normal (a subnormal one
@@ -607,17 +1118,21 @@ mod tests {
             .collect()
     }
 
-    /// The argument after `flag`.
-    fn after<'a>(args: &'a [String], flag: &str) -> &'a str {
-        let at = args
-            .iter()
+    /// Where `flag` is in `args`.
+    fn index(args: &[String], flag: &str) -> usize {
+        args.iter()
             .position(|arg| arg == flag)
-            .unwrap_or_else(|| panic!("{flag} is not in {args:?}"));
-        &args[at + 1]
+            .unwrap_or_else(|| panic!("{flag} is not in {args:?}"))
     }
 
-    /// A FLUX.2 klein picture: four steps, no negative prompt, on the default device.
-    fn job() -> SdJob {
+    /// The argument after `flag`.
+    fn after<'a>(args: &'a [String], flag: &str) -> &'a str {
+        &args[index(args, flag) + 1]
+    }
+
+    /// A FLUX.2 klein picture: four steps, no negative prompt, on the default device, with
+    /// none of the recipe's own fields set.
+    fn klein_job() -> SdJob {
         SdJob {
             parts: vec![
                 (PartRole::Diffusion, p("/m/d.gguf")),
@@ -628,19 +1143,36 @@ mod tests {
             negative: None,
             width: 1024,
             height: 1024,
+            size_multiple: 16,
             steps: 4,
             cfg: 1.0,
+            guidance: None,
+            img_cfg: None,
             flow_shift: None,
+            timestep_shift: None,
             sampler: Some(Sampler::Euler),
             scheduler: Some(Scheduler::Simple),
+            sigmas: Vec::new(),
+            high_noise: None,
+            moe_boundary: None,
+            strength: None,
             seed: 81723,
             batch: 1,
             frames: None,
             fps: None,
             init_image: None,
+            end_image: None,
+            mask_image: None,
+            control_image: None,
             ref_images: Vec::new(),
+            vae_format: None,
+            model_args: None,
+            lora_dir: None,
+            loras: Vec::new(),
             backend: None,
-            memory_saving: false,
+            vae_tiling: false,
+            offload_to_cpu: false,
+            tiling_allowed: true,
             processor_only: false,
             threads: None,
             out_dir: p("/g/.partial/r1"),
@@ -651,7 +1183,10 @@ mod tests {
     }
 
     fn job_with(parts: Vec<(PartRole, PathBuf)>) -> SdJob {
-        SdJob { parts, ..job() }
+        SdJob {
+            parts,
+            ..klein_job()
+        }
     }
 
     /// A Wan 2.2 TI2V video from a start frame: 49 frames at 24 fps with a flow shift.
@@ -673,8 +1208,65 @@ mod tests {
             fps: Some(24),
             init_image: Some(p("/g/refs/start.png")),
             format: OutputFormat::Webm,
-            ..job()
+            ..klein_job()
         }
+    }
+
+    /// A Wan 2.2 T2V A14B video: two diffusion parts, UMT5-XXL and the Wan 2.1 VAE, 33 frames
+    /// at 16 fps with the recipe's flow shift and size multiple.
+    fn wan_a14b_job() -> SdJob {
+        SdJob {
+            parts: vec![
+                (
+                    PartRole::Diffusion,
+                    p("/m/wan2.2_t2v_low_noise_14B_Q4_K_M.gguf"),
+                ),
+                (
+                    PartRole::HighNoiseDiffusion,
+                    p("/m/wan2.2_t2v_high_noise_14B_Q4_K_M.gguf"),
+                ),
+                (PartRole::T5xxl, p("/m/umt5-xxl-encoder-Q8_0.gguf")),
+                (PartRole::Vae, p("/m/wan_2.1_vae.safetensors")),
+            ],
+            width: 832,
+            height: 480,
+            size_multiple: 16,
+            steps: 20,
+            cfg: 3.0,
+            flow_shift: Some(12.0),
+            sampler: Some(Sampler::Euler),
+            scheduler: None,
+            frames: Some(33),
+            fps: Some(16),
+            format: OutputFormat::Webm,
+            ..klein_job()
+        }
+    }
+
+    /// Every part role, each with a file of its own.
+    fn every_part() -> Vec<(PartRole, PathBuf)> {
+        [
+            PartRole::Diffusion,
+            PartRole::HighNoiseDiffusion,
+            PartRole::UncondDiffusion,
+            PartRole::Llm,
+            PartRole::LlmVision,
+            PartRole::T5xxl,
+            PartRole::ClipL,
+            PartRole::ClipG,
+            PartRole::ClipVision,
+            PartRole::Tokenizer,
+            PartRole::Vae,
+            PartRole::Tae,
+            PartRole::AudioVae,
+            PartRole::AudioEncoder,
+            PartRole::EmbeddingsConnectors,
+            PartRole::Single,
+        ]
+        .into_iter()
+        .enumerate()
+        .map(|(i, role)| (role, p(&format!("/m/part{i}.gguf"))))
+        .collect()
     }
 
     #[test]
@@ -698,19 +1290,32 @@ mod tests {
                 "/m/v.safetensors"
             ]
         );
+        // design 7.1's table: one flag a slot
         let roles = [
             (PartRole::Diffusion, "--diffusion-model"),
             (PartRole::HighNoiseDiffusion, "--high-noise-diffusion-model"),
+            (PartRole::UncondDiffusion, "--uncond-diffusion-model"),
             (PartRole::Llm, "--llm"),
+            (PartRole::LlmVision, "--llm_vision"),
             (PartRole::T5xxl, "--t5xxl"),
             (PartRole::ClipL, "--clip_l"),
+            (PartRole::ClipG, "--clip_g"),
             (PartRole::ClipVision, "--clip_vision"),
+            (PartRole::Tokenizer, "--tokenizer"),
             (PartRole::Vae, "--vae"),
+            (PartRole::Tae, "--tae"),
+            (PartRole::AudioVae, "--audio-vae"),
+            (PartRole::AudioEncoder, "--audio-encoder"),
+            (PartRole::EmbeddingsConnectors, "--embeddings-connectors"),
             (PartRole::Single, "-m"),
         ];
         for (role, flag) in roles {
             assert_eq!(flag_for(role), flag, "{role:?}");
         }
+        // every part passes its own flag, in the parts' order, before anything else
+        let a = strings(build_args(&job_with(every_part())).unwrap());
+        let flags: Vec<&str> = a[..32].iter().step_by(2).map(String::as_str).collect();
+        assert_eq!(flags, roles.map(|(_, flag)| flag));
     }
 
     #[test]
@@ -718,7 +1323,7 @@ mod tests {
         let job = SdJob {
             prompt: "-o /etc/x".into(),
             negative: Some("--vae evil".into()),
-            ..job()
+            ..klein_job()
         };
         let a = strings(build_args(&job).unwrap());
         let (prompt, negative) = prompt_files(&job);
@@ -738,14 +1343,17 @@ mod tests {
     #[test]
     fn a_blank_negative_prompt_is_no_negative_prompt() {
         for negative in [None, Some(String::new()), Some(" \n".into())] {
-            let job = SdJob { negative, ..job() };
+            let job = SdJob {
+                negative,
+                ..klein_job()
+            };
             assert_eq!(prompt_files(&job).1, None);
             let a = strings(build_args(&job).unwrap());
             assert!(!a.contains(&"--negative-prompt-file".into()));
         }
         let job = SdJob {
             negative: Some("blurry".into()),
-            ..job()
+            ..klein_job()
         };
         assert_eq!(prompt_files(&job).1, Some(job.out_dir.join("negative.txt")));
     }
@@ -755,14 +1363,14 @@ mod tests {
         assert!(
             build_args(&SdJob {
                 prompt: "a".repeat(4_000),
-                ..job()
+                ..klein_job()
             })
             .is_ok()
         );
         assert_eq!(
             build_args(&SdJob {
                 prompt: "a".repeat(4_001),
-                ..job()
+                ..klein_job()
             }),
             Err(ArgsError::PromptTooLong)
         );
@@ -770,7 +1378,7 @@ mod tests {
         assert!(
             build_args(&SdJob {
                 prompt: "風".repeat(4_000),
-                ..job()
+                ..klein_job()
             })
             .is_ok()
         );
@@ -782,7 +1390,7 @@ mod tests {
             assert_eq!(
                 build_args(&SdJob {
                     prompt: prompt.into(),
-                    ..job()
+                    ..klein_job()
                 }),
                 Err(ArgsError::EmptyPrompt),
                 "{prompt:?}"
@@ -796,7 +1404,7 @@ mod tests {
             assert_eq!(
                 build_args(&SdJob {
                     out_dir: dir.into(),
-                    ..job()
+                    ..klein_job()
                 }),
                 Err(ArgsError::PercentInOutputPath),
                 "{dir}"
@@ -805,7 +1413,7 @@ mod tests {
         assert!(
             build_args(&SdJob {
                 out_dir: "/g/100% real".into(),
-                ..job()
+                ..klein_job()
             })
             .is_ok()
         );
@@ -833,7 +1441,7 @@ mod tests {
             assert_eq!(
                 build_args(&SdJob {
                     out_stem: stem.into(),
-                    ..job()
+                    ..klein_job()
                 }),
                 Err(ArgsError::BadOutputStem),
                 "{stem:?}"
@@ -842,7 +1450,7 @@ mod tests {
         let a = strings(
             build_args(&SdJob {
                 out_stem: "run-1".into(),
-                ..job()
+                ..klein_job()
             })
             .unwrap(),
         );
@@ -861,8 +1469,14 @@ mod tests {
         /// A job with one integer field set to the number given.
         type With = fn(u32) -> SdJob;
         let jobs: [(&str, With); 5] = [
-            ("steps", |n| SdJob { steps: n, ..job() }),
-            ("batch", |n| SdJob { batch: n, ..job() }),
+            ("steps", |n| SdJob {
+                steps: n,
+                ..klein_job()
+            }),
+            ("batch", |n| SdJob {
+                batch: n,
+                ..klein_job()
+            }),
             ("frames", |n| SdJob {
                 frames: Some(n),
                 ..video()
@@ -873,7 +1487,7 @@ mod tests {
             }),
             ("threads", |n| SdJob {
                 threads: Some(n),
-                ..job()
+                ..klein_job()
             }),
         ];
         for (field, with) in jobs {
@@ -891,14 +1505,17 @@ mod tests {
         let a = strings(
             build_args(&SdJob {
                 seed: seed_max,
-                ..job()
+                ..klein_job()
             })
             .unwrap(),
         );
         assert_eq!(after(&a, "--seed"), seed_max.to_string());
         for seed in [seed_max + 1, u64::MAX] {
             assert_eq!(
-                build_args(&SdJob { seed, ..job() }),
+                build_args(&SdJob {
+                    seed,
+                    ..klein_job()
+                }),
                 Err(ArgsError::NumberOutOfRange("seed")),
                 "{seed}"
             );
@@ -918,7 +1535,10 @@ mod tests {
             f32::from_bits(1),
         ] {
             assert_eq!(
-                build_args(&SdJob { cfg: bad, ..job() }),
+                build_args(&SdJob {
+                    cfg: bad,
+                    ..klein_job()
+                }),
                 Err(ArgsError::NumberOutOfRange("cfg")),
                 "{bad}"
             );
@@ -958,7 +1578,7 @@ mod tests {
 
     #[test]
     fn the_metadata_flag_is_always_there() {
-        for job in [job(), video()] {
+        for job in [klein_job(), video()] {
             assert!(
                 strings(build_args(&job).unwrap()).contains(&"--disable-image-metadata".into())
             );
@@ -966,21 +1586,41 @@ mod tests {
     }
 
     #[test]
-    fn memory_saving_adds_tiling_and_offload_and_processor_only_picks_cpu_and_threads() {
+    fn tiling_and_offload_are_each_their_own_and_processor_only_picks_cpu_and_threads() {
         let a = strings(
             build_args(&SdJob {
-                memory_saving: true,
-                ..job()
+                vae_tiling: true,
+                offload_to_cpu: true,
+                ..klein_job()
             })
             .unwrap(),
         );
         assert!(a.contains(&"--vae-tiling".into()) && a.contains(&"--offload-to-cpu".into()));
+        // tiling alone: a video or a picture above 1024×1024 on the engine's own auto-fit
+        let a = strings(
+            build_args(&SdJob {
+                vae_tiling: true,
+                ..klein_job()
+            })
+            .unwrap(),
+        );
+        assert!(a.contains(&"--vae-tiling".into()) && !a.contains(&"--offload-to-cpu".into()));
+        // offload alone: Memory saving where the recipe disables tiling
+        let a = strings(
+            build_args(&SdJob {
+                offload_to_cpu: true,
+                tiling_allowed: false,
+                ..klein_job()
+            })
+            .unwrap(),
+        );
+        assert!(!a.contains(&"--vae-tiling".into()) && a.contains(&"--offload-to-cpu".into()));
         let a = strings(
             build_args(&SdJob {
                 processor_only: true,
                 threads: Some(5),
                 backend: Some("vulkan0".into()),
-                ..job()
+                ..klein_job()
             })
             .unwrap(),
         );
@@ -1007,12 +1647,12 @@ mod tests {
         let a = strings(
             build_args(&SdJob {
                 backend: Some("vulkan0".into()),
-                ..job()
+                ..klein_job()
             })
             .unwrap(),
         );
         assert_eq!(after(&a, "--backend"), "vulkan0");
-        let a = strings(build_args(&job()).unwrap());
+        let a = strings(build_args(&klein_job()).unwrap());
         assert!(!a.contains(&"--backend".into()) && !a.contains(&"--threads".into()));
         assert!(!a.contains(&"--vae-tiling".into()) && !a.contains(&"--offload-to-cpu".into()));
     }
@@ -1023,12 +1663,12 @@ mod tests {
             build_args(&SdJob {
                 scheduler: None,
                 sampler: None,
-                ..job()
+                ..klein_job()
             })
             .unwrap(),
         );
         assert!(!a.contains(&"--scheduler".into()) && !a.contains(&"--sampling-method".into()));
-        let a = strings(build_args(&job()).unwrap());
+        let a = strings(build_args(&klein_job()).unwrap());
         assert_eq!(
             (after(&a, "--sampling-method"), after(&a, "--scheduler")),
             ("euler", "simple")
@@ -1044,7 +1684,7 @@ mod tests {
         assert_eq!(after(&a, "--flow-shift"), "3");
         assert_eq!(after(&a, "-i"), "/g/refs/start.png");
         assert!(after(&a, "-o").ends_with(".webm"), "{a:?}");
-        let picture = strings(build_args(&job()).unwrap());
+        let picture = strings(build_args(&klein_job()).unwrap());
         for flag in ["-M", "--video-frames", "--fps", "--flow-shift", "-i"] {
             assert!(!picture.contains(&flag.into()), "{flag}");
         }
@@ -1064,7 +1704,8 @@ mod tests {
             ref_images: vec![p("/g/refs/a.png"), p("/g/refs/b.png")],
             backend: Some("vulkan0".into()),
             threads: Some(7),
-            memory_saving: true,
+            vae_tiling: true,
+            offload_to_cpu: true,
             ..video()
         };
         let out = |name: &str| job.out_dir.join(name).to_str().unwrap().to_owned();
@@ -1144,13 +1785,13 @@ mod tests {
     }
 
     #[test]
-    fn sizes_are_multiples_of_16_from_64_to_2048() {
+    fn sizes_are_multiples_of_the_jobs_multiple_from_64_to_2048() {
         for (width, height) in [(64, 64), (2048, 2048), (832, 480)] {
             assert!(
                 build_args(&SdJob {
                     width,
                     height,
-                    ..job()
+                    ..klein_job()
                 })
                 .is_ok(),
                 "{width}x{height}"
@@ -1161,9 +1802,9 @@ mod tests {
                 build_args(&SdJob {
                     width,
                     height,
-                    ..job()
+                    ..klein_job()
                 }),
-                Err(ArgsError::BadSize),
+                Err(ArgsError::BadSize { multiple: 16 }),
                 "{width}x{height}"
             );
         }
@@ -1190,15 +1831,32 @@ mod tests {
             job_with(vec![(PartRole::Diffusion, bad.clone())]),
             SdJob {
                 init_image: Some(bad.clone()),
-                ..job()
+                ..klein_job()
             },
             SdJob {
                 ref_images: vec![p("/g/refs/a.png"), bad.clone()],
-                ..job()
+                ..klein_job()
             },
             SdJob {
                 out_dir: bad.clone(),
-                ..job()
+                ..klein_job()
+            },
+            SdJob {
+                end_image: Some(bad.clone()),
+                ..video()
+            },
+            SdJob {
+                init_image: Some(p("/g/refs/in.png")),
+                mask_image: Some(bad.clone()),
+                ..klein_job()
+            },
+            SdJob {
+                control_image: Some(bad.clone()),
+                ..klein_job()
+            },
+            SdJob {
+                lora_dir: Some(bad.clone()),
+                ..klein_job()
             },
         ];
         for job in jobs {
@@ -1216,65 +1874,128 @@ mod tests {
                 "euler_a",
                 "heun",
                 "dpm2",
+                "dpm++2s_a",
                 "dpm++2m",
                 "dpm++2mv2",
-                "lcm"
+                "ipndm",
+                "ipndm_v",
+                "lcm",
+                "ddim_trailing",
+                "tcd",
+                "res_multistep",
+                "res_2s",
+                "er_sde",
+                "euler_cfg_pp",
+                "euler_a_cfg_pp",
+                "euler_ge",
+                "dpm++2m_sde",
+                "dpm++2m_sde_bt",
+                "lms"
             ]
         );
         let schedulers: Vec<&str> = Scheduler::ALL.iter().map(|s| s.as_str()).collect();
-        assert_eq!(schedulers, ["discrete", "karras", "exponential", "simple"]);
+        assert_eq!(
+            schedulers,
+            [
+                "discrete",
+                "karras",
+                "exponential",
+                "ays",
+                "gits",
+                "sgm_uniform",
+                "simple",
+                "smoothstep",
+                "kl_optimal",
+                "lcm",
+                "bong_tangent",
+                "ltx2",
+                "logit_normal",
+                "flux2",
+                "flux",
+                "beta",
+                "llada_image"
+            ]
+        );
         for sampler in Sampler::ALL {
             assert_eq!(Sampler::from_cli(sampler.as_str()), Some(*sampler));
         }
         for scheduler in Scheduler::ALL {
             assert_eq!(Scheduler::from_cli(scheduler.as_str()), Some(*scheduler));
         }
-        for word in ["", "Euler", "ddim_trailing", "euler "] {
+        for word in ["", "Euler", "ddim", "euler "] {
             assert_eq!(Sampler::from_cli(word), None, "{word:?}");
         }
-        for word in ["", "Karras", "normal", "ays"] {
+        for word in ["", "Karras", "normal", "auto"] {
             assert_eq!(Scheduler::from_cli(word), None, "{word:?}");
         }
     }
 
-    /// `FLAGS` is exactly what `build_args` can emit: a job with every field set gives each
-    /// flag, and nothing outside the list.
-    #[test]
-    fn flags_lists_every_flag_build_args_emits() {
-        let all_parts = vec![
-            (PartRole::Diffusion, p("/m/d.gguf")),
-            (PartRole::HighNoiseDiffusion, p("/m/h.gguf")),
-            (PartRole::Llm, p("/m/q.gguf")),
-            (PartRole::T5xxl, p("/m/t.gguf")),
-            (PartRole::ClipL, p("/m/l.safetensors")),
-            (PartRole::ClipVision, p("/m/cv.safetensors")),
-            (PartRole::Vae, p("/m/v.safetensors")),
-            (PartRole::Single, p("/m/all.safetensors")),
-        ];
-        let everything = SdJob {
-            parts: all_parts,
+    /// A job with every field set: each part role, a negative prompt, every recipe field, the
+    /// four input pictures and two references, a LoRA, a device, threads, tiling and offload.
+    fn everything() -> SdJob {
+        SdJob {
+            parts: every_part(),
             negative: Some("blurry".into()),
+            guidance: Some(3.5),
+            img_cfg: Some(1.5),
+            timestep_shift: Some(250),
             sampler: Some(Sampler::DpmPp2m),
             scheduler: Some(Scheduler::Karras),
-            ref_images: vec![p("/g/refs/a.png")],
+            sigmas: vec![1.0, 0.5, 0.0],
+            high_noise: Some(HighNoise {
+                steps: -1,
+                cfg: 4.0,
+                sampler: Some(Sampler::Euler),
+            }),
+            moe_boundary: Some(0.875),
+            strength: Some(0.75),
+            end_image: Some(p("/g/refs/end.png")),
+            mask_image: Some(p("/g/refs/mask.png")),
+            control_image: Some(p("/g/refs/edges.png")),
+            ref_images: vec![p("/g/refs/a.png"), p("/g/refs/b.png")],
+            vae_format: Some(VaeFormat::Wan),
+            model_args: Some("qwen_image_zero_cond_t=true".into()),
+            lora_dir: Some(p("/m/@loras")),
+            loras: vec![LoraTag {
+                name: "style".into(),
+                weight: 0.8,
+                high_noise: false,
+            }],
             backend: Some("vulkan0".into()),
             threads: Some(3),
-            memory_saving: true,
+            vae_tiling: true,
+            offload_to_cpu: true,
             ..video()
-        };
-        let emitted: Vec<String> = strings(build_args(&everything).unwrap())
-            .into_iter()
-            .filter(|arg| arg.starts_with('-'))
-            .collect();
-        for arg in &emitted {
-            assert!(FLAGS.contains(&arg.as_str()), "{arg} is not in FLAGS");
         }
-        for flag in FLAGS {
-            assert!(
-                emitted.iter().any(|arg| arg == flag),
-                "{flag} is never emitted"
-            );
+    }
+
+    /// The flags of `args`, each once (the `-r` of each reference read as one): every flag
+    /// but the three switches takes the next argument as its value, as the pinned parser
+    /// reads them (a value may start with `-`, as `--high-noise-steps -1` does).
+    fn flags_of(args: &[String]) -> Vec<&str> {
+        const SWITCHES: [&str; 3] = [
+            "--vae-tiling",
+            "--offload-to-cpu",
+            "--disable-image-metadata",
+        ];
+        let mut flags = Vec::new();
+        let mut rest = args.iter();
+        while let Some(flag) = rest.next() {
+            if !SWITCHES.contains(&flag.as_str()) {
+                rest.next().unwrap_or_else(|| panic!("{flag} has no value"));
+            }
+            flags.push(flag.as_str());
         }
+        flags.dedup();
+        flags
+    }
+
+    /// `FLAGS` is exactly what `build_args` can emit, in its order: a job with every field set
+    /// gives each flag in turn, and nothing outside the list.
+    #[test]
+    fn flags_lists_every_flag_build_args_emits() {
+        let a = strings(build_args(&everything()).unwrap());
+        assert_eq!(flags_of(&a), FLAGS);
     }
 
     #[test]
@@ -1303,6 +2024,453 @@ mod tests {
         }
         for word in ["euler", "heun", "dpm2"] {
             assert!(!missing.contains(&word), "{word}: {missing:?}");
+        }
+    }
+
+    #[test]
+    fn recipe_fields_reach_their_flags_in_order() {
+        let mut j = wan_a14b_job();
+        j.guidance = Some(3.5);
+        j.high_noise = Some(HighNoise {
+            steps: -1,
+            cfg: 4.0,
+            sampler: Some(Sampler::Euler),
+        });
+        j.moe_boundary = Some(0.875);
+        j.sigmas = vec![1.0, 0.5, 0.0];
+        j.vae_format = Some(VaeFormat::Wan);
+        j.model_args = Some("qwen_image_zero_cond_t=true".into());
+        let a = strings(build_args(&j).unwrap());
+        assert_eq!(after(&a, "--high-noise-steps"), "-1");
+        assert_eq!(after(&a, "--sigmas"), "1,0.5,0");
+        assert!(
+            index(&a, "--guidance") < index(&a, "--flow-shift")
+                && index(&a, "--moe-boundary") < index(&a, "--seed")
+        );
+        assert_eq!(after(&a, "-M"), "vid_gen");
+        assert_eq!(
+            (
+                after(&a, "--high-noise-cfg-scale"),
+                after(&a, "--high-noise-sampling-method"),
+                after(&a, "--moe-boundary"),
+            ),
+            ("4", "euler", "0.875")
+        );
+        assert_eq!(
+            (after(&a, "--vae-format"), after(&a, "--model-args")),
+            ("wan", "qwen_image_zero_cond_t=true")
+        );
+        // the fields left empty send nothing; the engine's `auto` VAE format is never sent
+        for flag in [
+            "--img-cfg-scale",
+            "--timestep-shift",
+            "--strength",
+            "--lora-model-dir",
+        ] {
+            assert!(!a.contains(&flag.to_owned()), "{flag}");
+        }
+        let a = strings(build_args(&wan_a14b_job()).unwrap());
+        for flag in [
+            "--guidance",
+            "--sigmas",
+            "--high-noise-steps",
+            "--vae-format",
+        ] {
+            assert!(!a.contains(&flag.to_owned()), "{flag}");
+        }
+        assert_eq!(
+            [
+                VaeFormat::Flux,
+                VaeFormat::Sd3,
+                VaeFormat::Flux2,
+                VaeFormat::Wan
+            ]
+            .map(VaeFormat::as_str),
+            ["flux", "sd3", "flux2", "wan"]
+        );
+        // a high-noise part without its own sampler leaves the engine its own
+        let a = strings(
+            build_args(&SdJob {
+                high_noise: Some(HighNoise {
+                    steps: 8,
+                    cfg: 3.5,
+                    sampler: None,
+                }),
+                ..wan_a14b_job()
+            })
+            .unwrap(),
+        );
+        assert_eq!(after(&a, "--high-noise-steps"), "8");
+        assert!(!a.contains(&"--high-noise-sampling-method".to_owned()));
+    }
+
+    #[test]
+    fn the_size_follows_the_recipes_multiple() {
+        let mut j = klein_job();
+        j.size_multiple = 64;
+        j.width = 1000;
+        assert_eq!(build_args(&j), Err(ArgsError::BadSize { multiple: 64 }));
+        j.size_multiple = 8;
+        assert!(build_args(&j).is_ok());
+        j.size_multiple = 0;
+        assert_eq!(build_args(&j), Err(ArgsError::BadSize { multiple: 0 }));
+        j.width = 1024;
+        assert_eq!(build_args(&j), Err(ArgsError::BadSize { multiple: 0 }));
+        // still from 64 to 2048, whatever the multiple
+        for (multiple, side) in [(8, 56), (8, 2056), (1, 63)] {
+            let j = SdJob {
+                size_multiple: multiple,
+                height: side,
+                ..klein_job()
+            };
+            assert_eq!(
+                build_args(&j),
+                Err(ArgsError::BadSize { multiple }),
+                "{side}"
+            );
+        }
+    }
+
+    #[test]
+    fn every_sampler_and_scheduler_is_the_engines_word() {
+        // against the help's own "one of [...]" lists, not a loose `contains`
+        let help = include_str!("../../tests/fixtures/sd_help.txt");
+        let choices = |flag: &str| -> Vec<String> {
+            help_options(help)
+                .into_iter()
+                .find(|o| o.names.contains(&flag))
+                .unwrap()
+                .choices()
+                .into_iter()
+                .map(str::to_owned)
+                .collect()
+        };
+        // 21, in the engine's order
+        assert_eq!(
+            Sampler::ALL.iter().map(|s| s.as_str()).collect::<Vec<_>>(),
+            choices("--sampling-method")
+        );
+        assert_eq!(
+            choices("--high-noise-sampling-method"),
+            choices("--sampling-method")
+        );
+        // 17
+        assert_eq!(
+            Scheduler::ALL
+                .iter()
+                .map(|s| s.as_str())
+                .collect::<Vec<_>>(),
+            choices("--scheduler")
+        );
+        assert_eq!((Sampler::ALL.len(), Scheduler::ALL.len()), (21, 17));
+    }
+
+    #[test]
+    fn typed_lora_tags_are_removed_and_attached_ones_appended() {
+        let mut j = klein_job();
+        j.prompt = "a cat <lora:evil:3> on a mat".into();
+        j.lora_dir = Some("/m/@loras".into());
+        j.loras = vec![LoraTag {
+            name: "local/pixel art ü".into(),
+            weight: 0.8,
+            high_noise: false,
+        }];
+        assert_eq!(
+            prompt_file_text(&j),
+            "a cat  on a mat <lora:local/pixel art ü:0.8>"
+        );
+        assert_eq!(
+            after(&strings(build_args(&j).unwrap()), "--lora-model-dir"),
+            "/m/@loras"
+        );
+        // without LoRAs the prompt is written as given, typed tags still removed
+        j.loras.clear();
+        assert_eq!(prompt_file_text(&j), "a cat  on a mat");
+        j.prompt = "two lines\nand 風".into();
+        assert_eq!(prompt_file_text(&j), j.prompt);
+        // a prompt that is only typed tags is empty
+        j.prompt = " <lora:x:1> ".into();
+        assert_eq!(build_args(&j), Err(ArgsError::EmptyPrompt));
+    }
+
+    #[test]
+    fn a_lora_tag_names_its_part_and_weight_as_the_engine_reads_them() {
+        let tag = |name: &str, weight: f32, high_noise: bool| {
+            lora_tag(&LoraTag {
+                name: name.into(),
+                weight,
+                high_noise,
+            })
+        };
+        assert_eq!(tag("x", 1.0, false), "<lora:x:1>");
+        assert_eq!(tag("a/b c", -0.25, false), "<lora:a/b c:-0.25>");
+        assert_eq!(
+            tag("o/r/日本語 スタイル", 0.05, true),
+            "<lora:|high_noise|o/r/日本語 スタイル:0.05>"
+        );
+        assert_eq!(
+            (LORA_WEIGHT_RANGE, LORA_WEIGHT_STEP, LORA_WEIGHT_DEFAULT),
+            (-1.0..=2.0, 0.05, 1.0)
+        );
+    }
+
+    /// The engine finds every span its pattern matches, so no `<lora:` the person typed may
+    /// be left, alone or joined with what is around it or with the tags Studio appends.
+    #[test]
+    fn no_typed_lora_tag_survives_the_strip() {
+        for (typed, kept) in [
+            ("<lora:a:1>", ""),
+            ("x <lora:a:1><lora:b:2> y", "x  y"),
+            // a span removed joins its two sides into a new opener
+            ("<lo<lora:a:1>ra:evil:3>", "evil:3>"),
+            ("<lo<lora:ra:x", "x"),
+            ("<lo<lora:ra:x:1>", "<lo"),
+            ("<lora:<lora:a:1>b:1>", "b:1>"),
+            // openers without a whole tag: an appended tag would close them
+            ("a fox <lora:evil:3", "a fox evil:3"),
+            ("a fox <lora:evil", "a fox evil"),
+            ("<lora:>x", ">x"),
+            ("<lora::1>", ":1>"),
+            // the weight may hold anything but `>`, a line break too
+            ("<lora:a:\n1>z", "z"),
+            ("<LORA:a:1>", "<LORA:a:1>"),
+            ("風 <lora:日本:1> 景", "風  景"),
+        ] {
+            let stripped = strip_lora_tags(typed);
+            assert_eq!(stripped, kept, "{typed:?}");
+            assert!(!stripped.contains("<lora:"), "{typed:?}");
+        }
+        // with a LoRA appended, the engine reads only the tag appended
+        let j = SdJob {
+            prompt: "a fox <lora:evil:3".into(),
+            lora_dir: Some(p("/m/@loras")),
+            loras: vec![LoraTag {
+                name: "x".into(),
+                weight: 1.0,
+                high_noise: false,
+            }],
+            ..klein_job()
+        };
+        let text = prompt_file_text(&j);
+        assert_eq!(text, "a fox evil:3 <lora:x:1>");
+        assert_eq!(text.matches("<lora:").count(), 1);
+    }
+
+    /// A prompt built to make a repeat-until-stable strip, or a scan to the end for each
+    /// `<lora:`, take quadratic time is stripped in one pass each (a few milliseconds here;
+    /// minutes if either came back).
+    #[test]
+    fn a_pathological_prompt_strips_in_linear_time() {
+        let n = 100_000;
+        // openers that never close, each name ended by the next opener's colon
+        let open = "<lora:a:".repeat(n);
+        assert_eq!(strip_lora_tags(&open), "a:".repeat(n));
+        // openers with empty names, one `>` at the very end
+        let empty = format!("{}>", "<lora::".repeat(n));
+        assert_eq!(strip_lora_tags(&empty), format!("{}>", ":".repeat(n)));
+        // nested joins, each removal making a new opener
+        let nested = format!("{}<lora:a:1>{}", "<lo".repeat(n), "ra:".repeat(n));
+        assert_eq!(strip_lora_tags(&nested), "");
+    }
+
+    #[test]
+    fn mask_and_control_pictures_reach_their_flags() {
+        let mut j = klein_job();
+        j.init_image = Some("/r/in.png".into());
+        j.mask_image = Some("/r/mask.png".into());
+        j.control_image = Some("/r/edges.png".into());
+        let a = strings(build_args(&j).unwrap());
+        assert_eq!(
+            (
+                after(&a, "-i"),
+                after(&a, "--mask"),
+                after(&a, "--control-image")
+            ),
+            ("/r/in.png", "/r/mask.png", "/r/edges.png")
+        );
+        // the ControlNet strength is never sent
+        assert!(!a.contains(&"--control-strength".to_owned()));
+        j.init_image = None;
+        assert_eq!(build_args(&j), Err(ArgsError::MaskWithoutPicture));
+        // a control picture needs no picture to change; an end frame follows the start frame
+        j.mask_image = None;
+        assert!(build_args(&j).is_ok());
+        let a = strings(
+            build_args(&SdJob {
+                end_image: Some(p("/g/refs/end.png")),
+                ..video()
+            })
+            .unwrap(),
+        );
+        assert_eq!(after(&a, "--end-img"), "/g/refs/end.png");
+        assert_eq!(index(&a, "-i") + 2, index(&a, "--end-img"));
+    }
+
+    #[test]
+    fn lora_names_the_engine_could_misread_are_refused() {
+        for bad in [
+            "",
+            "C:/x",
+            "a>b",
+            "a<b",
+            "|high_noise|x",
+            "../x",
+            "a\\b",
+            "a/./b",
+        ] {
+            assert!(!valid_lora_name(bad), "{bad}");
+        }
+        for bad in ["/abs", "a//b", "a/", "a/..", ".", "a\nb", "a\u{7f}b", "x:1"] {
+            assert!(!valid_lora_name(bad), "{bad:?}");
+        }
+        for good in ["local/pixel art ü", "o/r/日本語 スタイル", "x"] {
+            assert!(valid_lora_name(good), "{good}");
+        }
+        let mut j = klein_job();
+        j.loras = vec![LoraTag {
+            name: "x".into(),
+            weight: 1.0,
+            high_noise: false,
+        }];
+        assert_eq!(build_args(&j), Err(ArgsError::LorasWithoutFolder));
+        j.lora_dir = Some("/m/@loras".into());
+        j.loras[0].weight = 2.5;
+        assert_eq!(
+            build_args(&j),
+            Err(ArgsError::NumberOutOfRange("lora weight"))
+        );
+        for weight in [-1.01, f32::NAN, f32::INFINITY, f32::MIN_POSITIVE / 2.0] {
+            j.loras[0].weight = weight;
+            assert_eq!(
+                build_args(&j),
+                Err(ArgsError::NumberOutOfRange("lora weight")),
+                "{weight}"
+            );
+        }
+        for weight in [-1.0, 0.0, 2.0] {
+            j.loras[0].weight = weight;
+            assert!(build_args(&j).is_ok(), "{weight}");
+        }
+        j.loras[0].name = "../x".into();
+        assert_eq!(build_args(&j), Err(ArgsError::BadLoraName("../x".into())));
+    }
+
+    #[test]
+    fn at_most_eight_loras() {
+        let tag = |i: usize| LoraTag {
+            name: format!("l{i}"),
+            weight: 1.0,
+            high_noise: i % 2 == 1,
+        };
+        let j = SdJob {
+            lora_dir: Some(p("/m/@loras")),
+            loras: (0..MAX_LORAS).map(tag).collect(),
+            ..klein_job()
+        };
+        assert!(build_args(&j).is_ok());
+        assert_eq!(prompt_file_text(&j).matches("<lora:").count(), 8);
+        let j = SdJob {
+            loras: (0..=MAX_LORAS).map(tag).collect(),
+            ..j
+        };
+        assert_eq!(build_args(&j), Err(ArgsError::TooManyLoras));
+    }
+
+    #[test]
+    fn model_args_are_key_value_pairs() {
+        for good in [
+            "qwen_image_zero_cond_t=true",
+            "pixart_vae_scale_factor=0.18215",
+            "pixart_vae_scale_factor=0.18215,pixart_pos_embed_base_size=32,pixart_interpolation_scale=1",
+        ] {
+            let j = SdJob {
+                model_args: Some(good.into()),
+                ..klein_job()
+            };
+            assert_eq!(
+                after(&strings(build_args(&j).unwrap()), "--model-args"),
+                good
+            );
+        }
+        for bad in [
+            "",
+            "a",
+            "=b",
+            "a=",
+            "a=b,",
+            ",a=b",
+            "A=b",
+            "a=b=c",
+            "a=b c",
+            "a=-1",
+            "a=b;--vae x",
+            "a=b,,c=d",
+        ] {
+            let j = SdJob {
+                model_args: Some(bad.into()),
+                ..klein_job()
+            };
+            assert_eq!(build_args(&j), Err(ArgsError::BadModelArgs), "{bad:?}");
+        }
+    }
+
+    /// The recipe's numbers are refused as the 0.1.x ones are: an integer above `i32::MAX`,
+    /// and a float that is not finite or is subnormal, named by its field.
+    #[test]
+    fn a_recipe_number_the_engine_cannot_read_is_refused() {
+        let over = u32::try_from(i32::MAX).unwrap() + 1;
+        assert_eq!(
+            build_args(&SdJob {
+                timestep_shift: Some(over),
+                ..klein_job()
+            }),
+            Err(ArgsError::NumberOutOfRange("timestep_shift"))
+        );
+        let subnormal = f32::MIN_POSITIVE / 2.0;
+        type With = fn(f32) -> SdJob;
+        let jobs: [(&str, With); 7] = [
+            ("guidance", |x| SdJob {
+                guidance: Some(x),
+                ..klein_job()
+            }),
+            ("img_cfg", |x| SdJob {
+                img_cfg: Some(x),
+                ..klein_job()
+            }),
+            ("high_noise_cfg", |x| SdJob {
+                high_noise: Some(HighNoise {
+                    steps: -1,
+                    cfg: x,
+                    sampler: None,
+                }),
+                ..wan_a14b_job()
+            }),
+            ("moe_boundary", |x| SdJob {
+                moe_boundary: Some(x),
+                ..wan_a14b_job()
+            }),
+            ("strength", |x| SdJob {
+                strength: Some(x),
+                ..klein_job()
+            }),
+            ("sigmas", |x| SdJob {
+                sigmas: vec![1.0, x, 0.0],
+                ..klein_job()
+            }),
+            ("cfg", |x| SdJob {
+                cfg: x,
+                ..klein_job()
+            }),
+        ];
+        for (field, with) in jobs {
+            for bad in [f32::NAN, f32::INFINITY, subnormal] {
+                assert_eq!(
+                    build_args(&with(bad)),
+                    Err(ArgsError::NumberOutOfRange(field)),
+                    "{field} = {bad}"
+                );
+            }
+            assert!(build_args(&with(0.5)).is_ok(), "{field}");
         }
     }
 }

@@ -4,7 +4,8 @@
 //! [`run_job`] writes the prompt files, starts one `sd-cli` through the spawn helper (its own
 //! process tree, a scrubbed environment, the engine's folder as working directory), reads its
 //! progress from both pipes and gives back the files it wrote. Stop kills the whole tree;
-//! running out of memory is tried once more with memory saving; a run that shows no progress
+//! running out of memory is tried once more with the weights offloaded (and the decoder
+//! tiled, where the recipe allows it); a run that shows no progress
 //! for [`RunLimits::stall_after`] is reported, never killed; every way a run ends without its
 //! files removes the run's folder. [`list_devices`] asks the engine for its devices.
 
@@ -18,7 +19,7 @@ use tokio::sync::mpsc;
 use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 
-use super::args::{PartRole, SdJob, build_args, prompt_files};
+use super::args::{PartRole, SdJob, build_args, prompt_file_text, prompt_files};
 use super::devices::{SdDevice, parse_list_devices};
 use super::engine::Engine;
 use super::failure::{SdFailure, classify};
@@ -76,7 +77,7 @@ pub enum RunEvent {
     /// Stop and Keep waiting. Sent once for each silence: the next progress re-arms it.
     Stalled,
     /// The engine failed with this ([`SdFailure::OutOfMemory`]) and starts once more with
-    /// memory saving.
+    /// the weights offloaded (and the decoder tiled, where the recipe allows it).
     Retrying(SdFailure),
 }
 
@@ -86,23 +87,24 @@ pub struct RunOutput {
     /// The files the engine wrote in the job's `out_dir`: the picture or the clip, or a
     /// batch's pictures in order.
     pub files: Vec<PathBuf>,
-    /// The first start ran out of memory, and the files come from the second, with memory
-    /// saving.
+    /// The first start ran out of memory, and the files come from the second, with the
+    /// weights offloaded.
     pub retried: bool,
     /// Milliseconds from the call to the end, a retry included.
     pub elapsed_ms: u64,
 }
 
-/// One `sd-cli` for `job` (and one more with memory saving after a first out-of-memory
-/// failure), after writing the prompt files.
+/// One `sd-cli` for `job` (and one more with the weights offloaded after a first
+/// out-of-memory failure), after writing the prompt files.
 ///
 /// Cancel kills the tree and waits for it; Cancel and every final failure remove
 /// `job.out_dir` (the prompt files with it). After a success the folder holds the prompt files
 /// and the outputs, and the caller removes it once it has moved the outputs.
 ///
 /// - The files of [`prompt_files`] are written into `job.out_dir` (created), and no other:
-///   the prompt and the negative prompt as given, UTF-8 with no newline added. A blank
-///   negative prompt has no file, as [`build_args`] passes none.
+///   [`prompt_file_text`] (the prompt without its typed LoRA tags, then the attached LoRAs'
+///   tags) and the negative prompt as given, UTF-8 with no newline added. A blank negative
+///   prompt has no file, as [`build_args`] passes none.
 /// - The engine starts in `engine.dir` with `engine.leading_args` then [`build_args`]. Its
 ///   environment is the platform allowlist with `GGML_NO_BACKTRACE=1`; `PATH` then ends
 ///   with [`Engine::vulkan_fallback`] when the engine has one (llama.cpp's bundled Vulkan
@@ -114,9 +116,10 @@ pub struct RunOutput {
 /// - Exit 0 gives the files in `job.out_dir` named as `sd-cli` names them: `<out_stem>.<ext>`
 ///   for one picture or a clip, `<out_stem>_<n>.<ext>` for a batch, in the order of `n`. An
 ///   exit 0 without such a file is a failure named from the output.
-/// - [`SdFailure::OutOfMemory`] on a job without `memory_saving`: [`RunEvent::Retrying`],
+/// - [`SdFailure::OutOfMemory`] on a job without `offload_to_cpu`: [`RunEvent::Retrying`],
 ///   the files the engine left removed (the prompt files stay) and the same job once more
-///   with `memory_saving`. The second start's failure is final.
+///   with `offload_to_cpu`, and `vae_tiling` as `tiling_allowed` says (the recipes that
+///   disable tiling are never tiled). The second start's failure is final.
 /// - [`SdFailure::EngineMissing`] when the program or its folder is not there,
 ///   [`SdFailure::EngineBlocked`] when the system refuses to start it, [`SdFailure::Io`]
 ///   when the run's folder cannot be written, or when [`build_args`] refuses the job (the
@@ -216,13 +219,14 @@ impl Run<'_> {
         }
         write_prompt_files(job).await?;
         match self.start(job, args).await {
-            Err(SdFailure::OutOfMemory) if !job.memory_saving => {}
+            Err(SdFailure::OutOfMemory) if !job.offload_to_cpu => {}
             other => return other.map(|files| (files, false)),
         }
         (self.on_event)(RunEvent::Retrying(SdFailure::OutOfMemory));
         remove_outputs(job).await;
         let saving = SdJob {
-            memory_saving: true,
+            offload_to_cpu: true,
+            vae_tiling: job.tiling_allowed,
             ..job.clone()
         };
         let args = build_args(&saving).map_err(refused)?;
@@ -418,14 +422,15 @@ async fn stop(child: &mut ManagedChild) {
 }
 
 /// Writes the prompt files into the run's folder, creating it: exactly the files of
-/// [`prompt_files`], the paths [`build_args`] passes, so a blank negative prompt has none.
+/// [`prompt_files`], the paths [`build_args`] passes, so a blank negative prompt has none. The
+/// prompt's file holds [`prompt_file_text`], UTF-8 with no newline added.
 async fn write_prompt_files(job: &SdJob) -> Result<(), SdFailure> {
     let failed = |error: io::Error| SdFailure::Io(format!("writing the run's folder: {error}"));
     tokio::fs::create_dir_all(&job.out_dir)
         .await
         .map_err(failed)?;
     let (prompt, negative) = prompt_files(job);
-    tokio::fs::write(&prompt, job.prompt.as_bytes())
+    tokio::fs::write(&prompt, prompt_file_text(job).as_bytes())
         .await
         .map_err(failed)?;
     if let (Some(path), Some(text)) = (negative, job.negative.as_deref()) {
@@ -542,7 +547,7 @@ mod tests {
     use std::ffi::OsString;
 
     use super::*;
-    use crate::sd::args::OutputFormat;
+    use crate::sd::args::{LoraTag, OutputFormat};
     use crate::sd::engine::EngineSource;
 
     fn engine(dir: &Path) -> Engine {
@@ -564,19 +569,36 @@ mod tests {
             negative: None,
             width: 512,
             height: 512,
+            size_multiple: 16,
             steps: 4,
             cfg: 1.0,
+            guidance: None,
+            img_cfg: None,
             flow_shift: None,
+            timestep_shift: None,
             sampler: None,
             scheduler: None,
+            sigmas: Vec::new(),
+            high_noise: None,
+            moe_boundary: None,
+            strength: None,
             seed: 1,
             batch: 1,
             frames: None,
             fps: None,
             init_image: None,
+            end_image: None,
+            mask_image: None,
+            control_image: None,
+            vae_format: None,
+            model_args: None,
+            lora_dir: None,
+            loras: Vec::new(),
             ref_images: Vec::new(),
             backend: None,
-            memory_saving: false,
+            vae_tiling: false,
+            offload_to_cpu: false,
+            tiling_allowed: true,
             processor_only: false,
             threads: None,
             out_dir: out_dir.to_path_buf(),
@@ -749,6 +771,92 @@ mod tests {
         );
         // a blank negative prompt has no file
         assert!(!job.out_dir.join("negative.txt").exists());
+    }
+
+    /// The spans the engine's pattern `<lora:([^:>]+):([^>]+)>` finds in `text`
+    /// (`extract_and_remove_lora`, `examples/common/common.cpp:2356` at the pinned commit),
+    /// applied by hand as `std::regex_search` applies it to the file's bytes: the leftmost
+    /// match, then on from its end. Each is its name and its weight.
+    fn engine_lora_spans(text: &[u8]) -> Vec<(String, String)> {
+        let open = b"<lora:";
+        let mut spans = Vec::new();
+        let mut at = 0;
+        while at < text.len() {
+            if !text[at..].starts_with(open) {
+                at += 1;
+                continue;
+            }
+            let name_start = at + open.len();
+            let name_end = (name_start..text.len())
+                .find(|&i| text[i] == b':' || text[i] == b'>')
+                .filter(|&i| i > name_start && text[i] == b':');
+            let Some(name_end) = name_end else {
+                at += 1;
+                continue;
+            };
+            let weight_start = name_end + 1;
+            let weight_end = (weight_start..text.len())
+                .find(|&i| text[i] == b'>')
+                .filter(|&i| i > weight_start);
+            let Some(weight_end) = weight_end else {
+                at += 1;
+                continue;
+            };
+            let utf8 = |bytes: &[u8]| String::from_utf8(bytes.to_vec()).expect("UTF-8");
+            spans.push((
+                utf8(&text[name_start..name_end]),
+                utf8(&text[weight_start..weight_end]),
+            ));
+            at = weight_end + 1;
+        }
+        spans
+    }
+
+    #[tokio::test]
+    async fn lora_tags_reach_the_prompt_file_with_unicode_names() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut j = SdJob {
+            prompt: "a red fox".into(),
+            ..job(dir.path())
+        };
+        j.lora_dir = Some(dir.path().join("@loras"));
+        j.loras = vec![
+            LoraTag {
+                name: "local/pixel art ü".into(),
+                weight: 0.8,
+                high_noise: false,
+            },
+            LoraTag {
+                name: "o/r/日本語 スタイル".into(),
+                weight: 1.0,
+                high_noise: true,
+            },
+        ];
+        write_prompt_files(&j).await.unwrap();
+        let text = std::fs::read(dir.path().join("prompt.txt")).unwrap();
+        assert_eq!(
+            String::from_utf8(text.clone()).unwrap(),
+            "a red fox <lora:local/pixel art ü:0.8> <lora:|high_noise|o/r/日本語 スタイル:1>"
+        );
+        // the engine's pattern <lora:([^:>]+):([^>]+)> (common.cpp:2356) finds both, names intact
+        assert_eq!(
+            engine_lora_spans(&text),
+            [
+                ("local/pixel art ü".into(), "0.8".into()),
+                ("|high_noise|o/r/日本語 スタイル".into(), "1".into())
+            ]
+        );
+        // a tag typed into the prompt, whole or left open, is not among them
+        j.prompt = "a red fox <lora:evil:3> and <lora:open:2".into();
+        write_prompt_files(&j).await.unwrap();
+        let text = std::fs::read(dir.path().join("prompt.txt")).unwrap();
+        assert_eq!(
+            engine_lora_spans(&text)
+                .into_iter()
+                .map(|(name, _)| name)
+                .collect::<Vec<_>>(),
+            ["local/pixel art ü", "|high_noise|o/r/日本語 スタイル"]
+        );
     }
 
     #[tokio::test]

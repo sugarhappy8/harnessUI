@@ -13,7 +13,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
-use runtime::sd::args::{OutputFormat, PartRole, SdJob, build_args};
+use runtime::sd::args::{LoraTag, OutputFormat, PartRole, SdJob, build_args, prompt_file_text};
 use runtime::sd::devices::parse_list_devices;
 use runtime::sd::engine::{Engine, EngineSource};
 use runtime::sd::failure::SdFailure;
@@ -48,7 +48,8 @@ fn main() {
         the_engine_gets_exactly_the_flags_studio_built_and_the_prompt_by_file,
         the_environment_is_scrubbed,
         stop_kills_the_engine_and_its_child_within_a_second_and_removes_the_partial_folder,
-        out_of_memory_retries_once_with_memory_saving,
+        out_of_memory_retries_once_with_tiling_and_offload,
+        the_retry_never_tiles_where_the_recipe_disables_it,
         a_second_out_of_memory_is_named,
         a_failed_run_removes_its_partial_folder,
         a_crash_a_missing_library_and_a_bad_model_are_named,
@@ -130,19 +131,36 @@ fn picture_job(gallery: &Path) -> SdJob {
         negative: None,
         width: 1024,
         height: 1024,
+        size_multiple: 16,
         steps: 4,
         cfg: 1.0,
+        guidance: None,
+        img_cfg: None,
         flow_shift: None,
+        timestep_shift: None,
         sampler: None,
         scheduler: None,
+        sigmas: Vec::new(),
+        high_noise: None,
+        moe_boundary: None,
+        strength: None,
         seed: 81723,
         batch: 1,
         frames: None,
         fps: None,
         init_image: None,
+        end_image: None,
+        mask_image: None,
+        control_image: None,
         ref_images: Vec::new(),
+        vae_format: None,
+        model_args: None,
+        lora_dir: None,
+        loras: Vec::new(),
         backend: None,
-        memory_saving: false,
+        vae_tiling: false,
+        offload_to_cpu: false,
+        tiling_allowed: true,
         processor_only: false,
         threads: None,
         out_dir: gallery.join(".partial").join("r1"),
@@ -366,6 +384,32 @@ fn the_engine_gets_exactly_the_flags_studio_built_and_the_prompt_by_file() {
         ),
         (vec!["prompt.txt".to_owned()], false)
     );
+
+    // a LoRA reaches the engine as its tag in the prompt's file, with the LoRA folder as an
+    // argument; a tag typed into the prompt does not
+    let f = folders();
+    let job = SdJob {
+        prompt: "a red kite <lora:evil:3> over the sea".into(),
+        lora_dir: Some(f.gallery.join("@loras")),
+        loras: vec![LoraTag {
+            name: "local/pixel art ü".into(),
+            weight: 0.8,
+            high_noise: false,
+        }],
+        ..picture_job(&f.gallery)
+    };
+    run(&fake("ok", &f.rec), &job, RunLimits::default())
+        .0
+        .expect("the run succeeds");
+    assert_eq!(
+        recorded_prompt(&f.rec, 0),
+        "a red kite  over the sea <lora:local/pixel art ü:0.8>"
+    );
+    assert_eq!(recorded_prompt(&f.rec, 0), prompt_file_text(&job));
+    assert_eq!(
+        recorded_argv(&f.rec, 0),
+        strings(build_args(&job).expect("the arguments"))
+    );
 }
 
 fn the_environment_is_scrubbed() {
@@ -480,10 +524,14 @@ fn stop_kills_the_engine_and_its_child_within_a_second_and_removes_the_partial_f
     }
 }
 
-fn out_of_memory_retries_once_with_memory_saving() {
+fn out_of_memory_retries_once_with_tiling_and_offload() {
     let f = folders();
     let job = picture_job(&f.gallery);
     let (result, events) = run(&fake("oom-once", &f.rec), &job, RunLimits::default());
+    assert_eq!(
+        (retries(&events), starts(&f.rec)),
+        (vec![SdFailure::OutOfMemory], 2)
+    );
     let out = result.expect("the second start succeeds");
     assert!(out.retried);
     assert_eq!(out.files, [job.out_dir.join("r1.png")]);
@@ -500,7 +548,8 @@ fn out_of_memory_retries_once_with_memory_saving() {
         second,
         strings(
             build_args(&SdJob {
-                memory_saving: true,
+                vae_tiling: true,
+                offload_to_cpu: true,
                 ..job.clone()
             })
             .expect("the arguments")
@@ -509,7 +558,23 @@ fn out_of_memory_retries_once_with_memory_saving() {
     // the first start's half file was removed before the second; the prompt file stayed
     assert_eq!(recorded_listing(&f.rec, 1), ["prompt.txt"]);
     assert_eq!(recorded_prompt(&f.rec, 1), job.prompt);
-    assert_eq!(retries(&events), [SdFailure::OutOfMemory]);
+}
+
+fn the_retry_never_tiles_where_the_recipe_disables_it() {
+    let f = folders();
+    let job = SdJob {
+        tiling_allowed: false,
+        ..picture_job(&f.gallery)
+    };
+    run(&fake("oom-once", &f.rec), &job, RunLimits::default())
+        .0
+        .expect("the second start succeeds");
+    let second = recorded_argv(&f.rec, 1);
+    assert!(
+        second.contains(&"--offload-to-cpu".to_string())
+            && !second.contains(&"--vae-tiling".to_string()),
+        "{second:?}"
+    );
     assert_eq!(starts(&f.rec), 2);
 }
 
@@ -521,10 +586,10 @@ fn a_second_out_of_memory_is_named() {
     assert_eq!(retries(&events), [SdFailure::OutOfMemory]);
     assert_eq!(starts(&f.rec), 2);
 
-    // a job that already saves memory is not tried again
+    // a job that already offloads its weights is not tried again, tiled or not
     let f = folders();
     let job = SdJob {
-        memory_saving: true,
+        offload_to_cpu: true,
         ..picture_job(&f.gallery)
     };
     let (result, events) = run(&fake("oom", &f.rec), &job, RunLimits::default());

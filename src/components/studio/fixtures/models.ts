@@ -1597,6 +1597,10 @@ export const LOCAL: LocalModels = {
                   "label": "DPM2"
                 },
                 {
+                  "value": "dpm++2s_a",
+                  "label": "DPM++ 2S a"
+                },
+                {
                   "value": "dpm++2m",
                   "label": "DPM++ 2M"
                 },
@@ -1605,8 +1609,60 @@ export const LOCAL: LocalModels = {
                   "label": "DPM++ 2M v2"
                 },
                 {
+                  "value": "ipndm",
+                  "label": "iPNDM"
+                },
+                {
+                  "value": "ipndm_v",
+                  "label": "iPNDM v"
+                },
+                {
                   "value": "lcm",
                   "label": "LCM"
+                },
+                {
+                  "value": "ddim_trailing",
+                  "label": "DDIM trailing"
+                },
+                {
+                  "value": "tcd",
+                  "label": "TCD"
+                },
+                {
+                  "value": "res_multistep",
+                  "label": "RES multistep"
+                },
+                {
+                  "value": "res_2s",
+                  "label": "RES 2S"
+                },
+                {
+                  "value": "er_sde",
+                  "label": "ER-SDE"
+                },
+                {
+                  "value": "euler_cfg_pp",
+                  "label": "Euler CFG++"
+                },
+                {
+                  "value": "euler_a_cfg_pp",
+                  "label": "Euler a CFG++"
+                },
+                {
+                  "value": "euler_ge",
+                  "label": "Euler GE"
+                },
+                {
+                  "value": "dpm++2m_sde",
+                  "label": "DPM++ 2M SDE"
+                },
+                {
+                  "value": "dpm++2m_sde_bt",
+                  "label": "DPM++ 2M SDE BT"
+                },
+                {
+                  "value": "lms",
+                  "label": "LMS"
                 }
               ]
             },
@@ -1637,8 +1693,60 @@ export const LOCAL: LocalModels = {
                   "label": "Exponential"
                 },
                 {
+                  "value": "ays",
+                  "label": "AYS"
+                },
+                {
+                  "value": "gits",
+                  "label": "GITS"
+                },
+                {
+                  "value": "sgm_uniform",
+                  "label": "SGM uniform"
+                },
+                {
                   "value": "simple",
                   "label": "Simple"
+                },
+                {
+                  "value": "smoothstep",
+                  "label": "Smoothstep"
+                },
+                {
+                  "value": "kl_optimal",
+                  "label": "KL optimal"
+                },
+                {
+                  "value": "lcm",
+                  "label": "LCM"
+                },
+                {
+                  "value": "bong_tangent",
+                  "label": "Bong tangent"
+                },
+                {
+                  "value": "ltx2",
+                  "label": "LTX-2"
+                },
+                {
+                  "value": "logit_normal",
+                  "label": "Logit normal"
+                },
+                {
+                  "value": "flux2",
+                  "label": "FLUX.2"
+                },
+                {
+                  "value": "flux",
+                  "label": "FLUX"
+                },
+                {
+                  "value": "beta",
+                  "label": "Beta"
+                },
+                {
+                  "value": "llada_image",
+                  "label": "LLaDA-Image"
                 }
               ]
             },
@@ -1928,6 +2036,10 @@ export const LOCAL: LocalModels = {
                   "label": "DPM2"
                 },
                 {
+                  "value": "dpm++2s_a",
+                  "label": "DPM++ 2S a"
+                },
+                {
                   "value": "dpm++2m",
                   "label": "DPM++ 2M"
                 },
@@ -1936,8 +2048,60 @@ export const LOCAL: LocalModels = {
                   "label": "DPM++ 2M v2"
                 },
                 {
+                  "value": "ipndm",
+                  "label": "iPNDM"
+                },
+                {
+                  "value": "ipndm_v",
+                  "label": "iPNDM v"
+                },
+                {
                   "value": "lcm",
                   "label": "LCM"
+                },
+                {
+                  "value": "ddim_trailing",
+                  "label": "DDIM trailing"
+                },
+                {
+                  "value": "tcd",
+                  "label": "TCD"
+                },
+                {
+                  "value": "res_multistep",
+                  "label": "RES multistep"
+                },
+                {
+                  "value": "res_2s",
+                  "label": "RES 2S"
+                },
+                {
+                  "value": "er_sde",
+                  "label": "ER-SDE"
+                },
+                {
+                  "value": "euler_cfg_pp",
+                  "label": "Euler CFG++"
+                },
+                {
+                  "value": "euler_a_cfg_pp",
+                  "label": "Euler a CFG++"
+                },
+                {
+                  "value": "euler_ge",
+                  "label": "Euler GE"
+                },
+                {
+                  "value": "dpm++2m_sde",
+                  "label": "DPM++ 2M SDE"
+                },
+                {
+                  "value": "dpm++2m_sde_bt",
+                  "label": "DPM++ 2M SDE BT"
+                },
+                {
+                  "value": "lms",
+                  "label": "LMS"
                 }
               ]
             },
@@ -1968,8 +2132,60 @@ export const LOCAL: LocalModels = {
                   "label": "Exponential"
                 },
                 {
+                  "value": "ays",
+                  "label": "AYS"
+                },
+                {
+                  "value": "gits",
+                  "label": "GITS"
+                },
+                {
+                  "value": "sgm_uniform",
+                  "label": "SGM uniform"
+                },
+                {
                   "value": "simple",
                   "label": "Simple"
+                },
+                {
+                  "value": "smoothstep",
+                  "label": "Smoothstep"
+                },
+                {
+                  "value": "kl_optimal",
+                  "label": "KL optimal"
+                },
+                {
+                  "value": "lcm",
+                  "label": "LCM"
+                },
+                {
+                  "value": "bong_tangent",
+                  "label": "Bong tangent"
+                },
+                {
+                  "value": "ltx2",
+                  "label": "LTX-2"
+                },
+                {
+                  "value": "logit_normal",
+                  "label": "Logit normal"
+                },
+                {
+                  "value": "flux2",
+                  "label": "FLUX.2"
+                },
+                {
+                  "value": "flux",
+                  "label": "FLUX"
+                },
+                {
+                  "value": "beta",
+                  "label": "Beta"
+                },
+                {
+                  "value": "llada_image",
+                  "label": "LLaDA-Image"
                 }
               ]
             },

@@ -106,6 +106,9 @@ const GEN_LORA_COLUMNS: &str = "id, name, file, rel_name, repo, revision, path, 
      sha256, base_hint, format, source, added_at";
 
 /// Characters the engine's `<lora:NAME:W>` tag cannot carry in a name (correction 14).
+/// `runtime::sd::args::valid_lora_name` is the authority on LoRA names (it also refuses `\`,
+/// control characters, an absolute name and `.` or `..` parts) and checks every name again
+/// before a run; keep these four in step with it.
 const NOT_IN_A_NAME: [char; 4] = [':', '<', '>', '|'];
 
 fn gen_lora_from_row(r: &Row<'_>) -> rusqlite::Result<GenLora> {

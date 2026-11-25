@@ -23,11 +23,16 @@ FIXTURES = Path(__file__).resolve().parent.parent.parent / "crates" / "runtime" 
 
 # Every flag Studio can send (runtime::sd::args::FLAGS), and the four that take no value.
 FLAGS = {
-    "--diffusion-model", "--high-noise-diffusion-model", "--llm", "--t5xxl", "--clip_l",
-    "--clip_vision", "--vae", "-m", "-M", "--prompt-file", "--negative-prompt-file", "-W", "-H",
-    "--steps", "--cfg-scale", "--flow-shift", "--sampling-method", "--scheduler", "--seed",
-    "--batch-count", "--video-frames", "--fps", "-i", "-r", "--backend", "--threads",
-    "--vae-tiling", "--offload-to-cpu", "-o", "--disable-image-metadata", "--log-level",
+    "--diffusion-model", "--high-noise-diffusion-model", "--uncond-diffusion-model", "--llm",
+    "--llm_vision", "--t5xxl", "--clip_l", "--clip_g", "--clip_vision", "--tokenizer", "--vae",
+    "--tae", "--audio-vae", "--audio-encoder", "--embeddings-connectors", "-m", "-M",
+    "--prompt-file", "--negative-prompt-file", "-W", "-H", "--steps", "--cfg-scale", "--guidance",
+    "--img-cfg-scale", "--flow-shift", "--timestep-shift", "--sampling-method", "--scheduler",
+    "--sigmas", "--high-noise-steps", "--high-noise-cfg-scale", "--high-noise-sampling-method",
+    "--moe-boundary", "--strength", "--seed", "--batch-count", "--video-frames", "--fps", "-i",
+    "--end-img", "--mask", "--control-image", "-r", "--vae-format", "--model-args",
+    "--lora-model-dir", "--backend", "--threads", "--vae-tiling", "--offload-to-cpu", "-o",
+    "--disable-image-metadata", "--log-level",
 }
 SWITCHES = {"--vae-tiling", "--offload-to-cpu", "--disable-image-metadata", "--list-devices"}
 

@@ -830,9 +830,13 @@ impl LocalMediaProvider {
             negative,
             width,
             height,
+            size_multiple: entry.limits.multiple_of,
             steps: shape.steps,
             cfg: number_param(req, key::GUIDANCE)?.map_or(entry.defaults.cfg, |x| x as f32),
+            guidance: None,
+            img_cfg: None,
             flow_shift: entry.defaults.flow_shift,
+            timestep_shift: None,
             sampler: word_param(req, key::SAMPLER, Sampler::from_cli)?.or_else(|| {
                 entry
                     .defaults
@@ -847,6 +851,10 @@ impl LocalMediaProvider {
                     .as_deref()
                     .and_then(Scheduler::from_cli)
             }),
+            sigmas: Vec::new(),
+            high_noise: None,
+            moe_boundary: None,
+            strength: None,
             seed,
             batch: shape.pictures,
             frames,
@@ -854,13 +862,23 @@ impl LocalMediaProvider {
             init_image: takes(GenInput::StartFrame)
                 .then(|| added(RefRole::StartFrame).next())
                 .flatten(),
+            end_image: None,
+            mask_image: None,
+            control_image: None,
             ref_images: if takes(GenInput::Reference) {
                 added(RefRole::Reference).collect()
             } else {
                 Vec::new()
             },
+            vae_format: None,
+            model_args: None,
+            lora_dir: None,
+            loras: Vec::new(),
             backend,
-            memory_saving: opts.memory_saving,
+            // 0.1.x's memory saving, both halves; Task S11 splits them.
+            vae_tiling: opts.memory_saving,
+            offload_to_cpu: opts.memory_saving,
+            tiling_allowed: true,
             processor_only: opts.processor_only,
             threads: opts.threads.filter(|_| opts.processor_only),
             out_dir: out_dir.to_path_buf(),
@@ -1656,9 +1674,23 @@ fn sampler_label(sampler: Sampler) -> &'static str {
         Sampler::EulerA => "Euler a",
         Sampler::Heun => "Heun",
         Sampler::Dpm2 => "DPM2",
+        Sampler::DpmPp2sA => "DPM++ 2S a",
         Sampler::DpmPp2m => "DPM++ 2M",
         Sampler::DpmPp2mV2 => "DPM++ 2M v2",
+        Sampler::Ipndm => "iPNDM",
+        Sampler::IpndmV => "iPNDM v",
         Sampler::Lcm => "LCM",
+        Sampler::DdimTrailing => "DDIM trailing",
+        Sampler::Tcd => "TCD",
+        Sampler::ResMultistep => "RES multistep",
+        Sampler::Res2s => "RES 2S",
+        Sampler::ErSde => "ER-SDE",
+        Sampler::EulerCfgPp => "Euler CFG++",
+        Sampler::EulerACfgPp => "Euler a CFG++",
+        Sampler::EulerGe => "Euler GE",
+        Sampler::DpmPp2mSde => "DPM++ 2M SDE",
+        Sampler::DpmPp2mSdeBt => "DPM++ 2M SDE BT",
+        Sampler::Lms => "LMS",
     }
 }
 
@@ -1667,7 +1699,20 @@ fn scheduler_label(scheduler: Scheduler) -> &'static str {
         Scheduler::Discrete => "Discrete",
         Scheduler::Karras => "Karras",
         Scheduler::Exponential => "Exponential",
+        Scheduler::Ays => "AYS",
+        Scheduler::Gits => "GITS",
+        Scheduler::SgmUniform => "SGM uniform",
         Scheduler::Simple => "Simple",
+        Scheduler::Smoothstep => "Smoothstep",
+        Scheduler::KlOptimal => "KL optimal",
+        Scheduler::Lcm => "LCM",
+        Scheduler::BongTangent => "Bong tangent",
+        Scheduler::Ltx2 => "LTX-2",
+        Scheduler::LogitNormal => "Logit normal",
+        Scheduler::Flux2 => "FLUX.2",
+        Scheduler::Flux => "FLUX",
+        Scheduler::Beta => "Beta",
+        Scheduler::LladaImage => "LLaDA-Image",
     }
 }
 
@@ -2247,6 +2292,18 @@ pub(crate) mod tests {
             offered("memory_saving"),
             ["automatic", "off", "on"].map(Value::from)
         );
+        // the pinned engine's full lists (design 7.6), each word with a plain label
+        let (samplers, schedulers) = (offered("sampler"), offered("scheduler"));
+        assert_eq!((samplers.len(), schedulers.len()), (21, 17));
+        assert_eq!(samplers[0], "euler");
+        assert!(schedulers.contains(&json!("ltx2")));
+        assert!(
+            params
+                .iter()
+                .filter(|p| p.key == "sampler" || p.key == "scheduler")
+                .all(|p| matches!(&p.kind, ParamKind::Enum { values }
+                    if values.iter().all(|c| c.value != c.label)))
+        );
         assert_eq!(
             offered("run_on"),
             ["graphicsCard", "processor"].map(Value::from)
@@ -2326,7 +2383,7 @@ pub(crate) mod tests {
             ("dpm++2m", "karras")
         );
         // The memory and processor fields are the lane's to resolve: the job follows `opts`.
-        assert!(!job.memory_saving && !job.processor_only);
+        assert!(!job.vae_tiling && !job.offload_to_cpu && !job.processor_only);
         // An exact size wins over the shape.
         let r = picture(json!({"aspect_ratio": "16:9", "size": "768x512"}));
         assert_eq!(validate(&model, &r), Ok(()));
@@ -2456,6 +2513,76 @@ pub(crate) mod tests {
             (after(&argv, "--backend"), after(&argv, "--threads")),
             ("cpu", "5")
         );
+    }
+
+    /// A klein picture installed with 0.1.x, as 0.1.2's `job_for` and `build_args` gave it:
+    /// recorded from the unchanged 0.1.2 code before Task S2 (preflight P4, Review Focus 5).
+    /// The part files are fixed (`/m/<file>`) and the run's folder is `/g/.partial/r1`, so the
+    /// vector is the same on every computer; a Windows separator reads as `/`.
+    const KLEIN_0_1_2_ARGS: &[&str] = &[
+        "--diffusion-model",
+        "/m/flux-2-klein-4b-Q4_0.gguf",
+        "--llm",
+        "/m/Qwen3-4B-Q4_K_M.gguf",
+        "--vae",
+        "/m/flux2-vae.safetensors",
+        "--prompt-file",
+        "/g/.partial/r1/prompt.txt",
+        "-W",
+        "1024",
+        "-H",
+        "1024",
+        "--steps",
+        "4",
+        "--cfg-scale",
+        "1",
+        "--sampling-method",
+        "euler",
+        "--seed",
+        "7",
+        "--batch-count",
+        "1",
+        "--backend",
+        "Vulkan0",
+        "-o",
+        "/g/.partial/r1/r1.png",
+        "--disable-image-metadata",
+        "--log-level",
+        "info",
+    ];
+
+    #[test]
+    fn an_01x_klein_picture_keeps_its_0_1_2_arguments() {
+        // the klein catalog entry, 1024×1024, 4 steps, seed 7; a green fit, so 0.1.2's options
+        // have memory_saving: false; Vulkan0
+        let dir = Scratch::new();
+        let (provider, klein, mut row) = offline(&dir, KLEIN);
+        for part in row.parts.as_array_mut().unwrap() {
+            let name = part["path"].as_str().unwrap().rsplit('/').next().unwrap();
+            part["file"] = json!(format!("/m/{name}"));
+        }
+        let opts = LocalJobOptions {
+            processor_only: false,
+            memory_saving: false,
+            threads: None,
+            device_description: None,
+        };
+        let job = provider
+            .job_for(
+                &klein,
+                &row,
+                &picture(json!({"seed": 7})),
+                &opts,
+                Some("Vulkan0".into()),
+                Path::new("/g/.partial/r1"),
+                "r1",
+            )
+            .unwrap();
+        let args: Vec<String> = strings(build_args(&job).unwrap())
+            .into_iter()
+            .map(|arg| arg.replace('\\', "/"))
+            .collect();
+        assert_eq!(args, KLEIN_0_1_2_ARGS);
     }
 
     #[test]
