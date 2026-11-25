@@ -837,10 +837,14 @@ fn installed_files(installed: &InstalledFiles) -> Vec<InstalledFile> {
 }
 
 /// What `overrides` give each slot: a Hub file (of the main repo `main`, else of its own
-/// repo at its commit, whose listing is read once into `others`, else a companion's row); a
-/// file an installed model uses; a file on this computer ([`checked_disk_file`]); or none. A
-/// Hub file whose listing was read without it is `not_found`; one whose listing could not
-/// be read and that no companion row names cannot be pinned, so its slot stays empty.
+/// repo at its commit, whose listing is read once into `others`); a file an installed model
+/// uses; a file on this computer ([`checked_disk_file`]); or none (`SlotChoice::Empty`, the
+/// only choice the planner leaves out). A Hub file is always pinned by its SHA-256, never
+/// handed over without one:
+/// - its listing read, the file is the listing's: `not_found` when it is not listed,
+///   `studio_no_checksum` when it has no published SHA-256;
+/// - its listing not read, a companion row with that repo, revision and path pins it; with
+///   none, the read's own error (a temporary failure is never taken for a choice).
 async fn slot_choices(
     deps: &PlanDeps<'_>,
     main: Option<&RepoDetail>,
@@ -848,54 +852,66 @@ async fn slot_choices(
     others: &mut OtherRepos,
 ) -> AppResult<Vec<(SlotId, SlotChoice)>> {
     let mut choices = Vec::with_capacity(overrides.len());
+    // Why each listing in `others` that is `None` was not read.
+    let mut failed: BTreeMap<(String, String), AppError> = BTreeMap::new();
     for o in overrides {
         let choice = match &o.file {
             SlotFile::Hub { repo, commit, path } => {
-                let listing = match main.filter(|d| d.id == *repo && d.commit == *commit) {
-                    Some(detail) => Some(detail),
-                    None => {
-                        let key = (repo.clone(), commit.clone());
-                        if !others.contains_key(&key) {
-                            let read = match deps.hf {
-                                Some(hf) => hf
-                                    .repo(repo, Some(commit))
-                                    .await
-                                    .inspect_err(|e| {
-                                        tracing::warn!(%repo, "a chosen file's listing was not read: {e}");
-                                    })
-                                    .ok(),
-                                None => None,
-                            };
-                            others.insert(key.clone(), read);
+                let key = (repo.clone(), commit.clone());
+                if main.is_none_or(|d| d.id != *repo || d.commit != *commit)
+                    && !others.contains_key(&key)
+                {
+                    let read = match deps.hf {
+                        Some(hf) => hf
+                            .repo(repo, Some(commit))
+                            .await
+                            .map_err(crate::hub::hf_error),
+                        None => Err(AppError::internal("a chosen Hub file without a Hub client")),
+                    };
+                    match read {
+                        Ok(detail) => {
+                            others.insert(key.clone(), Some(detail));
                         }
-                        others.get(&key).and_then(Option::as_ref)
+                        Err(e) => {
+                            tracing::warn!(%repo, code = %e.code, "a chosen file's listing was not read");
+                            failed.insert(key.clone(), e);
+                            others.insert(key.clone(), None);
+                        }
                     }
-                };
+                }
+                let listing = main
+                    .filter(|d| d.id == *repo && d.commit == *commit)
+                    .or_else(|| others.get(&key).and_then(Option::as_ref));
                 let file = match listing {
-                    Some(detail) => detail
-                        .files
-                        .iter()
-                        .find(|f| f.path == *path)
-                        .cloned()
-                        .ok_or_else(|| AppError::not_found("model file"))?,
-                    None => deps
-                        .catalog
-                        .companions
-                        .files
-                        .iter()
-                        .find(|c| c.repo == *repo && c.revision == *commit && c.path == *path)
-                        .map_or_else(
-                            || RepoFile {
-                                path: path.clone(),
-                                size: 0,
-                                sha256: None,
-                            },
-                            |c| RepoFile {
+                    Some(detail) => {
+                        let file = detail
+                            .files
+                            .iter()
+                            .find(|f| f.path == *path)
+                            .ok_or_else(|| AppError::not_found("model file"))?;
+                        if file.sha256.is_none() {
+                            return Err(errors::no_published_checksum());
+                        }
+                        file.clone()
+                    }
+                    None => {
+                        let pinned =
+                            deps.catalog.companions.files.iter().find(|c| {
+                                c.repo == *repo && c.revision == *commit && c.path == *path
+                            });
+                        match pinned {
+                            Some(c) => RepoFile {
                                 path: c.path.clone(),
                                 size: c.size,
                                 sha256: Some(c.sha256.clone()),
                             },
-                        ),
+                            None => {
+                                return Err(failed.get(&key).cloned().unwrap_or_else(|| {
+                                    AppError::internal("a chosen file's listing was not read")
+                                }));
+                            }
+                        }
+                    }
                 };
                 SlotChoice::Hub {
                     repo: repo.clone(),

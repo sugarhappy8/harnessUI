@@ -1207,6 +1207,17 @@ pub fn cannot_read_file(ext: &str) -> AppError {
     )
 }
 
+/// A file the person chose for a set-up that Hugging Face publishes no SHA-256 for: it cannot
+/// be pinned, so it is never set up.
+pub fn no_published_checksum() -> AppError {
+    AppError::new(
+        "studio_no_checksum",
+        "Hugging Face publishes no checksum for this file, so Studio can't check it.",
+        "Choose another file for this part.",
+        String::new(),
+    )
+}
+
 /// A file from this computer that is not a model file Studio reads.
 pub fn not_a_model_format() -> AppError {
     AppError::new(
@@ -1747,6 +1758,7 @@ mod tests {
             recipe_not_offered(),
             cannot_read_file(".ckpt"),
             not_a_model_format(),
+            no_published_checksum(),
         ];
         all.extend(every_pack_error().iter().map(engine_not_installed));
         for to in [PictureUse::Chat, PictureUse::Prompt] {

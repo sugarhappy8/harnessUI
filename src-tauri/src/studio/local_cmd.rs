@@ -2126,6 +2126,13 @@ mod tests {
                     Some((id, rev)) => (id, Some(rev)),
                     None => (rest, None),
                 };
+                // Hugging Face limiting requests, or failing for a moment.
+                if id.starts_with("busy/") {
+                    return b"HTTP/1.1 429 X\r\nretry-after: 30\r\nconnection: close\r\ncontent-length: 0\r\n\r\n".to_vec();
+                }
+                if id.starts_with("down/") {
+                    return b"HTTP/1.1 503 X\r\nconnection: close\r\ncontent-length: 0\r\n\r\n".to_vec();
+                }
                 return match repos
                     .iter()
                     .find(|r| r.id == id && revision.is_none_or(|rev| rev == r.commit))
@@ -2560,6 +2567,113 @@ mod tests {
             setup_plan(&deps, &source, &missing).await.unwrap_err().code,
             "not_found"
         );
+    }
+
+    fn sdxl_repo() -> TestRepo {
+        TestRepo::new("stabilityai/stable-diffusion-xl-base-1.0")
+            .tagged("text-to-image")
+            .file("sd_xl_base_1.0.safetensors", 6_938_078_334.0, Some("sdxl"))
+    }
+
+    /// Review fix 1: a file the person chose from another repo is pinned by its SHA-256 or
+    /// refused, never dropped. A listing that could not be read (Hugging Face limiting
+    /// requests, failing for a moment, a repo not found) gives its own error, and a listed
+    /// file with no published checksum is refused: for a required slot (Kontext's decoder)
+    /// and for an optional one (an SDXL checkpoint's own decoder, which the plan would else
+    /// lose). Leaving a slot empty on purpose is still the person's choice.
+    #[tokio::test]
+    async fn a_chosen_file_that_cannot_be_pinned_is_refused_not_dropped() {
+        let scratch = Scratch::new();
+        let other_commit = "1".repeat(40);
+        let vae_repo = TestRepo::new("someone/my-vae")
+            .at(&other_commit)
+            .file("my_ae.safetensors", 335_000_000.0, None)
+            .plain("no_lfs_ae.safetensors");
+        let hub = hub(vec![flux_kontext_repo(&["Q4_K_M"]), sdxl_repo(), vae_repo]).await;
+        let deps = repo_deps(&hub, gpu(16, 32), &scratch);
+        let vae = |file: SlotFile| SetupChoice {
+            recipe: None,
+            overrides: vec![SlotOverride {
+                role: GenRole::Vae,
+                file,
+            }],
+        };
+        let hub_file = |repo: &str, path: &str| {
+            vae(SlotFile::Hub {
+                repo: repo.into(),
+                commit: other_commit.clone(),
+                path: path.into(),
+            })
+        };
+        let sdxl = search_source(
+            "stabilityai/stable-diffusion-xl-base-1.0",
+            "sd_xl_base_1.0.safetensors",
+        );
+        let kontext = search_source(KONTEXT, "flux1-kontext-dev-Q4_K_M.gguf");
+        let vae_slot = |p: &SetupPlanDto| {
+            p.slots
+                .iter()
+                .find(|s| s.role == GenRole::Vae)
+                .map(|s| (s.source, s.required))
+        };
+        // With nothing chosen, the checkpoint's own decoder fills the optional slot.
+        let plain = setup_plan(&deps, &sdxl, &SetupChoice::default())
+            .await
+            .unwrap();
+        assert_eq!(vae_slot(&plain), Some((PartSource::Embedded, false)));
+
+        for source in [&sdxl, &kontext] {
+            for (repo, code) in [
+                ("busy/vae", "hf_rate_limited"),
+                ("down/vae", "hf_error"),
+                ("someone/gone", "hf_not_found"),
+            ] {
+                let e = setup_plan(&deps, source, &hub_file(repo, "ae.safetensors"))
+                    .await
+                    .unwrap_err();
+                assert_eq!(e.code, code, "{repo}");
+            }
+            let e = setup_plan(
+                &deps,
+                source,
+                &hub_file("someone/my-vae", "no_lfs_ae.safetensors"),
+            )
+            .await
+            .unwrap_err();
+            assert_eq!(
+                (e.code.as_str(), e.message.as_str(), e.next_step.as_str()),
+                (
+                    "studio_no_checksum",
+                    "Hugging Face publishes no checksum for this file, so Studio can't check it.",
+                    "Choose another file for this part."
+                )
+            );
+            // A pinned file is the person's choice.
+            let chosen = setup_plan(
+                &deps,
+                source,
+                &hub_file("someone/my-vae", "my_ae.safetensors"),
+            )
+            .await
+            .unwrap();
+            assert_eq!(
+                vae_slot(&chosen).map(|(source, _)| source),
+                Some(PartSource::Chosen)
+            );
+            assert!(chosen.can_download);
+        }
+
+        // "None" on purpose: an optional slot goes, a required one is missing.
+        let cleared = setup_plan(&deps, &sdxl, &vae(SlotFile::None))
+            .await
+            .unwrap();
+        assert_eq!(vae_slot(&cleared), None);
+        assert!(cleared.can_download);
+        let missing = setup_plan(&deps, &kontext, &vae(SlotFile::None))
+            .await
+            .unwrap();
+        assert_eq!(vae_slot(&missing), Some((PartSource::Missing, true)));
+        assert!(!missing.can_download);
     }
 
     #[tokio::test]
