@@ -101,6 +101,9 @@ pub(crate) struct ConnShared {
 struct Calls {
     in_flight: usize,
     progress: Option<ProgressFn>,
+    /// The progress value of the last line shown for the call in flight, so a line that
+    /// arrives late never steps the tool card backwards.
+    last_shown: Option<f64>,
 }
 
 impl ConnShared {
@@ -123,12 +126,31 @@ impl ConnShared {
         let mut calls = self.calls();
         calls.in_flight += 1;
         calls.progress = if calls.in_flight == 1 { progress } else { None };
+        calls.last_shown = None;
         CallGuard { shared: self }
     }
 
     /// Where progress goes now, if anywhere.
+    #[cfg(test)]
     fn progress(&self) -> Option<ProgressFn> {
         self.calls().progress.clone()
+    }
+
+    /// Shows `line`, the server's report of `progress`, for the call in flight, unless an
+    /// earlier line of this call showed more. The SDK hands each notification to its own
+    /// task, so they can arrive out of order; the tool card never steps backwards. The
+    /// check and the callback run under the lock, so two late lines cannot pass each other
+    /// either.
+    fn show_progress(&self, progress: f64, line: String) {
+        let mut calls = self.calls();
+        let Some(show) = calls.progress.clone() else {
+            return;
+        };
+        if calls.last_shown.is_some_and(|last| progress < last) {
+            return;
+        }
+        calls.last_shown = Some(progress);
+        show(line);
     }
 }
 
@@ -169,19 +191,17 @@ impl ClientHandler for HostClient {
         params: ProgressNotificationParam,
         _context: NotificationContext<RoleClient>,
     ) {
-        if let Some(progress) = self.shared.progress() {
-            let amount = match params.total {
-                Some(total) if total > 0.0 => format!("{:.0}%", params.progress / total * 100.0),
-                _ => format!("{}", params.progress),
-            };
-            let line = match params.message {
-                Some(message) => {
-                    format!("{} ({amount})", policy::sanitize::one_line(&message, 200))
-                }
-                None => amount,
-            };
-            progress(line);
-        }
+        let amount = match params.total {
+            Some(total) if total > 0.0 => format!("{:.0}%", params.progress / total * 100.0),
+            _ => format!("{}", params.progress),
+        };
+        let line = match params.message {
+            Some(message) => {
+                format!("{} ({amount})", policy::sanitize::one_line(&message, 200))
+            }
+            None => amount,
+        };
+        self.shared.show_progress(params.progress, line);
     }
 
     async fn on_logging_message(
@@ -811,5 +831,27 @@ mod tests {
         // A later call on its own gets progress again.
         let _three = shared.begin_call(Some(progress));
         assert!(shared.progress().is_some());
+    }
+
+    #[test]
+    fn progress_that_arrives_late_never_steps_back() {
+        let shared = ConnShared::new(Arc::new(StderrLog::new("s", None)));
+        let seen = Arc::new(Mutex::new(Vec::<String>::new()));
+        let sink = seen.clone();
+        let progress: ProgressFn = Arc::new(move |line| sink.lock().unwrap().push(line));
+        {
+            let _call = shared.begin_call(Some(progress.clone()));
+            for step in [2.0, 1.0, 3.0] {
+                shared.show_progress(step, format!("step {step}"));
+            }
+        }
+        assert_eq!(*seen.lock().unwrap(), ["step 2", "step 3"]);
+        // The next call starts from nothing: its first step is shown.
+        let _call = shared.begin_call(Some(progress));
+        shared.show_progress(1.0, "next call, step 1".into());
+        assert_eq!(
+            seen.lock().unwrap().last().map(String::as_str),
+            Some("next call, step 1")
+        );
     }
 }
