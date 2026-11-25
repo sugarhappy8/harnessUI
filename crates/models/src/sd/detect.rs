@@ -120,6 +120,11 @@ impl SdVersion {
         self.unet_group().is_some()
     }
 
+    /// `sd_version_is_sdxl` (`src/model.h:116-121`).
+    pub fn is_sdxl(self) -> bool {
+        self.unet_group() == Some(SdVersion::Sdxl)
+    }
+
     /// `sd_version_is_flux` (`src/model.h:139-150`).
     pub fn is_flux(self) -> bool {
         use SdVersion::*;

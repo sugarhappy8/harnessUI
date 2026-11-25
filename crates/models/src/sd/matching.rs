@@ -484,7 +484,7 @@ fn without_extension(text: &str) -> &str {
 }
 
 /// `text` without its extension, lower case, with `_` and ` ` read as `-`.
-fn normalise(text: &str) -> String {
+pub(crate) fn normalise(text: &str) -> String {
     without_extension(text)
         .to_lowercase()
         .replace(['_', ' '], "-")

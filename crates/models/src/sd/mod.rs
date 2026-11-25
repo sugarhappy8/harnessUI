@@ -12,8 +12,10 @@ pub mod index;
 pub mod inspect;
 pub mod lora;
 pub mod matching;
+pub mod names;
 pub mod recipes;
 pub mod remote;
+pub mod setup;
 #[cfg(any(test, feature = "test-support"))]
 pub mod testing;
 
