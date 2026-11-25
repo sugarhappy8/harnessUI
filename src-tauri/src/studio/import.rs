@@ -189,13 +189,16 @@ pub(crate) enum Added {
 /// 3. the file is hashed as it is read (used where it is: inside the models folder always) or
 ///    copied into the models folder ([`copy_in`]), with progress to `progress`;
 /// 4. planned again where it now is, with its SHA-256, as `local:<SHA-256, 16 characters>`:
-///    added at once when every part is here, else one download group of what it fetches.
+///    added at once when every part is here, else one download group of what it fetches. A
+///    file imported again replaces its row; the files only the old row used stay while a run
+///    on this computer holds the model (`in_use`: `downloads::register_present_gen_model`).
 pub(crate) async fn prepare_import(
     deps: &LocalCmdDeps,
     path: &Path,
     mode: ImportMode,
     choice: Option<&SetupChoice>,
     progress: &ProgressSink,
+    in_use: &(dyn Fn(&str) -> bool + Sync),
 ) -> AppResult<PreparedImport> {
     if !deps.notice_accepted {
         return Err(errors::notice_needed());
@@ -269,7 +272,10 @@ pub(crate) async fn prepare_import(
     )?;
     let needs_engine = prepared.needs_engine;
     let added = if prepared.files.is_empty() {
-        Added::Now(register_present_gen_model(&deps.store, &deps.models_dir, &prepared.meta).await?)
+        Added::Now(
+            register_present_gen_model(&deps.store, &deps.models_dir, &prepared.meta, in_use)
+                .await?,
+        )
     } else {
         Added::Download(Box::new(prepared))
     };
@@ -298,7 +304,8 @@ pub async fn import_model(
     let progress: ProgressSink = Arc::new(move |p| {
         let _ = to.emit_to(crate::MAIN_WINDOW, IMPORT_PROGRESS_EVENT, p);
     });
-    let prepared = prepare_import(&deps, path, mode, choice.as_ref(), &progress).await?;
+    let in_use = |id: &str| studio.local_uses_model(id);
+    let prepared = prepare_import(&deps, path, mode, choice.as_ref(), &progress, &in_use).await?;
     let result = match prepared.added {
         Added::Now(id) => ImportResultDto {
             gen_model_id: Some(id),
@@ -583,7 +590,7 @@ mod tests {
         ) -> AppResult<PreparedImport> {
             self.refresh().await;
             let sink = self.sink();
-            prepare_import(&self.deps, path, mode, choice.as_ref(), &sink).await
+            prepare_import(&self.deps, path, mode, choice.as_ref(), &sink, &|_| false).await
         }
 
         /// *Add* on the file at `path`: what `import_model` does, a download group recorded but

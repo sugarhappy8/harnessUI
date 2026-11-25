@@ -127,7 +127,8 @@ pub(crate) async fn plan_source(
 /// header was not read (past the files read for one repo, or a read that failed), are planned
 /// with the recipe the person chose, untested, of no known version; never a pickle or
 /// sharded file. Any other file Studio can't run is `studio_cannot_run` with its label's
-/// sentence ([`errors::cannot_run`]); a file not listed is `not_found`, and another
+/// sentence ([`errors::cannot_run`]), a pickle file "Studio can't read .pt files" with its
+/// own extension ([`errors::cannot_read_file`]); a file not listed is `not_found`, and another
 /// (a LoRA, an extra part, one not read without a recipe) `studio_not_supported_yet`.
 pub(crate) async fn plan_file(
     deps: &PlanDeps<'_>,
@@ -168,6 +169,15 @@ pub(crate) async fn plan_file(
             reason: CannotRunReason::UnknownWeights,
             ..
         }) if choice.recipe.is_some() => by_hand()?,
+        // A pickle file named by its own extension (ruling S9-pickle-ext).
+        Some(FileLabel::CannotRun {
+            reason: CannotRunReason::Pickle,
+            ..
+        }) => {
+            return Err(errors::cannot_read_file(
+                pickle_extension(file).unwrap_or(".ckpt"),
+            ));
+        }
         Some(FileLabel::CannotRun { reason, .. }) => return Err(errors::cannot_run(*reason)),
         _ => return Err(errors::not_supported_yet(errors::NOT_A_RUNNABLE_FILE)),
     };
@@ -957,13 +967,21 @@ pub(crate) fn checked_disk_file(path: impl AsRef<Path>) -> AppResult<(PathBuf, u
         .file_name()
         .map(|n| n.to_string_lossy().to_lowercase())
         .unwrap_or_default();
-    if let Some(ext) = PICKLE_EXTENSIONS.iter().find(|ext| name.ends_with(*ext)) {
+    if let Some(ext) = pickle_extension(&name) {
         return Err(errors::cannot_read_file(ext));
     }
     if !READ_EXTENSIONS.iter().any(|ext| name.ends_with(ext)) {
         return Err(errors::not_a_model_format());
     }
     Ok((real, meta.len()))
+}
+
+/// The pickle extension (`.ckpt`, `.pt`, `.pth`, `.bin`) a file name ends with, in any case.
+fn pickle_extension(name: &str) -> Option<&'static str> {
+    let lower = name.to_lowercase();
+    PICKLE_EXTENSIONS
+        .into_iter()
+        .find(|ext| lower.ends_with(ext))
 }
 
 /// For each of `entry`'s parts, the file on this computer it uses where it is: a part from

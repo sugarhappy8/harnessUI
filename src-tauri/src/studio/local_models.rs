@@ -36,7 +36,7 @@
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, LazyLock};
 
 use models::download::FileSpec;
 
@@ -1020,6 +1020,140 @@ pub(crate) fn is_studios_copy(models_dir: &Path, file: &Path) -> bool {
     let real = dunce::canonicalize(file).ok();
     real.zip(imported)
         .is_some_and(|(real, root)| crate::downloads::inside_folder(&real, &root))
+}
+
+/// The setting that lists the files replaced installed rows used which are kept back until
+/// nothing needs them ([`keep_and_remove_files`]).
+const KEPT_FILES: &str = "studioKeptFiles";
+
+/// Files a replaced row of picture or video model `model` used, kept back: a run on this
+/// computer may still hold them, or a download writes them, or removing one failed.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct KeptFiles {
+    pub model: String,
+    pub files: Vec<String>,
+}
+
+/// One change to the kept files at a time: the list is read, changed and written back.
+static KEPT_LOCK: LazyLock<tokio::sync::Mutex<()>> = LazyLock::new(|| tokio::sync::Mutex::new(()));
+
+/// Adds `replaced` (the files a replaced row used that Studio may remove:
+/// [`removable_files`]) to the files kept back, those no installed model uses now (the row
+/// that replaced it among them), saved before anything is removed so none is forgotten; then
+/// removes every kept file nothing needs any more ([`remove_kept_files`]'s rules, a download
+/// other than `except_group`'s counting). Returns the files removed.
+pub(crate) async fn keep_and_remove_files(
+    store: &store::Store,
+    models_dir: &Path,
+    replaced: Option<KeptFiles>,
+    in_use: &(dyn Fn(&str) -> bool + Sync),
+    except_group: Option<&str>,
+) -> AppResult<Vec<PathBuf>> {
+    let _one = KEPT_LOCK.lock().await;
+    let mut kept: Vec<KeptFiles> = store.get_setting(KEPT_FILES).await?.unwrap_or_default();
+    let replaced = match replaced {
+        Some(mut replaced) => {
+            let chat = store.list_models().await?;
+            let gen_files = store.gen_model_files().await?;
+            replaced
+                .files
+                .retain(|f| !crate::hub::used_elsewhere(&chat, &gen_files, Path::new(f)));
+            Some(replaced)
+        }
+        None => None,
+    };
+    if let Some(replaced) = replaced.filter(|r| !r.files.is_empty()) {
+        match kept.iter_mut().find(|k| k.model == replaced.model) {
+            Some(entry) => {
+                for file in replaced.files {
+                    if !entry.files.contains(&file) {
+                        entry.files.push(file);
+                    }
+                }
+            }
+            None => kept.push(replaced),
+        }
+        store.set_setting(KEPT_FILES, &kept).await?;
+    }
+    remove_kept(store, models_dir, kept, in_use, except_group).await
+}
+
+/// Removes each file kept back ([`keep_and_remove_files`]) that nothing needs any more, every
+/// guard checked again now:
+/// - none while a run on this computer, queued or running, holds its model (`in_use`): the
+///   run may still open it, and Windows refuses to remove an open file;
+/// - as [`remove_unused_files`]: none an unfinished download writes or will use (other than
+///   `except_group`'s), none an installed model uses (one that took it up since), none outside
+///   the models folder.
+///
+/// A file still wanted later (its model's run, a download, a removal that failed) stays kept,
+/// tried again at the next replacement of a row and at the next start; one an installed model
+/// uses now, one already gone and one outside the models folder are forgotten, never removed.
+/// Returns the files removed.
+pub(crate) async fn remove_kept_files(
+    store: &store::Store,
+    models_dir: &Path,
+    in_use: &(dyn Fn(&str) -> bool + Sync),
+    except_group: Option<&str>,
+) -> AppResult<Vec<PathBuf>> {
+    let _one = KEPT_LOCK.lock().await;
+    let kept: Vec<KeptFiles> = store.get_setting(KEPT_FILES).await?.unwrap_or_default();
+    remove_kept(store, models_dir, kept, in_use, except_group).await
+}
+
+/// [`remove_kept_files`] on the list `kept` (its lock held), the list saved again with what
+/// stays kept.
+async fn remove_kept(
+    store: &store::Store,
+    models_dir: &Path,
+    kept: Vec<KeptFiles>,
+    in_use: &(dyn Fn(&str) -> bool + Sync),
+    except_group: Option<&str>,
+) -> AppResult<Vec<PathBuf>> {
+    if kept.is_empty() {
+        return Ok(Vec::new());
+    }
+    let writing = files_being_written(store, except_group).await?;
+    let busy = |p: &Path| writing.contains(&p.display().to_string());
+    let root = dunce::canonicalize(models_dir).ok();
+    let mut still = Vec::new();
+    let mut removed = Vec::new();
+    for entry in kept {
+        if in_use(&entry.model) {
+            tracing::info!(model = %entry.model, "files a replaced set-up used stay while a run uses the model");
+            still.push(entry);
+            continue;
+        }
+        let files: Vec<PathBuf> = entry.files.iter().map(PathBuf::from).collect();
+        let gone = remove_unused_files(store, models_dir, &files, &busy).await?;
+        let chat = store.list_models().await?;
+        let gen_files = store.gen_model_files().await?;
+        let left: Vec<String> = files
+            .iter()
+            .filter(|f| !gone.contains(f) && !crate::hub::used_elsewhere(&chat, &gen_files, f))
+            .filter(|f| {
+                let real = dunce::canonicalize(f).ok();
+                real.zip(root.as_ref()).is_some_and(|(real, root)| {
+                    real.is_file() && crate::downloads::inside_folder(&real, root)
+                })
+            })
+            .map(|f| f.display().to_string())
+            .collect();
+        removed.extend(gone);
+        if !left.is_empty() {
+            still.push(KeptFiles {
+                model: entry.model,
+                files: left,
+            });
+        }
+    }
+    if still.is_empty() {
+        store.delete_setting(KEPT_FILES).await?;
+    } else {
+        store.set_setting(KEPT_FILES, &still).await?;
+    }
+    Ok(removed)
 }
 
 /// Removes each of `files` that no installed model uses (a chat model, or a part of a picture
@@ -2832,10 +2966,11 @@ pub(crate) mod tests {
             .await
             .unwrap_err();
         assert_eq!(
-            (e.code.as_str(), e.message.as_str()),
+            (e.code.as_str(), e.message.as_str(), e.next_step.as_str()),
             (
                 "studio_cannot_run",
-                "Hugging Face publishes no checksum for this file, so Studio can't check it."
+                "Hugging Face publishes no checksum for this file, so Studio can't check it.",
+                "Choose another file for this part."
             )
         );
         assert!(t.groups().await.is_empty() && t.files_on_disk().is_empty());

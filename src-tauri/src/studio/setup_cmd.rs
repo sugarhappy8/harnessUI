@@ -38,7 +38,9 @@ use super::setup_plan::{
     PlanDeps, Planned, own_parts, plan_installed, plan_source, ready_to_fetch,
 };
 use crate::commands::only_main_window;
-use crate::downloads::{DownloadManager, GroupMeta, register_present_gen_model};
+use crate::downloads::{
+    DownloadManager, GroupMeta, gen_model_downloading, register_present_gen_model,
+};
 use crate::dto::{
     ModelFilesDto, PartDto, PlannedSlotDto, SetModelFilesDto, SetupChoice, SetupPlanDto,
 };
@@ -82,14 +84,16 @@ pub(crate) struct PreparedSetUp {
 
 /// *Set it up yourself* on installed model `gen_model_id` with the person's `choice`: another
 /// recipe, another file for any slot. Refused with `studio_model_in_use` while a run on this
-/// computer waits for the model or uses it (`in_use`), before anything else. Planned with the
+/// computer waits for the model or uses it (`in_use`), before anything else, and with
+/// `studio_setup_in_progress` while a download not finished yet adds or replaces it (an
+/// earlier change's, *Download again*: whichever completed last would win). Planned with the
 /// model's own files kept and the choices on top (`setup_plan::plan_installed`); a set-up that
 /// misses a part, or fetches a gated repository's file with no Hugging Face token, is refused
 /// as a download's is, and so is one that does not fit on the disk. When a Hub file must be
 /// fetched, its download is returned, not started: its completion replaces the row (same id).
 /// Otherwise the row is rewritten at once (`downloads::register_present_gen_model`: the model
-/// file checked again, then the files only the old set-up used removed), unless nothing
-/// changed. A model not installed is `not_found`.
+/// file checked again, then the files only the old set-up used removed once no run holds the
+/// model), unless nothing changed. A model not installed is `not_found`.
 pub(crate) async fn prepare_set_model_files(
     deps: &LocalCmdDeps,
     in_use: &(dyn Fn(&str) -> bool + Sync),
@@ -98,6 +102,11 @@ pub(crate) async fn prepare_set_model_files(
 ) -> AppResult<PreparedSetUp> {
     if in_use(gen_model_id) {
         return Err(errors::model_in_use());
+    }
+    // A download not finished yet would replace this change when it completes, or this
+    // change the files it counts on.
+    if gen_model_downloading(&deps.store, gen_model_id).await? {
+        return Err(errors::setup_in_progress());
     }
     let row = installed_row(deps, gen_model_id).await?;
     let catalog = deps.catalog.gen_catalog().await;
@@ -131,7 +140,7 @@ pub(crate) async fn prepare_set_model_files(
             download: None,
         });
     }
-    register_present_gen_model(&deps.store, &deps.models_dir, &prepared.meta).await?;
+    register_present_gen_model(&deps.store, &deps.models_dir, &prepared.meta, in_use).await?;
     // The model's files as its new row has them.
     let installed = InstalledFiles::read(&deps.store).await?;
     let pd = PlanDeps {
@@ -317,7 +326,7 @@ mod tests {
     use serde_json::{Value, json};
 
     use super::*;
-    use crate::downloads::{DownloadManager, finish_gen_group};
+    use crate::downloads::{DownloadManager, finish_gen_group, finish_gen_group_while};
     use crate::dto::LocalModelsDto;
     use crate::dto::{SlotFile, SlotOverride};
     use crate::error::AppError;
@@ -327,7 +336,8 @@ mod tests {
     };
     use crate::studio::local_models::tests::small_weights;
     use crate::studio::local_models::{
-        DownloadDeps, InstalledFiles, LocalSource, entry_from_installed, prepare_download,
+        DownloadDeps, InstalledFiles, KeptFiles, LocalSource, entry_from_installed,
+        prepare_download, remove_kept_files,
     };
     use crate::studio::setup_plan::PlanDeps;
     use crate::studio::test_support::Scratch;
@@ -466,6 +476,15 @@ mod tests {
         /// Puts each file `group` fetches in its place (what its repo serves, else a small
         /// safetensors file) and finishes it as its task does.
         async fn complete(&self, group: &str) {
+            self.write_files_of(group).await;
+            finish_gen_group(&self.deps.store, &self.deps.models_dir, group)
+                .await
+                .unwrap();
+        }
+
+        /// Puts each file `group` fetches in its place, at its pinned size (what is served
+        /// first, then a sparse rest), as a finished download leaves it.
+        async fn write_files_of(&self, group: &str) {
             let rows = self
                 .deps
                 .store
@@ -481,11 +500,36 @@ mod tests {
                     .map_or_else(small_weights, <[u8]>::to_vec);
                 let dest = Path::new(&row.dest_path);
                 std::fs::create_dir_all(dest.parent().unwrap()).unwrap();
-                std::fs::write(dest, bytes).unwrap();
+                std::fs::write(dest, &bytes).unwrap();
+                if row.size_bytes > bytes.len() as u64 {
+                    std::fs::OpenOptions::new()
+                        .write(true)
+                        .open(dest)
+                        .unwrap()
+                        .set_len(row.size_bytes)
+                        .unwrap();
+                }
             }
-            finish_gen_group(&self.deps.store, &self.deps.models_dir, group)
+        }
+
+        /// [`T::complete`] while a run on this computer holds the model the test holds.
+        async fn complete_while_held(&self, group: &str) {
+            let held = self.held.clone();
+            let in_use = move |m: &str| held.as_deref() == Some(m);
+            self.write_files_of(group).await;
+            finish_gen_group_while(&self.deps.store, &self.deps.models_dir, group, &in_use)
                 .await
                 .unwrap();
+        }
+
+        /// The files kept back for later removal, by model.
+        async fn kept(&self) -> Vec<KeptFiles> {
+            self.deps
+                .store
+                .get_setting("studioKeptFiles")
+                .await
+                .unwrap()
+                .unwrap_or_default()
         }
     }
 
@@ -671,8 +715,8 @@ mod tests {
     }
 
     /// A repo of files Studio does not recognise: weights of no known kind, a file whose
-    /// header is not served (so it is not read), a Lumina 2 model the engine misruns, a
-    /// pickle file, and a decoder by its name.
+    /// header is not served (so it is not read), a Lumina 2 model the engine misruns, two
+    /// pickle files, and a decoder by its name.
     fn unknown_weights_repo() -> TestRepo {
         let weights = safetensors(&json!({
             "mystery.block.0.weight": {"dtype": "F16", "shape": [1], "data_offsets": [0, 2]}
@@ -682,6 +726,7 @@ mod tests {
             .file("broken.safetensors", 6_000_000_000.0, None)
             .file("lumina_2.safetensors", 5_219_585_680.0, Some("lumina2"))
             .file("old.ckpt", 4_265_380_512.0, None)
+            .file("weights.PT", 4_265_380_512.0, None)
             .file("my_vae.safetensors", 334_643_268.0, None)
     }
 
@@ -879,13 +924,20 @@ mod tests {
                 "Download the file anyway to use it elsewhere."
             )
         );
-        let e = t
-            .setup_plan_err(mystery("old.ckpt"), recipe("sd1-checkpoint"))
-            .await;
-        assert_eq!(
-            (e.code.as_str(), e.message.as_str()),
-            ("studio_cannot_run", "Studio can't read .ckpt files.")
-        );
+        // A pickle file is named by its own extension (ruling S9-pickle-ext).
+        for (file, message) in [
+            ("old.ckpt", "Studio can't read .ckpt files"),
+            ("weights.PT", "Studio can't read .pt files"),
+        ] {
+            let e = t
+                .setup_plan_err(mystery(file), recipe("sd1-checkpoint"))
+                .await;
+            assert_eq!(
+                (e.code.as_str(), e.message.as_str()),
+                ("bad_request", message),
+                "{file}"
+            );
+        }
     }
 
     /// A file set up by hand downloads as its plan says and joins the installed models with
@@ -972,6 +1024,185 @@ mod tests {
         );
         assert_eq!(t.row(FLUX).await, before);
         assert!(t.deps.store.list_downloads(None).await.unwrap().is_empty());
+    }
+
+    /// Finding 1: a set-up download that completes while a run on this computer holds the
+    /// model replaces its row, but keeps the files only the old set-up used until no run holds
+    /// it; then they go, every guard checked again, and one another model has taken up since
+    /// is never removed.
+    #[tokio::test]
+    async fn files_a_run_still_holds_stay_until_it_ends() {
+        let mut t = harness_with(installed_generic_flux).await;
+        let before = files_of(&t.row(FLUX).await);
+        let (clip, t5) = (PathBuf::from(&before[1].1), PathBuf::from(&before[2].1));
+        let group = t
+            .set_model_files(FLUX, recipe("z-image"))
+            .await
+            .unwrap()
+            .download_group
+            .unwrap();
+        t.hold_run_on(FLUX);
+        t.complete_while_held(&group).await;
+        assert_eq!(t.row(FLUX).await.recipe_id.as_deref(), Some("z-image"));
+        assert!(clip.exists() && t5.exists());
+        let kept = t.kept().await;
+        assert_eq!(kept.len(), 1);
+        assert_eq!(kept[0].model, FLUX);
+        let mut files = kept[0].files.clone();
+        files.sort();
+        let mut want = vec![clip.display().to_string(), t5.display().to_string()];
+        want.sort();
+        assert_eq!(files, want);
+        // Still held: a later sweep keeps them.
+        let held = |m: &str| m == FLUX;
+        let removed = remove_kept_files(&t.deps.store, &t.deps.models_dir, &held, None)
+            .await
+            .unwrap();
+        assert!(removed.is_empty() && clip.exists() && t5.exists());
+
+        // Meanwhile another model takes up the T5 file (only that one).
+        let (t5_part, _) = companion_part(&t.deps.models_dir, GenRole::T5xxl, "t5xxl-fp8");
+        let bytes = fixture_bytes("flux1-kontext");
+        let other_file = place(&t.deps.models_dir, "o/other", "other.gguf", &bytes);
+        let other_main = GenPart {
+            role: GenRole::Diffusion,
+            repo: "o/other".into(),
+            revision: COMMIT.into(),
+            path: "other.gguf".into(),
+            size: bytes.len() as u64,
+            sha256: "e".repeat(64),
+            license: "apache-2.0".into(),
+            local: None,
+            folder: None,
+        };
+        let other = row_of(
+            "hf:o/other:other.gguf",
+            "flux",
+            Some("flux1-kontext"),
+            store::GenSource::Search,
+            vec![(other_main, other_file), (t5_part, t5.clone())],
+        );
+        t.deps.store.insert_gen_model(other).await.unwrap();
+
+        // The run ended (at the next start no run holds anything): the CLIP file goes, the T5
+        // file another model uses stays, and nothing is kept any more.
+        let removed = remove_kept_files(&t.deps.store, &t.deps.models_dir, &|_| false, None)
+            .await
+            .unwrap();
+        assert_eq!(removed, std::slice::from_ref(&clip));
+        assert!(!clip.exists() && t5.exists());
+        assert!(t.kept().await.is_empty());
+    }
+
+    /// Finding 3: a second change while the first change's download is unfinished is refused
+    /// (whichever completed last would win), and changes nothing; once it is done, it is taken.
+    #[tokio::test]
+    async fn a_second_change_waits_for_the_first_ones_download() {
+        let mut t = harness_with(installed_generic_flux).await;
+        let group = t
+            .set_model_files(FLUX, recipe("z-image"))
+            .await
+            .unwrap()
+            .download_group
+            .unwrap();
+        let before = t.row(FLUX).await;
+        let ae = t.outside_file("my ae.safetensors", fixture_bytes("ae-flux1"));
+        let vae = || {
+            choice_override(
+                GenRole::Vae,
+                SlotFile::Disk {
+                    path: ae.display().to_string(),
+                },
+            )
+        };
+        let e = t.set_model_files(FLUX, vae()).await.unwrap_err();
+        assert_eq!(
+            (e.code.as_str(), e.message.as_str()),
+            (
+                "studio_setup_in_progress",
+                "This model's files are still downloading for an earlier change."
+            )
+        );
+        assert_eq!(t.row(FLUX).await, before);
+        t.complete(&group).await;
+        let r = t.set_model_files(FLUX, vae()).await.unwrap();
+        assert!(r.download_group.is_none());
+        let row = t.row(FLUX).await;
+        assert_eq!(row.recipe_id.as_deref(), Some("z-image"));
+        let vae_file = files_of(&row).last().unwrap().1.clone();
+        assert_eq!(Path::new(&vae_file), dunce::canonicalize(&ae).unwrap());
+    }
+
+    /// Finding 2: a model of the recommended list the person set up again is still installed
+    /// in that list (its row keeps the entry's id, with no catalog id now), so its card offers
+    /// no Download that would replace their set-up; its name stays.
+    #[tokio::test]
+    async fn an_edited_catalog_model_is_still_installed_in_the_recommended_list() {
+        const ZIMAGE: &str = "z-image-turbo-q4";
+        fn installed_zimage(models: &Path) -> store::NewGenModel {
+            let entry = bundled().entries.remove(ZIMAGE).unwrap();
+            let header = file_of(&models::sd::testing::gguf_txt_fixture("zimage"));
+            let mut parts = Vec::new();
+            for (i, part) in entry.parts.iter().enumerate() {
+                let mut part = part.clone();
+                let file = destination(models, &part.repo, &part.path).unwrap();
+                std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+                if i == 0 {
+                    std::fs::write(&file, &header).unwrap();
+                    part.size = header.len() as u64;
+                } else {
+                    std::fs::File::create(&file)
+                        .unwrap()
+                        .set_len(part.size)
+                        .unwrap();
+                }
+                parts.push((part, file));
+            }
+            store::NewGenModel {
+                catalog_id: Some(ZIMAGE.into()),
+                name: entry.name.clone(),
+                kind: "image".into(),
+                ..row_of(
+                    ZIMAGE,
+                    &crate::studio::local_models::family_word(&entry),
+                    Some(&entry.recipe),
+                    store::GenSource::Catalog,
+                    parts,
+                )
+            }
+        }
+        let mut t = harness_with(installed_zimage).await;
+        let name = t.row(ZIMAGE).await.name;
+        let entry_of = |local: &LocalModelsDto| {
+            local
+                .recommended
+                .iter()
+                .chain(&local.not_here)
+                .find(|e| e.id == ZIMAGE)
+                .cloned()
+                .unwrap()
+        };
+        assert!(entry_of(&t.local_models().await).installed);
+        let ae = t.outside_file("my ae.safetensors", fixture_bytes("ae-flux1"));
+        let r = t
+            .set_model_files(
+                ZIMAGE,
+                choice_override(
+                    GenRole::Vae,
+                    SlotFile::Disk {
+                        path: ae.display().to_string(),
+                    },
+                ),
+            )
+            .await
+            .unwrap();
+        assert!(r.download_group.is_none());
+        let row = t.row(ZIMAGE).await;
+        assert_eq!(
+            (row.catalog_id.as_deref(), row.name.as_str()),
+            (None, name.as_str())
+        );
+        assert!(entry_of(&t.local_models().await).installed);
     }
 
     #[tokio::test]

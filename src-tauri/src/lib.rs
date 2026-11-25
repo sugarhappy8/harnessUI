@@ -531,6 +531,23 @@ pub fn run() {
                     async move { downloads.resume_interrupted(&handle).await },
                 );
             }
+            // 0.2.0: the files replaced picture or video models used, kept back while a run
+            // held them, removed now that nothing needs them. No run from before this start
+            // holds one: each run reads its model's files when it starts.
+            {
+                let handle = handle.clone();
+                tauri::async_runtime::spawn(async move {
+                    let store = handle.state::<state::AppState>().store.clone();
+                    let models_dir = hub::models_dir(&handle).await;
+                    let none = |_: &str| false;
+                    if let Err(e) =
+                        studio::local_models::remove_kept_files(&store, &models_dir, &none, None)
+                            .await
+                    {
+                        tracing::warn!(code = %e.code, "the files kept back were not removed");
+                    }
+                });
+            }
             // 0.1.0: the Studio runs the app left unfinished, and yesterday's spending stubs.
             tauri::async_runtime::spawn(async move { studio.resume_interrupted().await });
             create_windows(app)?;

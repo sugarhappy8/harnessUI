@@ -157,9 +157,12 @@ pub async fn local_models(deps: &LocalCmdDeps) -> AppResult<LocalModelsDto> {
             in_place: in_place(&deps.models_dir, row),
         });
     }
+    // A recommended entry is installed by its row's catalog id, or by its id: a row the person
+    // set up again (*Set it up yourself*) keeps the entry's id but is their own, with no
+    // catalog id. Its card then offers no Download that would replace their set-up.
     let installed_ids: BTreeSet<&str> = rows
         .iter()
-        .filter_map(|r| r.catalog_id.as_deref())
+        .flat_map(|r| r.catalog_id.as_deref().into_iter().chain([r.id.as_str()]))
         .collect();
 
     let mut entries = Vec::with_capacity(catalog.entries.len());

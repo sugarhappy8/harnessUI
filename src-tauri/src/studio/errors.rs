@@ -1154,6 +1154,18 @@ pub fn local_model_missing() -> AppError {
 
 // ---- Get local models ------------------------------------------------------------------------
 
+/// *Set it up yourself* on a model a download not finished yet adds or replaces (an earlier
+/// set-up change, *Download again*): that download would replace the change, or the change the
+/// files it counts on.
+pub fn setup_in_progress() -> AppError {
+    AppError::new(
+        "studio_setup_in_progress",
+        "This model's files are still downloading for an earlier change.",
+        "Let that download finish in Models → Downloads, or cancel it there, then try again.",
+        String::new(),
+    )
+}
+
 /// *Delete* on a local model while a run on this computer waits for it or uses it: deleting a
 /// file the Studio engine has open fails half-way on Windows.
 pub fn model_in_use() -> AppError {
@@ -1213,7 +1225,9 @@ pub fn setup_incomplete(missing: &[SlotId]) -> AppError {
 /// published SHA-256, an add-on file. Only weights the engine does not recognise, or a file
 /// whose header was not read, can be set up by hand, with a recipe the person chose. The
 /// message is the label's sentence (`FILE_LABEL.cannotRun`'s, a pickle file's with its default
-/// `.ckpt`); the details, the reason's word.
+/// `.ckpt`: a set-up plan names a pickle file's own extension with [`cannot_read_file`]); the
+/// next step, to download the file anyway, except for a file with no published SHA-256, which
+/// no download takes (ruling S9-nosha-next-step); the details, the reason's word.
 pub fn cannot_run(reason: CannotRunReason) -> AppError {
     let message = match reason {
         CannotRunReason::Lumina2 => engine_cant_run("a Lumina 2"),
@@ -1255,12 +1269,12 @@ pub fn cannot_run(reason: CannotRunReason) -> AppError {
         Ok(serde_json::Value::String(word)) => word,
         _ => format!("{reason:?}"),
     };
-    AppError::new(
-        "studio_cannot_run",
-        message,
-        "Download the file anyway to use it elsewhere.",
-        details,
-    )
+    // Every download is pinned by its SHA-256: a file with none cannot be downloaded at all.
+    let next_step = match reason {
+        CannotRunReason::NoSha => CHOOSE_ANOTHER_FILE,
+        _ => "Download the file anyway to use it elsewhere.",
+    };
+    AppError::new("studio_cannot_run", message, next_step, details)
 }
 
 /// "This is <a model>, which the Studio engine can't run."
@@ -1295,10 +1309,13 @@ pub fn no_published_checksum() -> AppError {
     AppError::new(
         "studio_no_checksum",
         "Hugging Face publishes no checksum for this file, so Studio can't check it.",
-        "Choose another file for this part.",
+        CHOOSE_ANOTHER_FILE,
         String::new(),
     )
 }
+
+/// The next step for a file Studio can't check: Hugging Face publishes no SHA-256 for it.
+const CHOOSE_ANOTHER_FILE: &str = "Choose another file for this part.";
 
 /// The code of [`import_is_lora`]: the webview adds such a file as a LoRA instead.
 pub const IMPORT_IS_LORA: &str = "studio_import_is_lora";
@@ -1878,6 +1895,8 @@ mod tests {
             no_published_checksum(),
             setup_incomplete(&[SlotId::T5xxl, SlotId::Vae]),
             cannot_run(CannotRunReason::Lumina2),
+            cannot_run(CannotRunReason::NoSha),
+            setup_in_progress(),
             import_is_lora(),
             import_file_changed(),
             import_failed("No space left on device"),
@@ -2296,6 +2315,16 @@ mod tests {
             )
         );
         assert_eq!(e.details, "lumina2");
+        // A file with no published SHA-256 is never downloaded (ruling S9-nosha-next-step).
+        let e = cannot_run(CannotRunReason::NoSha);
+        assert_eq!(
+            (e.message.as_str(), e.next_step.as_str()),
+            (
+                "Hugging Face publishes no checksum for this file, so Studio can't check it.",
+                "Choose another file for this part."
+            )
+        );
+        assert_eq!(e.next_step, no_published_checksum().next_step);
         for (reason, message) in [
             (CannotRunReason::Pickle, "Studio can't read .ckpt files."),
             (

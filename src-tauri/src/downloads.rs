@@ -354,12 +354,14 @@ fn downloaded_entry(new: &store::NewGenModel, untested: bool) -> AppResult<GenEn
 /// group wrote itself ([`written_by`], as Cancel deletes only those) are removed when no
 /// installed model uses them and no other download writes them, with their emptied folders.
 /// A part the download found already in place stays. A model installed already (downloaded
-/// again, or set up again: *Set it up yourself*) is replaced ([`insert_replacing`]).
+/// again, or set up again: *Set it up yourself*) is replaced ([`insert_replacing`]; `in_use`:
+/// whether a run on this computer holds a model).
 pub(crate) async fn register_gen_model(
     store: &store::Store,
     models_dir: &Path,
     group: &str,
     meta: &GroupMeta,
+    in_use: &(dyn Fn(&str) -> bool + Sync),
 ) -> AppResult<()> {
     let rows = store.list_downloads(Some(group.to_string())).await?;
     let new = gen_model_from(meta, &rows)?;
@@ -393,7 +395,7 @@ pub(crate) async fn register_gen_model(
         return Err(refused);
     }
     let id = new.id.clone();
-    insert_replacing(store, models_dir, new, Some(group)).await?;
+    insert_replacing(store, models_dir, new, Some(group), in_use).await?;
     tracing::info!(model = %id, "picture or video model downloaded");
     Ok(())
 }
@@ -403,11 +405,13 @@ pub(crate) async fn register_gen_model(
 /// nothing, or an installed model set up again with its own files), with no group or rows:
 /// each present file still whole ([`gen_model_from`]), then the model file's header
 /// ([`check_main_file`]). A refusal adds nothing and removes nothing. A model installed
-/// already is replaced ([`insert_replacing`]). Returns the model's id.
+/// already is replaced ([`insert_replacing`]; `in_use`: whether a run on this computer holds a
+/// model). Returns the model's id.
 pub(crate) async fn register_present_gen_model(
     store: &store::Store,
     models_dir: &Path,
     meta: &GroupMeta,
+    in_use: &(dyn Fn(&str) -> bool + Sync),
 ) -> AppResult<String> {
     let new = gen_model_from(meta, &[])?;
     let path = main_part(meta)?
@@ -417,40 +421,70 @@ pub(crate) async fn register_present_gen_model(
         .ok_or_else(|| AppError::internal("a model added at once whose file is not here"))?;
     check_added(meta, &new, path).await??;
     let id = new.id.clone();
-    insert_replacing(store, models_dir, new, None).await?;
+    insert_replacing(store, models_dir, new, None, in_use).await?;
     tracing::info!(model = %id, "picture or video model added");
     Ok(id)
 }
 
 /// Adds `new` to Studio's installed models, replacing the row with its id (same id, `INSERT
-/// OR REPLACE`), then removes each file the replaced row used that nothing uses now and no
-/// download other than `group` writes (`local_models::remove_unused_files`: inside the models
-/// folder only; a file from this computer is the person's own and stays, unless it is
-/// Studio's copy of an import: `local_models::removable_files`). A file that cannot be removed
-/// (open on Windows) stays, logged, and does not fail the change.
+/// OR REPLACE`). The files the replaced row used that Studio may remove (a file from this
+/// computer is the person's own and stays, unless it is Studio's copy of an import:
+/// `local_models::removable_files`) are kept back, then removed once nothing needs them
+/// (`local_models::keep_and_remove_files`): never while a run on this computer holds the
+/// model (`in_use`), nor while a download other than `group` writes or will use one, nor one an
+/// installed model uses, nor one outside the models folder. What stays kept is tried again at
+/// the next replacement and the next start. A failure there is logged and does not fail the
+/// change.
 async fn insert_replacing(
     store: &store::Store,
     models_dir: &Path,
     new: store::NewGenModel,
     group: Option<&str>,
+    in_use: &(dyn Fn(&str) -> bool + Sync),
 ) -> AppResult<()> {
     let old = store.get_gen_model(&new.id).await?;
     store.insert_gen_model(new).await?;
-    let Some(old) = old else {
-        return Ok(());
-    };
-    let files = crate::studio::local_models::removable_files(&old, models_dir);
-    let removed = match files_being_written(store, group).await {
-        Ok(writing) => {
-            let busy = |p: &Path| writing.contains(&p.display().to_string());
-            crate::studio::local_models::remove_unused_files(store, models_dir, &files, &busy).await
-        }
-        Err(e) => Err(e),
-    };
+    let replaced = old.map(|old| crate::studio::local_models::KeptFiles {
+        files: crate::studio::local_models::removable_files(&old, models_dir)
+            .iter()
+            .map(|f| f.display().to_string())
+            .collect(),
+        model: old.id,
+    });
+    let removed = crate::studio::local_models::keep_and_remove_files(
+        store, models_dir, replaced, in_use, group,
+    )
+    .await;
     if let Err(e) = removed {
-        tracing::warn!(model = %old.id, code = %e.code, "the files a set-up no longer uses stayed");
+        tracing::warn!(code = %e.code, "the files a replaced set-up used stay for now");
     }
     Ok(())
+}
+
+/// Whether a download not finished yet (a paused, failed or cancelled one too: it can go on)
+/// adds or replaces picture or video model `gen_model_id`. A group's metadata that cannot be
+/// read is an error, never taken for another model's.
+pub(crate) async fn gen_model_downloading(
+    store: &store::Store,
+    gen_model_id: &str,
+) -> AppResult<bool> {
+    let groups: BTreeSet<String> = store
+        .list_downloads(None)
+        .await?
+        .into_iter()
+        .filter(|r| r.status != DownloadStatus::Completed)
+        .map(|r| r.group_id)
+        .collect();
+    for group in groups {
+        let meta: Option<GroupMeta> = store.get_setting(&meta_key(&group)).await?;
+        if meta
+            .and_then(|m| m.generator)
+            .is_some_and(|g| g.gen_model_id == gen_model_id)
+        {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 /// The model part of the picture or video model `meta` downloads.
@@ -487,6 +521,17 @@ pub(crate) async fn finish_gen_group(
     models_dir: &Path,
     group: &str,
 ) -> AppResult<()> {
+    finish_gen_group_while(store, models_dir, group, &|_| false).await
+}
+
+/// [`finish_gen_group`] while `in_use` says which models a run on this computer holds.
+#[cfg(test)]
+pub(crate) async fn finish_gen_group_while(
+    store: &store::Store,
+    models_dir: &Path,
+    group: &str,
+    in_use: &(dyn Fn(&str) -> bool + Sync),
+) -> AppResult<()> {
     let meta: GroupMeta = store
         .get_setting(&meta_key(group))
         .await?
@@ -505,7 +550,7 @@ pub(crate) async fn finish_gen_group(
             )
             .await?;
     }
-    register_gen_model(store, models_dir, group, &meta).await?;
+    register_gen_model(store, models_dir, group, &meta, in_use).await?;
     for row in &rows {
         store
             .update_download(
@@ -1844,7 +1889,13 @@ impl DownloadManager {
         let state = app.state::<AppState>();
         if meta.generator.is_some() {
             let models_dir = crate::hub::models_dir(app).await;
-            return register_gen_model(&state.store, &models_dir, group, meta).await;
+            // A run on this computer may hold the model a set-up change or *Download again*
+            // replaces: the old row's files stay until it ends.
+            let studio = app
+                .try_state::<Arc<crate::studio::manager::StudioManager>>()
+                .map(|s| s.inner().clone());
+            let in_use = move |id: &str| studio.as_ref().is_some_and(|s| s.local_uses_model(id));
+            return register_gen_model(&state.store, &models_dir, group, meta, &in_use).await;
         }
         let rows = state.store.list_downloads(Some(group.to_string())).await?;
         let path_of = |file: &str| {
@@ -4407,7 +4458,7 @@ mod tests {
             )
             .await
             .unwrap();
-        register_gen_model(&store, &models, "g", &meta)
+        register_gen_model(&store, &models, "g", &meta, &|_| false)
             .await
             .unwrap();
         let added = store.list_gen_models().await.unwrap();
@@ -4637,6 +4688,95 @@ mod tests {
         assert!(files_being_written(&store, None).await.unwrap().is_empty());
     }
 
+    /// S9 review, finding 3: a file a picture or video model's unfinished download will use
+    /// (`present`) is kept when another change replaces the row that used it, as a file it
+    /// writes would be, so that download still finds it whole; a file only the old row used
+    /// goes at once. Once the download is done and nothing uses the file, it goes too.
+    #[tokio::test]
+    async fn a_replaced_rows_file_an_unfinished_download_will_use_is_kept() {
+        let store = store::Store::open_in_memory().unwrap();
+        let scratch = crate::studio::test_support::Scratch::new();
+        let models = scratch.path().join("models");
+        let [main, only_old, present] =
+            ["m.gguf", "clip.safetensors", "t5.safetensors"].map(|n| models.join("o/r").join(n));
+        for f in [&main, &only_old, &present] {
+            std::fs::create_dir_all(f.parent().unwrap()).unwrap();
+            std::fs::write(f, b"x").unwrap();
+        }
+        let part = |role: &str, file: &Path| {
+            serde_json::json!({"role": role, "repo": "o/r", "revision": "a".repeat(40),
+                "path": file.file_name().unwrap().to_string_lossy(), "size": 1,
+                "sha256": "b".repeat(64), "license": "apache-2.0",
+                "file": file.display().to_string()})
+        };
+        let id = "hf:o/r:m.gguf";
+        let row = |parts: Vec<serde_json::Value>| store::NewGenModel {
+            id: id.into(),
+            catalog_id: None,
+            name: "m".into(),
+            kind: "image".into(),
+            family: "flux".into(),
+            recipe_id: Some("flux1-dev".into()),
+            parts: serde_json::Value::Array(parts),
+            size_bytes: 3,
+            source: store::GenSource::Search,
+        };
+        let old = vec![
+            part("diffusion", &main),
+            part("clip-l", &only_old),
+            part("t5xxl", &present),
+        ];
+        store.insert_gen_model(row(old)).await.unwrap();
+        // An unfinished set-up download of the same model that counts on the T5 file.
+        let mut group = klein();
+        group.gen_model_id = id.into();
+        group.parts[2].present = Some(present.display().to_string());
+        let meta = GroupMeta {
+            generator: Some(group.clone()),
+            ..meta()
+        };
+        let files: Vec<(FileSpec, PathBuf)> = group.parts[..2]
+            .iter()
+            .map(|p| {
+                let dest = models::download::destination(&models, &p.repo, &p.path).unwrap();
+                let spec = FileSpec {
+                    repo: p.repo.clone(),
+                    commit: p.revision.clone(),
+                    path: p.path.clone(),
+                    size: p.size,
+                    sha256: Some(p.sha256.clone()),
+                };
+                (spec, dest)
+            })
+            .collect();
+        let g = insert_group(&store, &meta, &files).await.unwrap();
+        assert!(gen_model_downloading(&store, id).await.unwrap());
+        assert!(
+            !gen_model_downloading(&store, "hf:o/r:other.gguf")
+                .await
+                .unwrap()
+        );
+        // Another change replaces the row first, without the CLIP and T5 files.
+        let never = |_: &str| false;
+        insert_replacing(
+            &store,
+            &models,
+            row(vec![part("diffusion", &main)]),
+            None,
+            &never,
+        )
+        .await
+        .unwrap();
+        assert!(!only_old.exists() && present.exists());
+        set_all(&store, &g, S::Completed).await;
+        assert!(!gen_model_downloading(&store, id).await.unwrap());
+        let removed = crate::studio::local_models::remove_kept_files(&store, &models, &never, None)
+            .await
+            .unwrap();
+        assert_eq!(removed, std::slice::from_ref(&present));
+        assert!(!present.exists() && main.exists());
+    }
+
     /// What `files_being_written` gives guards deleting, so an unfinished group whose
     /// metadata does not read is an error, never a group that uses nothing; a group with no
     /// metadata at all (a chat download from before) uses only its rows' files.
@@ -4806,7 +4946,7 @@ mod tests {
         note_written(&store, "g", &dests[1].display().to_string())
             .await
             .unwrap();
-        let e = register_gen_model(&store, &models, "g", &meta)
+        let e = register_gen_model(&store, &models, "g", &meta, &|_| false)
             .await
             .unwrap_err();
         assert_eq!(e.code, "studio_not_that_model");
@@ -4828,7 +4968,7 @@ mod tests {
         ]) {
             write(dest, &bytes);
         }
-        register_gen_model(&store, &models, "g", &meta)
+        register_gen_model(&store, &models, "g", &meta, &|_| false)
             .await
             .unwrap();
         let added = store.list_gen_models().await.unwrap();
