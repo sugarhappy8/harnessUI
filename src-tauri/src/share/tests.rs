@@ -2087,8 +2087,10 @@ async fn the_coding_apps_get_the_key_only_while_sharing_listens() {
         key: None,
     };
     assert_eq!(sharing.now(&env).await, off);
-    // On, but the kept port was taken meanwhile: not listening, no key.
-    let taken = TcpListener::bind(("127.0.0.1", port)).await.unwrap();
+    // On, but the kept port was taken meanwhile: not listening, no key. Taken the way the
+    // app takes a kept port back: a child another test is starting may hold a copy of the
+    // proxy's socket for a moment after it was let go.
+    let taken = bind_retrying(|| proxy::bind(port)).await.unwrap();
     assert!(!sharing.set_enabled(&env, true).await.unwrap().listening);
     assert_eq!(
         sharing.now(&env).await,
