@@ -182,6 +182,23 @@ function linkName(l: Licence): string {
   return l.id === ENGINE_LICENCE_ID ? licenceWord(l.name) : l.name;
 }
 
+/** A repository's licences, with its set-up plan's when it has one: each licence once (by its
+ *  id), the plan's first (the files a download fetches), then the repository's own, which
+ *  shows whether or not Studio can set the repository up. */
+export function repoLicences(repo: LocalRepo, plan: SetupPlan | null): Licence[] {
+  const seen = new Set<string>();
+  const out: Licence[] = [];
+  for (const l of [...(plan?.licences ?? []), ...repo.licences, ...(repo.licence ? [repo.licence] : [])]) {
+    if (seen.has(l.id)) continue;
+    seen.add(l.id);
+    out.push(l);
+  }
+  return out;
+}
+
+/** No gate: a gated repository that could not be read says what to do in its gated line. */
+const NO_GATE: Gate = { mode: "none", collects: [] };
+
 /** Runs a download once the note about local models was accepted: at once when it was, else
  *  after *I understand* (the backend refuses local downloads until then); *Cancel* runs
  *  nothing. `notice` is the note, to render. */
@@ -367,7 +384,8 @@ function RepoReview(props: { repo: LocalRepo; local: LocalModels }) {
   const kind: MediaKind = plan?.recipe.kind === "video" ? "video" : "image";
   const installed = chosen !== null && local.installed.some((m) => m.id === searchedModelId(repo.repo, chosen.file));
   const main = plan ? mainSlot(plan.slots) : null;
-  const licenceOf = new Map((plan?.licences ?? []).map((l) => [l.id, l]));
+  const licences = repoLicences(repo, plan);
+  const licenceOf = new Map(licences.map((l) => [l.id, l]));
   const labels = choiceLabels(repo.files);
   const lorasOnly = repo.files.length === 0 && repo.verdict !== "unknown" && "lora" in repo.verdict;
 
@@ -414,12 +432,13 @@ function RepoReview(props: { repo: LocalRepo; local: LocalModels }) {
           )}
           <PlanParts slots={plan.slots} licences={plan.licences} onChoose={(role) => void onChoose(role)} busy={planning} />
           <Licences
-            licences={plan.licences}
+            licences={licences}
             kind={kind}
             gate={repo.gate}
             pageRepo={repo.repo}
             engineBytes={plan.needsEngine ? local.engine.downloadBytes : null}
             engineLicence={local.engine.licenseName}
+            none={MODEL_DETAIL.noLicence}
           />
           <ActionBar
             total={plan.toFetchBytes + (plan.needsEngine ? local.engine.downloadBytes : 0)}
@@ -436,23 +455,37 @@ function RepoReview(props: { repo: LocalRepo; local: LocalModels }) {
             onDownload={download}
           />
         </>
-      ) : gate !== null ? (
-        <ActionBar
-          total={null}
-          warnings={[]}
-          why={why}
-          off
-          busy={false}
-          planning={false}
-          installed={false}
-          group={null}
-          name={visiblePath(repo.repo)}
-          error={null}
-          onDismiss={() => undefined}
-          onDownload={() => undefined}
-        />
       ) : (
-        !lorasOnly && <NoSetup repo={repo} />
+        // No set-up: the repository's own licence all the same, before its files and LoRAs
+        // (their downloads stay offered), and a gated one's Download, off with what to do.
+        <>
+          {gate === null && !lorasOnly && <NoSetup repo={repo} />}
+          <Licences
+            licences={licences}
+            kind={null}
+            gate={gate === null ? repo.gate : NO_GATE}
+            pageRepo={repo.repo}
+            engineBytes={null}
+            engineLicence={local.engine.licenseName}
+            none={MODEL_DETAIL.noLicence}
+          />
+          {gate !== null && (
+            <ActionBar
+              total={null}
+              warnings={[]}
+              why={why}
+              off
+              busy={false}
+              planning={false}
+              installed={false}
+              group={null}
+              name={visiblePath(repo.repo)}
+              error={null}
+              onDismiss={() => undefined}
+              onDownload={() => undefined}
+            />
+          )}
+        </>
       )}
       <OtherFiles repo={repo} run={run} />
       {notice}
@@ -798,32 +831,45 @@ function PartRow(props: { slot: PlannedSlot; licence: string | null; onChoose?(r
   );
 }
 
-/** The licences, each in plain words with its colour (the licence badge's) and its link, then
- *  what the pictures or videos you make may be used for; the Studio engine when it comes with
- *  the model (its licence is about the engine, not what you make), and a gated repository's
- *  form. */
+/** The licences, each in plain words with its colour (the licence badge's) and its link (with
+ *  none, `none` says so), then what the pictures or videos you make may be used for (a `kind`
+ *  of `null`: nothing Studio makes with it); the Studio engine when it comes with the model
+ *  (its licence is about the engine, not what you make), and a gated repository's form. */
 function Licences(props: {
   licences: Licence[];
-  kind: MediaKind;
+  kind: MediaKind | null;
   gate: Gate;
   pageRepo: string | null;
   engineBytes: number | null;
   engineLicence: string;
+  none?: string;
 }) {
   const [error, setError] = useState<ErrorInfo | null>(null);
-  if (props.licences.length === 0 && props.gate.mode === "none" && props.engineBytes === null) return null;
-  const said = verdict(
-    props.licences.filter((l) => l.id !== ENGINE_LICENCE_ID),
-    props.kind,
-  );
+  if (props.licences.length === 0 && props.none === undefined && props.gate.mode === "none" && props.engineBytes === null) {
+    return null;
+  }
+  const said =
+    props.kind === null
+      ? ""
+      : verdict(
+          props.licences.filter((l) => l.id !== ENGINE_LICENCE_ID),
+          props.kind,
+        );
   return (
     <Section title={MODEL_DETAIL.licences}>
-      {props.licences.length > 0 && (
+      {props.licences.length > 0 ? (
         <ul className="flex flex-col gap-2">
           {props.licences.map((l) => (
             <LicenceRow key={l.id} licence={l} onError={setError} />
           ))}
         </ul>
+      ) : (
+        props.none !== undefined && (
+          <p data-licence="none" className={clsx("flex items-start gap-2 rounded-xl border px-3 py-2.5 text-sm font-medium", LICENCE_TONE.red)}>
+            <span className={`mt-1.5 inline-block size-2 shrink-0 rounded-full ${TONE_DOT.red}`} aria-hidden />
+            <span>{props.none}</span>
+          </p>
+        )
       )}
       {said !== "" && <p className="text-sm font-medium">{said}</p>}
       {props.engineBytes !== null && (

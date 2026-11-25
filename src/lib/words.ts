@@ -2409,6 +2409,8 @@ export const MODEL_DETAIL = {
   /** Who published a result: "by leejet". */
   by: (author: string) => `by ${author}`,
   licences: "Licences",
+  /** A repository that names no licence at all. */
+  noLicence: `This repository names no licence. ${LICENCE_BADGE.unclear} before you use what you make.`,
   /** A part with no file yet. */
   noFile: "No file yet",
   /** A part the person chose from this computer: "Chosen by you · t5xxl.safetensors". */

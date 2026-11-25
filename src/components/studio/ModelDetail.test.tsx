@@ -747,6 +747,114 @@ describe("gated files, in plain words with their next step (ruling S7)", () => {
   });
 });
 
+describe("the repository's own licence (fix round 1)", () => {
+  /** The panel's licence rows, in its Licences section. */
+  function licenceRows(panel: HTMLElement): HTMLElement[] {
+    return [...within(panel).getByRole("region", { name: "Licences" }).querySelectorAll<HTMLElement>("[data-licence]")];
+  }
+  const before = (a: HTMLElement, b: HTMLElement) =>
+    expect(a.compareDocumentPosition(b) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+
+  it("a can't-run repository shows its licence beside Download file anyway", async () => {
+    const lumina: FileLabel = { cannotRun: { reason: "lumina2", version: null } };
+    const panel = await openRepo(
+      supported({
+        repo: "Alpha-VLLM/Lumina-Image-2.0",
+        verdict: lumina,
+        files: [],
+        licence: apache,
+        licences: [apache],
+        fileViews: [view("consolidated.00-of-01.pth", 10_400_000_000, { cannotRun: { reason: "pickle", version: null } })],
+      }),
+    );
+    const rows = licenceRows(panel);
+    expect(rows).toHaveLength(1);
+    expect(rows[0]!.getAttribute("data-licence")).toBe("green");
+    within(rows[0]!).getByText("Free for any use, including commercial.");
+    expect(within(rows[0]!).getByRole("link", { name: "Apache License 2.0" }).getAttribute("href")).toBe(apache.url);
+    // Read before the file's plain download.
+    before(rows[0]!, within(panel).getByRole("button", { name: "Download file anyway" }));
+    // Nothing is made with it in Studio: no line about what you make.
+    expect(within(panel).queryByText(/^Pictures you make/)).toBeNull();
+  });
+
+  it("a LoRA-only repository shows its licence beside Download LoRA", async () => {
+    const loras = [view("pixel-art-xl-v1.1.safetensors", 170_000_000, { lora: { base: "sdxl" } })];
+    const panel = await openRepo(
+      supported({
+        repo: "someone/pixel-art-xl-lora",
+        verdict: { lora: { base: "sdxl" } },
+        files: [],
+        loras,
+        fileViews: loras,
+        licence: openrail,
+        licences: [openrail],
+      }),
+    );
+    const rows = licenceRows(panel);
+    expect(rows).toHaveLength(1);
+    expect(rows[0]!.getAttribute("data-licence")).toBe("amber");
+    within(rows[0]!).getByText("Commercial use allowed, with use rules");
+    expect(within(rows[0]!).getByRole("link", { name: "CreativeML Open RAIL-M" }).getAttribute("href")).toBe(openrail.url);
+    before(rows[0]!, within(panel).getByRole("button", { name: "Download LoRA" }));
+  });
+
+  it("a repository whose plan parts share its licence lists it once; one of its own the plan lacks is added", async () => {
+    // The repository and every part of the plan: Apache 2.0, one row.
+    const panel = await openRepo();
+    const rows = licenceRows(panel);
+    expect(rows).toHaveLength(1);
+    within(rows[0]!).getByRole("link", { name: "Apache License 2.0" });
+    // The repository's own licence, named by none of the plan's parts: both, each once.
+    cleanup();
+    useStudio.setState(INITIAL, true);
+    const both = await openRepo(supported({ licence: kommunity, licences: [kommunity, apache] }));
+    expect(licenceRows(both).map((r) => within(r).getByRole("link").textContent)).toEqual([
+      "Apache License 2.0",
+      "Example Community Licence",
+    ]);
+    // The strictest of all of them says what you make may be used for.
+    within(both).getByText("Pictures you make: commercial use only under $5M revenue.");
+  });
+
+  it("a repository that names no licence says so plainly", async () => {
+    const lumina: FileLabel = { cannotRun: { reason: "lumina2", version: null } };
+    const panel = await openRepo(
+      supported({
+        repo: "someone/unlabelled",
+        verdict: lumina,
+        files: [],
+        licence: null,
+        licences: [],
+        fileViews: [view("model.safetensors", 5_000_000_000, lumina)],
+      }),
+    );
+    const none = within(panel).getByText("This repository names no licence. Check the licence before you use what you make.");
+    expect(none.closest("[data-licence]")!.getAttribute("data-licence")).toBe("none");
+    before(none, within(panel).getByRole("button", { name: "Download file anyway" }));
+  });
+
+  it("a gated repository that could not be read shows its licence too, with one way to its page", async () => {
+    const panel = await openRepo(
+      supported({
+        repo: "black-forest-labs/FLUX.1-Kontext-dev",
+        files: [],
+        licence: nonCommercial,
+        licences: [nonCommercial],
+        gate: { mode: "auto", collects: ["username"] },
+        fileViews: [view("flux1-kontext-dev.safetensors", 23_800_000_000, { notRead: { reason: "needsTerms" } })],
+      }),
+    );
+    const rows = licenceRows(panel);
+    expect(rows).toHaveLength(1);
+    expect(rows[0]!.getAttribute("data-licence")).toBe("red");
+    within(rows[0]!).getByText("Only for non-commercial use.");
+    before(rows[0]!, downloadButton(panel));
+    // Its gated line says what to do; the form is not said twice.
+    expect(within(panel).getAllByRole("link", { name: "Open the model page" })).toHaveLength(1);
+  });
+});
+
 describe("LoRAs in a repository", () => {
   it("each LoRA has Download LoRA; one of an unknown model type says so, never that it may not fit (ruling R6-lora-none)", async () => {
     const LORA_REPO = "someone/pixel-art-xl-lora";
