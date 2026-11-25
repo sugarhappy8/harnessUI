@@ -13,8 +13,8 @@
 //!   before anything starts.
 //! - **Before downloading**, Studio shows the model licences and asks first-time users to read the local model notice.
 //! - **The download** ([`start_local_download`]): one group of the download manager, each part
-//!   at its own revision; once every part is checked, and the diffusion file's own tensor table
-//!   is its family's, it joins Studio's installed models (`downloads::register_gen_model`). The
+//!   at its own revision; once every part is checked, and the model file's own header is a
+//!   model its recipe runs, it joins Studio's installed models (`downloads::register_gen_model`). The
 //!   Windows engine pack comes with the first model; where no engine is found and none can
 //!   come, the model still downloads, and Get local models tells it from the engine's state.
 //! - **Deleting** ([`delete_local_model`]): refused while a run on this computer waits for the
@@ -31,10 +31,12 @@ use models::download::FileSpec;
 use crate::hub::{UsedFile, chat_files_used, download_destination, gen_files_used};
 use models::gen_catalog::{
     FamilyRecord, GateMode, GenCatalog, GenEntry, GenFamily, GenGate, GenLicence, GenPart, GenRole,
-    gen_catalog,
+    GenericSpec, gen_catalog, generic_entry,
 };
 use models::gen_search::{Recognition, entry_for, recognise, searched_licence};
 use models::hf::{Gated, HfClient, HubInfo, RepoDetail};
+use models::sd::detect::SdVersion;
+use models::sd::matching::recipes_for;
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Manager};
 
@@ -323,10 +325,12 @@ pub fn entry_from_listing(
 
 /// The entry an installed model is, without a request: its saved parts (the revisions and
 /// SHA-256s it was downloaded at), with the rest from its catalog entry when the catalog still
-/// lists it, else from its family record as a searched file's entry is made
-/// (`gen_search::entry_for`). A searched file's licence is worked out again from its saved
-/// repository, revision and licence id, so repairs show the same metadata. A family
-/// this build has no record of is `studio_not_supported_yet`.
+/// lists it, else from its family record when its family is one of 0.1.x's, as a searched
+/// file's entry is made (`gen_search::entry_for`), else from its recipe alone
+/// ([`generic_entry`]). A searched file's licence is worked out again from its saved
+/// repository, revision and licence id, so repairs show the same metadata. A 0.1.x family
+/// this build has no record of, and a model with no recipe yet (*Set it up yourself*), are
+/// `studio_not_supported_yet`.
 pub fn entry_from_installed(model: &store::GenModel, catalog: &GenCatalog) -> AppResult<GenEntry> {
     let parts: Vec<GenPart> = serde_json::from_value(model.parts.clone())
         .map_err(|e| AppError::internal(format!("an installed model's parts: {e}")))?;
@@ -342,21 +346,23 @@ pub fn entry_from_installed(model: &store::GenModel, catalog: &GenCatalog) -> Ap
         .catalog_id
         .as_deref()
         .and_then(|id| catalog.entries.get(id));
-    let mut entry = match listed {
-        Some(entry) => entry.clone(),
-        None => {
-            let family: GenFamily = serde_json::from_value(model.family.clone().into())
-                .map_err(|e| errors::not_supported_yet(e.to_string()))?;
+    let family = serde_json::from_value::<GenFamily>(model.family.clone().into());
+    let mut entry = match (listed, family) {
+        (Some(entry), _) => entry.clone(),
+        (None, Ok(family)) => {
             let record = catalog
                 .families
                 .get(&family)
                 .ok_or_else(|| errors::not_supported_yet(errors::FAMILY_RECORD_MISSING))?;
             from_record(model, record, diffusion)
         }
+        (None, Err(_)) => from_recipe(model)?,
     };
     entry.id.clone_from(&model.id);
+    // A file from this computer is the person's own: it names no licence.
     if let Some(missing) = parts
         .iter()
+        .filter(|p| p.local.is_none())
         .find(|p| !entry.licenses.contains_key(&p.license))
     {
         return Err(errors::not_supported_yet(format!(
@@ -366,6 +372,50 @@ pub fn entry_from_installed(model: &store::GenModel, catalog: &GenCatalog) -> Ap
     }
     entry.parts = parts;
     Ok(entry)
+}
+
+/// An installed model of no 0.1.x family: a generic entry of its recipe, its family column the
+/// engine version its file was detected as. Untested when that is `unknown`, or a version
+/// whose recipes do not include it (the person chose it). No recipe yet is
+/// `studio_not_supported_yet`: such a model is listed with *Set it up yourself*.
+fn from_recipe(model: &store::GenModel) -> AppResult<GenEntry> {
+    let recipe_id = model
+        .recipe_id
+        .as_deref()
+        .ok_or_else(|| errors::not_supported_yet(errors::NO_RECIPE_YET))?;
+    let recipe = models::sd::recipes::recipe(recipe_id)
+        .ok_or_else(|| errors::not_supported_yet(format!("no engine recipe {recipe_id}")))?;
+    let version = SdVersion::from_word(&model.family);
+    let untested = model.family == UNKNOWN_FAMILY
+        || version.is_none_or(|v| !recipes_for(v).contains(&recipe_id));
+    Ok(generic_entry(GenericSpec {
+        id: model.id.clone(),
+        name: model.name.clone(),
+        publisher: String::new(),
+        recipe,
+        version,
+        parts: Vec::new(),
+        licenses: BTreeMap::new(),
+        // Not saved: the stored Hugging Face token is used for every download anyway.
+        gate: GenGate {
+            mode: GateMode::None,
+            collects: Vec::new(),
+        },
+        untested,
+    }))
+}
+
+/// The family column of a model whose file's version was not detected.
+const UNKNOWN_FAMILY: &str = "unknown";
+
+/// The family column an entry's installed row keeps: its 0.1.x family, else the engine
+/// version its model is, else `unknown`.
+pub(crate) fn family_word(entry: &GenEntry) -> String {
+    match (entry.family, entry.version) {
+        (Some(family), _) => word(&family),
+        (None, Some(version)) => version.word().to_owned(),
+        (None, None) => UNKNOWN_FAMILY.to_owned(),
+    }
 }
 
 /// An installed searched model's entry from its family `record`, as `gen_search::entry_for`
@@ -395,8 +445,12 @@ fn from_record(model: &store::GenModel, record: &FamilyRecord, diffusion: &GenPa
         summary: String::new(),
         publisher: record.publisher.clone(),
         kind: record.kind,
-        family: record.family,
+        family: Some(record.family),
+        recipe: record.family.recipe_id().to_owned(),
+        version: Some(record.family.version()),
+        untested: false,
         inputs: record.inputs.clone(),
+        input_counts: Vec::new(),
         parts: Vec::new(),
         licenses,
         // Not saved: the stored Hugging Face token is used for every download anyway.
@@ -432,7 +486,7 @@ fn gen_group(entry: &GenEntry, catalog_id: Option<String>, source: store::GenSou
         catalog_id,
         name: entry.name.clone(),
         kind: word(&entry.kind),
-        family: word(&entry.family),
+        family: family_word(entry),
         source: source.as_str().to_string(),
         parts: entry
             .parts
@@ -1054,7 +1108,7 @@ mod tests {
         );
         let e = entry_from_listing(&d, "z_image_turbo-Q4_K.gguf", &families()).unwrap();
         assert_eq!(e.id, "hf:leejet/Z-Image-Turbo-GGUF:z_image_turbo-Q4_K.gguf");
-        assert_eq!(e.family, GenFamily::ZImageTurbo);
+        assert_eq!(e.family, Some(GenFamily::ZImageTurbo));
         assert_eq!(e.diffusion().revision, d.commit);
         let d = detail("repo-uncensored.json");
         let file = "z_image_turbo_uncensored-Q4_K.gguf";
@@ -1232,7 +1286,7 @@ mod tests {
             e.parts, searched.parts,
             "the saved parts at their saved revisions"
         );
-        assert_eq!(e.family, GenFamily::ZImageTurbo);
+        assert_eq!(e.family, Some(GenFamily::ZImageTurbo));
         assert_eq!(e.defaults, record.defaults);
         assert_eq!(e.limits, record.limits);
         for part in &e.parts {
@@ -1274,6 +1328,191 @@ mod tests {
             entry_from_installed(&row, &bare).unwrap_err().code,
             "studio_not_supported_yet"
         );
+    }
+
+    /// An installed row with these saved parts (each `file` beside its fields).
+    fn row_with(
+        id: &str,
+        family: &str,
+        recipe_id: Option<&str>,
+        catalog_id: Option<&str>,
+        parts: Value,
+    ) -> store::GenModel {
+        store::GenModel {
+            id: id.into(),
+            catalog_id: catalog_id.map(str::to_owned),
+            name: format!("Model {id}"),
+            kind: "image".into(),
+            family: family.into(),
+            recipe_id: recipe_id.map(str::to_owned),
+            parts,
+            size_bytes: 1,
+            source: store::GenSource::Search,
+            added_at: 1,
+        }
+    }
+
+    /// A 0.1.x search row: its 0.1.x family word, no catalog id and V4's recipe; its diffusion
+    /// file from someone's repository, beside the family's companions.
+    fn search_row(id: &str, family: &str, recipe_id: Option<&str>) -> store::GenModel {
+        let (repo, path) = id
+            .strip_prefix("hf:")
+            .and_then(|rest| rest.split_once(':'))
+            .unwrap();
+        let record = &families()[&serde_json::from_value::<GenFamily>(json!(family)).unwrap()];
+        let diffusion = json!({
+            "role": "diffusion", "repo": repo, "revision": "c".repeat(40), "path": path,
+            "file": format!("/models/{repo}/{path}"), "size": 4096, "sha256": "d".repeat(64),
+            "license": record.upstream_license,
+        });
+        let companions = record.companions.iter().map(|p| {
+            let mut v = serde_json::to_value(p).unwrap();
+            v["file"] = format!("/models/{}/{}", p.repo, p.path).into();
+            v
+        });
+        let parts = std::iter::once(diffusion).chain(companions).collect();
+        row_with(id, family, recipe_id, None, Value::Array(parts))
+    }
+
+    #[test]
+    fn an_01x_search_row_keeps_its_0_1_2_entry() {
+        let row = search_row(
+            "hf:o/FLUX.3-Image-Klein-GGUF:f3.gguf",
+            "flux3-image-klein",
+            Some("flux3-klein"),
+        );
+        let e = entry_from_installed(&row, &catalog()).unwrap();
+        // The family record's defaults, as 0.1.2.
+        assert_eq!(
+            (e.family, e.untested, e.defaults.steps),
+            (Some(GenFamily::Flux3ImageKlein), false, 16)
+        );
+        let record = &families()[&GenFamily::Flux3ImageKlein];
+        assert_eq!(
+            (e.recipe.as_str(), e.version, &e.limits, &e.fallback),
+            (
+                "flux3-klein",
+                Some(SdVersion::Flux3),
+                &record.limits,
+                &record.fallback
+            )
+        );
+        // A 0.1.x family's row keeps its record even with no recipe saved.
+        let row = search_row(
+            "hf:o/FLUX.3-Image-Klein-GGUF:f3.gguf",
+            "flux3-image-klein",
+            None,
+        );
+        assert_eq!(
+            entry_from_installed(&row, &catalog()).unwrap().family,
+            Some(GenFamily::Flux3ImageKlein)
+        );
+    }
+
+    /// A model of no 0.1.x family is a generic entry of its recipe, its saved parts its own;
+    /// it is untested when its version is not known or does not take that recipe. A file
+    /// from this computer names no licence.
+    #[test]
+    fn a_model_of_no_01x_family_is_a_generic_entry_of_its_recipe() {
+        let local = json!([{
+            "role": "model", "repo": "", "revision": "", "path": "",
+            "file": "/home/me/sdxl ü.safetensors", "local": "/home/me/sdxl ü.safetensors",
+            "size": 6_938_078_334u64, "sha256": "ab".repeat(32), "license": "",
+        }]);
+        let row = |family: &str, recipe: Option<&str>| {
+            row_with("local:1", family, recipe, None, local.clone())
+        };
+        let e = entry_from_installed(&row("sdxl", Some("sdxl-checkpoint")), &catalog()).unwrap();
+        assert_eq!(
+            (e.id.as_str(), e.name.as_str(), e.recipe.as_str()),
+            ("local:1", "Model local:1", "sdxl-checkpoint")
+        );
+        assert_eq!(
+            (e.family, e.version, e.untested),
+            (None, Some(SdVersion::Sdxl), false)
+        );
+        assert_eq!((e.defaults.steps, e.defaults.cfg), (20, 5.0));
+        assert_eq!(e.parts.len(), 1);
+        assert_eq!(
+            e.parts[0].local.as_deref(),
+            Some(Path::new("/home/me/sdxl ü.safetensors"))
+        );
+        assert_eq!(family_word(&e), "sdxl");
+        // SDXL Vega takes the SDXL recipe: still tested.
+        let e = entry_from_installed(&row("sdxl-vega", Some("sdxl-checkpoint")), &catalog());
+        assert!(!e.unwrap().untested);
+        // Not known, or a recipe its version does not take: untested.
+        for (family, recipe) in [
+            ("unknown", "sdxl-checkpoint"),
+            ("flux", "sdxl-checkpoint"),
+            ("a-future-family", "sdxl-checkpoint"),
+        ] {
+            let e = entry_from_installed(&row(family, Some(recipe)), &catalog()).unwrap();
+            assert!(e.untested, "{family}");
+        }
+        assert_eq!(
+            family_word(
+                &entry_from_installed(&row("unknown", Some("flux1-dev")), &catalog()).unwrap()
+            ),
+            "unknown"
+        );
+        // No recipe yet (Set it up yourself), or one the engine does not have: no entry.
+        for recipe in [None, Some("no-such-recipe")] {
+            assert_eq!(
+                entry_from_installed(&row("sdxl", recipe), &catalog())
+                    .unwrap_err()
+                    .code,
+                "studio_not_supported_yet",
+                "{recipe:?}"
+            );
+        }
+        // A Hub part still needs a licence the entry knows.
+        let hub = json!([{
+            "role": "model", "repo": "o/r", "revision": "1".repeat(40), "path": "m.safetensors",
+            "file": "/models/o/r/m.safetensors", "size": 1, "sha256": "ab".repeat(32),
+            "license": "openrail",
+        }]);
+        let row = row_with(
+            "hf:o/r:m.safetensors",
+            "sdxl",
+            Some("sdxl-checkpoint"),
+            None,
+            hub,
+        );
+        assert_eq!(
+            entry_from_installed(&row, &catalog()).unwrap_err().code,
+            "studio_not_supported_yet"
+        );
+    }
+
+    /// A catalog row is its catalog entry, with the entry's recipe and version.
+    #[test]
+    fn a_catalog_row_is_its_catalog_entry() {
+        let catalog = catalog();
+        let klein = &catalog.entries["flux2-klein-4b-q4"];
+        let parts = klein
+            .parts
+            .iter()
+            .map(|p| {
+                let mut v = serde_json::to_value(p).unwrap();
+                v["file"] = format!("/models/{}", p.path).into();
+                v
+            })
+            .collect();
+        let row = row_with(
+            "flux2-klein-4b-q4",
+            "flux2-klein-4b",
+            Some("flux2-klein-4b"),
+            Some("flux2-klein-4b-q4"),
+            Value::Array(parts),
+        );
+        let e = entry_from_installed(&row, &catalog).unwrap();
+        assert_eq!((&e.recipe, e.version), (&klein.recipe, klein.version));
+        assert_eq!(
+            (e.defaults.steps, e.family),
+            (4, Some(GenFamily::Flux2Klein4b))
+        );
+        assert_eq!(family_word(&e), "flux2-klein-4b");
     }
 
     /// What a download of an entry records: each part at its own revision, as the model's

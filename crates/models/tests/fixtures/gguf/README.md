@@ -8,8 +8,9 @@ or for the Qwen3 chat model, whose tokenizer comes first, the first 8 MiB.
 as a tiny model file (32 bytes of data a tensor, no metadata keys).
 
 leejet's and Green-Sky's files hold no metadata keys at all, so there is no
-`general.architecture` to read: the table is what tells the families apart
-(`gen_search::family_from_tensors`).
+`general.architecture` to read: the table is what tells the models apart (0.2.0: the
+engine's own detection on it, `sd::inspect`, which the app's `downloads::check_main_file`
+reads).
 
 | File | Repository @ revision, file |
 |---|---|

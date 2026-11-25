@@ -1013,7 +1013,7 @@ fn gb_up(bytes: u64) -> String {
     format!("{}.{} GB", tenths / 10, tenths % 10)
 }
 
-/// A downloaded diffusion file whose own tensor table is not its family's (a FLUX.2 klein 9B
+/// A downloaded model file whose own header is not a model its entry runs (a FLUX.2 klein 9B
 /// named like the 4B, or a file whose name lies): it is not added, and its files go.
 pub fn not_that_model(details: impl Into<String>) -> AppError {
     AppError::new(
@@ -1165,6 +1165,8 @@ pub fn model_in_use() -> AppError {
 /// Why a recognised family's model is not supported yet when this build has no record of the
 /// family (a catalog newer than the build, or one that hid the record).
 pub const FAMILY_RECORD_MISSING: &str = "its family record is missing";
+/// The details of an installed model with no engine recipe yet (*Set it up yourself*).
+pub const NO_RECIPE_YET: &str = "it has no engine recipe yet";
 
 /// Why a recognised repository offers no file: each of its model files was refused when its
 /// entry or its download was worked out (a part not pinned, a licence not known).
@@ -1183,6 +1185,10 @@ pub const PART_READS_THE_PROMPT: &str = "reads your prompt";
 pub const PART_READS_THE_PICTURE: &str = "reads the picture you add";
 /// What the decoder is, in the download dialog.
 pub const PART_PICTURE_DECODER: &str = "picture decoder";
+/// What an audio decoder is, in the download dialog.
+pub const PART_SOUND_DECODER: &str = "sound decoder";
+/// What an audio encoder is, in the download dialog: it reads added sound.
+pub const PART_READS_THE_SOUND: &str = "reads the sound you add";
 
 /// A fit asked at a size the model is never made at (a side of 0, or longer than its
 /// longest).
@@ -1249,7 +1255,7 @@ pub const LOCAL_WRONG_KIND: &str = "This model does not make what was asked for.
 pub const LOCAL_PART_MISSING: &str = "A file of this model is missing.";
 /// A part file is not the size it was downloaded at.
 pub const LOCAL_PART_CHANGED: &str = "A file of this model is not the size it was downloaded at.";
-/// The diffusion file's own tensor table is not its family's; the check's details follow.
+/// The model file's own header is not a model its entry runs; the check's details follow.
 pub const LOCAL_NOT_ITS_MODEL: &str = "The model file is not the model it was downloaded as";
 /// A prompt over `runtime::sd::args::PROMPT_MAX_CHARS`.
 pub const LOCAL_PROMPT_TOO_LONG: &str = "The prompt is longer than 4,000 characters.";

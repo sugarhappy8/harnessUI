@@ -203,14 +203,27 @@ impl Weights {
         };
         for part in &entry.parts {
             match part.role {
-                GenRole::Diffusion | GenRole::HighNoiseDiffusion | GenRole::Model => {
+                GenRole::Diffusion
+                | GenRole::HighNoiseDiffusion
+                | GenRole::UncondDiffusion
+                | GenRole::Model => {
                     w.diffusion = w.diffusion.saturating_add(part.size);
                     w.largest_diffusion = w.largest_diffusion.max(part.size);
                 }
-                GenRole::Llm | GenRole::T5xxl | GenRole::ClipL | GenRole::ClipVision => {
+                GenRole::Llm
+                | GenRole::LlmVision
+                | GenRole::T5xxl
+                | GenRole::ClipL
+                | GenRole::ClipG
+                | GenRole::ClipVision
+                | GenRole::Tokenizer
+                | GenRole::AudioEncoder
+                | GenRole::EmbeddingsConnectors => {
                     w.encoders = w.encoders.saturating_add(part.size);
                 }
-                GenRole::Vae => w.decoder = w.decoder.saturating_add(part.size),
+                GenRole::Vae | GenRole::Tae | GenRole::AudioVae => {
+                    w.decoder = w.decoder.saturating_add(part.size);
+                }
             }
         }
         w
@@ -627,6 +640,7 @@ pub(crate) mod tests {
             max_side: 2048,
             frame_rule: None,
             max_frames: None,
+            video: None,
         }
     }
 
@@ -636,6 +650,7 @@ pub(crate) mod tests {
             max_side: 1280,
             frame_rule: Some(FrameRule::FourNPlusOne),
             max_frames: Some(max_frames),
+            video: None,
         }
     }
 
@@ -655,8 +670,12 @@ pub(crate) mod tests {
             summary: String::new(),
             publisher: String::new(),
             kind,
-            family,
+            family: Some(family),
+            recipe: family.recipe_id().into(),
+            version: Some(family.version()),
+            untested: false,
             inputs: Vec::new(),
+            input_counts: Vec::new(),
             parts: parts
                 .into_iter()
                 .map(|(role, size)| GenPart {
@@ -667,6 +686,8 @@ pub(crate) mod tests {
                     size,
                     sha256: "ab".repeat(32),
                     license: "apache-2.0".into(),
+                    local: None,
+                    folder: None,
                 })
                 .collect(),
             licenses: BTreeMap::new(),
@@ -684,6 +705,13 @@ pub(crate) mod tests {
                 height: default.height,
                 frames: (kind == GenKind::Video).then_some(default.frames),
                 fps: (kind == GenKind::Video).then_some(24),
+                guidance: None,
+                img_cfg: None,
+                timestep_shift: None,
+                sigmas: Vec::new(),
+                high_noise: None,
+                moe_boundary: None,
+                strength: None,
             },
             limits,
             fallback,
@@ -800,6 +828,78 @@ pub(crate) mod tests {
             height,
             frames,
         }
+    }
+
+    /// 0.2.0: a model the catalog does not list, from its recipe with these parts.
+    fn generic(recipe_id: &str, parts: &[(GenRole, u64)]) -> GenEntry {
+        crate::gen_catalog::generic_entry(crate::gen_catalog::GenericSpec {
+            id: recipe_id.into(),
+            name: recipe_id.into(),
+            publisher: String::new(),
+            recipe: crate::sd::recipes::recipe(recipe_id).unwrap(),
+            version: None,
+            parts: parts
+                .iter()
+                .map(|&(role, size)| GenPart {
+                    role,
+                    repo: "test/model".into(),
+                    revision: "0".repeat(40),
+                    path: format!("{role:?}.gguf"),
+                    size,
+                    sha256: "ab".repeat(32),
+                    license: "apache-2.0".into(),
+                    local: None,
+                    folder: None,
+                })
+                .collect(),
+            licenses: BTreeMap::new(),
+            gate: GenGate {
+                mode: GateMode::None,
+                collects: Vec::new(),
+            },
+            untested: false,
+        })
+    }
+
+    /// A generic SDXL checkpoint goes through the same formulas with its kind's fallback: 32
+    /// pixels a token (sizes are multiples of 64), so 1024 × 1024 is 1024 tokens.
+    #[test]
+    fn a_generic_picture_model_is_judged_by_its_kinds_fallback() {
+        let sdxl = generic("sdxl-checkpoint", &[(GenRole::Model, 6_938_078_334)]);
+        // act_dit 0.5 + 0.0001·1024 = 0.60; act_vae 0.0000003·1024² = 0.31
+        assert_eq!(tokens(&sdxl, sq(1024)), 1024);
+        // 6.94 + 0.60 + 1 spare = 8.54 <= 9
+        assert_eq!(
+            gen_fit(&sdxl, sq(1024), &gpu(9, 32), None).fit,
+            GenFit::Green
+        );
+        // 8.54 > 8; one part 6.94 + 0.60 + 1 = 8.54 > 8
+        assert_ne!(
+            gen_fit(&sdxl, sq(1024), &gpu(8, 32), None).fit,
+            GenFit::Green
+        );
+    }
+
+    /// A generic Wan 2.2 A14B's two diffusion parts take turns, like 0.1.x's: one part at a
+    /// time needs the larger one only.
+    #[test]
+    fn a_generic_two_model_video_runs_its_diffusion_parts_in_turns() {
+        let wan = generic(
+            "wan22-t2v",
+            &[
+                (GenRole::HighNoiseDiffusion, 9_651_800_000),
+                (GenRole::Diffusion, 9_651_800_000),
+                (GenRole::T5xxl, 4_145_878_880),
+                (GenRole::Vae, 253_815_318),
+            ],
+        );
+        let size = clip(1280, 720, 33);
+        // 80 × 45 tokens a latent frame, 9 latent frames.
+        assert_eq!(tokens(&wan, size), 32_400);
+        // green 23.70 + 9.10 + 1 > 24; one part 9.65 + 9.10 + 1 = 19.75 <= 24, and the
+        // weights (23.70) wait in 64 − 2 GB
+        let r = gen_fit(&wan, size, &gpu(24, 64), None);
+        assert_eq!((r.fit, r.memory_saving), (GenFit::OnePartAtATime, true));
     }
 
     #[test]

@@ -4065,7 +4065,7 @@ fn installed_row(entry: &GenEntry) -> store::GenModel {
             .as_str()
             .unwrap()
             .to_owned(),
-        recipe_id: Some(entry.family.recipe_id().into()),
+        recipe_id: Some(entry.recipe.clone()),
         parts: json!([]),
         size_bytes: entry.total_bytes(),
         source: store::GenSource::Catalog,

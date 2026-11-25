@@ -606,12 +606,20 @@ fn parts_dto(plan: &DownloadPlan) -> Vec<PartDto> {
 /// What a part does, in the download dialog's words.
 fn part_label(role: GenRole) -> &'static str {
     match role {
-        GenRole::Diffusion | GenRole::HighNoiseDiffusion | GenRole::Model => {
-            errors::PART_MAKES_THE_PICTURE
-        }
-        GenRole::Llm | GenRole::T5xxl | GenRole::ClipL => errors::PART_READS_THE_PROMPT,
-        GenRole::ClipVision => errors::PART_READS_THE_PICTURE,
-        GenRole::Vae => errors::PART_PICTURE_DECODER,
+        GenRole::Diffusion
+        | GenRole::HighNoiseDiffusion
+        | GenRole::UncondDiffusion
+        | GenRole::Model => errors::PART_MAKES_THE_PICTURE,
+        GenRole::Llm
+        | GenRole::T5xxl
+        | GenRole::ClipL
+        | GenRole::ClipG
+        | GenRole::Tokenizer
+        | GenRole::EmbeddingsConnectors => errors::PART_READS_THE_PROMPT,
+        GenRole::ClipVision | GenRole::LlmVision => errors::PART_READS_THE_PICTURE,
+        GenRole::Vae | GenRole::Tae => errors::PART_PICTURE_DECODER,
+        GenRole::AudioVae => errors::PART_SOUND_DECODER,
+        GenRole::AudioEncoder => errors::PART_READS_THE_SOUND,
     }
 }
 
@@ -879,8 +887,12 @@ mod tests {
             summary: format!("{id}, for the test"),
             publisher: "Test Labs".into(),
             kind,
-            family,
+            family: Some(family),
+            recipe: family.recipe_id().into(),
+            version: Some(family.version()),
+            untested: false,
             inputs: Vec::new(),
+            input_counts: Vec::new(),
             parts: parts
                 .into_iter()
                 .map(|(role, size)| GenPart {
@@ -891,6 +903,8 @@ mod tests {
                     size,
                     sha256: "ab".repeat(32),
                     license: "apache-2.0".into(),
+                    local: None,
+                    folder: None,
                 })
                 .collect(),
             licenses: BTreeMap::from([("apache-2.0".to_owned(), apache())]),
@@ -908,12 +922,20 @@ mod tests {
                 height,
                 frames: video.then_some(frames),
                 fps: video.then_some(24),
+                guidance: None,
+                img_cfg: None,
+                timestep_shift: None,
+                sigmas: Vec::new(),
+                high_noise: None,
+                moe_boundary: None,
+                strength: None,
             },
             limits: GenLimits {
                 multiple_of: if video { 32 } else { 16 },
                 max_side: if video { 1280 } else { 2048 },
                 frame_rule: video.then_some(FrameRule::FourNPlusOne),
                 max_frames: video.then_some(121),
+                video: None,
             },
             fallback: if video {
                 wan22_fallback()
@@ -1480,6 +1502,8 @@ mod tests {
             size: 3_864_250_304,
             sha256: "d".repeat(64),
             license: "apache-2.0".into(),
+            local: None,
+            folder: None,
         };
         let parts: Vec<&GenPart> = std::iter::once(&diffusion)
             .chain(&record.companions)
@@ -1616,6 +1640,8 @@ mod tests {
             size: 1_234_567,
             sha256: "f".repeat(64),
             license: "apache-2.0".into(),
+            local: None,
+            folder: None,
         };
         install(
             &deps.store,

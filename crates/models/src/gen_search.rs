@@ -8,8 +8,8 @@
 //! ([`FamilyRecord`]).
 //!
 //! A name never proves what a file holds: [`recognise`] decides what a repository offers
-//! from its listing, and the downloaded file's own tensor table ([`family_from_tensors`])
-//! decides whether it is added and run.
+//! from its listing, and the engine's detection on the downloaded file's own header
+//! (`downloads::check_main_file` in the app) decides whether it is added and run.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::iter;
@@ -224,71 +224,6 @@ pub fn recognise(detail: &RepoDetail, families: &BTreeMap<GenFamily, FamilyRecor
 
 // ---- tensor tables ------------------------------------------------------------------------
 
-/// What a family's diffusion file holds, from the pinned files' tensor tables
-/// (tests/fixtures/gguf/).
-struct TensorSignature {
-    family: GenFamily,
-    /// Name prefixes at least one tensor has.
-    required: &'static [&'static str],
-    /// The tensor the width is read from, the index of the dimension (ggml's order) and the
-    /// width.
-    width: (&'static str, usize, u64),
-    /// Each block prefix and how many numbered blocks (`<prefix><n>.…`) it has.
-    blocks: &'static [(&'static str, usize)],
-    /// A patch embedding's input channels: the tensor, its kernel's volume and the
-    /// channels (its elements are width × channels × volume, however a converter stacked
-    /// the dimensions).
-    channels: Option<(&'static str, u64, u64)>,
-}
-
-const SIGNATURES: &[TensorSignature] = &[
-    TensorSignature {
-        family: GenFamily::Flux2Klein4b,
-        required: &["double_blocks.", "single_blocks."],
-        width: ("img_in.weight", 1, 3072),
-        blocks: &[("double_blocks.", 5), ("single_blocks.", 20)],
-        channels: None,
-    },
-    TensorSignature {
-        family: GenFamily::ZImageTurbo,
-        required: &["cap_embedder."],
-        width: ("cap_embedder.1.weight", 1, 3840),
-        blocks: &[
-            ("layers.", 30),
-            ("noise_refiner.", 2),
-            ("context_refiner.", 2),
-        ],
-        channels: None,
-    },
-    TensorSignature {
-        family: GenFamily::Flux3ImageKlein,
-        required: &["emb_in.image.", "final_layer.image."],
-        width: ("emb_in.image.weight", 1, 3072),
-        blocks: &[
-            ("content_mode_blocks.image.", 5),
-            ("content_mode_blocks.image_cond.", 5),
-            ("txt_mode_blocks.", 5),
-            ("single_blocks.", 28),
-        ],
-        channels: None,
-    },
-    // The fast and full versions share it: the name decides between them.
-    TensorSignature {
-        family: GenFamily::Wan22Ti2v5bFast,
-        required: &["blocks.", "patch_embedding."],
-        width: ("patch_embedding.bias", 0, 3072),
-        blocks: &[("blocks.", 30)],
-        channels: Some(("patch_embedding.weight", 4, 48)),
-    },
-    TensorSignature {
-        family: GenFamily::Wan21T2v1_3b,
-        required: &["blocks.", "patch_embedding."],
-        width: ("patch_embedding.bias", 0, 1536),
-        blocks: &[("blocks.", 30)],
-        channels: Some(("patch_embedding.weight", 4, 16)),
-    },
-];
-
 /// Prefixes a converter puts before every name (the engine's own converter writes the
 /// checkpoint's `model.diffusion_model.`).
 const CONVERTER_PREFIXES: [&str; 2] = ["model.diffusion_model.", "diffusion_model."];
@@ -321,78 +256,18 @@ const DIFFUSION_NAMES: &[&str] = &[
     "context_refiner.",
     "first_stage_model.",
     "cond_stage_model.",
+    // FLUX.3 Image Klein's image embedding.
+    "emb_in.image.",
 ];
 
-/// A tensor's name without a converter's prefix.
-fn bare(name: &str) -> &str {
-    CONVERTER_PREFIXES
-        .iter()
-        .find_map(|p| name.strip_prefix(p))
-        .unwrap_or(name)
-}
-
-/// How many distinct `<n>` there are in names `<prefix><n>.…`.
-fn block_count(shapes: &[TensorShape], prefix: &str) -> usize {
-    shapes
-        .iter()
-        .filter_map(|t| {
-            let rest = bare(&t.name).strip_prefix(prefix)?;
-            rest.split('.').next()?.parse::<u64>().ok()
-        })
-        .collect::<BTreeSet<_>>()
-        .len()
-}
-
-fn has_prefixes(shapes: &[TensorShape], prefixes: &[&str]) -> bool {
-    prefixes
-        .iter()
-        .all(|p| shapes.iter().any(|t| bare(&t.name).starts_with(p)))
-}
-
-fn dims_of<'a>(shapes: &'a [TensorShape], name: &str) -> Option<&'a [u64]> {
-    shapes
-        .iter()
-        .find(|t| bare(&t.name) == name)
-        .map(|t| t.dims.as_slice())
-}
-
-fn matches_signature(sig: &TensorSignature, shapes: &[TensorShape]) -> bool {
-    let (tensor, index, width) = sig.width;
-    has_prefixes(shapes, sig.required)
-        && dims_of(shapes, tensor).and_then(|d| d.get(index)) == Some(&width)
-        && sig
-            .blocks
-            .iter()
-            .all(|(prefix, count)| block_count(shapes, prefix) == *count)
-        && sig.channels.is_none_or(|(tensor, volume, channels)| {
-            let elements = dims_of(shapes, tensor)
-                .and_then(|d| d.iter().try_fold(1u64, |n, &x| n.checked_mul(x)));
-            elements == Some(width * channels * volume)
-        })
-}
-
-/// The family of a local GGUF diffusion file, from its tensor table (most such files carry
-/// no `general.architecture`): the names its signature needs, the width one tensor's
-/// dimensions give, the block counts and, for Wan, the patch embedding's input channels.
-/// Anything else, a 9B klein named like the 4B included, is `None`.
-pub fn family_from_tensors(shapes: &[TensorShape]) -> Option<GenFamily> {
-    SIGNATURES
-        .iter()
-        .find(|sig| matches_signature(sig, shapes))
-        .map(|sig| sig.family)
-}
-
-/// Whether a tensor table is a picture or video model's: a known family, the names a known
-/// signature needs (another size of it), or names only such models use.
+/// Whether a tensor table is a picture or video model's: a converter's prefix, or a name only
+/// such models use. Whether it is the model it was downloaded as is the engine's detection's
+/// to say (`downloads::check_main_file` in the app).
 pub fn looks_like_diffusion(shapes: &[TensorShape]) -> bool {
-    family_from_tensors(shapes).is_some()
-        || SIGNATURES
-            .iter()
-            .any(|sig| has_prefixes(shapes, sig.required))
-        || shapes.iter().any(|t| {
-            CONVERTER_PREFIXES.iter().any(|p| t.name.starts_with(p))
-                || DIFFUSION_NAMES.iter().any(|p| t.name.starts_with(p))
-        })
+    shapes.iter().any(|t| {
+        CONVERTER_PREFIXES.iter().any(|p| t.name.starts_with(p))
+            || DIFFUSION_NAMES.iter().any(|p| t.name.starts_with(p))
+    })
 }
 
 // ---- licences -----------------------------------------------------------------------------
@@ -635,6 +510,8 @@ pub fn entry_for(
         size: file.size,
         sha256,
         license: licence.id.clone(),
+        local: None,
+        folder: None,
     };
     let mut licenses = record.licenses.clone();
     licenses.insert(licence.id.clone(), licence);
@@ -653,8 +530,12 @@ pub fn entry_for(
         summary: String::new(),
         publisher: record.publisher.clone(),
         kind: record.kind,
-        family: record.family,
+        family: Some(record.family),
+        recipe: record.family.recipe_id().to_owned(),
+        version: Some(record.family.version()),
+        untested: false,
         inputs: record.inputs.clone(),
+        input_counts: Vec::new(),
         parts,
         licenses,
         gate: GenGate {
@@ -687,6 +568,7 @@ mod tests {
     };
     use crate::gguf::{TensorShape, read_tensor_shapes, testing};
     use crate::hf::{OFFICIAL_ENDPOINT, RepoDetail, parse_repo_detail};
+    use crate::sd::detect::SdVersion;
 
     /// The Studio engine build the app pins (`runtime::sd::lock`, which this crate cannot
     /// depend on).
@@ -988,7 +870,16 @@ mod tests {
         assert_eq!(e.parts[0].sha256, file.sha256.clone().unwrap());
         assert_eq!(
             (e.family, e.kind, e.defaults.steps, e.quirks.clone()),
-            (rec.family, rec.kind, rec.defaults.steps, rec.quirks.clone())
+            (
+                Some(rec.family),
+                rec.kind,
+                rec.defaults.steps,
+                rec.quirks.clone()
+            )
+        );
+        assert_eq!(
+            (e.recipe.as_str(), e.version, e.untested),
+            ("z-image-turbo", Some(SdVersion::ZImage), false)
         );
         assert_eq!(e.name, "Z-Image Turbo (Q2_K)");
         assert_eq!(e.effective_licence().id, "apache-2.0");
@@ -1089,10 +980,6 @@ mod tests {
         let entry = entry_for(&r, &files[0], &catalog[&family]).unwrap();
         assert_eq!(entry.defaults.steps, 16);
         assert_eq!(entry.parts[1].repo, "Qwen/Qwen3-VL-4B-Instruct-GGUF");
-        assert_eq!(
-            family_from_tensors(&table("flux3-klein-tensors.txt")),
-            Some(family)
-        );
         for other in ["base", "pup", "TE"] {
             assert_eq!(
                 family_of_name(&format!("flux-3-image-klein-{other}-GGUF")),
@@ -1230,32 +1117,11 @@ mod tests {
         assert_eq!(family_of_name("unsloth/Qwen3-4B-GGUF"), NameMatch::None);
     }
 
+    /// A picture or video model's table is told from a chat model's: every recorded table of
+    /// one (a 9B klein's, one missing a block) and FLUX.3 Image Klein's image embedding alone.
+    /// Which model it is, the engine's detection says (`downloads::check_main_file`).
     #[test]
-    fn families_are_told_apart_by_their_tensor_tables() {
-        assert_eq!(
-            family_from_tensors(&table("klein4b-tensors.txt")),
-            Some(GenFamily::Flux2Klein4b)
-        );
-        // A 9B file named like the 4B is never taken for it.
-        assert_eq!(family_from_tensors(&table("klein9b-tensors.txt")), None);
-        assert_eq!(
-            family_from_tensors(&table("zimage-tensors.txt")),
-            Some(GenFamily::ZImageTurbo)
-        );
-        assert_eq!(
-            family_from_tensors(&table("wan22-ti2v-5b-tensors.txt")),
-            Some(GenFamily::Wan22Ti2v5bFast)
-        );
-        // Converted with the engine's own tool: every name starts `model.diffusion_model.`.
-        assert_eq!(
-            family_from_tensors(&table("wan21-t2v-1.3b-tensors.txt")),
-            Some(GenFamily::Wan21T2v1_3b)
-        );
-        assert!(
-            looks_like_diffusion(&table("klein9b-tensors.txt"))
-                && !looks_like_diffusion(&table("qwen3-4b-tensors.txt"))
-        );
-        assert_eq!(family_from_tensors(&table("qwen3-4b-tensors.txt")), None);
+    fn a_picture_or_video_models_table_is_told_from_a_chat_models() {
         for fixture in testing::TENSOR_FIXTURES {
             assert_eq!(
                 looks_like_diffusion(&table(fixture)),
@@ -1263,34 +1129,16 @@ mod tests {
                 "{fixture}"
             );
         }
-    }
-
-    /// One block more or less, another width, other input channels: not the family.
-    #[test]
-    fn a_signature_needs_every_part_of_it() {
-        let wan = table("wan22-ti2v-5b-tensors.txt");
-        let without_last_block: Vec<TensorShape> = wan
-            .iter()
+        let without_last_block: Vec<TensorShape> = table("wan22-ti2v-5b-tensors.txt")
+            .into_iter()
             .filter(|t| !t.name.starts_with("blocks.29."))
-            .cloned()
             .collect();
-        assert_eq!(family_from_tensors(&without_last_block), None);
         assert!(looks_like_diffusion(&without_last_block));
-        let mut other_channels = wan.clone();
-        for t in &mut other_channels {
-            if t.name == "patch_embedding.weight" {
-                t.dims = vec![2, 2, 1, 16 * 3072];
-            }
-        }
-        assert_eq!(family_from_tensors(&other_channels), None);
-        let mut other_width = table("klein4b-tensors.txt");
-        for t in &mut other_width {
-            if t.name == "img_in.weight" {
-                t.dims = vec![128, 3584];
-            }
-        }
-        assert_eq!(family_from_tensors(&other_width), None);
-        assert_eq!(family_from_tensors(&[]), None);
+        let embedding: Vec<TensorShape> = table("flux3-klein-tensors.txt")
+            .into_iter()
+            .filter(|t| t.name.starts_with("emb_in.image."))
+            .collect();
+        assert!(!embedding.is_empty() && looks_like_diffusion(&embedding));
         assert!(!looks_like_diffusion(&[]));
     }
 

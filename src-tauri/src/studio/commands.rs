@@ -2050,7 +2050,7 @@ pub(crate) mod tests {
                 name: entry.name.clone(),
                 kind: kind.as_str().unwrap().into(),
                 family: family.as_str().unwrap().into(),
-                recipe_id: Some(entry.family.recipe_id().into()),
+                recipe_id: Some(entry.recipe.clone()),
                 parts: json!(parts),
                 size_bytes: entry.total_bytes(),
                 source: store::GenSource::Catalog,

@@ -13,7 +13,9 @@ use std::sync::{Arc, Mutex as StdMutex};
 use std::time::{Duration, Instant};
 
 use models::download::{FileSpec, Progress, download_file_checked, resumable_bytes};
-use models::gen_catalog::GenFamily;
+use models::gen_catalog::{GateMode, GenEntry, GenFamily, GenGate, GenPart, GenRole, GenericSpec};
+use models::sd::inspect::{FileKind, inspect_local, inspect_local_folder};
+use models::sd::matching::{Match, match_recipe, recipes_for};
 use serde::{Deserialize, Serialize};
 use store::{DownloadPatch, DownloadStatus, ModelSource, NewDownload};
 use tauri::{AppHandle, Emitter, Manager};
@@ -176,34 +178,113 @@ fn row_of<'a>(rows: &'a [store::Download], part: &GenGroupPart) -> Option<&'a st
         .find(|r| r.repo == part.repo && r.file == part.path)
 }
 
-/// Whether the downloaded diffusion part at `path` is a model of `family`, by its own tensor
-/// table (`gen_search::family_from_tensors`; most such files name no architecture), so a file
-/// whose name lies (a FLUX.2 klein 9B named like the 4B) is never added. A `.safetensors`
-/// part was checked by its size and SHA-256 only. Otherwise `studio_not_that_model`.
-pub(crate) fn check_diffusion_file(family: GenFamily, path: &Path) -> AppResult<()> {
-    let gguf = path
-        .extension()
-        .and_then(|e| e.to_str())
-        .is_some_and(|e| e.eq_ignore_ascii_case("gguf"));
-    if !gguf {
-        return Ok(());
+/// Whether the model file at `path` (a download's or an installed model's) is a model `entry`
+/// runs, by the engine's own detection on its header (`sd::inspect`: most such files name no
+/// architecture), so a file whose name lies is never added or run:
+/// - the file is a model of a version that takes the entry's recipe
+///   (`sd::matching::recipes_for`): an SDXL Vega or SSD-1B checkpoint takes
+///   `sdxl-checkpoint`;
+/// - for a 0.1.x family's entry, the recipe the file's own facts pick under the entry's file
+///   name is the entry's, as 0.1.x's tensor signatures told sizes apart: a FLUX.2 klein 9B
+///   named like the 4B is refused;
+/// - an untested set-up takes any weights that read;
+/// - a diffusers folder's entry (parts with a `folder` name) is checked by its folder.
+///
+/// Otherwise `studio_not_that_model`.
+pub(crate) fn check_main_file(entry: &GenEntry, path: &Path) -> AppResult<()> {
+    let main = entry
+        .parts
+        .iter()
+        .find(|p| matches!(p.role, GenRole::Diffusion | GenRole::Model));
+    let read = if entry.parts.iter().any(|p| p.folder.is_some()) {
+        inspect_local_folder(&folder_root(path, main.and_then(|p| p.folder.as_deref())))
+    } else {
+        inspect_local(path)
+    };
+    let facts = read.map_err(|e| studio_errors::not_that_model(format!("its header: {e}")))?;
+    let refused = |is: String| {
+        studio_errors::not_that_model(format!("expected a model for {}, {is}", entry.recipe))
+    };
+    if entry.untested {
+        return match facts.kind {
+            FileKind::CannotRun {
+                reason: models::sd::CannotRunReason::Pickle,
+                ..
+            } => Err(refused("the file is a pickle file".into())),
+            _ => Ok(()),
+        };
     }
-    let shapes = models::gguf::read_diffusion_tensor_shapes(path)
-        .map_err(|e| studio_errors::not_that_model(format!("its tensor table: {e}")))?;
-    match models::gen_search::family_from_tensors(&shapes) {
-        Some(found) if found == family => Ok(()),
-        // The full and distilled Wan checkpoints have identical tensor layouts.
-        Some(GenFamily::Wan22Ti2v5bFast) if family == GenFamily::Wan22Ti2v5b => Ok(()),
-        found => Err(studio_errors::not_that_model(format!(
-            "expected {family:?}, its tensor table is {}",
-            found.map_or_else(|| "no known family's".to_string(), |f| format!("{f:?}'s"))
-        ))),
+    let (version, embeds) = match &facts.kind {
+        FileKind::Model {
+            version, embeds, ..
+        } => (*version, embeds),
+        FileKind::Lora { .. } => return Err(refused("the file is a LoRA".into())),
+        FileKind::Extra { slot } => {
+            return Err(refused(format!("the file is a {} part", slot.word())));
+        }
+        FileKind::CannotRun { reason, .. } => {
+            return Err(refused(format!("Studio cannot run the file ({reason:?})")));
+        }
+    };
+    if !recipes_for(version).contains(&entry.recipe.as_str()) {
+        return Err(refused(format!("the file is a {} model", version.word())));
     }
+    if let (Some(_), Some(main)) = (entry.family, main) {
+        let name = format!("{}/{}", main.repo, main.path);
+        match match_recipe(version, &facts.facts, embeds, &name) {
+            Match::Recipe { id, .. } if id == entry.recipe => {}
+            Match::Recipe { id, .. } => {
+                return Err(refused(format!("the file is one for {id}")));
+            }
+            Match::Refused(reason) => {
+                return Err(refused(format!("Studio cannot run the file ({reason:?})")));
+            }
+        }
+    }
+    Ok(())
+}
+
+/// The root of the diffusers folder whose file `inside` (`unet/…`, the main part's folder
+/// name) is at `path`; `path` itself when it is the folder.
+fn folder_root(path: &Path, inside: Option<&str>) -> PathBuf {
+    if path.is_dir() {
+        return path.to_path_buf();
+    }
+    let depth = inside.map_or(0, |f| Path::new(f).components().count());
+    path.ancestors().nth(depth).unwrap_or(path).to_path_buf()
+}
+
+/// The entry the finished download `new` is checked as ([`check_main_file`]): its parts, with
+/// its family's recipe and version. A family this build does not know is
+/// `studio_not_supported_yet`.
+fn downloaded_entry(new: &store::NewGenModel) -> AppResult<GenEntry> {
+    let family: GenFamily = serde_json::from_value(new.family.clone().into())
+        .map_err(|e| studio_errors::not_supported_yet(e.to_string()))?;
+    let recipe = models::sd::recipes::recipe(family.recipe_id())
+        .ok_or_else(|| AppError::internal("a family's recipe is not among the engine's"))?;
+    let parts: Vec<GenPart> = serde_json::from_value(new.parts.clone())
+        .map_err(|e| AppError::internal(format!("a downloaded model's parts: {e}")))?;
+    let mut entry = models::gen_catalog::generic_entry(GenericSpec {
+        id: new.id.clone(),
+        name: new.name.clone(),
+        publisher: String::new(),
+        recipe,
+        version: Some(family.version()),
+        parts,
+        licenses: Default::default(),
+        gate: GenGate {
+            mode: GateMode::None,
+            collects: Vec::new(),
+        },
+        untested: false,
+    });
+    entry.family = Some(family);
+    Ok(entry)
 }
 
 /// 0.1.0 Studio: adds the picture or video model `group` downloaded ([`GroupMeta::generator`])
-/// to Studio's installed models: every part checked ([`gen_model_from`]), then the diffusion
-/// part's tensor table ([`check_diffusion_file`], read off the async runtime). A diffusion file
+/// to Studio's installed models: every part checked ([`gen_model_from`]), then the model
+/// part's header ([`check_main_file`], read off the async runtime). A diffusion file
 /// of another model is refused: nothing is added, and the diffusion file and the files the
 /// group wrote itself ([`written_by`], as Cancel deletes only those) are removed when no
 /// installed model uses them and no other download writes them, with their emptied folders.
@@ -216,8 +297,7 @@ pub(crate) async fn register_gen_model(
 ) -> AppResult<()> {
     let rows = store.list_downloads(Some(group.to_string())).await?;
     let new = gen_model_from(meta, &rows)?;
-    let family: GenFamily = serde_json::from_value(new.family.clone().into())
-        .map_err(|e| studio_errors::not_supported_yet(e.to_string()))?;
+    let entry = downloaded_entry(&new)?;
     let diffusion = meta
         .generator
         .iter()
@@ -226,7 +306,7 @@ pub(crate) async fn register_gen_model(
         .and_then(|p| row_of(&rows, p))
         .ok_or_else(|| AppError::internal("a picture or video model without its model part"))?;
     let path = PathBuf::from(&diffusion.dest_path);
-    let checked = tokio::task::spawn_blocking(move || check_diffusion_file(family, &path))
+    let checked = tokio::task::spawn_blocking(move || check_main_file(&entry, &path))
         .await
         .map_err(|e| AppError::internal(format!("the model file's check stopped: {e}")))?;
     if let Err(refused) = checked {
@@ -3757,8 +3837,8 @@ mod tests {
     /// No recommended model's download is refused as another model: each recommended entry
     /// whose diffusion file had its tensor table recorded (the fixtures' README in
     /// crates/models/tests/fixtures/gguf/ names each table's repository, revision and file) is
-    /// recognised as its own family, by the check `register_gen_model` makes. An entry whose
-    /// file was recorded at another revision fails: its table is recorded again.
+    /// detected as a model its recipe runs, by the check `register_gen_model` makes. An entry
+    /// whose file was recorded at another revision fails: its table is recorded again.
     #[test]
     fn every_recommended_diffusion_file_is_its_own_family() {
         use models::gguf::testing::{diffusion_gguf, shapes};
@@ -3796,14 +3876,10 @@ mod tests {
                 revision, part.revision,
                 "{id}: its table was recorded at another revision; record it again"
             );
-            assert_eq!(
-                models::gen_search::family_from_tensors(&shapes(fixture)),
-                Some(entry.family),
-                "{id}"
-            );
+            assert!(!shapes(fixture).is_empty(), "{id}");
             let file = dir.path().join(format!("{id}.gguf"));
             std::fs::write(&file, diffusion_gguf(fixture)).unwrap();
-            check_diffusion_file(entry.family, &file).unwrap_or_else(|e| panic!("{id}: {e:?}"));
+            check_main_file(entry, &file).unwrap_or_else(|e| panic!("{id}: {e:?}"));
             checked.push(id.as_str());
         }
         assert!(
@@ -3812,10 +3888,229 @@ mod tests {
         );
     }
 
-    /// A downloaded diffusion file is checked by its own tensor table before it is added: a
-    /// FLUX.2 klein 9B named like the 4B is refused, nothing is added, and the diffusion file
-    /// goes with the files the download wrote (no other model uses them), while a part it found
-    /// already in place stays. A `.safetensors` part was checked by size and SHA-256 only.
+    /// The bundled catalog's entry `id`.
+    fn catalog_entry(id: &str) -> GenEntry {
+        models::gen_catalog::gen_catalog(
+            &models::catalog::Catalog::bundled(),
+            runtime::sd::lock::embedded().sd_cpp.build,
+        )
+        .entries
+        .remove(id)
+        .unwrap()
+    }
+
+    /// The tiny model file of 0.1.x's recorded table `<name>-tensors.txt`, written in `dir`.
+    fn write_gguf_txt_fixture(dir: &Scratch, name: &str) -> PathBuf {
+        let path = dir.path().join(format!("{name}.gguf"));
+        std::fs::write(
+            &path,
+            models::gguf::testing::diffusion_gguf(&format!("{name}-tensors.txt")),
+        )
+        .unwrap();
+        path
+    }
+
+    /// A `.safetensors` file at `path` whose header holds `tensors` (no data).
+    fn write_safetensors(path: &Path, tensors: &[(&str, Vec<u64>)]) {
+        let header: serde_json::Map<String, serde_json::Value> = tensors
+            .iter()
+            .map(|(name, shape)| {
+                let entry =
+                    serde_json::json!({"dtype": "F16", "shape": shape, "data_offsets": [0, 0]});
+                ((*name).to_string(), entry)
+            })
+            .collect();
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(
+            path,
+            models::sd::testing::safetensors(&serde_json::Value::Object(header)),
+        )
+        .unwrap();
+    }
+
+    /// An SDXL checkpoint without the middle block's attention and the output block 3.1's
+    /// second transformer block: the engine detects Segmind Vega (row 48).
+    fn sdxl_vega_names() -> Vec<(&'static str, Vec<u64>)> {
+        vec![
+            (
+                "model.diffusion_model.input_blocks.0.0.weight",
+                vec![320, 4, 3, 3],
+            ),
+            (
+                "conditioner.embedders.1.model.token_embedding.weight",
+                vec![49408, 1280],
+            ),
+            (
+                "conditioner.embedders.0.transformer.text_model.embeddings.token_embedding.weight",
+                vec![49408, 768],
+            ),
+        ]
+    }
+
+    /// A generic entry of `recipe_id` with one `model` part.
+    fn generic(recipe_id: &str, version: Option<models::sd::detect::SdVersion>) -> GenEntry {
+        models::gen_catalog::generic_entry(GenericSpec {
+            id: "local:x".into(),
+            name: "x".into(),
+            publisher: String::new(),
+            recipe: models::sd::recipes::recipe(recipe_id).unwrap(),
+            version,
+            parts: Vec::new(),
+            licenses: Default::default(),
+            gate: GenGate {
+                mode: GateMode::None,
+                collects: Vec::new(),
+            },
+            untested: false,
+        })
+    }
+
+    /// 0.1.x's family signatures are the engine's detection now: a file of the entry's family
+    /// passes and one of another family does not, and a generic entry takes any version its
+    /// recipe serves.
+    #[test]
+    fn the_01x_family_signature_check_now_uses_detection() {
+        use models::sd::detect::SdVersion;
+        let dir = Scratch::new();
+        let klein = catalog_entry("flux2-klein-4b-q4");
+        assert!(check_main_file(&klein, &write_gguf_txt_fixture(&dir, "klein4b")).is_ok());
+        assert_eq!(
+            check_main_file(&klein, &write_gguf_txt_fixture(&dir, "zimage"))
+                .unwrap_err()
+                .code,
+            studio_errors::NOT_THAT_MODEL
+        );
+        // The 9B, of the same version, is told from the 4B by its width.
+        assert_eq!(
+            check_main_file(&klein, &write_gguf_txt_fixture(&dir, "klein9b"))
+                .unwrap_err()
+                .code,
+            studio_errors::NOT_THAT_MODEL
+        );
+        let vega = dir.path().join("vega.safetensors");
+        write_safetensors(&vega, &sdxl_vega_names());
+        assert!(matches!(
+            models::sd::inspect::inspect_local(&vega).unwrap().kind,
+            FileKind::Model {
+                version: SdVersion::SdxlVega,
+                ..
+            }
+        ));
+        let sdxl = generic("sdxl-checkpoint", Some(SdVersion::Sdxl));
+        // sdxl-vega takes the sdxl-checkpoint recipe.
+        assert!(check_main_file(&sdxl, &vega).is_ok());
+        // A generic entry is not held to a name: any file of a version its recipe serves.
+        let klein9b = generic("flux2-klein-4b", Some(SdVersion::Flux2Klein));
+        assert!(check_main_file(&klein9b, &write_gguf_txt_fixture(&dir, "klein9b")).is_ok());
+        for (name, why) in [
+            ("klein4b", "another version"),
+            ("qwen3-4b", "not a picture model"),
+        ] {
+            let e = check_main_file(&sdxl, &write_gguf_txt_fixture(&dir, name)).unwrap_err();
+            assert_eq!(e.code, studio_errors::NOT_THAT_MODEL, "{why}");
+        }
+    }
+
+    /// An untested set-up takes any weights that read, never a pickle file or one that does
+    /// not read.
+    #[test]
+    fn an_untested_set_up_takes_any_readable_weights() {
+        let dir = Scratch::new();
+        let mut sdxl = generic("sdxl-checkpoint", None);
+        let zimage = write_gguf_txt_fixture(&dir, "zimage");
+        assert!(check_main_file(&sdxl, &zimage).is_err());
+        sdxl.untested = true;
+        assert!(check_main_file(&sdxl, &zimage).is_ok());
+        assert!(check_main_file(&sdxl, &write_gguf_txt_fixture(&dir, "qwen3-4b")).is_ok());
+        let pickle = dir.path().join("model.ckpt");
+        std::fs::write(&pickle, b"PK").unwrap();
+        assert!(check_main_file(&sdxl, &pickle).is_err());
+        let junk = dir.path().join("junk.safetensors");
+        std::fs::write(&junk, b"not a model").unwrap();
+        assert!(check_main_file(&sdxl, &junk).is_err());
+    }
+
+    /// A diffusers folder's entry is checked by its folder, from the main part's file in it or
+    /// the folder itself.
+    #[test]
+    fn a_folder_entry_is_checked_by_its_folder() {
+        use models::sd::testing::fixture;
+        let dir = Scratch::new();
+        let root = dir.path().join("sd 1.4 ü");
+        for (name, inside) in [
+            (
+                "sd14-diffusers-unet",
+                "unet/diffusion_pytorch_model.safetensors",
+            ),
+            (
+                "sd14-diffusers-text-encoder",
+                "text_encoder/model.safetensors",
+            ),
+        ] {
+            let index = fixture(name);
+            let tensors: Vec<(&str, Vec<u64>)> = index
+                .tensors
+                .iter()
+                .map(|t| (t.name.as_str(), t.shape.clone()))
+                .collect();
+            write_safetensors(&root.join(inside), &tensors);
+        }
+        let mut sd1 = generic("sd1-checkpoint", Some(models::sd::detect::SdVersion::Sd1));
+        let mut unet = models::gen_catalog::GenPart {
+            role: GenRole::Model,
+            repo: "CompVis/stable-diffusion-v1-4".into(),
+            revision: "1".repeat(40),
+            path: "unet/diffusion_pytorch_model.safetensors".into(),
+            size: 1,
+            sha256: "ab".repeat(32),
+            license: String::new(),
+            local: None,
+            folder: Some("unet/diffusion_pytorch_model.safetensors".into()),
+        };
+        sd1.parts = vec![unet.clone()];
+        let unet_file = root
+            .join("unet")
+            .join("diffusion_pytorch_model.safetensors");
+        check_main_file(&sd1, &unet_file).unwrap();
+        check_main_file(&sd1, &root).unwrap();
+        // The UNet alone, read as a file, is not the folder's model.
+        unet.folder = None;
+        sd1.parts = vec![unet];
+        assert!(check_main_file(&sd1, &unet_file).is_err());
+        let sdxl = generic("sdxl-checkpoint", None);
+        let mut sdxl_folder = sdxl.clone();
+        sdxl_folder.parts = sd1.parts.clone();
+        sdxl_folder.parts[0].folder = Some("unet/diffusion_pytorch_model.safetensors".into());
+        assert!(
+            check_main_file(&sdxl_folder, &unet_file).is_err(),
+            "SD 1 is not SDXL"
+        );
+    }
+
+    /// A finished download of a family this build does not know adds nothing.
+    #[test]
+    fn a_download_of_an_unknown_family_has_no_entry() {
+        let new = store::NewGenModel {
+            id: "hf:o/r:x.gguf".into(),
+            catalog_id: None,
+            name: "x".into(),
+            kind: "image".into(),
+            family: "sd3.5-medium".into(),
+            recipe_id: None,
+            parts: serde_json::json!([]),
+            size_bytes: 0,
+            source: store::GenSource::Search,
+        };
+        assert_eq!(
+            downloaded_entry(&new).unwrap_err().code,
+            "studio_not_supported_yet"
+        );
+    }
+
+    /// A downloaded diffusion file is checked by its own header before it is added: a FLUX.2
+    /// klein 9B named like the 4B is refused, nothing is added, and the diffusion file goes
+    /// with the files the download wrote (no other model uses them), while a part it found
+    /// already in place stays.
     #[tokio::test]
     async fn a_searched_file_that_is_another_model_is_not_added() {
         use models::gguf::testing::diffusion_gguf;
@@ -3859,32 +4154,42 @@ mod tests {
         };
 
         let diffusion = &dests[0];
+        let entry = downloaded_entry(&store::NewGenModel {
+            id: group.gen_model_id.clone(),
+            catalog_id: None,
+            name: group.name.clone(),
+            kind: group.kind.clone(),
+            family: group.family.clone(),
+            recipe_id: Some("flux2-klein-4b".into()),
+            parts: serde_json::to_value(&group.parts).unwrap(),
+            size_bytes: 0,
+            source: store::GenSource::Search,
+        })
+        .unwrap();
+        assert_eq!(
+            (entry.family, entry.recipe.as_str(), entry.untested),
+            (Some(GenFamily::Flux2Klein4b), "flux2-klein-4b", false)
+        );
+        assert_eq!(entry.diffusion().path, "flux-2-klein-4b-Q8_0.gguf");
         write(diffusion, &diffusion_gguf("klein9b-tensors.txt"));
         assert_eq!(
-            check_diffusion_file(GenFamily::Flux2Klein4b, diffusion)
-                .unwrap_err()
-                .code,
+            check_main_file(&entry, diffusion).unwrap_err().code,
             "studio_not_that_model"
         );
         write(diffusion, b"not a model");
         assert_eq!(
-            check_diffusion_file(GenFamily::Flux2Klein4b, diffusion)
-                .unwrap_err()
-                .code,
+            check_main_file(&entry, diffusion).unwrap_err().code,
             "studio_not_that_model",
-            "a table that does not read"
+            "a header that does not read"
         );
         write(diffusion, &diffusion_gguf("klein4b-tensors.txt"));
-        check_diffusion_file(GenFamily::Flux2Klein4b, diffusion).unwrap();
-        assert_eq!(
-            check_diffusion_file(GenFamily::ZImageTurbo, diffusion)
-                .unwrap_err()
-                .code,
-            "studio_not_that_model",
-            "another family's"
-        );
+        check_main_file(&entry, diffusion).unwrap();
         write(&dests[2], b"safetensors bytes");
-        check_diffusion_file(GenFamily::Flux2Klein4b, &dests[2]).unwrap();
+        assert_eq!(
+            check_main_file(&entry, &dests[2]).unwrap_err().code,
+            "studio_not_that_model",
+            "a .safetensors model file is read too"
+        );
 
         // Registering the download with the 9B file adds nothing and removes its files.
         let store = store::Store::open_in_memory().unwrap();

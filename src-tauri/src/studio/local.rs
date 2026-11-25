@@ -15,8 +15,8 @@
 //!   the run).
 //! - **Before the engine starts** ([`LocalProvider::start_local`]): an engine is found (looked
 //!   for again while none is known or the one known is gone, so one a download installs runs
-//!   the next job), every part file is there at the size it was downloaded at, a `.gguf`
-//!   diffusion file's own tensor table is its family's, the prompt fits and the arguments
+//!   the next job), every part file is there at the size it was downloaded at, the model
+//!   file's own header is a model the entry runs, the prompt fits and the arguments
 //!   build. Then one `sd-cli` runs in a task of its own (`runtime::sd::run_job`) with what the
 //!   lane decided ([`LocalJobOptions`]): the processor only, memory saving, and llama.cpp's
 //!   graphics card found among the engine's own devices by its description.
@@ -1456,16 +1456,24 @@ fn parse_size(size: &str) -> Option<(u32, u32)> {
     Some((side(width)?, side(height)?))
 }
 
-/// The engine role of a part.
+/// The engine role of a part: one to one.
 fn part_role(role: GenRole) -> PartRole {
     match role {
         GenRole::Diffusion => PartRole::Diffusion,
         GenRole::HighNoiseDiffusion => PartRole::HighNoiseDiffusion,
+        GenRole::UncondDiffusion => PartRole::UncondDiffusion,
         GenRole::Llm => PartRole::Llm,
+        GenRole::LlmVision => PartRole::LlmVision,
         GenRole::T5xxl => PartRole::T5xxl,
         GenRole::ClipL => PartRole::ClipL,
+        GenRole::ClipG => PartRole::ClipG,
         GenRole::ClipVision => PartRole::ClipVision,
+        GenRole::Tokenizer => PartRole::Tokenizer,
         GenRole::Vae => PartRole::Vae,
+        GenRole::Tae => PartRole::Tae,
+        GenRole::AudioVae => PartRole::AudioVae,
+        GenRole::AudioEncoder => PartRole::AudioEncoder,
+        GenRole::EmbeddingsConnectors => PartRole::EmbeddingsConnectors,
         GenRole::Model => PartRole::Single,
     }
 }
@@ -1495,10 +1503,9 @@ fn installed_parts(model: &store::GenModel) -> Result<Vec<InstalledPart>, MediaE
     })
 }
 
-/// Every part file is there at the size it was downloaded at, and a `.gguf` diffusion file's
-/// own tensor table is the entry's family's (`downloads::check_diffusion_file`, read off the
-/// async runtime); a `.safetensors` one was checked by its size and SHA-256 when it
-/// downloaded. Otherwise `ModelFileBad`: download it again.
+/// Every part file is there at the size it was downloaded at, and the model file's own header
+/// is a model the entry runs (`downloads::check_main_file`, read off the async runtime).
+/// Otherwise `ModelFileBad`: download it again.
 async fn check_files(entry: &GenEntry, model: &store::GenModel) -> Result<(), MediaError> {
     let parts = installed_parts(model)?;
     for part in &parts {
@@ -1522,10 +1529,9 @@ async fn check_files(entry: &GenEntry, model: &store::GenModel) -> Result<(), Me
         .iter()
         .find(|p| matches!(p.role, GenRole::Diffusion | GenRole::Model))
         .ok_or_else(|| refused(FailureKind::ModelFileBad, errors::LOCAL_PART_MISSING))?;
-    let (family, path) = (entry.family, diffusion.file.clone());
+    let (entry, path) = (entry.clone(), diffusion.file.clone());
     let checked =
-        tokio::task::spawn_blocking(move || crate::downloads::check_diffusion_file(family, &path))
-            .await;
+        tokio::task::spawn_blocking(move || crate::downloads::check_main_file(&entry, &path)).await;
     let details = match checked {
         Ok(Ok(())) => return Ok(()),
         Ok(Err(e)) => e.details,
@@ -1957,7 +1963,7 @@ pub(crate) mod tests {
             name: entry.name.clone(),
             kind: word(&entry.kind),
             family: word(&entry.family),
-            recipe_id: Some(entry.family.recipe_id().into()),
+            recipe_id: Some(entry.recipe.clone()),
             parts: Value::Array(parts),
             size_bytes: total,
             source: store::GenSource::Catalog,
@@ -3172,6 +3178,19 @@ pub(crate) mod tests {
         // A run that was stopped is gone, never failed; stopping it again is no error.
         assert_eq!(w.provider.check(&remote_id).await.unwrap(), JobState::Gone);
         w.provider.cancel(&remote_id).await.unwrap();
+    }
+
+    /// Each of the 16 part roles is passed with the flag of the recipe slot it fills.
+    #[test]
+    fn every_part_role_takes_its_slots_flag() {
+        for slot in models::sd::recipes::SlotId::RUNNABLE {
+            let role = GenRole::from_slot(slot).unwrap();
+            assert_eq!(
+                Some(runtime::sd::args::flag_for(part_role(role))),
+                slot.flag(),
+                "{role:?}"
+            );
+        }
     }
 
     #[tokio::test]

@@ -323,11 +323,6 @@ pub fn read_tensor_shapes(path: &Path) -> Result<Vec<TensorShape>, GgufError> {
     file_shapes(path, MAX_DIMS)
 }
 
-/// Stable-diffusion.cpp also loads five-dimensional video convolution kernels.
-pub fn read_diffusion_tensor_shapes(path: &Path) -> Result<Vec<TensorShape>, GgufError> {
-    file_shapes(path, 5)
-}
-
 fn file_shapes(path: &Path, max_dims: u32) -> Result<Vec<TensorShape>, GgufError> {
     let file = File::open(path)?;
     let len = file.metadata()?.len();
