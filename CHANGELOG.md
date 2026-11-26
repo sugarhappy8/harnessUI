@@ -34,7 +34,7 @@ Studio, opened up. The owner said: "I was mostly talking about how nothing from 
 - **The scheduled Reverse engineering self-test on Linux and macOS** now passes again.
 
 ### Known limits
-- **Some models can't run in Studio.** The engine can't run Lumina 2, LTX-Video 0.9, HunyuanVideo v1, HiDream-I1 or Stable Video Diffusion, so they say *Can't run in Studio* and have no Download button.
+- **Some models can't run in Studio.** The Studio engine can't run Lumina 2, LTX-Video 0.9, HunyuanVideo 1 or Stable Video Diffusion, and it doesn't recognise HiDream-I1. They are labelled *Can't run in Studio* (HiDream-I1 says "The Studio engine doesn't recognise this model"), and Studio won't set them up. Their files can still be downloaded one at a time, with *Download file anyway*, for another app.
 - **Adapter files are not offered.** ControlNet, IP-Adapter, PhotoMaker and other adapter files, upscalers and audio-driven video are not offered.
 - **Masks are added as black-and-white pictures.** Painting a mask in the app comes later.
 - **Pickle files are not read.** Files such as `.ckpt` can run code when opened, so Studio does not open them.
