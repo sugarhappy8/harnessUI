@@ -39,7 +39,7 @@ use models::hf::{HfClient, RepoSummary, uploader_text};
 use models::sd::candidates::candidates;
 use models::sd::detect::SdVersion;
 use models::sd::matching::{RecipeKind, in_scope_recipes, kind_of, recipes_for};
-use models::sd::{FileLabel, Verdict, verdict_of};
+use models::sd::{CannotRunReason, FileLabel, Verdict, verdict_of};
 use tauri::{AppHandle, Manager, State};
 
 use super::deps::{AppHardware, LocalHardware, with_device_free};
@@ -703,7 +703,28 @@ async fn repo_dto(deps: &LocalCmdDeps, read: &ReadRepo, card: Option<&str>) -> L
         }),
         read_files: reading.read,
         unread_files: reading.unread,
+        by_hand_recipes: if reading.labels.values().any(set_up_by_hand) {
+            recipe_choices(None, true)
+        } else {
+            Vec::new()
+        },
     }
+}
+
+/// Whether a repository's file with `label` can be set up by hand (`setup_plan::plan_file`):
+/// weights the engine does not recognise, or a file whose header was not read for the budget
+/// or a failed read. Never a pickle or split file, a LoRA, an extra part, a model the engine
+/// is known to misrun, or one a gated repository would refuse.
+pub(crate) fn set_up_by_hand(label: &FileLabel) -> bool {
+    matches!(
+        label,
+        FileLabel::CannotRun {
+            reason: CannotRunReason::UnknownWeights,
+            ..
+        } | FileLabel::NotRead {
+            reason: models::sd::NotRead::Budget | models::sd::NotRead::Failed,
+        }
+    )
 }
 
 // ---- set-up plans -----------------------------------------------------------------------------

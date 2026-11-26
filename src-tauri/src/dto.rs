@@ -1549,6 +1549,11 @@ pub struct LocalRepoDto {
     pub read_files: u32,
     /// Files labelled not read.
     pub unread_files: u32,
+    /// When a file of it can be set up by hand (*Set it up yourself*: weights the engine does
+    /// not recognise, or a file whose header was not read for the budget or a failed read):
+    /// the model types it may be set up as, every recipe Studio runs, by kind and then name.
+    /// Empty otherwise.
+    pub by_hand_recipes: Vec<RecipeChoiceDto>,
 }
 
 /// A picture or video repository Hugging Face found.

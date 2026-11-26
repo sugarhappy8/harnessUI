@@ -169,6 +169,7 @@ function supported(patch: Partial<LocalRepo> = {}): LocalRepo {
     gate: { mode: "none", collects: [] },
     readFiles: 3,
     unreadFiles: 0,
+    byHandRecipes: [],
     ...patch,
   };
 }
@@ -493,11 +494,62 @@ describe("a result's detail panel", () => {
     const anyway = within(files).getAllByRole("button", { name: "Download file anyway" });
     expect(anyway).toHaveLength(3);
     for (const b of anyway) expect(b.className).not.toContain("btn-primary");
+    // A pickle file, a model the engine misruns and an extra file are never set up by hand.
+    expect(within(files).queryByRole("button", { name: "Set it up yourself" })).toBeNull();
     await click(anyway[0]!);
     expect(api.studioLocalDownloadFile).toHaveBeenCalledWith("Alpha-VLLM/Lumina-Image-2.0", COMMIT, "consolidated.00-of-01.pth");
     within(files).getByText("Queued in Models → Downloads.");
     expect(api.studioLocalDownload).not.toHaveBeenCalled();
     within(panel).getByRole("link", { name: "View files on Hugging Face" });
+  });
+
+  // Final review, area 3, I2: design 7.5's fallback, *Set it up yourself*, for a file Studio
+  // can't place: a model type, its plan, then Download with the choice; never for a pickle.
+  it("a file Studio can't place offers Set it up yourself, and Download sends the model type chosen", async () => {
+    const unknown: FileLabel = { cannotRun: { reason: "unknownWeights", version: null } };
+    const pickle: FileLabel = { cannotRun: { reason: "pickle", version: null } };
+    const sdxlType: RecipeChoice = { id: "sdxl-checkpoint", name: "SDXL", kind: "picture" };
+    const fluxType: RecipeChoice = { id: "flux1-dev", name: "FLUX.1 dev", kind: "picture" };
+    const repo = supported({
+      repo: "someone/unplaced-model",
+      summary: null,
+      verdict: unknown,
+      files: [],
+      licences: [],
+      fileViews: [
+        view("mystery.safetensors", 6_000_000_000, unknown),
+        view("later.safetensors", 6_000_000_000, { notRead: { reason: "budget" } }),
+        view("old.ckpt", 4_265_380_512, pickle),
+      ],
+      byHandRecipes: [fluxType, sdxlType],
+    });
+    const panel = await openRepo(repo);
+    // What can still be done is said truly.
+    within(panel).getByText(/Set one up yourself/);
+    const files = within(panel).getByRole("region", { name: "Other files in this repository" });
+    const yourself = within(files).getAllByRole("button", { name: "Set it up yourself" });
+    // The unknown file and the one not read; never the pickle file.
+    expect(yourself).toHaveLength(2);
+    expect(yourself[0]!.getAttribute("aria-describedby")).toBeTruthy();
+    const mystery = { search: { repo: repo.repo, commit: COMMIT, file: "mystery.safetensors" } };
+    vi.mocked(api.studioSetupPlan).mockResolvedValue({
+      ...zPlan("mystery.safetensors", 6_000_000_000, fits),
+      recipe: sdxlType,
+      recipes: [fluxType, sdxlType],
+      untested: true,
+    });
+    await click(yourself[0]!);
+    fireEvent.pointerDown(within(panel).getByRole("combobox", { name: "Model type" }), {
+      button: 0,
+      ctrlKey: false,
+      pointerType: "mouse",
+    });
+    await click(screen.getByRole("option", { name: /^SDXL/ }));
+    const choice = { recipe: "sdxl-checkpoint", overrides: [] };
+    expect(api.studioSetupPlan).toHaveBeenCalledWith(mystery, choice);
+    within(panel).getByText("untested set-up");
+    await click(downloadButton(panel));
+    expect(api.studioLocalDownload).toHaveBeenCalledWith(mystery, choice);
   });
 
   it("a pickle file of a repository that works is never a main file", async () => {

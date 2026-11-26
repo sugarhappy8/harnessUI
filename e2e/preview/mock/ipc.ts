@@ -163,6 +163,7 @@ async function handle(cmd: string, args: Args): Promise<unknown> {
         plan: isLora ? null : planFor(state.local.installed, { disk: { path } }, null),
         lastMode: state.prefs.lastImportMode ?? "copy",
         insideModels: false,
+        byHandRecipes: [],
       };
     }
     case "studio_import_model":

@@ -620,6 +620,7 @@ function wanRepo(repo: string): LocalRepo {
     gate: { mode: "none", collects: [] },
     readFiles: fileViews.length,
     unreadFiles: 0,
+    byHandRecipes: [],
   };
 }
 
@@ -634,6 +635,7 @@ export function repoFor(repo: string): LocalRepo {
     gate: { mode: "none", collects: [] } as Gate,
     loras: [] as RepoFileView[],
     unreadFiles: 0,
+    byHandRecipes: [],
   };
   if (repo.includes("Wan2.2")) return wanRepo(repo);
   if (repo.endsWith("-GGUF")) {

@@ -14,6 +14,7 @@ import { formatBytes } from "../../lib/format";
 import type { DownloadGroup, ErrorInfo } from "../../lib/types";
 import {
   FILE_LABEL,
+  FILES,
   fileLabelWords,
   GET_MODELS,
   KIND_WORD,
@@ -80,7 +81,10 @@ import type {
 //    too;
 // 7. OtherFiles: the LoRAs, each with *Download LoRA*, and the files Studio can't run (or only
 //    adds to a model), each with what it is and a quiet *Download file anyway* (0.1.2's plain
-//    download).
+//    download). A file Studio can't place (weights of no known kind, or one not read for the
+//    budget or a failed read) also offers *Set it up yourself* (design 7.5; never a pickle
+//    file): ByHandSetup, a Model type, its plan as in 4–6, and Download with that choice, an
+//    untested set-up.
 // A catalog model has one main file and no other files. Names from Hugging Face are shown with
 // invisible characters as codes (`visiblePath`).
 
@@ -212,6 +216,8 @@ function RepoReview(props: { repo: LocalRepo; local: LocalModels }) {
   // Why a plan or a download was refused.
   const [problem, setProblem] = useState<ErrorInfo | null>(null);
   const [starting, setStarting] = useState(false);
+  // The file being set up by hand (*Set it up yourself*), if any.
+  const [byHand, setByHand] = useState<string | null>(null);
   const asked = useRef(0);
   const { run, notice } = useNoticeFirst(local.noticeAccepted);
   const chosen = repo.files.find((f) => f.file === picked) ?? firstChoice(repo);
@@ -432,9 +438,138 @@ function RepoReview(props: { repo: LocalRepo; local: LocalModels }) {
           )}
         </>
       )}
-      <OtherFiles repo={repo} run={run} />
+      {byHand !== null && <ByHandSetup key={byHand} repo={repo} file={byHand} local={local} run={run} />}
+      <OtherFiles repo={repo} run={run} onSetUp={setByHand} />
       {notice}
     </div>
+  );
+}
+
+/** *Set it up yourself* (design 7.5) for `file`, a file of `repo` Studio can't place: a Model
+ *  type over every recipe Studio runs, then that type's plan (its parts, each with *Choose a
+ *  file* when it has none, the licences and the total) and one Download carrying the choice. The
+ *  model joins as an untested set-up; its files can be changed later in Settings → Files. */
+function ByHandSetup(props: { repo: LocalRepo; file: string; local: LocalModels; run(action: () => void): void }) {
+  const { repo, file, local } = props;
+  const setupPlan = useStudio((s) => s.setupPlan);
+  const downloadSetup = useStudio((s) => s.downloadSetup);
+  const chooseFile = useStudio((s) => s.chooseFile);
+  const [made, setMade] = useState<{ choice: SetupChoice; plan: SetupPlan } | null>(null);
+  const [recipe, setRecipe] = useState<string | null>(null);
+  const [planning, setPlanning] = useState(false);
+  const [problem, setProblem] = useState<ErrorInfo | null>(null);
+  const [starting, setStarting] = useState(false);
+  const asked = useRef(0);
+  const source: LocalSource = { search: { repo: repo.repo, commit: repo.commit, file } };
+  const id = searchedModelId(repo.repo, file);
+  const group = useShownDownload((g) => g === id);
+  const pickable = useStudio((s) => canPick(s.local, id));
+  const installed = local.installed.some((m) => m.id === id);
+  const plan = made?.plan ?? null;
+  const name = visiblePath(nameOf(file));
+
+  /** Asks for the plan with `next`; only the last answer is kept. */
+  function replan(next: SetupChoice) {
+    const mine = ++asked.current;
+    setPlanning(true);
+    setProblem(null);
+    setupPlan(source, next).then(
+      (p) => {
+        if (mine !== asked.current) return;
+        setMade({ choice: next, plan: p });
+        setPlanning(false);
+      },
+      (e: unknown) => {
+        if (mine !== asked.current) return;
+        setProblem(toErrorInfo(e));
+        setPlanning(false);
+      },
+    );
+  }
+
+  async function onChoose(role: PartRole) {
+    if (!made) return;
+    let path: string | null;
+    try {
+      path = await chooseFile("model");
+    } catch (e) {
+      setProblem(toErrorInfo(e));
+      return;
+    }
+    if (path === null) return;
+    const overrides = [...made.choice.overrides.filter((o) => o.role !== role), { role, file: { disk: { path } } }];
+    replan({ recipe: made.choice.recipe, overrides });
+  }
+
+  function download() {
+    if (!made) return;
+    const sent = made.choice;
+    props.run(() => {
+      setStarting(true);
+      setProblem(null);
+      downloadSetup(source, sent)
+        .catch((e: unknown) => setProblem(toErrorInfo(e)))
+        .finally(() => setStarting(false));
+    });
+  }
+
+  const refused = setupProblem(problem?.code);
+  const why: ReactNode =
+    refused === "hf_needs_token" || refused === "hf_needs_terms" ? (
+      <GateLine problem={refused} repo={repo.repo} size="sm" />
+    ) : plan !== null && (!plan.canDownload || refused === "studio_setup_incomplete") ? (
+      <Why>{MODEL_DETAIL.missingWhy}</Why>
+    ) : null;
+  return (
+    <Section title={SETUP.yourself} note={<p className="text-sm text-fg-muted">{MODEL_DETAIL.byHandFor(name)}</p>}>
+      <div className="flex flex-wrap items-end gap-x-3 gap-y-1.5">
+        <div className="min-w-56">
+          <SelectField
+            label={SETUP.modelType}
+            value={recipe}
+            placeholder={FILES.chooseType}
+            options={repo.byHandRecipes.map((r) => ({ value: r.id, label: r.name, hint: KIND_WORD[r.kind] }))}
+            onChange={(r) => {
+              setRecipe(r);
+              replan({ recipe: r, overrides: made?.choice.overrides ?? [] });
+            }}
+            disabled={planning}
+          />
+        </div>
+        {plan?.untested && <span className="mb-1.5 rounded-full bg-warning/10 px-2 py-0.5 text-xs text-warning">{SETUP.untested}</span>}
+      </div>
+      {plan ? (
+        <>
+          <PlanParts slots={plan.slots} licences={plan.licences} onChoose={(role) => void onChoose(role)} busy={planning} />
+          <Licences
+            licences={plan.licences}
+            kind={plan.recipe.kind === "video" ? "video" : "image"}
+            gate={repo.gate}
+            pageRepo={repo.repo}
+            engineBytes={plan.needsEngine ? local.engine.downloadBytes : null}
+            engineLicence={local.engine.licenseName}
+            none={MODEL_DETAIL.noLicence}
+          />
+          <ActionBar
+            total={plan.toFetchBytes + (plan.needsEngine ? local.engine.downloadBytes : 0)}
+            warnings={warningsFor(plan.fit, plan.lowDisk)}
+            why={why}
+            off={!plan.canDownload || planning}
+            busy={starting}
+            planning={planning}
+            installed={installed}
+            group={group}
+            name={name}
+            onUse={pickable ? () => pickNewModelAndFocus(id) : undefined}
+            error={refused === null ? problem : null}
+            onDismiss={() => setProblem(null)}
+            onDownload={download}
+          />
+        </>
+      ) : (
+        problem && <ErrorBanner error={problem} onDismiss={() => setProblem(null)} />
+      )}
+    </Section>
   );
 }
 
@@ -750,8 +885,9 @@ function ActionBar(props: {
   );
 }
 
-/** A repository Studio can set nothing up from (and not a gated one: its line says what it
- *  needs): why, and that its files can still be downloaded one at a time. */
+/** A repository Studio can set nothing up from by itself (and not a gated one: its line says
+ *  what it needs): why, and what can still be done: a file it can't place set up by hand
+ *  (*Set it up yourself*, when it has one), and its files downloaded one at a time. */
 function NoSetup(props: { repo: LocalRepo }) {
   const v = props.repo.verdict;
   const why = v === "unknown" ? VERDICT.notRecognised : "cannotRun" in v ? FILE_LABEL.cannotRun(v.cannotRun.reason) : null;
@@ -760,10 +896,20 @@ function NoSetup(props: { repo: LocalRepo }) {
       <CircleSlash size={18} aria-hidden className="mt-0.5 shrink-0 text-danger" />
       <div className="flex flex-col gap-1 text-sm">
         {why && <p className="font-medium">{why}</p>}
-        <p className="text-fg-muted">{MODEL_DETAIL.noSetup}</p>
+        <p className="text-fg-muted">
+          {props.repo.byHandRecipes.length > 0 ? MODEL_DETAIL.noSetupByHand : MODEL_DETAIL.noSetup}
+        </p>
       </div>
     </div>
   );
+}
+
+/** Whether a repository's file can be set up by hand (the backend's `set_up_by_hand`): weights
+ *  Studio can't place, or a file not read for the budget or a failed read. Never a pickle file,
+ *  a split file, a model the engine misruns, a LoRA or an extra file. */
+function settable(v: RepoFileView): boolean {
+  if ("cannotRun" in v.label) return v.label.cannotRun.reason === "unknownWeights";
+  return "notRead" in v.label && (v.label.notRead.reason === "budget" || v.label.notRead.reason === "failed");
 }
 
 /** Whether a repository's file is listed with its plain download: a file Studio can't run, an
@@ -778,7 +924,7 @@ function listed(v: RepoFileView): boolean {
 /** The repository's other files: the LoRAs, each with *Download LoRA* (after the note about
  *  local models, as a model's download), then the files Studio can't run or only adds, each
  *  with what it is and a quiet *Download file anyway*. Nothing when there are none. */
-export function OtherFiles(props: { repo: LocalRepo; run(action: () => void): void }) {
+export function OtherFiles(props: { repo: LocalRepo; run(action: () => void): void; onSetUp?(file: string): void }) {
   const { repo } = props;
   const [error, setError] = useState<ErrorInfo | null>(null);
   const loraPaths = new Set(repo.loras.map((l) => l.path));
@@ -792,7 +938,13 @@ export function OtherFiles(props: { repo: LocalRepo; run(action: () => void): vo
           <LoraRow key={v.path} repo={repo} file={v} run={props.run} onError={setError} />
         ))}
         {files.map((v) => (
-          <FileRow key={v.path} repo={repo} file={v} onError={setError} />
+          <FileRow
+            key={v.path}
+            repo={repo}
+            file={v}
+            onError={setError}
+            onSetUp={props.onSetUp && repo.byHandRecipes.length > 0 && settable(v) ? () => props.onSetUp?.(v.path) : undefined}
+          />
         ))}
       </ul>
       {error && <ErrorBanner error={error} onDismiss={() => setError(null)} />}
@@ -884,7 +1036,7 @@ function LoraRow(props: { repo: LocalRepo; file: RepoFileView; run(action: () =>
 /** One file Studio can't run (or only adds): what it is, and a quiet *Download file anyway*
  *  (the file alone, without a set-up; one with no published checksum in the browser), or how
  *  far its download got, and where it was saved. */
-function FileRow(props: { repo: LocalRepo; file: RepoFileView; onError(e: ErrorInfo): void }) {
+function FileRow(props: { repo: LocalRepo; file: RepoFileView; onError(e: ErrorInfo): void; onSetUp?(): void }) {
   const { repo, file: f, onError } = props;
   const nameId = useId();
   const [starting, setStarting] = useState(false);
@@ -917,9 +1069,21 @@ function FileRow(props: { repo: LocalRepo; file: RepoFileView; onError(e: ErrorI
             </BrowserLink>
           </span>
         ) : group && group.status !== "cancelled" && group.status !== "done" ? null : (
-          <button type="button" className={quiet} aria-describedby={nameId} disabled={starting} onClick={() => void download()}>
-            {SETUP.anyway}
-          </button>
+          <span className="flex shrink-0 items-center gap-1">
+            {props.onSetUp && (
+              <button
+                type="button"
+                className={`${CARD_BUTTON} inline-flex shrink-0 items-center ${FOCUS_RING}`}
+                aria-describedby={nameId}
+                onClick={props.onSetUp}
+              >
+                {SETUP.yourself}
+              </button>
+            )}
+            <button type="button" className={quiet} aria-describedby={nameId} disabled={starting} onClick={() => void download()}>
+              {SETUP.anyway}
+            </button>
+          </span>
         )}
       </div>
       {group && group.status !== "cancelled" && group.status !== "done" && (

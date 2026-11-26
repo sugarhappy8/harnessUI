@@ -1040,6 +1040,23 @@ mod tests {
         }
     }
 
+    /// Final review, area 3, I2: the repository's reading names the model types a file Studio
+    /// can't place may be set up as, for *Set it up yourself* in the detail panel; a
+    /// repository with no such file names none.
+    #[tokio::test]
+    async fn a_repo_with_a_file_to_set_up_by_hand_offers_every_model_type() {
+        let mut t = harness(vec![unknown_weights_repo()]).await;
+        t.refresh().await;
+        let r = crate::studio::local_cmd::local_repo(&t.deps, MYSTERY)
+            .await
+            .unwrap();
+        let ids: Vec<&str> = r.by_hand_recipes.iter().map(|c| c.id.as_str()).collect();
+        assert_eq!(ids.len(), in_scope_recipes().len());
+        assert!(ids.contains(&"sdxl-checkpoint") && ids.contains(&"wan22-t2v"));
+        let first = &r.by_hand_recipes[0];
+        assert_eq!(first.kind, models::sd::matching::RecipeKind::Picture);
+    }
+
     /// A file set up by hand downloads as its plan says and joins the installed models with
     /// the recipe the person chose, untested: its version unknown.
     #[tokio::test]

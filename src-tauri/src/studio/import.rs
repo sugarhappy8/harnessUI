@@ -37,7 +37,9 @@ use sha2::{Digest, Sha256};
 use tauri::{AppHandle, Emitter, Manager};
 
 use super::errors;
-use super::local_cmd::{LocalCmdDeps, app_deps_for_writing, plan_deps, setup_plan_dto};
+use super::local_cmd::{
+    LocalCmdDeps, app_deps_for_writing, plan_deps, recipe_choices, setup_plan_dto,
+};
 use super::local_models::{
     Added, DownloadDeps, is_studios_copy, plan_download, prepared_download, remove_unused_files,
 };
@@ -46,7 +48,7 @@ use super::setup_plan::{DiskFile, disk_setup, plan_disk_with, read_disk_file, re
 use crate::downloads::{
     DownloadManager, files_being_written, inside_folder, register_present_gen_model,
 };
-use crate::dto::{SetupChoice, SetupPlanDto};
+use crate::dto::{RecipeChoiceDto, SetupChoice, SetupPlanDto};
 use crate::error::AppResult;
 
 /// The event a model file's import sends to the main window while it is read or copied.
@@ -109,6 +111,10 @@ pub struct ImportInspectionDto {
     pub last_mode: ImportMode,
     /// It is inside the models folder: used where it is, without asking.
     pub inside_models: bool,
+    /// For weights Studio can't place (`CannotRun { UnknownWeights }`): the model types it may
+    /// be set up as by hand (*Set it up yourself*, untested), every recipe Studio runs, by
+    /// kind and then name. Empty for any other file.
+    pub by_hand_recipes: Vec<RecipeChoiceDto>,
 }
 
 /// What an import did: the model added (`gen_model_id`), or the download group that adds it
@@ -129,6 +135,11 @@ pub(crate) type ProgressSink = Arc<dyn Fn(ImportProgress) + Send + Sync>;
 pub async fn inspect_import(deps: &LocalCmdDeps, path: &Path) -> AppResult<ImportInspectionDto> {
     let file = read_disk_file(path).await?;
     let label = file.label();
+    let by_hand_recipes = if by_hand(&label) {
+        recipe_choices(None, true)
+    } else {
+        Vec::new()
+    };
     let plan = match label {
         FileLabel::Works { .. } => {
             let catalog = deps.catalog.gen_catalog().await;
@@ -149,7 +160,21 @@ pub async fn inspect_import(deps: &LocalCmdDeps, path: &Path) -> AppResult<Impor
         plan,
         last_mode: deps.last_import_mode.unwrap_or(ImportMode::Copy),
         inside_models: inside_models(&deps.models_dir, &file.path),
+        by_hand_recipes,
     })
+}
+
+/// Whether a file with `label` can be set up by hand, with a model type the person chooses:
+/// weights the engine does not recognise. Never a pickle file (refused before it is read), a
+/// LoRA, an extra part or a model the engine is known to misrun.
+fn by_hand(label: &FileLabel) -> bool {
+    matches!(
+        label,
+        FileLabel::CannotRun {
+            reason: models::sd::CannotRunReason::UnknownWeights,
+            ..
+        }
+    )
 }
 
 /// The id a file's plan has before its SHA-256 is known (`local_models::plan_disk`'s).
@@ -203,9 +228,12 @@ pub(crate) async fn prepare_import(
         return Err(errors::notice_needed());
     }
     let file = read_disk_file(path).await?;
-    match file.label() {
+    let label = file.label();
+    match label {
         FileLabel::Works { .. } => {}
         FileLabel::Lora { .. } => return Err(errors::import_is_lora()),
+        // *Set it up yourself*: with the model type the person chose (`disk_setup`).
+        _ if by_hand(&label) && choice.is_some_and(|c| c.recipe.is_some()) => {}
         _ => return Err(errors::not_supported_yet(errors::NOT_A_RUNNABLE_FILE)),
     }
     let inside = inside_models(&deps.models_dir, &file.path);
@@ -1331,6 +1359,71 @@ mod tests {
                 .await
                 .is_err()
         );
+    }
+
+    /// Weights of no kind Studio knows: a safetensors file with one tensor no version has.
+    fn mystery_bytes() -> Vec<u8> {
+        models::sd::testing::safetensors(
+            &json!({"mystery.block.0.weight": {"dtype": "F16", "shape": [1], "data_offsets": [0, 2]}}),
+        )
+    }
+
+    /// Final review, area 3, I2: *Set it up yourself* from *Add a model file*. A file Studio
+    /// can't place offers every model type; with one chosen it is planned and added as an
+    /// untested set-up, as a searched file is; without one it is still refused.
+    #[tokio::test]
+    async fn an_unknown_file_from_this_computer_can_be_set_up_by_hand() {
+        let mut t = harness().await;
+        let src = t.outside_file("mystery.safetensors", mystery_bytes());
+        let seen = t.inspect(&src).await.unwrap();
+        assert!(matches!(
+            seen.label,
+            FileLabel::CannotRun {
+                reason: models::sd::CannotRunReason::UnknownWeights,
+                ..
+            }
+        ));
+        assert!(seen.plan.is_none());
+        assert_eq!(
+            seen.by_hand_recipes.len(),
+            models::sd::matching::in_scope_recipes().len()
+        );
+        // A file Studio runs has its plan, and no list for setting it up by hand.
+        let known = t.outside_file("m.safetensors", fixture_bytes("sd15"));
+        assert!(t.inspect(&known).await.unwrap().by_hand_recipes.is_empty());
+
+        // With a model type: planned like a searched file set up by hand, untested.
+        let choice = SetupChoice {
+            recipe: Some("flux1-dev".into()),
+            overrides: Vec::new(),
+        };
+        let source = crate::studio::local_models::LocalSource::Disk {
+            path: src.display().to_string(),
+        };
+        t.refresh().await;
+        let plan = crate::studio::setup_cmd::setup_plan(&t.deps, &source, &choice)
+            .await
+            .unwrap();
+        assert!(plan.untested && plan.can_download, "{plan:?}");
+        assert_eq!(plan.recipe.id, "flux1-dev");
+        // Without one, it is refused as before, and nothing is copied.
+        let e = t.import(&src, ImportMode::Copy, None).await.unwrap_err();
+        assert_eq!(e.code, "studio_not_supported_yet");
+        assert!(t.imported_files().is_empty());
+        // Added with it: its encoders and decoder download, then it joins as untested.
+        let r = t
+            .import(&src, ImportMode::InPlace, Some(choice))
+            .await
+            .unwrap();
+        let group = r.download_group.expect("its companions download");
+        t.complete(&group).await;
+        let rows = t.store().list_gen_models().await.unwrap();
+        let row = rows.iter().find(|m| m.source == GenSource::Import).unwrap();
+        assert_eq!(
+            (row.recipe_id.as_deref(), row.family.as_str()),
+            (Some("flux1-dev"), "unknown")
+        );
+        assert_eq!(part_in(row, "diffusion")["file"], src.display().to_string());
     }
 
     /// A file that is not the size it was when it was checked (still being written) is

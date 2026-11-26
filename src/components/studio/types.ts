@@ -890,6 +890,10 @@ export interface LocalRepo {
   gate: Gate;
   readFiles: number;
   unreadFiles: number;
+  /** When a file of it can be set up by hand (*Set it up yourself*: weights Studio can't place,
+   *  or a file not read for the budget or a failed read): every model type it may be set up as,
+   *  by kind and then name. Empty otherwise. */
+  byHandRecipes: RecipeChoice[];
 }
 
 /** A file Studio uses for one slot: of a Hugging Face repository, an installed model's, a
@@ -964,6 +968,9 @@ export interface ImportInspection {
   lastMode: ImportMode;
   /** Inside the models folder: used where it is, without asking. */
   insideModels: boolean;
+  /** For weights Studio can't place: every model type it may be set up as by hand (*Set it up
+   *  yourself*), by kind and then name. Empty for any other file. */
+  byHandRecipes: RecipeChoice[];
 }
 
 /** What an import did: the model added, or the download group that adds it once its other

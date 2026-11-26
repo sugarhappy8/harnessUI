@@ -6,8 +6,10 @@ import { formatBytes } from "../../lib/format";
 import type { ErrorInfo } from "../../lib/types";
 import {
   DOWNLOAD_LOCAL,
+  FILES,
   fileLabelWords,
   IMPORT,
+  KIND_WORD,
   LOCAL_WARNING,
   SETUP,
   setupProblem,
@@ -16,10 +18,11 @@ import {
 } from "../../lib/words";
 import { toErrorInfo } from "../../store/app";
 import { useStudio } from "../../store/studio";
+import { SelectField } from "../ui/SelectField";
 import { FOCUS_RING } from "../ui/styles";
 import { LocalNotice } from "./LocalNotice";
 import { SECONDARY_BUTTON } from "./styles";
-import type { ImportInspection, ImportMode, SetupPlan } from "./types";
+import type { ImportInspection, ImportMode, SetupChoice, SetupPlan } from "./types";
 
 // *Add a model file* and *Add a LoRA file* (0.2.0 Task U4, design 7.8), opened by the store's
 // `importOpen` from the model sheet's foot, Get models or the LoRAs section. Its steps:
@@ -36,6 +39,9 @@ import type { ImportInspection, ImportMode, SetupPlan } from "./types";
 // 5. *Add* (the note about local models first, while it was never accepted), its progress
 //    (`importProgress`), then Added, and the model is chosen on its tab. A LoRA file, whichever
 //    button chose it, is added to the LoRAs.
+// A file Studio can't place (weights of no known kind, `byHandRecipes`) offers *Set it up
+// yourself* (design 7.5): a Model type, then its plan as in step 4, and *Add* with that choice:
+// it runs as an untested set-up. Never for a pickle file or a model the engine misruns.
 // While a file is being added, the dialog stays open. Focus goes back to what opened it, else
 // to the composer's model chip.
 
@@ -52,6 +58,15 @@ type Step =
   | { at: "done"; file: ImportInspection; fetching: boolean }
   /** The file could not be read, or Studio does not read its kind of file. */
   | { at: "failed"; path: string; error: ErrorInfo };
+
+/** *Set it up yourself* on a file Studio can't place: the model type chosen (`null` before
+ *  one is), its plan once made, a plan on its way, and why one was refused. */
+interface ByHand {
+  recipe: string | null;
+  plan: SetupPlan | null;
+  planning: boolean;
+  problem: ErrorInfo | null;
+}
 
 /** A refusal in plain words: a set-up's problem in `SETUP.problem`'s words (which say what to
  *  do), else the backend's message and next step. */
@@ -73,8 +88,11 @@ export function ImportDialog() {
   const [step, setStep] = useState<Step>({ at: "choosing" });
   const [mode, setMode] = useState<ImportMode>("copy");
   const [notice, setNotice] = useState(false);
+  // *Set it up yourself* on a file Studio can't place: the model type chosen and its plan.
+  const [byHand, setByHand] = useState<ByHand | null>(null);
   // Counts the files chosen, and each closing, so a late answer for one before is dropped.
   const run = useRef(0);
+  const asked = useRef(0);
   const opener = useRef<Element | null>(null);
 
   // Each opening starts at the file chooser, once (counted, so a second run of the effect for
@@ -93,6 +111,7 @@ export function ImportDialog() {
 
   const read = useCallback(async (path: string, mine: number) => {
     setStep({ at: "reading", path });
+    setByHand(null);
     try {
       const file = await useStudio.getState().importInspect(path);
       if (mine !== run.current) return;
@@ -153,7 +172,8 @@ export function ImportDialog() {
         if (mine === run.current) setStep({ at: "done", file, fetching: false });
         return;
       }
-      const result = await s.importModel(file.path, file.insideModels ? "inPlace" : mode, null);
+      const choice: SetupChoice | null = byHand?.plan ? { recipe: byHand.recipe, overrides: [] } : null;
+      const result = await s.importModel(file.path, file.insideModels ? "inPlace" : mode, choice);
       if (mine !== run.current) return;
       const after = useStudio.getState();
       const added = result.genModelId === null ? undefined : after.local?.installed.find((m) => m.id === result.genModelId);
@@ -170,8 +190,26 @@ export function ImportDialog() {
   const file = step.at === "read" || step.at === "adding" || step.at === "done" ? step.file : null;
   const works = file !== null && "works" in file.label;
   const isLora = file !== null && "lora" in file.label;
-  const incomplete = works && file.plan !== null && !file.plan.canDownload;
-  const canAdd = step.at === "read" && (works || isLora) && !incomplete;
+  // Weights Studio can't place: the backend lists the model types it may be set up as.
+  const unplaced = file !== null && !works && !isLora && file.byHandRecipes.length > 0;
+  const handPlan = byHand?.plan ?? null;
+  const incomplete =
+    (works && file.plan !== null && !file.plan.canDownload) || (handPlan !== null && !handPlan.canDownload);
+  const canAdd =
+    step.at === "read" && (works || isLora || (handPlan !== null && !byHand?.planning)) && !incomplete;
+
+  /** The plan of the file set up by hand as `recipe`: only the last answer is kept. */
+  const chooseType = (f: ImportInspection, recipe: string) => {
+    const mine = ++asked.current;
+    setByHand((b) => ({ recipe, plan: b?.plan ?? null, planning: true, problem: null }));
+    useStudio
+      .getState()
+      .setupPlan({ disk: { path: f.path } }, { recipe, overrides: [] })
+      .then(
+        (plan) => mine === asked.current && setByHand({ recipe, plan, planning: false, problem: null }),
+        (e: unknown) => mine === asked.current && setByHand({ recipe, plan: null, planning: false, problem: toErrorInfo(e) }),
+      );
+  };
 
   return (
     <Dialog.Root open onOpenChange={(o) => !o && !adding && close()}>
@@ -228,9 +266,44 @@ export function ImportDialog() {
                 {file.plan && <PlanPart plan={file.plan} problem={step.problem} />}
               </>
             )}
-            {step.at === "read" && step.problem && !(works && file.plan && setupProblem(step.problem.code) !== null) && (
-              <Problem error={step.problem} />
+            {step.at === "read" && unplaced && byHand === null && (
+              <div className="flex flex-col items-start gap-2">
+                <p className="text-sm text-fg-muted">{IMPORT.byHand}</p>
+                <button
+                  type="button"
+                  onClick={() => setByHand({ recipe: null, plan: null, planning: false, problem: null })}
+                  className={`${SECONDARY_BUTTON} ${FOCUS_RING}`}
+                >
+                  {SETUP.yourself}
+                </button>
+              </div>
             )}
+            {step.at === "read" && unplaced && byHand !== null && (
+              <>
+                {!file.insideModels && <ModeQuestion mode={mode} onMode={setMode} />}
+                <div className="flex flex-wrap items-end gap-x-3 gap-y-1.5">
+                  <div className="min-w-56">
+                    <SelectField
+                      label={SETUP.modelType}
+                      value={byHand.recipe}
+                      placeholder={FILES.chooseType}
+                      options={file.byHandRecipes.map((r) => ({ value: r.id, label: r.name, hint: KIND_WORD[r.kind] }))}
+                      onChange={(recipe) => chooseType(file, recipe)}
+                      disabled={byHand.planning}
+                    />
+                  </div>
+                  {handPlan?.untested && (
+                    <span className="mb-1.5 rounded-full bg-warning/10 px-2 py-0.5 text-xs text-warning">{SETUP.untested}</span>
+                  )}
+                </div>
+                {byHand.planning && <Working words={IMPORT.planning} />}
+                {handPlan && <PlanPart plan={handPlan} problem={step.problem} />}
+                {byHand.problem && <Problem error={byHand.problem} />}
+              </>
+            )}
+            {step.at === "read" &&
+              step.problem &&
+              !((works ? file.plan : handPlan) && setupProblem(step.problem.code) !== null) && <Problem error={step.problem} />}
             {step.at === "adding" && <Adding total={file?.sizeBytes ?? 0} />}
             {step.at === "done" && (
               <div role="status" className="flex flex-col gap-1">

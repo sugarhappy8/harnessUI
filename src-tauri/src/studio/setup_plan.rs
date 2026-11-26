@@ -442,34 +442,48 @@ pub(crate) async fn read_disk_file(path: impl AsRef<Path>) -> AppResult<DiskFile
 /// gives, and the person's choices for its slots, read once ([`slot_choices`]: a chosen file
 /// of another repo asks for that repo's listing).
 pub(crate) struct DiskSetup {
-    version: SdVersion,
+    /// `None` for weights of no known kind set up by hand.
+    version: Option<SdVersion>,
     recipe_id: String,
     part: Option<NoisePart>,
     overrides: Vec<(SlotId, SlotChoice)>,
     others: OtherRepos,
 }
 
-/// [`DiskSetup`] for `file` with `choice`. A file Studio does not run (its label is not
-/// *Works in Studio*) is `studio_not_supported_yet`.
+/// [`DiskSetup`] for `file` with `choice`. *Set it up yourself*: weights the engine does not
+/// recognise (`CannotRun { UnknownWeights }`) are set up with the recipe the person chose,
+/// untested, of no known version, as a searched file's are ([`plan_file`]; final review,
+/// area 3, I2). Any other file Studio does not run (its label is not *Works in Studio*), or
+/// such weights with no recipe chosen, is `studio_not_supported_yet`.
 pub(crate) async fn disk_setup(
     deps: &PlanDeps<'_>,
     file: &DiskFile,
     choice: &SetupChoice,
 ) -> AppResult<DiskSetup> {
-    let FileLabel::Works {
-        version,
-        recipe,
-        part,
-        ..
-    } = file.label()
-    else {
-        return Err(errors::not_supported_yet(errors::NOT_A_RUNNABLE_FILE));
+    let (version, recipe_id, part) = match (file.label(), &choice.recipe) {
+        (
+            FileLabel::Works {
+                version,
+                recipe,
+                part,
+                ..
+            },
+            _,
+        ) => (Some(version), recipe, part),
+        (
+            FileLabel::CannotRun {
+                reason: CannotRunReason::UnknownWeights,
+                ..
+            },
+            Some(recipe),
+        ) => (None, recipe.clone(), None),
+        _ => return Err(errors::not_supported_yet(errors::NOT_A_RUNNABLE_FILE)),
     };
     let mut others = OtherRepos::default();
     let overrides = slot_choices(deps, None, &choice.overrides, &mut others).await?;
     Ok(DiskSetup {
         version,
-        recipe_id: recipe,
+        recipe_id,
         part,
         overrides,
         others,
@@ -506,7 +520,7 @@ pub(crate) fn plan_disk_with(
                 sha256,
             },
             facts: &file.facts,
-            version: Some(setup.version),
+            version: setup.version,
             recipe_id: &setup.recipe_id,
             part: setup.part,
             listing: &[],

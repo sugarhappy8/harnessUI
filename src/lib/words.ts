@@ -2311,6 +2311,11 @@ export const IMPORT = {
   /** Added, while the files its set-up fetches download. */
   fetching: "Its extra files are downloading; the model is ready when they finish.",
   cancel: "Cancel",
+  /** While the plan of the model type chosen is made. */
+  planning: "Updating the files…",
+  /** A file Studio can't place (design 7.5): what *Set it up yourself* does. */
+  byHand:
+    "If you know what model this is, set it up yourself: choose its type, and Studio adds the files it needs. It runs as an untested set-up.",
 } as const;
 
 /** The codes of what can stop a set-up (`studio_setup_plan`, a download, *Add*): plain words
@@ -2512,6 +2517,11 @@ export const MODEL_DETAIL = {
   chosen: (name: string) => `Chosen by you · ${name}`,
   /** A repository with no model Studio can set up (its files are listed below). */
   noSetup: "Studio can't set this repository up. Its files can still be downloaded one at a time, for another app.",
+  /** A repository with a file Studio can't place but may run (design 7.5). */
+  noSetupByHand:
+    "Studio can't set this repository up by itself. Set one up yourself, choosing its type, or download a file anyway, for another app.",
+  /** The *Set it up yourself* section's lead: which file it sets up. */
+  byHandFor: (file: string) => `Set up ${file} as:`,
   otherFiles: "Other files in this repository",
   openFiles: "View files on Hugging Face",
   /** A file with no published checksum: the browser downloads it instead. */

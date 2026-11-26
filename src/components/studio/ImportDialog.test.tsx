@@ -15,6 +15,12 @@ vi.mock("../../lib/ipc", () => ipc);
 vi.mock("./api");
 vi.mock("@tauri-apps/plugin-dialog", () => ({ open: vi.fn() }));
 
+// Radix Select captures the pointer and scrolls its options, which jsdom cannot.
+Element.prototype.hasPointerCapture ??= () => false;
+Element.prototype.setPointerCapture ??= () => {};
+Element.prototype.releasePointerCapture ??= () => {};
+Element.prototype.scrollIntoView ??= () => {};
+
 const api = await import("./api");
 const dialog = await import("@tauri-apps/plugin-dialog");
 const { ImportDialog } = await import("./ImportDialog");
@@ -86,6 +92,7 @@ function inspection(patch: Partial<ImportInspection> = {}): ImportInspection {
     plan: plan(),
     lastMode: "copy",
     insideModels: false,
+    byHandRecipes: [],
     ...patch,
   };
 }
@@ -267,6 +274,54 @@ describe("ImportDialog", () => {
     vi.mocked(dialog.open).mockResolvedValue(PATH);
     await click(within(d).getByRole("button", { name: "Choose another file" }));
     within(theDialog()).getByRole("radiogroup", { name: "How to add it" });
+  });
+
+  // Final review, area 3, I2: design 7.5's fallback, *Set it up yourself*, for a file Studio
+  // can't place: a model type, its plan, then Add with the choice.
+  it("a file Studio can't place offers Set it up yourself, and Add sends the model type chosen", async () => {
+    await load();
+    const sdxlType = { id: "sdxl-checkpoint", name: "SDXL", kind: "picture" } as const;
+    const fluxType = { id: "flux1-dev", name: "FLUX.1 dev", kind: "picture" } as const;
+    vi.mocked(api.studioImportInspect).mockResolvedValue(
+      inspection({
+        name: "mystery.safetensors",
+        label: { cannotRun: { reason: "unknownWeights", version: null } },
+        plan: null,
+        byHandRecipes: [fluxType, sdxlType],
+      }),
+    );
+    vi.mocked(api.studioSetupPlan).mockResolvedValue(plan({ recipe: sdxlType, recipes: [fluxType, sdxlType], untested: true }));
+    vi.mocked(api.studioImportModel).mockResolvedValue({ genModelId: null, downloadGroup: "g1" });
+    await openFor("model");
+    const d = theDialog();
+    expect(within(d).queryByRole("button", { name: "Add" })).toBeNull();
+    await click(within(d).getByRole("button", { name: "Set it up yourself" }));
+    fireEvent.pointerDown(within(d).getByRole("combobox", { name: "Model type" }), {
+      button: 0,
+      ctrlKey: false,
+      pointerType: "mouse",
+    });
+    await click(screen.getByRole("option", { name: /^SDXL/ }));
+    const choice = { recipe: "sdxl-checkpoint", overrides: [] };
+    expect(api.studioSetupPlan).toHaveBeenCalledWith({ disk: { path: PATH } }, choice);
+    within(d).getByText("untested set-up");
+    within(d).getByRole("region", { name: "Extra files" });
+    await click(within(d).getByRole("button", { name: "Add" }));
+    expect(api.studioImportModel).toHaveBeenCalledWith(PATH, "copy", choice);
+  });
+
+  it("Set it up yourself is never offered for a pickle file or a model the engine misruns", async () => {
+    await load();
+    for (const label of [
+      { cannotRun: { reason: "pickle", version: null } },
+      { cannotRun: { reason: "lumina2", version: null } },
+    ] as const) {
+      vi.mocked(api.studioImportInspect).mockResolvedValue(inspection({ label, plan: null }));
+      await openFor("model");
+      expect(within(theDialog()).queryByRole("button", { name: "Set it up yourself" })).toBeNull();
+      cleanup();
+      useStudio.getState().openImport(null);
+    }
   });
 
   it("a set-up that needs a Hugging Face token says so in place of the total to download", async () => {

@@ -117,6 +117,7 @@ function supported(patch: Partial<LocalRepo> = {}): LocalRepo {
     gate: { mode: "none", collects: [] },
     readFiles: 1,
     unreadFiles: 0,
+    byHandRecipes: [],
     ...patch,
   };
 }
