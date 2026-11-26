@@ -510,6 +510,15 @@ class Studio0_2_0Docs(unittest.TestCase):
         for words in ("94 of the engine's 112 recipes", "the other 18"):
             self.assertIn(words, text)
 
+    def test_7_10_reads_one_header_per_group_of_quantisations(self):
+        text = "\n".join(section("### 7.10 Any model the engine can run (0.2.0)"))
+        self.assertIn("one header read for each group of quantisations", text)
+        self.assertIn("smallest file", text)
+        self.assertIn("labels every quantisation", text)
+        self.assertNotIn("one per quantisation", text)
+        cand = read("crates/models/src/sd/candidates.rs")
+        self.assertIn("/// The smallest member; for a split file, its first shard.", cand)
+
     def test_7_10_says_what_the_code_does_with_a_file(self):
         text = "\n".join(section("### 7.10 Any model the engine can run (0.2.0)"))
         for words in ("`--lora-model-dir`", "`<models>/@loras`", "`<lora:NAME:W>`", "`--prompt-file`", "`--vae-tiling`",
