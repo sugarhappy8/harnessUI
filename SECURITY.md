@@ -39,9 +39,8 @@ built, not by the model's good behaviour:
   *Allow* on its own approval card. Since 0.0.7 the app minimises its window before
   approved computer input that the window is in the way of, and brings it back for every
   approval card of that chat, in front of your other windows but without taking the
-  keyboard. Each time it comes back, approval cards and the Allow all and Full access
-  confirmations ignore clicks for a moment, so a click meant for another app cannot
-  approve an action or switch the mode. Without a card answered just now (a grant, Allow
+  keyboard. Each time it comes back, approval cards ignore clicks for a moment, so a
+  click meant for another app cannot approve an action. Without a card answered just now (a grant, Allow
   all) the app steps aside only when you have not touched the keyboard or mouse for 1.5
   seconds (a key pressed within a few hundredths of a second of the model's own input can
   be taken for the model's). It hands the
