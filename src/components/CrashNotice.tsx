@@ -11,7 +11,7 @@ import { CRASH } from "../lib/words";
 import { FOCUS_RING } from "./ui/styles";
 
 const SECONDARY =
-  "inline-flex items-center gap-1.5 rounded-lg border border-border bg-bg px-3 py-1.5 text-sm hover:border-border-strong hover:bg-bg-muted " +
+  "inline-flex items-center gap-1.5 rounded-lg border border-border bg-surface px-3 py-1.5 text-sm hover:border-border-strong hover:bg-bg-muted " +
   FOCUS_RING;
 const PRIMARY = "btn-primary inline-flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-sm font-medium " + FOCUS_RING;
 
