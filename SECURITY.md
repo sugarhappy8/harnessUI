@@ -459,8 +459,8 @@ Windows, Kuna on macOS, both on Linux) and to fail if they try to reach another 
 On Linux it watches every program the contract tests start, name lookups included; on
 Windows it blocks and watches Node.js, Java and Ghidra's decompiler; on macOS it blocks and
 watches the contract tests' TCP and UDP traffic. One more check, of the app's own call path
-with rea and Kuna, runs on Linux and macOS outside these watchers. It has not run on GitHub yet: its Linux checks were run on the
-build machine, and its Windows and macOS jobs have not run at all.
+with rea and Kuna, runs on Linux and macOS outside these watchers. It runs every night on
+GitHub, on Linux, Windows and macOS.
 
 **Limits:**
 
@@ -672,12 +672,14 @@ first local model, from GitHub only, into its own folder, never the chat model r
   written to a file in the run's folder, which is deleted when the run ends. A local prompt
   may be at most 16,384 characters, so the child-safety check reads all of it; a negative
   prompt may be at most 262,144 characters; and no prompt can be longer than 1 MiB.
-- Model files must be `.gguf` or `.safetensors`. `.ckpt`, `.pt` and `.pth` files are
-  refused everywhere, because they can run code when they are loaded. Every file is checked
-  against its published size and SHA-256, and a GGUF model file is checked by its own
-  tensor table, after download and before every run, so a file whose name lies is never
-  run. As with llama-server, a checksum proves where a file came from, not that the engine
-  parses it safely.
+- Studio reads `.safetensors`, `.sft` and `.gguf` model files, plus a tokenizer's `.json`.
+  Pickle files (`.ckpt`, `.pt`, `.pth`, `.bin`) can run code when they are loaded, so Studio
+  never reads, parses or runs them: it offers them only as a plain file download for another
+  app, with *Download file anyway*. Every file Studio downloads is checked against its
+  published size and SHA-256, and the model file is checked by its own header, its tensor
+  table, after download and before every run, so a file whose name lies is never run. As
+  with llama-server, a checksum proves where a file came from, not that the engine parses
+  it safely.
 
 ## Reading and adding model files (0.2.0)
 

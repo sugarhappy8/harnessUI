@@ -249,6 +249,13 @@ class ReleaseDocsSayWhetherTheWorkflowRan(unittest.TestCase):
         for where, text in docs.items():
             self.assertEqual("has not run" in text, pending, f"{where}: say whether reverse.yml has run, as 16 does")
 
+    def test_the_nightly_run_is_said_where_it_runs(self):
+        # Final review, area 4, I2: the workflow runs every night, and passed on all three.
+        self.assertIn("schedule:", (WORKFLOWS / "reverse.yml").read_text(encoding="utf-8"))
+        self.assertIn("runs every night on the default branch", reverse_sentences()["16 reverse CI"])
+        self.assertIn("It runs every night on GitHub, on Linux, Windows and macOS.", doc_paragraph("SECURITY.md", "the real decompilers"))
+        self.assertNotIn("unverified", reverse_sentences()["13.6 stays offline"])
+
 
 class OfflineCoverAsItIs(unittest.TestCase):
     """The 13.6 Test bullet says what the offline test sees; the testing table and
@@ -316,6 +323,47 @@ class StudioDocs(unittest.TestCase):
         row = paragraph(section("### 13.6 Network use"), "| Studio |")
         for words in ("`openrouter.ai`", "`api.openai.com`", "guarded fetcher", "without the key"):
             self.assertIn(words, row)
+
+    def test_pickle_files_and_the_formats_studio_reads_are_said_exactly(self):
+        # Final review, area 4, I3 with area 1, M-3 and area 2, M4, by controller ruling (design
+        # section 3): pickle files are never read, parsed or run and are only a plain download;
+        # Studio reads .safetensors, .sft and .gguf, plus a tokenizer's .json.
+        index = read("crates/models/src/sd/index.rs")
+        self.assertIn('PICKLE_EXTENSIONS: [&str; 4] = [".ckpt", ".pt", ".pth", ".bin"]', index)
+        self.assertIn('READ_EXTENSIONS: [&str; 3] = [".safetensors", ".sft", ".gguf"]', index)
+        self.assertIn('TOKENIZER_EXTENSION: &str = ".json"', read("crates/models/src/gen_catalog.rs"))
+        security = doc_paragraph("SECURITY.md", "Studio reads `.safetensors`, `.sft` and `.gguf` model files")
+        files = paragraph(section("### 7.9 Studio on this computer (0.1.0)"), "- **Model files.**")
+        for where, text in (("SECURITY.md", security), ("ARCHITECTURE.md 7.9", files)):
+            for words in (
+                "`.safetensors`, `.sft` and `.gguf`",
+                "tokenizer's `.json`",
+                "(`.ckpt`, `.pt`, `.pth`, `.bin`)",
+                "never reads, parses or runs",
+                "plain file download for another app",
+                "*Download file anyway*",
+            ):
+                self.assertIn(words, text, where)
+            for stale in ("refused everywhere", "must be `.gguf` or `.safetensors`", "`.gguf` and `.safetensors` only"):
+                self.assertNotIn(stale, text, where)
+
+    def test_the_input_delay_names_no_removed_confirmation(self):
+        # Final review, area 4, M4: G4 removed the Allow all and Full access confirmations.
+        aside = paragraph(architecture(), "- *Stepping aside (0.0.7):*")
+        self.assertNotIn("Allow all / Full access confirmation", aside)
+        self.assertIn("every approval card and the buttons that set the agent going again", aside)
+
+    def test_the_out_of_memory_retry_flags_are_the_codes(self):
+        run = read("crates/runtime/src/sd/run.rs")
+        self.assertIn("Err(SdFailure::OutOfMemory) if !job.offload_to_cpu => {}", run)
+        self.assertIn("offload_to_cpu: true,\n            vae_tiling: job.tiling_allowed,", run)
+        process = paragraph(section("### 7.9 Studio on this computer (0.1.0)"), "- **One process per job.**")
+        self.assertIn(
+            "a run that ran out of memory without `--offload-to-cpu` is tried once more with memory saving: "
+            "`--offload-to-cpu`, and `--vae-tiling` unless the recipe disables tiling",
+            process,
+        )
+        self.assertNotIn("(`--vae-tiling --offload-to-cpu`)", process)
 
     def test_the_money_rules_are_the_codes(self):
         spend = read("src-tauri/src/studio/spend.rs")
@@ -412,6 +460,22 @@ class StudioDocs(unittest.TestCase):
             self.assertIn(words, entry)
         for words in ("Task ", ".rs", "CI"):
             self.assertNotIn(words, entry)
+
+    def test_the_0_2_0_entry_says_where_settings_are_and_what_an_update_turns_off(self):
+        # Final review: area 3, I6 and area 4, I4 (the model sheet only picks a model) and
+        # area 4, I5 (an update from 0.1.x turns the old default spending prefs off once).
+        entries = read("CHANGELOG.md").split("\n## ")[1:]
+        entry = next((item for item in entries if item.startswith("0.2.0 (")), "")
+        sheet = next(line for line in entry.splitlines() if line.startswith("- **The model sheet.**"))
+        self.assertNotIn("its settings and your saved setups sit in one sheet", sheet)
+        for words in ("for picking a model", "*Settings* side panel", "*My setups*"):
+            self.assertIn(words, sheet)
+        spending = next(line for line in entry.splitlines() if line.startswith("- **The spending limits are off by default.**"))
+        for words in ("update from 0.1.x", "$10", "every video", "$1 or more", "turned off once", "you changed yourself is kept"):
+            self.assertIn(words, spending)
+        prefs = read("src-tauri/src/studio/prefs.rs")
+        for code in ("DEFAULT_DAILY_LIMIT_USD", "CONFIRM_AT_USD", "prefs.confirm_every_video = false"):
+            self.assertIn(code, prefs)
 
 
 class StaleFrom0_1_xDocs(unittest.TestCase):
