@@ -38,10 +38,14 @@ use tauri::{AppHandle, Emitter, Manager};
 
 use super::errors;
 use super::local_cmd::{LocalCmdDeps, app_deps_for_writing, plan_deps, setup_plan_dto};
-use super::local_models::{Added, DownloadDeps, plan_download, prepared_download};
+use super::local_models::{
+    Added, DownloadDeps, is_studios_copy, plan_download, prepared_download, remove_unused_files,
+};
 use super::manager::StudioManager;
 use super::setup_plan::{DiskFile, disk_setup, plan_disk_with, read_disk_file, ready_to_fetch};
-use crate::downloads::{DownloadManager, inside_folder, register_present_gen_model};
+use crate::downloads::{
+    DownloadManager, files_being_written, inside_folder, register_present_gen_model,
+};
 use crate::dto::{SetupChoice, SetupPlanDto};
 use crate::error::AppResult;
 
@@ -168,6 +172,9 @@ pub(crate) struct PreparedImport {
     /// The mode the person was offered and chose, to offer first next time; `None` for a file
     /// inside the models folder, used where it is without asking.
     pub chosen: Option<ImportMode>,
+    /// Studio's copy under `<models>/@imported/` that this import made or reused; `None` for a
+    /// file used where it is. Removed if the download that adds the model cannot start.
+    pub copied: Option<PathBuf>,
 }
 
 /// *Add* on the model file at `path` (untrusted) with `mode` and the person's `choice` for
@@ -245,37 +252,85 @@ pub(crate) async fn prepare_import(
     .await
     .map_err(|e| errors::import_failed(format!("reading the file stopped: {e}")))??;
 
-    let id = format!("local:{}", &sha256[..16]);
-    let planned = plan_disk_with(&plan_deps, &file, &setup, (&at, Some(&sha256), id), &choice)?;
-    let download_deps = DownloadDeps {
-        plan: plan_deps,
-        store: &deps.store,
-        models_dir: &deps.models_dir,
-        // What it fetches was checked against the free space with the copy, above.
-        free_bytes: None,
-        engine: &deps.engine_need,
+    // From here on a failure leaves no copy behind (final review, area 2, M1).
+    let copied = copy.then(|| at.clone());
+    let finish = async {
+        let id = format!("local:{}", &sha256[..16]);
+        let planned = plan_disk_with(&plan_deps, &file, &setup, (&at, Some(&sha256), id), &choice)?;
+        let download_deps = DownloadDeps {
+            plan: plan_deps,
+            store: &deps.store,
+            models_dir: &deps.models_dir,
+            // What it fetches was checked against the free space with the copy, above.
+            free_bytes: None,
+            engine: &deps.engine_need,
+        };
+        let prepared = prepared_download(
+            &download_deps,
+            planned.entry,
+            Some(&planned.plan),
+            None,
+            store::GenSource::Import,
+        )?;
+        let needs_engine = prepared.needs_engine;
+        let added = if prepared.files.is_empty() {
+            Added::Now(
+                register_present_gen_model(&deps.store, &deps.models_dir, &prepared.meta, in_use)
+                    .await?,
+            )
+        } else {
+            Added::Download(Box::new(prepared))
+        };
+        Ok((added, needs_engine))
     };
-    let prepared = prepared_download(
-        &download_deps,
-        planned.entry,
-        Some(&planned.plan),
-        None,
-        store::GenSource::Import,
-    )?;
-    let needs_engine = prepared.needs_engine;
-    let added = if prepared.files.is_empty() {
-        Added::Now(
-            register_present_gen_model(&deps.store, &deps.models_dir, &prepared.meta, in_use)
-                .await?,
-        )
-    } else {
-        Added::Download(Box::new(prepared))
-    };
+    let (added, needs_engine) =
+        removing_copy_on_error(&deps.store, &deps.models_dir, copied.as_deref(), finish).await?;
     Ok(PreparedImport {
         added,
         needs_engine,
         chosen: (!inside).then_some(mode),
+        copied,
     })
+}
+
+/// `work`'s result; when it fails, Studio's own `copy` made for this import is removed
+/// ([`remove_unused_copy`]), so a failed import leaves no copy of many GB that no row owns
+/// and nothing would ever sweep (final review, area 2, M1).
+pub(crate) async fn removing_copy_on_error<T>(
+    store: &store::Store,
+    models_dir: &Path,
+    copy: Option<&Path>,
+    work: impl std::future::Future<Output = AppResult<T>>,
+) -> AppResult<T> {
+    let result = work.await;
+    if result.is_err()
+        && let Some(copy) = copy
+    {
+        remove_unused_copy(store, models_dir, copy).await;
+    }
+    result
+}
+
+/// Removes `copy` when it is Studio's copy under `<models>/@imported/`
+/// (`local_models::is_studios_copy`), through the path that removes any unused model file
+/// (`local_models::remove_unused_files`): never while an installed model uses it or an
+/// unfinished download writes or will use it. Anything else, the person's own file above
+/// all, is left alone. A failure is logged: the import's own error is what the person sees.
+async fn remove_unused_copy(store: &store::Store, models_dir: &Path, copy: &Path) {
+    if !is_studios_copy(models_dir, copy) {
+        return;
+    }
+    let writing = match files_being_written(store, None).await {
+        Ok(writing) => writing,
+        Err(e) => {
+            tracing::warn!(code = %e.code, "a failed import's copy stays for now");
+            return;
+        }
+    };
+    let busy = |p: &Path| writing.contains(&p.display().to_string());
+    if let Err(e) = remove_unused_files(store, models_dir, &[copy.to_path_buf()], &busy).await {
+        tracing::warn!(code = %e.code, "a failed import's copy stays for now");
+    }
 }
 
 /// *Add* in the app ([`prepare_import`], progress to the main window): the model added, or its
@@ -305,7 +360,10 @@ pub async fn import_model(
         },
         Added::Download(download) => {
             let downloads = app.state::<Arc<DownloadManager>>().inner().clone();
-            let group = downloads.start(app, download.meta, download.files).await?;
+            // Refused while another download writes one of its files: the copy goes too.
+            let start = downloads.start(app, download.meta, download.files);
+            let copy = prepared.copied.as_deref();
+            let group = removing_copy_on_error(&deps.store, &deps.models_dir, copy, start).await?;
             ImportResultDto {
                 gen_model_id: None,
                 download_group: Some(group),
@@ -510,7 +568,7 @@ mod tests {
     use store::GenSource;
 
     use super::*;
-    use crate::downloads::{GroupMeta, files_being_written, finish_gen_group};
+    use crate::downloads::{GroupMeta, finish_gen_group};
     use crate::studio::local_cmd::tests::{RepoHub, gpu, hub, repo_deps};
     use crate::studio::local_models::tests::{install_catalog_entry, small_weights};
     use crate::studio::local_models::{
@@ -1209,6 +1267,69 @@ mod tests {
         assert_eq!(
             e.message,
             "A file of this model was moved or changed on this computer."
+        );
+    }
+
+    /// Final review, area 2, M1: an import that fails after its copy was made removes
+    /// Studio's copy when nothing uses it, and never a file that is not Studio's copy or that
+    /// a model uses.
+    #[tokio::test]
+    async fn a_failure_after_the_copy_removes_studios_unused_copy() {
+        let mut t = harness().await;
+        let failed = || async { Err::<(), _>(errors::import_failed("a later step")) };
+        let src = t.outside_file("m.safetensors", fixture_bytes("sd15"));
+        let copy = t.models_file(
+            &format!("{IMPORTED_FOLDER}/0123456789abcdef/m.safetensors"),
+            fixture_bytes("sd15"),
+        );
+        let e = removing_copy_on_error(t.store(), t.models_dir(), Some(&copy), failed())
+            .await
+            .unwrap_err();
+        assert_eq!(e.code, "studio_import_failed");
+        assert!(!copy.exists(), "the copy is removed");
+        assert!(!copy.parent().unwrap().exists(), "and its empty folder");
+        assert!(src.exists(), "never the person's file");
+
+        // Success keeps it.
+        let copy = t.models_file(
+            &format!("{IMPORTED_FOLDER}/0123456789abcdef/m.safetensors"),
+            fixture_bytes("sd15"),
+        );
+        removing_copy_on_error(t.store(), t.models_dir(), Some(&copy), async { Ok(()) })
+            .await
+            .unwrap();
+        assert!(copy.exists());
+
+        // A copy an installed model uses stays (the same file imported before).
+        let id = t
+            .import(&src, ImportMode::Copy, None)
+            .await
+            .unwrap()
+            .gen_model_id
+            .unwrap();
+        let row = t.store().get_gen_model(&id).await.unwrap().unwrap();
+        let used = PathBuf::from(part_in(&row, "model")["file"].as_str().unwrap());
+        assert!(
+            removing_copy_on_error(t.store(), t.models_dir(), Some(&used), failed())
+                .await
+                .is_err()
+        );
+        assert!(used.exists());
+
+        // A file outside `@imported` is the person's own, even inside the models folder.
+        let own = t.models_file("@files/abc/m.safetensors", fixture_bytes("sd15"));
+        assert!(
+            removing_copy_on_error(t.store(), t.models_dir(), Some(&own), failed())
+                .await
+                .is_err()
+        );
+        assert!(own.exists());
+
+        // A file used where it is (no copy) is never touched.
+        assert!(
+            removing_copy_on_error(t.store(), t.models_dir(), None, failed())
+                .await
+                .is_err()
         );
     }
 
