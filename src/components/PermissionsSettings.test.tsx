@@ -22,7 +22,7 @@ const ipcMock = vi.hoisted(() => ({
 vi.mock("../lib/ipc", () => ipcMock);
 
 const { AuditLogView, FULL_ACCESS_NOTE, PermissionsSettings, decisionLabel } = await import("./PermissionsSettings");
-const { APPROVAL_MODES, CONFIRM_INPUT_DELAY_MS, FULL_ACCESS_RISKS, STILL_ASKS } = await import("./AllowAllButton");
+const { APPROVAL_MODES } = await import("./AllowAllButton");
 const { useApprovalMode } = await import("../lib/approvalMode");
 
 const radio = (label: string) => screen.getByRole("radio", { name: new RegExp(`^${label}`) });
@@ -44,11 +44,6 @@ async function choose(label: string) {
     fireEvent.click(radio(label));
   });
 }
-
-const arm = () =>
-  act(() => {
-    vi.advanceTimersByTime(CONFIRM_INPUT_DELAY_MS + 10);
-  });
 
 const label = (mode: ApprovalModeName) => {
   const m = APPROVAL_MODES.find((x) => x.mode === mode)!;
@@ -89,45 +84,19 @@ describe("Settings: the mode every chat starts in", () => {
     expect(text).toContain("also changes chats you switched by hand");
   });
 
-  it("asks before Allow all, with the list of what still asks", async () => {
-    await open();
-    expect(checked()).toEqual([label("ask")]);
-    await choose("Allow all");
-    // Nothing is saved by the click itself.
-    expect(ipcMock.setDefaultApprovalMode).not.toHaveBeenCalled();
-    expect(checked()).toEqual([label("ask")]);
-    const dialog = screen.getByRole("alertdialog");
-    expect(within(dialog).getByText("Allow all in every chat?")).toBeTruthy();
-    const still = within(dialog).getByRole("list", { name: "Still asks" });
-    expect(within(still).getAllByRole("listitem").map((li) => li.textContent)).toEqual([...STILL_ASKS]);
-    arm();
-    await act(async () => {
-      fireEvent.click(within(dialog).getByRole("button", { name: "Allow all in every chat" }));
-    });
-    expect(ipcMock.setDefaultApprovalMode).toHaveBeenCalledWith("allowAll");
-    expect(checked()).toEqual([label("allowAll")]);
-  });
-
-  it("asks before Full access with its warning, ignores an early click, then re-reads the chats", async () => {
+  it("changing the start mode saves without asking", async () => {
     // A chat the window has shown, switched to Ask first by hand.
     useApprovalMode.setState({ modes: { 7: "ask" } });
     await open();
+    expect(checked()).toEqual([label("ask")]);
+    await choose("Allow all");
+    expect(screen.queryByRole("alertdialog")).toBeNull();
+    expect(ipcMock.setDefaultApprovalMode).toHaveBeenCalledTimes(1);
+    expect(ipcMock.setDefaultApprovalMode).toHaveBeenCalledWith("allowAll");
+    expect(checked()).toEqual([label("allowAll")]);
     await choose("Full access");
-    expect(ipcMock.setDefaultApprovalMode).not.toHaveBeenCalled();
-    const dialog = screen.getByRole("alertdialog");
-    expect(within(dialog).getByText("Turn on Full access in every chat?")).toBeTruthy();
-    const risks = within(dialog).getByRole("list", { name: "Risks" });
-    const lines = within(risks).getAllByRole("listitem").map((li) => li.textContent ?? "");
-    expect(lines.slice(0, -1)).toEqual([...FULL_ACCESS_RISKS]);
-    expect(lines.at(-1)).toContain("stays on after a restart");
-    const confirm = within(dialog).getByRole("button", { name: "Turn on Full access" });
-    fireEvent.click(confirm);
-    expect(ipcMock.setDefaultApprovalMode).not.toHaveBeenCalled();
-    arm();
-    await act(async () => {
-      fireEvent.click(confirm);
-    });
-    expect(ipcMock.setDefaultApprovalMode).toHaveBeenCalledWith("fullAccess");
+    expect(screen.queryByRole("alertdialog")).toBeNull();
+    expect(ipcMock.setDefaultApprovalMode).toHaveBeenLastCalledWith("fullAccess");
     expect(checked()).toEqual([label("fullAccess")]);
     expect(useApprovalMode.getState().defaultMode).toBe("fullAccess");
     // Every chat follows the new default, also one switched by hand.
@@ -135,19 +104,6 @@ describe("Settings: the mode every chat starts in", () => {
     expect(useApprovalMode.getState().modes[7]).toBe("fullAccess");
     // The chosen mode reads in its colour.
     expect(radio("Full access").querySelector(".text-danger")?.textContent).toBe("Full access");
-  });
-
-  it("stays as it was when a confirmation is cancelled", async () => {
-    await open();
-    for (const mode of ["Allow all", "Full access"]) {
-      await choose(mode);
-      await act(async () => {
-        fireEvent.click(within(screen.getByRole("alertdialog")).getByText("Cancel"));
-      });
-      expect(screen.queryByRole("alertdialog")).toBeNull();
-    }
-    expect(ipcMock.setDefaultApprovalMode).not.toHaveBeenCalled();
-    expect(checked()).toEqual([label("ask")]);
   });
 
   it("goes back to Ask first at once and re-reads the chats on screen", async () => {
@@ -162,14 +118,6 @@ describe("Settings: the mode every chat starts in", () => {
     expect(checked()).toEqual([label("ask")]);
     expect(ipcMock.getChatApprovalMode).toHaveBeenCalledWith(7);
     expect(useApprovalMode.getState().modes[7]).toBe("ask");
-  });
-
-  it("asks even for a step down from Full access to Allow all, since chats switched by hand follow it", async () => {
-    saved = "fullAccess";
-    await open();
-    await choose("Allow all");
-    expect(within(screen.getByRole("alertdialog")).getByText("Allow all in every chat?")).toBeTruthy();
-    expect(ipcMock.setDefaultApprovalMode).not.toHaveBeenCalled();
   });
 
   it("keeps the choice as it was and shows the error when the app refuses", async () => {

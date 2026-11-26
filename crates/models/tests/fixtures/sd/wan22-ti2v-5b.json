@@ -1,0 +1,108 @@
+{
+ "source": {
+  "repo": "QuantStack/Wan2.2-TI2V-5B-GGUF",
+  "revision": "57437632ddd08bdcbd1508c866aa22e126ed51d2",
+  "path": "Wan2.2-TI2V-5B-Q4_K_M.gguf",
+  "size": 3433116000,
+  "sha256": "95b19697b7f98e65b0a543640e9ca7b4dfec32e2a6e3731e8e10708be52655e2",
+  "capturedOn": "2026-11-24"
+ },
+ "format": "gguf",
+ "metadata": {
+  "general.architecture": "wan"
+ },
+ "tensors": [
+  [
+   "blocks.0.cross_attn.k.bias",
+   "f16",
+   [
+    3072
+   ]
+  ],
+  [
+   "blocks.0.cross_attn.norm_k.weight",
+   "f16",
+   [
+    3072
+   ]
+  ],
+  [
+   "blocks.29.cross_attn.k.bias",
+   "f16",
+   [
+    3072
+   ]
+  ],
+  [
+   "head.head.bias",
+   "f16",
+   [
+    192
+   ]
+  ],
+  [
+   "head.head.weight",
+   "f16",
+   [
+    3072,
+    192
+   ]
+  ],
+  [
+   "patch_embedding.bias",
+   "f16",
+   [
+    3072
+   ]
+  ],
+  [
+   "patch_embedding.weight",
+   "f32",
+   [
+    2,
+    2,
+    1,
+    48,
+    3072
+   ]
+  ],
+  [
+   "text_embedding.0.bias",
+   "f16",
+   [
+    3072
+   ]
+  ],
+  [
+   "text_embedding.0.weight",
+   "f16",
+   [
+    4096,
+    3072
+   ]
+  ],
+  [
+   "time_embedding.0.bias",
+   "f16",
+   [
+    3072
+   ]
+  ],
+  [
+   "time_projection.1.bias",
+   "f16",
+   [
+    18432
+   ]
+  ],
+  [
+   "time_projection.1.weight",
+   "f16",
+   [
+    3072,
+    18432
+   ]
+  ]
+ ],
+ "parameters": 4999787712
+}

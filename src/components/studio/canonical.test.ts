@@ -2,9 +2,9 @@
 // the nearest value the new model takes, with one note that says what changed.
 import { describe, expect, it } from "vitest";
 import { SETTING_WORDS } from "../../lib/words";
-import { carry, changedCount, changedKeys, closestModel, defaultsFor, familyOf } from "./canonical";
+import { carry, changedCount, changedKeys, closestModel, defaultsFor, familyOf, valueWords } from "./canonical";
 import { LOCAL, MODELS } from "./fixtures/models";
-import type { MediaModel, ParamKind, RefItem, RefRole } from "./types";
+import type { Lora, LoraUse, MediaModel, ParamKind, RefItem, RefRole, SdVersion } from "./types";
 
 function byId(id: string): MediaModel {
   const model = MODELS.find((m) => m.id === id) ?? LOCAL.installed.find((i) => i.id === id)?.model;
@@ -283,5 +283,80 @@ describe("setting words", () => {
     expect(SETTING_WORDS.withUnit("80", "%")).toBe("80%");
     expect(SETTING_WORDS.withUnit("120", "ms")).toBe("120 ms");
     expect(SETTING_WORDS.keyName("foo_bar")).toBe("foo bar");
+  });
+});
+
+// Final review, area 3, I1: a model switch with LoRAs attached kept none and said
+// "[object Object]". The LoRAs that fit the new model by `lorasFor`'s rule stay; each that does
+// not is named in the note.
+describe("carrying LoRAs", () => {
+  const sdxl = byId("hf:stabilityai/stable-diffusion-xl-base-1.0:sd_xl_base_1.0.safetensors");
+  const lora = (id: string, name: string, base: SdVersion | null): Lora => ({
+    id,
+    name,
+    base,
+    format: "kohya",
+    sizeBytes: 1_000_000,
+    source: "import",
+    repo: null,
+    missing: false,
+  });
+  const pixel = lora("local:a", "pixel art ü", "sdxl");
+  const style = lora("local:b", "klein style", "flux2-klein");
+  const mystery = lora("local:c", "mystery", null);
+  const installed = [pixel, style, mystery];
+  const uses: LoraUse[] = [
+    { id: pixel.id, weight: 0.8, highNoise: false },
+    { id: style.id, weight: 1, highNoise: false },
+    { id: mystery.id, weight: 1.5, highNoise: true },
+  ];
+
+  it("keeps the LoRAs that fit the new model and names each one it removes", () => {
+    const r = carry(klein, sdxl, { loras: uses }, {}, [], { loras: installed, base: "sdxl" });
+    // The one made for SDXL and the one of no known type stay; the high-noise switch goes,
+    // as sd_xl_base_1.0 has no high-noise part.
+    expect(r.values.loras).toEqual([
+      { id: pixel.id, weight: 0.8, highNoise: false },
+      { id: mystery.id, weight: 1.5, highNoise: false },
+    ]);
+    expect(r.note).toBe("The LoRA klein style was made for FLUX.2 klein models, so it was removed.");
+  });
+
+  it("keeps every LoRA when the new model's type is not known, with no note", () => {
+    const r = carry(klein, sdxl, { loras: uses }, {}, [], { loras: installed, base: null });
+    expect((r.values.loras as LoraUse[]).map((u) => u.id)).toEqual([pixel.id, style.id, mystery.id]);
+    expect(r.note).toBeNull();
+  });
+
+  it("names each LoRA removed for a model that takes none", () => {
+    const r = carry(klein, flare, { loras: uses }, {}, [], { loras: installed, base: null });
+    expect(r.values.loras).toBeUndefined();
+    expect(r.note).toBe(
+      "GPT Image 2.6 Flare takes no LoRAs, so pixel art ü, klein style and mystery were removed.",
+    );
+  });
+
+  it("keeps as many as the new model takes, within its strengths", () => {
+    const one = withKind(sdxl, "loras", {
+      type: "loras",
+      max: 1,
+      highNoise: false,
+      weightMin: 0,
+      weightMax: 1,
+      weightStep: 0.25,
+      weightDefault: 1,
+    });
+    const r = carry(klein, one, { loras: [uses[2], uses[0]] }, {}, [], { loras: installed, base: "sdxl" });
+    expect(r.values.loras).toEqual([{ id: mystery.id, weight: 1, highNoise: false }]);
+    expect(r.note).toBe("sd_xl_base_1.0 takes up to 1 LoRA, so pixel art ü was removed.");
+  });
+
+  it("never writes a list or an object as text", () => {
+    expect(valueWords([{ id: "x" }, { id: "y" }])).not.toContain("[object");
+    expect(valueWords({ id: "x" })).not.toContain("[object");
+    // Without the LoRAs installed it still says something true.
+    const r = carry(klein, flare, { loras: uses }, {}, []);
+    expect(r.note).not.toContain("[object");
+    expect(r.note).toBe("GPT Image 2.6 Flare takes no LoRAs, so 3 LoRAs were removed.");
   });
 });

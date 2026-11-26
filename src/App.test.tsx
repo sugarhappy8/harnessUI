@@ -73,7 +73,6 @@ vi.mock("./components/ModelsDialog", () => ({ ModelsDialog: () => null }));
 vi.mock("./components/FirstRun", () => ({ FirstRun: () => null }));
 vi.mock("./components/ShortcutsDialog", () => ({ ShortcutsDialog: () => null }));
 vi.mock("./components/AppNotices", () => ({ AppNotices: () => null }));
-vi.mock("./components/AllowAllButton", () => ({ FullAccessStartCheck: () => null }));
 
 const { default: App } = await import("./App");
 const { useApp } = await import("./store/app");
@@ -363,7 +362,7 @@ describe("Studio", () => {
     expect(useStudio.getState()).toMatchObject({ view: "studio", tab: "video" });
   });
 
-  it('app:open-studio with "local" opens Studio on Get local models', async () => {
+  it('app:open-studio with "local" opens Studio on Get models', async () => {
     useStudio.setState({ localView: false });
     await renderApp();
     act(() => {
@@ -374,8 +373,8 @@ describe("Studio", () => {
     act(() => {
       window.dispatchEvent(new CustomEvent("app:open-studio", { detail: "local" }));
     });
-    // On the tab shown last, which its own tabs start on.
-    expect(useStudio.getState()).toMatchObject({ view: "studio", tab: "video", localView: true, localTab: "video" });
+    // On the tab shown last, which its filter starts on.
+    expect(useStudio.getState()).toMatchObject({ view: "studio", tab: "video", localView: true, searchFilter: "video" });
   });
 
   it("the chat stays mounted, hidden, while Studio is shown", async () => {

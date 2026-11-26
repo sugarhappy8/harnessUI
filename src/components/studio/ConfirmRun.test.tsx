@@ -20,6 +20,7 @@ vi.mock("./api");
 
 const api = await import("./api");
 const { StudioView } = await import("./StudioView");
+const { UiProviders } = await import("../ui/UiProviders");
 const { useStudio } = await import("../../store/studio");
 
 const INITIAL = useStudio.getState();
@@ -46,7 +47,10 @@ function prefs(patch: Partial<StudioPrefs> = {}): StudioPrefs {
       video: { target: { endpoint: 1 }, model: "google/veo-3.1" },
     },
     advancedOpen: false,
+    settingsOpen: false,
+    prefsVersion: 1,
     confirmEveryVideo: true,
+    confirmUnknownPrice: false,
     confirmAtUsd: 1,
     dailyLimitUsd: 10,
     setups: [],
@@ -55,6 +59,7 @@ function prefs(patch: Partial<StudioPrefs> = {}): StudioPrefs {
     reloadChatAfter: false,
     suggestionDismissed: true,
     localNoticeAcceptedAt: null,
+    lastImportMode: null,
     ...patch,
   };
 }
@@ -101,7 +106,11 @@ async function show(tab: StudioTab, estimate: Estimate, p: StudioPrefs = prefs()
   );
   useStudio.getState().showStudio(tab);
   await act(async () => {
-    render(<StudioView />);
+    render(
+      <UiProviders>
+        <StudioView />
+      </UiProviders>,
+    );
   });
   await flush();
   fireEvent.change(screen.getByRole("textbox", { name: "Prompt" }), { target: { value: "slow drone push" } });
@@ -190,6 +199,13 @@ describe("ConfirmRun", () => {
     const saved = vi.mocked(api.studioSetPrefs).mock.invocationCallOrder[0]!;
     expect(saved).toBeLessThan(vi.mocked(api.studioStart).mock.invocationCallOrder[0]!);
     expect(screen.queryByRole("alertdialog")).toBeNull();
+  });
+
+  it("with asking from an amount off, Don't ask again names every video, not an amount", async () => {
+    await show("video", est({ usd: 0.09, reasons: ["video"], confirmAtUsd: null }));
+    await create();
+    screen.getByRole("checkbox", { name: "Don't ask again before every video" });
+    expect(screen.queryByRole("checkbox", { name: /under/ })).toBeNull();
   });
 
   it("confirming sends the press that asked, whatever the draft became", async () => {

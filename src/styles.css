@@ -131,9 +131,79 @@ body {
   background: color-mix(in srgb, var(--accent) 30%, transparent);
 }
 
-:focus-visible {
-  outline: 2px solid var(--focus);
-  outline-offset: 2px;
+/* In the base layer, so a utility (`outline-none`, the ring of FOCUS_RING in
+   components/ui/styles.ts) overrides it. Unlayered, it beat them and drew a second outline
+   around fields that already show their own focus. */
+@layer base {
+  :focus-visible {
+    outline: 2px solid var(--focus);
+    outline-offset: 2px;
+  }
+}
+
+/* The type scale (design 10.4). */
+@utility text-view-title {
+  font-size: var(--text-xl);
+  line-height: var(--text-xl--line-height);
+  font-weight: 600;
+}
+
+@utility text-title {
+  font-size: var(--text-lg);
+  line-height: var(--text-lg--line-height);
+  font-weight: 600;
+}
+
+@utility text-section {
+  font-size: var(--text-sm);
+  line-height: var(--text-sm--line-height);
+  font-weight: 600;
+}
+
+@utility text-body {
+  font-size: var(--text-sm);
+  line-height: var(--text-sm--line-height);
+}
+
+@utility text-meta {
+  font-size: var(--text-xs);
+  line-height: var(--text-xs--line-height);
+  color: var(--fg-muted);
+}
+
+/* Studio's page: in light a quiet grey behind white cards, so cards and page separate; in
+   dark the page is the darkest layer. */
+.studio-page {
+  background: var(--bg-subtle);
+}
+
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) .studio-page {
+    background: var(--bg);
+  }
+}
+
+:root[data-theme="dark"] .studio-page {
+  background: var(--bg);
+}
+
+/* A search box's clear button in the theme's muted colour, not the browser's blue one
+   (critique §2.8): a small cross drawn by a mask, so it follows the theme. */
+input[type="search"]::-webkit-search-cancel-button {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 14px;
+  height: 14px;
+  cursor: pointer;
+  background-color: var(--fg-muted);
+  -webkit-mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2.5' stroke-linecap='round'%3E%3Cpath d='M18 6 6 18M6 6l12 12'/%3E%3C/svg%3E")
+    center / contain no-repeat;
+  mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2.5' stroke-linecap='round'%3E%3Cpath d='M18 6 6 18M6 6l12 12'/%3E%3C/svg%3E")
+    center / contain no-repeat;
+}
+
+input[type="search"]::-webkit-search-cancel-button:hover {
+  background-color: var(--fg);
 }
 
 /* Thin scrollbars in the theme's colours, instead of the system's wide grey ones. */
@@ -356,10 +426,11 @@ button:not(:disabled):active {
     0 8px 24px color-mix(in srgb, var(--accent) 40%, transparent);
 }
 
+/* Off, it keeps a hairline edge, so it does not vanish into a dark card (critique §5). */
 .btn-primary:disabled {
   background: var(--bg-muted);
   color: var(--fg-muted);
-  box-shadow: none;
+  box-shadow: inset 0 0 0 1px var(--border-strong);
 }
 
 /* The page behind a chat: a very faint glow of the accent at the top, so the main area

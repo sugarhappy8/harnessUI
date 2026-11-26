@@ -13,6 +13,32 @@
 //! word ("Essex" holds no sexual word). A few words name a sexualised child by themselves, so
 //! they are in both lists and refused alone.
 //!
+//! The check reads the prompt four times, with the same rules each time (rulings S2-safety,
+//! S2-attention and S2-attention-2):
+//!
+//! 1. as typed;
+//! 2. as the engine receives it, with the LoRA tags and image markers removed
+//!    (`runtime::sd::args::strip_prompt_markers`). Removing a tag joins the text on either side
+//!    of it, so `se<lora:a:1>xy` reaches the engine as "sexy", and a tag between two words
+//!    breaks a pair rule (`little <lora:a:1> girl`);
+//! 3. as the model reads that text through the engine's weighting syntax
+//!    (`runtime::sd::args::attention_text`): brackets and `:<number>)` go and the pieces
+//!    join, so `se()xy`, `se[]xy`, `se:1)xy` and `(se)(xy)` all read "sexy". The pieces are
+//!    joined across weights too, as an LLM encoder reads them side by side;
+//! 4. as the engine's own segments (`runtime::sd::args::parse_prompt_attention`), one word
+//!    apart: it joins only pieces of equal weight and encodes each segment on its own (CLIP
+//!    ends each with `</w>`, T5 starts each with `▁`), so `se()xy(children)` reaches the model
+//!    as "sexy" and "children", which reading 3 glues into "sexychildren".
+//!
+//! The fourth reading costs the engine's weighting, which grows with the square of the
+//! brackets, so it reads a prompt of at most `LOCAL_PROMPT_MAX_CHARS` (16,384) characters and
+//! no longer: [`refuses`] expects its caller to have refused a longer prompt first, as the
+//! local lane does (`studio_prompt_too_long_here`). At that length the worst bracket nesting
+//! is read in about 0.2 s (ruling G3-safety-bound); the 4,000-character cap of 0.1.x is gone,
+//! and every prompt up to the bound is read all four ways. The negative prompt is not
+//! checked (since 0.1.x: "no children"-style negatives would be refused), so its own bound
+//! (`NEGATIVE_MAX_CHARS`, 262,144 characters) is only the 1 MiB one in characters.
+//!
 //! The lists trade misses against harmless prompts refused. Bare "baby" and "minor" are left
 //! out of [`MINOR`] because they refuse too much that is harmless ("a sexy baby-blue dress",
 //! "baby doll lingerie", "a sexy saxophone solo in A minor", "sexy dress, minor alterations"),
@@ -26,6 +52,10 @@
 //! - "the naked emperor in a children's book".
 
 use std::collections::BTreeSet;
+
+use runtime::sd::args::{
+    LOCAL_PROMPT_MAX_CHARS, attention_text, parse_prompt_attention, strip_prompt_markers,
+};
 
 /// Sexual words, as they read after folding (see the module's notes).
 const SEXUAL: &[&str] = &[
@@ -186,9 +216,33 @@ const LOOK_ALIKES: [(&str, char); 25] = [
     ("źżžᴢ", 'z'),
 ];
 
-/// Whether `prompt` pairs a sexual word with a word for children.
+/// Whether `prompt` pairs a sexual word with a word for children, as typed, as the engine
+/// receives it ([`strip_prompt_markers`]), as the model reads that joined
+/// ([`attention_text`]), or as the engine's segments one word apart ([`segment_words`]). The
+/// last reading is made only for a prompt of at most [`LOCAL_PROMPT_MAX_CHARS`] characters,
+/// which the caller checks first (see the module's notes).
 pub fn refuses(prompt: &str) -> bool {
-    let tokens = tokens(&folded(prompt));
+    let received = strip_prompt_markers(prompt);
+    pairs(prompt)
+        || pairs(&received)
+        || pairs(&attention_text(&received))
+        || (prompt.chars().count() <= LOCAL_PROMPT_MAX_CHARS && pairs(&segment_words(&received)))
+}
+
+/// The segments the engine encodes from `text` ([`parse_prompt_attention`]), joined with one
+/// space: its own merge of equal weights, each segment a word apart from the next.
+fn segment_words(text: &str) -> String {
+    parse_prompt_attention(text)
+        .into_iter()
+        .map(|(segment, _)| segment)
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+/// Whether `text` pairs a sexual word with a word for children: the rules of the module's
+/// notes, on one reading of the prompt.
+fn pairs(text: &str) -> bool {
+    let tokens = tokens(&folded(text));
     let mut words: BTreeSet<String> = tokens.windows(2).map(|pair| pair.join(" ")).collect();
     words.extend(spelled_out(&tokens));
     words.extend(tokens);
@@ -351,6 +405,199 @@ mod tests {
         }
         for prompt in passed {
             assert!(!refuses(prompt), "should pass: {prompt:?}");
+        }
+    }
+
+    /// The engine receives the prompt without its LoRA tags, and removing one joins the text
+    /// around it: what it receives is checked too (ruling S2-safety).
+    #[test]
+    fn a_lora_tag_cannot_hide_what_the_engine_receives() {
+        for prompt in [
+            "se<lora:xy chil<lora:dren",
+            "se<lora:a:1>xy chi<lora:b:1>ldren",
+            "sexy little <lora:a:1> girl",
+        ] {
+            assert!(
+                tokens(&folded(prompt)).len() > 1 && !pairs(prompt),
+                "the rules alone pass it: {prompt:?}"
+            );
+            assert!(pairs(&strip_prompt_markers(prompt)), "{prompt:?}");
+            assert!(refuses(prompt), "should be refused: {prompt:?}");
+        }
+        // a harmless prompt with a tag still passes
+        for prompt in [
+            "a fox in the snow <lora:style:0.8>",
+            "children <lora:watercolour:1> reading in a library",
+        ] {
+            assert!(!refuses(prompt), "should pass: {prompt:?}");
+        }
+    }
+
+    /// The model reads the prompt through the engine's weighting syntax, which drops brackets
+    /// and `:<number>)` and joins the pieces (ruling S2-attention); an image marker joins the
+    /// text around it as a LoRA tag does (ruling S2-image-markers).
+    #[test]
+    fn the_weighting_syntax_cannot_hide_what_the_model_reads() {
+        for prompt in [
+            "se()xy chil()dren",
+            "se[]xy chil[]dren",
+            "se:1)xy chil:1)dren",
+            "se(xy:1) chil(dren:1)",
+            "nu[]de kids",
+            "naked t()ee()n",
+            "erotic tod()dler",
+            "sexy little(:1) girl",
+            "(se)(xy) (chil)(dren)",
+            "se<lora:a:1>(xy) chil[]dren",
+        ] {
+            assert!(
+                !pairs(prompt) && !pairs(&strip_prompt_markers(prompt)),
+                "the first two readings alone pass it: {prompt:?}"
+            );
+            assert!(refuses(prompt), "should be refused: {prompt:?}");
+        }
+        // an image marker is removed as a LoRA tag is: the second reading joins the text
+        for prompt in ["se<image:x>xy children", "se<image:x xy chil<image:dren"] {
+            assert!(!pairs(prompt), "the rules alone pass it: {prompt:?}");
+            assert!(refuses(prompt), "should be refused: {prompt:?}");
+        }
+        // ordinary weighting stays ordinary
+        for prompt in [
+            "a (red:1.2) car on a [wet] road",
+            "portrait, (soft light), BREAK, city at night",
+            "children (playing:1.3) in a [sunny] park",
+            "a (sexy:1.2) red sports car, BREAK, studio lighting",
+            "(masterpiece), kids' (birthday party:1.1), [balloons]",
+        ] {
+            assert!(!refuses(prompt), "should pass: {prompt:?}");
+        }
+    }
+
+    /// The engine encodes segments of different weights one by one, so the words either side
+    /// of a weight change stay apart (ruling S2-attention-2): reading 3 glues them into one
+    /// non-word, and reading 4 reads them apart.
+    #[test]
+    fn a_weight_change_cannot_glue_words_out_of_sight() {
+        for prompt in [
+            "se()xy(children)",
+            "(sexy)chil()dren",
+            "nu[]de(kids)",
+            "(nu)(de)kids",
+            "naked(t()een)",
+            "erotic(tod()dler)",
+            "(nude:1.2)tee()n",
+            "sexy little(:1)(girl)",
+            "n[]ude kids(B",
+            "a ph()oto of nu()de(children) at the beach",
+        ] {
+            let received = strip_prompt_markers(prompt);
+            assert!(
+                !pairs(prompt) && !pairs(&received) && !pairs(&attention_text(&received)),
+                "the first three readings alone pass it: {prompt:?}"
+            );
+            assert!(pairs(&segment_words(&received)), "{prompt:?}");
+            assert!(refuses(prompt), "should be refused: {prompt:?}");
+        }
+        assert_eq!(segment_words("se()xy(children)"), "sexy children");
+        // ordinary weighting still passes
+        for prompt in [
+            "a (red:1.2) car on a [wet] road",
+            "portrait, (soft light), BREAK, city at night",
+            "(masterpiece:1.2), a (cozy:0.8) cabin, [fog], children's (book:1.1) style",
+        ] {
+            assert!(!refuses(prompt), "should pass: {prompt:?}");
+        }
+    }
+
+    /// 0.2.0 (ruling G3-safety-bound): the 4,000-character cap is gone, and every local
+    /// prompt the lane accepts, up to LOCAL_PROMPT_MAX_CHARS characters, is read all four
+    /// ways: a phrase split across weights past the old cap is still refused.
+    #[test]
+    fn a_weight_change_past_4000_characters_is_still_read() {
+        let tail = " se()xy(children)";
+        let past = format!("{}{tail}", "a ".repeat(2_500));
+        let longest = format!("{}{tail}", "a".repeat(LOCAL_PROMPT_MAX_CHARS - tail.len()));
+        assert_eq!(longest.chars().count(), LOCAL_PROMPT_MAX_CHARS);
+        for prompt in [&past, &longest] {
+            assert!(prompt.chars().count() > 4_000);
+            let received = strip_prompt_markers(prompt);
+            assert!(
+                !pairs(prompt) && !pairs(&received) && !pairs(&attention_text(&received)),
+                "the first three readings alone pass it"
+            );
+            assert!(refuses(prompt), "the segments' reading refuses it");
+        }
+    }
+
+    /// The fourth reading costs the engine's weighting, quadratic in the brackets, so it reads
+    /// a prompt of at most LOCAL_PROMPT_MAX_CHARS characters: the caller refuses a longer one
+    /// first, as the local lane does. Beyond the bound it is not made: this test would take
+    /// minutes if it were.
+    #[test]
+    fn the_segment_reading_is_bounded_by_the_prompt_length() {
+        let nested = format!("{}x", "(x".repeat(250_000));
+        assert!(!refuses(&nested));
+        let tricked = format!("se()xy(children) {}", "a".repeat(LOCAL_PROMPT_MAX_CHARS));
+        assert!(tricked.chars().count() > LOCAL_PROMPT_MAX_CHARS);
+        assert!(!refuses(&tricked), "read only up to the bound");
+        assert!(refuses("se()xy(children)"));
+    }
+
+    /// The worst bracket nesting for the engine's weighting, at the longest local prompt: as
+    /// many brackets as segments, each bracket over every segment, round ones (weights that
+    /// overflow) and square ones (weights that sink into the subnormal floats). Each is read
+    /// all four ways in a bounded time, so a crafted prompt cannot make the check slow
+    /// (about 0.2 s at most in a release build; the bound here is for an unoptimised test
+    /// build on a slow machine). Square brackets cost about what round ones do: on a
+    /// processor with a slow path for subnormal floats, a plain `*=` made them about ten
+    /// times slower (`times` in `runtime::sd::prompt_view`).
+    #[test]
+    fn the_worst_bracket_nesting_at_the_longest_local_prompt_is_read_in_time() {
+        use std::time::{Duration, Instant};
+        let half = LOCAL_PROMPT_MAX_CHARS / 2;
+        let quarter = LOCAL_PROMPT_MAX_CHARS / 4;
+        let worst = [
+            format!("{}{}", "(".repeat(half), "B".repeat(half)),
+            format!("{}{}", "[".repeat(half), "B".repeat(half)),
+            format!("{}{}", "([".repeat(quarter), "B".repeat(half)),
+            "[B".repeat(half),
+            format!(
+                "{}{}{}",
+                "[".repeat(quarter),
+                "B".repeat(half),
+                "]".repeat(quarter)
+            ),
+        ];
+        let took: Vec<Duration> = worst
+            .iter()
+            .map(|prompt| {
+                assert_eq!(prompt.chars().count(), LOCAL_PROMPT_MAX_CHARS);
+                let started = Instant::now();
+                assert!(!refuses(prompt));
+                started.elapsed()
+            })
+            .collect();
+        for (prompt, took) in worst.iter().zip(&took) {
+            assert!(
+                *took < Duration::from_secs(5),
+                "{:?}…: {took:?}",
+                &prompt[..8]
+            );
+        }
+        let (round, square) = (took[0], took[1]);
+        assert!(
+            square < round * 4 + Duration::from_millis(100),
+            "square brackets {square:?}, round ones {round:?}"
+        );
+    }
+
+    /// The model's reading turns each `BREAK` into a space, where the engine may keep a run
+    /// of them as text (`BREAK:1)BREAK`). That can hide no listed word only while no listed
+    /// word holds "break".
+    #[test]
+    fn no_listed_word_holds_break() {
+        for word in SEXUAL.iter().chain(MINOR) {
+            assert!(!word.contains("break"), "{word}");
         }
     }
 

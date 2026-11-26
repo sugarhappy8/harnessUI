@@ -27,12 +27,25 @@
 // into one folder: in ./studioResults, composed in here), the grid's filters and Load more.
 // Task B10: the Studio engine's state read again (Settings → Studio's engine line), and Delete
 // stopped and failed runs (in ./studioResults). Task B11: a picture attached in a chat opened
-// in Studio's Pictures tab, and Send to chat (in ./studioResults). Task B13: Get local models'
-// tabs, hardware filter, Hugging Face search, download confirmation, repairs and the local
-// model notice are in ./studioLocal.
+// in Studio's Pictures tab, and Send to chat (in ./studioResults). Task B13: Get models'
+// tabs, hardware filter, Hugging Face search, download confirmation (since Task U6, the detail
+// panel), repairs and the local model notice are in ./studioLocal. Task U3 (0.2.0): whether the side panel (Settings) is open,
+// saved in the preferences. Task U4: whether the model sheet (on which filter) and *Add a model
+// file* are open, and a pick of an installed model that needs setting up. Task U7: the follower
+// of Studio's downloads (a model or LoRA that is done is read again, whatever Studio shows), the
+// downloads that finished meanwhile, and *Use it* (`pickNewModel`).
 import { create, type StoreApi, type UseBoundStore } from "zustand";
 import * as api from "../components/studio/api";
-import { carry, closestModel, defaultsFor, dropUnmet, familyOf, type Values } from "../components/studio/canonical";
+import {
+  carry,
+  closestModel,
+  defaultsFor,
+  dropUnmet,
+  familyOf,
+  loraGroup,
+  type LoraContext,
+  type Values,
+} from "../components/studio/canonical";
 import type {
   Company,
   ImageInput,
@@ -40,9 +53,12 @@ import type {
   LocalEntry,
   LocalFit,
   LocalModels,
+  Lora,
+  LoraUse,
   MediaKind,
   MediaModel,
   ModelChoice,
+  ParamKind,
   RefItem,
   RefRole,
   Routing,
@@ -62,6 +78,7 @@ import { listenInEffect } from "../lib/listen";
 import type { ErrorInfo } from "../lib/types";
 import { STUDIO_CHAT_LINK, STUDIO_EMPTY, STUDIO_FIELDS, STUDIO_REFS, STUDIO_SETUPS } from "../lib/words";
 import { toErrorInfo } from "./app";
+import { followDownloads, useDownloads } from "./downloads";
 import { createLocal, type StudioLocalState } from "./studioLocal";
 import { createResults, type StudioResultsState } from "./studioResults";
 import { createRun, targetOf, type StudioRunState } from "./studioRun";
@@ -70,7 +87,7 @@ import { createRun, targetOf, type StudioRunState } from "./studioRun";
 export {
   currentEstimate,
   ESTIMATE_DELAY_MS,
-  PROMPT_MAX_CHARS,
+  PROMPT_BOUNDS,
   promptProblems,
   requestFromRun,
   requestKey,
@@ -93,7 +110,7 @@ export {
   type StudioResultsState,
 } from "./studioResults";
 
-// Get local models' state and actions live in ./studioLocal; they are used from here.
+// Get models' state and actions live in ./studioLocal; they are used from here.
 export type { StudioLocalState } from "./studioLocal";
 
 /** Studio's tabs: Pictures and Video. */
@@ -130,7 +147,7 @@ export interface StudioState extends StudioRunState, StudioResultsState, StudioL
   /** The id of a video that finished while the chat was shown. */
   readyNotice: string | null;
   /** Opens Studio. Given `tab` (*Open in Studio*, a finished video's *Open*), on that tab's
-   *  cards, closing Get local models if it was left open; else as it was left, on the tab and
+   *  cards, closing Get models if it was left open; else as it was left, on the tab and
    *  view shown last. */
   showStudio(tab?: StudioTab): void;
   /** Shows the chat; the viewer closes (it would stay over the chat). */
@@ -213,26 +230,33 @@ export interface StudioState extends StudioRunState, StudioResultsState, StudioL
   /** Sets `tab`'s draft to the model used last when it is still offered, else to
    *  `defaultModel`, at that model's starting values. Fetches nothing (not even a price). */
   selectInitialModel(tab: StudioTab): void;
-  /** The user's pick in the model picker: `tab`'s draft goes to model `modelId` at `target`,
+  /** The user's pick in the model sheet: `tab`'s draft goes to model `modelId` at `target`,
    *  its settings carried there (`carry`) with a note of what changed. An OpenRouter picture
    *  model whose price was never fetched is asked for it, once; a local model never is. Its
    *  Extra field comes with that answer, so the draft's extra settings are held aside until
    *  then (`holding`) and carried to the model as it comes back (kept held when the request
    *  fails, until *Get the price* brings the answer; as listed, dropped with the note, when
-   *  another model is picked first). A model `tab` cannot use is ignored. */
+   *  another model is picked first). A model `tab` cannot use is ignored, except an installed
+   *  one that needs setting up (Task U4): the draft goes to it, so its files can be chosen. */
   chooseModel(tab: StudioTab, target: RunTarget, modelId: string): void;
   /** *Get the price*: asks for the price of `tab`'s model (a model restored when Studio opened
    *  is never asked by itself); extra settings held for it are carried to it as it comes back.
    *  A failure goes to `priceError`, not to the caller. */
   fetchPrice(tab: StudioTab): Promise<void>;
+  /** Create pressed while `tab`'s extra settings wait for its model's price (`holding`, design
+   *  9.2): waits for that price request (the one on its way, or a new one when the last
+   *  failed) and carries them to the model as it comes back. Resolves `true` once they are
+   *  carried, or nothing is held any more (another model was picked meanwhile); `false` when
+   *  the request failed: they stay held, the failure in `priceError`. Never rejects. */
+  finishPrice(tab: StudioTab): Promise<boolean>;
   /** Each tab's failed price request, while the tab stays on the model it asked for (shown
    *  under the Model field, where *Get the price* asks again); put away by the next request
    *  and by a change of model. */
   priceError: Record<StudioTab, ErrorInfo | null>;
   dismissPriceError(tab: StudioTab): void;
   /** Each tab whose extra settings are held aside until its model's price answer brings the
-   *  model's Extra field (see `chooseModel`): Create waits while they are. A failed request
-   *  keeps them held, and *Get the price* asks again. */
+   *  model's Extra field (see `chooseModel`): a press of Create finishes that price first
+   *  (`finishPrice`). A failed request keeps them held, and *Get the price* asks again. */
   holding: Record<StudioTab, boolean>;
   setPrompt(tab: StudioTab, text: string): void;
   /** Sets field `key` of `tab`'s draft. A transparent background moves a file type that cannot
@@ -242,6 +266,22 @@ export interface StudioState extends StudioRunState, StudioResultsState, StudioL
   /** Unsets field `key` (back to Automatic, so it is not sent), and with it every value whose
    *  field no longer applies. */
   resetValue(tab: StudioTab, key: string): void;
+  /** *Add* on a LoRA, in the current tab's draft: attached at the model's usual strength with
+   *  no high-noise part, when the model takes LoRAs, has room (its `max`) and the LoRA is not
+   *  attached yet. The draft's `loras` value is the `LoraUse[]` the backend reads. */
+  attachLora(id: string): void;
+  /** The strength of attached LoRA `id`: kept between the model's `weightMin` and `weightMax`
+   *  and on its `weightStep`. */
+  setLoraWeight(id: string, weight: number): void;
+  /** Whether attached LoRA `id` goes to the model's high-noise part (a model that has one). */
+  setLoraHighNoise(id: string, on: boolean): void;
+  /** *Remove* on an attached LoRA; with none left the value leaves the draft. */
+  detachLora(id: string): void;
+  /** The LoRAs for installed model `model`, in groups: those made for its model type
+   *  (`loraBase`) first, those whose type is not known (`unknown`: not judged), and the others,
+   *  which "may not fit this model". A model of no known type judges none: every LoRA is
+   *  `unknown`. */
+  lorasFor(model: InstalledLocal): { fits: Lora[]; unknown: Lora[]; others: Lora[] };
   /** Adds a picture kept by `studio_add_ref` to `tab`'s draft, as `ref.role` or, without one,
    *  as the first role of the model's picture fields with room. Returns why it was not added
    *  (the model takes no more), or `null`. */
@@ -258,7 +298,8 @@ export interface StudioState extends StudioRunState, StudioResultsState, StudioL
   /** Field `key` of `tab` holds `problem`, or (`null`) nothing that cannot be sent. */
   setInvalid(tab: StudioTab, key: string, problem: string | null): void;
   /** *Reset all*: every Advanced field back to Automatic, no Extra fields and no routing (and
-   *  the seed no longer kept); then every value whose field no longer applies leaves the draft. */
+   *  the seed no longer kept); then every value whose field no longer applies leaves the draft.
+   *  The LoRAs attached stay: they are not Advanced's (the panel's LoRAs section has them). */
   resetAdvanced(tab: StudioTab): void;
   /** The dice: a new random seed, other than the one set, for a model that takes a seed. */
   newSeed(tab: StudioTab): void;
@@ -303,11 +344,51 @@ export interface StudioState extends StudioRunState, StudioResultsState, StudioL
   /** Changes only the preferences `patch` names. */
   setPrefs(patch: StudioPrefsPatch): Promise<void>;
 
-  /** The model picker opened from elsewhere: `"cloud"` on its first cloud group (*Choose a
-   *  cloud model*); `null` once it closes. */
-  pickerOpen: "cloud" | null;
-  openPicker(place: "cloud" | null): void;
+  /** Task U4: the model sheet is open, from the composer's model chip or from *Choose a cloud
+   *  model*. */
+  sheetOpen: boolean;
+  /** What the sheet shows as it opens: Cloud from *Choose a cloud model*, else All. */
+  sheetFilter: SheetFilter;
+  /** Opens the model sheet (on `filter`, All when not given) or closes it. */
+  openSheet(open: boolean, filter?: SheetFilter): void;
+  /** Task U4: *Add a model file* or *Add a LoRA file* is open, for that kind of file; `null`
+   *  while it is closed. */
+  importOpen: "model" | "lora" | null;
+  openImport(kind: "model" | "lora" | null): void;
+
+  /** Task U3: Studio's side panel (Settings) is open: from `prefs.settingsOpen` when Studio
+   *  first reads what is saved, then as it is opened and closed. */
+  settingsOpen: boolean;
+  /** The part of the panel it was opened on, if any (Task U8 scrolls to it). */
+  settingsSection: SettingsSection | null;
+  /** Opens or closes the side panel (on `section`, if given), and saves whether it is open. */
+  setSettingsOpen(open: boolean, section?: SettingsSection): void;
+
+  /** Task U7: the Studio downloads (a picture or video model's, or a LoRA's) that finished while
+   *  Studio followed them (`followStudioDownloads`), by download group ID, newest first. The top
+   *  bar's indicator lists them, a model's with *Use it*, and a model's card and detail panel
+   *  show it ready, until it is used or the list is cleared. */
+  doneDownloads: string[];
+  /** *Clear finished* in the indicator's list. */
+  clearDoneDownloads(): void;
+  /** *Use it* on an installed model, a new one most often (Task U7, design 10.3): its kind's tab
+   *  is shown with the model chosen (`chooseModel`, whatever its fit: a warning, never a
+   *  refusal), Get models and its detail panel close, back at the results and the composer, and
+   *  its finished downloads leave the indicator's list. A model that is not installed, or that
+   *  its tab cannot use (`canPick`), is ignored. Not named use…, which the hooks lint rule
+   *  reserves. */
+  pickNewModel(genModelId: string): void;
 }
+
+/** The parts of Studio's side panel. */
+export type SettingsSection = "setups" | "advanced" | "loras" | "files";
+
+/** Which models the model sheet shows: every one, those on this computer, or the cloud's. */
+export type SheetFilter = "all" | "local" | "cloud";
+
+/** The narrowest window Studio's side panel is docked on; below it, it slides over the
+ *  results (design 10.1). */
+export const DOCK_MIN_WIDTH = 1400;
 
 const EMPTY_DRAFT: Draft = {
   target: null,
@@ -571,7 +652,7 @@ export const useStudio: UseBoundStore<StoreApi<StudioState>> = create<StudioStat
     let routing = saved.routing;
     let note: string | null = null;
     if (!offered && endpoint) {
-      const carried = carry(null, to, values, extra, []);
+      const carried = carry(null, to, values, extra, [], loraContext(s, target, to));
       values = carried.values;
       extra = carried.extra;
       // Which companies may run it belongs to the model it was saved for.
@@ -709,8 +790,14 @@ export const useStudio: UseBoundStore<StoreApi<StudioState>> = create<StudioStat
           set((s) => ({
             endpoints: newestLists(models.endpoints, since),
             local,
+            // The LoRAs come with the local models (`lorasFor` and the cards read them).
+            loras: local.loras,
             prefs,
             usage,
+            // A panel left open is docked on a wide window; on a narrower one it would slide
+            // over the results before anything was asked, so it starts closed there (the choice
+            // saved for wide windows stays).
+            settingsOpen: prefs.settingsOpen && window.innerWidth >= DOCK_MIN_WIDTH,
             loaded: true,
             // Runs heard of while reading stay.
             recentRuns: newestRuns([...(newest ?? page).runs, ...s.recentRuns]),
@@ -733,7 +820,7 @@ export const useStudio: UseBoundStore<StoreApi<StudioState>> = create<StudioStat
         api.studioGetPrefs(),
         api.studioUsage(),
       ]);
-      set({ endpoints: newestLists(models.endpoints, since), local, prefs, usage });
+      set({ endpoints: newestLists(models.endpoints, since), local, loras: local.loras, prefs, usage });
       forgetFits();
       fillDrafts();
     },
@@ -746,7 +833,7 @@ export const useStudio: UseBoundStore<StoreApi<StudioState>> = create<StudioStat
     },
     refreshLocal: async () => {
       const local = await api.studioLocalModels();
-      set({ local });
+      set({ local, loras: local.loras });
       forgetFits();
       fillDrafts();
     },
@@ -776,7 +863,9 @@ export const useStudio: UseBoundStore<StoreApi<StudioState>> = create<StudioStat
     },
     chooseModel: (tab, target, modelId) => {
       const s = get();
-      const to = offeredModel(tab, target, modelId, s.local, s.endpoints);
+      const to =
+        offeredModel(tab, target, modelId, s.local, s.endpoints) ??
+        (target === "thisComputer" ? toSetUp(tab, modelId, s.local) : null);
       if (!to) return;
       const endpoint = target === "thisComputer" ? null : s.endpoints.find((e) => e.providerId === target.endpoint);
       const unpriced = endpoint ? priceNotAsked(to, endpoint.company) : false;
@@ -793,7 +882,7 @@ export const useStudio: UseBoundStore<StoreApi<StudioState>> = create<StudioStat
       const extra = { ...draft.extra, ...dropped?.extra };
       const from = draft.target && draft.model ? listedModel(draft.target, draft.model, s.local, s.endpoints) : null;
       const hold = mustHold(to, unpriced, extra);
-      const carried = carry(from, to, draft.values, hold ? {} : extra, draft.refs);
+      const carried = carry(from, to, draft.values, hold ? {} : extra, draft.refs, loraContext(s, target, to));
       const note = [dropped?.note ?? null, carried.note].filter((n) => n !== null).join(" ") || null;
       set((st) => ({
         drafts: {
@@ -826,6 +915,17 @@ export const useStudio: UseBoundStore<StoreApi<StudioState>> = create<StudioStat
         settleHeld(tab, waiting, priced);
       }
     },
+    finishPrice: async (tab) => {
+      const waiting = held[tab];
+      if (!waiting || waiting.target === "thisComputer") return true;
+      try {
+        settleHeld(tab, waiting, await priceFor(tab, waiting.target.endpoint, waiting.model.id));
+        return true;
+      } catch {
+        // Still held, unless the draft moved on meanwhile; the failure is in `priceError`.
+        return held[tab] !== waiting;
+      }
+    },
     priceError: { image: null, video: null },
     holding: { image: false, video: false },
     dismissPriceError: (tab) => set((s) => ({ priceError: { ...s.priceError, [tab]: null } })),
@@ -854,6 +954,26 @@ export const useStudio: UseBoundStore<StoreApi<StudioState>> = create<StudioStat
         const values = Object.fromEntries(Object.entries(draft.values).filter(([k]) => k !== key));
         return { drafts: { ...s.drafts, [tab]: { ...draft, values: model ? dropUnmet(model, values) : values } } };
       }),
+    attachLora: (id) =>
+      changeLoras(set, get, (uses, field) => {
+        if (uses.length >= field.max || uses.some((u) => u.id === id)) return uses;
+        return [...uses, { id, weight: field.weightDefault, highNoise: false }];
+      }),
+    setLoraWeight: (id, weight) =>
+      changeLoras(set, get, (uses, field) =>
+        uses.map((u) => (u.id === id ? { ...u, weight: steppedWeight(weight, field) } : u)),
+      ),
+    setLoraHighNoise: (id, on) =>
+      changeLoras(set, get, (uses, field) =>
+        field.highNoise ? uses.map((u) => (u.id === id ? { ...u, highNoise: on } : u)) : uses,
+      ),
+    detachLora: (id) => changeLoras(set, get, (uses) => uses.filter((u) => u.id !== id)),
+    lorasFor: (model) => {
+      const groups = { fits: [] as Lora[], unknown: [] as Lora[], others: [] as Lora[] };
+      // The same rule carries the LoRAs attached to another model (`carry`).
+      for (const lora of get().loras) groups[loraGroup(lora, model.loraBase)].push(lora);
+      return groups;
+    },
     addRef: (tab, ref) => {
       const s = get();
       const draft = s.drafts[tab];
@@ -894,7 +1014,9 @@ export const useStudio: UseBoundStore<StoreApi<StudioState>> = create<StudioStat
       set((s) => {
         const draft = s.drafts[tab];
         const model = draftModel(s, tab);
-        const advanced = new Set(model?.params.filter((p) => p.layer === "advanced").map((p) => p.key));
+        const advanced = new Set(
+          model?.params.filter((p) => p.layer === "advanced" && p.kind.type !== "loras").map((p) => p.key),
+        );
         const kept = Object.fromEntries(Object.entries(draft.values).filter(([k]) => !advanced.has(k)));
         const values = model ? dropUnmet(model, kept) : kept;
         return { drafts: { ...s.drafts, [tab]: { ...draft, values, extra: {}, routing: null, seedLocked: false } } };
@@ -1013,8 +1135,35 @@ export const useStudio: UseBoundStore<StoreApi<StudioState>> = create<StudioStat
     ...createRun(set, get, rereadUsage),
     ...createResults(set, get, { fillDraft, rereadUsage }),
     ...createLocal(set, get),
-    pickerOpen: null,
-    openPicker: (place) => set({ pickerOpen: place }),
+    sheetOpen: false,
+    sheetFilter: "all",
+    openSheet: (open, filter = "all") => set(open ? { sheetOpen: true, sheetFilter: filter } : { sheetOpen: false }),
+    importOpen: null,
+    openImport: (importOpen) => set({ importOpen }),
+    settingsOpen: false,
+    settingsSection: null,
+    setSettingsOpen: (open, section) => {
+      set({ settingsOpen: open, settingsSection: open ? (section ?? null) : null });
+      if (get().prefs?.settingsOpen === open) return;
+      get()
+        .setPrefs({ settingsOpen: open })
+        // It opens or closes all the same, for now; the failure leaves a trace.
+        .catch((e: unknown) => console.warn("Studio: whether Settings is open could not be saved", e));
+    },
+
+    doneDownloads: [],
+    clearDoneDownloads: () => set({ doneDownloads: [] }),
+    pickNewModel: (genModelId) => {
+      const s = get();
+      const row = s.local?.installed.find((m) => m.id === genModelId);
+      if (!row || !canPick(s.local, genModelId)) return;
+      const tab = row.kind;
+      const its = new Set(useDownloads.getState().groups.filter((g) => g.genModelId === genModelId).map((g) => g.id));
+      set((st) => ({ tab, sheetOpen: false, doneDownloads: st.doneDownloads.filter((id) => !its.has(id)) }));
+      get().chooseModel(tab, "thisComputer", row.model.id);
+      // Get models closes with its detail panel: back at the results, with the composer.
+      get().showLocalModels(false);
+    },
   };
 });
 
@@ -1036,16 +1185,28 @@ const PREFERRED: Record<MediaKind, readonly string[]> = {
   video: ["google/veo-3.1-fast"],
 };
 
-/** `local` when this computer can make `tab`'s kind at all (video needs a usable graphics
- *  card or an Apple-silicon Mac, and is hidden otherwise); `null` too until it is read. */
-function localFor(tab: StudioTab, local: LocalModels | null): LocalModels | null {
-  return local && (tab === "image" || local.videoPossible) ? local : null;
+/** The installed local models `tab` can use: this version can run them. Fit never leaves one
+ *  out (a warning, never a refusal), and video is made on the processor where there is no
+ *  graphics card, very slowly. */
+export function localModelsFor(tab: StudioTab, local: LocalModels | null): InstalledLocal[] {
+  return local?.installed.filter((m) => m.kind === tab && m.model.usable === null) ?? [];
 }
 
-/** The installed local models `tab` can use: this version can run them, and this computer
- *  can make the kind. */
-export function localModelsFor(tab: StudioTab, local: LocalModels | null): InstalledLocal[] {
-  return localFor(tab, local)?.installed.filter((m) => m.kind === tab && m.model.usable === null) ?? [];
+/** Whether *Use it* can choose installed model `genModelId` (`pickNewModel`): it is installed,
+ *  and its kind's tab can use it, whatever its fit (a warning, never a refusal), or it needs
+ *  setting up (its files are chosen there). */
+export function canPick(local: LocalModels | null, genModelId: string): boolean {
+  const row = local?.installed.find((m) => m.id === genModelId);
+  if (!row) return false;
+  return (
+    localModelsFor(row.kind, local).some((m) => m.id === genModelId) || toSetUp(row.kind, row.model.id, local) !== null
+  );
+}
+
+/** The installed model `id` of `tab`'s kind that needs setting up (no recipe yet); `null` for
+ *  any other. */
+function toSetUp(tab: StudioTab, id: string, local: LocalModels | null): MediaModel | null {
+  return local?.installed.find((m) => m.kind === tab && m.needsSetup && m.model.id === id)?.model ?? null;
 }
 
 /** An "Auto" model, which picks a model for you: Studio never offers one, as it would hide
@@ -1076,7 +1237,7 @@ export function cloudModelsFor(endpoint: StudioEndpoint, tab: StudioTab): MediaM
 
 /** The first recommended entry of `tab`'s kind that fits this computer. */
 export function fittingEntry(tab: StudioTab, local: LocalModels | null): LocalEntry | null {
-  return localFor(tab, local)?.recommended.find((e) => e.kind === tab && FITTING.has(e.fit.word)) ?? null;
+  return local?.recommended.find((e) => e.kind === tab && FITTING.has(e.fit.word)) ?? null;
 }
 
 /** Whether `endpoint`'s company makes `tab`'s kind, with or without its lists saved. */
@@ -1104,6 +1265,18 @@ export function listedModel(
 ): MediaModel | null {
   if (target === "thisComputer") return local?.installed.find((m) => m.model.id === id)?.model ?? null;
   return endpoints.find((e) => e.providerId === target.endpoint)?.models.find((m) => m.id === id) ?? null;
+}
+
+/** What `carry` needs to judge a draft's LoRAs on `to` at `target`: the installed LoRAs, and
+ *  the type of model `to` takes LoRAs for when it is a model on this computer (`null` when that
+ *  is not known, or for a cloud model). */
+export function loraContext(
+  s: Pick<StudioState, "local" | "loras">,
+  target: RunTarget,
+  to: MediaModel,
+): LoraContext {
+  const row = target === "thisComputer" ? s.local?.installed.find((m) => m.model.id === to.id) : undefined;
+  return { loras: s.loras, base: row?.loraBase ?? null };
 }
 
 /** The saved endpoint `target` names; `null` for this computer, without a target, or once the
@@ -1158,9 +1331,8 @@ export function defaultModel(
 /**
  * What `tab` shows in place of the card stream, by one ordered rule, the first that applies:
  * nothing when the tab has a model to use (an installed local model of its kind, or an
- * endpoint's, which needs a key); *Get local models* when a recommended entry of its kind
- * fits this computer (after the chat model is unloaded counts; video also needs a computer
- * that can make it); cloud as the backup when no endpoint is saved; nothing while an
+ * endpoint's, which needs a key); *Get models* when a recommended entry of its kind
+ * fits this computer (after the chat model is unloaded counts); cloud as the backup when no endpoint is saved; nothing while an
  * endpoint that makes the kind has no saved list (its *Get the list* stands in); else *add
  * an endpoint*: the saved ones make no such kind (the Video tab with only OpenAI), or offer
  * none Studio can use (no key, or no such model in their lists), and the card says which.
@@ -1238,7 +1410,61 @@ export function followStudio(): () => void {
   };
 }
 
+/** Follows the app's downloads for Studio (Task U7): each `download-progress` event keeps the
+ *  download groups up, which a model's card, the detail panel and the top bar's indicator read,
+ *  and a picture or video model's, or a LoRA's, download that is done joins `doneDownloads` and
+ *  reads the local models (`refreshLocal`) or the LoRAs (`loadLoras`) again. StudioView starts
+ *  it as Studio first opens and keeps it while the app runs (App keeps Studio mounted), whatever
+ *  Studio shows: 0.1.2 read the local models again only while Get models was open, so a
+ *  model finished after Back was not listed (critique §2.7 and §6). Before Studio has read
+ *  what is saved, that first read lists a model that is done. Returns the function that stops
+ *  following; outside the app it follows nothing. */
+export function followStudioDownloads(): () => void {
+  return followDownloads((group) => {
+    if (group.status !== "done" || !(group.genModelId || group.loraId)) return;
+    const s = useStudio.getState();
+    if (!s.doneDownloads.includes(group.id)) useStudio.setState({ doneDownloads: [group.id, ...s.doneDownloads] });
+    if (group.genModelId && s.loaded) {
+      s.refreshLocal().catch((e: unknown) => console.warn("Studio: the local models could not be read again", e));
+    }
+    if (group.loraId) s.loadLoras().catch((e: unknown) => console.warn("Studio: the LoRAs could not be read again", e));
+  });
+}
+
 // ---- settings and added pictures ----------------------------------------------------------
+
+type LorasField = Extract<ParamKind, { type: "loras" }>;
+
+/** `weight` kept in the field's range and on its step ("2.37" → 2, "0.83" → 0.85 at 0.05). */
+function steppedWeight(weight: number, field: LorasField): number {
+  const kept = Math.min(field.weightMax, Math.max(field.weightMin, weight));
+  const steps = Math.round((kept - field.weightMin) / field.weightStep);
+  const stepped = Math.min(field.weightMax, field.weightMin + steps * field.weightStep);
+  // 0.05 steps are not exact in binary: cut what the arithmetic added.
+  return Number(stepped.toFixed(6));
+}
+
+/** Changes the current tab's draft LoRAs with `change` (given the attached ones and the
+ *  model's LoRA field); nothing when the draft's model takes none. No LoRAs left removes the
+ *  value. */
+function changeLoras(
+  set: StoreApi<StudioState>["setState"],
+  get: StoreApi<StudioState>["getState"],
+  change: (uses: LoraUse[], field: LorasField) => LoraUse[],
+): void {
+  const s = get();
+  const tab = s.tab;
+  const draft = s.drafts[tab];
+  const found = draftModel(s, tab)?.params.find((p) => p.kind.type === "loras");
+  if (!found || found.kind.type !== "loras") return;
+  const held = draft.values[found.key];
+  const before = Array.isArray(held) ? (held as LoraUse[]) : [];
+  const after = change(before, found.kind);
+  if (after === before) return;
+  const rest = Object.fromEntries(Object.entries(draft.values).filter(([k]) => k !== found.key));
+  const values = after.length === 0 ? rest : { ...rest, [found.key]: after };
+  set({ drafts: { ...s.drafts, [tab]: { ...draft, values } } });
+}
 
 /** The file types a transparent background can have, in the order Studio picks them. */
 const TRANSPARENT_TYPES = ["png", "webp"];

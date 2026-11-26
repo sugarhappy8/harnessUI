@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { act, cleanup, fireEvent, render, screen, within } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
 import type { ApprovalRequest, KeepAsking } from "../lib/types";
 import type { ApprovalModeName } from "../lib/ipc";
 
@@ -30,7 +30,6 @@ vi.mock("../lib/windowShown", () => ({
 const { ALLOW_ALL_AFTER_UNTRUSTED, ApprovalCard, CARD_INPUT_DELAY_MS, KEEP_ASKING_TEXT } = await import(
   "./ApprovalCard"
 );
-const { CONFIRM_INPUT_DELAY_MS, STILL_ASKS } = await import("./AllowAllButton");
 const { useApprovalMode } = await import("../lib/approvalMode");
 const { useApp } = await import("../store/app");
 
@@ -128,11 +127,6 @@ describe("ApprovalCard: Allow all in this chat", () => {
     act(() => {
       vi.advanceTimersByTime(ms + 10);
     });
-  const dialog = () => screen.getByText("Allow all in this chat?").closest('[role="alertdialog"]') as HTMLElement;
-  const openConfirm = () => {
-    arm(CARD_INPUT_DELAY_MS);
-    fireEvent.click(screen.getByText("Allow all in this chat"));
-  };
 
   it("is a third choice on cards that can be granted, and only there", () => {
     const { unmount } = render(<ApprovalCard request={base} onDecide={() => {}} />);
@@ -146,56 +140,29 @@ describe("ApprovalCard: Allow all in this chat", () => {
   });
 
   it("ignores the click until the card has been on screen for a moment", () => {
-    render(<ApprovalCard request={base} onDecide={() => {}} />);
-    fireEvent.click(screen.getByText("Allow all in this chat"));
-    expect(screen.queryByText("Allow all in this chat?")).toBeNull();
-    openConfirm();
-    expect(screen.getByText("Allow all in this chat?")).toBeTruthy();
-  });
-
-  it("asks first with the list of what still asks, then switches the chat and approves this card", async () => {
     const onDecide = vi.fn();
     render(<ApprovalCard request={base} onDecide={onDecide} />);
-    openConfirm();
-    const d = dialog();
-    // Nothing has happened yet: opening the dialog changes nothing.
+    fireEvent.click(screen.getByText("Allow all in this chat"));
     expect(ipcMock.setChatApprovalMode).not.toHaveBeenCalled();
     expect(onDecide).not.toHaveBeenCalled();
-    const still = within(d).getByRole("list", { name: "Still asks" });
-    expect(within(still).getAllByRole("listitem").map((li) => li.textContent)).toEqual([...STILL_ASKS]);
-    expect(d.textContent).toContain("Deleting files or folders");
-    expect(d.textContent).toContain("git push");
-    // Cancel has the focus, never the confirm button.
-    const confirm = within(d).getByRole("button", { name: "Allow all in this chat" });
-    expect(document.activeElement).not.toBe(confirm);
-    // The confirm button ignores a click that comes too soon (a double click).
-    fireEvent.click(confirm);
-    expect(ipcMock.setChatApprovalMode).not.toHaveBeenCalled();
-    arm(CONFIRM_INPUT_DELAY_MS);
+  });
+
+  it("Allow all in this chat applies at once: the chat is switched, then this card is approved", async () => {
+    const onDecide = vi.fn();
+    render(<ApprovalCard request={base} onDecide={onDecide} />);
+    arm(CARD_INPUT_DELAY_MS);
     await act(async () => {
-      fireEvent.click(confirm);
+      fireEvent.click(screen.getByText("Allow all in this chat"));
     });
+    expect(screen.queryByRole("alertdialog", { name: /Allow all in this chat\?/ })).toBeNull();
+    expect(screen.queryByText("Allow all in this chat?")).toBeNull();
+    expect(ipcMock.setChatApprovalMode).toHaveBeenCalledTimes(1);
     expect(ipcMock.setChatApprovalMode).toHaveBeenCalledWith(1, "allowAll");
     expect(onDecide).toHaveBeenCalledWith("allowOnce", null);
-    // The chat is switched before the card is approved.
     const switched = ipcMock.setChatApprovalMode.mock.invocationCallOrder[0] ?? Infinity;
     const approved = onDecide.mock.invocationCallOrder[0] ?? -1;
     expect(switched).toBeLessThan(approved);
     expect(useApprovalMode.getState().modes[1]).toBe("allowAll");
-  });
-
-  it("approves nothing when the confirmation is cancelled", async () => {
-    const onDecide = vi.fn();
-    render(<ApprovalCard request={base} onDecide={onDecide} />);
-    openConfirm();
-    arm(CONFIRM_INPUT_DELAY_MS);
-    await act(async () => {
-      fireEvent.click(within(dialog()).getByText("Cancel"));
-    });
-    expect(screen.queryByText("Allow all in this chat?")).toBeNull();
-    expect(ipcMock.setChatApprovalMode).not.toHaveBeenCalled();
-    expect(onDecide).not.toHaveBeenCalled();
-    expect(useApprovalMode.getState().modes[1]).toBeUndefined();
   });
 
   it("approves nothing when the app refuses the switch", async () => {
@@ -207,10 +174,9 @@ describe("ApprovalCard: Allow all in this chat", () => {
     });
     const onDecide = vi.fn();
     render(<ApprovalCard request={base} onDecide={onDecide} />);
-    openConfirm();
-    arm(CONFIRM_INPUT_DELAY_MS);
+    arm(CARD_INPUT_DELAY_MS);
     await act(async () => {
-      fireEvent.click(within(dialog()).getByRole("button", { name: "Allow all in this chat" }));
+      fireEvent.click(screen.getByText("Allow all in this chat"));
     });
     expect(onDecide).not.toHaveBeenCalled();
     expect(useApprovalMode.getState().modes[1]).toBeUndefined();
@@ -280,7 +246,6 @@ describe("ApprovalCard: Allow all in this chat", () => {
 
   it("keeps its labels apart from Allow once and Deny", () => {
     render(<ApprovalCard request={base} onDecide={() => {}} />);
-    openConfirm();
     const labels = [...document.querySelectorAll("button")].map((b) => b.textContent ?? "");
     expect(labels.filter((l) => l.includes("Allow once"))).toEqual(["Allow once"]);
     expect(labels.filter((l) => l.includes("Deny"))).toEqual(["Deny"]);

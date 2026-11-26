@@ -108,8 +108,6 @@
     "allow-set-chat-approval-mode",
     "allow-get-default-approval-mode",
     "allow-set-default-approval-mode",
-    "allow-get-full-access-default-pending",
-    "allow-answer-full-access-default",
     "allow-list-mcp-servers",
     "allow-preview-mcp-config",
     "allow-add-mcp-servers",
@@ -256,10 +254,19 @@
     "allow-studio-local-models",
     "allow-studio-local-search",
     "allow-studio-local-repo",
+    "allow-studio-setup-plan",
     "allow-studio-local-fit",
     "allow-studio-local-download",
     "allow-studio-local-download-file",
     "allow-studio-local-delete",
-    "allow-studio-accept-local-notice"
+    "allow-studio-import-inspect",
+    "allow-studio-import-model",
+    "allow-studio-accept-local-notice",
+    "allow-studio-model-files",
+    "allow-studio-set-model-files",
+    "allow-studio-loras",
+    "allow-studio-lora-download",
+    "allow-studio-lora-import",
+    "allow-studio-lora-delete"
   ]
 }

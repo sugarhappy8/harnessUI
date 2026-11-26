@@ -8,6 +8,13 @@ use serde_json::{Map, Value};
 
 use store::{ChatId, MessageId, ProviderId};
 
+use models::gen_catalog::GenRole;
+use models::sd::detect::SdVersion;
+use models::sd::inspect::LoraFormat;
+use models::sd::matching::RecipeKind;
+use models::sd::setup::PartSource;
+use models::sd::{FileLabel, Verdict};
+
 use crate::error::AppError;
 use crate::load_settings::{ContextSource, GpuUse, ThinkingLimit};
 use crate::studio::prefs::RunTarget;
@@ -940,8 +947,8 @@ pub struct EstimateDto {
     pub usd: Option<f64>,
     /// Why the run would ask before it is sent; empty when it would not.
     pub reasons: Vec<ConfirmReason>,
-    /// The amount from which a cloud run asks, in US dollars.
-    pub confirm_at_usd: f64,
+    /// The amount from which a cloud run asks, in US dollars; `None` when that is off.
+    pub confirm_at_usd: Option<f64>,
     /// The daily limit as it stands for this run.
     pub limit: LimitDto,
     /// A plain sentence for each setting the model would refuse.
@@ -1177,9 +1184,9 @@ pub struct EngineProgressDto {
     pub error: Option<AppError>,
 }
 
-// ---- Get local models (0.1.0) -----------------------------------------------------------------
+// ---- Get models (0.1.0) -----------------------------------------------------------------
 
-/// What Get local models' header says about this computer: "This computer: Radeon RX 7600, 8
+/// What Get models' header says about this computer: "This computer: Radeon RX 7600, 8
 /// GB graphics memory · 32 GB memory · 412 GB free".
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -1198,7 +1205,7 @@ pub struct HardwareLineDto {
     pub free_disk_bytes: Option<u64>,
 }
 
-/// A model licence as Get local models and the download dialog show it.
+/// A model licence as Get models and the download dialog show it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct LicenceDto {
@@ -1211,8 +1218,8 @@ pub struct LicenceDto {
     pub sha256: String,
     /// `green`, `amber` or `red`.
     pub badge: String,
-    /// What it allows for what you make: `yes`, `underRevenue`, `registration`, `unclear` or
-    /// `no`.
+    /// What it allows for what you make: `yes`, `underRevenue`, `registration`,
+    /// `withUseRules`, `unclear` or `no`.
     pub commercial: String,
     /// The yearly revenue under which commercial use is allowed, in US dollars, when
     /// `commercial` is `underRevenue` and the licence states one.
@@ -1233,24 +1240,23 @@ pub struct GateDto {
     pub collects: Vec<String>,
 }
 
-/// One file of a model, as the download dialog lists it.
+/// One file of a model, as the download dialog and a set-up plan list it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PartDto {
-    /// `diffusion`, `llm`, `t5xxl`, `vae`, …
-    pub role: String,
-    /// "makes the picture", "reads your prompt", "reads the picture you add" or "picture
-    /// decoder".
-    pub label: String,
-    /// `owner/name` on Hugging Face.
+    /// The slot it fills (`diffusion`, `llm`, `t5xxl`, `vae`, …): the webview words it.
+    pub role: GenRole,
+    /// `owner/name` on Hugging Face; empty for a file from this computer.
     pub repo: String,
-    /// Its path in the repository.
+    /// Its path in the repository; for a file from this computer, where it is.
     pub path: String,
     pub size_bytes: u64,
-    /// The id of its licence among the model's licences.
+    /// The id of its licence among the model's licences; empty for a file from this computer.
     pub licence_id: String,
     /// Its file is already in place (another model's shared part): checked, not fetched.
     pub already_here: bool,
+    /// A file from this computer (the person's own), used where it is.
+    pub local: bool,
 }
 
 /// Whether a model fits this computer at one size, and how long a run takes here.
@@ -1272,6 +1278,8 @@ pub struct LocalFitDto {
     pub eta: Option<EtaDto>,
     /// Not here, or a run would take longer than 15 minutes: Studio offers a cloud model.
     pub very_slow: bool,
+    /// A video that would run on the processor (this computer runs models there): very slow.
+    pub video_on_processor: bool,
 }
 
 /// A model of the recommended list.
@@ -1309,8 +1317,9 @@ pub struct LocalEntryDto {
 
 /// An installed picture or video model. One this build cannot read (its family record hidden
 /// by a newer signed catalog, a part's licence no longer known, a family this build does not
-/// know) is listed too, so it can be deleted: its fit `notHere` with why, and its `model`
-/// without controls, `usable` saying why.
+/// know), and one with no recipe yet (`needs_setup`), are listed too, so they can be deleted
+/// or set up: its fit `notHere` with why, and its `model` without controls, `usable` saying
+/// why.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct InstalledLocalDto {
@@ -1324,9 +1333,29 @@ pub struct InstalledLocalDto {
     pub fit: LocalFitDto,
     /// As Studio's picker offers it: free, with its controls.
     pub model: MediaModelDto,
+    /// The recipe it runs with (the Model type menu's words); `None` before it is set up.
+    pub recipe: Option<RecipeChoiceDto>,
+    /// The engine version its model file was detected as; `None` when none was.
+    pub version: Option<SdVersion>,
+    /// Its set-up is untested: its recipe is not one its version runs, or its version is
+    /// unknown (the person chose it): a run's settings line says "untested set-up".
+    pub untested: bool,
+    /// It has no recipe yet: *Set it up yourself* first.
+    pub needs_setup: bool,
+    /// Its recipe takes a high-noise part (a two-model video).
+    pub high_noise: bool,
+    /// Its recipe takes LoRAs.
+    pub takes_loras: bool,
+    /// The family of LoRAs it takes (its version's), when its version is known.
+    pub lora_base: Option<SdVersion>,
+    /// Where it came from: `catalog`, `search` or `import`.
+    pub source: String,
+    /// A file from this computer used where it is (not Studio's copy of it), its model file
+    /// or a part's: the person's own, which deleting the model never deletes.
+    pub in_place: bool,
 }
 
-/// Get local models (`studio_local_models`). Nothing in it comes from the network.
+/// Get models (`studio_local_models`). Nothing in it comes from the network.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct LocalModelsDto {
@@ -1336,88 +1365,262 @@ pub struct LocalModelsDto {
     pub installed: Vec<InstalledLocalDto>,
     /// The recommended list's entries that run on this computer.
     pub recommended: Vec<LocalEntryDto>,
-    /// "Not for this computer": the entries that do not, each with its reason.
+    /// The entries that may not fit this computer, each with its reason: shown with the
+    /// warning, never refused.
     pub not_here: Vec<LocalEntryDto>,
     /// The note about local models was accepted.
     pub notice_accepted: bool,
-    /// This computer has a graphics card or Apple silicon: video is offered.
-    pub video_possible: bool,
+    /// This computer runs models on the processor: a video is made there, very slowly.
+    pub video_on_processor: bool,
     /// The disk the installed picture and video models take, a shared file counted once.
     pub installed_bytes: u64,
     /// The entries of `recommended` not installed yet whose word is `fits` or `afterUnload`
     /// ("2 more fit this computer"); one that is only `slow` is not counted.
     pub more_fit: u32,
+    /// 0.2.0 (Task S10): the LoRAs, newest first.
+    pub loras: Vec<LoraDto>,
 }
 
-/// A picture or video repository Hugging Face found.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+/// 0.2.0 (Task S10): a LoRA Studio's engine can apply (`studio::loras`), as Get models
+/// and the LoRA picker list it.
+#[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub struct LocalSearchHitDto {
-    /// `owner/name`.
-    pub repo: String,
-    pub downloads: u64,
-    pub likes: u64,
-    /// `none`, `auto` or `manual`, as [`GateDto::mode`] says it.
-    pub gated: String,
-    /// The repository's own licence label (`apache-2.0`), as it gives it.
-    pub license_label: Option<String>,
+pub struct LoraDto {
+    /// `hf:<owner>/<repo>:<path>` for a downloaded LoRA, `local:<SHA-256>` for an imported
+    /// one: what a draft attaches.
+    pub id: String,
+    /// Its file's stem, as written (spaces and any Unicode kept).
+    pub name: String,
+    /// The version of the models it was most likely made for, from its header; `None` when
+    /// that cannot be told.
+    pub base: Option<SdVersion>,
+    pub format: LoraFormat,
+    pub size_bytes: u64,
+    /// `search` (downloaded from Hugging Face) or `import` (added from this computer).
+    pub source: String,
+    /// The Hugging Face repository it was downloaded from; `None` when imported.
+    pub repo: Option<String>,
+    /// Its file is gone.
+    pub missing: bool,
 }
 
-/// A Hugging Face search for picture or video models: one page, matching GGUF families first.
+/// A recipe a model can run with, as the Model type menu offers it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub struct LocalSearchPage {
-    pub items: Vec<LocalSearchHitDto>,
+pub struct RecipeChoiceDto {
+    /// The recipe's id (`flux1-kontext`): never shown.
+    pub id: String,
+    /// The recipe's own name.
+    pub name: String,
+    pub kind: RecipeKind,
 }
 
-/// A diffusion file of a searched repository, with the parts it needs beside it.
+/// One slot of a set-up plan and the file that fills it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub struct LocalFileChoiceDto {
-    /// Its path in the repository (`studio_local_download`'s `{"search":{…,"file":…}}`).
-    pub file: String,
-    /// Its quantisation (`Q4_K`), when its name says.
-    pub quant: String,
-    pub parts: Vec<PartDto>,
-    /// Every licence shown with the download, each once.
+pub struct PlannedSlotDto {
+    pub role: GenRole,
+    /// The plan cannot run without it.
+    pub required: bool,
+    /// Where its file comes from; `missing` when nothing fills it.
+    pub source: PartSource,
+    /// `None` when the main file carries the part (`embedded`) and when nothing fills it.
+    pub part: Option<PartDto>,
+}
+
+/// What setting a model up takes (`studio_setup_plan`, and each file of a repository): its
+/// recipe, each slot's file, the licences, the sizes and its fit here.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SetupPlanDto {
+    pub recipe: RecipeChoiceDto,
+    /// The recipes the model's version can run with, the default first.
+    pub recipes: Vec<RecipeChoiceDto>,
+    /// In the recipe's slot order.
+    pub slots: Vec<PlannedSlotDto>,
+    /// Every licence shown with the download, each once: its parts', then the Studio
+    /// engine's when the engine comes with it.
     pub licences: Vec<LicenceDto>,
     /// Every part's size.
     pub total_bytes: u64,
-    /// The parts not already in place.
+    /// The parts not already on this computer: what is fetched.
     pub to_fetch_bytes: u64,
-    /// At the family's default size.
+    /// At the recipe's default size.
     pub fit: LocalFitDto,
-    /// The Studio engine downloads with it.
-    pub needs_engine: bool,
+    /// Every slot the plan needs has a file.
+    pub can_download: bool,
     /// Less than 10 GB would be left on the disk after the download.
     pub low_disk: bool,
+    /// The Studio engine downloads with it.
+    pub needs_engine: bool,
+    /// The recipe was never matched to the model (the person chose it).
+    pub untested: bool,
 }
 
-/// A searched repository at its latest commit, as Studio recognises it (`studio_local_repo`).
+/// An installed model's files (`studio_model_files`, *Set it up yourself*): its recipe, the
+/// recipes it can be set up as, and each slot with its file.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ModelFilesDto {
+    pub gen_model_id: String,
+    /// `None` for a model with no recipe yet.
+    pub recipe: Option<RecipeChoiceDto>,
+    /// The recipes its version runs, the default first; for an untested set-up, or a model of
+    /// no recipe yet, every recipe Studio runs, by kind and then name.
+    pub recipes: Vec<RecipeChoiceDto>,
+    /// In the recipe's slot order: its model file `main`, its other files `installed`, a
+    /// file the person chose `chosen`, one to fetch from where it comes. With no recipe yet,
+    /// its own files.
+    pub slots: Vec<PlannedSlotDto>,
+    /// The recipe is not one its version runs, or its version is unknown.
+    pub untested: bool,
+    /// Every slot its recipe needs has a file.
+    pub can_run: bool,
+}
+
+/// What *Set it up yourself* did (`studio_set_model_files`): the model's files as they are
+/// now, or as the download that brings the missing ones makes them (`download_group`; the
+/// model keeps its old set-up until it is done).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SetModelFilesDto {
+    pub files: ModelFilesDto,
+    pub download_group: Option<String>,
+}
+
+/// A file of a repository with what Studio found it is.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RepoFileDto {
+    pub path: String,
+    pub size_bytes: u64,
+    /// Its quantisation (`Q4_K_M`), when its name says.
+    pub quant: Option<String>,
+    pub label: FileLabel,
+}
+
+/// A main file of a searched repository that works in Studio, with its set-up plan.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LocalFileChoiceDto {
+    /// Its path in the repository (`studio_setup_plan`'s and `studio_local_download`'s
+    /// `{"search":{…,"file":…}}`); a diffusers folder's UNet file.
+    pub file: String,
+    /// Its quantisation (`Q4_K_M`), when its name says; `fp16` or `fp32` for a diffusers
+    /// folder.
+    pub quant: String,
+    pub label: FileLabel,
+    /// With nothing chosen: the file's own recipe and the files the planner picks.
+    pub plan: SetupPlanDto,
+    /// "Best for this computer": the largest whose fit word is `fits` or `afterUnload`.
+    pub best: bool,
+}
+
+/// A searched repository at its latest commit, as Studio reads it (`studio_local_repo`).
+#[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct LocalRepoDto {
     pub repo: String,
     /// The commit the listing describes; a download pins it.
     pub commit: String,
-    /// `supported` or `notSupportedYet`.
-    pub status: String,
-    /// Why Studio cannot run this model.
-    pub reason: Option<String>,
-    /// The family's name, when supported.
-    pub family: Option<String>,
-    /// Its diffusion files with a published SHA-256; empty unless supported.
+    /// The repository's owner.
+    pub author: String,
+    /// The model card's first paragraph, made safe; `None` when the card was not read.
+    pub summary: Option<String>,
+    /// From its files' labels, or its name's hint while files that could change it are not
+    /// read.
+    pub verdict: Verdict,
+    /// One per main file that works, largest set-up first: one per quantisation (an A14B
+    /// pair's low-noise half within its high-noise half's plan), a diffusers folder once.
     pub files: Vec<LocalFileChoiceDto>,
-    /// Repository files outside the runnable choices, including files served through the browser.
-    pub standalone_files: Vec<models::RepoFile>,
-    /// The strictest licence of its files' parts, for the badge, when supported.
+    /// The LoRAs among its files.
+    pub loras: Vec<RepoFileDto>,
+    /// Every file Studio labelled, by path.
+    pub file_views: Vec<RepoFileDto>,
+    /// The repository's own licence, as its label says.
     pub licence: Option<LicenceDto>,
     /// Every licence shown with its files, each once.
     pub licences: Vec<LicenceDto>,
     /// "The repository says MIT; FLUX.2 klein 4B is Apache 2.0." when its label is not its
-    /// family's licence.
+    /// family's licence; `None` for a generic model, which has no family upstream.
     pub label_mismatch: Option<String>,
     pub gate: GateDto,
+    /// Files whose header was read.
+    pub read_files: u32,
+    /// Files labelled not read.
+    pub unread_files: u32,
+    /// When a file of it can be set up by hand (*Set it up yourself*: weights the engine does
+    /// not recognise, or a file whose header was not read for the budget or a failed read):
+    /// the model types it may be set up as, every recipe Studio runs, by kind and then name.
+    /// Empty otherwise.
+    pub by_hand_recipes: Vec<RecipeChoiceDto>,
+}
+
+/// A picture or video repository Hugging Face found.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LocalSearchHitDto {
+    /// `owner/name`.
+    pub repo: String,
+    /// The owner.
+    pub author: String,
+    pub downloads: u64,
+    pub likes: u64,
+    /// When it last changed, as Hugging Face gives it.
+    pub updated_at: Option<String>,
+    /// `none`, `auto` or `manual`, as [`GateDto::mode`] says it.
+    pub gated: String,
+    /// The repository's own licence label (`apache-2.0`), as it gives it.
+    pub license_label: Option<String>,
+    /// From its files' labels once it was opened (`exact`), else from its name.
+    pub verdict: Verdict,
+    pub exact: bool,
+}
+
+/// A Hugging Face search for picture or video models: one page, matching models first.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LocalSearchPage {
+    pub items: Vec<LocalSearchHitDto>,
+}
+
+/// What a search looks for: `pictures`, `video` or `loras`.
+pub type SearchFilter = models::hf::GenSearchKind;
+
+/// The person's choices for a set-up: another recipe, and files for some slots.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SetupChoice {
+    /// A recipe id; `None` keeps the file's own.
+    pub recipe: Option<String>,
+    #[serde(default)]
+    pub overrides: Vec<SlotOverride>,
+}
+
+/// A file the person chose for one slot.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SlotOverride {
+    pub role: GenRole,
+    pub file: SlotFile,
+}
+
+/// Where a chosen file is: `{"hub":{…}}`, `{"installed":{…}}`, `{"disk":{…}}` or `"none"`.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "camelCase", rename_all_fields = "camelCase")]
+pub enum SlotFile {
+    /// A file of a Hugging Face repository at a commit.
+    Hub {
+        repo: String,
+        commit: String,
+        path: String,
+    },
+    /// The file an installed model uses for `role`.
+    Installed { gen_model_id: String, role: GenRole },
+    /// A file on this computer: untrusted, checked before it is read.
+    Disk { path: String },
+    /// No file: clears an optional slot.
+    None,
 }
 
 #[cfg(test)]

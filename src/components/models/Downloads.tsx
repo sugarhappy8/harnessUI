@@ -65,14 +65,15 @@ export function Downloads() {
                 <div className="min-w-0 flex-1">
                   <div className="flex min-w-0 items-center gap-2">
                     <p className="truncate font-medium">
-                      <bdi dir="ltr">
-                        {visiblePath(g.repo)} · {visiblePath(g.label)}
-                      </bdi>
+                      {/* 0.2.0 Studio: a model file added from this computer has no repository
+                          (its group fetches the extra files): its name alone, as a downloaded
+                          model's after its repository. */}
+                      <bdi dir="ltr">{g.repo ? `${visiblePath(g.repo)} · ${visiblePath(g.label)}` : visiblePath(g.label)}</bdi>
                     </p>
                     {/* 0.1.0 Studio: a picture or video model's download says so. */}
                     {g.generatorKind && <Badge>{DOWNLOAD_KIND_WORDS[g.generatorKind]}</Badge>}
                   </div>
-                  {/* 0.1.0 Studio: a picture or video model's row in Get local models says it too. */}
+                  {/* 0.1.0 Studio: a picture or video model's row in Get models says it too. */}
                   <p className="text-xs text-fg-muted">{downloadProgressWords(g, formatBytes)}</p>
                 </div>
                 {g.status === "done" && savedPath && (

@@ -8,12 +8,17 @@ import { alertDialogsAnimate } from "./fixtures/dialogs";
 import { LOCAL, LOCAL_RUN, MODELS, RUN } from "./fixtures/models";
 import type { Output, Run, RunsCursor, StudioEndpoint, StudioPrefs, Usage } from "./types";
 
-// Radix positions menus with ResizeObserver, which jsdom does not have.
+// Radix positions menus with ResizeObserver, which jsdom does not have; its Select captures the
+// pointer and scrolls its options into view.
 globalThis.ResizeObserver ??= class {
   observe() {}
   unobserve() {}
   disconnect() {}
 } as unknown as typeof ResizeObserver;
+Element.prototype.hasPointerCapture ??= () => false;
+Element.prototype.setPointerCapture ??= () => {};
+Element.prototype.releasePointerCapture ??= () => {};
+Element.prototype.scrollIntoView ??= () => {};
 
 vi.mock("../../lib/ipc", () => ({ isTauri: () => true }));
 vi.mock("./api");
@@ -24,6 +29,7 @@ const api = await import("./api");
 const dialog = await import("@tauri-apps/plugin-dialog");
 const { Grid } = await import("./Grid");
 const { StudioView } = await import("./StudioView");
+const { UiProviders } = await import("../ui/UiProviders");
 const { useStudio } = await import("../../store/studio");
 
 const INITIAL = useStudio.getState();
@@ -43,7 +49,10 @@ function prefs(): StudioPrefs {
   return {
     lastModel: {},
     advancedOpen: false,
+    settingsOpen: false,
+    prefsVersion: 1,
     confirmEveryVideo: true,
+    confirmUnknownPrice: false,
     confirmAtUsd: 1,
     dailyLimitUsd: 10,
     setups: [],
@@ -52,6 +61,7 @@ function prefs(): StudioPrefs {
     reloadChatAfter: false,
     suggestionDismissed: true,
     localNoticeAcceptedAt: null,
+    lastImportMode: null,
   };
 }
 
@@ -177,7 +187,11 @@ async function showGrid(runs: Run[] = [RUN, LOCAL_RUN, GIF, VIDEO], next: RunsCu
   });
   useStudio.getState().showStudio();
   await act(async () => {
-    render(<StudioView />);
+    render(
+      <UiProviders>
+        <StudioView />
+      </UiProviders>,
+    );
   });
   await flush();
   await click(screen.getByRole("button", { name: "Grid" }));
@@ -189,8 +203,16 @@ function tile(outputId: string): HTMLElement {
   return found;
 }
 
+/** Select mode on (once), then each of `ids` ticked by its box. */
 async function selectTiles(...ids: string[]) {
+  const select = screen.queryByRole("button", { name: "Select" });
+  if (select) await click(select);
   for (const id of ids) await click(within(tile(id)).getByRole("checkbox"));
+}
+
+/** Whether a tile's box is ticked. */
+function ticked(id: string): boolean {
+  return within(tile(id)).getByRole("checkbox").getAttribute("aria-checked") === "true";
 }
 
 async function confirmDialog() {
@@ -201,11 +223,15 @@ function typeSearch(text: string) {
   fireEvent.change(screen.getByRole("searchbox", { name: "Search" }), { target: { value: text } });
 }
 
+/** The date choice opened, and `label` chosen in it. */
 function pickDate(label: string) {
-  const select = screen.getByRole("combobox", { name: "When" }) as HTMLSelectElement;
-  const option = [...select.options].find((o) => o.text === label);
-  if (!option) throw new Error(`no date choice ${label}`);
-  fireEvent.change(select, { target: { value: option.value } });
+  fireEvent.pointerDown(screen.getByRole("combobox", { name: "When" }), { button: 0, ctrlKey: false, pointerType: "mouse" });
+  fireEvent.click(screen.getByRole("option", { name: label }));
+}
+
+/** The date choice as it reads, closed. */
+function dateShown(): string {
+  return screen.getByRole("combobox", { name: "When" }).textContent ?? "";
 }
 
 const original = { create: URL.createObjectURL, revoke: URL.revokeObjectURL };
@@ -249,7 +275,11 @@ describe("Grid", () => {
     const onOpen = vi.fn();
     useStudio.setState({ runs: [RUN] });
     await act(async () => {
-      render(<Grid onOpen={onOpen} />);
+      render(
+        <UiProviders>
+          <Grid onOpen={onOpen} />
+        </UiProviders>,
+      );
     });
     await flush();
     await click(within(tile("o2")).getByRole("button", { name: /^Open picture 2 of 4/ }));
@@ -325,7 +355,10 @@ describe("Grid", () => {
     expect(document.querySelector('[data-output-tile="o1"]')).toBeNull();
     expect(document.querySelector('[data-output-tile="o2"]')).toBeNull();
     tile("o3");
+    // Done: Select mode ends with the action.
     expect(screen.queryByRole("button", { name: /^Delete \d/ })).toBeNull();
+    expect(within(tile("o3")).queryByRole("checkbox")).toBeNull();
+    screen.getByRole("button", { name: "Select" });
   });
 
   it("a second click on Delete while the question closes deletes nothing more", async () => {
@@ -382,7 +415,7 @@ describe("Grid", () => {
     await waitFor(() => expect(screen.getByRole("status").textContent).toBe("Saved to /tmp/\\u{202E}out"));
     expect(screen.getByRole("status").querySelector("bdi[dir=ltr]")?.textContent).toBe("/tmp/\\u{202E}out");
     expect(screen.queryByRole("button", { name: /^Save \d/ })).toBeNull();
-    expect((within(tile("o1")).getByRole("checkbox") as HTMLInputElement).checked).toBe(false);
+    expect(within(tile("o1")).queryByRole("checkbox")).toBeNull();
   });
 
   it("a folder picker that is cancelled saves nothing and keeps the selection", async () => {
@@ -392,32 +425,117 @@ describe("Grid", () => {
     await click(screen.getByRole("button", { name: "Save 1…" }));
     expect(api.studioExport).not.toHaveBeenCalled();
     screen.getByRole("button", { name: "Save 1…" });
-    expect((within(tile("o1")).getByRole("checkbox") as HTMLInputElement).checked).toBe(true);
+    expect(ticked("o1")).toBe(true);
     expect(screen.queryByText(/^Saved to/)).toBeNull();
   });
 
   it("the date choice shows the gallery's date filter as it stands", async () => {
     await showGrid();
-    const when = () => screen.getByRole("combobox", { name: "When" }) as HTMLSelectElement;
-    expect(when().selectedOptions[0]!.text).toBe("Any time");
+    expect(dateShown()).toBe("Any time");
     // A read that fails puts the filter back (the runs shown are still its), and the choice says so.
     vi.mocked(api.studioRuns).mockRejectedValueOnce({ code: "internal", message: "No", nextStep: "", details: "" });
     pickDate("Last 7 days");
     await flush();
     screen.getByText("No");
     expect(useStudio.getState().filter.since ?? null).toBeNull();
-    expect(when().selectedOptions[0]!.text).toBe("Any time");
+    expect(dateShown()).toBe("Any time");
     // The filter changed elsewhere: the choice follows it.
     await act(async () => {
       await useStudio.getState().setFilter({ since: null });
     });
-    expect(when().selectedOptions[0]!.text).toBe("Any time");
+    expect(dateShown()).toBe("Any time");
     const today = new Date();
     today.setHours(0, 0, 0, 0);
     await act(async () => {
       await useStudio.getState().setFilter({ since: today.getTime() });
     });
-    expect(when().selectedOptions[0]!.text).toBe("Today");
+    expect(dateShown()).toBe("Today");
+  });
+
+  // [0.2.0 U9] Design 10.4: no box on every tile; Select turns one on for each, with a bar of
+  // actions on the selection.
+  it("tiles have no checkbox until Select, and Select mode picks tiles and offers actions on them", async () => {
+    await showGrid();
+    expect(document.querySelectorAll("[data-output-tile] [role=checkbox]")).toHaveLength(0);
+    expect(screen.queryByRole("checkbox")).toBeNull();
+    const select = screen.getByRole("button", { name: "Select" });
+    await click(select);
+    // Every tile has its box, named for its result; the button now ends the mode.
+    const boxes = [...document.querySelectorAll("[data-output-tile]")].map((t) => within(t as HTMLElement).getByRole("checkbox"));
+    expect(boxes).toHaveLength(8);
+    within(tile("o2")).getByRole("checkbox", { name: `Select picture 2 of 4: ${RUN.prompt}` });
+    screen.getByRole("button", { name: "Done" });
+    // The bar: nothing selected yet, so nothing to act on.
+    const bar = screen.getByRole("toolbar", { name: "Selection" });
+    within(bar).getByText("0 selected");
+    expect((within(bar).getByRole("button", { name: "Delete 0" }) as HTMLButtonElement).disabled).toBe(true);
+    // A box ticks its tile; a click on the picture does too, and opens nothing.
+    await click(within(tile("o1")).getByRole("checkbox"));
+    expect(within(tile("l1")).queryByRole("button", { name: /^Open/ })).toBeNull();
+    await click(tile("l1").querySelector<HTMLElement>("[data-tile-picture]")!);
+    expect(useStudio.getState().viewer).toBeNull();
+    expect(ticked("o1")).toBe(true);
+    expect(ticked("l1")).toBe(true);
+    within(bar).getByText("2 selected");
+    within(bar).getByRole("button", { name: "Save 2…" });
+    // The tiles' own actions give way to the bar's.
+    expect(within(tile("o1")).queryByRole("button", { name: /^Delete picture/ })).toBeNull();
+    // A second tick puts one back; Done ends the mode and the selection with it.
+    await click(within(tile("l1")).getByRole("checkbox"));
+    within(bar).getByText("1 selected");
+    await click(screen.getByRole("button", { name: "Done" }));
+    expect(screen.queryByRole("checkbox")).toBeNull();
+    expect(screen.queryByRole("toolbar", { name: "Selection" })).toBeNull();
+    await click(screen.getByRole("button", { name: "Select" }));
+    expect(ticked("o1")).toBe(false);
+    // Esc ends it too, but not an Esc that closes the delete question.
+    await click(within(tile("o1")).getByRole("checkbox"));
+    await click(screen.getByRole("button", { name: "Delete 1" }));
+    await act(async () => {
+      fireEvent.keyDown(screen.getByRole("alertdialog"), { key: "Escape" });
+    });
+    await flush();
+    expect(screen.queryByRole("alertdialog")).toBeNull();
+    expect(ticked("o1")).toBe(true);
+    await act(async () => {
+      fireEvent.keyDown(within(tile("o1")).getByRole("checkbox"), { key: "Escape" });
+    });
+    expect(screen.queryByRole("checkbox")).toBeNull();
+    screen.getByRole("button", { name: "Select" });
+  });
+
+  it("a tile's actions are buttons named for the picture, reachable by keyboard", async () => {
+    vi.mocked(api.studioStar).mockResolvedValue({ ...RUN.outputs[1]!, starred: true });
+    vi.mocked(api.studioDelete).mockResolvedValue(undefined);
+    await showGrid([RUN, LOCAL_RUN]);
+    const actions = tile("o2").querySelector<HTMLElement>("[data-tile-actions]")!;
+    const star = within(tile("o2")).getByRole("button", { name: "Star picture 2 of 4" });
+    const remove = within(tile("o2")).getByRole("button", { name: "Delete picture 2 of 4" });
+    for (const b of [star, remove]) {
+      expect(b.tagName).toBe("BUTTON");
+      expect(b.getAttribute("tabindex")).not.toBe("-1");
+      expect(actions.contains(b)).toBe(true);
+      // Shown on hover and while focus is in the tile, so the keyboard reaches them.
+      expect(b.className).toContain("group-hover:opacity-100");
+      expect(b.className).toContain("group-focus-within:opacity-100");
+    }
+    // Tab order: the tile's picture, then its actions.
+    const open = within(tile("o2")).getByRole("button", { name: /^Open picture 2 of 4/ });
+    expect(open.compareDocumentPosition(star) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(star.getAttribute("aria-pressed")).toBe("false");
+    await click(star);
+    expect(api.studioStar).toHaveBeenCalledWith("o2", true);
+    const starred = within(tile("o2")).getByRole("button", { name: "Star picture 2 of 4" });
+    expect(starred.getAttribute("aria-pressed")).toBe("true");
+    // A starred result's star shows without a hover.
+    expect(starred.className).not.toContain("opacity-0");
+    // Delete asks first, then deletes that one result.
+    await click(remove);
+    within(screen.getByRole("alertdialog")).getByText("Delete this picture?");
+    await confirmDialog();
+    expect(api.studioDelete).toHaveBeenCalledWith(["o2"]);
+    expect(document.querySelector('[data-output-tile="o2"]')).toBeNull();
+    tile("o1");
   });
 
   it("a tile reads its picture only once it comes near the screen", async () => {

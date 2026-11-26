@@ -7,9 +7,14 @@
 //! build), a newer Studio engine, a part that is not a pinned `.gguf` or `.safetensors`
 //! file, a licence whose text is not the bundled one. The
 //! chat catalog never depends on any of it.
+//!
+//! 0.2.0: every entry names the pinned engine's recipe it runs with and the engine version
+//! its model is. A catalog entry takes both from its family; a model the catalog does not
+//! list is a generic entry made from its recipe alone ([`generic_entry`]).
 
 use std::cmp::Reverse;
 use std::collections::{BTreeMap, BTreeSet};
+use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -17,6 +22,10 @@ use sha2::{Digest, Sha256};
 
 use crate::catalog::{Catalog, is_hex};
 use crate::hf::{Gated, validate_repo_id, validate_repo_path};
+use crate::sd::companions::CompanionTable;
+use crate::sd::detect::SdVersion;
+use crate::sd::matching::{RecipeInput, RecipeKind, inputs_of, kind_of};
+use crate::sd::recipes::{FrameRounding, Recipe, SlotId, VideoRule};
 
 /// What a model makes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
@@ -54,7 +63,45 @@ pub enum GenFamily {
     Wan21T2v1_3b,
 }
 
-/// What a part is to the engine; each role has one fixed engine flag.
+impl GenFamily {
+    /// Every family, in declaration order.
+    pub const ALL: [GenFamily; 6] = [
+        GenFamily::Flux2Klein4b,
+        GenFamily::Flux3ImageKlein,
+        GenFamily::ZImageTurbo,
+        GenFamily::Wan22Ti2v5b,
+        GenFamily::Wan22Ti2v5bFast,
+        GenFamily::Wan21T2v1_3b,
+    ];
+
+    /// 0.2.0: the pinned engine's recipe a model of this family runs with (an id in
+    /// `catalog/sd-recipes.json`), which schema 4 gives every model 0.1.x installed. The
+    /// distilled Wan 2.2 TI2V-5B runs with the full model's recipe.
+    pub fn recipe_id(self) -> &'static str {
+        match self {
+            GenFamily::Flux2Klein4b => "flux2-klein-4b",
+            GenFamily::Flux3ImageKlein => "flux3-klein",
+            GenFamily::ZImageTurbo => "z-image-turbo",
+            GenFamily::Wan22Ti2v5b | GenFamily::Wan22Ti2v5bFast => "wan22-ti2v-5b",
+            GenFamily::Wan21T2v1_3b => "wan21-t2v",
+        }
+    }
+
+    /// 0.2.0: the engine version the pinned engine detects a model of this family as.
+    pub fn version(self) -> SdVersion {
+        match self {
+            GenFamily::Flux2Klein4b => SdVersion::Flux2Klein,
+            GenFamily::Flux3ImageKlein => SdVersion::Flux3,
+            GenFamily::ZImageTurbo => SdVersion::ZImage,
+            GenFamily::Wan22Ti2v5b | GenFamily::Wan22Ti2v5bFast => SdVersion::Wan22Ti2v,
+            GenFamily::Wan21T2v1_3b => SdVersion::Wan2,
+        }
+    }
+}
+
+/// What a part is to the engine; each role has one fixed engine flag, and fills one of the
+/// recipe slots Studio runs ([`SlotId::RUNNABLE`]). The words of 0.1.x's roles are kept, so
+/// the parts 0.1.2 saved still read.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum GenRole {
@@ -62,28 +109,95 @@ pub enum GenRole {
     Diffusion,
     /// The high-noise diffusion model of a two-model video family.
     HighNoiseDiffusion,
+    /// The unconditional diffusion model of a family that guides with one.
+    UncondDiffusion,
     /// A language model used as the text encoder.
     Llm,
+    /// The vision encoder of that language model.
+    LlmVision,
     /// The T5-XXL text encoder.
     T5xxl,
     /// The CLIP-L text encoder.
     ClipL,
+    /// The CLIP-G text encoder.
+    ClipG,
     /// The CLIP vision encoder.
     ClipVision,
+    /// The tokenizer file (the one role a `.json` file may fill).
+    Tokenizer,
     /// The decoder.
     Vae,
+    /// The tiny decoder.
+    Tae,
+    /// The audio decoder.
+    AudioVae,
+    /// The audio encoder.
+    AudioEncoder,
+    /// The embeddings connectors.
+    EmbeddingsConnectors,
     /// One file holding the whole model.
     Model,
 }
 
 impl GenRole {
     /// Whether the part is the model itself (an entry has exactly one).
-    fn is_model(self) -> bool {
+    pub fn is_model(self) -> bool {
         matches!(self, Self::Diffusion | Self::Model)
+    }
+
+    /// The role that fills recipe slot `slot`; `None` for the adapter slots, which Studio
+    /// does not run.
+    pub fn from_slot(slot: SlotId) -> Option<GenRole> {
+        Some(match slot {
+            SlotId::Model => Self::Model,
+            SlotId::DiffusionModel => Self::Diffusion,
+            SlotId::HighNoiseDiffusionModel => Self::HighNoiseDiffusion,
+            SlotId::UncondDiffusionModel => Self::UncondDiffusion,
+            SlotId::ClipL => Self::ClipL,
+            SlotId::ClipG => Self::ClipG,
+            SlotId::T5xxl => Self::T5xxl,
+            SlotId::Llm => Self::Llm,
+            SlotId::LlmVision => Self::LlmVision,
+            SlotId::ClipVision => Self::ClipVision,
+            SlotId::Tokenizer => Self::Tokenizer,
+            SlotId::Vae => Self::Vae,
+            SlotId::Tae => Self::Tae,
+            SlotId::AudioVae => Self::AudioVae,
+            SlotId::AudioEncoder => Self::AudioEncoder,
+            SlotId::EmbeddingsConnectors => Self::EmbeddingsConnectors,
+            SlotId::ControlNet
+            | SlotId::IpAdapter
+            | SlotId::MotionModule
+            | SlotId::PhotoMaker
+            | SlotId::PulidWeights => return None,
+        })
+    }
+
+    /// The recipe slot this role fills.
+    pub fn slot(self) -> SlotId {
+        match self {
+            Self::Model => SlotId::Model,
+            Self::Diffusion => SlotId::DiffusionModel,
+            Self::HighNoiseDiffusion => SlotId::HighNoiseDiffusionModel,
+            Self::UncondDiffusion => SlotId::UncondDiffusionModel,
+            Self::ClipL => SlotId::ClipL,
+            Self::ClipG => SlotId::ClipG,
+            Self::T5xxl => SlotId::T5xxl,
+            Self::Llm => SlotId::Llm,
+            Self::LlmVision => SlotId::LlmVision,
+            Self::ClipVision => SlotId::ClipVision,
+            Self::Tokenizer => SlotId::Tokenizer,
+            Self::Vae => SlotId::Vae,
+            Self::Tae => SlotId::Tae,
+            Self::AudioVae => SlotId::AudioVae,
+            Self::AudioEncoder => SlotId::AudioEncoder,
+            Self::EmbeddingsConnectors => SlotId::EmbeddingsConnectors,
+        }
     }
 }
 
-/// A picture a model takes beside the prompt.
+/// A picture a model takes beside the prompt: the one vocabulary of input pictures, for
+/// catalog entries and for the engine's recipes (`sd::matching::inputs_of`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum GenInput {
@@ -93,6 +207,13 @@ pub enum GenInput {
     StartFrame,
     /// The last frame of a clip.
     EndFrame,
+    /// The picture to change (the engine's `-i`), for inpainting, Fill and Flex.2.
+    Source,
+    /// Which part of the picture to change (`--mask`): any picture, which the engine
+    /// resizes and rounds to black and white; the white areas change.
+    Mask,
+    /// A control picture (`--control-image`), such as edges or depth.
+    Control,
 }
 
 /// A compiled-in adjustment for one platform; never free text.
@@ -116,6 +237,9 @@ pub enum Commercial {
     UnderRevenue,
     /// Commercial use after registering with the publisher.
     Registration,
+    /// Commercial use allowed, with use rules: the OpenRAIL licences most SD 1.x and SDXL
+    /// models carry, which forbid listed harmful uses (design 11a).
+    WithUseRules,
     /// The licence does not say clearly.
     Unclear,
     /// Non-commercial.
@@ -194,12 +318,14 @@ pub struct GenLicence {
 }
 
 impl GenLicence {
-    /// Green when outputs are free for any use; amber with a condition (a revenue limit
-    /// or a registration); red when non-commercial or unclear.
+    /// Green when outputs are free for any use; amber with a condition (a revenue limit,
+    /// a registration or use rules); red when non-commercial or unclear.
     pub fn badge(&self) -> Badge {
         match self.commercial_outputs {
             Commercial::Yes => Badge::Green,
-            Commercial::UnderRevenue | Commercial::Registration => Badge::Amber,
+            Commercial::UnderRevenue | Commercial::Registration | Commercial::WithUseRules => {
+                Badge::Amber
+            }
             Commercial::Unclear | Commercial::No => Badge::Red,
         }
     }
@@ -235,17 +361,26 @@ fn strictest<'a>(licences: impl Iterator<Item = &'a GenLicence>) -> Option<&'a G
 #[serde(rename_all = "camelCase")]
 pub struct GenPart {
     pub role: GenRole,
-    /// `owner/name` on Hugging Face.
+    /// `owner/name` on Hugging Face; empty for a file from this computer.
     pub repo: String,
-    /// 40-hex commit.
+    /// 40-hex commit; empty for a file from this computer.
     pub revision: String,
     /// Path inside the repository.
     pub path: String,
     pub size: u64,
     /// Lowercase hex.
     pub sha256: String,
-    /// A key of the entry's `licenses`.
+    /// A key of the entry's `licenses`; empty for a file from this computer (the person's
+    /// own).
     pub license: String,
+    /// 0.2.0: a file from this computer, where it is: its repository and revision are then
+    /// empty, and its SHA-256 the one worked out when it was imported.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub local: Option<PathBuf>,
+    /// 0.2.0: a part of a diffusers folder: its engine name in the folder
+    /// (`unet/diffusion_pytorch_model.safetensors`, …).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub folder: Option<String>,
 }
 
 /// What Hugging Face asks before it serves the files.
@@ -278,6 +413,39 @@ pub struct GenDefaults {
     pub frames: Option<u32>,
     #[serde(default)]
     pub fps: Option<u32>,
+    /// 0.2.0: the distilled guidance (`--guidance`).
+    #[serde(default)]
+    pub guidance: Option<f32>,
+    /// 0.2.0: the picture guidance of an edit model (`--img-cfg-scale`).
+    #[serde(default)]
+    pub img_cfg: Option<f32>,
+    /// 0.2.0: the shifted timestep (`--timestep-shift`).
+    #[serde(default)]
+    pub timestep_shift: Option<u32>,
+    /// 0.2.0: custom sigmas (`--sigmas`); empty is the scheduler's own.
+    #[serde(default)]
+    pub sigmas: Vec<f32>,
+    /// 0.2.0: the high-noise part's sampling, for a two-model video family.
+    #[serde(default)]
+    pub high_noise: Option<HighNoiseDefaults>,
+    /// 0.2.0: where the high-noise part hands over (`--moe-boundary`).
+    #[serde(default)]
+    pub moe_boundary: Option<f32>,
+    /// 0.2.0: how much a picture to change is changed (`--strength`).
+    #[serde(default)]
+    pub strength: Option<f32>,
+}
+
+/// The high-noise part's own sampling, for a two-model video family (Wan 2.2 A14B).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HighNoiseDefaults {
+    /// Its steps; -1 lets the engine split the steps at the MoE boundary.
+    pub steps: i32,
+    pub cfg: f32,
+    /// An engine sampler word; `None` is the engine's choice.
+    #[serde(default)]
+    pub sampler: Option<String>,
 }
 
 /// The sizes a model takes.
@@ -291,7 +459,36 @@ pub struct GenLimits {
     pub frame_rule: Option<FrameRule>,
     #[serde(default)]
     pub max_frames: Option<u32>,
+    /// 0.2.0: a generic video entry's frame-count rule: its recipe's.
+    #[serde(default)]
+    pub video: Option<VideoRule>,
 }
+
+impl GenLimits {
+    /// The frame-count rule of a video model: its recipe's, else its catalog frame rule's
+    /// (4n + 1: steps of 4 from 1, rounded down; 8n + 1 the same in steps of 8), up to
+    /// [`max_frames`](Self::max_frames) or the engine's most; `None` for a picture model.
+    pub fn video_rule(&self) -> Option<VideoRule> {
+        if let Some(rule) = self.video {
+            return Some(rule);
+        }
+        let frame_step = match self.frame_rule? {
+            FrameRule::FourNPlusOne => 4,
+            FrameRule::EightNPlusOne => 8,
+        };
+        Some(VideoRule {
+            frame_step,
+            frame_offset: 1,
+            rounding: FrameRounding::Floor,
+            min_frames: 1,
+            max_frames: self.max_frames.unwrap_or(ENGINE_MAX_FRAMES),
+            fixed_fps: None,
+        })
+    }
+}
+
+/// The most frames the engine takes when a recipe states none (`Recipe::video`).
+const ENGINE_MAX_FRAMES: u32 = 4096;
 
 /// Conservative coefficients for the fit check when no measured point applies.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -352,8 +549,26 @@ pub struct GenEntry {
     /// Who made the model (not who converted it).
     pub publisher: String,
     pub kind: GenKind,
-    pub family: GenFamily,
+    /// The 0.1.x family a catalog entry or a 0.1.x searched model is; `None` for a generic
+    /// model ([`generic_entry`]).
+    pub family: Option<GenFamily>,
+    /// 0.2.0: the pinned engine's recipe it runs with (an id in `catalog/sd-recipes.json`).
+    /// A catalog entry's is its family's.
+    #[serde(default)]
+    pub recipe: String,
+    /// 0.2.0: the engine version its model is, when known. A catalog entry's is its
+    /// family's.
+    #[serde(default)]
+    pub version: Option<SdVersion>,
+    /// 0.2.0: a set-up the person made themselves whose recipe was never matched to the
+    /// model (*Set it up yourself*): any readable weights are taken for it.
+    #[serde(default)]
+    pub untested: bool,
     pub inputs: Vec<GenInput>,
+    /// 0.2.0: how many pictures of each input a generic entry takes, from its recipe; empty
+    /// for a catalog entry, whose `inputs` say it.
+    #[serde(default)]
+    pub input_counts: Vec<RecipeInput>,
     /// Exactly one `diffusion` or `model` part, plus encoders and the decoder.
     pub parts: Vec<GenPart>,
     /// Every licence a part names, by id.
@@ -456,11 +671,18 @@ pub struct GenCatalog {
     pub families: BTreeMap<GenFamily, FamilyRecord>,
     pub tiers: GenTiers,
     pub hidden: Vec<Hidden>,
+    /// 0.2.0: the companion table a generic model's set-up takes its shared files from
+    /// ([`CompanionTable::from_catalog`]); empty when it does not read.
+    pub companions: CompanionTable,
 }
 
 /// The only file types a part may be (`.ckpt`, `.pt`, `.pth` and other pickle files can
-/// run code). Compared without regard to case.
-pub const ALLOWED_PART_EXTENSIONS: [&str; 2] = [".gguf", ".safetensors"];
+/// run code): the ones Studio reads. Compared without regard to case. A `tokenizer` part may
+/// also be a `.json` file ([`TOKENIZER_EXTENSION`]).
+pub const ALLOWED_PART_EXTENSIONS: [&str; 3] = crate::sd::index::READ_EXTENSIONS;
+
+/// The one more file type a `tokenizer` part may be.
+const TOKENIZER_EXTENSION: &str = ".json";
 
 /// Canonical licence texts bundled with the app (third_party/licenses/models/), by licence
 /// id: the catalog pins their SHA-256.
@@ -471,8 +693,10 @@ pub const BUNDLED_LICENCE_TEXTS: &[(&str, &str)] = &[(
 
 const UNKNOWN: &str = "unknown family, role, input, kind or quirk";
 const NEWER_ENGINE: &str = "needs a newer Studio engine";
-const NOT_ALLOWED_FILE: &str = "not a .gguf or .safetensors file";
+/// Every file type a part may be ([`ALLOWED_PART_EXTENSIONS`], and a tokenizer's `.json`).
+const NOT_ALLOWED_FILE: &str = "not a .safetensors, .sft or .gguf file, or a tokenizer's .json";
 const NOT_PINNED: &str = "a part is not pinned";
+const LOCAL_PART: &str = "a part names a file on this computer";
 const NO_LICENCE: &str = "a part has no licence";
 const TEXT_MISMATCH: &str = "licence text does not match";
 const NO_MODEL_PART: &str = "no model part";
@@ -594,11 +818,16 @@ pub fn gen_catalog(catalog: &Catalog, engine_build: u32) -> GenCatalog {
         }
     }
     let tiers = read_tiers(&catalog.generator_tiers, &entries, &mut hidden);
+    let companions = CompanionTable::from_catalog(catalog).unwrap_or_else(|reason| {
+        tracing::warn!(%reason, "the companion table is not used");
+        CompanionTable::default()
+    });
     GenCatalog {
         entries,
         families,
         tiers,
         hidden,
+        companions,
     }
 }
 
@@ -656,8 +885,12 @@ fn read_entry(
         summary: raw.summary,
         publisher: raw.publisher,
         kind: raw.kind,
-        family: raw.family,
+        family: Some(raw.family),
+        recipe: raw.family.recipe_id().to_owned(),
+        version: Some(raw.family.version()),
+        untested: false,
         inputs: raw.inputs,
+        input_counts: Vec::new(),
         parts: raw.parts,
         licenses,
         gate: raw.gate,
@@ -721,7 +954,7 @@ fn read_family(key: &str, raw: &Value) -> Result<FamilyRecord, String> {
 }
 
 /// Each licence with its id set to its key.
-fn keyed(licenses: BTreeMap<String, GenLicence>) -> BTreeMap<String, GenLicence> {
+pub(crate) fn keyed(licenses: BTreeMap<String, GenLicence>) -> BTreeMap<String, GenLicence> {
     licenses
         .into_iter()
         .map(|(id, mut l)| {
@@ -731,19 +964,28 @@ fn keyed(licenses: BTreeMap<String, GenLicence>) -> BTreeMap<String, GenLicence>
         .collect()
 }
 
-/// Every part is an allowed file, pinned, and names one of `licenses`.
+/// Every part of a catalog entry or family record is an allowed file, pinned, and names one
+/// of `licenses`. Only a `tokenizer` part may be a `.json` file. A catalog part never names a
+/// file on this computer (`local`): that would waive its repository, revision and licence and
+/// point a run at any file, so such an entry is hidden (final review, area 1, M-1). Parts
+/// from this computer exist only in the person's own models, checked by the store.
 pub(crate) fn check_parts(
     parts: &[GenPart],
     licenses: &BTreeMap<String, GenLicence>,
 ) -> Result<(), String> {
     for p in parts {
+        if p.local.is_some() {
+            return Err(LOCAL_PART.into());
+        }
         if validate_repo_id(&p.repo).is_err() || validate_repo_path(&p.path).is_err() {
             return Err(NOT_PINNED.into());
         }
-        let path = p.path.to_ascii_lowercase();
-        if !ALLOWED_PART_EXTENSIONS
-            .iter()
-            .any(|ext| path.ends_with(ext))
+        let file = p.path.to_ascii_lowercase();
+        let tokenizer = p.role == GenRole::Tokenizer && file.ends_with(TOKENIZER_EXTENSION);
+        if !tokenizer
+            && !ALLOWED_PART_EXTENSIONS
+                .iter()
+                .any(|ext| file.ends_with(ext))
         {
             return Err(NOT_ALLOWED_FILE.into());
         }
@@ -831,6 +1073,168 @@ fn read_tiers(
     }
 }
 
+// ---- generic entries (0.2.0) -------------------------------------------------------------
+
+/// What a generic entry is made from: a model the catalog does not list, with the recipe it
+/// runs with.
+#[derive(Debug, Clone)]
+pub struct GenericSpec<'a> {
+    pub id: String,
+    pub name: String,
+    pub publisher: String,
+    pub recipe: &'a Recipe,
+    /// The engine version its model was detected as, when known.
+    pub version: Option<SdVersion>,
+    pub parts: Vec<GenPart>,
+    pub licenses: BTreeMap<String, GenLicence>,
+    pub gate: GenGate,
+    /// A set-up whose recipe was never matched to the model ([`GenEntry::untested`]).
+    pub untested: bool,
+}
+
+/// The engine's own steps and cfg, which a recipe that states none runs with.
+const ENGINE_STEPS: u32 = 20;
+const ENGINE_CFG: f32 = 7.0;
+/// The high-noise steps that let the engine split the steps at the MoE boundary.
+const ENGINE_HIGH_NOISE_STEPS: i32 = -1;
+/// The longest side a generic entry is offered at.
+const GENERIC_MAX_SIDE: u32 = 2048;
+/// The engine build that has every recipe (the pin).
+const GENERIC_MIN_BUILD: u32 = 1106;
+/// The recipes of Z-Image's versions, which run with 0.1.x's Z-Image quirk.
+const METAL_TENSOR_OFF_RECIPES: [&str; 3] = ["z-image", "z-image-turbo", "z-image-l2p"];
+
+/// The entry of a model the catalog does not list, from its `recipe`: its kind and input
+/// pictures, its defaults field for field (the engine's own steps, cfg and size where the
+/// recipe states none), its sizes and frame rule, and the fit's fallback for its kind
+/// ([`fallback_for`]). No measured memory or speed; never tested by the catalog.
+pub fn generic_entry(spec: GenericSpec<'_>) -> GenEntry {
+    let recipe = spec.recipe;
+    let video = recipe.video();
+    let input_counts = inputs_of(&recipe.id);
+    GenEntry {
+        id: spec.id,
+        name: spec.name,
+        summary: String::new(),
+        publisher: spec.publisher,
+        kind: match kind_of(&recipe.id) {
+            RecipeKind::Picture => GenKind::Image,
+            RecipeKind::PictureEdit => GenKind::ImageEdit,
+            RecipeKind::Video => GenKind::Video,
+        },
+        family: None,
+        recipe: recipe.id.clone(),
+        version: spec.version,
+        untested: spec.untested,
+        inputs: input_counts.iter().map(|input| input.role).collect(),
+        input_counts,
+        parts: spec.parts,
+        licenses: spec.licenses,
+        gate: spec.gate,
+        defaults: recipe_defaults(recipe, spec.version),
+        limits: GenLimits {
+            multiple_of: recipe.size_multiple(),
+            max_side: GENERIC_MAX_SIDE,
+            frame_rule: None,
+            max_frames: video.map(|v| v.max_frames),
+            video,
+        },
+        fallback: fallback_for(recipe),
+        memory: Vec::new(),
+        speed: Vec::new(),
+        quirks: if METAL_TENSOR_OFF_RECIPES.contains(&recipe.id.as_str()) {
+            vec![Quirk::MetalTensorOff]
+        } else {
+            Vec::new()
+        },
+        min_build: GENERIC_MIN_BUILD,
+        runs_on_apple: true,
+        tested: None,
+    }
+}
+
+/// A recipe's defaults under Studio's names. Where it states no size: 512 × 512 for an
+/// SD 1 or SD 2 model, else 1024 × 1024 (`instruct-pix2pix`, `cosxl-edit` and
+/// `flux1-kontext` state none: they take the size of the picture they change).
+fn recipe_defaults(recipe: &Recipe, version: Option<SdVersion>) -> GenDefaults {
+    let d = &recipe.defaults;
+    let side = if version.is_some_and(is_sd1_or_sd2) {
+        512
+    } else {
+        1024
+    };
+    let high_noise = (d.high_noise_steps.is_some()
+        || d.high_noise_cfg_scale.is_some()
+        || d.high_noise_sampling_method.is_some())
+    .then(|| HighNoiseDefaults {
+        steps: d.high_noise_steps.unwrap_or(ENGINE_HIGH_NOISE_STEPS),
+        cfg: d.high_noise_cfg_scale.unwrap_or(ENGINE_CFG),
+        sampler: d.high_noise_sampling_method.clone(),
+    });
+    GenDefaults {
+        steps: d.steps.unwrap_or(ENGINE_STEPS),
+        cfg: d.cfg_scale.unwrap_or(ENGINE_CFG),
+        flow_shift: d.flow_shift,
+        sampler: d.sampling_method.clone(),
+        scheduler: d.scheduler.clone(),
+        width: d.width.unwrap_or(side),
+        height: d.height.unwrap_or(side),
+        frames: d.video_frames,
+        fps: d.fps,
+        guidance: d.distilled_guidance,
+        img_cfg: d.img_cfg_scale,
+        timestep_shift: d.shifted_timestep,
+        sigmas: d.custom_sigmas.clone(),
+        high_noise,
+        moe_boundary: d.moe_boundary,
+        strength: d.strength,
+    }
+}
+
+/// The SD 1 and SD 2 versions (the engine's `sd_version_is_sd1` and `_sd2` groups,
+/// `src/model.h:102-114`), which run at 512 × 512.
+fn is_sd1_or_sd2(version: SdVersion) -> bool {
+    use SdVersion::*;
+    matches!(
+        version,
+        Sd1 | Sd1Inpaint
+            | Sd1Pix2pix
+            | Sd1TinyUnet
+            | Sdxs512Ds
+            | Sd2
+            | Sd2Inpaint
+            | Sd2TinyUnet
+            | Sdxs09
+    )
+}
+
+/// The fit's coefficients for a generic model of `recipe`'s kind: 0.1.x's factors of the
+/// nearest catalog entry, rounded up (FLUX.2 klein's for a picture, Wan 2.2 TI2V-5B's for a
+/// video). A latent token is 32 pixels a side when sizes are multiples of 32 or more, else 16.
+pub fn fallback_for(recipe: &Recipe) -> FitFallback {
+    let token_div = if recipe.size_multiple() >= 32 { 32 } else { 16 };
+    match recipe.video() {
+        None => FitFallback {
+            act_base_bytes: 500_000_000,
+            act_bytes_per_token: 100_000,
+            vae_bytes_per_pixel_frame: 300,
+            vae_tile_cap_bytes: 500_000_000,
+            token_div,
+            frame_div: None,
+            vae_chunk_frames: None,
+        },
+        Some(video) => FitFallback {
+            act_base_bytes: 1_000_000_000,
+            act_bytes_per_token: 250_000,
+            vae_bytes_per_pixel_frame: 400,
+            vae_tile_cap_bytes: 2_500_000_000,
+            token_div,
+            frame_div: Some(video.frame_step),
+            vae_chunk_frames: Some(4),
+        },
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -898,7 +1302,7 @@ mod tests {
         }
         assert_eq!(
             reason(&g, "sample-image").as_deref(),
-            Some("not a .gguf or .safetensors file")
+            Some("not a .safetensors, .sft or .gguf file, or a tokenizer's .json")
         );
         true
     }
@@ -929,6 +1333,7 @@ mod tests {
             licence("kommunity", Commercial::UnderRevenue, Some(5_000_000)),
             licence("tiny-revenue", Commercial::UnderRevenue, Some(1_000_000)),
             licence("sign-up", Commercial::Registration, None),
+            licence("openrail", Commercial::WithUseRules, None),
             licence("unclear", Commercial::Unclear, None),
             licence("flux-nc", Commercial::No, None),
         ];
@@ -972,7 +1377,7 @@ mod tests {
             (v.name.as_str(), v.publisher.as_str()),
             ("Sample Clip 5B, fast", "Example Labs")
         );
-        assert_eq!(v.family, GenFamily::Wan22Ti2v5bFast);
+        assert_eq!(v.family, Some(GenFamily::Wan22Ti2v5bFast));
         assert_eq!(v.inputs, [GenInput::StartFrame]);
         assert_eq!(
             v.parts.iter().map(|p| p.role).collect::<Vec<_>>(),
@@ -1028,7 +1433,7 @@ mod tests {
         let i = &g.entries["sample-image"];
         assert_eq!(
             (i.kind, i.family),
-            (GenKind::Image, GenFamily::Flux2Klein4b)
+            (GenKind::Image, Some(GenFamily::Flux2Klein4b))
         );
         assert_eq!(i.inputs, [GenInput::Reference]);
         assert_eq!(i.memory[0].peak_bytes, 6_200_000_000);
@@ -1056,10 +1461,14 @@ mod tests {
             (json!(GenInput::Reference), "reference"),
             (json!(GenInput::StartFrame), "startFrame"),
             (json!(GenInput::EndFrame), "endFrame"),
+            (json!(GenInput::Source), "source"),
+            (json!(GenInput::Mask), "mask"),
+            (json!(GenInput::Control), "control"),
             (json!(Quirk::MetalTensorOff), "metal-tensor-off"),
             (json!(Quirk::VideoWebpOnMac), "video-webp-on-mac"),
             (json!(Commercial::UnderRevenue), "underRevenue"),
             (json!(Commercial::Registration), "registration"),
+            (json!(Commercial::WithUseRules), "withUseRules"),
             (json!(Badge::Amber), "amber"),
             (json!(GateMode::Manual), "manual"),
             (json!(FrameRule::FourNPlusOne), "4n+1"),
@@ -1071,6 +1480,58 @@ mod tests {
             serde_json::from_str::<GenFamily>("\"wan2.1-t2v-1.3b\"").unwrap(),
             GenFamily::Wan21T2v1_3b
         );
+    }
+
+    /// 0.2.0: each of 0.1.x's families runs with one of the pinned engine's recipes, the
+    /// one schema 4 gives its installed models, and is the engine version that recipe is
+    /// matched from.
+    #[test]
+    fn each_01x_family_names_its_recipe_and_version() {
+        use GenFamily::*;
+        assert_eq!(
+            [
+                Flux2Klein4b,
+                Flux3ImageKlein,
+                ZImageTurbo,
+                Wan22Ti2v5b,
+                Wan22Ti2v5bFast,
+                Wan21T2v1_3b
+            ]
+            .map(|f| (f.recipe_id(), f.version())),
+            [
+                ("flux2-klein-4b", SdVersion::Flux2Klein),
+                ("flux3-klein", SdVersion::Flux3),
+                ("z-image-turbo", SdVersion::ZImage),
+                ("wan22-ti2v-5b", SdVersion::Wan22Ti2v),
+                ("wan22-ti2v-5b", SdVersion::Wan22Ti2v),
+                ("wan21-t2v", SdVersion::Wan2)
+            ]
+        );
+        for f in GenFamily::ALL {
+            assert!(crate::sd::recipes::recipe(f.recipe_id()).is_some(), "{f:?}");
+            assert!(
+                crate::sd::matching::in_scope_recipes().contains(&f.recipe_id()),
+                "{f:?}"
+            );
+            assert!(
+                crate::sd::matching::recipes_for(f.version()).contains(&f.recipe_id()),
+                "{f:?}: a file of its version can take its recipe"
+            );
+            // The name rules agree with the family's recipe: read under the recipe's own id,
+            // only a file's facts can pick another (`check_main_file` in the app).
+            assert!(
+                matches!(
+                    crate::sd::matching::match_recipe(
+                        f.version(),
+                        &crate::sd::inspect::MatchFacts::default(),
+                        &[],
+                        f.recipe_id()
+                    ),
+                    crate::sd::matching::Match::Recipe { id, .. } if id == f.recipe_id()
+                ),
+                "{f:?}: its recipe's id names its recipe"
+            );
+        }
     }
 
     #[test]
@@ -1088,7 +1549,7 @@ mod tests {
             );
         }
         hidden_for("unknown family, role, input, kind or quirk", |e| {
-            e["inputs"] = json!(["mask"])
+            e["inputs"] = json!(["audio"])
         });
         hidden_for("unknown family, role, input, kind or quirk", |e| {
             e["kind"] = json!("audio")
@@ -1189,6 +1650,9 @@ mod tests {
             "sign-up"
         );
         assert_eq!(strictest(&["unclear", "sign-up"]), "unclear");
+        // Use rules are stricter than a registration and laxer than an unclear licence.
+        assert_eq!(strictest(&["sign-up", "openrail"]), "openrail");
+        assert_eq!(strictest(&["openrail", "unclear"]), "unclear");
         assert_eq!(strictest(&["unclear", "flux-nc"]), "flux-nc");
         assert_eq!(strictest(&["apache-2.0"]), "apache-2.0");
     }
@@ -1199,6 +1663,7 @@ mod tests {
             (Commercial::Yes, Badge::Green),
             (Commercial::UnderRevenue, Badge::Amber),
             (Commercial::Registration, Badge::Amber),
+            (Commercial::WithUseRules, Badge::Amber),
             (Commercial::Unclear, Badge::Red),
             (Commercial::No, Badge::Red),
         ] {
@@ -1395,6 +1860,515 @@ mod tests {
         );
     }
 
+    // ---- 0.2.0: generic models (Task S3) ---------------------------------------------------
+
+    use crate::sd::recipes::recipe;
+
+    const SHA: &str = "abababababababababababababababababababababababababababababababab";
+
+    /// The licence map the test parts name.
+    fn apache() -> BTreeMap<String, GenLicence> {
+        BTreeMap::from([(
+            "apache-2.0".to_string(),
+            licence("apache-2.0", Commercial::Yes, None),
+        )])
+    }
+
+    /// A pinned Hub part of `role` at `path`.
+    fn part(role: GenRole, path: &str, size: u64) -> GenPart {
+        GenPart {
+            role,
+            repo: "example/model".into(),
+            revision: "1".repeat(40),
+            path: path.into(),
+            size,
+            sha256: SHA.into(),
+            license: "apache-2.0".into(),
+            local: None,
+            folder: None,
+        }
+    }
+
+    /// A part from a file on this computer: no repository, revision or licence.
+    fn local_part(role: GenRole, file: &str, sha256: &str) -> GenPart {
+        GenPart {
+            role,
+            repo: String::new(),
+            revision: String::new(),
+            path: String::new(),
+            size: 6_938_078_334,
+            sha256: sha256.into(),
+            license: String::new(),
+            local: Some(PathBuf::from(file)),
+            folder: None,
+        }
+    }
+
+    fn spec(recipe: &Recipe, version: Option<SdVersion>, parts: Vec<GenPart>) -> GenericSpec<'_> {
+        GenericSpec {
+            id: "hf:o/r:x.safetensors".into(),
+            name: "A model".into(),
+            publisher: String::new(),
+            recipe,
+            version,
+            parts,
+            licenses: apache(),
+            gate: GenGate {
+                mode: GateMode::None,
+                collects: Vec::new(),
+            },
+            untested: false,
+        }
+    }
+
+    /// Wan 2.2 T2V A14B: its two diffusion models, the text encoder and the decoder.
+    fn wan_a14b_parts() -> Vec<GenPart> {
+        vec![
+            part(
+                GenRole::HighNoiseDiffusion,
+                "wan2.2_t2v_high_noise_14B_Q4_K_M.gguf",
+                9_651_800_000,
+            ),
+            part(
+                GenRole::Diffusion,
+                "wan2.2_t2v_low_noise_14B_Q4_K_M.gguf",
+                9_651_800_000,
+            ),
+            part(
+                GenRole::T5xxl,
+                "umt5-xxl-encoder-Q5_K_M.gguf",
+                4_145_878_880,
+            ),
+            part(GenRole::Vae, "wan_2.1_vae.safetensors", 253_815_318),
+        ]
+    }
+
+    #[test]
+    fn catalog_entries_carry_their_recipe_and_version() {
+        let c = gen_catalog(&Catalog::bundled(), 1106);
+        let klein = &c.entries["flux2-klein-4b-q4"];
+        assert_eq!(
+            (klein.recipe.as_str(), klein.version),
+            ("flux2-klein-4b", Some(SdVersion::Flux2Klein))
+        );
+        // The catalog's tested defaults stay; recipe defaults are for generic models only.
+        assert_eq!(klein.defaults.steps, 4);
+        assert_eq!(klein.family, Some(GenFamily::Flux2Klein4b));
+        assert!(!klein.untested && klein.input_counts.is_empty());
+        for e in c.entries.values() {
+            let family = e.family.unwrap();
+            assert_eq!(
+                (e.recipe.as_str(), e.version),
+                (family.recipe_id(), Some(family.version())),
+                "{}",
+                e.id
+            );
+        }
+    }
+
+    #[test]
+    fn a_generic_sdxl_entry_takes_the_recipes_defaults_and_limits() {
+        let e = generic_entry(spec(
+            recipe("sdxl-checkpoint").unwrap(),
+            Some(SdVersion::Sdxl),
+            vec![part(GenRole::Model, "x.safetensors", 6_938_078_334)],
+        ));
+        assert_eq!(
+            (
+                e.kind,
+                e.defaults.steps,
+                e.defaults.cfg,
+                e.defaults.width,
+                e.limits.multiple_of
+            ),
+            (GenKind::Image, 20, 5.0, 1024, 64)
+        );
+        assert_eq!(e.fallback.token_div, 32);
+        assert_eq!(
+            (e.id.as_str(), e.name.as_str(), e.recipe.as_str()),
+            ("hf:o/r:x.safetensors", "A model", "sdxl-checkpoint")
+        );
+        assert_eq!((e.family, e.version), (None, Some(SdVersion::Sdxl)));
+        assert_eq!(
+            (e.limits.max_side, e.limits.video, e.limits.max_frames),
+            (2048, None, None)
+        );
+        assert!(e.inputs.is_empty() && e.input_counts.is_empty());
+        assert!(e.quirks.is_empty() && e.memory.is_empty() && e.speed.is_empty());
+        assert_eq!(
+            (
+                e.min_build,
+                e.runs_on_apple,
+                e.tested.as_deref(),
+                e.untested
+            ),
+            (1106, true, None, false)
+        );
+        assert_eq!(e.diffusion().path, "x.safetensors");
+        assert_eq!(e.effective_licence().id, "apache-2.0");
+    }
+
+    #[test]
+    fn a_generic_wan_a14b_entry_is_a_video_with_two_diffusion_parts() {
+        let e = generic_entry(spec(
+            recipe("wan22-t2v").unwrap(),
+            Some(SdVersion::Wan2),
+            wan_a14b_parts(),
+        ));
+        assert_eq!(e.kind, GenKind::Video);
+        assert_eq!(e.limits.video_rule().unwrap().frame_step, 4);
+        assert_eq!(e.defaults.high_noise.as_ref().unwrap().cfg, 4.0);
+        assert_eq!(e.defaults.moe_boundary, Some(0.875));
+        assert_eq!(
+            e.defaults.high_noise,
+            Some(HighNoiseDefaults {
+                steps: -1,
+                cfg: 4.0,
+                sampler: Some("euler".into())
+            })
+        );
+        assert_eq!(
+            (
+                e.defaults.frames,
+                e.defaults.fps,
+                e.defaults.flow_shift,
+                e.defaults.width,
+                e.defaults.height
+            ),
+            (Some(33), Some(16), Some(12.0), 1280, 720)
+        );
+        assert_eq!(e.limits.max_frames, Some(4096));
+        assert_eq!(e.diffusion().path, "wan2.2_t2v_low_noise_14B_Q4_K_M.gguf");
+        assert_eq!(
+            e.fallback,
+            FitFallback {
+                act_base_bytes: 1_000_000_000,
+                act_bytes_per_token: 250_000,
+                vae_bytes_per_pixel_frame: 400,
+                vae_tile_cap_bytes: 2_500_000_000,
+                token_div: 16,
+                frame_div: Some(4),
+                vae_chunk_frames: Some(4),
+            }
+        );
+    }
+
+    /// Every defaults field a recipe states reaches the entry under Studio's name.
+    #[test]
+    fn a_generic_entry_takes_every_default_the_recipe_states() {
+        let r = recipe("sdxl-checkpoint").unwrap();
+        let mut r = r.clone();
+        r.defaults = crate::sd::recipes::RecipeDefaults {
+            sampling_method: Some("dpm++2m".into()),
+            scheduler: Some("karras".into()),
+            cfg_scale: Some(3.5),
+            steps: Some(28),
+            width: Some(832),
+            height: Some(1216),
+            distilled_guidance: Some(2.5),
+            flow_shift: Some(3.0),
+            video_frames: Some(49),
+            fps: Some(24),
+            custom_sigmas: vec![1.0, 0.5, 0.0],
+            img_cfg_scale: Some(1.5),
+            high_noise_steps: Some(2),
+            high_noise_cfg_scale: None,
+            high_noise_sampling_method: None,
+            high_noise_flow_shift: Some(5.0),
+            moe_boundary: Some(0.9),
+            shifted_timestep: Some(250),
+            strength: Some(0.75),
+        };
+        let d = generic_entry(spec(&r, Some(SdVersion::Sdxl), vec![])).defaults;
+        assert_eq!(
+            d,
+            GenDefaults {
+                steps: 28,
+                cfg: 3.5,
+                flow_shift: Some(3.0),
+                sampler: Some("dpm++2m".into()),
+                scheduler: Some("karras".into()),
+                width: 832,
+                height: 1216,
+                frames: Some(49),
+                fps: Some(24),
+                guidance: Some(2.5),
+                img_cfg: Some(1.5),
+                timestep_shift: Some(250),
+                sigmas: vec![1.0, 0.5, 0.0],
+                // The engine's own cfg when only the steps are stated.
+                high_noise: Some(HighNoiseDefaults {
+                    steps: 2,
+                    cfg: 7.0,
+                    sampler: None
+                }),
+                moe_boundary: Some(0.9),
+                strength: Some(0.75),
+            }
+        );
+    }
+
+    /// A recipe that leaves them out takes the engine's own steps and cfg, and 512 × 512 for
+    /// an SD 1 or SD 2 version, else 1024 × 1024.
+    #[test]
+    fn a_recipe_without_defaults_takes_the_engines() {
+        let e = generic_entry(spec(
+            recipe("cosxl-edit").unwrap(),
+            Some(SdVersion::SdxlPix2pix),
+            vec![],
+        ));
+        assert_eq!(
+            (
+                e.defaults.steps,
+                e.defaults.cfg,
+                e.defaults.width,
+                e.defaults.height
+            ),
+            (20, 7.0, 1024, 1024)
+        );
+        assert_eq!(
+            (e.defaults.img_cfg, e.defaults.high_noise.as_ref()),
+            (Some(1.5), None)
+        );
+        let size = |id: &str, version: Option<SdVersion>| {
+            let d = generic_entry(spec(recipe(id).unwrap(), version, vec![])).defaults;
+            (d.width, d.height)
+        };
+        assert_eq!(
+            size("instruct-pix2pix", Some(SdVersion::Sd1Pix2pix)),
+            (512, 512)
+        );
+        assert_eq!(size("flux1-kontext", Some(SdVersion::Flux)), (1024, 1024));
+        assert_eq!(size("flux1-kontext", None), (1024, 1024));
+        assert_eq!(
+            size("sd2-512-checkpoint", Some(SdVersion::Sd2)),
+            (512, 512),
+            "its own"
+        );
+        let r = recipe("sd1-checkpoint").unwrap();
+        let mut sizeless = r.clone();
+        (sizeless.defaults.width, sizeless.defaults.height) = (None, None);
+        for v in [SdVersion::Sd2Inpaint, SdVersion::Sdxs512Ds, SdVersion::Sd1] {
+            let d = generic_entry(spec(&sizeless, Some(v), vec![])).defaults;
+            assert_eq!((d.width, d.height), (512, 512), "{v:?}");
+        }
+        let d = generic_entry(spec(&sizeless, Some(SdVersion::Sdxl), vec![])).defaults;
+        assert_eq!((d.width, d.height), (1024, 1024));
+    }
+
+    #[test]
+    fn only_z_image_recipes_turn_metal_tensors_off() {
+        for id in ["z-image", "z-image-turbo", "z-image-l2p"] {
+            let e = generic_entry(spec(recipe(id).unwrap(), None, vec![]));
+            assert_eq!(e.quirks, [Quirk::MetalTensorOff], "{id}");
+        }
+        let e = generic_entry(spec(recipe("flux1-dev").unwrap(), None, vec![]));
+        assert!(e.quirks.is_empty());
+    }
+
+    #[test]
+    fn an_untested_set_up_is_kept_on_the_entry() {
+        let mut s = spec(recipe("flux1-dev").unwrap(), None, vec![]);
+        s.untested = true;
+        assert!(generic_entry(s).untested);
+    }
+
+    #[test]
+    fn a_picture_fallback_reads_its_token_size_from_the_multiple() {
+        let f = fallback_for(recipe("flux1-dev").unwrap());
+        assert_eq!(
+            f,
+            FitFallback {
+                act_base_bytes: 500_000_000,
+                act_bytes_per_token: 100_000,
+                vae_bytes_per_pixel_frame: 300,
+                vae_tile_cap_bytes: 500_000_000,
+                token_div: 16,
+                frame_div: None,
+                vae_chunk_frames: None,
+            }
+        );
+        assert_eq!(
+            fallback_for(recipe("sdxl-checkpoint").unwrap()).token_div,
+            32
+        );
+        let wan5b = fallback_for(recipe("wan22-ti2v-5b").unwrap());
+        assert_eq!((wan5b.token_div, wan5b.frame_div), (32, Some(4)));
+    }
+
+    #[test]
+    fn the_video_rule_is_the_recipes_else_the_frame_rule() {
+        let limits = |frame_rule, video| GenLimits {
+            multiple_of: 16,
+            max_side: 1280,
+            frame_rule,
+            max_frames: Some(121),
+            video,
+        };
+        let rule = |step| VideoRule {
+            frame_step: step,
+            frame_offset: 1,
+            rounding: FrameRounding::Floor,
+            min_frames: 1,
+            max_frames: 121,
+            fixed_fps: None,
+        };
+        assert_eq!(
+            limits(Some(FrameRule::FourNPlusOne), None).video_rule(),
+            Some(rule(4))
+        );
+        assert_eq!(
+            limits(Some(FrameRule::EightNPlusOne), None).video_rule(),
+            Some(rule(8))
+        );
+        assert_eq!(limits(None, None).video_rule(), None);
+        let own = recipe("minimax-h3-fl2va").unwrap().video().unwrap();
+        assert_eq!(
+            limits(Some(FrameRule::FourNPlusOne), Some(own)).video_rule(),
+            Some(own)
+        );
+    }
+
+    #[test]
+    fn the_tokenizer_role_takes_a_json_file_and_no_other_role_does() {
+        let l = apache();
+        assert!(check_parts(&[part(GenRole::Tokenizer, "tokenizer.json", 1)], &l).is_ok());
+        assert!(check_parts(&[part(GenRole::Vae, "vae.json", 1)], &l).is_err());
+        assert!(check_parts(&[part(GenRole::Diffusion, "m.sft", 1)], &l).is_ok());
+    }
+
+    #[test]
+    fn a_catalog_part_may_not_name_a_file_on_this_computer() {
+        // A signed catalog's `local` would waive the repository, revision and licence checks
+        // and point a run at any file (final review, area 1, M-1).
+        let l = apache();
+        let refused = |p: GenPart| check_parts(&[p], &l).unwrap_err();
+        assert_eq!(
+            refused(local_part(GenRole::Model, "/home/me/m.safetensors", SHA)),
+            "a part names a file on this computer"
+        );
+        let mut pinned = part(GenRole::Model, "m.gguf", 1);
+        pinned.local = Some(PathBuf::from("/etc/m.gguf"));
+        assert_eq!(refused(pinned), "a part names a file on this computer");
+        // A Hub part still needs all of it.
+        let mut hub = part(GenRole::Model, "m.gguf", 1);
+        hub.license = String::new();
+        assert_eq!(refused(hub), "a part has no licence");
+        let mut hub = part(GenRole::Model, "m.gguf", 1);
+        hub.revision = String::new();
+        assert_eq!(refused(hub), "a part is not pinned");
+    }
+
+    #[test]
+    fn an_entry_or_a_family_with_a_local_part_is_hidden() {
+        hidden_for("a part names a file on this computer", |e| {
+            e["parts"][0]["local"] = json!("/home/me/m.gguf");
+        });
+        let g = read_with(|v| {
+            v["generatorFamilies"]["flux2-klein-4b"]["companions"][0]["local"] =
+                json!("C:\\Users\\me\\llm.safetensors");
+        });
+        assert!(!g.families.contains_key(&GenFamily::Flux2Klein4b));
+        assert_eq!(
+            reason(&g, "family:flux2-klein-4b").as_deref(),
+            Some("a part names a file on this computer")
+        );
+    }
+
+    #[test]
+    fn every_slot_has_a_role_and_back() {
+        for s in SlotId::RUNNABLE {
+            assert_eq!(GenRole::from_slot(s).unwrap().slot(), s);
+        }
+        for s in [
+            SlotId::ControlNet,
+            SlotId::IpAdapter,
+            SlotId::MotionModule,
+            SlotId::PhotoMaker,
+            SlotId::PulidWeights,
+        ] {
+            assert_eq!(GenRole::from_slot(s), None, "{s:?}");
+        }
+        assert_eq!(GenRole::Model.slot(), SlotId::Model);
+        assert_eq!(GenRole::Diffusion.slot(), SlotId::DiffusionModel);
+    }
+
+    #[test]
+    fn the_new_roles_have_their_kebab_words() {
+        for (role, word) in [
+            (GenRole::UncondDiffusion, "uncond-diffusion"),
+            (GenRole::LlmVision, "llm-vision"),
+            (GenRole::ClipG, "clip-g"),
+            (GenRole::Tokenizer, "tokenizer"),
+            (GenRole::Tae, "tae"),
+            (GenRole::AudioVae, "audio-vae"),
+            (GenRole::AudioEncoder, "audio-encoder"),
+            (GenRole::EmbeddingsConnectors, "embeddings-connectors"),
+            (GenRole::Diffusion, "diffusion"),
+            (GenRole::Llm, "llm"),
+            (GenRole::Vae, "vae"),
+        ] {
+            assert_eq!(json!(role), json!(word));
+            assert_eq!(
+                serde_json::from_value::<GenRole>(json!(word)).unwrap(),
+                role
+            );
+        }
+    }
+
+    /// An installed model's parts as 0.1.2 saved them still read, with no local file or
+    /// folder name, and write back without the new fields.
+    #[test]
+    fn a_0_1_2_parts_json_still_parses() {
+        let saved = json!([
+            {"role": "diffusion", "repo": "leejet/FLUX.2-klein-4B-GGUF",
+             "revision": "a".repeat(40), "path": "flux-2-klein-4b-Q4_0.gguf",
+             "file": "/models/leejet/FLUX.2-klein-4B-GGUF/flux-2-klein-4b-Q4_0.gguf",
+             "size": 2_460_378_560u64, "sha256": "b".repeat(64), "license": "apache-2.0"},
+            {"role": "llm", "repo": "unsloth/Qwen3-4B-GGUF", "revision": "c".repeat(40),
+             "path": "Qwen3-4B-Q4_K_M.gguf", "file": "/models/q.gguf", "size": 2_497_281_312u64,
+             "sha256": "d".repeat(64), "license": "apache-2.0"},
+            {"role": "vae", "repo": "Comfy-Org/Flux-2-Klein-4B", "revision": "e".repeat(40),
+             "path": "split_files/vae/flux2-vae.safetensors", "file": "/models/v.safetensors",
+             "size": 336_211_292u64, "sha256": "f".repeat(64), "license": "apache-2.0"}
+        ]);
+        let parts: Vec<GenPart> = serde_json::from_value(saved).unwrap();
+        assert_eq!(
+            parts.iter().map(|p| p.role).collect::<Vec<_>>(),
+            [GenRole::Diffusion, GenRole::Llm, GenRole::Vae]
+        );
+        assert!(
+            parts
+                .iter()
+                .all(|p| p.local.is_none() && p.folder.is_none())
+        );
+        let written = serde_json::to_value(&parts[0]).unwrap();
+        assert!(written.get("local").is_none() && written.get("folder").is_none());
+        assert_eq!(written["path"], "flux-2-klein-4b-Q4_0.gguf");
+    }
+
+    #[test]
+    fn an_inpainting_entry_takes_a_picture_to_change_and_a_mask() {
+        let e = generic_entry(spec(
+            recipe("sdxl-inpainting").unwrap(),
+            Some(SdVersion::SdxlInpaint),
+            vec![part(GenRole::Model, "x.safetensors", 1)],
+        ));
+        assert_eq!(
+            (e.kind, e.inputs.clone()),
+            (GenKind::ImageEdit, vec![GenInput::Source, GenInput::Mask])
+        );
+        assert_eq!(
+            e.input_counts,
+            crate::sd::matching::inputs_of("sdxl-inpainting")
+        );
+        assert_eq!(
+            (e.input_counts[0].min, e.input_counts[0].max),
+            (1, 1),
+            "each row's min and max"
+        );
+    }
+
     #[test]
     fn a_family_record_is_checked_like_an_entry() {
         let family = |change: fn(&mut Value)| {
@@ -1408,7 +2382,7 @@ mod tests {
         );
         assert_eq!(
             family(|f| f["companions"][1]["path"] = json!("vae.pt")),
-            "not a .gguf or .safetensors file"
+            "not a .safetensors, .sft or .gguf file, or a tokenizer's .json"
         );
         assert_eq!(
             family(|f| f["upstreamLicense"] = json!("mit")),

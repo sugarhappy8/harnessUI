@@ -91,8 +91,10 @@ pub enum LeaseWait {
 pub enum Refused {
     /// The job was stopped while it waited, or the unload it waited for was cancelled.
     Cancelled,
-    /// It does not fit even with the chat model unloaded, and cannot run on the processor
-    /// (or the person said not to unload).
+    /// Under [`GpuPolicy::Ask`], the person said to keep the chat model, and the job cannot
+    /// run on the processor (a video, or a job that fits nowhere): it does not fit beside the
+    /// chat model. (Under the other policies a job that fits nowhere unloads the chat model
+    /// and runs: design 9.2.)
     DoesNotFit,
     /// Under [`GpuPolicy::Ask`]: ask the person, then ask the lease again with the answer.
     NeedsAnswer,
@@ -303,9 +305,13 @@ impl GpuLease {
     /// while another job has it); no chat model on a device, or a job that fits beside it
     /// (unless "Keep in memory" pins it in shared memory) → [`Grant::Alongside`]; a job that
     /// does not fit even after an unload → [`Grant::UseProcessor`] when it can run there
-    /// (after an unload on shared memory, where the processor uses the same memory), else
-    /// [`Refused::DoesNotFit`]; "Keep in memory" on shared memory → an unload whatever the
-    /// policy; then as `policy` says. An unload waits for a reply being written
+    /// (after an unload on shared memory, where the processor uses the same memory);
+    /// "Keep in memory" on shared memory → an unload whatever the policy; then, for a job
+    /// that fits only after an unload, or nowhere, as `policy` says. One that fits nowhere
+    /// goes ahead after the unload (design 9.2), the engine's auto-fit spreading its weights
+    /// over the card, the computer's memory and the disk, and under Ask it is asked first
+    /// (ruling S11-ask-honoured); [`Refused::DoesNotFit`] only for "Keep the chat model"
+    /// under Ask, for a job that cannot use the processor. An unload waits for a reply being written
     /// (`on_wait(ReplyRunning)`). A grant after an unload names the unloaded chat model.
     ///
     /// `answered`: the person's answer to "Unload the chat model?" under [`GpuPolicy::Ask`]
@@ -441,15 +447,15 @@ impl GpuLease {
         if need.alongside && !pinned {
             return Ok(Step::Grant(Grant::Alongside));
         }
-        if !need.after_unload {
-            if !need.processor_ok {
-                return Err(Refused::DoesNotFit);
-            }
+        if !need.after_unload && need.processor_ok {
             if need.shared_memory {
                 return Ok(Step::Unload(AfterIt::UseProcessor));
             }
             return Ok(Step::Grant(Grant::UseProcessor { unloaded: None }));
         }
+        // It fits only after an unload, or nowhere: either way it runs after an unload, as
+        // the policy says (one that fits nowhere goes ahead with the whole card, design 9.2;
+        // under Ask it is asked like any other unload, ruling S11-ask-honoured).
         if pinned {
             return Ok(Step::Unload(AfterIt::AfterUnload));
         }
@@ -841,25 +847,79 @@ pub(crate) mod tests {
     }
 
     #[tokio::test]
-    async fn a_job_that_does_not_fit_even_after_an_unload_is_refused() {
+    async fn a_job_that_fits_nowhere_unloads_the_chat_model_and_runs() {
+        // Under Unload, and under Processor too (it cannot run on the processor), the chat
+        // model goes and the job runs with the whole card (design 9.2).
+        for policy in [GpuPolicy::Unload, GpuPolicy::Processor] {
+            let chat = FakeChat::loaded(8 * GB);
+            let lease = GpuLease::new(chat.clone());
+            let need = StudioNeed {
+                judged_with: Some(8 * GB),
+                ..need(false, false, false)
+            };
+            let (grant, hold) = lease
+                .acquire_for_studio(&need, policy, None, &tok(), &|_| {})
+                .await
+                .unwrap();
+            assert!(matches!(grant, Grant::AfterUnload { .. }), "{policy:?}");
+            assert_eq!(
+                grant,
+                Grant::AfterUnload {
+                    unloaded: Some(CHAT.to_string())
+                }
+            );
+            assert_eq!(chat.unloads(), 1);
+            assert!(lease.holds_card());
+            drop(hold);
+        }
+    }
+
+    /// Ruling S11-ask-honoured: under Ask, a job that fits nowhere asks like any other unload.
+    /// Unload: it runs after the unload. Keep: it does not fit beside the chat model, which
+    /// stays (`DoesNotFit`, the lane's "the chat model stays loaded").
+    #[tokio::test]
+    async fn under_ask_a_job_that_fits_nowhere_asks_first() {
+        let nowhere = StudioNeed {
+            judged_with: Some(8 * GB),
+            ..need(false, false, false)
+        };
+        let ask = |chat: &Arc<FakeChat>, answered: Option<bool>| {
+            let lease = GpuLease::new(chat.clone());
+            async move {
+                let waits = Waits::default();
+                let result = lease
+                    .acquire_for_studio(&nowhere, GpuPolicy::Ask, answered, &tok(), &|w| {
+                        waits.push(w)
+                    })
+                    .await
+                    .map(|(g, _hold)| g);
+                (result, waits.seen())
+            }
+        };
+        // Not asked yet: ask, and change nothing meanwhile.
+        let chat = FakeChat::loaded(8 * GB);
+        let (result, seen) = ask(&chat, None).await;
+        assert_eq!(result, Err(Refused::NeedsAnswer));
+        assert_eq!(seen, [LeaseWait::NeedsAnswer]);
+        assert_eq!(chat.unloads(), 0);
+        // Keep the chat model: it stays, and the job does not fit beside it.
+        assert_eq!(ask(&chat, Some(false)).await.0, Err(Refused::DoesNotFit));
+        assert_eq!(chat.unloads(), 0);
+        // Unload: the job runs after the unload.
+        assert_eq!(
+            ask(&chat, Some(true)).await.0,
+            Ok(Grant::AfterUnload {
+                unloaded: Some(CHAT.to_string())
+            })
+        );
+        assert_eq!(chat.unloads(), 1);
+    }
+
+    #[tokio::test]
+    async fn a_job_that_does_not_fit_even_after_an_unload_runs_on_the_processor_when_it_can() {
         let chat = FakeChat::loaded(5 * GB);
         let lease = GpuLease::new(chat.clone());
-        let refused = lease
-            .acquire_for_studio(
-                &need(false, false, false),
-                GpuPolicy::Unload,
-                None,
-                &tok(),
-                &|_| {},
-            )
-            .await
-            .unwrap_err();
-        assert_eq!(refused, Refused::DoesNotFit);
-        assert_eq!(chat.unloads(), 0);
-        assert!(!lease.holds_card());
-
-        // A picture that can run on the processor does, beside the chat model (and the
-        // refusal above gave its place back).
+        // A picture that can run on the processor does, beside the chat model.
         let (g, hold) = within(lease.acquire_for_studio(
             &need(false, false, true),
             GpuPolicy::Unload,

@@ -30,7 +30,7 @@ use super::deps::{
 };
 use super::label;
 use super::local::LocalMediaProvider;
-use super::local::tests::{Fixed, catalog, fake_engine, install};
+use super::local::tests::{Fixed, FixedFolder, catalog, fake_engine, install};
 use super::manager::{PollPlan, StudioDeps, StudioManager};
 use super::manager_tests::FixedHardware;
 use super::prefs::{self, RunTarget, StudioPrefs};
@@ -77,6 +77,9 @@ struct MockOpenRouter {
 struct MockState {
     /// Each request's method and path, in the order they came.
     requests: Mutex<Vec<(String, String)>>,
+    /// Each request's method, path and `Authorization` header (None when it sent none), in
+    /// the order they came.
+    authorizations: Mutex<Vec<(String, String, Option<String>)>>,
     /// The video job may complete.
     video_ready: AtomicBool,
     /// Checks on the video job since it may complete.
@@ -130,6 +133,18 @@ impl MockOpenRouter {
     /// Every request so far: its method and path.
     fn requests(&self) -> Vec<(String, String)> {
         self.state.requests.lock().unwrap().clone()
+    }
+
+    /// The `Authorization` header of each `method` request for `path`, in the order they came.
+    fn authorizations(&self, method: &str, path: &str) -> Vec<Option<String>> {
+        self.state
+            .authorizations
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(m, p, _)| m == method && p == path)
+            .map(|(_, _, a)| a.clone())
+            .collect()
     }
 
     /// From now on video job [`JOB`] is pending once more, then completed.
@@ -211,14 +226,17 @@ async fn serve(socket: tokio::net::TcpStream, state: Arc<MockState>, base: Strin
         return;
     }
     let mut length = 0;
+    let mut authorization = None;
     loop {
         let mut header = String::new();
         match read.read_line(&mut header).await {
             Ok(n) if n > 0 && !header.trim_end().is_empty() => {
-                if let Some((name, value)) = header.split_once(':')
-                    && name.trim().eq_ignore_ascii_case("content-length")
-                {
-                    length = value.trim().parse().unwrap_or(0);
+                if let Some((name, value)) = header.split_once(':') {
+                    if name.trim().eq_ignore_ascii_case("content-length") {
+                        length = value.trim().parse().unwrap_or(0);
+                    } else if name.trim().eq_ignore_ascii_case("authorization") {
+                        authorization = Some(value.trim().to_owned());
+                    }
                 }
             }
             _ => break,
@@ -237,6 +255,11 @@ async fn serve(socket: tokio::net::TcpStream, state: Arc<MockState>, base: Strin
         .lock()
         .unwrap()
         .push((method.clone(), path.to_owned()));
+    state
+        .authorizations
+        .lock()
+        .unwrap()
+        .push((method.clone(), path.to_owned(), authorization));
     let reply = MockOpenRouter::answer(&state, &base, &method, path, query);
     let head = format!(
         "HTTP/1.1 {}\r\ncontent-type: {}\r\ncontent-length: {}\r\nconnection: close\r\n\r\n",
@@ -301,6 +324,10 @@ impl Drop for Managers {
 }
 
 /// The app's Studio as it is wired at start-up, with an OpenRouter endpoint at the mock.
+///
+/// Rust drops fields in the order they are declared, so `managers` must stay above `scratch`:
+/// every manager's tasks stop before the folder holding the gallery, the store's files and the
+/// fake engine's record goes. Moving `scratch` up would delete that folder under running tasks.
 struct WireHarness {
     manager: StudioManager,
     mock: MockOpenRouter,
@@ -331,6 +358,18 @@ impl WireHarness {
     /// in `mode`, a 6 GB Vulkan card with 1 GB free beside a 5 GB chat model, and the app's
     /// lease over that chat model.
     async fn with_local(mock: &MockOpenRouter, mode: &str) -> Self {
+        Self::with_local_on(mock, mode, 1, 32, 5).await
+    }
+
+    /// [`Self::with_local`] on a Vulkan card with `free_gb` GB free beside a chat model of
+    /// `chat_gb` GB, and `ram_gb` GB of free memory.
+    async fn with_local_on(
+        mock: &MockOpenRouter,
+        mode: &str,
+        free_gb: u64,
+        ram_gb: u64,
+        chat_gb: u64,
+    ) -> Self {
         let scratch = Scratch::new();
         let store = store::Store::open_in_memory().unwrap();
         store
@@ -343,12 +382,16 @@ impl WireHarness {
             .unwrap();
         let record = scratch.path().join("record");
         std::fs::create_dir_all(&record).unwrap();
-        let provider =
-            LocalMediaProvider::new(store.clone(), Arc::new(Fixed(catalog())), Arc::new(|| None));
+        let provider = LocalMediaProvider::new(
+            store.clone(),
+            Arc::new(Fixed(catalog())),
+            Arc::new(|| None),
+            Arc::new(FixedFolder(scratch.path().join("models"))),
+        );
         provider.set_engine(Some(fake_engine(mode, &record)));
-        let chat = FakeChat::loaded(5 * GB);
-        let hardware = FixedHardware::gpu(1, 32);
-        hardware.set_chat(Some(5));
+        let chat = FakeChat::loaded(chat_gb * GB);
+        let hardware = FixedHardware::gpu(free_gb, ram_gb);
+        hardware.set_chat(Some(chat_gb));
         let lane = LocalLane {
             provider: Arc::new(provider),
             lease: Arc::new(AppLease(GpuLease::new(chat.clone()))),
@@ -737,6 +780,25 @@ async fn a_picture_and_a_video_through_a_mock_openrouter() {
 }
 
 #[tokio::test]
+async fn the_key_reaches_the_endpoint_in_the_authorization_header() {
+    let mock = MockOpenRouter::start().await;
+    let h = WireHarness::new(&mock).await;
+    h.refresh_lists().await;
+    h.refresh_price(FLUX).await;
+    let pic = h
+        .manager
+        .start(h.picture(FLUX, json!({"resolution": "1K"})), false)
+        .await
+        .unwrap();
+    h.wait(&pic.id, "done").await;
+    // The create request carried the key the keychain holds, as a bearer token.
+    assert_eq!(
+        mock.authorizations("POST", "/api/v1/images"),
+        [Some(format!("Bearer {KEY}"))]
+    );
+}
+
+#[tokio::test]
 async fn opening_studio_makes_no_request() {
     let mock = MockOpenRouter::start().await;
     let h = WireHarness::new(&mock).await;
@@ -759,6 +821,11 @@ async fn a_video_past_the_daily_limit_never_reaches_the_mock() {
     let mock = MockOpenRouter::start().await;
     let h = WireHarness::new(&mock).await;
     h.refresh_lists().await;
+    // The limit is a switch, off on a new install.
+    h.manager
+        .set_prefs(serde_json::from_value(json!({"dailyLimitUsd": 10.0})).unwrap())
+        .await
+        .unwrap();
     h.seed_spent_today(9.95).await;
     // 4 s at 480p with no start frame.
     let req = h.video(GROK_LITE, json!({"duration": 4, "resolution": "480p"}));
@@ -852,6 +919,73 @@ async fn a_local_run_and_a_cloud_run_go_side_by_side_and_stop_works() {
     assert_eq!(error.charged, Some(false));
     assert!(h.partial_is_empty());
     assert_eq!(h.chat_unloads(), 1);
+}
+
+/// Design 9.2: a model that may not fit is a warning, never a refusal. A 2048 × 2048 FLUX.2
+/// klein picture fits nowhere here (not beside the 1 GB chat model on a card with nothing
+/// else free, not after its unload, not on the processor with 1 GB of memory): the app's
+/// lease unloads the chat model, and the engine runs it.
+#[tokio::test]
+async fn a_local_run_that_fits_nowhere_unloads_the_chat_model_and_runs() {
+    let mock = MockOpenRouter::start().await;
+    let h = WireHarness::with_local_on(&mock, "ok", 0, 1, 1).await;
+    let big = json!({"size": "2048x2048"});
+    let estimate = h
+        .manager
+        .estimate(&h.local(KLEIN, big.clone()))
+        .await
+        .unwrap();
+    let local = estimate.local.unwrap();
+    assert_eq!(local.fit, "notHere");
+    assert!(local.reason.is_some());
+    let run = h.manager.start(h.local(KLEIN, big), false).await.unwrap();
+    let done = h.wait(&run.id, "done").await;
+    assert_eq!(done.outputs.len(), 1);
+    assert!(done.error.is_none());
+    assert_eq!(h.chat_unloads(), 1);
+}
+
+/// Ruling S11-ask-honoured: under "Ask before unloading", a run that fits nowhere asks like
+/// any other unload, through the app's lease. While the question waits the run still holds
+/// its model (*Delete* and a set-up change are refused). Keep: the chat model stays and the
+/// run ends with "the chat model stays loaded", never charged. Unload: it runs.
+#[tokio::test]
+async fn under_ask_a_local_run_that_fits_nowhere_asks_first() {
+    let mock = MockOpenRouter::start().await;
+    let h = WireHarness::with_local_on(&mock, "ok", 0, 1, 1).await;
+    let ask: prefs::StudioPrefsPatch = serde_json::from_value(json!({"gpuPolicy": "ask"})).unwrap();
+    h.manager.set_prefs(ask).await.unwrap();
+    let big = json!({"size": "2048x2048"});
+    let asking =
+        |run: &RunDto| run.local.as_ref().and_then(|l| l.waiting_for.as_deref()) == Some("answer");
+
+    let run = h
+        .manager
+        .start(h.local(KLEIN, big.clone()), false)
+        .await
+        .unwrap();
+    let waiting = h.wait_for(&run.id, "asking", asking).await;
+    assert_eq!(waiting.status, "queued");
+    assert!(h.manager.local_uses_model(KLEIN));
+    assert_eq!(h.chat_unloads(), 0);
+    h.manager.answer_unload(&run.id, false).await.unwrap();
+    let kept = h.wait(&run.id, "failed").await;
+    let error = kept.error.unwrap();
+    assert_eq!(
+        (error.code.as_str(), error.charged),
+        ("studio_chat_model_kept", Some(false))
+    );
+    assert!(!h.manager.local_uses_model(KLEIN));
+    assert_eq!(h.chat_unloads(), 0);
+
+    let run = h.manager.start(h.local(KLEIN, big), false).await.unwrap();
+    h.wait_for(&run.id, "asking", asking).await;
+    assert!(h.manager.local_uses_model(KLEIN));
+    h.manager.answer_unload(&run.id, true).await.unwrap();
+    let done = h.wait(&run.id, "done").await;
+    assert_eq!(done.outputs.len(), 1);
+    assert_eq!(h.chat_unloads(), 1);
+    assert!(!h.manager.local_uses_model(KLEIN));
 }
 
 #[tokio::test]

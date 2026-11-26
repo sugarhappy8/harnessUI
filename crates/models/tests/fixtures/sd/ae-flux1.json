@@ -1,0 +1,59 @@
+{
+ "source": {
+  "repo": "lodestones/Chroma",
+  "revision": "2f3b2730d7b5edbd02cdff12f72610af5787300b",
+  "path": "ae.safetensors",
+  "size": 335304388,
+  "sha256": "afc8e28272cd15db3919bacdb6918ce9c1ed22e96cb12c4d5ed0fba823529e38",
+  "capturedOn": "2026-11-24"
+ },
+ "format": "safetensors",
+ "metadata": {
+  "modelspec.architecture": "Flux.1-AE",
+  "modelspec.title": "Flux.1 Autoencoder",
+  "modelspec.author": "Black Forest Labs",
+  "modelspec.description": "The autoencoder for the Flux.1 model family",
+  "modelspec.implementation": "https://github.com/black-forest-labs/flux",
+  "modelspec.date": "2024-08-01",
+  "modelspec.license": "Apache License 2.0",
+  "modelspec.hash_sha256": "0xddec9c299f56c1178e6281a12167f2ebec9aa4de8fce81e234a687bb231d5b6d",
+  "modelspec.sai_model_spec": "1.0.1"
+ },
+ "tensors": [
+  [
+   "decoder.conv_in.bias",
+   "F32",
+   [
+    512
+   ]
+  ],
+  [
+   "decoder.conv_in.weight",
+   "F32",
+   [
+    512,
+    16,
+    3,
+    3
+   ]
+  ],
+  [
+   "encoder.conv_in.bias",
+   "F32",
+   [
+    128
+   ]
+  ],
+  [
+   "encoder.conv_in.weight",
+   "F32",
+   [
+    128,
+    3,
+    3,
+    3
+   ]
+  ]
+ ],
+ "parameters": 83819683
+}

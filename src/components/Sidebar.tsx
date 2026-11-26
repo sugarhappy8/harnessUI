@@ -165,13 +165,17 @@ export function Sidebar(props: {
             showChat();
             void newChat();
           }}
-          className="btn-primary flex w-full items-center justify-center gap-1.5 rounded-lg px-3 py-2 text-sm font-medium"
+          // In Studio the gradient is Create's alone (design 10.4, critique §2.5): New chat is a
+          // quiet button there.
+          className={`flex w-full items-center justify-center gap-1.5 rounded-lg px-3 py-2 text-sm font-medium ${
+            studioShown ? "border border-border bg-surface text-fg shadow-soft hover:border-border-strong hover:bg-bg-muted" : "btn-primary"
+          }`}
           title="New chat (Ctrl+N)"
         >
           <Plus size={16} aria-hidden />
           New chat
         </button>
-        <label className="flex items-center gap-2 rounded-lg border border-border bg-bg px-2.5 py-1.5 focus-within:border-border-strong">
+        <label className="flex items-center gap-2 rounded-lg border border-border bg-bg px-2.5 py-1.5 focus-within:border-border-strong focus-within:ring-2 focus-within:ring-accent/40">
           <Search size={14} className="text-fg-muted" aria-hidden />
           <span className="sr-only">Search chats</span>
           <input

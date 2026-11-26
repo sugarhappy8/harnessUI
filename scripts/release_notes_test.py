@@ -15,6 +15,7 @@ import contextlib
 import io
 import json
 import os
+import re
 import shutil
 import sys
 import tempfile
@@ -187,6 +188,16 @@ class TheWorkflow(unittest.TestCase):
         publish_lines = [line.strip() for line in verify.splitlines() if "--draft=false" in line]
         self.assertEqual(len(publish_lines), 1)
         self.assertIn("--notes-file", publish_lines[0])
+
+    def test_no_doc_gives_app_a_version(self):
+        # Final review, area 4, M11: `app` takes no argument; it reads tauri.conf.json.
+        for rel in ("docs/dev/0.2.0/plan.md", "e2e/README.md", "ARCHITECTURE.md", "README.md", ".github/workflows/release.yml"):
+            text = (rn.ROOT / rel).read_text(encoding="utf-8")
+            given = re.search(r"release_notes\.py app +[0-9v][^`\n]*", text)
+            self.assertIsNone(given, f"{rel}: {given and given.group(0)}")
+        with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit) as refused:
+            rn.main(["app", "0.2.0"])
+        self.assertEqual(refused.exception.code, 2)
 
     def test_ci_runs_these_tests(self):
         ci = (rn.ROOT / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")

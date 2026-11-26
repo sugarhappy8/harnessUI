@@ -2,10 +2,11 @@ import { useEffect, useState } from "react";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import * as ipc from "../../lib/ipc";
 import type { ErrorInfo } from "../../lib/types";
-import { STUDIO_ACTIONS, STUDIO_DELETE, STUDIO_SETTINGS } from "../../lib/words";
+import { STUDIO_ACTIONS, STUDIO_DELETE, STUDIO_SETTINGS, STUDIO_TOPBAR } from "../../lib/words";
 import { toErrorInfo } from "../../store/app";
 import { useStudio } from "../../store/studio";
 import { ErrorBanner } from "../ErrorBanner";
+import { SwitchField } from "../ui/SwitchField";
 import { visiblePath } from "../FolderChip";
 import * as api from "../studio/api";
 import { ConfirmDialog } from "../studio/ConfirmDialog";
@@ -20,16 +21,18 @@ import type { GpuPolicy, LocalModels, StudioEndpoint, StudioPrefs, StudioPrefsPa
 // notice read only (Task B14); what happens to the chat model when a local job needs the
 // graphics card, and whether it loads again after Studio. Then what the
 // gallery holds and where, with *Open folder*, *Change…* (new results only) and *Delete
-// stopped and failed runs* (which asks first); the confirmations and the daily limit for cloud
-// runs; and when each cloud model list was updated, with *Update now*. Opening the page reads
+// stopped and failed runs* (which asks first); the four spending switches (all off until turned on) for
+// cloud runs; and when each cloud model list was updated, with *Update now*. Opening the page reads
 // what is saved (the store's `reread`) and sends nothing; each change sends only its own field,
 // and applies to the next run at once.
 
 /** The amounts the backend takes (`prefs::DAILY_LIMIT_RANGE`, `prefs::CONFIRM_AT_RANGE`). */
 const DAILY_LIMIT = { min: 1, max: 1000 } as const;
 const CONFIRM_AT = { min: 0.25, max: 100 } as const;
-/** The daily limit when it is turned on again with no amount of its own this session. */
+/** The amounts the switches fill in when they are turned on with no amount of their own yet
+ *  (`DEFAULT_DAILY_LIMIT_USD` and `CONFIRM_AT_USD` in the backend). */
 const DEFAULT_LIMIT_USD = 10;
+const DEFAULT_CONFIRM_AT_USD = 1;
 
 const GPU_POLICIES: readonly GpuPolicy[] = ["unload", "ask", "processor"];
 
@@ -111,10 +114,10 @@ function OnThisComputer(props: { local: LocalModels | null; prefs: StudioPrefs |
             <button
               type="button"
               className={BUTTON}
-              // Studio opens on Get local models; Settings closes as it does.
+              // Studio opens on Get models; Settings closes as it does.
               onClick={() => window.dispatchEvent(new CustomEvent("app:open-studio", { detail: "local" }))}
             >
-              {STUDIO_ACTIONS.getLocalModels}
+              {STUDIO_TOPBAR.getModels}
             </button>
           </div>
           <EngineLine engine={local.engine} hasModel={local.installed.length > 0} removable />
@@ -303,79 +306,102 @@ function AmountField(props: {
   );
 }
 
-/** The confirmations and the daily limit for cloud runs. */
+/** The amount a switch is turned on again at: the newest one, kept in the box here or saved.
+ *  Turning a switch off leaves the box first, so an amount just kept there may not be saved yet
+ *  (`saved` still the old one) when the switch goes off: that amount, not `saved`, comes back. */
+function useKeptAmount(saved: number | null, fallback: number) {
+  const [kept, setKept] = useState(saved ?? fallback);
+  const [lastSaved, setLastSaved] = useState(saved);
+  if (saved !== lastSaved) {
+    setLastSaved(saved);
+    if (saved !== null) setKept(saved);
+  }
+  return [kept, setKept] as const;
+}
+
+/** The spending guards for cloud runs: four switches, all off until turned on; the two with an
+ *  amount show its box while they are on (Task G1). Prices show before every cloud run either way. */
 function Spending(props: { prefs: StudioPrefs }) {
   const { prefs } = props;
   const limit = prefs.dailyLimitUsd;
+  const confirmAt = prefs.confirmAtUsd;
   const [error, setError] = useState<ErrorInfo | null>(null);
-  // The amount the limit is turned on again at: the newest one, kept in the box here or saved.
-  // Unticking leaves the box first, so an amount just kept there may not be saved yet (`limit`
-  // still the old one) when the box is unticked: that amount, not `limit`, comes back.
-  const [kept, setKept] = useState(limit ?? DEFAULT_LIMIT_USD);
-  const [savedLimit, setSavedLimit] = useState(limit);
-  if (limit !== savedLimit) {
-    setSavedLimit(limit);
-    if (limit !== null) setKept(limit);
-  }
+  const [keptLimit, setKeptLimit] = useKeptAmount(limit, DEFAULT_LIMIT_USD);
+  const [keptAt, setKeptAt] = useKeptAmount(confirmAt, DEFAULT_CONFIRM_AT_USD);
   return (
     <section aria-labelledby="studio-spending" className="space-y-3">
       <h3 id="studio-spending" className={HEADING}>
         {STUDIO_SETTINGS.spending}
       </h3>
-      <label className="flex items-center gap-2">
-        <input
-          type="checkbox"
-          checked={prefs.confirmEveryVideo}
-          onChange={(e) => changePrefs({ confirmEveryVideo: e.target.checked }, setError)}
-        />
-        {STUDIO_SETTINGS.confirmVideo}
-      </label>
-      <AmountField
-        id="studio-confirm-at"
-        label={STUDIO_SETTINGS.confirmAt}
-        after={STUDIO_SETTINGS.orMore}
-        value={prefs.confirmAtUsd}
-        min={CONFIRM_AT.min}
-        max={CONFIRM_AT.max}
-        rangeWords={STUDIO_SETTINGS.confirmAtRange}
-        onCommit={(usd) => changePrefs({ confirmAtUsd: usd }, setError)}
-      />
+      <p className="text-xs text-fg-muted">{STUDIO_SETTINGS.spendingNote}</p>
       <div>
-        <div className="flex flex-wrap items-start gap-3">
-          <label className="flex items-center gap-2 py-1">
-            <input
-              type="checkbox"
-              checked={limit !== null}
-              aria-describedby="studio-limit-help"
-              onChange={(e) => {
-                changePrefs({ dailyLimitUsd: e.target.checked ? kept : null }, setError);
+        <SwitchField
+          label={STUDIO_SETTINGS.limit}
+          description={STUDIO_SETTINGS.limitHelp}
+          checked={limit !== null}
+          onChange={(on) => changePrefs({ dailyLimitUsd: on ? keptLimit : null }, setError)}
+        />
+        {limit !== null && (
+          <div className="mt-1.5">
+            <AmountField
+              id="studio-limit"
+              ariaLabel={STUDIO_SETTINGS.limitAmount}
+              value={limit}
+              min={DAILY_LIMIT.min}
+              max={DAILY_LIMIT.max}
+              rangeWords={STUDIO_SETTINGS.limitRange}
+              onCommit={(usd) => {
+                setKeptLimit(usd);
+                // A refused amount is not kept: the limit comes back at the saved one.
+                changePrefs({ dailyLimitUsd: usd }, setError, () =>
+                  setKeptLimit((now) =>
+                    now === usd ? (useStudio.getState().prefs?.dailyLimitUsd ?? limit ?? DEFAULT_LIMIT_USD) : now,
+                  ),
+                );
               }}
             />
-            {STUDIO_SETTINGS.limit}
-          </label>
-          <AmountField
-            // A box turned off or on again starts from the saved amount.
-            key={limit === null ? "off" : "on"}
-            id="studio-limit"
-            ariaLabel={STUDIO_SETTINGS.limitAmount}
-            value={limit ?? kept}
-            min={DAILY_LIMIT.min}
-            max={DAILY_LIMIT.max}
-            rangeWords={STUDIO_SETTINGS.limitRange}
-            disabled={limit === null}
-            onCommit={(usd) => {
-              setKept(usd);
-              // A refused amount is not kept: the limit comes back at the saved one.
-              changePrefs({ dailyLimitUsd: usd }, setError, () =>
-                setKept((now) => (now === usd ? (useStudio.getState().prefs?.dailyLimitUsd ?? limit ?? DEFAULT_LIMIT_USD) : now)),
-              );
-            }}
-          />
-        </div>
-        <p id="studio-limit-help" className="mt-1 text-xs text-fg-muted">
-          {STUDIO_SETTINGS.limitHelp}
-        </p>
+          </div>
+        )}
       </div>
+      <SwitchField
+        label={STUDIO_SETTINGS.confirmVideo}
+        checked={prefs.confirmEveryVideo}
+        onChange={(on) => changePrefs({ confirmEveryVideo: on }, setError)}
+      />
+      <div>
+        <SwitchField
+          label={STUDIO_SETTINGS.confirmAt}
+          checked={confirmAt !== null}
+          onChange={(on) => changePrefs({ confirmAtUsd: on ? keptAt : null }, setError)}
+        />
+        {confirmAt !== null && (
+          <div className="mt-1.5">
+            <AmountField
+              id="studio-confirm-at"
+              ariaLabel={STUDIO_SETTINGS.confirmAtAmount}
+              after={STUDIO_SETTINGS.orMore}
+              value={confirmAt}
+              min={CONFIRM_AT.min}
+              max={CONFIRM_AT.max}
+              rangeWords={STUDIO_SETTINGS.confirmAtRange}
+              onCommit={(usd) => {
+                setKeptAt(usd);
+                changePrefs({ confirmAtUsd: usd }, setError, () =>
+                  setKeptAt((now) =>
+                    now === usd ? (useStudio.getState().prefs?.confirmAtUsd ?? confirmAt ?? DEFAULT_CONFIRM_AT_USD) : now,
+                  ),
+                );
+              }}
+            />
+          </div>
+        )}
+      </div>
+      <SwitchField
+        label={STUDIO_SETTINGS.confirmUnknown}
+        description={STUDIO_SETTINGS.confirmUnknownHelp}
+        checked={prefs.confirmUnknownPrice}
+        onChange={(on) => changePrefs({ confirmUnknownPrice: on }, setError)}
+      />
       {error && <ErrorBanner error={error} onDismiss={() => setError(null)} />}
     </section>
   );

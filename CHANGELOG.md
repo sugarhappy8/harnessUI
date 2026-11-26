@@ -2,6 +2,44 @@
 
 All notable changes, by milestone. Dates are UTC.
 
+## 0.2.0 (2026-11-26)
+
+Studio, opened up. The owner said: "I was mostly talking about how nothing from huggingface for video and image models is supported", and, about the limits in the app: "Work on fixing the app and removing ur set restrictions due to it being very not user friendly". So 0.2.0 lets Studio run any Hugging Face picture or video model the Studio engine can run, not only the few it was told about, and it takes out the limits that got in the way. The model list, the downloads and the composer were redesigned along the way.
+
+### Added
+- **Any Hugging Face picture or video model the Studio engine can run.** Search Hugging Face in *Get models*, or paste a repository name. Before you download, each model says *Works in Studio*, with its type, for example "Works in Studio · SDXL picture model". One *Download* fetches the model and the extra files it needs, such as a text encoder and a decoder, and shows the total size first.
+- **Add a model file.** A model file already on this computer can be added in place, with *Use it where it is*, or copied in. Studio reads the file's header, never runs it, to tell what kind of model it is.
+- **LoRAs.** Add a LoRA from Hugging Face or from a file, switch it on beside a model of the same family and set how strongly it applies.
+- **Set it up yourself.** For a model Studio is unsure about, *Set it up yourself* lets you say what the model type is and which files are which, then run it.
+- **The model type, and every sampler and scheduler.** A model's page now shows its type and offers the engine's full lists of samplers and schedulers under *Advanced*.
+- **Inpainting and Fill models.** Give them a picture and a mask picture, and they change only the masked part. FLUX.1 Canny, FLUX.1 Depth and Flex.2 take a control picture the same way.
+- **Licences with use rules.** A licence that allows commercial use but sets rules for what you may do with the model, such as an OpenRAIL licence, now reads "Commercial use allowed, with use rules".
+
+### Changed
+- **The spending limits are off by default.** The four spending switches in *Settings → Studio* are switches now, and all four start off. If you update from 0.1.x, the daily limit of $10, the question before every video and the question before runs of $1 or more are turned off once where they were still the defaults; a limit or an amount you changed yourself is kept. Prices are still always shown before a cloud run. Turn a switch on if you want the app to ask or stop for you.
+- **"May not fit this computer" is a warning, not a wall.** A model that may be too big for this computer can still be downloaded and tried.
+- **Video on the processor is offered.** A computer without a good graphics card can try local video, slowly.
+- **The 4,000-character prompt limit is gone.** A picture prompt can be up to 16,384 characters.
+- **Create finishes a pending price.** If a cloud model's price is still loading when you click *Create*, Studio waits for it and then goes on, instead of asking you to click again.
+- **An update no longer waits for a local job.** Installing an update now stops a picture or video being made on this computer, instead of refusing until it finishes.
+- **Chat modes stop asking.** Choosing *Allow all* or *Full access* applies at once, with no extra question. A start mode you have saved is not asked about again at launch. Chats still start in *Ask* unless you saved another start mode.
+- **One composer, with a model chip.** Studio has a single composer, and the model chip in it shows the model you are using and opens the model sheet to change it.
+- **The model sheet.** The model chip opens one sheet for picking a model: your recent models, then the models on this computer, then cloud models by company, with *Add a model file* and *Get more models* at its foot. A model's settings, *My setups*, its LoRAs and its files are in the *Settings* side panel.
+- **Get models is a full view.** It has a search box, a verdict on each model (*Works in Studio* or *Can't run in Studio*, with the reason) and a detail panel for the model you pick, with its files, licence and fit for this computer.
+- **Pause, Cancel and Use it on downloads.** Every model download can be paused, resumed or cancelled, from its card, the detail panel or the downloads list in the top bar. When a model is ready, *Use it* puts it in the composer.
+- **Bigger pictures.** Results open larger, and the results grid has *Select* for choosing several pictures at once.
+
+### Fixed
+- **Kuna on a slow Mac.** The first time it ran, Kuna could show as unavailable because a one-time set-up step ran out of time. It now waits long enough.
+- **The scheduled Reverse engineering self-test on Linux and macOS** now passes again.
+
+### Known limits
+- **Some models can't run in Studio.** The Studio engine can't run Lumina 2, LTX-Video 0.9, HunyuanVideo 1 or Stable Video Diffusion, and it doesn't recognise HiDream-I1. They are labelled *Can't run in Studio* (HiDream-I1 says "The Studio engine doesn't recognise this model"), and Studio won't set them up. Their files can still be downloaded one at a time, with *Download file anyway*, for another app.
+- **Adapter files are not offered.** ControlNet, IP-Adapter, PhotoMaker and other adapter files, upscalers and audio-driven video are not offered.
+- **Masks are added as black-and-white pictures.** Painting a mask in the app comes later.
+- **Pickle files are not read.** Files such as `.ckpt` can run code when opened, so Studio does not open them.
+- **Split files can't run.** A model saved as several numbered parts, which is called sharded, can't be run.
+
 ## 0.1.2 (2026-11-20)
 
 - Studio can download and run FLUX.3 Image Klein and the full Wan 2.2 TI2V-5B from Hugging Face. Each download includes the text encoder and decoder the model needs.
@@ -33,7 +71,7 @@ The picture and video update. The owner asked, word for word: "For the cloud upd
 - **Prices before you run.** *Create* shows a cloud run's price before you click it, in words and, from $1, in colour, and the card says what the run cost once it ends.
 - **Confirmation and the $10 daily limit.** Studio asks before every cloud video and any run of $1 or more or with an unknown price. A daily limit of $10 of cloud spending, on by default, stops a run that would go past it ("Daily limit reached: $X of $10 spent today"); *Settings → Studio* changes it. Deleting a result does not lower what was spent today. Runs on this computer cost nothing and never count.
 - **Videos that keep going after you close the app.** A cloud video takes a few minutes. You can keep working, switch to a chat or close harnessUI: on the next start Studio checks on the job and downloads the result. Studio never sends the same run twice, so you never pay twice for it.
-- **The gallery folder.** What you make is saved in the `harnessUI/studio` folder in your home folder (*Settings → Studio* can change it), by month, with a small record of each run's settings beside the files, never your key.
+- **The gallery folder.** What you make is saved in the `harnessUI/studio` folder in your home folder (*Settings → Studio* can change it), by month, with a small record of each run's settings and its prompt beside the files, never your key.
 - ***Send to chat* and *Open in Studio*.** *Send to chat* puts a picture you made into a chat's message box, and a picture in a chat has *Open in Studio*, which adds it to the pictures for your next Studio run.
 - **One audit row per run.** *Settings → Audit log* lists each Studio run with its model, where it ran, its status and cost, and the prompt's length, but never the prompt.
 
@@ -58,7 +96,7 @@ The picture and video update. The owner asked, word for word: "For the cloud upd
 - **How long OpenRouter keeps a finished video is not documented**, so a video finished while harnessUI was closed for a long time may be gone when it starts again.
 - **A video over 256 MiB opens from its folder instead of playing in the app** (*Show in folder*).
 - **Going back to 0.0.8 after 0.1.0 has opened the database is refused**, because 0.0.8 cannot read schema 3, the database layout that holds Studio's records.
-- **Built and tested on Linux, Windows and macOS from CI.** The build machine has no graphics card, so real local runs on Windows PCs and Macs, and the benchmark the first guesses come from, are left to the owner's computers.
+- **Built and tested on Linux, Windows and macOS from CI.**
 
 ## 0.0.8 (2026-11-16)
 
@@ -214,7 +252,7 @@ Every part had an independent security review. The main things found and closed 
 ### Known limits
 - **Nothing of 0.0.6 has been tried by hand on Windows or macOS,** and the build machine has no graphics card. Everything was built and tested on Linux, on the processor; the Windows and macOS builds come from CI. The graphics-card choices, Save memory on Vulkan and Metal, Keep in memory, Automatic on a graphics card, the usage figures on Windows and macOS, and the exact figures of *Where the model goes* on a graphics card wait for the owner's checklist (`docs/dev/0.0.6/owner-checklist.md`).
 - **Ghidra's download is checked only against the checksum GitHub publishes.** A release offers a download only once it has been checked against its maker's own checksum or signature; for Ghidra that is the checksum GitHub publishes. It could not be read where this version was built, so a CI run of this project (run 43380365172) read it; it matched and is recorded, so a release offers Ghidra. Every release build reads it again and stops if it no longer matches.
-- Each new feature has scripted end-to-end tests that drive the real app. rea is tested there against a stand-in. Tests with the real rea and its decompilers passed on Linux; a separate CI workflow is set up to run them on Windows (Ghidra), macOS (Kuna) and Linux (both), but it has not run yet.
+- Each new feature has scripted end-to-end tests that drive the real app. rea is tested there against a stand-in. Tests with the real rea and its decompilers passed on Linux; a separate CI workflow is set up to run them on Windows (Ghidra), macOS (Kuna) and Linux (both), but it had not run yet.
 - On a Mac only Kuna is offered in 0.0.6. It cannot open Windows programs, or most Mac apps, because those are built for both Apple and Intel chips. rea cannot use Kuna on Windows yet.
 - Ghidra on Windows is rea's newest support: it opens `.exe` and `.dll` files on this PC's own drives only. Opening a file can take a few minutes, and Ghidra uses up to about 3 GB of memory while it works. Pressing Stop while rea works restarts rea, which takes about 9 seconds.
 - On Windows, if a program the app starts (llama-server, Node.js, Java or a decompiler) crashes, Windows Error Reporting may handle it the way your Windows settings say, which can include sending a report to Microsoft. The app itself sends nothing.

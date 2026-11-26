@@ -8,6 +8,7 @@ import { act, cleanup, fireEvent, render, screen, within } from "@testing-librar
 import { COMPOSE_IMAGES_EVENT } from "../../lib/composeImages";
 import { LOCAL, LOCAL_RUN, MODELS, RUN } from "./fixtures/models";
 import type { LocalRun, Run, RunError, StudioPrefs } from "./types";
+import { STUDIO_CARD } from "../../lib/words";
 
 vi.mock("../../lib/ipc", () => ({ isTauri: () => true, loadLocalModel: vi.fn(), modelBusy: vi.fn() }));
 vi.mock("./api");
@@ -15,6 +16,7 @@ vi.mock("./api");
 const api = await import("./api");
 const ipc = await import("../../lib/ipc");
 const { RunCard, localLine, queueSummary, usualSeconds, usualTimesOf } = await import("./RunCard");
+const { UiProviders } = await import("../ui/UiProviders");
 const { useStudio } = await import("../../store/studio");
 const { useApp } = await import("../../store/app");
 
@@ -77,7 +79,10 @@ function prefs(patch: Partial<StudioPrefs> = {}): StudioPrefs {
   return {
     lastModel: {},
     advancedOpen: false,
+    settingsOpen: false,
+    prefsVersion: 1,
     confirmEveryVideo: true,
+    confirmUnknownPrice: false,
     confirmAtUsd: 1,
     dailyLimitUsd: 10,
     setups: [],
@@ -86,6 +91,7 @@ function prefs(patch: Partial<StudioPrefs> = {}): StudioPrefs {
     reloadChatAfter: false,
     suggestionDismissed: true,
     localNoticeAcceptedAt: null,
+    lastImportMode: null,
     ...patch,
   };
 }
@@ -98,7 +104,11 @@ async function flush() {
 
 async function show(r: Run) {
   await act(async () => {
-    render(<RunCard run={r} />);
+    render(
+      <UiProviders>
+        <RunCard run={r} />
+      </UiProviders>,
+    );
   });
 }
 
@@ -474,6 +484,129 @@ describe("RunCard", () => {
     });
   });
 
+  // [0.2.0 U9] Design 10.4: the card leads with its pictures; the prompt is its heading, the
+  // model and settings one quiet line; a failure is an inline alert with what to do next.
+  describe("its layout", () => {
+    const original = { create: URL.createObjectURL, revoke: URL.revokeObjectURL };
+    beforeEach(() => {
+      URL.createObjectURL = vi.fn(() => "blob:tile");
+      URL.revokeObjectURL = vi.fn();
+      vi.mocked(api.studioOutputBytes).mockResolvedValue(new ArrayBuffer(8));
+    });
+    afterEach(() => {
+      URL.createObjectURL = original.create;
+      URL.revokeObjectURL = original.revoke;
+    });
+
+    const tile = (id: string) => document.querySelector<HTMLElement>(`[data-output-tile="${id}"]`)!;
+
+    it("a finished card leads with its pictures at their own shape, up to 256 px", async () => {
+      const wide = { ...RUN.outputs[0]!, id: "wide", width: 1536, height: 1024 };
+      const tall = { ...RUN.outputs[1]!, id: "tall", width: 768, height: 1344 };
+      // A result whose size is not known takes the run's shape.
+      const unknown = { ...RUN.outputs[2]!, id: "unknown", width: null, height: null };
+      await show(run({ params: { ...RUN.params, aspect_ratio: "16:9" }, outputs: [wide, tall, unknown] }));
+      await flush();
+      const card = document.querySelector<HTMLElement>("[data-run-card]")!;
+      const pictures = card.querySelector("[data-run-pictures]")!;
+      // The pictures come first, before the prompt and everything else.
+      expect(card.firstElementChild).toBe(pictures);
+      expect(
+        pictures.compareDocumentPosition(within(card).getByRole("heading", { level: 3 })) & Node.DOCUMENT_POSITION_FOLLOWING,
+      ).toBeTruthy();
+      expect(tile("wide").style.width).toBe("256px");
+      expect(tile("wide").style.height).toBe("");
+      expect(tile("wide").style.aspectRatio).toBe("1536 / 1024");
+      expect(tile("tall").style.height).toBe("256px");
+      expect(tile("tall").style.width).toBe("");
+      expect(tile("tall").style.aspectRatio).toBe("768 / 1344");
+      expect(tile("unknown").style.width).toBe("256px");
+      expect(tile("unknown").style.aspectRatio).toBe("16 / 9");
+      // Never wider than the card.
+      for (const id of ["wide", "tall", "unknown"]) expect(tile(id).className).toContain("max-w-full");
+    });
+
+    it("the prompt is the card's heading, and settings and model are one line", async () => {
+      const untested = LOCAL.installed.find((m) => m.untested && m.takesLoras)!;
+      const pixelArt = LOCAL.loras[0]!;
+      useStudio.setState({ local: LOCAL, loras: LOCAL.loras });
+      await show(
+        localRun({
+          model: untested.model.id,
+          modelLabel: untested.name,
+          params: { ...LOCAL_RUN.params, loras: [{ id: pixelArt.id, weight: 0.8 }] },
+        }),
+      );
+      const heading = screen.getByRole("heading", { level: 3, name: LOCAL_RUN.prompt });
+      expect(heading.className).toContain("text-section");
+      // Not quoted, and the card is named by it.
+      expect(heading.textContent).toBe(LOCAL_RUN.prompt);
+      screen.getByRole("article", { name: LOCAL_RUN.prompt });
+      const line = document.querySelectorAll("[data-settings-line]");
+      expect(line).toHaveLength(1);
+      expect(line[0]!.className).toContain("text-meta");
+      expect(line[0]!.textContent).toBe(
+        `${untested.name} · on this computer · 1024×1024 · ×2 · seed 81723 · LoRAs: pixel-art-xl 0.8 · untested set-up · free`,
+      );
+      // How long it took sits at the heading's right, at body size.
+      const figure = document.querySelector<HTMLElement>("[data-run-figure]")!;
+      expect(figure.textContent).toBe("took 3 min 48 s");
+      expect(heading.parentElement!.contains(figure)).toBe(true);
+      cleanup();
+      // A set-up Studio matched says nothing of the kind; a cloud run's figure is its cost.
+      await show(run());
+      expect(document.querySelector("[data-settings-line]")!.textContent).toBe(
+        "GPT Image 2.6 Flare · My OpenRouter · 1:1 · ×4 · seed 81723",
+      );
+      expect(document.querySelector("[data-run-figure]")!.textContent).toBe("$0.04");
+    });
+
+    it("a failure is an inline alert with its message, next step and actions", async () => {
+      await show(
+        run({
+          status: "failed",
+          outputs: [],
+          costUsd: null,
+          error: err({
+            code: "studio_timeout",
+            charged: false,
+            requestId: "gen-17",
+            message: "OpenRouter did not answer in time, or the connection was cut.",
+            nextStep: "OpenRouter does not charge for a picture you did not receive. Try again.",
+            details: "timed out after 120 s",
+          }),
+        }),
+      );
+      const alert = screen.getByRole("alert");
+      within(alert).getByText("OpenRouter did not answer in time, or the connection was cut.");
+      within(alert).getByText("OpenRouter does not charge for a picture you did not receive. Try again.");
+      within(alert).getByText("Not charged · request gen-17");
+      within(alert).getByRole("button", { name: "Again" });
+      within(alert).getByRole("button", { name: "Reuse" });
+      const details = within(alert).getByRole("button", { name: "Details" });
+      await click(details);
+      expect(details.getAttribute("aria-expanded")).toBe("true");
+      within(alert).getByText("timed out after 120 s");
+      // The card's one alert: no second row of buttons outside it.
+      expect(screen.getAllByRole("button", { name: "Again" })).toHaveLength(1);
+      cleanup();
+      // A run stopped on purpose is not a failure: it is said quietly, with the same actions.
+      await show(
+        localRun(
+          {
+            status: "cancelled",
+            outputs: [],
+            error: err({ code: "studio_stopped", company: "local", charged: false, message: "Stopped. Nothing was charged." }),
+          },
+          { elapsedMs: null },
+        ),
+      );
+      expect(screen.queryByRole("alert")).toBeNull();
+      within(screen.getByRole("status")).getByText("Stopped. Nothing was charged.");
+      within(screen.getByRole("status")).getByRole("button", { name: "Run again" });
+    });
+  });
+
   describe("the queue strip and the usual time", () => {
     it("the queue strip counts", () => {
       const runs = [
@@ -709,7 +842,7 @@ describe("RunCard", () => {
       const failed = (code: string, message: string) =>
         localRun({ status: "failed", outputs: [], error: err({ code, message, company: "local", charged: false }) });
       await show(failed("studio_engine_missing", "The Studio engine is missing or was blocked."));
-      const download = button("Download the Studio engine (29 MB, MIT)");
+      const download = button("Download the Studio engine (30 MB, MIT)");
       expect(download.getAttribute("title")).toBe(LOCAL.engine.licenseName);
       await click(download);
       expect(api.studioEngineDownload).toHaveBeenCalledWith(true);
@@ -723,7 +856,38 @@ describe("RunCard", () => {
       cleanup();
       await show(failed("studio_model_file_bad", "A model file is damaged."));
       await click(button("Download again"));
-      expect(api.studioLocalDownload).toHaveBeenCalledWith({ installed: { genModelId: LOCAL_RUN.model } });
+      expect(api.studioLocalDownload).toHaveBeenCalledWith({ installed: { genModelId: LOCAL_RUN.model } }, null);
+    });
+
+    it("Download again on a model checked at once says its files are whole", async () => {
+      vi.mocked(api.studioLocalDownload).mockResolvedValue(null);
+      await show(
+        localRun({
+          status: "failed",
+          outputs: [],
+          error: err({ code: "studio_model_file_bad", message: "A model file is damaged.", company: "local" }),
+        }),
+      );
+      await click(button("Download again"));
+      screen.getByText(STUDIO_CARD.repairedNow);
+      expect(screen.queryByText(STUDIO_CARD.repairing)).toBeNull();
+    });
+
+    it("a file of the person's own that moved offers no download", async () => {
+      await show(
+        localRun({
+          status: "failed",
+          outputs: [],
+          error: err({
+            code: "studio_local_file_moved",
+            message: "A file of this model was moved or changed on this computer.",
+            nextStep: "Add the file again with Add a model file in Get models, or delete this model.",
+            company: "local",
+          }),
+        }),
+      );
+      screen.getByText("A file of this model was moved or changed on this computer.");
+      noButton(/Download again/);
     });
 
     it("a refused repair says why on the card", async () => {

@@ -15,8 +15,7 @@
 //!   wins the race against Stop's own (the end of the stopped turn) gives the keyboard too.
 //!
 //! The page is told just before the window comes back and again once it is on screen, and
-//! every approval card and Allow all / Full access confirmation on screen starts its input
-//! delay again, so a click meant for another application cannot land on it.
+//! every approval card on screen starts its input delay again, so a click meant for another application cannot land on it.
 //!
 //! The quiet restores never activate the window: on Windows `ShowWindow(SW_SHOWNOACTIVATE)`
 //! ([`computer::restore_window_without_activating`]; Tauri's own restore is
@@ -358,8 +357,7 @@ mod tests {
     }
 
     /// The page listens for the event the app sends when it brings the window back:
-    /// approval cards and the Allow all / Full access confirmations start their input delay
-    /// again.
+    /// approval cards start their input delay again.
     #[test]
     fn the_page_listens_for_the_window_coming_back() {
         let page = include_str!("../../../src/lib/windowShown.ts");
@@ -371,7 +369,5 @@ mod tests {
         assert!(delay.contains("onMainWindowShown(restart)"));
         let card = include_str!("../../../src/components/ApprovalCard.tsx");
         assert!(card.contains("useInputDelay(CARD_INPUT_DELAY_MS)"));
-        let confirms = include_str!("../../../src/components/AllowAllButton.tsx");
-        assert!(confirms.contains("useInputDelay(CONFIRM_INPUT_DELAY_MS)"));
     }
 }

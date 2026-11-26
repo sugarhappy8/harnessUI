@@ -21,6 +21,8 @@
 
 use std::collections::BTreeMap;
 
+// The prompt's one bound, in bytes of UTF-8, the same for every run (design 9.2).
+use runtime::sd::args::PROMPT_MAX_BYTES;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
@@ -40,9 +42,6 @@ pub const OPENAI_SIZE_RULES: SizeRules = SizeRules {
     min_pixels: 655_360,
     max_pixels: 8_294_400,
 };
-
-/// The longest prompt sent to a cloud company, in characters.
-const PROMPT_MAX_CHARS: usize = 32_000;
 
 /// Names an extra setting never takes: they belong to the request itself.
 const RESERVED: &[&str] = &["model", "prompt", "provider"];
@@ -203,6 +202,24 @@ pub enum ParamKind {
         /// The names the model takes.
         allowed_keys: Vec<String>,
     },
+    /// The LoRAs a local model's run attaches: `[{"id": string, "weight": number,
+    /// "highNoise": bool}]`, at most `max`, each id once per part, each weight from
+    /// `weight_min` to `weight_max` on `weight_step`, and `highNoise` only when `high_noise`
+    /// (a model with a high-noise part, which takes LoRAs of its own).
+    Loras {
+        /// The most LoRAs one run takes.
+        max: u32,
+        /// The model has a high-noise part.
+        high_noise: bool,
+        /// The weakest strength.
+        weight_min: f64,
+        /// The strongest strength.
+        weight_max: f64,
+        /// The strengths are `weight_min` plus whole steps of this.
+        weight_step: f64,
+        /// A LoRA's strength when it is attached.
+        weight_default: f64,
+    },
 }
 
 /// One company that runs an OpenRouter picture model: a record of the model's `/endpoints`
@@ -309,7 +326,7 @@ pub enum Invalid {
     Reserved(String),
     /// The prompt is empty.
     EmptyPrompt,
-    /// The prompt is longer than 32,000 characters.
+    /// The prompt is longer than 1 MiB of UTF-8 ([`PROMPT_MAX_BYTES`]).
     PromptTooLong,
     /// The model cannot be used; the reason.
     NotUsable(String),
@@ -418,8 +435,9 @@ pub fn family_of(id: &str) -> String {
 /// Checks a request against the model's controls: every setting is one the model offers,
 /// with a value it takes; extra settings are ones it lists (a company setting also needs a
 /// company the routing allows that lists it), never a typed field's name, `model`, `prompt`
-/// or `provider`; the pictures of each role are within the model's limits; the prompt is
-/// 1 to 32,000 characters. A model that cannot be used is refused. A setting sent with its
+/// or `provider`; the pictures of each role are within the model's limits; the prompt is not
+/// empty and at most 1 MiB of UTF-8 ([`PROMPT_MAX_BYTES`], a safety bound never shown as a
+/// limit). A model that cannot be used is refused. A setting sent with its
 /// company default is the same as one left out, so what it requires is not checked.
 ///
 /// # Errors
@@ -431,7 +449,7 @@ pub fn validate(model: &MediaModel, req: &MediaRequest) -> Result<(), Vec<Invali
     let mut problems = Vec::new();
     if req.prompt.trim().is_empty() {
         problems.push(Invalid::EmptyPrompt);
-    } else if req.prompt.chars().count() > PROMPT_MAX_CHARS {
+    } else if req.prompt.len() > PROMPT_MAX_BYTES {
         problems.push(Invalid::PromptTooLong);
     }
 
@@ -491,7 +509,7 @@ pub fn validate(model: &MediaModel, req: &MediaRequest) -> Result<(), Vec<Invali
             problems.push(problem);
         }
     }
-    for role in [RefRole::Reference, RefRole::StartFrame, RefRole::EndFrame] {
+    for role in RefRole::ALL {
         if !roles.contains(&role) && req.refs.iter().any(|r| r.role == role) {
             problems.push(Invalid::TooManyPictures { role, max: 0 });
         }
@@ -1118,6 +1136,32 @@ fn fits(kind: &ParamKind, value: &Value) -> bool {
         ParamKind::Text { max_chars } => value
             .as_str()
             .is_some_and(|text| text.chars().count() <= *max_chars as usize),
+        ParamKind::Loras {
+            max,
+            high_noise,
+            weight_min,
+            weight_max,
+            weight_step,
+            ..
+        } => value.as_array().is_some_and(|loras| {
+            let mut attached = std::collections::BTreeSet::new();
+            loras.len() <= *max as usize
+                && loras.iter().all(|lora| {
+                    let id = lora.get("id").and_then(Value::as_str);
+                    let weight = lora.get("weight").and_then(Value::as_f64);
+                    let high = lora.get("highNoise").and_then(Value::as_bool);
+                    match (id, weight, high) {
+                        (Some(id), Some(weight), Some(high)) => {
+                            !id.is_empty()
+                                && (*weight_min..=*weight_max).contains(&weight)
+                                && on_step(weight - weight_min, *weight_step)
+                                && (*high_noise || !high)
+                                && attached.insert((id, high))
+                        }
+                        _ => false,
+                    }
+                })
+        }),
         ParamKind::Images { .. } | ParamKind::Extra { .. } => false,
     }
 }
@@ -1816,6 +1860,32 @@ mod tests {
         );
     }
 
+    /// 0.2.0 (design 9.2): the 32,000-character cap is gone; one hidden bound of 1 MiB of
+    /// UTF-8 stays.
+    #[test]
+    fn the_cloud_prompt_is_bounded_by_bytes_at_1_mib() {
+        let flare = image("openai/gpt-image-2.6-flare");
+        let p = |text: String| {
+            validate(
+                &flare,
+                &MediaRequest {
+                    prompt: text,
+                    ..request_p(json!({}))
+                },
+            )
+        };
+        assert!(p("a".repeat(40_000)).is_ok()); // past 0.1.2's 32,000 characters
+        assert_eq!(
+            p("a".repeat(PROMPT_MAX_BYTES + 1)),
+            Err(vec![Invalid::PromptTooLong])
+        );
+        assert!(p("é".repeat(PROMPT_MAX_BYTES / 2)).is_ok()); // bytes now, not characters
+        assert_eq!(
+            p("é".repeat(PROMPT_MAX_BYTES / 2 + 1)),
+            Err(vec![Invalid::PromptTooLong])
+        );
+    }
+
     #[test]
     fn validate_checks_the_prompt_the_picture_count_and_usability() {
         let flare = image("openai/gpt-image-2.6-flare");
@@ -1824,16 +1894,6 @@ mod tests {
             ..request_p(json!({}))
         };
         assert_eq!(validate(&flare, &blank), Err(vec![Invalid::EmptyPrompt]));
-        let long = MediaRequest {
-            prompt: "a".repeat(32_001),
-            ..request_p(json!({}))
-        };
-        assert_eq!(validate(&flare, &long), Err(vec![Invalid::PromptTooLong]));
-        let wide = MediaRequest {
-            prompt: "é".repeat(32_000),
-            ..request_p(json!({}))
-        };
-        assert!(validate(&flare, &wide).is_ok()); // characters, not bytes
         assert_eq!(
             validate(
                 &image("krea/k3-edit"),
@@ -2001,5 +2061,126 @@ mod tests {
                 "{bad}"
             );
         }
+    }
+
+    /// A `loras` field with at most `max` LoRAs, high-noise ones when `high_noise`, at the
+    /// strength slider's range, step and default (design 8).
+    fn loras_spec(max: u32, high_noise: bool) -> ParamSpec {
+        field(
+            "loras",
+            ParamKind::Loras {
+                max,
+                high_noise,
+                weight_min: -1.0,
+                weight_max: 2.0,
+                weight_step: 0.05,
+                weight_default: 1.0,
+            },
+        )
+    }
+
+    #[test]
+    fn the_loras_value_is_validated() {
+        let m = hand_made(vec![loras_spec(8, false)]);
+        let bad = |v: Value| validate(&m, &request_p(json!({ "loras": v })));
+        let refused = Err(vec![Invalid::BadValue("loras".into())]);
+        // Outside the range, high-noise on a model without a high-noise part, more than 8.
+        assert_eq!(
+            bad(json!([{"id": "a", "weight": 2.5, "highNoise": false}])),
+            refused
+        );
+        assert_eq!(
+            bad(json!([{"id": "a", "weight": 1.0, "highNoise": true}])),
+            refused
+        );
+        assert_eq!(
+            bad(json!(
+                (0..9)
+                    .map(|i| json!({"id": i.to_string(), "weight": 1.0, "highNoise": false}))
+                    .collect::<Vec<_>>()
+            )),
+            refused
+        );
+        // Off the step, of another shape, or attached twice.
+        assert_eq!(
+            bad(json!([{"id": "a", "weight": 0.83, "highNoise": false}])),
+            refused
+        );
+        for shape in [
+            json!({"id": "a", "weight": 1.0, "highNoise": false}),
+            json!([{"id": 3, "weight": 1.0, "highNoise": false}]),
+            json!([{"id": "a", "weight": "1", "highNoise": false}]),
+            json!([{"id": "a", "weight": 1.0}]),
+            json!([{"id": "", "weight": 1.0, "highNoise": false}]),
+            json!([
+                {"id": "a", "weight": 1.0, "highNoise": false},
+                {"id": "a", "weight": 0.5, "highNoise": false}
+            ]),
+        ] {
+            assert_eq!(bad(shape.clone()), refused, "{shape}");
+        }
+        assert_eq!(
+            bad(json!([{"id": "a", "weight": 0.85, "highNoise": false}])),
+            Ok(())
+        );
+        assert_eq!(bad(json!([])), Ok(()));
+        assert_eq!(
+            bad(json!([
+                {"id": "a", "weight": -1, "highNoise": false},
+                {"id": "b", "weight": 2, "highNoise": false}
+            ])),
+            Ok(())
+        );
+        // A model with a high-noise part takes the same LoRA for either part.
+        let wan = hand_made(vec![loras_spec(8, true)]);
+        let two_parts = json!([
+            {"id": "a", "weight": 1.0, "highNoise": true},
+            {"id": "a", "weight": 1.0, "highNoise": false}
+        ]);
+        assert_eq!(
+            validate(&wan, &request_p(json!({ "loras": two_parts }))),
+            Ok(())
+        );
+    }
+
+    /// The pictures of the roles a local model's recipe takes (Task R7) are checked like the
+    /// others: a picture of a role the model does not offer is refused.
+    #[test]
+    fn a_picture_to_change_a_mask_and_a_control_picture_are_counted() {
+        let images = |key: &str, min, max, role| field(key, ParamKind::Images { min, max, role });
+        let m = hand_made(vec![
+            images("source_picture", 1, 1, RefRole::Source),
+            images("mask_picture", 1, 1, RefRole::Mask),
+        ]);
+        let with = |roles: &[RefRole]| {
+            roles.iter().fold(request_p(json!({})), |req, role| {
+                let mut more = with_refs(request_p(json!({})), *role, 1).refs;
+                MediaRequest {
+                    refs: [req.refs, std::mem::take(&mut more)].concat(),
+                    ..req
+                }
+            })
+        };
+        assert_eq!(
+            validate(&m, &with(&[RefRole::Source, RefRole::Mask])),
+            Ok(())
+        );
+        assert_eq!(
+            validate(&m, &with(&[RefRole::Source])),
+            Err(vec![Invalid::TooFewPictures {
+                role: RefRole::Mask,
+                min: 1
+            }])
+        );
+        assert_eq!(
+            validate(
+                &m,
+                &with(&[RefRole::Source, RefRole::Mask, RefRole::Control])
+            ),
+            Err(vec![Invalid::TooManyPictures {
+                role: RefRole::Control,
+                max: 0
+            }])
+        );
     }
 }

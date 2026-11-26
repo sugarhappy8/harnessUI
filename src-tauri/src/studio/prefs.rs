@@ -1,9 +1,14 @@
 //! Studio's preferences (Settings → Studio), kept as one setting ([`PREFS_KEY`]).
 //!
-//! - **Defaults.** A daily limit of [`DEFAULT_DAILY_LIMIT_USD`] US dollars; every cloud
-//!   video, and any cloud run estimated at [`CONFIRM_AT_USD`] US dollars or more, asks before
-//!   it is sent; a local job that does not fit beside the chat model unloads it
-//!   ([`GpuPolicy::Unload`]).
+//! - **Defaults.** Every spending guard is a switch and is off: no daily limit, no asking
+//!   before every video, before runs of a chosen amount or more, or when the price is
+//!   unknown. [`DEFAULT_DAILY_LIMIT_USD`] and [`CONFIRM_AT_USD`] are the amounts the webview
+//!   fills in when a switch is turned on. A local job that does not fit beside the chat model
+//!   unloads it ([`GpuPolicy::Unload`]).
+//! - **Moving old defaults off** ([`migrate`]): prefs saved before 0.2.0 (no
+//!   [`StudioPrefs::prefs_version`]) hold the old defaults (asking before every video, before
+//!   $1, and a $10 limit). [`load`] turns exactly those off, once, and saves the file;
+//!   anything the person changed stays.
 //! - **Reading** ([`load`]): fields missing from what was saved (prefs saved by an earlier
 //!   version) read as their defaults; a value that is missing, cannot be read or breaks a rule
 //!   reads as the defaults.
@@ -17,7 +22,7 @@
 //! - **Changes** ([`StudioPrefs::apply`]): only the fields a [`StudioPrefsPatch`] sends
 //!   change; `null` turns the limit off or puts the gallery back in its default place. No
 //!   patch sets when the note about local models was accepted (`studio_accept_local_notice`
-//!   records it).
+//!   records it), or how the last model file was added (`studio_import_model` records it).
 
 use std::collections::BTreeMap;
 use std::ops::RangeInclusive;
@@ -29,12 +34,15 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
 use super::errors;
+use super::import::ImportMode;
 use super::spend::{CONFIRM_AT_USD, ConfirmRules, DEFAULT_DAILY_LIMIT_USD};
 use crate::error::{AppError, AppResult};
 use crate::hub::check_writable_folder;
 
 /// The settings key the preferences are kept under, as one JSON value.
 pub const PREFS_KEY: &str = "studioPrefs";
+/// The version of the saved preferences: 1 once the old spending defaults were moved to off.
+pub const PREFS_VERSION: u32 = 1;
 /// The most setups the user can save.
 pub const MAX_SETUPS: usize = 50;
 /// What the daily limit can be set to, in US dollars, when it is on.
@@ -101,15 +109,27 @@ pub struct Setup {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
 pub struct StudioPrefs {
+    /// 0.2.0: which version of the preferences this is; a file saved earlier has none (0), and
+    /// [`migrate`] runs on it once. Set only by [`load`], never by a patch.
+    #[serde(default)]
+    pub prefs_version: u32,
     /// The model last used, for pictures and for video.
     pub last_model: BTreeMap<MediaKind, ModelChoice>,
     /// The advanced settings are open.
     pub advanced_open: bool,
-    /// Every cloud video asks before it is sent.
+    /// 0.2.0: Studio's side panel (Settings) was left open; it stays docked on a wide window.
+    #[serde(default)]
+    pub settings_open: bool,
+    /// Every cloud video asks before it is sent (off by default).
     pub confirm_every_video: bool,
-    /// A cloud run estimated at this many US dollars or more asks before it is sent.
-    pub confirm_at_usd: f64,
-    /// The daily spending limit for cloud runs, in US dollars; `None` when it is off.
+    /// A cloud run estimated at this many US dollars or more asks before it is sent; `None`
+    /// when that is off (the default).
+    pub confirm_at_usd: Option<f64>,
+    /// 0.2.0: a cloud run whose price is unknown asks before it is sent (off by default).
+    #[serde(default)]
+    pub confirm_unknown_price: bool,
+    /// The daily spending limit for cloud runs, in US dollars; `None` when it is off (the
+    /// default).
     pub daily_limit_usd: Option<f64>,
     /// The saved setups.
     pub setups: Vec<Setup>,
@@ -124,22 +144,31 @@ pub struct StudioPrefs {
     /// When the note about local models was accepted, in Unix ms. Set only by
     /// `studio_accept_local_notice`, never by a patch.
     pub local_notice_accepted_at: Option<i64>,
+    /// 0.2.0: how the last model file from this computer was added (copied into the models
+    /// folder, or used where it is), preselected the next time. Set only by
+    /// `studio_import_model`, never by a patch.
+    #[serde(default)]
+    pub last_import_mode: Option<ImportMode>,
 }
 
 impl Default for StudioPrefs {
     fn default() -> Self {
         Self {
+            prefs_version: PREFS_VERSION,
             last_model: BTreeMap::new(),
             advanced_open: false,
-            confirm_every_video: true,
-            confirm_at_usd: CONFIRM_AT_USD,
-            daily_limit_usd: Some(DEFAULT_DAILY_LIMIT_USD),
+            settings_open: false,
+            confirm_every_video: false,
+            confirm_at_usd: None,
+            confirm_unknown_price: false,
+            daily_limit_usd: None,
             setups: Vec::new(),
             gallery_dir: None,
             gpu_policy: GpuPolicy::Unload,
             reload_chat_after: false,
             suggestion_dismissed: false,
             local_notice_accepted_at: None,
+            last_import_mode: None,
         }
     }
 }
@@ -154,10 +183,15 @@ pub struct StudioPrefsPatch {
     pub last_model: Option<BTreeMap<MediaKind, ModelChoice>>,
     /// See [`StudioPrefs::advanced_open`].
     pub advanced_open: Option<bool>,
+    /// See [`StudioPrefs::settings_open`].
+    pub settings_open: Option<bool>,
     /// See [`StudioPrefs::confirm_every_video`].
     pub confirm_every_video: Option<bool>,
-    /// See [`StudioPrefs::confirm_at_usd`].
-    pub confirm_at_usd: Option<f64>,
+    /// See [`StudioPrefs::confirm_at_usd`]; `Some(None)` turns it off.
+    #[serde(default, with = "store::double_option")]
+    pub confirm_at_usd: Option<Option<f64>>,
+    /// See [`StudioPrefs::confirm_unknown_price`].
+    pub confirm_unknown_price: Option<bool>,
     /// See [`StudioPrefs::daily_limit_usd`]; `Some(None)` turns the limit off.
     #[serde(default, with = "store::double_option")]
     pub daily_limit_usd: Option<Option<f64>>,
@@ -180,6 +214,7 @@ impl StudioPrefs {
         ConfirmRules {
             every_video: self.confirm_every_video,
             at_usd: self.confirm_at_usd,
+            unknown_price: self.confirm_unknown_price,
         }
     }
 
@@ -192,7 +227,10 @@ impl StudioPrefs {
         {
             return Err(errors::LIMIT_OUT_OF_RANGE.into());
         }
-        if !CONFIRM_AT_RANGE.contains(&self.confirm_at_usd) {
+        if self
+            .confirm_at_usd
+            .is_some_and(|usd| !CONFIRM_AT_RANGE.contains(&usd))
+        {
             return Err(errors::CONFIRM_AT_OUT_OF_RANGE.into());
         }
         if self.setups.len() > MAX_SETUPS {
@@ -210,8 +248,10 @@ impl StudioPrefs {
         let StudioPrefsPatch {
             last_model,
             advanced_open,
+            settings_open,
             confirm_every_video,
             confirm_at_usd,
+            confirm_unknown_price,
             daily_limit_usd,
             setups,
             gallery_dir,
@@ -220,10 +260,13 @@ impl StudioPrefs {
             suggestion_dismissed,
         } = patch;
         let next = StudioPrefs {
+            prefs_version: self.prefs_version,
             last_model: last_model.unwrap_or_else(|| self.last_model.clone()),
             advanced_open: advanced_open.unwrap_or(self.advanced_open),
+            settings_open: settings_open.unwrap_or(self.settings_open),
             confirm_every_video: confirm_every_video.unwrap_or(self.confirm_every_video),
             confirm_at_usd: confirm_at_usd.unwrap_or(self.confirm_at_usd),
+            confirm_unknown_price: confirm_unknown_price.unwrap_or(self.confirm_unknown_price),
             daily_limit_usd: daily_limit_usd.unwrap_or(self.daily_limit_usd),
             setups: setups.unwrap_or_else(|| self.setups.clone()),
             gallery_dir: gallery_dir.unwrap_or_else(|| self.gallery_dir.clone()),
@@ -231,18 +274,48 @@ impl StudioPrefs {
             reload_chat_after: reload_chat_after.unwrap_or(self.reload_chat_after),
             suggestion_dismissed: suggestion_dismissed.unwrap_or(self.suggestion_dismissed),
             local_notice_accepted_at: self.local_notice_accepted_at,
+            last_import_mode: self.last_import_mode,
         };
         next.validate()?;
         Ok(next)
     }
 }
 
-/// The saved preferences; the defaults when none were saved, or what was saved cannot be
-/// read or breaks a rule.
+/// Moves the spending settings that were the defaults before 0.2.0 to off, once: only when
+/// `prefs_version` is below [`PREFS_VERSION`]. Asking before every video, asking from $1 and
+/// a $10 limit turn off, as does asking when the price is unknown (it was always on); any
+/// other value stays, because the person chose it. Returns whether anything changed, so the
+/// caller saves the file.
+pub fn migrate(prefs: &mut StudioPrefs) -> bool {
+    if prefs.prefs_version >= PREFS_VERSION {
+        return false;
+    }
+    if prefs.confirm_at_usd == Some(CONFIRM_AT_USD) {
+        prefs.confirm_at_usd = None;
+    }
+    if prefs.daily_limit_usd == Some(DEFAULT_DAILY_LIMIT_USD) {
+        prefs.daily_limit_usd = None;
+    }
+    prefs.confirm_every_video = false;
+    prefs.confirm_unknown_price = false;
+    prefs.prefs_version = PREFS_VERSION;
+    true
+}
+
+/// The saved preferences, with [`migrate`] run (and the file saved when it changed
+/// something); the defaults when none were saved, or what was saved cannot be read or breaks
+/// a rule.
 pub async fn load(store: &store::Store) -> StudioPrefs {
     match store.get_setting::<StudioPrefs>(PREFS_KEY).await {
-        Ok(Some(prefs)) => match prefs.validate() {
-            Ok(()) => prefs,
+        Ok(Some(mut prefs)) => match prefs.validate() {
+            Ok(()) => {
+                if migrate(&mut prefs)
+                    && let Err(e) = store.set_setting(PREFS_KEY, &prefs).await
+                {
+                    tracing::warn!("the migrated Studio preferences could not be saved ({e})");
+                }
+                prefs
+            }
             Err(rule) => {
                 tracing::warn!(
                     "the saved Studio preferences break a rule ({rule}); using the defaults"
@@ -314,7 +387,7 @@ mod tests {
 
     fn with_confirm_at(confirm_at_usd: f64) -> StudioPrefs {
         StudioPrefs {
-            confirm_at_usd,
+            confirm_at_usd: Some(confirm_at_usd),
             ..Default::default()
         }
     }
@@ -355,9 +428,10 @@ mod tests {
     #[test]
     fn the_defaults_are_the_owners() {
         let p = StudioPrefs::default();
-        assert_eq!(p.daily_limit_usd, Some(10.0));
-        assert!(p.confirm_every_video);
-        assert_eq!(p.confirm_at_usd, 1.0);
+        assert_eq!(p.prefs_version, PREFS_VERSION);
+        assert_eq!(p.daily_limit_usd, None);
+        assert!(!p.confirm_every_video && !p.confirm_unknown_price);
+        assert_eq!(p.confirm_at_usd, None);
         assert_eq!(p.gpu_policy, GpuPolicy::Unload);
         assert!(
             !p.reload_chat_after && !p.suggestion_dismissed && p.local_notice_accepted_at.is_none()
@@ -365,6 +439,47 @@ mod tests {
         assert!(p.last_model.is_empty() && p.setups.is_empty() && p.gallery_dir.is_none());
         assert!(!p.advanced_open);
         assert_eq!(p.validate(), Ok(()));
+    }
+
+    #[test]
+    fn a_new_install_starts_with_every_spending_switch_off() {
+        let p = StudioPrefs::default();
+        assert_eq!(
+            (
+                p.confirm_every_video,
+                p.confirm_at_usd,
+                p.confirm_unknown_price,
+                p.daily_limit_usd
+            ),
+            (false, None, false, None)
+        );
+    }
+
+    #[test]
+    fn the_switches_turn_on_and_off_by_patch() {
+        let on = StudioPrefs::default()
+            .apply(patch(
+                json!({"confirmAtUsd": 1.0, "confirmUnknownPrice": true, "dailyLimitUsd": 10.0}),
+            ))
+            .unwrap();
+        assert_eq!(
+            (
+                on.confirm_at_usd,
+                on.confirm_unknown_price,
+                on.daily_limit_usd
+            ),
+            (Some(1.0), true, Some(10.0))
+        );
+        let off = on.apply(patch(json!({"confirmAtUsd": null}))).unwrap();
+        assert_eq!(off.confirm_at_usd, None);
+        assert!(
+            off.confirm_unknown_price,
+            "a patch that leaves it out keeps it"
+        );
+        assert_eq!(
+            StudioPrefs::default().apply(patch(json!({"confirmAtUsd": 0.1}))),
+            Err("Choose an amount from $0.25 to $100.".into())
+        );
     }
 
     #[test]
@@ -438,6 +553,34 @@ mod tests {
                 .local_notice_accepted_at,
             Some(7)
         );
+    }
+
+    /// The last import's mode reads as the webview writes it, is none in prefs saved before
+    /// 0.2.0, and no patch sets or clears it.
+    #[test]
+    fn the_last_import_mode_is_kept_and_no_patch_changes_it() {
+        assert_eq!(StudioPrefs::default().last_import_mode, None);
+        let copied = StudioPrefs {
+            last_import_mode: Some(ImportMode::Copy),
+            ..Default::default()
+        };
+        let v = serde_json::to_value(&copied).unwrap();
+        assert_eq!(v["lastImportMode"], json!("copy"));
+        assert_eq!(serde_json::from_value::<StudioPrefs>(v).unwrap(), copied);
+        let in_place: StudioPrefs =
+            serde_json::from_value(json!({"lastImportMode": "inPlace"})).unwrap();
+        assert_eq!(in_place.last_import_mode, Some(ImportMode::InPlace));
+        let before: StudioPrefs = serde_json::from_value(json!({"advancedOpen": true})).unwrap();
+        assert_eq!(before.last_import_mode, None);
+        for sent in [
+            json!({"lastImportMode": "inPlace"}),
+            json!({"lastImportMode": null}),
+        ] {
+            assert_eq!(
+                copied.apply(patch(sent)).unwrap().last_import_mode,
+                Some(ImportMode::Copy)
+            );
+        }
     }
 
     #[test]
@@ -534,7 +677,10 @@ mod tests {
             }
         );
         assert!(q.advanced_open && !q.confirm_every_video);
-        assert_eq!((q.confirm_at_usd, q.daily_limit_usd), (2.5, Some(40.0)));
+        assert_eq!(
+            (q.confirm_at_usd, q.daily_limit_usd),
+            (Some(2.5), Some(40.0))
+        );
         assert_eq!(q.setups.len(), 1);
         assert_eq!(q.setups[0].params["n"], json!(2));
         assert_eq!(
@@ -554,6 +700,21 @@ mod tests {
     }
 
     #[test]
+    fn settings_open_defaults_to_false_and_round_trips() {
+        assert!(!StudioPrefs::default().settings_open);
+        // Saved before 0.2.0, without the field: the side panel starts closed.
+        let old: StudioPrefs = serde_json::from_value(json!({"advancedOpen": true})).unwrap();
+        assert!(!old.settings_open && old.advanced_open);
+        // A patch that names it sets it, and one that does not keeps it.
+        let open = old.apply(patch(json!({"settingsOpen": true}))).unwrap();
+        assert!(open.settings_open);
+        assert!(open.apply(patch(json!({}))).unwrap().settings_open);
+        let v = serde_json::to_value(&open).unwrap();
+        assert_eq!(v["settingsOpen"], json!(true));
+        assert_eq!(serde_json::from_value::<StudioPrefs>(v).unwrap(), open);
+    }
+
+    #[test]
     fn a_patch_that_breaks_a_rule_is_refused() {
         assert_eq!(
             StudioPrefs::default().apply(patch(json!({"dailyLimitUsd": 0.5}))),
@@ -568,15 +729,17 @@ mod tests {
             ConfirmRules::default()
         );
         let p = StudioPrefs {
-            confirm_every_video: false,
-            confirm_at_usd: 3.0,
+            confirm_every_video: true,
+            confirm_at_usd: Some(3.0),
+            confirm_unknown_price: true,
             ..Default::default()
         };
         assert_eq!(
             p.confirm_rules(),
             ConfirmRules {
-                every_video: false,
-                at_usd: 3.0
+                every_video: true,
+                at_usd: Some(3.0),
+                unknown_price: true
             }
         );
     }
@@ -600,8 +763,80 @@ mod tests {
             .unwrap();
         let p = load(&store).await;
         assert!(p.advanced_open);
-        assert_eq!(p.daily_limit_usd, Some(10.0));
+        assert_eq!(p.daily_limit_usd, None);
         assert_eq!(p.gpu_policy, GpuPolicy::Unload);
+    }
+
+    async fn saved_file(store: &store::Store) -> Value {
+        store
+            .get_setting::<Value>(PREFS_KEY)
+            .await
+            .unwrap()
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn old_default_spending_prefs_move_to_off_once_and_changed_ones_stay() {
+        let store = store::Store::open_in_memory().unwrap();
+        store
+            .set_setting(
+                PREFS_KEY,
+                &json!({"confirmEveryVideo": true, "confirmAtUsd": 1.0, "dailyLimitUsd": 10.0,
+                        "gpuPolicy": "unload"}),
+            )
+            .await
+            .unwrap();
+        let p = load(&store).await;
+        assert_eq!(
+            (
+                p.confirm_every_video,
+                p.confirm_at_usd,
+                p.daily_limit_usd,
+                p.confirm_unknown_price,
+                p.prefs_version
+            ),
+            (false, None, None, false, 1)
+        );
+        assert_eq!(saved_file(&store).await["prefsVersion"], json!(1));
+        // Turned on again by the person: never migrated again.
+        save(
+            &store,
+            &StudioPrefs {
+                confirm_every_video: true,
+                ..p
+            },
+        )
+        .await
+        .unwrap();
+        assert!(load(&store).await.confirm_every_video);
+        // Settings the person changed before 0.2.0 stay.
+        store
+            .set_setting(
+                PREFS_KEY,
+                &json!({"confirmEveryVideo": false, "confirmAtUsd": 2.5, "dailyLimitUsd": 25.0}),
+            )
+            .await
+            .unwrap();
+        let q = load(&store).await;
+        assert_eq!(
+            (q.confirm_every_video, q.confirm_at_usd, q.daily_limit_usd),
+            (false, Some(2.5), Some(25.0))
+        );
+        assert_eq!(saved_file(&store).await["prefsVersion"], json!(1));
+    }
+
+    #[test]
+    fn migrate_does_nothing_to_current_prefs() {
+        let mut p = StudioPrefs {
+            confirm_every_video: true,
+            confirm_at_usd: Some(1.0),
+            daily_limit_usd: Some(10.0),
+            confirm_unknown_price: true,
+            ..Default::default()
+        };
+        let before = p.clone();
+        assert!(!migrate(&mut p));
+        assert_eq!(p, before);
     }
 
     #[tokio::test]

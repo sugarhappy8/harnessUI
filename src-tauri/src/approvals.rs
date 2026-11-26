@@ -77,10 +77,6 @@ struct Inner {
     /// Whether untrusted content had entered the turn when the chat's latest call was
     /// decided (for navigations the browser holds while that call runs).
     untrusted: HashMap<i64, bool>,
-    /// The saved default is Full access and the user has not confirmed it in this run. Until
-    /// then every chat starts in Ask first: a saved value is a row in a database a command
-    /// can write, so it alone never turns Full access on.
-    full_access_pending: bool,
 }
 
 impl ApprovalModes {
@@ -165,29 +161,6 @@ impl ApprovalModes {
         } else {
             ApprovalMode::Ask
         });
-    }
-
-    /// Marks the saved Full access default as waiting for the user's confirmation.
-    fn set_full_access_pending(&self, pending: bool) {
-        if let Ok(mut m) = self.0.lock() {
-            m.full_access_pending = pending;
-        }
-    }
-
-    /// Whether the saved Full access default waits for the user's confirmation.
-    pub fn full_access_pending(&self) -> bool {
-        self.0
-            .lock()
-            .map(|m| m.full_access_pending)
-            .unwrap_or(false)
-    }
-
-    /// Clears the wait and says whether there was one.
-    fn take_full_access_pending(&self) -> bool {
-        self.0
-            .lock()
-            .map(|mut m| std::mem::take(&mut m.full_access_pending))
-            .unwrap_or(false)
     }
 
     /// Notes whether untrusted content had entered the turn at the decision being made.
@@ -304,8 +277,7 @@ pub async fn release_held_navigation(
 /// Reads the saved default into `modes` (at start). A missing or unreadable value is read
 /// as missing, and then the 0.0.4 "Allow all in every chat" decides (Allow all or Ask). If
 /// 0.0.4 switched that off after 0.0.5 saved a mode, off wins: the user's latest choice.
-/// A saved Full access is not applied: every chat starts in Ask first until the user
-/// confirms it in this run ([`answer_full_access_default`]).
+/// A saved Full access is applied like any other saved mode, without asking again.
 async fn load_default_into(store: &store::Store, modes: &ApprovalModes) {
     let saved: Option<ApprovalMode> = store
         .get_setting(APPROVAL_MODE_DEFAULT)
@@ -319,10 +291,8 @@ async fn load_default_into(store: &store::Store, modes: &ApprovalModes) {
         (None, Some(true)) => ApprovalMode::AllowAll,
         (None, _) => ApprovalMode::Ask,
     };
-    match mode {
-        ApprovalMode::FullAccess => modes.set_full_access_pending(true),
-        ApprovalMode::AllowAll => modes.set_default_mode(mode),
-        ApprovalMode::Ask => {}
+    if mode != ApprovalMode::Ask {
+        modes.set_default_mode(mode);
     }
 }
 
@@ -331,12 +301,12 @@ pub fn load_default(app: &AppHandle) {
     let _ = APP.set(app.clone());
     let state = app.state::<AppState>();
     tauri::async_runtime::block_on(load_default_into(&state.store, modes()));
-    if modes().full_access_pending() {
-        tracing::warn!(
-            "the saved setting says every chat starts in Full access; waiting for the user to confirm"
-        );
-    } else if modes().default_mode() == ApprovalMode::AllowAll {
-        tracing::info!("every chat starts in Allow all (saved setting)");
+    match modes().default_mode() {
+        ApprovalMode::AllowAll => tracing::info!("every chat starts in Allow all (saved setting)"),
+        ApprovalMode::FullAccess => {
+            tracing::info!("every chat starts in Full access (saved setting)")
+        }
+        ApprovalMode::Ask => {}
     }
 }
 
@@ -353,8 +323,6 @@ async fn save_default(
         .set_setting(ALLOW_ALL_DEFAULT, &json!(mode != ApprovalMode::Ask))
         .await?;
     modes.set_default_mode(mode);
-    // The user chose the default in this run: nothing waits for a confirmation any more.
-    modes.set_full_access_pending(false);
     Ok(())
 }
 
@@ -469,41 +437,6 @@ pub async fn set_default_approval_mode(
     only_main_window(window.label())?;
     save_default(&state.store, modes(), mode).await?;
     tracing::info!(?mode, "the mode every chat starts in changed by the user");
-    tell_window(None);
-    Ok(())
-}
-
-/// Whether the saved setting says every chat starts in Full access and the user has not
-/// confirmed it since the app started. The main window then asks.
-#[tauri::command]
-pub fn get_full_access_default_pending() -> bool {
-    modes().full_access_pending()
-}
-
-/// The user's answer to that question: `on` makes every chat start in Full access for this
-/// run (and keeps it saved); otherwise every chat starts in Ask first, saved. Does nothing
-/// when no question is open.
-#[tauri::command]
-pub async fn answer_full_access_default(
-    window: tauri::WebviewWindow,
-    state: State<'_, AppState>,
-    on: bool,
-) -> AppResult<()> {
-    only_main_window(window.label())?;
-    if !modes().take_full_access_pending() {
-        return Ok(());
-    }
-    let mode = if on {
-        ApprovalMode::FullAccess
-    } else {
-        ApprovalMode::Ask
-    };
-    if let Err(e) = save_default(&state.store, modes(), mode).await {
-        // Not saved: ask again rather than leave the question unanswered.
-        modes().set_full_access_pending(true);
-        return Err(e);
-    }
-    tracing::info!(on, "the saved Full access default answered by the user");
     tell_window(None);
     Ok(())
 }
@@ -723,6 +656,25 @@ mod tests {
         }
     }
 
+    #[tokio::test]
+    async fn a_saved_full_access_default_applies_at_launch_without_asking() {
+        let store = store::Store::open_in_memory().unwrap();
+        save_default(&store, &ApprovalModes::default(), ApprovalMode::FullAccess)
+            .await
+            .unwrap();
+        let modes = ApprovalModes::default();
+        load_default_into(&store, &modes).await;
+        assert_eq!(modes.default_mode(), ApprovalMode::FullAccess);
+    }
+
+    #[tokio::test]
+    async fn with_nothing_saved_chats_start_in_ask_first() {
+        let store = store::Store::open_in_memory().unwrap();
+        let modes = ApprovalModes::default();
+        load_default_into(&store, &modes).await;
+        assert_eq!(modes.default_mode(), ApprovalMode::Ask);
+    }
+
     /// The saved default: the 0.0.5 key wins; without it the 0.0.4 key is read; both are
     /// written, the old one as "anything but Ask"; an unreadable value is Ask.
     #[tokio::test]
@@ -743,14 +695,11 @@ mod tests {
         assert_eq!(saved.as_deref(), Some("fullAccess"));
         let old: Option<bool> = store.get_setting(ALLOW_ALL_DEFAULT).await.unwrap();
         assert_eq!(old, Some(true));
-        // A saved Full access waits for the user: every chat starts in Ask first.
+        // A saved Full access applies at launch without asking.
         let after_restart = ApprovalModes::default();
         load_default_into(&store, &after_restart).await;
-        assert_eq!(after_restart.default_mode(), ApprovalMode::Ask);
-        assert!(after_restart.full_access_pending());
-        assert_eq!(after_restart.mode(1), ApprovalMode::Ask);
-        assert!(after_restart.take_full_access_pending());
-        assert!(!after_restart.full_access_pending());
+        assert_eq!(after_restart.default_mode(), ApprovalMode::FullAccess);
+        assert_eq!(after_restart.mode(1), ApprovalMode::FullAccess);
 
         // 0.0.4 switched "Allow all in every chat" off afterwards: off wins.
         store
@@ -760,7 +709,6 @@ mod tests {
         let downgraded = ApprovalModes::default();
         load_default_into(&store, &downgraded).await;
         assert_eq!(downgraded.default_mode(), ApprovalMode::Ask);
-        assert!(!downgraded.full_access_pending());
         store
             .set_setting(ALLOW_ALL_DEFAULT, &json!(true))
             .await

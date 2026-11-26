@@ -167,3 +167,72 @@ class Session:
 
         el = self.wait_for(find, timeout, f"button {label!r}")
         self._pointer_click(find, el)
+
+
+def settings_tab(s, tab: str):
+    """Opens section `tab` of the open Settings dialog and waits until it shows. The tab is
+    found by its text among the dialog's own tabs and given a real pointer click: a button
+    elsewhere can carry the same name (the sidebar's Studio button comes first in the page and
+    sits under the dialog's overlay, where `click_button` would fall back to a DOM click on
+    it)."""
+
+    def find():
+        el = s.execute(
+            """
+            return [...document.querySelectorAll(
+              '[role=dialog] [role=tablist][aria-label="Settings sections"] [role=tab]')]
+              .find(t => t.innerText.trim() === arguments[0]) || null;
+            """,
+            tab,
+        )
+        return el or False
+
+    el = s.wait_for(find, 10, f"settings tab {tab!r}")
+    s._pointer_click(find, el)
+    # The page must really open, or a script would pass without loading it.
+    s.wait_for(
+        lambda: s.execute(
+            "return [...document.querySelectorAll('[role=dialog] [role=tab][aria-selected=true]')]"
+            ".some(t => t.innerText.trim() === arguments[0]);",
+            tab,
+        ),
+        10,
+        f"settings page {tab!r}",
+    )
+
+
+def close_settings(s):
+    """Closes the Settings dialog with its own Close button and waits until it is gone."""
+    s.execute("document.querySelector('[role=dialog] button[aria-label=\"Close settings\"]').click();")
+    s.wait_for(
+        lambda: s.execute("return !document.querySelector('[aria-label=\"Settings sections\"]');"),
+        10,
+        "Settings closed",
+    )
+
+
+def studio_tab(s, label: str):
+    """Studio's [Pictures | Video] tab `label` (the top bar's), with a real pointer click, once
+    it is chosen."""
+    tabs = '[data-studio-view] header [role=tablist][aria-label="Pictures or video"] [role=tab]'
+
+    def find():
+        el = s.execute(
+            f"return [...document.querySelectorAll('{tabs}')].find(t => t.innerText.trim() === arguments[0]) || null;",
+            label,
+        )
+        return el or False
+
+    el = s.wait_for(find, 10, f"Studio tab {label!r}")
+    s._pointer_click(find, el)
+    s.wait_for(
+        lambda: s.execute(
+            f"""
+            return [...document.querySelectorAll('{tabs}')]
+              .some(t => t.innerText.trim() === arguments[0] && t.getAttribute('aria-selected') === 'true');
+            """,
+            label,
+        ),
+        10,
+        f"Studio tab {label!r} chosen",
+    )

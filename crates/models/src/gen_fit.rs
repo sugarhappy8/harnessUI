@@ -14,9 +14,11 @@
 //! - **Red** otherwise.
 //!
 //! On the processor ([`Target::Cpu`]) every part shares the one memory, so a run is Green
-//! or Red: nothing takes turns there. On Apple silicon the working set is a share of the
-//! computer's memory, so a verdict other than Red also needs every part and the working
-//! memory (the Green need without the spare) to fit the computer's memory less the reserve.
+//! or Red: nothing takes turns there. A video there is judged the same way, and flagged
+//! ([`GenFitResult::video_on_processor`]: it is very slow). On Apple silicon the working set
+//! is a share of the computer's memory, so a verdict other than Red also needs every part and
+//! the working memory (the Green need without the spare) to fit the computer's memory less
+//! the reserve. A verdict only warns (design 9.2): a run goes ahead whatever it says.
 
 use serde::Serialize;
 
@@ -95,11 +97,6 @@ pub enum NotFor {
     /// every part and the working memory besides the reserve (its free memory counted as all
     /// of it).
     MacMemory { needs: u64 },
-    /// Video needs a graphics card or Apple silicon; this computer runs models on the
-    /// processor.
-    VideoNeedsGpu,
-    /// The catalog keeps this video model off Apple silicon (`runs_on_apple`).
-    VideoNotOnThisMac,
 }
 
 /// The fit of one model at one size on this computer.
@@ -115,10 +112,14 @@ pub struct GenFitResult {
     /// The free memory there as the system reports it: the graphics card's, the Metal
     /// working set, or the computer's before the reserve is kept back.
     pub available_bytes: u64,
-    /// `fit` runs with memory saving ([`needs_memory_saving`]).
+    /// `fit` keeps parts in the computer's memory ([`needs_memory_saving`]): a description of
+    /// the fit only. The engine's flags follow the Memory saving field, never the fit
+    /// (`studio::local::memory_flags`; the engine's auto-fit does the rest).
     pub memory_saving: bool,
     /// The computer runs models on the processor ([`Target::Cpu`]).
     pub processor_only: bool,
+    /// A video on the processor: judged by memory like a picture, and very slow.
+    pub video_on_processor: bool,
     /// Why not, when the run is red even with the chat model unloaded.
     pub not_for: Option<NotFor>,
     /// When the requested size does not run on the device (whole or one part at a time),
@@ -128,8 +129,8 @@ pub struct GenFitResult {
     pub suggestion: Option<GenSize>,
 }
 
-/// One part at a time and partly on the processor both run with memory saving
-/// (`--vae-tiling --offload-to-cpu`).
+/// One part at a time and partly on the processor both keep parts in the computer's memory
+/// while the others work (what `--offload-to-cpu`, or the engine's own auto-fit, does).
 pub fn needs_memory_saving(fit: GenFit) -> bool {
     matches!(fit, GenFit::OnePartAtATime | GenFit::PartlyOnProcessor)
 }
@@ -203,14 +204,27 @@ impl Weights {
         };
         for part in &entry.parts {
             match part.role {
-                GenRole::Diffusion | GenRole::HighNoiseDiffusion | GenRole::Model => {
+                GenRole::Diffusion
+                | GenRole::HighNoiseDiffusion
+                | GenRole::UncondDiffusion
+                | GenRole::Model => {
                     w.diffusion = w.diffusion.saturating_add(part.size);
                     w.largest_diffusion = w.largest_diffusion.max(part.size);
                 }
-                GenRole::Llm | GenRole::T5xxl | GenRole::ClipL | GenRole::ClipVision => {
+                GenRole::Llm
+                | GenRole::LlmVision
+                | GenRole::T5xxl
+                | GenRole::ClipL
+                | GenRole::ClipG
+                | GenRole::ClipVision
+                | GenRole::Tokenizer
+                | GenRole::AudioEncoder
+                | GenRole::EmbeddingsConnectors => {
                     w.encoders = w.encoders.saturating_add(part.size);
                 }
-                GenRole::Vae => w.decoder = w.decoder.saturating_add(part.size),
+                GenRole::Vae | GenRole::Tae | GenRole::AudioVae => {
+                    w.decoder = w.decoder.saturating_add(part.size);
+                }
             }
         }
         w
@@ -444,52 +458,40 @@ fn mac_with_working_set(working_set: u64) -> u64 {
 /// Whether `entry` at `size` fits `target`. `target` as probed now (with the chat model
 /// loaded, if one is); `chat_device_bytes`: what unloading it would give back.
 ///
-/// On [`Target::Cpu`] the run is judged against the computer's memory, Green or Red, and a
-/// video is red ([`NotFor::VideoNeedsGpu`]); on [`Target::AppleUnified`] a video model the
-/// catalog keeps off Apple silicon is red ([`NotFor::VideoNotOnThisMac`]), and any other run
-/// is red when the computer's memory less the reserve cannot hold all of it.
+/// On [`Target::Cpu`] the run is judged against the computer's memory, Green or Red, a video
+/// as a picture is (and flagged, [`GenFitResult::video_on_processor`]); on
+/// [`Target::AppleUnified`] a run is red when the computer's memory less the reserve cannot
+/// hold all of it, a video the catalog does not mark as run on Apple silicon
+/// (`runs_on_apple`) included. The verdict only warns.
 pub fn gen_fit(
     entry: &GenEntry,
     size: GenSize,
     target: &Target,
     chat_device_bytes: Option<u64>,
 ) -> GenFitResult {
-    let video = entry.kind == GenKind::Video;
-    let blocked = match target {
-        Target::Cpu { .. } if video => Some(NotFor::VideoNeedsGpu),
-        Target::AppleUnified { .. } if video && !entry.runs_on_apple => {
-            Some(NotFor::VideoNotOnThisMac)
-        }
-        _ => None,
-    };
     let backend = backend(target);
     let need = Need::of(entry, size, backend);
-    let judge = |place: Place| match blocked {
-        Some(_) => GenFit::Red,
-        None => need.fit(place),
-    };
     let place = Place::of(target);
-    let fit = judge(place);
+    let fit = need.fit(place);
     let unloaded = chat_device_bytes.map(|bytes| place.unloaded(bytes));
-    let after_unload = unloaded.filter(|_| fit != GenFit::Green).map(judge);
+    let after_unload = unloaded
+        .filter(|_| fit != GenFit::Green)
+        .map(|place| need.fit(place));
     // With a chat model loaded, the reason and the suggestion are for the room after the
     // unload: a run that is red now is not Green, so `after_unload` is that room's verdict.
     let judged = unloaded.unwrap_or(place);
-    let not_for = (after_unload.unwrap_or(fit) == GenFit::Red)
-        .then(|| blocked.unwrap_or_else(|| need.not_for(judged)));
-    let suggestion = match blocked {
-        Some(_) => None,
-        None => suggest(entry, size, backend, judged),
-    };
+    let not_for = (after_unload.unwrap_or(fit) == GenFit::Red).then(|| need.not_for(judged));
+    let processor_only = matches!(target, Target::Cpu { .. });
     GenFitResult {
         fit,
         after_unload,
         needed_bytes: need.whole,
         available_bytes: target.free_bytes(),
         memory_saving: needs_memory_saving(fit),
-        processor_only: matches!(target, Target::Cpu { .. }),
+        processor_only,
+        video_on_processor: processor_only && entry.kind == GenKind::Video,
         not_for,
-        suggestion,
+        suggestion: suggest(entry, size, backend, judged),
     }
 }
 
@@ -627,6 +629,7 @@ pub(crate) mod tests {
             max_side: 2048,
             frame_rule: None,
             max_frames: None,
+            video: None,
         }
     }
 
@@ -636,6 +639,7 @@ pub(crate) mod tests {
             max_side: 1280,
             frame_rule: Some(FrameRule::FourNPlusOne),
             max_frames: Some(max_frames),
+            video: None,
         }
     }
 
@@ -655,8 +659,12 @@ pub(crate) mod tests {
             summary: String::new(),
             publisher: String::new(),
             kind,
-            family,
+            family: Some(family),
+            recipe: family.recipe_id().into(),
+            version: Some(family.version()),
+            untested: false,
             inputs: Vec::new(),
+            input_counts: Vec::new(),
             parts: parts
                 .into_iter()
                 .map(|(role, size)| GenPart {
@@ -667,6 +675,8 @@ pub(crate) mod tests {
                     size,
                     sha256: "ab".repeat(32),
                     license: "apache-2.0".into(),
+                    local: None,
+                    folder: None,
                 })
                 .collect(),
             licenses: BTreeMap::new(),
@@ -684,6 +694,13 @@ pub(crate) mod tests {
                 height: default.height,
                 frames: (kind == GenKind::Video).then_some(default.frames),
                 fps: (kind == GenKind::Video).then_some(24),
+                guidance: None,
+                img_cfg: None,
+                timestep_shift: None,
+                sigmas: Vec::new(),
+                high_noise: None,
+                moe_boundary: None,
+                strength: None,
             },
             limits,
             fallback,
@@ -802,6 +819,78 @@ pub(crate) mod tests {
         }
     }
 
+    /// 0.2.0: a model the catalog does not list, from its recipe with these parts.
+    fn generic(recipe_id: &str, parts: &[(GenRole, u64)]) -> GenEntry {
+        crate::gen_catalog::generic_entry(crate::gen_catalog::GenericSpec {
+            id: recipe_id.into(),
+            name: recipe_id.into(),
+            publisher: String::new(),
+            recipe: crate::sd::recipes::recipe(recipe_id).unwrap(),
+            version: None,
+            parts: parts
+                .iter()
+                .map(|&(role, size)| GenPart {
+                    role,
+                    repo: "test/model".into(),
+                    revision: "0".repeat(40),
+                    path: format!("{role:?}.gguf"),
+                    size,
+                    sha256: "ab".repeat(32),
+                    license: "apache-2.0".into(),
+                    local: None,
+                    folder: None,
+                })
+                .collect(),
+            licenses: BTreeMap::new(),
+            gate: GenGate {
+                mode: GateMode::None,
+                collects: Vec::new(),
+            },
+            untested: false,
+        })
+    }
+
+    /// A generic SDXL checkpoint goes through the same formulas with its kind's fallback: 32
+    /// pixels a token (sizes are multiples of 64), so 1024 × 1024 is 1024 tokens.
+    #[test]
+    fn a_generic_picture_model_is_judged_by_its_kinds_fallback() {
+        let sdxl = generic("sdxl-checkpoint", &[(GenRole::Model, 6_938_078_334)]);
+        // act_dit 0.5 + 0.0001·1024 = 0.60; act_vae 0.0000003·1024² = 0.31
+        assert_eq!(tokens(&sdxl, sq(1024)), 1024);
+        // 6.94 + 0.60 + 1 spare = 8.54 <= 9
+        assert_eq!(
+            gen_fit(&sdxl, sq(1024), &gpu(9, 32), None).fit,
+            GenFit::Green
+        );
+        // 8.54 > 8; one part 6.94 + 0.60 + 1 = 8.54 > 8
+        assert_ne!(
+            gen_fit(&sdxl, sq(1024), &gpu(8, 32), None).fit,
+            GenFit::Green
+        );
+    }
+
+    /// A generic Wan 2.2 A14B's two diffusion parts take turns, like 0.1.x's: one part at a
+    /// time needs the larger one only.
+    #[test]
+    fn a_generic_two_model_video_runs_its_diffusion_parts_in_turns() {
+        let wan = generic(
+            "wan22-t2v",
+            &[
+                (GenRole::HighNoiseDiffusion, 9_651_800_000),
+                (GenRole::Diffusion, 9_651_800_000),
+                (GenRole::T5xxl, 4_145_878_880),
+                (GenRole::Vae, 253_815_318),
+            ],
+        );
+        let size = clip(1280, 720, 33);
+        // 80 × 45 tokens a latent frame, 9 latent frames.
+        assert_eq!(tokens(&wan, size), 32_400);
+        // green 23.70 + 9.10 + 1 > 24; one part 9.65 + 9.10 + 1 = 19.75 <= 24, and the
+        // weights (23.70) wait in 64 − 2 GB
+        let r = gen_fit(&wan, size, &gpu(24, 64), None);
+        assert_eq!((r.fit, r.memory_saving), (GenFit::OnePartAtATime, true));
+    }
+
     #[test]
     fn klein_at_1024_is_green_on_an_8_gb_card() {
         // 5.30 + 0.91 + 1 spare = 7.21 <= 8
@@ -891,11 +980,23 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn video_on_the_processor_is_not_offered_and_pictures_say_processor() {
-        assert!(matches!(
-            gen_fit(&wan22(), clip(832, 480, 49), &cpu(32), None).not_for,
-            Some(NotFor::VideoNeedsGpu)
-        ));
+    fn video_on_the_processor_is_judged_and_flagged_not_blocked() {
+        let r = gen_fit(&wan22(), clip(832, 480, 49), &cpu(64), None);
+        assert!(r.video_on_processor && r.not_for.is_none() && r.fit != GenFit::Red);
+        assert!(r.processor_only);
+        // Judged by memory like a picture: too little of it is red, with the free memory it
+        // needs, and a smaller preset that fits is suggested.
+        let r = gen_fit(&wan22(), clip(832, 480, 49), &cpu(8), None);
+        assert!(r.video_on_processor);
+        assert_eq!(r.fit, GenFit::Red);
+        assert!(matches!(r.not_for, Some(NotFor::GraphicsMemory { .. })));
+        // A picture on the processor, or a video on a graphics card, is not flagged.
+        assert!(!gen_fit(&klein(), sq(512), &cpu(32), None).video_on_processor);
+        assert!(!gen_fit(&wan22(), clip(832, 480, 49), &gpu(24, 64), None).video_on_processor);
+    }
+
+    #[test]
+    fn pictures_on_the_processor_say_processor() {
         assert!(gen_fit(&klein(), sq(512), &cpu(32), None).processor_only);
         // A picture too big for the computer's memory: the free memory the system would have
         // to report, every part and the working memory with the spare and the 2 GB reserve
@@ -1082,7 +1183,7 @@ pub(crate) mod tests {
                         "{case}: a Mac of {needs} is not enough"
                     );
                 }
-                Some(NotFor::VideoNeedsGpu | NotFor::VideoNotOnThisMac) | None => continue,
+                None => continue,
             }
             figures += 1;
         }
@@ -1144,14 +1245,17 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn on_a_mac_the_reason_names_the_mac_and_a_video_model_may_be_kept_off_it() {
+    fn on_a_mac_the_reason_names_the_mac_and_a_video_model_is_judged_by_memory() {
+        // A video the catalog marks as not run on Apple silicon is judged by memory there too.
         let mut wan = wan22();
         wan.runs_on_apple = false;
         let r = gen_fit(&wan, clip(832, 480, 49), &apple(16, 24), None);
+        let kept_on = gen_fit(&wan22(), clip(832, 480, 49), &apple(16, 24), None);
         assert_eq!(
-            (r.fit, r.not_for, r.suggestion),
-            (GenFit::Red, Some(NotFor::VideoNotOnThisMac), None)
+            (r.fit, r.not_for, r.video_on_processor),
+            (kept_on.fit, kept_on.not_for, false)
         );
+        assert_ne!(r.fit, GenFit::Red);
         // 2.84 + 4.15 + 0.25 + 1.90 + 1 = 10.14 <= 16
         let r = gen_fit(&wan21(), clip(832, 480, 33), &apple(16, 24), None);
         assert_eq!((r.fit, r.not_for), (GenFit::Green, None));

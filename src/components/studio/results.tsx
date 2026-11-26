@@ -1,9 +1,12 @@
-import { useEffect, useRef, useState, type ReactNode, type Ref } from "react";
-import { Film, ImageIcon, Star } from "lucide-react";
+import { useEffect, useRef, useState, type CSSProperties, type ReactNode, type Ref } from "react";
+import { Film, ImageIcon, Play, Star, Trash2 } from "lucide-react";
+import clsx from "clsx";
 import type { ErrorInfo } from "../../lib/types";
 import { STUDIO_DELETE, STUDIO_TILE, STUDIO_VIEWER } from "../../lib/words";
 import { toErrorInfo } from "../../store/app";
 import { visiblePath } from "../FolderChip";
+import { CheckboxField } from "../ui/CheckboxField";
+import { FOCUS_RING } from "../ui/styles";
 import * as api from "./api";
 import { ConfirmDialog } from "./ConfirmDialog";
 import { RefThumb } from "./RefTray";
@@ -15,7 +18,10 @@ import { clock } from "./Working";
 // shows the thumbnail when there is one; else the file itself (a GIF, an SVG, a picture the
 // worker could not shrink), always through an `img` element, where an SVG's scripts never run;
 // else, for a video, its length and its start frame. It reads its picture only once it comes
-// within a screen of what is shown.
+// within a screen of what is shown. Since 0.2.0 Task U9 (design 10.4) a card's tile is the
+// picture's own shape, up to 256 px (`cardTileStyle`); a tile's actions (its star, the grid's
+// Delete) show on hover and while focus is in it, each named for its result; and the grid's
+// Select mode puts a box on each tile in their place.
 
 /** Where results were saved: the path left to right, with every invisible or
  *  direction-changing character as its code (`visiblePath`), as Settings shows a folder. */
@@ -123,19 +129,57 @@ export function resultsOf(run: Run): Output[] {
   return [...run.outputs].sort((a, b) => a.idx - b.idx);
 }
 
-/** One result's tile: it opens the viewer. In the grid it has a box to select it with others;
- *  on a card, a star; elsewhere a starred result shows its star. */
+/** The longest side of a card's tile (design 10.4). */
+const CARD_TILE_PX = 256;
+
+/** `text` as two sides, "16:9" or "832x480"; `null` when it is not that. */
+function sidesOf(text: unknown): [number, number] | null {
+  if (typeof text !== "string") return null;
+  const [w, h] = text.split(/[:x×]/).map(Number);
+  return w !== undefined && h !== undefined && w > 0 && h > 0 ? [w, h] : null;
+}
+
+/** A card's tile at its picture's own shape, its longer side 256 px: the result's size, else the
+ *  run's exact size or shape, else square. Never wider than the card (`max-w-full` on the tile). */
+export function cardTileStyle(run: Run, output: Output): CSSProperties {
+  const [w, h] =
+    output.width && output.height && output.width > 0 && output.height > 0
+      ? [output.width, output.height]
+      : (sidesOf(run.params.size) ?? sidesOf(run.params.aspect_ratio) ?? [1, 1]);
+  return w >= h
+    ? { width: CARD_TILE_PX, aspectRatio: `${w} / ${h}` }
+    : { height: CARD_TILE_PX, aspectRatio: `${w} / ${h}` };
+}
+
+/** A tile's action over its picture: shown on hover and while focus is in the tile (so the
+ *  keyboard reaches it), or always (`shown`: a starred result's star). */
+function tileAction(shown: boolean): string {
+  return clsx(
+    "grid size-7 place-items-center rounded-lg bg-black/55 text-white backdrop-blur-sm transition-opacity hover:bg-black/75",
+    !shown && "opacity-0 group-hover:opacity-100 group-focus-within:opacity-100",
+    FOCUS_RING,
+  );
+}
+
+/** One result's tile: it opens the viewer. Its star (`onStar`) and Delete (`onDelete`, the
+ *  grid's) show over it on hover and focus, its star always while starred. In the grid's Select
+ *  mode (`select`) it has a box instead, and a click on the picture ticks it. `caption` shows the
+ *  prompt along its foot on hover (the grid's). */
 export function ResultTile(props: {
   run: Run;
   output: Output;
   onOpen(outputId: string): void;
-  /** The grid's box, and whether the result is selected. */
+  /** The box of the grid's Select mode, and whether the result is selected. */
   select?: { selected: boolean; onChange(selected: boolean): void };
-  /** The card's star, pressed while the result is starred. */
+  /** Its star, pressed while the result is starred. */
   onStar?: () => void;
-  className: string;
+  /** Its Delete (which asks first). */
+  onDelete?: () => void;
+  caption?: boolean;
+  className?: string;
+  style?: CSSProperties;
 }) {
-  const { run, output } = props;
+  const { run, output, select } = props;
   const all = resultsOf(run);
   const n = all.findIndex((o) => o.id === output.id) + 1;
   const of = all.length;
@@ -149,52 +193,97 @@ export function ResultTile(props: {
     ) : (
       <Placeholder kind="video" />
     );
+  const selected = select?.selected ?? false;
   return (
     <div
       data-output-tile={output.id}
-      className={`relative overflow-hidden rounded-lg border border-border bg-bg-muted ${props.className}`}
+      data-selected={selected || undefined}
+      style={props.style}
+      className={clsx(
+        "group relative shrink-0 overflow-hidden rounded-xl bg-bg-muted ring-accent transition-shadow",
+        selected && "ring-[3px]",
+        props.className,
+      )}
     >
-      <button
-        type="button"
-        aria-label={STUDIO_TILE.open(run.kind, n, of, run.prompt)}
-        onClick={() => props.onOpen(output.id)}
-        className="block size-full"
-      >
-        <WhenNear kind={run.kind}>{media}</WhenNear>
-      </button>
+      {select ? (
+        // The box below is what a keyboard or screen reader uses; the picture is a larger target
+        // for the pointer.
+        <div
+          data-tile-picture
+          aria-hidden
+          onClick={() => select.onChange(!selected)}
+          className={clsx("size-full cursor-pointer transition-transform duration-150", selected && "scale-[0.92]")}
+        >
+          <WhenNear kind={run.kind}>{media}</WhenNear>
+        </div>
+      ) : (
+        <button
+          type="button"
+          aria-label={STUDIO_TILE.open(run.kind, n, of, run.prompt)}
+          onClick={() => props.onOpen(output.id)}
+          className="block size-full outline-none focus-visible:ring-[3px] focus-visible:ring-accent focus-visible:ring-inset"
+        >
+          <WhenNear kind={run.kind}>{media}</WhenNear>
+        </button>
+      )}
+      {props.caption && !select && run.prompt && (
+        <p
+          aria-hidden
+          className="pointer-events-none absolute inset-x-0 bottom-0 line-clamp-2 bg-linear-to-t from-black/75 to-transparent px-2.5 pt-6 pb-2 text-sm text-white opacity-0 transition-opacity group-hover:opacity-100 group-focus-within:opacity-100"
+        >
+          {run.prompt}
+        </p>
+      )}
       {run.kind === "video" && output.durationMs !== null && (
-        <span className="pointer-events-none absolute right-1 bottom-1 rounded bg-black/60 px-1 text-xs text-white tabular-nums">
+        <span className="pointer-events-none absolute right-2 bottom-2 inline-flex items-center gap-1 rounded-md bg-black/60 px-1.5 py-px text-sm font-medium text-white tabular-nums backdrop-blur-sm">
+          <Play size={11} aria-hidden fill="currentColor" />
           {clock(output.durationMs)}
         </span>
       )}
-      {props.select && (
-        <input
-          type="checkbox"
-          aria-label={STUDIO_TILE.select(run.kind, n, of, run.prompt)}
-          checked={props.select.selected}
-          onChange={(e) => props.select?.onChange(e.target.checked)}
-          className="absolute top-1.5 left-1.5 size-4"
-        />
-      )}
-      {props.onStar ? (
-        <button
-          type="button"
-          aria-label={STUDIO_TILE.star(run.kind, n, of)}
-          aria-pressed={output.starred}
-          onClick={props.onStar}
-          className="absolute top-1 right-1 rounded-md bg-black/50 p-1 text-white hover:bg-black/70"
-        >
-          <Star size={12} aria-hidden fill={output.starred ? "currentColor" : "none"} />
-        </button>
-      ) : (
-        output.starred && (
-          <Star
-            size={14}
-            aria-hidden
-            fill="currentColor"
-            className="pointer-events-none absolute top-1.5 right-1.5 text-white drop-shadow"
+      {select ? (
+        <div className="absolute top-2 left-2">
+          <CheckboxField
+            label={STUDIO_TILE.select(run.kind, n, of, run.prompt)}
+            hideLabel
+            tone="overlay"
+            checked={selected}
+            onChange={select.onChange}
           />
+        </div>
+      ) : (
+        (props.onStar || props.onDelete) && (
+          <div data-tile-actions className="absolute top-1.5 right-1.5 flex gap-1">
+            {props.onStar && (
+              <button
+                type="button"
+                aria-label={STUDIO_TILE.star(run.kind, n, of)}
+                aria-pressed={output.starred}
+                onClick={props.onStar}
+                className={tileAction(output.starred)}
+              >
+                <Star size={14} aria-hidden fill={output.starred ? "currentColor" : "none"} />
+              </button>
+            )}
+            {props.onDelete && (
+              <button
+                type="button"
+                aria-label={STUDIO_TILE.delete(run.kind, n, of)}
+                onClick={props.onDelete}
+                className={tileAction(false)}
+              >
+                <Trash2 size={14} aria-hidden />
+              </button>
+            )}
+          </div>
         )
+      )}
+      {!select && !props.onStar && output.starred && (
+        <Star
+          size={14}
+          aria-hidden
+          fill="currentColor"
+          className="pointer-events-none absolute top-2 right-2 text-white drop-shadow"
+        />
       )}
     </div>
   );

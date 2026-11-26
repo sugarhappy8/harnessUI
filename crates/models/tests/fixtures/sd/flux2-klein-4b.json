@@ -1,0 +1,101 @@
+{
+ "source": {
+  "repo": "black-forest-labs/FLUX.2-klein-4B",
+  "revision": "e7b7dc27f91deacad38e78976d1f2b499d76a294",
+  "path": "flux-2-klein-4b.safetensors",
+  "size": 7751105712,
+  "sha256": "ec3d4e733a771f61c052fb4856c48b336c55eaf2c65487c2a1faeb9bbda7a343",
+  "capturedOn": "2026-11-24"
+ },
+ "format": "safetensors",
+ "metadata": {},
+ "tensors": [
+  [
+   "double_blocks.0.img_attn.norm.key_norm.scale",
+   "BF16",
+   [
+    128
+   ]
+  ],
+  [
+   "double_blocks.4.img_attn.norm.key_norm.scale",
+   "BF16",
+   [
+    128
+   ]
+  ],
+  [
+   "double_stream_modulation_img.lin.weight",
+   "BF16",
+   [
+    18432,
+    3072
+   ]
+  ],
+  [
+   "double_stream_modulation_txt.lin.weight",
+   "BF16",
+   [
+    18432,
+    3072
+   ]
+  ],
+  [
+   "final_layer.adaLN_modulation.1.weight",
+   "BF16",
+   [
+    6144,
+    3072
+   ]
+  ],
+  [
+   "img_in.weight",
+   "BF16",
+   [
+    3072,
+    128
+   ]
+  ],
+  [
+   "single_blocks.0.linear1.weight",
+   "BF16",
+   [
+    27648,
+    3072
+   ]
+  ],
+  [
+   "single_blocks.19.linear1.weight",
+   "BF16",
+   [
+    27648,
+    3072
+   ]
+  ],
+  [
+   "single_stream_modulation.lin.weight",
+   "BF16",
+   [
+    9216,
+    3072
+   ]
+  ],
+  [
+   "time_in.in_layer.weight",
+   "BF16",
+   [
+    3072,
+    256
+   ]
+  ],
+  [
+   "txt_in.weight",
+   "BF16",
+   [
+    3072,
+    7680
+   ]
+  ]
+ ],
+ "parameters": 3875544576
+}

@@ -133,7 +133,7 @@ function Body(props: {
       {videoOnly && (
         <label className="mt-3 flex items-center gap-2">
           <input type="checkbox" checked={dontAsk} onChange={(e) => setDontAsk(e.target.checked)} />
-          {STUDIO_CONFIRM.dontAskVideos(formatUsd(estimate.confirmAtUsd))}
+          {STUDIO_CONFIRM.dontAskVideos(estimate.confirmAtUsd === null ? null : formatUsd(estimate.confirmAtUsd))}
         </label>
       )}
       <div className="mt-4 flex justify-end gap-2">

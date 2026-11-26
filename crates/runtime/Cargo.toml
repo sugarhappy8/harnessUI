@@ -57,5 +57,11 @@ name = "sd_cli"
 path = "tests/sd_cli.rs"
 harness = false
 
+# Doubles as a fake llama-server when its file is named llama-server (see the file header).
+[[test]]
+name = "llama_tail"
+path = "tests/llama_tail.rs"
+harness = false
+
 [lints]
 workspace = true

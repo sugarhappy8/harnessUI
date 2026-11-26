@@ -1,0 +1,42 @@
+{
+ "source": {
+  "repo": "city96/umt5-xxl-encoder-gguf",
+  "revision": "b535255bee98c2b0a59ea7c0ae2dcd0c6657b3b7",
+  "path": "umt5-xxl-encoder-Q5_K_M.gguf",
+  "size": 4145878880,
+  "sha256": "eaea358bb438c5d211721a4feecc162000e3636e9cb96f51e216f1f44ebd12ce",
+  "capturedOn": "2026-11-24"
+ },
+ "format": "gguf",
+ "metadata": {
+  "general.architecture": "t5encoder",
+  "general.name": "Umt5 Xxl"
+ },
+ "tensors": [
+  [
+   "enc.blk.0.attn_k.weight",
+   "q5_K",
+   [
+    4096,
+    4096
+   ]
+  ],
+  [
+   "enc.blk.0.attn_q.weight",
+   "q5_K",
+   [
+    4096,
+    4096
+   ]
+  ],
+  [
+   "token_embd.weight",
+   "q6_K",
+   [
+    4096,
+    256384
+   ]
+  ]
+ ],
+ "parameters": 5680910336
+}

@@ -24,6 +24,14 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      # Paths that differ only in letter case are one file on Windows and macOS. For code
+      # modules the extension is left out, as an import leaves it out: `ModelSheet.tsx` and
+      # `modelSheet.ts` are both `./modelSheet` (commit 37e0814 failed only on Windows).
+      - name: No two paths that differ only in letter case
+        run: |
+          same=$(git ls-files | tr 'A-Z' 'a-z' | sort | uniq -d)
+          mods=$(git ls-files '*.ts' '*.tsx' '*.js' '*.jsx' '*.mjs' '*.cjs' | sed -E 's/\.(d\.ts|tsx?|jsx?|[cm]js)$//' | tr 'A-Z' 'a-z' | sort | uniq -d)
+          if [ -n "$same$mods" ]; then printf 'Paths that differ only in case:\n%s\n%s\n' "$same" "$mods"; exit 1; fi
       # The runner's default Ubuntu mirror (azure.archive.ubuntu.com) stopped answering on
       # 2026-11-11 and this step hung for 37 minutes. Each apt-get call has a time limit;
       # when the default mirror fails, Ubuntu's own archive is used, then the kernel.org
@@ -73,12 +81,13 @@ jobs:
       - run: python3 scripts/fetch_sd_test.py
       # Reverse engineering: the pinned downloads (reverse.lock.json) and their fixtures,
       # offline. The real rea runs in reverse.yml.
-      - run: python3 -I scripts/pin_reverse.py --check && python3 -I scripts/pin_reverse_test.py
+      - run: python3 -I scripts/pin_reverse.py --check && python3 -I scripts/pin_reverse_test.py && python3 -I scripts/check_strace_test.py
       # In-app updates: the key-setup helper (scripts/setup_updater.py, run by the owner) and
       # the check release.yml runs before every release, with stand-ins for node and gh; and
       # the release notes release.yml makes from CHANGELOG.md (scripts/release_notes.py).
       - run: python3 -I scripts/setup_updater_test.py
       - run: python3 -I scripts/release_notes_test.py
+      - run: python3 -I scripts/vendor_sd_recipes_test.py
       # ARCHITECTURE.md's sentences about rea's tests and CI against the workflows and test
       # files they describe, and no TODO(lead) marker left in it.
       - run: python3 -I scripts/docs_test.py
@@ -304,8 +313,10 @@ jobs:
   intel-mac:
     name: Intel Mac smoke test
     needs: build
-    # Also when only the Windows build failed; without a disk image the download fails.
-    if: ${{ !cancelled() }}
+    # Also when only the Windows build failed (the matrix's result is then a failure, and
+    # the disk image exists). Not when the builds were skipped because the checks failed:
+    # there is no disk image to download then.
+    if: ${{ !cancelled() && needs.build.result != 'skipped' }}
     runs-on: macos-15-intel
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1

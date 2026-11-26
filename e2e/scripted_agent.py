@@ -1395,21 +1395,6 @@ def p_allow_all(c, notes):
             time.sleep(0.2)
         raise AssertionError("the turn did not finish")
 
-    def click_in_confirmation(label):
-        # The confirmation is the open dialog; a card behind it can carry the same label.
-        time.sleep(0.9)
-        done = s.execute(
-            """
-            const d = document.querySelector('[role=alertdialog][data-state=open]');
-            const b = d && [...d.querySelectorAll('button')].find(x => x.innerText.trim() === arguments[0]);
-            if (b) b.click();
-            return !!b;
-            """,
-            label,
-        )
-        assert done, f"no {label!r} in the confirmation"
-        time.sleep(0.4)
-
     def mode():
         return s.invoke("get_approval_mode", {"chatId": chat})
 
@@ -1445,21 +1430,9 @@ def p_allow_all(c, notes):
                 assert "cannot be changed this way" in str(e), e
         assert s.invoke("get_allow_all_default") is False and mode() is False
 
-        # 2. The header menu: Allow all asks first, listing what still asks.
+        # 2. The header menu: Allow all applies at once, with no confirmation.
         choose_mode(s, "Ask first", "Allow all")
-        s.wait_text("Allow all in this chat?", 10)
-        dialog = s.execute(
-            "const d = document.querySelector('[role=alertdialog][data-state=open]'); return d ? d.innerText : null;")
-        (OUT / "allow-all-dialog.txt").write_text(dialog or "")
-        s.screenshot(str(OUT / "allow-all-dialog.png"))
-        for needle in ("It still asks before:", "Deleting files or folders", "git push", "Cancel"):
-            assert needle in dialog, (needle, dialog)
-        assert mode() is False, "opening the confirmation switched the mode"
-        click_in_confirmation("Cancel")
-        assert mode() is False, "Cancel switched the mode"
-        choose_mode(s, "Ask first", "Allow all")
-        s.wait_text("Allow all in this chat?", 10)
-        click_in_confirmation("Allow all in this chat")
+        assert not s.execute("return !!document.querySelector('[role=alertdialog][data-state=open]');"), "a confirmation was asked"
         s.wait_for(mode, 10, "the chat in Allow all")
         s.wait_for(lambda: s.execute("return !!document.querySelector('button[aria-label=\"Allow all\"]');"), 10, "the Allow all button")
         s.screenshot(str(OUT / "allow-all-on.png"))
@@ -1497,21 +1470,19 @@ def p_allow_all(c, notes):
         s.execute("document.dispatchEvent(new KeyboardEvent('keydown', {key: 'Escape', bubbles: true}));")
         time.sleep(0.4)
 
-        # 5. Switching back needs no confirmation, and a write asks again.
+        # 5. Switching back applies at once, and a write asks again.
         choose_mode(s, "Allow all", "Ask first")
         s.wait_for(lambda: mode() is False, 10, "the chat back in Ask mode")
-        assert "Allow all in this chat?" not in s.page_text(), "switching back asked for confirmation"
+        assert not s.execute("return !!document.querySelector('[role=alertdialog][data-state=open]');"), "a confirmation was asked"
         Fake.queue.append(call("write_file", {"path": str(b), "content": "three\n"}))
         Fake.queue.append({"content": "written"})
         send(s, "go on")
         assert card_or_done(), "a write ran without asking after switching back"
 
-        # The card's third choice: confirm, and this card is approved and the chat switched.
+        # The card's third choice: applies at once, this card is approved and the chat switched.
         time.sleep(0.9)
         s.click_button("Allow all in this chat")
-        s.wait_text("Allow all in this chat?", 10)
-        assert not b.exists() and mode() is False, "the card's button acted before the confirmation"
-        click_in_confirmation("Allow all in this chat")
+        assert not s.execute("return !!document.querySelector('[role=alertdialog][data-state=open]');"), "a confirmation was asked"
         wait_idle(s)
         assert b.read_text() == "three\n"
         assert mode() is True
@@ -1527,15 +1498,13 @@ def p_allow_all(c, notes):
         s.execute("document.dispatchEvent(new KeyboardEvent('keydown', {key: 'Escape', bubbles: true}));")
         time.sleep(0.3)
 
-        # "Allow all in every chat" in Settings: asks first, and is a saved setting.
+        # "Allow all in every chat" in Settings: applies at once, and is a saved setting.
         s.invoke("set_approval_mode", {"chatId": chat, "allowAll": False})
         s.click_button("Settings")
         s.click_button("Permissions")
         s.wait_text("Every chat starts in", 10)
         settings_radio(s, "Allow all")
-        s.wait_text("Allow all in every chat?", 10)
-        assert s.invoke("get_allow_all_default") is False
-        click_in_confirmation("Allow all in every chat")
+        assert not s.execute("return !!document.querySelector('[role=alertdialog][data-state=open]');"), "a confirmation was asked"
         s.wait_for(lambda: s.invoke("get_allow_all_default") is True, 10, "the default switched on")
         assert mode() is True, "an open chat did not follow the default"
         assert s.invoke("get_setting", {"key": "allowAllDefault"}) is True
@@ -1594,20 +1563,6 @@ def p_full_access(c, notes):
             time.sleep(0.2)
         raise AssertionError("the turn did not finish")
 
-    def click_in_confirmation(label):
-        time.sleep(0.9)
-        done = s.execute(
-            """
-            const d = document.querySelector('[role=alertdialog][data-state=open]');
-            const b = d && [...d.querySelectorAll('button')].find(x => x.innerText.trim() === arguments[0]);
-            if (b) b.click();
-            return !!b;
-            """,
-            label,
-        )
-        assert done, f"no {label!r} in the confirmation"
-        time.sleep(0.4)
-
     def header(label):
         return s.execute(
             "return !!document.querySelector('button[aria-label=\"' + arguments[0] + '\"]');", label)
@@ -1636,22 +1591,10 @@ def p_full_access(c, notes):
             except WebDriverError as e:
                 assert "cannot be changed this way" in str(e), e
 
-        # 1. The header menu: Full access asks first with a plain warning; Cancel changes nothing.
+        # 1. The header menu: Full access applies at once, with no confirmation.
         s.wait_for(lambda: header("Ask first"), 10, "the Ask first button")
         choose_mode(s, "Ask first", "Full access")
-        s.wait_text("Full access in this chat?", 10)
-        dialog = s.execute(
-            "const d = document.querySelector('[role=alertdialog][data-state=open]'); return d ? d.innerText : null;")
-        (OUT / "full-access-dialog.txt").write_text(dialog or "")
-        s.screenshot(str(OUT / "full-access-dialog.png"))
-        for needle in ("delete", "trash", "trick", "app's own data", "Cancel", "Turn on Full access"):
-            assert needle in dialog, (needle, dialog)
-        assert mode() == "ask", "opening the confirmation switched the mode"
-        click_in_confirmation("Cancel")
-        assert mode() == "ask", "Cancel switched the mode"
-        choose_mode(s, "Ask first", "Full access")
-        s.wait_text("Full access in this chat?", 10)
-        click_in_confirmation("Turn on Full access")
+        assert not s.execute("return !!document.querySelector('[role=alertdialog][data-state=open]');"), "a confirmation was asked"
         s.wait_for(lambda: mode() == "fullAccess", 10, "the chat in Full access")
         s.wait_for(lambda: header("Full access"), 10, "the Full access button")
         s.wait_for(lambda: folder_chip(s) == "Folders for this chat: Whole computer", 10, "the folder chip in Full access")  # [0.0.6 item 7]
@@ -1707,11 +1650,11 @@ def p_full_access(c, notes):
         s.execute("document.dispatchEvent(new KeyboardEvent('keydown', {key: 'Escape', bubbles: true}));")
         time.sleep(0.4)
 
-        # 4. Back to Ask first: one click, no confirmation, and a write asks again.
+        # 4. Back to Ask first: one click, and a write asks again.
         choose_mode(s, "Full access", "Ask first")
         s.wait_for(lambda: mode() == "ask", 10, "the chat back in Ask first")
         s.wait_for(lambda: folder_chip(s) == f"Folders for this chat: {c.work.name}", 10, "the folder chip back in Ask first")  # [0.0.6 item 7]
-        assert "Full access in this chat?" not in s.page_text()
+        assert not s.execute("return !!document.querySelector('[role=alertdialog][data-state=open]');"), "a confirmation was asked"
         Fake.queue.append(call("write_file", {"path": str(outside / "after.txt"), "content": "x"}))
         Fake.queue.append({"tool_calls": [{"name": "make_folder", "arguments": {"path": str(inside / "nope")}}]})
         Fake.queue.append({"content": "refused"})
@@ -1722,14 +1665,12 @@ def p_full_access(c, notes):
         assert not (inside / "nope").exists(), "a folder tool ran outside Full access"
         assert not {"make_folder", "move_path", "delete_folder"} & set(offered()), offered()
 
-        # 5. Settings: the mode every chat starts in, saved, with the same confirmation.
+        # 5. Settings: the mode every chat starts in, saved at once.
         s.click_button("Settings")
         s.click_button("Permissions")
         s.wait_text("Every chat starts in", 10)
         settings_radio(s, "Full access")
-        s.wait_text("Full access in every chat?", 10)
-        assert s.invoke("get_default_approval_mode") == "ask"
-        click_in_confirmation("Turn on Full access")
+        assert not s.execute("return !!document.querySelector('[role=alertdialog][data-state=open]');"), "a confirmation was asked"
         s.wait_for(lambda: s.invoke("get_default_approval_mode") == "fullAccess", 10, "the default in Full access")
         assert mode() == "fullAccess", "an open chat did not follow the default"
         assert s.invoke("get_setting", {"key": "approvalModeDefault"}) == "fullAccess"

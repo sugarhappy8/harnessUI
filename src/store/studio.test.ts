@@ -2,13 +2,21 @@
 // reports them, and the notice for a video that finished while the chat was shown.
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { LOCAL, LOCAL_RUN, MODELS, RUN } from "../components/studio/fixtures/models";
-import type { Run, StudioEndpoint, StudioPrefs } from "../components/studio/types";
+import { settingsParts } from "../components/studio/settingsLine";
+import type { InstalledLocal, LocalModels, Lora, Run, StudioEndpoint, StudioPrefs } from "../components/studio/types";
+import type { DownloadGroup } from "../lib/types";
 
-vi.mock("../lib/ipc", () => ({ isTauri: () => true }));
+const ipc = vi.hoisted(() => ({
+  isTauri: () => true,
+  listDownloads: vi.fn<() => Promise<DownloadGroup[]>>(),
+  onDownloadProgress: vi.fn<(handler: (g: DownloadGroup) => void) => Promise<() => void>>(),
+}));
+vi.mock("../lib/ipc", () => ipc);
 vi.mock("../components/studio/api");
 
 const api = await import("../components/studio/api");
-const { followStudio, runningCount, useStudio } = await import("./studio");
+const { canPick, followStudio, followStudioDownloads, runningCount, useStudio } = await import("./studio");
+const { useDownloads } = await import("./downloads");
 
 const INITIAL = useStudio.getState();
 
@@ -36,7 +44,7 @@ describe("the view", () => {
     expect(useStudio.getState().view).toBe("chat");
   });
 
-  it("a tab asked for closes Get local models; opened without one, Studio keeps it", () => {
+  it("a tab asked for closes Get models; opened without one, Studio keeps it", () => {
     useStudio.getState().showStudio();
     useStudio.getState().showLocalModels(true);
     useStudio.getState().showChat();
@@ -44,7 +52,7 @@ describe("the view", () => {
     useStudio.getState().showStudio();
     expect(useStudio.getState()).toMatchObject({ view: "studio", localView: true });
     useStudio.getState().showChat();
-    // Open in Studio, a finished video's Open: the tab's cards, not Get local models.
+    // Open in Studio, a finished video's Open: the tab's cards, not Get models.
     useStudio.getState().showStudio("video");
     expect(useStudio.getState()).toMatchObject({ view: "studio", tab: "video", localView: false });
   });
@@ -173,6 +181,116 @@ describe("following the backend", () => {
   });
 });
 
+describe("Studio's downloads (Task U7)", () => {
+  /** A download group as the download manager reports it. */
+  function download(patch: Partial<DownloadGroup>): DownloadGroup {
+    return {
+      id: "g1",
+      repo: "leejet/Z-Image-Turbo-GGUF",
+      label: "Z-Image Turbo",
+      fileCount: 3,
+      bytesDone: 0,
+      bytesTotal: 6e9,
+      status: "downloading",
+      error: null,
+      bytesPerSecond: null,
+      unverified: false,
+      ...patch,
+    };
+  }
+
+  /** `LOCAL` with a picture model `id` installed (and `patch` on its row). */
+  function installed(id: string, patch: Partial<InstalledLocal> = {}): LocalModels {
+    const row = LOCAL.installed[0]!;
+    return { ...LOCAL, installed: [{ ...row, id, name: id, model: { ...row.model, id, displayName: id }, ...patch }, ...LOCAL.installed] };
+  }
+
+  let heard: (g: DownloadGroup) => void = () => undefined;
+  beforeEach(() => {
+    useDownloads.setState({ groups: [] });
+    ipc.listDownloads.mockResolvedValue([]);
+    ipc.onDownloadProgress.mockImplementation(async (handler) => {
+      heard = handler;
+      return () => undefined;
+    });
+  });
+
+  it("a model's download that is done reads the local models again and is listed as finished; a LoRA's reads the LoRAs", async () => {
+    useStudio.setState({ local: LOCAL, loaded: true });
+    const stop = followStudioDownloads();
+    await flush();
+    expect(ipc.listDownloads).toHaveBeenCalledTimes(1);
+    vi.mocked(api.studioLocalModels).mockResolvedValue(installed("z-image-turbo-q4"));
+    heard(download({ genModelId: "z-image-turbo-q4", generatorKind: "image" }));
+    // Running: kept, nothing read again.
+    expect(useDownloads.getState().groups).toHaveLength(1);
+    expect(api.studioLocalModels).not.toHaveBeenCalled();
+    heard(download({ genModelId: "z-image-turbo-q4", generatorKind: "image", status: "done" }));
+    await flush();
+    expect(api.studioLocalModels).toHaveBeenCalledTimes(1);
+    expect(useStudio.getState().local?.installed[0]?.id).toBe("z-image-turbo-q4");
+    expect(useStudio.getState().doneDownloads).toEqual(["g1"]);
+    // The same event again lists it once.
+    heard(download({ genModelId: "z-image-turbo-q4", generatorKind: "image", status: "done" }));
+    expect(useStudio.getState().doneDownloads).toEqual(["g1"]);
+    // A LoRA's: the LoRAs, Get models' copy too, and not the local models.
+    const lora: Lora = { ...LOCAL.loras[0]!, id: "hf:o/r:anime.safetensors", name: "anime" };
+    vi.mocked(api.studioLoras).mockResolvedValue([lora]);
+    vi.mocked(api.studioLocalModels).mockClear();
+    heard(download({ id: "g2", loraId: lora.id, status: "done" }));
+    await flush();
+    expect(api.studioLoras).toHaveBeenCalledTimes(1);
+    expect(api.studioLocalModels).not.toHaveBeenCalled();
+    expect(useStudio.getState().loras).toEqual([lora]);
+    expect(useStudio.getState().local?.loras).toEqual([lora]);
+    expect(useStudio.getState().doneDownloads).toEqual(["g2", "g1"]);
+    // A chat model's download is not Studio's.
+    heard(download({ id: "g3", status: "done" }));
+    expect(useStudio.getState().doneDownloads).toEqual(["g2", "g1"]);
+    useStudio.getState().clearDoneDownloads();
+    expect(useStudio.getState().doneDownloads).toEqual([]);
+    stop();
+  });
+
+  it("before Studio has read what is saved, a model that is done is left to that first read", async () => {
+    const stop = followStudioDownloads();
+    await flush();
+    heard(download({ genModelId: "z-image-turbo-q4", status: "done" }));
+    await flush();
+    expect(api.studioLocalModels).not.toHaveBeenCalled();
+    expect(useStudio.getState().doneDownloads).toEqual(["g1"]);
+    stop();
+  });
+
+  it("Use it picks the model on its kind's tab, whatever its fit, and closes Get models and its panel", () => {
+    const wan = LOCAL.installed.find((m) => m.kind === "video")!;
+    useStudio.setState({ local: { ...LOCAL, installed: LOCAL.installed.map((m) => (m.id === wan.id ? { ...m, fit: { ...m.fit, word: "notHere" as const } } : m)) }, loaded: true, doneDownloads: ["g1", "g2"] });
+    useDownloads.setState({ groups: [download({ id: "g1", genModelId: wan.id, status: "done" }), download({ id: "g2", loraId: "x", status: "done" })] });
+    useStudio.getState().showLocalModels(true);
+    void useStudio.getState().openDetail({ entryId: "x" });
+    expect(canPick(useStudio.getState().local, wan.id)).toBe(true);
+    useStudio.getState().pickNewModel(wan.id);
+    expect(useStudio.getState()).toMatchObject({ tab: "video", localView: false, detail: null, doneDownloads: ["g2"] });
+    expect(useStudio.getState().drafts.video).toMatchObject({ target: "thisComputer", model: wan.model.id });
+  });
+
+  it("Use it is not offered for a model that is not installed, or that its tab cannot use", () => {
+    expect(canPick(LOCAL, "nothing-here")).toBe(false);
+    const unreadable = installed("old", { model: { ...LOCAL.installed[0]!.model, id: "old", usable: "This version cannot read it." } });
+    expect(canPick(unreadable, "old")).toBe(false);
+    // One that needs setting up can be chosen: its files are chosen there.
+    const mystery = LOCAL.installed.find((m) => m.needsSetup)!;
+    expect(canPick(LOCAL, mystery.id)).toBe(true);
+    // Video on a computer that runs models on the processor is offered, with a warning.
+    const wan = LOCAL.installed.find((m) => m.kind === "video")!;
+    expect(canPick({ ...LOCAL, videoOnProcessor: true }, wan.id)).toBe(true);
+    useStudio.setState({ local: LOCAL, tab: "image" });
+    const before = useStudio.getState().drafts;
+    useStudio.getState().pickNewModel("nothing-here");
+    expect(useStudio.getState().drafts).toBe(before);
+  });
+});
+
 describe("an installed local model deleted", () => {
   it("is off the list at once, and a failed read afterwards only leaves a trace (the files are gone)", async () => {
     const id = LOCAL.installed[0]!.id;
@@ -227,6 +345,93 @@ describe("why a press was refused, and the model it was for", () => {
   it("stays while the same model is picked again", () => {
     useStudio.getState().chooseModel("image", { endpoint: 1 }, "openai/gpt-image-2.6-flare");
     expect(refused()).toEqual(limit);
+  });
+});
+
+// 0.2.0 (design 9.2): Create no longer waits on a price. Pressed while extra settings wait for
+// the model's price, it finishes that request first, then sends; when the request fails, it
+// sends without them and says so.
+describe("Create while extra settings wait for the model's price", () => {
+  const endpoint: StudioEndpoint = {
+    providerId: 1,
+    name: "OpenRouter",
+    company: "openrouter",
+    host: "openrouter.ai",
+    cloud: true,
+    hasKey: true,
+    fetchedAt: 1794900000000,
+    models: MODELS,
+  };
+  const flare = MODELS.find((m) => m.id === "openai/gpt-image-2.6-flare")!;
+  const nano = MODELS.find((m) => m.id === "google/gemini-nano-banana-2.1")!;
+  /** Nano Banana's answer from OpenRouter's endpoints: priced, with an Extra field. */
+  const nanoAnswered = {
+    ...nano,
+    priceFetchedAt: 1794909600000,
+    params: [
+      ...nano.params,
+      { ...flare.params.find((p) => p.kind.type === "extra")!, kind: { type: "extra" as const, allowedKeys: ["moderation"] } },
+    ],
+  };
+  const unreachable = { code: "network", message: "OpenRouter could not be reached.", nextStep: "Try again.", details: "" };
+
+  beforeEach(() => {
+    vi.mocked(api.studioUsage).mockResolvedValue({ spentTodayUsd: 0, pendingUsd: 0, limitUsd: 10, folder: "", bytes: 0, pictures: 0, videos: 0 });
+    vi.mocked(api.studioGetPrefs).mockResolvedValue({ lastModel: {} } as unknown as StudioPrefs);
+    vi.mocked(api.studioSetPrefs).mockResolvedValue({ lastModel: {} } as unknown as StudioPrefs);
+    vi.mocked(api.studioStart).mockResolvedValue(run({ id: "new", status: "queued" }));
+    useStudio.setState({ local: LOCAL, endpoints: [endpoint] });
+    // On Flare (its price saved), with an extra setting and a prompt.
+    useStudio.getState().chooseModel("image", { endpoint: 1 }, flare.id);
+    useStudio.setState((s) => ({
+      drafts: { ...s.drafts, image: { ...s.drafts.image, prompt: "a fox", extra: { moderation: "low" } } },
+    }));
+  });
+
+  it("Create while a price is pending waits for it, then sends with the extras", async () => {
+    let answer: (m: typeof nanoAnswered) => void = () => undefined;
+    vi.mocked(api.studioModelPrice).mockReturnValue(new Promise((resolve) => (answer = resolve)));
+    useStudio.getState().chooseModel("image", { endpoint: 1 }, nano.id);
+    expect(useStudio.getState().holding.image).toBe(true);
+    const pressed = useStudio.getState().start("image", false);
+    await flush();
+    // Waiting for the price: nothing sent yet, and another press does nothing.
+    expect(api.studioStart).not.toHaveBeenCalled();
+    expect(useStudio.getState().starting).toBe(true);
+    expect(await useStudio.getState().start("image", false)).toBeNull();
+    answer(nanoAnswered);
+    expect((await pressed)?.id).toBe("new");
+    expect(api.studioModelPrice).toHaveBeenCalledTimes(1);
+    expect(api.studioStart).toHaveBeenCalledTimes(1);
+    expect(api.studioStart).toHaveBeenCalledWith(
+      expect.objectContaining({ model: nano.id, prompt: "a fox", extra: { moderation: "low" } }),
+      false,
+    );
+    expect(useStudio.getState().holding.image).toBe(false);
+    expect(useStudio.getState().drafts.image.note).toBeNull();
+    expect(useStudio.getState().starting).toBe(false);
+  });
+
+  it("Create sends without extras when the price request fails, and says so", async () => {
+    let fail: (e: unknown) => void = () => undefined;
+    vi.mocked(api.studioModelPrice).mockReturnValue(new Promise((_, reject) => (fail = reject)));
+    useStudio.getState().chooseModel("image", { endpoint: 1 }, nano.id);
+    const pressed = useStudio.getState().start("image", false);
+    await flush();
+    fail(unreachable);
+    expect((await pressed)?.id).toBe("new");
+    expect(api.studioModelPrice).toHaveBeenCalledTimes(1);
+    expect(api.studioStart).toHaveBeenCalledWith(expect.objectContaining({ model: nano.id, extra: {} }), false);
+    expect(useStudio.getState().drafts.image.note).toBe("Sent without the extra settings: their price couldn't be read.");
+    // They stay held, for Get the price; the failure is shown where it asks again.
+    expect(useStudio.getState().holding.image).toBe(true);
+    expect(useStudio.getState().priceError.image).toEqual(unreachable);
+    // A later press asks for the price again.
+    vi.mocked(api.studioModelPrice).mockResolvedValue(nanoAnswered);
+    await useStudio.getState().start("image", false);
+    expect(api.studioModelPrice).toHaveBeenCalledTimes(2);
+    expect(api.studioStart).toHaveBeenLastCalledWith(expect.objectContaining({ extra: { moderation: "low" } }), false);
+    expect(useStudio.getState().holding.image).toBe(false);
   });
 });
 
@@ -751,5 +956,143 @@ describe("the gallery's results (Task B9)", () => {
     answer({ runs: [LOCAL_RUN], next: null });
     await more;
     expect(useStudio.getState().runs).toEqual([]);
+  });
+});
+
+describe("LoRAs in the draft", () => {
+  const sdxl = LOCAL.installed.find((m) => m.loraBase === "sdxl")!;
+  const field = sdxl.model.params.find((p) => p.kind.type === "loras")!;
+  const lora = (id: string, name: string, base: Lora["base"]): Lora => ({
+    id,
+    name,
+    base,
+    format: "kohya",
+    sizeBytes: 3,
+    source: "import",
+    repo: null,
+    missing: false,
+  });
+  const attached = () => useStudio.getState().drafts.image.values[field.key];
+
+  beforeEach(() => {
+    useStudio.setState({ local: LOCAL, loras: [lora("a", "pixel art ü", "sdxl"), lora("b", "style", "sdxl")] });
+    useStudio.getState().chooseModel("image", "thisComputer", sdxl.model.id);
+  });
+
+  it("attachLora adds weight 1 and setLoraWeight clamps to -1..2 in steps of 0.05", () => {
+    const { attachLora, setLoraWeight } = useStudio.getState();
+    attachLora("a");
+    expect(attached()).toEqual([{ id: "a", weight: 1, highNoise: false }]);
+    // The same LoRA is not attached twice.
+    attachLora("a");
+    expect(attached()).toHaveLength(1);
+    setLoraWeight("a", 2.37);
+    expect(attached()).toEqual([{ id: "a", weight: 2, highNoise: false }]);
+    setLoraWeight("a", 0.83);
+    expect(attached()).toEqual([{ id: "a", weight: 0.85, highNoise: false }]);
+    setLoraWeight("a", -7);
+    expect((attached() as { weight: number }[])[0]!.weight).toBe(-1);
+  });
+
+  it("the bounds are the field's own, and no more than its max are attached", () => {
+    if (field.kind.type !== "loras") throw new Error("not a LoRA field");
+    const max = field.kind.max;
+    for (let i = 0; i < max + 2; i++) useStudio.getState().attachLora(`l${i}`);
+    expect(attached()).toHaveLength(max);
+  });
+
+  it("high-noise is kept only for a model with a high-noise part; detaching the last one unsets the value", () => {
+    const { attachLora, setLoraHighNoise, detachLora } = useStudio.getState();
+    attachLora("a");
+    attachLora("b");
+    // SDXL has no high-noise part.
+    setLoraHighNoise("a", true);
+    expect(attached()).toEqual([
+      { id: "a", weight: 1, highNoise: false },
+      { id: "b", weight: 1, highNoise: false },
+    ]);
+    detachLora("a");
+    expect(attached()).toEqual([{ id: "b", weight: 1, highNoise: false }]);
+    detachLora("b");
+    expect(field.key in useStudio.getState().drafts.image.values).toBe(false);
+  });
+
+  it("a draft without a model leaves its values alone", () => {
+    const s = useStudio.getState();
+    useStudio.setState({ drafts: { ...s.drafts, image: { ...s.drafts.image, target: null, model: null } } });
+    const before = useStudio.getState().drafts.image.values;
+    useStudio.getState().attachLora("a");
+    expect(useStudio.getState().drafts.image.values).toBe(before);
+  });
+
+  it("a model switch keeps the LoRAs that fit and names each it removes", () => {
+    // Final review, area 3, I1: klein to sd_xl_base_1.0 with two LoRAs attached kept none and
+    // said "[object Object]".
+    const klein = LOCAL.installed.find((m) => m.loraBase === "flux2-klein")!;
+    useStudio.setState({
+      loras: [lora("a", "pixel art ü", "sdxl"), lora("k", "klein style", "flux2-klein"), lora("u", "mystery", null)],
+    });
+    const { attachLora, chooseModel } = useStudio.getState();
+    chooseModel("image", "thisComputer", klein.model.id);
+    attachLora("a");
+    attachLora("k");
+    attachLora("u");
+    chooseModel("image", "thisComputer", sdxl.model.id);
+    const draft = useStudio.getState().drafts.image;
+    expect(draft.values[field.key]).toEqual([
+      { id: "a", weight: 1, highNoise: false },
+      { id: "u", weight: 1, highNoise: false },
+    ]);
+    expect(draft.note).toBe("The LoRA klein style was made for FLUX.2 klein models, so it was removed.");
+  });
+
+  it("lorasFor lists LoRAs for the model's base first", () => {
+    useStudio.setState({
+      loras: [
+        lora("other", "other", "flux"),
+        lora("fit", "fit", "sdxl"),
+        lora("unk", "unk", null),
+        lora("fit2", "fit2", "sdxl"),
+      ],
+    });
+    const ids = (list: Lora[]) => list.map((l) => l.id);
+    const groups = useStudio.getState().lorasFor(sdxl);
+    expect({ fits: ids(groups.fits), unknown: ids(groups.unknown), others: ids(groups.others) }).toEqual({
+      fits: ["fit", "fit2"],
+      unknown: ["unk"],
+      others: ["other"],
+    });
+    // A model of no known type judges none of them.
+    const blind = useStudio.getState().lorasFor({ ...sdxl, loraBase: null });
+    expect({ fits: blind.fits, others: blind.others, unknown: ids(blind.unknown) }).toEqual({
+      fits: [],
+      others: [],
+      unknown: ["other", "fit", "unk", "fit2"],
+    });
+  });
+});
+
+describe("the settings line", () => {
+  it("the settings line names attached LoRAs", () => {
+    const model = LOCAL.installed.find((m) => m.loraBase === "sdxl")!.model;
+    const key = model.params.find((p) => p.kind.type === "loras")!.key;
+    const loras: Lora[] = [
+      { id: "local:a", name: "pixel art ü", base: "sdxl", format: "kohya", sizeBytes: 3, source: "import", repo: null, missing: false },
+    ];
+    const used = run({
+      ...LOCAL_RUN,
+      params: {
+        ...LOCAL_RUN.params,
+        [key]: [
+          { id: "local:a", weight: 0.8, highNoise: false },
+          { id: "hf:o/r:styles/style.safetensors", weight: 1, highNoise: false },
+          { id: "local:gone", weight: 0.30000000000000004, highNoise: false },
+        ],
+      },
+    });
+    expect(settingsParts(used, model, loras)).toContain("LoRAs: pixel art ü 0.8, style 1, a removed LoRA 0.3");
+    // A run with none says nothing about them; nor does a cloud run.
+    expect(settingsParts(LOCAL_RUN, model, loras).some((p) => p.startsWith("LoRAs"))).toBe(false);
+    expect(settingsParts({ ...used, runsOn: "cloud" }, null, loras).some((p) => p.startsWith("LoRAs"))).toBe(false);
   });
 });

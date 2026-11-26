@@ -174,8 +174,17 @@ class ReverseCiAsTheWorkflowsRunIt(unittest.TestCase):
         self.assertIn("control", self.bullet)
 
     def test_the_linux_checker_fails_on_name_lookups(self):
-        self.assertIn("htons(53)", self.reverse)
+        self.assertIn("htons(53)", read("scripts/check_strace.py"))
+        self.assertIn("scripts/check_strace.py", self.reverse)
         self.assertIn("name lookup", self.bullet)
+        self.assertIn("UDP socket to port 0", self.bullet)
+        # A send on such a socket is checked by its peer (final review, area 4, I1).
+        self.assertIn("checked by its peer", self.bullet)
+        # Each message on its own, its address never read from a payload (security residuals).
+        self.assertIn("each message of a send is judged on its own", self.bullet)
+        self.assertIn("never from a payload", self.bullet)
+        self.assertIn("a send on a UDP socket connected to port 0", self.bullet)
+        self.assertIn("udp-port-0-send", self.reverse)
         self.assertIn("name lookup", self.sentences["13.6 stays offline"])
 
     def test_the_server_call_path_runs_with_the_real_rea(self):
@@ -242,6 +251,13 @@ class ReleaseDocsSayWhetherTheWorkflowRan(unittest.TestCase):
         }
         for where, text in docs.items():
             self.assertEqual("has not run" in text, pending, f"{where}: say whether reverse.yml has run, as 16 does")
+
+    def test_the_nightly_run_is_said_where_it_runs(self):
+        # Final review, area 4, I2: the workflow runs every night, and passed on all three.
+        self.assertIn("schedule:", (WORKFLOWS / "reverse.yml").read_text(encoding="utf-8"))
+        self.assertIn("runs every night on the default branch", reverse_sentences()["16 reverse CI"])
+        self.assertIn("It runs every night on GitHub, on Linux, Windows and macOS.", doc_paragraph("SECURITY.md", "the real decompilers"))
+        self.assertNotIn("unverified", reverse_sentences()["13.6 stays offline"])
 
 
 class OfflineCoverAsItIs(unittest.TestCase):
@@ -311,13 +327,54 @@ class StudioDocs(unittest.TestCase):
         for words in ("`openrouter.ai`", "`api.openai.com`", "guarded fetcher", "without the key"):
             self.assertIn(words, row)
 
+    def test_pickle_files_and_the_formats_studio_reads_are_said_exactly(self):
+        # Final review, area 4, I3 with area 1, M-3 and area 2, M4, by controller ruling (design
+        # section 3): pickle files are never read, parsed or run and are only a plain download;
+        # Studio reads .safetensors, .sft and .gguf, plus a tokenizer's .json.
+        index = read("crates/models/src/sd/index.rs")
+        self.assertIn('PICKLE_EXTENSIONS: [&str; 4] = [".ckpt", ".pt", ".pth", ".bin"]', index)
+        self.assertIn('READ_EXTENSIONS: [&str; 3] = [".safetensors", ".sft", ".gguf"]', index)
+        self.assertIn('TOKENIZER_EXTENSION: &str = ".json"', read("crates/models/src/gen_catalog.rs"))
+        security = doc_paragraph("SECURITY.md", "Studio reads `.safetensors`, `.sft` and `.gguf` model files")
+        files = paragraph(section("### 7.9 Studio on this computer (0.1.0)"), "- **Model files.**")
+        for where, text in (("SECURITY.md", security), ("ARCHITECTURE.md 7.9", files)):
+            for words in (
+                "`.safetensors`, `.sft` and `.gguf`",
+                "tokenizer's `.json`",
+                "(`.ckpt`, `.pt`, `.pth`, `.bin`)",
+                "never reads, parses or runs",
+                "plain file download for another app",
+                "*Download file anyway*",
+            ):
+                self.assertIn(words, text, where)
+            for stale in ("refused everywhere", "must be `.gguf` or `.safetensors`", "`.gguf` and `.safetensors` only"):
+                self.assertNotIn(stale, text, where)
+
+    def test_the_input_delay_names_no_removed_confirmation(self):
+        # Final review, area 4, M4: G4 removed the Allow all and Full access confirmations.
+        aside = paragraph(architecture(), "- *Stepping aside (0.0.7):*")
+        self.assertNotIn("Allow all / Full access confirmation", aside)
+        self.assertIn("every approval card and the buttons that set the agent going again", aside)
+
+    def test_the_out_of_memory_retry_flags_are_the_codes(self):
+        run = read("crates/runtime/src/sd/run.rs")
+        self.assertIn("Err(SdFailure::OutOfMemory) if !job.offload_to_cpu => {}", run)
+        self.assertIn("offload_to_cpu: true,\n            vae_tiling: job.tiling_allowed,", run)
+        process = paragraph(section("### 7.9 Studio on this computer (0.1.0)"), "- **One process per job.**")
+        self.assertIn(
+            "a run that ran out of memory without `--offload-to-cpu` is tried once more with memory saving: "
+            "`--offload-to-cpu`, and `--vae-tiling` unless the recipe disables tiling",
+            process,
+        )
+        self.assertNotIn("(`--vae-tiling --offload-to-cpu`)", process)
+
     def test_the_money_rules_are_the_codes(self):
         spend = read("src-tauri/src/studio/spend.rs")
         for name, value in (("CONFIRM_AT_USD", "1.0"), ("DEFAULT_DAILY_LIMIT_USD", "10.0"), ("UNKNOWN_PRICE_RESERVE_USD", "5.0")):
             self.assertRegex(spend, rf"pub const {name}: f64 = {re.escape(value)};")
         for doc in ("SECURITY.md", "README.md"):
+            self.assertIn("Spending guards are off by default", read(doc), doc)
             self.assertIn("$10", read(doc), doc)
-            self.assertIn("$1 or more", read(doc), doc)
 
     def test_the_audit_row_keeps_the_prompt_length_only(self):
         bullet = paragraph(section("### 13.7 Audit log"), "- *Studio* (0.1.0)")
@@ -353,13 +410,26 @@ class StudioDocs(unittest.TestCase):
 
     def test_7_9_states_the_local_rules_the_code_keeps(self):
         local = "\n".join(section("### 7.9 Studio on this computer (0.1.0)"))
-        for words in ("one `sd-cli` process per job", "no `sd-server`", "`--prompt-file`", "4,000 characters", "`.ckpt`",
-                      "`--disable-image-metadata`", "never `resources/llama/main`", "Unload the chat model"):
+        for words in ("one `sd-cli` process per job", "no `sd-server`", "`--prompt-file`", "1 MiB", "16,384 characters",
+                      "262,144 characters", "`.ckpt`",
+                      "`--disable-image-metadata`", "never `resources/llama/main`", "Unload the chat model",
+                      "installing an update stops it"):
             self.assertIn(words, local)
-        self.assertRegex(read("crates/runtime/src/sd/args.rs"), r"pub const PROMPT_MAX_CHARS: usize = 4_000;")
+        self.assertNotIn("4,000 characters", local)
+        args = read("crates/runtime/src/sd/args.rs")
+        self.assertRegex(args, r"pub const PROMPT_MAX_BYTES: usize = 1_048_576;")
+        self.assertRegex(args, r"pub const LOCAL_PROMPT_MAX_CHARS: usize = 16_384;")
+        self.assertRegex(args, r"pub const NEGATIVE_MAX_CHARS: usize = PROMPT_MAX_BYTES / 4;")
 
     def test_security_says_a_local_run_sends_nothing(self):
         self.assertIn("A local Studio run sends nothing", read("SECURITY.md"))
+
+    def test_security_states_the_prompt_bounds_the_code_keeps(self):
+        engine = doc_paragraph("SECURITY.md", "The prompt is never on its command line")
+        for words in ("at most 16,384 characters, so the child-safety check reads all of it",
+                      "at most 262,144 characters", "longer than 1 MiB"):
+            self.assertIn(words, engine)
+        self.assertNotIn("4,000 characters", engine)
 
     def test_the_readme_leads_studio_with_this_computer(self):
         studio = doc_paragraph("README.md", "Studio makes pictures and short videos")
@@ -382,7 +452,221 @@ class StudioDocs(unittest.TestCase):
         self.assertTrue(entry, "missing 0.1.0 changelog entry")
         for words in ("Studio", "On this computer", "stable-diffusion.cpp", "Hugging Face", "$10", "$1 or more", "### Added", "### Known limits"):
             self.assertIn(words, entry)
-        self.assertLess(entry.index("On this computer"), entry.index("OpenRouter"))
+        added = entry.split("### Added", 1)[1].split("\n### ", 1)[0]
+        self.assertLess(added.index("On this computer"), added.index("OpenRouter"))
+
+    def test_the_changelog_tells_users_what_0_2_0_does(self):
+        entries = read("CHANGELOG.md").split("\n## ")[1:]
+        entry = next((item for item in entries if item.startswith("0.2.0 (")), "")
+        self.assertTrue(entry, "missing 0.2.0 changelog entry")
+        for words in ("Hugging Face", "LoRA", "Works in Studio", "off by default", "### Added", "### Changed", "### Known limits"):
+            self.assertIn(words, entry)
+        for words in ("Task ", ".rs", "CI"):
+            self.assertNotIn(words, entry)
+
+    def test_the_0_2_0_entry_says_where_settings_are_and_what_an_update_turns_off(self):
+        # Final review: area 3, I6 and area 4, I4 (the model sheet only picks a model) and
+        # area 4, I5 (an update from 0.1.x turns the old default spending prefs off once).
+        entries = read("CHANGELOG.md").split("\n## ")[1:]
+        entry = next((item for item in entries if item.startswith("0.2.0 (")), "")
+        sheet = next(line for line in entry.splitlines() if line.startswith("- **The model sheet.**"))
+        self.assertNotIn("its settings and your saved setups sit in one sheet", sheet)
+        for words in ("for picking a model", "*Settings* side panel", "*My setups*"):
+            self.assertIn(words, sheet)
+        spending = next(line for line in entry.splitlines() if line.startswith("- **The spending limits are off by default.**"))
+        for words in ("update from 0.1.x", "$10", "every video", "$1 or more", "turned off once", "you changed yourself is kept"):
+            self.assertIn(words, spending)
+        prefs = read("src-tauri/src/studio/prefs.rs")
+        for code in ("DEFAULT_DAILY_LIMIT_USD", "CONFIRM_AT_USD", "prefs.confirm_every_video = false"):
+            self.assertIn(code, prefs)
+
+
+class StaleFrom0_1_xDocs(unittest.TestCase):
+    """The 0.1.0 review's follow-ups (docs/dev/0.1.0/follow-ups.md, items 1 to 8): the process and
+    trust tables, the sidecar, the signing claims, README's first sentence, the VC++ DLLs and
+    7.9's removed 0.1.x gates."""
+
+    def test_section_4_lists_sd_cli(self):
+        row = paragraph(section("## 4. Process model"), "| `sd-cli`")
+        for words in ("one process per local Studio job", "spawn helper"):
+            self.assertIn(words, row)
+
+    def test_13_1_has_a_studio_engine_row(self):
+        lines = section("### 13.1 Trust boundaries")
+        row = paragraph(lines, "| `sd-cli`")
+        for words in ("Pinned build only", "the prompt by file", "`.ckpt`", "the checksum proves origin, not safety"):
+            self.assertIn(words, row)
+        self.assertIn("`sd-cli`", paragraph(lines, "| Model files"))
+
+    def test_13_6_names_what_runs_at_launch_and_what_the_engine_is_given(self):
+        row = paragraph(section("### 13.6 Network use"), "| Studio |")
+        for words in ("`resume_interrupted`", "still waiting or downloading", "the endpoint's key"):
+            self.assertIn(words, row)
+        bullet = paragraph(section("### 13.6 Network use"), "- **Studio (0.1.0).**")
+        for words in ("the pictures added to the run", "`--lora-model-dir`", "`--tokenizer`", "its prompt file"):
+            self.assertIn(words, bullet)
+        args = read("crates/runtime/src/sd/args.rs")
+        for flag in ("--lora-model-dir", "--tokenizer", "--prompt-file", "--negative-prompt-file", "--end-img", "--control-image"):
+            self.assertIn(f'"{flag}"', args)
+
+    def test_the_sidecar_is_said_to_hold_the_prompt(self):
+        security = doc_paragraph("SECURITY.md", "Results are kept in the gallery folder")
+        sentence = security.split("Results are kept in the gallery folder", 1)[1].split("Studio has no tool", 1)[0]
+        self.assertIn("record of its settings and its prompt beside it that never holds a key", sentence)
+        self.assertIn("The prompt is never written into a local result's file", sentence)
+        for doc in ("README.md", "CHANGELOG.md"):
+            self.assertIn("a small record of each run's settings and its prompt", doc_line(doc, "a small record of each run"), doc)
+
+    def test_the_signed_claims_wait_for_the_developer_id(self):
+        self.assertIn("once the Apple Developer ID exists", paragraph(section("### 7.1 Pinning and layout"), "- **The Studio engine (0.1.0)"))
+        self.assertIn("once the Apple Developer ID exists", doc_paragraph("SECURITY.md", "Studio's local pictures and videos are made by one more program"))
+
+    def test_the_readme_first_sentence_names_studio(self):
+        text = read("README.md")
+        first = text.split("\n\n", 2)[1]
+        self.assertIn("chat, tools, skills and MCP", first)
+        self.assertIn("Studio", first)
+        self.assertNotIn("early test builds", text)
+
+    def test_the_changelog_keeps_no_build_machine_sentence(self):
+        self.assertNotIn("The build machine has no graphics card", read("CHANGELOG.md"))
+
+    def test_the_vc_bullet_says_who_needs_which_dll(self):
+        bullet = paragraph(section("### 7.1 Pinning and layout"), "- **VC++ runtime.**")
+        self.assertIn("llama.cpp needs the first three; the Studio engine also needs `msvcp140_codecvt_ids.dll` and `vcomp140.dll`", bullet)
+        self.assertNotIn("Every llama.cpp binary needs them", bullet)
+
+    def test_7_9_has_no_0_1_0_licence_gate(self):
+        local = "\n".join(section("### 7.9 Studio on this computer (0.1.0)"))
+        self.assertNotIn("Not supported yet", local)
+        self.assertNotIn("after its licence is shown", local)
+        self.assertNotIn("once its licence is accepted", "\n".join(section("### 7.1 Pinning and layout")))
+
+    def test_the_dll_names_are_the_locks(self):
+        lock = read("llama.lock.json")
+        for dll in ("msvcp140_codecvt_ids.dll", "vcomp140.dll"):
+            self.assertIn(dll, lock)
+
+    def test_17_credits_each_local_and_cloud_e2e_to_its_script(self):
+        text = "\n".join(section("## 17. Testing"))
+        self.assertIn("cloud in `e2e/m12_studio.py`", text)
+        self.assertIn("`e2e/m8_offline.py`", text)
+        self.assertIn("`jiff`", "\n".join(section("## 18. Dependencies")))
+
+
+class Studio0_2_0Docs(unittest.TestCase):
+    """0.2.0: any model the engine can run (7.10), what is read before a download, and the
+    fewer blocks, checked against the code and the lock they describe."""
+
+    def test_7_10_names_the_caps_the_code_keeps(self):
+        index = read("crates/models/src/sd/index.rs")
+        self.assertRegex(index, r"pub const SAFETENSORS_HEADER_CAP: u64 = 100 \* 1024 \* 1024;")
+        self.assertRegex(index, r"pub const GGUF_HEADER_CAP: u64 = 64 \* 1024 \* 1024;")
+        self.assertRegex(read("crates/models/src/sd/remote.rs"), r"pub const MAX_FILES_PER_REPO: usize = 24;")
+        self.assertRegex(read("src-tauri/src/studio/detect.rs"), r"pub const CACHE_ENTRIES: usize = 512;")
+        # Security residuals, item 1: a safetensors header's metadata and shapes are bounded.
+        self.assertRegex(index, r"const MAX_KEPT_METADATA: u64 = 16 \* 1024 \* 1024;")
+        self.assertRegex(index, r"const MAX_METADATA_ENTRIES: usize = 65_536;")
+        self.assertRegex(index, r"const MAX_SHAPE_DIMS: usize = 8;")
+        text = "\n".join(section("### 7.10 Any model the engine can run (0.2.0)"))
+        for words in ("100 MiB", "64 MiB", "24 files", "512 entries", "Range",
+                      "more than 8 dimensions", "65,536 entries and 16 MiB of keys and values"):
+            self.assertIn(words, text)
+
+    def test_7_10_names_the_recipes_and_their_commit(self):
+        lock = json.loads(read("sd.lock.json"))["sd_cpp"]
+        text = "\n".join(section("### 7.10 Any model the engine can run (0.2.0)"))
+        self.assertIn("`catalog/sd-recipes.json`", text)
+        self.assertIn("`scripts/vendor_sd_recipes.py`", text)
+        self.assertIn(f"`{lock['tag'].rsplit('-', 1)[1]}`", text)
+        vendored = json.loads(read("catalog/sd-recipes.json"))
+        self.assertEqual(vendored["sdCommit"], lock["commit"])
+        # 94 run in Studio and 18 do not: the engine's 112.
+        self.assertEqual(len(vendored["recipes"]), 112)
+        for words in ("94 of the engine's 112 recipes", "the other 18"):
+            self.assertIn(words, text)
+
+    def test_7_10_reads_one_header_per_group_of_quantisations(self):
+        text = "\n".join(section("### 7.10 Any model the engine can run (0.2.0)"))
+        self.assertIn("one header read for each group of quantisations", text)
+        self.assertIn("smallest file", text)
+        self.assertIn("labels every quantisation", text)
+        self.assertNotIn("one per quantisation", text)
+        cand = read("crates/models/src/sd/candidates.rs")
+        self.assertIn("/// The smallest member; for a split file, its first shard.", cand)
+
+    def test_7_10_says_what_the_code_does_with_a_file(self):
+        text = "\n".join(section("### 7.10 Any model the engine can run (0.2.0)"))
+        for words in ("`--lora-model-dir`", "`<models>/@loras`", "`<lora:NAME:W>`", "`--prompt-file`", "`--vae-tiling`",
+                      "`--offload-to-cpu`", "`@imported`", "Set it up yourself", "untested set-up",
+                      "Lumina 2", "LTX-Video 0.9", "HunyuanVideo", "never parsed"):
+            self.assertIn(words, text)
+        lora = read("crates/runtime/src/sd/lora_tags.rs")
+        self.assertRegex(lora, r"pub const MAX_LORAS: usize = 8;")
+        self.assertRegex(lora, r"LORA_WEIGHT_RANGE: RangeInclusive<f32> = -1\.0\.\.=2\.0;")
+
+    def test_7_9_says_a_fit_only_warns(self):
+        local = "\n".join(section("### 7.9 Studio on this computer (0.1.0)"))
+        self.assertIn("May not fit", local)
+        self.assertNotIn("is refused unless it is a picture", local)
+        self.assertNotIn("Not for this computer", local)
+        self.assertNotIn("family_from_tensors", local)
+
+    def test_13_6_says_when_studio_reads_file_headers(self):
+        row = paragraph(section("### 13.6 Network use"), "| Studio on this computer |")
+        for words in ("Range", "when a result opens", "each time Get models opens", "Popular"):
+            self.assertIn(words, row)
+
+    def test_13_6_qualifies_what_is_sent_with_nothing_clicked(self):
+        lines = section("### 13.6 Network use")
+        quiet = paragraph(lines, "- **No telemetry, no crash upload, no account.**")
+        for words in ("resume_interrupted", "cloud video"):
+            self.assertIn(words, quiet)
+        studio = paragraph(lines, "- **Studio (0.1.0).**")
+        self.assertIn("`resume_interrupted`", studio)
+        self.assertIn("Get models", studio)
+        self.assertNotIn("Opening Studio, Get local models or Settings", studio)
+
+    def test_13_6_names_every_settings_page_the_offline_test_visits(self):
+        self.assertIn('"Search"', read("e2e/m8_offline.py"))
+
+    def test_13_1_says_headers_are_untrusted_and_pickles_never_parsed(self):
+        lines = section("### 13.1 Trust boundaries")
+        row = paragraph(lines, "| Model file headers (0.2.0)")
+        for words in ("Untrusted input", "never executed", "100 MiB", "never parsed"):
+            self.assertIn(words, row)
+
+    def test_16_and_17_name_the_detection_fixtures_and_the_capture_script(self):
+        for heading in ("## 16. Packaging, CI and release", "## 17. Testing"):
+            text = "\n".join(section(heading))
+            self.assertIn("`scripts/capture_sd_fixtures.py`", text, heading)
+            self.assertIn("not run in CI", text, heading)
+        self.assertIn("`scripts/vendor_sd_recipes_test.py`", "\n".join(section("## 16. Packaging, CI and release")))
+        self.assertIn("scripts/vendor_sd_recipes_test.py", read(".github/workflows/ci.yml"))
+
+    def test_the_llama_server_signing_claim_waits_for_the_developer_id(self):
+        bullet = paragraph(section("### 7.1 Pinning and layout"), "- **macOS.**")
+        self.assertIn("once the Apple Developer ID exists", bullet)
+
+    def test_security_names_the_header_caps_and_the_prompt_bound(self):
+        text = read("SECURITY.md")
+        for words in ("100 MiB", "64 MiB", "24 files", "1 MiB", "16,384"):
+            self.assertIn(words, text)
+        self.assertNotIn("after its licence is shown", text)
+        folder = doc_paragraph("SECURITY.md", "Studio's LoRAs are kept")
+        for words in ("@loras", "never run"):
+            self.assertIn(words, folder)
+
+    def test_security_says_a_click_is_ignored_again_when_the_window_returns(self):
+        cards = doc_paragraph("SECURITY.md", "Cards are built to be read safely")
+        self.assertIn("window", cards)
+
+    def test_the_readme_says_any_model_the_engine_runs(self):
+        studio = doc_paragraph("README.md", "Studio makes pictures and short videos")
+        for words in ("LoRA", "Hugging Face", "Add a model file"):
+            self.assertIn(words, studio)
+        self.assertLess(studio.index("on this computer"), studio.index("OpenRouter"))
+        self.assertNotIn("Not for this computer", read("README.md"))
 
 
 if __name__ == "__main__":

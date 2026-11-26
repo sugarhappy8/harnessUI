@@ -658,29 +658,43 @@ async fn start_again_after_failed_install(app: &AppHandle, state: &AppState) {
     crate::toolset::start_saved_servers(app).await;
 }
 
-/// 0.1.0: installing is refused while a local Studio job works (`studio`'s
-/// `local_running`): the restart would stop it without the question quitting asks.
-pub(crate) fn refuse_while_studio_works(
-    studio: Option<&crate::studio::manager::StudioManager>,
-) -> AppResult<()> {
-    if studio.is_some_and(|studio| studio.local_running()) {
-        return Err(crate::studio::errors::busy_for_update());
+/// 0.2.0 (design 9.2): installing stops a local Studio job first (`studio`'s
+/// `local_running`), as the update box warns while one runs ("Installing stops the picture
+/// being made"); 0.1.x refused to install instead. The restart would stop it anyway; stopped
+/// here, it ends as a stopped run. Studio is not closing, so local runs can start again, but
+/// no chat model is loaded again until the install fails
+/// ([`resume_studio_after_failed_install`]), even with no local run to stop. Without Studio
+/// there is nothing to stop.
+pub(crate) async fn stop_studio_for_update(studio: Option<&crate::studio::manager::StudioManager>) {
+    if let Some(studio) = studio {
+        studio.stop_local_for_update().await;
     }
-    Ok(())
+}
+
+/// The install failed after [`stop_studio_for_update`]: Studio loads the chat model a local
+/// run unloaded again, as "Reload it after Studio" says; it did not while the update
+/// installed (ruling G3-no-reload-on-update). Without Studio there is nothing to do.
+pub(crate) fn resume_studio_after_failed_install(
+    studio: Option<&crate::studio::manager::StudioManager>,
+) {
+    if let Some(studio) = studio {
+        studio.resume_after_failed_update();
+    }
 }
 
 /// *Restart and update*: installs the downloaded update (or downloads it first when none
-/// waits), then restarts the app. Refused while a local Studio job works.
+/// waits), then restarts the app. A local Studio job is stopped just before the install.
 #[tauri::command]
 pub async fn install_update(app: AppHandle, state: State<'_, AppState>) -> AppResult<()> {
-    let studio = app.try_state::<Arc<crate::studio::manager::StudioManager>>();
-    refuse_while_studio_works(studio.as_deref().map(Arc::as_ref))?;
     if !configured(app.config()) {
         return Err(not_configured());
     }
     refuse_read_only_place()?;
     let updates = app.state::<Updates>();
     let package = package_to_install(&app, &updates).await?;
+    // Only once the package is here: a refusal or a failed download stops nothing.
+    let studio = app.try_state::<Arc<crate::studio::manager::StudioManager>>();
+    stop_studio_for_update(studio.as_deref().map(Arc::as_ref)).await;
     if STOP_BEFORE_INSTALL {
         stop_for_install(&app, &state).await;
     }
@@ -696,6 +710,7 @@ pub async fn install_update(app: AppHandle, state: State<'_, AppState>) -> AppRe
         if STOP_BEFORE_INSTALL {
             start_again_after_failed_install(&app, &state).await;
         }
+        resume_studio_after_failed_install(studio.as_deref().map(Arc::as_ref));
         // The package stays waiting, so the user can try again.
         return Err(err);
     }

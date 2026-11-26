@@ -8,7 +8,8 @@ import type { Run } from "./types";
 // addendum Wireframe L4): where it waits in the queue, or what a local run waits for (and the
 // question to unload the chat model); "Making it" with a timer (a video's time so far and usual
 // time, and that the app may be closed); or a local run's stage, step and time left
-// (`localLine`). Each with what stops it. The card's actions run through the card's own
+// (`localLine`). Each with what stops it, on the one status line under the card's thin progress
+// bar (design 10.4, Task U9); a video's note that the app may be closed is a quiet line below. The card's actions run through the card's own
 // `perform`, so an answer waits like its other buttons and a failure is said where theirs are.
 
 /** The local stages before a step was timed: the first guess stands in for the time left. */
@@ -127,12 +128,12 @@ export function Working(props: {
       .filter((p): p is string => typeof p === "string")
       .join(STUDIO_CARD.joiner);
     return (
-      <div className="flex flex-col gap-1 text-sm">
-        <p className="tabular-nums">{line}</p>
+      <div className="flex flex-col gap-0.5 text-sm">
         <div className="flex flex-wrap items-center gap-2">
-          <p className="min-w-0 flex-1 text-xs text-fg-muted">{STUDIO_CARD.keepWorking}</p>
+          <p className="min-w-0 flex-1 tabular-nums">{line}</p>
           {stopButton(STUDIO_CARD.stopWatching)}
         </div>
+        <p className="text-meta">{STUDIO_CARD.keepWorking}</p>
       </div>
     );
   }

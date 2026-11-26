@@ -3,17 +3,20 @@
 //! documentation; in more detail:
 //!
 //! - **Starting** ([`StudioManager::start`] with `RunTarget::ThisComputer`): the same press
-//!   sent twice gives the run it made; the prompt check (`studio_wont_make`), then the
-//!   prompt's length (at most `runtime::sd::args::PROMPT_MAX_CHARS`,
-//!   `studio_prompt_too_long_here`); the model among the installed ones (`parse_catalog` of
+//!   sent twice gives the run it made; the prompt's length (at most
+//!   `runtime::sd::args::LOCAL_PROMPT_MAX_CHARS`, a hidden bound,
+//!   `studio_prompt_too_long_here`), then the prompt check (`studio_wont_make`), which reads
+//!   every prompt of at most that length all four ways (rulings S2-attention-2 and
+//!   G3-safety-bound); the model among the installed ones (`parse_catalog` of
 //!   the provider's list), its settings checked (`spec::validate`) and a seed picked when
 //!   none is set; the run's fit and time ([`local_verdict`](super::local_verdict)), the time
 //!   where the lease would run it (on the processor rather than after an unload, as Create
-//!   estimates it). One that does not fit even with the chat model unloaded, and is not a
-//!   picture the processor can make, is refused (`studio_does_not_fit`). A local run is free
-//!   (`Price::Free`): it never asks and never meets the daily limit. Only then, under the
-//!   same `starting` lock as a cloud start (the hardware is asked before it, so a cloud
-//!   start never waits for a probe), is the press checked again, each added picture found
+//!   estimates it). The fit only warns (design 9.2): one that may not fit even with the chat
+//!   model unloaded still runs, the lease unloading the chat model and the engine's auto-fit
+//!   spreading the weights. A local run is free (`Price::Free`): it never asks and never
+//!   meets the daily limit. Only then, under the same `starting` lock as a cloud start (the
+//!   hardware is asked before it, so a cloud start never waits for a probe), is the press
+//!   checked again, each added picture found
 //!   still there (a delete may have removed it meanwhile: `studio_ref_missing`), and the run
 //!   recorded (`queued`, $0, "This computer", the installed model and the engine's build),
 //!   with its audit row (the prompt's length, never the prompt), and queued.
@@ -30,9 +33,13 @@
 //!   never charged. The card is held from the grant until the task ends, an out-of-memory
 //!   retry inside the engine job included, and freed however it ends.
 //! - **Stop** kills the engine's whole tree (`MediaProvider::cancel`); a run still waiting for
-//!   the card never starts.
+//!   the card never starts. *Quit and stop* stops every local run for good
+//!   ([`StudioManager::stop_local`]); installing an update stops them too, and Studio stays
+//!   usable should the install fail ([`StudioManager::stop_local_for_update`]), when the chat
+//!   model is loaded again ([`StudioManager::resume_after_failed_update`]).
 //! - **The chat model** a grant unloaded is kept while the local queue has work; when the
-//!   queue empties and "Reload it after Studio" is on, it is loaded again, once.
+//!   queue empties and "Reload it after Studio" is on, it is loaded again, once; never while
+//!   the app is closing or an update installs.
 //! - **Restarts**: a local run the app left queued or running is `interrupted`, never
 //!   charged, and its `.partial/<run>` goes. At exit the engine is stopped and nothing is
 //!   recorded.
@@ -51,7 +58,7 @@ use agent::media::{
 use jiff::Timestamp;
 use models::gen_catalog::GenEntry;
 use models::gen_eta::{self, Eta, FitWord};
-use runtime::sd::args::PROMPT_MAX_CHARS;
+use runtime::sd::args::LOCAL_PROMPT_MAX_CHARS;
 use runtime::sd::progress::{LocalProgress, LocalStage};
 use serde_json::{Value, json};
 use tokio::sync::Notify;
@@ -71,7 +78,7 @@ use crate::studio::deps::{Endpoint, LocalLane};
 use crate::studio::errors;
 use crate::studio::gallery::io_error;
 use crate::studio::label::{AiLabel, label_file};
-use crate::studio::local::{LocalRunStatus, RunShape, run_shape, runs_on_processor};
+use crate::studio::local::{LocalRunStatus, RunShape, key, run_shape, runs_on_processor};
 use crate::studio::prompt_check;
 use crate::studio::spend;
 
@@ -96,6 +103,26 @@ impl LocalStep {
     pub(super) fn model(&self) -> &str {
         &self.request.model
     }
+
+    /// The LoRAs the run attaches, by id ([`lora_ids`]).
+    pub(super) fn loras(&self) -> Vec<String> {
+        lora_ids(&self.request)
+    }
+}
+
+/// The ids of the LoRAs `request` attaches: its `loras` value (`local::key::LORAS`),
+/// `[{"id": …, "weight": …, "highNoise": …}, …]` (`LoraUse`). A value of another shape
+/// attaches none, and the run's own check refuses it.
+fn lora_ids(request: &MediaRequest) -> Vec<String> {
+    request
+        .params
+        .get(key::LORAS)
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|lora| lora.get("id").and_then(Value::as_str))
+        .map(str::to_owned)
+        .collect()
 }
 
 /// What a local run's card shows beyond its row while Studio follows it, and the answer to
@@ -141,7 +168,6 @@ struct LocalPrepared {
 /// How the graphics card was asked for.
 enum Card {
     Granted(Grant, Box<dyn Any + Send + Sync>),
-    DoesNotFit,
     /// Asked "Unload the chat model?", the person answered "Keep the chat model", and the run
     /// cannot use the processor instead.
     KeptChat,
@@ -307,7 +333,8 @@ fn audit_entry(
 }
 
 impl StudioManager {
-    /// Whether a local run is queued or running: quitting asks first, and an update waits.
+    /// Whether a local run is queued or running: quitting asks first, and installing an
+    /// update stops it.
     pub fn local_running(&self) -> bool {
         let lanes = self.inner.lanes();
         lanes.running.values().any(|r| r.lane == LaneKey::Local)
@@ -331,6 +358,23 @@ impl StudioManager {
                 .into_iter()
                 .flatten()
                 .any(|job| job.local_model() == Some(model))
+    }
+
+    /// 0.2.0 (Task S10): whether a local run that attaches LoRA `id` is queued or running:
+    /// the engine opens its file, so *Delete* refuses the LoRA while one is
+    /// (`studio_lora_in_use`).
+    pub fn local_uses_lora(&self, id: &str) -> bool {
+        let lanes = self.inner.lanes();
+        lanes
+            .running
+            .values()
+            .any(|r| r.local_loras.iter().any(|l| l == id))
+            || lanes
+                .queues
+                .get(&LaneKey::Local)
+                .into_iter()
+                .flatten()
+                .any(|job| job.local_loras().iter().any(|l| l == id))
     }
 
     /// The answer to "Unload the chat model?" for local run `run_id` under
@@ -359,6 +403,35 @@ impl StudioManager {
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .take();
+        self.stop_every_local_run().await;
+    }
+
+    /// 0.2.0 (design 9.2): installing an update stops every local run, those waiting first,
+    /// as *Quit and stop* does, once the update box has said so ("Installing stops the
+    /// picture being made"). The app is not closing yet, so local runs can still start (a
+    /// failed install leaves Studio usable). The chat model a grant unloaded is not loaded
+    /// again while the update installs: the install and the restart follow, and a reload
+    /// would start llama-server under them (ruling G3-no-reload-on-update). It stays kept for
+    /// [`StudioManager::resume_after_failed_update`].
+    pub async fn stop_local_for_update(&self) {
+        self.inner.updating.store(true, Ordering::SeqCst);
+        self.stop_every_local_run().await;
+    }
+
+    /// The update did not install: the chat model a grant unloaded is loaded again now, as
+    /// "Reload it after Studio" says, when no local run is left to do it at its end.
+    pub fn resume_after_failed_update(&self) {
+        self.inner.updating.store(false, Ordering::SeqCst);
+        if let Some(lane) = &self.inner.deps.local
+            && !self.local_running()
+        {
+            self.inner.after_local(lane);
+        }
+    }
+
+    /// Stops every local run, those waiting first, then the one running; returns once each
+    /// has ended (or was given up on: `cancel`'s wait).
+    async fn stop_every_local_run(&self) {
         let ids: Vec<String> = {
             let lanes = self.inner.lanes();
             let waiting = lanes
@@ -399,11 +472,14 @@ impl StudioManager {
         if let Some(run) = inner.known_press(&req.client_token).await? {
             return Ok(inner.dto_of(&run, seq));
         }
+        // The length first: the prompt check reads the engine's weighting of a prompt of at
+        // most LOCAL_PROMPT_MAX_CHARS characters, and that reading grows with the square of
+        // the brackets.
+        if req.prompt.chars().count() > LOCAL_PROMPT_MAX_CHARS {
+            return Err(errors::prompt_too_long_here());
+        }
         if prompt_check::refuses(&req.prompt) {
             return Err(errors::wont_make());
-        }
-        if req.prompt.chars().count() > PROMPT_MAX_CHARS {
-            return Err(errors::prompt_too_long_here());
         }
         let prepared = inner.prepare_local(&req, &lane).await?;
         if !prepared.problems.is_empty() {
@@ -413,13 +489,11 @@ impl StudioManager {
             ));
         }
         let shape = prepared.shape.clone()?;
+        // Its fit only warns: one that may not fit still runs.
         let verdict = prepared
             .verdict
             .clone()
             .ok_or_else(|| AppError::internal("a local run without its fit"))?;
-        if verdict.word == FitWord::NotHere {
-            return Err(errors::does_not_fit(verdict.reason));
-        }
         // The time its card shows until the grant: where the lease would run it.
         let eta = inner
             .processor_instead(&verdict, &prepared.entry, shape, &lane)
@@ -472,8 +546,8 @@ impl StudioManager {
         // Free: it never asks and always passes the limit.
         let billing = spend::billing_of(&Price::Free, Some(0.0));
         let mut invalid = errors::invalid_sentences(&problems, &model);
-        if req.prompt.chars().count() > PROMPT_MAX_CHARS {
-            invalid.push(errors::PROMPT_TOO_LONG_HERE.to_owned());
+        if req.prompt.chars().count() > LOCAL_PROMPT_MAX_CHARS {
+            invalid.push(errors::PROMPT_TOO_LONG.to_owned());
         }
         let verdict = verdict.as_ref();
         Ok(EstimateDto {
@@ -538,6 +612,16 @@ impl StudioManager {
 }
 
 impl Inner {
+    /// Why installed model `id` is not offered to a local run: a row with no engine recipe
+    /// yet needs setting up (ruling U4-needs-setup-create); without a row, or one that cannot
+    /// be read, it is not installed (any more).
+    async fn not_offered(&self, id: &str) -> AppError {
+        match self.deps.store.get_gen_model(id).await {
+            Ok(Some(row)) if row.recipe_id.is_none() => errors::needs_set_up(),
+            _ => errors::local_model_missing(),
+        }
+    }
+
     /// `req` checked against its installed model: the model from the provider's list (it
     /// reads the store, never the network), the seed added, the settings checked, the job's
     /// shape and its verdict.
@@ -551,18 +635,18 @@ impl Inner {
             .fetch_catalog()
             .await
             .map_err(|e| local_ending(&e, req.kind, self.cap_of(req.kind)).error)?;
-        let model = parse_catalog(Company::Local, &raw, &BTreeMap::new())
+        let Some(model) = parse_catalog(Company::Local, &raw, &BTreeMap::new())
             .into_iter()
             .find(|m| m.id == req.model)
-            .ok_or_else(errors::local_model_missing)?;
+        else {
+            return Err(self.not_offered(&req.model).await);
+        };
         if req.kind != model.kind {
             return Err(errors::wrong_kind(model.kind));
         }
-        let (row, entry) = lane
-            .provider
-            .entry_of(&model.id)
-            .await
-            .ok_or_else(errors::local_model_missing)?;
+        let Some((row, entry)) = lane.provider.entry_of(&model.id).await else {
+            return Err(self.not_offered(&model.id).await);
+        };
         let mut params = req.params.clone();
         let seed = pick_seed(&model, &mut params);
         let request = MediaRequest {
@@ -735,6 +819,11 @@ impl Inner {
         if self.root.is_cancelled() || self.quitting.load(Ordering::SeqCst) {
             return;
         }
+        // An update installs: the model stays kept until the install fails
+        // (`resume_after_failed_update`).
+        if self.updating.load(Ordering::SeqCst) {
+            return;
+        }
         let empty = self
             .lanes()
             .queues
@@ -786,11 +875,8 @@ impl Inner {
                 .await
                 .map_or(verdict.eta, |there| there.eta);
             self.with_live(&job.run_id, |live| live.eta = eta);
-            if verdict.word == FitWord::NotHere {
-                let ending = Ending::failed(errors::does_not_fit(verdict.reason), Some(false));
-                self.end_run(job, ending, None).await;
-                return;
-            }
+            // Its fit only warns: one that may not fit still asks for the card, and the lease
+            // unloads the chat model for it when nothing else would make room.
             let card = self.take_card(t, lane, &verdict.need, &row).await;
             // It no longer waits for anything, however that ended.
             self.with_live(&job.run_id, |live| live.waiting_for = None);
@@ -799,11 +885,6 @@ impl Inner {
                 // The chat model on the card changed while it waited: judged again, on the
                 // card as it is now, and asked again.
                 Card::JudgeAgain => {}
-                Card::DoesNotFit => {
-                    let ending = Ending::failed(errors::does_not_fit(verdict.reason), Some(false));
-                    self.end_run(job, ending, None).await;
-                    return;
-                }
                 Card::KeptChat => {
                     let ending = Ending::failed(errors::chat_model_kept(), Some(false));
                     self.end_run(job, ending, None).await;
@@ -960,9 +1041,9 @@ impl Inner {
             match asked {
                 Ok((grant, hold)) => return Card::Granted(grant, hold),
                 // Kept, for a run that cannot use the processor (any video): it does not fit
-                // because the person chose so, not because of this computer.
-                Err(Refused::DoesNotFit) if answered == Some(false) => return Card::KeptChat,
-                Err(Refused::DoesNotFit) => return Card::DoesNotFit,
+                // because the person chose so, not because of this computer. The lease gives
+                // no other refusal of the kind: a run that fits nowhere unloads the chat model.
+                Err(Refused::DoesNotFit) => return Card::KeptChat,
                 Err(Refused::JudgeAgain) => return Card::JudgeAgain,
                 Err(Refused::Cancelled) if self.root.is_cancelled() => return Card::Shutdown,
                 Err(Refused::Cancelled) if t.token.is_cancelled() => return Card::Stopped,

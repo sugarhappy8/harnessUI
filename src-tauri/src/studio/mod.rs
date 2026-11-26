@@ -23,10 +23,21 @@
 //!   prompt can add as pictures, the webview never sending a path.
 //! - [`engine_cmd`]: the Studio engine's state on this computer, and the Windows engine pack's
 //!   download (with the first local model, or from its own button), cancel and remove.
-//! - [`local_cmd`]: Get local models' commands: what this computer can run (the installed
+//! - [`detect`]: reading a Hugging Face repo's files when it opens (one header read per group
+//!   of quantisations, at most 24 a repo, kept in a small cache), each file's label and the
+//!   repo's verdict.
+//! - [`local_cmd`]: Get models' commands: what this computer can run (the installed
 //!   models and the recommended list, each with its fit, licences and parts), Hugging Face
 //!   search and a repository's files, a fit at a size, download, delete and the note about
 //!   local models.
+//! - [`import`]: adding a model file from this computer, copied into the models folder or used
+//!   where it is, and set up as a download is.
+//! - [`setup_plan`]: a searched file's, a file on this computer's or an installed model's
+//!   set-up: the file for each slot of its recipe, with the person's choices, and the generic
+//!   entry it makes.
+//! - [`setup_cmd`]: *Set it up yourself*: a set-up plan with another recipe or other files, an
+//!   installed model's files, and changing its type or any of its files (with an untested
+//!   set-up note when the type is the person's choice).
 //! - [`local_models`]: downloading a picture or video model to this computer, part by part,
 //!   after the user acknowledges the local model notice (with the
 //!   Windows engine pack on first use), and deleting one with the part files nothing else uses.
@@ -45,20 +56,25 @@ pub mod actions;
 pub mod catalog;
 pub mod commands;
 pub mod deps;
+pub mod detect;
 pub mod dropped;
 pub mod engine_cmd;
 pub mod errors;
 pub mod gallery;
+pub mod import;
 pub mod label;
 pub mod local;
 pub mod local_cmd;
 pub mod local_models;
+pub mod loras;
 pub mod manager;
 #[cfg(test)]
 mod manager_tests;
 pub mod prefs;
 pub mod prompt_check;
 pub mod quit;
+pub mod setup_cmd;
+pub mod setup_plan;
 pub mod spend;
 #[cfg(test)]
 pub(crate) mod test_support;

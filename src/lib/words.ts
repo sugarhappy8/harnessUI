@@ -2,14 +2,31 @@
 // a raw identifier such as "vulkan", "Vulkan0" or "text_model". Every phrase of the model
 // loading screens lives here, so the wording stays the same wherever it appears; the test
 // walks every value of the contract's enums.
-import type { Company, GpuPolicy, Licence, LocalFit, MediaKind, RefRole } from "../components/studio/types";
+import type {
+  CannotRunReason,
+  Company,
+  FileLabel,
+  GpuPolicy,
+  Licence,
+  LocalFit,
+  MediaKind,
+  NotReadReason,
+  PartRole,
+  PartSource,
+  RecipeKind,
+  RefRole,
+  SdVersion,
+  SearchFilter,
+  Verdict as StudioVerdict,
+} from "../components/studio/types";
 import { APP_NAME } from "./app";
-import { formatEta } from "./format";
+import { formatBytes, formatCount, formatEta } from "./format";
 import type {
   BackendKind,
   ContextSource,
   DeviceOption,
   DownloadGroup,
+  DownloadStatus,
   FitDevice,
   FitResult,
   GpuUse,
@@ -357,14 +374,6 @@ export function amountNumber(bytes: number): string {
 /** An amount in use or needed (binary gigabytes, I6-10): "11.7 GB", "12 GB". */
 export function amountGb(bytes: number): string {
   return `${amountNumber(bytes)} GB`;
-}
-
-const MIB = 1024 * 1024;
-
-/** A download's size in the same binary units (0.1.0 Studio): whole megabytes, rounded up as
- *  the backend counts the Studio engine's pack, under 1 GB ("29 MB"), else `amountGb`. */
-export function downloadAmount(bytes: number): string {
-  return Number.isFinite(bytes) && bytes > 0 && bytes < GIB ? `${Math.ceil(bytes / MIB)} MB` : amountGb(bytes);
 }
 
 /** A licence line's short name (0.1.0 Studio): the last word of its first part, so
@@ -959,6 +968,9 @@ const PICTURE_NOUNS: Record<RefRole, readonly [string, string]> = {
   reference: ["added picture", "added pictures"],
   startFrame: ["start frame", "start frames"],
   endFrame: ["end frame", "end frames"],
+  source: ["picture to change", "pictures to change"],
+  mask: ["mask", "masks"],
+  control: ["control picture", "control pictures"],
 };
 
 /** How a setting and its value read inside Studio's sentences and chips (Tasks B4 and B6). */
@@ -987,6 +999,21 @@ export const CARRY_WORDS = {
   noSetting: (model: string, name: string) => `${model} has no ${name} setting, so it was removed.`,
   notOffered: (model: string, name: string, value: string) => `${model} does not offer ${name} ${value}, so it was removed.`,
   notAccepted: (model: string, key: string) => `${model} does not accept ${key}, so it was removed.`,
+  /** A list or an object as a value in a sentence (never its raw text). */
+  items: (n: number) => (n === 1 ? "1 item" : `${n} items`),
+  aValue: "a value",
+  /** A LoRA attached that was made for another type of model than the new one. */
+  loraNotFor: (name: string, type: string) => `The LoRA ${name} was made for ${type} models, so it was removed.`,
+  /** The LoRAs attached, by name, for a model that takes none. */
+  noLoras: (model: string, names: readonly string[]) =>
+    `${model} takes no LoRAs, so ${andList(names)} ${names.length === 1 ? "was" : "were"} removed.`,
+  noLorasCount: (model: string, n: number) =>
+    `${model} takes no LoRAs, so ${n === 1 ? "1 LoRA was" : `${n} LoRAs were`} removed.`,
+  /** The LoRAs past the new model's limit, by name. */
+  lorasPastLimit: (model: string, max: number, names: readonly string[]) =>
+    `${model} takes up to ${max === 1 ? "1 LoRA" : `${max} LoRAs`}, so ${andList(names)} ${names.length === 1 ? "was" : "were"} removed.`,
+  lorasPastLimitCount: (model: string, max: number, n: number) =>
+    `${model} takes up to ${max === 1 ? "1 LoRA" : `${max} LoRAs`}, so ${n === 1 ? "1 was" : `${n} were`} removed.`,
   /** Added pictures past the new model's limit for their role (`fit` may be 0). */
   leftOut(model: string, role: RefRole, fit: number, dropped: number): string {
     const [one, many] = PICTURE_NOUNS[role];
@@ -999,7 +1026,7 @@ export const CARRY_WORDS = {
 /** Studio's tabs. */
 export const STUDIO_TABS: Record<MediaKind, string> = { image: "Pictures", video: "Video" };
 
-/** Studio's top bar, its menu and the prompt box (Task B2). */
+/** Studio's top bar and its menu (Task B2; the prompt box's words are `STUDIO_COMPOSER`'s). */
 export const STUDIO_BAR = {
   /** The button beside Studio's name that shows or hides the chat list (Ctrl/⌘ B too). */
   chatList: "Show or hide the chat list",
@@ -1014,11 +1041,6 @@ export const STUDIO_BAR = {
   /** Cloud spending today, after the amount ("$0.84 today"). */
   spentToday: (amount: string) => `${amount} today`,
   spentTitle: "Spent on cloud models today. Runs on this computer are free.",
-  prompt: "Prompt",
-  promptPlaceholder: {
-    image: "Describe the picture you want…",
-    video: "Describe the video you want…",
-  } satisfies Record<MediaKind, string>,
 } as const;
 
 /** The mark for a model that runs on this computer. */
@@ -1045,7 +1067,6 @@ export function placeMarkSpoken(title: string): string {
 
 /** Buttons that more than one Studio screen shows. */
 export const STUDIO_ACTIONS = {
-  getLocalModels: "Get local models",
   openEndpoints: "Open Endpoints",
   getTheList: "Get the list",
   notNow: "Not now",
@@ -1053,28 +1074,29 @@ export const STUDIO_ACTIONS = {
   downloadAgain: "Download again",
 } as const;
 
-/** The Studio engine's download size and the short name of its licence: "29 MB, MIT". */
+/** The Studio engine's download size and the short name of its licence: "30 MB, MIT". The
+ *  size is `formatBytes`'s, as every size Studio shows (Task U7). */
 export function engineSizeWords(bytes: number, licenseName: string): string {
-  return `${downloadAmount(bytes)}, ${licenceWord(licenseName)}`;
+  return `${formatBytes(bytes)}, ${licenceWord(licenseName)}`;
 }
 
 /** The Studio engine's download, where it is missing (Tasks B8, B10 and B13): its size and the
- *  short name of its licence, "Download the Studio engine (29 MB, MIT)". */
+ *  short name of its licence, "Download the Studio engine (30 MB, MIT)". */
 export function engineDownloadWords(bytes: number, licenseName: string): string {
   return `Download the Studio engine (${engineSizeWords(bytes, licenseName)})`;
 }
 
-/** The Studio engine's line (Settings → Studio and Get local models' footer, Tasks B10 and
+/** The Studio engine's line (Settings → Studio and Get models' footer, Tasks B10 and
  *  B13): built in on a Mac; on Windows a pack that comes with the first model, is missing,
  *  downloads or is installed. */
 export const ENGINE_LINE = {
   builtIn: "Studio engine: built in",
-  /** No local model yet: the pack downloads with the first one ("29 MB, MIT"). */
+  /** No local model yet: the pack downloads with the first one ("30 MB, MIT"). */
   withFirstModel: (size: string) => `Studio engine: comes with your first model (${size})`,
   missing: "Studio engine: missing",
   partial: "Studio engine: partly downloaded",
   installed: (build: string) => `Studio engine: installed · build ${build}`,
-  /** How much of the pack is here; amounts are `downloadAmount`'s ("12 MB of 29 MB"). */
+  /** How much of the pack is here; amounts are `formatBytes`'s ("13 MB of 30 MB"). */
   downloading: (done: string | null, total: string | null) =>
     done !== null && total !== null ? `Studio engine: downloading · ${done} of ${total}` : "Studio engine: downloading…",
   unpacking: "Studio engine: unpacking…",
@@ -1084,7 +1106,7 @@ export const ENGINE_LINE = {
   separator: "·",
   remove: "Remove",
   removeTitle: "Remove the Studio engine?",
-  /** Under the question; `size` is its download ("29 MB"). */
+  /** Under the question; `size` is its download ("30 MB"). */
   removeBody: (size: string) =>
     `Pictures and videos cannot be made on this computer until it is downloaded again (${size}). Your models and results stay.`,
   cancel: "Cancel",
@@ -1093,7 +1115,7 @@ export const ENGINE_LINE = {
 /** A recommended local model that fits, and its whole download: "FLUX.2 klein 4B fits this
  *  computer (5.3 GB)." */
 export function fitsThisComputer(name: string, bytes: number): string {
-  return `${name} fits this computer (${amountGb(bytes)}).`;
+  return `${name} fits this computer (${formatBytes(bytes)}).`;
 }
 
 /** Studio's empty states (Task B2), local first; the backup and cloud lines name the companies
@@ -1112,9 +1134,6 @@ export const STUDIO_EMPTY = {
     video:
       "This computer cannot run local video models well. OpenRouter makes videos in the cloud: add it in Settings → Endpoints.",
   } satisfies Record<MediaKind, string>,
-  /** The Video tab on a computer that cannot make video here. */
-  noVideoHere:
-    "Video on this computer needs a graphics card or an Apple-silicon Mac. OpenRouter makes videos in the cloud: add it in Settings → Endpoints.",
   /** A saved endpoint makes the tab's kind but has no key, so none of its models can be used. */
   noKey: (name: string) => `${name} has no key, so Studio cannot use its models. Add a key in Settings → Endpoints.`,
   /** A saved endpoint makes the tab's kind, but its saved lists have no such model Studio can use. */
@@ -1125,7 +1144,7 @@ export const STUDIO_EMPTY = {
 /** The one-time suggestion while nothing is installed locally. */
 export const STUDIO_SUGGESTION = {
   text: (name: string) => `Studio works on this computer. ${name} fits here: free and private.`,
-  size: (bytes: number) => `One download of ${amountGb(bytes)}.`,
+  size: (bytes: number) => `One download of ${formatBytes(bytes)}.`,
 } as const;
 
 /** An endpoint whose lists are not saved yet ("Get OpenRouter's picture and video models"). */
@@ -1155,12 +1174,12 @@ export function listsUpdatedWords(name: string, fetchedAt: number | null, now: n
 }
 
 /** A local model's fit word (Task B3): "Fits", "Slow here", "Fits after the chat model is
- *  unloaded", or not for this computer at all. */
+ *  unloaded", or "May not fit" (a warning, never a refusal: `LOCAL_WARNING` says why). */
 export const LOCAL_FIT_WORDS: Record<LocalFit["word"], string> = {
   fits: "Fits",
   slow: "Slow here",
   afterUnload: "Fits after the chat model is unloaded",
-  notHere: "Not for this computer",
+  notHere: "May not fit",
 };
 
 /** How long a local run takes (Task B3; `eta.ts` works out the figure): "about 4 min a picture",
@@ -1191,44 +1210,17 @@ export const STUDIO_PRICE = {
   free: "free",
 } as const;
 
-/** Studio's model picker (Task B3). */
+/** Studio's model picker (Task B3), as the model sheet and the side panel's price line keep
+ *  it (Task U4). */
 export const STUDIO_PICKER = {
-  label: "Model",
   choose: "Choose a model",
-  search: "Search models",
-  searchPlaceholder: "Search models…",
-  filters: "Show only",
-  filter: {
-    edit: "Edit",
-    references: "References",
-    startFrame: "Start frame",
-    endFrame: "End frame",
-    sound: "Sound",
-    transparent: "Transparent",
-  },
-  /** What a model takes or makes, beside its name. */
-  badge: {
-    edit: "Edit",
-    refs: (n: number) => `Refs ${n}`,
-    startFrame: "Start frame",
-    endFrame: "End frame",
-    sound: "Sound",
-    transparent: "Transparent",
-    gif: "GIF",
-    svg: "SVG",
-  },
-  recent: "Recent",
   localTag: "free · private · nothing is sent",
-  /** An endpoint's group: "via OpenRouter". */
-  via: (name: string) => `via ${name}`,
-  /** The Cloud mark's tooltip on an endpoint's group. */
+  /** Where an endpoint's prompt goes, on its group in the model sheet. */
   goesTo: (host: string) => `Your prompt and added pictures go to ${host}.`,
   noKey: "Add a key in Settings → Endpoints",
-  /** The local group's last line while more recommended models that fit are not installed. */
-  getMoreLocal: (n: number) => `+ ${STUDIO_ACTIONS.getLocalModels} (${n} more fit this computer)`,
   noLocalYet: (name: string, bytes: number) => `No local models yet. ${fitsThisComputer(name, bytes)}`,
-  /** No local model of either kind fits this computer, or the Video tab where it cannot make video. */
-  noLocalHere: "Local models need a graphics card or an Apple-silicon Mac; the cloud models below are the backup.",
+  /** Nothing installed, and no local model of either kind known to fit this computer. */
+  noLocalHere: "No local model is installed, and none is known to fit this computer; the cloud models below are the backup.",
   /** No local model of the tab's kind fits this computer, though one of the other kind does. */
   noKindHere: {
     image: "No picture model fits this computer yet; the cloud models below are the backup.",
@@ -1240,6 +1232,26 @@ export const STUDIO_PICKER = {
   getList: (name: string) => `${name}: ${STUDIO_ACTIONS.getTheList}`,
 } as const;
 
+/** The model sheet (Task U4, design 10.2): the composer's model chip opens it. */
+export const MODEL_SHEET = {
+  title: "Choose a model",
+  search: "Search models",
+  /** The name of the All · On this computer · Cloud chips. */
+  filters: "Show",
+  all: "All",
+  local: "On this computer",
+  cloud: "Cloud",
+  recent: "Recent",
+  priceUnknown: "price unknown",
+  canEdit: "Can change a picture",
+  transparent: "Transparent background",
+  notes: "About this model",
+  getMore: "Get more models",
+  /** The LoRAs the draft attaches to the model: "1 LoRA", "2 LoRAs". */
+  loraCount: (n: number) => (n === 1 ? "1 LoRA" : `${n} LoRAs`),
+  needsSetup: "Needs setting up",
+} as const;
+
 /** Studio's right panel and its fields (Task B5). */
 export const STUDIO_FIELDS = {
   /** An unset field: not sent, so the company decides. */
@@ -1247,8 +1259,6 @@ export const STUDIO_FIELDS = {
   /** An unset field of a model on this computer. */
   automaticHere: "Automatic",
   reset: (label: string) => `Reset ${label}`,
-  moreShapes: "More shapes",
-  more: "More",
   /** An unset seed: Studio picks one for each run. */
   random: "Random",
   /** A chip with its time here: "2 s · about 3 min". */
@@ -1276,6 +1286,8 @@ export const STUDIO_FIELDS = {
   newSeed: "New seed",
   /** The seed's lock: it stays as it is for the next run. */
   keepIt: "Keep it",
+  /** A field's help button, whose tooltip holds the help (Task U8). */
+  about: (label: string) => `About ${label}`,
 } as const;
 
 /** The Advanced drawer (Task B6, design Wireframe 2): the chips under the prompt, Reset all, an
@@ -1348,28 +1360,37 @@ export const STUDIO_PLACE = {
   cloud: (name: string) => `via ${name} · Cloud`,
 } as const;
 
-/** The tray's and frame zones' file chooser. */
+/** The strip's and input zones' file chooser. */
 const CHOOSE_PICTURE = "Choose a picture";
 
-/** Added pictures: the tray, the frame drop zones and their role chips (Task B5). */
-export const STUDIO_REFS = {
-  add: "+ Add picture",
-  choose: CHOOSE_PICTURE,
-  /** The file chooser of a frame zone, named by its field: "Start frame: Choose a picture". */
-  chooseFor: (label: string) => `${label}: ${CHOOSE_PICTURE}`,
-  role: {
+/** What a picture added to the prompt is for, and what the two files that need explaining
+ *  are (Task S12): the role menu and the picture zones of Phase U's screens. */
+export const INPUT_ROLE = {
+  label: {
     reference: "Reference",
     startFrame: "Start frame",
     endFrame: "End frame",
+    source: "Picture to change",
+    mask: "Mask",
+    control: "Control picture",
   } satisfies Record<RefRole, string>,
+  hint: {
+    mask: "A black-and-white picture: white areas are changed, black areas are kept.",
+    control: "An edge map for Canny models, a depth map for Depth models.",
+  },
+} as const;
+
+/** Added pictures: the composer's strip, its input zones and the role chips (Task B5; the
+ *  composer's own words are `STUDIO_COMPOSER`'s). */
+export const STUDIO_REFS = {
+  choose: CHOOSE_PICTURE,
+  /** The file chooser of an input zone, named by its field: "Start frame: Choose a picture". */
+  chooseFor: (label: string) => `${label}: ${CHOOSE_PICTURE}`,
+  role: INPUT_ROLE.label,
   roleMenu: "What this picture is for",
   picture: (n: number) => `Picture ${n}`,
-  remove: (n: number) => `Remove picture ${n}`,
-  /** A frame's drop zone, empty. */
-  dropHere: "Drop a picture here, or choose one",
-  /** A frame's drop zone with its picture, which another replaces. */
+  /** An input zone with its picture, which another replaces. */
   change: (label: string) => `${label}: change the picture`,
-  removeFrame: (label: string) => `Remove ${label.charAt(0).toLowerCase()}${label.slice(1)}`,
   /** The most pictures of `role` the model takes (`null`: of any role, together). */
   takes(max: number, role: RefRole | null): string {
     const [one, many] = PICTURE_NOUNS[role ?? "reference"];
@@ -1385,33 +1406,31 @@ export const STUDIO_COMPANY: Record<Company, string> = {
   local: "This computer",
 };
 
-/** The prompt dock (Task B7, design Wireframe 1 and local addendum Wireframe L4): the line
- *  above Create, the price or time on it, the daily limit, and cloud as the backup. */
+/** Create and what goes with it (the prompt dock of Task B7, the composer's since Task U3):
+ *  the privacy line, the price or time on Create, the daily limit, and cloud as the backup. */
 export const STUDIO_DOCK = {
   create: "Create",
   /** Under the prompt, judged on it as it is: the backend's own words for the same checks
-   *  (`errors::invalid_sentences`, `errors::PROMPT_TOO_LONG_HERE`). */
+   *  (`errors::invalid_sentences`, `errors::PROMPT_TOO_LONG`). */
   writePrompt: "Write a prompt first.",
-  promptTooLong: "Keep the prompt under 32,000 characters.",
-  promptTooLongHere: "Keep the prompt under 4,000 characters for local models.",
+  /** A prompt over its hidden bound (design 9.2: never shown as a limit), local or cloud. */
+  promptTooLong: "This prompt is too long.",
+  /** Create pressed while the extra settings waited for the model's price, which could not
+   *  be read: the run went without them (they stay held for *Get the price*). */
+  sentWithoutExtra: "Sent without the extra settings: their price couldn't be read.",
   /** A cloud run's estimate for the whole run, on Create: "~ $0.16". */
   estimate: (usd: string) => `~ ${usd}`,
-  /** The line above Create for a model on this computer. */
+  /** The privacy line under the composer, for a model on this computer. */
   here: "On this computer: your prompt and pictures stay here",
   /** After `here`, when the chat model is unloaded to make room for the run. */
   unloadChat: "the chat model will be unloaded to make room",
-  /** Joins the parts of the line above Create. */
+  /** Joins the parts of the privacy line. */
   joiner: " · ",
   /** Under Create, in amber, for a local run that takes more than 15 minutes. */
   over15: (time: string) =>
     `This will take ${time} and keep the graphics card busy. On a MacBook it will get warm.`,
-  /** Beside the greyed-out Create of a local model that does not fit this computer, with why
-   *  ("needs 6 GB of graphics memory"). */
-  notHere: (reason: string | null) => (reason ? `Not for this computer: ${reason}` : "Not for this computer"),
   /** A local run that is very slow here, while an endpoint can make it. */
   tooSlow: "Too slow here? A cloud model makes this in minutes, for a price you see first.",
-  /** A local model that cannot run on this computer at all, while an endpoint can make it. */
-  cloudInstead: "A cloud model can make this instead.",
   chooseCloud: "Choose a cloud model",
   /** The same, while no saved endpoint can make the tab's kind (OpenAI makes no video). */
   addEndpoint: {
@@ -1432,6 +1451,60 @@ export const STUDIO_DOCK = {
     failed
       ? "Your extra settings wait for this model's price, which could not be got. Press Get the price to ask again."
       : "Your extra settings wait for this model's price, which says which ones it takes.",
+} as const;
+
+/** The backend's names for added pictures in its refusals (`errors::pictures`): as
+ *  `PICTURE_NOUNS`, but a reference is a "reference picture". */
+const NEEDED_NOUNS: Record<RefRole, readonly [string, string]> = {
+  ...PICTURE_NOUNS,
+  reference: ["reference picture", "reference pictures"],
+};
+
+/** Studio's composer (0.2.0 Task U3, design 10.1): the prompt, the pictures in front of it, and
+ *  the toolbar with the model chip, Shape, How many, a video's Length, Settings and Create. */
+export const STUDIO_COMPOSER = {
+  region: (kind: MediaKind) => (kind === "video" ? "Make a video" : "Make a picture"),
+  prompt: "Prompt",
+  placeholder: (kind: MediaKind) => (kind === "video" ? "Describe the video you want…" : "Describe the picture you want…"),
+  toolbar: "Picture settings",
+  shape: "Shape",
+  count: "How many",
+  length: "Length",
+  settings: "Settings",
+  addPicture: "Add picture",
+  /** A picture's Remove button, named after it: "Remove picture 1", "Remove mask". */
+  remove: (name: string) => `Remove ${SETTING_WORDS.midSentence(name)}`,
+  required: "required",
+  maskNeedsSource: "Add the picture to change before its mask.",
+  /** An input picture's empty zone: "Add the picture to change", "Add the mask". */
+  addInput: (label: string) => `Add the ${SETTING_WORDS.midSentence(label)}`,
+  /** Why Create waits for a required picture, in the backend's words
+   *  (`errors::invalid_sentences`): "This model needs at least 1 picture to change." */
+  needsPictures(role: RefRole, min: number): string {
+    const [one, many] = NEEDED_NOUNS[role];
+    return `This model needs at least ${min} ${min === 1 ? one : many}.`;
+  },
+  /** The model chip's dot, whose tooltip says where the prompt and pictures go. */
+  privacy: "Where your prompt goes",
+  /** A menu's trigger, named with its value: "Shape: 1:1", "How many: 2". */
+  menuValue: (name: string, value: string) => `${name}: ${value}`,
+  /** How many, on its trigger: "×2". */
+  times: (n: string) => `×${n}`,
+} as const;
+
+/** Studio's side panel (0.2.0 Task U8, design 10.1): its title and its sections. Shape and How
+ *  many are never in it: they are the composer's. */
+export const STUDIO_PANEL = {
+  title: "Settings",
+  setups: "My setups",
+  advanced: "Advanced",
+  loras: "LoRAs",
+  files: "Files",
+} as const;
+
+/** Studio's top bar (0.2.0 Task U3). */
+export const STUDIO_TOPBAR = {
+  getModels: "Get models",
 } as const;
 
 /** The confirmation before a cloud run (Task B7, design Wireframe 3). */
@@ -1456,7 +1529,9 @@ export const STUDIO_CONFIRM = {
   },
   videoCharge: (company: string) =>
     `${company} charges for a video once it has started, even if you stop watching it.`,
-  dontAskVideos: (usd: string) => `Don't ask again for videos under ${usd}`,
+  /** `usd` is the amount asked from while that switch is on; `null` when it is off. */
+  dontAskVideos: (usd: string | null) =>
+    usd === null ? "Don't ask again before every video" : `Don't ask again for videos under ${usd}`,
   cancel: "Cancel",
   makeVideo: "Make video",
 } as const;
@@ -1477,6 +1552,11 @@ export const STUDIO_CARD = {
   addedPictures: (n: number) => (n === 1 ? "1 added picture" : `${n} added pictures`),
   startFrame: "start frame",
   endFrame: "end frame",
+  /** The LoRAs a local run attached: "LoRAs: pixel art ü 0.8, style 1" (each `loraUse`). */
+  loras: (uses: readonly string[]) => `LoRAs: ${uses.join(", ")}`,
+  loraUse: (name: string, weight: string) => `${name} ${weight}`,
+  /** A LoRA whose row is gone, named by nothing else. */
+  loraGone: "a removed LoRA",
   /** How long a finished local run took ("took 3 min 48 s"). */
   took: (time: string) => `took ${time}`,
   /** A run waiting for its place in the queue (from 1). */
@@ -1542,6 +1622,8 @@ export const STUDIO_CARD = {
   /** After the engine's or a damaged part's download started from the card. */
   engineDownloading: "The Studio engine is downloading. Press Run again when it is done.",
   repairing: "The model's damaged parts are downloading again. Press Run again when it is done.",
+  /** After *Download again* on a model whose files are all on this computer: checked at once. */
+  repairedNow: "The model's files were checked and are whole. Press Run again.",
 } as const;
 
 /** The strip above the card stream: this session's runs of the tab, by state ("1 making ·
@@ -1630,8 +1712,11 @@ export const STUDIO_TILE = {
   /** Its box in the grid, to select it with others (the prompt cut the same way). */
   select: (kind: MediaKind, n: number, of: number, prompt: string) =>
     tilePrompt(prompt) ? `Select ${resultName(kind, n, of)}: ${tilePrompt(prompt)}` : `Select ${resultName(kind, n, of)}`,
-  /** Its star on a card: "Star picture 2 of 4" (pressed while starred). */
+  /** Its star, on hover and focus (always shown while starred): "Star picture 2 of 4"
+   *  (pressed while starred). */
   star: (kind: MediaKind, n: number, of: number) => `Star ${resultName(kind, n, of)}`,
+  /** Its Delete in the grid, on hover and focus: "Delete picture 2 of 4". */
+  delete: (kind: MediaKind, n: number, of: number) => `Delete ${resultName(kind, n, of)}`,
 } as const;
 
 /** The gallery's grid (Task B9): its filters beside the top bar's search and Starred, Load
@@ -1650,10 +1735,31 @@ export const STUDIO_GRID = {
   loadMore: "Load more",
   empty: "Nothing here yet.",
   nothingMatches: "No results match.",
-  selected: (n: number) => `${n} selected`,
-  deleteSome: (n: number) => `Delete ${n}`,
   saveSome: (n: number) => `Save ${n}…`,
   clear: "Clear selection",
+} as const;
+
+/** Studio's results (0.2.0 Task U9, design 10.4): the grid's Select mode, which puts a box on
+ *  every tile and a bar of actions over the selection, and the empty state without a model on
+ *  this computer, with its one action. */
+export const STUDIO_RESULTS = {
+  select: "Select",
+  selected: (n: number) => `${n} selected`,
+  done: "Done",
+  /** Only while nothing at all is installed on this computer. */
+  noModels: "No models on this computer yet",
+  /** Models are installed, but none of the tab's kind (U9 fix round 1). */
+  noModelsOfKind: {
+    image: "No picture models on this computer yet",
+    video: "No video models on this computer yet",
+  } satisfies Record<MediaKind, string>,
+  getModels: "Get models",
+  deleteSelected: (n: number) => `Delete ${n}`,
+  /** The first-use card's button, which opens the model that fits in its detail panel:
+   *  "Get FLUX.2 klein 4B". */
+  getModel: (name: string) => `Get ${name}`,
+  /** The bar of actions on the selection, for a screen reader. */
+  selection: "Selection",
 } as const;
 
 /** Deleting results, in the viewer or several from the grid (Task B9): the file and its record
@@ -1684,7 +1790,7 @@ export const STUDIO_REUSE = {
   goneHere: "This model is no longer on this computer.",
   endpointGone: "This run's endpoint was removed in Settings → Endpoints.",
   /** Again, or Run again, on such a run: what to do instead. */
-  endpointGoneNext: "Choose a model in the right panel, then press Create.",
+  endpointGoneNext: "Choose a model from the model chip under the prompt, then press Create.",
 } as const;
 
 /** Animate and Edit when the tab's model cannot take the picture (Task B9): another model is
@@ -1779,9 +1885,9 @@ export const STUDIO_VIEWER_KEYS = {
  *  the cloud model lists. */
 export const STUDIO_SETTINGS = {
   local: LOCAL_MARK.name,
-  /** The picture and video models installed here and the disk they take ("14 GB"). */
+  /** The picture and video models installed here and the disk they take ("14.2 GB"). */
   models: (count: number, bytes: number) =>
-    count === 0 ? "Picture and video models: none yet" : `Picture and video models: ${count} (${amountGb(bytes)})`,
+    count === 0 ? "Picture and video models: none yet" : `Picture and video models: ${count} (${formatBytes(bytes)})`,
   gpu: "When a local job needs the graphics card",
   gpuHelp: "When a local job fits beside the chat model, both run. When it does not:",
   gpuChoice: {
@@ -1794,10 +1900,10 @@ export const STUDIO_SETTINGS = {
   /** Opens the note about local models, read only (Task B14). */
   whatLocalMeans: "What local models mean",
   results: "Results",
-  /** What the gallery holds and where: "Studio uses 1.2 GB in ~/harnessUI/studio (312
-   *  pictures, 14 videos)". Sizes in the same binary units as `amountGb`. */
+  /** What the gallery holds and where: "Studio uses 1.3 GB in ~/harnessUI/studio (312
+   *  pictures, 14 videos)". Sizes are `formatBytes`'s, as every size Studio shows. */
   usage(bytes: number, folder: string, pictures: number, videos: number): string {
-    const size = bytes > 0 ? downloadAmount(bytes) : "0 MB";
+    const size = bytes > 0 ? formatBytes(bytes) : "0 MB";
     const count = (n: number, one: string) => `${n} ${one}${n === 1 ? "" : "s"}`;
     return `Studio uses ${size} in ${folder} (${count(pictures, "picture")}, ${count(videos, "video")})`;
   },
@@ -1812,13 +1918,18 @@ export const STUDIO_SETTINGS = {
   deleted: (n: number) =>
     n === 0 ? "There were no stopped or failed runs." : n === 1 ? "1 run was deleted." : `${n} runs were deleted.`,
   spending: "Cloud spending",
+  /** Under the heading: all four are off until turned on. */
+  spendingNote: "Each is off until you turn it on. Prices are always shown before a cloud run.",
   confirmVideo: "Ask before every video",
   /** Before an amount box, which takes US dollars. */
   dollar: "$",
-  /** Before the amount box; "or more" follows it. */
-  confirmAt: "Ask before runs of",
+  /** The switch that asks from an amount; its box (`confirmAtAmount`) shows while it is on. */
+  confirmAt: "Ask before runs of a set amount or more",
+  confirmAtAmount: "Ask before runs of this many US dollars or more",
   orMore: "or more",
   confirmAtRange: "Choose an amount from $0.25 to $100.",
+  confirmUnknown: "Ask when the price is unknown",
+  confirmUnknownHelp: "Some models do not say what a run costs before it is sent.",
   limit: "Daily limit",
   limitAmount: "Daily limit in US dollars",
   limitHelp:
@@ -1838,6 +1949,7 @@ export const LICENCE_BADGE = {
   underRevenue: (limit: string | null) =>
     limit === null ? "Commercial use only under a revenue limit" : `Commercial use only under ${limit} revenue`,
   registration: "Commercial use only after registering with the publisher",
+  withUseRules: "Commercial use allowed, with use rules",
   unclear: "Check the licence",
   no: "Non-commercial",
 } as const satisfies Record<Licence["commercial"], string | ((limit: string | null) => string)>;
@@ -1856,115 +1968,258 @@ export function revenueLimit(usd: number): string {
   return `$${usd}`;
 }
 
-/** Get local models, Studio's own view (Task B13, local addendum Wireframe L2): the header,
- *  the filters, each model's row, Hugging Face search and the footer. */
+/** Get models' cards (Task B13; the view's own words are `GET_MODELS`, Task U5, and the detail
+ *  panel's `MODEL_DETAIL`, Task U6): a model's time, its download and its deletion, and the
+ *  footer's notice. */
 export const LOCAL_MODELS = {
-  title: STUDIO_ACTIONS.getLocalModels,
-  back: "Back",
-  /** The header's parts: "This computer: Radeon RX 7600, 8 GB graphics memory · 32 GB
-   *  memory · 412 GB free"; amounts are `amountGb`'s. */
-  thisComputer: (what: string) => `This computer: ${what}`,
-  processorOnly: "processor only",
-  graphicsMemory: (amount: string) => `${amount} graphics memory`,
-  sharedMemory: (amount: string) => `${amount} shared memory`,
-  /** The device with its memory, in the header: "Radeon RX 7600, 8 GB graphics memory". */
-  deviceWith: (device: string, memory: string) => `${device}, ${memory}`,
-  memory: (amount: string) => `${amount} memory`,
-  freeDisk: (amount: string) => `${amount} free`,
-  onlyFits: "Only what fits",
-  recommended: "Recommended for this computer",
-  installed: "Installed",
   download: "Download",
-  delete: "Delete",
-  /** The folded list of models that do not fit this computer. */
-  notHere: (n: number) => `Not for this computer (${n})`,
-  /** The tab has no model that fits this computer. */
-  noneFit: {
-    image: "No picture model fits this computer.",
-    video: "No video model fits this computer.",
-  } satisfies Record<MediaKind, string>,
-  videoNote: "Local video is slower and simpler than cloud video, but free and private.",
   /** A time line without an estimate (nothing measured here, no first guess). */
   noTime: STUDIO_TIME.notYet.charAt(0).toUpperCase() + STUDIO_TIME.notYet.slice(1),
-  /** The bar of a model's download on its row, while it runs. */
+  /** The bar of a model's download on its card, while it runs. */
   downloading: (name: string) => `Downloading ${name}`,
-  /** After *Download again*: what happens now. */
-  repairing: "Its files are being checked; anything missing or damaged downloads again (Models → Downloads).",
+  /** After *Repair*: what happens now. */
+  repairing: "Its files are being checked; anything missing or damaged downloads again, with its progress here.",
+  /** After *Repair* on a model whose files are all on this computer: nothing downloads. */
+  repairedNow: "Its files were checked: they are all on this computer and whole.",
   deleteTitle: (name: string) => `Delete ${name}?`,
   deleteBody:
     "Its files are removed from this computer, except parts another model still uses. Pictures and videos you made stay in the gallery.",
+  /** A model that uses a file of the person's own where it is (*Use it where it is*, or a file
+   *  chosen from this computer): Studio never deletes that file. */
+  deleteBodyOwn:
+    "Studio forgets this model and removes the files it downloaded or copied, except parts another model still uses. Your own file stays where it is. Pictures and videos you made stay in the gallery.",
+  /** A model copied in with *Add a model file*: Studio's copy goes, the file it came from stays. */
+  deleteBodyCopy:
+    "Studio's copy of its file and the files it downloaded are removed, except parts another model still uses. The file you added it from stays where it is. Pictures and videos you made stay in the gallery.",
   cancel: "Cancel",
-  search: "Search Hugging Face",
-  searchPlaceholder: "Search Hugging Face for picture and video models…",
-  searchButton: "Search",
-  searchSends: "Searching sends your words to huggingface.co.",
-  searching: "Searching…",
-  results: "Found on Hugging Face",
-  noResults: "Hugging Face found no picture or video models for that.",
-  /** A search hit's downloads, as `formatCount` gives them ("12.3k"). */
-  downloads: (count: string) => `${count} downloads`,
-  /** A search hit's licence, as its repository labels it. */
-  labelled: (label: string) => `labelled ${label}`,
-  opening: "Reading the repository on huggingface.co…",
-  /** A searched file: "3 parts · 7.1 GB in all · 4.6 GB to download" (the last part only when
-   *  some of it is already here). */
-  fileLine(parts: number, total: number, toFetch: number): string {
-    const line = `${parts === 1 ? "1 part" : `${parts} parts`} · ${amountGb(total)} in all`;
-    return toFetch < total ? `${line} · ${amountGb(toFetch)} to download` : line;
-  },
-  /** One part of a searched file: "reads your prompt · 2.5 GB · already on this computer". */
-  part: (label: string, bytes: number, here: boolean) =>
-    `${label} · ${amountGb(bytes)}${here ? " · already on this computer" : ""}`,
-  noLocalSetup: "Individual files can be used in a compatible app. Studio has no local generation setup for this repository.",
-  browserDownload: "Download file in browser",
-  weightFile: "Repository file",
-  saveWeight: "Download file",
-  openFiles: "View files on Hugging Face",
   showInFolder: "Show in folder",
-  queuedFile: "Queued in Models → Downloads.",
-  otherFiles: "Other repository files",
   notice: "Local models run only on this computer; no company checks prompts or results.",
   whatThatMeans: "What that means",
 } as const;
+
+/** A model version's name as people know it (Task S6), never the engine's word for it. */
+export const VERSION_NAME: Record<SdVersion, string> = {
+  sd1: "SD 1.5",
+  "sd1-inpaint": "SD 1.5 Inpainting",
+  "sd1-pix2pix": "InstructPix2Pix",
+  "sd1-tiny-unet": "SD 1.5 Tiny",
+  sd2: "SD 2.1",
+  "sd2-inpaint": "SD 2 Inpainting",
+  "sd2-tiny-unet": "SD 2 Tiny",
+  "sdxs-512-ds": "SDXS-512",
+  "sdxs-09": "SDXS-09",
+  sdxl: "SDXL",
+  "sdxl-inpaint": "SDXL Inpainting",
+  "sdxl-pix2pix": "CosXL Edit",
+  "sdxl-vega": "Segmind Vega",
+  "sdxl-ssd1b": "Segmind SSD-1B",
+  svd: "Stable Video Diffusion",
+  sd3: "SD 3.5",
+  flux: "FLUX.1",
+  "flux-fill": "FLUX.1 Fill",
+  "flux-controls": "FLUX.1 Canny or Depth",
+  "flex-2": "Flex.2",
+  "chroma-radiance": "Chroma Radiance",
+  wan2: "Wan 2.1",
+  "wan2.2-i2v": "Wan 2.2 Image-to-Video",
+  "wan2.2-ti2v": "Wan 2.2 5B",
+  "wan2.2-s2v": "Wan 2.2 Speech-to-Video",
+  "lingbot-video": "LingBot-Video",
+  "qwen-image": "Qwen-Image",
+  "qwen-image-layered": "Qwen-Image Layered",
+  "qwen-image-2.1": "Qwen-Image 2.1",
+  "hunyuan-video": "HunyuanVideo 1.5",
+  anima: "Anima",
+  flux2: "FLUX.2",
+  "flux2-klein": "FLUX.2 klein",
+  ltxav: "LTX-2.3",
+  "minimax-h3": "MiniMax H3",
+  "hidream-o1": "HiDream-O1",
+  "z-image": "Z-Image",
+  "boogu-image": "Boogu Image",
+  "ovis-image": "Ovis-Image",
+  "ernie-image": "ERNIE-Image",
+  lens: "Lens",
+  minit2i: "MiniT2I",
+  longcat: "LongCat-Image",
+  pid: "PiD",
+  ideogram4: "Ideogram 4",
+  "sefi-image": "SeFi-Image",
+  krea2: "Krea 2",
+  "mage-flow": "MageFlow",
+  "sensenova-u1.5": "SenseNova U1.5",
+  "llada-image": "LLaDA-Image",
+  pixart: "PixArt",
+  "ming-image": "Ming-Image",
+  "z-image-l2p": "Z-Image L2P",
+  iris: "Iris",
+  flux3: "FLUX.3",
+  "moss-image": "MOSS-Image",
+  fibo2: "FIBO 2",
+  chroma: "Chroma",
+  "p-h3-image": "P-H3 Image",
+  "minimax-h3-image": "MiniMax H3 Image",
+};
+
+/** The model type of the recipes whose type is not their version's name. */
+export const RECIPE_TYPE_NAME: Record<string, string> = {
+  "wan22-t2v": "Wan 2.2",
+  "wan22-i2v": "Wan 2.2",
+  "flux1-kontext": "FLUX.1 Kontext",
+  "qwen-image-edit": "Qwen-Image Edit",
+  "qwen-image-edit-2509": "Qwen-Image Edit",
+  "qwen-image-edit-2511": "Qwen-Image Edit",
+  "ltx25-dev": "LTX-2.5",
+};
+
+/** A model's type in words: its recipe's own type where it has one, else its version's name
+ *  ("Wan 2.2" for the A14B recipe, though the engine reads it as Wan 2.1). A version this
+ *  build has no name for (a newer backend's) reads "Unknown". */
+export function typeName(version: SdVersion, recipe: string | null): string {
+  return (recipe === null ? undefined : RECIPE_TYPE_NAME[recipe]) ?? VERSION_NAME[version] ?? "Unknown";
+}
+
+/** What a model makes, as a file's label says it ("SDXL picture model"). */
+export const KIND_WORD: Record<RecipeKind, string> = {
+  picture: "picture",
+  pictureEdit: "picture edit",
+  video: "video",
+};
+
+/** What a file does in a model's set-up, as its plan lists it (design 7.4). */
+export const SLOT_LABEL: Record<PartRole, string> = {
+  model: "Model",
+  diffusion: "Diffusion model",
+  "high-noise-diffusion": "Diffusion model (high-noise part)",
+  "uncond-diffusion": "Diffusion model (unconditional)",
+  "clip-l": "Text encoder (CLIP-L)",
+  "clip-g": "Text encoder (CLIP-G)",
+  t5xxl: "Text encoder (T5-XXL)",
+  llm: "Text encoder (language model)",
+  "llm-vision": "Picture encoder (language model)",
+  "clip-vision": "Picture encoder (CLIP vision)",
+  tokenizer: "Tokenizer",
+  vae: "Decoder (VAE)",
+  tae: "Tiny decoder (TAE)",
+  "audio-vae": "Sound decoder",
+  "audio-encoder": "Sound encoder",
+  "embeddings-connectors": "Embeddings connectors",
+};
+
+/** A model's parameters as a label says them: "14B", "2.6B", "860M". */
+export function parameterWords(parameters: number): string {
+  if (parameters >= 1e9) {
+    const billions = parameters / 1e9;
+    return `${billions >= 10 ? Math.round(billions) : Math.round(billions * 10) / 10}B`;
+  }
+  if (parameters >= 1e6) return `${Math.round(parameters / 1e6)}M`;
+  return String(parameters);
+}
+
+/** Why Studio can't run a file, as one sentence; `ext` names a pickle file's extension. */
+const CANNOT_RUN_WORDS: Record<CannotRunReason, (ext: string) => string> = {
+  lumina2: () => "This is a Lumina 2 model, which the Studio engine can't run",
+  ltxVideo09: () => "This is an LTX-Video 0.9 model, which the Studio engine can't run",
+  hunyuanVideo1: () => "This is a HunyuanVideo 1 model, which the Studio engine can't run",
+  svd: () => "This is a Stable Video Diffusion model, which the Studio engine can't run",
+  unknownWeights: () => "The Studio engine doesn't recognise this model",
+  sharded: () => "This model is split into several files, which Studio can't put back together",
+  pickle: (ext) => `Studio can't read ${ext} files`,
+  noSha: () => "Hugging Face publishes no checksum for this file, so Studio can't check it",
+  adapter: () => "This is an add-on file (such as a ControlNet or an IP-Adapter), which Studio doesn't use",
+  needsControlFrames: () => "This model needs control video frames, which Studio can't give it",
+  needsAudio: () => "This model needs a sound file, which Studio can't give it",
+  upscaler: () => "This is an upscaler, not a picture or video model",
+  folderModel: () => "This model comes as a folder of parts, which the Studio engine can't load",
+  notThisEngine: () => "The Studio engine can't run this kind of model",
+  ltx2: () => "This is an LTX-2 model, which the Studio engine can't run",
+};
+
+/** Why a file of a repository was not read, as one sentence. */
+const NOT_READ_WORDS: Record<NotReadReason, string> = {
+  needsToken: "Add a Hugging Face token in Settings to read this file",
+  needsTerms: "Accept the model's terms on Hugging Face first",
+  budget: "Not read: Studio reads 24 files per repository",
+  failed: "Couldn't read this file",
+};
+
+/** What a file of a repository is, as its row says it (design 7.3). */
+export const FILE_LABEL = {
+  /** "Works in Studio · SDXL picture model", "Works in Studio · Wan 2.2 video model, 14B,
+   *  high-noise part" (`parameters` 0 says no size). */
+  works(type: string, kind: RecipeKind, part: "high" | "low" | null, parameters: number): string {
+    const details = [parameters > 0 ? parameterWords(parameters) : null, part === null ? null : `${part}-noise part`];
+    const more = details.filter((d) => d !== null).map((d) => `, ${d}`);
+    return `Works in Studio · ${type} ${KIND_WORD[kind] ?? KIND_WORD.picture} model${more.join("")}`;
+  },
+  /** "LoRA for FLUX.1"; without a known base, "LoRA for an unknown model type". */
+  lora: (type: string | null) => (type === null ? "LoRA for an unknown model type" : `LoRA for ${type}`),
+  /** "Extra file · Decoder (VAE)". */
+  extra: (role: PartRole) => `Extra file · ${SLOT_LABEL[role] ?? "another part"}`,
+  /** "Can't run in Studio: Studio can't read .ckpt files" (`ext`, with its dot, for a pickle
+   *  file). */
+  cannotRun: (reason: CannotRunReason, ext = ".ckpt") =>
+    `Can't run in Studio: ${(CANNOT_RUN_WORDS[reason] ?? CANNOT_RUN_WORDS.unknownWeights)(ext)}`,
+  notRead: (reason: NotReadReason) => NOT_READ_WORDS[reason] ?? NOT_READ_WORDS.failed,
+} as const;
+
+/** A pickle file's extension, from its path ("model.CKPT" → ".ckpt"). */
+function extensionOf(path: string): string {
+  const name = path.split("/").pop() ?? path;
+  const dot = name.lastIndexOf(".");
+  return dot < 0 ? ".ckpt" : name.slice(dot).toLowerCase();
+}
+
+/** A file's label in words, for its row (`path` names a pickle file's extension). */
+export function fileLabelWords(label: FileLabel, path: string): string {
+  if ("works" in label) {
+    const w = label.works;
+    return FILE_LABEL.works(typeName(w.version, w.recipe), w.kind, w.part, w.parameters);
+  }
+  if ("lora" in label) return FILE_LABEL.lora(label.lora.base === null ? null : typeName(label.lora.base, null));
+  if ("extra" in label) return FILE_LABEL.extra(label.extra.role);
+  if ("cannotRun" in label) return FILE_LABEL.cannotRun(label.cannotRun.reason, extensionOf(path));
+  return FILE_LABEL.notRead(label.notRead.reason);
+}
+
+/** What a search result offers, in words; `null` when its name says nothing Studio knows. */
+export function verdictWords(verdict: StudioVerdict): string | null {
+  if (verdict === "unknown") return null;
+  if ("works" in verdict)
+    return FILE_LABEL.works(typeName(verdict.works.version, verdict.works.recipe), verdict.works.kind, null, 0);
+  if ("lora" in verdict) return FILE_LABEL.lora(verdict.lora.base === null ? null : typeName(verdict.lora.base, null));
+  return FILE_LABEL.cannotRun(verdict.cannotRun.reason);
+}
 
 /** "username and email", "username, email and company". */
 function andList(items: readonly string[]): string {
   return items.length <= 1 ? (items[0] ?? "") : `${items.slice(0, -1).join(", ")} and ${items[items.length - 1]}`;
 }
 
-/** Whose files the download dialog's verdict is about, by the model's kind. */
+/** Whose files a download's licence verdict is about, by the model's kind. */
 const VERDICT_LEAD = { image: "Pictures you make", video: "Videos you make" } as const satisfies Record<MediaKind, string>;
 
-/** The download confirmation of a local model (Task B14, local addendum Wireframe L3): every
- *  part with its size and licence, what you make may be used for, the Studio engine, a gated
- *  repository, an amber licence's condition, low disk space and the licences to read. */
-
+/** What the review before a local download says (0.1.0 Task B14's confirmation; since 0.2.0
+ *  Task U6, the detail panel, whose own words are `MODEL_DETAIL`): a part already here, what
+ *  you make may be used for, the Studio engine, a gated repository, an excluded region, low
+ *  disk space, and a page the browser did not open. */
 export const DOWNLOAD_LOCAL = {
-  title: (name: string) => `Download ${name}?`,
-  /** "3 files, 6.2 GB in all, from Hugging Face (huggingface.co)"; with some of it here
-   *  already, "…, 3.9 GB to download, from …". Amounts are `amountGb`'s. */
-  summary(files: number, total: number, toFetch: number): string {
-    const count = files === 1 ? "1 file" : `${files} files`;
-    const fetch = toFetch < total ? `, ${amountGb(toFetch)} to download` : "";
-    return `${count}, ${amountGb(total)} in all${fetch}, from Hugging Face (huggingface.co)`;
-  },
   /** A part another model brought already: checked, not downloaded again. */
   alreadyHere: "already on this computer",
-  /** What the pictures or videos you make may be used for, by the strictest licence
-   *  (`verdict`): "Pictures you make: free for any use, including commercial.", "Videos you
-   *  make: …" for a video model. */
-  verdictLead: VERDICT_LEAD,
   /** The verdict as one line: "Pictures you make: you may use them commercially". */
   verdictLine: (kind: MediaKind, allowed: string) => `${VERDICT_LEAD[kind]}: ${allowed}`,
+  /** What the pictures or videos you make may be used for, by the strictest licence (the
+   *  detail panel's `verdict`): "Pictures you make: free for any use, including commercial." */
   verdict: {
     yes: "free for any use, including commercial.",
     underRevenue: (limit: string | null) =>
       limit === null ? "commercial use only under a revenue limit." : `commercial use only under ${limit} revenue.`,
     registration: "commercial use only after registering with the publisher.",
+    withUseRules: "commercial use allowed, with the licence's use rules.",
     unclear: "check the licence before any commercial use.",
     no: "non-commercial use only.",
   } as const satisfies Record<Licence["commercial"], string | ((limit: string | null) => string)>,
-  /** The Studio engine comes with the model (Windows): "(29 MB, MIT licence)", from
+  /** The Studio engine comes with the model (Windows): "(30 MB, MIT licence)", from
    *  `engineSizeWords`. */
   engine: (size: string) => `Also downloads the Studio engine (${size} licence).`,
   /** Which form a gated repository's publisher shows on Hugging Face. */
@@ -1976,32 +2231,371 @@ export const DOWNLOAD_LOCAL = {
   /** What the publisher of a gated repository receives: "username and email". */
   collects: (what: readonly string[]) => `The publisher receives your Hugging Face ${andList(what)}.`,
   openModelPage: "Open the model page",
-  /** An amber licence's condition, then each duty it asks of you ("Review pictures before you
-   *  share them." reads "The licence asks you to review pictures before you share them."). */
-  amber(licence: Licence): string {
-    const condition =
-      licence.commercial === "registration"
-        ? "Commercial use only after registering with the publisher."
-        : licence.revenueLimitUsd === null
-          ? "Commercial use only if your organisation earns less than the licence's limit."
-          : `Commercial use only if your organisation earns less than ${revenueLimit(licence.revenueLimitUsd)} a year.`;
-    const duties = licence.obligations.map((o) => `The licence asks you to ${SETTING_WORDS.midSentence(o)}`);
-    return [condition, ...duties].join(" ");
-  },
   lowDisk: "This leaves less than 10 GB free on this disk.",
-  /** The link to a licence's text; with several licences, each says which it opens (by its
-   *  name, the Studio engine's by its short word: "Read the licences (MIT)"). */
-  readLicences: (name: string | null) => (name === null ? "Read the licences" : `Read the licences (${name})`),
   /** A licence or model page the browser did not open, and where to find it instead. */
   notOpened: "The page could not be opened in your browser.",
   goTo: (url: string) => `Go to ${url} in your browser.`,
   excludedRegions: (licence: string, regions: string[]) => `${licence} excludes ${andList(regions)}.`,
-  cancel: "Cancel",
-  download: "Download",
 } as const;
 
+/** LoRAs, in the composer's LoRA section and in Get models (Phase U). */
+export const LORAS = {
+  title: "LoRAs",
+  add: "Add",
+  remove: "Remove",
+  strength: "Strength",
+  highNoise: "High-noise part",
+  mayNotFit: "may not fit this model",
+  none: "No LoRAs yet",
+  /** The heading over the LoRAs whose model type is not known: they are not judged. */
+  unknownType: "LoRA for an unknown model type",
+  /** An attached LoRA's strength slider, named after it (Task U8). */
+  strengthOf: (name: string) => `Strength of ${name}`,
+  /** An attached LoRA's Remove button, named after it. */
+  removeOf: (name: string) => `Remove ${name}`,
+  getLoras: "Get LoRAs",
+  /** The composer's LoRAs button, with how many the draft attaches: "LoRAs (1)". */
+  lorasButton: (n: number) => (n > 0 ? `LoRAs (${n})` : "LoRAs"),
+  /** A LoRA whose file is gone: *Add* greys it out, and an attached one says so. */
+  missing: "Its file is gone from this computer.",
+} as const;
+
+/** The model's files in Studio's side panel (Task U8, design 7.5): *Change* for a part, with a
+ *  file on this computer, from disk or from a Hugging Face repository. *Change*, *Model type*
+ *  and "untested set-up" are `SETUP`'s. */
+export const FILES = {
+  installedFile: "A file on this computer",
+  diskFile: "A file from disk…",
+  hubFile: "A file from Hugging Face…",
+  repoLabel: "Repository",
+  needsSetup: "Choose the model type and its files to use this model.",
+  /** The Model type menu of a model that has none yet. */
+  chooseType: "Choose a type",
+  /** *A file on this computer* when no other installed model has a file for the part. */
+  noInstalled: "No other file on this computer for this part",
+  /** An installed file, by the model it belongs to: "from sd_xl_base_1.0". */
+  fromModel: (model: string) => `from ${model}`,
+  /** The Hugging Face dialog's title: "Decoder (VAE) from Hugging Face". */
+  hubTitle: (part: string) => `${part} from Hugging Face`,
+  repoHint: "owner/name",
+  showFiles: "Show its files",
+  readingRepo: "Reading the repository…",
+  noFiles: "This repository has no file Studio can use for this part.",
+  useFile: "Use this file",
+  cancel: "Cancel",
+  /** While the model's files are read (nothing is sent). */
+  reading: "Reading the model's files…",
+  /** While the model's own download runs: why its files cannot be changed meanwhile. */
+  downloading: "Its files are downloading. You can change them again once the download is done.",
+} as const;
+
+/** Adding a model or LoRA file from this computer (Phase U's dialog, Task U4). */
+export const IMPORT = {
+  addModel: "Add a model file",
+  addLora: "Add a LoRA file",
+  copy: "Copy it into Studio's models folder",
+  inPlace: "Use it where it is",
+  reading: "Reading the file…",
+  copying: "Copying…",
+  title: "Add a model file",
+  /** The extra files a model file's set-up fetches: "Also downloads 335 MB from Hugging Face". */
+  alsoDownloads: (size: string) => `Also downloads ${size} from Hugging Face`,
+  add: "Add",
+  done: "Added",
+  /** The button that closes the dialog once the file is added. */
+  finish: "Done",
+  /** Before the file chooser answers. */
+  choose: "Choose a .safetensors, .sft or .gguf file.",
+  chooseAnother: "Choose another file",
+  /** The question of how a file from outside the models folder is added. */
+  mode: "How to add it",
+  /** The extra files of a model file's set-up, under this heading. */
+  extraFiles: "Extra files",
+  /** A LoRA file, whichever button chose it. */
+  asLora: "It is added to your LoRAs.",
+  /** How far adding it is: "1.2 GB of 6.9 GB". */
+  amount: (done: string, total: string) => `${done} of ${total}`,
+  /** Added, while the files its set-up fetches download. */
+  fetching: "Its extra files are downloading; the model is ready when they finish.",
+  cancel: "Cancel",
+  /** While the plan of the model type chosen is made. */
+  planning: "Updating the files…",
+  /** A file Studio can't place (design 7.5): what *Set it up yourself* does. */
+  byHand:
+    "If you know what model this is, set it up yourself: choose its type, and Studio adds the files it needs. It runs as an untested set-up.",
+} as const;
+
+/** The codes of what can stop a set-up (`studio_setup_plan`, a download, *Add*): plain words
+ *  for each, so none shows as its code. */
+export type SetupProblem = "hf_needs_token" | "hf_needs_terms" | "studio_setup_incomplete";
+
+/** A model's set-up: its labels and the problems it can meet (Phase U's set-up sheet). */
+export const SETUP = {
+  modelType: "Model type",
+  files: "Files",
+  change: "Change",
+  untested: "untested set-up",
+  yourself: "Set it up yourself",
+  anyway: "Download file anyway",
+  problem: {
+    hf_needs_token: "This model is gated. Add a Hugging Face token in Settings → Hugging Face first.",
+    hf_needs_terms: "Accept this model's terms on its Hugging Face page first.",
+    studio_setup_incomplete: "Choose a file for each part first.",
+  } satisfies Record<SetupProblem, string>,
+  /** Where a slot's file comes from, in the set-up's list. */
+  source: {
+    main: "the model file",
+    sibling: "next to the model file",
+    installed: "from a model already installed",
+    repo: "from the repository",
+    companion: "the usual one for this model type",
+    chosen: "chosen by you",
+    embedded: "inside the model file",
+    folder: "in the model's folder",
+    missing: "no file yet",
+  } satisfies Record<PartSource, string>,
+} as const;
+
+/** The set-up problem a refusal's `code` names, so it is said in `SETUP.problem`'s words; `null`
+ *  for any other code. Only the group's own keys count ("toString" is not one). */
+export function setupProblem(code: string | null | undefined): SetupProblem | null {
+  return typeof code === "string" && Object.hasOwn(SETUP.problem, code) ? (code as SetupProblem) : null;
+}
+
+/** A model that may not run well here: a warning, never a refusal (Phase U's sheet, composer
+ *  and cards). */
+export const LOCAL_WARNING = {
+  mayNotFit: (reason: string) => `May not fit this computer: ${reason}. It may fail or be very slow.`,
+  videoOnProcessor: "Video on the processor is very slow",
+  /** In the update box while a local job runs: installing stops it (design 9.2). */
+  updateStopsIt: "Installing stops the picture being made",
+} as const;
+
+/** When a Hugging Face repository was last updated, as a result card says it: "today",
+ *  "yesterday", "3 days ago", "2 weeks ago", "4 months ago", "a year ago". A time not yet come
+ *  (a clock running behind) reads "today". */
+export function updatedWhen(at: number, now: number = Date.now()): string {
+  const days = Math.floor(Math.max(0, now - at) / 86_400_000);
+  if (days < 1) return "today";
+  if (days === 1) return "yesterday";
+  if (days < 7) return `${days} days ago`;
+  const ago = (n: number, unit: string) => (n === 1 ? `a ${unit} ago` : `${n} ${unit}s ago`);
+  if (days < 30) return ago(Math.floor(days / 7), "week");
+  if (days < 365) return ago(Math.floor(days / 30), "month");
+  return ago(Math.floor(days / 365), "year");
+}
+
+/** Get models, Studio's full view (Task U5, design 10.3): its header with this computer's
+ *  chips, the Hugging Face search with its filters, and the sections without a query. */
+export const GET_MODELS = {
+  title: STUDIO_TOPBAR.getModels,
+  subtitle: "Picture and video models that run on this computer: free, and private.",
+  back: "Back",
+  /** The name of the header's chips. */
+  thisComputer: "This computer",
+  /** The graphics card and its memory: "Radeon RX 7600 · 8 GB graphics memory". */
+  gpu: (name: string, gb: string) => `${name} · ${gb} graphics memory`,
+  /** Apple silicon, whose memory is shared: "Apple M5 · 16 GB shared memory". */
+  shared: (name: string, gb: string) => `${name} · ${gb} shared memory`,
+  processorOnly: "Processor only",
+  ram: (gb: string) => `${gb} memory`,
+  freeDisk: (gb: string) => `${gb} free`,
+  addModel: IMPORT.addModel,
+  addLora: IMPORT.addLora,
+  searchLabel: "Search Hugging Face",
+  searchPlaceholder: "Search Hugging Face: SDXL, Flux, Wan 2.2, or a repo name",
+  search: "Search",
+  searchSends: "Searching sends your words to huggingface.co.",
+  /** The name of the Pictures · Video · LoRAs chips. */
+  filters: MODEL_SHEET.filters,
+  pictures: STUDIO_TABS.image,
+  video: STUDIO_TABS.video,
+  loras: LORAS.title,
+  fitsOnly: "Fits this computer",
+  recommended: "Recommended for this computer",
+  popular: "Popular on Hugging Face",
+  here: "On this computer",
+  results: "Found on Hugging Face",
+  searching: "Searching…",
+  noResults: {
+    pictures: "Hugging Face found no picture models for that.",
+    video: "Hugging Face found no video models for that.",
+    loras: "Hugging Face found no LoRAs for that.",
+  } satisfies Record<SearchFilter, string>,
+  /** Without a query, no catalog model of the kind is left (*Fits this computer* hid them). */
+  noneFit: {
+    image: "No picture model in Studio's list fits this computer.",
+    video: "No video model in Studio's list fits this computer.",
+  } satisfies Record<MediaKind, string>,
+  videoNote: "Local video is slower and simpler than cloud video, but free and private.",
+  nothingHere: "No models on this computer yet",
+  noLorasHere: LORAS.none,
+  retry: "Try again",
+  /** More of the Popular list than its first row or two. */
+  showAll: (n: number) => `Show all ${n}`,
+  showFewer: "Show fewer",
+  /** The catalog's pick for this computer, on its card. */
+  topPick: "Top pick",
+  installed: "Installed",
+  download: LOCAL_MODELS.download,
+  repair: "Repair",
+  repairHint: "Checks its files and downloads again anything missing or damaged.",
+  delete: "Delete",
+  /** A result card's figures: "48.2k downloads", "312 likes". */
+  downloads: (n: number) => (n === 1 ? "1 download" : `${formatCount(n)} downloads`),
+  likes: (n: number) => (n === 1 ? "1 like" : `${formatCount(n)} likes`),
+  /** "updated 3 weeks ago", from `updatedWhen`. */
+  updated: (date: string) => `updated ${date}`,
+  /** A gated model's next step: Settings → Hugging Face, where the token goes. */
+  openSettings: "Open Settings",
+  /** Where a LoRA came from. */
+  loraFrom: (repo: string) => `From ${repo}`,
+  loraAdded: "Added from this computer",
+  loraMissing: LORAS.missing,
+  deleteLoraTitle: (name: string) => `Delete ${name}?`,
+  deleteLoraBody: "Its file is removed from this computer. Pictures and videos you made with it stay in the gallery.",
+} as const;
+
+/** What Studio can do with a model it does not run, as a badge says it in short. */
+const CANT_RUN_SHORT: Record<CannotRunReason, string> = {
+  lumina2: "Lumina 2",
+  ltxVideo09: "LTX-Video 0.9",
+  hunyuanVideo1: "HunyuanVideo 1",
+  svd: "Stable Video Diffusion",
+  unknownWeights: "unknown model",
+  sharded: "split files",
+  pickle: "unreadable files",
+  noSha: "no checksum",
+  adapter: "add-on file",
+  needsControlFrames: "needs control video",
+  needsAudio: "needs sound",
+  upscaler: "upscaler",
+  folderModel: "folder of parts",
+  notThisEngine: "unsupported type",
+  ltx2: "LTX-2",
+};
+
+/** A Hugging Face result's Studio verdict, as its badge says it (Task U5, design 10.3): from
+ *  its name until it is opened (`hint`), exact once its files were read. */
+export const VERDICT = {
+  /** "Works in Studio · SDXL". */
+  works: (type: string) => `Works in Studio · ${type}`,
+  /** "LoRA for FLUX.1"; without a known model type, "LoRA for an unknown model type". */
+  lora: (type: string | null) => (type === null ? LORAS.unknownType : `LoRA for ${type}`),
+  /** "Can't run: Lumina 2", in short; its badge's tooltip has the whole sentence. */
+  cantRun: (reason: CannotRunReason) => `Can't run: ${CANT_RUN_SHORT[reason] ?? CANT_RUN_SHORT.unknownWeights}`,
+  /** Its name says nothing Studio knows: opening it reads its files. */
+  unknown: "Open to check",
+  /** Opened, and none of its files is one Studio knows. */
+  notRecognised: "Not recognised",
+  /** A hint's tooltip. */
+  hint: "From the name: opening it reads the files",
+} as const;
+
+/** A result's or a catalog model's detail panel in Get models (Task U6, design 10.3): the review
+ *  before a download, with its main file (one per quantisation, the best for this computer
+ *  marked), the extra files Studio adds, the licences, the total and one Download; then the
+ *  files Studio can't run and the LoRAs. */
+export const MODEL_DETAIL = {
+  mainFile: "Main file",
+  best: "Best for this computer",
+  extras: "Extra files Studio adds",
+  alreadyHere: "already on this computer",
+  chooseFile: "Choose a file",
+  /** "Total to download: 4.6 GB": the files not on this computer yet (and the Studio engine
+   *  when it comes with the model). */
+  total: (size: string) => `Total to download: ${size}`,
+  download: "Download",
+  /** Why Download is off while a part has no file. */
+  missingWhy: SETUP.problem.studio_setup_incomplete,
+  /** Why Download is off for a gated model while no Hugging Face token is saved. */
+  needsToken: SETUP.problem.hf_needs_token,
+  downloadLora: "Download LoRA",
+  /** While the repository is read on opening. */
+  reading: "Reading the repository on huggingface.co…",
+  /** Who published a result: "by leejet". */
+  by: (author: string) => `by ${author}`,
+  licences: "Licences",
+  /** A repository that names no licence at all. */
+  noLicence: `This repository names no licence. ${LICENCE_BADGE.unclear} before you use what you make.`,
+  /** A part with no file yet. */
+  noFile: "No file yet",
+  /** A part the person chose from this computer: "Chosen by you · t5xxl.safetensors". */
+  chosen: (name: string) => `Chosen by you · ${name}`,
+  /** A repository with no model Studio can set up (its files are listed below). */
+  noSetup: "Studio can't set this repository up. Its files can still be downloaded one at a time, for another app.",
+  /** A repository with a file Studio can't place but may run (design 7.5). */
+  noSetupByHand:
+    "Studio can't set this repository up by itself. Set one up yourself, choosing its type, or download a file anyway, for another app.",
+  /** The *Set it up yourself* section's lead: which file it sets up. */
+  byHandFor: (file: string) => `Set up ${file} as:`,
+  otherFiles: "Other files in this repository",
+  openFiles: "View files on Hugging Face",
+  /** A file with no published checksum: the browser downloads it instead. */
+  browserDownload: "Download file in browser",
+  queued: "Queued in Models → Downloads.",
+  installed: GET_MODELS.installed,
+  /** An amber licence's duty: "Pass the use restrictions on." reads "The licence asks you to
+   *  pass the use restrictions on." */
+  duty: (obligation: string) => `The licence asks you to ${SETTING_WORDS.midSentence(obligation)}`,
+  /** While a new plan is asked for, after a change of model type or a file chosen. */
+  planning: "Updating the files…",
+} as const;
+
+/** Studio's downloads (Task U7, design 10.3): a model's or a LoRA's download on its card, in the
+ *  detail panel and in the top bar's indicator, with Pause or Resume and Cancel, and *Use it*
+ *  once a model is ready. Every size is `formatBytes`'s. */
+export const STUDIO_DOWNLOADS = {
+  /** The top bar's indicator while downloads run: "2 downloading". */
+  indicator: (n: number) => `${n} downloading`,
+  /** The indicator once none runs, while finished ones are listed: "1 ready". */
+  indicatorReady: (n: number) => `${n} ready`,
+  /** The indicator's list. */
+  title: "Downloads",
+  /** Takes the finished downloads off the indicator's list. */
+  clear: "Clear finished",
+  /** How far a download got: "2.4 GB of 6.7 GB · 2 min left"; `left` is the time left, or
+   *  what the download is doing ("Paused"), or nothing. */
+  progress: (done: string, total: string, left: string | null) =>
+    left === null ? `${done} of ${total}` : `${done} of ${total} · ${left}`,
+  /** What a download that is not simply downloading is doing, after its sizes. */
+  status: {
+    queued: "Waiting",
+    downloading: null,
+    paused: "Paused",
+    verifying: "Checking the files…",
+    done: "Ready",
+    error: "Stopped",
+    cancelled: "Cancelled",
+    cancelling: "Cancelling…",
+  } satisfies Record<DownloadStatus, string | null>,
+  /** A file already on this computer, read through before the rest downloads. */
+  checking: "Checking the file…",
+  /** A file without a published checksum is part of it. */
+  unverified: "no published checksum",
+  /** The buttons, named for the model or LoRA. */
+  pause: (name: string) => `Pause downloading ${name}`,
+  resume: (name: string) => `Resume downloading ${name}`,
+  cancel: (name: string) => `Cancel downloading ${name}`,
+  /** Their tooltips. */
+  tip: { pause: "Pause", resume: "Resume", cancel: "Cancel" },
+  /** A finished model chosen in the composer: its tab, back at the results. */
+  useIt: "Use it",
+  ready: "Ready",
+  /** What a download in the indicator's list is. */
+  lora: "LoRA",
+} as const;
+
+/** A result's verdict badge in words: exact (`exact`) or its name's hint. */
+export function verdictBadgeWords(verdict: StudioVerdict, exact: boolean): string {
+  if (verdict === "unknown") return exact ? VERDICT.notRecognised : VERDICT.unknown;
+  if ("works" in verdict) return VERDICT.works(typeName(verdict.works.version, verdict.works.recipe));
+  if ("lora" in verdict) return VERDICT.lora(verdict.lora.base === null ? null : typeName(verdict.lora.base, null));
+  return VERDICT.cantRun(verdict.cannotRun.reason);
+}
+
 /** The one-time note about local models (Task B14, local addendum L1), word for word: shown
- *  before the first local download, and again from Get local models' footer and Settings →
+ *  before the first local download, and again from Get models' footer and Settings →
  *  Studio. `lead` is its first sentence, in bold. */
 export const LOCAL_NOTICE = {
   lead: "Local models run only on your computer.",
@@ -2019,11 +2613,10 @@ function downloadStatusWords(g: DownloadGroup): string {
   return g.status;
 }
 
-/** A download's progress as Models → Downloads says it, also on a picture or video model's row
- *  in Get local models (0.1.0 Task B14): "1.2 GB of 6.6 GB · downloading · 3 min left", with
- *  " · no published checksum" when a file has none. `amount` writes the sizes (Models:
- *  `formatBytes`; Studio: `amountGb`, as its model sizes are written). 0.0.7 (P6b review m5): no
- *  time left while a file is checked. */
+/** A download's progress as Models → Downloads says it: "1.2 GB of 6.6 GB · downloading · 3 min
+ *  left", with " · no published checksum" when a file has none. `amount` writes the sizes
+ *  (`formatBytes`). 0.0.7 (P6b review m5): no time left while a file is checked. Studio says
+ *  its downloads in its own words since 0.2.0 Task U7 (`STUDIO_DOWNLOADS`). */
 export function downloadProgressWords(g: DownloadGroup, amount: (bytes: number) => string): string {
   const checking = g.status === "downloading" && g.checking === true;
   const eta = g.status === "downloading" && !checking ? formatEta(g.bytesTotal - g.bytesDone, g.bytesPerSecond) : null;
@@ -2057,3 +2650,8 @@ export function abilitiesWords(media: { image: boolean; video: boolean } | undef
   if (media?.video) parts.push(STUDIO_TABS.video);
   return parts.join(" · ");
 }
+
+/** The shared controls in `src/components/ui`. */
+export const UI = {
+  close: "Close",
+} as const;

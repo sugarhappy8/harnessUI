@@ -482,27 +482,213 @@ fn strings_of(out: &ToolOutput) -> Vec<String> {
     all
 }
 
-/// Whether `path` is written in rea's own package (a constant of its code or texts), as is
-/// or JSON-escaped.
-fn in_package(rea_dir: &Path, path: &str) -> bool {
-    let escaped = path.replace('\\', "\\\\");
-    let mut stack = vec![rea_dir.join("dist")];
-    while let Some(dir) = stack.pop() {
-        for e in std::fs::read_dir(&dir).into_iter().flatten().flatten() {
-            let p = e.path();
-            if p.is_dir() {
-                stack.push(p);
-            } else if p
-                .extension()
-                .is_some_and(|x| x == "js" || x == "json" || x == "mjs")
-                && std::fs::read_to_string(&p)
-                    .is_ok_and(|t| t.contains(path) || t.contains(&escaped))
-            {
-                return true;
+/// The texts of rea's own package (`dist/**/*.js|json|mjs`), and the paths its code joins
+/// from constants. A path counts as rea's own constant in exactly two ways (never a prefix of
+/// one, and never a join in another order or across files):
+///
+/// - it is written whole in one text, delimited on both sides (so `/proc` in a remediation
+///   sentence and `"/usr/bin/prlimit"` in code count, `/tmp` inside `/tmp/rea/x` does not);
+/// - it equals, in order, the arguments of one `join(...)` call of one file, each argument a
+///   string literal or a name that file assigns one string literal.
+struct Package {
+    texts: Vec<String>,
+    joined: BTreeSet<String>,
+}
+
+impl Package {
+    fn load(rea_dir: &Path) -> Self {
+        let mut texts = Vec::new();
+        let mut stack = vec![rea_dir.join("dist")];
+        while let Some(dir) = stack.pop() {
+            for e in std::fs::read_dir(&dir).into_iter().flatten().flatten() {
+                let p = e.path();
+                if p.is_dir() {
+                    stack.push(p);
+                } else if p
+                    .extension()
+                    .is_some_and(|x| x == "js" || x == "json" || x == "mjs")
+                    && let Ok(t) = std::fs::read_to_string(&p)
+                {
+                    texts.push(t);
+                }
             }
         }
+        Self::from_texts(texts)
     }
-    false
+
+    fn from_texts(texts: Vec<String>) -> Self {
+        let joined = texts.iter().flat_map(|t| joins_of(t)).collect();
+        Self { texts, joined }
+    }
+
+    fn explains(&self, path: &str) -> bool {
+        let escaped = path.replace('\\', "\\\\");
+        self.joined.contains(path)
+            || self
+                .texts
+                .iter()
+                .any(|t| whole_in(t, path) || (escaped != path && whole_in(t, &escaped)))
+    }
+}
+
+/// Whether `path` is written whole in `text`: not inside a longer path or word.
+fn whole_in(text: &str, path: &str) -> bool {
+    let word = |c: char| c.is_alphanumeric() || "_-./\\".contains(c);
+    text.match_indices(path).any(|(at, _)| {
+        let before = text[..at].chars().next_back();
+        let mut after = text[at + path.len()..].chars();
+        let next = after.next();
+        let ends = match next {
+            None => true,
+            Some('.') => after.next().is_none_or(|c| !c.is_alphanumeric()),
+            Some(c) => !word(c),
+        };
+        ends && before.is_none_or(|c| !word(c))
+    })
+}
+
+/// The string literal `arg` is (`"x"`, `'x'` or a plain `` `x` ``), without its quotes.
+fn literal(arg: &str) -> Option<&str> {
+    let q = arg.chars().next().filter(|c| "\"'`".contains(*c))?;
+    let inner = arg.strip_prefix(q)?.strip_suffix(q)?;
+    let plain = !inner.contains(q) && !inner.contains('\\') && !(q == '`' && inner.contains("${"));
+    plain.then_some(inner)
+}
+
+/// Every string a name is assigned in `text` (`NAME = "x"`, `const NAME = 'x'`).
+fn assignments(text: &str, name: &str) -> Vec<String> {
+    let word = |c: char| c.is_alphanumeric() || c == '_' || c == '$';
+    let mut out = Vec::new();
+    for (at, _) in text.match_indices(name) {
+        if text[..at].chars().next_back().is_some_and(word) {
+            continue;
+        }
+        let rest = text[at + name.len()..].trim_start();
+        let Some(rest) = rest.strip_prefix('=') else {
+            continue;
+        };
+        if rest.starts_with(['=', '>']) {
+            continue;
+        }
+        let rest = rest.trim_start();
+        let Some(q) = rest.chars().next().filter(|c| "\"'`".contains(*c)) else {
+            continue;
+        };
+        if let Some(end) = rest[1..].find(q)
+            && let Some(l) = literal(&rest[..end + 2])
+        {
+            out.push(l.to_owned());
+        }
+    }
+    out
+}
+
+/// The arguments of the call whose `(` is just before `rest`, split at the top level, and
+/// the text after its `)`.
+fn call_args(rest: &str) -> Option<Vec<&str>> {
+    let (mut depth, mut quote, mut start) = (0usize, None::<char>, 0usize);
+    let mut args = Vec::new();
+    let mut escaped = false;
+    for (i, c) in rest.char_indices() {
+        if let Some(q) = quote {
+            if escaped {
+                escaped = false;
+            } else if c == '\\' {
+                escaped = true;
+            } else if c == q {
+                quote = None;
+            }
+            continue;
+        }
+        match c {
+            '"' | '\'' | '`' => quote = Some(c),
+            '(' | '[' | '{' => depth += 1,
+            ')' | ']' | '}' if depth == 0 => {
+                args.push(rest[start..i].trim());
+                return Some(args);
+            }
+            ')' | ']' | '}' => depth -= 1,
+            ',' if depth == 0 => {
+                args.push(rest[start..i].trim());
+                start = i + 1;
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+/// The paths the `join(...)` calls of one text build from literals and from names that the
+/// text assigns one literal, as `posix.join` writes them (parts joined by `/`).
+fn joins_of(text: &str) -> Vec<String> {
+    let word = |c: char| c.is_alphanumeric() || c == '_' || c == '$';
+    let mut out = Vec::new();
+    for (at, _) in text.match_indices("join(") {
+        if text[..at].chars().next_back().is_some_and(word) {
+            continue;
+        }
+        let Some(args) = call_args(&text[at + 5..]) else {
+            continue;
+        };
+        let mut parts: Vec<String> = Vec::new();
+        for arg in args.iter().filter(|a| !a.is_empty()) {
+            let value = match literal(arg) {
+                Some(l) => l.to_owned(),
+                None if arg.chars().all(word) => match assignments(text, arg).as_slice() {
+                    [one] => one.clone(),
+                    _ => break,
+                },
+                None => break,
+            };
+            parts.push(value);
+        }
+        if parts.len() == args.iter().filter(|a| !a.is_empty()).count() && parts.len() > 1 {
+            let mut path = parts.join("/");
+            while path.contains("//") {
+                path = path.replace("//", "/");
+            }
+            out.push(path);
+        }
+    }
+    out
+}
+
+/// The absolute paths of `text` ([`absolute_paths`]), each extended over the words that
+/// follow it when they continue a name with spaces: a following word that holds a `/` and
+/// starts like a name part (a capital, a digit, or a dot before an extension), such as the
+/// `Disassembler.app/Contents/MacOS/hopper` of `Hopper Disassembler.app`. The extended path
+/// is what is reported, whether or not it is explained; the shorter one never stands in for
+/// it.
+fn paths_with_spaces(text: &str) -> Vec<String> {
+    let stop = |c: char| "\"'`,;)]}>|".contains(c);
+    absolute_paths(text)
+        .into_iter()
+        .map(|plain| {
+            let Some(at) = text.find(&plain) else {
+                return plain;
+            };
+            let mut path = plain;
+            let mut rest = &text[at + path.len()..];
+            while let Some(tail) = rest.strip_prefix(' ') {
+                let end = tail
+                    .find(|c: char| c.is_whitespace() || stop(c))
+                    .unwrap_or(tail.len());
+                let word = &tail[..end];
+                let first = word.split('/').next().unwrap_or_default();
+                let name_like = first
+                    .chars()
+                    .next()
+                    .is_some_and(|c| c.is_uppercase() || c.is_ascii_digit())
+                    || first.contains('.');
+                if !word.contains('/') || !name_like {
+                    break;
+                }
+                path = format!("{path} {word}");
+                rest = &tail[end..];
+            }
+            path.trim_end_matches(['.', ':']).to_owned()
+        })
+        .collect()
 }
 
 fn text_of(out: &ToolOutput) -> String {
@@ -986,9 +1172,16 @@ async fn end_to_end(decompiler: Decompiler, kind: Base) {
         temp.phase("binary_session");
         let session = call(&mut guard, "binary_session", json!({})).await;
         assert!(!session.is_error, "{}", session.joined_text());
+        let rea_dir = installation
+            .rea
+            .as_ref()
+            .and_then(|r| r.part("rea"))
+            .map(|p| p.dir.clone())
+            .expect("rea's folder");
+        let package = Package::load(&rea_dir);
         let mut outside: Vec<String> = strings_of(&session)
             .iter()
-            .flat_map(|s| absolute_paths(s))
+            .flat_map(|s| paths_with_spaces(s))
             .filter(|p| {
                 let p = Path::new(p);
                 !p.starts_with(&root) && !p.starts_with(&files)
@@ -1000,14 +1193,8 @@ async fn end_to_end(decompiler: Decompiler, kind: Base) {
         // `/usr/bin/prlimit` for tools the app does not offer, and its list of provider
         // candidates names Hopper's default launcher (checked, never started:
         // REA_ANALYSIS_PROVIDER is fixed).
-        let rea_dir = installation
-            .rea
-            .as_ref()
-            .and_then(|r| r.part("rea"))
-            .map(|p| p.dir.clone())
-            .expect("rea's folder");
         let (constants, unexplained): (Vec<String>, Vec<String>) =
-            outside.into_iter().partition(|p| in_package(&rea_dir, p));
+            outside.into_iter().partition(|p| package.explains(p));
         println!("real_rea: binary_session names rea's own constant paths {constants:?}");
         assert!(
             unexplained.is_empty(),
@@ -1319,6 +1506,79 @@ fn paths_are_found_in_rea_text() {
         .collect();
     found.sort();
     assert_eq!(found, ["/srv/x", r"C:\A\b"]);
+}
+
+#[test]
+fn only_exact_constants_of_reas_text_are_its_own_paths() {
+    // Lines copied from rea 6.9.0's `dist` (quoted), in-memory: no file is written.
+    let paths = r#"
+MAC_HOPPER_APPLICATION_DIRECTORY = "/Applications";
+MAC_HOPPER_APPLICATION_NAME = "Hopper Disassembler.app";
+MAC_HOPPER_USER_APPLICATIONS_DIRECTORY = "Applications";
+MAC_HOPPER_SYSTEM_LAUNCHER = posix.join(MAC_HOPPER_APPLICATION_DIRECTORY, MAC_HOPPER_APPLICATION_NAME, "Contents/MacOS/hopper");
+macHopperUserApplicationPath = (homeDirectory) => appendCallerPath(homeDirectory, `${MAC_HOPPER_USER_APPLICATIONS_DIRECTORY}/${MAC_HOPPER_APPLICATION_NAME}`, "darwin");
+const packagePath = posix.join(temporary, "hopper.dmg")
+"#;
+    let other = r#"
+const evmInterfaceFailure = (cause, { phase, path, workerLimits, limiter = "/usr/bin/prlimit", fileFailure })
+"... and ensure REA has permission to inspect /proc entries for running processes ..."
+const tmp = "/tmp"; const dir = "/root"; const home = "/home/user"; const cache = ".cache"; const share = ".local/share"; const rea = "rea";
+const x = join(dir, cache, rea); const y = join(rea, dir, cache);
+"#;
+    let package = Package::from_texts(vec![paths.to_owned(), other.to_owned()]);
+    // rea's own: a whole literal, a whole word of a sentence, an in-order join (names
+    // resolved in the same file).
+    for own in [
+        "/proc",
+        "/usr/bin/prlimit",
+        "/Applications",
+        "/Applications/Hopper Disassembler.app/Contents/MacOS/hopper",
+        "/root/.cache/rea",
+    ] {
+        assert!(package.explains(own), "{own}");
+    }
+    // Not rea's: parts that are all in its text but not joined that way, prefixes, another
+    // order, the join of one file with a name of another, the owner's folders, and another
+    // Hopper bundle.
+    for not in [
+        "/root/.local/share/rea",
+        "/home/user/.config/rea",
+        "/home/user/.cache/rea",
+        "/tmp/rea/cache",
+        "/tmp/cache/rea",
+        "/tmp/work",
+        "/opt/homebrew/bin/node",
+        "/usr/bin",
+        "/Applications/Hopper",
+        "/Applications/Hopper v5.app/Contents/MacOS/hopper",
+        "/Users/someone/Library/x",
+        "/rea/root/.cache",
+    ] {
+        assert!(!package.explains(not), "{not}");
+    }
+    // The extraction: a name with spaces is reported whole, explained or not, never as the
+    // shorter path.
+    let text = "launcher /Applications/Hopper Disassembler.app/Contents/MacOS/hopper is missing, see /usr/bin/prlimit.";
+    assert_eq!(
+        paths_with_spaces(text),
+        [
+            "/Applications/Hopper Disassembler.app/Contents/MacOS/hopper",
+            "/usr/bin/prlimit"
+        ]
+    );
+    let found =
+        paths_with_spaces("found /Applications/Hopper v5.app/Contents/MacOS/hopper and/or more");
+    assert_eq!(found, ["/Applications/Hopper v5.app/Contents/MacOS/hopper"]);
+    assert!(!package.explains(&found[0]));
+    // Prose after a path does not extend it.
+    assert_eq!(
+        paths_with_spaces("see /usr/bin/prlimit and/or /x"),
+        ["/usr/bin/prlimit", "/x"]
+    );
+    assert_eq!(
+        paths_with_spaces("opened /Users/someone/My Files/a.bin ok"),
+        ["/Users/someone/My Files/a.bin"]
+    );
 }
 
 #[test]

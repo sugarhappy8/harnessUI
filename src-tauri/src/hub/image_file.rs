@@ -745,6 +745,7 @@ pub async fn download_image_file(
         image_files: None,
         generator: None,
         file_only: false,
+        lora: None,
     };
     manager
         .start(

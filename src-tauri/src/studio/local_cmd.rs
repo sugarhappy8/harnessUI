@@ -1,58 +1,71 @@
-//! Get local models (studio-local-design.md, "Get local models"; 0.1.0 Task L16): Studio's
+//! Get models (studio-local-design.md, which calls it by its 0.1.x name; 0.1.0 Task L16): Studio's
 //! own view of the picture and video models this computer can run.
 //!
 //! - **The list** ([`local_models`]): what harnessUI detected, the Studio engine's state, the
 //!   installed models, and the signed catalog's recommended list split into the entries that
 //!   run here and those that do not ("Not for this computer", each with its reason), with
 //!   "Recommended for this computer" marked once per kind at most. It sends nothing.
-//! - **Hugging Face**, each only on a click: a search for picture or video repositories
-//!   ([`local_search`]), and a repository's listing at its latest commit ([`local_repo`]),
-//!   recognised here: each of its family's files with the parts it needs beside it, their
-//!   licences and its fit, or why nothing is offered.
+//! - **Hugging Face**, each only on a click: a search for picture, video or LoRA repositories
+//!   ([`local_search`]), each hit with what it offers (exact once its files were read, else
+//!   from its name), and a repository's listing at its latest commit ([`local_repo`]): every
+//!   file's label, one choice per quantisation of each model that works with its set-up plan,
+//!   licences and fit, and the best for this computer marked.
+//! - **A set-up plan** ([`setup_plan_dto`], in the webview's words) of a searched file or a
+//!   file on this computer; the commands that ask for one, and *Set it up yourself*, are
+//!   [`super::setup_cmd`]'s.
+//! - **Adding a model file from this computer**: the commands over [`super::import`].
 //! - **A fit** ([`local_fit`]) at a size and a length in seconds, with no request for a
 //!   catalog or an installed model.
 //! - **Download, delete and the note about local models**: `local_models`'
 //!   [`start_local_download`] and [`delete_local_model`], and
 //!   [`StudioManager::accept_local_notice`].
 //!
-//! Every fit is the local lane's verdict ([`local_verdict`]), so Create and Get local models
+//! Every fit is the local lane's verdict ([`local_verdict`]), so Create and Get models
 //! say the same; this module only words it. Each command is a thin wrapper over a plain
 //! function taking what it reads ([`LocalCmdDeps`]), and checks that the main window called
 //! it.
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use agent::media::{MediaKind, MediaModel, Price};
 use models::fit::{RAM_RESERVE_BYTES, Target};
-use models::gen_catalog::{
-    Commercial, GateMode, GenEntry, GenGate, GenKind, GenLicence, GenRole, GenTiers,
-};
+use models::gen_catalog::{Commercial, GateMode, GenEntry, GenGate, GenKind, GenLicence, GenTiers};
 use models::gen_eta::{self, FitWord};
 use models::gen_fit::{GenFit, GenSize};
-use models::gen_search::{Recognition, entry_for, recognise, searched_licence};
-use models::hf::{GenSearchKind, HfClient, RepoDetail, RepoSummary};
+use models::gen_search::{repo_licence, verdict_hint};
+use models::hf::{HfClient, RepoSummary, uploader_text};
+use models::sd::candidates::candidates;
+use models::sd::detect::SdVersion;
+use models::sd::matching::{RecipeKind, in_scope_recipes, kind_of, recipes_for};
+use models::sd::{CannotRunReason, FileLabel, Verdict, verdict_of};
 use tauri::{AppHandle, Manager, State};
 
 use super::deps::{AppHardware, LocalHardware, with_device_free};
+use super::detect::DetectService;
 use super::engine_cmd::{self, EngineNeed};
 use super::errors;
+use super::import::{
+    ImportInspectionDto, ImportMode, ImportResultDto, import_model, inspect_import,
+};
 use super::local::{
     AppGenCatalog, GenCatalogSource, default_frames, frames_for, longest_side, media_kind,
     media_model,
 };
 use super::local_models::{
     DownloadPlan, InstalledFiles, LocalSource, delete_local_model, entry_from_installed,
-    entry_with, plan_download, start_local_download, word,
+    entry_with, installed_version, is_studios_copy, plan_download, start_local_download, word,
 };
 use super::manager::{LocalVerdict, StudioManager, device_label, eta_dto, local_verdict, word_tag};
 use super::prefs::StudioPrefs;
+use super::setup_plan::{PlanDeps, Planned, ReadRepo, plan_file};
 use crate::commands::only_main_window;
 use crate::dto::{
     EngineStatusDto, GateDto, HardwareLineDto, InstalledLocalDto, LicenceDto, LocalEntryDto,
     LocalFileChoiceDto, LocalFitDto, LocalModelsDto, LocalRepoDto, LocalSearchHitDto,
-    LocalSearchPage, PartDto, media_model_dto,
+    LocalSearchPage, PartDto, PlannedSlotDto, RecipeChoiceDto, RepoFileDto, SearchFilter,
+    SetupChoice, SetupPlanDto, media_model_dto,
 };
 use crate::error::{AppError, AppResult};
 use crate::state::AppState;
@@ -60,7 +73,7 @@ use crate::state::AppState;
 /// A billion bytes: the GB the catalog's tiers count in.
 const GB: u64 = 1_000_000_000;
 
-/// What Get local models reads: each part a test can stand in for.
+/// What Get models reads: each part a test can stand in for.
 pub struct LocalCmdDeps {
     /// The installed models, this computer's measured runs.
     pub store: store::Store,
@@ -70,6 +83,8 @@ pub struct LocalCmdDeps {
     pub hardware: Arc<dyn LocalHardware>,
     /// Hugging Face, with the stored token; `None` where nothing is asked of it.
     pub hf: Option<HfClient>,
+    /// What reading repos' files found, kept between openings.
+    pub detect: Arc<DetectService>,
     /// Where model files go (`<models>/<owner>/<repo>/<path>`).
     pub models_dir: PathBuf,
     /// The free space on the models folder's disk, when the system says.
@@ -85,11 +100,14 @@ pub struct LocalCmdDeps {
     /// The files the installed models use: a part's place is shown as its download would
     /// have it (`local_models::plan_download`).
     pub installed_files: InstalledFiles,
+    /// How the last model file from this computer was added (the manager's held
+    /// preferences): offered first by the next import.
+    pub last_import_mode: Option<ImportMode>,
 }
 
 // ---- the list ---------------------------------------------------------------------------------
 
-/// Get local models: this computer, the engine, the installed models (newest first, each at
+/// Get models: this computer, the engine, the installed models (newest first, each at
 /// its default size; one this build cannot read is still listed, not for this computer, so it
 /// can be deleted), and the recommended list at each entry's default size, split by its fit
 /// word (`notHere` into `not_here`). Per kind, the first entry of the highest tier at or below
@@ -115,11 +133,12 @@ pub async fn local_models(deps: &LocalCmdDeps) -> AppResult<LocalModelsDto> {
                     "an installed model cannot be run by this version: {}",
                     e.details
                 );
-                installed.push(unreadable(row));
+                installed.push(unreadable(deps, row));
                 continue;
             }
         };
         let verdict = judge(deps, &entry, default_size(&entry)).await;
+        let (high_noise, takes_loras) = recipe_features(&entry.recipe);
         installed.push(InstalledLocalDto {
             id: row.id.clone(),
             name: entry.name.clone(),
@@ -127,11 +146,23 @@ pub async fn local_models(deps: &LocalCmdDeps) -> AppResult<LocalModelsDto> {
             size_bytes: row.size_bytes,
             fit: fit_dto(&entry, &verdict),
             model: media_model_dto(&media_model(row, &entry), None),
+            recipe: recipe_choice(&entry.recipe),
+            version: entry.version,
+            untested: entry.untested,
+            needs_setup: row.recipe_id.is_none(),
+            high_noise,
+            takes_loras,
+            lora_base: entry.version.map(SdVersion::lora_family),
+            source: row.source.as_str().to_owned(),
+            in_place: in_place(&deps.models_dir, row),
         });
     }
+    // A recommended entry is installed by its row's catalog id, or by its id: a row the person
+    // set up again (*Set it up yourself*) keeps the entry's id but is their own, with no
+    // catalog id. Its card then offers no Download that would replace their set-up.
     let installed_ids: BTreeSet<&str> = rows
         .iter()
-        .filter_map(|r| r.catalog_id.as_deref())
+        .flat_map(|r| r.catalog_id.as_deref().into_iter().chain([r.id.as_str()]))
         .collect();
 
     let mut entries = Vec::with_capacity(catalog.entries.len());
@@ -178,9 +209,10 @@ pub async fn local_models(deps: &LocalCmdDeps) -> AppResult<LocalModelsDto> {
         recommended,
         not_here,
         notice_accepted: deps.notice_accepted,
-        video_possible: !matches!(device, Target::Cpu { .. }),
+        video_on_processor: matches!(device, Target::Cpu { .. }),
         installed_bytes: space_taken(&rows),
         more_fit: u32::try_from(more_fit).unwrap_or(u32::MAX),
+        loras: super::loras::list_loras(&deps.store, &deps.models_dir).await?,
     })
 }
 
@@ -245,12 +277,21 @@ fn recommended_for(
 
 /// An installed model this build cannot read (`entry_from_installed` refuses it: its family
 /// record hidden by a newer signed catalog, a part's licence no longer known, a family this
-/// build does not know): its stored id, name and kind, its parts' sizes, and not for this
-/// computer, with why, so that *Delete* can still remove its files.
-fn unreadable(row: &store::GenModel) -> InstalledLocalDto {
+/// build does not know), or one with no recipe yet (`needs_setup`: *Set it up yourself*): its
+/// stored id, name and kind, its parts' sizes, what its row says it is set up as, and not for
+/// this computer, with why, so that *Delete* can still remove its files.
+fn unreadable(deps: &LocalCmdDeps, row: &store::GenModel) -> InstalledLocalDto {
     let kind = serde_json::from_value::<GenKind>(row.kind.clone().into())
         .map_or(MediaKind::Image, media_kind);
-    let reason = errors::NOT_RUN_BY_THIS_VERSION;
+    let needs_setup = row.recipe_id.is_none();
+    let reason = if needs_setup {
+        errors::NEEDS_SET_UP
+    } else {
+        errors::NOT_RUN_BY_THIS_VERSION
+    };
+    let recipe_id = row.recipe_id.as_deref().unwrap_or_default();
+    let version = installed_version(row);
+    let (high_noise, takes_loras) = recipe_features(recipe_id);
     let model = MediaModel {
         id: row.id.clone(),
         display_name: row.name.clone(),
@@ -276,9 +317,38 @@ fn unreadable(row: &store::GenModel) -> InstalledLocalDto {
             suggestion: None,
             eta: None,
             very_slow: gen_eta::very_slow(FitWord::NotHere, None),
+            video_on_processor: false,
         },
         model: media_model_dto(&model, None),
+        recipe: recipe_choice(recipe_id),
+        version,
+        untested: needs_setup || version.is_none_or(|v| !recipes_for(v).contains(&recipe_id)),
+        needs_setup,
+        high_noise,
+        takes_loras,
+        lora_base: version.map(SdVersion::lora_family),
+        source: row.source.as_str().to_owned(),
+        in_place: in_place(&deps.models_dir, row),
     }
+}
+
+/// Whether recipe `recipe_id` takes a high-noise part, and LoRAs; neither for a recipe the
+/// engine does not have.
+fn recipe_features(recipe_id: &str) -> (bool, bool) {
+    models::sd::recipes::recipe(recipe_id).map_or((false, false), |r| {
+        (r.feature("high_noise"), r.feature("lora"))
+    })
+}
+
+/// Whether installed model `row` uses a file from this computer where it is: its model file
+/// imported in place, or a file the person chose for a part, never Studio's copy under
+/// `<models>/@imported/`. Deleting the model never deletes such a file, and its Delete says so
+/// (final review, area 3, I4).
+fn in_place(models_dir: &Path, row: &store::GenModel) -> bool {
+    row.parts.as_array().into_iter().flatten().any(|p| {
+        let local = p.get("local").and_then(serde_json::Value::as_str);
+        local.is_some_and(|file| !is_studios_copy(models_dir, Path::new(file)))
+    })
 }
 
 /// An installed model's parts' sizes added up; its recorded total when no part gives one.
@@ -316,7 +386,7 @@ fn entry_dto(
     verdict: &LocalVerdict,
     installed: bool,
 ) -> AppResult<LocalEntryDto> {
-    let plan = plan(deps, entry.clone())?;
+    let plan = plan(deps, entry.clone(), None)?;
     Ok(LocalEntryDto {
         id: entry.id.clone(),
         name: entry.name.clone(),
@@ -340,8 +410,9 @@ fn entry_dto(
 // ---- a fit ------------------------------------------------------------------------------------
 
 /// The fit of the model `source` names at `width` × `height` and, for a clip, `seconds` (0:
-/// its default length), with this computer as it is now. A request only for a search source's
-/// listing. A size the model is never made at is refused (`size_not_offered`).
+/// its default length), with this computer as it is now; a searched file's or a file on this
+/// computer's as its set-up plan makes it, with nothing chosen. A request only for a search
+/// source's listing. A size the model is never made at is refused (`size_not_offered`).
 pub async fn local_fit(
     deps: &LocalCmdDeps,
     source: &LocalSource,
@@ -350,7 +421,7 @@ pub async fn local_fit(
     seconds: u32,
 ) -> AppResult<LocalFitDto> {
     let catalog = deps.catalog.gen_catalog().await;
-    let entry = entry_with(&deps.store, &catalog, deps.hf.as_ref(), source).await?;
+    let entry = entry_with(&deps.store, &plan_deps(deps, &catalog), source).await?;
     let longest = longest_side(&entry);
     if width == 0 || height == 0 || width.max(height) > longest {
         return Err(errors::size_not_offered());
@@ -412,207 +483,399 @@ fn fit_dto(entry: &GenEntry, verdict: &LocalVerdict) -> LocalFitDto {
             .map(|size| errors::fits_at(size, entry.kind == GenKind::Video)),
         eta: verdict.eta.as_ref().map(|eta| eta_dto(eta, None)),
         very_slow: gen_eta::very_slow(verdict.word, verdict.eta.as_ref()),
+        video_on_processor: verdict.fit.video_on_processor,
     }
 }
 
 // ---- Hugging Face -----------------------------------------------------------------------------
 
-/// A Hugging Face search for picture (`image`) or video repositories matching `text`
-/// (`HfClient::search_generators`: its three queries, merged into one page).
+/// A Hugging Face search for picture, video or LoRA repositories matching `text`
+/// (`HfClient::search_generators`: its three queries, merged into one page), each hit with
+/// what it offers ([`search_page`]).
 pub async fn local_search(
     hf: &HfClient,
+    detect: &DetectService,
     text: &str,
-    kind: MediaKind,
+    filter: SearchFilter,
 ) -> AppResult<LocalSearchPage> {
-    let kind = match kind {
-        MediaKind::Image => GenSearchKind::Pictures,
-        MediaKind::Video => GenSearchKind::Video,
-    };
     let found = hf
-        .search_generators(text, kind)
+        .search_generators(text, filter)
         .await
         .map_err(crate::hub::hf_error)?;
-    Ok(search_page(found))
+    Ok(search_page(found, detect))
 }
 
-/// The search's repositories as hits, in their order.
-fn search_page(found: Vec<RepoSummary>) -> LocalSearchPage {
+/// The search's repositories as hits, in their order: each with its owner, when it last
+/// changed, and its verdict: the last reading of its files' (`exact`,
+/// [`DetectService::verdict`]), else its name's hint ([`verdict_hint`]).
+fn search_page(found: Vec<RepoSummary>, detect: &DetectService) -> LocalSearchPage {
     LocalSearchPage {
         items: found
             .into_iter()
-            .map(|r| LocalSearchHitDto {
-                gated: word(&GateMode::from(r.gated)),
-                repo: r.id,
-                downloads: r.downloads,
-                likes: r.likes,
-                license_label: r.license,
+            .map(|r| {
+                let exact = detect.verdict(&r.id);
+                LocalSearchHitDto {
+                    gated: word(&GateMode::from(r.gated)),
+                    author: owner(&r.id).to_owned(),
+                    verdict: exact
+                        .clone()
+                        .unwrap_or_else(|| verdict_hint(&r.id, r.pipeline_tag.as_deref())),
+                    exact: exact.is_some(),
+                    downloads: r.downloads,
+                    likes: r.likes,
+                    updated_at: r.last_modified,
+                    license_label: r.license,
+                    repo: r.id,
+                }
             })
             .collect(),
     }
 }
 
-/// Repository `repo`'s listing at its latest commit, as Studio recognises it ([`repo_dto`]).
+/// A repo id's owner (`owner/name`).
+fn owner(repo: &str) -> &str {
+    repo.split_once('/').map_or(repo, |(owner, _)| owner)
+}
+
+/// Repository `repo` at its latest commit, as Studio reads it ([`repo_dto`]): its listing,
+/// then its files' headers (`DetectService::read_repo`) and its model card at once.
 pub async fn local_repo(deps: &LocalCmdDeps, repo: &str) -> AppResult<LocalRepoDto> {
     let hf = deps
         .hf
         .as_ref()
         .ok_or_else(|| AppError::internal("a repository listing without a Hub client"))?;
     let detail = hf.repo(repo, None).await.map_err(crate::hub::hf_error)?;
-    Ok(repo_dto(deps, &detail).await)
+    let (read, card) = tokio::join!(
+        ReadRepo::of(&deps.detect, hf, detail.clone()),
+        hf.model_card(&detail.id, &detail.commit)
+    );
+    Ok(repo_dto(deps, &read, card.ok().as_deref()).await)
 }
 
-/// What a repository's listing offers (`gen_search::recognise`): for a family harnessUI runs,
-/// each of its diffusion files with a published SHA-256 as the entry it makes
-/// (`gen_search::entry_for`: its family's parts beside it, the stricter of the family's
-/// licence and the repository's label), what its download takes here and its fit at the
-/// family's default size. Verified weights outside those plans can be saved individually.
-async fn repo_dto(deps: &LocalCmdDeps, detail: &RepoDetail) -> LocalRepoDto {
+/// The first paragraph of a model card after its front matter, made safe and cut at 400
+/// characters (`hf::uploader_text`); headings, pictures and HTML lines are passed over.
+/// `None` when it has none.
+fn card_summary(card: &str) -> Option<String> {
+    let mut lines = card.lines().peekable();
+    if lines.peek().is_some_and(|l| l.trim() == "---") {
+        lines.next();
+        for line in lines.by_ref() {
+            if line.trim() == "---" {
+                break;
+            }
+        }
+    }
+    let paragraph: Vec<&str> = lines
+        .map(str::trim)
+        .skip_while(|l| l.is_empty() || !is_prose(l))
+        .take_while(|l| !l.is_empty() && is_prose(l))
+        .collect();
+    let text = uploader_text(&paragraph.join(" "), 400);
+    (!text.is_empty()).then_some(text)
+}
+
+/// A line of a paragraph: not a heading, a picture, an HTML tag or a rule.
+fn is_prose(line: &str) -> bool {
+    !(line.starts_with('#')
+        || line.starts_with("![")
+        || line.starts_with('<')
+        || line.starts_with("---")
+        || line.starts_with("```"))
+}
+
+/// What a repository offers, from what reading it found (`read`) and its model card: every
+/// file's label; for each main file that works (an A14B pair's low-noise half in its
+/// high-noise half's plan, a diffusers folder once) the set-up plan with nothing chosen,
+/// largest first, "best for this computer" on the largest whose plan can download and whose
+/// fit word is `fits` or `afterUnload`; the licences; and the verdict: from its labels when a file works, it is a
+/// LoRA or nothing went unread, else its name's hint. A file whose plan cannot be made is
+/// left out of the choices, still labelled.
+async fn repo_dto(deps: &LocalCmdDeps, read: &ReadRepo, card: Option<&str>) -> LocalRepoDto {
+    let ReadRepo { detail, reading } = read;
     let catalog = deps.catalog.gen_catalog().await;
-    let mut dto = LocalRepoDto {
+    let pd = plan_deps(deps, &catalog);
+    let size_of = |path: &str| {
+        detail
+            .files
+            .iter()
+            .find(|f| f.path == path)
+            .map_or(0, |f| f.size)
+    };
+    let view = |(path, label): (&String, &FileLabel)| RepoFileDto {
+        path: path.clone(),
+        size_bytes: size_of(path),
+        quant: models::files::quant_label(path),
+        label: label.clone(),
+    };
+    let file_views: Vec<RepoFileDto> = reading.labels.iter().map(view).collect();
+    let loras = file_views
+        .iter()
+        .filter(|f| matches!(f.label, FileLabel::Lora { .. }))
+        .cloned()
+        .collect();
+    let has_high = reading.labels.values().any(|l| {
+        matches!(
+            l,
+            FileLabel::Works {
+                part: Some(models::sd::matching::NoisePart::High),
+                ..
+            }
+        )
+    });
+    let fp16_folder = candidates(&detail.files).folder.map(|f| f.fp16);
+
+    let mut files = Vec::new();
+    for (path, label) in &reading.labels {
+        let FileLabel::Works { part, folder, .. } = label else {
+            continue;
+        };
+        if has_high && *part == Some(models::sd::matching::NoisePart::Low) {
+            continue;
+        }
+        let planned = match plan_file(&pd, read, path, &SetupChoice::default()).await {
+            Ok(planned) => planned,
+            Err(e) => {
+                tracing::warn!(file = %path, "a searched file has no set-up: {}", e.details);
+                continue;
+            }
+        };
+        let plan = match setup_plan_dto(deps, &planned).await {
+            Ok(plan) => plan,
+            Err(e) => {
+                tracing::warn!(file = %path, "a searched file has no set-up: {}", e.details);
+                continue;
+            }
+        };
+        let quant = match (folder, fp16_folder) {
+            (true, Some(true)) => "fp16".to_owned(),
+            (true, _) => "fp32".to_owned(),
+            (false, _) => models::files::quant_label(path).unwrap_or_default(),
+        };
+        files.push(LocalFileChoiceDto {
+            file: path.clone(),
+            quant,
+            label: label.clone(),
+            plan,
+            best: false,
+        });
+    }
+    files.sort_by(|a, b| {
+        b.plan
+            .total_bytes
+            .cmp(&a.plan.total_bytes)
+            .then_with(|| a.file.cmp(&b.file))
+    });
+    if let Some(best) = files
+        .iter_mut()
+        .find(|f| f.plan.can_download && matches!(f.plan.fit.word.as_str(), "fits" | "afterUnload"))
+    {
+        best.best = true;
+    }
+    let mut licences: Vec<LicenceDto> = Vec::new();
+    for licence in files.iter().flat_map(|f| &f.plan.licences) {
+        if !licences.iter().any(|l| l.sha256 == licence.sha256) {
+            licences.push(licence.clone());
+        }
+    }
+    let labels: Vec<FileLabel> = reading.labels.values().cloned().collect();
+    let verdict = match verdict_of(&labels) {
+        v @ (Verdict::Works { .. } | Verdict::Lora { .. }) => v,
+        v if reading.unread == 0 => v,
+        _ => verdict_hint(&detail.id, detail.info.pipeline_tag.as_deref()),
+    };
+    LocalRepoDto {
         repo: detail.id.clone(),
         commit: detail.commit.clone(),
-        standalone_files: detail.files.clone(),
-        status: String::new(),
-        reason: None,
-        family: None,
-        files: Vec::new(),
-        licence: None,
-        licences: Vec::new(),
+        author: owner(&detail.id).to_owned(),
+        summary: card.and_then(card_summary),
+        verdict,
+        files,
+        loras,
+        file_views,
+        licence: Some(licence_dto(&repo_licence(detail))),
+        licences,
         label_mismatch: None,
         gate: gate_dto(&GenGate {
             mode: GateMode::from(detail.gated),
             collects: Vec::new(),
         }),
-    };
-    // Put common weight formats first, then verified files, then repository metadata.
-    // The extension only affects display order.
-    dto.standalone_files.sort_by_cached_key(|f| {
-        let ext = std::path::Path::new(&f.path)
-            .extension()
-            .and_then(|s| s.to_str())
-            .unwrap_or("")
-            .to_ascii_lowercase();
-        let weights = matches!(
-            ext.as_str(),
-            "gguf"
-                | "safetensors"
-                | "onnx"
-                | "ckpt"
-                | "pth"
-                | "pt"
-                | "bin"
-                | "mlmodel"
-                | "tflite"
-                | "h5"
-        );
-        (!weights, f.sha256.is_none())
-    });
-    let (family, files) = match recognise(detail, &catalog.families) {
-        Recognition::Supported { family, files } => (family, files),
-        Recognition::NotSupportedYet(why) => {
-            dto.status = "notSupportedYet".into();
-            dto.reason = Some(why);
-            return dto;
-        }
-    };
-    let Some(record) = catalog.families.get(&family) else {
-        dto.status = "notSupportedYet".into();
-        dto.reason = Some(errors::FAMILY_RECORD_MISSING.to_owned());
-        return dto;
-    };
-    let searched = searched_licence(detail, record);
-    // The badge's licence: the strictest of a file's parts, the same for every file (each is
-    // under the searched licence beside the family's companions).
-    let mut badge: Option<GenLicence> = None;
-    for file in &files {
-        let entry = match entry_for(detail, file, record) {
-            Ok(entry) => entry,
-            Err(why) => {
-                tracing::debug!(file = %file.path, "a searched file is not offered: {why}");
-                continue;
-            }
-        };
-        let plan = match plan(deps, entry) {
-            Ok(plan) => plan,
-            Err(e) => {
-                tracing::warn!(file = %file.path, "a searched file is not offered: {}", e.details);
-                continue;
-            }
-        };
-        let verdict = judge(deps, &plan.entry, default_size(&plan.entry)).await;
-        badge.get_or_insert_with(|| plan.entry.effective_licence().clone());
-        let licences: Vec<LicenceDto> = plan.licences.iter().map(licence_dto).collect();
-        for licence in &licences {
-            if !dto.licences.iter().any(|l| l.sha256 == licence.sha256) {
-                dto.licences.push(licence.clone());
-            }
-        }
-        dto.files.push(LocalFileChoiceDto {
-            file: file.path.clone(),
-            quant: models::files::quant_label(&file.path).unwrap_or_default(),
-            parts: parts_dto(&plan),
-            licences,
-            total_bytes: plan.total_bytes,
-            to_fetch_bytes: plan.to_fetch_bytes,
-            fit: fit_dto(&plan.entry, &verdict),
-            needs_engine: plan.needs_engine,
-            low_disk: plan.low_disk(),
-        });
+        read_files: reading.read,
+        unread_files: reading.unread,
+        by_hand_recipes: if reading.labels.values().any(set_up_by_hand) {
+            recipe_choices(None, true)
+        } else {
+            Vec::new()
+        },
     }
-    if dto.files.is_empty() {
-        dto.status = "notSupportedYet".into();
-        dto.reason = Some(errors::NO_FILE_OFFERED.to_owned());
-        return dto;
-    }
-    let offered: BTreeSet<&str> = dto.files.iter().map(|f| f.file.as_str()).collect();
-    dto.standalone_files
-        .retain(|f| !offered.contains(f.path.as_str()));
-    dto.status = "supported".into();
-    dto.family = Some(record.name.clone());
-    dto.label_mismatch = searched.label_mismatch;
-    dto.licence = Some(licence_dto(&badge.unwrap_or(searched.licence)));
-    dto
 }
 
-// ---- the words of a download ------------------------------------------------------------------
-
-/// What downloading `entry` takes here (`local_models::plan_download`), never refused for the
-/// disk: a list says that with `low_disk`, and the download itself refuses it.
-fn plan(deps: &LocalCmdDeps, entry: GenEntry) -> AppResult<DownloadPlan> {
-    let used = deps.installed_files.except(&entry.id);
-    let mut plan = plan_download(entry, &deps.models_dir, &deps.engine_need, None, &used)?;
-    plan.free_bytes = deps.free_disk_bytes;
-    Ok(plan)
+/// Whether a repository's file with `label` can be set up by hand (`setup_plan::plan_file`):
+/// weights the engine does not recognise, or a file whose header was not read for the budget
+/// or a failed read. Never a pickle or split file, a LoRA, an extra part, a model the engine
+/// is known to misrun, or one a gated repository would refuse.
+pub(crate) fn set_up_by_hand(label: &FileLabel) -> bool {
+    matches!(
+        label,
+        FileLabel::CannotRun {
+            reason: CannotRunReason::UnknownWeights,
+            ..
+        } | FileLabel::NotRead {
+            reason: models::sd::NotRead::Budget | models::sd::NotRead::Failed,
+        }
+    )
 }
 
-/// Each part of a plan, as the download dialog lists it.
-fn parts_dto(plan: &DownloadPlan) -> Vec<PartDto> {
-    plan.entry
+// ---- set-up plans -----------------------------------------------------------------------------
+
+/// What planning reads in Get models: its Hub client, readings, catalog and installed
+/// files.
+pub(crate) fn plan_deps<'a>(
+    deps: &'a LocalCmdDeps,
+    catalog: &'a models::gen_catalog::GenCatalog,
+) -> PlanDeps<'a> {
+    PlanDeps {
+        hf: deps.hf.as_ref(),
+        detect: &deps.detect,
+        catalog,
+        installed: &deps.installed_files,
+    }
+}
+
+/// A recipe as the Model type menu offers it.
+pub(crate) fn recipe_choice(id: &str) -> Option<RecipeChoiceDto> {
+    let recipe = models::sd::recipes::recipe(id)?;
+    Some(RecipeChoiceDto {
+        id: recipe.id.clone(),
+        name: recipe.name.clone(),
+        kind: kind_of(id),
+    })
+}
+
+/// The recipes the Model type menu offers a model of `version`: those its version runs, the
+/// default first; for an `untested` set-up, or a model of no known version, every recipe
+/// Studio runs, by kind (pictures, picture edits, video) and then name.
+pub(crate) fn recipe_choices(version: Option<SdVersion>, untested: bool) -> Vec<RecipeChoiceDto> {
+    match version {
+        Some(version) if !untested => recipes_for(version)
+            .into_iter()
+            .filter_map(recipe_choice)
+            .collect(),
+        _ => {
+            let rank = |kind: RecipeKind| match kind {
+                RecipeKind::Picture => 0,
+                RecipeKind::PictureEdit => 1,
+                RecipeKind::Video => 2,
+            };
+            let mut all: Vec<RecipeChoiceDto> = in_scope_recipes()
+                .into_iter()
+                .filter_map(recipe_choice)
+                .collect();
+            all.sort_by(|a, b| (rank(a.kind), &a.name, &a.id).cmp(&(rank(b.kind), &b.name, &b.id)));
+            all
+        }
+    }
+}
+
+/// Each slot of `planned` with its file, as `download` (what its download takes here) lists
+/// the parts: a part the main file carries, and a slot nothing fills, have none.
+pub(crate) fn slots_dto(planned: &Planned, download: &DownloadPlan) -> Vec<PlannedSlotDto> {
+    let parts = parts_dto(download);
+    planned
+        .plan
         .parts
         .iter()
-        .zip(&plan.files)
-        .map(|(part, (_, dest))| PartDto {
-            role: word(&part.role),
-            label: part_label(part.role).to_owned(),
-            repo: part.repo.clone(),
-            path: part.path.clone(),
-            size_bytes: part.size,
-            licence_id: part.license.clone(),
-            already_here: plan.already_here.contains(dest),
+        .zip(&planned.part_of)
+        .filter_map(|(p, at)| {
+            Some(PlannedSlotDto {
+                role: models::gen_catalog::GenRole::from_slot(p.slot)?,
+                required: p.required,
+                source: p.source,
+                part: at.and_then(|i| parts.get(i).cloned()),
+            })
         })
         .collect()
 }
 
-/// What a part does, in the download dialog's words.
-fn part_label(role: GenRole) -> &'static str {
-    match role {
-        GenRole::Diffusion | GenRole::HighNoiseDiffusion | GenRole::Model => {
-            errors::PART_MAKES_THE_PICTURE
-        }
-        GenRole::Llm | GenRole::T5xxl | GenRole::ClipL => errors::PART_READS_THE_PROMPT,
-        GenRole::ClipVision => errors::PART_READS_THE_PICTURE,
-        GenRole::Vae => errors::PART_PICTURE_DECODER,
-    }
+/// A plan in the webview's words: each slot with its file, what its download takes here
+/// (`local_models::plan_download`), its fit at the recipe's default size, and the recipes the
+/// Model type menu offers ([`recipe_choices`]).
+pub(crate) async fn setup_plan_dto(
+    deps: &LocalCmdDeps,
+    planned: &Planned,
+) -> AppResult<SetupPlanDto> {
+    let download = plan(deps, planned.entry.clone(), Some(&planned.plan))?;
+    let verdict = judge(deps, &download.entry, default_size(&download.entry)).await;
+    let recipe = recipe_choice(&planned.plan.recipe_id)
+        .ok_or_else(|| AppError::internal("a plan with a recipe the engine does not have"))?;
+    Ok(SetupPlanDto {
+        recipe,
+        recipes: recipe_choices(planned.entry.version, planned.plan.untested),
+        slots: slots_dto(planned, &download),
+        licences: download.licences.iter().map(licence_dto).collect(),
+        total_bytes: download.total_bytes,
+        to_fetch_bytes: download.to_fetch_bytes,
+        fit: fit_dto(&download.entry, &verdict),
+        can_download: planned.plan.can_run(),
+        low_disk: download.low_disk(),
+        needs_engine: download.needs_engine,
+        untested: planned.plan.untested,
+    })
+}
+
+// ---- the words of a download ------------------------------------------------------------------
+
+/// What downloading `entry` (made by the set-up plan `setup`, if any) takes here
+/// (`local_models::plan_download`), never refused for the disk: a list says that with
+/// `low_disk`, and the download itself refuses it.
+pub(crate) fn plan(
+    deps: &LocalCmdDeps,
+    entry: GenEntry,
+    setup: Option<&models::sd::setup::SetupPlan>,
+) -> AppResult<DownloadPlan> {
+    let used = deps.installed_files.except(&entry.id);
+    let mut plan = plan_download(
+        entry,
+        setup,
+        &deps.models_dir,
+        &deps.engine_need,
+        None,
+        &used,
+    )?;
+    plan.free_bytes = deps.free_disk_bytes;
+    Ok(plan)
+}
+
+/// Each part of a plan, in the entry's order, as the download dialog lists it: a Hub part
+/// already here when its place has its pinned size, a part used where it is on this computer
+/// always (a file from this computer by its path).
+fn parts_dto(plan: &DownloadPlan) -> Vec<PartDto> {
+    let mut places = plan.files.iter().map(|(_, dest)| dest);
+    plan.entry
+        .parts
+        .iter()
+        .zip(&plan.present)
+        .map(|(part, here)| {
+            let (path, already_here) = match (&part.local, here) {
+                (Some(local), _) => (local.display().to_string(), true),
+                (None, Some(_)) => (part.path.clone(), true),
+                (None, None) => (
+                    part.path.clone(),
+                    places
+                        .next()
+                        .is_some_and(|dest| plan.already_here.contains(dest)),
+                ),
+            };
+            PartDto {
+                role: part.role,
+                repo: part.repo.clone(),
+                path,
+                size_bytes: part.size,
+                licence_id: part.license.clone(),
+                already_here,
+                local: part.local.is_some(),
+            }
+        })
+        .collect()
 }
 
 fn licence_dto(licence: &GenLicence) -> LicenceDto {
@@ -641,23 +904,77 @@ fn gate_dto(gate: &GenGate) -> GateDto {
 
 // ---- commands ---------------------------------------------------------------------------------
 
-/// What the commands read in the app: its store, the signed catalog, this computer, the
-/// models folder and its disk, the engine and the note as the manager holds it; `hf` only for
-/// a command that asks Hugging Face.
-async fn app_deps(app: &AppHandle, studio: &StudioManager, hf: Option<HfClient>) -> LocalCmdDeps {
-    let models_dir = crate::hub::models_dir(app).await;
+/// Why a command reads the installed models' files ([`installed_files_for`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum FilesUse {
+    /// To show something: the list, a repo, a fit, a set-up plan before anything is done.
+    Show,
+    /// To write, rename or delete files (an import): the files guard what it does.
+    Write,
+}
+
+/// The installed models' files a command works with, from its `read` of them. A command that
+/// only shows something takes a failed read as no files (logged), so its view still opens. One
+/// that writes, renames or deletes files is refused with the read's error, never planned
+/// against an empty list: the files decide which companions are reused, and which places a
+/// part is never renamed over (`local_models::plan_download`'s `used`).
+pub(crate) fn installed_files_for(
+    read: AppResult<InstalledFiles>,
+    files_use: FilesUse,
+) -> AppResult<InstalledFiles> {
+    match (read, files_use) {
+        (Ok(files), _) => Ok(files),
+        (Err(e), FilesUse::Write) => Err(e),
+        (Err(e), FilesUse::Show) => {
+            tracing::warn!(code = %e.code, "the installed models' files were not read");
+            Ok(InstalledFiles::default())
+        }
+    }
+}
+
+/// What the commands that show something read in the app: its store, the signed catalog, this
+/// computer, the models folder and its disk, the engine and the note as the manager holds it;
+/// `hf` only for a command that asks Hugging Face. A failed read of the installed models'
+/// files reads as none ([`FilesUse::Show`]).
+pub(crate) async fn app_deps(
+    app: &AppHandle,
+    studio: &StudioManager,
+    hf: Option<HfClient>,
+) -> LocalCmdDeps {
     let store = app.state::<AppState>().store.clone();
-    let installed_files = InstalledFiles::read(&store)
-        .await
-        .inspect_err(
-            |e| tracing::warn!(code = %e.code, "the installed models' files were not read"),
-        )
-        .unwrap_or_default();
+    let read = InstalledFiles::read(&store).await;
+    let installed_files = installed_files_for(read, FilesUse::Show).unwrap_or_default();
+    deps_of(app, studio, hf, store, installed_files).await
+}
+
+/// [`app_deps`] for a command that writes, renames or deletes files (an import): a failed read
+/// of the installed models' files refuses it ([`FilesUse::Write`]) before it does anything.
+pub(crate) async fn app_deps_for_writing(
+    app: &AppHandle,
+    studio: &StudioManager,
+    hf: Option<HfClient>,
+) -> AppResult<LocalCmdDeps> {
+    let store = app.state::<AppState>().store.clone();
+    let read = InstalledFiles::read(&store).await;
+    let installed_files = installed_files_for(read, FilesUse::Write)?;
+    Ok(deps_of(app, studio, hf, store, installed_files).await)
+}
+
+/// The commands' dependencies in the app, with the installed models' files as read.
+async fn deps_of(
+    app: &AppHandle,
+    studio: &StudioManager,
+    hf: Option<HfClient>,
+    store: store::Store,
+    installed_files: InstalledFiles,
+) -> LocalCmdDeps {
+    let models_dir = crate::hub::models_dir(app).await;
     LocalCmdDeps {
         store,
         catalog: Arc::new(AppGenCatalog(app.clone())),
         hardware: Arc::new(AppHardware(app.clone())),
         hf,
+        detect: app.state::<Arc<DetectService>>().inner().clone(),
         free_disk_bytes: reverse::diskspace::free_bytes(&models_dir),
         models_dir,
         ram_total_bytes: models::hardware::system_memory().map(|m| m.total_bytes),
@@ -665,10 +982,11 @@ async fn app_deps(app: &AppHandle, studio: &StudioManager, hf: Option<HfClient>)
         engine_need: engine_cmd::engine_need(app),
         notice_accepted: studio.prefs().local_notice_accepted_at.is_some(),
         installed_files,
+        last_import_mode: studio.prefs().last_import_mode,
     }
 }
 
-/// Get local models. Sends nothing.
+/// Get models. Sends nothing.
 #[tauri::command]
 pub async fn studio_local_models(
     window: tauri::WebviewWindow,
@@ -679,21 +997,22 @@ pub async fn studio_local_models(
     local_models(&app_deps(&app, &studio, None).await).await
 }
 
-/// Search (or Enter) in Get local models: Hugging Face's picture or video repositories
-/// matching `text`, with the stored token, so gated repositories are found.
+/// Search (or Enter) in Get models: Hugging Face's picture, video or LoRA
+/// repositories matching `text`, with the stored token, so gated repositories are found.
 #[tauri::command]
 pub async fn studio_local_search(
     window: tauri::WebviewWindow,
     app: AppHandle,
+    detect: State<'_, Arc<DetectService>>,
     text: String,
-    kind: MediaKind,
+    filter: SearchFilter,
 ) -> AppResult<LocalSearchPage> {
     only_main_window(window.label())?;
     let hf = crate::hub::hf_client(&app).await?;
-    local_search(&hf, &text, kind).await
+    local_search(&hf, &detect, &text, filter).await
 }
 
-/// Opening a search result: repository `repo` at its latest commit, recognised here.
+/// Opening a search result: repository `repo` at its latest commit, its files read here.
 #[tauri::command]
 pub async fn studio_local_repo(
     window: tauri::WebviewWindow,
@@ -721,7 +1040,9 @@ pub async fn studio_local_fit(
     only_main_window(window.label())?;
     let hf = match source {
         LocalSource::Search { .. } => Some(crate::hub::hf_client(&app).await?),
-        LocalSource::Catalog { .. } | LocalSource::Installed { .. } => None,
+        LocalSource::Catalog { .. } | LocalSource::Installed { .. } | LocalSource::Disk { .. } => {
+            None
+        }
     };
     local_fit(
         &app_deps(&app, &studio, hf).await,
@@ -733,15 +1054,20 @@ pub async fn studio_local_fit(
     .await
 }
 
-/// Starts a checked download of the model and returns its download group.
+/// Starts a checked download of the model and returns its download group: a searched file
+/// with the files its set-up plan lists, with the person's `choice` (none: the plan as it
+/// comes), registered with its recipe once every file is checked. `null` when nothing was to
+/// be fetched (*Repair* on a model whose every file is on this computer): the model was
+/// checked and added again at once.
 #[tauri::command]
 pub async fn studio_local_download(
     window: tauri::WebviewWindow,
     app: AppHandle,
     source: LocalSource,
-) -> AppResult<String> {
+    choice: Option<SetupChoice>,
+) -> AppResult<Option<String>> {
     only_main_window(window.label())?;
-    start_local_download(&app, source).await
+    start_local_download(&app, source, choice).await
 }
 
 /// Download an individual weight file even when Studio has no matching generation recipe.
@@ -768,6 +1094,36 @@ pub async fn studio_local_delete(
     delete_local_model(&app, &gen_model_id).await
 }
 
+/// *Add a model file*, once the file is chosen: what it is, read from its header (its set-up
+/// plan when it works in Studio, whether it is inside the models folder, and the mode to offer
+/// first). Sends nothing.
+#[tauri::command]
+pub async fn studio_import_inspect(
+    window: tauri::WebviewWindow,
+    app: AppHandle,
+    studio: State<'_, Arc<StudioManager>>,
+    path: String,
+) -> AppResult<ImportInspectionDto> {
+    only_main_window(window.label())?;
+    inspect_import(&app_deps(&app, &studio, None).await, Path::new(&path)).await
+}
+
+/// *Add*: the model file at `path` copied into the models folder or used where it is
+/// (`mode`; a file inside the folder always where it is), set up as a download is with the
+/// person's `choice` (none: the plan as it comes). Gives the model added, or the download
+/// group that adds it once its companions are fetched.
+#[tauri::command]
+pub async fn studio_import_model(
+    window: tauri::WebviewWindow,
+    app: AppHandle,
+    path: String,
+    mode: ImportMode,
+    choice: Option<SetupChoice>,
+) -> AppResult<ImportResultDto> {
+    only_main_window(window.label())?;
+    import_model(&app, Path::new(&path), mode, choice).await
+}
+
 /// *I understand* on the note about local models: records when, and gives the preferences.
 #[tauri::command]
 pub async fn studio_accept_local_notice(
@@ -779,7 +1135,7 @@ pub async fn studio_accept_local_notice(
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use std::collections::BTreeMap;
     use std::path::{Path, PathBuf};
     use std::sync::{Arc, Mutex};
@@ -803,6 +1159,7 @@ mod tests {
 
     use super::*;
     use crate::dto::{EngineStatusDto, LocalEntryDto, RunDto};
+    use crate::dto::{SlotFile, SlotOverride};
     use crate::error::AppResult;
     use crate::studio::deps::{
         Clock, Endpoint, ForeignFetch, LocalHardware, ProviderSource, StudioSink,
@@ -812,8 +1169,14 @@ mod tests {
     use crate::studio::local_models::{LocalSource, delete_unless_in_use};
     use crate::studio::manager::{PollPlan, StudioDeps, StudioManager};
     use crate::studio::prefs::{self, StudioPrefs, StudioPrefsPatch};
+    use crate::studio::setup_cmd::setup_plan;
     use crate::studio::spend::day_start_in;
     use crate::studio::test_support::Scratch;
+    use models::sd::CannotRunReason;
+    use models::sd::detect::SdVersion;
+    use models::sd::matching::RecipeKind;
+    use models::sd::setup::PartSource;
+    use models::sd::testing::{Served, file_of, fixture, serve};
 
     const GB: u64 = 1_000_000_000;
     const KLEIN: &str = "flux2-klein-4b-q4";
@@ -828,7 +1191,7 @@ mod tests {
     // as literals, so each fit expectation follows from the formulas and a re-tuned or longer
     // bundled catalog (Task L17) never moves it.
 
-    fn bundled() -> GenCatalog {
+    pub(crate) fn bundled() -> GenCatalog {
         gen_catalog(
             &Catalog::bundled(),
             runtime::sd::lock::embedded().sd_cpp.build,
@@ -879,8 +1242,12 @@ mod tests {
             summary: format!("{id}, for the test"),
             publisher: "Test Labs".into(),
             kind,
-            family,
+            family: Some(family),
+            recipe: family.recipe_id().into(),
+            version: Some(family.version()),
+            untested: false,
             inputs: Vec::new(),
+            input_counts: Vec::new(),
             parts: parts
                 .into_iter()
                 .map(|(role, size)| GenPart {
@@ -891,6 +1258,8 @@ mod tests {
                     size,
                     sha256: "ab".repeat(32),
                     license: "apache-2.0".into(),
+                    local: None,
+                    folder: None,
                 })
                 .collect(),
             licenses: BTreeMap::from([("apache-2.0".to_owned(), apache())]),
@@ -908,12 +1277,20 @@ mod tests {
                 height,
                 frames: video.then_some(frames),
                 fps: video.then_some(24),
+                guidance: None,
+                img_cfg: None,
+                timestep_shift: None,
+                sigmas: Vec::new(),
+                high_noise: None,
+                moe_boundary: None,
+                strength: None,
             },
             limits: GenLimits {
                 multiple_of: if video { 32 } else { 16 },
                 max_side: if video { 1280 } else { 2048 },
                 frame_rule: video.then_some(FrameRule::FourNPlusOne),
                 max_frames: video.then_some(121),
+                video: None,
             },
             fallback: if video {
                 wan22_fallback()
@@ -1004,6 +1381,7 @@ mod tests {
                 video: BTreeMap::from([(8, vec![WAN22.to_owned()])]),
             },
             hidden: Vec::new(),
+            companions: bundled().companions,
         }
     }
 
@@ -1022,7 +1400,7 @@ mod tests {
 
     // ---- this computer --------------------------------------------------------------------
 
-    struct Fixed {
+    pub(crate) struct Fixed {
         target: Target,
         backend: &'static str,
         chat: Option<u64>,
@@ -1031,7 +1409,7 @@ mod tests {
 
     /// A Vulkan card with `free_gb` GB free, and `ram_gb` GB of free memory; its probe gives
     /// no total.
-    fn gpu(free_gb: u64, ram_gb: u64) -> Fixed {
+    pub(crate) fn gpu(free_gb: u64, ram_gb: u64) -> Fixed {
         Fixed {
             target: Target::Gpu {
                 name: CARD.into(),
@@ -1147,36 +1525,6 @@ mod tests {
             Self::new(|_| ("404 Not Found", "{}".into())).await
         }
 
-        /// A Hub that answers repository `fixture`'s listing (a file in
-        /// crates/models/tests/fixtures/hf/) and nothing else.
-        async fn listing(fixture: &str) -> Self {
-            let text = match fixture {
-                "repo-unknown-diffusion.json" => include_str!(
-                    "../../../crates/models/tests/fixtures/hf/repo-unknown-diffusion.json"
-                ),
-                "repo-z-image-turbo-gguf.json" => include_str!(
-                    "../../../crates/models/tests/fixtures/hf/repo-z-image-turbo-gguf.json"
-                ),
-                "repo-uncensored.json" => {
-                    include_str!("../../../crates/models/tests/fixtures/hf/repo-uncensored.json")
-                }
-                other => panic!("no listing fixture {other}"),
-            };
-            let repo = serde_json::from_str::<Value>(text).unwrap()["id"]
-                .as_str()
-                .unwrap()
-                .to_owned();
-            let asked = format!("GET /api/models/{repo}?");
-            Self::new(move |line| {
-                if line.starts_with(&asked) {
-                    ("200 OK", text.to_owned())
-                } else {
-                    ("404 Not Found", "{}".into())
-                }
-            })
-            .await
-        }
-
         /// A Hub client whose every request comes here.
         fn client(&self) -> HfClient {
             HfClient::for_test(&self.endpoint)
@@ -1201,7 +1549,7 @@ mod tests {
         }
     }
 
-    /// Get local models' dependencies on `hardware`, with `catalog`, an empty store, a models
+    /// Get models' dependencies on `hardware`, with `catalog`, an empty store, a models
     /// folder of its own (in `scratch`), 500 GB free, 32 GB of memory and the engine built in.
     fn deps_with(
         catalog: GenCatalog,
@@ -1214,6 +1562,7 @@ mod tests {
             catalog: Arc::new(TestCatalog(catalog)),
             hardware: Arc::new(hardware),
             hf,
+            detect: Arc::new(DetectService::new()),
             models_dir: scratch.path().join("models"),
             free_disk_bytes: Some(500 * GB),
             ram_total_bytes: Some(32 * GB),
@@ -1221,6 +1570,7 @@ mod tests {
             engine_need: EngineNeed::Found,
             notice_accepted: false,
             installed_files: InstalledFiles::default(),
+            last_import_mode: None,
         }
     }
 
@@ -1239,9 +1589,9 @@ mod tests {
             .unwrap_or_else(|| panic!("{id} is not in {:?}", ids(entries)))
     }
 
-    // ---- Get local models -----------------------------------------------------------------
+    // ---- Get models -----------------------------------------------------------------
 
-    /// Opening Get local models sends nothing: it reads the catalog, the store and this
+    /// Opening Get models sends nothing: it reads the catalog, the store and this
     /// computer.
     #[tokio::test]
     async fn opening_get_local_models_makes_no_request() {
@@ -1275,7 +1625,7 @@ mod tests {
         assert!(marked.contains(&(ZIMAGE, MediaKind::Image)), "{marked:?}");
         assert!(marked.contains(&(WAN22, MediaKind::Video)), "{marked:?}");
         assert_eq!(local.more_fit, 3);
-        assert!(local.video_possible);
+        assert!(!local.video_on_processor);
         for e in &local.recommended {
             assert_eq!(e.fit.word, "fits", "{}", e.id);
             assert!(!e.installed && !e.needs_engine && !e.low_disk, "{}", e.id);
@@ -1480,6 +1830,8 @@ mod tests {
             size: 3_864_250_304,
             sha256: "d".repeat(64),
             license: "apache-2.0".into(),
+            local: None,
+            folder: None,
         };
         let parts: Vec<&GenPart> = std::iter::once(&diffusion)
             .chain(&record.companions)
@@ -1538,6 +1890,9 @@ mod tests {
                 name: name.into(),
                 kind: "image".into(),
                 family: family.into(),
+                recipe_id: serde_json::from_value::<GenFamily>(json!(family))
+                    .ok()
+                    .map(|f| f.recipe_id().into()),
                 parts: json!(saved),
                 size_bytes: parts.iter().map(|p| p.size).sum(),
                 source: if catalog_id.is_some() {
@@ -1613,6 +1968,8 @@ mod tests {
             size: 1_234_567,
             sha256: "f".repeat(64),
             license: "apache-2.0".into(),
+            local: None,
+            folder: None,
         };
         install(
             &deps.store,
@@ -1627,10 +1984,12 @@ mod tests {
 
         let local = local_models(&deps).await.unwrap();
         assert_eq!(local.installed.len(), 3, "{:?}", local.installed);
-        for (id, name, size) in [
-            (KLEIN, KLEIN, klein().total_bytes()),
-            (ZIMAGE, ZIMAGE, zimage().total_bytes()),
-            (future_id, "A future model", 1_234_567),
+        // A family this build does not know has no recipe: it is listed as needing set-up
+        // (*Set it up yourself*), the others as not run by this version.
+        for (id, name, size, needs_setup) in [
+            (KLEIN, KLEIN, klein().total_bytes(), false),
+            (ZIMAGE, ZIMAGE, zimage().total_bytes(), false),
+            (future_id, "A future model", 1_234_567, true),
         ] {
             let row = local
                 .installed
@@ -1642,10 +2001,13 @@ mod tests {
             assert_eq!(row.size_bytes, size, "{id}");
             assert_eq!(row.fit.word, "notHere", "{id}");
             assert_eq!(row.fit.verdict, "red", "{id}");
-            assert_eq!(
-                row.fit.reason.as_deref(),
-                Some("This version of harnessUI cannot run this model.")
-            );
+            assert_eq!(row.needs_setup, needs_setup, "{id}");
+            let reason = if needs_setup {
+                "Choose this model's type and files first."
+            } else {
+                "This version of harnessUI cannot run this model."
+            };
+            assert_eq!(row.fit.reason.as_deref(), Some(reason));
             assert!(row.fit.very_slow);
             assert_eq!(row.fit.suggestion, None);
             assert_eq!(row.fit.eta, None);
@@ -1773,188 +2135,1129 @@ mod tests {
         assert_eq!(fit_size(&klein(), 512, 512, 7).frames, 1);
     }
 
-    /// On a computer that runs models on the processor, video is not offered.
+    /// On a computer that runs models on the processor, a video is judged by its memory like
+    /// a picture, and flagged: it runs there, very slowly (design 9.2).
     #[tokio::test]
-    async fn video_is_hidden_on_a_processor_only_computer() {
+    async fn video_on_a_processor_only_computer_is_judged_and_flagged() {
         let scratch = Scratch::new();
-        let local = local_models(&deps(cpu(16), &scratch)).await.unwrap();
-        assert!(!local.video_possible);
-        let wan = find(&local.not_here, WAN22);
+        let local = local_models(&deps(cpu(64), &scratch)).await.unwrap();
+        assert!(local.video_on_processor);
+        let wan = find(&local.recommended, WAN22);
         assert_eq!(
-            wan.fit.reason.as_deref(),
-            Some("video needs a graphics card or an Apple-silicon Mac")
+            (wan.fit.word.as_str(), wan.fit.reason.as_deref()),
+            ("slow", None)
         );
+        assert!(wan.fit.video_on_processor);
         // Pictures run there, slowly: listed, but none counted as more that fit.
-        assert_eq!(find(&local.recommended, KLEIN).fit.word, "slow");
+        let klein = find(&local.recommended, KLEIN);
+        assert_eq!(klein.fit.word, "slow");
+        assert!(!klein.fit.video_on_processor);
         assert_eq!(local.more_fit, 0);
+        // Too little memory for it: it may not fit, with the free memory it needs.
+        let local = local_models(&deps(cpu(4), &scratch)).await.unwrap();
+        let wan = find(&local.not_here, WAN22);
+        assert!(wan.fit.video_on_processor);
+        assert!(
+            wan.fit
+                .reason
+                .as_deref()
+                .is_some_and(|r| r.ends_with("GB of free memory")),
+            "{:?}",
+            wan.fit.reason
+        );
+        // A graphics card makes no video on the processor.
+        let local = local_models(&deps(gpu(8, 32), &scratch)).await.unwrap();
+        assert!(!local.video_on_processor);
     }
 
-    // ---- a searched repository ------------------------------------------------------------
+    // ---- a searched repository (Task S6) ---------------------------------------------------
 
-    /// A family without a runnable recipe still has downloadable weights.
-    #[tokio::test]
-    async fn an_unknown_family_offers_a_standalone_download() {
-        let scratch = Scratch::new();
-        let hub = Hub::listing("repo-unknown-diffusion.json").await;
-        let deps = deps_with(catalog(), gpu(8, 32), &scratch, Some(hub.client()));
-        let repo = local_repo(&deps, "example-labs/Sample-Diffusion-2B-GGUF")
-            .await
-            .unwrap();
-        // One request: the listing at the latest commit (no revision in the address).
-        let asked = hub.requests();
-        assert_eq!(asked.len(), 1, "{asked:?}");
-        assert!(
-            asked[0].starts_with("GET /api/models/example-labs/Sample-Diffusion-2B-GGUF?"),
-            "{asked:?}"
-        );
-        assert_eq!(repo.standalone_files.len(), 3);
-        assert_eq!(
-            repo.standalone_files[0].path,
-            "sample-diffusion-2b-Q4_0.gguf"
-        );
-        assert_eq!(repo.repo, "example-labs/Sample-Diffusion-2B-GGUF");
-        assert_eq!(repo.commit, "2".repeat(40));
-        assert_eq!(repo.status, "notSupportedYet");
-        assert!(repo.reason.as_deref().is_some_and(|r| !r.is_empty()));
-        assert!(repo.files.is_empty());
-        assert!(repo.licences.is_empty());
-        assert_eq!((repo.family, repo.licence), (None, None));
+    /// The commit every test repo is listed at.
+    pub(crate) const COMMIT: &str = "0123456789abcdef0123456789abcdef01234567";
+
+    /// A repo as the test Hub lists it, and what the Hub serves for its files.
+    #[derive(Clone)]
+    pub(crate) struct TestRepo {
+        id: String,
+        commit: String,
+        label: Option<String>,
+        gated: bool,
+        pipeline_tag: Option<String>,
+        files: Vec<models::files::RepoFile>,
+        served: BTreeMap<String, Served>,
+        card: Option<String>,
     }
 
-    /// A supported repository tagged uncensored lists its pinned files.
-    #[tokio::test]
-    async fn a_supported_uncensored_repo_lists_its_files() {
-        let scratch = Scratch::new();
-        let hub = Hub::listing("repo-uncensored.json").await;
-        let deps = deps_with(catalog(), gpu(8, 32), &scratch, Some(hub.client()));
-        let repo = local_repo(&deps, "example-quants/Z-Image-Turbo-Uncensored-GGUF")
-            .await
-            .unwrap();
-        assert_eq!(hub.requests().len(), 1);
-        assert_eq!(repo.status, "supported");
-        assert_eq!(repo.reason, None);
-        assert!(
-            repo.files
+    impl TestRepo {
+        pub(crate) fn new(id: &str) -> Self {
+            TestRepo {
+                id: id.into(),
+                commit: COMMIT.into(),
+                label: None,
+                gated: false,
+                pipeline_tag: None,
+                files: Vec::new(),
+                served: BTreeMap::new(),
+                card: None,
+            }
+        }
+
+        pub(crate) fn label(mut self, label: &str) -> Self {
+            self.label = Some(label.into());
+            self
+        }
+
+        pub(crate) fn at(mut self, commit: &str) -> Self {
+            self.commit = commit.into();
+            self
+        }
+
+        pub(crate) fn tagged(mut self, tag: &str) -> Self {
+            self.pipeline_tag = Some(tag.into());
+            self
+        }
+
+        fn card(mut self, text: &str) -> Self {
+            self.card = Some(text.into());
+            self
+        }
+
+        /// Lists `path` (`size` bytes, with a SHA-256 made from the repo and the path) and
+        /// serves the header of the detection fixture `header`, if any.
+        pub(crate) fn file(self, path: &str, size: f64, header: Option<&str>) -> Self {
+            use std::hash::{DefaultHasher, Hash, Hasher};
+            let mut h = DefaultHasher::new();
+            (&self.id, path).hash(&mut h);
+            let sha = format!("{:016x}", h.finish()).repeat(4);
+            self.pinned(path, size as u64, &sha, header)
+        }
+
+        /// Lists `path` with this size and SHA-256, serving `header`'s fixture, if any.
+        fn pinned(mut self, path: &str, size: u64, sha256: &str, header: Option<&str>) -> Self {
+            self.files.push(models::files::RepoFile {
+                path: path.into(),
+                size,
+                sha256: Some(sha256.into()),
+            });
+            if let Some(name) = header {
+                self.served
+                    .insert(path.into(), Served::Bytes(file_of(&fixture(name))));
+            }
+            self
+        }
+
+        /// Gated (`auto`): Hugging Face serves its files only with a token.
+        pub(crate) fn gated(mut self) -> Self {
+            self.gated = true;
+            self
+        }
+
+        /// Lists `path` (`size` bytes, with a SHA-256 made from the repo and the path) and
+        /// serves `bytes` as its start.
+        pub(crate) fn serving(mut self, path: &str, size: u64, bytes: Vec<u8>) -> Self {
+            self = self.file(path, size as f64, None);
+            self.served.insert(path.into(), Served::Bytes(bytes));
+            self
+        }
+
+        /// No longer lists or serves `path`.
+        pub(crate) fn without(mut self, path: &str) -> Self {
+            self.files.retain(|f| f.path != path);
+            self.served.remove(path);
+            self
+        }
+
+        /// Lists `path` with no SHA-256 (not stored with LFS), serving the header of the
+        /// detection fixture `header`.
+        pub(crate) fn unpinned(mut self, path: &str, size: u64, header: &str) -> Self {
+            self.files.push(models::files::RepoFile {
+                path: path.into(),
+                size,
+                sha256: None,
+            });
+            self.served
+                .insert(path.into(), Served::Bytes(file_of(&fixture(header))));
+            self
+        }
+
+        /// The repo's id.
+        pub(crate) fn id(&self) -> &str {
+            &self.id
+        }
+
+        /// What it serves for `path`, if anything.
+        pub(crate) fn served(&self, path: &str) -> Option<&[u8]> {
+            match self.served.get(path) {
+                Some(Served::Bytes(bytes)) => Some(bytes),
+                _ => None,
+            }
+        }
+
+        /// Lists a file that is not stored with LFS (no SHA-256).
+        fn plain(mut self, path: &str) -> Self {
+            self.files.push(models::files::RepoFile {
+                path: path.into(),
+                size: 1_000,
+                sha256: None,
+            });
+            self
+        }
+
+        /// The listing as Hugging Face's API gives it.
+        fn listing(&self) -> Value {
+            let siblings: Vec<Value> = self
+                .files
                 .iter()
-                .any(|f| f.file == "z_image_turbo_uncensored-Q4_K.gguf")
-        );
-    }
-
-    /// A recognised repository none of whose files can be offered (here each file's entry is
-    /// refused: a part of its family is not pinned) is not supported yet, with why, and has
-    /// no file.
-    #[tokio::test]
-    async fn a_searched_repo_whose_every_file_is_refused_offers_no_download() {
-        let scratch = Scratch::new();
-        let hub = Hub::listing("repo-z-image-turbo-gguf.json").await;
-        let mut unpinned = catalog();
-        unpinned
-            .families
-            .get_mut(&GenFamily::ZImageTurbo)
-            .unwrap()
-            .companions[0]
-            .size = 0;
-        let deps = deps_with(unpinned, gpu(8, 32), &scratch, Some(hub.client()));
-        let repo = local_repo(&deps, "leejet/Z-Image-Turbo-GGUF")
-            .await
-            .unwrap();
-        assert_eq!(hub.requests().len(), 1);
-        assert_eq!(repo.status, "notSupportedYet");
-        assert_eq!(
-            repo.reason.as_deref(),
-            Some("Studio could not assemble the files needed to run this model.")
-        );
-        assert!(repo.files.is_empty());
-        assert!(repo.licences.is_empty());
-        assert_eq!(
-            (repo.family, repo.licence, repo.label_mismatch),
-            (None, None, None)
-        );
-    }
-
-    /// What each part does, in the download dialog's words: a CLIP-vision encoder reads the
-    /// added picture, not the prompt.
-    #[test]
-    fn each_part_says_what_it_does() {
-        for (role, label) in [
-            (GenRole::Diffusion, "makes the picture"),
-            (GenRole::HighNoiseDiffusion, "makes the picture"),
-            (GenRole::Model, "makes the picture"),
-            (GenRole::Llm, "reads your prompt"),
-            (GenRole::T5xxl, "reads your prompt"),
-            (GenRole::ClipL, "reads your prompt"),
-            (GenRole::ClipVision, "reads the picture you add"),
-            (GenRole::Vae, "picture decoder"),
-        ] {
-            assert_eq!(part_label(role), label, "{role:?}");
+                .map(|f| match &f.sha256 {
+                    Some(sha) => json!({"rfilename": f.path, "size": f.size,
+                                        "lfs": {"size": f.size, "sha256": sha}}),
+                    None => json!({"rfilename": f.path, "size": f.size}),
+                })
+                .collect();
+            let mut tags = vec![json!("diffusers")];
+            if let Some(label) = &self.label {
+                tags.push(json!(format!("license:{label}")));
+            }
+            json!({
+                "id": self.id,
+                "sha": self.commit,
+                "gated": if self.gated { json!("auto") } else { json!(false) },
+                "tags": tags,
+                "pipeline_tag": self.pipeline_tag,
+                "siblings": siblings,
+            })
         }
     }
 
-    /// Each diffusion file of a recognised repository is offered with its family's parts; a
-    /// part already in place (a shared text encoder) is checked, not fetched.
-    #[tokio::test]
-    async fn a_searched_repo_lists_each_file_with_the_shared_parts_already_here() {
-        let scratch = Scratch::new();
-        let hub = Hub::listing("repo-z-image-turbo-gguf.json").await;
-        let deps = deps_with(catalog(), gpu(8, 32), &scratch, Some(hub.client()));
-        let encoder = &families()[&GenFamily::ZImageTurbo].companions[0];
-        let file = destination(&deps.models_dir, &encoder.repo, &encoder.path).unwrap();
-        std::fs::create_dir_all(file.parent().unwrap()).unwrap();
-        std::fs::write(&file, vec![0u8; usize::try_from(encoder.size).unwrap()]).unwrap();
+    /// A Hub on this computer for `repos`: each one's listing (at its latest commit, or at its
+    /// own commit by revision), the headers of its files (`HEAD` and ranged `GET` on
+    /// `resolve`), and its model card; anything else is 404. It keeps every request line.
+    pub(crate) struct RepoHub {
+        url: String,
+        seen: Arc<Mutex<Vec<String>>>,
+    }
 
-        let repo = local_repo(&deps, "leejet/Z-Image-Turbo-GGUF")
+    impl RepoHub {
+        fn client(&self) -> HfClient {
+            HfClient::for_test(&self.url)
+        }
+
+        fn requests(&self) -> Vec<String> {
+            self.seen.lock().unwrap().clone()
+        }
+
+        /// The ranged `GET`s: one per header read.
+        pub(crate) fn header_reads(&self) -> usize {
+            self.requests()
+                .iter()
+                .filter(|l| l.starts_with("GET") && l.contains("/resolve/"))
+                .count()
+        }
+    }
+
+    fn not_found() -> Vec<u8> {
+        b"HTTP/1.1 404 X\r\nx-error-code: EntryNotFound\r\nconnection: close\r\ncontent-length: 0\r\n\r\n"
+            .to_vec()
+    }
+
+    fn ok(content_type: &str, body: &[u8]) -> Vec<u8> {
+        let mut out = format!(
+            "HTTP/1.1 200 OK\r\ncontent-type: {content_type}\r\nconnection: close\r\ncontent-length: {}\r\n\r\n",
+            body.len()
+        )
+        .into_bytes();
+        out.extend_from_slice(body);
+        out
+    }
+
+    pub(crate) async fn hub(repos: Vec<TestRepo>) -> RepoHub {
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let lines = seen.clone();
+        let url = serve(move |line, headers| {
+            lines.lock().unwrap().push(line.trim_end().to_owned());
+            let target = line.split_whitespace().nth(1).unwrap_or_default();
+            let path = target.split('?').next().unwrap_or_default();
+            if let Some(rest) = path.strip_prefix("/api/models/") {
+                let (id, revision) = match rest.split_once("/revision/") {
+                    Some((id, rev)) => (id, Some(rev)),
+                    None => (rest, None),
+                };
+                // Hugging Face limiting requests, or failing for a moment.
+                if id.starts_with("busy/") {
+                    return b"HTTP/1.1 429 X\r\nretry-after: 30\r\nconnection: close\r\ncontent-length: 0\r\n\r\n".to_vec();
+                }
+                if id.starts_with("down/") {
+                    return b"HTTP/1.1 503 X\r\nconnection: close\r\ncontent-length: 0\r\n\r\n".to_vec();
+                }
+                return match repos
+                    .iter()
+                    .find(|r| r.id == id && revision.is_none_or(|rev| rev == r.commit))
+                {
+                    Some(r) => ok("application/json", r.listing().to_string().as_bytes()),
+                    None => b"HTTP/1.1 404 X\r\nx-error-code: RepoNotFound\r\nconnection: close\r\ncontent-length: 0\r\n\r\n".to_vec(),
+                };
+            }
+            let Some(repo) = repos
+                .iter()
+                .find(|r| path.starts_with(&format!("/{}/", r.id)))
+            else {
+                return not_found();
+            };
+            let rest = &path[repo.id.len() + 2..];
+            if rest == format!("raw/{}/README.md", repo.commit) {
+                return match &repo.card {
+                    Some(card) => ok("text/plain", card.as_bytes()),
+                    None => not_found(),
+                };
+            }
+            let Some(file) = rest.strip_prefix(&format!("resolve/{}/", repo.commit)) else {
+                return not_found();
+            };
+            let bytes = match repo.served.get(file) {
+                Some(Served::Bytes(bytes)) => bytes,
+                Some(Served::Gated(status)) => {
+                    return format!(
+                        "HTTP/1.1 {status} X\r\nx-error-code: GatedRepo\r\nconnection: close\r\ncontent-length: 0\r\n\r\n"
+                    )
+                    .into_bytes();
+                }
+                None => return not_found(),
+            };
+            if line.starts_with("HEAD") {
+                return format!(
+                    "HTTP/1.1 200 OK\r\nconnection: close\r\ncontent-length: {}\r\n\r\n",
+                    bytes.len()
+                )
+                .into_bytes();
+            }
+            let last = headers
+                .iter()
+                .find_map(|h| {
+                    h.to_ascii_lowercase()
+                        .strip_prefix("range: bytes=0-")
+                        .map(str::to_string)
+                })
+                .and_then(|n| n.parse::<usize>().ok())
+                .unwrap_or(usize::MAX - 1);
+            let end = (last + 1).min(bytes.len());
+            let mut out = format!(
+                "HTTP/1.1 206 Partial Content\r\nconnection: close\r\ncontent-length: {end}\r\ncontent-range: bytes 0-{}/{}\r\n\r\n",
+                end.saturating_sub(1),
+                bytes.len()
+            )
+            .into_bytes();
+            out.extend_from_slice(&bytes[..end]);
+            out
+        })
+        .await;
+        RepoHub { url, seen }
+    }
+
+    /// Get models on `hardware` asking `hub`, with the bundled catalog (its companion
+    /// table) and nothing installed.
+    pub(crate) fn repo_deps(hub: &RepoHub, hardware: Fixed, scratch: &Scratch) -> LocalCmdDeps {
+        deps_with(bundled(), hardware, scratch, Some(hub.client()))
+    }
+
+    pub(crate) fn search_source(repo: &str, file: &str) -> LocalSource {
+        LocalSource::Search {
+            repo: repo.into(),
+            commit: COMMIT.into(),
+            file: file.into(),
+        }
+    }
+
+    /// The companion table's row `id`.
+    fn companion(id: &str) -> models::sd::companions::Companion {
+        bundled()
+            .companions
+            .files
+            .into_iter()
+            .find(|c| c.id == id)
+            .unwrap()
+    }
+
+    pub(crate) const KONTEXT: &str = "QuantStack/FLUX.1-Kontext-dev-GGUF";
+
+    /// QuantStack's FLUX.1 Kontext GGUFs at their real sizes, each serving the Q4_K_M file's
+    /// header.
+    pub(crate) fn flux_kontext_repo(quants: &[&str]) -> TestRepo {
+        quants.iter().fold(
+            TestRepo::new(KONTEXT)
+                .plain("README.md")
+                .tagged("image-to-image"),
+            |repo, q| {
+                let size = match *q {
+                    "Q4_K_M" => 6_931_817_760.0,
+                    "Q8_0" => 12_708_163_776.0,
+                    "F16" => 23_802_816_640.0,
+                    _ => 5e9,
+                };
+                repo.file(
+                    &format!("flux1-kontext-dev-{q}.gguf"),
+                    size,
+                    Some("flux1-kontext"),
+                )
+            },
+        )
+    }
+
+    fn lumina_repo() -> TestRepo {
+        TestRepo::new("Comfy-Org/Lumina-Image-2")
+            .file(
+                "split_files/diffusion_models/lumina_2_model_bf16.safetensors",
+                5_219_585_680.0,
+                Some("lumina2"),
+            )
+            .file("split_files/vae/ae.safetensors", 335_304_388.0, None)
+            .plain("README.md")
+    }
+
+    /// CompVis/stable-diffusion-v1-4 as a diffusers folder: plain and fp16 files, the UNet
+    /// and text encoder serving the sd14 fixtures' headers, and its other folders.
+    pub(crate) fn sd14_diffusers_repo() -> TestRepo {
+        let unet = Some("sd14-diffusers-unet");
+        let text_encoder = Some("sd14-diffusers-text-encoder");
+        TestRepo::new("CompVis/stable-diffusion-v1-4")
+            .label("creativeml-openrail-m")
+            .plain("model_index.json")
+            .file(
+                "unet/diffusion_pytorch_model.safetensors",
+                3_438_167_534.0,
+                unet,
+            )
+            .file(
+                "unet/diffusion_pytorch_model.fp16.safetensors",
+                1_719_125_304.0,
+                unet,
+            )
+            .file(
+                "text_encoder/model.safetensors",
+                492_265_879.0,
+                text_encoder,
+            )
+            .file(
+                "text_encoder/model.fp16.safetensors",
+                246_144_352.0,
+                text_encoder,
+            )
+            .file(
+                "vae/diffusion_pytorch_model.safetensors",
+                334_643_268.0,
+                None,
+            )
+            .file(
+                "vae/diffusion_pytorch_model.fp16.safetensors",
+                167_335_342.0,
+                None,
+            )
+            .file("safety_checker/model.safetensors", 1_215_981_830.0, None)
+            .plain("scheduler/scheduler_config.json")
+            .file("sd-v1-4.ckpt", 4_265_380_512.0, None)
+    }
+
+    /// QuantStack's Wan 2.2 T2V A14B: each quantisation of the high-noise and the low-noise
+    /// part, each serving its part's header.
+    pub(crate) fn wan_a14b_repo(quants: &[&str]) -> TestRepo {
+        quants.iter().enumerate().fold(
+            TestRepo::new("QuantStack/Wan2.2-T2V-A14B-GGUF").tagged("text-to-video"),
+            |repo, (i, q)| {
+                let size = 5e9 + 1e9 * i as f64;
+                repo.file(
+                    &format!("HighNoise/Wan2.2-T2V-A14B-HighNoise-{q}.gguf"),
+                    size,
+                    Some("wan22-t2v-a14b-high"),
+                )
+                .file(
+                    &format!("LowNoise/Wan2.2-T2V-A14B-LowNoise-{q}.gguf"),
+                    size,
+                    Some("wan22-t2v-a14b-low"),
+                )
+            },
+        )
+    }
+
+    #[tokio::test]
+    async fn a_flux_repo_shows_one_choice_per_quantisation_with_the_best_marked() {
+        let scratch = Scratch::new();
+        let hub = hub(vec![flux_kontext_repo(&["Q4_K_M", "Q8_0", "F16"])]).await;
+        // A 16 GB card: Q8_0 runs one part at a time, F16 only partly on the processor.
+        let deps = repo_deps(&hub, gpu(16, 32), &scratch);
+        let r = local_repo(&deps, KONTEXT).await.unwrap();
+        assert_eq!(
+            r.files.iter().map(|f| f.quant.as_str()).collect::<Vec<_>>(),
+            ["F16", "Q8_0", "Q4_K_M"]
+        );
+        assert_eq!(
+            r.files
+                .iter()
+                .filter(|f| f.best)
+                .map(|f| f.quant.as_str())
+                .collect::<Vec<_>>(),
+            ["Q8_0"]
+        );
+        assert_eq!(r.files[0].plan.fit.word, "slow");
+        let p = &r.files[1].plan;
+        assert_eq!(p.recipe.id, "flux1-kontext");
+        assert_eq!(p.recipe.kind, RecipeKind::PictureEdit);
+        assert_eq!(
+            p.recipes.iter().map(|r| r.id.as_str()).collect::<Vec<_>>(),
+            recipes_for(SdVersion::Flux)
+        );
+        assert_eq!(
+            p.slots.iter().map(|s| s.role).collect::<Vec<_>>(),
+            [
+                GenRole::Diffusion,
+                GenRole::ClipL,
+                GenRole::T5xxl,
+                GenRole::Vae
+            ]
+        );
+        assert_eq!(
+            p.slots.iter().map(|s| s.source).collect::<Vec<_>>(),
+            [
+                PartSource::Main,
+                PartSource::Companion,
+                PartSource::Companion,
+                PartSource::Companion
+            ]
+        );
+        assert_eq!(p.to_fetch_bytes, p.total_bytes);
+        assert_eq!(
+            p.total_bytes,
+            12_708_163_776
+                + companion("clip-l").size
+                + companion("t5xxl-fp8").size
+                + companion("ae-flux1").size
+        );
+        assert!(p.can_download && !p.untested && !p.low_disk && !p.needs_engine);
+        assert!(matches!(
+            r.verdict,
+            Verdict::Works {
+                version: SdVersion::Flux,
+                ..
+            }
+        ));
+        // One header read labelled all three; the listing, the card and that read were asked.
+        assert_eq!(hub.header_reads(), 1);
+        assert_eq!((r.read_files, r.unread_files), (1, 0));
+        assert_eq!(r.file_views.len(), 3);
+        assert_eq!(r.author, "QuantStack");
+        assert_eq!(r.summary, None, "no card served");
+        // The companions are Apache 2.0; the repo's own licence states none: check it.
+        assert_eq!(r.licence.as_ref().map(|l| l.badge.as_str()), Some("red"));
+    }
+
+    /// "Best for this computer" goes to a choice whose plan can download (S6 minor): the
+    /// largest that fits here, a Hunyuan Video 1.5 file with no text encoder anywhere, is
+    /// passed over for the next.
+    #[tokio::test]
+    async fn the_best_choice_is_one_whose_plan_can_download() {
+        let scratch = Scratch::new();
+        let mut hunyuan = fixture("hunyuan-video-15");
+        hunyuan.format = models::sd::index::FileFormat::Gguf;
+        let repo = TestRepo::new("someone/two-models")
+            .serving("h-Q4_0.gguf", 20_000_000_000, file_of(&hunyuan))
+            .file(
+                "flux1-kontext-dev-Q4_K_M.gguf",
+                6_931_817_760.0,
+                Some("flux1-kontext"),
+            );
+        let hub = hub(vec![repo]).await;
+        let r = local_repo(
+            &repo_deps(&hub, gpu(80, 128), &scratch),
+            "someone/two-models",
+        )
+        .await
+        .unwrap();
+        let first = &r.files[0];
+        assert_eq!(first.file, "h-Q4_0.gguf");
+        assert!(matches!(
+            first.plan.fit.word.as_str(),
+            "fits" | "afterUnload"
+        ));
+        assert!(!first.plan.can_download && !first.best);
+        assert_eq!(
+            r.files
+                .iter()
+                .filter(|f| f.best)
+                .map(|f| f.file.as_str())
+                .collect::<Vec<_>>(),
+            ["flux1-kontext-dev-Q4_K_M.gguf"]
+        );
+    }
+
+    #[tokio::test]
+    async fn a_file_studio_cant_run_is_listed_with_its_reason() {
+        let scratch = Scratch::new();
+        let hub = hub(vec![lumina_repo()]).await;
+        let r = local_repo(
+            &repo_deps(&hub, gpu(12, 32), &scratch),
+            "Comfy-Org/Lumina-Image-2",
+        )
+        .await
+        .unwrap();
+        assert!(r.files.is_empty());
+        assert!(r.file_views.iter().any(|f| f.label
+            == FileLabel::CannotRun {
+                reason: CannotRunReason::Lumina2,
+                version: Some(SdVersion::ZImage)
+            }));
+        assert!(
+            r.file_views
+                .iter()
+                .any(|f| f.label == FileLabel::Extra { role: GenRole::Vae }
+                    && f.path == "split_files/vae/ae.safetensors")
+        );
+        assert_eq!(
+            r.verdict,
+            Verdict::CannotRun {
+                reason: CannotRunReason::Lumina2,
+                version: Some(SdVersion::ZImage)
+            }
+        );
+        assert!(r.licences.is_empty() && r.loras.is_empty());
+    }
+
+    #[tokio::test]
+    async fn the_setup_plan_command_takes_a_recipe_and_an_override() {
+        let scratch = Scratch::new();
+        let hub = hub(vec![flux_kontext_repo(&["Q4_K_M"])]).await;
+        let deps = repo_deps(&hub, gpu(12, 32), &scratch);
+        let t5 = companion("t5xxl-fp16");
+        let p = setup_plan(
+            &deps,
+            &search_source(KONTEXT, "flux1-kontext-dev-Q4_K_M.gguf"),
+            &SetupChoice {
+                recipe: Some("flux1-dev".into()),
+                overrides: vec![SlotOverride {
+                    role: GenRole::T5xxl,
+                    file: SlotFile::Hub {
+                        repo: "comfyanonymous/flux_text_encoders".into(),
+                        commit: t5.revision.clone(),
+                        path: "t5xxl_fp16.safetensors".into(),
+                    },
+                }],
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(p.recipe.id, "flux1-dev");
+        assert_eq!(p.recipe.kind, RecipeKind::Picture);
+        assert!(!p.untested); // flux1-dev is among the version's recipes
+        assert_eq!(p.slots[2].role, GenRole::T5xxl);
+        assert_eq!(p.slots[2].source, PartSource::Chosen);
+        // The chosen file is the companion table's own row: pinned by it, under its licence.
+        let part = p.slots[2].part.as_ref().unwrap();
+        assert_eq!(
+            (part.repo.as_str(), part.size_bytes),
+            ("comfyanonymous/flux_text_encoders", t5.size)
+        );
+        let licence = p.licences.iter().find(|l| l.id == part.licence_id).unwrap();
+        assert_eq!(licence.name, "Apache License 2.0");
+        assert!(p.can_download);
+        // A recipe of another version is untested; one the engine does not have is refused.
+        let other = SetupChoice {
+            recipe: Some("sdxl-checkpoint".into()),
+            overrides: Vec::new(),
+        };
+        let source = search_source(KONTEXT, "flux1-kontext-dev-Q4_K_M.gguf");
+        assert!(setup_plan(&deps, &source, &other).await.unwrap().untested);
+        let unknown = SetupChoice {
+            recipe: Some("no-such-recipe".into()),
+            overrides: Vec::new(),
+        };
+        assert_eq!(
+            setup_plan(&deps, &source, &unknown).await.unwrap_err().code,
+            "bad_request"
+        );
+        let left_out = SetupChoice {
+            recipe: Some("sd1-controlnet".into()),
+            overrides: Vec::new(),
+        };
+        assert_eq!(
+            setup_plan(&deps, &source, &left_out)
+                .await
+                .unwrap_err()
+                .code,
+            "bad_request"
+        );
+    }
+
+    /// Ruling S4-licence-ref: a file the person chose from another repo is under that repo's
+    /// label, read at its commit, never the main repo's.
+    #[tokio::test]
+    async fn a_chosen_file_of_another_repo_has_that_repos_licence() {
+        let scratch = Scratch::new();
+        let other_commit = "1".repeat(40);
+        let vae_repo = TestRepo::new("someone/my-flux-vae")
+            .label("mit")
+            .at(&other_commit)
+            .file("my_ae.safetensors", 335_000_000.0, None);
+        let hub = hub(vec![
+            flux_kontext_repo(&["Q4_K_M"]).label("creativeml-openrail-m"),
+            vae_repo,
+        ])
+        .await;
+        let deps = repo_deps(&hub, gpu(12, 32), &scratch);
+        let p = setup_plan(
+            &deps,
+            &search_source(KONTEXT, "flux1-kontext-dev-Q4_K_M.gguf"),
+            &SetupChoice {
+                recipe: None,
+                overrides: vec![SlotOverride {
+                    role: GenRole::Vae,
+                    file: SlotFile::Hub {
+                        repo: "someone/my-flux-vae".into(),
+                        commit: other_commit.clone(),
+                        path: "my_ae.safetensors".into(),
+                    },
+                }],
+            },
+        )
+        .await
+        .unwrap();
+        let licence_of = |role: GenRole| {
+            let part = p
+                .slots
+                .iter()
+                .find(|s| s.role == role)
+                .and_then(|s| s.part.as_ref())
+                .unwrap();
+            p.licences
+                .iter()
+                .find(|l| l.id == part.licence_id)
+                .unwrap()
+                .clone()
+        };
+        let vae = licence_of(GenRole::Vae);
+        assert_eq!(
+            (vae.name.as_str(), vae.badge.as_str()),
+            ("MIT License", "green")
+        );
+        assert!(vae.url.contains("someone/my-flux-vae"), "{}", vae.url);
+        let main = licence_of(GenRole::Diffusion);
+        assert_eq!(
+            (main.commercial.as_str(), main.badge.as_str()),
+            ("withUseRules", "amber")
+        );
+        // The other repo's listing was asked at the chosen commit.
+        assert!(hub.requests().iter().any(|l| l.contains(&format!(
+            "/api/models/someone/my-flux-vae/revision/{other_commit}"
+        ))));
+        // A file that repo does not list is not found.
+        let missing = SetupChoice {
+            recipe: None,
+            overrides: vec![SlotOverride {
+                role: GenRole::Vae,
+                file: SlotFile::Hub {
+                    repo: "someone/my-flux-vae".into(),
+                    commit: other_commit,
+                    path: "nothing.safetensors".into(),
+                },
+            }],
+        };
+        let source = search_source(KONTEXT, "flux1-kontext-dev-Q4_K_M.gguf");
+        assert_eq!(
+            setup_plan(&deps, &source, &missing).await.unwrap_err().code,
+            "not_found"
+        );
+    }
+
+    pub(crate) fn sdxl_repo() -> TestRepo {
+        TestRepo::new("stabilityai/stable-diffusion-xl-base-1.0")
+            .tagged("text-to-image")
+            .file("sd_xl_base_1.0.safetensors", 6_938_078_334.0, Some("sdxl"))
+    }
+
+    /// Review fix 1: a file the person chose from another repo is pinned by its SHA-256 or
+    /// refused, never dropped. A listing that could not be read (Hugging Face limiting
+    /// requests, failing for a moment, a repo not found) gives its own error, and a listed
+    /// file with no published checksum is refused: for a required slot (Kontext's decoder)
+    /// and for an optional one (an SDXL checkpoint's own decoder, which the plan would else
+    /// lose). Leaving a slot empty on purpose is still the person's choice.
+    #[tokio::test]
+    async fn a_chosen_file_that_cannot_be_pinned_is_refused_not_dropped() {
+        let scratch = Scratch::new();
+        let other_commit = "1".repeat(40);
+        let vae_repo = TestRepo::new("someone/my-vae")
+            .at(&other_commit)
+            .file("my_ae.safetensors", 335_000_000.0, None)
+            .plain("no_lfs_ae.safetensors");
+        let hub = hub(vec![flux_kontext_repo(&["Q4_K_M"]), sdxl_repo(), vae_repo]).await;
+        let deps = repo_deps(&hub, gpu(16, 32), &scratch);
+        let vae = |file: SlotFile| SetupChoice {
+            recipe: None,
+            overrides: vec![SlotOverride {
+                role: GenRole::Vae,
+                file,
+            }],
+        };
+        let hub_file = |repo: &str, path: &str| {
+            vae(SlotFile::Hub {
+                repo: repo.into(),
+                commit: other_commit.clone(),
+                path: path.into(),
+            })
+        };
+        let sdxl = search_source(
+            "stabilityai/stable-diffusion-xl-base-1.0",
+            "sd_xl_base_1.0.safetensors",
+        );
+        let kontext = search_source(KONTEXT, "flux1-kontext-dev-Q4_K_M.gguf");
+        let vae_slot = |p: &SetupPlanDto| {
+            p.slots
+                .iter()
+                .find(|s| s.role == GenRole::Vae)
+                .map(|s| (s.source, s.required))
+        };
+        // With nothing chosen, the checkpoint's own decoder fills the optional slot.
+        let plain = setup_plan(&deps, &sdxl, &SetupChoice::default())
             .await
             .unwrap();
-        let asked = hub.requests();
-        assert_eq!(asked.len(), 1, "{asked:?}");
-        assert!(
-            asked[0].starts_with("GET /api/models/leejet/Z-Image-Turbo-GGUF?"),
-            "{asked:?}"
-        );
-        assert_eq!(repo.status, "supported");
-        assert_eq!(repo.reason, None);
-        assert_eq!(repo.family.as_deref(), Some("Z-Image Turbo"));
-        assert_eq!(repo.commit, "c61c0e422dc8b541b7548cf33a4ef8302b0f8085");
-        assert_eq!(repo.gate.mode, "none");
-        assert_eq!(repo.label_mismatch, None);
-        assert!(!repo.files.is_empty());
-        let first = &repo.files[0];
-        assert!(first.file.ends_with(".gguf"), "{}", first.file);
-        assert!(!first.quant.is_empty());
-        assert_eq!(first.parts.len(), 3);
-        assert_eq!(first.parts[0].label, "makes the picture");
-        assert_eq!(first.parts[1].label, "reads your prompt");
-        assert_eq!(first.parts[2].label, "picture decoder");
-        assert!(!first.parts[0].already_here);
-        assert!(first.parts[1].already_here);
-        assert!(first.to_fetch_bytes < first.total_bytes);
-        assert_eq!(first.to_fetch_bytes, first.total_bytes - encoder.size);
-        assert_eq!(first.fit.word, "fits");
-        let licence = repo.licence.as_ref().unwrap();
-        assert_eq!(licence.badge, "green");
-        assert_eq!(licence.sha256, apache().sha256);
+        assert_eq!(vae_slot(&plain), Some((PartSource::Embedded, false)));
+
+        for source in [&sdxl, &kontext] {
+            for (repo, code) in [
+                ("busy/vae", "hf_rate_limited"),
+                ("down/vae", "hf_error"),
+                ("someone/gone", "hf_not_found"),
+            ] {
+                let e = setup_plan(&deps, source, &hub_file(repo, "ae.safetensors"))
+                    .await
+                    .unwrap_err();
+                assert_eq!(e.code, code, "{repo}");
+            }
+            let e = setup_plan(
+                &deps,
+                source,
+                &hub_file("someone/my-vae", "no_lfs_ae.safetensors"),
+            )
+            .await
+            .unwrap_err();
+            assert_eq!(
+                (e.code.as_str(), e.message.as_str(), e.next_step.as_str()),
+                (
+                    "studio_no_checksum",
+                    "Hugging Face publishes no checksum for this file, so Studio can't check it.",
+                    "Choose another file for this part."
+                )
+            );
+            // A pinned file is the person's choice.
+            let chosen = setup_plan(
+                &deps,
+                source,
+                &hub_file("someone/my-vae", "my_ae.safetensors"),
+            )
+            .await
+            .unwrap();
+            assert_eq!(
+                vae_slot(&chosen).map(|(source, _)| source),
+                Some(PartSource::Chosen)
+            );
+            assert!(chosen.can_download);
+        }
+
+        // "None" on purpose: an optional slot goes, a required one is missing.
+        let cleared = setup_plan(&deps, &sdxl, &vae(SlotFile::None))
+            .await
+            .unwrap();
+        assert_eq!(vae_slot(&cleared), None);
+        assert!(cleared.can_download);
+        let missing = setup_plan(&deps, &kontext, &vae(SlotFile::None))
+            .await
+            .unwrap();
+        assert_eq!(vae_slot(&missing), Some((PartSource::Missing, true)));
+        assert!(!missing.can_download);
+    }
+
+    #[tokio::test]
+    async fn a_diffusers_repo_is_one_choice_whose_plan_lists_the_folder_files() {
+        let scratch = Scratch::new();
+        let hub = hub(vec![sd14_diffusers_repo()]).await;
+        let r = local_repo(
+            &repo_deps(&hub, gpu(8, 32), &scratch),
+            "CompVis/stable-diffusion-v1-4",
+        )
+        .await
+        .unwrap();
+        assert_eq!(r.files.len(), 1);
         assert_eq!(
-            repo.licences
-                .iter()
-                .map(|l| l.id.as_str())
-                .collect::<Vec<_>>(),
-            ["apache-2.0"]
+            (
+                r.files[0].quant.as_str(),
+                r.files[0].plan.recipe.id.as_str()
+            ),
+            ("fp16", "sd1-checkpoint")
         );
-        assert_eq!(first.licences, repo.licences);
+        assert_eq!(
+            r.files[0].file,
+            "unet/diffusion_pytorch_model.fp16.safetensors"
+        );
+        assert_eq!(
+            r.files[0]
+                .plan
+                .slots
+                .iter()
+                .map(|s| (s.role, s.source))
+                .collect::<Vec<_>>(),
+            [
+                (GenRole::Model, PartSource::Main),
+                (GenRole::Vae, PartSource::Folder),
+                (GenRole::ClipL, PartSource::Folder)
+            ]
+        );
+        assert!(r.files[0].best);
+        // Its licence is the repo's OpenRAIL label: amber, with use rules.
+        let licence = r.licence.as_ref().unwrap();
+        assert_eq!(
+            (licence.badge.as_str(), licence.commercial.as_str()),
+            ("amber", "withUseRules")
+        );
+        assert_eq!(r.licences, std::slice::from_ref(licence));
+        assert!(r.file_views.iter().any(|f| f.path == "sd-v1-4.ckpt"
+            && f.label
+                == FileLabel::CannotRun {
+                    reason: CannotRunReason::Pickle,
+                    version: None
+                }));
+    }
+
+    /// An A14B pair is one choice per quantisation: the low-noise half is in its high-noise
+    /// half's plan, never a choice of its own.
+    #[tokio::test]
+    async fn an_a14b_pair_is_one_choice_per_quantisation() {
+        let scratch = Scratch::new();
+        let hub = hub(vec![wan_a14b_repo(&["Q4_K_M", "Q8_0"])]).await;
+        let r = local_repo(
+            &repo_deps(&hub, gpu(24, 64), &scratch),
+            "QuantStack/Wan2.2-T2V-A14B-GGUF",
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            r.files.iter().map(|f| f.file.as_str()).collect::<Vec<_>>(),
+            [
+                "HighNoise/Wan2.2-T2V-A14B-HighNoise-Q8_0.gguf",
+                "HighNoise/Wan2.2-T2V-A14B-HighNoise-Q4_K_M.gguf"
+            ]
+        );
+        let slots = &r.files[1].plan.slots;
+        let sibling = slots.iter().find(|s| s.role == GenRole::Diffusion).unwrap();
+        assert_eq!(sibling.source, PartSource::Sibling);
+        assert_eq!(
+            sibling.part.as_ref().unwrap().path,
+            "LowNoise/Wan2.2-T2V-A14B-LowNoise-Q4_K_M.gguf"
+        );
+        assert_eq!(r.file_views.len(), 4);
+    }
+
+    /// A part already on this computer (another model's shared file) is checked, not fetched.
+    #[tokio::test]
+    async fn a_shared_part_already_installed_is_not_fetched_again() {
+        let scratch = Scratch::new();
+        let hub = hub(vec![flux_kontext_repo(&["Q4_K_M"])]).await;
+        let mut deps = repo_deps(&hub, gpu(12, 32), &scratch);
+        let ae = companion("ae-flux1");
+        let file = destination(&deps.models_dir, &ae.repo, &ae.path).unwrap();
+        std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+        std::fs::write(&file, vec![0u8; usize::try_from(ae.size).unwrap()]).unwrap();
+        let part = GenPart {
+            role: GenRole::Vae,
+            repo: ae.repo.clone(),
+            revision: ae.revision.clone(),
+            path: ae.path.clone(),
+            size: ae.size,
+            sha256: ae.sha256.clone(),
+            license: ae.license.clone(),
+            local: None,
+            folder: None,
+        };
+        install(
+            &deps.store,
+            &deps.models_dir,
+            "someone-elses-model",
+            None,
+            "Another model",
+            "z-image",
+            &[&part],
+        )
+        .await;
+        deps.installed_files = InstalledFiles::read(&deps.store).await.unwrap();
+        let r = local_repo(&deps, KONTEXT).await.unwrap();
+        let p = &r.files[0].plan;
+        let vae = p.slots.iter().find(|s| s.role == GenRole::Vae).unwrap();
+        assert_eq!(vae.source, PartSource::Installed);
+        let vae_part = vae.part.as_ref().unwrap();
+        assert!(vae_part.already_here && !vae_part.local);
+        assert_eq!(vae_part.repo, ae.repo);
+        assert_eq!(p.to_fetch_bytes, p.total_bytes - ae.size);
+        assert_eq!(
+            p.licences
+                .iter()
+                .find(|l| l.id == vae_part.licence_id)
+                .map(|l| l.name.as_str()),
+            Some("Apache License 2.0")
+        );
+    }
+
+    /// A gated repo without a token: its files say they need one, no header is read, and
+    /// the verdict stays its name's.
+    #[tokio::test]
+    async fn a_gated_repo_without_a_token_offers_no_choice_yet() {
+        let scratch = Scratch::new();
+        let mut repo = flux_kontext_repo(&["Q4_K_M"]);
+        repo.gated = true;
+        let hub = hub(vec![repo]).await;
+        let r = local_repo(&repo_deps(&hub, gpu(12, 32), &scratch), KONTEXT)
+            .await
+            .unwrap();
+        assert_eq!(hub.header_reads(), 0);
+        assert!(r.files.is_empty());
+        assert_eq!(
+            r.file_views[0].label,
+            FileLabel::NotRead {
+                reason: models::sd::NotRead::NeedsToken
+            }
+        );
+        assert_eq!((r.read_files, r.unread_files), (0, 1));
+        assert_eq!(r.gate.mode, "auto");
+        // The name's hint, from its pipeline tag.
+        assert_eq!(
+            r.verdict,
+            Verdict::Works {
+                version: SdVersion::Flux,
+                kind: RecipeKind::PictureEdit,
+                recipe: None
+            }
+        );
+    }
+
+    #[tokio::test]
+    async fn a_repo_shows_its_cards_first_paragraph() {
+        let scratch = Scratch::new();
+        let card = "---\nlicense: other\ntags:\n- flux\n---\n\n# FLUX.1 Kontext GGUF\n\n![grid](grid.png)\n\nQuantised **FLUX.1 Kontext [dev]**\nfor\tstable-diffusion.cpp.\u{202E}\n\nMore below.\n";
+        let hub = hub(vec![flux_kontext_repo(&["Q4_K_M"]).card(card)]).await;
+        let r = local_repo(&repo_deps(&hub, gpu(12, 32), &scratch), KONTEXT)
+            .await
+            .unwrap();
+        assert_eq!(
+            r.summary.as_deref(),
+            Some("Quantised **FLUX.1 Kontext [dev]** for stable-diffusion.cpp.[U+202E]")
+        );
+        assert_eq!(card_summary("---\na: b\n---\n# Only a heading\n"), None);
+        assert_eq!(card_summary("Plain text."), Some("Plain text.".to_owned()));
+        assert_eq!(
+            card_summary(&"word ".repeat(200)).unwrap().chars().count(),
+            400
+        );
+    }
+
+    /// A file on this computer is planned from its header, its parts from the companion
+    /// table; one that is not a model file Studio reads is refused by its extension.
+    #[tokio::test]
+    async fn a_file_on_this_computer_is_planned_from_its_header() {
+        let scratch = Scratch::new();
+        let hub = hub(vec![]).await;
+        let deps = repo_deps(&hub, gpu(12, 32), &scratch);
+        let dir = scratch.path().join("ü dir");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("my kontext.gguf");
+        std::fs::write(&path, file_of(&fixture("flux1-kontext"))).unwrap();
+        let source = LocalSource::Disk {
+            path: path.display().to_string(),
+        };
+        let p = setup_plan(&deps, &source, &SetupChoice::default())
+            .await
+            .unwrap();
+        assert_eq!(p.recipe.id, "flux1-kontext");
+        let main = p.slots[0].part.as_ref().unwrap();
+        assert!(main.local && main.already_here && main.repo.is_empty());
+        assert_eq!(main.licence_id, "");
+        assert_eq!(p.to_fetch_bytes, p.total_bytes - main.size_bytes);
+        assert!(hub.requests().is_empty(), "{:?}", hub.requests());
+        // Its fit comes from the same plan.
+        let fit = local_fit(&deps, &source, 1024, 1024, 0).await.unwrap();
+        assert_eq!(fit.word, p.fit.word);
+        for (name, code, message) in [
+            ("m.ckpt", "bad_request", "Studio can't read .ckpt files"),
+            (
+                "notes.txt",
+                "bad_request",
+                "This is not a model file Studio can read.",
+            ),
+        ] {
+            let other = dir.join(name);
+            std::fs::write(&other, b"x").unwrap();
+            let e = setup_plan(
+                &deps,
+                &LocalSource::Disk {
+                    path: other.display().to_string(),
+                },
+                &SetupChoice::default(),
+            )
+            .await
+            .unwrap_err();
+            assert_eq!((e.code.as_str(), e.message.as_str()), (code, message));
+        }
+        let gone = LocalSource::Disk {
+            path: dir.join("gone.gguf").display().to_string(),
+        };
+        assert_eq!(
+            setup_plan(&deps, &gone, &SetupChoice::default())
+                .await
+                .unwrap_err()
+                .code,
+            "not_found"
+        );
+    }
+
+    /// A plan is for a searched file or a file on this computer; a file Studio can't run says
+    /// why in its label's words, and an extra part, or a file the repo does not list, has none.
+    #[tokio::test]
+    async fn a_plan_is_refused_for_a_file_studio_does_not_run() {
+        let scratch = Scratch::new();
+        let hub = hub(vec![lumina_repo()]).await;
+        let deps = repo_deps(&hub, gpu(12, 32), &scratch);
+        let repo = "Comfy-Org/Lumina-Image-2";
+        for (file, code) in [
+            (
+                "split_files/diffusion_models/lumina_2_model_bf16.safetensors",
+                "studio_cannot_run",
+            ),
+            ("split_files/vae/ae.safetensors", "studio_not_supported_yet"),
+            ("not-listed.safetensors", "not_found"),
+        ] {
+            let e = setup_plan(&deps, &search_source(repo, file), &SetupChoice::default())
+                .await
+                .unwrap_err();
+            assert_eq!(e.code, code, "{file}");
+        }
+        let catalog = LocalSource::Catalog {
+            entry_id: KLEIN.into(),
+        };
+        assert_eq!(
+            setup_plan(&deps, &catalog, &SetupChoice::default())
+                .await
+                .unwrap_err()
+                .code,
+            "studio_not_supported_yet"
+        );
     }
 
     // ---- the search -----------------------------------------------------------------------
 
     /// A search asks Hugging Face its three queries (the two picture pipeline tags, then none)
     /// and gives one page, most downloads first (the untagged hit, asked last, comes first):
-    /// each hit says how popular the repository is, how it is gated in a gate's words and its
-    /// own licence label; an untagged hit stays only when its name is a picture family's.
+    /// each hit says who made it, how popular the repository is, when it changed, how it is
+    /// gated in a gate's words, its own licence label and what its name says it offers; an
+    /// untagged hit stays only when its name is a picture model's.
     #[tokio::test]
     async fn a_search_hit_says_what_hugging_face_lists() {
         let hub = Hub::new(|line| {
             let found = if line.contains("pipeline_tag=text-to-image") {
                 json!([{"id": "leejet/Z-Image-Turbo-GGUF", "downloads": 9, "likes": 2,
-                        "gated": "manual", "tags": ["gguf", "license:apache-2.0"]}])
+                        "gated": "manual", "tags": ["gguf", "license:apache-2.0"],
+                        "pipeline_tag": "text-to-image", "lastModified": "2026-10-01T00:00:00.000Z"}])
             } else if line.contains("pipeline_tag=") {
                 json!([])
             } else {
@@ -1968,9 +3271,14 @@ mod tests {
             ("200 OK", found.to_string())
         })
         .await;
-        let page = local_search(&hub.client(), "z-image", MediaKind::Image)
-            .await
-            .unwrap();
+        let page = local_search(
+            &hub.client(),
+            &DetectService::new(),
+            "z-image",
+            SearchFilter::Pictures,
+        )
+        .await
+        .unwrap();
         let asked = hub.requests();
         assert_eq!(asked.len(), 3, "{asked:?}");
         assert!(
@@ -1987,24 +3295,124 @@ mod tests {
                 "{tag}: {asked:?}"
             );
         }
+        let z_image = Verdict::Works {
+            version: SdVersion::ZImage,
+            kind: RecipeKind::Picture,
+            recipe: None,
+        };
         assert_eq!(
             page.items,
             [
                 LocalSearchHitDto {
                     repo: "someone/Z-Image-Turbo-Q8-GGUF".into(),
+                    author: "someone".into(),
                     downloads: 40,
                     likes: 1,
+                    updated_at: None,
                     gated: "none".into(),
                     license_label: None,
+                    verdict: z_image.clone(),
+                    exact: false,
                 },
                 LocalSearchHitDto {
                     repo: "leejet/Z-Image-Turbo-GGUF".into(),
+                    author: "leejet".into(),
                     downloads: 9,
                     likes: 2,
+                    updated_at: Some("2026-10-01T00:00:00.000Z".into()),
                     gated: "manual".into(),
                     license_label: Some("apache-2.0".into()),
+                    verdict: z_image,
+                    exact: false,
                 },
             ]
+        );
+    }
+
+    fn summary(id: &str, tag: Option<&str>, updated: Option<&str>) -> RepoSummary {
+        RepoSummary {
+            id: id.into(),
+            downloads: 1,
+            likes: 0,
+            gated: models::hf::Gated::No,
+            license: None,
+            last_modified: updated.map(str::to_owned),
+            pipeline_tag: tag.map(str::to_owned),
+            not_for_all_audiences: false,
+        }
+    }
+
+    #[test]
+    fn hits_carry_author_update_and_a_verdict() {
+        let page = search_page(
+            vec![summary(
+                "QuantStack/Wan2.2-T2V-A14B-GGUF",
+                Some("text-to-video"),
+                Some("2026-10-01T00:00:00.000Z"),
+            )],
+            &DetectService::new(),
+        );
+        assert_eq!(
+            (page.items[0].author.as_str(), page.items[0].exact),
+            ("QuantStack", false)
+        );
+        assert_eq!(
+            page.items[0].updated_at.as_deref(),
+            Some("2026-10-01T00:00:00.000Z")
+        );
+        assert!(matches!(
+            page.items[0].verdict,
+            Verdict::Works {
+                kind: RecipeKind::Video,
+                ..
+            }
+        ));
+    }
+
+    /// Once a repo was opened, its hit's verdict is what reading its files found, over its
+    /// name's hint.
+    #[tokio::test]
+    async fn an_opened_repos_hit_carries_its_exact_verdict() {
+        let scratch = Scratch::new();
+        let hub = hub(vec![lumina_repo()]).await;
+        let deps = repo_deps(&hub, gpu(12, 32), &scratch);
+        // Before: the name says nothing it knows.
+        let before = search_page(
+            vec![summary(
+                "Comfy-Org/Lumina-Image-2",
+                Some("text-to-image"),
+                None,
+            )],
+            &deps.detect,
+        );
+        assert_eq!(
+            (before.items[0].verdict.clone(), before.items[0].exact),
+            (
+                Verdict::CannotRun {
+                    reason: CannotRunReason::Lumina2,
+                    version: None
+                },
+                false
+            )
+        );
+        local_repo(&deps, "Comfy-Org/Lumina-Image-2").await.unwrap();
+        let after = search_page(
+            vec![summary(
+                "Comfy-Org/Lumina-Image-2",
+                Some("text-to-image"),
+                None,
+            )],
+            &deps.detect,
+        );
+        assert_eq!(
+            (after.items[0].verdict.clone(), after.items[0].exact),
+            (
+                Verdict::CannotRun {
+                    reason: CannotRunReason::Lumina2,
+                    version: Some(SdVersion::ZImage)
+                },
+                true
+            )
         );
     }
 
@@ -2117,5 +3525,66 @@ mod tests {
             prefs::load(&store).await.local_notice_accepted_at,
             Some(1000)
         );
+    }
+
+    /// A failed read of the installed models' files refuses a command that writes files (an
+    /// import, through `app_deps_for_writing`) with the read's own error, and reads as no
+    /// files for one that only shows something. The store gives the app crate no way to make
+    /// that read fail, so the rule is tested here, on the read's result.
+    #[test]
+    fn a_failed_read_of_the_installed_files_refuses_a_write_and_shows_none() {
+        let failed = || -> AppResult<InstalledFiles> { Err(store::StoreError::Closed.into()) };
+        let refused = installed_files_for(failed(), FilesUse::Write).unwrap_err();
+        let closed = AppError::from(store::StoreError::Closed);
+        assert_eq!(
+            (refused.code, refused.details),
+            (closed.code, closed.details)
+        );
+        let shown = installed_files_for(failed(), FilesUse::Show).unwrap();
+        assert!(shown.chat.is_empty() && shown.gen_models.is_empty());
+        // A read that worked is the same for both.
+        let read = || -> AppResult<InstalledFiles> {
+            Ok(InstalledFiles {
+                chat: vec![crate::hub::UsedFile {
+                    path: "/m/a.gguf".into(),
+                    sha256: None,
+                }],
+                gen_models: Vec::new(),
+                loras: Vec::new(),
+            })
+        };
+        for files_use in [FilesUse::Show, FilesUse::Write] {
+            let files = installed_files_for(read(), files_use).unwrap();
+            assert_eq!(files.chat.len(), 1, "{files_use:?}");
+        }
+    }
+
+    /// The mode an import was added with is saved and held, so the next import offers it
+    /// first, and a later Settings change keeps it.
+    #[tokio::test]
+    async fn the_last_import_mode_is_saved_and_a_settings_change_keeps_it() {
+        let scratch = Scratch::new();
+        let store = store::Store::open_in_memory().unwrap();
+        let manager = idle_manager(&store, &scratch);
+        let prefs = manager.note_import_mode(ImportMode::InPlace).await.unwrap();
+        assert_eq!(prefs.last_import_mode, Some(ImportMode::InPlace));
+        assert_eq!(manager.prefs().last_import_mode, Some(ImportMode::InPlace));
+        assert_eq!(
+            prefs::load(&store).await.last_import_mode,
+            Some(ImportMode::InPlace)
+        );
+        manager
+            .set_prefs(StudioPrefsPatch {
+                advanced_open: Some(true),
+                ..StudioPrefsPatch::default()
+            })
+            .await
+            .unwrap();
+        assert_eq!(
+            prefs::load(&store).await.last_import_mode,
+            Some(ImportMode::InPlace)
+        );
+        manager.note_import_mode(ImportMode::Copy).await.unwrap();
+        assert_eq!(manager.prefs().last_import_mode, Some(ImportMode::Copy));
     }
 }

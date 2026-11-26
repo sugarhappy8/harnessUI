@@ -40,7 +40,9 @@ use super::deps::{
     CardLease, Clock, Endpoint, ForeignFetch, LocalHardware, LocalLane, ProviderSource, StudioSink,
 };
 use super::label::read_label;
-use super::local::{LocalJobOptions, LocalMediaProvider, LocalProvider, LocalRunStatus};
+use super::local::{
+    LocalJobOptions, LocalMediaProvider, LocalProvider, LocalRunStatus, MemoryChoice,
+};
 use super::manager::{
     EARLIER_GALLERIES_KEY, LOCAL_CHECK_EVERY, LocalVerdict, PICTURES_AT_ONCE, PollPlan, StudioDeps,
     StudioManager, VIDEOS_AT_ONCE, audit_settings, job_options, local_verdict,
@@ -1299,11 +1301,21 @@ async fn sending_is_recorded_before_the_request_goes_out() {
 #[tokio::test]
 async fn a_video_without_confirmation_is_refused() {
     let h = harness().await;
+    h.spending_guards_on().await;
     let err = h.manager.start(h.video_req(), false).await.unwrap_err();
     assert_eq!(err.code, "studio_needs_confirmation");
     assert_eq!(h.provider.starts(), 0);
     assert!(h.store_runs().await.is_empty());
     assert!(h.audit_rows().await.is_empty());
+}
+
+#[tokio::test]
+async fn a_cloud_video_starts_without_confirmation_when_the_switch_is_off() {
+    // A new install: every spending switch is off.
+    let h = harness().await;
+    let run = h.manager.start(h.video_req(), false).await.unwrap();
+    h.wait_status(&run.id, "waiting").await;
+    assert_eq!(h.provider.starts(), 1);
 }
 
 #[tokio::test]
@@ -1344,6 +1356,7 @@ async fn a_started_video_waits_with_its_remote_id() {
 #[tokio::test]
 async fn a_run_over_the_daily_limit_is_refused_whatever_the_webview_says() {
     let h = harness().await;
+    h.spending_guards_on().await;
     h.seed_done_run_costing(9.50).await;
     let err = h
         .manager
@@ -1392,6 +1405,7 @@ async fn an_unknown_price_refused_for_the_reserve_says_why() {
 #[tokio::test]
 async fn queued_and_running_estimates_count_against_the_limit() {
     let h = harness().await;
+    h.spending_guards_on().await;
     h.provider.hold();
     for token in ["t1", "t2"] {
         h.manager
@@ -1413,6 +1427,7 @@ async fn queued_and_running_estimates_count_against_the_limit() {
 #[tokio::test]
 async fn two_starts_at_once_cannot_both_pass_the_limit() {
     let h = harness().await;
+    h.spending_guards_on().await;
     h.seed_done_run_costing(8.50).await;
     // Held, so the run that passes still counts its estimate when the other is checked.
     h.provider.hold();
@@ -1447,6 +1462,7 @@ async fn the_same_create_press_twice_makes_one_run() {
 #[tokio::test]
 async fn a_refused_unconfirmed_press_then_the_confirmed_one_makes_one_run() {
     let h = harness().await;
+    h.spending_guards_on().await;
     let req = || StartRequest {
         client_token: "press-2".into(),
         ..h.video_req()
@@ -1464,6 +1480,7 @@ async fn a_refused_unconfirmed_press_then_the_confirmed_one_makes_one_run() {
 #[tokio::test]
 async fn three_openai_runs_in_a_row_stay_within_the_limit() {
     let h = harness().await;
+    h.spending_guards_on().await;
     for token in ["o1", "o2", "o3"] {
         h.provider.answer(Answer::Done {
             pictures: 1,
@@ -2434,10 +2451,11 @@ async fn cloud_runs_say_they_ran_in_the_cloud() {
 #[tokio::test]
 async fn an_estimate_sends_nothing_and_says_what_a_run_would_meet() {
     let h = harness().await;
+    h.spending_guards_on().await;
     let e = h.manager.estimate(&h.picture_req("x")).await.unwrap();
     assert_eq!(e.usd, Some(0.048));
     assert!(e.reasons.is_empty());
-    assert_eq!(e.confirm_at_usd, 1.0);
+    assert_eq!(e.confirm_at_usd, Some(1.0));
     assert!(e.invalid.is_empty());
     assert_eq!(e.limit.limit_usd, Some(10.0));
     assert!(e.limit.would_pass);
@@ -2599,6 +2617,7 @@ async fn spending_follows_the_status_and_the_charge() {
 #[tokio::test]
 async fn refusals_have_four_parts() {
     let h = harness().await;
+    h.spending_guards_on().await;
     let refusals: Vec<AppError> = vec![
         h.manager.start(h.video_req(), false).await.unwrap_err(),
         h.manager
@@ -3664,6 +3683,7 @@ fn patch(value: Value) -> StudioPrefsPatch {
 #[tokio::test]
 async fn deleting_todays_results_does_not_lower_spent_today() {
     let h = harness().await;
+    h.spending_guards_on().await;
     let run = h.seed_done_run_costing(9.50).await;
     h.manager.delete_outputs(output_ids(&run)).await.unwrap();
     assert!(!Path::new(&run.outputs[0].path).exists());
@@ -3936,6 +3956,7 @@ async fn a_new_gallery_folder_applies_to_the_next_run() {
 #[tokio::test]
 async fn set_prefs_changes_only_what_it_is_sent_and_checks_it() {
     let h = harness().await;
+    h.spending_guards_on().await;
     let video = h.video_req_estimated(0.96);
     assert_eq!(
         h.manager.estimate(&video).await.unwrap().reasons,
@@ -4046,6 +4067,8 @@ struct FakeLocal {
     cancels: AtomicUsize,
     /// The options of each device listing asked for.
     listings: Mutex<Vec<LocalJobOptions>>,
+    /// Controls every installed model offers besides its own.
+    offered: Mutex<Vec<agent::media::ParamSpec>>,
 }
 
 /// An installed model's row for a catalog `entry`.
@@ -4065,6 +4088,7 @@ fn installed_row(entry: &GenEntry) -> store::GenModel {
             .as_str()
             .unwrap()
             .to_owned(),
+        recipe_id: Some(entry.recipe.clone()),
         parts: json!([]),
         size_bytes: entry.total_bytes(),
         source: store::GenSource::Catalog,
@@ -4095,7 +4119,13 @@ impl FakeLocal {
             releases: AtomicUsize::new(0),
             cancels: AtomicUsize::new(0),
             listings: Mutex::new(Vec::new()),
+            offered: Mutex::new(Vec::new()),
         }
+    }
+
+    /// Every installed model offers `spec` too.
+    fn offer(&self, spec: agent::media::ParamSpec) {
+        self.offered.lock().unwrap().push(spec);
     }
 
     fn starts(&self) -> usize {
@@ -4170,7 +4200,8 @@ impl MediaProvider for FakeLocal {
             .unwrap()
             .iter()
             .map(|(row, entry)| {
-                let params = LocalMediaProvider::params_for(entry);
+                let mut params = LocalMediaProvider::params_for(entry);
+                params.extend(self.offered.lock().unwrap().iter().cloned());
                 MediaModel {
                     id: row.id.clone(),
                     display_name: entry.name.clone(),
@@ -4341,7 +4372,7 @@ impl LocalProvider for FakeLocal {
             body: json!({
                 "prompt": req.prompt,
                 "processorOnly": opts.processor_only,
-                "memorySaving": opts.memory_saving,
+                "memory": format!("{:?}", opts.memory),
                 "device": opts.device_description,
                 "listedFor": listed_for,
             }),
@@ -4642,7 +4673,7 @@ impl LocalHardware for FixedHardware {
         self.target.lock().unwrap().clone()
     }
 
-    /// Never read by the local lane (only Get local models' header shows it).
+    /// Never read by the local lane (only Get models' header shows it).
     async fn device_total_bytes(&self) -> Option<u64> {
         None
     }
@@ -4688,6 +4719,18 @@ impl H {
 
     async fn set_prefs(&self, value: Value) {
         self.manager.set_prefs(patch(value)).await.unwrap();
+    }
+
+    /// Turns on every spending switch at the amounts Settings suggests (a new install has them
+    /// all off).
+    async fn spending_guards_on(&self) {
+        self.set_prefs(json!({
+            "confirmEveryVideo": true,
+            "confirmAtUsd": 1.0,
+            "confirmUnknownPrice": true,
+            "dailyLimitUsd": 10.0,
+        }))
+        .await;
     }
 
     /// The local part of each `running` event of run `id`.
@@ -4977,7 +5020,8 @@ async fn the_grant_and_the_fit_reach_the_engine_job() {
     assert!(h.running_cards(&run.id).iter().any(|l| l.on_processor));
     assert_eq!(done.local.unwrap().device.as_deref(), Some("Processor"));
 
-    // One part at a time beside the chat model: memory saving (Automatic), the card's device.
+    // One part at a time beside the chat model: the card's device, and memory saving as
+    // the request has it (Automatic): the fit decides nothing (`local::memory_flags`).
     h.set_prefs(json!({"gpuPolicy": "unload"})).await;
     h.hardware.set_gpu(6, 32);
     h.hardware.set_chat(Some(5));
@@ -4988,7 +5032,7 @@ async fn the_grant_and_the_fit_reach_the_engine_job() {
         .unwrap();
     h.wait_status(&run.id, "done").await;
     let opts = h.local.last_options();
-    assert!(opts.memory_saving);
+    assert_eq!(opts.memory, MemoryChoice::Automatic);
     assert!(!opts.processor_only);
     assert_eq!(opts.threads, None);
     assert_eq!(opts.device_description.as_deref(), Some(RX_7600));
@@ -4998,14 +5042,16 @@ async fn the_grant_and_the_fit_reach_the_engine_job() {
         "{cards:?}"
     );
 
-    // Memory saving off in the request wins, whatever the fit.
-    let mut req = h.local_req_for(ZIMAGE, "x");
-    req.params.insert("memory_saving".into(), json!("off"));
-    let run = h.manager.start(req, false).await.unwrap();
-    h.wait_status(&run.id, "done").await;
-    assert!(!h.local.last_options().memory_saving);
+    // Memory saving in the request goes as it is, whatever the fit.
+    for (word, choice) in [("off", MemoryChoice::Off), ("on", MemoryChoice::On)] {
+        let mut req = h.local_req_for(ZIMAGE, "x");
+        req.params.insert("memory_saving".into(), json!(word));
+        let run = h.manager.start(req, false).await.unwrap();
+        h.wait_status(&run.id, "done").await;
+        assert_eq!(h.local.last_options().memory, choice);
+    }
 
-    // After an unload, the fit it runs with is the one after the unload (Green here).
+    // After an unload too.
     h.lease.then(LeaseStep::Grant(Grant::AfterUnload {
         unloaded: Some(CHAT.into()),
     }));
@@ -5016,7 +5062,7 @@ async fn the_grant_and_the_fit_reach_the_engine_job() {
         .await
         .unwrap();
     h.wait_status(&run.id, "done").await;
-    assert!(!h.local.last_options().memory_saving);
+    assert_eq!(h.local.last_options().memory, MemoryChoice::Automatic);
 }
 
 /// "See the exact command" for a run on this computer has the engine list its devices first,
@@ -5031,6 +5077,7 @@ async fn a_local_preview_lists_the_engines_devices_before_it_shows_the_command()
         .await
         .unwrap();
     assert_eq!(preview.body["device"], json!(RX_7600));
+    assert_eq!(preview.body["memory"], json!("Automatic"));
     // Listed before the command was built, for the device the command names.
     assert_eq!(preview.body["listedFor"], json!(RX_7600));
     let listings = h.local.listings.lock().unwrap().clone();
@@ -5038,7 +5085,7 @@ async fn a_local_preview_lists_the_engines_devices_before_it_shows_the_command()
         listings,
         [LocalJobOptions {
             processor_only: false,
-            memory_saving: preview.body["memorySaving"].as_bool().unwrap(),
+            memory: MemoryChoice::Automatic,
             threads: None,
             device_description: Some(RX_7600.into()),
         }]
@@ -5057,6 +5104,7 @@ fn a_processor_sent_with_a_local_video_is_ignored() {
         available_bytes: 0,
         memory_saving: false,
         processor_only: false,
+        video_on_processor: false,
         not_for: None,
         suggestion: None,
     };
@@ -5166,33 +5214,64 @@ async fn the_chat_model_reloads_once_when_the_queue_empties() {
     assert_eq!(h.lease.reloads(), [CHAT]);
 }
 
+/// Design 9.2: a model that may not fit is a warning, never a refusal. Klein fits nowhere
+/// here (not beside the 5 GB chat model on a card with 1 GB free, not after its unload, not on
+/// the processor with 1 GB of memory): the run is recorded and asks the lease, which unloads
+/// the chat model (`GpuLease`'s own rule), and the engine starts.
 #[tokio::test]
-async fn a_job_that_does_not_fit_even_after_an_unload_is_refused() {
+async fn a_model_that_does_not_fit_still_runs() {
     let h = harness_with_local().await;
-    h.hardware.set_cpu(16);
-    let err = h
+    h.hardware.set_gpu(0, 1);
+    h.hardware.set_chat(Some(1));
+    let e = h.manager.estimate(&h.local_req("a red fox")).await.unwrap();
+    let local = e.local.unwrap();
+    assert_eq!(local.fit, "notHere");
+    assert!(local.reason.is_some());
+    h.lease.then(LeaseStep::Grant(Grant::AfterUnload {
+        unloaded: Some(CHAT.into()),
+    }));
+    let run = h
         .manager
-        .start(h.local_video_req(), false)
+        .start(h.local_req("a red fox"), false)
         .await
-        .unwrap_err();
-    assert_eq!(err.code, "studio_does_not_fit");
-    assert_eq!(err.message, "This model does not fit this computer.");
-    assert_eq!(err.next_step, "Choose a smaller size or a cloud model.");
-    assert!(h.store_runs().await.is_empty());
-    assert!(h.audit_rows().await.is_empty());
-    assert_eq!(h.local.starts(), 0);
-
-    // The lease's own refusal ends the run the same way, never charged.
-    h.hardware.set_gpu(8, 32);
-    h.lease.then(LeaseStep::Refuse(Refused::DoesNotFit));
-    let run = h.manager.start(h.local_req("x"), false).await.unwrap();
-    let failed = h.wait_status(&run.id, "failed").await;
-    let error = failed.error.unwrap();
-    assert_eq!(
-        (error.code.as_str(), error.charged),
-        ("studio_does_not_fit", Some(false))
+        .unwrap();
+    let done = h.wait_status(&run.id, "done").await;
+    // The engine started: no does-not-fit ending.
+    assert_eq!(h.local.starts(), 1);
+    let need = h.lease.needs()[0];
+    assert!(
+        !need.alongside && !need.after_unload && !need.processor_ok,
+        "{need:?}"
     );
-    assert_eq!(h.local.starts(), 0);
+    assert!(done.error.is_none());
+    assert!(
+        h.running_cards(&run.id)
+            .iter()
+            .any(|l| l.unloaded_chat.as_deref() == Some(CHAT)),
+        "the card names the unloaded chat model"
+    );
+}
+
+/// A video on a computer that runs models on the processor is judged by memory and runs
+/// there, on the processor; one too big for its memory still runs.
+#[tokio::test]
+async fn a_video_on_a_processor_only_computer_runs_on_the_processor() {
+    let h = harness_with_local().await;
+    h.hardware.set_cpu(64);
+    let e = h.manager.estimate(&h.local_video_req()).await.unwrap();
+    assert_eq!(e.local.unwrap().fit, "slow");
+    let run = h.manager.start(h.local_video_req(), false).await.unwrap();
+    let done = h.wait_status(&run.id, "done").await;
+    let opts = h.local.last_options();
+    assert!(opts.processor_only && opts.threads.is_some());
+    assert_eq!(done.local.unwrap().device.as_deref(), Some("Processor"));
+    // Too big for the computer's memory: it may not fit, and it runs all the same.
+    h.hardware.set_cpu(2);
+    let e = h.manager.estimate(&h.local_video_req()).await.unwrap();
+    assert_eq!(e.local.unwrap().fit, "notHere");
+    let run = h.manager.start(h.local_video_req(), false).await.unwrap();
+    h.wait_status(&run.id, "done").await;
+    assert_eq!(h.local.starts(), 2);
 }
 
 #[tokio::test]
@@ -5312,34 +5391,224 @@ async fn studio_wont_make_what_the_check_refuses() {
     assert_eq!(h.local.starts(), 0);
 }
 
+/// A LoRA tag typed into the prompt cannot hide what the engine receives once the tag is
+/// removed (ruling S2-safety): the run is refused before anything is stored or started.
 #[tokio::test]
-async fn a_local_prompt_over_4000_characters_is_refused_before_anything_is_stored() {
+async fn a_lora_tag_cannot_carry_a_refused_prompt_past_the_check() {
     let h = harness_with_local().await;
-    let long = "a".repeat(4_001);
+    for prompt in [
+        "se<lora:xy chil<lora:dren",
+        "se<lora:a:1>xy chi<lora:b:1>ldren",
+        "sexy little <lora:a:1> girl",
+    ] {
+        let err = h
+            .manager
+            .start(h.local_req(prompt), false)
+            .await
+            .unwrap_err();
+        assert_eq!(err.code, "studio_wont_make", "{prompt:?}");
+    }
+    assert!(h.store_runs().await.is_empty());
+    assert_eq!(h.local.starts(), 0);
+}
+
+/// A weight change cannot glue words out of the check's sight (ruling S2-attention-2): the
+/// engine encodes each segment on its own, so the run is refused before anything is stored
+/// or started.
+#[tokio::test]
+async fn a_weight_change_cannot_carry_a_refused_prompt_past_the_check() {
+    let h = harness_with_local().await;
+    for prompt in [
+        "se()xy(children)",
+        "(sexy)chil()dren",
+        "nu[]de(kids)",
+        "(nu)(de)kids",
+        "naked(t()een)",
+        "erotic(tod()dler)",
+        "(nude:1.2)tee()n",
+        "sexy little(:1)(girl)",
+        "n[]ude kids(B",
+        "a ph()oto of nu()de(children) at the beach",
+    ] {
+        let err = h
+            .manager
+            .start(h.local_req(prompt), false)
+            .await
+            .unwrap_err();
+        assert_eq!(err.code, "studio_wont_make", "{prompt:?}");
+    }
+    assert!(h.store_runs().await.is_empty());
+    assert_eq!(h.local.starts(), 0);
+}
+
+/// The length is checked before the prompt check, which reads a prompt of at most
+/// LOCAL_PROMPT_MAX_CHARS characters all four ways (rulings S2-attention-2 and
+/// G3-safety-bound).
+#[tokio::test]
+async fn a_local_prompt_over_the_length_is_refused_before_the_check_reads_it() {
+    let h = harness_with_local().await;
+    // the check would refuse it (as typed), so the code says which came first
+    let long = format!(
+        "erotic photo of minors {}",
+        "a".repeat(runtime::sd::args::LOCAL_PROMPT_MAX_CHARS)
+    );
     let err = h
         .manager
         .start(h.local_req(&long), false)
         .await
         .unwrap_err();
     assert_eq!(err.code, "studio_prompt_too_long_here");
-    assert_eq!(err.next_step, "Shorten it, or choose a cloud model.");
     assert!(h.store_runs().await.is_empty());
-    assert!(
+    assert_eq!(h.local.starts(), 0);
+}
+
+/// Past 0.1.x's 4,000 characters, a phrase split across weights is still read as the engine
+/// encodes it, one segment a word apart from the next (ruling G3-safety-bound): refused
+/// before anything is stored or started, up to the longest local prompt.
+#[tokio::test]
+async fn a_weight_change_past_4000_characters_cannot_carry_a_refused_prompt_past_the_check() {
+    let h = harness_with_local().await;
+    let tail = " se()xy(children)";
+    let longest = runtime::sd::args::LOCAL_PROMPT_MAX_CHARS;
+    for prompt in [
+        format!("{}{tail}", "a ".repeat(2_500)),
+        format!("{}{tail}", "a".repeat(longest - tail.len())),
+    ] {
+        assert!(prompt.chars().count() > 4_000 && prompt.chars().count() <= longest);
+        let err = h
+            .manager
+            .start(h.local_req(&prompt), false)
+            .await
+            .unwrap_err();
+        assert_eq!(err.code, "studio_wont_make");
+    }
+    assert!(h.store_runs().await.is_empty());
+    assert_eq!(h.local.starts(), 0);
+}
+
+/// The engine's weighting syntax cannot hide what the model reads (ruling S2-attention),
+/// nor can a typed image marker (ruling S2-image-markers): the run is refused before
+/// anything is stored or started.
+#[tokio::test]
+async fn the_weighting_syntax_cannot_carry_a_refused_prompt_past_the_check() {
+    let h = harness_with_local().await;
+    for prompt in [
+        "se()xy chil()dren",
+        "(se)(xy) (chil)(dren)",
+        "se<image:x>xy children",
+    ] {
+        let err = h
+            .manager
+            .start(h.local_req(prompt), false)
+            .await
+            .unwrap_err();
+        assert_eq!(err.code, "studio_wont_make", "{prompt:?}");
+    }
+    assert!(h.store_runs().await.is_empty());
+    assert_eq!(h.local.starts(), 0);
+}
+
+/// Ruling U4-needs-setup-create: a local run of an installed model with no engine recipe yet
+/// (*Set it up yourself*) is refused as needing setting up, with Settings → Files as the next
+/// step, never as not installed; a model with no row at all is not installed. Nothing is
+/// stored or started either way.
+#[tokio::test]
+async fn a_local_run_of_a_model_that_needs_setting_up_is_never_called_not_installed() {
+    let h = harness_with_local().await;
+    let row = installed_row(&h.local.entry_of(KLEIN).await.unwrap().1);
+    h.store
+        .insert_gen_model(store::NewGenModel {
+            id: "local:0123456789abcdef".into(),
+            catalog_id: None,
+            name: "mystery".into(),
+            kind: row.kind,
+            family: row.family,
+            recipe_id: None,
+            parts: json!([{"role": "model", "file": "/home/me/mystery.safetensors", "size": 4}]),
+            size_bytes: 4,
+            source: store::GenSource::Import,
+        })
+        .await
+        .unwrap();
+    let err = h
+        .manager
+        .start(h.local_req_for("local:0123456789abcdef", "a fox"), false)
+        .await
+        .unwrap_err();
+    assert_eq!(err.code, "studio_setup_incomplete");
+    assert_eq!(err.message, "This model's files need setting up first.");
+    assert_eq!(
+        err.next_step,
+        "Open Settings → Files to choose its type and files."
+    );
+    let gone = h
+        .manager
+        .start(h.local_req_for("local:fedcba9876543210", "a fox"), false)
+        .await
+        .unwrap_err();
+    assert_eq!(gone.code, "studio_local_model_missing");
+    assert!(h.store_runs().await.is_empty());
+    assert_eq!(h.local.starts(), 0);
+}
+
+#[tokio::test]
+async fn a_local_prompt_of_5000_characters_runs() {
+    let h = harness_with_local().await;
+    let run = h
+        .manager
+        .start(h.local_req(&"a".repeat(5_000)), false)
+        .await
+        .unwrap();
+    h.wait_status(&run.id, "done").await;
+    assert_eq!(h.local.starts(), 1);
+}
+
+#[tokio::test]
+async fn a_local_prompt_over_1_mib_is_refused_before_anything_is_stored() {
+    let h = harness_with_local().await;
+    let err = h
+        .manager
+        .start(h.local_req(&"a".repeat(1_048_577)), false)
+        .await
+        .unwrap_err();
+    assert_eq!(
+        (err.message.as_str(), err.next_step.as_str()),
+        ("This prompt is too long.", "Shorten it.")
+    );
+    assert!(h.store_runs().await.is_empty());
+}
+
+/// The local prompt's own hidden bound, for the prompt check (ruling G3-safety-bound): at it
+/// the run goes and the estimate lists nothing; one character more is refused before
+/// anything is stored, in the same words, and the estimate says so.
+#[tokio::test]
+async fn a_local_prompt_over_its_bound_is_refused_in_the_same_words() {
+    let h = harness_with_local().await;
+    let longest = runtime::sd::args::LOCAL_PROMPT_MAX_CHARS;
+    let long = "a".repeat(longest + 1);
+    let err = h
+        .manager
+        .start(h.local_req(&long), false)
+        .await
+        .unwrap_err();
+    assert_eq!(err.code, "studio_prompt_too_long_here");
+    assert_eq!(
+        (err.message.as_str(), err.next_step.as_str()),
+        ("This prompt is too long.", "Shorten it.")
+    );
+    assert!(h.store_runs().await.is_empty());
+    assert_eq!(
         h.manager
             .estimate(&h.local_req(&long))
             .await
             .unwrap()
-            .invalid
-            .contains(&"Keep the prompt under 4,000 characters for local models.".to_string())
+            .invalid,
+        ["This prompt is too long."]
     );
-    assert!(
-        h.manager
-            .estimate(&h.local_req(&"a".repeat(4_000)))
-            .await
-            .unwrap()
-            .invalid
-            .is_empty()
-    );
+    let fits = h.local_req(&"a".repeat(longest));
+    assert!(h.manager.estimate(&fits).await.unwrap().invalid.is_empty());
+    let run = h.manager.start(fits, false).await.unwrap();
+    h.wait_status(&run.id, "done").await;
 }
 
 #[tokio::test]
@@ -5376,15 +5645,20 @@ async fn the_estimate_for_a_local_run_is_a_time_not_a_price() {
         .unwrap();
     assert!(local.very_slow && local.over_15_min, "{local:?}");
 
-    // Not here: very slow (Studio offers a cloud model), but no time, and why.
-    h.hardware.set_cpu(16);
+    // Not here: very slow (Studio offers a cloud model), but no time, and why: a video on a
+    // computer with too little memory for it.
+    h.hardware.set_cpu(2);
     let e = h.manager.estimate(&h.local_video_req()).await.unwrap();
     let local = e.local.unwrap();
     assert_eq!(local.fit, "notHere");
     assert!(local.very_slow && !local.over_15_min);
-    assert_eq!(
-        local.reason.as_deref(),
-        Some("video needs a graphics card or an Apple-silicon Mac")
+    assert!(
+        local
+            .reason
+            .as_deref()
+            .is_some_and(|r| r.starts_with("needs ") && r.ends_with(" GB of free memory")),
+        "{:?}",
+        local.reason
     );
     assert!(e.eta.is_none());
 }
@@ -5486,21 +5760,79 @@ async fn quitting_is_asked_only_while_a_local_job_works() {
 }
 
 #[tokio::test]
-async fn an_update_waits_for_a_local_job() {
+async fn an_update_stops_a_local_job_and_local_runs_still_start_afterwards() {
     let h = harness_with_local().await;
     h.local.hold();
     let run = h.manager.start(h.local_req("x"), false).await.unwrap();
     h.wait_status(&run.id, "running").await;
-    let err = crate::updates::refuse_while_studio_works(Some(&h.manager)).unwrap_err();
-    assert_eq!(err.code, "studio_busy_for_update");
-    assert_eq!(
-        err.next_step,
-        "Stop it in Studio, or install the update when it finishes."
-    );
+    crate::updates::stop_studio_for_update(Some(&h.manager)).await;
+    h.wait_status(&run.id, "cancelled").await;
+    assert!(!h.manager.local_running());
     h.local.release_all();
-    h.wait_status(&run.id, "done").await;
-    assert!(crate::updates::refuse_while_studio_works(Some(&h.manager)).is_ok());
-    assert!(crate::updates::refuse_while_studio_works(None).is_ok());
+    // not quitting: a failed install leaves Studio usable
+    let again = h.manager.start(h.local_req("y"), false).await.unwrap();
+    h.wait_status(&again.id, "done").await;
+    // no Studio: nothing to do
+    crate::updates::stop_studio_for_update(None).await;
+}
+
+/// The update stops a waiting run too, first, so none starts after the one running; the
+/// model they use is free again once they end (S11's *Delete*, S9's set-up and file
+/// removals go by it).
+#[tokio::test]
+async fn an_update_stops_the_waiting_runs_first_and_frees_their_model() {
+    let h = harness_with_local().await;
+    h.local.hold();
+    let running = h.manager.start(h.local_req("x"), false).await.unwrap();
+    h.wait_status(&running.id, "running").await;
+    let waiting = h.manager.start(h.local_req("y"), false).await.unwrap();
+    h.wait_status(&waiting.id, "queued").await;
+    assert!(h.manager.local_uses_model(KLEIN));
+    crate::updates::stop_studio_for_update(Some(&h.manager)).await;
+    h.wait_status(&running.id, "cancelled").await;
+    h.wait_status(&waiting.id, "cancelled").await;
+    assert!(!h.manager.local_running());
+    assert!(!h.manager.local_uses_model(KLEIN));
+    // the one waiting never started
+    assert_eq!(h.local.starts(), 1);
+    h.local.release_all();
+}
+
+/// Ruling G3-no-reload-on-update: with "Reload it after Studio" on, an update stop never starts
+/// the chat-model reload once its stopped runs end (the install and the restart follow, and a
+/// reload would start llama-server under them); only a failed install loads it again. Their
+/// model is free as they end, and Studio can start local runs again.
+#[tokio::test]
+async fn an_update_stop_reloads_the_chat_model_only_once_the_install_fails() {
+    let h = harness_with_local().await;
+    h.set_prefs(json!({"reloadChatAfter": true})).await;
+    h.lease.then(LeaseStep::Grant(Grant::AfterUnload {
+        unloaded: Some(CHAT.into()),
+    }));
+    h.local.hold();
+    let first = h.manager.start(h.local_req("one"), false).await.unwrap();
+    let second = h.manager.start(h.local_req("two"), false).await.unwrap();
+    h.wait_status(&first.id, "running").await;
+    crate::updates::stop_studio_for_update(Some(&h.manager)).await;
+    for id in [&first.id, &second.id] {
+        assert_eq!(h.run_dto(id).await.status, "cancelled");
+    }
+    assert!(!h.manager.local_running());
+    assert!(!h.manager.local_uses_model(KLEIN));
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert!(h.lease.reloads().is_empty(), "{:?}", h.lease.reloads());
+    // The install failed: the chat model is loaded again, once.
+    crate::updates::resume_studio_after_failed_install(Some(&h.manager));
+    eventually("the chat model reloads", || !h.lease.reloads().is_empty()).await;
+    assert_eq!(h.lease.reloads(), [CHAT]);
+    // Studio is usable again, and later runs keep the usual rule.
+    h.local.release_all();
+    let again = h.manager.start(h.local_req("three"), false).await.unwrap();
+    h.wait_status(&again.id, "done").await;
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert_eq!(h.lease.reloads(), [CHAT]);
+    // No Studio: nothing to do.
+    crate::updates::resume_studio_after_failed_install(None);
 }
 
 /// Ruling L16-delete-in-use: *Delete* on a local model is refused while a run on this
@@ -5525,6 +5857,7 @@ async fn a_model_a_local_run_waits_for_or_uses_is_not_deleted() {
                 name: row.name,
                 kind: row.kind,
                 family: row.family,
+                recipe_id: row.recipe_id,
                 parts: json!([{"role": "diffusion", "file": file.display().to_string(), "size": 4}]),
                 size_bytes: 4,
                 source: row.source,
@@ -5591,6 +5924,60 @@ async fn a_model_a_local_run_waits_for_or_uses_is_not_deleted() {
     assert!(!h.manager.local_uses_model(KLEIN));
     assert_eq!(delete(KLEIN).await.unwrap(), [files[0].clone()]);
     assert!(h.store.get_gen_model(KLEIN).await.unwrap().is_none());
+}
+
+/// 0.2.0 (Task S10): a local run holds the LoRAs it attaches (its `loras` value, by id) from
+/// when it is queued until it ends: the engine opens their files, so *Delete* refuses them
+/// meanwhile. A run that attaches none, or another run's LoRA, holds nothing.
+#[tokio::test]
+async fn the_loras_a_local_run_waits_for_or_uses_are_in_use() {
+    let h = harness_with_local().await;
+    let attached = json!([
+        {"id": "local:aa", "weight": 0.8, "highNoise": false},
+        {"id": "hf:o/r:x.safetensors", "weight": 1.0, "highNoise": false},
+    ]);
+    // Until Task S11 offers its own LoRA control, the attached list is one value offered.
+    let entry = h.local.entry_of(KLEIN).await.unwrap().1;
+    let mut loras = LocalMediaProvider::params_for(&entry)[0].clone();
+    loras.key = "loras".into();
+    loras.company_default = None;
+    loras.requires = None;
+    loras.kind = ParamKind::Enum {
+        values: vec![agent::media::Choice {
+            value: attached.clone(),
+            label: "Two LoRAs".into(),
+        }],
+    };
+    h.local.offer(loras);
+    let with_loras = |prompt: &str| {
+        let mut req = h.local_req(prompt);
+        req.params.insert("loras".into(), attached.clone());
+        req
+    };
+
+    h.local.hold();
+    let other = h
+        .manager
+        .start(h.local_req_for(ZIMAGE, "other"), false)
+        .await
+        .unwrap();
+    h.wait_status(&other.id, "running").await;
+    assert!(!h.manager.local_uses_lora("local:aa"));
+    let first = h.manager.start(with_loras("one"), false).await.unwrap();
+    assert_eq!(h.run_dto(&first.id).await.status, "queued");
+    assert!(h.manager.local_uses_lora("local:aa"));
+    assert!(h.manager.local_uses_lora("hf:o/r:x.safetensors"));
+    assert!(!h.manager.local_uses_lora("local:bb"));
+
+    h.local.release_one();
+    h.wait_status(&other.id, "done").await;
+    h.wait_status(&first.id, "running").await;
+    assert!(h.manager.local_uses_lora("local:aa"));
+
+    h.local.release_all();
+    h.wait_status(&first.id, "done").await;
+    assert!(!h.manager.local_uses_lora("local:aa"));
+    assert!(!h.manager.local_uses_lora("hf:o/r:x.safetensors"));
 }
 
 #[tokio::test]

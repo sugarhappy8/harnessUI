@@ -1,0 +1,103 @@
+{
+ "source": {
+  "repo": "QuantStack/FLUX.1-Kontext-dev-GGUF",
+  "revision": "2d083027732f81e5548620b57ac47da22d30aa5a",
+  "path": "flux1-kontext-dev-Q4_K_M.gguf",
+  "size": 6931817760,
+  "sha256": "ebd4e92c44c47f104ad64e4353692f37addf06eb99420c9b459334d871c8b750",
+  "capturedOn": "2026-11-24"
+ },
+ "format": "gguf",
+ "metadata": {
+  "general.architecture": "flux"
+ },
+ "tensors": [
+  [
+   "double_blocks.0.img_attn.norm.key_norm.scale",
+   "f32",
+   [
+    128
+   ]
+  ],
+  [
+   "double_blocks.18.img_attn.norm.key_norm.scale",
+   "f32",
+   [
+    128
+   ]
+  ],
+  [
+   "final_layer.adaLN_modulation.1.bias",
+   "f32",
+   [
+    6144
+   ]
+  ],
+  [
+   "guidance_in.in_layer.bias",
+   "f32",
+   [
+    3072
+   ]
+  ],
+  [
+   "img_in.bias",
+   "f32",
+   [
+    3072
+   ]
+  ],
+  [
+   "img_in.weight",
+   "bf16",
+   [
+    64,
+    3072
+   ]
+  ],
+  [
+   "single_blocks.0.linear1.bias",
+   "f32",
+   [
+    21504
+   ]
+  ],
+  [
+   "single_blocks.37.linear1.bias",
+   "f32",
+   [
+    21504
+   ]
+  ],
+  [
+   "time_in.in_layer.bias",
+   "f32",
+   [
+    3072
+   ]
+  ],
+  [
+   "txt_in.bias",
+   "f32",
+   [
+    3072
+   ]
+  ],
+  [
+   "txt_in.weight",
+   "bf16",
+   [
+    4096,
+    3072
+   ]
+  ],
+  [
+   "vector_in.in_layer.bias",
+   "f32",
+   [
+    3072
+   ]
+  ]
+ ],
+ "parameters": 11901408320
+}

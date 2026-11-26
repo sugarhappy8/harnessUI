@@ -1,8 +1,9 @@
 // Studio's commands and events (0.1.0): one wrapper per command in src-tauri/src/studio/
-// {commands,engine_cmd,local_cmd}.rs, in their order there. Argument names are the Rust
+// {commands,engine_cmd,local_cmd,setup_cmd}.rs, in their order there. Argument names are the Rust
 // parameters' in camelCase, as Tauri reads them. Only the read commands' price and list
 // updates (`studioRefreshModels`, `studioModelPrice`) and Hugging Face (`studioLocalSearch`,
-// `studioLocalRepo`, `studioLocalFit` for a searched file) send anything anywhere.
+// `studioLocalRepo`, `studioSetupPlan` and `studioLocalFit` for a searched file) send
+// anything anywhere.
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import type {
@@ -10,12 +11,21 @@ import type {
   EngineStatus,
   Estimate,
   ImageInput,
+  ImportInspection,
+  ImportMode,
+  ImportProgress,
+  ImportResult,
   LocalFit,
   LocalModels,
   LocalRepo,
   LocalSearchPage,
   LocalSource,
-  MediaKind,
+  Lora,
+  ModelFiles,
+  SearchFilter,
+  SetModelFilesResult,
+  SetupChoice,
+  SetupPlan,
   MediaModel,
   Output,
   RefItem,
@@ -110,26 +120,59 @@ export const studioEngineDownload = (acceptLicense: boolean) =>
 export const studioEngineCancel = () => invoke<void>("studio_engine_cancel");
 export const studioEngineRemove = () => invoke<void>("studio_engine_remove");
 
-// ---- Get local models ---------------------------------------------------------------------
+// ---- Get models ---------------------------------------------------------------------
 
 /** What this computer can run. Sends nothing. */
 export const studioLocalModels = () => invoke<LocalModels>("studio_local_models");
-/** A Hugging Face search, on Search or Enter. */
-export const studioLocalSearch = (text: string, kind: MediaKind) =>
-  invoke<LocalSearchPage>("studio_local_search", { text, kind });
+/** A Hugging Face search for pictures, video or LoRAs, on Search or Enter. */
+export const studioLocalSearch = (text: string, filter: SearchFilter) =>
+  invoke<LocalSearchPage>("studio_local_search", { text, filter });
 /** A searched repository's files at its latest commit, when one result is opened. */
 export const studioLocalRepo = (repo: string) => invoke<LocalRepo>("studio_local_repo", { repo });
+/** A searched file's (or a file on this computer's) set-up with another recipe or files the
+ *  person chose. */
+export const studioSetupPlan = (source: LocalSource, choice: SetupChoice) =>
+  invoke<SetupPlan>("studio_setup_plan", { source, choice });
 /** A fit at a size and, for a clip, a length in seconds (0 for a picture). */
 export const studioLocalFit = (source: LocalSource, width: number, height: number, seconds: number) =>
   invoke<LocalFit>("studio_local_fit", { source, width, height, seconds });
-/** Downloads a model and returns its download group ID. */
-export const studioLocalDownload = (source: LocalSource) =>
-  invoke<string>("studio_local_download", { source });
+/** Downloads a model and returns its download group ID: a searched file with the files its
+ *  set-up plan lists, with the person's `choice` (`null`: the plan as it comes). */
+/** The download's group, or `null` when nothing was to be fetched: every file of the model
+ *  is on this computer (*Repair* on a model added from a file), so it was checked at once. */
+export const studioLocalDownload = (source: LocalSource, choice: SetupChoice | null) =>
+  invoke<string | null>("studio_local_download", { source, choice });
 export const studioLocalDownloadFile = (repo: string, commit: string, file: string) =>
   invoke<string>("studio_local_download_file", { repo, commit, file });
 export const studioLocalDelete = (genModelId: string) => invoke<void>("studio_local_delete", { genModelId });
+/** *Add a model file*, once chosen: what it is, from its header. Sends nothing. */
+export const studioImportInspect = (path: string) => invoke<ImportInspection>("studio_import_inspect", { path });
+/** *Add*: the file copied into the models folder or used where it is, set up as a download is
+ *  with the person's `choice` (`null`: the plan as it comes). */
+export const studioImportModel = (path: string, mode: ImportMode, choice: SetupChoice | null) =>
+  invoke<ImportResult>("studio_import_model", { path, mode, choice });
 /** The note about local models, accepted. */
 export const studioAcceptLocalNotice = () => invoke<StudioPrefs>("studio_accept_local_notice");
+/** *Set it up yourself*: an installed model's files. Sends nothing. */
+export const studioModelFiles = (genModelId: string) => invoke<ModelFiles>("studio_model_files", { genModelId });
+/** *Set it up yourself*: an installed model set up with another recipe or other files, rewritten
+ *  at once or by the download it starts (`downloadGroup`). */
+export const studioSetModelFiles = (genModelId: string, choice: SetupChoice) =>
+  invoke<SetModelFilesResult>("studio_set_model_files", { genModelId, choice });
+
+// ---- LoRAs --------------------------------------------------------------------------------
+
+/** The LoRAs, newest first. Sends nothing. */
+export const studioLoras = () => invoke<Lora[]>("studio_loras");
+/** Downloads a searched repository's LoRA file and returns its download group ID; the LoRA is
+ *  added once its file is checked (`DownloadGroup.loraId`). */
+export const studioLoraDownload = (repo: string, commit: string, file: string) =>
+  invoke<string>("studio_lora_download", { repo, commit, file });
+/** *Add a LoRA file*: the file copied into Studio's LoRA folder, with progress
+ *  (`onImportProgress`). The same file added again gives the same LoRA. */
+export const studioLoraImport = (path: string) => invoke<Lora>("studio_lora_import", { path });
+/** Deletes a LoRA and its file, unless a run on this computer uses it. */
+export const studioLoraDelete = (id: string) => invoke<void>("studio_lora_delete", { id });
 
 // ---- events -------------------------------------------------------------------------------
 
@@ -140,6 +183,10 @@ export function onStudioProgress(handler: (run: Run) => void): Promise<UnlistenF
 /** The Windows engine pack's download, at most every 300 ms, then once finished. */
 export function onEngineProgress(handler: (p: EngineProgress) => void): Promise<UnlistenFn> {
   return listen<EngineProgress>("studio-engine-progress", (e) => handler(e.payload));
+}
+/** A model file's import, at most every 250 ms while it is read or copied, then once finished. */
+export function onImportProgress(handler: (p: ImportProgress) => void): Promise<UnlistenFn> {
+  return listen<ImportProgress>("studio-import-progress", (e) => handler(e.payload));
 }
 /** Files dropped on the window (Tauri's native drop): how many, and where, in CSS pixels from
  *  the webview's top left corner. */

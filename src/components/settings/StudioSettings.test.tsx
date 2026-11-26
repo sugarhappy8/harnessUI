@@ -7,7 +7,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { LOCAL } from "../studio/fixtures/models";
 import type { EngineProgress, EngineStatus, LocalModels, StudioEndpoint, StudioPrefs, Usage } from "../studio/types";
-import { amountGb } from "../../lib/words";
+import { formatBytes } from "../../lib/format";
 
 vi.mock("../../lib/ipc", () => ({ isTauri: () => true }));
 vi.mock("../studio/api");
@@ -23,7 +23,10 @@ const INITIAL = useStudio.getState();
 const PREFS: StudioPrefs = {
   lastModel: {},
   advancedOpen: false,
+  settingsOpen: false,
+  prefsVersion: 1,
   confirmEveryVideo: true,
+  confirmUnknownPrice: false,
   confirmAtUsd: 1,
   dailyLimitUsd: 10,
   setups: [],
@@ -32,6 +35,7 @@ const PREFS: StudioPrefs = {
   reloadChatAfter: false,
   suggestionDismissed: false,
   localNoticeAcceptedAt: null,
+  lastImportMode: null,
 };
 
 const USAGE: Usage = {
@@ -56,7 +60,7 @@ const OPENROUTER: StudioEndpoint = {
   models: [],
 };
 
-/** The Windows engine pack: 29 MB to download. */
+/** The Windows engine pack: 30 MB to download. */
 const PACK = 30_303_000;
 
 function engine(patch: Partial<EngineStatus>): EngineStatus {
@@ -128,7 +132,7 @@ afterEach(() => cleanup());
 describe("Settings → Studio", () => {
   it("says how much Studio holds and where", async () => {
     await show();
-    screen.getByText("Studio uses 1.2 GB in ~/harnessUI/studio (312 pictures, 14 videos)");
+    screen.getByText("Studio uses 1.3 GB in ~/harnessUI/studio (312 pictures, 14 videos)");
     vi.mocked(api.studioOpenFolder).mockResolvedValue(undefined);
     await click(button("Open folder"));
     expect(api.studioOpenFolder).toHaveBeenCalledTimes(1);
@@ -154,8 +158,8 @@ describe("Settings → Studio", () => {
     const headings = screen.getAllByRole("heading").map((h) => h.textContent);
     expect(headings.indexOf("On this computer")).toBeGreaterThanOrEqual(0);
     expect(headings.indexOf("On this computer")).toBeLessThan(headings.indexOf("Cloud spending"));
-    screen.getByText(`Picture and video models: ${LOCAL.installed.length} (${amountGb(LOCAL.installedBytes)})`);
-    button("Get local models");
+    screen.getByText(`Picture and video models: ${LOCAL.installed.length} (${formatBytes(LOCAL.installedBytes)})`);
+    button("Get models");
     screen.getByText("Studio engine: built in"); // LOCAL.engine.state "builtIn" (a Mac)
     expect(screen.queryByRole("button", { name: "Remove" })).toBeNull();
     const unload = screen.getByRole("radio", { name: "Unload the chat model" }) as HTMLInputElement;
@@ -170,13 +174,13 @@ describe("Settings → Studio", () => {
     expect(api.studioSetPrefs).toHaveBeenLastCalledWith({ reloadChatAfter: true });
   });
 
-  it("Get local models opens Studio's own view", async () => {
+  it("Get models opens Studio's own view", async () => {
     await show();
     const opened: unknown[] = [];
     const onOpen = (e: Event) => opened.push((e as CustomEvent<unknown>).detail);
     window.addEventListener("app:open-studio", onOpen);
     try {
-      await click(button("Get local models"));
+      await click(button("Get models"));
     } finally {
       window.removeEventListener("app:open-studio", onOpen);
     }
@@ -198,7 +202,7 @@ describe("Settings → Studio", () => {
   it("with no local model yet the line says so", async () => {
     await show({ ...LOCAL, installed: [], installedBytes: 0 });
     screen.getByText("Picture and video models: none yet");
-    button("Get local models");
+    button("Get models");
   });
 
   it("removing the Windows engine asks first, then reads the engine again", async () => {
@@ -217,7 +221,7 @@ describe("Settings → Studio", () => {
     expect(api.studioEngineStatus).toHaveBeenCalledTimes(1);
     expect(useStudio.getState().local?.engine.state).toBe("notInstalled");
     // A model is still installed, so the engine is offered again.
-    button("Download the Studio engine (29 MB, MIT)");
+    button("Download the Studio engine (30 MB, MIT)");
   });
 
   it("a refused removal says why, and the engine is read again", async () => {
@@ -248,7 +252,7 @@ describe("Settings → Studio", () => {
   it("a missing engine on Windows offers its download, and shows how it goes", async () => {
     await show(withEngine({ state: "notInstalled" }));
     screen.getByText("Studio engine: missing");
-    const download = button("Download the Studio engine (29 MB, MIT)");
+    const download = button("Download the Studio engine (30 MB, MIT)");
     expect(download.getAttribute("title")).toBe(LOCAL.engine.licenseName);
     vi.mocked(api.studioEngineDownload).mockResolvedValue(undefined);
     vi.mocked(api.studioEngineStatus).mockResolvedValue(engine({ state: "downloading", bytesDone: 0 }));
@@ -258,7 +262,7 @@ describe("Settings → Studio", () => {
     screen.getByText("Studio engine: downloading…");
     expect(screen.queryByRole("button", { name: /Download the Studio engine/ })).toBeNull();
     await act(async () => progress?.({ done: 12 * 1024 * 1024, total: PACK, unpacking: false, finished: false, error: null }));
-    screen.getByText("Studio engine: downloading · 12 MB of 29 MB");
+    screen.getByText("Studio engine: downloading · 13 MB of 30 MB");
     await act(async () => progress?.({ done: PACK, total: PACK, unpacking: true, finished: false, error: null }));
     screen.getByText("Studio engine: unpacking…");
     vi.mocked(api.studioEngineStatus).mockResolvedValue(engine({ state: "installed" }));
@@ -270,10 +274,10 @@ describe("Settings → Studio", () => {
   it("a partly downloaded engine is offered again; with no model it comes with the first one", async () => {
     await show(withEngine({ state: "partial" }));
     screen.getByText("Studio engine: partly downloaded");
-    button("Download the Studio engine (29 MB, MIT)");
+    button("Download the Studio engine (30 MB, MIT)");
     cleanup();
     await show(withEngine({ state: "notInstalled" }, { installed: [], installedBytes: 0 }));
-    const line = screen.getByText("Studio engine: comes with your first model (29 MB, MIT)");
+    const line = screen.getByText("Studio engine: comes with your first model (30 MB, MIT)");
     expect(line.getAttribute("title")).toBe(LOCAL.engine.licenseName);
     expect(screen.queryByRole("button", { name: /Download the Studio engine/ })).toBeNull();
   });
@@ -287,7 +291,7 @@ describe("Settings → Studio", () => {
       details: "",
     });
     vi.mocked(api.studioEngineStatus).mockResolvedValue(engine({ state: "notInstalled" }));
-    await click(button("Download the Studio engine (29 MB, MIT)"));
+    await click(button("Download the Studio engine (30 MB, MIT)"));
     await flush();
     screen.getByText("The Studio engine could not be downloaded.");
     // It never started, so no `finished` event comes: the engine is read again.
@@ -310,18 +314,17 @@ describe("Settings → Studio", () => {
     expect(api.studioEngineStatus).toHaveBeenCalledTimes(1);
   });
 
-  it("the daily limit is on at $10 and can be changed or turned off", async () => {
+  it("the daily limit, when on at $10, can be changed or turned off", async () => {
     await show();
-    const on = screen.getByRole("checkbox", { name: "Daily limit" }) as HTMLInputElement;
-    expect(on.checked).toBe(true);
+    expect(screen.getByRole("switch", { name: "Daily limit" }).getAttribute("aria-checked")).toBe("true");
     expect((screen.getByLabelText("Daily limit in US dollars") as HTMLInputElement).value).toBe("10");
     await setAmount("Daily limit in US dollars", "20");
     expect(api.studioSetPrefs).toHaveBeenLastCalledWith({ dailyLimitUsd: 20 });
-    await click(screen.getByRole("checkbox", { name: "Daily limit" }));
+    await click(screen.getByRole("switch", { name: "Daily limit" }));
     expect(api.studioSetPrefs).toHaveBeenLastCalledWith({ dailyLimitUsd: null });
-    expect((screen.getByLabelText("Daily limit in US dollars") as HTMLInputElement).disabled).toBe(true);
+    expect(screen.queryByLabelText("Daily limit in US dollars")).toBeNull();
     // Turned on again at the amount it had.
-    await click(screen.getByRole("checkbox", { name: "Daily limit" }));
+    await click(screen.getByRole("switch", { name: "Daily limit" }));
     expect(api.studioSetPrefs).toHaveBeenLastCalledWith({ dailyLimitUsd: 20 });
     vi.mocked(api.studioSetPrefs).mockClear();
     await setAmount("Daily limit in US dollars", "0.5");
@@ -351,9 +354,9 @@ describe("Settings → Studio", () => {
     screen.getByText("Choose an amount from $1 to $1,000.");
     expect(api.studioSetPrefs).not.toHaveBeenCalled();
     // The confirmation amount reads them too.
-    await setAmount("Ask before runs of", "$1,00");
+    await setAmount("Ask before runs of this many US dollars or more", "$1,00");
     screen.getByText("Choose an amount from $0.25 to $100.");
-    await setAmount("Ask before runs of", "$2.50");
+    await setAmount("Ask before runs of this many US dollars or more", "$2.50");
     expect(api.studioSetPrefs).toHaveBeenLastCalledWith({ confirmAtUsd: 2.5 });
   });
 
@@ -370,9 +373,9 @@ describe("Settings → Studio", () => {
     screen.getByText("Studio's preferences could not be saved.");
     // The box shows the saved amount, and turned off and on again the limit is that amount.
     expect((screen.getByLabelText("Daily limit in US dollars") as HTMLInputElement).value).toBe("10");
-    await click(screen.getByRole("checkbox", { name: "Daily limit" }));
+    await click(screen.getByRole("switch", { name: "Daily limit" }));
     expect(api.studioSetPrefs).toHaveBeenLastCalledWith({ dailyLimitUsd: null });
-    await click(screen.getByRole("checkbox", { name: "Daily limit" }));
+    await click(screen.getByRole("switch", { name: "Daily limit" }));
     expect(api.studioSetPrefs).toHaveBeenLastCalledWith({ dailyLimitUsd: 10 });
   });
 
@@ -395,32 +398,62 @@ describe("Settings → Studio", () => {
       fireEvent.change(box, { target: { value: "20" } });
       fireEvent.blur(box);
     });
-    await click(screen.getByRole("checkbox", { name: "Daily limit" }));
+    await click(screen.getByRole("switch", { name: "Daily limit" }));
     expect(vi.mocked(api.studioSetPrefs).mock.calls).toEqual([[{ dailyLimitUsd: 20 }], [{ dailyLimitUsd: null }]]);
     await act(async () => {
       for (const answer of answers.splice(0)) answer();
     });
     await flush();
     expect(useStudio.getState().prefs?.dailyLimitUsd).toBeNull();
-    await click(screen.getByRole("checkbox", { name: "Daily limit" }));
+    await click(screen.getByRole("switch", { name: "Daily limit" }));
     expect(api.studioSetPrefs).toHaveBeenLastCalledWith({ dailyLimitUsd: 20 });
+  });
+
+  it("the four spending switches are off by default and turning one on shows its amount", async () => {
+    held = { ...PREFS, confirmEveryVideo: false, confirmAtUsd: null, confirmUnknownPrice: false, dailyLimitUsd: null };
+    await show();
+    const names = ["Daily limit", "Ask before every video", "Ask before runs of a set amount or more", "Ask when the price is unknown"];
+    const note = "Each is off until you turn it on. Prices are always shown before a cloud run.";
+    screen.getByText(note);
+    expect(screen.queryByText(/These are all off/)).toBeNull();
+    for (const name of names) expect(screen.getByRole("switch", { name }).getAttribute("aria-checked")).toBe("false");
+    expect(screen.queryByLabelText("Daily limit in US dollars")).toBeNull();
+    expect(screen.queryByLabelText("Ask before runs of this many US dollars or more")).toBeNull();
+    // The amounts are filled in when a switch is turned on.
+    await click(screen.getByRole("switch", { name: "Daily limit" }));
+    expect(api.studioSetPrefs).toHaveBeenLastCalledWith({ dailyLimitUsd: 10 });
+    expect((screen.getByLabelText("Daily limit in US dollars") as HTMLInputElement).value).toBe("10");
+    await click(screen.getByRole("switch", { name: "Ask before runs of a set amount or more" }));
+    expect(api.studioSetPrefs).toHaveBeenLastCalledWith({ confirmAtUsd: 1 });
+    expect((screen.getByLabelText("Ask before runs of this many US dollars or more") as HTMLInputElement).value).toBe("1");
+    // The two plain switches have no amount.
+    await click(screen.getByRole("switch", { name: "Ask before every video" }));
+    expect(api.studioSetPrefs).toHaveBeenLastCalledWith({ confirmEveryVideo: true });
+    await click(screen.getByRole("switch", { name: "Ask when the price is unknown" }));
+    expect(api.studioSetPrefs).toHaveBeenLastCalledWith({ confirmUnknownPrice: true });
+    // The note stays true with switches on.
+    screen.getByText(note);
+    // Turned off again, the amount goes and the backend is told with null.
+    await click(screen.getByRole("switch", { name: "Ask before runs of a set amount or more" }));
+    expect(api.studioSetPrefs).toHaveBeenLastCalledWith({ confirmAtUsd: null });
+    expect(screen.queryByLabelText("Ask before runs of this many US dollars or more")).toBeNull();
   });
 
   it("the confirmation choices can be changed", async () => {
     await show();
-    const video = screen.getByRole("checkbox", { name: "Ask before every video" }) as HTMLInputElement;
-    expect(video.checked).toBe(true);
+    const video = screen.getByRole("switch", { name: "Ask before every video" });
+    expect(video.getAttribute("aria-checked")).toBe("true");
     await click(video);
     expect(api.studioSetPrefs).toHaveBeenLastCalledWith({ confirmEveryVideo: false });
-    expect((screen.getByLabelText("Ask before runs of") as HTMLInputElement).value).toBe("1");
-    await setAmount("Ask before runs of", "2.5");
+    expect((screen.getByLabelText("Ask before runs of this many US dollars or more") as HTMLInputElement).value).toBe("1");
+    await setAmount("Ask before runs of this many US dollars or more", "2.5");
     expect(api.studioSetPrefs).toHaveBeenLastCalledWith({ confirmAtUsd: 2.5 });
     vi.mocked(api.studioSetPrefs).mockClear();
-    await setAmount("Ask before runs of", "0.1");
+    await setAmount("Ask before runs of this many US dollars or more", "0.1");
     screen.getByText("Choose an amount from $0.25 to $100.");
     expect(api.studioSetPrefs).not.toHaveBeenCalled();
     // Enter keeps it too.
-    const box = screen.getByLabelText("Ask before runs of");
+    const box = screen.getByLabelText("Ask before runs of this many US dollars or more");
     await act(async () => {
       fireEvent.change(box, { target: { value: "5" } });
       fireEvent.keyDown(box, { key: "Enter" });
@@ -436,11 +469,11 @@ describe("Settings → Studio", () => {
       nextStep: "",
       details: "",
     });
-    await click(screen.getByRole("checkbox", { name: "Ask before every video" }));
+    await click(screen.getByRole("switch", { name: "Ask before every video" }));
     await flush();
     screen.getByRole("alert");
     // The box still shows what is saved.
-    expect((screen.getByRole("checkbox", { name: "Ask before every video" }) as HTMLInputElement).checked).toBe(true);
+    expect(screen.getByRole("switch", { name: "Ask before every video" }).getAttribute("aria-checked")).toBe("true");
   });
 
   it("Delete stopped and failed runs asks first", async () => {

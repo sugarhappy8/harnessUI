@@ -1866,9 +1866,19 @@ async fn choosing_another_port() {
     );
     assert_eq!(sharing.status(&env).await.port, Some(free));
     assert!(port_open(free).await);
-    // A free one moves the proxy there.
+    // A free one moves the proxy there. Asked over a few tries, as the app takes a kept port
+    // back: a child another test is starting may hold a copy of `taken` for a moment.
     drop(taken);
-    let moved = sharing.set_port(&env, taken_port).await.unwrap();
+    let mut tries = 1;
+    let moved = loop {
+        match sharing.set_port(&env, taken_port).await {
+            Err(e) if e.code == "share_port_taken" && tries < KEPT_PORT_TRIES => {
+                tries += 1;
+                tokio::time::sleep(KEPT_PORT_WAIT).await;
+            }
+            moved => break moved.unwrap(),
+        }
+    };
     assert_eq!(moved.port, Some(taken_port));
     assert!(moved.listening);
     assert!(port_open(taken_port).await);
@@ -1975,20 +1985,44 @@ async fn switching_on_starts_from_zero_even_when_the_kept_port_is_taken() {
     sharing.shutdown().await;
 }
 
+/// Ports only [`a_kept_port_freed_within_the_tries_is_bound`] binds: below every system's
+/// ephemeral range (Linux hands out 32768 and up, macOS and Windows 49152 and up) and
+/// outside [`PORT_RANGE`], so no other test can be handed one by the system or pick one at
+/// random while it is free.
+const PORTS_ONLY_ONE_TEST_BINDS: RangeInclusive<u16> = 23_000..=23_999;
+
 /// A kept port still held a moment after it was let go (sharing switched off and on at
-/// once) is tried again; the holder here lets go just before the last try.
+/// once) is tried again; the holder here lets go between the last two tries.
+///
+/// The holder lets go a whole [`KEPT_PORT_WAIT`] before the last try, not at it: a child
+/// that another test is starting holds a copy of every socket of this process from its
+/// fork until its own program starts, so a port let go at the instant of a try can still
+/// be held then. The port is one no other test can be given meanwhile.
 #[tokio::test]
 async fn a_kept_port_freed_within_the_tries_is_bound() {
-    let held = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let port = held.local_addr().unwrap().port();
+    let mut held = None;
+    for port in PORTS_ONLY_ONE_TEST_BINDS {
+        if let Ok(listener) = TcpListener::bind(("127.0.0.1", port)).await {
+            held = Some((listener, port));
+            break;
+        }
+    }
+    let (held, port) = held.expect("a free port among the ones only this test binds");
     let mut held = Some(held);
     let mut tries = 0;
     let listener = bind_retrying(|| {
         tries += 1;
-        if tries == KEPT_PORT_TRIES {
-            drop(held.take());
+        let let_go = if tries == KEPT_PORT_TRIES - 1 {
+            held.take()
+        } else {
+            None
+        };
+        async move {
+            let bound = proxy::bind(port).await;
+            // After this try failed, so the last try comes a wait after the port was let go.
+            drop(let_go);
+            bound
         }
-        proxy::bind(port)
     })
     .await
     .unwrap();
@@ -2063,8 +2097,10 @@ async fn the_coding_apps_get_the_key_only_while_sharing_listens() {
         key: None,
     };
     assert_eq!(sharing.now(&env).await, off);
-    // On, but the kept port was taken meanwhile: not listening, no key.
-    let taken = TcpListener::bind(("127.0.0.1", port)).await.unwrap();
+    // On, but the kept port was taken meanwhile: not listening, no key. Taken the way the
+    // app takes a kept port back: a child another test is starting may hold a copy of the
+    // proxy's socket for a moment after it was let go.
+    let taken = bind_retrying(|| proxy::bind(port)).await.unwrap();
     assert!(!sharing.set_enabled(&env, true).await.unwrap().listening);
     assert_eq!(
         sharing.now(&env).await,

@@ -15,8 +15,8 @@
 //!   the run).
 //! - **Before the engine starts** ([`LocalProvider::start_local`]): an engine is found (looked
 //!   for again while none is known or the one known is gone, so one a download installs runs
-//!   the next job), every part file is there at the size it was downloaded at, a `.gguf`
-//!   diffusion file's own tensor table is its family's, the prompt fits and the arguments
+//!   the next job), every part file is there at the size it was downloaded at, the model
+//!   file's own header is a model the entry runs, the prompt fits and the arguments
 //!   build. Then one `sd-cli` runs in a task of its own (`runtime::sd::run_job`) with what the
 //!   lane decided ([`LocalJobOptions`]): the processor only, memory saving, and llama.cpp's
 //!   graphics card found among the engine's own devices by its description.
@@ -39,11 +39,16 @@ use agent::media::{
     ParamSpec, Price, RawCatalog, RefRole, RequestPreview, SEED_MAX, Saved, SizeRules, Started,
 };
 use async_trait::async_trait;
-use models::gen_catalog::{FrameRule, GenCatalog, GenEntry, GenInput, GenKind, GenRole, Quirk};
+use models::gen_catalog::{GenCatalog, GenEntry, GenInput, GenKind, GenRole, Quirk};
 use models::gen_fit::{GenSize, SHAPES, at_shape, shape_of};
+use models::sd::matching::MAX_REFERENCES;
+use models::sd::recipes::{FrameRounding, Recipe, recipe};
 use rand::Rng;
 use runtime::sd::args::{
-    ArgsError, OutputFormat, PROMPT_MAX_CHARS, PartRole, Sampler, Scheduler, SdJob, build_args,
+    ArgsError, HighNoise, LOCAL_PROMPT_MAX_CHARS, LORA_WEIGHT_DEFAULT, LORA_WEIGHT_RANGE,
+    LORA_WEIGHT_STEP, LoraTag, MAX_LORAS, NEGATIVE_MAX_CHARS, OutputFormat, PartRole, Sampler,
+    Scheduler, SdJob, VaeFormat, build_args, negative_file_text, prompt_file_text,
+    strip_prompt_markers,
 };
 use runtime::sd::devices::{SdDevice, match_llama_device};
 use runtime::sd::engine::Engine;
@@ -58,6 +63,7 @@ use tokio_util::sync::CancellationToken;
 
 use super::errors;
 use super::local_models::{current_gen_catalog, entry_from_installed};
+use super::loras::{engine_lora_file, lora_folder};
 
 /// What a local run's remote id starts with: `local:<run id>`.
 const REMOTE_PREFIX: &str = "local:";
@@ -72,16 +78,26 @@ const FREE: Cost = Cost {
 };
 
 /// The keys of the controls a local model offers, named as the cloud models name theirs.
-mod key {
+pub(crate) mod key {
     pub const SHAPE: &str = "aspect_ratio";
     pub const COUNT: &str = "n";
     pub const RESOLUTION: &str = "resolution";
     pub const LENGTH: &str = "duration";
     pub const START_FRAME: &str = "first_frame";
+    pub const END_FRAME: &str = "last_frame";
     pub const REFERENCES: &str = "input_references";
+    pub const SOURCE: &str = "source_picture";
+    pub const MASK: &str = "mask_picture";
+    pub const CONTROL: &str = "control_picture";
     pub const SEED: &str = "seed";
     pub const STEPS: &str = "steps";
     pub const GUIDANCE: &str = "cfg_scale";
+    pub const DISTILLED_GUIDANCE: &str = "guidance";
+    pub const IMG_CFG: &str = "img_cfg_scale";
+    pub const HIGH_NOISE_STEPS: &str = "high_noise_steps";
+    pub const HIGH_NOISE_CFG: &str = "high_noise_cfg_scale";
+    /// The LoRAs a run attaches: `[{"id": …, "weight": …, "highNoise": …}]`.
+    pub const LORAS: &str = "loras";
     pub const SAMPLER: &str = "sampler";
     pub const SCHEDULER: &str = "scheduler";
     pub const SIZE: &str = "size";
@@ -102,14 +118,29 @@ const FIRST_SECONDS: u32 = 2;
 /// The most pictures one run makes.
 const MAX_PICTURES: u32 = 4;
 
-/// The most reference pictures a run takes.
-const MAX_REFERENCES: u32 = 4;
-
 /// The most steps offered.
 const MAX_STEPS: u32 = 50;
 
 /// The guidance offered: from 1 to 20, by halves.
 const GUIDANCE_RANGE: (f64, f64, f64) = (1.0, 20.0, 0.5);
+
+/// The distilled guidance offered: from 0.5 to 100, by halves; the recipes' defaults reach 30
+/// (`flux1-canny`, `flux1-fill`).
+const DISTILLED_GUIDANCE_RANGE: (f64, f64, f64) = (0.5, 100.0, 0.5);
+
+/// The picture guidance offered (`--img-cfg-scale`): from 1 to 20, by halves.
+const IMG_CFG_RANGE: (f64, f64, f64) = (1.0, 20.0, 0.5);
+
+/// The high-noise part's steps offered: -1 (Automatic: the engine hands over at the model's
+/// boundary) to 50.
+const HIGH_NOISE_STEPS_RANGE: (i32, i32) = (-1, 50);
+
+/// The engine's high-noise steps when nothing sets them: -1, which hands over at the model's
+/// boundary.
+const AUTOMATIC_HIGH_NOISE_STEPS: i32 = -1;
+
+/// The pictures above this many pixels whose decoder Automatic memory saving tiles.
+const TILED_ABOVE_PIXELS: u64 = 1024 * 1024;
 
 /// The frames a second the pinned engine makes when `--fps` is not given, for a video entry
 /// that states none.
@@ -167,15 +198,35 @@ impl GenCatalogSource for AppGenCatalog {
 /// `engine_cmd::current_engine`).
 pub type DiscoverEngine = Arc<dyn Fn() -> Option<Engine> + Send + Sync>;
 
-/// The `memory_saving` field. The manager resolves Automatic from the fit
-/// (`manager::job_options`).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// Where the models folder is now: the LoRA folder the engine reads (`--lora-model-dir`) is
+/// in it ([`lora_folder`]), wherever the folder was when a LoRA was added.
+#[async_trait]
+pub trait ModelsFolder: Send + Sync {
+    /// The models folder as Settings has it now.
+    async fn models_dir(&self) -> PathBuf;
+}
+
+/// The app's models folder (`hub::models_dir`).
+pub struct AppModelsFolder(pub AppHandle);
+
+#[async_trait]
+impl ModelsFolder for AppModelsFolder {
+    async fn models_dir(&self) -> PathBuf {
+        crate::hub::models_dir(&self.0).await
+    }
+}
+
+/// The `memory_saving` field, which the lane passes to the job as it is ([`memory_flags`]).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum MemoryChoice {
-    /// Memory saving when the run would not fit without it.
+    /// The engine fits the model itself (its auto-fit); the decoder is tiled for a video and
+    /// for a picture above 1024 × 1024.
+    #[default]
     Automatic,
     /// Never.
     Off,
-    /// Always.
+    /// Always: the decoder tiled (where the recipe allows it) and the weights kept in memory
+    /// until needed.
     On,
 }
 
@@ -222,13 +273,43 @@ pub fn runs_on_processor(req: &MediaRequest) -> bool {
 pub struct LocalJobOptions {
     /// Run on the processor (`--backend cpu`).
     pub processor_only: bool,
-    /// Decode in tiles and keep the weights in memory until needed.
-    pub memory_saving: bool,
+    /// The `memory_saving` field, which the job reads with its size ([`memory_flags`]).
+    pub memory: MemoryChoice,
     /// Processor threads, for a run on the processor; `None` lets the engine choose.
     pub threads: Option<u32>,
     /// llama.cpp's probed device, matched to the engine's own `--list-devices` for
     /// `--backend`; `None` lets the engine choose.
     pub device_description: Option<String>,
+}
+
+/// Memory saving's two halves for a run of `recipe` at `width` × `height` (`video`: a clip),
+/// as `memory` chooses them: `(vae_tiling, offload_to_cpu)`.
+/// - On: the decoder tiled where the recipe allows it, and the weights kept in memory until
+///   needed.
+/// - Off: neither.
+/// - Automatic: the decoder tiled for a video or a picture above 1024 × 1024 where the recipe
+///   allows it, and never offloaded: the engine's own auto-fit spreads the weights over the
+///   card, memory and disk (spec correction 4).
+///
+/// The decoder may tile unless the recipe disables `vae_tiling` (the four pixel-space recipes,
+/// correction 5); a model of no known recipe may. The out-of-memory retry
+/// (`runtime::sd::run_job`) turns offloading on, and tiling where allowed.
+pub fn memory_flags(
+    recipe: Option<&Recipe>,
+    width: u32,
+    height: u32,
+    video: bool,
+    memory: MemoryChoice,
+) -> (bool, bool) {
+    let tiling_allowed = recipe.is_none_or(|r| r.feature("vae_tiling"));
+    match memory {
+        MemoryChoice::On => (tiling_allowed, true),
+        MemoryChoice::Off => (false, false),
+        MemoryChoice::Automatic => {
+            let large = u64::from(width) * u64::from(height) > TILED_ABOVE_PIXELS;
+            (tiling_allowed && (video || large), false)
+        }
+    }
 }
 
 /// Where a local run is, from what the engine last told.
@@ -361,12 +442,15 @@ pub struct LocalMediaProvider {
     store: store::Store,
     catalog: Arc<dyn GenCatalogSource>,
     discover: DiscoverEngine,
+    folder: Arc<dyn ModelsFolder>,
     /// The engine last found or set; looked for again while there is none, or when its
     /// program is gone.
     engine: RwLock<Option<Engine>>,
     /// The installed models as last read, which the exact command (that cannot wait for the
     /// store) is built from.
     installed: RwLock<Vec<(store::GenModel, GenEntry)>>,
+    /// The LoRAs and the LoRA folder as last read with them.
+    loras: RwLock<KnownLoras>,
     /// The engine last asked for its devices, and the devices it listed (`None` when it
     /// could not list them).
     devices: DeviceCache,
@@ -441,28 +525,45 @@ impl RunState {
     }
 }
 
-/// A part of an installed model as its row keeps it: the file on disk and its size.
+/// A part of an installed model as its row keeps it: the file on disk, its size, and its
+/// engine name in a diffusers folder.
 #[derive(Deserialize)]
 struct InstalledPart {
     role: GenRole,
     file: PathBuf,
     size: u64,
+    #[serde(default)]
+    folder: Option<String>,
+    /// A file of the person's own (a model added from a file), used where it is.
+    #[serde(default)]
+    local: Option<PathBuf>,
+}
+
+/// The LoRAs as the store has them, and the LoRA folder the engine reads them from (in the
+/// models folder as it is now).
+#[derive(Debug, Clone, Default)]
+struct KnownLoras {
+    rows: Vec<store::GenLora>,
+    dir: PathBuf,
 }
 
 impl LocalMediaProvider {
     /// The provider over the installed models in `store`, with their entries from `catalog`,
-    /// running the engine `discover` finds.
+    /// running the engine `discover` finds, with the LoRAs of the LoRA folder in `folder`.
     pub fn new(
         store: store::Store,
         catalog: Arc<dyn GenCatalogSource>,
         discover: DiscoverEngine,
+        folder: Arc<dyn ModelsFolder>,
     ) -> Self {
         Self {
             store,
             catalog,
             discover,
+            folder,
             engine: RwLock::new(None),
             installed: RwLock::new(Vec::new()),
+            loras: RwLock::new(KnownLoras::default()),
             devices: Arc::new(tokio::sync::Mutex::new(None)),
             runs: Mutex::new(HashMap::new()),
             in_use: EngineUse::default(),
@@ -516,18 +617,43 @@ impl LocalMediaProvider {
             })
             .collect();
         write(&self.installed).clone_from(&installed);
+        self.read_loras().await;
         installed
+    }
+
+    /// The LoRAs as the store has them now, and the LoRA folder in the models folder as it is
+    /// now, kept for the exact command (which cannot wait for them).
+    async fn read_loras(&self) -> KnownLoras {
+        let rows = match self.store.list_gen_loras().await {
+            Ok(rows) => rows,
+            Err(e) => {
+                tracing::warn!("the LoRAs could not be read: {e}");
+                Vec::new()
+            }
+        };
+        let known = KnownLoras {
+            rows,
+            dir: lora_folder(&self.folder.models_dir().await),
+        };
+        write(&self.loras).clone_from(&known);
+        known
     }
 
     /// The controls of `entry`, with the cloud models' `canonical` roles so a value carries
     /// between local and cloud models. In front: Shape; How many (pictures); Resolution and
-    /// Length (video, from 480p and 2 s); the start frame and reference pictures when the
-    /// entry takes them. Under Advanced: the seed, steps, guidance (only when the default is
-    /// above 1, which 4-step models are not), the sampler and scheduler, an exact size, the
-    /// negative prompt (with guidance above 1), Memory saving and Run on (pictures: a clip
-    /// runs on the graphics card only). No Extra fields.
+    /// Length (video, from 480p and 2 s; its frames by the model's rule, [`frames_for`]); the
+    /// pictures it takes, one field per role ([`picture_inputs`]). Under Advanced: the seed,
+    /// steps, guidance (only when the default is above 1, which 4-step models are not), the
+    /// distilled guidance, the picture guidance and the high-noise part's steps and guidance
+    /// when the recipe takes them, the sampler and scheduler (the engine's full lists), an
+    /// exact size (on the model's multiple), the negative prompt (with guidance above 1), the
+    /// LoRAs (when the recipe takes them), Memory saving and Run on (pictures: a clip runs on
+    /// the graphics card only). No Extra fields. A catalog entry keeps its tested defaults and
+    /// limits.
     pub fn params_for(entry: &GenEntry) -> Vec<ParamSpec> {
         let video = entry.kind == GenKind::Video;
+        let recipe = recipe(&entry.recipe);
+        let feature = |name: &str| recipe.is_some_and(|r| r.feature(name));
         let shapes: Vec<String> = SHAPES.into_iter().map(shape_name).collect();
         let mut params = vec![ParamSpec {
             company_default: Some(shape_name(default_shape(entry)).into()),
@@ -579,32 +705,11 @@ impl LocalMediaProvider {
                 )
             });
         }
-        if entry.inputs.contains(&GenInput::StartFrame) {
-            params.push(field(
-                key::START_FRAME,
-                Some(Canonical::StartFrame),
-                "Start frame",
-                Layer::Simple,
-                ParamKind::Images {
-                    min: 0,
-                    max: 1,
-                    role: RefRole::StartFrame,
-                },
-            ));
-        }
-        if entry.inputs.contains(&GenInput::Reference) {
-            params.push(field(
-                key::REFERENCES,
-                Some(Canonical::References),
-                "Reference pictures",
-                Layer::Simple,
-                ParamKind::Images {
-                    min: 0,
-                    max: MAX_REFERENCES,
-                    role: RefRole::Reference,
-                },
-            ));
-        }
+        params.extend(
+            picture_inputs(entry)
+                .into_iter()
+                .map(|(input, min, max)| picture_field(input, min, max)),
+        );
 
         let result = if video { "video" } else { "picture" };
         params.push(ParamSpec {
@@ -634,7 +739,6 @@ impl LocalMediaProvider {
         });
         let guided = entry.defaults.cfg > 1.0;
         if guided {
-            let (min, max, step) = GUIDANCE_RANGE;
             params.push(ParamSpec {
                 company_default: Some(json!(decimal(entry.defaults.cfg))),
                 ..field(
@@ -642,12 +746,71 @@ impl LocalMediaProvider {
                     None,
                     "Guidance",
                     Layer::Advanced,
+                    halves(GUIDANCE_RANGE),
+                )
+            });
+        }
+        if feature("distilled_guidance") {
+            params.push(ParamSpec {
+                company_default: entry.defaults.guidance.map(|g| json!(decimal(g))),
+                help: Some(format!(
+                    "How closely the {result} follows the prompt, for a model that is guided \
+                     this way."
+                )),
+                ..field(
+                    key::DISTILLED_GUIDANCE,
+                    None,
+                    "Distilled guidance",
+                    Layer::Advanced,
+                    halves(DISTILLED_GUIDANCE_RANGE),
+                )
+            });
+        }
+        if feature("img_cfg") {
+            params.push(ParamSpec {
+                company_default: entry.defaults.img_cfg.map(|g| json!(decimal(g))),
+                help: Some("How closely the result keeps to the pictures it is given.".to_owned()),
+                ..field(
+                    key::IMG_CFG,
+                    None,
+                    "Picture guidance",
+                    Layer::Advanced,
+                    halves(IMG_CFG_RANGE),
+                )
+            });
+        }
+        if feature("high_noise") {
+            let high = entry.defaults.high_noise.as_ref();
+            let (min, max) = HIGH_NOISE_STEPS_RANGE;
+            params.push(ParamSpec {
+                company_default: Some(high.map_or(AUTOMATIC_HIGH_NOISE_STEPS, |h| h.steps).into()),
+                help: Some(
+                    "The steps of the high-noise part. −1 is Automatic: it hands over to the \
+                     low-noise part where the model says."
+                        .to_owned(),
+                ),
+                ..field(
+                    key::HIGH_NOISE_STEPS,
+                    None,
+                    "High-noise steps",
+                    Layer::Advanced,
                     ParamKind::Range {
-                        min,
-                        max,
-                        step: Some(step),
+                        min: f64::from(min),
+                        max: f64::from(max),
+                        step: Some(1.0),
                         unit: None,
                     },
+                )
+            });
+            params.push(ParamSpec {
+                company_default: high.map(|h| json!(decimal(h.cfg))),
+                help: Some("The guidance of the high-noise part.".to_owned()),
+                ..field(
+                    key::HIGH_NOISE_CFG,
+                    None,
+                    "High-noise guidance",
+                    Layer::Advanced,
+                    halves(GUIDANCE_RANGE),
                 )
             });
         }
@@ -712,16 +875,32 @@ impl LocalMediaProvider {
                     "Negative prompt",
                     Layer::Advanced,
                     ParamKind::Text {
-                        max_chars: u32::try_from(PROMPT_MAX_CHARS).unwrap_or(u32::MAX),
+                        max_chars: u32::try_from(NEGATIVE_MAX_CHARS).unwrap_or(u32::MAX),
                     },
                 )
             });
         }
+        if feature("lora") {
+            params.push(field(
+                key::LORAS,
+                None,
+                "LoRAs",
+                Layer::Advanced,
+                ParamKind::Loras {
+                    max: u32::try_from(MAX_LORAS).unwrap_or(u32::MAX),
+                    high_noise: feature("high_noise"),
+                    weight_min: decimal(*LORA_WEIGHT_RANGE.start()),
+                    weight_max: decimal(*LORA_WEIGHT_RANGE.end()),
+                    weight_step: decimal(LORA_WEIGHT_STEP),
+                    weight_default: decimal(LORA_WEIGHT_DEFAULT),
+                },
+            ));
+        }
         params.push(ParamSpec {
             company_default: Some(MemoryChoice::Automatic.word().into()),
             help: Some(
-                "Slower, but needs less graphics memory. Automatic uses it when the model would \
-                 not fit otherwise."
+                "Slower, but needs less graphics memory. Automatic lets the Studio engine fit \
+                 the model, and decodes videos and large pictures in parts."
                     .to_owned(),
             ),
             ..field(
@@ -755,18 +934,33 @@ impl LocalMediaProvider {
         params
     }
 
-    /// The engine job for a validated request: Shape → width and height on the entry's
-    /// multiple (an exact size wins), How many → the batch, Length → frames by the family's
-    /// rule ([`frames_for`]), the start frame → the init image, references → reference
-    /// pictures, the entry's flow shift; `opts` → processor only (`cpu`, with its threads),
-    /// memory saving and `backend` (the device the engine names llama.cpp's card by, which
-    /// [`LocalProvider::start_local`] finds); quirks → environment variables. A setting the
-    /// request leaves out is the entry's default; a seed it leaves out is picked here. A value
-    /// the job cannot take is `BadRequest`, never charged.
+    /// The engine job for a validated request, from `entry`'s recipe:
+    /// - each part of `model` with its engine role; a diffusers folder ([`job_parts`]) as one
+    ///   `-m <its folder>`, with only the parts a person put outside it passed by their own
+    ///   flag;
+    /// - Shape → width and height on the entry's multiple (an exact size wins; with a picture
+    ///   to change and neither, its shape at about the default's pixels, [`size_of`]), How
+    ///   many → the batch, Length → frames by the model's rule ([`frames_for`]);
+    /// - the guidance, the distilled guidance, the picture guidance and the high-noise part's
+    ///   steps and guidance from the request over the entry's defaults; the recipe's flow
+    ///   shift, sigmas, shifted timestep, strength, MoE boundary, VAE format and extra model
+    ///   arguments as the recipe gives them;
+    /// - the picture to change (or a clip's start frame) → `-i`, the end frame, the mask, the
+    ///   control picture and the references, each of a role the entry takes; a mask without a
+    ///   picture to change is refused ([`errors::MASK_NEEDS_PICTURE`]);
+    /// - each attached LoRA of `loras` by its name in the LoRA folder `lora_dir`, where the
+    ///   engine looks for its file: one whose row or file is gone is refused
+    ///   ([`errors::lora_missing`]);
+    /// - `opts` → processor only (`cpu`, with its threads), memory saving ([`memory_flags`])
+    ///   and `backend` (the device the engine names llama.cpp's card by, which
+    ///   [`LocalProvider::start_local`] finds); quirks → environment variables.
+    ///
+    /// A setting the request leaves out is the entry's default; a seed it leaves out is picked
+    /// here. A value the job cannot take is `BadRequest`, never charged.
     #[expect(
         clippy::too_many_arguments,
-        reason = "the lane's interface: the run's entry, row, request, options, device, folder \
-                  and name each come from a different step"
+        reason = "the lane's interface: the run's entry, row, request, options, LoRAs, device, \
+                  folder and name each come from a different step"
     )]
     pub fn job_for(
         &self,
@@ -774,20 +968,19 @@ impl LocalMediaProvider {
         model: &store::GenModel,
         req: &MediaRequest,
         opts: &LocalJobOptions,
+        loras: &[store::GenLora],
+        lora_dir: &Path,
         backend: Option<String>,
         out_dir: &Path,
         run_id: &str,
     ) -> Result<SdJob, MediaError> {
-        let parts = installed_parts(model)?
-            .into_iter()
-            .map(|part| (part_role(part.role), part.file))
-            .collect();
+        let parts = job_parts(&installed_parts(model)?);
         let negative = text_param(req, key::NEGATIVE)?
             .filter(|text| !text.trim().is_empty())
             .map(str::to_owned);
         if negative
             .as_ref()
-            .is_some_and(|text| text.chars().count() > PROMPT_MAX_CHARS)
+            .is_some_and(|text| text.chars().count() > NEGATIVE_MAX_CHARS)
         {
             return Err(refused(
                 FailureKind::BadRequest,
@@ -803,18 +996,27 @@ impl LocalMediaProvider {
             None => rand::rng().random_range(0..=SEED_MAX),
         };
         let (width, height) = (shape.size.width, shape.size.height);
-        let (frames, fps) = if entry.kind == GenKind::Video {
+        let video = entry.kind == GenKind::Video;
+        let (frames, fps) = if video {
             (Some(shape.size.frames), Some(fps_of(entry)))
         } else {
             (None, None)
         };
-        let added = |role: RefRole| {
+        let takes = |input: GenInput| entry.inputs.contains(&input);
+        let added = |input: GenInput| {
             req.refs
                 .iter()
-                .filter(move |r| r.role == role)
+                .filter(move |r| takes(input) && r.role == ref_role(input))
                 .map(|r| r.path.clone())
         };
-        let takes = |input: GenInput| entry.inputs.contains(&input);
+        let init_image = added(GenInput::Source)
+            .next()
+            .or_else(|| added(GenInput::StartFrame).next());
+        let mask_image = added(GenInput::Mask).next();
+        if mask_image.is_some() && init_image.is_none() {
+            return Err(refused(FailureKind::BadRequest, errors::MASK_NEEDS_PICTURE));
+        }
+        let (lora_dir, loras) = attached_loras(req, loras, lora_dir)?;
         let format = match entry.kind {
             GenKind::Video
                 if cfg!(target_os = "macos") && entry.quirks.contains(&Quirk::VideoWebpOnMac) =>
@@ -824,43 +1026,51 @@ impl LocalMediaProvider {
             GenKind::Video => OutputFormat::Webm,
             GenKind::Image | GenKind::ImageEdit => OutputFormat::Png,
         };
+        let recipe = recipe(&entry.recipe);
+        let context = recipe.and_then(|r| r.context.as_ref());
+        let (vae_tiling, offload_to_cpu) = memory_flags(recipe, width, height, video, opts.memory);
+        let defaults = &entry.defaults;
+        let decimal_param = |key: &str| number_param(req, key).map(|x| x.map(|x| x as f32));
         Ok(SdJob {
             parts,
             prompt: req.prompt.clone(),
             negative,
             width,
             height,
+            size_multiple: entry.limits.multiple_of,
             steps: shape.steps,
-            cfg: number_param(req, key::GUIDANCE)?.map_or(entry.defaults.cfg, |x| x as f32),
-            flow_shift: entry.defaults.flow_shift,
-            sampler: word_param(req, key::SAMPLER, Sampler::from_cli)?.or_else(|| {
-                entry
-                    .defaults
-                    .sampler
-                    .as_deref()
-                    .and_then(Sampler::from_cli)
-            }),
-            scheduler: word_param(req, key::SCHEDULER, Scheduler::from_cli)?.or_else(|| {
-                entry
-                    .defaults
-                    .scheduler
-                    .as_deref()
-                    .and_then(Scheduler::from_cli)
-            }),
+            cfg: decimal_param(key::GUIDANCE)?.unwrap_or(defaults.cfg),
+            guidance: decimal_param(key::DISTILLED_GUIDANCE)?.or(defaults.guidance),
+            img_cfg: decimal_param(key::IMG_CFG)?.or(defaults.img_cfg),
+            flow_shift: defaults.flow_shift,
+            timestep_shift: defaults.timestep_shift,
+            sampler: word_param(req, key::SAMPLER, Sampler::from_cli)?
+                .or_else(|| defaults.sampler.as_deref().and_then(Sampler::from_cli)),
+            scheduler: word_param(req, key::SCHEDULER, Scheduler::from_cli)?
+                .or_else(|| defaults.scheduler.as_deref().and_then(Scheduler::from_cli)),
+            sigmas: defaults.sigmas.clone(),
+            high_noise: high_noise(entry, req)?,
+            moe_boundary: defaults.moe_boundary,
+            strength: defaults.strength,
             seed,
             batch: shape.pictures,
             frames,
             fps,
-            init_image: takes(GenInput::StartFrame)
-                .then(|| added(RefRole::StartFrame).next())
-                .flatten(),
-            ref_images: if takes(GenInput::Reference) {
-                added(RefRole::Reference).collect()
-            } else {
-                Vec::new()
-            },
+            init_image,
+            end_image: added(GenInput::EndFrame).next(),
+            mask_image,
+            control_image: added(GenInput::Control).next(),
+            ref_images: added(GenInput::Reference).collect(),
+            vae_format: context
+                .and_then(|c| c.vae_format.as_deref())
+                .and_then(VaeFormat::from_cli),
+            model_args: context.and_then(|c| c.model_args.clone()),
+            lora_dir,
+            loras,
             backend,
-            memory_saving: opts.memory_saving,
+            vae_tiling,
+            offload_to_cpu,
+            tiling_allowed: recipe.is_none_or(|r| r.feature("vae_tiling")),
             processor_only: opts.processor_only,
             threads: opts.threads.filter(|_| opts.processor_only),
             out_dir: out_dir.to_path_buf(),
@@ -923,13 +1133,15 @@ impl LocalMediaProvider {
         backend_from(devices.as_deref()?, description)
     }
 
-    /// The command `req` would run, from the installed models as last read: its arguments,
-    /// and its negative prompt.
+    /// The command `req` would run, from the installed models and the LoRAs as last read:
+    /// its arguments, and the prompt and negative prompt as the engine reads them from their
+    /// files (without the image markers and LoRA tags typed into them, with the attached
+    /// LoRAs' tags: `runtime::sd::args::prompt_file_text`).
     fn command(
         &self,
         req: &MediaRequest,
         opts: &LocalJobOptions,
-    ) -> Result<(Vec<String>, Option<String>), MediaError> {
+    ) -> Result<(Vec<String>, String, Option<String>), MediaError> {
         let found = read(&self.installed)
             .iter()
             .find(|(row, _)| row.id == req.model)
@@ -940,13 +1152,24 @@ impl LocalMediaProvider {
         let out_dir = Path::new(PREVIEW_GALLERY)
             .join(".partial")
             .join(PREVIEW_RUN);
-        let job = self.job_for(&entry, &model, req, opts, backend, &out_dir, PREVIEW_RUN)?;
+        let loras = read(&self.loras).clone();
+        let job = self.job_for(
+            &entry,
+            &model,
+            req,
+            opts,
+            &loras.rows,
+            &loras.dir,
+            backend,
+            &out_dir,
+            PREVIEW_RUN,
+        )?;
         let args = build_args(&job).map_err(|e| args_refused(&e))?;
         let args = args
             .into_iter()
             .map(|arg| arg.to_string_lossy().into_owned())
             .collect();
-        Ok((args, job.negative))
+        Ok((args, prompt_file_text(&job), negative_file_text(&job)))
     }
 
     /// Starts `job` in a task of its own, as run `remote_id`.
@@ -1157,11 +1380,8 @@ impl LocalProvider for LocalMediaProvider {
         let engine = self
             .engine()
             .ok_or_else(|| refused(FailureKind::EngineMissing, errors::LOCAL_ENGINE_NOT_FOUND))?;
-        if req.prompt.chars().count() > PROMPT_MAX_CHARS {
-            return Err(refused(
-                FailureKind::BadRequest,
-                errors::LOCAL_PROMPT_TOO_LONG,
-            ));
+        if req.prompt.chars().count() > LOCAL_PROMPT_MAX_CHARS {
+            return Err(refused(FailureKind::BadRequest, errors::PROMPT_TOO_LONG));
         }
         let (model, entry) = self
             .entry_of(&req.model)
@@ -1175,7 +1395,18 @@ impl LocalProvider for LocalMediaProvider {
             Some(description) => self.backend_for(&engine, description).await,
             None => None,
         };
-        let job = self.job_for(&entry, &model, req, opts, backend, scratch, run_id)?;
+        let loras = self.read_loras().await;
+        let job = self.job_for(
+            &entry,
+            &model,
+            req,
+            opts,
+            &loras.rows,
+            &loras.dir,
+            backend,
+            scratch,
+            run_id,
+        )?;
         build_args(&job).map_err(|e| args_refused(&e))?;
         let remote_id = format!("{REMOTE_PREFIX}{run_id}");
         self.spawn_run(engine, job, &remote_id, req.kind)?;
@@ -1200,14 +1431,14 @@ impl LocalProvider for LocalMediaProvider {
 
     fn preview_local(&self, req: &MediaRequest, opts: &LocalJobOptions) -> RequestPreview {
         let body = match self.command(req, opts) {
-            Ok((argv, negative)) => json!({
+            Ok((argv, prompt, negative)) => json!({
                 "argv": argv,
-                "prompt": req.prompt,
+                "prompt": prompt,
                 "negativePrompt": negative,
             }),
             Err(e) => json!({
                 "argv": [],
-                "prompt": req.prompt,
+                "prompt": strip_prompt_markers(&req.prompt),
                 "negativePrompt": Value::Null,
                 "error": e.to_string(),
             }),
@@ -1267,9 +1498,10 @@ pub struct RunShape {
 }
 
 /// The shape of a validated request's engine job, as [`LocalMediaProvider::job_for`] builds
-/// it: Shape (or an exact size) → width and height, Length → frames by the family's rule
-/// ([`frames_for`]), How many → the pictures, Steps; a setting left out is the entry's
-/// default. A value the job cannot take is `BadRequest`, never charged.
+/// it: Shape (or an exact size, or the picture to change, [`size_of`]) → width and height,
+/// Length → frames by the model's rule ([`frames_for`]), How many → the pictures, Steps; a
+/// setting left out is the entry's default. A value the job cannot take is `BadRequest`,
+/// never charged.
 pub fn run_shape(entry: &GenEntry, req: &MediaRequest) -> Result<RunShape, MediaError> {
     let (width, height) = size_of(entry, req)?;
     let (pictures, frames) = if entry.kind == GenKind::Video {
@@ -1293,7 +1525,7 @@ pub fn run_shape(entry: &GenEntry, req: &MediaRequest) -> Result<RunShape, Media
 }
 
 /// The frames of a clip whose Length is left out: the entry's default, else 2 s by its
-/// family's rule.
+/// model's rule.
 pub fn default_frames(entry: &GenEntry) -> u32 {
     entry
         .defaults
@@ -1301,47 +1533,55 @@ pub fn default_frames(entry: &GenEntry) -> u32 {
         .unwrap_or_else(|| frames_for(entry, FIRST_SECONDS))
 }
 
-/// Frames for a clip of `seconds`: seconds × the entry's frames a second, made one more than a
-/// multiple of 4 (or 8) as its family's rule asks (2 s at 24 fps: 49), and never more than
-/// the entry's most (Wan 2.2: 121).
+/// Frames for a clip of `seconds`, by the model's frame rule (`GenLimits::video_rule`, its
+/// recipe's or its catalog frame rule's): seconds × its frames a second, rounded to its step
+/// as the rule says (down or up) with its offset added (`4n + 1`: 2 s at 24 fps is 49), then
+/// kept within its fewest and most frames (Wan 2.2 TI2V-5B: 121). Without a rule (a picture
+/// model), seconds × frames a second, at least 1.
 pub fn frames_for(entry: &GenEntry, seconds: u32) -> u32 {
-    let step = match entry.limits.frame_rule {
-        Some(FrameRule::FourNPlusOne) => 4,
-        Some(FrameRule::EightNPlusOne) => 8,
-        None => 1,
+    let wanted = u64::from(seconds) * u64::from(fps_of(entry));
+    let Some(rule) = entry.limits.video_rule() else {
+        return u32::try_from(wanted.max(1)).unwrap_or(u32::MAX);
     };
-    let on_rule = |frames: u64| {
-        if step == 1 {
-            frames.max(1)
-        } else {
-            frames / step * step + 1
-        }
+    let step = u64::from(rule.frame_step.max(1));
+    let offset = u64::from(rule.frame_offset);
+    let n = match rule.rounding {
+        FrameRounding::Floor => wanted / step,
+        FrameRounding::Ceil => wanted.div_ceil(step),
     };
-    let frames = on_rule(u64::from(seconds) * u64::from(fps_of(entry)));
-    // The largest count on the rule within the entry's most.
-    let most = entry.limits.max_frames.map_or(u64::MAX, |most| {
-        let most = u64::from(most).max(1);
-        if step == 1 { most } else { on_rule(most - 1) }
-    });
-    u32::try_from(frames.min(most)).unwrap_or(u32::MAX)
+    let on_rule = |n: u64| n * step + offset;
+    // The fewest and most counts on the rule within its fewest and most frames.
+    let fewest = on_rule(
+        u64::from(rule.min_frames)
+            .saturating_sub(offset)
+            .div_ceil(step),
+    );
+    let most = u64::from(rule.max_frames)
+        .checked_sub(offset)
+        .map_or(fewest, |room| on_rule(room / step))
+        .max(fewest);
+    u32::try_from(on_rule(n).clamp(fewest, most)).unwrap_or(u32::MAX)
 }
 
-/// The entry's frames a second; the engine's own when it states none.
+/// The entry's frames a second: the rule's fixed rate when it has one, else the entry's, else
+/// the engine's own.
 fn fps_of(entry: &GenEntry) -> u32 {
     entry
-        .defaults
-        .fps
+        .limits
+        .video_rule()
+        .and_then(|rule| rule.fixed_fps)
+        .or(entry.defaults.fps)
         .filter(|&fps| fps > 0)
         .unwrap_or(ENGINE_FPS)
 }
 
-/// The longest clip offered, in whole seconds: the entry's most frames at its frames a second
-/// (at least 1; the starting length when it states no most).
+/// The longest clip offered, in whole seconds: the most frames of the model's rule at its
+/// frames a second (at least 1; the starting length for a model with no rule).
 fn longest_seconds(entry: &GenEntry) -> u32 {
     entry
         .limits
-        .max_frames
-        .map_or(FIRST_SECONDS, |frames| frames / fps_of(entry))
+        .video_rule()
+        .map_or(FIRST_SECONDS, |rule| rule.max_frames / fps_of(entry))
         .max(1)
 }
 
@@ -1367,12 +1607,14 @@ fn size_rules(entry: &GenEntry) -> SizeRules {
     }
 }
 
-/// The width and height `req` asks of `entry`: an exact size when one is set; else the entry's
-/// default size when neither Shape nor Resolution is set; else the shape (the default size's
-/// own when not set) at a shorter side of the resolution's lines for a clip (the default's
-/// shorter side when not set), or for a picture keeping about the default size's pixels.
-/// The webview works out a clip's size the same way (`localClipSize`); the test
-/// `size_of_matches_the_webviews_local_clip_size` holds the two to the same cases.
+/// The width and height `req` asks of `entry`: an exact size when one is set; else, when
+/// neither Shape nor Resolution is set, the shape of the picture to change (an edit's
+/// picture, [`picture_to_follow`]) at about the default size's pixels, or the entry's default
+/// size; else the shape (the default size's own when not set) at a shorter side of the
+/// resolution's lines for a clip (the default's shorter side when not set), or for a picture
+/// keeping about the default size's pixels. The webview works out a clip's size the same way
+/// (`localClipSize`); the test `size_of_matches_the_webviews_local_clip_size` holds the two
+/// to the same cases.
 fn size_of(entry: &GenEntry, req: &MediaRequest) -> Result<(u32, u32), MediaError> {
     if let Some(size) = text_param(req, key::SIZE)? {
         return parse_size(size).ok_or_else(|| bad_value(key::SIZE));
@@ -1393,7 +1635,10 @@ fn size_of(entry: &GenEntry, req: &MediaRequest) -> Result<(u32, u32), MediaErro
         None
     };
     if shape.is_none() && lines.is_none() {
-        return Ok((width, height));
+        let followed = picture_to_follow(entry, req)
+            .and_then(picture_size)
+            .and_then(|picture| at_pixels_of(entry, within_ratio(picture)));
+        return Ok(followed.unwrap_or((width, height)));
     }
     let shape = shape.unwrap_or_else(|| default_shape(entry));
     let shorter = match lines {
@@ -1410,6 +1655,61 @@ fn size_of(entry: &GenEntry, req: &MediaRequest) -> Result<(u32, u32), MediaErro
     // 16:9 on a multiple of 32 is 832 × 480, 720p 1280 × 704): the fit's own helper.
     let max_side = Some(size_rules(entry).max_side);
     at_shape(shorter, shape, entry.limits.multiple_of, max_side).ok_or_else(|| bad_value(key::SIZE))
+}
+
+/// The picture whose shape a run of `entry` with no size set follows: the picture to change,
+/// else the first reference of a picture edit (the picture it changes: an InstructPix2Pix,
+/// CosXL Edit or Kontext model states no size of its own). A model that takes neither has
+/// none.
+fn picture_to_follow<'a>(entry: &GenEntry, req: &'a MediaRequest) -> Option<&'a Path> {
+    let first = |input: GenInput| {
+        entry
+            .inputs
+            .contains(&input)
+            .then(|| req.refs.iter().find(|r| r.role == ref_role(input)))
+            .flatten()
+            .map(|r| r.path.as_path())
+    };
+    first(GenInput::Source).or_else(|| {
+        (entry.kind == GenKind::ImageEdit)
+            .then(|| first(GenInput::Reference))
+            .flatten()
+    })
+}
+
+/// The width and height of the picture at `path`, from its header; `None` when it cannot be
+/// read (the run then takes the default size).
+fn picture_size(path: &Path) -> Option<(u32, u32)> {
+    let reader = image::ImageReader::open(path)
+        .and_then(image::ImageReader::with_guessed_format)
+        .ok()?;
+    reader
+        .into_dimensions()
+        .ok()
+        .filter(|&(w, h)| w > 0 && h > 0)
+}
+
+/// `(w, h)` with its sides at most four times one another, as an exact size's are.
+fn within_ratio((w, h): (u32, u32)) -> (u32, u32) {
+    let ratio = f64::from(w.max(h)) / f64::from(w.min(h));
+    if ratio <= MAX_SIDE_RATIO {
+        (w, h)
+    } else if w > h {
+        (4, 1)
+    } else {
+        (1, 4)
+    }
+}
+
+/// `shape` at about the pixels of `entry`'s default size, each side on its multiple and the
+/// longer within its longest side.
+fn at_pixels_of(entry: &GenEntry, shape: (u32, u32)) -> Option<(u32, u32)> {
+    let (lo, hi) = (shape.0.min(shape.1), shape.0.max(shape.1));
+    let pixels = f64::from(entry.defaults.width) * f64::from(entry.defaults.height);
+    // A side of a few thousand pixels: `as` cannot lose anything here.
+    let shorter = (pixels * f64::from(lo) / f64::from(hi)).sqrt() as u32;
+    let max_side = Some(size_rules(entry).max_side);
+    at_shape(shorter, shape, entry.limits.multiple_of, max_side)
 }
 
 /// The offered shape nearest the entry's default size (`gen_fit::shape_of`).
@@ -1438,18 +1738,243 @@ fn parse_size(size: &str) -> Option<(u32, u32)> {
     Some((side(width)?, side(height)?))
 }
 
-/// The engine role of a part.
+/// The engine role of a part: one to one.
 fn part_role(role: GenRole) -> PartRole {
     match role {
         GenRole::Diffusion => PartRole::Diffusion,
         GenRole::HighNoiseDiffusion => PartRole::HighNoiseDiffusion,
+        GenRole::UncondDiffusion => PartRole::UncondDiffusion,
         GenRole::Llm => PartRole::Llm,
+        GenRole::LlmVision => PartRole::LlmVision,
         GenRole::T5xxl => PartRole::T5xxl,
         GenRole::ClipL => PartRole::ClipL,
+        GenRole::ClipG => PartRole::ClipG,
         GenRole::ClipVision => PartRole::ClipVision,
+        GenRole::Tokenizer => PartRole::Tokenizer,
         GenRole::Vae => PartRole::Vae,
+        GenRole::Tae => PartRole::Tae,
+        GenRole::AudioVae => PartRole::AudioVae,
+        GenRole::AudioEncoder => PartRole::AudioEncoder,
+        GenRole::EmbeddingsConnectors => PartRole::EmbeddingsConnectors,
         GenRole::Model => PartRole::Single,
     }
+}
+
+/// The pictures `entry` takes, each role with how many: its recipe's (`input_counts`, Task
+/// R7) for a generic entry, so inpainting asks for a picture to change and its mask, FLUX.1
+/// Canny and Depth for a control picture and Flex.2 offers all three; a catalog entry's
+/// `inputs` (its `input_counts` is empty) as 0.1.2 offered them, none required: up to
+/// [`MAX_REFERENCES`] references and one of any other picture.
+fn picture_inputs(entry: &GenEntry) -> Vec<(GenInput, u32, u32)> {
+    if entry.input_counts.is_empty() {
+        let mut inputs = entry.inputs.clone();
+        // 0.1.2's order: the start frame before the references.
+        inputs.sort_by_key(|input| *input != GenInput::StartFrame);
+        inputs
+            .into_iter()
+            .map(|input| match input {
+                GenInput::Reference => (input, 0, MAX_REFERENCES),
+                _ => (input, 0, 1),
+            })
+            .collect()
+    } else {
+        entry
+            .input_counts
+            .iter()
+            .map(|counts| (counts.role, counts.min, counts.max))
+            .collect()
+    }
+}
+
+/// The field of the pictures of `input`, from `min` to `max` of them.
+fn picture_field(input: GenInput, min: u32, max: u32) -> ParamSpec {
+    let (key, canonical, label, help) = match input {
+        GenInput::Reference => (
+            key::REFERENCES,
+            Some(Canonical::References),
+            "Reference pictures",
+            None,
+        ),
+        GenInput::StartFrame => (
+            key::START_FRAME,
+            Some(Canonical::StartFrame),
+            "Start frame",
+            None,
+        ),
+        GenInput::EndFrame => (key::END_FRAME, Some(Canonical::EndFrame), "End frame", None),
+        GenInput::Source => (key::SOURCE, None, "Picture to change", None),
+        GenInput::Mask => (
+            key::MASK,
+            None,
+            "Mask",
+            Some("Any picture: its white areas are the ones changed."),
+        ),
+        GenInput::Control => (
+            key::CONTROL,
+            None,
+            "Control picture",
+            Some("A picture of edges or depth, made beforehand."),
+        ),
+    };
+    ParamSpec {
+        help: help.map(str::to_owned),
+        ..field(
+            key,
+            canonical,
+            label,
+            Layer::Simple,
+            ParamKind::Images {
+                min,
+                max,
+                role: ref_role(input),
+            },
+        )
+    }
+}
+
+/// The role an added picture of `input` has in a request.
+fn ref_role(input: GenInput) -> RefRole {
+    match input {
+        GenInput::Reference => RefRole::Reference,
+        GenInput::StartFrame => RefRole::StartFrame,
+        GenInput::EndFrame => RefRole::EndFrame,
+        GenInput::Source => RefRole::Source,
+        GenInput::Mask => RefRole::Mask,
+        GenInput::Control => RefRole::Control,
+    }
+}
+
+/// A range from `min` to `max` by `step`, with no unit.
+fn halves((min, max, step): (f64, f64, f64)) -> ParamKind {
+    ParamKind::Range {
+        min,
+        max,
+        step: Some(step),
+        unit: None,
+    }
+}
+
+/// The diffusers folder the model part of `parts` is in: its file with its engine name in the
+/// folder (`unet/diffusion_pytorch_model.safetensors`) taken off; `None` for a model part in
+/// no folder, or one not at that name (the person's own file, put in its place).
+fn folder_of(parts: &[InstalledPart]) -> Option<PathBuf> {
+    let model = parts.iter().find(|p| p.role.is_model())?;
+    let inside = Path::new(model.folder.as_deref()?);
+    let depth = inside.components().count();
+    (depth > 0 && model.file.ends_with(inside))
+        .then(|| model.file.ancestors().nth(depth))
+        .flatten()
+        .map(Path::to_path_buf)
+}
+
+/// Each part of an installed model with its engine role, in the row's order. A diffusers
+/// folder (the model part in its folder, [`folder_of`]) is one `-m <the folder>`, which the
+/// engine reads its parts from (`init_from_diffusers_file`, `src/model_loader.cpp:421-440` at
+/// the pinned commit: its `unet/` file, and its `vae/`, `text_encoder/` and `text_encoder_2/`
+/// when there); a part the person put in place of one of them (*Set it up yourself*), whose
+/// file is outside the folder, is passed by its own flag (ruling S9-folder-swap). With the
+/// model part in no folder, every part is passed by its own flag.
+fn job_parts(parts: &[InstalledPart]) -> Vec<(PartRole, PathBuf)> {
+    let Some(root) = folder_of(parts) else {
+        return parts
+            .iter()
+            .map(|part| (part_role(part.role), part.file.clone()))
+            .collect();
+    };
+    let outside: Vec<_> = parts
+        .iter()
+        .filter(|part| !part.file.starts_with(&root))
+        .map(|part| (part_role(part.role), part.file.clone()))
+        .collect();
+    std::iter::once((PartRole::Single, root))
+        .chain(outside)
+        .collect()
+}
+
+/// The high-noise part's sampling (a two-model video family): its steps and guidance from the
+/// request over the entry's defaults (−1 steps, Automatic, and the entry's guidance when it
+/// states none), and its sampler from the defaults; `None` when neither sets any.
+fn high_noise(entry: &GenEntry, req: &MediaRequest) -> Result<Option<HighNoise>, MediaError> {
+    let steps = integer_param(req, key::HIGH_NOISE_STEPS)?;
+    let cfg = number_param(req, key::HIGH_NOISE_CFG)?.map(|x| x as f32);
+    let defaults = entry.defaults.high_noise.as_ref();
+    if defaults.is_none() && steps.is_none() && cfg.is_none() {
+        return Ok(None);
+    }
+    Ok(Some(HighNoise {
+        steps: steps
+            .or(defaults.map(|h| h.steps))
+            .unwrap_or(AUTOMATIC_HIGH_NOISE_STEPS),
+        cfg: cfg
+            .or(defaults.map(|h| h.cfg))
+            .unwrap_or(entry.defaults.cfg),
+        sampler: defaults
+            .and_then(|h| h.sampler.as_deref())
+            .and_then(Sampler::from_cli),
+    }))
+}
+
+/// One LoRA a request attaches, as its `loras` value names it (`LoraUse` in the webview).
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct LoraUse {
+    id: String,
+    weight: f64,
+    high_noise: bool,
+}
+
+/// The LoRA folder and the LoRA tags of the LoRAs `req` attaches: each found among `loras` by
+/// its id, by its name in `lora_dir` (the LoRA folder of the models folder as it is now),
+/// where the engine looks for its file ([`engine_lora_file`]), never where its row says the
+/// file was saved: a models folder moved since leaves the old one behind. A LoRA whose row or
+/// file is gone is refused by name ([`errors::lora_missing`]). No folder with none attached.
+fn attached_loras(
+    req: &MediaRequest,
+    loras: &[store::GenLora],
+    lora_dir: &Path,
+) -> Result<(Option<PathBuf>, Vec<LoraTag>), MediaError> {
+    let Some(value) = req.params.get(key::LORAS) else {
+        return Ok((None, Vec::new()));
+    };
+    let attached: Vec<LoraUse> = Vec::deserialize(value).map_err(|_| bad_value(key::LORAS))?;
+    if attached.is_empty() {
+        return Ok((None, Vec::new()));
+    }
+    let tags = attached
+        .into_iter()
+        .map(|lora| {
+            let row = loras.iter().find(|row| row.id == lora.id).ok_or_else(|| {
+                refused(
+                    FailureKind::BadRequest,
+                    errors::lora_missing(&lora_name_of(&lora.id)),
+                )
+            })?;
+            if engine_lora_file(lora_dir, &row.rel_name).is_none() {
+                return Err(refused(
+                    FailureKind::BadRequest,
+                    errors::lora_missing(&row.name),
+                ));
+            }
+            Ok(LoraTag {
+                name: row.rel_name.clone(),
+                // A strength from -1 to 2 by 0.05 (the field's check): `as` keeps it.
+                weight: lora.weight as f32,
+                high_noise: lora.high_noise,
+            })
+        })
+        .collect::<Result<Vec<_>, MediaError>>()?;
+    Ok((Some(lora_dir.to_path_buf()), tags))
+}
+
+/// A LoRA's name from its id alone, for one whose row is gone: a downloaded LoRA's file name
+/// without its extension (`hf:<owner>/<repo>:<path>`); an imported one has no name in its id.
+fn lora_name_of(id: &str) -> String {
+    id.strip_prefix("hf:")
+        .and_then(|rest| rest.rsplit_once(':'))
+        .and_then(|(_, path)| path.rsplit('/').next())
+        .map(|file| file.rsplit_once('.').map_or(file, |(stem, _)| stem))
+        .filter(|name| !name.is_empty())
+        .map_or_else(|| errors::LORA_ADDED_HERE.to_owned(), str::to_owned)
 }
 
 /// The variables the entry's quirks add, from the compiled-in list only:
@@ -1477,15 +2002,20 @@ fn installed_parts(model: &store::GenModel) -> Result<Vec<InstalledPart>, MediaE
     })
 }
 
-/// Every part file is there at the size it was downloaded at, and a `.gguf` diffusion file's
-/// own tensor table is the entry's family's (`downloads::check_diffusion_file`, read off the
-/// async runtime); a `.safetensors` one was checked by its size and SHA-256 when it
-/// downloaded. Otherwise `ModelFileBad`: download it again.
+/// Every part file is there at the size it was downloaded at, and the model file's own header
+/// is a model the entry runs (`downloads::check_main_file`, read off the async runtime): a
+/// diffusers folder's as the folder the engine reads ([`job_parts`]), a model part in no
+/// folder as its own file, whatever folder its other parts are in. Otherwise `ModelFileBad`:
+/// download it again; for a file of the person's own that is gone or resized,
+/// [`errors::LOCAL_FILE_MOVED`], which no download brings back.
 async fn check_files(entry: &GenEntry, model: &store::GenModel) -> Result<(), MediaError> {
     let parts = installed_parts(model)?;
     for part in &parts {
         match tokio::fs::metadata(&part.file).await {
             Ok(meta) if meta.is_file() && meta.len() == part.size => {}
+            _ if part.local.is_some() => {
+                return Err(refused(FailureKind::ModelFileBad, errors::LOCAL_FILE_MOVED));
+            }
             Ok(_) => {
                 return Err(refused(
                     FailureKind::ModelFileBad,
@@ -1504,10 +2034,15 @@ async fn check_files(entry: &GenEntry, model: &store::GenModel) -> Result<(), Me
         .iter()
         .find(|p| matches!(p.role, GenRole::Diffusion | GenRole::Model))
         .ok_or_else(|| refused(FailureKind::ModelFileBad, errors::LOCAL_PART_MISSING))?;
-    let (family, path) = (entry.family, diffusion.file.clone());
+    let (mut entry, path) = (entry.clone(), diffusion.file.clone());
+    if folder_of(&parts).is_none() {
+        // The engine reads the model part as one file: so is it checked.
+        for part in &mut entry.parts {
+            part.folder = None;
+        }
+    }
     let checked =
-        tokio::task::spawn_blocking(move || crate::downloads::check_diffusion_file(family, &path))
-            .await;
+        tokio::task::spawn_blocking(move || crate::downloads::check_main_file(&entry, &path)).await;
     let details = match checked {
         Ok(Ok(())) => return Ok(()),
         Ok(Err(e)) => e.details,
@@ -1656,9 +2191,23 @@ fn sampler_label(sampler: Sampler) -> &'static str {
         Sampler::EulerA => "Euler a",
         Sampler::Heun => "Heun",
         Sampler::Dpm2 => "DPM2",
+        Sampler::DpmPp2sA => "DPM++ 2S a",
         Sampler::DpmPp2m => "DPM++ 2M",
         Sampler::DpmPp2mV2 => "DPM++ 2M v2",
+        Sampler::Ipndm => "iPNDM",
+        Sampler::IpndmV => "iPNDM v",
         Sampler::Lcm => "LCM",
+        Sampler::DdimTrailing => "DDIM trailing",
+        Sampler::Tcd => "TCD",
+        Sampler::ResMultistep => "RES multistep",
+        Sampler::Res2s => "RES 2S",
+        Sampler::ErSde => "ER-SDE",
+        Sampler::EulerCfgPp => "Euler CFG++",
+        Sampler::EulerACfgPp => "Euler a CFG++",
+        Sampler::EulerGe => "Euler GE",
+        Sampler::DpmPp2mSde => "DPM++ 2M SDE",
+        Sampler::DpmPp2mSdeBt => "DPM++ 2M SDE BT",
+        Sampler::Lms => "LMS",
     }
 }
 
@@ -1667,7 +2216,20 @@ fn scheduler_label(scheduler: Scheduler) -> &'static str {
         Scheduler::Discrete => "Discrete",
         Scheduler::Karras => "Karras",
         Scheduler::Exponential => "Exponential",
+        Scheduler::Ays => "AYS",
+        Scheduler::Gits => "GITS",
+        Scheduler::SgmUniform => "SGM uniform",
         Scheduler::Simple => "Simple",
+        Scheduler::Smoothstep => "Smoothstep",
+        Scheduler::KlOptimal => "KL optimal",
+        Scheduler::Lcm => "LCM",
+        Scheduler::BongTangent => "Bong tangent",
+        Scheduler::Ltx2 => "LTX-2",
+        Scheduler::LogitNormal => "Logit normal",
+        Scheduler::Flux2 => "FLUX.2",
+        Scheduler::Flux => "FLUX",
+        Scheduler::Beta => "Beta",
+        Scheduler::LladaImage => "LLaDA-Image",
     }
 }
 
@@ -1685,6 +2247,26 @@ fn whole_param(req: &MediaRequest, key: &str) -> Result<Option<u32>, MediaError>
             });
             whole
                 .and_then(|n| u32::try_from(n).ok())
+                .ok_or_else(|| bad_value(key))
+        })
+        .transpose()
+}
+
+/// The whole number, negative ones too, `req` sets for `key`; refused when it is not one an
+/// `i32` holds.
+fn integer_param(req: &MediaRequest, key: &str) -> Result<Option<i32>, MediaError> {
+    req.params
+        .get(key)
+        .map(|value| {
+            let whole = value.as_i64().or_else(|| {
+                value
+                    .as_f64()
+                    .filter(|x| x.fract() == 0.0 && x.abs() <= f64::from(i32::MAX))
+                    // A whole number within i32: `as` is exact.
+                    .map(|x| x as i64)
+            });
+            whole
+                .and_then(|n| i32::try_from(n).ok())
                 .ok_or_else(|| bad_value(key))
         })
         .transpose()
@@ -1788,8 +2370,10 @@ pub(crate) mod tests {
     };
     use async_trait::async_trait;
     use models::catalog::Catalog;
-    use models::gen_catalog::{GenCatalog, GenEntry, GenRole, Quirk, gen_catalog};
+    use models::gen_catalog::{GenCatalog, GenEntry, GenPart, GenRole, Quirk, gen_catalog};
     use models::gguf::testing::diffusion_gguf;
+    use models::sd::detect::SdVersion;
+    use models::sd::recipes::{SlotId, VideoRule};
     use runtime::sd::args::{OutputFormat, PartRole, build_args};
     use runtime::sd::devices::parse_list_devices;
     use runtime::sd::engine::{Engine, EngineSource, program_file_name};
@@ -1867,6 +2451,16 @@ pub(crate) mod tests {
         }
     }
 
+    /// A models folder that never moves.
+    pub(crate) struct FixedFolder(pub(crate) PathBuf);
+
+    #[async_trait]
+    impl ModelsFolder for FixedFolder {
+        async fn models_dir(&self) -> PathBuf {
+            self.0.clone()
+        }
+    }
+
     /// A value's serde word (`GenKind::Image` → `image`).
     fn word<T: serde::Serialize>(value: &T) -> String {
         serde_json::to_value(value)
@@ -1912,6 +2506,7 @@ pub(crate) mod tests {
             name: entry.name.clone(),
             kind: word(&entry.kind),
             family: word(&entry.family),
+            recipe_id: Some(entry.recipe.clone()),
             parts: Value::Array(parts),
             size_bytes: total,
             source: store::GenSource::Catalog,
@@ -1926,6 +2521,7 @@ pub(crate) mod tests {
             name: new.name,
             kind: new.kind,
             family: new.family,
+            recipe_id: new.recipe_id,
             parts: new.parts,
             size_bytes: new.size_bytes,
             source: new.source,
@@ -1982,7 +2578,12 @@ pub(crate) mod tests {
     async fn world_with(discover: DiscoverEngine) -> World {
         let dir = Scratch::new();
         let store = store::Store::open_in_memory().unwrap();
-        let provider = LocalMediaProvider::new(store.clone(), Arc::new(Fixed(catalog())), discover);
+        let provider = LocalMediaProvider::new(
+            store.clone(),
+            Arc::new(Fixed(catalog())),
+            discover,
+            Arc::new(FixedFolder(dir.path().join("models"))),
+        );
         let world = World {
             dir,
             store,
@@ -2015,13 +2616,21 @@ pub(crate) mod tests {
         let table = TABLES.iter().find(|(m, _)| *m == id).unwrap().1;
         let row = row_of(install(&dir.path().join("models"), id, table));
         let entry = entry_from_installed(&row, &catalog()).unwrap();
-        let provider = LocalMediaProvider::new(
+        (provider(), entry, row)
+    }
+
+    /// A provider over an empty store, for the engine job alone.
+    fn provider() -> LocalMediaProvider {
+        LocalMediaProvider::new(
             store::Store::open_in_memory().unwrap(),
             Arc::new(Fixed(catalog())),
             Arc::new(|| None),
-        );
-        (provider, entry, row)
+            Arc::new(FixedFolder(PathBuf::from("/m"))),
+        )
     }
+
+    /// The LoRA folder of a job with no LoRA attached.
+    const NO_LORAS: &str = "/m/@loras";
 
     fn request(model: &str, kind: MediaKind, prompt: &str, params: Value) -> MediaRequest {
         let Value::Object(params) = params else {
@@ -2153,15 +2762,18 @@ pub(crate) mod tests {
             keys(klein, Layer::Simple),
             ["aspect_ratio", "n", "input_references"]
         );
-        // Its guidance is 1.0: no guidance and no negative prompt.
+        // Its guidance is 1.0: no guidance and no negative prompt. Its recipe takes a picture
+        // guidance and LoRAs.
         assert_eq!(
             keys(klein, Layer::Advanced),
             [
                 "seed",
                 "steps",
+                "img_cfg_scale",
                 "sampler",
                 "scheduler",
                 "size",
+                "loras",
                 "memory_saving",
                 "run_on"
             ]
@@ -2226,7 +2838,7 @@ pub(crate) mod tests {
         );
         assert_eq!(cfg.company_default, Some(json!(3.5)));
         let negative = params.iter().find(|p| p.key == "negative_prompt").unwrap();
-        assert_eq!(negative.kind, ParamKind::Text { max_chars: 4_000 });
+        assert_eq!(negative.kind, ParamKind::Text { max_chars: 262_144 });
         assert_eq!(negative.layer, Layer::Advanced);
     }
 
@@ -2244,6 +2856,18 @@ pub(crate) mod tests {
         assert_eq!(
             offered("memory_saving"),
             ["automatic", "off", "on"].map(Value::from)
+        );
+        // the pinned engine's full lists (design 7.6), each word with a plain label
+        let (samplers, schedulers) = (offered("sampler"), offered("scheduler"));
+        assert_eq!((samplers.len(), schedulers.len()), (21, 17));
+        assert_eq!(samplers[0], "euler");
+        assert!(schedulers.contains(&json!("ltx2")));
+        assert!(
+            params
+                .iter()
+                .filter(|p| p.key == "sampler" || p.key == "scheduler")
+                .all(|p| matches!(&p.kind, ParamKind::Enum { values }
+                    if values.iter().all(|c| c.value != c.label)))
         );
         assert_eq!(
             offered("run_on"),
@@ -2310,6 +2934,8 @@ pub(crate) mod tests {
                 &row,
                 &r,
                 &LocalJobOptions::default(),
+                &[],
+                Path::new(NO_LORAS),
                 None,
                 &out,
                 "r1",
@@ -2324,7 +2950,7 @@ pub(crate) mod tests {
             ("dpm++2m", "karras")
         );
         // The memory and processor fields are the lane's to resolve: the job follows `opts`.
-        assert!(!job.memory_saving && !job.processor_only);
+        assert!(!job.vae_tiling && !job.offload_to_cpu && !job.processor_only);
         // An exact size wins over the shape.
         let r = picture(json!({"aspect_ratio": "16:9", "size": "768x512"}));
         assert_eq!(validate(&model, &r), Ok(()));
@@ -2334,6 +2960,8 @@ pub(crate) mod tests {
                 &row,
                 &r,
                 &LocalJobOptions::default(),
+                &[],
+                Path::new(NO_LORAS),
                 None,
                 &out,
                 "r1",
@@ -2355,6 +2983,8 @@ pub(crate) mod tests {
                 &row,
                 &req("x"),
                 &LocalJobOptions::default(),
+                &[],
+                Path::new(NO_LORAS),
                 None,
                 &out,
                 "r1",
@@ -2399,6 +3029,8 @@ pub(crate) mod tests {
                     &row,
                     &picture(json!({"aspect_ratio": shape})),
                     &LocalJobOptions::default(),
+                    &[],
+                    Path::new(NO_LORAS),
                     None,
                     &out,
                     "r1",
@@ -2456,6 +3088,78 @@ pub(crate) mod tests {
         );
     }
 
+    /// A klein picture installed with 0.1.x, as 0.1.2's `job_for` and `build_args` gave it:
+    /// recorded from the unchanged 0.1.2 code before Task S2 (preflight P4, Review Focus 5).
+    /// The part files are fixed (`/m/<file>`) and the run's folder is `/g/.partial/r1`, so the
+    /// vector is the same on every computer; a Windows separator reads as `/`.
+    const KLEIN_0_1_2_ARGS: &[&str] = &[
+        "--diffusion-model",
+        "/m/flux-2-klein-4b-Q4_0.gguf",
+        "--llm",
+        "/m/Qwen3-4B-Q4_K_M.gguf",
+        "--vae",
+        "/m/flux2-vae.safetensors",
+        "--prompt-file",
+        "/g/.partial/r1/prompt.txt",
+        "-W",
+        "1024",
+        "-H",
+        "1024",
+        "--steps",
+        "4",
+        "--cfg-scale",
+        "1",
+        "--sampling-method",
+        "euler",
+        "--seed",
+        "7",
+        "--batch-count",
+        "1",
+        "--backend",
+        "Vulkan0",
+        "-o",
+        "/g/.partial/r1/r1.png",
+        "--disable-image-metadata",
+        "--log-level",
+        "info",
+    ];
+
+    #[test]
+    fn an_01x_klein_picture_keeps_its_0_1_2_arguments() {
+        // the klein catalog entry, 1024×1024, 4 steps, seed 7; a green fit, so 0.1.2's options
+        // had memory_saving: false, which is memory Automatic at 1024×1024 now; Vulkan0
+        let dir = Scratch::new();
+        let (provider, klein, mut row) = offline(&dir, KLEIN);
+        for part in row.parts.as_array_mut().unwrap() {
+            let name = part["path"].as_str().unwrap().rsplit('/').next().unwrap();
+            part["file"] = json!(format!("/m/{name}"));
+        }
+        let opts = LocalJobOptions {
+            processor_only: false,
+            memory: MemoryChoice::Automatic,
+            threads: None,
+            device_description: None,
+        };
+        let job = provider
+            .job_for(
+                &klein,
+                &row,
+                &picture(json!({"seed": 7})),
+                &opts,
+                &[],
+                Path::new(NO_LORAS),
+                Some("Vulkan0".into()),
+                Path::new("/g/.partial/r1"),
+                "r1",
+            )
+            .unwrap();
+        let args: Vec<String> = strings(build_args(&job).unwrap())
+            .into_iter()
+            .map(|arg| arg.replace('\\', "/"))
+            .collect();
+        assert_eq!(args, KLEIN_0_1_2_ARGS);
+    }
+
     #[test]
     fn the_job_follows_the_lanes_options() {
         let dir = Scratch::new();
@@ -2474,6 +3178,8 @@ pub(crate) mod tests {
                         &row,
                         &req("x"),
                         &opts,
+                        &[],
+                        Path::new(NO_LORAS),
                         Some("vulkan0".into()),
                         &out,
                         "r1",
@@ -2487,7 +3193,7 @@ pub(crate) mod tests {
             ("cpu", "3")
         );
         let opts = LocalJobOptions {
-            memory_saving: true,
+            memory: MemoryChoice::On,
             ..Default::default()
         };
         let a = strings(
@@ -2498,6 +3204,8 @@ pub(crate) mod tests {
                         &row,
                         &req("x"),
                         &opts,
+                        &[],
+                        Path::new(NO_LORAS),
                         Some("vulkan0".into()),
                         &out,
                         "r1",
@@ -2507,20 +3215,31 @@ pub(crate) mod tests {
             .unwrap(),
         );
         assert_eq!(after(&a, "--backend"), "vulkan0");
-        assert!(a.contains(&"--offload-to-cpu".into()));
+        assert!(a.contains(&"--offload-to-cpu".into()) && a.contains(&"--vae-tiling".into()));
         // Threads go only with a run on the processor.
         let opts = LocalJobOptions {
             threads: Some(3),
             ..Default::default()
         };
         let job = provider
-            .job_for(&klein, &row, &req("x"), &opts, None, &out, "r1")
+            .job_for(
+                &klein,
+                &row,
+                &req("x"),
+                &opts,
+                &[],
+                Path::new(NO_LORAS),
+                None,
+                &out,
+                "r1",
+            )
             .unwrap();
         assert_eq!(job.threads, None);
     }
 
     /// The engine's numbers and texts at their edges: the largest seed and a negative prompt of
-    /// 4,000 characters go, one more of either is refused before the engine starts.
+    /// 262,144 characters (the most that always fit in 1 MiB of UTF-8) go, one more of either
+    /// is refused before the engine starts.
     #[test]
     fn numbers_and_texts_at_their_edges() {
         let dir = Scratch::new();
@@ -2532,6 +3251,8 @@ pub(crate) mod tests {
                 &row,
                 &picture(params),
                 &LocalJobOptions::default(),
+                &[],
+                Path::new(NO_LORAS),
                 None,
                 &out,
                 "r1",
@@ -2546,13 +3267,13 @@ pub(crate) mod tests {
             bad(job(json!({"seed": SEED_MAX + 1}))),
             (FailureKind::BadRequest, Some(false))
         );
-        let longest = "n".repeat(4_000);
+        let longest = "n".repeat(262_144);
         assert_eq!(
             job(json!({"negative_prompt": longest})).unwrap().negative,
             Some(longest)
         );
         assert_eq!(
-            bad(job(json!({"negative_prompt": "n".repeat(4_001)}))),
+            bad(job(json!({"negative_prompt": "n".repeat(262_145)}))),
             (FailureKind::BadRequest, Some(false))
         );
         // A blank negative prompt is none.
@@ -2575,10 +3296,11 @@ pub(crate) mod tests {
         let w = world("ok").await;
         let f = refusal(
             w.provider
-                .start(&req(&"a".repeat(4_001)), &w.partial())
+                .start(&req(&"a".repeat(LOCAL_PROMPT_MAX_CHARS + 1)), &w.partial())
                 .await,
         );
         assert_eq!((f.kind, f.charged), (FailureKind::BadRequest, Some(false)));
+        assert_eq!(f.message, "This prompt is too long.");
         // An exact size beyond the engine's 2048 is refused with the arguments' own sentence.
         let f = refusal(
             w.provider
@@ -3045,6 +3767,19 @@ pub(crate) mod tests {
         w.provider.cancel(&remote_id).await.unwrap();
     }
 
+    /// Each of the 16 part roles is passed with the flag of the recipe slot it fills.
+    #[test]
+    fn every_part_role_takes_its_slots_flag() {
+        for slot in models::sd::recipes::SlotId::RUNNABLE {
+            let role = GenRole::from_slot(slot).unwrap();
+            assert_eq!(
+                Some(runtime::sd::args::flag_for(part_role(role))),
+                slot.flag(),
+                "{role:?}"
+            );
+        }
+    }
+
     #[tokio::test]
     async fn a_file_of_another_family_is_refused_before_the_engine_starts() {
         let w = world("ok").await;
@@ -3099,6 +3834,58 @@ pub(crate) mod tests {
         let f = refusal(provider_start(&w).await);
         assert_eq!(f.kind, FailureKind::ModelFileBad);
         assert!(no_argv_recorded(&w.rec()));
+    }
+
+    /// Final review, area 2, I1: a part of the person's own (`local`, a model added from a
+    /// file) that is gone or resized was moved or changed on this computer: said as such,
+    /// with no advice to download it. A Hub part keeps "download it again".
+    #[tokio::test]
+    async fn a_moved_file_of_the_persons_own_says_so_and_not_download_it() {
+        for change in ["remove", "resize"] {
+            let w = world("ok").await;
+            let mut row = w.store.get_gen_model(KLEIN).await.unwrap().unwrap();
+            let file = w.part_file(KLEIN, "llm").await;
+            for part in row.parts.as_array_mut().unwrap() {
+                if part["role"] == "llm" {
+                    part["local"] = json!(file.to_str().unwrap());
+                }
+            }
+            w.store
+                .insert_gen_model(store::NewGenModel {
+                    id: row.id.clone(),
+                    catalog_id: row.catalog_id.clone(),
+                    name: row.name.clone(),
+                    kind: row.kind.clone(),
+                    family: row.family.clone(),
+                    recipe_id: row.recipe_id.clone(),
+                    parts: row.parts.clone(),
+                    size_bytes: row.size_bytes,
+                    source: row.source,
+                })
+                .await
+                .unwrap();
+            if change == "remove" {
+                std::fs::remove_file(&file).unwrap();
+            } else {
+                std::fs::write(&file, b"short").unwrap();
+            }
+            let f = refusal(provider_start(&w).await);
+            assert_eq!(f.kind, FailureKind::ModelFileBad, "{change}");
+            assert_eq!(
+                f.message, "A file of this model was moved or changed on this computer.",
+                "{change}"
+            );
+            let e = errors::from_local_failure(&f, MediaKind::Image);
+            assert_eq!(e.code, "studio_local_file_moved");
+            assert!(!e.next_step.to_lowercase().contains("download"), "{e:?}");
+            assert!(no_argv_recorded(&w.rec()));
+        }
+        // A Hub part's damage still says to download it again, in Get models.
+        let w = world("ok").await;
+        std::fs::remove_file(w.part_file(KLEIN, "vae").await).unwrap();
+        let e = errors::from_local_failure(&refusal(provider_start(&w).await), MediaKind::Image);
+        assert_eq!(e.code, "studio_model_file_bad");
+        assert!(e.next_step.contains("Get models"), "{e:?}");
     }
 
     #[tokio::test]
@@ -3171,6 +3958,8 @@ pub(crate) mod tests {
                 &row,
                 &r,
                 &LocalJobOptions::default(),
+                &[],
+                Path::new(NO_LORAS),
                 None,
                 &out,
                 "r1",
@@ -3186,6 +3975,8 @@ pub(crate) mod tests {
                 &row,
                 &req("x"),
                 &LocalJobOptions::default(),
+                &[],
+                Path::new(NO_LORAS),
                 None,
                 &out,
                 "r1",
@@ -3201,6 +3992,8 @@ pub(crate) mod tests {
                     &row,
                     &clip(json!({})),
                     &LocalJobOptions::default(),
+                    &[],
+                    Path::new(NO_LORAS),
                     None,
                     &out,
                     "r1",
@@ -3230,6 +4023,8 @@ pub(crate) mod tests {
                     &row,
                     &clip(params),
                     &LocalJobOptions::default(),
+                    &[],
+                    Path::new(NO_LORAS),
                     None,
                     &out,
                     "r1",
@@ -3268,6 +4063,8 @@ pub(crate) mod tests {
                 &row,
                 &r,
                 &LocalJobOptions::default(),
+                &[],
+                Path::new(NO_LORAS),
                 None,
                 &out,
                 "r1",
@@ -3332,6 +4129,8 @@ pub(crate) mod tests {
                 &row,
                 &r,
                 &LocalJobOptions::default(),
+                &[],
+                Path::new(NO_LORAS),
                 None,
                 &dir.path().join("r1"),
                 "r1",
@@ -3362,5 +4161,910 @@ pub(crate) mod tests {
             values.iter().map(|c| c.value.clone()).collect::<Vec<_>>(),
             ["1:1", "4:3", "3:4", "16:9", "9:16"].map(Value::from)
         );
+    }
+
+    // ---- runs from recipes (Task S11) ------------------------------------------------------
+
+    /// Where the parts of the generic test entries are.
+    const MODELS: &str = "/m";
+    /// The run's folder of the engine-job tests.
+    const OUT: &str = "/g/.partial/r";
+
+    /// Catalog entry `id` of the bundled catalog.
+    fn catalog_entry(id: &str) -> GenEntry {
+        catalog().entries.remove(id).unwrap()
+    }
+
+    /// The engine's recipe `id`.
+    fn recipe(id: &str) -> Option<&'static Recipe> {
+        models::sd::recipes::recipe(id)
+    }
+
+    /// One part of a generic entry: `file` (under [`MODELS`]), `folder` its engine name in a
+    /// diffusers folder.
+    fn part(role: GenRole, file: &str, folder: Option<&str>) -> GenPart {
+        GenPart {
+            role,
+            repo: "someone/model".into(),
+            revision: "0".repeat(40),
+            path: file.into(),
+            size: 1,
+            sha256: "a".repeat(64),
+            license: String::new(),
+            local: None,
+            folder: folder.map(str::to_owned),
+        }
+    }
+
+    /// A generic entry of recipe `recipe_id` for a model of `version`, with `parts`.
+    fn generic_with(recipe_id: &str, version: SdVersion, parts: Vec<GenPart>) -> GenEntry {
+        let recipe = recipe(recipe_id).unwrap();
+        models::gen_catalog::generic_entry(models::gen_catalog::GenericSpec {
+            id: format!("test/{recipe_id}"),
+            name: recipe.name.clone(),
+            publisher: "someone".into(),
+            recipe,
+            version: Some(version),
+            parts,
+            licenses: BTreeMap::new(),
+            gate: models::gen_catalog::GenGate {
+                mode: models::gen_catalog::GateMode::None,
+                collects: Vec::new(),
+            },
+            untested: false,
+        })
+    }
+
+    /// A generic entry of recipe `recipe_id` for a model of `version`, with a file for each
+    /// slot it needs: every required slot, and the first of each slot group it needs one of.
+    fn generic(recipe_id: &str, version: SdVersion) -> GenEntry {
+        let recipe = recipe(recipe_id).unwrap();
+        let mut slots: Vec<SlotId> = recipe
+            .slots
+            .iter()
+            .filter(|s| s.required)
+            .map(|s| s.id)
+            .collect();
+        slots.extend(recipe.required_any.iter().filter_map(|group| group.first()));
+        let parts = slots
+            .into_iter()
+            .map(|slot| {
+                let role = GenRole::from_slot(slot).unwrap();
+                part(role, &format!("{}.safetensors", slot.word()), None)
+            })
+            .collect();
+        generic_with(recipe_id, version, parts)
+    }
+
+    /// The installed row of `entry`: each part's file under [`MODELS`].
+    fn row(entry: &GenEntry) -> store::GenModel {
+        let parts = entry
+            .parts
+            .iter()
+            .map(|p| {
+                json!({
+                    "role": p.role,
+                    "file": Path::new(MODELS).join(&p.path),
+                    "size": p.size,
+                    "folder": p.folder,
+                })
+            })
+            .collect();
+        store::GenModel {
+            id: entry.id.clone(),
+            catalog_id: None,
+            name: entry.name.clone(),
+            kind: word(&entry.kind),
+            family: "unknown".into(),
+            recipe_id: Some(entry.recipe.clone()),
+            parts: Value::Array(parts),
+            size_bytes: entry.total_bytes(),
+            source: store::GenSource::Search,
+            added_at: 0,
+        }
+    }
+
+    /// A picture with `params` (on any generic test entry).
+    fn generic_req(params: Value) -> MediaRequest {
+        request("test/model", MediaKind::Image, "a red fox", params)
+    }
+
+    /// A picture with no settings and each of `refs`, a picture of its role.
+    fn req_with_refs(refs: &[(RefRole, &str)]) -> MediaRequest {
+        let mut r = generic_req(json!({}));
+        r.refs = refs
+            .iter()
+            .map(|(role, file)| added(*role, &Path::new("/g/refs").join(file)))
+            .collect();
+        r
+    }
+
+    fn opts(memory: MemoryChoice) -> LocalJobOptions {
+        LocalJobOptions {
+            memory,
+            ..Default::default()
+        }
+    }
+
+    /// The engine job of `entry` installed as `row` for `req`, with `loras` in `lora_dir`.
+    fn job_with_loras(
+        entry: &GenEntry,
+        row: &store::GenModel,
+        req: &MediaRequest,
+        loras: &[store::GenLora],
+        lora_dir: &Path,
+    ) -> Result<SdJob, MediaError> {
+        provider().job_for(
+            entry,
+            row,
+            req,
+            &opts(MemoryChoice::Automatic),
+            loras,
+            lora_dir,
+            None,
+            Path::new(OUT),
+            "r",
+        )
+    }
+
+    /// The engine job of generic `entry` (its own row) for `req`, with no LoRA.
+    fn job(entry: &GenEntry, req: &MediaRequest) -> Result<SdJob, MediaError> {
+        job_with_loras(entry, &row(entry), req, &[], Path::new(NO_LORAS))
+    }
+
+    fn object(value: Value) -> Map<String, Value> {
+        match value {
+            Value::Object(map) => map,
+            other => panic!("not an object: {other}"),
+        }
+    }
+
+    /// A refusal's kind and message.
+    fn refused_as(e: MediaError) -> (FailureKind, String) {
+        match e {
+            MediaError::Answered(f) => (f.kind, f.message),
+            other => panic!("not refused: {other:?}"),
+        }
+    }
+
+    fn spec<'a>(params: &'a [ParamSpec], key: &str) -> &'a ParamSpec {
+        params
+            .iter()
+            .find(|p| p.key == key)
+            .unwrap_or_else(|| panic!("no {key}"))
+    }
+
+    fn has(params: &[ParamSpec], key: &str) -> bool {
+        params.iter().any(|p| p.key == key)
+    }
+
+    /// A LoRA row named `rel_name` whose file was saved at `file`.
+    fn lora_row(rel_name: &str, file: &Path) -> store::GenLora {
+        store::GenLora {
+            id: format!("local:{}", "b".repeat(64)),
+            name: rel_name.rsplit('/').next().unwrap().into(),
+            file: file.to_str().unwrap().into(),
+            rel_name: rel_name.into(),
+            repo: None,
+            revision: None,
+            path: None,
+            size_bytes: 3,
+            sha256: "b".repeat(64),
+            base_hint: Some("sdxl".into()),
+            format: store::LoraFileFormat::Kohya,
+            source: store::LoraSource::Import,
+            added_at: 0,
+        }
+    }
+
+    /// `<lora_dir>/<rel_name><ext>`, written with a few bytes.
+    fn saved_lora(lora_dir: &Path, rel_name: &str, ext: &str) -> PathBuf {
+        let mut file = lora_dir.to_path_buf();
+        file.extend(rel_name.split('/'));
+        let file = PathBuf::from(format!("{}{ext}", file.display()));
+        std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+        std::fs::write(&file, b"abc").unwrap();
+        file
+    }
+
+    #[test]
+    fn a_generic_sdxl_picture_runs_with_m_and_the_recipe_defaults() {
+        let sdxl = generic_with(
+            "sdxl-checkpoint",
+            SdVersion::Sdxl,
+            vec![part(GenRole::Model, "sd_xl_base_1.0.safetensors", None)],
+        );
+        let a = strings(build_args(&job(&sdxl, &generic_req(json!({}))).unwrap()).unwrap());
+        assert_eq!(
+            (
+                after(&a, "-m").ends_with("sd_xl_base_1.0.safetensors"),
+                after(&a, "--steps"),
+                after(&a, "--cfg-scale"),
+                after(&a, "-W")
+            ),
+            (true, "20", "5", "1024")
+        );
+        assert!(!a.contains(&"--diffusion-model".to_string()));
+        assert!(!a.contains(&"--vae-tiling".to_string()));
+        // Its guidance is above 1: it offers guidance and a negative prompt, and its
+        // recipe's LoRAs; no distilled guidance, picture guidance or high-noise settings.
+        let p = LocalMediaProvider::params_for(&sdxl);
+        assert!(has(&p, key::GUIDANCE) && has(&p, key::NEGATIVE) && has(&p, key::LORAS));
+        for key in [
+            key::DISTILLED_GUIDANCE,
+            key::IMG_CFG,
+            key::HIGH_NOISE_STEPS,
+            key::HIGH_NOISE_CFG,
+        ] {
+            assert!(!has(&p, key), "{key}");
+        }
+        // Sizes on its multiple of 64.
+        assert!(matches!(
+            spec(&p, key::SIZE).kind,
+            ParamKind::Size { rules, .. } if rules.multiple_of == 64
+        ));
+    }
+
+    /// A diffusers folder model, SD 1.4's fp16 folder: `-m <its folder>`, its other parts
+    /// read from it by the engine (correction 9).
+    #[test]
+    fn a_diffusers_folder_runs_with_m_and_its_root() {
+        let root = "CompVis/stable-diffusion-v1-4/@fp16";
+        let folder = generic_with(
+            "sd1-checkpoint",
+            SdVersion::Sd1,
+            vec![
+                part(
+                    GenRole::Model,
+                    &format!("{root}/unet/diffusion_pytorch_model.safetensors"),
+                    Some("unet/diffusion_pytorch_model.safetensors"),
+                ),
+                part(
+                    GenRole::Vae,
+                    &format!("{root}/vae/diffusion_pytorch_model.safetensors"),
+                    Some("vae/diffusion_pytorch_model.safetensors"),
+                ),
+                part(
+                    GenRole::ClipL,
+                    &format!("{root}/text_encoder/model.safetensors"),
+                    Some("text_encoder/model.safetensors"),
+                ),
+            ],
+        );
+        let j = job(&folder, &generic_req(json!({}))).unwrap();
+        assert_eq!(j.parts, [(PartRole::Single, Path::new(MODELS).join(root))]);
+        let a = strings(build_args(&j).unwrap());
+        assert!(after(&a, "-m").replace('\\', "/").ends_with(root));
+        assert!(!a.contains(&"--vae".to_string()) && !a.contains(&"--clip_l".to_string()));
+        assert_eq!(after(&a, "-W"), "512");
+    }
+
+    /// Ruling S9-folder-swap: a part the person put in place of one of the folder's own,
+    /// outside it, reaches the engine by its own flag beside `-m <the folder>`; with the model
+    /// part itself put outside the folder there is no folder, and every part has its flag.
+    #[test]
+    fn a_part_swapped_out_of_a_diffusers_folder_is_passed_by_its_own_flag() {
+        let root = "CompVis/stable-diffusion-v1-4";
+        let unet = part(
+            GenRole::Model,
+            &format!("{root}/unet/diffusion_pytorch_model.safetensors"),
+            Some("unet/diffusion_pytorch_model.safetensors"),
+        );
+        let clip = part(
+            GenRole::ClipL,
+            &format!("{root}/text_encoder/model.safetensors"),
+            Some("text_encoder/model.safetensors"),
+        );
+        let my_vae = part(GenRole::Vae, "@imported/my-vae.safetensors", None);
+        let swapped = generic_with(
+            "sd1-checkpoint",
+            SdVersion::Sd1,
+            vec![unet.clone(), my_vae.clone(), clip.clone()],
+        );
+        let a = strings(build_args(&job(&swapped, &generic_req(json!({}))).unwrap()).unwrap());
+        let shown = |arg: &str| arg.replace('\\', "/");
+        assert!(shown(after(&a, "-m")).ends_with(root));
+        assert!(shown(after(&a, "--vae")).ends_with("@imported/my-vae.safetensors"));
+        assert!(!a.contains(&"--clip_l".to_string()));
+        // The model part itself replaced: no folder, every part by its own flag.
+        let my_model = part(GenRole::Model, "@imported/my-sd14.safetensors", None);
+        let own = generic_with("sd1-checkpoint", SdVersion::Sd1, vec![my_model, clip]);
+        let a = strings(build_args(&job(&own, &generic_req(json!({}))).unwrap()).unwrap());
+        assert!(shown(after(&a, "-m")).ends_with("@imported/my-sd14.safetensors"));
+        assert!(shown(after(&a, "--clip_l")).ends_with("text_encoder/model.safetensors"));
+    }
+
+    #[test]
+    fn video_and_big_pictures_tile_the_decoder_unless_the_recipe_says_no() {
+        use MemoryChoice::{Automatic, Off, On};
+        assert_eq!(
+            memory_flags(recipe("wan22-ti2v-5b"), 832, 480, true, Automatic),
+            (true, false)
+        );
+        assert_eq!(
+            memory_flags(recipe("sdxl-checkpoint"), 1024, 1024, false, Automatic),
+            (false, false)
+        );
+        assert_eq!(
+            memory_flags(recipe("sdxl-checkpoint"), 1088, 1024, false, Automatic),
+            (true, false)
+        );
+        assert_eq!(
+            memory_flags(recipe("z-image-l2p"), 2048, 2048, false, Automatic),
+            (false, false)
+        );
+        // Never tiled, even with On.
+        assert_eq!(
+            memory_flags(recipe("z-image-l2p"), 512, 512, false, On),
+            (false, true)
+        );
+        assert_eq!(
+            memory_flags(recipe("sdxl-checkpoint"), 512, 512, false, On),
+            (true, true)
+        );
+        assert_eq!(
+            memory_flags(recipe("sdxl-checkpoint"), 2048, 2048, true, Off),
+            (false, false)
+        );
+        // A model of no known recipe may tile.
+        assert_eq!(memory_flags(None, 832, 480, true, Automatic), (true, false));
+        // The job follows them, and a recipe that disables tiling never tiles, the retry
+        // included.
+        let l2p = generic("z-image-l2p", SdVersion::ZImageL2p);
+        let j = provider()
+            .job_for(
+                &l2p,
+                &row(&l2p),
+                &generic_req(json!({"size": "2048x2048"})),
+                &opts(On),
+                &[],
+                Path::new(NO_LORAS),
+                None,
+                Path::new(OUT),
+                "r",
+            )
+            .unwrap();
+        assert_eq!(
+            (j.vae_tiling, j.offload_to_cpu, j.tiling_allowed),
+            (false, true, false)
+        );
+    }
+
+    #[test]
+    fn attached_loras_reach_the_job_and_a_missing_one_is_refused() {
+        let dir = Scratch::new();
+        let loras = dir.path().join("models").join("@loras");
+        let sdxl = generic("sdxl-checkpoint", SdVersion::Sdxl);
+        let file = saved_lora(&loras, "local/pixel art ü", ".safetensors");
+        let l = lora_row("local/pixel art ü", &file);
+        let attach = |id: &str, weight: f64| {
+            generic_req(json!({"loras": [{"id": id, "weight": weight, "highNoise": false}]}))
+        };
+        let j = job_with_loras(
+            &sdxl,
+            &row(&sdxl),
+            &attach(&l.id, 0.8),
+            std::slice::from_ref(&l),
+            &loras,
+        )
+        .unwrap();
+        assert_eq!(
+            j.loras,
+            [LoraTag {
+                name: "local/pixel art ü".into(),
+                weight: 0.8,
+                high_noise: false
+            }]
+        );
+        assert_eq!(j.lora_dir.as_deref(), Some(loras.as_path()));
+        let a = strings(build_args(&j).unwrap());
+        assert_eq!(after(&a, "--lora-model-dir"), loras.to_str().unwrap());
+        // None attached: no folder.
+        let j = job_with_loras(
+            &sdxl,
+            &row(&sdxl),
+            &generic_req(json!({})),
+            std::slice::from_ref(&l),
+            &loras,
+        )
+        .unwrap();
+        assert_eq!((j.lora_dir, j.loras.len()), (None, 0));
+        let j = job_with_loras(
+            &sdxl,
+            &row(&sdxl),
+            &generic_req(json!({"loras": []})),
+            std::slice::from_ref(&l),
+            &loras,
+        )
+        .unwrap();
+        assert_eq!(j.lora_dir, None);
+        // A LoRA whose file is gone is refused by its name.
+        let gone = lora_row("local/x", Path::new("/nope/x.safetensors"));
+        let e = job_with_loras(&sdxl, &row(&sdxl), &attach(&gone.id, 1.0), &[gone], &loras)
+            .unwrap_err();
+        let (kind, message) = refused_as(e);
+        assert_eq!(kind, FailureKind::BadRequest);
+        assert_eq!(message, errors::lora_missing("x"));
+        // One whose row was deleted too, by the name its id holds.
+        let e = job_with_loras(
+            &sdxl,
+            &row(&sdxl),
+            &attach("hf:someone/loras:styles/ink wash.safetensors", 1.0),
+            &[],
+            &loras,
+        )
+        .unwrap_err();
+        assert_eq!(refused_as(e).1, errors::lora_missing("ink wash"));
+        // A value of another shape is refused as a bad value.
+        let e = job_with_loras(
+            &sdxl,
+            &row(&sdxl),
+            &generic_req(json!({"loras": {"id": l.id}})),
+            &[l],
+            &loras,
+        )
+        .unwrap_err();
+        assert_eq!(refused_as(e).0, FailureKind::BadRequest);
+    }
+
+    /// The engine reads `<the models folder now>/@loras/<name>`: a LoRA whose saved file is
+    /// still where an earlier models folder was is missing for it, and one the engine finds
+    /// under its name with another of its extensions (`.gguf`) is there.
+    #[test]
+    fn a_lora_is_looked_for_where_the_engine_reads_it() {
+        let dir = Scratch::new();
+        let sdxl = generic("sdxl-checkpoint", SdVersion::Sdxl);
+        let old = saved_lora(
+            &dir.path().join("old models").join("@loras"),
+            "local/ink",
+            ".safetensors",
+        );
+        let now = dir.path().join("models").join("@loras");
+        let l = lora_row("local/ink", &old);
+        let attach =
+            generic_req(json!({"loras": [{"id": l.id, "weight": 1.0, "highNoise": false}]}));
+        assert!(old.is_file());
+        let e = job_with_loras(&sdxl, &row(&sdxl), &attach, std::slice::from_ref(&l), &now)
+            .unwrap_err();
+        assert_eq!(refused_as(e).1, errors::lora_missing("ink"));
+        // A folder at the bare name is what the engine would read: missing too.
+        std::fs::create_dir_all(now.join("local").join("ink")).unwrap();
+        saved_lora(&now, "local/ink", ".gguf");
+        assert!(
+            job_with_loras(&sdxl, &row(&sdxl), &attach, std::slice::from_ref(&l), &now).is_err()
+        );
+        std::fs::remove_dir(now.join("local").join("ink")).unwrap();
+        let j = job_with_loras(&sdxl, &row(&sdxl), &attach, &[l], &now).unwrap();
+        assert_eq!(j.lora_dir.as_deref(), Some(now.as_path()));
+    }
+
+    #[test]
+    fn a_mask_and_a_control_picture_reach_the_job() {
+        let inpaint = generic("sdxl-inpainting", SdVersion::SdxlInpaint);
+        let p = LocalMediaProvider::params_for(&inpaint);
+        assert!(matches!(
+            spec(&p, key::MASK).kind,
+            ParamKind::Images {
+                min: 1,
+                max: 1,
+                role: RefRole::Mask
+            }
+        ));
+        assert!(matches!(
+            spec(&p, key::SOURCE).kind,
+            ParamKind::Images {
+                min: 1,
+                max: 1,
+                role: RefRole::Source
+            }
+        ));
+        let j = job(
+            &inpaint,
+            &req_with_refs(&[(RefRole::Source, "in.png"), (RefRole::Mask, "mask.png")]),
+        )
+        .unwrap();
+        assert!(
+            j.init_image.unwrap().ends_with("in.png")
+                && j.mask_image.unwrap().ends_with("mask.png")
+        );
+        // A mask without its picture is refused, with plain words.
+        let flex = generic("flex2", SdVersion::Flex2);
+        let e = job(&flex, &req_with_refs(&[(RefRole::Mask, "mask.png")])).unwrap_err();
+        assert_eq!(
+            refused_as(e),
+            (FailureKind::BadRequest, errors::MASK_NEEDS_PICTURE.into())
+        );
+        // Flex.2 offers all three, none required.
+        let p = LocalMediaProvider::params_for(&flex);
+        for (key, role) in [
+            (key::SOURCE, RefRole::Source),
+            (key::MASK, RefRole::Mask),
+            (key::CONTROL, RefRole::Control),
+        ] {
+            assert_eq!(
+                spec(&p, key).kind,
+                ParamKind::Images {
+                    min: 0,
+                    max: 1,
+                    role
+                },
+                "{key}"
+            );
+        }
+        let canny = generic("flux1-canny", SdVersion::FluxControls);
+        let j = job(&canny, &req_with_refs(&[(RefRole::Control, "edges.png")])).unwrap();
+        assert!(j.control_image.as_ref().unwrap().ends_with("edges.png"));
+        let a = strings(build_args(&j).unwrap());
+        assert!(after(&a, "--control-image").ends_with("edges.png"));
+        assert!(!a.contains(&"-i".to_owned()) && !a.contains(&"--mask".to_owned()));
+        // A picture of a role the model does not take never reaches it.
+        let j = job(&canny, &req_with_refs(&[(RefRole::Reference, "r.png")])).unwrap();
+        assert!(j.ref_images.is_empty());
+    }
+
+    /// Ruling R7-catalog-inputs: a catalog entry whose `inputs` name a picture to change, a
+    /// mask and a control picture (none of the bundled catalog's does) offers their fields,
+    /// and they reach `-i`, `--mask` and `--control-image`.
+    #[test]
+    fn a_catalog_entry_that_takes_a_mask_and_a_control_picture_offers_them() {
+        let dir = Scratch::new();
+        let (provider, mut klein, row) = offline(&dir, KLEIN);
+        klein
+            .inputs
+            .extend([GenInput::Source, GenInput::Mask, GenInput::Control]);
+        assert!(klein.input_counts.is_empty());
+        let p = LocalMediaProvider::params_for(&klein);
+        for (key, role, max) in [
+            (key::REFERENCES, RefRole::Reference, MAX_REFERENCES),
+            (key::SOURCE, RefRole::Source, 1),
+            (key::MASK, RefRole::Mask, 1),
+            (key::CONTROL, RefRole::Control, 1),
+        ] {
+            assert_eq!(
+                spec(&p, key).kind,
+                ParamKind::Images { min: 0, max, role },
+                "{key}"
+            );
+        }
+        let mut r = picture(json!({}));
+        r.refs = vec![
+            added(RefRole::Source, &dir.path().join("in.png")),
+            added(RefRole::Mask, &dir.path().join("mask.png")),
+            added(RefRole::Control, &dir.path().join("edges.png")),
+        ];
+        let j = provider
+            .job_for(
+                &klein,
+                &row,
+                &r,
+                &LocalJobOptions::default(),
+                &[],
+                Path::new(NO_LORAS),
+                None,
+                Path::new(OUT),
+                "r",
+            )
+            .unwrap();
+        let a = strings(build_args(&j).unwrap());
+        assert!(after(&a, "-i").ends_with("in.png"));
+        assert!(after(&a, "--mask").ends_with("mask.png"));
+        assert!(after(&a, "--control-image").ends_with("edges.png"));
+    }
+
+    #[test]
+    fn klein_keeps_its_reference_field() {
+        let p = LocalMediaProvider::params_for(&catalog_entry(KLEIN));
+        assert!(matches!(
+            spec(&p, key::REFERENCES).kind,
+            ParamKind::Images {
+                min: 0,
+                max: MAX_REFERENCES,
+                role: RefRole::Reference
+            }
+        ));
+        // Wan 2.2's catalog entry keeps its start frame.
+        let p = LocalMediaProvider::params_for(&catalog_entry(WAN));
+        assert!(matches!(
+            spec(&p, key::START_FRAME).kind,
+            ParamKind::Images {
+                min: 0,
+                max: 1,
+                role: RefRole::StartFrame
+            }
+        ));
+    }
+
+    #[test]
+    fn distilled_guidance_reaches_the_recipes_own_defaults() {
+        let fill = generic("flux1-fill", SdVersion::FluxFill);
+        let p = LocalMediaProvider::params_for(&fill);
+        let guidance = spec(&p, key::DISTILLED_GUIDANCE);
+        assert!(
+            matches!(guidance.kind, ParamKind::Range { min, max, .. } if min <= 0.5 && max >= 30.0)
+        );
+        assert_eq!(guidance.company_default, Some(json!(30.0)));
+        // Its cfg is 1: no guidance and no negative prompt (the 0.1.x rule), and it takes a
+        // picture guidance.
+        assert!(!has(&p, key::GUIDANCE) && !has(&p, key::NEGATIVE) && has(&p, key::IMG_CFG));
+        // The request over the recipe's default.
+        let picture_and_mask = [(RefRole::Source, "in.png"), (RefRole::Mask, "mask.png")];
+        let j = job(&fill, &req_with_refs(&picture_and_mask)).unwrap();
+        assert_eq!((j.guidance, j.strength), (Some(30.0), Some(1.0)));
+        let mut r = req_with_refs(&picture_and_mask);
+        r.params = object(json!({"guidance": 12.5, "img_cfg_scale": 2.5}));
+        let j = job(&fill, &r).unwrap();
+        assert_eq!((j.guidance, j.img_cfg), (Some(12.5), Some(2.5)));
+        let a = strings(build_args(&j).unwrap());
+        assert_eq!(
+            (after(&a, "--guidance"), after(&a, "--img-cfg-scale")),
+            ("12.5", "2.5")
+        );
+    }
+
+    #[test]
+    fn a_wan_a14b_model_offers_high_noise_settings_and_high_noise_loras() {
+        let wan = generic("wan22-t2v", SdVersion::Wan2);
+        let p = LocalMediaProvider::params_for(&wan);
+        assert!(matches!(
+            spec(&p, key::LORAS).kind,
+            ParamKind::Loras { max: 8, high_noise: true, weight_min, weight_max, weight_step, weight_default }
+                if (weight_min, weight_max, weight_default) == (-1.0, 2.0, 1.0)
+                    && (weight_step - 0.05).abs() < 1e-9
+        ));
+        assert!(has(&p, key::HIGH_NOISE_STEPS) && has(&p, key::HIGH_NOISE_CFG));
+        let steps = spec(&p, key::HIGH_NOISE_STEPS);
+        assert_eq!(steps.layer, Layer::Advanced);
+        assert_eq!(steps.company_default, Some(json!(-1)));
+        assert!(
+            matches!(steps.kind, ParamKind::Range { min, max, .. } if (min, max) == (-1.0, 50.0))
+        );
+        // The recipe's high-noise sampling and MoE boundary reach the job, the request's
+        // steps and guidance over them.
+        let clip = |params: Value| {
+            let mut r = request("test/model", MediaKind::Video, "a wave", params);
+            r.kind = MediaKind::Video;
+            r
+        };
+        let j = job(&wan, &clip(json!({}))).unwrap();
+        assert_eq!(
+            j.high_noise,
+            Some(HighNoise {
+                steps: -1,
+                cfg: 4.0,
+                sampler: Some(Sampler::Euler)
+            })
+        );
+        assert_eq!(
+            (j.moe_boundary, j.flow_shift, j.frames, j.fps),
+            (Some(0.875), Some(12.0), Some(33), Some(16))
+        );
+        let j = job(
+            &wan,
+            &clip(json!({"high_noise_steps": 8, "high_noise_cfg_scale": 3.5})),
+        )
+        .unwrap();
+        assert_eq!(j.high_noise.map(|h| (h.steps, h.cfg)), Some((8, 3.5)));
+        // A high-noise LoRA reaches its tag.
+        let dir = Scratch::new();
+        let loras = dir.path().join("@loras");
+        let l = lora_row(
+            "local/lightx2v high",
+            &saved_lora(&loras, "local/lightx2v high", ".safetensors"),
+        );
+        let r = clip(json!({"loras": [{"id": l.id, "weight": 1.0, "highNoise": true}]}));
+        let j = job_with_loras(&wan, &row(&wan), &r, &[l], &loras).unwrap();
+        assert!(j.loras[0].high_noise);
+        // A recipe that takes no high-noise part offers none.
+        let p = LocalMediaProvider::params_for(&generic("wan21-t2v", SdVersion::Wan2));
+        assert!(!has(&p, key::HIGH_NOISE_STEPS));
+        assert!(matches!(
+            spec(&p, key::LORAS).kind,
+            ParamKind::Loras {
+                high_noise: false,
+                ..
+            }
+        ));
+    }
+
+    /// The recipe's own settings reach the engine as given: its sigmas, shifted timestep,
+    /// VAE format and extra model arguments.
+    #[test]
+    fn the_recipes_own_settings_reach_the_job() {
+        let sigmas = job(
+            &generic("minimax-h3-image", SdVersion::MinimaxH3Image),
+            &generic_req(json!({})),
+        )
+        .unwrap();
+        assert_eq!(sigmas.sigmas.len(), 7);
+        assert!(strings(build_args(&sigmas).unwrap()).contains(&"--sigmas".to_owned()));
+        let nitro = job(
+            &generic("nitrosd-realism", SdVersion::Sdxl),
+            &generic_req(json!({})),
+        )
+        .unwrap();
+        assert_eq!(nitro.timestep_shift, Some(250));
+        let pid = job(
+            &generic("pid-15-sd3", SdVersion::Pid),
+            &generic_req(json!({})),
+        )
+        .unwrap();
+        assert_eq!(pid.vae_format, Some(VaeFormat::Sd3));
+        let pixart = job(
+            &generic("pixart-alpha-1024", SdVersion::Pixart),
+            &generic_req(json!({})),
+        )
+        .unwrap();
+        assert_eq!(
+            pixart.model_args.as_deref(),
+            Some("pixart_vae_scale_factor=0.18215")
+        );
+        let a = strings(build_args(&pixart).unwrap());
+        assert_eq!(after(&a, "--model-args"), "pixart_vae_scale_factor=0.18215");
+        // A catalog entry's recipe has none of them: nothing changes for it.
+        let dir = Scratch::new();
+        let (provider, klein, row) = offline(&dir, KLEIN);
+        let j = provider
+            .job_for(
+                &klein,
+                &row,
+                &picture(json!({})),
+                &LocalJobOptions::default(),
+                &[],
+                Path::new(NO_LORAS),
+                None,
+                Path::new(OUT),
+                "r",
+            )
+            .unwrap();
+        assert_eq!(
+            (
+                j.sigmas.len(),
+                j.timestep_shift,
+                j.vae_format,
+                j.model_args,
+                j.guidance,
+                j.img_cfg,
+                j.high_noise
+            ),
+            (0, None, None, None, None, None, None)
+        );
+    }
+
+    /// A clip's frames follow the model's frame rule: its step, offset and rounding, its fewest
+    /// and most frames, and a fixed frame rate.
+    #[test]
+    fn a_clip_length_becomes_frames_by_the_recipes_rule() {
+        // Wan 2.1: 4n + 1, rounded down, at its 16 frames a second.
+        let wan = generic("wan21-t2v", SdVersion::Wan2);
+        assert_eq!((frames_for(&wan, 2), frames_for(&wan, 1)), (33, 17));
+        // HyperFlow: 17n + 5, rounded up, at a fixed 24 frames a second, 5 frames at least.
+        let mut hyper = generic("hyperflow-h3-flash-fl2va", SdVersion::MinimaxH3);
+        assert_eq!(fps_of(&hyper), 24);
+        assert_eq!((frames_for(&hyper, 1), frames_for(&hyper, 2)), (39, 56));
+        hyper.defaults.fps = Some(10);
+        assert_eq!(fps_of(&hyper), 24, "the rule's rate is fixed");
+        // Never beyond the most frames on the rule.
+        hyper.limits.video = hyper.limits.video.map(|rule| VideoRule {
+            max_frames: 100,
+            ..rule
+        });
+        assert_eq!(frames_for(&hyper, 60), 90);
+    }
+
+    /// With a picture to change and no size chosen, the size follows the picture: its shape,
+    /// at about the recipe default's pixels, on the model's multiple. A size, or a shape,
+    /// chosen wins.
+    #[test]
+    fn an_edits_size_follows_its_picture() {
+        let dir = Scratch::new();
+        let tall = dir.path().join("tall.png");
+        image::RgbImage::new(1000, 1500).save(&tall).unwrap();
+        let inpaint = generic("sdxl-inpainting", SdVersion::SdxlInpaint);
+        let mask = dir.path().join("mask.png");
+        let with = |params: Value| {
+            let mut r = generic_req(params);
+            r.refs = vec![added(RefRole::Source, &tall), added(RefRole::Mask, &mask)];
+            r
+        };
+        let size = |r: &MediaRequest| {
+            let j = job(&inpaint, r).unwrap();
+            (j.width, j.height)
+        };
+        // 1024 × 1024 is 1,048,576 pixels: at 2:3 that is 836 × 1254, on 64s 832 × 1216.
+        assert_eq!(size(&with(json!({}))), (832, 1216));
+        assert_eq!(size(&with(json!({"size": "1024x1024"}))), (1024, 1024));
+        assert_eq!(size(&with(json!({"aspect_ratio": "16:9"}))), (1344, 768));
+        // A picture that cannot be read leaves the default.
+        let mut r = with(json!({}));
+        r.refs[0].path = dir.path().join("gone.png");
+        assert_eq!(size(&r), (1024, 1024));
+        // A picture edit's reference is the picture it changes.
+        let edit = generic("instruct-pix2pix", SdVersion::Sd1Pix2pix);
+        let mut r = generic_req(json!({}));
+        r.refs = vec![added(RefRole::Reference, &tall)];
+        let j = job(&edit, &r).unwrap();
+        assert!(j.height > j.width, "{}x{}", j.width, j.height);
+        // A picture model's references leave its size alone (klein, as 0.1.2).
+        let (provider, klein, row) = offline(&dir, KLEIN);
+        let mut r = picture(json!({}));
+        r.refs = vec![added(RefRole::Reference, &tall)];
+        let j = provider
+            .job_for(
+                &klein,
+                &row,
+                &r,
+                &LocalJobOptions::default(),
+                &[],
+                Path::new(NO_LORAS),
+                None,
+                Path::new(OUT),
+                "r",
+            )
+            .unwrap();
+        assert_eq!((j.width, j.height), (1024, 1024));
+    }
+
+    /// "See the exact command" shows the prompt as the engine reads it from its file: without
+    /// the image markers and LoRA tags typed into it, with the attached LoRAs' tags.
+    #[tokio::test]
+    async fn the_preview_shows_the_prompt_the_engine_reads() {
+        let w = world("ok").await;
+        let loras = w.models().join("@loras");
+        let file = saved_lora(&loras, "local/ink", ".safetensors");
+        let l = lora_row("local/ink", &file);
+        w.store
+            .insert_gen_lora(store::NewGenLora {
+                id: l.id.clone(),
+                name: l.name.clone(),
+                file: l.file.clone(),
+                rel_name: l.rel_name.clone(),
+                repo: None,
+                revision: None,
+                path: None,
+                size_bytes: l.size_bytes,
+                sha256: l.sha256.clone(),
+                base_hint: l.base_hint.clone(),
+                format: l.format,
+                source: l.source,
+            })
+            .await
+            .unwrap();
+        w.provider.fetch_catalog().await.unwrap();
+        let mut r = req("a <lora:other:1> lighthouse");
+        r.params = object(json!({"loras": [{"id": l.id, "weight": 0.5, "highNoise": false}]}));
+        let p = w.provider.preview(&r);
+        let prompt = p.body["prompt"].as_str().unwrap();
+        assert!(!prompt.contains("<lora:other"), "{prompt}");
+        assert!(
+            prompt.starts_with("a ") && prompt.ends_with("lighthouse <lora:local/ink:0.5>"),
+            "{prompt}"
+        );
+        let argv = p.body["argv"].as_array().unwrap();
+        assert!(argv.iter().any(|a| a == loras.to_str().unwrap()));
+        // A command that cannot be made shows the prompt without its typed tags too.
+        let mut r = req("a <lora:other:1> lighthouse");
+        r.model = "not-installed".into();
+        let p = w.provider.preview(&r);
+        assert!(!p.body["prompt"].as_str().unwrap().contains("<lora:"));
+    }
+
+    /// A run of a model whose recipe takes a tokenizer passes it; one whose path holds both
+    /// `=` and `,` is refused in plain words before the engine starts.
+    #[test]
+    fn a_tokenizer_path_the_engine_cannot_read_is_refused_in_plain_words() {
+        let lens = generic_with(
+            "lens",
+            SdVersion::Lens,
+            vec![
+                part(GenRole::Diffusion, "lens.safetensors", None),
+                part(GenRole::Tokenizer, "a=1,b/tokenizer.json", None),
+            ],
+        );
+        let j = job(&lens, &generic_req(json!({}))).unwrap();
+        assert_eq!(
+            build_args(&j).map_err(|e| errors::local_args_refused(&e)),
+            Err(errors::local_args_refused(&ArgsError::TokenizerPath))
+        );
+        assert!(!errors::local_args_refused(&ArgsError::TokenizerPath).contains("TokenizerPath"));
     }
 }

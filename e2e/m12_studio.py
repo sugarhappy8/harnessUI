@@ -7,11 +7,12 @@ http://127.0.0.1:<port>/api/v1 that answers as openrouter.ai does, from the reco
 
 The checks, each PASS or FAIL (the run goes on; the exit code is 1 if any failed):
 - Studio opens with "On this computer" first, and the empty state this computer gets
-  (*Get local models* when a recommended picture model fits here, else cloud as the backup);
+  (*Get models* when a recommended picture model fits here, else cloud as the backup);
 - an OpenRouter endpoint at the mock, added in Settings → Endpoints: Test fetches the lists;
 - Ctrl+G opens Studio; picking FLUX 3 Image fetches its price; a 1K picture ($0.05) is made
   without a question and one tile appears;
-- a 4 s video asks "Make this video?" first, and the card waits;
+- with *Ask before every video* turned on (every spending guard is off until turned on), a 4 s
+  video asks "Make this video?" first, and the card waits;
 - the app restarts while the video waits. On Linux the app keeps API keys in memory only, so
   the endpoint has no key after the restart and the card says so, with *Get it anyway*; the
   key is saved again, the job completes at the mock and *Get it anyway* fetches it: one
@@ -20,7 +21,7 @@ The checks, each PASS or FAIL (the run goes on; the exit code is 1 if any failed
   result's file is gone;
 - Settings → Audit log shows three Studio rows (the picture, the video, and the follow-up of
   *Get it anyway*), none with the prompt;
-- with a daily limit of $1, an 8 s 1080p video (~ $1.12) shows "Daily limit reached: $0.41
+- with *Daily limit* turned on and set to $1, an 8 s 1080p video (~ $1.12) shows "Daily limit reached: $0.41
   of $1 spent today" in place of Create (the deleted result still counts).
 
 The native save dialog is out of WebDriver's reach: it is answered with xdotool
@@ -48,7 +49,7 @@ from urllib.parse import urlsplit
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "e2e"))
-from webdriver import Session, WebDriverError  # noqa: E402
+from webdriver import Session, WebDriverError, close_settings, settings_tab, studio_tab  # noqa: E402
 
 APP = os.environ.get("APP_BIN", str(ROOT / "target" / "debug" / "app"))
 LLAMA_DIR = os.environ.get("APP_DEV_LLAMA_DIR", str(ROOT / ".cache" / "llama-linux"))
@@ -227,31 +228,6 @@ def pointer_click_found(s, script: str, *args, what: str):
     s._pointer_click(find, el)
 
 
-def settings_tab(s, tab: str):
-    """Opens section `tab` of the open Settings dialog, found among the dialog's own tabs and
-    given a real pointer click (the sidebar's Studio button carries the same name, under the
-    dialog's overlay)."""
-    pointer_click_found(
-        s,
-        """
-        return [...document.querySelectorAll(
-          '[role=dialog] [role=tablist][aria-label="Settings sections"] [role=tab]')]
-          .find(t => t.innerText.trim() === arguments[0]) || null;
-        """,
-        tab,
-        what=f"settings tab {tab!r}",
-    )
-    s.wait_for(
-        lambda: s.execute(
-            "return [...document.querySelectorAll('[role=dialog] [role=tab][aria-selected=true]')]"
-            ".some(t => t.innerText.trim() === arguments[0]);",
-            tab,
-        ),
-        10,
-        f"settings page {tab!r}",
-    )
-
-
 def open_settings(s, tab: str):
     s.click_button("Settings")
     s.wait_for(lambda: s.execute("return !!document.querySelector('[aria-label=\"Settings sections\"]');"), 10,
@@ -259,47 +235,75 @@ def open_settings(s, tab: str):
     settings_tab(s, tab)
 
 
-def close_settings(s):
-    s.execute("document.querySelector('[role=dialog] button[aria-label=\"Close settings\"]').click();")
-    s.wait_for(lambda: s.execute("return !document.querySelector('[aria-label=\"Settings sections\"]');"), 10,
-               "Settings closed")
-
-
-def studio_tab(s, label: str):
-    """The top bar's [Pictures | Video] tab `label`, once it is chosen."""
-    script = """
-        return [...document.querySelectorAll('[data-studio-view] header [role=tablist] [role=tab]')]
-          .find(t => t.innerText.trim() === arguments[0]) || null;
+def set_switch(s, label: str, on: bool):
+    """Turns the switch labelled `label` in the open Settings dialog on or off, with a real pointer
+    click (the spending guards are all off until turned on)."""
+    find = """
+        const l = [...document.querySelectorAll('[role=dialog] label')]
+          .find(l => l.innerText.trim() === arguments[0]);
+        return (l && document.getElementById(l.htmlFor)) || null;
     """
-    pointer_click_found(s, script, label, what=f"Studio tab {label!r}")
-    s.wait_for(lambda: s.execute(
-        """
-        const t = [...document.querySelectorAll('[data-studio-view] header [role=tablist] [role=tab]')]
-          .find(t => t.innerText.trim() === arguments[0]);
-        return !!t && t.getAttribute('aria-selected') === 'true';
-        """, label), 10, f"Studio tab {label!r} chosen")
+    is_on = """
+        const l = [...document.querySelectorAll('[role=dialog] label')]
+          .find(l => l.innerText.trim() === arguments[0]);
+        const el = l && document.getElementById(l.htmlFor);
+        return el ? el.getAttribute('aria-checked') === 'true' : null;
+    """
+    s.wait_for(lambda: s.execute(is_on, label) is not None, 10, f"the {label!r} switch")
+    if s.execute(is_on, label) != on:
+        pointer_click_found(s, find, label, what=f"the {label!r} switch")
+    s.wait_for(lambda: s.execute(is_on, label) == on, 10, f"the {label!r} switch {'on' if on else 'off'}")
+
+
+# 0.2.0 (Task U3): the composer at the foot of Studio's results holds the prompt, the model chip
+# (which opens the model sheet, Task U4), Shape, How many and a video's Length as menus, Settings and
+# Create; the side panel (Settings), with the model's other fields, is closed until Settings
+# opens it (a slide-over below 1400 px, docked beside the results from there).
+MODEL_CHIP = "return document.querySelector('[data-studio-view] [data-composer] [data-model-chip] button');"
 
 
 def pick_model(s, name: str):
-    """Opens the model picker and chooses the model named `name`."""
-    pointer_click_found(
-        s, "return document.querySelector('[data-model-picker] button[aria-haspopup]');", what="the model picker"
-    )
+    """Opens the model sheet from the composer's model chip and chooses the model named `name`
+    (its row, or its Recent tile)."""
+    pointer_click_found(s, MODEL_CHIP, what="the model chip")
     pointer_click_found(
         s,
         """
-        return [...document.querySelectorAll('[data-radix-popper-content-wrapper] [role=option]')]
-          .find(o => o.querySelector('span').innerText.trim() === arguments[0]
+        return [...document.querySelectorAll('[data-model-sheet] [data-sheet-pick]')]
+          .find(o => o.querySelector('[data-sheet-name]').innerText.trim() === arguments[0]
                      && o.getAttribute('aria-disabled') !== 'true') || null;
         """,
         name,
-        what=f"the model {name!r} in the picker",
+        what=f"the model {name!r} in the model sheet",
     )
-    s.wait_for(lambda: s.execute("return !document.querySelector('[data-radix-popper-content-wrapper] [role=option]');"),
-               10, "the picker closed")
+    s.wait_for(lambda: s.execute("return !document.querySelector('[data-model-sheet]');"), 10, "the model sheet closed")
 
 
-# The chip (a radio) `arguments[1]` of the right panel's field labelled `arguments[0]`, as `chip`.
+def open_studio_settings(s):
+    """Studio's side panel, opened from the composer's Settings, once it shows."""
+    if not visible(s, "[data-settings-panel]"):
+        pointer_click_found(
+            s, "return document.querySelector('[data-studio-view] [data-composer] [data-settings-button]');", what="the composer's Settings"
+        )
+    s.wait_for(lambda: visible(s, "[data-settings-panel]"), 10, "Studio's side panel")
+
+
+def close_studio_settings(s):
+    """Studio's side panel closed with its own Close button (the slide-over's or the docked one's)."""
+    pointer_click_found(
+        s,
+        """
+        const panel = document.querySelector('[data-settings-panel]');
+        const box = panel && panel.closest('[role=dialog], aside');
+        return box ? box.querySelector('button[aria-label="Close"]') : null;
+        """,
+        what="the side panel's Close",
+    )
+    s.wait_for(lambda: s.execute("return !document.querySelector('[data-settings-panel]');"), 10,
+               "Studio's side panel closed")
+
+
+# The chip (a radio) `arguments[1]` of the side panel's field labelled `arguments[0]`, as `chip`.
 FIND_CHIP = """
     const [field, label] = arguments;
     const group = [...document.querySelectorAll('[data-settings-panel] [role=radiogroup]')].find(g => {
@@ -311,56 +315,55 @@ FIND_CHIP = """
 
 
 def choose_chip(s, field: str, chip: str):
-    """In the right panel, the chip `chip` of the field labelled `field`, once it is chosen."""
+    """In the side panel (opened for it, and closed again so the composer is in reach), the chip
+    `chip` of the field labelled `field`, once it is chosen."""
+    open_studio_settings(s)
     pointer_click_found(s, FIND_CHIP + "return chip || null;", field, chip, what=f"the {field!r} chip {chip!r}")
     s.wait_for(lambda: s.execute(FIND_CHIP + "return !!chip && chip.getAttribute('aria-checked') === 'true';",
                                  field, chip), 10, f"{chip!r} chosen")
+    close_studio_settings(s)
 
 
-# The select of the right panel's field labelled `arguments[0]`, as `select`.
-FIND_SELECT = """
+# The button of the composer's menu named `arguments[0]` ("Length: 4 s"), as `trigger`.
+FIND_MENU = """
     const field = arguments[0];
-    const select = [...document.querySelectorAll('[data-settings-panel] select')].find(e => {
-      const name = document.getElementById(e.getAttribute('aria-labelledby'));
-      return name && name.innerText.trim() === field;
-    });
+    const trigger = [...document.querySelectorAll('[data-studio-view] [data-composer] [role=toolbar] button')]
+      .find(b => (b.getAttribute('aria-label') || '').startsWith(field + ': '));
 """
 
 
-def chosen_option(s, field: str) -> str | None:
-    """The words of the option chosen in the right panel's list field labelled `field`."""
-    return s.execute(FIND_SELECT + "return select ? select.selectedOptions[0].innerText.trim() : null;", field)
+def menu_value(s, field: str) -> str | None:
+    """What the composer's menu `field` shows: "4 s" for the button named "Length: 4 s"."""
+    label = s.execute(FIND_MENU + "return trigger ? trigger.getAttribute('aria-label') : null;", field)
+    return label[len(field) + 2:] if label else None
 
 
-def choose_option(s, field: str, option: str):
-    """In the right panel, the option `option` of the list field labelled `field`, chosen as a
-    person would (React sees the change)."""
-    s.wait_for(lambda: s.execute(FIND_SELECT + "return !!select;", field), 10, f"the {field!r} list")
-    s.execute(
-        FIND_SELECT + """
-        const option = [...select.options].find(o => o.innerText.trim() === arguments[1]);
-        const set = Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype, 'value').set;
-        set.call(select, option.value);
-        select.dispatchEvent(new Event('change', {bubbles: true}));
-        """,
-        field,
-        option,
+def choose_menu(s, field: str, item: str):
+    """In the composer's menu `field` (Shape, How many, Length), the item `item`, once chosen."""
+    pointer_click_found(s, FIND_MENU + "return trigger || null;", field, what=f"the {field!r} menu")
+    pointer_click_found(
+        s,
+        "return [...document.querySelectorAll('[role=menu] [role=menuitemradio]')]"
+        ".find(i => i.innerText.trim() === arguments[0]) || null;",
+        item,
+        what=f"{item!r} in the {field!r} menu",
     )
-    s.wait_for(lambda: chosen_option(s, field) == option, 10, f"{option!r} chosen")
+    s.wait_for(lambda: menu_value(s, field) == item, 10, f"{item!r} chosen")
 
 
 def write_prompt(s, text: str):
-    type_into(s, "[data-prompt-dock] textarea", text)
+    type_into(s, "[data-studio-view] [data-composer] textarea", text)
 
 
 def dock_text(s) -> str:
-    return s.execute("const d = document.querySelector('[data-prompt-dock]'); return d ? d.innerText : '';")
+    """The composer's words with the privacy line under it (the card's parent holds both)."""
+    return s.execute("const d = document.querySelector('[data-studio-view] [data-composer]'); return d ? d.parentElement.innerText : '';")
 
 
 def create_button(s):
     return s.execute(
         """
-        return [...document.querySelectorAll('[data-prompt-dock] button')]
+        return [...document.querySelectorAll('[data-studio-view] [data-composer] button')]
           .find(b => b.innerText.trim() === 'Create') || null;
         """
     )
@@ -369,12 +372,12 @@ def create_button(s):
 def press_create(s):
     s.wait_for(lambda: s.execute(
         """
-        const b = [...document.querySelectorAll('[data-prompt-dock] button')].find(b => b.innerText.trim() === 'Create');
+        const b = [...document.querySelectorAll('[data-studio-view] [data-composer] button')].find(b => b.innerText.trim() === 'Create');
         return !!b && !b.disabled;
         """), 15, "Create enabled")
     pointer_click_found(
         s,
-        "return [...document.querySelectorAll('[data-prompt-dock] button')].find(b => b.innerText.trim() === 'Create') || null;",
+        "return [...document.querySelectorAll('[data-studio-view] [data-composer] button')].find(b => b.innerText.trim() === 'Create') || null;",
         what="Create",
     )
 
@@ -444,26 +447,24 @@ def c_first_open(c, notes):
     local = s.invoke("studio_local_models")
     fits = [e["name"] for e in local["recommended"] if e["kind"] == "image" and e["fit"]["word"] in ("fits", "afterUnload")]
     notes.append(f"this computer: {local['hardware']}; recommended picture models that fit: {fits}")
-    pointer_click_found(
-        s, "return document.querySelector('[data-model-picker] button[aria-haspopup]');", what="the model picker"
-    )
+    pointer_click_found(s, MODEL_CHIP, what="the model chip")
     first = s.wait_for(lambda: s.execute(
         """
-        const pop = document.querySelector('[data-radix-popper-content-wrapper]');
-        const section = pop && pop.querySelector('section');
-        return section ? section.innerText : null;
-        """), 10, "the picker's first group")
-    assert first.startswith("On this computer"), f"the picker's first group: {first!r}"
+        const sheet = document.querySelector('[data-model-sheet]');
+        const heading = sheet && sheet.querySelector('section h3');
+        return heading ? heading.innerText.trim() : null;
+        """), 10, "the model sheet's first section")
+    assert first == "On this computer", f"the model sheet's first section: {first!r}"
     s.execute("document.dispatchEvent(new KeyboardEvent('keydown', {key: 'Escape', bubbles: true}));")
-    s.wait_for(lambda: s.execute("return !document.querySelector('[data-radix-popper-content-wrapper]');"), 10,
-               "the picker closed")
+    s.wait_for(lambda: s.execute("return !document.querySelector('[data-model-sheet]');"), 10,
+               "the model sheet closed")
     main = s.execute("return document.querySelector('[data-studio-view] main').innerText;")
     if fits:
         assert "Make pictures and videos on this computer: free, and nothing is sent." in main, main
         assert s.execute(
             "return [...document.querySelectorAll('[data-studio-view] main button')]"
-            ".some(b => b.innerText.trim() === 'Get local models');"
-        ), "no Get local models button"
+            ".some(b => b.innerText.trim() === 'Get models');"
+        ), "no Get models button"
     else:
         assert "This computer cannot run local models well." in main, main
         assert "Open Endpoints" in main, main
@@ -521,10 +522,15 @@ def c_picture(c, notes):
 def c_video(c, notes):
     """A 4 s video asks "Make this video?" first, and its card waits."""
     s = c.s
+    # Every spending guard is off on a new install: turn the question on first.
+    open_settings(s, "Studio")
+    set_switch(s, "Ask before every video", True)
+    s.wait_for(lambda: s.invoke("studio_get_prefs")["confirmEveryVideo"] is True, 10, "the switch saved")
+    close_settings(s)
     studio_tab(s, "Video")
     pick_model(s, "Grok Imagine Video 1.5 Lite")
-    # The shortest length of at least 4 s is the one Studio starts with.
-    assert chosen_option(s, "Length") == "4 s", chosen_option(s, "Length")
+    # The shortest length of at least 4 s is the one Studio starts with (the composer's Length).
+    assert menu_value(s, "Length") == "4 s", menu_value(s, "Length")
     write_prompt(s, VIDEO_PROMPT)
     press_create(s)
     s.wait_for(lambda: s.execute(
@@ -618,7 +624,8 @@ def c_save_delete(c, notes):
         """
         const label = [...document.querySelectorAll('[role=dialog] label')]
           .find(l => l.innerText.includes('Also save the settings'));
-        return label.querySelector('input').checked;
+        // A Radix checkbox: a button (role=checkbox) the label points at.
+        return document.getElementById(label.htmlFor).getAttribute('aria-checked') === 'true';
         """
     )
     assert settings_box is False, "Also save the settings is ticked"
@@ -681,17 +688,20 @@ def c_audit(c, notes):
 
 @check("daily-limit")
 def c_daily_limit(c, notes):
-    """With a daily limit of $1, an 8 s 1080p video (~ $1.12) shows "Daily limit reached: $0.41
+    """With the daily limit turned on at $1, an 8 s 1080p video (~ $1.12) shows "Daily limit reached: $0.41
     of $1 spent today" in place of Create; the deleted result still counts."""
     s = c.s
     open_settings(s, "Studio")
+    set_switch(s, "Daily limit", True)  # off until turned on; it comes on at $10
+    s.wait_for(lambda: s.execute(
+        "return !!document.querySelector('input[aria-label=\"Daily limit in US dollars\"]');"), 10, "the limit's amount box")
     type_into(s, "input[aria-label=\"Daily limit in US dollars\"]", "1")
     s.type(s.find("input[aria-label=\"Daily limit in US dollars\"]"), "\ue007")
     s.wait_for(lambda: s.invoke("studio_get_prefs")["dailyLimitUsd"] == 1, 10, "the limit saved")
     close_settings(s)
     studio_tab(s, "Video")
     choose_chip(s, "Resolution", "1080p")
-    choose_option(s, "Length", "8 s")
+    choose_menu(s, "Length", "8 s")
     write_prompt(s, LIMIT_PROMPT)
     s.wait_for(lambda: "Daily limit reached: $0.41 of $1 spent today" in dock_text(s), 15, "the daily limit line")
     assert create_button(s) is None, "Create is still there"

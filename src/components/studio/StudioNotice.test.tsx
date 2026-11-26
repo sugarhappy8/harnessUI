@@ -27,7 +27,7 @@ describe("StudioNotice", () => {
     useStudio.getState().applyProgress({ ...VIDEO, status: "waiting", watching: true, seq: VIDEO.seq - 1 });
     useStudio.getState().applyProgress(VIDEO);
     expect(useStudio.getState().readyNotice).toBe("v");
-    // Get local models was left open in Studio: Open still lands on the video's cards.
+    // Get models was left open in Studio: Open still lands on the video's cards.
     useStudio.setState({ localView: true });
     render(<StudioNotice />);
     screen.getByText("Your video is ready");

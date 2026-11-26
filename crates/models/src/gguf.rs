@@ -44,6 +44,12 @@ pub enum GgufError {
     BigEndian,
     #[error("the file is damaged or truncated: {0}")]
     Corrupt(String),
+    /// A prefix ended inside the header or the tensor table ([`tensor_table_from_prefix`]).
+    #[error("needs {need} bytes")]
+    Truncated {
+        /// A lower bound on the prefix length that gets further.
+        need: u64,
+    },
     #[error(transparent)]
     Io(#[from] io::Error),
 }
@@ -153,6 +159,7 @@ fn read_inner<R: Read + Seek>(reader: R, len: u64, lenient: bool) -> Result<Gguf
         pos: 0,
         len,
         kept: 0,
+        prefix: false,
     };
     read_header(&mut r, lenient)
 }
@@ -177,7 +184,7 @@ fn read_header<R: Read + Seek>(r: &mut Reader<R>, lenient: bool) -> Result<GgufH
     }
     let tensor_count = r.u64()?;
     let kv_count = r.u64()?;
-    if kv_count > MAX_KV || (!lenient && kv_count.saturating_mul(13) > r.remaining()) {
+    if kv_count > MAX_KV || (!lenient && !r.prefix && kv_count.saturating_mul(13) > r.remaining()) {
         return Err(GgufError::Corrupt(format!("{kv_count} metadata entries")));
     }
     let mut metadata = BTreeMap::new();
@@ -221,9 +228,9 @@ fn read_entry<R: Read + Seek>(r: &mut Reader<R>) -> Result<Option<(String, Value
 
 // ---- 0.0.6 item 6: the tensor table (WP10b) ----------------------------------------------
 
-/// Tensor tables longer than this mean a damaged file (the largest models llama.cpp loads
-/// have a few thousand tensors).
-const MAX_TENSORS: u64 = 65_536;
+/// Tensor tables longer than this mean a damaged file (LTX-2.3 has 4,444 tensors, LoRA
+/// files reach tens of thousands; the caller's header cap is the real bound).
+pub const MAX_TENSORS: u64 = 262_144;
 /// Tensor names longer than this mean a damaged file (llama.cpp itself allows 63 bytes).
 const MAX_TENSOR_NAME: u64 = 256;
 /// Dimensions per tensor (ggml's `GGML_MAX_DIMS`).
@@ -253,21 +260,21 @@ pub struct TensorShape {
 
 /// A tensor table entry as written in the file, before sizes are known.
 #[derive(Clone, Debug, PartialEq, Eq)]
-struct RawTensor {
-    name: String,
-    /// ggml's type number (only the tests look at it, to check the sizes).
-    #[cfg_attr(not(test), allow(dead_code))]
-    ggml_type: u32,
-    /// The element count per dimension.
-    dims: Vec<u64>,
+pub struct RawTensor {
+    /// The tensor's name.
+    pub name: String,
+    /// ggml's type number (see [`ggml_type_name`]).
+    pub ggml_type: u32,
+    /// The element count per dimension, fastest-changing first.
+    pub dims: Vec<u64>,
     /// Offset from the start of the data section.
-    offset: u64,
+    pub offset: u64,
 }
 
 /// Reads the tensor table of the GGUF file at `path`: every tensor's name and size.
 /// A split model has one table per file; read each file.
 ///
-/// Refused as damaged: more than 65,536 tensors, a name longer than 256 bytes or not UTF-8,
+/// Refused as damaged: more than 262,144 tensors, a name longer than 256 bytes or not UTF-8,
 /// more than four dimensions, an alignment that is not a power of two, and offsets that
 /// overflow, lie beyond the end of the file or do not increase. A file cut off inside its
 /// last tensor is not noticed (no type table is kept); llama.cpp refuses to load it.
@@ -303,6 +310,7 @@ fn read_checked_table<R: Read + Seek>(
         pos: 0,
         len,
         kept: 0,
+        prefix: false,
     };
     let header = read_header(&mut r, false)?;
     let raw = read_raw_tensors(&mut r, &header, max_dims)?;
@@ -313,11 +321,6 @@ fn read_checked_table<R: Read + Seek>(
 /// Read a tensor table with the dimension limit used by llama.cpp.
 pub fn read_tensor_shapes(path: &Path) -> Result<Vec<TensorShape>, GgufError> {
     file_shapes(path, MAX_DIMS)
-}
-
-/// Stable-diffusion.cpp also loads five-dimensional video convolution kernels.
-pub fn read_diffusion_tensor_shapes(path: &Path) -> Result<Vec<TensorShape>, GgufError> {
-    file_shapes(path, 5)
 }
 
 fn file_shapes(path: &Path, max_dims: u32) -> Result<Vec<TensorShape>, GgufError> {
@@ -342,6 +345,105 @@ fn read_shapes<R: Read + Seek>(
         .collect())
 }
 
+/// The longest entry of the tensor table: name, dimension count, five dimensions, type, offset.
+const MAX_TABLE_ENTRY: u64 = 8 + MAX_TENSOR_NAME + 4 + 5 * 8 + 4 + 8;
+/// How much more to ask for when a prefix ends inside the metadata.
+const METADATA_STEP: u64 = 1024 * 1024;
+
+/// The string-valued metadata and the tensor table as written, from `bytes`, the first bytes
+/// of a GGUF file. Dimensions up to five are read (stable-diffusion.cpp's limit).
+///
+/// [`GgufError::Truncated`] when `bytes` ends inside the header or the table, with a lower
+/// bound on the length that gets further: what the cut-off read needed, or the length
+/// reached plus one table entry (inside the table) or 1 MiB (inside the metadata).
+pub fn tensor_table_from_prefix(
+    bytes: &[u8],
+) -> Result<(Vec<RawTensor>, BTreeMap<String, String>), GgufError> {
+    tensor_table_with_end(bytes).map(|(raw, strings, _)| (raw, strings))
+}
+
+/// The tensors, the string metadata and the byte position where the table ends.
+pub type TableWithEnd = (Vec<RawTensor>, BTreeMap<String, String>, u64);
+
+/// [`tensor_table_from_prefix`] and the byte position where the table ends.
+pub fn tensor_table_with_end(bytes: &[u8]) -> Result<TableWithEnd, GgufError> {
+    let mut r = Reader {
+        inner: io::Cursor::new(bytes),
+        pos: 0,
+        len: bytes.len() as u64,
+        kept: 0,
+        prefix: true,
+    };
+    let reached = r.len;
+    let header = read_header(&mut r, false).map_err(|e| match e {
+        GgufError::Truncated { need } => GgufError::Truncated {
+            need: need.max(reached.saturating_add(METADATA_STEP)),
+        },
+        e => e,
+    })?;
+    let raw = read_raw_tensors(&mut r, &header, 5).map_err(|e| match e {
+        GgufError::Truncated { need } => GgufError::Truncated {
+            need: need.max(reached.saturating_add(MAX_TABLE_ENTRY)),
+        },
+        e => e,
+    })?;
+    let strings = header
+        .metadata
+        .into_iter()
+        .filter_map(|(k, v)| match v {
+            Value::String(s) => Some((k, s)),
+            _ => None,
+        })
+        .collect();
+    Ok((raw, strings, r.pos))
+}
+
+/// ggml's name for a tensor type number, as `type_traits` has it at the ggml commit in
+/// `sd.lock.json` (`"f16"`, `"q4_K"`); `"type<N>"` for a number it does not know.
+pub fn ggml_type_name(id: u32) -> String {
+    let name = match id {
+        0 => "f32",
+        1 => "f16",
+        2 => "q4_0",
+        3 => "q4_1",
+        6 => "q5_0",
+        7 => "q5_1",
+        8 => "q8_0",
+        9 => "q8_1",
+        10 => "q2_K",
+        11 => "q3_K",
+        12 => "q4_K",
+        13 => "q5_K",
+        14 => "q6_K",
+        15 => "q8_K",
+        16 => "iq2_xxs",
+        17 => "iq2_xs",
+        18 => "iq3_xxs",
+        19 => "iq1_s",
+        20 => "iq4_nl",
+        21 => "iq3_s",
+        22 => "iq2_s",
+        23 => "iq4_xs",
+        24 => "i8",
+        25 => "i16",
+        26 => "i32",
+        27 => "i64",
+        28 => "f64",
+        29 => "iq1_m",
+        30 => "bf16",
+        34 => "tq1_0",
+        35 => "tq2_0",
+        39 => "mxfp4",
+        40 => "nvfp4",
+        41 => "q1_0",
+        42 => "q2_0",
+        43 => "f8_e4m3",
+        44 => "f8_e5m2",
+        _ => return format!("type{id}"),
+    };
+    name.to_string()
+}
+
 /// The data alignment the file names (`general.alignment`, an unsigned integer that is a
 /// power of two), or the default.
 fn alignment(header: &GgufHeader) -> Result<u64, GgufError> {
@@ -359,11 +461,11 @@ fn read_raw_tensors<R: Read + Seek>(
     max_dims: u32,
 ) -> Result<Vec<RawTensor>, GgufError> {
     let count = header.tensor_count;
-    if count > MAX_TENSORS || count.saturating_mul(MIN_TENSOR_ENTRY) > r.remaining() {
+    if count > MAX_TENSORS || (!r.prefix && count.saturating_mul(MIN_TENSOR_ENTRY) > r.remaining())
+    {
         return Err(GgufError::Corrupt(format!("{count} tensors")));
     }
-    // At most 65,536 by the check above.
-    let mut out = Vec::with_capacity(usize::try_from(count).unwrap_or(0));
+    let mut out = Vec::with_capacity(table_capacity(count, r.remaining()));
     for _ in 0..count {
         let name_len = r.u64()?;
         if name_len > MAX_TENSOR_NAME {
@@ -390,6 +492,13 @@ fn read_raw_tensors<R: Read + Seek>(
         });
     }
     Ok(out)
+}
+
+/// The entries to make room for before reading a table of `count` entries with `remaining`
+/// bytes in hand: at most what those bytes could hold, so a 24-byte prefix that claims
+/// [`MAX_TENSORS`] entries does not reserve room for all of them (final review I-1, R2).
+fn table_capacity(count: u64, remaining: u64) -> usize {
+    usize::try_from(count.min(remaining / MIN_TENSOR_ENTRY).min(MAX_TENSORS)).unwrap_or(0)
 }
 
 /// Sizes from the gaps between the offsets: the data section starts at `table_end`
@@ -442,6 +551,9 @@ struct Reader<R> {
     len: u64,
     /// The part of [`MAX_KEPT_TOTAL`] used by what was kept so far.
     kept: u64,
+    /// `len` is only the first bytes of the file: running out is [`GgufError::Truncated`],
+    /// not damage.
+    prefix: bool,
 }
 
 impl<R: Read + Seek> Reader<R> {
@@ -461,12 +573,23 @@ impl<R: Read + Seek> Reader<R> {
         }
     }
 
+    /// The error for wanting `n` more bytes than there are.
+    fn short(&self, n: u64, what: &str) -> GgufError {
+        if self.prefix {
+            GgufError::Truncated {
+                need: self.pos.saturating_add(n),
+            }
+        } else {
+            GgufError::Corrupt(what.into())
+        }
+    }
+
     fn read_exact(&mut self, buf: &mut [u8]) -> Result<(), GgufError> {
         if buf.len() as u64 > self.remaining() {
-            return Err(GgufError::Corrupt("unexpected end of file".into()));
+            return Err(self.short(buf.len() as u64, "unexpected end of file"));
         }
         self.inner.read_exact(buf).map_err(|e| match e.kind() {
-            io::ErrorKind::UnexpectedEof => GgufError::Corrupt("unexpected end of file".into()),
+            io::ErrorKind::UnexpectedEof => self.short(buf.len() as u64, "unexpected end of file"),
             _ => GgufError::Io(e),
         })?;
         self.pos += buf.len() as u64;
@@ -475,7 +598,7 @@ impl<R: Read + Seek> Reader<R> {
 
     fn skip(&mut self, n: u64) -> Result<(), GgufError> {
         if n > self.remaining() {
-            return Err(GgufError::Corrupt("unexpected end of file".into()));
+            return Err(self.short(n, "unexpected end of file"));
         }
         let n_i64 = i64::try_from(n).map_err(|_| GgufError::Corrupt("length overflow".into()))?;
         self.inner.seek(SeekFrom::Current(n_i64))?;
@@ -497,7 +620,7 @@ impl<R: Read + Seek> Reader<R> {
 
     fn string(&mut self, len: u64) -> Result<String, GgufError> {
         if len > self.remaining() {
-            return Err(GgufError::Corrupt("string longer than the file".into()));
+            return Err(self.short(len, "string longer than the file"));
         }
         let mut buf = vec![0u8; len as usize];
         self.read_exact(&mut buf)?;
@@ -508,7 +631,7 @@ impl<R: Read + Seek> Reader<R> {
     /// caller.
     fn utf8(&mut self, len: u64) -> Result<String, GgufError> {
         if len > self.remaining() {
-            return Err(GgufError::Corrupt("string longer than the file".into()));
+            return Err(self.short(len, "string longer than the file"));
         }
         let size =
             usize::try_from(len).map_err(|_| GgufError::Corrupt("length overflow".into()))?;
@@ -549,7 +672,9 @@ impl<R: Read + Seek> Reader<R> {
                     _ => return Err(GgufError::Corrupt(format!("unknown value type {elem}"))),
                 };
                 if count.saturating_mul(min_size) > self.remaining() {
-                    return Err(GgufError::Corrupt("array longer than the file".into()));
+                    return Err(
+                        self.short(count.saturating_mul(min_size), "array longer than the file")
+                    );
                 }
                 if count > MAX_KEPT_ARRAY || !self.keep(count.saturating_mul(VALUE_COST)) {
                     match fixed_size(elem) {
@@ -598,7 +723,9 @@ impl<R: Read + Seek> Reader<R> {
                     Some(size) => self.skip(count.saturating_mul(size)),
                     None => {
                         if count.saturating_mul(8) > self.remaining() {
-                            return Err(GgufError::Corrupt("array longer than the file".into()));
+                            return Err(
+                                self.short(count.saturating_mul(8), "array longer than the file")
+                            );
                         }
                         for _ in 0..count {
                             self.skip_value(elem, depth + 1)?;
@@ -1027,6 +1154,18 @@ mod tests {
     }
 
     #[test]
+    fn a_short_prefix_that_claims_many_tensors_reserves_only_what_it_could_hold() {
+        // A 24-byte prefix's claim of 262,144 entries used to reserve about 17 MB.
+        assert_eq!(table_capacity(MAX_TENSORS, 24), 1);
+        assert_eq!(table_capacity(MAX_TENSORS, 0), 0);
+        assert_eq!(table_capacity(3, 1024 * 1024), 3);
+        assert_eq!(
+            table_capacity(MAX_TENSORS, 64 * 1024 * 1024),
+            MAX_TENSORS as usize
+        );
+    }
+
+    #[test]
     fn tensor_table_sizes_come_from_the_offsets() {
         let bytes = Writer::new()
             .str("general.architecture", "llama")
@@ -1387,6 +1526,7 @@ mod tests {
             pos: 0,
             len,
             kept: 0,
+            prefix: false,
         };
         let header = read_header(&mut r, false).unwrap();
         let raw = read_raw_tensors(&mut r, &header, MAX_DIMS).unwrap();

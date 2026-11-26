@@ -1507,19 +1507,29 @@ pub(crate) mod tests {
         "studio_engine_download",
         "studio_engine_cancel",
         "studio_engine_remove",
-        // Get local models (studio::local_cmd).
+        // Get models (studio::local_cmd).
         "studio_local_models",
         "studio_local_search",
         "studio_local_repo",
+        "studio_setup_plan",
         "studio_local_fit",
         "studio_local_download",
         "studio_local_download_file",
         "studio_local_delete",
         "studio_accept_local_notice",
+        // Set it up yourself (studio::setup_cmd).
+        "studio_model_files",
+        "studio_set_model_files",
+        // LoRAs (studio::loras).
+        "studio_loras",
+        "studio_lora_download",
+        "studio_lora_import",
+        "studio_lora_delete",
     ];
 
     /// The modules Studio's commands live in.
-    const STUDIO_COMMAND_MODULES: &[&str] = &["commands", "engine_cmd", "local_cmd"];
+    const STUDIO_COMMAND_MODULES: &[&str] =
+        &["commands", "engine_cmd", "local_cmd", "setup_cmd", "loras"];
 
     #[test]
     fn every_studio_command_is_listed_granted_and_registered() {
@@ -2050,9 +2060,72 @@ pub(crate) mod tests {
                 name: entry.name.clone(),
                 kind: kind.as_str().unwrap().into(),
                 family: family.as_str().unwrap().into(),
+                recipe_id: Some(entry.recipe.clone()),
                 parts: json!(parts),
                 size_bytes: entry.total_bytes(),
                 source: store::GenSource::Catalog,
+            })
+            .await
+            .unwrap();
+    }
+
+    /// The generic models the fixture installs.
+    #[derive(Clone, Copy)]
+    enum GenericRow {
+        /// A file whose model type is not chosen yet (*Set it up yourself*).
+        NeedsSetUp,
+        /// A file set up as a type its version does not run: "untested set-up".
+        Untested,
+        /// An SDXL checkpoint, set up as its version runs.
+        Sdxl,
+    }
+
+    /// Installs a searched file of 0.2.0 as `row` says, its file's place in `models`.
+    async fn install_generic(store: &store::Store, models: &Path, row: GenericRow) {
+        let (repo, path, name, family, recipe) = match row {
+            GenericRow::NeedsSetUp => (
+                "someone/mystery-model",
+                "mystery.safetensors",
+                "mystery",
+                "unknown",
+                None,
+            ),
+            GenericRow::Untested => (
+                "someone/flux-dev-copy",
+                "flux-dev-copy.safetensors",
+                "flux-dev-copy",
+                "unknown",
+                Some("sdxl-checkpoint"),
+            ),
+            GenericRow::Sdxl => (
+                "stabilityai/stable-diffusion-xl-base-1.0",
+                "sd_xl_base_1.0.safetensors",
+                "sd_xl_base_1.0",
+                "sdxl",
+                Some("sdxl-checkpoint"),
+            ),
+        };
+        let part = json!({
+            "role": "model",
+            "repo": repo,
+            "revision": "1".repeat(40),
+            "path": path,
+            "size": 6_938_078_334_u64,
+            "sha256": "e".repeat(64),
+            "license": "openrail++",
+            "file": destination(models, repo, path).unwrap().display().to_string(),
+        });
+        store
+            .insert_gen_model(store::NewGenModel {
+                id: format!("hf:{repo}:{path}"),
+                catalog_id: None,
+                name: name.into(),
+                kind: "image".into(),
+                family: family.into(),
+                recipe_id: recipe.map(str::to_owned),
+                parts: json!([part]),
+                size_bytes: 6_938_078_334,
+                source: store::GenSource::Search,
             })
             .await
             .unwrap();
@@ -2159,6 +2232,32 @@ pub(crate) mod tests {
         // defaults (one picture in 1 min 54 s, not in the fixture) and a finished run of
         // klein (two pictures in 3 min 48 s): klein's measured times here.
         let models_dir = scratch.path().join("models");
+        // Three models of 0.2.0 (older than the two below, so they come after them): a set-up
+        // that needs a model type chosen first, a file set up as a type its version does not
+        // run, and a plain SDXL checkpoint. Then a LoRA made for SDXL, its file in place.
+        install_generic(&h.store, &models_dir, GenericRow::NeedsSetUp).await;
+        install_generic(&h.store, &models_dir, GenericRow::Untested).await;
+        install_generic(&h.store, &models_dir, GenericRow::Sdxl).await;
+        let lora_file = models_dir.join("@loras").join("pixel-art-xl.safetensors");
+        std::fs::create_dir_all(lora_file.parent().unwrap()).unwrap();
+        std::fs::write(&lora_file, b"lora").unwrap();
+        h.store
+            .insert_gen_lora(store::NewGenLora {
+                id: format!("local:{}", "c".repeat(64)),
+                name: "pixel-art-xl".into(),
+                file: lora_file.display().to_string(),
+                rel_name: "pixel-art-xl".into(),
+                repo: None,
+                revision: None,
+                path: None,
+                size_bytes: 170_000_000,
+                sha256: "c".repeat(64),
+                base_hint: Some("sdxl".into()),
+                format: store::LoraFileFormat::Kohya,
+                source: store::LoraSource::Import,
+            })
+            .await
+            .unwrap();
         install_bundled(&h.store, &models_dir, WAN_ID).await;
         install_bundled(&h.store, &models_dir, KLEIN_ID).await;
         record_ended(
@@ -2254,6 +2353,7 @@ pub(crate) mod tests {
             catalog: Arc::new(BundledCatalog),
             hardware: Arc::new(FixtureCard),
             hf: None,
+            detect: Arc::new(crate::studio::detect::DetectService::new()),
             models_dir,
             free_disk_bytes: Some(412 * GIB),
             ram_total_bytes: Some(32 * GIB),
@@ -2261,14 +2361,17 @@ pub(crate) mod tests {
             engine_need: EngineNeed::Found,
             notice_accepted: true,
             installed_files: crate::studio::local_models::InstalledFiles::default(),
+            last_import_mode: None,
         };
         let mut local = local_models(&deps).await.unwrap();
         // The store dates an install by its own clock: fixed here.
-        for (installed, at) in local
-            .installed
-            .iter_mut()
-            .zip([KLEIN_INSTALLED_S, WAN_INSTALLED_S])
-        {
+        for (installed, at) in local.installed.iter_mut().zip([
+            KLEIN_INSTALLED_S,
+            WAN_INSTALLED_S,
+            WAN_INSTALLED_S - 86_400,
+            WAN_INSTALLED_S - 2 * 86_400,
+            WAN_INSTALLED_S - 3 * 86_400,
+        ]) {
             installed.model.created = Some(at);
         }
         assert_eq!(local.engine.state, "builtIn");
@@ -2279,8 +2382,30 @@ pub(crate) mod tests {
                 .iter()
                 .map(|m| m.id.as_str())
                 .collect::<Vec<_>>(),
-            [KLEIN_ID, WAN_ID]
+            [
+                KLEIN_ID,
+                WAN_ID,
+                "hf:stabilityai/stable-diffusion-xl-base-1.0:sd_xl_base_1.0.safetensors",
+                "hf:someone/flux-dev-copy:flux-dev-copy.safetensors",
+                "hf:someone/mystery-model:mystery.safetensors"
+            ]
         );
+        // The checkpoint runs as its version does and takes SDXL's LoRAs; the second is
+        // untested; the third needs its model type chosen.
+        let generic: Vec<_> = local.installed[2..]
+            .iter()
+            .map(|m| (m.untested, m.needs_setup, m.lora_base.is_some()))
+            .collect();
+        assert_eq!(
+            generic,
+            [
+                (false, false, true),
+                (true, false, false),
+                (true, true, false)
+            ]
+        );
+        assert_eq!(local.loras.len(), 1);
+        assert!(!local.loras[0].missing && local.loras[0].base.is_some());
         let klein = &local.installed[0];
         assert_eq!(klein.fit.word, "fits");
         assert!(klein.fit.eta.as_ref().is_some_and(|eta| eta.measured));

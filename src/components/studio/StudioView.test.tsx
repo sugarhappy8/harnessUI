@@ -1,8 +1,10 @@
-// Studio's view (0.1.0 Task B2): the frame (top bar, card stream, panel and dock slots), the
-// empty states and the default model, local first, and the saved lists, read without a fetch.
+// Studio's view (0.1.0 Task B2; 0.2.0 Task U3): the frame (the top bar, the results with the
+// composer at their foot, and the side panel, closed until asked for), the empty states and the
+// default model, local first, and the saved lists, read without a fetch.
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
-import { amountGb } from "../../lib/words";
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { formatBytes } from "../../lib/format";
+import type { DownloadGroup } from "../../lib/types";
 import { LOCAL, MODELS, RUN } from "./fixtures/models";
 import type { LocalModels, Run, StudioEndpoint, StudioPrefs, Usage } from "./types";
 
@@ -13,12 +15,22 @@ globalThis.ResizeObserver ??= class {
   disconnect() {}
 } as unknown as typeof ResizeObserver;
 
-vi.mock("../../lib/ipc", () => ({ isTauri: () => true }));
+const ipc = vi.hoisted(() => ({
+  isTauri: () => true,
+  listDownloads: vi.fn<() => Promise<DownloadGroup[]>>(),
+  onDownloadProgress: vi.fn<(handler: (g: DownloadGroup) => void) => Promise<() => void>>(),
+  pauseDownload: vi.fn<(groupId: string) => Promise<void>>(),
+  resumeDownload: vi.fn<(groupId: string) => Promise<void>>(),
+  cancelDownload: vi.fn<(groupId: string) => Promise<void>>(),
+}));
+vi.mock("../../lib/ipc", () => ipc);
 vi.mock("./api");
 
 const api = await import("./api");
 const { StudioView } = await import("./StudioView");
+const { UiProviders } = await import("../ui/UiProviders");
 const { defaultModel, emptyState, useStudio } = await import("../../store/studio");
+const { useDownloads } = await import("../../store/downloads");
 
 const INITIAL = useStudio.getState();
 /** The first recommended entry: FLUX.2 klein 4B, about 5.3 GB. */
@@ -46,7 +58,10 @@ function prefs(patch: Partial<StudioPrefs> = {}): StudioPrefs {
   return {
     lastModel: {},
     advancedOpen: false,
+    settingsOpen: false,
+    prefsVersion: 1,
     confirmEveryVideo: true,
+    confirmUnknownPrice: false,
     confirmAtUsd: 1,
     dailyLimitUsd: 10,
     setups: [],
@@ -55,6 +70,7 @@ function prefs(patch: Partial<StudioPrefs> = {}): StudioPrefs {
     reloadChatAfter: false,
     suggestionDismissed: true,
     localNoticeAcceptedAt: null,
+    lastImportMode: null,
     ...patch,
   };
 }
@@ -99,7 +115,16 @@ async function show(
   vi.mocked(api.studioGetPrefs).mockResolvedValue(p);
   vi.mocked(api.studioSetPrefs).mockImplementation(async (patch) => ({ ...p, ...patch }));
   vi.mocked(api.studioUsage).mockResolvedValue(saved.usage ?? usage());
-  // Get local models' footer follows the engine's download (Task B13).
+  // The side panel's Files section reads a local model's files (Task U8; nothing is sent).
+  vi.mocked(api.studioModelFiles).mockImplementation(async (genModelId) => ({
+    genModelId,
+    recipe: null,
+    recipes: [],
+    slots: [],
+    untested: false,
+    canRun: true,
+  }));
+  // Get models' footer follows the engine's download (Task B13).
   vi.mocked(api.onEngineProgress).mockResolvedValue(() => undefined);
   // The prompt dock asks for the draft's estimate (Task B7).
   vi.mocked(api.studioEstimate).mockResolvedValue({
@@ -113,7 +138,11 @@ async function show(
   });
   useStudio.getState().showStudio();
   await act(async () => {
-    render(<StudioView />);
+    render(
+      <UiProviders>
+        <StudioView />
+      </UiProviders>,
+    );
   });
   await flush();
 }
@@ -143,9 +172,18 @@ function typePrompt(text: string) {
 let opened: unknown[] = [];
 const onOpenSettings = (e: Event) => opened.push((e as CustomEvent<unknown>).detail);
 
+/** What the download manager's `download-progress` event tells Studio, once it listens. */
+let progress: (g: DownloadGroup) => void = () => undefined;
+
 beforeEach(() => {
   vi.clearAllMocks();
   useStudio.setState(INITIAL, true);
+  useDownloads.setState({ groups: [] });
+  ipc.listDownloads.mockResolvedValue([]);
+  ipc.onDownloadProgress.mockImplementation((handler) => {
+    progress = handler;
+    return Promise.resolve(() => undefined);
+  });
   opened = [];
   window.addEventListener("app:open-settings", onOpenSettings);
 });
@@ -170,19 +208,23 @@ describe("StudioView", () => {
     // getLocal
     await show({ endpoints: [], local: { ...LOCAL, installed: [] } });
     screen.getByText("Make pictures and videos on this computer: free, and nothing is sent.");
-    screen.getByText(`${klein.name} fits this computer (${amountGb(klein.sizeBytes)}).`);
+    screen.getByText(`${klein.name} fits this computer (${formatBytes(klein.sizeBytes)}).`);
     screen.getByText("No good graphics card? Cloud models are the backup: OpenRouter or OpenAI."); // second, smaller
     await click(screen.getByRole("button", { name: "Open Endpoints" }));
     expect(opened).toEqual(["endpoints"]); // app:open-settings detail
-    // Get local models takes the empty state's place (Task B13).
-    await click(screen.getByRole("button", { name: "Get local models" }));
+    // Get models takes the empty state's place (Task B13), opened on the model the card names,
+    // in its detail panel (Task U9).
+    vi.mocked(api.studioLocalSearch).mockResolvedValue({ items: [] });
+    const main = screen.getByRole("main");
+    await click(within(main).getByRole("button", { name: `Get ${klein.name}` }));
     expect(useStudio.getState().localView).toBe(true);
+    expect(useStudio.getState().detail).toEqual({ entryId: klein.id });
     expect(screen.queryByText("Make pictures and videos on this computer: free, and nothing is sent.")).toBeNull();
   });
 
   it("each empty state follows one ordered rule", () => {
     const none = { ...LOCAL, installed: [] };
-    const nothingFits = { ...none, recommended: [], notHere: LOCAL.recommended, videoPossible: false };
+    const nothingFits = { ...none, recommended: [], notHere: LOCAL.recommended, videoOnProcessor: true };
     expect(emptyState("image", LOCAL, [])).toBeNull(); // klein is installed
     expect(emptyState("image", none, [])).toBe("getLocal");
     expect(emptyState("image", nothingFits, [])).toBe("cloudBackup");
@@ -194,13 +236,16 @@ describe("StudioView", () => {
     // cloudBackup
     await show({
       endpoints: [],
-      local: { ...LOCAL, installed: [], recommended: [], notHere: LOCAL.recommended, videoPossible: false },
+      local: { ...LOCAL, installed: [], recommended: [], notHere: LOCAL.recommended, videoOnProcessor: true },
     });
     screen.getByText(
       "This computer cannot run local models well. Cloud models run on a company's computers instead: add OpenRouter or OpenAI.",
     );
     screen.getByRole("button", { name: "Open Endpoints" });
-    expect(screen.queryByRole("button", { name: "Get local models" })).toBeNull();
+    // Since Task U9 the card says there is no model here yet and still offers Get models first
+    // (a model may run slowly rather than not at all), the cloud as its second line.
+    screen.getByText("No models on this computer yet");
+    within(screen.getByRole("main")).getByRole("button", { name: "Get models" });
   });
 
   it("the first-run suggestion leads with local models and can be put away", async () => {
@@ -252,7 +297,7 @@ describe("StudioView", () => {
   it("an endpoint without a key offers no model to use", async () => {
     const keyless = endpoint({ hasKey: false });
     const none = { ...LOCAL, installed: [] };
-    const nothingFits = { ...none, recommended: [], notHere: LOCAL.recommended, videoPossible: false };
+    const nothingFits = { ...none, recommended: [], notHere: LOCAL.recommended, videoOnProcessor: true };
     const openai = endpoint({ providerId: 2, company: "openai" });
     expect(defaultModel("image", none, [keyless])).toBeNull();
     expect(defaultModel("image", none, [keyless, openai])).toEqual({ target: { endpoint: 2 }, model: "gpt-image-2.6-flare" });
@@ -288,7 +333,7 @@ describe("StudioView", () => {
 
   it("with a local model to get, the card's second line says why a saved endpoint is not used", async () => {
     await show({ endpoints: [endpoint({ hasKey: false })], local: { ...LOCAL, installed: [] } });
-    screen.getByText(`${klein.name} fits this computer (${amountGb(klein.sizeBytes)}).`);
+    screen.getByText(`${klein.name} fits this computer (${formatBytes(klein.sizeBytes)}).`);
     screen.getByText("OpenRouter has no key, so Studio cannot use its models. Add a key in Settings → Endpoints.");
     expect(screen.queryByText("No good graphics card? Cloud models are the backup: OpenRouter or OpenAI.")).toBeNull();
   });
@@ -300,19 +345,306 @@ describe("StudioView", () => {
     expect(api.studioRefreshModels).toHaveBeenCalledWith(1);
   });
 
-  it("the top bar shows Pictures and Video, where the chosen model runs, and cloud spending", async () => {
-    await show({ usage: usage({ spentTodayUsd: 0.84 }) }); // the default: a local model
-    screen.getByRole("tab", { name: "Pictures" });
-    screen.getByRole("tab", { name: "Video" });
-    screen.getByText("$0.84 today");
-    expect(document.querySelector("[data-local-mark]")).not.toBeNull();
-    expect(document.querySelector("[data-cloud-mark]")).toBeNull();
+  it("the top bar shows the title, Pictures and Video, the gallery's controls and the menu", async () => {
+    await show();
+    const bar = screen.getByRole("banner");
+    expect(within(bar).getByRole("heading", { name: "Studio" }).className).toContain("text-title");
+    within(bar).getByRole("tab", { name: "Pictures" });
+    within(bar).getByRole("tab", { name: "Video" });
+    within(bar).getByRole("searchbox", { name: "Search" });
+    within(bar).getByRole("button", { name: "Starred" });
+    within(bar).getByRole("button", { name: "Grid" });
+    within(bar).getByRole("button", { name: "Studio menu" });
+  });
+
+  it("Get models is a top-bar button and the place chip is gone", async () => {
+    await show();
+    const bar = screen.getByRole("banner");
+    // Critique §6: the chip looked clickable and was not.
+    expect(bar.querySelector("[data-local-mark], [data-cloud-mark]")).toBeNull();
     act(() =>
       useStudio.setState((s) => ({
         drafts: { ...s.drafts, image: { ...s.drafts.image, target: { endpoint: 1 }, model: "openai/gpt-image-2.6-flare" } },
       })),
     );
-    expect(document.querySelector("[data-cloud-mark]")).not.toBeNull();
+    expect(bar.querySelector("[data-local-mark], [data-cloud-mark]")).toBeNull();
+    // The menu keeps Update model lists; Get models has its own button.
+    await openMenu();
+    screen.getByRole("menuitem", { name: "Update model lists" });
+    expect(screen.queryByRole("menuitem", { name: /Get models/ })).toBeNull();
+    await act(async () => {
+      fireEvent.keyDown(document.activeElement ?? document.body, { key: "Escape" });
+    });
+    vi.mocked(api.studioLocalSearch).mockResolvedValue({ items: [] });
+    await click(within(bar).getByRole("button", { name: "Get models" }));
+    expect(useStudio.getState().localView).toBe(true);
+  });
+
+  it("the Get models button reads as pressed while the view is open", async () => {
+    await show();
+    vi.mocked(api.studioLocalSearch).mockResolvedValue({ items: [] });
+    const getModels = within(screen.getByRole("banner")).getByRole("button", { name: "Get models" });
+    expect(getModels.getAttribute("aria-pressed")).toBe("false");
+    await click(getModels);
+    expect(useStudio.getState().localView).toBe(true);
+    expect(getModels.getAttribute("aria-pressed")).toBe("true");
+    expect(getModels.className).toContain("aria-pressed:bg-accent/10");
+    // The view's own filter stands in for the tabs, and the gallery's controls go.
+    expect(within(screen.getByRole("banner")).queryByRole("tab", { name: "Pictures" })).toBeNull();
+    expect(within(screen.getByRole("banner")).queryByRole("button", { name: "Grid" })).toBeNull();
+    // Pressed again, it goes back to the results.
+    await click(getModels);
+    expect(useStudio.getState().localView).toBe(false);
+    expect(getModels.getAttribute("aria-pressed")).toBe("false");
+    screen.getByRole("textbox", { name: "Prompt" });
+  });
+
+  it("the top-bar indicator counts running downloads and lists them", async () => {
+    const GB = 1_000_000_000;
+    const download = (patch: Partial<DownloadGroup>): DownloadGroup => ({
+      id: "g",
+      repo: "leejet/Z-Image-Turbo-GGUF",
+      label: "Z-Image Turbo",
+      fileCount: 3,
+      bytesDone: 2.4 * GB,
+      bytesTotal: 6.7 * GB,
+      status: "downloading",
+      error: null,
+      bytesPerSecond: null,
+      unverified: false,
+      generatorKind: "image",
+      genModelId: "z-image-turbo-q4",
+      ...patch,
+    });
+    // No Studio download: no indicator.
+    await show();
+    expect(document.querySelector("[data-download-indicator]")).toBeNull();
+    cleanup();
+    ipc.listDownloads.mockResolvedValue([
+      download({ id: "zimage" }),
+      download({ id: "wan", label: "Wan 2.2 TI2V 5B", genModelId: "wan22-ti2v-5b-fast-q6", generatorKind: "video", status: "paused", bytesDone: 1.2 * GB, bytesTotal: 3.6 * GB }),
+      download({ id: "lora", label: "pixel-art-xl", genModelId: null, generatorKind: null, loraId: "hf:nerijs/pixel-art-xl:pixel-art-xl.safetensors", bytesDone: 60_000_000, bytesTotal: 170_000_000 }),
+      // Neither listed: one done before (not while Studio followed it), and a chat model's.
+      download({ id: "old", label: "FLUX.2 klein 4B", genModelId: "flux2-klein-4b-q4", status: "done", bytesDone: 6.7 * GB }),
+      download({ id: "chat", label: "qwen3-8b-q4_k_m.gguf", genModelId: null, generatorKind: null }),
+    ]);
+    await show();
+    const indicator = within(screen.getByRole("banner")).getByRole("button", { name: "3 downloading" });
+    expect(indicator.getAttribute("aria-haspopup")).toBe("dialog");
+    // Beside Get models.
+    expect(indicator.nextElementSibling).toBe(within(screen.getByRole("banner")).getByRole("button", { name: "Get models" }));
+    await click(indicator);
+    const list = screen.getByRole("dialog", { name: "Downloads" });
+    const rows = [...list.querySelectorAll<HTMLElement>("[data-download-row]")];
+    expect(rows.map((r) => r.dataset.downloadRow)).toEqual(["zimage", "wan", "lora"]);
+    within(rows[0]!).getByText("Z-Image Turbo");
+    within(rows[0]!).getByText("Picture model");
+    within(rows[0]!).getByText("2.4 GB of 6.7 GB");
+    within(rows[0]!).getByRole("button", { name: "Pause downloading Z-Image Turbo" });
+    within(rows[1]!).getByText("Video model");
+    within(rows[1]!).getByText("1.2 GB of 3.6 GB · Paused");
+    within(rows[1]!).getByRole("button", { name: "Resume downloading Wan 2.2 TI2V 5B" });
+    within(rows[2]!).getByText("LoRA");
+    within(rows[2]!).getByText("60 MB of 170 MB");
+    ipc.cancelDownload.mockResolvedValue(undefined);
+    await click(within(rows[2]!).getByRole("button", { name: "Cancel downloading pixel-art-xl" }));
+    expect(ipc.cancelDownload).toHaveBeenCalledWith("lora");
+    // As they move on, the count follows: one cancelled, one done.
+    act(() => progress(download({ id: "lora", label: "pixel-art-xl", genModelId: null, generatorKind: null, loraId: "x", status: "cancelled" })));
+    act(() => progress(download({ id: "zimage", status: "done", bytesDone: 6.7 * GB })));
+    await flush();
+    expect(indicator.textContent).toBe("1 downloading");
+    expect([...screen.getByRole("dialog", { name: "Downloads" }).querySelectorAll<HTMLElement>("[data-download-row]")].map((r) => r.dataset.downloadRow)).toEqual(["zimage", "wan"]);
+    // Esc closes the list, and focus goes back to the indicator.
+    fireEvent.keyDown(screen.getByRole("dialog", { name: "Downloads" }), { key: "Escape" });
+    await flush();
+    expect(screen.queryByRole("dialog", { name: "Downloads" })).toBeNull();
+    // Radix gives focus back on the next task.
+    await waitFor(() => expect(document.activeElement).toBe(indicator));
+  });
+
+  describe("the download list opens only when the indicator is pressed (U7 fix round 1)", () => {
+    /** A Studio download (Z-Image Turbo's unless `patch` says otherwise). */
+    const download = (patch: Partial<DownloadGroup>): DownloadGroup => ({
+      id: "g1",
+      repo: "leejet/Z-Image-Turbo-GGUF",
+      label: "Z-Image Turbo",
+      fileCount: 3,
+      bytesDone: 2_400_000_000,
+      bytesTotal: 6_700_000_000,
+      status: "downloading",
+      error: null,
+      bytesPerSecond: null,
+      unverified: false,
+      generatorKind: "image",
+      genModelId: "z-image-turbo-q4",
+      ...patch,
+    });
+
+    /** Lets Radix's focus moves, made on the next task, happen. */
+    const nextTask = () => act(() => new Promise<void>((resolve) => setTimeout(resolve, 0)));
+
+    /** The person is writing a prompt when another download starts: nothing pops open and the
+     *  cursor stays in the prompt. */
+    async function anotherDownloadStarts() {
+      expect(document.querySelector("[data-download-indicator]")).toBeNull();
+      promptBox().focus();
+      expect(document.activeElement).toBe(promptBox());
+      act(() => progress(download({ id: "g2", label: "FLUX.2 klein 4B", genModelId: "flux2-klein-4b-q4", bytesDone: 0 })));
+      await flush();
+      await nextTask();
+      within(screen.getByRole("banner")).getByRole("button", { name: "1 downloading" });
+      expect(screen.queryByRole("dialog", { name: "Downloads" })).toBeNull();
+      expect(document.activeElement).toBe(promptBox());
+    }
+
+    it("after Clear finished with nothing running, the next download does not open the list", async () => {
+      ipc.listDownloads.mockResolvedValue([download({})]);
+      await show();
+      // It finishes while Studio follows it: listed as ready.
+      act(() => progress(download({ status: "done", bytesDone: 6_700_000_000 })));
+      await flush();
+      await click(within(screen.getByRole("banner")).getByRole("button", { name: "1 ready" }));
+      const list = screen.getByRole("dialog", { name: "Downloads" });
+      await click(within(list).getByRole("button", { name: "Clear finished" }));
+      await nextTask();
+      expect(screen.queryByRole("dialog", { name: "Downloads" })).toBeNull();
+      // Focus is not lost with the list: it goes to Get models beside it.
+      expect(document.activeElement).toBe(within(screen.getByRole("banner")).getByRole("button", { name: "Get models" }));
+      await anotherDownloadStarts();
+    });
+
+    it("after the last download in the list is cancelled, the next download does not open the list", async () => {
+      ipc.listDownloads.mockResolvedValue([download({})]);
+      ipc.cancelDownload.mockResolvedValue(undefined);
+      await show();
+      await click(within(screen.getByRole("banner")).getByRole("button", { name: "1 downloading" }));
+      const list = screen.getByRole("dialog", { name: "Downloads" });
+      await click(within(list).getByRole("button", { name: "Cancel downloading Z-Image Turbo" }));
+      expect(ipc.cancelDownload).toHaveBeenCalledWith("g1");
+      act(() => progress(download({ status: "cancelling" })));
+      act(() => progress(download({ status: "cancelled", bytesDone: 0 })));
+      await flush();
+      await nextTask();
+      expect(screen.queryByRole("dialog", { name: "Downloads" })).toBeNull();
+      await anotherDownloadStarts();
+    });
+  });
+
+  describe("today's spend", () => {
+    const OFF = { dailyLimitUsd: null, confirmEveryVideo: false, confirmAtUsd: null, confirmUnknownPrice: false } as const;
+    const SPENT = "$0.84 today";
+
+    /** The top bar's width, which the page measures (jsdom has no layout). */
+    function barWidth(px: number) {
+      vi.spyOn(Element.prototype, "getBoundingClientRect").mockImplementation(function (this: Element) {
+        const width = this.tagName === "HEADER" ? px : 0;
+        return { width, height: 0, top: 0, left: 0, right: width, bottom: 0, x: 0, y: 0, toJSON: () => ({}) };
+      });
+    }
+    afterEach(() => vi.restoreAllMocks());
+
+    it("shows while any one of the four spending switches is on", async () => {
+      barWidth(1000);
+      for (const on of [
+        { dailyLimitUsd: 10 },
+        { confirmEveryVideo: true },
+        { confirmAtUsd: 1 },
+        { confirmUnknownPrice: true },
+      ]) {
+        useStudio.setState(INITIAL, true);
+        await show({ usage: usage({ spentTodayUsd: 0.84 }), prefs: prefs({ ...OFF, ...on }) });
+        within(screen.getByRole("banner")).getByText(SPENT);
+        cleanup();
+      }
+    });
+
+    it("does not show when every switch is off, on the bar or in the menu", async () => {
+      for (const px of [1000, 500]) {
+        barWidth(px);
+        useStudio.setState(INITIAL, true);
+        await show({ usage: usage({ spentTodayUsd: 0.84 }), prefs: prefs(OFF) });
+        expect(screen.queryByText(SPENT)).toBeNull();
+        await openMenu();
+        expect(screen.queryByText(SPENT)).toBeNull();
+        cleanup();
+      }
+    });
+
+    it("shows on the bar of a wide window and not in the menu", async () => {
+      barWidth(1000);
+      await show({ usage: usage({ spentTodayUsd: 0.84 }), prefs: prefs({ ...OFF, dailyLimitUsd: 10 }) });
+      within(screen.getByRole("banner")).getByText(SPENT);
+      await openMenu();
+      expect(screen.getAllByText(SPENT)).toHaveLength(1);
+    });
+
+    it("shows in the menu of a narrow window and not on the bar", async () => {
+      barWidth(500);
+      await show({ usage: usage({ spentTodayUsd: 0.84 }), prefs: prefs({ ...OFF, dailyLimitUsd: 10 }) });
+      expect(screen.queryByText(SPENT)).toBeNull();
+      await openMenu();
+      expect(screen.getAllByText(SPENT)).toHaveLength(1);
+    });
+  });
+
+  it("the results take the page and the side panel is closed by default", async () => {
+    await show({ runs: [RUN] });
+    const results = document.querySelector<HTMLElement>("[data-results]")!;
+    // The card stream and the composer at its foot share one column; nothing sits beside it.
+    expect(results.contains(document.querySelector("main"))).toBe(true);
+    expect(results.contains(screen.getByRole("region", { name: "Make a picture" }))).toBe(true);
+    expect(
+      document.querySelector("main")!.compareDocumentPosition(screen.getByRole("region", { name: "Make a picture" })) &
+        Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy();
+    expect(screen.queryByRole("complementary", { name: "Settings" })).toBeNull();
+    expect(screen.queryByRole("dialog", { name: "Settings" })).toBeNull();
+    expect(document.querySelector("[data-settings-panel]")).toBeNull();
+    expect(screen.getByRole("button", { name: "Settings" }).getAttribute("aria-expanded")).toBe("false");
+    expect(useStudio.getState().settingsOpen).toBe(false);
+  });
+
+  describe("on a wide window", () => {
+    const width = Object.getOwnPropertyDescriptor(window, "innerWidth");
+    function windowWidth(px: number) {
+      Object.defineProperty(window, "innerWidth", { configurable: true, value: px });
+      window.dispatchEvent(new Event("resize"));
+    }
+    afterEach(() => {
+      if (width) Object.defineProperty(window, "innerWidth", width);
+    });
+
+    it("the panel stays docked on a 1400 px window when it was left open", async () => {
+      windowWidth(1400);
+      await show({ prefs: prefs({ settingsOpen: true }) });
+      const panel = screen.getByRole("complementary", { name: "Settings" });
+      within(panel).getByText("My setups");
+      // Docked beside the results, not over them.
+      expect(screen.queryByRole("dialog", { name: "Settings" })).toBeNull();
+      expect(document.querySelector("[data-results]")!.contains(panel)).toBe(false);
+      expect(screen.getByRole("button", { name: "Settings" }).getAttribute("aria-expanded")).toBe("true");
+      // Closing it is saved, and Settings opens it again, docked.
+      await click(within(panel).getByRole("button", { name: "Close" }));
+      expect(screen.queryByRole("complementary", { name: "Settings" })).toBeNull();
+      expect(api.studioSetPrefs).toHaveBeenLastCalledWith({ settingsOpen: false });
+      await click(screen.getByRole("button", { name: "Settings" }));
+      expect(screen.getByRole("complementary", { name: "Settings" }).contains(document.activeElement)).toBe(true);
+      // Narrower, the same open panel slides over the results.
+      act(() => windowWidth(1399));
+      await flush();
+      expect(screen.queryByRole("complementary", { name: "Settings" })).toBeNull();
+      screen.getByRole("dialog", { name: "Settings" });
+    });
+
+    it("a panel left open does not cover the results when Studio opens on a narrower window", async () => {
+      windowWidth(1200);
+      await show({ prefs: prefs({ settingsOpen: true }) });
+      expect(screen.queryByRole("dialog", { name: "Settings" })).toBeNull();
+      expect(useStudio.getState().settingsOpen).toBe(false);
+      // The choice saved for wide windows is kept.
+      expect(api.studioSetPrefs).not.toHaveBeenCalled();
+    });
   });
 
   it("each tab keeps its own draft", async () => {
@@ -404,6 +736,30 @@ describe("StudioView", () => {
     }
   });
 
+  it("the grid opens at its top", async () => {
+    // Critique §2.2 and g2: the grid kept the stream's scroll, so it opened at its bottom with its
+    // filters out of view.
+    vi.mocked(api.studioOutputBytes).mockReturnValue(new Promise(() => {}));
+    const main = Object.getOwnPropertyDescriptor(Element.prototype, "scrollHeight");
+    Object.defineProperty(HTMLElement.prototype, "scrollHeight", { configurable: true, get: () => 1000 });
+    try {
+      await show({ runs: [RUN] });
+      const scroller = document.querySelector("main")!;
+      // The stream opens at its newest card.
+      expect(scroller.scrollTop).toBe(1000);
+      await click(screen.getByRole("button", { name: "Grid" }));
+      expect(document.querySelector("[data-grid]")).not.toBeNull();
+      expect(scroller.scrollTop).toBe(0);
+      // Back to the cards, the stream is at its newest card again.
+      scroller.scrollTop = 300;
+      await click(screen.getByRole("button", { name: "Grid" }));
+      expect(scroller.scrollTop).toBe(1000);
+    } finally {
+      if (main) Object.defineProperty(HTMLElement.prototype, "scrollHeight", main);
+      else delete (HTMLElement.prototype as { scrollHeight?: number }).scrollHeight;
+    }
+  });
+
   it("a press accepted from Studio brings its new card into view", async () => {
     const shownCards: Element[] = [];
     Element.prototype.scrollIntoView = vi.fn(function (this: Element) {
@@ -427,12 +783,8 @@ describe("StudioView", () => {
     }
   });
 
-  it("at the window's smallest the middle column keeps room: a narrower panel, and a chat list toggle", async () => {
+  it("at the window's smallest the chat list can be hidden from the top bar", async () => {
     await show();
-    // jsdom lays nothing out: the classes are the layout (288 px from 1000 px, 240 px below).
-    const panel = (document.querySelector("[data-studio-panel]")?.getAttribute("class") ?? "").split(/\s+/);
-    expect(panel).toEqual(expect.arrayContaining(["w-60", "min-[1000px]:w-72"]));
-    expect(panel).not.toContain("w-72");
     const toggled = vi.fn();
     window.addEventListener("app:toggle-sidebar", toggled);
     try {
@@ -452,7 +804,7 @@ describe("StudioView", () => {
     expect(api.studioRuns).toHaveBeenCalledWith({ kind: "video" }, null, 60);
   });
 
-  it("the card stream shows the tab's runs, oldest first and newest above the dock, over the queue strip of this session's runs", async () => {
+  it("the card stream shows the tab's runs, oldest first and newest above the composer, over the queue strip of this session's runs", async () => {
     const older: Run = { ...RUN, id: "older", createdAt: RUN.createdAt - 1000, prompt: "An older picture" };
     const making: Run = {
       ...RUN,
@@ -485,21 +837,32 @@ describe("StudioView", () => {
     await show({ endpoints: [endpoint({ company: "openai" })], local: { ...LOCAL, installed: [] } });
     await click(screen.getByRole("tab", { name: "Video" }));
     const video = LOCAL.recommended.find((e) => e.kind === "video")!; // "Wan 2.2 5B, fast" unless the benchmark chose Wan 2.1
-    screen.getByText(`${video.name} fits this computer (${amountGb(video.sizeBytes)}).`);
+    screen.getByText(`${video.name} fits this computer (${formatBytes(video.sizeBytes)}).`);
     screen.getByText("Or make videos with OpenRouter: add it in Settings → Endpoints.");
   });
 
-  it("on a computer without a usable graphics card, the Video tab is cloud only", async () => {
-    // addEndpoint
-    await show({ endpoints: [endpoint({ company: "openai" })], local: { ...LOCAL, videoPossible: false } });
+  it("the Video tab is offered on a computer that runs models on the processor", async () => {
+    await show({
+      endpoints: [endpoint({ company: "openai" })],
+      local: { ...LOCAL, videoOnProcessor: true, installed: [] },
+    });
     await click(screen.getByRole("tab", { name: "Video" }));
-    screen.getByText(
-      "Video on this computer needs a graphics card or an Apple-silicon Mac. OpenRouter makes videos in the cloud: add it in Settings → Endpoints.",
-    );
+    expect(screen.getByRole("tab", { name: "Video" }).getAttribute("aria-selected")).toBe("true");
+    // Local video is what it offers first (not "cloud only"), and nothing says it needs a graphics card.
+    const video = LOCAL.recommended.find((e) => e.kind === "video")!;
+    screen.getByText(`${video.name} fits this computer (${formatBytes(video.sizeBytes)}).`);
+    expect(screen.queryByText(/graphics card or an Apple-silicon Mac/)).toBeNull();
+    // An installed video model is picked for the prompt, with its warning beside Create.
+    cleanup();
+    useStudio.setState(INITIAL, true);
+    await show({ endpoints: [], local: { ...LOCAL, videoOnProcessor: true } });
+    await click(screen.getByRole("tab", { name: "Video" }));
+    expect(useStudio.getState().drafts.video).toMatchObject({ target: "thisComputer" });
+    screen.getByRole("region", { name: "Make a video" });
   });
 
   describe("what is saved, read again", () => {
-    const nothingFits = { ...LOCAL, installed: [], recommended: [], notHere: LOCAL.recommended, videoPossible: false };
+    const nothingFits = { ...LOCAL, installed: [], recommended: [], notHere: LOCAL.recommended, videoOnProcessor: true };
     const cloudBackup =
       "This computer cannot run local models well. Cloud models run on a company's computers instead: add OpenRouter or OpenAI.";
     const SAVED_READS = [api.studioModels, api.studioLocalModels, api.studioGetPrefs, api.studioUsage];

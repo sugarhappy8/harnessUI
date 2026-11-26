@@ -81,8 +81,6 @@ get_chat_approval_mode
 set_chat_approval_mode
 get_default_approval_mode
 set_default_approval_mode
-get_full_access_default_pending
-answer_full_access_default
 list_mcp_servers
 preview_mcp_config
 add_mcp_servers
@@ -229,8 +227,17 @@ studio_engine_remove
 studio_local_models
 studio_local_search
 studio_local_repo
+studio_setup_plan
 studio_local_fit
 studio_local_download
 studio_local_download_file
 studio_local_delete
+studio_import_inspect
+studio_import_model
 studio_accept_local_notice
+studio_model_files
+studio_set_model_files
+studio_loras
+studio_lora_download
+studio_lora_import
+studio_lora_delete

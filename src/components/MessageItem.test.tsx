@@ -242,7 +242,7 @@ describe("Open in Studio", () => {
 
   it("Open in Studio puts an attached picture in the tray", async () => {
     studioOn(flare);
-    // Get local models was left open in Studio: the picture's tray is shown, not that view.
+    // Get models was left open in Studio: the picture's tray is shown, not that view.
     useStudio.setState({ localView: true });
     ipcMock.getAttachment.mockResolvedValueOnce("data:image/webp;base64,UklGRg==");
     await shown(user({ documents: [], mentions: [] }));
@@ -352,7 +352,10 @@ describe("Open in Studio", () => {
     vi.mocked(studioApi.studioGetPrefs).mockResolvedValue({
       lastModel: { image: { target: { endpoint: 1 }, model: flare.id } },
       advancedOpen: false,
+      settingsOpen: false,
+      prefsVersion: 1,
       confirmEveryVideo: true,
+      confirmUnknownPrice: false,
       confirmAtUsd: 1,
       dailyLimitUsd: 10,
       setups: [],
@@ -361,6 +364,7 @@ describe("Open in Studio", () => {
       reloadChatAfter: false,
       suggestionDismissed: true,
       localNoticeAcceptedAt: null,
+      lastImportMode: null,
     });
     vi.mocked(studioApi.studioUsage).mockResolvedValue({
       spentTodayUsd: 0,

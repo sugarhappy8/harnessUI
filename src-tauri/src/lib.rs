@@ -200,8 +200,6 @@ pub fn run() {
             approvals::set_chat_approval_mode,
             approvals::get_default_approval_mode,
             approvals::set_default_approval_mode,
-            approvals::get_full_access_default_pending,
-            approvals::answer_full_access_default,
             mcp_cmd::list_mcp_servers,
             mcp_cmd::preview_mcp_config,
             mcp_cmd::add_mcp_servers,
@@ -350,11 +348,20 @@ pub fn run() {
             studio::local_cmd::studio_local_models,
             studio::local_cmd::studio_local_search,
             studio::local_cmd::studio_local_repo,
+            studio::setup_cmd::studio_setup_plan,
             studio::local_cmd::studio_local_fit,
             studio::local_cmd::studio_local_download,
             studio::local_cmd::studio_local_download_file,
             studio::local_cmd::studio_local_delete,
+            studio::local_cmd::studio_import_inspect,
+            studio::local_cmd::studio_import_model,
             studio::local_cmd::studio_accept_local_notice,
+            studio::setup_cmd::studio_model_files,
+            studio::setup_cmd::studio_set_model_files,
+            studio::loras::studio_loras,
+            studio::loras::studio_lora_download,
+            studio::loras::studio_lora_import,
+            studio::loras::studio_lora_delete,
         ])
         .setup(|app| {
             let handle = app.handle().clone();
@@ -400,6 +407,7 @@ pub fn run() {
                     let handle = handle.clone();
                     Arc::new(move || studio::engine_cmd::current_engine(&handle))
                 },
+                Arc::new(studio::local::AppModelsFolder(handle.clone())),
             ));
             app.manage(local_provider.engine_use());
             // 0.1.0: Studio's runs, holding Settings → Studio as saved.
@@ -441,6 +449,8 @@ pub fn run() {
                 tauri::async_runtime::block_on(studio::prefs::load(&store)),
             ));
             app.manage(studio.clone());
+            // 0.2.0: the headers of the Hugging Face files Studio read, and each repo's verdict.
+            app.manage(Arc::new(studio::detect::DetectService::new()));
             let skills = Arc::new(tools::SkillsServer::new());
             let pass_through: Vec<String> =
                 tauri::async_runtime::block_on(store.get_setting(toolset::TERMINAL_PASS_THROUGH))
@@ -523,6 +533,23 @@ pub fn run() {
                 tauri::async_runtime::spawn(
                     async move { downloads.resume_interrupted(&handle).await },
                 );
+            }
+            // 0.2.0: the files replaced picture or video models used, kept back while a run
+            // held them, removed now that nothing needs them. No run from before this start
+            // holds one: each run reads its model's files when it starts.
+            {
+                let handle = handle.clone();
+                tauri::async_runtime::spawn(async move {
+                    let store = handle.state::<state::AppState>().store.clone();
+                    let models_dir = hub::models_dir(&handle).await;
+                    let none = |_: &str| false;
+                    if let Err(e) =
+                        studio::local_models::remove_kept_files(&store, &models_dir, &none, None)
+                            .await
+                    {
+                        tracing::warn!(code = %e.code, "the files kept back were not removed");
+                    }
+                });
             }
             // 0.1.0: the Studio runs the app left unfinished, and yesterday's spending stubs.
             tauri::async_runtime::spawn(async move { studio.resume_interrupted().await });

@@ -4,7 +4,9 @@ import * as ipc from "../lib/ipc";
 import { listenInEffect } from "../lib/listen";
 import { APP_NAME } from "../lib/app";
 import type { ErrorInfo, UpdateInfo } from "../lib/types";
+import { LOCAL_WARNING } from "../lib/words";
 import { toErrorInfo, turnChatId, useApp } from "../store/app";
+import { useStudio } from "../store/studio";
 import { ErrorBanner } from "./ErrorBanner";
 
 /**
@@ -186,6 +188,11 @@ function ReadyBox(props: { update: UpdateInfo; placement: UpdatePlacement; onLat
   const [installing, setInstalling] = useState(false);
   const [error, setError] = useState<ErrorInfo | null>(null);
   const replying = useApp((s) => turnChatId(s) !== null);
+  // 0.2.0 (design 9.2): installing stops a picture or video being made on this computer, or
+  // waiting to be (it is no longer refused), so the box says so above its button.
+  const localJob = useStudio((s) =>
+    Object.values(s.live).some((r) => r.runsOn === "local" && (r.status === "running" || r.status === "queued")),
+  );
   const boxRef = useRef<HTMLElement>(null);
   const room = useRoom(props.placement, boxRef);
   const notesId = useId();
@@ -241,6 +248,11 @@ function ReadyBox(props: { update: UpdateInfo; placement: UpdatePlacement; onLat
         >
           {notes}
         </div>
+      )}
+      {localJob && (
+        <p role="note" className="mt-2 shrink-0 text-xs text-warning">
+          {LOCAL_WARNING.updateStopsIt}
+        </p>
       )}
       <div className="mt-2.5 flex shrink-0 flex-wrap items-center gap-2">
         <button

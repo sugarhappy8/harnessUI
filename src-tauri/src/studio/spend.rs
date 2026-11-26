@@ -1,12 +1,14 @@
 //! The spending guard for cloud runs: when a run asks before it is sent, and the daily limit.
 //!
-//! - **Confirmation** ([`confirm_reasons`]): every cloud video (unless the user turned that
-//!   off), any cloud run estimated at [`CONFIRM_AT_USD`] or more, and any cloud run whose
-//!   price is unknown. The backend refuses with `studio_needs_confirmation` when the request
-//!   is not confirmed and a reason applies.
-//! - **The daily limit** ([`check_limit`]): a run that would take today's spending past the
-//!   limit ([`DEFAULT_DAILY_LIMIT_USD`] unless the user changed it) is not sent; reaching the
-//!   limit exactly is allowed. An unknown price needs [`UNKNOWN_PRICE_RESERVE_USD`] of the
+//! - **Every guard is a switch, off by default** (0.2.0). **Confirmation**
+//!   ([`confirm_reasons`]): every cloud video, any cloud run estimated at the chosen amount
+//!   or more, and any cloud run whose price is unknown, each only while its switch is on.
+//!   The backend refuses with `studio_needs_confirmation` when the request is not confirmed
+//!   and a reason applies. [`CONFIRM_AT_USD`] is the amount filled in when that switch is
+//!   turned on.
+//! - **The daily limit** ([`check_limit`]): with a limit on ([`DEFAULT_DAILY_LIMIT_USD`] is
+//!   the amount filled in when it is turned on), a run that would take today's spending past
+//!   it is not sent; reaching the limit exactly is allowed. An unknown price needs [`UNKNOWN_PRICE_RESERVE_USD`] of the
 //!   limit left.
 //! - **What a run counts** ([`counted_usd`], [`spent_since`]): a run counts on the local
 //!   calendar day it was created ([`day_start_in`]). A run still going counts its estimate;
@@ -23,9 +25,9 @@ use jiff::Timestamp;
 use jiff::tz::TimeZone;
 use serde::Serialize;
 
-/// A cloud run estimated at this many US dollars or more asks before it is sent.
+/// The amount filled in when "ask before runs of $X or more" is turned on, in US dollars.
 pub const CONFIRM_AT_USD: f64 = 1.0;
-/// The daily spending limit, in US dollars, until the user changes it.
+/// The amount filled in when the daily limit is turned on, in US dollars.
 pub const DEFAULT_DAILY_LIMIT_USD: f64 = 10.0;
 /// What a run with an unknown price counts until its cost arrives, in US dollars, and how
 /// much of the limit must be left for it to be sent.
@@ -35,22 +37,15 @@ pub const UNKNOWN_PRICE_RESERVE_USD: f64 = 5.0;
 /// counts as reaching it (`0.1 + 0.2` is not exactly `0.3` in floating point).
 const LEEWAY_USD: f64 = 1e-9;
 
-/// When a cloud run asks before it is sent (Settings → Studio).
-#[derive(Debug, Clone, Copy, PartialEq)]
+/// When a cloud run asks before it is sent (Settings → Studio). Every rule is off by default.
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
 pub struct ConfirmRules {
     /// Every cloud video asks, whatever its price.
     pub every_video: bool,
-    /// A cloud run estimated at this many US dollars or more asks.
-    pub at_usd: f64,
-}
-
-impl Default for ConfirmRules {
-    fn default() -> Self {
-        Self {
-            every_video: true,
-            at_usd: CONFIRM_AT_USD,
-        }
-    }
+    /// A cloud run estimated at this many US dollars or more asks; `None` when it is off.
+    pub at_usd: Option<f64>,
+    /// A cloud run whose price is unknown asks.
+    pub unknown_price: bool,
 }
 
 /// Why a run asks before it is sent. The dollar threshold travels beside it, as the
@@ -85,7 +80,7 @@ pub fn billing_of(price: &Price, estimate: Option<f64>) -> Billing {
 }
 
 /// Why a run of `kind` billed `billing` asks before it is sent under `rules`; empty when it
-/// does not ask. A run on this computer never asks.
+/// does not ask (always, while every rule is off). A run on this computer never asks.
 pub fn confirm_reasons(
     kind: MediaKind,
     billing: Billing,
@@ -98,10 +93,10 @@ pub fn confirm_reasons(
     if rules.every_video && kind == MediaKind::Video {
         reasons.push(ConfirmReason::Video);
     }
-    match estimate {
-        Some(usd) if usd + LEEWAY_USD >= rules.at_usd => reasons.push(ConfirmReason::AtLeast),
-        Some(_) => {}
-        None => reasons.push(ConfirmReason::UnknownPrice),
+    match (estimate, rules.at_usd) {
+        (Some(usd), Some(at)) if usd + LEEWAY_USD >= at => reasons.push(ConfirmReason::AtLeast),
+        (None, _) if rules.unknown_price => reasons.push(ConfirmReason::UnknownPrice),
+        _ => {}
     }
     reasons
 }
@@ -320,23 +315,77 @@ mod tests {
         TimeZone::fixed(Offset::from_seconds(seconds).unwrap())
     }
 
+    /// Every switch on, at the suggested amount.
+    fn all_on() -> ConfirmRules {
+        ConfirmRules {
+            every_video: true,
+            at_usd: Some(CONFIRM_AT_USD),
+            unknown_price: true,
+        }
+    }
+
     #[test]
     fn every_video_asks() {
         assert_eq!(
-            confirm_reasons(MediaKind::Video, Paid(Some(0.09)), &ConfirmRules::default()),
+            confirm_reasons(MediaKind::Video, Paid(Some(0.09)), &all_on()),
             [ConfirmReason::Video]
         );
     }
 
     #[test]
     fn a_dollar_or_more_asks() {
-        assert!(
-            confirm_reasons(MediaKind::Image, Paid(Some(0.99)), &ConfirmRules::default())
-                .is_empty()
+        assert!(confirm_reasons(MediaKind::Image, Paid(Some(0.99)), &all_on()).is_empty());
+        assert_eq!(
+            confirm_reasons(MediaKind::Image, Paid(Some(1.00)), &all_on()),
+            [ConfirmReason::AtLeast]
+        );
+    }
+
+    #[test]
+    fn nothing_asks_when_every_switch_is_off() {
+        let off = ConfirmRules::default();
+        assert_eq!(
+            off,
+            ConfirmRules {
+                every_video: false,
+                at_usd: None,
+                unknown_price: false
+            }
+        );
+        assert!(confirm_reasons(MediaKind::Video, Paid(Some(3.0)), &off).is_empty());
+        assert!(confirm_reasons(MediaKind::Image, Paid(None), &off).is_empty());
+        assert!(confirm_reasons(MediaKind::Video, Paid(None), &off).is_empty());
+    }
+
+    #[test]
+    fn each_switch_adds_its_reason() {
+        let only = |every_video, at_usd, unknown_price| ConfirmRules {
+            every_video,
+            at_usd,
+            unknown_price,
+        };
+        assert_eq!(
+            confirm_reasons(MediaKind::Video, Paid(Some(0.2)), &only(true, None, false)),
+            [ConfirmReason::Video]
         );
         assert_eq!(
-            confirm_reasons(MediaKind::Image, Paid(Some(1.00)), &ConfirmRules::default()),
+            confirm_reasons(
+                MediaKind::Image,
+                Paid(Some(1.5)),
+                &only(false, Some(1.0), false)
+            ),
             [ConfirmReason::AtLeast]
+        );
+        assert_eq!(
+            confirm_reasons(MediaKind::Image, Paid(None), &only(false, None, true)),
+            [ConfirmReason::UnknownPrice]
+        );
+        // The other switches stay quiet for the same runs.
+        assert!(
+            confirm_reasons(MediaKind::Image, Paid(Some(1.5)), &only(true, None, true)).is_empty()
+        );
+        assert!(
+            confirm_reasons(MediaKind::Image, Paid(None), &only(true, Some(1.0), false)).is_empty()
         );
     }
 
@@ -344,9 +393,7 @@ mod tests {
     fn a_local_run_never_asks_even_for_a_video() {
         assert_eq!(billing_of(&Price::Free, Some(0.0)), Billing::Free);
         assert_eq!(billing_of(&Price::Unknown, None), Paid(None));
-        assert!(
-            confirm_reasons(MediaKind::Video, Billing::Free, &ConfirmRules::default()).is_empty()
-        );
+        assert!(confirm_reasons(MediaKind::Video, Billing::Free, &all_on()).is_empty());
     }
 
     #[test]
@@ -399,10 +446,11 @@ mod tests {
     }
 
     #[test]
-    fn an_unknown_price_always_asks() {
+    fn an_unknown_price_asks_only_when_its_switch_is_on() {
         let lax = ConfirmRules {
             every_video: false,
-            at_usd: 100.0,
+            at_usd: Some(100.0),
+            unknown_price: true,
         };
         assert_eq!(
             confirm_reasons(MediaKind::Image, Paid(None), &lax),
@@ -414,7 +462,8 @@ mod tests {
     fn dont_ask_again_for_videos_keeps_the_dollar_rule() {
         let r = ConfirmRules {
             every_video: false,
-            at_usd: 1.0,
+            at_usd: Some(1.0),
+            unknown_price: false,
         };
         assert!(confirm_reasons(MediaKind::Video, Paid(Some(0.96)), &r).is_empty());
         assert_eq!(

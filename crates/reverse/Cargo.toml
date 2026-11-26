@@ -22,7 +22,7 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
-tokio = { workspace = true, features = ["rt", "sync", "time", "macros", "fs"] }
+tokio = { workspace = true, features = ["rt", "sync", "time", "macros", "fs", "io-util"] }
 tokio-util = { workspace = true }
 sha2 = { workspace = true }
 reqwest = { workspace = true }

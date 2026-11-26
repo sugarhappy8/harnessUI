@@ -10,12 +10,18 @@ engine does in mode `ok` (crates/runtime/src/sd/testing.rs, `fake_main`), for pi
 - the pinned build's output is printed from its fixture, `\\r` redraws and all (FLUX.2
   klein's for one picture, the batch's for `--batch-count` above 1), the bars and info lines
   on stdout and the rest on stderr, and a tiny PNG is written where sd-cli writes each result
-  (the `-o` path, or `<stem>_<i>.png` for a batch) before the saving lines; exit 0.
+  (the `-o` path, or `<stem>_<i>.png` for a batch) before the saving lines; exit 0;
+- when the folder `$HOME/fake-sd-record` exists (the app starts the engine with HOME as it
+  had it, and nothing else), each start for a job records there, `<n>` counting from 0, as the
+  Rust fake does with RUNTIME_FAKE_SD_RECORD: `argv-<n>.json` (the arguments) and
+  `prompt-<n>.txt` (the bytes of the `--prompt-file`). A `--list-devices` start records none.
 
 A video (`-M vid_gen`) is refused: the scenarios make pictures only. Standard library only;
 the fixtures are read from the checkout this file is in.
 """
 
+import json
+import os
 import sys
 from pathlib import Path
 
@@ -23,11 +29,16 @@ FIXTURES = Path(__file__).resolve().parent.parent.parent / "crates" / "runtime" 
 
 # Every flag Studio can send (runtime::sd::args::FLAGS), and the four that take no value.
 FLAGS = {
-    "--diffusion-model", "--high-noise-diffusion-model", "--llm", "--t5xxl", "--clip_l",
-    "--clip_vision", "--vae", "-m", "-M", "--prompt-file", "--negative-prompt-file", "-W", "-H",
-    "--steps", "--cfg-scale", "--flow-shift", "--sampling-method", "--scheduler", "--seed",
-    "--batch-count", "--video-frames", "--fps", "-i", "-r", "--backend", "--threads",
-    "--vae-tiling", "--offload-to-cpu", "-o", "--disable-image-metadata", "--log-level",
+    "--diffusion-model", "--high-noise-diffusion-model", "--uncond-diffusion-model", "--llm",
+    "--llm_vision", "--t5xxl", "--clip_l", "--clip_g", "--clip_vision", "--tokenizer", "--vae",
+    "--tae", "--audio-vae", "--audio-encoder", "--embeddings-connectors", "-m", "-M",
+    "--prompt-file", "--negative-prompt-file", "-W", "-H", "--steps", "--cfg-scale", "--guidance",
+    "--img-cfg-scale", "--flow-shift", "--timestep-shift", "--sampling-method", "--scheduler",
+    "--sigmas", "--high-noise-steps", "--high-noise-cfg-scale", "--high-noise-sampling-method",
+    "--moe-boundary", "--strength", "--seed", "--batch-count", "--video-frames", "--fps", "-i",
+    "--end-img", "--mask", "--control-image", "-r", "--vae-format", "--model-args",
+    "--lora-model-dir", "--backend", "--threads", "--vae-tiling", "--offload-to-cpu", "-o",
+    "--disable-image-metadata", "--log-level",
 }
 SWITCHES = {"--vae-tiling", "--offload-to-cpu", "--disable-image-metadata", "--list-devices"}
 
@@ -45,10 +56,18 @@ def fail(message: str):
     sys.exit(1)
 
 
+def _lines(text: str) -> list[str]:
+    """`text` cut after each newline and nowhere else, each piece keeping its end."""
+    parts = text.split("\n")
+    return [p + "\n" for p in parts[:-1]] + ([parts[-1]] if parts[-1] else [])
+
+
 def emit(text: str):
     """Prints `text` line by line as the pinned build splits it: `[E]` lines and lines
     without a level on stderr, the rest (`[I]`, `[W]`, the bars, blank lines) on stdout."""
-    for segment in text.splitlines(keepends=True):
+    # Lines end at `\n` only, as the Rust fake's `split_inclusive('\n')` has them:
+    # `str.splitlines` would also break at the `\r` of a redraw.
+    for segment in _lines(text):
         line = segment.lstrip("\r")
         on_stderr = line.startswith("[E]") or not (line.startswith(("[", "  |")) or not line.strip())
         out = sys.stderr if on_stderr else sys.stdout
@@ -60,6 +79,23 @@ def fixture(name: str) -> str:
     # newline="" keeps the `\r` redraws as they are.
     with open(FIXTURES / name, encoding="utf-8", newline="") as f:
         return f.read()
+
+
+def record(args: list[str], values: dict[str, str]):
+    """Records this start in `$HOME/fake-sd-record`, when that folder is there."""
+    home = os.environ.get("HOME")
+    folder = Path(home) / "fake-sd-record" if home else None
+    if folder is None or not folder.is_dir():
+        return
+    n = 0
+    while (folder / f"argv-{n}.json").exists():
+        n += 1
+    (folder / f"argv-{n}.json").write_text(json.dumps(args), encoding="utf-8")
+    try:
+        prompt = Path(values["--prompt-file"]).read_bytes()
+    except (KeyError, OSError):
+        return
+    (folder / f"prompt-{n}.txt").write_bytes(prompt)
 
 
 def main(args: list[str]):
@@ -79,6 +115,7 @@ def main(args: list[str]):
     if list_devices:
         sys.stdout.write(fixture("sd_list_devices_vulkan.txt"))
         sys.exit(0)
+    record(args, values)
     if values.get("-M") == "vid_gen":
         fail("[E] the end-to-end stand-in engine makes pictures only --- main.cpp:0\n")
     if "--prompt-file" in values:

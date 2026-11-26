@@ -42,7 +42,7 @@ export function SourceEditor(props: { value: string; onChange: (value: string) =
         caret.current = start + 2;
         props.onChange(`${el.value.slice(0, start)}  ${el.value.slice(el.selectionEnd)}`);
       }}
-      className="h-full min-h-40 w-full resize-none border-0 bg-bg p-3 font-mono text-[13px] leading-relaxed outline-none"
+      className="h-full min-h-40 w-full resize-none border-0 bg-bg p-3 font-mono text-[13px] leading-relaxed outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-accent/40"
     />
   );
 }

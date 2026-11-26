@@ -327,15 +327,14 @@ pub fn running_fit(r: &GenFitResult) -> (GenFit, bool) {
 
 /// In this order, so a job that fits once the chat model is unloaded is never called red or
 /// slow because of the chat model:
-/// 1. `fit` Green or one part at a time → Fits, or Slow for a picture on the processor or
-///    when `is_slow(eta)`;
+/// 1. `fit` Green or one part at a time → Fits, or Slow on the processor (a picture, or a
+///    video, which runs there too) or when `is_slow(eta)`;
 /// 2. `after_unload` Green or one part at a time → AfterUnload;
 /// 3. partly on the processor, now or after an unload → Slow;
 /// 4. otherwise NotHere.
 pub fn fit_word(entry: &GenEntry, r: &GenFitResult, eta: Option<&Eta>) -> FitWord {
     if r.fit.on_device() {
-        let picture_on_processor = r.processor_only && entry.kind != GenKind::Video;
-        return if picture_on_processor || eta.is_some_and(|e| is_slow(entry, e)) {
+        return if r.processor_only || eta.is_some_and(|e| is_slow(entry, e)) {
             FitWord::Slow
         } else {
             FitWord::Fits

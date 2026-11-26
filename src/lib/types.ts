@@ -457,6 +457,9 @@ export interface DownloadGroup {
    *  catalog id, or a searched file's `hf:<owner>/<repo>:<file>`); `null` (or left out) for a
    *  chat model's. */
   genModelId?: string | null;
+  /** 0.2.0 Studio: the id of the LoRA this group downloads, so a finished one can be offered
+   *  for use; `null` (or left out) for any other group. */
+  loraId?: string | null;
   savedFile?: { commit: string; path: string };
 }
 

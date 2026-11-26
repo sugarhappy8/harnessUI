@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useState, type KeyboardEvent, type ReactNode } from "react";
+import { FOCUS_RING } from "../ui/styles";
 import { ArrowDown, ArrowUp, Pencil, Pin as PinIcon, X } from "lucide-react";
 import { toErrorInfo } from "../../store/app";
 import * as api from "./api";
@@ -122,7 +123,7 @@ function PinItem(props: {
             autoFocus
             aria-label="Pinned instruction"
             aria-describedby={counterId}
-            className="w-full resize-y rounded-lg border border-border bg-bg p-2 text-sm outline-none focus:border-accent"
+            className={`w-full resize-y rounded-lg border border-border bg-bg p-2 text-sm focus:border-accent ${FOCUS_RING}`}
           />
           <div className="flex items-center gap-2">
             <CharCounter text={draft} max={props.maxChars} id={counterId} />
@@ -302,7 +303,7 @@ export function PinnedList(props: { chatId: number }) {
           placeholder={full ? `${max} of ${max}: unpin one to add another.` : "An instruction to keep, such as “Answer in British English.”"}
           aria-label="New pinned instruction"
           aria-describedby="new-pin-count"
-          className="w-full resize-y rounded-lg border border-border bg-bg p-2 text-sm outline-none focus:border-accent disabled:opacity-60"
+          className={`w-full resize-y rounded-lg border border-border bg-bg p-2 text-sm focus:border-accent disabled:opacity-60 ${FOCUS_RING}`}
         />
         <div className="flex flex-wrap items-center gap-3">
           <CharCounter text={text} max={maxChars} id="new-pin-count" />

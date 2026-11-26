@@ -37,7 +37,10 @@ import {
   STUDIO_DELETE,
   STUDIO_TILE,
   STUDIO_REFS,
-  LOCAL_MODELS,
+  GET_MODELS,
+  VERDICT,
+  verdictBadgeWords,
+  updatedWhen,
   DOWNLOAD_LOCAL,
   INSTALLED_STUDIO_LINE,
   amountNumber,
@@ -73,6 +76,14 @@ import {
   usageIcons,
   usageLine,
   wontFitQuestion,
+  FILE_LABEL,
+  fileLabelWords,
+  KIND_WORD,
+  parameterWords,
+  SLOT_LABEL,
+  typeName,
+  verdictWords,
+  VERSION_NAME,
 } from "./words";
 import { computerBar, gb, graphicsBar, picture, placement, usage } from "../components/fine.fixtures";
 
@@ -1047,9 +1058,7 @@ describe("0.1.0 Studio: the viewer and the gallery in plain words", () => {
   });
 
   it("puts the pieces components join together in words, here and not in the components", () => {
-    expect(LOCAL_MODELS.deviceWith("Radeon RX 7600", LOCAL_MODELS.graphicsMemory("8 GB"))).toBe(
-      "Radeon RX 7600, 8 GB graphics memory",
-    );
+    expect(GET_MODELS.gpu("Radeon RX 7600", "8 GB")).toBe("Radeon RX 7600 · 8 GB graphics memory");
     expect(DOWNLOAD_LOCAL.verdictLine("video", "you may use them commercially")).toBe(
       "Videos you make: you may use them commercially",
     );
@@ -1071,5 +1080,232 @@ describe("0.1.0 Studio: the viewer and the gallery in plain words", () => {
     const emoji = "🌊".repeat(100);
     expect(STUDIO_TILE.open("image", 1, 1, emoji)).toBe(`Open picture: ${"🌊".repeat(72)}…`);
     expect(STUDIO_TILE.open("image", 1, 1, "  ")).toBe("Open picture");
+  });
+});
+
+describe("a repository's file labels (Task S6)", () => {
+  it("says what each file is, with the model type and never the engine's words", () => {
+    expect(FILE_LABEL.works("SDXL", "picture", null, 0)).toBe("Works in Studio · SDXL picture model");
+    expect(FILE_LABEL.works(typeName("wan2", "wan22-t2v"), "video", "high", 14_288_000_000)).toBe(
+      "Works in Studio · Wan 2.2 video model, 14B, high-noise part",
+    );
+    expect(FILE_LABEL.lora("FLUX.1")).toBe("LoRA for FLUX.1");
+    expect(FILE_LABEL.lora(null)).toBe("LoRA for an unknown model type");
+    expect(FILE_LABEL.extra("vae")).toBe("Extra file · Decoder (VAE)");
+    expect(FILE_LABEL.cannotRun("lumina2")).toBe(
+      "Can't run in Studio: This is a Lumina 2 model, which the Studio engine can't run",
+    );
+    expect(FILE_LABEL.cannotRun("pickle")).toBe("Can't run in Studio: Studio can't read .ckpt files");
+    expect(FILE_LABEL.notRead("needsToken")).toBe("Add a Hugging Face token in Settings to read this file");
+    expect(FILE_LABEL.notRead("needsTerms")).toBe("Accept the model's terms on Hugging Face first");
+    expect(FILE_LABEL.notRead("budget")).toBe("Not read: Studio reads 24 files per repository");
+    expect(FILE_LABEL.notRead("failed")).toBe("Couldn't read this file");
+  });
+
+  it("names a pickle file's own extension, and a file's type by its recipe first", () => {
+    expect(fileLabelWords({ cannotRun: { reason: "pickle", version: null } }, "weights/model.PTH")).toBe(
+      "Can't run in Studio: Studio can't read .pth files",
+    );
+    const kontext = {
+      works: { version: "flux", recipe: "flux1-kontext", kind: "pictureEdit", part: null, parameters: 0, folder: false },
+    } as const;
+    expect(fileLabelWords(kontext, "k.gguf")).toBe("Works in Studio · FLUX.1 Kontext picture edit model");
+    expect(fileLabelWords({ lora: { base: "sdxl" } }, "x.safetensors")).toBe("LoRA for SDXL");
+    expect(typeName("qwen-image", "qwen-image-edit-2509")).toBe("Qwen-Image Edit");
+    expect(typeName("ltxav", "ltx25-dev")).toBe("LTX-2.5");
+    expect(typeName("ltxav", "ltx23-dev")).toBe("LTX-2.3");
+    expect(typeName("wan2.2-ti2v", null)).toBe("Wan 2.2 5B");
+  });
+
+  it("a search hit's verdict reads as a file's label; a name that says nothing, nothing", () => {
+    expect(verdictWords({ works: { version: "sdxl", kind: "picture", recipe: null } })).toBe(
+      "Works in Studio · SDXL picture model",
+    );
+    // Final review, area 3, I3: Wan 2.2 A14B reads as `wan2`; its recipe names it.
+    expect(verdictWords({ works: { version: "wan2", kind: "video", recipe: "wan22-t2v" } })).toBe(
+      "Works in Studio · Wan 2.2 video model",
+    );
+    expect(verdictWords({ lora: { base: null } })).toBe("LoRA for an unknown model type");
+    expect(verdictWords({ cannotRun: { reason: "svd", version: null } })).toBe(
+      "Can't run in Studio: This is a Stable Video Diffusion model, which the Studio engine can't run",
+    );
+    expect(verdictWords("unknown")).toBeNull();
+  });
+
+  it("every version, kind and slot has its words, none an engine identifier", () => {
+    for (const [word, name] of Object.entries(VERSION_NAME)) {
+      expect(name, word).not.toBe("");
+      expect(name, word).not.toBe(word);
+    }
+    expect(Object.keys(VERSION_NAME)).toHaveLength(60);
+    expect(Object.values(KIND_WORD)).toEqual(["picture", "picture edit", "video"]);
+    expect(Object.keys(SLOT_LABEL)).toHaveLength(16);
+    expect(SLOT_LABEL.t5xxl).toBe("Text encoder (T5-XXL)");
+    expect(SLOT_LABEL.llm).toBe("Text encoder (language model)");
+    expect(SLOT_LABEL.tokenizer).toBe("Tokenizer");
+  });
+
+  it("writes a model's parameters as people read them", () => {
+    expect(parameterWords(14_288_000_000)).toBe("14B");
+    expect(parameterWords(2_567_000_000)).toBe("2.6B");
+    expect(parameterWords(860_000_000)).toBe("860M");
+  });
+});
+
+describe("Get models' words (Task U5)", () => {
+  it("a result's verdict badge says what Studio can do with it, in short, never the engine's words", () => {
+    expect(verdictBadgeWords({ works: { version: "sdxl", kind: "picture", recipe: "sdxl-checkpoint" } }, true)).toBe(
+      "Works in Studio · SDXL",
+    );
+    expect(verdictBadgeWords({ works: { version: "wan2", kind: "video", recipe: "wan22-t2v" } }, true)).toBe(
+      "Works in Studio · Wan 2.2",
+    );
+    expect(verdictBadgeWords({ works: { version: "wan2", kind: "video", recipe: null } }, false)).toBe(
+      "Works in Studio · Wan 2.1",
+    );
+    expect(verdictBadgeWords({ lora: { base: "flux" } }, false)).toBe("LoRA for FLUX.1");
+    expect(verdictBadgeWords({ lora: { base: null } }, true)).toBe("LoRA for an unknown model type");
+    expect(verdictBadgeWords({ cannotRun: { reason: "lumina2", version: null } }, true)).toBe("Can't run: Lumina 2");
+    expect(verdictBadgeWords("unknown", false)).toBe("Open to check");
+    expect(verdictBadgeWords("unknown", true)).toBe("Not recognised");
+    const reasons = [
+      "lumina2", "ltxVideo09", "hunyuanVideo1", "svd", "unknownWeights", "sharded", "pickle", "noSha", "adapter",
+      "needsControlFrames", "needsAudio", "upscaler", "folderModel", "notThisEngine", "ltx2",
+    ] as const;
+    for (const reason of reasons) {
+      const words = VERDICT.cantRun(reason);
+      expect(words).toMatch(/^Can't run: \S/);
+      // No engine identifier: none of the camelCase reason words.
+      if (/[A-Z]/.test(reason)) expect(words, reason).not.toContain(reason);
+      expect(words.length, reason).toBeLessThanOrEqual(36);
+    }
+  });
+
+  it("says when a result was updated, from today to years ago", () => {
+    const now = new Date(2026, 10, 25, 12).getTime();
+    const day = 86_400_000;
+    expect(updatedWhen(now - 3_600_000, now)).toBe("today");
+    expect(updatedWhen(now + 3_600_000, now)).toBe("today");
+    expect(updatedWhen(now - day, now)).toBe("yesterday");
+    expect(updatedWhen(now - 3 * day, now)).toBe("3 days ago");
+    expect(updatedWhen(now - 8 * day, now)).toBe("a week ago");
+    expect(updatedWhen(now - 26 * day, now)).toBe("3 weeks ago");
+    expect(updatedWhen(now - 40 * day, now)).toBe("a month ago");
+    expect(updatedWhen(now - 200 * day, now)).toBe("6 months ago");
+    expect(updatedWhen(now - 800 * day, now)).toBe("2 years ago");
+    expect(GET_MODELS.updated(updatedWhen(now - 3 * day, now))).toBe("updated 3 days ago");
+    expect(GET_MODELS.downloads(48_213)).toBe("48.2k downloads");
+    expect(GET_MODELS.likes(1)).toBe("1 like");
+  });
+});
+
+describe("Studio's words for LoRAs, importing and set-up (Task S12)", () => {
+  it("keep the briefed wording", async () => {
+    const w = await import("./words");
+    expect(w.LORAS).toMatchObject({
+      title: "LoRAs",
+      add: "Add",
+      remove: "Remove",
+      strength: "Strength",
+      highNoise: "High-noise part",
+      mayNotFit: "may not fit this model",
+      none: "No LoRAs yet",
+      unknownType: "LoRA for an unknown model type",
+    });
+    expect(w.IMPORT.copy).toBe("Copy it into Studio's models folder");
+    expect(w.SETUP.untested).toBe("untested set-up");
+    expect(w.LOCAL_WARNING.mayNotFit("it needs 24 GB")).toBe(
+      "May not fit this computer: it needs 24 GB. It may fail or be very slow.",
+    );
+    expect(w.INPUT_ROLE.label).toMatchObject({ source: "Picture to change", mask: "Mask", control: "Control picture" });
+    expect(w.STUDIO_REFS.role).toBe(w.INPUT_ROLE.label);
+  });
+
+  it("no wording says a model is not for this computer", async () => {
+    const w = (await import("./words")) as Record<string, unknown>;
+    const found: string[] = [];
+    const seen = new Set<unknown>();
+    // Every string reachable from the exports; a function is called with a few plain arguments.
+    const walk = (v: unknown, depth: number): void => {
+      if (typeof v === "string") found.push(v);
+      else if (depth > 6 || v === null || seen.has(v)) return;
+      else if (typeof v === "function") {
+        seen.add(v);
+        for (const args of [["x"], ["x", 1], [1, 2], [1], [null], []]) {
+          try {
+            walk((v as (...a: unknown[]) => unknown)(...args), depth + 1);
+          } catch {
+            // Not that shape of argument.
+          }
+        }
+      } else if (typeof v === "object") {
+        seen.add(v);
+        for (const x of Object.values(v)) walk(x, depth + 1);
+      }
+    };
+    for (const v of Object.values(w)) walk(v, 0);
+    expect(found.length).toBeGreaterThan(1000);
+    expect(found.filter((t) => /Not for this computer/i.test(t))).toEqual([]);
+    expect(found.filter((t) => t.includes("needs a graphics card or an Apple-silicon Mac"))).toEqual([]);
+  });
+
+  it("word every reason a set-up can meet, none as its code", async () => {
+    const w = await import("./words");
+    for (const text of [...Object.values(w.SETUP.problem), ...Object.values(w.SETUP.source)]) {
+      expect(text).not.toMatch(/hf_|studio_|^[a-z]+-[a-z]+$/);
+    }
+    expect(Object.keys(w.SETUP.problem).sort()).toEqual(["hf_needs_terms", "hf_needs_token", "studio_setup_incomplete"]);
+    expect(Object.keys(w.SETUP.source)).toHaveLength(9);
+  });
+});
+
+describe("the detail panel's words (Task U6)", () => {
+  it("keep the briefed wording", async () => {
+    const w = await import("./words");
+    expect(w.MODEL_DETAIL).toMatchObject({
+      mainFile: "Main file",
+      best: "Best for this computer",
+      extras: "Extra files Studio adds",
+      alreadyHere: "already on this computer",
+      chooseFile: "Choose a file",
+      download: "Download",
+      missingWhy: "Choose a file for each part first.",
+      needsToken: w.SETUP.problem.hf_needs_token,
+      downloadLora: "Download LoRA",
+    });
+    expect(w.MODEL_DETAIL.total("4.6 GB")).toBe("Total to download: 4.6 GB");
+    expect(w.MODEL_DETAIL.duty("Keep the licence with the files.")).toBe("The licence asks you to keep the licence with the files.");
+    expect(w.SETUP.anyway).toBe("Download file anyway");
+    expect(w.SETUP.modelType).toBe("Model type");
+  });
+
+  it("a set-up problem is found by its own code only", async () => {
+    const { setupProblem } = await import("./words");
+    expect(setupProblem("hf_needs_token")).toBe("hf_needs_token");
+    expect(setupProblem("hf_needs_terms")).toBe("hf_needs_terms");
+    expect(setupProblem("studio_setup_incomplete")).toBe("studio_setup_incomplete");
+    // Not a set-up problem, nor a key every object has.
+    for (const code of ["studio_disk_too_small", "toString", "constructor", "__proto__", "", null, undefined]) {
+      expect(setupProblem(code)).toBeNull();
+    }
+  });
+});
+
+describe("Studio's download words (Task U7)", () => {
+  it("keep the briefed wording", async () => {
+    const { STUDIO_DOWNLOADS: d } = await import("./words");
+    expect(d.indicator(2)).toBe("2 downloading");
+    expect(d.indicatorReady(1)).toBe("1 ready");
+    expect(d.progress("2.4 GB", "6.7 GB", "2 min left")).toBe("2.4 GB of 6.7 GB · 2 min left");
+    expect(d.progress("2.4 GB", "6.7 GB", null)).toBe("2.4 GB of 6.7 GB");
+    expect(d.pause("Z-Image Turbo")).toBe("Pause downloading Z-Image Turbo");
+    expect(d.resume("Z-Image Turbo")).toBe("Resume downloading Z-Image Turbo");
+    expect(d.cancel("Z-Image Turbo")).toBe("Cancel downloading Z-Image Turbo");
+    expect(d.useIt).toBe("Use it");
+    expect(d.ready).toBe("Ready");
+    // Every state a download can be in has its words, or (downloading) the time left instead.
+    expect(Object.keys(d.status).sort()).toEqual(
+      ["cancelled", "cancelling", "done", "downloading", "error", "paused", "queued", "verifying"],
+    );
   });
 });

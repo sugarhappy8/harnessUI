@@ -1,10 +1,10 @@
 import { useState } from "react";
 import { Plus, Trash2 } from "lucide-react";
+import { FOCUS_RING } from "../ui/styles";
 import { STEP_LABEL, STEP_MARK } from "./TaskParts";
 import type { StepStatus, TaskStep } from "./types";
 
-const field =
-  "w-full rounded-md border border-border bg-bg px-2 py-1 text-sm focus:border-accent focus:outline-none";
+const field = `w-full rounded-md border border-border bg-bg px-2 py-1 text-sm focus:border-accent ${FOCUS_RING}`;
 
 function Buttons(props: { onApply: () => void; onCancel: () => void; busy: boolean }) {
   return (

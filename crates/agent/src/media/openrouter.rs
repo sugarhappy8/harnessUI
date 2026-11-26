@@ -684,7 +684,8 @@ fn frames(req: &MediaRequest) -> impl Iterator<Item = (&RefImage, &'static str)>
     req.refs.iter().filter_map(|picture| match picture.role {
         RefRole::StartFrame => Some((picture, "first_frame")),
         RefRole::EndFrame => Some((picture, "last_frame")),
-        RefRole::Reference => None,
+        // A cloud model offers none of the last three: the check refuses them first.
+        RefRole::Reference | RefRole::Source | RefRole::Mask | RefRole::Control => None,
     })
 }
 

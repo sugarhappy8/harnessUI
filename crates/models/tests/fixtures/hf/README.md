@@ -54,3 +54,11 @@ The search answers are the three queries `HfClient::search_generators` sends
 | `gen-search-text-to-image.json` | `pipeline_tag=text-to-image`, `search=klein` |
 | `gen-search-image-to-video.json` | `pipeline_tag=image-to-video`, `search=wan2.2 5b` (holds Turbo repositories) |
 | `gen-search-untagged.json` | no pipeline tag, `search=5b` (holds Green-Sky's FastWan, which has no pipeline tag, and chat models; one unrelated chat repository was removed from the recorded answer, so it holds 29 items) |
+
+## Recorded on 2026-11-26 (final review)
+
+`tree-comfy-wan-2.2.json` is the answer of `GET /api/models/Comfy-Org/Wan-2.2/tree/main?recursive=true`
+(the repository once named `Wan_2.2_ComfyUI_Repackaged`), indented and otherwise unchanged:
+52 entries, the fp16, bf16, fp8 and int8 files of each Wan 2.2 model, its LoRAs and its
+companions. It tests how the 24-file read budget is spent on a large repository of many
+models (`sd::candidates`, `studio::detect`).

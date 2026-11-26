@@ -315,16 +315,22 @@ async fn lists_and_calls_tools() {
     }));
     let out = call(&host, "fake__progress", json!({}), with_progress).await;
     assert_eq!(out.joined_text(), "progressed");
-    assert!(
-        eventually(Duration::from_secs(2), || lines.lock().unwrap().len() == 3).await
-            || !lines.lock().unwrap().is_empty(),
-        "no progress lines"
-    );
-    assert!(
-        lines.lock().unwrap()[0].starts_with("step 1"),
-        "{:?}",
-        lines.lock().unwrap()
-    );
+    // The SDK hands each notification to its own task, so the three steps can arrive in
+    // any order; a step lower than one already shown is dropped. What is shown only goes
+    // up. Which steps are shown is not fixed: one handled after the answer came back finds
+    // the call over and is not shown at all.
+    let shown = lines.lock().unwrap().clone();
+    let steps: Vec<u32> = shown
+        .iter()
+        .map(|line| {
+            line.strip_prefix("step ")
+                .and_then(|rest| rest.split(' ').next())
+                .and_then(|n| n.parse().ok())
+                .unwrap_or_else(|| panic!("not a step line: {line:?}"))
+        })
+        .collect();
+    assert!(!steps.is_empty(), "no progress lines");
+    assert!(steps.windows(2).all(|w| w[0] < w[1]), "{shown:?}");
     host.shutdown().await;
 }
 

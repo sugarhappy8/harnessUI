@@ -1,11 +1,11 @@
 // The one-time content notice (0.1.0 Task B14, local addendum L1): shown before the first
 // local download, word for word, and accepted with *I understand* (recorded by the backend);
-// read again, read only, from Get local models' footer and from Settings → Studio.
+// read again, read only, from Get models' footer and from Settings → Studio.
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { LOCAL } from "./fixtures/models";
 
-// Get local models follows the app's downloads: none here.
+// Get models follows the app's downloads: none here.
 vi.mock("../../lib/ipc", () => ({
   isTauri: () => true,
   listDownloads: () => Promise.resolve([]),
@@ -128,14 +128,16 @@ describe("the content notice", () => {
     expect(api.studioAcceptLocalNotice).not.toHaveBeenCalled();
   });
 
-  it("Cancel on the notice before a first download puts the offer away", async () => {
+  it("Cancel on the notice before a first download downloads nothing", async () => {
     await showLocal({ ...LOCAL, noticeAccepted: false });
+    // Since 0.2.0 (Task U6) the card's Download opens the detail panel, whose Download shows
+    // the notice first.
     await click(within(screen.getByRole("article", { name: "Z-Image Turbo" })).getByRole("button", { name: "Download" }));
+    await click(within(screen.getByRole("dialog", { name: "Z-Image Turbo" })).getByRole("button", { name: "Download" }));
     screen.getByText("Local models run only on your computer.");
     await click(screen.getByRole("button", { name: "Cancel" }));
     expect(screen.queryByText("Local models run only on your computer.")).toBeNull();
-    expect(screen.queryByText("Download Z-Image Turbo?")).toBeNull();
-    expect(useStudio.getState().offer).toBeNull();
+    expect(api.studioLocalDownload).not.toHaveBeenCalled();
     expect(api.studioAcceptLocalNotice).not.toHaveBeenCalled();
   });
 });

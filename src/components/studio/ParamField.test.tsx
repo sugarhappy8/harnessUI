@@ -1,18 +1,47 @@
-// Studio's controls (0.1.0 Task B5): each kind of field drawn with its widget from the model's
-// own settings, "Automatic" until a field is set, fields shown only while what they require is
-// met, and values that no longer apply dropped from the draft.
+// Studio's controls (0.1.0 Task B5; styled Radix controls since Task U8, critique §2.8): each kind
+// of field drawn with its widget from the model's own settings, "Automatic" in the control until
+// a field is set (critique §4.f: never a second label beside it), fields shown only while what
+// they require is met, and values that no longer apply dropped from the draft.
+import type { ReactElement } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { act, cleanup, fireEvent, render as rtlRender, screen, waitFor, type RenderResult } from "@testing-library/react";
 import { dropUnmet, visibleFields, type Values } from "./canonical";
 import { MODELS } from "./fixtures/models";
 import type { Choice, Layer, MediaModel, ParamKind, ParamSpec, StudioEndpoint, StudioPrefs } from "./types";
+
+// jsdom has none of what Radix selects and sliders measure and capture with.
+globalThis.ResizeObserver ??= class {
+  observe() {}
+  unobserve() {}
+  disconnect() {}
+} as unknown as typeof ResizeObserver;
+Element.prototype.hasPointerCapture ??= () => false;
+Element.prototype.setPointerCapture ??= () => {};
+Element.prototype.releasePointerCapture ??= () => {};
+Element.prototype.scrollIntoView ??= () => {};
 
 vi.mock("../../lib/ipc", () => ({ isTauri: () => true }));
 vi.mock("./api");
 
 const api = await import("./api");
 const { ParamField, widgetFor } = await import("./ParamField");
+const { UiProviders } = await import("../ui/UiProviders");
 const { useStudio } = await import("../../store/studio");
+
+/** Renders inside the one tooltip provider the help buttons need, as the app does. */
+function render(ui: ReactElement): RenderResult {
+  return rtlRender(ui, { wrapper: UiProviders });
+}
+
+/** Opens a Radix select from its trigger. */
+function press(trigger: HTMLElement) {
+  fireEvent.pointerDown(trigger, { button: 0, ctrlKey: false, pointerType: "mouse" });
+}
+
+/** Picks `option` in the open select. */
+function pick(option: string) {
+  fireEvent.click(screen.getByRole("option", { name: option }));
+}
 
 const INITIAL = useStudio.getState();
 
@@ -47,7 +76,10 @@ function prefs(): StudioPrefs {
   return {
     lastModel: {},
     advancedOpen: false,
+    settingsOpen: false,
+    prefsVersion: 1,
     confirmEveryVideo: true,
+    confirmUnknownPrice: false,
     confirmAtUsd: 1,
     dailyLimitUsd: 10,
     setups: [],
@@ -56,6 +88,7 @@ function prefs(): StudioPrefs {
     reloadChatAfter: false,
     suggestionDismissed: true,
     localNoticeAcceptedAt: null,
+    lastImportMode: null,
   };
 }
 
@@ -139,10 +172,10 @@ describe("widgetFor", () => {
     expect(widgetFor(spec({ kind: { type: "extra", allowedKeys: ["moderation"] } }))).toBe("json");
   });
 
-  it("draws Shape and How many as chips, whatever their size", () => {
-    expect(widgetFor(spec({ canonical: "shape", kind: { type: "enum", values: choices(11) } }))).toBe("chips");
-    expect(widgetFor(spec({ canonical: "shape", kind: { type: "enum", values: choices(3) } }))).toBe("chips");
-    expect(widgetFor(spec({ canonical: "count", kind: { type: "range", min: 1, max: 10, step: 1 } }))).toBe("chips");
+  it("draws Shape and How many by their kind, as any field (the panel leaves them to the composer)", () => {
+    expect(widgetFor(spec({ canonical: "shape", kind: { type: "enum", values: choices(11) } }))).toBe("select");
+    expect(widgetFor(spec({ canonical: "shape", kind: { type: "enum", values: choices(3) } }))).toBe("segmented");
+    expect(widgetFor(spec({ canonical: "count", kind: { type: "range", min: 1, max: 10, step: 1 } }))).toBe("slider");
   });
 });
 
@@ -281,58 +314,161 @@ describe("ParamField", () => {
   const quality = flare.params.find((f) => f.key === "quality")!;
   const compression = flare.params.find((f) => f.key === "output_compression")!;
 
-  it("reads Automatic (company default) until set, and Automatic for a model on this computer", () => {
+  it("reads Automatic (company default) until set, and Automatic for a model on this computer, as its chosen chip", () => {
     field(background, undefined);
-    screen.getByText("Automatic (company default)");
+    const automatic = screen.getByRole("radio", { name: "Automatic (company default)" });
+    expect(automatic.getAttribute("aria-checked")).toBe("true");
+    // Said once, in the control: never as a second label beside it (critique §4.f).
+    expect(screen.getAllByText(/Automatic/)).toHaveLength(1);
     expect(screen.queryByRole("button", { name: "Reset Background" })).toBeNull();
     cleanup();
     field(background, undefined, { local: true });
-    screen.getByText("Automatic");
+    expect(screen.getByRole("radio", { name: "Automatic" }).getAttribute("aria-checked")).toBe("true");
   });
 
-  it("a set field offers its reset, and nothing reads Automatic", () => {
+  it("a set field offers its reset, and Automatic is no longer the chosen chip", () => {
     const { onReset } = field(background, "transparent");
     expect(screen.getByRole("radio", { name: "Transparent" }).getAttribute("aria-checked")).toBe("true");
-    expect(screen.queryByText("Automatic (company default)")).toBeNull();
+    expect(screen.getByRole("radio", { name: "Automatic (company default)" }).getAttribute("aria-checked")).toBe("false");
     fireEvent.click(screen.getByRole("button", { name: "Reset Background" }));
     expect(onReset).toHaveBeenCalledTimes(1);
+    // Automatic, chosen again, resets it too.
+    fireEvent.click(screen.getByRole("radio", { name: "Automatic (company default)" }));
+    expect(onReset).toHaveBeenCalledTimes(2);
   });
 
   it("a short list is a set of radios; choosing one sends its value", () => {
     const { onChange } = field(background, undefined);
-    expect(screen.getAllByRole("radio").map((r) => r.textContent)).toEqual(["Auto", "Transparent", "Opaque"]);
+    expect(screen.getAllByRole("radio").map((r) => r.textContent)).toEqual([
+      "Automatic (company default)",
+      "Auto",
+      "Transparent",
+      "Opaque",
+    ]);
     fireEvent.click(screen.getByRole("radio", { name: "Opaque" }));
     expect(onChange).toHaveBeenCalledWith("opaque");
   });
 
+  it("a short list with a default the model names shows it chosen while unset, with no Automatic chip", () => {
+    const memory = spec({
+      key: "memory_saving",
+      label: "Memory saving",
+      layer: "advanced",
+      kind: {
+        type: "enum",
+        values: [
+          { value: "automatic", label: "Automatic" },
+          { value: "off", label: "Off" },
+          { value: "on", label: "On" },
+        ],
+      },
+      companyDefault: "automatic",
+    });
+    field(memory, undefined, { local: true });
+    expect(screen.getAllByRole("radio").map((r) => r.textContent)).toEqual(["Automatic", "Off", "On"]);
+    expect(screen.getByRole("radio", { name: "Automatic" }).getAttribute("aria-checked")).toBe("true");
+    // Not twice, as 0.1.2 had it (critique §4.f).
+    expect(screen.getAllByText("Automatic")).toHaveLength(1);
+  });
+
   it("a long list is a select that starts at Automatic, and Automatic resets it", () => {
     const { onChange } = field(quality, undefined);
-    const select = screen.getByRole("combobox", { name: "Quality" }) as HTMLSelectElement;
-    expect(select.selectedOptions[0]?.textContent).toBe("Automatic (company default)");
-    fireEvent.change(select, { target: { value: "4" } });
+    const select = screen.getByRole("combobox", { name: "Quality" });
+    expect(select.textContent).toBe("Automatic (company default)");
+    press(select);
+    // Unset, Automatic is the placeholder, not a choice.
+    expect(screen.getAllByRole("option").map((o) => o.textContent)).toEqual(["Auto", "Low", "Medium", "High", "Extra high", "Max"]);
+    pick("Extra high");
     expect(onChange).toHaveBeenCalledWith("xhigh");
     cleanup();
     const { onReset } = field(quality, "high");
-    fireEvent.change(screen.getByRole("combobox", { name: "Quality" }), { target: { value: "" } });
+    expect(screen.getByRole("combobox", { name: "Quality" }).textContent).toBe("High");
+    press(screen.getByRole("combobox", { name: "Quality" }));
+    pick("Automatic (company default)");
     expect(onReset).toHaveBeenCalledTimes(1);
   });
 
-  it("a number box takes a number when it is done, within the field's range", () => {
+  it("a range is a slider on the field's steps, within its range, its value said beside its name", () => {
     const { onChange } = field(compression, undefined);
-    const box = screen.getByRole("spinbutton", { name: "Compression" });
-    fireEvent.change(box, { target: { value: "150" } });
-    expect(onChange).not.toHaveBeenCalled();
-    fireEvent.blur(box);
-    expect(onChange).toHaveBeenCalledWith(100);
+    const slider = screen.getByRole("slider", { name: "Compression" });
+    // Unset with no default named: it reads Automatic, resting mid-range (Task U9), and moves on
+    // from there.
+    screen.getByText("Automatic (company default)");
+    expect(slider.getAttribute("aria-valuetext")).toBe("Automatic (company default)");
+    fireEvent.keyDown(slider, { key: "ArrowRight" });
+    expect(onChange).toHaveBeenLastCalledWith(51);
+    fireEvent.keyDown(slider, { key: "End" });
+    expect(onChange).toHaveBeenLastCalledWith(100);
+    cleanup();
+    field(compression, 80);
+    screen.getByText("80%");
+    expect(screen.getByRole("slider", { name: "Compression" }).getAttribute("aria-valuenow")).toBe("80");
+    cleanup();
+    // Unset with a default the model names: that value.
+    const cfg = spec({ key: "cfg_scale", label: "Guidance", kind: { type: "range", min: 1, max: 20, step: 0.5 }, companyDefault: 5 });
+    field(cfg, undefined, { local: true });
+    screen.getByText("5");
+    expect(screen.getByRole("slider", { name: "Guidance" }).getAttribute("aria-valuenow")).toBe("5");
+    expect(screen.queryByText("Automatic")).toBeNull();
+  });
+
+  // [0.2.0 U9, from U8's review] An unset slider whose thumb sat at the minimum read as the
+  // minimum chosen (screen f, Picture guidance).
+  it("an unset slider's thumb is not at its minimum: it rests greyed at the default, else mid-range, until moved", () => {
+    const guidance = spec({
+      key: "img_cfg_scale",
+      label: "Picture guidance",
+      layer: "advanced",
+      kind: { type: "range", min: 1, max: 20, step: 0.5 },
+    });
+    const { onChange } = field(guidance, undefined, { local: true });
+    let thumb = screen.getByRole("slider", { name: "Picture guidance" });
+    expect(thumb.getAttribute("aria-valuenow")).not.toBe("1");
+    expect(thumb.getAttribute("aria-valuenow")).toBe("10.5");
+    expect(thumb.getAttribute("aria-valuetext")).toBe("Automatic");
+    // Greyed, with no filled track behind it: nothing is chosen.
+    expect(thumb.hasAttribute("data-unset")).toBe(true);
+    expect(document.querySelector("[data-slider-range]")!.hasAttribute("data-unset")).toBe(true);
+    fireEvent.keyDown(thumb, { key: "ArrowLeft" });
+    expect(onChange).toHaveBeenLastCalledWith(10);
+    cleanup();
+    // With a default the model names (here the recipe's), it rests there, greyed too.
+    const steps = spec({ key: "steps", label: "Steps", kind: { type: "range", min: 1, max: 50, step: 1 }, companyDefault: 4 });
+    field(steps, undefined, { local: true });
+    thumb = screen.getByRole("slider", { name: "Steps" });
+    expect(thumb.getAttribute("aria-valuenow")).toBe("4");
+    expect(thumb.hasAttribute("data-unset")).toBe(true);
+    cleanup();
+    // Once set, it is the accent's, at its value.
+    field(guidance, 1, { local: true });
+    thumb = screen.getByRole("slider", { name: "Picture guidance" });
+    expect(thumb.getAttribute("aria-valuenow")).toBe("1");
+    expect(thumb.hasAttribute("data-unset")).toBe(false);
+    expect(document.querySelector("[data-slider-range]")!.hasAttribute("data-unset")).toBe(false);
   });
 
   it("a switch shows the company's default until set", () => {
     const sound = spec({ key: "generate_audio", label: "Sound", kind: { type: "boolean" }, companyDefault: true });
     const { onChange } = field(sound, undefined);
-    const toggle = screen.getByRole("switch", { name: "Sound" }) as HTMLInputElement;
-    expect(toggle.checked).toBe(true);
+    const toggle = screen.getByRole("switch", { name: "Sound" });
+    expect(toggle.getAttribute("aria-checked")).toBe("true");
+    expect(screen.queryByText(/Automatic/)).toBeNull();
     fireEvent.click(toggle);
     expect(onChange).toHaveBeenCalledWith(false);
+  });
+
+  it("a field's help is a tooltip on its help button, and describes the field", async () => {
+    const help = "Picks the noise the picture starts from.";
+    const seed = spec({ key: "seed", canonical: "seed", label: "Seed", layer: "advanced", help, kind: { type: "seed", max: 2147483647 } });
+    field(seed, undefined);
+    const group = screen.getByRole("group", { name: "Seed" });
+    expect(document.getElementById(group.getAttribute("aria-describedby")!)?.textContent).toBe(help);
+    // No native title tooltip (critique §2.8): a styled one, on hover or keyboard focus.
+    expect(document.querySelector("[title]")).toBeNull();
+    await act(async () => {
+      screen.getByRole("button", { name: "About Seed" }).focus();
+    });
+    await waitFor(() => expect(screen.getByRole("tooltip").textContent).toContain(help));
   });
 
   it("an unset seed says Studio picks one", () => {
@@ -394,28 +530,6 @@ describe("ParamField", () => {
     expect(onInvalid).toHaveBeenLastCalledWith(null);
   });
 
-  /** How many, over `kind`'s range. */
-  function count(kind: Extract<ParamKind, { type: "range" }>): ParamSpec {
-    return spec({ key: "n", canonical: "count", label: "How many", kind });
-  }
-
-  it("How many offers no chip above the model's maximum", () => {
-    field(count({ type: "range", min: 1, max: 3, step: 1 }), undefined);
-    expect(screen.getAllByRole("radio").map((r) => r.textContent)).toEqual(["1", "2"]);
-    // 3 is not a chip, so More offers it.
-    fireEvent.click(screen.getByRole("button", { name: "More" }));
-    expect(screen.getByRole("spinbutton", { name: "How many" }).getAttribute("max")).toBe("3");
-  });
-
-  it("How many offers only the chips on the model's steps", () => {
-    // 1, 4, 7 and 10: 2 is not a number this model takes.
-    field(count({ type: "range", min: 1, max: 10, step: 3 }), undefined);
-    expect(screen.getAllByRole("radio").map((r) => r.textContent)).toEqual(["1", "4"]);
-    cleanup();
-    field(count({ type: "range", min: 2, max: 8, step: 2 }), undefined);
-    expect(screen.getAllByRole("radio").map((r) => r.textContent)).toEqual(["2", "4"]);
-  });
-
   describe("a text field", () => {
     const negative = spec({ key: "negative_prompt", label: "Leave out", layer: "advanced", kind: { type: "text", maxChars: 5 } });
 
@@ -431,6 +545,18 @@ describe("ParamField", () => {
       expect((screen.getByRole("textbox", { name: "Leave out" }) as HTMLTextAreaElement).value).toBe("a😀");
       screen.getByText("3 left");
       expect(onReset).not.toHaveBeenCalled();
+    });
+
+    // 0.2.0 (design 9.2): the limit is a hidden bound, so its count shows only near it.
+    it("shows what is left only when fewer than 1,000 characters remain", () => {
+      const long = spec({ ...negative, kind: { type: "text", maxChars: 262_144 } });
+      const left = () => screen.queryByText(/ left$/);
+      const { rerender } = render(<ParamField spec={long} value={undefined} onChange={vi.fn()} onReset={vi.fn()} />);
+      expect(left()).toBeNull();
+      rerender(<ParamField spec={long} value={"a".repeat(261_144)} onChange={vi.fn()} onReset={vi.fn()} />);
+      expect(left()).toBeNull();
+      rerender(<ParamField spec={long} value={"a".repeat(261_145)} onChange={vi.fn()} onReset={vi.fn()} />);
+      expect(left()?.textContent).toBe("999 left");
     });
 
     it("emptied, the field is unset", () => {
@@ -457,58 +583,71 @@ describe("ParamField", () => {
       },
     });
     const freeSize = spec({ key: "size", canonical: "size", label: "Size", kind: { type: "size", rules, values: [] } });
-    const select = () => screen.getByRole("combobox", { name: "Size" }) as HTMLSelectElement;
+    const select = () => screen.getByRole("combobox", { name: "Size" });
+    const choose = (option: string) => {
+      press(select());
+      pick(option);
+    };
     const box = (name: "Width" | "Height") => screen.getByRole("spinbutton", { name }) as HTMLInputElement;
 
     it("is a select starting at Automatic; choosing a listed size sends it", () => {
       const { onChange } = field(listedSize, undefined);
-      expect(select().selectedOptions[0]?.textContent).toBe("Automatic (company default)");
+      expect(select().textContent).toBe("Automatic (company default)");
       expect(screen.queryByRole("spinbutton", { name: "Width" })).toBeNull();
-      fireEvent.change(select(), { target: { value: "1" } });
+      choose("1536 × 1024");
       expect(onChange).toHaveBeenCalledWith("1536x1024");
     });
 
     it("shows the size set, Custom size with its sides when it is not in the list", () => {
       field(listedSize, "1536x1024");
-      expect(select().selectedOptions[0]?.textContent).toBe("1536 × 1024");
+      expect(select().textContent).toBe("1536 × 1024");
       expect(screen.queryByRole("spinbutton", { name: "Width" })).toBeNull();
       cleanup();
       field(listedSize, "1280x720");
-      expect(select().selectedOptions[0]?.textContent).toBe("Custom size");
+      expect(select().textContent).toBe("Custom size");
       expect([box("Width").value, box("Height").value]).toEqual(["1280", "720"]);
     });
 
     it("a size not in the list, set from the store, shows the boxes with its numbers", () => {
       const sized: MediaModel = { ...flare, params: [listedSize] };
       renderFields(sized, "simple", {});
-      expect(select().selectedOptions[0]?.textContent).toBe("Automatic (company default)");
+      expect(select().textContent).toBe("Automatic (company default)");
       // As a carry or a setup writes it: not chosen in the select.
       setValue("size", "1280x720");
-      expect(select().selectedOptions[0]?.textContent).toBe("Custom size");
+      expect(select().textContent).toBe("Custom size");
       expect([box("Width").value, box("Height").value]).toEqual(["1280", "720"]);
       setValue("size", "1024x1024");
-      expect(select().selectedOptions[0]?.textContent).toBe("1024 × 1024");
+      expect(select().textContent).toBe("1024 × 1024");
       expect(screen.queryByRole("spinbutton", { name: "Width" })).toBeNull();
     });
 
-    it("Custom size opens empty boxes until a size is typed", () => {
+    it("Custom size opens empty boxes until a size is typed, and Automatic closes them", () => {
       const { onChange } = field(listedSize, undefined);
-      fireEvent.change(select(), { target: { value: "custom" } });
-      expect(select().selectedOptions[0]?.textContent).toBe("Custom size");
+      choose("Custom size");
+      expect(select().textContent).toBe("Custom size");
       expect([box("Width").value, box("Height").value]).toEqual(["", ""]);
       expect(onChange).not.toHaveBeenCalled();
       fireEvent.change(box("Width"), { target: { value: "1280" } });
       fireEvent.change(box("Height"), { target: { value: "720" } });
       expect(onChange).toHaveBeenLastCalledWith("1280x720");
+      cleanup();
+      const again = field(listedSize, undefined);
+      choose("Custom size");
+      box("Width");
+      // Nothing typed yet: Automatic, back in the list, puts the boxes away.
+      choose("Automatic (company default)");
+      expect(screen.queryByRole("spinbutton", { name: "Width" })).toBeNull();
+      expect(select().textContent).toBe("Automatic (company default)");
+      expect(again.onReset).toHaveBeenCalled();
     });
 
     it("Custom size over a listed size unsets it, and boxes emptied stay open", () => {
       const sized: MediaModel = { ...flare, params: [listedSize] };
       renderFields(sized, "simple", { size: "1024x1024" });
-      fireEvent.change(select(), { target: { value: "custom" } });
+      choose("Custom size");
       // Nothing is sent until a custom size fits.
       expect(values()).toEqual({});
-      expect(select().selectedOptions[0]?.textContent).toBe("Custom size");
+      expect(select().textContent).toBe("Custom size");
       expect([box("Width").value, box("Height").value]).toEqual(["", ""]);
       fireEvent.change(box("Width"), { target: { value: "1280" } });
       fireEvent.change(box("Height"), { target: { value: "720" } });
@@ -519,7 +658,7 @@ describe("ParamField", () => {
       fireEvent.change(box("Width"), { target: { value: "" } });
       fireEvent.change(box("Height"), { target: { value: "" } });
       expect(values()).toEqual({});
-      expect(select().selectedOptions[0]?.textContent).toBe("Custom size");
+      expect(select().textContent).toBe("Custom size");
       box("Width");
     });
 
@@ -539,14 +678,14 @@ describe("ParamField", () => {
       const onChange = vi.fn();
       const onReset = vi.fn();
       const { rerender } = render(<ParamField spec={listedSize} value={undefined} onChange={onChange} onReset={onReset} />);
-      fireEvent.change(select(), { target: { value: "custom" } });
+      choose("Custom size");
       box("Width");
       const other = spec({
         ...listedSize,
         kind: { type: "size", rules, values: [{ value: "768x768", label: "768 × 768" }] },
       });
       rerender(<ParamField spec={other} value={undefined} onChange={onChange} onReset={onReset} />);
-      expect(select().selectedOptions[0]?.textContent).toBe("Automatic (company default)");
+      expect(select().textContent).toBe("Automatic (company default)");
       expect(screen.queryByRole("spinbutton", { name: "Width" })).toBeNull();
     });
   });

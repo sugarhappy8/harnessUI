@@ -1,7 +1,7 @@
 {
   "name": "app-frontend",
   "private": true,
-  "version": "0.1.2",
+  "version": "0.2.0",
   "type": "module",
   "scripts": {
     "dev": "vite",
@@ -10,7 +10,10 @@
     "lint": "eslint .",
     "typecheck": "tsc -b --noEmit",
     "test": "vitest run",
-    "tauri": "tauri"
+    "tauri": "tauri",
+    "preview:serve": "vite --config e2e/preview/vite.config.ts",
+    "preview:shoot": "node e2e/preview/shoot.mjs",
+    "preview:pairs": "node e2e/preview/pairs.mjs"
   },
   "dependencies": {
     "@tanstack/react-virtual": "^3.14.26",

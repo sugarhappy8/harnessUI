@@ -13,8 +13,8 @@ use std::process::ExitStatus;
 use std::time::Duration;
 
 use runtime::sd::args::{
-    FLAGS, OutputFormat, PartRole, Sampler, Scheduler, SdJob, build_args, missing_from_help,
-    prompt_files,
+    FLAGS, HighNoise, LoraTag, OutputFormat, PartRole, Sampler, Scheduler, SdJob, VaeFormat,
+    build_args, missing_from_help, negative_file_text, prompt_file_text, prompt_files,
 };
 use runtime::sd::devices::parse_list_devices;
 use runtime::{SpawnSpec, spawn};
@@ -99,19 +99,36 @@ async fn the_pinned_engine_parses_the_exact_arguments_studio_builds() {
         negative: Some("--vae blurry".into()),
         width: 1024,
         height: 768,
+        size_multiple: 16,
         steps: 4,
         cfg: 1.0,
+        guidance: None,
+        img_cfg: None,
         flow_shift: None,
+        timestep_shift: None,
         sampler: Some(Sampler::Euler),
         scheduler: Some(Scheduler::Simple),
+        sigmas: Vec::new(),
+        high_noise: None,
+        moe_boundary: None,
+        strength: None,
         seed: 2_147_483_647,
         batch: 2,
         frames: None,
         fps: None,
         init_image: None,
+        end_image: None,
+        mask_image: None,
+        control_image: None,
         ref_images: vec![picture_png.clone()],
+        vae_format: None,
+        model_args: None,
+        lora_dir: None,
+        loras: Vec::new(),
         backend: None,
-        memory_saving: true,
+        vae_tiling: true,
+        offload_to_cpu: true,
+        tiling_allowed: true,
         processor_only: true,
         threads: Some(3),
         out_dir: scratch.path().join("picture"),
@@ -145,34 +162,180 @@ async fn the_pinned_engine_parses_the_exact_arguments_studio_builds() {
         ref_images: Vec::new(),
         processor_only: false,
         threads: None,
-        memory_saving: false,
+        vae_tiling: false,
+        offload_to_cpu: false,
         out_dir: scratch.path().join("video"),
         out_stem: "r2".into(),
         format: OutputFormat::Webm,
         ..picture.clone()
     };
     for job in [picture, video] {
-        std::fs::create_dir_all(&job.out_dir).unwrap();
-        let (prompt_file, negative_file) = prompt_files(&job);
-        std::fs::write(&prompt_file, &job.prompt).unwrap();
-        if let (Some(file), Some(negative)) = (&negative_file, &job.negative) {
-            std::fs::write(file, negative).unwrap();
-        }
-        let mut args = build_args(&job).unwrap();
-        args.extend([
-            "-M".into(),
-            "metadata".into(),
-            "--image".into(),
-            picture_png.as_os_str().to_owned(),
-        ]);
-        let (status, stdout, stderr) = run(&bin, args).await;
-        let output = format!("{stdout}{stderr}");
-        assert!(status.success(), "{status} for {job:?}: {output}");
-        let lower = output.to_lowercase();
-        assert!(
-            !lower.contains("unknown argument") && !lower.contains("invalid"),
-            "{job:?}: {output}"
-        );
+        parses_in_metadata_mode(&bin, &job, &picture_png).await;
+    }
+}
+
+/// Writes `job`'s prompt files as `run_job` does, runs `bin` with `build_args(job)` then
+/// `-M metadata --image <picture>` (the last `-M` wins), and checks that the engine parsed
+/// every argument: exit 0, and no `unknown argument` or `invalid` line.
+async fn parses_in_metadata_mode(bin: &Path, job: &SdJob, picture: &Path) {
+    std::fs::create_dir_all(&job.out_dir).unwrap();
+    let (prompt_file, negative_file) = prompt_files(job);
+    std::fs::write(&prompt_file, prompt_file_text(job)).unwrap();
+    if let (Some(file), Some(negative)) = (&negative_file, negative_file_text(job)) {
+        std::fs::write(file, negative).unwrap();
+    }
+    let mut args = build_args(job).unwrap();
+    args.extend([
+        "-M".into(),
+        "metadata".into(),
+        "--image".into(),
+        picture.as_os_str().to_owned(),
+    ]);
+    let (status, stdout, stderr) = run(bin, args).await;
+    let output = format!("{stdout}{stderr}");
+    assert!(status.success(), "{status} for {job:?}: {output}");
+    let lower = output.to_lowercase();
+    assert!(
+        !lower.contains("unknown argument") && !lower.contains("invalid"),
+        "{job:?}: {output}"
+    );
+}
+
+#[tokio::test]
+async fn the_pinned_engine_parses_recipe_arguments() {
+    let Some(bin) = engine("the_pinned_engine_parses_recipe_arguments") else {
+        return;
+    };
+    let scratch = tempfile::tempdir().unwrap();
+    let png = |name: &str| {
+        let path = scratch.path().join(name);
+        std::fs::write(&path, TINY_PNG).unwrap();
+        path
+    };
+    let (picture_png, start, end, mask, edges) = (
+        png("tiny.png"),
+        png("start.png"),
+        png("end.png"),
+        png("mask.png"),
+        png("edges.png"),
+    );
+    let models = scratch.path().join("models");
+    let loras = models.join("@loras");
+    std::fs::create_dir_all(loras.join("local")).unwrap();
+    std::fs::write(loras.join("local").join("pixel art ü.safetensors"), b"lora").unwrap();
+    // Wan 2.2 T2V A14B with every recipe field set, a LoRA on each part
+    let wan_a14b = SdJob {
+        parts: vec![
+            (
+                PartRole::Diffusion,
+                models.join("wan2.2_t2v_low_noise_14B_Q4_K_M.gguf"),
+            ),
+            (
+                PartRole::HighNoiseDiffusion,
+                models.join("wan2.2_t2v_high_noise_14B_Q4_K_M.gguf"),
+            ),
+            (PartRole::T5xxl, models.join("umt5-xxl-encoder-Q8_0.gguf")),
+            (PartRole::Vae, models.join("wan_2.1_vae.safetensors")),
+        ],
+        prompt: "a river at dawn <lora:typed:3>".into(),
+        negative: Some("blurry".into()),
+        width: 832,
+        height: 480,
+        size_multiple: 16,
+        steps: 20,
+        cfg: 3.0,
+        guidance: Some(3.5),
+        img_cfg: Some(1.5),
+        flow_shift: Some(12.0),
+        timestep_shift: Some(250),
+        sampler: Some(Sampler::Euler),
+        scheduler: Some(Scheduler::Simple),
+        sigmas: vec![1.0, 0.75, 0.5, 0.25, 0.0],
+        high_noise: Some(HighNoise {
+            steps: -1,
+            cfg: 4.0,
+            sampler: Some(Sampler::Euler),
+        }),
+        moe_boundary: Some(0.875),
+        strength: Some(0.75),
+        seed: 42,
+        batch: 1,
+        frames: Some(33),
+        fps: Some(16),
+        init_image: Some(start),
+        end_image: Some(end),
+        mask_image: None,
+        control_image: None,
+        ref_images: Vec::new(),
+        vae_format: Some(VaeFormat::Wan),
+        model_args: Some("qwen_image_zero_cond_t=true".into()),
+        lora_dir: Some(loras.clone()),
+        loras: vec![
+            LoraTag {
+                name: "local/pixel art ü".into(),
+                weight: 0.8,
+                high_noise: false,
+            },
+            LoraTag {
+                name: "local/pixel art ü".into(),
+                weight: 1.0,
+                high_noise: true,
+            },
+        ],
+        backend: None,
+        vae_tiling: true,
+        offload_to_cpu: true,
+        tiling_allowed: true,
+        processor_only: true,
+        threads: Some(2),
+        out_dir: scratch.path().join("video"),
+        out_stem: "r1".into(),
+        format: OutputFormat::Webm,
+        env: Vec::new(),
+    };
+    // a picture to change with its mask, and a control picture
+    let inpaint = SdJob {
+        parts: vec![
+            (PartRole::Diffusion, models.join("flux1-fill-dev-Q4_0.gguf")),
+            (PartRole::ClipL, models.join("clip_l.safetensors")),
+            (PartRole::T5xxl, models.join("t5xxl_fp16.safetensors")),
+            (PartRole::Vae, models.join("ae.safetensors")),
+        ],
+        prompt: "a red kite".into(),
+        negative: None,
+        width: 1024,
+        height: 1024,
+        size_multiple: 8,
+        steps: 20,
+        cfg: 1.0,
+        guidance: Some(30.0),
+        img_cfg: None,
+        flow_shift: None,
+        timestep_shift: None,
+        sigmas: Vec::new(),
+        high_noise: None,
+        moe_boundary: None,
+        strength: Some(1.0),
+        frames: None,
+        fps: None,
+        init_image: Some(picture_png.clone()),
+        end_image: None,
+        mask_image: Some(mask),
+        control_image: Some(edges),
+        vae_format: Some(VaeFormat::Flux),
+        model_args: None,
+        lora_dir: None,
+        loras: Vec::new(),
+        vae_tiling: false,
+        offload_to_cpu: false,
+        tiling_allowed: false,
+        out_dir: scratch.path().join("picture"),
+        out_stem: "r2".into(),
+        format: OutputFormat::Png,
+        ..wan_a14b.clone()
+    };
+    for job in [wan_a14b, inpaint] {
+        parses_in_metadata_mode(&bin, &job, &picture_png).await;
     }
 }
 

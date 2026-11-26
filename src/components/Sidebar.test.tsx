@@ -230,6 +230,17 @@ describe("the Studio button", () => {
     expect(screen.getByRole("button", { name: "Studio" }).getAttribute("aria-current")).toBeNull();
   });
 
+  // [0.2.0 U9] Design 10.4: in Studio the gradient is Create's alone; New chat is not Studio's
+  // primary action, so there it is a quiet button (critique §2.5).
+  it("in Studio, New chat gives the gradient up to Studio's Create", () => {
+    useStudio.setState({ view: "studio", live: {} });
+    show();
+    const newChat = screen.getByRole("button", { name: "New chat" });
+    expect(newChat.className).not.toContain("btn-primary");
+    act(() => useStudio.getState().showChat());
+    expect(screen.getByRole("button", { name: "New chat" }).className).toContain("btn-primary");
+  });
+
   it("a chat click or New chat leaves Studio", () => {
     const openChat = vi.fn(async () => undefined);
     const newChat = vi.fn(async () => undefined);
