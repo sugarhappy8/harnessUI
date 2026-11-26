@@ -5,7 +5,7 @@ import * as ipc from "../lib/ipc";
 import type { ApprovedFolder, AuditRow, ErrorInfo, HotkeyStatus } from "../lib/types";
 import { toErrorInfo } from "../store/app";
 import { useApprovalMode, type ApprovalModeName } from "../lib/approvalMode";
-import { APPROVAL_MODES, AllowAllConfirm, FullAccessConfirm, MODE_LOOK } from "./AllowAllButton";
+import { APPROVAL_MODES, MODE_LOOK } from "./AllowAllButton";
 import { ErrorBanner } from "./ErrorBanner";
 import { visiblePath } from "./FolderChip";
 
@@ -128,12 +128,11 @@ export function PermissionsSettings() {
 
 /**
  * The mode every chat starts in: Ask first (where a new install starts), Allow all or Full
- * access. Ask first saves at once; the other two ask first, as in the chat header.
+ * access. A choice saves at once.
  */
 function DefaultApprovalMode(props: { onError: (e: ErrorInfo) => void }) {
   const { onError } = props;
   const mode = useApprovalMode((s) => s.defaultMode);
-  const [confirm, setConfirm] = useState<"allowAll" | "fullAccess" | null>(null);
   useEffect(() => {
     let alive = true;
     useApprovalMode
@@ -151,16 +150,10 @@ function DefaultApprovalMode(props: { onError: (e: ErrorInfo) => void }) {
       onError(toErrorInfo(e));
     }
   }
-  // Even a step down from Full access to Allow all asks: the new default also applies to
-  // chats switched by hand, and some of those may have been in Ask first.
   function choose(next: ApprovalModeName) {
     if (next === mode) return;
-    if (next === "ask") void save("ask");
-    else setConfirm(next);
+    void save(next);
   }
-  const closeConfirm = (open: boolean) => {
-    if (!open) setConfirm(null);
-  };
   return (
     <section>
       <h3 className="mb-1 font-medium">Approvals</h3>
@@ -169,7 +162,7 @@ function DefaultApprovalMode(props: { onError: (e: ErrorInfo) => void }) {
         in the mode you choose here, and changing it also changes chats you switched by hand. To change one chat
         only, use the shield button in the chat&apos;s header.
       </p>
-      {/* Controlled by the saved default: a choice that asks first shows only once confirmed. */}
+      {/* Controlled by the saved default. */}
       <RadioGroup.Root
         value={mode}
         onValueChange={(v) => choose(v as ApprovalModeName)}
@@ -194,18 +187,6 @@ function DefaultApprovalMode(props: { onError: (e: ErrorInfo) => void }) {
           </RadioGroup.Item>
         ))}
       </RadioGroup.Root>
-      <AllowAllConfirm
-        open={confirm === "allowAll"}
-        scope="every"
-        onOpenChange={closeConfirm}
-        onConfirm={() => void save("allowAll")}
-      />
-      <FullAccessConfirm
-        open={confirm === "fullAccess"}
-        scope="every"
-        onOpenChange={closeConfirm}
-        onConfirm={() => void save("fullAccess")}
-      />
     </section>
   );
 }

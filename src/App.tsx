@@ -8,7 +8,6 @@ import { FirstRun } from "./components/FirstRun";
 import { ShortcutsDialog } from "./components/ShortcutsDialog";
 import { AppNotices } from "./components/AppNotices";
 import type { UpdatePlacement } from "./components/UpdateBox";
-import { FullAccessStartCheck } from "./components/AllowAllButton";
 import { StudioView } from "./components/studio/StudioView";
 import { StudioNotice } from "./components/studio/StudioNotice";
 import { QuitWhileMaking } from "./components/studio/QuitWhileMaking";
@@ -228,7 +227,6 @@ export default function App() {
       </div>
       {dialogs}
       {/* Only with the main window on screen, after first run: it asks about chats. */}
-      {ipc.isTauri() && <FullAccessStartCheck />}
     </div>
   );
 }

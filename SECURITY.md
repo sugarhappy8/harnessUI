@@ -101,8 +101,7 @@ short moment after a card appears.
 
 Every chat starts in *Ask first*, the order above. You can switch a chat, or the mode every
 chat starts in, to one of two other modes. Only you can: the switch is in the chat's header
-and in *Settings → Permissions*, both behind a confirmation, and no tool or model output
-can reach it.
+and in *Settings → Permissions*, and no tool or model output can reach it.
 
 - **Allow all** (0.0.4) answers most cards for you. Deleting, throwing away work, system
   commands, sensitive places, paying and publishing still ask, and so does sending data
@@ -115,8 +114,12 @@ can reach it.
   Code or Codex, which then work online with your account. Only the hard limits
   remain: a tool that is off stays off, and the app's own folders (its database, logs and
   install folder) and the folders where the system keeps saved keys stay out of reach of
-  its file tools. A saved "every chat starts in Full access" is asked again each time the
-  app starts, because a program could have written that setting.
+  its file tools.
+
+Since 0.2.0, switching a chat to Allow all or Full access, or saving either as the start
+mode, takes effect without a confirmation, and a saved Full-access start mode is applied
+at launch without being asked again. Earlier versions asked again at each launch, in case
+another program had changed the setting; the owner chose to drop that check.
 
 What Full access means for safety, plainly: prompt injection is no longer stopped by an
 approval card. A web page, a file or a tool result that tricks the model can make it do

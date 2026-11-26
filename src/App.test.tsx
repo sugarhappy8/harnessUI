@@ -73,7 +73,6 @@ vi.mock("./components/ModelsDialog", () => ({ ModelsDialog: () => null }));
 vi.mock("./components/FirstRun", () => ({ FirstRun: () => null }));
 vi.mock("./components/ShortcutsDialog", () => ({ ShortcutsDialog: () => null }));
 vi.mock("./components/AppNotices", () => ({ AppNotices: () => null }));
-vi.mock("./components/AllowAllButton", () => ({ FullAccessStartCheck: () => null }));
 
 const { default: App } = await import("./App");
 const { useApp } = await import("./store/app");

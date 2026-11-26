@@ -4,7 +4,6 @@ import type { ApprovalRequest, KeepAsking } from "../lib/types";
 import { useApprovalMode, useChatMode } from "../lib/approvalMode";
 import { toErrorInfo, useApp } from "../store/app";
 import { useInputDelay } from "../lib/useInputDelay";
-import { AllowAllConfirm } from "./AllowAllButton";
 
 /**
  * Clicks and keys on a card are ignored for this long after it appears (13.3), and again
@@ -65,7 +64,6 @@ export function ApprovalCard(props: {
   const { armed, armedRef } = useInputDelay(CARD_INPUT_DELAY_MS);
   const [note, setNote] = useState("");
   const [showNote, setShowNote] = useState(false);
-  const [confirmAll, setConfirmAll] = useState(false);
   // A card should not appear in Full access at all; if one does, it reads as in Allow all.
   const allowAll = useChatMode(request.chatId) !== "ask";
   const denyRef = useRef<HTMLButtonElement>(null);
@@ -154,7 +152,7 @@ export function ApprovalCard(props: {
         {!always && !allowAll && (
           <button
             type="button"
-            onClick={() => armedRef.current && setConfirmAll(true)}
+            onClick={() => armedRef.current && allowAllInChat()}
             aria-disabled={!armed}
             className="rounded-md border border-border px-3 py-1 hover:bg-bg-muted aria-disabled:opacity-50"
           >
@@ -177,8 +175,6 @@ export function ApprovalCard(props: {
         )}
       </div>
     </div>
-    {/* Outside the card: the card swallows Enter, and here Enter on Cancel must cancel. */}
-    <AllowAllConfirm open={confirmAll} scope="chat" onOpenChange={setConfirmAll} onConfirm={allowAllInChat} />
     </>
   );
 }

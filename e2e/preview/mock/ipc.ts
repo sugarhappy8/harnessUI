@@ -268,8 +268,6 @@ async function handle(cmd: string, args: Args): Promise<unknown> {
       return INSTALLED_CHAT_MODELS;
     case "disk_usage":
       return { modelsDir: "/home/me/models", totalBytes: 12_327_783_488 };
-    case "get_full_access_default_pending":
-      return false;
     case "get_setting":
       return null;
     case "list_providers":
