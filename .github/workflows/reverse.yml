@@ -69,7 +69,8 @@ jobs:
           echo "REAL_REA_DIR=$RUNNER_TEMP/real-rea" >> "$GITHUB_ENV"
       # The checker reads an strace log of the test and everything it starts (rea, Kuna, Java,
       # Ghidra's decompiler). It fails on any connection, send or bind that is not loopback,
-      # a Unix socket or netlink (a UDP connect to port 0, glibc's route check, is allowed); on any name lookup (port 53, even through the loopback
+      # a Unix socket or netlink (a UDP connect to port 0, glibc's route check, is allowed, but a
+      # send on such a socket is checked by its peer); on any name lookup (port 53, even through the loopback
       # resolver); on any program started from outside the pack except `ps`, which rea runs to
       # list its own processes; and on any file or folder created, written, renamed or linked
       # outside the test's folder, except devices, /proc and Java's performance counters
@@ -81,25 +82,33 @@ jobs:
           # host plus an appended one would give it two.
           sudo sed -i "/[[:space:]]$(hostname)\([[:space:]]\|\$\)/d" /etc/hosts && echo "127.0.1.1 $(hostname)" | sudo tee -a /etc/hosts
           test "$(getent ahosts "$(hostname)" | awk '{print $1}' | sort -u)" = "127.0.1.1"
-          # Three controls under the same strace options as the tests: a TCP connect and a UDP send
-          # to 192.0.2.1 must be caught, and a UDP connect to port 0 must pass.
+          # Four controls under the same strace options as the tests: a TCP connect, a UDP send and a
+          # send on a UDP socket connected to port 0, all to 192.0.2.1, must be caught, each by name,
+          # and a UDP connect to port 0 alone must pass.
           control() {
             strace -f -qq -yy --seccomp-bpf -e trace=connect,sendto,sendmsg,sendmmsg,bind -e signal=none \
               -o "$RUNNER_TEMP/control-$1.log" python3 -I -c "import socket; $2"
             python3 -I scripts/check_strace.py "$RUNNER_TEMP/control-$1.log" "$RUNNER_TEMP/none" "$PWD" "$(command -v python3)" > "$RUNNER_TEMP/control-$1.out" 2>&1
           }
-          if control tcp 's = socket.socket(); s.settimeout(2); s.connect_ex(("192.0.2.1", 9))'; then
-            echo "The checker did not catch a TCP connection to 192.0.2.1"; exit 1
+          if control tcp 's = socket.socket(); s.settimeout(2); s.connect_ex(("192.0.2.1", 9))' \
+            || ! grep -q '192\.0\.2\.1' "$RUNNER_TEMP/control-tcp.out"; then
+            cat "$RUNNER_TEMP/control-tcp.out"; echo "The checker did not catch a TCP connection to 192.0.2.1"; exit 1
           fi
           echo "Control 1, a TCP connect to 192.0.2.1:9: caught"
           control udp-route 's = socket.socket(socket.AF_INET, socket.SOCK_DGRAM); s.connect(("192.0.2.1", 0))' || {
             cat "$RUNNER_TEMP/control-udp-route.out"; echo "The checker reported a UDP connect to port 0"; exit 1
           }
           echo "Control 2, a UDP connect to 192.0.2.1 port 0: passed"
-          if control udp-send 's = socket.socket(socket.AF_INET, socket.SOCK_DGRAM); s.sendto(b"x", ("192.0.2.1", 9))'; then
-            echo "The checker did not catch a UDP send to 192.0.2.1"; exit 1
+          if control udp-send 's = socket.socket(socket.AF_INET, socket.SOCK_DGRAM); s.sendto(b"x", ("192.0.2.1", 9))' \
+            || ! grep -q '192\.0\.2\.1' "$RUNNER_TEMP/control-udp-send.out"; then
+            cat "$RUNNER_TEMP/control-udp-send.out"; echo "The checker did not catch a UDP send to 192.0.2.1"; exit 1
           fi
           echo "Control 3, a UDP sendto 192.0.2.1:9: caught"
+          if control udp-port-0-send 's = socket.socket(socket.AF_INET, socket.SOCK_DGRAM); s.connect(("192.0.2.1", 0)); s.send(b"x")' \
+            || ! grep -q 'sends to a non-loopback address.*192\.0\.2\.1' "$RUNNER_TEMP/control-udp-port-0-send.out"; then
+            cat "$RUNNER_TEMP/control-udp-port-0-send.out"; echo "The checker did not catch a send on a UDP socket connected to 192.0.2.1 port 0"; exit 1
+          fi
+          echo "Control 4, a send on a UDP socket connected to 192.0.2.1 port 0: caught"
       - name: Kuna and Ghidra under strace (loopback and Unix sockets only, the pack's programs only, writes only in the test's folder)
         run: |
           REVERSE_PACK_CACHE="$PWD/.cache/reverse" strace -f -qq -yy --seccomp-bpf \

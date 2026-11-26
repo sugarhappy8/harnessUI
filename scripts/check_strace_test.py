@@ -183,6 +183,82 @@ class WithTheSocketKind(unittest.TestCase):
         self.assertEqual(code, 0, out)
 
 
+class AddresslessSends(unittest.TestCase):
+    """A send with no address goes to the socket's peer, which `-yy` prints (final review I1)."""
+
+    # Recorded under the job's options, the address changed from 127.0.0.1 to 192.0.2.1.
+    CONNECT_0 = '100 connect(3<UDP:[5010653]>, {sa_family=AF_INET, sin_port=htons(0), sin_addr=inet_addr("192.0.2.1")}, 16) = 0'
+
+    def test_a_send_on_a_udp_socket_connected_to_port_0_fails(self):
+        code, out = check(
+            start(),
+            self.CONNECT_0,
+            '100 sendto(3<UDP:[127.0.0.1:38426->192.0.2.1:0]>, "exfil", 5, 0, NULL, 0) = 5',
+        )
+        self.assertEqual(code, 1, out)
+        self.assertIn("sends to a non-loopback address", out)
+        self.assertIn("192.0.2.1", out)
+
+    def test_a_sendmsg_on_a_udp_socket_connected_to_port_0_fails(self):
+        code, out = check(
+            start(),
+            self.CONNECT_0,
+            "100 sendmsg(3<UDP:[127.0.0.1:44609->192.0.2.1:0]>, {msg_name=NULL, msg_namelen=0, "
+            'msg_iov=[{iov_base="x", iov_len=1}], msg_iovlen=1, msg_controllen=0, msg_flags=0}, 0) = 1',
+        )
+        self.assertEqual(code, 1, out)
+        self.assertIn("192.0.2.1", out)
+
+    def test_a_sendmmsg_and_an_ipv6_send_on_connected_sockets_fail(self):
+        code, out = check(
+            start(),
+            "100 sendmmsg(3<UDP:[10.0.0.5:5000->192.0.2.1:0]>, [{msg_hdr={msg_name=NULL, msg_namelen=0, "
+            'msg_iov=[{iov_base="x", iov_len=1}], msg_iovlen=1, msg_controllen=0, msg_flags=0}, msg_len=1}], 1, 0) = 1',
+        )
+        self.assertEqual(code, 1, out)
+        code, out = check(
+            start(),
+            '100 sendto(6<UDPv6:[[2001:db8::5]:5000->[2001:db8::1]:0]>, "x", 1, 0, NULL, 0) = 1',
+        )
+        self.assertEqual(code, 1, out)
+        self.assertIn("2001:db8::1", out)
+
+    def test_a_send_on_a_tcp_socket_to_another_computer_fails(self):
+        code, _ = check(start(), '100 sendto(5<TCP:[10.0.0.5:5000->192.0.2.1:443]>, "x", 1, 0, NULL, 0) = 1')
+        self.assertEqual(code, 1)
+
+    def test_addressless_sends_to_loopback_and_on_unix_sockets_pass(self):
+        code, out = check(
+            start(),
+            '100 connect(3<UDP:[5061659]>, {sa_family=AF_INET, sin_port=htons(0), sin_addr=inet_addr("127.0.0.1")}, 16) = 0',
+            '100 sendto(3<UDP:[127.0.0.1:57104->127.0.0.1:0]>, "exfil", 5, 0, NULL, 0) = 5',
+            '100 sendto(6<UDPv6:[[::1]:5000->[::1]:0]>, "x", 1, 0, NULL, 0) = 1',
+            '100 sendto(7<TCP:[127.0.0.1:5000->127.0.0.1:8080]>, "x", 1, 0, NULL, 0) = 1',
+            '100 sendto(8<UNIX-STREAM:[11->12]>, "x", 1, MSG_NOSIGNAL, NULL, 0) = 1',
+            '100 sendmsg(9<NETLINK:[ROUTE:20573]>, {msg_name={sa_family=AF_NETLINK, nl_pid=0, nl_groups=00000000}, msg_namelen=12}, 0) = 20',
+        )
+        self.assertEqual(code, 0, out)
+
+    def test_a_udp_send_whose_peer_strace_could_not_show_fails(self):
+        # The socket's kind is known but not its peer: fail closed when the send went out.
+        code, out = check(start(), '100 sendto(3<UDP:[5010653]>, "x", 1, 0, NULL, 0) = 1')
+        self.assertEqual(code, 1, out)
+        self.assertIn("peer", out)
+
+    def test_a_refused_send_on_an_unconnected_udp_socket_is_not_a_finding(self):
+        code, out = check(start(), '100 sendto(3<UDP:[5010653]>, "x", 1, 0, NULL, 0) = -1 EDESTADDRREQ (Destination address required)')
+        self.assertEqual(code, 0, out)
+
+    def test_a_udp_connect_to_port_0_without_the_socket_kind_fails(self):
+        # Without -yy the socket's kind is unknown, so port 0 is not allowed (F1, deferred).
+        code, out = check(
+            start(),
+            '100 connect(5, {sa_family=AF_INET, sin_port=htons(0), sin_addr=inet_addr("192.0.2.1")}, 16) = 0',
+        )
+        self.assertEqual(code, 1, out)
+        self.assertIn("192.0.2.1", out)
+
+
 class FindingsNameTheirProgram(unittest.TestCase):
     def test_a_finding_names_its_program(self):
         code, out = check(

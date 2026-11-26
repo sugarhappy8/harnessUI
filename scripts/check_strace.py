@@ -89,6 +89,28 @@ def finding(pid, text):
 # With strace -yy a socket prints as 5<UDP:[...]>, 5<UDPv6:[...]>, 5<TCP:[...]> or 5<UNIX:[...]>.
 UDP_CONNECT = re.compile(r"^connect\(\d+<UDP(?:v6)?:")
 PORT_0 = re.compile(r"sin6?_port=htons\(0\)")
+# The socket a call is made on, as -yy prints it: 3<UDP:[127.0.0.1:38426->192.0.2.1:0]>,
+# 6<UDPv6:[[::1]:5000->[2001:db8::1]:0]>, or 3<UDP:[5010653]> when strace shows no peer.
+SOCKET = re.compile(r"^\w+\(\d+<(UDP|UDPv6|TCP|TCPv6)(?::\[(.*)\])?>")
+
+
+def peer_of(call):
+    """For a call on an IP socket that -yy printed: (kind, the peer's host or None)."""
+    m = SOCKET.match(call)
+    if not m:
+        return None, None
+    kind, inner = m.group(1), m.group(2) or ""
+    if "->" not in inner:
+        return kind, None
+    peer = inner.rsplit("->", 1)[1]
+    host = peer[1:].split("]", 1)[0] if peer.startswith("[") else peer.rsplit(":", 1)[0]
+    return kind, host
+
+
+def loopback_host(host):
+    return host.startswith("127.") or host == "::1" or host.startswith("::ffff:127.")
+
+
 for pid, call in records():
     if first is None:
         first = pid
@@ -102,15 +124,28 @@ for pid, call in records():
     if name in ("connect", "sendto", "sendmsg", "sendmmsg", "bind"):
         seen_net += 1
         family = re.search(r"sa_family=(AF_[A-Z0-9]+)", call)
+        if family is None and name != "connect" and name != "bind":
+            # A send with no address goes to the socket's peer (`write()` is not traced; the
+            # connect was). A UDP socket connected to port 0 does send, so the peer is read
+            # from the -yy annotation: not loopback is a finding, and so is a UDP send that
+            # went out with no peer shown. Without -yy the kind is unknown, and every port-0
+            # connect is already a finding.
+            kind, host = peer_of(call)
+            if host is not None and not loopback_host(host):
+                finding(pid, f"sends to a non-loopback address: {call.strip()[:300]}")
+            elif host is None and kind in ("UDP", "UDPv6") and ok:
+                finding(pid, f"a UDP send whose peer strace did not show: {call.strip()[:300]}")
+            continue
         if family is None or family.group(1) in ("AF_UNIX", "AF_LOCAL", "AF_NETLINK", "AF_UNSPEC"):
-            continue  # a connected socket's send names no address; its connect was checked
+            continue
         loopback = re.search(r'inet_addr\("127\.|"::1"|"::ffff:127\.', call) is not None
         if "htons(53)" in call:
             lookups.append(call.strip())
             finding(pid, f"a name lookup: {call.strip()}")
         elif name == "connect" and UDP_CONNECT.match(call) and PORT_0.search(call):
             # glibc's getaddrinfo sorts a host name's addresses (RFC 6724) by connecting an
-            # unbound UDP socket to each; port 0 sends nothing.
+            # unbound UDP socket to each and sends nothing. A later send on such a socket is
+            # checked above, by its peer.
             continue
         elif family.group(1) not in ("AF_INET", "AF_INET6") or not loopback:
             finding(pid, f"{'listens on' if name == 'bind' else 'reaches'} a non-loopback address: {call.strip()}")

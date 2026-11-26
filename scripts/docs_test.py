@@ -178,6 +178,10 @@ class ReverseCiAsTheWorkflowsRunIt(unittest.TestCase):
         self.assertIn("scripts/check_strace.py", self.reverse)
         self.assertIn("name lookup", self.bullet)
         self.assertIn("UDP socket to port 0", self.bullet)
+        # A send on such a socket is checked by its peer (final review, area 4, I1).
+        self.assertIn("checked by its peer", self.bullet)
+        self.assertIn("a send on a UDP socket connected to port 0", self.bullet)
+        self.assertIn("udp-port-0-send", self.reverse)
         self.assertIn("name lookup", self.sentences["13.6 stays offline"])
 
     def test_the_server_call_path_runs_with_the_real_rea(self):
