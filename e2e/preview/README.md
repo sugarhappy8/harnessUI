@@ -28,7 +28,15 @@ never committed: they go to `.cache/preview/` (ignored).
 Query flags: `?view=studio` (open Studio), `?empty=1` (first use: nothing installed, no
 endpoint, no runs), `&fits=0` with it (nothing in the catalog fits this computer either),
 `&pictures=1` with it (the picture models stay installed; no video model is installed or fits),
-`?notice=0` (the local-model notice never accepted, so the first download shows it). `window.__preview` exposes `useStudio`, `useApp`, `state` (the mock's
+`?notice=0` (the local-model notice never accepted, so the first download shows it).
+`?real=1` answers Get models with real backend answers captured from Hugging Face
+(`src/components/studio/fixtures/real/`: the search for "qwen image uncensored" and the
+repositories saved there), and `&crash=detail` with it takes the parts out of their plans, so a
+model's page throws while it is drawn and shows its error notice. `?crash=root` draws a part that
+throws at once, to show the whole window's error notice (0.2.1). The page installs the app's
+Trusted Types policy as `main.tsx` does; serve the built page with the CSP of
+`src-tauri/tauri.conf.json` as a header to check a screen under the app's real rules (the dev
+server sends none). `window.__preview` exposes `useStudio`, `useApp`, `state` (the mock's
 data) and `emit(event, payload)` to send a backend event such as `studio-progress`.
 
 ## Run it

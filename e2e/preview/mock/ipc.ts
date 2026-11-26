@@ -27,6 +27,25 @@ import {
 } from "./data";
 import { pictureBytes } from "./pictures";
 
+type RealRepo = { repo: string; files: { file: string; plan: { slots: unknown } | null }[] };
+/** `?real=1`: Get models answers with real backend answers captured from Hugging Face
+ *  (src/components/studio/fixtures/real/): the search for "qwen image uncensored", and the
+ *  repositories and plans saved there; any other repository is the mock's own. */
+const real = new URLSearchParams(location.search).get("real") === "1";
+/** `?crash=detail` (with `real=1`): every real repository's plans lose their parts, so a
+ *  model's page throws while it is drawn, to show the panel's error notice (0.2.1). */
+const crashDetail = new URLSearchParams(location.search).get("crash") === "detail";
+const REAL = "../../../src/components/studio/fixtures/real/";
+const realFiles = import.meta.glob("../../../src/components/studio/fixtures/real/**/*.json", {
+  eager: true,
+  import: "default",
+}) as Record<string, unknown>;
+function realRepo(repo: string): RealRepo | undefined {
+  const found = realFiles[`${REAL}${repo.replace("/", "__")}/repo.json`] as RealRepo | undefined;
+  if (!found || !crashDetail) return found;
+  return { ...found, files: found.files.map((f) => ({ ...f, plan: f.plan && { ...f.plan, slots: null } })) };
+}
+
 type Args = Record<string, unknown> | undefined;
 
 /** `?empty=1`: Studio as a new user finds it: nothing installed, no endpoint, no runs. */
@@ -143,12 +162,18 @@ async function handle(cmd: string, args: Args): Promise<unknown> {
       return { ...state.local, noticeAccepted: state.prefs.localNoticeAcceptedAt !== null };
     case "studio_local_search":
       await new Promise((r) => setTimeout(r, 150));
+      if (real) return realFiles[`${REAL}search.json`];
       return searchFor((a.filter ?? "pictures") as SearchFilter);
     case "studio_local_repo":
       await new Promise((r) => setTimeout(r, 150));
+      if (real && realRepo(String(a.repo))) return realRepo(String(a.repo));
       return repoFor(String(a.repo));
-    case "studio_setup_plan":
+    case "studio_setup_plan": {
+      const searched = (a.source as { search?: { repo: string; file: string } } | undefined)?.search;
+      const r = real && searched ? realRepo(searched.repo) : undefined;
+      if (r) return (r.files.find((f) => f.file === searched!.file) ?? r.files[0])?.plan ?? null;
       return planFor(state.local.installed, a.source, a.choice ?? null);
+    }
     case "studio_import_inspect": {
       const path = String(a.path);
       const name = path.split("/").pop() ?? path;
