@@ -59,7 +59,9 @@ function prefs(patch: Partial<StudioPrefs> = {}): StudioPrefs {
     lastModel: {},
     advancedOpen: false,
     settingsOpen: false,
+    prefsVersion: 1,
     confirmEveryVideo: true,
+    confirmUnknownPrice: false,
     confirmAtUsd: 1,
     dailyLimitUsd: 10,
     setups: [],
@@ -529,13 +531,61 @@ describe("StudioView", () => {
     });
   });
 
-  it("today's spend shows only while a daily limit is on", async () => {
-    await show({ usage: usage({ spentTodayUsd: 0.84 }), prefs: prefs({ dailyLimitUsd: 10 }) });
-    within(screen.getByRole("banner")).getByText("$0.84 today");
-    cleanup();
-    useStudio.setState(INITIAL, true);
-    await show({ usage: usage({ spentTodayUsd: 0.84 }), prefs: prefs({ dailyLimitUsd: null }) });
-    expect(screen.queryByText("$0.84 today")).toBeNull();
+  describe("today's spend", () => {
+    const OFF = { dailyLimitUsd: null, confirmEveryVideo: false, confirmAtUsd: null, confirmUnknownPrice: false } as const;
+    const SPENT = "$0.84 today";
+
+    /** The top bar's width, which the page measures (jsdom has no layout). */
+    function barWidth(px: number) {
+      vi.spyOn(Element.prototype, "getBoundingClientRect").mockImplementation(function (this: Element) {
+        const width = this.tagName === "HEADER" ? px : 0;
+        return { width, height: 0, top: 0, left: 0, right: width, bottom: 0, x: 0, y: 0, toJSON: () => ({}) };
+      });
+    }
+    afterEach(() => vi.restoreAllMocks());
+
+    it("shows while any one of the four spending switches is on", async () => {
+      barWidth(1000);
+      for (const on of [
+        { dailyLimitUsd: 10 },
+        { confirmEveryVideo: true },
+        { confirmAtUsd: 1 },
+        { confirmUnknownPrice: true },
+      ]) {
+        useStudio.setState(INITIAL, true);
+        await show({ usage: usage({ spentTodayUsd: 0.84 }), prefs: prefs({ ...OFF, ...on }) });
+        within(screen.getByRole("banner")).getByText(SPENT);
+        cleanup();
+      }
+    });
+
+    it("does not show when every switch is off, on the bar or in the menu", async () => {
+      for (const px of [1000, 500]) {
+        barWidth(px);
+        useStudio.setState(INITIAL, true);
+        await show({ usage: usage({ spentTodayUsd: 0.84 }), prefs: prefs(OFF) });
+        expect(screen.queryByText(SPENT)).toBeNull();
+        await openMenu();
+        expect(screen.queryByText(SPENT)).toBeNull();
+        cleanup();
+      }
+    });
+
+    it("shows on the bar of a wide window and not in the menu", async () => {
+      barWidth(1000);
+      await show({ usage: usage({ spentTodayUsd: 0.84 }), prefs: prefs({ ...OFF, dailyLimitUsd: 10 }) });
+      within(screen.getByRole("banner")).getByText(SPENT);
+      await openMenu();
+      expect(screen.getAllByText(SPENT)).toHaveLength(1);
+    });
+
+    it("shows in the menu of a narrow window and not on the bar", async () => {
+      barWidth(500);
+      await show({ usage: usage({ spentTodayUsd: 0.84 }), prefs: prefs({ ...OFF, dailyLimitUsd: 10 }) });
+      expect(screen.queryByText(SPENT)).toBeNull();
+      await openMenu();
+      expect(screen.getAllByText(SPENT)).toHaveLength(1);
+    });
   });
 
   it("the results take the page and the side panel is closed by default", async () => {

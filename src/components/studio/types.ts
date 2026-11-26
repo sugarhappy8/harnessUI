@@ -357,7 +357,8 @@ export interface LocalEstimate {
 export interface Estimate {
   usd: number | null;
   reasons: ConfirmReason[];
-  confirmAtUsd: number;
+  /** `null` when asking from an amount is off. */
+  confirmAtUsd: number | null;
   limit: Limit;
   /** A plain sentence for each setting the model would refuse. */
   invalid: string[];
@@ -403,12 +404,18 @@ export interface Setup {
 
 /** Settings → Studio. */
 export interface StudioPrefs {
+  /** 1 once the old spending defaults were moved to off; set only by the backend. */
+  prefsVersion: number;
   lastModel: Partial<Record<MediaKind, ModelChoice>>;
   advancedOpen: boolean;
   /** Studio's side panel (Settings) was left open: it stays docked on a wide window. */
   settingsOpen: boolean;
+  /** Every spending guard is a switch, off by default. */
   confirmEveryVideo: boolean;
-  confirmAtUsd: number;
+  /** Ask before runs of this many dollars or more; `null` when that is off. */
+  confirmAtUsd: number | null;
+  /** Ask before a run whose price is unknown. */
+  confirmUnknownPrice: boolean;
   /** `null` when the limit is off. */
   dailyLimitUsd: number | null;
   setups: Setup[];
@@ -423,9 +430,9 @@ export interface StudioPrefs {
   lastImportMode: ImportMode | null;
 }
 
-/** A change to the preferences: only the fields sent change (`null` turns the limit off, or
- *  goes back to the default gallery folder). */
-export type StudioPrefsPatch = Partial<Omit<StudioPrefs, "localNoticeAcceptedAt" | "lastImportMode">>;
+/** A change to the preferences: only the fields sent change (`null` turns the limit or asking from an
+ *  amount off, or goes back to the default gallery folder). */
+export type StudioPrefsPatch = Partial<Omit<StudioPrefs, "prefsVersion" | "localNoticeAcceptedAt" | "lastImportMode">>;
 
 /** Today's spending and the gallery's size. */
 export interface Usage {

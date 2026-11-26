@@ -74,7 +74,9 @@ function prefs(patch: Partial<StudioPrefs> = {}): StudioPrefs {
     lastModel: {},
     advancedOpen: false,
     settingsOpen: false,
+    prefsVersion: 1,
     confirmEveryVideo: true,
+    confirmUnknownPrice: false,
     confirmAtUsd: 1,
     dailyLimitUsd: 10,
     setups: [],
@@ -913,6 +915,11 @@ describe("Composer", () => {
     });
 
     it("today's spending follows a cloud run: read again when it is accepted and when it ends", async () => {
+      // A wide top bar shows the spend itself (jsdom has no layout, so say how wide it is).
+      vi.spyOn(Element.prototype, "getBoundingClientRect").mockImplementation(function (this: Element) {
+        const width = this.tagName === "HEADER" ? 1000 : 0;
+        return { width, height: 0, top: 0, left: 0, right: width, bottom: 0, x: 0, y: 0, toJSON: () => ({}) };
+      });
       await show({ prefs: prefs({ lastModel: CLOUD_LAST }) });
       expect(api.studioUsage).toHaveBeenCalledTimes(1);
       vi.mocked(api.studioUsage).mockResolvedValue(usage({ spentTodayUsd: 0, pendingUsd: 0.16 }));
@@ -928,6 +935,7 @@ describe("Composer", () => {
       await flush();
       expect(api.studioUsage).toHaveBeenCalledTimes(3);
       screen.getByText("$0.16 today");
+      vi.restoreAllMocks();
     });
 
     it("an empty prompt says so quietly until a press is refused for it, then aloud", async () => {

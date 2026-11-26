@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useRef, useState, type RefObject } from "react";
 import { DropdownMenu } from "radix-ui";
 import { Download, Ellipsis, LayoutGrid, PanelLeft, RefreshCw, Search, Star } from "lucide-react";
 import { listsUpdatedWords, STUDIO_BAR, STUDIO_NAV, STUDIO_TOPBAR } from "../../lib/words";
@@ -12,8 +12,8 @@ import { KindTabs } from "./KindTabs";
 
 // Studio's top bar (0.1.0 Task B2; design 10.1 since Task U3): the title, [Pictures | Video],
 // then the gallery's search, Starred and Grid, *Get models*, cloud spending today (only while
-// a daily limit is on; Task G1 extends this to every spending switch) and the menu with *Update
-// model lists*. Where the chosen model runs is the composer's model chip now: the place chip
+// one of the four spending switches is on, Task G1; on the bar while it is wide, in the menu
+// when it is not, never both) and the menu with *Update model lists*. Where the chosen model runs is the composer's model chip now: the place chip
 // here looked clickable and was not (critique §6). While the grid is open, its own All,
 // Pictures and Video choose what it shows, and [Pictures | Video] is hidden (Task B9). While
 // Get models is shown, its own Pictures · Video · LoRAs stand in for these, the gallery's
@@ -23,6 +23,10 @@ import { KindTabs } from "./KindTabs";
 // DownloadIndicator.tsx) lists them. On a narrow Studio, Starred, Grid and the indicator keep
 // their icons (Starred and Grid their tooltips), and the search box narrows.
 
+/** The bar is wide from this width (the `3xl` container size, 48rem) and shows today's spend
+ *  itself; narrower, the spend is in the menu. */
+const WIDE_REM = 48;
+
 /** How long the search box waits after the last key before it asks for the gallery. */
 const SEARCH_DELAY_MS = 250;
 
@@ -30,6 +34,26 @@ const TOGGLE =
   "flex h-8 shrink-0 items-center gap-1.5 rounded-lg px-2 text-sm whitespace-nowrap text-fg-muted hover:bg-bg-muted hover:text-fg " +
   "aria-pressed:bg-accent/10 aria-pressed:text-accent " +
   FOCUS_RING;
+
+/** Whether `ref`'s element is `WIDE_REM` wide, followed as it is resized (`false` until it has
+ *  been measured, so the spend is in the menu, never missing). */
+function useWide(ref: RefObject<HTMLElement | null>): boolean {
+  const [wide, setWide] = useState(false);
+  useLayoutEffect(() => {
+    const el = ref.current;
+    if (!el) return;
+    const measure = () => {
+      const rem = parseFloat(getComputedStyle(document.documentElement).fontSize) || 16;
+      setWide(el.getBoundingClientRect().width >= WIDE_REM * rem);
+    };
+    measure();
+    if (typeof ResizeObserver === "undefined") return;
+    const observer = new ResizeObserver(measure);
+    observer.observe(el);
+    return () => observer.disconnect();
+  }, [ref]);
+  return wide;
+}
 
 /** Title, [Pictures | Video] (not while the grid or Get models is open), search, Starred and
  *  Grid (not while Get models is open), the download indicator, *Get models*, cloud spending
@@ -41,9 +65,13 @@ export function TopBar(props: { onError: (e: unknown) => void }) {
   const localView = useStudio((s) => s.localView);
   const setFilter = useStudio((s) => s.setFilter);
   const setGrid = useStudio((s) => s.setGrid);
+  const barRef = useRef<HTMLElement>(null);
+  const wide = useWide(barRef);
 
   return (
-    <header className="glass @container z-10 flex flex-wrap items-center gap-x-2 gap-y-1 border-b border-border px-3 py-2">
+    <header
+      ref={barRef}
+      className="glass @container z-10 flex flex-wrap items-center gap-x-2 gap-y-1 border-b border-border px-3 py-2">
       {/* At the window's smallest the chat list leaves Studio's middle column little room. */}
       <Tip content={STUDIO_BAR.chatList} side="bottom">
         <button
@@ -86,8 +114,8 @@ export function TopBar(props: { onError: (e: unknown) => void }) {
         )}
         <DownloadIndicator />
         <GetModels />
-        <Spending />
-        <StudioMenu onError={props.onError} />
+        {wide && <Spending />}
+        <StudioMenu onError={props.onError} wide={wide} />
       </div>
     </header>
   );
@@ -156,35 +184,40 @@ function SearchBox(props: { onError: (e: unknown) => void }) {
   );
 }
 
-/** Cloud spending today as words ("$0.84 today"), while a daily limit is on, once there is a
- *  cloud endpoint or anything was spent; else `null`. */
+/** Cloud spending today as words ("$0.84 today"), while any spending switch is on (the daily
+ *  limit, asking before every video, before runs of an amount or more, or when the price is
+ *  unknown), once there is a cloud endpoint or anything was spent; else `null`. */
 function useSpentToday(): string | null {
   const usage = useStudio((s) => s.usage);
-  const limited = useStudio((s) => (s.prefs?.dailyLimitUsd ?? null) !== null);
+  const guarded = useStudio((s) => {
+    const p = s.prefs;
+    return p !== null && (p.dailyLimitUsd !== null || p.confirmEveryVideo || p.confirmAtUsd !== null || p.confirmUnknownPrice);
+  });
   const cloud = useStudio((s) => s.endpoints.some((e) => e.cloud));
-  if (!limited || !usage || (!cloud && usage.spentTodayUsd <= 0)) return null;
+  if (!guarded || !usage || (!cloud && usage.spentTodayUsd <= 0)) return null;
   return STUDIO_BAR.spentToday(formatUsd(usage.spentTodayUsd));
 }
 
-/** Cloud spending today, on the top bar; on a narrow Studio it is in the menu only. */
+/** Cloud spending today, on the top bar; on a narrow Studio it is in the menu instead. */
 function Spending() {
   const spent = useSpentToday();
   if (spent === null) return null;
   return (
     <span
       title={STUDIO_BAR.spentTitle}
-      className="ml-1 shrink-0 text-xs whitespace-nowrap text-fg-muted tabular-nums @max-3xl:hidden"
+      className="ml-1 shrink-0 text-xs whitespace-nowrap text-fg-muted tabular-nums"
     >
       {spent}
     </span>
   );
 }
 
-/** *Update model lists* with when each endpoint's were saved, and cloud spending today while a
- *  daily limit is on (*Get models* is the top bar's own button). */
-function StudioMenu(props: { onError: (e: unknown) => void }) {
+/** *Update model lists* with when each endpoint's were saved, and, on a narrow bar, cloud
+ *  spending today (a wide bar shows it itself; *Get models* is the top bar's own button). */
+function StudioMenu(props: { onError: (e: unknown) => void; wide: boolean }) {
   const endpoints = useStudio((s) => s.endpoints);
-  const spent = useSpentToday();
+  const todays = useSpentToday();
+  const spent = props.wide ? null : todays;
   const [updating, setUpdating] = useState(false);
 
   // One endpoint after another (each answer holds every endpoint's lists); one that fails

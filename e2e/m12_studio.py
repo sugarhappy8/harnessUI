@@ -11,7 +11,8 @@ The checks, each PASS or FAIL (the run goes on; the exit code is 1 if any failed
 - an OpenRouter endpoint at the mock, added in Settings → Endpoints: Test fetches the lists;
 - Ctrl+G opens Studio; picking FLUX 3 Image fetches its price; a 1K picture ($0.05) is made
   without a question and one tile appears;
-- a 4 s video asks "Make this video?" first, and the card waits;
+- with *Ask before every video* turned on (every spending guard is off until turned on), a 4 s
+  video asks "Make this video?" first, and the card waits;
 - the app restarts while the video waits. On Linux the app keeps API keys in memory only, so
   the endpoint has no key after the restart and the card says so, with *Get it anyway*; the
   key is saved again, the job completes at the mock and *Get it anyway* fetches it: one
@@ -20,7 +21,7 @@ The checks, each PASS or FAIL (the run goes on; the exit code is 1 if any failed
   result's file is gone;
 - Settings → Audit log shows three Studio rows (the picture, the video, and the follow-up of
   *Get it anyway*), none with the prompt;
-- with a daily limit of $1, an 8 s 1080p video (~ $1.12) shows "Daily limit reached: $0.41
+- with *Daily limit* turned on and set to $1, an 8 s 1080p video (~ $1.12) shows "Daily limit reached: $0.41
   of $1 spent today" in place of Create (the deleted result still counts).
 
 The native save dialog is out of WebDriver's reach: it is answered with xdotool
@@ -263,6 +264,26 @@ def close_settings(s):
     s.execute("document.querySelector('[role=dialog] button[aria-label=\"Close settings\"]').click();")
     s.wait_for(lambda: s.execute("return !document.querySelector('[aria-label=\"Settings sections\"]');"), 10,
                "Settings closed")
+
+
+def set_switch(s, label: str, on: bool):
+    """Turns the switch labelled `label` in the open Settings dialog on or off, with a real pointer
+    click (the spending guards are all off until turned on)."""
+    find = """
+        const l = [...document.querySelectorAll('[role=dialog] label')]
+          .find(l => l.innerText.trim() === arguments[0]);
+        return (l && document.getElementById(l.htmlFor)) || null;
+    """
+    is_on = """
+        const l = [...document.querySelectorAll('[role=dialog] label')]
+          .find(l => l.innerText.trim() === arguments[0]);
+        const el = l && document.getElementById(l.htmlFor);
+        return el ? el.getAttribute('aria-checked') === 'true' : null;
+    """
+    s.wait_for(lambda: s.execute(is_on, label) is not None, 10, f"the {label!r} switch")
+    if s.execute(is_on, label) != on:
+        pointer_click_found(s, find, label, what=f"the {label!r} switch")
+    s.wait_for(lambda: s.execute(is_on, label) == on, 10, f"the {label!r} switch {'on' if on else 'off'}")
 
 
 def studio_tab(s, label: str):
@@ -547,6 +568,11 @@ def c_picture(c, notes):
 def c_video(c, notes):
     """A 4 s video asks "Make this video?" first, and its card waits."""
     s = c.s
+    # Every spending guard is off on a new install: turn the question on first.
+    open_settings(s, "Studio")
+    set_switch(s, "Ask before every video", True)
+    s.wait_for(lambda: s.invoke("studio_get_prefs")["confirmEveryVideo"] is True, 10, "the switch saved")
+    close_settings(s)
     studio_tab(s, "Video")
     pick_model(s, "Grok Imagine Video 1.5 Lite")
     # The shortest length of at least 4 s is the one Studio starts with (the composer's Length).
@@ -707,10 +733,13 @@ def c_audit(c, notes):
 
 @check("daily-limit")
 def c_daily_limit(c, notes):
-    """With a daily limit of $1, an 8 s 1080p video (~ $1.12) shows "Daily limit reached: $0.41
+    """With the daily limit turned on at $1, an 8 s 1080p video (~ $1.12) shows "Daily limit reached: $0.41
     of $1 spent today" in place of Create; the deleted result still counts."""
     s = c.s
     open_settings(s, "Studio")
+    set_switch(s, "Daily limit", True)  # off until turned on; it comes on at $10
+    s.wait_for(lambda: s.execute(
+        "return !!document.querySelector('input[aria-label=\"Daily limit in US dollars\"]');"), 10, "the limit's amount box")
     type_into(s, "input[aria-label=\"Daily limit in US dollars\"]", "1")
     s.type(s.find("input[aria-label=\"Daily limit in US dollars\"]"), "\ue007")
     s.wait_for(lambda: s.invoke("studio_get_prefs")["dailyLimitUsd"] == 1, 10, "the limit saved")

@@ -24,7 +24,9 @@ const PREFS: StudioPrefs = {
   lastModel: {},
   advancedOpen: false,
   settingsOpen: false,
+  prefsVersion: 1,
   confirmEveryVideo: true,
+  confirmUnknownPrice: false,
   confirmAtUsd: 1,
   dailyLimitUsd: 10,
   setups: [],
@@ -312,18 +314,17 @@ describe("Settings → Studio", () => {
     expect(api.studioEngineStatus).toHaveBeenCalledTimes(1);
   });
 
-  it("the daily limit is on at $10 and can be changed or turned off", async () => {
+  it("the daily limit, when on at $10, can be changed or turned off", async () => {
     await show();
-    const on = screen.getByRole("checkbox", { name: "Daily limit" }) as HTMLInputElement;
-    expect(on.checked).toBe(true);
+    expect(screen.getByRole("switch", { name: "Daily limit" }).getAttribute("aria-checked")).toBe("true");
     expect((screen.getByLabelText("Daily limit in US dollars") as HTMLInputElement).value).toBe("10");
     await setAmount("Daily limit in US dollars", "20");
     expect(api.studioSetPrefs).toHaveBeenLastCalledWith({ dailyLimitUsd: 20 });
-    await click(screen.getByRole("checkbox", { name: "Daily limit" }));
+    await click(screen.getByRole("switch", { name: "Daily limit" }));
     expect(api.studioSetPrefs).toHaveBeenLastCalledWith({ dailyLimitUsd: null });
-    expect((screen.getByLabelText("Daily limit in US dollars") as HTMLInputElement).disabled).toBe(true);
+    expect(screen.queryByLabelText("Daily limit in US dollars")).toBeNull();
     // Turned on again at the amount it had.
-    await click(screen.getByRole("checkbox", { name: "Daily limit" }));
+    await click(screen.getByRole("switch", { name: "Daily limit" }));
     expect(api.studioSetPrefs).toHaveBeenLastCalledWith({ dailyLimitUsd: 20 });
     vi.mocked(api.studioSetPrefs).mockClear();
     await setAmount("Daily limit in US dollars", "0.5");
@@ -353,9 +354,9 @@ describe("Settings → Studio", () => {
     screen.getByText("Choose an amount from $1 to $1,000.");
     expect(api.studioSetPrefs).not.toHaveBeenCalled();
     // The confirmation amount reads them too.
-    await setAmount("Ask before runs of", "$1,00");
+    await setAmount("Ask before runs of this many US dollars or more", "$1,00");
     screen.getByText("Choose an amount from $0.25 to $100.");
-    await setAmount("Ask before runs of", "$2.50");
+    await setAmount("Ask before runs of this many US dollars or more", "$2.50");
     expect(api.studioSetPrefs).toHaveBeenLastCalledWith({ confirmAtUsd: 2.5 });
   });
 
@@ -372,9 +373,9 @@ describe("Settings → Studio", () => {
     screen.getByText("Studio's preferences could not be saved.");
     // The box shows the saved amount, and turned off and on again the limit is that amount.
     expect((screen.getByLabelText("Daily limit in US dollars") as HTMLInputElement).value).toBe("10");
-    await click(screen.getByRole("checkbox", { name: "Daily limit" }));
+    await click(screen.getByRole("switch", { name: "Daily limit" }));
     expect(api.studioSetPrefs).toHaveBeenLastCalledWith({ dailyLimitUsd: null });
-    await click(screen.getByRole("checkbox", { name: "Daily limit" }));
+    await click(screen.getByRole("switch", { name: "Daily limit" }));
     expect(api.studioSetPrefs).toHaveBeenLastCalledWith({ dailyLimitUsd: 10 });
   });
 
@@ -397,32 +398,57 @@ describe("Settings → Studio", () => {
       fireEvent.change(box, { target: { value: "20" } });
       fireEvent.blur(box);
     });
-    await click(screen.getByRole("checkbox", { name: "Daily limit" }));
+    await click(screen.getByRole("switch", { name: "Daily limit" }));
     expect(vi.mocked(api.studioSetPrefs).mock.calls).toEqual([[{ dailyLimitUsd: 20 }], [{ dailyLimitUsd: null }]]);
     await act(async () => {
       for (const answer of answers.splice(0)) answer();
     });
     await flush();
     expect(useStudio.getState().prefs?.dailyLimitUsd).toBeNull();
-    await click(screen.getByRole("checkbox", { name: "Daily limit" }));
+    await click(screen.getByRole("switch", { name: "Daily limit" }));
     expect(api.studioSetPrefs).toHaveBeenLastCalledWith({ dailyLimitUsd: 20 });
+  });
+
+  it("the four spending switches are off by default and turning one on shows its amount", async () => {
+    held = { ...PREFS, confirmEveryVideo: false, confirmAtUsd: null, confirmUnknownPrice: false, dailyLimitUsd: null };
+    await show();
+    const names = ["Daily limit", "Ask before every video", "Ask before runs of a set amount or more", "Ask when the price is unknown"];
+    for (const name of names) expect(screen.getByRole("switch", { name }).getAttribute("aria-checked")).toBe("false");
+    expect(screen.queryByLabelText("Daily limit in US dollars")).toBeNull();
+    expect(screen.queryByLabelText("Ask before runs of this many US dollars or more")).toBeNull();
+    // The amounts are filled in when a switch is turned on.
+    await click(screen.getByRole("switch", { name: "Daily limit" }));
+    expect(api.studioSetPrefs).toHaveBeenLastCalledWith({ dailyLimitUsd: 10 });
+    expect((screen.getByLabelText("Daily limit in US dollars") as HTMLInputElement).value).toBe("10");
+    await click(screen.getByRole("switch", { name: "Ask before runs of a set amount or more" }));
+    expect(api.studioSetPrefs).toHaveBeenLastCalledWith({ confirmAtUsd: 1 });
+    expect((screen.getByLabelText("Ask before runs of this many US dollars or more") as HTMLInputElement).value).toBe("1");
+    // The two plain switches have no amount.
+    await click(screen.getByRole("switch", { name: "Ask before every video" }));
+    expect(api.studioSetPrefs).toHaveBeenLastCalledWith({ confirmEveryVideo: true });
+    await click(screen.getByRole("switch", { name: "Ask when the price is unknown" }));
+    expect(api.studioSetPrefs).toHaveBeenLastCalledWith({ confirmUnknownPrice: true });
+    // Turned off again, the amount goes and the backend is told with null.
+    await click(screen.getByRole("switch", { name: "Ask before runs of a set amount or more" }));
+    expect(api.studioSetPrefs).toHaveBeenLastCalledWith({ confirmAtUsd: null });
+    expect(screen.queryByLabelText("Ask before runs of this many US dollars or more")).toBeNull();
   });
 
   it("the confirmation choices can be changed", async () => {
     await show();
-    const video = screen.getByRole("checkbox", { name: "Ask before every video" }) as HTMLInputElement;
-    expect(video.checked).toBe(true);
+    const video = screen.getByRole("switch", { name: "Ask before every video" });
+    expect(video.getAttribute("aria-checked")).toBe("true");
     await click(video);
     expect(api.studioSetPrefs).toHaveBeenLastCalledWith({ confirmEveryVideo: false });
-    expect((screen.getByLabelText("Ask before runs of") as HTMLInputElement).value).toBe("1");
-    await setAmount("Ask before runs of", "2.5");
+    expect((screen.getByLabelText("Ask before runs of this many US dollars or more") as HTMLInputElement).value).toBe("1");
+    await setAmount("Ask before runs of this many US dollars or more", "2.5");
     expect(api.studioSetPrefs).toHaveBeenLastCalledWith({ confirmAtUsd: 2.5 });
     vi.mocked(api.studioSetPrefs).mockClear();
-    await setAmount("Ask before runs of", "0.1");
+    await setAmount("Ask before runs of this many US dollars or more", "0.1");
     screen.getByText("Choose an amount from $0.25 to $100.");
     expect(api.studioSetPrefs).not.toHaveBeenCalled();
     // Enter keeps it too.
-    const box = screen.getByLabelText("Ask before runs of");
+    const box = screen.getByLabelText("Ask before runs of this many US dollars or more");
     await act(async () => {
       fireEvent.change(box, { target: { value: "5" } });
       fireEvent.keyDown(box, { key: "Enter" });
@@ -438,11 +464,11 @@ describe("Settings → Studio", () => {
       nextStep: "",
       details: "",
     });
-    await click(screen.getByRole("checkbox", { name: "Ask before every video" }));
+    await click(screen.getByRole("switch", { name: "Ask before every video" }));
     await flush();
     screen.getByRole("alert");
     // The box still shows what is saved.
-    expect((screen.getByRole("checkbox", { name: "Ask before every video" }) as HTMLInputElement).checked).toBe(true);
+    expect(screen.getByRole("switch", { name: "Ask before every video" }).getAttribute("aria-checked")).toBe("true");
   });
 
   it("Delete stopped and failed runs asks first", async () => {

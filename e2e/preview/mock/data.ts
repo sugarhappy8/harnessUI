@@ -375,7 +375,9 @@ export const PREFS: StudioPrefs = {
   },
   advancedOpen: false,
   settingsOpen: false,
+  prefsVersion: 1,
   confirmEveryVideo: true,
+  confirmUnknownPrice: false,
   confirmAtUsd: 1,
   dailyLimitUsd: 10,
   setups: [

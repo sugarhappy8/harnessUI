@@ -947,8 +947,8 @@ pub struct EstimateDto {
     pub usd: Option<f64>,
     /// Why the run would ask before it is sent; empty when it would not.
     pub reasons: Vec<ConfirmReason>,
-    /// The amount from which a cloud run asks, in US dollars.
-    pub confirm_at_usd: f64,
+    /// The amount from which a cloud run asks, in US dollars; `None` when that is off.
+    pub confirm_at_usd: Option<f64>,
     /// The daily limit as it stands for this run.
     pub limit: LimitDto,
     /// A plain sentence for each setting the model would refuse.

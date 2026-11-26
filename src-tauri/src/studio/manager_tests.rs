@@ -1301,11 +1301,21 @@ async fn sending_is_recorded_before_the_request_goes_out() {
 #[tokio::test]
 async fn a_video_without_confirmation_is_refused() {
     let h = harness().await;
+    h.spending_guards_on().await;
     let err = h.manager.start(h.video_req(), false).await.unwrap_err();
     assert_eq!(err.code, "studio_needs_confirmation");
     assert_eq!(h.provider.starts(), 0);
     assert!(h.store_runs().await.is_empty());
     assert!(h.audit_rows().await.is_empty());
+}
+
+#[tokio::test]
+async fn a_cloud_video_starts_without_confirmation_when_the_switch_is_off() {
+    // A new install: every spending switch is off.
+    let h = harness().await;
+    let run = h.manager.start(h.video_req(), false).await.unwrap();
+    h.wait_status(&run.id, "waiting").await;
+    assert_eq!(h.provider.starts(), 1);
 }
 
 #[tokio::test]
@@ -1346,6 +1356,7 @@ async fn a_started_video_waits_with_its_remote_id() {
 #[tokio::test]
 async fn a_run_over_the_daily_limit_is_refused_whatever_the_webview_says() {
     let h = harness().await;
+    h.spending_guards_on().await;
     h.seed_done_run_costing(9.50).await;
     let err = h
         .manager
@@ -1394,6 +1405,7 @@ async fn an_unknown_price_refused_for_the_reserve_says_why() {
 #[tokio::test]
 async fn queued_and_running_estimates_count_against_the_limit() {
     let h = harness().await;
+    h.spending_guards_on().await;
     h.provider.hold();
     for token in ["t1", "t2"] {
         h.manager
@@ -1415,6 +1427,7 @@ async fn queued_and_running_estimates_count_against_the_limit() {
 #[tokio::test]
 async fn two_starts_at_once_cannot_both_pass_the_limit() {
     let h = harness().await;
+    h.spending_guards_on().await;
     h.seed_done_run_costing(8.50).await;
     // Held, so the run that passes still counts its estimate when the other is checked.
     h.provider.hold();
@@ -1449,6 +1462,7 @@ async fn the_same_create_press_twice_makes_one_run() {
 #[tokio::test]
 async fn a_refused_unconfirmed_press_then_the_confirmed_one_makes_one_run() {
     let h = harness().await;
+    h.spending_guards_on().await;
     let req = || StartRequest {
         client_token: "press-2".into(),
         ..h.video_req()
@@ -1466,6 +1480,7 @@ async fn a_refused_unconfirmed_press_then_the_confirmed_one_makes_one_run() {
 #[tokio::test]
 async fn three_openai_runs_in_a_row_stay_within_the_limit() {
     let h = harness().await;
+    h.spending_guards_on().await;
     for token in ["o1", "o2", "o3"] {
         h.provider.answer(Answer::Done {
             pictures: 1,
@@ -2436,10 +2451,11 @@ async fn cloud_runs_say_they_ran_in_the_cloud() {
 #[tokio::test]
 async fn an_estimate_sends_nothing_and_says_what_a_run_would_meet() {
     let h = harness().await;
+    h.spending_guards_on().await;
     let e = h.manager.estimate(&h.picture_req("x")).await.unwrap();
     assert_eq!(e.usd, Some(0.048));
     assert!(e.reasons.is_empty());
-    assert_eq!(e.confirm_at_usd, 1.0);
+    assert_eq!(e.confirm_at_usd, Some(1.0));
     assert!(e.invalid.is_empty());
     assert_eq!(e.limit.limit_usd, Some(10.0));
     assert!(e.limit.would_pass);
@@ -2601,6 +2617,7 @@ async fn spending_follows_the_status_and_the_charge() {
 #[tokio::test]
 async fn refusals_have_four_parts() {
     let h = harness().await;
+    h.spending_guards_on().await;
     let refusals: Vec<AppError> = vec![
         h.manager.start(h.video_req(), false).await.unwrap_err(),
         h.manager
@@ -3666,6 +3683,7 @@ fn patch(value: Value) -> StudioPrefsPatch {
 #[tokio::test]
 async fn deleting_todays_results_does_not_lower_spent_today() {
     let h = harness().await;
+    h.spending_guards_on().await;
     let run = h.seed_done_run_costing(9.50).await;
     h.manager.delete_outputs(output_ids(&run)).await.unwrap();
     assert!(!Path::new(&run.outputs[0].path).exists());
@@ -3938,6 +3956,7 @@ async fn a_new_gallery_folder_applies_to_the_next_run() {
 #[tokio::test]
 async fn set_prefs_changes_only_what_it_is_sent_and_checks_it() {
     let h = harness().await;
+    h.spending_guards_on().await;
     let video = h.video_req_estimated(0.96);
     assert_eq!(
         h.manager.estimate(&video).await.unwrap().reasons,
@@ -4700,6 +4719,18 @@ impl H {
 
     async fn set_prefs(&self, value: Value) {
         self.manager.set_prefs(patch(value)).await.unwrap();
+    }
+
+    /// Turns on every spending switch at the amounts Settings suggests (a new install has them
+    /// all off).
+    async fn spending_guards_on(&self) {
+        self.set_prefs(json!({
+            "confirmEveryVideo": true,
+            "confirmAtUsd": 1.0,
+            "confirmUnknownPrice": true,
+            "dailyLimitUsd": 10.0,
+        }))
+        .await;
     }
 
     /// The local part of each `running` event of run `id`.

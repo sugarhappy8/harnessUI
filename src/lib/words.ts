@@ -1514,7 +1514,9 @@ export const STUDIO_CONFIRM = {
   },
   videoCharge: (company: string) =>
     `${company} charges for a video once it has started, even if you stop watching it.`,
-  dontAskVideos: (usd: string) => `Don't ask again for videos under ${usd}`,
+  /** `usd` is the amount asked from while that switch is on; `null` when it is off. */
+  dontAskVideos: (usd: string | null) =>
+    usd === null ? "Don't ask again before every video" : `Don't ask again for videos under ${usd}`,
   cancel: "Cancel",
   makeVideo: "Make video",
 } as const;
@@ -1899,13 +1901,18 @@ export const STUDIO_SETTINGS = {
   deleted: (n: number) =>
     n === 0 ? "There were no stopped or failed runs." : n === 1 ? "1 run was deleted." : `${n} runs were deleted.`,
   spending: "Cloud spending",
+  /** Under the heading: all four are off until turned on. */
+  spendingNote: "These are all off. Turn on the ones you want. A cloud run's price is always shown before you send it.",
   confirmVideo: "Ask before every video",
   /** Before an amount box, which takes US dollars. */
   dollar: "$",
-  /** Before the amount box; "or more" follows it. */
-  confirmAt: "Ask before runs of",
+  /** The switch that asks from an amount; its box (`confirmAtAmount`) shows while it is on. */
+  confirmAt: "Ask before runs of a set amount or more",
+  confirmAtAmount: "Ask before runs of this many US dollars or more",
   orMore: "or more",
   confirmAtRange: "Choose an amount from $0.25 to $100.",
+  confirmUnknown: "Ask when the price is unknown",
+  confirmUnknownHelp: "Some models do not say what a run costs before it is sent.",
   limit: "Daily limit",
   limitAmount: "Daily limit in US dollars",
   limitHelp:

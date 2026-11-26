@@ -558,13 +558,14 @@ build machine, and its Windows and macOS jobs have not run at all.
   record of its settings beside it that never holds a key, and the prompt is never written
   into a local result. Studio has no tool: a chat model cannot start a run or read the
   gallery, and a picture reaches a chat only when you click *Send to chat*.
-- **Studio's spending rules (cloud runs).** The backend keeps them whatever the window
-  sends: it asks before every cloud video, any cloud run estimated at $1 or more and any
-  run whose price is unknown, and it keeps a daily limit of $10, on by default and counted
-  per calendar day on this computer (Settings → Studio changes both): a run that would take
-  today's spending past it is not sent, and a run with an unknown price needs $5 of the
-  limit left. Deleting a result never lowers today's spending. A run on this computer is
-  free, never asks and never counts.
+- **Studio's spending rules (cloud runs).** Spending guards are off by default: a daily
+  limit (suggested $10), asking before every video, before runs of $1 or more, and when the
+  price is unknown are switches in Settings → Studio. Prices are still shown before every
+  cloud run. The backend keeps whichever switches are on whatever the window sends: a daily
+  limit, counted per calendar day on this computer, means a run that would take today's
+  spending past it is not sent, and a run with an unknown price needs $5 of the limit left.
+  Deleting a result never lowers today's spending. A run on this computer is free, never asks
+  and never counts.
 - The usage line under the model name (0.0.6) is read from this computer's own counters,
   only while the window is visible. Nothing is sent anywhere, and the model is never told
   the figures.

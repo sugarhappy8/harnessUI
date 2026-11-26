@@ -775,6 +775,11 @@ async fn a_video_past_the_daily_limit_never_reaches_the_mock() {
     let mock = MockOpenRouter::start().await;
     let h = WireHarness::new(&mock).await;
     h.refresh_lists().await;
+    // The limit is a switch, off on a new install.
+    h.manager
+        .set_prefs(serde_json::from_value(json!({"dailyLimitUsd": 10.0})).unwrap())
+        .await
+        .unwrap();
     h.seed_spent_today(9.95).await;
     // 4 s at 480p with no start frame.
     let req = h.video(GROK_LITE, json!({"duration": 4, "resolution": "480p"}));

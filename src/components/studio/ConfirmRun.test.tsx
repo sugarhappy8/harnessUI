@@ -48,7 +48,9 @@ function prefs(patch: Partial<StudioPrefs> = {}): StudioPrefs {
     },
     advancedOpen: false,
     settingsOpen: false,
+    prefsVersion: 1,
     confirmEveryVideo: true,
+    confirmUnknownPrice: false,
     confirmAtUsd: 1,
     dailyLimitUsd: 10,
     setups: [],
@@ -197,6 +199,13 @@ describe("ConfirmRun", () => {
     const saved = vi.mocked(api.studioSetPrefs).mock.invocationCallOrder[0]!;
     expect(saved).toBeLessThan(vi.mocked(api.studioStart).mock.invocationCallOrder[0]!);
     expect(screen.queryByRole("alertdialog")).toBeNull();
+  });
+
+  it("with asking from an amount off, Don't ask again names every video, not an amount", async () => {
+    await show("video", est({ usd: 0.09, reasons: ["video"], confirmAtUsd: null }));
+    await create();
+    screen.getByRole("checkbox", { name: "Don't ask again before every video" });
+    expect(screen.queryByRole("checkbox", { name: /under/ })).toBeNull();
   });
 
   it("confirming sends the press that asked, whatever the draft became", async () => {
