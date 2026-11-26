@@ -22,7 +22,9 @@
 //!   killed, and the call ends as [`ReverseError::Stopped`]. A start that a stop comes
 //!   during is undone; when the stop comes while the start still prepares rea's folders,
 //!   before it counts as starting, rea is never launched (that stop has removed the
-//!   temporary folder). After [`RestartReason::Quit`] nothing starts again. After a stop (and
+//!   temporary folder). On macOS the same holds while the start runs rea's helper
+//!   preparation ([`crate::warmup`], up to 180 s, the tab says Starting): a stop or quitting
+//!   drops that run at once, which kills its `node` and `swiftc`. After [`RestartReason::Quit`] nothing starts again. After a stop (and
 //!   the idle stop), the temporary folder outside the reverse folder is removed unless rea
 //!   was started again meanwhile; it is also removed when the app starts
 //!   ([`ReaProcess::new`]), in case the app ended without a stop.
@@ -257,6 +259,9 @@ struct Status {
     running: Option<Running>,
     /// The server being started, so a stop can cut the start short.
     starting: Option<Arc<dyn Rea>>,
+    /// Starts that run rea's macOS helper preparation (before the server exists): the tab
+    /// says Starting then too ([`PreparingGuard`]).
+    preparing: u32,
     /// Starts whose caller stopped waiting and whose half-started rea has not ended yet
     /// ([`StartGuard`]); their own task removes rea's temporary folder once it has.
     ending_starts: u32,
@@ -294,6 +299,9 @@ struct Shared {
     /// ([`ReverseLayout::run_tmp`]); held while it is prepared or removed, so a stop removes
     /// it only when no start has prepared it since the stop began.
     run_tmp_starts: StdMutex<u64>,
+    /// Carries [`Status::stops`] after every stop (and so after quitting), so a start that
+    /// prepares rea's macOS helper can drop that run at once.
+    stop_signal: watch::Sender<u64>,
     /// Tests only: holds a start once it has prepared rea's folders and before it counts as
     /// starting, so a test can stop rea in between.
     #[cfg(test)]
@@ -457,10 +465,16 @@ async fn wait_ended(server: &dyn Rea) {
 /// owns (Kuna's 10 second `--version` probe) does not compile the process helper inside
 /// that deadline ([`crate::warmup`]). A failure or a timeout only goes to the log (one
 /// plain line, the reverse folder masked): the start goes on and rea reports what it finds.
-async fn prepare_helper(shared: &Shared, config: &RunConfig) {
+///
+/// `None` when a stop (or quitting) came meanwhile: the run is dropped at once, which kills
+/// its process tree (the runtime crate's children die with their handle), so no `node` or
+/// `swiftc` outlives the stop or the app.
+async fn prepare_helper(shared: &Shared, config: &RunConfig, stops: u64) -> Option<()> {
     let Some(entry) = config.args.first().map(PathBuf::from) else {
-        return;
+        return Some(());
     };
+    let mut stopped = shared.stop_signal.subscribe();
+    let _preparing = PreparingGuard::begin(shared);
     let has_module = warmup::helper_module(&entry).is_some();
     let cached = warmup::helper_cached(config);
     let prepare = shared
@@ -469,10 +483,13 @@ async fn prepare_helper(shared: &Shared, config: &RunConfig) {
         .unwrap_or_else(|e| e.into_inner())
         .clone();
     let began = Instant::now();
-    let result = prepare(config.clone(), entry, Flavor::Macos).await;
+    let result = tokio::select! {
+        result = prepare(config.clone(), entry, Flavor::Macos) => result,
+        _ = stopped.wait_for(|n| *n != stops) => return None,
+    };
     if !has_module {
         // This rea has nothing to prepare.
-        return;
+        return Some(());
     }
     match result {
         Ok(()) if cached => tracing::info!("rea's macOS process helper was already cached"),
@@ -491,6 +508,25 @@ async fn prepare_helper(shared: &Shared, config: &RunConfig) {
                 "rea's macOS process helper could not be prepared ({code}): {tail}; rea starts anyway"
             );
         }
+    }
+    Some(())
+}
+
+/// Counts a start that prepares rea's helper, so the tab says Starting meanwhile; undone
+/// when the start ends or its caller stops waiting.
+struct PreparingGuard<'a>(&'a Shared);
+
+impl<'a> PreparingGuard<'a> {
+    fn begin(shared: &'a Shared) -> Self {
+        shared.status().preparing += 1;
+        Self(shared)
+    }
+}
+
+impl Drop for PreparingGuard<'_> {
+    fn drop(&mut self) {
+        let mut s = self.0.status();
+        s.preparing = s.preparing.saturating_sub(1);
     }
 }
 
@@ -538,6 +574,7 @@ impl ReaProcess {
                 prepare: StdMutex::new(prepare_real()),
                 apple_root,
                 run_tmp_starts: StdMutex::new(0),
+                stop_signal: watch::Sender::new(0),
                 #[cfg(test)]
                 after_prepare: StdMutex::new(None),
             }),
@@ -602,7 +639,9 @@ impl ReaProcess {
     /// Whether rea is starting, a call holds it, or a stopped call is still ending (WP9d
     /// answers `busy` then, unless forced).
     pub fn is_busy(&self) -> bool {
-        self.shared.status().starting.is_some()
+        let s = self.shared.status();
+        s.starting.is_some()
+            || s.preparing > 0
             || self.shared.calls.try_lock().is_err()
             || *self.shared.in_flight.borrow() > 0
     }
@@ -610,7 +649,7 @@ impl ReaProcess {
     /// For the tab's status line.
     pub fn state(&self) -> RunState {
         let s = self.shared.status();
-        if s.starting.is_some() {
+        if s.starting.is_some() || s.preparing > 0 {
             return RunState::Starting;
         }
         if let Some(running) = &s.running {
@@ -660,6 +699,7 @@ async fn stop_shared(shared: &Arc<Shared>, grace: Duration) {
         if let Some(task) = s.idle_task.take() {
             task.abort();
         }
+        shared.stop_signal.send_replace(s.stops);
         // Taken: the start that runs ends as stopped, and the tab no longer says Starting.
         (s.running.take(), s.starting.take())
     };
@@ -788,8 +828,13 @@ impl ReaGuard {
         };
         #[cfg(test)]
         tests::Pause::at(&shared.after_prepare).await;
-        if Flavor::of(shared.platform) == Flavor::Macos {
-            prepare_helper(&shared, &config).await;
+        if Flavor::of(shared.platform) == Flavor::Macos
+            && prepare_helper(&shared, &config, stops).await.is_none()
+        {
+            // Stopped (or the app quit) during the preparation, which was dropped with its
+            // process tree: rea is never launched.
+            remove_run_tmp_after_stop(&shared, starts).await;
+            return Err(ReverseError::Stopped);
         }
         let spec = ManagedSpec {
             name: SERVER_NAME.into(),
@@ -2028,6 +2073,136 @@ mod tests {
             "rea's own environment carries the prepare run's variable"
         );
         assert_eq!(spec.args.last().map(String::as_str), Some("mcp"));
+    }
+
+    /// A prepare run that never ends: records its start, ends only by being dropped.
+    fn hanging_prepare(b: &Bench) -> Arc<AtomicBool> {
+        struct Dropped(Arc<AtomicBool>);
+        impl Drop for Dropped {
+            fn drop(&mut self) {
+                self.0.store(true, Ordering::SeqCst);
+            }
+        }
+        let dropped = Arc::new(AtomicBool::new(false));
+        let flag = dropped.clone();
+        *b.process.shared.prepare.lock().unwrap() = Arc::new(move |_, _, _| {
+            let guard = Dropped(flag.clone());
+            Box::pin(async move {
+                let _guard = guard;
+                std::future::pending::<()>().await;
+                Ok(())
+            })
+        });
+        dropped
+    }
+
+    #[tokio::test]
+    async fn the_tab_says_starting_while_the_helper_is_prepared_and_a_stop_ends_it_at_once() {
+        let (b, _calls, _root) = mac_bench(false);
+        let dropped = hanging_prepare(&b);
+        let config = mac_config(&b);
+        let mut g = b.process.lock().await;
+        let start = tokio::spawn(async move { g.ensure_started(config).await });
+        until_starting(&b.process).await;
+        assert!(b.process.is_busy());
+        let began = Instant::now();
+        b.process.stop(STOP_GRACE).await;
+        let result = start.await.unwrap();
+        assert_eq!(result.unwrap_err(), ReverseError::Stopped);
+        assert!(
+            began.elapsed() < Duration::from_millis(900),
+            "{:?}",
+            began.elapsed()
+        );
+        assert!(
+            dropped.load(Ordering::SeqCst),
+            "the prepare run was not dropped"
+        );
+        assert_eq!(b.count(), 0, "rea was launched after the stop");
+        assert_eq!(b.process.state(), RunState::Stopped);
+        assert!(!b.process.is_busy());
+    }
+
+    #[tokio::test]
+    async fn quitting_during_the_helper_preparation_drops_it_too() {
+        let (b, _calls, _root) = mac_bench(false);
+        let dropped = hanging_prepare(&b);
+        let config = mac_config(&b);
+        let mut g = b.process.lock().await;
+        let start = tokio::spawn(async move { g.ensure_started(config).await });
+        until_starting(&b.process).await;
+        b.process.restart(RestartReason::Quit).await;
+        assert_eq!(start.await.unwrap().unwrap_err(), ReverseError::Stopped);
+        assert!(dropped.load(Ordering::SeqCst));
+        assert_eq!(b.count(), 0);
+    }
+
+    /// The real prepare run, with a fake `node` that never ends: a stop kills its process.
+    #[cfg(all(unix, target_os = "linux"))]
+    #[tokio::test]
+    async fn a_stop_kills_the_real_prepare_runs_process() {
+        use std::os::unix::fs::PermissionsExt;
+        let (b, _calls, _root) = mac_bench(false);
+        // The pack's node is a script that records its pid and sleeps; the pack's rea gets
+        // the module the prepare run needs.
+        let rea = b.process.shared.installer().installation();
+        let entry = rea.rea_entry.clone().unwrap();
+        let module = entry
+            .parent()
+            .unwrap()
+            .parent()
+            .unwrap()
+            .join("dist/process");
+        std::fs::create_dir_all(&module).unwrap();
+        std::fs::write(module.join("OwnedCommand.js"), "").unwrap();
+        let pid_file = b._dir.path().join("pid");
+        let node = rea.node().unwrap();
+        std::fs::write(
+            &node,
+            format!(
+                "#!/bin/sh\necho $$ > '{}'\nexec sleep 600\n",
+                pid_file.display()
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&node, std::fs::Permissions::from_mode(0o755)).unwrap();
+        // The marker records each program's size, which rea's start checks.
+        let marker_path = node.parent().unwrap().parent().unwrap().join(".complete");
+        let mut marker: Value =
+            serde_json::from_str(&std::fs::read_to_string(&marker_path).unwrap()).unwrap();
+        marker["programs"][0]["size"] = Value::from(std::fs::metadata(&node).unwrap().len());
+        std::fs::write(&marker_path, marker.to_string()).unwrap();
+        *b.process.shared.prepare.lock().unwrap() = prepare_real();
+        let config = mac_config(&b);
+        let mut g = b.process.lock().await;
+        let start = tokio::spawn(async move { g.ensure_started(config).await });
+        until_starting(&b.process).await;
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !pid_file.exists()
+            || std::fs::read_to_string(&pid_file)
+                .unwrap()
+                .trim()
+                .is_empty()
+        {
+            assert!(Instant::now() < deadline, "the fake node never ran");
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        let pid = std::fs::read_to_string(&pid_file)
+            .unwrap()
+            .trim()
+            .to_owned();
+        assert!(Path::new("/proc").join(&pid).exists());
+        b.process.stop(STOP_GRACE).await;
+        assert_eq!(start.await.unwrap().unwrap_err(), ReverseError::Stopped);
+        // Killed at once; tokio reaps the dropped child a moment later.
+        let deadline = Instant::now() + Duration::from_secs(3);
+        while Path::new("/proc").join(&pid).exists() {
+            assert!(
+                Instant::now() < deadline,
+                "the prepare run's process outlived the stop"
+            );
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
     }
 
     #[tokio::test]

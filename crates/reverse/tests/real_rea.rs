@@ -482,27 +482,110 @@ fn strings_of(out: &ToolOutput) -> Vec<String> {
     all
 }
 
-/// Whether `path` is written in rea's own package (a constant of its code or texts), as is
-/// or JSON-escaped.
-fn in_package(rea_dir: &Path, path: &str) -> bool {
-    let escaped = path.replace('\\', "\\\\");
-    let mut stack = vec![rea_dir.join("dist")];
-    while let Some(dir) = stack.pop() {
-        for e in std::fs::read_dir(&dir).into_iter().flatten().flatten() {
-            let p = e.path();
-            if p.is_dir() {
-                stack.push(p);
-            } else if p
-                .extension()
-                .is_some_and(|x| x == "js" || x == "json" || x == "mjs")
-                && std::fs::read_to_string(&p)
-                    .is_ok_and(|t| t.contains(path) || t.contains(&escaped))
-            {
-                return true;
+/// The texts of rea's own package (`dist/**/*.js|json|mjs`), read once.
+struct Package(Vec<String>);
+
+impl Package {
+    fn load(rea_dir: &Path) -> Self {
+        let mut texts = Vec::new();
+        let mut stack = vec![rea_dir.join("dist")];
+        while let Some(dir) = stack.pop() {
+            for e in std::fs::read_dir(&dir).into_iter().flatten().flatten() {
+                let p = e.path();
+                if p.is_dir() {
+                    stack.push(p);
+                } else if p
+                    .extension()
+                    .is_some_and(|x| x == "js" || x == "json" || x == "mjs")
+                    && let Ok(t) = std::fs::read_to_string(&p)
+                {
+                    texts.push(t);
+                }
             }
         }
+        Self(texts)
     }
-    false
+
+    /// Whether `text` is written in the package, as is or JSON-escaped.
+    fn has(&self, text: &str) -> bool {
+        let escaped = text.replace('\\', "\\\\");
+        self.0
+            .iter()
+            .any(|t| t.contains(text) || t.contains(&escaped))
+    }
+
+    /// Whether `text` is a whole string literal of the package.
+    fn has_literal(&self, text: &str) -> bool {
+        ["\"", "'", "`"]
+            .iter()
+            .any(|q| self.has(&format!("{q}{text}{q}")))
+    }
+
+    /// Whether `path` is built from rea's own constants: written whole in its text, or
+    /// joined from pieces that are each a whole string literal there (rea joins
+    /// `"/Applications"`, `"Hopper Disassembler.app"` and `"Contents/MacOS/hopper"` at run
+    /// time, so the joined path is nowhere in its text).
+    fn explains(&self, path: &str) -> bool {
+        if self.has(path) {
+            return true;
+        }
+        let Some(rest) = path.strip_prefix('/') else {
+            return false;
+        };
+        let parts: Vec<&str> = rest.split('/').collect();
+        // reachable[i]: the first i components are covered by literal pieces.
+        let mut reachable = vec![false; parts.len() + 1];
+        reachable[0] = true;
+        for i in 0..parts.len() {
+            if !reachable[i] {
+                continue;
+            }
+            for j in i + 1..=parts.len() {
+                let piece = parts[i..j].join("/");
+                let piece = if i == 0 { format!("/{piece}") } else { piece };
+                if self.has_literal(&piece) {
+                    reachable[j] = true;
+                }
+            }
+        }
+        reachable[parts.len()]
+    }
+}
+
+/// The absolute paths of `text` ([`absolute_paths`]), each extended over the spaces that
+/// follow it (up to four words) when the longer path is one of rea's own constants: a name
+/// such as `Hopper Disassembler.app` holds a space, which the plain extraction stops at.
+fn paths_with_spaces(text: &str, package: &Package) -> Vec<String> {
+    let stop = |c: char| "\"'`,;)]}>|".contains(c);
+    absolute_paths(text)
+        .into_iter()
+        .map(|plain| {
+            let Some(at) = text.find(&plain) else {
+                return plain;
+            };
+            let mut best = plain.clone();
+            let mut candidate = plain.clone();
+            let mut rest = &text[at + plain.len()..];
+            for _ in 0..4 {
+                let Some(tail) = rest.strip_prefix(' ') else {
+                    break;
+                };
+                let end = tail
+                    .find(|c: char| c.is_whitespace() || stop(c))
+                    .unwrap_or(tail.len());
+                if end == 0 {
+                    break;
+                }
+                candidate = format!("{candidate} {}", &tail[..end]);
+                rest = &tail[end..];
+                let trimmed = candidate.trim_end_matches(['.', ':']);
+                if package.explains(trimmed) {
+                    best = trimmed.to_owned();
+                }
+            }
+            best
+        })
+        .collect()
 }
 
 fn text_of(out: &ToolOutput) -> String {
@@ -986,9 +1069,16 @@ async fn end_to_end(decompiler: Decompiler, kind: Base) {
         temp.phase("binary_session");
         let session = call(&mut guard, "binary_session", json!({})).await;
         assert!(!session.is_error, "{}", session.joined_text());
+        let rea_dir = installation
+            .rea
+            .as_ref()
+            .and_then(|r| r.part("rea"))
+            .map(|p| p.dir.clone())
+            .expect("rea's folder");
+        let package = Package::load(&rea_dir);
         let mut outside: Vec<String> = strings_of(&session)
             .iter()
-            .flat_map(|s| absolute_paths(s))
+            .flat_map(|s| paths_with_spaces(s, &package))
             .filter(|p| {
                 let p = Path::new(p);
                 !p.starts_with(&root) && !p.starts_with(&files)
@@ -1000,14 +1090,8 @@ async fn end_to_end(decompiler: Decompiler, kind: Base) {
         // `/usr/bin/prlimit` for tools the app does not offer, and its list of provider
         // candidates names Hopper's default launcher (checked, never started:
         // REA_ANALYSIS_PROVIDER is fixed).
-        let rea_dir = installation
-            .rea
-            .as_ref()
-            .and_then(|r| r.part("rea"))
-            .map(|p| p.dir.clone())
-            .expect("rea's folder");
         let (constants, unexplained): (Vec<String>, Vec<String>) =
-            outside.into_iter().partition(|p| in_package(&rea_dir, p));
+            outside.into_iter().partition(|p| package.explains(p));
         println!("real_rea: binary_session names rea's own constant paths {constants:?}");
         assert!(
             unexplained.is_empty(),
@@ -1319,6 +1403,42 @@ fn paths_are_found_in_rea_text() {
         .collect();
     found.sort();
     assert_eq!(found, ["/srv/x", r"C:\A\b"]);
+}
+
+#[test]
+fn a_path_joined_from_reas_constants_with_a_space_is_rea_s_own() {
+    // As rea 6.9.0 builds Hopper's launcher: posix.join("/Applications",
+    // "Hopper Disassembler.app", "Contents/MacOS/hopper"), never written whole.
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(dir.path().join("dist")).unwrap();
+    std::fs::write(
+        dir.path().join("dist/paths.js"),
+        r#"A = "/Applications"; N = "Hopper Disassembler.app"; L = posix.join(A, N, "Contents/MacOS/hopper"); P = "/usr/bin/prlimit";"#,
+    )
+    .unwrap();
+    let package = Package::load(dir.path());
+    let text = "launcher /Applications/Hopper Disassembler.app/Contents/MacOS/hopper is missing, see /usr/bin/prlimit.";
+    let found = paths_with_spaces(text, &package);
+    assert_eq!(
+        found,
+        [
+            "/Applications/Hopper Disassembler.app/Contents/MacOS/hopper",
+            "/usr/bin/prlimit"
+        ]
+    );
+    assert!(found.iter().all(|p| package.explains(p)));
+    // Not rea's: the owner's own folders, also under a folder rea names, and a longer
+    // path that merely starts like a constant.
+    for other in [
+        "/Users/someone/Library/x",
+        "/Applications/Other Tool.app/Contents/MacOS/hopper",
+        "/Applications/Hopper Disassembler.app/Contents/Secret",
+    ] {
+        assert!(!package.explains(other), "{other}");
+    }
+    let found = paths_with_spaces("opened /Users/someone/My Files/a.bin ok", &package);
+    assert_eq!(found, ["/Users/someone/My"]);
+    assert!(!package.explains(&found[0]));
 }
 
 #[test]
