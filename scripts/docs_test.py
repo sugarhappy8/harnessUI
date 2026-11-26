@@ -174,7 +174,8 @@ class ReverseCiAsTheWorkflowsRunIt(unittest.TestCase):
         self.assertIn("control", self.bullet)
 
     def test_the_linux_checker_fails_on_name_lookups(self):
-        self.assertIn("htons(53)", self.reverse)
+        self.assertIn("htons(53)", read("scripts/check_strace.py"))
+        self.assertIn("scripts/check_strace.py", self.reverse)
         self.assertIn("name lookup", self.bullet)
         self.assertIn("name lookup", self.sentences["13.6 stays offline"])
 

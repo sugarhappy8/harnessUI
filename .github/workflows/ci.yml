@@ -73,7 +73,7 @@ jobs:
       - run: python3 scripts/fetch_sd_test.py
       # Reverse engineering: the pinned downloads (reverse.lock.json) and their fixtures,
       # offline. The real rea runs in reverse.yml.
-      - run: python3 -I scripts/pin_reverse.py --check && python3 -I scripts/pin_reverse_test.py
+      - run: python3 -I scripts/pin_reverse.py --check && python3 -I scripts/pin_reverse_test.py && python3 -I scripts/check_strace_test.py
       # In-app updates: the key-setup helper (scripts/setup_updater.py, run by the owner) and
       # the check release.yml runs before every release, with stand-ins for node and gh; and
       # the release notes release.yml makes from CHANGELOG.md (scripts/release_notes.py).
