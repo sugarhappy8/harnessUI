@@ -999,6 +999,21 @@ export const CARRY_WORDS = {
   noSetting: (model: string, name: string) => `${model} has no ${name} setting, so it was removed.`,
   notOffered: (model: string, name: string, value: string) => `${model} does not offer ${name} ${value}, so it was removed.`,
   notAccepted: (model: string, key: string) => `${model} does not accept ${key}, so it was removed.`,
+  /** A list or an object as a value in a sentence (never its raw text). */
+  items: (n: number) => (n === 1 ? "1 item" : `${n} items`),
+  aValue: "a value",
+  /** A LoRA attached that was made for another type of model than the new one. */
+  loraNotFor: (name: string, type: string) => `The LoRA ${name} was made for ${type} models, so it was removed.`,
+  /** The LoRAs attached, by name, for a model that takes none. */
+  noLoras: (model: string, names: readonly string[]) =>
+    `${model} takes no LoRAs, so ${andList(names)} ${names.length === 1 ? "was" : "were"} removed.`,
+  noLorasCount: (model: string, n: number) =>
+    `${model} takes no LoRAs, so ${n === 1 ? "1 LoRA was" : `${n} LoRAs were`} removed.`,
+  /** The LoRAs past the new model's limit, by name. */
+  lorasPastLimit: (model: string, max: number, names: readonly string[]) =>
+    `${model} takes up to ${max === 1 ? "1 LoRA" : `${max} LoRAs`}, so ${andList(names)} ${names.length === 1 ? "was" : "were"} removed.`,
+  lorasPastLimitCount: (model: string, max: number, n: number) =>
+    `${model} takes up to ${max === 1 ? "1 LoRA" : `${max} LoRAs`}, so ${n === 1 ? "1 was" : `${n} were`} removed.`,
   /** Added pictures past the new model's limit for their role (`fit` may be 0). */
   leftOut(model: string, role: RefRole, fit: number, dropped: number): string {
     const [one, many] = PICTURE_NOUNS[role];

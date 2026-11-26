@@ -1025,6 +1025,27 @@ describe("LoRAs in the draft", () => {
     expect(useStudio.getState().drafts.image.values).toBe(before);
   });
 
+  it("a model switch keeps the LoRAs that fit and names each it removes", () => {
+    // Final review, area 3, I1: klein to sd_xl_base_1.0 with two LoRAs attached kept none and
+    // said "[object Object]".
+    const klein = LOCAL.installed.find((m) => m.loraBase === "flux2-klein")!;
+    useStudio.setState({
+      loras: [lora("a", "pixel art ü", "sdxl"), lora("k", "klein style", "flux2-klein"), lora("u", "mystery", null)],
+    });
+    const { attachLora, chooseModel } = useStudio.getState();
+    chooseModel("image", "thisComputer", klein.model.id);
+    attachLora("a");
+    attachLora("k");
+    attachLora("u");
+    chooseModel("image", "thisComputer", sdxl.model.id);
+    const draft = useStudio.getState().drafts.image;
+    expect(draft.values[field.key]).toEqual([
+      { id: "a", weight: 1, highNoise: false },
+      { id: "u", weight: 1, highNoise: false },
+    ]);
+    expect(draft.note).toBe("The LoRA klein style was made for FLUX.2 klein models, so it was removed.");
+  });
+
   it("lorasFor lists LoRAs for the model's base first", () => {
     useStudio.setState({
       loras: [

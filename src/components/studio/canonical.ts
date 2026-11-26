@@ -6,11 +6,39 @@
 // and the values that no longer apply, which Advanced settings are changed (counted in its
 // header, a chip each under the prompt), and model families (the same rule as Rust's
 // `family_of`) for offering a model in place of a retired one. The words are in words.ts.
-import { CARRY_WORDS, SETTING_WORDS, STUDIO_TIME } from "../../lib/words";
-import type { Choice, Layer, MediaModel, ParamSpec, RefItem, RefRole, SizeRules } from "./types";
+import { CARRY_WORDS, SETTING_WORDS, STUDIO_TIME, typeName } from "../../lib/words";
+import type {
+  Choice,
+  Layer,
+  Lora,
+  LoraUse,
+  MediaModel,
+  ParamKind,
+  ParamSpec,
+  RefItem,
+  RefRole,
+  SdVersion,
+  SizeRules,
+} from "./types";
 
 /** A draft's settings, by the model's field keys; an unset field has no key. */
 export type Values = Record<string, unknown>;
+
+/** What `carry` needs to judge the LoRAs a draft attaches: the installed LoRAs (for their
+ *  names and types) and the type of model the new model takes LoRAs for (its `loraBase`;
+ *  `null` when that is not known, or for a cloud model). */
+export interface LoraContext {
+  loras: Lora[];
+  base: SdVersion | null;
+}
+
+/** Where a LoRA stands for a model whose LoRA type is `base` (the store's `lorasFor` groups by
+ *  it): made for it (`fits`), of a type one of them does not say (`unknown`, never judged),
+ *  or made for another type (`others`). */
+export function loraGroup(lora: Lora, base: SdVersion | null): "fits" | "unknown" | "others" {
+  if (lora.base === null || base === null) return "unknown";
+  return lora.base === base ? "fits" : "others";
+}
 
 /** Quality names from cheapest to dearest; `auto` is kept only where it is offered. */
 const QUALITY_LADDER = ["low", "medium", "high", "xhigh", "max"];
@@ -48,9 +76,11 @@ function holdsValue(field: ParamSpec): boolean {
  * name or move to the next cheaper one offered (the cheapest when none is cheaper), length to
  * the nearest (the shorter on a tie); anything else `to` does not offer is removed. Added
  * pictures are kept, in order, up to `to`'s limit for their role; Extra fields only where `to`
- * accepts them. Every key left unset is filled from `defaultsFor(to)`. The note has one
- * sentence for each change, in the order of `from`'s fields (`to`'s when `from` is not known),
- * or `null` when nothing changed.
+ * accepts them. The LoRAs attached stay where `to` takes LoRAs and each fits it by `lorasFor`'s
+ * rule (`loraGroup` with `loras`: one of a type not known stays), up to `to`'s limit, each
+ * strength moved into `to`'s range; each LoRA removed is named. Every key left unset is filled
+ * from `defaultsFor(to)`. The note has one sentence for each change, in the order of `from`'s
+ * fields (`to`'s when `from` is not known), or `null` when nothing changed.
  */
 export function carry(
   from: MediaModel | null,
@@ -58,6 +88,7 @@ export function carry(
   values: Values,
   extra: Values,
   refs: RefItem[],
+  loras?: LoraContext,
 ): { values: Values; extra: Values; refs: RefItem[]; note: string | null } {
   const model = to.displayName;
   const notes: { at: number; text: string }[] = [];
@@ -75,6 +106,14 @@ export function carry(
     const role = source?.canonical ?? null;
     const target = to.params.find((f) => holdsValue(f) && (role ? f.canonical === role : f.key === key));
     const here = at((f) => f.key === key);
+    // The LoRAs attached: by their field, or by their value when `from` is not known.
+    const attached = Array.isArray(value) && value.length > 0 && value.every(isLoraUse);
+    if (source?.kind.type === "loras" || target?.kind.type === "loras" || attached) {
+      const moved = carryLoras(model, target?.kind.type === "loras" ? target.kind : null, value, loras);
+      if (target && moved.uses.length > 0) carried[target.key] = moved.uses;
+      for (const text of moved.notes) notes.push({ at: here, text });
+      continue;
+    }
     if (!target) {
       notes.push({ at: here, text: CARRY_WORDS.noSetting(model, source ? nameOf(source) : SETTING_WORDS.keyName(key)) });
       continue;
@@ -124,6 +163,67 @@ export function carry(
   return { values: carried, extra: extraKept, refs: kept, note: note || null };
 }
 
+/** The LoRAs `value` attaches carried to a model named `model` whose LoRA field is `field`
+ *  (`null`: it takes none), with a sentence for each that does not come. */
+function carryLoras(
+  model: string,
+  field: Extract<ParamKind, { type: "loras" }> | null,
+  value: unknown,
+  ctx: LoraContext | undefined,
+): { uses: LoraUse[]; notes: string[] } {
+  const all = Array.isArray(value) ? value.filter(isLoraUse) : [];
+  const installed = (id: string) => ctx?.loras.find((l) => l.id === id);
+  const named = (list: LoraUse[]) => {
+    const names = list.map((u) => installed(u.id)?.name);
+    return names.every((n) => n !== undefined) ? names : null;
+  };
+  if (all.length === 0) return { uses: [], notes: [] };
+  if (field === null) {
+    const names = named(all);
+    return { uses: [], notes: [names ? CARRY_WORDS.noLoras(model, names) : CARRY_WORDS.noLorasCount(model, all.length)] };
+  }
+  const notes: string[] = [];
+  const fitting: LoraUse[] = [];
+  for (const use of all) {
+    const lora = installed(use.id);
+    if (lora && ctx && loraGroup(lora, ctx.base) === "others" && lora.base !== null) {
+      notes.push(CARRY_WORDS.loraNotFor(lora.name, typeName(lora.base, null)));
+    } else {
+      fitting.push(use);
+    }
+  }
+  const kept = fitting.slice(0, field.max);
+  const cut = fitting.slice(field.max);
+  if (cut.length > 0) {
+    const names = named(cut);
+    notes.push(
+      names ? CARRY_WORDS.lorasPastLimit(model, field.max, names) : CARRY_WORDS.lorasPastLimitCount(model, field.max, cut.length),
+    );
+  }
+  const uses = kept.map((u) => ({
+    id: u.id,
+    weight: snapNumber(field.weightMin, field.weightMax, field.weightStep, u.weight) ?? field.weightDefault,
+    highNoise: field.highNoise && u.highNoise,
+  }));
+  return { uses, notes };
+}
+
+function isLoraUse(value: unknown): value is LoraUse {
+  if (typeof value !== "object" || value === null) return false;
+  const use = value as Partial<LoraUse>;
+  return typeof use.id === "string" && typeof use.weight === "number";
+}
+
+/** `value` within `min`..`max`, on a step of `step` from `min` (none: any value); `undefined`
+ *  for a value that is not a finite number. */
+function snapNumber(min: number, max: number, step: number | null | undefined, value: unknown): number | undefined {
+  if (typeof value !== "number" || !Number.isFinite(value)) return undefined;
+  const clamped = Math.min(max, Math.max(min, value));
+  if (!step) return clamped;
+  const stepped = min + Math.round((clamped - min) / step) * step;
+  return Math.min(max, Number(stepped.toPrecision(12)));
+}
+
 /** How many pictures of `role` the model takes (0 when it has no field for them). */
 function pictureLimit(model: MediaModel, role: RefRole): number {
   for (const field of model.params) {
@@ -150,6 +250,9 @@ export function valueWords(value: unknown, ...fields: (ParamSpec | undefined)[])
     if (choice) return choice.label;
   }
   const field = fields.find((f) => f !== undefined);
+  // Never `String()` of a list or an object ("[object Object]").
+  if (Array.isArray(value)) return CARRY_WORDS.items(value.length);
+  if (typeof value === "object" && value !== null) return CARRY_WORDS.aValue;
   if (field?.kind.type === "range" && field.kind.unit) return SETTING_WORDS.withUnit(String(value), field.kind.unit);
   if (field?.canonical === "length" && typeof value === "number") return STUDIO_TIME.seconds(value);
   return String(value);
@@ -161,13 +264,8 @@ function snap(field: ParamSpec, value: unknown): unknown {
   switch (kind.type) {
     case "enum":
       return snapChoice(field, kind.values, value);
-    case "range": {
-      if (typeof value !== "number" || !Number.isFinite(value)) return undefined;
-      const clamped = Math.min(kind.max, Math.max(kind.min, value));
-      if (!kind.step) return clamped;
-      const stepped = kind.min + Math.round((clamped - kind.min) / kind.step) * kind.step;
-      return Math.min(kind.max, Number(stepped.toPrecision(12)));
-    }
+    case "range":
+      return snapNumber(kind.min, kind.max, kind.step, value);
     case "boolean":
       return typeof value === "boolean" ? value : undefined;
     case "seed":

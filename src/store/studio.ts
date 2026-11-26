@@ -36,7 +36,16 @@
 // downloads that finished meanwhile, and *Use it* (`pickNewModel`).
 import { create, type StoreApi, type UseBoundStore } from "zustand";
 import * as api from "../components/studio/api";
-import { carry, closestModel, defaultsFor, dropUnmet, familyOf, type Values } from "../components/studio/canonical";
+import {
+  carry,
+  closestModel,
+  defaultsFor,
+  dropUnmet,
+  familyOf,
+  loraGroup,
+  type LoraContext,
+  type Values,
+} from "../components/studio/canonical";
 import type {
   Company,
   ImageInput,
@@ -643,7 +652,7 @@ export const useStudio: UseBoundStore<StoreApi<StudioState>> = create<StudioStat
     let routing = saved.routing;
     let note: string | null = null;
     if (!offered && endpoint) {
-      const carried = carry(null, to, values, extra, []);
+      const carried = carry(null, to, values, extra, [], loraContext(s, target, to));
       values = carried.values;
       extra = carried.extra;
       // Which companies may run it belongs to the model it was saved for.
@@ -873,7 +882,7 @@ export const useStudio: UseBoundStore<StoreApi<StudioState>> = create<StudioStat
       const extra = { ...draft.extra, ...dropped?.extra };
       const from = draft.target && draft.model ? listedModel(draft.target, draft.model, s.local, s.endpoints) : null;
       const hold = mustHold(to, unpriced, extra);
-      const carried = carry(from, to, draft.values, hold ? {} : extra, draft.refs);
+      const carried = carry(from, to, draft.values, hold ? {} : extra, draft.refs, loraContext(s, target, to));
       const note = [dropped?.note ?? null, carried.note].filter((n) => n !== null).join(" ") || null;
       set((st) => ({
         drafts: {
@@ -961,10 +970,8 @@ export const useStudio: UseBoundStore<StoreApi<StudioState>> = create<StudioStat
     detachLora: (id) => changeLoras(set, get, (uses) => uses.filter((u) => u.id !== id)),
     lorasFor: (model) => {
       const groups = { fits: [] as Lora[], unknown: [] as Lora[], others: [] as Lora[] };
-      for (const lora of get().loras) {
-        if (lora.base === null || model.loraBase === null) groups.unknown.push(lora);
-        else (lora.base === model.loraBase ? groups.fits : groups.others).push(lora);
-      }
+      // The same rule carries the LoRAs attached to another model (`carry`).
+      for (const lora of get().loras) groups[loraGroup(lora, model.loraBase)].push(lora);
       return groups;
     },
     addRef: (tab, ref) => {
@@ -1258,6 +1265,18 @@ export function listedModel(
 ): MediaModel | null {
   if (target === "thisComputer") return local?.installed.find((m) => m.model.id === id)?.model ?? null;
   return endpoints.find((e) => e.providerId === target.endpoint)?.models.find((m) => m.id === id) ?? null;
+}
+
+/** What `carry` needs to judge a draft's LoRAs on `to` at `target`: the installed LoRAs, and
+ *  the type of model `to` takes LoRAs for when it is a model on this computer (`null` when that
+ *  is not known, or for a cloud model). */
+export function loraContext(
+  s: Pick<StudioState, "local" | "loras">,
+  target: RunTarget,
+  to: MediaModel,
+): LoraContext {
+  const row = target === "thisComputer" ? s.local?.installed.find((m) => m.model.id === to.id) : undefined;
+  return { loras: s.loras, base: row?.loraBase ?? null };
 }
 
 /** The saved endpoint `target` names; `null` for this computer, without a target, or once the
