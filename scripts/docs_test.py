@@ -316,7 +316,7 @@ class StudioDocs(unittest.TestCase):
         for name, value in (("CONFIRM_AT_USD", "1.0"), ("DEFAULT_DAILY_LIMIT_USD", "10.0"), ("UNKNOWN_PRICE_RESERVE_USD", "5.0")):
             self.assertRegex(spend, rf"pub const {name}: f64 = {re.escape(value)};")
         for doc in ("SECURITY.md", "README.md"):
-            self.assertIn("off by default", read(doc), doc)
+            self.assertIn("Spending guards are off by default", read(doc), doc)
             self.assertIn("$10", read(doc), doc)
 
     def test_the_audit_row_keeps_the_prompt_length_only(self):

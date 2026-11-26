@@ -1902,7 +1902,7 @@ export const STUDIO_SETTINGS = {
     n === 0 ? "There were no stopped or failed runs." : n === 1 ? "1 run was deleted." : `${n} runs were deleted.`,
   spending: "Cloud spending",
   /** Under the heading: all four are off until turned on. */
-  spendingNote: "These are all off. Turn on the ones you want. A cloud run's price is always shown before you send it.",
+  spendingNote: "Each is off until you turn it on. Prices are always shown before a cloud run.",
   confirmVideo: "Ask before every video",
   /** Before an amount box, which takes US dollars. */
   dollar: "$",

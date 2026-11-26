@@ -413,6 +413,9 @@ describe("Settings → Studio", () => {
     held = { ...PREFS, confirmEveryVideo: false, confirmAtUsd: null, confirmUnknownPrice: false, dailyLimitUsd: null };
     await show();
     const names = ["Daily limit", "Ask before every video", "Ask before runs of a set amount or more", "Ask when the price is unknown"];
+    const note = "Each is off until you turn it on. Prices are always shown before a cloud run.";
+    screen.getByText(note);
+    expect(screen.queryByText(/These are all off/)).toBeNull();
     for (const name of names) expect(screen.getByRole("switch", { name }).getAttribute("aria-checked")).toBe("false");
     expect(screen.queryByLabelText("Daily limit in US dollars")).toBeNull();
     expect(screen.queryByLabelText("Ask before runs of this many US dollars or more")).toBeNull();
@@ -428,6 +431,8 @@ describe("Settings → Studio", () => {
     expect(api.studioSetPrefs).toHaveBeenLastCalledWith({ confirmEveryVideo: true });
     await click(screen.getByRole("switch", { name: "Ask when the price is unknown" }));
     expect(api.studioSetPrefs).toHaveBeenLastCalledWith({ confirmUnknownPrice: true });
+    // The note stays true with switches on.
+    screen.getByText(note);
     // Turned off again, the amount goes and the backend is told with null.
     await click(screen.getByRole("switch", { name: "Ask before runs of a set amount or more" }));
     expect(api.studioSetPrefs).toHaveBeenLastCalledWith({ confirmAtUsd: null });
