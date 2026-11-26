@@ -4,7 +4,11 @@ import reactHooks from "eslint-plugin-react-hooks";
 import tseslint from "typescript-eslint";
 
 export default tseslint.config(
-  { ignores: ["dist", "src-tauri", "crates", "target", "node_modules", ".cache", ".superpowers"] },
+  {
+    // docs/dev/0.2.0/before-harness is the 0.1.2 preview harness, kept as it was: it runs
+    // against a 0.1.2 checkout, not this tree.
+    ignores: ["dist", "src-tauri", "crates", "target", "node_modules", ".cache", ".superpowers", "docs/dev/0.2.0/before-harness"],
+  },
   {
     // The preview harness's scripts run in Node (e2e/preview/README.md).
     files: ["e2e/preview/**/*.mjs"],
