@@ -1,5 +1,6 @@
 // 0.2.1: a model's page in Get models that fails to draw shows a notice in its panel; Get
-// models' list behind it stays, and Try again or another model draws the page again. The data
+// models' list behind it stays, and Try again, another repository or a new commit shown while
+// the panel stays open (resetKeys), or closing it, draws the page again. The data
 // is real (the owner's repository); the throw is put in the page's parts list (PlanParts), which
 // only the page draws.
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
@@ -107,19 +108,53 @@ it("a model's page that throws shows a notice in its panel, and leaves Get model
   expect(within(dialog).getByRole("combobox")).toBeTruthy();
 });
 
-it("another model opened after a page that threw draws its own page", async () => {
+it("another repository shown while the panel stays open draws its own page (resetKeys)", async () => {
   vi.mocked(api.studioLocalRepo).mockResolvedValue(REPO);
   vi.mocked(api.studioSetupPlan).mockResolvedValue(PLAN);
   await search();
   await open(REPO.repo);
   expect(screen.getByRole("alert", { name: "This model's page couldn't be shown." })).toBeTruthy();
 
-  // Closed, then another card opened.
+  // The panel is never closed (closing it unmounts the page and its boundary, which resets it
+  // on its own): the store moves it to another repository.
+  broken.parts = false;
+  vi.mocked(api.studioLocalRepo).mockResolvedValue(CONTROL);
+  await act(async () => {
+    await useStudio.getState().openDetail({ repo: CONTROL.repo });
+  });
+  await flush();
+  const dialog = screen.getByRole("dialog", { name: CONTROL.repo });
+  expect(within(dialog).queryByRole("alert")).toBeNull();
+  expect(dialog.textContent).toContain(CONTROL.repo.split("/")[1]);
+});
+
+it("the same repository read again at a new commit, with the panel open, draws its page (resetKeys)", async () => {
+  vi.mocked(api.studioLocalRepo).mockResolvedValue(REPO);
+  vi.mocked(api.studioSetupPlan).mockResolvedValue(PLAN);
+  await search();
+  await open(REPO.repo);
+  const dialog = screen.getByRole("dialog", { name: REPO.repo });
+  expect(within(dialog).getByRole("alert")).toBeTruthy();
+
+  broken.parts = false;
+  await act(async () => {
+    useStudio.setState((s) => ({ repos: { ...s.repos, [REPO.repo]: { ...REPO, commit: "f".repeat(40) } } }));
+  });
+  await flush();
+  expect(within(dialog).queryByRole("alert")).toBeNull();
+  expect(within(dialog).getByRole("combobox")).toBeTruthy();
+});
+
+it("closing the panel and opening another card also draws its page (the boundary is unmounted with it)", async () => {
+  vi.mocked(api.studioLocalRepo).mockResolvedValue(REPO);
+  vi.mocked(api.studioSetupPlan).mockResolvedValue(PLAN);
+  await search();
+  await open(REPO.repo);
+  expect(screen.getByRole("alert", { name: "This model's page couldn't be shown." })).toBeTruthy();
   broken.parts = false;
   await act(async () => useStudio.getState().closeDetail());
   vi.mocked(api.studioLocalRepo).mockResolvedValue(CONTROL);
   await open(CONTROL.repo);
   const dialog = screen.getByRole("dialog", { name: CONTROL.repo });
   expect(within(dialog).queryByRole("alert")).toBeNull();
-  expect(dialog.textContent).toContain(CONTROL.repo.split("/")[1]);
 });

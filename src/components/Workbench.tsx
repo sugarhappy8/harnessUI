@@ -5,6 +5,7 @@ import { ArtifactsTab } from "./workbench/ArtifactsTab";
 import { TaskTab } from "./workbench/TaskTab";
 import { SourcesTab } from "./workbench/SourcesTab";
 import { ContextTab } from "./workbench/ContextTab";
+import { PanelBoundary } from "./CrashNotice";
 
 /** The tabs, in order. Each tab is one file in `workbench/`, owned by its feature. */
 const TABS: { id: WorkbenchTab; label: string; icon: ComponentType<{ size?: number }>; view: ComponentType<{ chatId: number }> }[] = [
@@ -58,7 +59,11 @@ export function Workbench() {
         </button>
       </div>
       <div className="min-h-0 flex-1 overflow-y-auto" role="tabpanel" aria-label={current.label}>
-        <View key={chatId} chatId={chatId} />
+        {/* A tab that fails to draw shows a notice here; the tab list and Close stay, and
+            another tab, another chat or opening the panel on a tab draws it again. */}
+        <PanelBoundary where="workbench" fill resetKeys={[current.id, chatId]}>
+          <View key={chatId} chatId={chatId} />
+        </PanelBoundary>
       </div>
     </aside>
   );

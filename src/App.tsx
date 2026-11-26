@@ -12,6 +12,7 @@ import { StudioView } from "./components/studio/StudioView";
 import { StudioNotice } from "./components/studio/StudioNotice";
 import { QuitWhileMaking } from "./components/studio/QuitWhileMaking";
 import { PanelBoundary } from "./components/CrashNotice";
+import { StudioBoundary } from "./components/studio/StudioBoundary";
 import { followApprovals, followRunningTurn, turnChatId, useApp, toErrorInfo } from "./store/app";
 import { followStudio, useStudio } from "./store/studio";
 import * as ipc from "./lib/ipc";
@@ -222,17 +223,16 @@ export default function App() {
           <PanelBoundary where="chat" fill resetKeys={[activeChatId]}>
             <ChatView />
           </PanelBoundary>
-          <PanelBoundary where="workbench" resetKeys={[activeChatId]}>
-            <Workbench />
-          </PanelBoundary>
+          {/* The workbench has its boundary inside, around the tab it shows. */}
+          <Workbench />
           {/* A video that finished while the chat was shown. */}
           <StudioNotice />
         </div>
         {studioMounted && (
           <div className="flex min-w-0 flex-1" hidden={!studioShown}>
-            <PanelBoundary where="studio" fill>
+            <StudioBoundary>
               <StudioView />
-            </PanelBoundary>
+            </StudioBoundary>
           </div>
         )}
       </div>
