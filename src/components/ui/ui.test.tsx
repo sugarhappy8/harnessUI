@@ -203,4 +203,50 @@ describe("shared controls", () => {
   it("Studio's text boxes carry the shared focus ring", () => {
     for (const cls of FOCUS_RING.split(" ")) expect(BOX.split(" ")).toContain(cls);
   });
+
+  // Final review, area 3, I5: the ring is a box-shadow, which Windows High Contrast removes, so
+  // a focused control also gets the transparent outline that forced colors draw
+  // (`outline-hidden`); at rest it has none, so only focus shows one.
+  it("the focus ring shows in normal themes and in forced colors, and only on focus", async () => {
+    const css = await tailwindFor(FOCUS_RING.split(" "));
+    const rule = (selector: string) => {
+      const at = css.indexOf(`${selector} {`);
+      expect(at, `${selector} in ${css}`).toBeGreaterThanOrEqual(0);
+      let depth = 0;
+      for (let i = css.indexOf("{", at); i < css.length; i++) {
+        if (css[i] === "{") depth++;
+        if (css[i] === "}" && --depth === 0) return css.slice(at, i + 1);
+      }
+      return css.slice(at);
+    };
+    // Normal themes: no outline, the 2 px ring in the accent on focus.
+    expect(rule(".focus-visible\\:ring-2:focus-visible")).toContain("box-shadow");
+    expect(rule(".focus-visible\\:ring-accent\\/40:focus-visible")).toContain("--tw-ring-color");
+    // Forced colors: a focused control's outline, which they draw.
+    const focused = rule(".focus-visible\\:outline-hidden:focus-visible");
+    expect(focused).toContain("outline-style: none");
+    expect(focused).toMatch(/@media \(forced-colors: active\)\s*\{\s*outline: 2px solid transparent;/);
+    // At rest, nothing forced colors would draw.
+    const atRest = FOCUS_RING.split(" ").filter((c) => !c.includes(":"));
+    for (const cls of atRest) expect(rule(`.${cls}`)).not.toContain("forced-colors");
+  });
 });
+
+/** The CSS Tailwind (the app's own, from node_modules) makes for `classes`. */
+async function tailwindFor(classes: string[]): Promise<string> {
+  const { compile } = await import("tailwindcss");
+  const fs = await import("node:fs");
+  const path = await import("node:path");
+  const root = path.resolve(__dirname, "../../..");
+  const compiler = await compile(
+    '@import "tailwindcss/theme.css" layer(theme); @import "tailwindcss/utilities.css" layer(utilities); @theme { --color-accent: #3366ff; }',
+    {
+      base: root,
+      loadStylesheet: async (id: string) => {
+        const file = path.join(root, "node_modules", id);
+        return { path: file, base: path.dirname(file), content: fs.readFileSync(file, "utf8") };
+      },
+    },
+  );
+  return compiler.build(classes);
+}
