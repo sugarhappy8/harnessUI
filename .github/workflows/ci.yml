@@ -24,6 +24,14 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      # Paths that differ only in letter case are one file on Windows and macOS. For code
+      # modules the extension is left out, as an import leaves it out: `ModelSheet.tsx` and
+      # `modelSheet.ts` are both `./modelSheet` (commit 37e0814 failed only on Windows).
+      - name: No two paths that differ only in letter case
+        run: |
+          same=$(git ls-files | tr 'A-Z' 'a-z' | sort | uniq -d)
+          mods=$(git ls-files '*.ts' '*.tsx' '*.js' '*.jsx' '*.mjs' '*.cjs' | sed -E 's/\.(d\.ts|tsx?|jsx?|[cm]js)$//' | tr 'A-Z' 'a-z' | sort | uniq -d)
+          if [ -n "$same$mods" ]; then printf 'Paths that differ only in case:\n%s\n%s\n' "$same" "$mods"; exit 1; fi
       # The runner's default Ubuntu mirror (azure.archive.ubuntu.com) stopped answering on
       # 2026-11-11 and this step hung for 37 minutes. Each apt-get call has a time limit;
       # when the default mirror fails, Ubuntu's own archive is used, then the kernel.org
