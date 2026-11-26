@@ -14,7 +14,7 @@
 
 use std::cmp::Reverse;
 use std::collections::{BTreeMap, BTreeSet};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -696,6 +696,7 @@ const NEWER_ENGINE: &str = "needs a newer Studio engine";
 /// Every file type a part may be ([`ALLOWED_PART_EXTENSIONS`], and a tokenizer's `.json`).
 const NOT_ALLOWED_FILE: &str = "not a .safetensors, .sft or .gguf file, or a tokenizer's .json";
 const NOT_PINNED: &str = "a part is not pinned";
+const LOCAL_PART: &str = "a part names a file on this computer";
 const NO_LICENCE: &str = "a part has no licence";
 const TEXT_MISMATCH: &str = "licence text does not match";
 const NO_MODEL_PART: &str = "no model part";
@@ -963,24 +964,23 @@ pub(crate) fn keyed(licenses: BTreeMap<String, GenLicence>) -> BTreeMap<String, 
         .collect()
 }
 
-/// Every part is an allowed file, pinned, and names one of `licenses`. A part from this
-/// computer (`local`) may have no repository, revision or licence (the person's own file),
-/// but needs its SHA-256 and an allowed file type. Only a `tokenizer` part may be a `.json`
-/// file.
+/// Every part of a catalog entry or family record is an allowed file, pinned, and names one
+/// of `licenses`. Only a `tokenizer` part may be a `.json` file. A catalog part never names a
+/// file on this computer (`local`): that would waive its repository, revision and licence and
+/// point a run at any file, so such an entry is hidden (final review, area 1, M-1). Parts
+/// from this computer exist only in the person's own models, checked by the store.
 pub(crate) fn check_parts(
     parts: &[GenPart],
     licenses: &BTreeMap<String, GenLicence>,
 ) -> Result<(), String> {
     for p in parts {
-        let local = p.local.as_deref();
-        // What a local part may leave empty is checked only when it is there.
-        let given = |field: &str| local.is_none() || !field.is_empty();
-        if (given(&p.repo) && validate_repo_id(&p.repo).is_err())
-            || (local.is_none() && validate_repo_path(&p.path).is_err())
-        {
+        if p.local.is_some() {
+            return Err(LOCAL_PART.into());
+        }
+        if validate_repo_id(&p.repo).is_err() || validate_repo_path(&p.path).is_err() {
             return Err(NOT_PINNED.into());
         }
-        let file = local.map_or_else(|| p.path.to_ascii_lowercase(), lowercase_name);
+        let file = p.path.to_ascii_lowercase();
         let tokenizer = p.role == GenRole::Tokenizer && file.ends_with(TOKENIZER_EXTENSION);
         if !tokenizer
             && !ALLOWED_PART_EXTENSIONS
@@ -989,22 +989,14 @@ pub(crate) fn check_parts(
         {
             return Err(NOT_ALLOWED_FILE.into());
         }
-        let pinned = !given(&p.revision) || is_hex(&p.revision, 40);
-        if !pinned || !is_hex(&p.sha256, 64) || (local.is_none() && p.size == 0) {
+        if !is_hex(&p.revision, 40) || !is_hex(&p.sha256, 64) || p.size == 0 {
             return Err(NOT_PINNED.into());
         }
-        if given(&p.license) && !licenses.contains_key(&p.license) {
+        if !licenses.contains_key(&p.license) {
             return Err(NO_LICENCE.into());
         }
     }
     Ok(())
-}
-
-/// The file name at `path`, lower case (empty when it has none).
-fn lowercase_name(path: &Path) -> String {
-    path.file_name()
-        .map(|n| n.to_string_lossy().to_ascii_lowercase())
-        .unwrap_or_default()
 }
 
 /// Each licence with a bundled text pins that text.
@@ -2243,58 +2235,21 @@ mod tests {
         assert!(check_parts(&[part(GenRole::Tokenizer, "tokenizer.json", 1)], &l).is_ok());
         assert!(check_parts(&[part(GenRole::Vae, "vae.json", 1)], &l).is_err());
         assert!(check_parts(&[part(GenRole::Diffusion, "m.sft", 1)], &l).is_ok());
-        // Empty repo, revision and licence.
-        assert!(
-            check_parts(
-                &[local_part(GenRole::Model, "/home/me/m.safetensors", SHA)],
-                &l
-            )
-            .is_ok()
-        );
-        // A local part needs its SHA-256.
-        assert!(
-            check_parts(
-                &[local_part(GenRole::Model, "/home/me/m.safetensors", "")],
-                &l
-            )
-            .is_err()
-        );
     }
 
     #[test]
-    fn a_local_part_is_checked_by_its_file() {
+    fn a_catalog_part_may_not_name_a_file_on_this_computer() {
+        // A signed catalog's `local` would waive the repository, revision and licence checks
+        // and point a run at any file (final review, area 1, M-1).
         let l = apache();
         let refused = |p: GenPart| check_parts(&[p], &l).unwrap_err();
         assert_eq!(
-            refused(local_part(GenRole::Model, "/home/me/m.ckpt", SHA)),
-            "not a .safetensors, .sft or .gguf file, or a tokenizer's .json"
+            refused(local_part(GenRole::Model, "/home/me/m.safetensors", SHA)),
+            "a part names a file on this computer"
         );
-        assert_eq!(
-            refused(local_part(GenRole::Vae, "/home/me/vae.json", SHA)),
-            "not a .safetensors, .sft or .gguf file, or a tokenizer's .json"
-        );
-        assert!(
-            check_parts(
-                &[local_part(
-                    GenRole::Tokenizer,
-                    "C:\\Users\\me\\tokenizer.JSON",
-                    SHA
-                )],
-                &l
-            )
-            .is_ok()
-        );
-        assert_eq!(
-            refused(local_part(
-                GenRole::Model,
-                "/home/me/m.gguf",
-                &"A".repeat(64)
-            )),
-            "a part is not pinned"
-        );
-        let mut named = local_part(GenRole::Model, "/home/me/m.gguf", SHA);
-        named.license = "mit".into();
-        assert_eq!(refused(named), "a part has no licence");
+        let mut pinned = part(GenRole::Model, "m.gguf", 1);
+        pinned.local = Some(PathBuf::from("/etc/m.gguf"));
+        assert_eq!(refused(pinned), "a part names a file on this computer");
         // A Hub part still needs all of it.
         let mut hub = part(GenRole::Model, "m.gguf", 1);
         hub.license = String::new();
@@ -2302,6 +2257,22 @@ mod tests {
         let mut hub = part(GenRole::Model, "m.gguf", 1);
         hub.revision = String::new();
         assert_eq!(refused(hub), "a part is not pinned");
+    }
+
+    #[test]
+    fn an_entry_or_a_family_with_a_local_part_is_hidden() {
+        hidden_for("a part names a file on this computer", |e| {
+            e["parts"][0]["local"] = json!("/home/me/m.gguf");
+        });
+        let g = read_with(|v| {
+            v["generatorFamilies"]["flux2-klein-4b"]["companions"][0]["local"] =
+                json!("C:\\Users\\me\\llm.safetensors");
+        });
+        assert!(!g.families.contains_key(&GenFamily::Flux2Klein4b));
+        assert_eq!(
+            reason(&g, "family:flux2-klein-4b").as_deref(),
+            Some("a part names a file on this computer")
+        );
     }
 
     #[test]
