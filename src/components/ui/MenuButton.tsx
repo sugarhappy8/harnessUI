@@ -4,12 +4,14 @@ import { Check } from "lucide-react";
 import { FIELD, OPTION, POPUP } from "./styles";
 
 /** A button that opens a menu (Radix DropdownMenu); `trigger` is what the button shows.
- *  `className` draws the button in place of the field look (a toolbar's chip). */
+ *  `className` draws the button in place of the field look (a toolbar's chip); `contentClassName`
+ *  adds to the menu's own look (its width, a long list's scrolling). */
 export function MenuButton(props: {
   label: string;
   trigger: ReactNode;
   align?: "start" | "end";
   className?: string;
+  contentClassName?: string;
   children: ReactNode;
 }) {
   return (
@@ -18,7 +20,7 @@ export function MenuButton(props: {
         {props.trigger}
       </DropdownMenu.Trigger>
       <DropdownMenu.Portal>
-        <DropdownMenu.Content align={props.align ?? "start"} sideOffset={4} className={`${POPUP} min-w-40`}>
+        <DropdownMenu.Content align={props.align ?? "start"} sideOffset={4} className={`${POPUP} min-w-40 ${props.contentClassName ?? ""}`}>
           {props.children}
         </DropdownMenu.Content>
       </DropdownMenu.Portal>

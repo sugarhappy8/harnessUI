@@ -317,9 +317,12 @@ export function dropUnmet(model: MediaModel, values: Values): Values {
 }
 
 /** The Advanced settings `values` and `extra` change: the key of each Advanced field set, in
- *  the model's order, and each Extra field. A Simple field (quality, say) is not one. */
+ *  the model's order, and each Extra field. A Simple field (quality, say) is not one, nor are
+ *  the LoRAs attached: they have their own section in the panel, and the composer counts them. */
 export function changedKeys(model: MediaModel, values: Values, extra: Values): { values: string[]; extra: string[] } {
-  const advanced = model.params.filter((f) => f.layer === "advanced" && holdsValue(f) && isSet(values[f.key]));
+  const advanced = model.params.filter(
+    (f) => f.layer === "advanced" && f.kind.type !== "loras" && holdsValue(f) && isSet(values[f.key]),
+  );
   return { values: advanced.map((f) => f.key), extra: Object.keys(extra) };
 }
 

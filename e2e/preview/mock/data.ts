@@ -172,6 +172,18 @@ const ANIME_LORA: Lora = {
   missing: false,
 };
 
+/** A third LoRA, added from this computer, whose model type its file does not say. */
+const GRAIN_LORA: Lora = {
+  id: "local:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+  name: "film-grain",
+  base: null,
+  format: "lycoris",
+  sizeBytes: 38_000_000,
+  source: "import",
+  repo: null,
+  missing: false,
+};
+
 export const LOCAL_MODELS: LocalModels = {
   ...LOCAL,
   noticeAccepted,
@@ -182,7 +194,7 @@ export const LOCAL_MODELS: LocalModels = {
     ),
     SDXL_INPAINT,
   ],
-  loras: [...LOCAL.loras, ANIME_LORA],
+  loras: [...LOCAL.loras, ANIME_LORA, GRAIN_LORA],
 };
 
 // ---- runs -------------------------------------------------------------------------------------
@@ -724,16 +736,31 @@ export function filesOf(installed: InstalledLocal[], genModelId: string, pickedR
     ...part("model", "", `/home/me/models/${model.name}.safetensors`, model.sizeBytes / GIB, "", true),
     local: model.inPlace,
   };
-  const slots: PlannedSlot[] = [
-    { role: "model", required: true, source: "main", part: main },
-    rec
-      ? { role: "vae", required: false, source: "embedded", part: null }
-      : { role: "vae", required: true, source: "missing", part: null },
-  ];
+  // An SDXL set-up (Task U8's Files screen): the usual decoder, and its two text encoders
+  // inside the model file.
+  const slots: PlannedSlot[] =
+    rec?.id === "sdxl-checkpoint"
+      ? [
+          { role: "model", required: true, source: "main", part: main },
+          {
+            role: "vae",
+            required: true,
+            source: "companion",
+            part: part("vae", "madebyollin/sdxl-vae-fp16-fix", "sdxl_vae.safetensors", 0.31, "mit", true),
+          },
+          { role: "clip-l", required: false, source: "embedded", part: null },
+          { role: "clip-g", required: false, source: "embedded", part: null },
+        ]
+      : [
+          { role: "model", required: true, source: "main", part: main },
+          rec
+            ? { role: "vae", required: false, source: "embedded", part: null }
+            : { role: "vae", required: true, source: "missing", part: null },
+        ];
   return {
     genModelId: model.id,
     recipe: rec,
-    recipes: model.untested || !rec ? RECIPES : RECIPES.slice(0, 1),
+    recipes: model.untested || !rec ? RECIPES : [rec],
     slots,
     untested: model.untested || (pickedRecipe !== null && pickedRecipe !== model.recipe?.id),
     canRun: slots.every((s) => !s.required || s.part !== null),

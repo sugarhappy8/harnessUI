@@ -76,6 +76,15 @@ export async function showLocal(
   vi.mocked(api.studioLive).mockResolvedValue([]);
   vi.mocked(api.studioGetPrefs).mockResolvedValue({ ...PREFS, localNoticeAcceptedAt: local.noticeAccepted ? 1 : null });
   vi.mocked(api.studioUsage).mockResolvedValue(USAGE);
+  // The side panel's Files section reads a local model's files (Task U8; nothing is sent).
+  vi.mocked(api.studioModelFiles).mockImplementation(async (genModelId) => ({
+    genModelId,
+    recipe: null,
+    recipes: [],
+    slots: [],
+    untested: false,
+    canRun: true,
+  }));
   vi.mocked(api.studioEstimate).mockResolvedValue({
     usd: 0,
     reasons: [],

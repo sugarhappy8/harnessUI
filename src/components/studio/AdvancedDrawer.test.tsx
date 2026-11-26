@@ -1,9 +1,13 @@
-// Studio's Advanced drawer (0.1.0 Task B6; design Wireframe 2): every setting the model offers
-// one click away with its reset, each change a chip under the prompt (the dock's ChipsRow), the
-// seed's dice and lock, an OpenRouter picture's routing, Extra fields (JSON) with the names the
-// model accepts, the exact request (on this computer, the exact command), and My setups.
+// Studio's Advanced drawer (0.1.0 Task B6; design Wireframe 2; styled controls since Task U8):
+// every setting the model offers one click away with its reset, each change a chip under the
+// prompt (the composer's ChipsRow), the seed's dice and lock, the full sampler and scheduler
+// lists as selects, an OpenRouter picture's routing, Extra fields (JSON) with the names the model
+// accepts, and the exact request (on this computer, the exact command). LoRAs have their own
+// section (LorasSection.test.tsx), so they are not counted here; My setups are tested with the
+// panel (SettingsPanel.test.tsx).
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { act, cleanup, fireEvent, render, screen, within, type RenderResult } from "@testing-library/react";
+import type { ReactElement } from "react";
+import { act, cleanup, fireEvent, render as rtlRender, screen, within, type RenderResult } from "@testing-library/react";
 import type { StudioTab } from "../../store/studio";
 import type { Values } from "./canonical";
 import { LOCAL, MODELS } from "./fixtures/models";
@@ -14,17 +18,20 @@ import type {
   MediaModel,
   RequestPreview,
   RunTarget,
-  Setup,
   StudioEndpoint,
   StudioPrefs,
 } from "./types";
 
-// Radix positions menus with ResizeObserver, which jsdom does not have.
+// jsdom has none of what Radix selects, menus and sliders measure and capture with.
 globalThis.ResizeObserver ??= class {
   observe() {}
   unobserve() {}
   disconnect() {}
 } as unknown as typeof ResizeObserver;
+Element.prototype.hasPointerCapture ??= () => false;
+Element.prototype.setPointerCapture ??= () => {};
+Element.prototype.releasePointerCapture ??= () => {};
+Element.prototype.scrollIntoView ??= () => {};
 
 vi.mock("../../lib/ipc", () => ({ isTauri: () => true }));
 vi.mock("./api");
@@ -32,7 +39,13 @@ vi.mock("./api");
 const api = await import("./api");
 const { AdvancedDrawer, ChipsRow, chipsFor, parseExtra } = await import("./AdvancedDrawer");
 const { SettingsPanel } = await import("./SettingsPanel");
+const { UiProviders } = await import("../ui/UiProviders");
 const { useStudio } = await import("../../store/studio");
+
+/** Renders inside the one tooltip provider the fields' help buttons need, as the app does. */
+function render(ui: ReactElement): RenderResult {
+  return rtlRender(ui, { wrapper: UiProviders });
+}
 
 const INITIAL = useStudio.getState();
 
@@ -103,6 +116,15 @@ async function load(saved: { endpoints?: StudioEndpoint[]; local?: LocalModels; 
     pictures: 0,
     videos: 0,
   });
+  // A local model's Files section reads its files (nothing is sent).
+  vi.mocked(api.studioModelFiles).mockImplementation(async (id) => ({
+    genModelId: id,
+    recipe: null,
+    recipes: [],
+    slots: [],
+    untested: false,
+    canRun: true,
+  }));
   await act(async () => {
     await useStudio.getState().load();
   });
@@ -142,17 +164,19 @@ async function renderDrawer(m: MediaModel, values?: Values, opts: { target?: Run
   await flush();
 }
 
-/** The whole right panel of `m`'s tab. */
-async function renderPanel(m: MediaModel, opts: { target?: RunTarget; prefs?: Partial<StudioPrefs> } = {}) {
-  const tab = await show(m, undefined, opts);
-  await act(async () => {
-    render(<SettingsPanel tab={tab} />);
-  });
-  await flush();
-}
-
 function draftSeed(): unknown {
   return useStudio.getState().drafts.image.values.seed;
+}
+
+/** Opens a Radix select from its trigger. */
+function press(trigger: HTMLElement) {
+  fireEvent.pointerDown(trigger, { button: 0, ctrlKey: false, pointerType: "mouse" });
+}
+
+/** Picks `option` in the select named `name`. */
+function choose(name: string, option: string) {
+  press(screen.getByRole("combobox", { name }));
+  fireEvent.click(screen.getByRole("option", { name: option }));
 }
 
 /** How long a clip takes here, by its length and the number of lines (measured): 2 s at 480p
@@ -170,26 +194,6 @@ const FLARE_PREVIEW: RequestPreview = {
   url: "https://openrouter.ai/api/v1/images/generations",
   host: "openrouter.ai",
   body: { model: "openai/gpt-image-2.6-flare" },
-};
-
-const PRODUCT_SHOT: Setup = {
-  name: "Product shot",
-  kind: "image",
-  target: { endpoint: 1 },
-  model: "openai/gpt-image-2.6-flare",
-  params: { quality: "high", background: "transparent" },
-  extra: {},
-  routing: null,
-};
-
-const LOCAL_SQUARE: Setup = {
-  name: "Local square",
-  kind: "image",
-  target: "thisComputer",
-  model: "flux2-klein-4b-q4",
-  params: { aspect_ratio: "1:1", steps: 4 },
-  extra: {},
-  routing: null,
 };
 
 beforeEach(() => {
@@ -233,7 +237,10 @@ describe("AdvancedDrawer", () => {
     act(() => useStudio.getState().setExtra("image", { moderation: "low" }));
     act(() => useStudio.getState().setRouting("image", { order: ["openai"], only: false, allowFallbacks: true, zdr: false }));
     fireEvent.click(screen.getByRole("button", { name: "Reset Background" }));
-    screen.getByText("Automatic (company default)");
+    const background = screen.getByRole("group", { name: "Background" });
+    expect(within(background).getByRole("radio", { name: "Automatic (company default)" }).getAttribute("aria-checked")).toBe(
+      "true",
+    );
     expect(useStudio.getState().drafts.image.values).toEqual({ output_format: "png" });
     fireEvent.click(screen.getByRole("button", { name: "Reset all" }));
     screen.getByText("Advanced"); // no "changed" count left
@@ -372,15 +379,17 @@ describe("AdvancedDrawer", () => {
     await renderDrawer(flare);
     screen.getByText("Company that runs it");
     const routing = () => useStudio.getState().drafts.image.routing;
-    const allow = screen.getByRole("checkbox", { name: "Allow another company if that one is busy" });
-    expect((allow as HTMLInputElement).disabled).toBe(true); // OpenRouter chooses
-    fireEvent.change(screen.getByRole("combobox", { name: "Company that runs it" }), { target: { value: "openai" } });
+    const allow = () => screen.getByRole("checkbox", { name: "Allow another company if that one is busy" }) as HTMLButtonElement;
+    expect(allow().disabled).toBe(true); // OpenRouter chooses
+    expect(screen.getByRole("combobox", { name: "Company that runs it" }).textContent).toBe("OpenRouter chooses");
+    choose("Company that runs it", "OpenAI");
     expect(routing()).toEqual({ order: ["openai"], only: false, allowFallbacks: true, zdr: false });
-    fireEvent.click(allow);
+    expect(allow().disabled).toBe(false);
+    fireEvent.click(allow());
     expect(routing()).toEqual({ order: ["openai"], only: false, allowFallbacks: false, zdr: false });
     fireEvent.click(screen.getByRole("checkbox", { name: "Only companies that keep no data" }));
     expect(routing()).toEqual({ order: ["openai"], only: false, allowFallbacks: false, zdr: true });
-    fireEvent.change(screen.getByRole("combobox", { name: "Company that runs it" }), { target: { value: "" } });
+    choose("Company that runs it", "OpenRouter chooses");
     expect(routing()).toEqual({ order: [], only: false, allowFallbacks: true, zdr: true });
     fireEvent.click(screen.getByRole("checkbox", { name: "Only companies that keep no data" }));
     expect(routing()).toBeNull();
@@ -388,6 +397,51 @@ describe("AdvancedDrawer", () => {
     await renderDrawer(veo);
     expect(screen.queryByText("Company that runs it")).toBeNull();
     screen.getByText(veo.params.find((p) => p.key === "seed")!.help!); // "… gives a different video."
+  });
+
+  it("Sampler and Scheduler are selects listing every engine choice by its plain name", async () => {
+    const sdxl = LOCAL.installed.find((m) => m.version === "sdxl" && !m.untested)!.model;
+    const sampler = sdxl.params.find((p) => p.key === "sampler")!;
+    const scheduler = sdxl.params.find((p) => p.key === "scheduler")!;
+    if (sampler.kind.type !== "enum" || scheduler.kind.type !== "enum") throw new Error("not lists");
+    await renderDrawer(sdxl, {}, { target: "thisComputer" });
+    // Nothing set and no default named: Automatic is each one's placeholder.
+    expect(screen.getByRole("combobox", { name: "Sampler" }).textContent).toBe("Automatic");
+    press(screen.getByRole("combobox", { name: "Sampler" }));
+    const samplers = screen.getAllByRole("option");
+    expect(samplers).toHaveLength(21);
+    expect(samplers.map((o) => o.textContent)).toEqual(sampler.kind.values.map((c) => c.label));
+    // Plain names, never the engine's ids.
+    expect(samplers.map((o) => o.textContent)).not.toContain("dpm++2m");
+    fireEvent.click(screen.getByRole("option", { name: sampler.kind.values[5]!.label }));
+    expect(useStudio.getState().drafts.image.values.sampler).toBe(sampler.kind.values[5]!.value);
+    press(screen.getByRole("combobox", { name: "Scheduler" }));
+    expect(screen.getAllByRole("option").map((o) => o.textContent)).toEqual(scheduler.kind.values.map((c) => c.label));
+    expect(screen.getAllByRole("option")).toHaveLength(17);
+    fireEvent.keyDown(screen.getByRole("listbox"), { key: "Escape" });
+    // Set, the Sampler offers Automatic again, first, and it resets the field.
+    choose("Sampler", "Automatic");
+    expect(useStudio.getState().drafts.image.values.sampler).toBeUndefined();
+    expect(document.querySelector("select")).toBeNull();
+    expect(document.querySelector("input[type=range], input[type=checkbox]")).toBeNull();
+  });
+
+  it("a model's own default shows in its select while it is unset", async () => {
+    await renderDrawer(klein, {}, { target: "thisComputer" });
+    // klein's engine runs Euler unless told otherwise.
+    expect(screen.getByRole("combobox", { name: "Sampler" }).textContent).toBe("Euler");
+    expect(screen.queryByRole("button", { name: "Reset Sampler" })).toBeNull();
+  });
+
+  it("LoRAs are not counted as Advanced changes, show no chip, and Reset all keeps them", async () => {
+    await renderDrawer(klein, { steps: 8 }, { target: "thisComputer" });
+    act(() => useStudio.getState().attachLora(LOCAL.loras[0]!.id));
+    expect(useStudio.getState().drafts.image.values.loras).toHaveLength(1);
+    screen.getByText("Advanced · 1 changed");
+    expect(screen.queryByText(/object Object/)).toBeNull();
+    expect(screen.queryByText(/^LoRAs:/)).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "Reset all" }));
+    expect(useStudio.getState().drafts.image.values).toEqual({ loras: [{ id: LOCAL.loras[0]!.id, weight: 1, highNoise: false }] });
   });
 
   it("a local model offers steps, memory saving and where it runs, and no Extra fields", async () => {
@@ -559,31 +613,32 @@ describe("AdvancedDrawer", () => {
     act(() =>
       useStudio.getState().setRouting("image", { order: ["acme-cloud"], only: false, allowFallbacks: true, zdr: false }),
     );
-    const company = screen.getByRole("combobox", { name: "Company that runs it" }) as HTMLSelectElement;
-    expect(company.value).toBe("acme-cloud");
-    expect(within(company).getAllByRole("option").map((o) => o.textContent)).toEqual([
+    const company = screen.getByRole("combobox", { name: "Company that runs it" });
+    expect(company.textContent).toBe("A company no longer listed");
+    press(company);
+    expect(screen.getAllByRole("option").map((o) => o.textContent)).toEqual([
       "OpenRouter chooses",
       "OpenAI",
       "A company no longer listed",
     ]);
-    expect(company.selectedOptions[0]?.textContent).toBe("A company no longer listed");
+    // Its tag is still what is sent.
+    expect(useStudio.getState().drafts.image.routing?.order).toEqual(["acme-cloud"]);
   });
 
   it("Allow another company comes back as chosen when a company is picked again", async () => {
     await renderDrawer(flare);
     const routing = () => useStudio.getState().drafts.image.routing;
-    const company = () => screen.getByRole("combobox", { name: "Company that runs it" });
-    fireEvent.change(company(), { target: { value: "openai" } });
+    choose("Company that runs it", "OpenAI");
     fireEvent.click(screen.getByRole("checkbox", { name: "Allow another company if that one is busy" }));
     expect(routing()).toEqual({ order: ["openai"], only: false, allowFallbacks: false, zdr: false });
-    fireEvent.change(company(), { target: { value: "" } }); // OpenRouter chooses
+    choose("Company that runs it", "OpenRouter chooses");
     expect(routing()).toBeNull();
-    fireEvent.change(company(), { target: { value: "openai" } });
+    choose("Company that runs it", "OpenAI");
     expect(routing()).toEqual({ order: ["openai"], only: false, allowFallbacks: false, zdr: false });
     // Reset all starts it again: another company may.
     fireEvent.click(screen.getByRole("button", { name: "Reset all" }));
     expect(routing()).toBeNull();
-    fireEvent.change(company(), { target: { value: "openai" } });
+    choose("Company that runs it", "OpenAI");
     expect(routing()).toEqual({ order: ["openai"], only: false, allowFallbacks: true, zdr: false });
   });
 
@@ -633,247 +688,5 @@ describe("AdvancedDrawer", () => {
     expect(api.studioSetPrefs).toHaveBeenCalledWith({ advancedOpen: true });
     screen.getByText("Background");
     screen.getByRole("button", { name: "See the exact request" });
-  });
-});
-
-describe("My setups", () => {
-  it("a setup brings back where it runs, the model and every setting", async () => {
-    await load({ endpoints: [endpoint()] });
-    useStudio.getState().applySetup(PRODUCT_SHOT);
-    expect(useStudio.getState().drafts.image).toMatchObject({
-      target: { endpoint: 1 },
-      model: "openai/gpt-image-2.6-flare",
-      values: { quality: "high", background: "transparent" },
-    });
-    useStudio.getState().applySetup(LOCAL_SQUARE);
-    expect(useStudio.getState().drafts.image).toMatchObject({
-      target: "thisComputer",
-      model: "flux2-klein-4b-q4",
-      values: { aspect_ratio: "1:1", steps: 4 },
-    });
-  });
-
-  it("a setup's values, extra fields and routing apply exactly as saved, and the prompt stays", async () => {
-    await load({ endpoints: [endpoint()] });
-    useStudio.getState().setPrompt("image", "a lighthouse");
-    const routing = { order: ["openai"], only: false, allowFallbacks: false, zdr: true };
-    expect(useStudio.getState().applySetup({ ...PRODUCT_SHOT, extra: { moderation: "low" }, routing })).toBeNull();
-    expect(useStudio.getState().drafts.image).toMatchObject({
-      prompt: "a lighthouse",
-      values: { quality: "high", background: "transparent" },
-      extra: { moderation: "low" },
-      routing,
-      note: null,
-    });
-    expect(Object.keys(useStudio.getState().drafts.image.values)).toEqual(["quality", "background"]);
-  });
-
-  it("a setup's value whose field no longer applies is not kept", async () => {
-    await load({ endpoints: [endpoint()] });
-    useStudio.getState().applySetup({ ...PRODUCT_SHOT, params: { output_format: "png", output_compression: 80 } });
-    expect(useStudio.getState().drafts.image.values).toEqual({ output_format: "png" }); // compression: JPEG and WebP only
-  });
-
-  it("a setup whose model was retired gets the closest one and says what changed", async () => {
-    await load({ endpoints: [endpoint()] });
-    const old: Setup = {
-      name: "Old clip",
-      kind: "video",
-      target: { endpoint: 1 },
-      model: "google/veo-3.0",
-      params: { duration: 5 },
-      extra: {},
-      routing: null,
-    };
-    expect(useStudio.getState().applySetup(old)).toBeNull();
-    expect(useStudio.getState().drafts.video).toMatchObject({
-      model: "google/veo-3.1",
-      values: { duration: 4, resolution: "720p" },
-      note: "OpenRouter no longer offers this setup's model, so Veo 3.1 is used. Length 5 s became 4 s.",
-    });
-  });
-
-  it("a setup with nothing left to run says so and changes nothing", async () => {
-    await load({ endpoints: [endpoint()] });
-    const before = useStudio.getState().drafts.image;
-    expect(useStudio.getState().applySetup({ ...PRODUCT_SHOT, model: "acme/gone-1" })).toBe(
-      "OpenRouter no longer offers this setup's model.",
-    );
-    expect(useStudio.getState().applySetup({ ...PRODUCT_SHOT, target: { endpoint: 9 } })).toBe(
-      "This setup's endpoint was removed in Settings → Endpoints.",
-    );
-    expect(useStudio.getState().applySetup({ ...LOCAL_SQUARE, model: "gone-local" })).toBe(
-      "This setup's model is no longer on this computer.",
-    );
-    expect(useStudio.getState().drafts.image).toBe(before);
-  });
-
-  it("a setup's extra fields wait for the price of a model never asked, then go in or are removed with the note", async () => {
-    const unpriced: MediaModel = {
-      ...flare,
-      priceFetchedAt: null,
-      params: flare.params.filter((p) => p.kind.type !== "extra"),
-    };
-    await load({ endpoints: [endpoint([unpriced, ...MODELS.filter((m) => m.id !== flare.id)])] });
-    let answer: (m: MediaModel) => void = () => undefined;
-    vi.mocked(api.studioModelPrice).mockReturnValue(new Promise((resolve) => (answer = resolve)));
-    await act(async () => {
-      render(<ChipsRow tab="image" />);
-    });
-    let refused: string | null = "";
-    act(() => {
-      refused = useStudio.getState().applySetup({ ...PRODUCT_SHOT, params: {}, extra: { moderation: "low", foo: 1 } });
-    });
-    expect(refused).toBeNull();
-    expect(api.studioModelPrice).toHaveBeenCalledWith(1, flare.id);
-    // Held aside until the model's Extra field is known: no chip, and nothing in the request.
-    expect(useStudio.getState().drafts.image).toMatchObject({ model: flare.id, extra: {}, note: null });
-    expect(screen.queryByRole("button", { name: /^Remove / })).toBeNull();
-    await act(async () => {
-      answer(flare);
-    });
-    await flush();
-    expect(useStudio.getState().drafts.image).toMatchObject({
-      extra: { moderation: "low" },
-      note: "GPT Image 2.6 Flare does not accept foo, so it was removed.",
-    });
-    screen.getByRole("button", { name: "Remove moderation: low" });
-  });
-
-  it("a setup at an endpoint without a key says so and changes nothing", async () => {
-    await load({ endpoints: [{ ...endpoint(), hasKey: false }] });
-    const before = useStudio.getState().drafts.image;
-    expect(useStudio.getState().applySetup(PRODUCT_SHOT)).toBe(
-      "OpenRouter has no key, so Studio cannot use its models. Add a key in Settings → Endpoints.",
-    );
-    expect(useStudio.getState().drafts.image).toBe(before);
-    expect(api.studioModelPrice).not.toHaveBeenCalled();
-  });
-
-  it("Save as setup saves the model and every setting under a name, and the menu shows it", async () => {
-    await renderPanel(flare);
-    act(() => useStudio.getState().setValue("image", "quality", "high"));
-    act(() => useStudio.getState().setExtra("image", { moderation: "low" }));
-    fireEvent.click(screen.getByRole("button", { name: "Save as setup…" }));
-    fireEvent.change(screen.getByRole("textbox", { name: "Setup name" }), { target: { value: "  Product shot " } });
-    await act(async () => {
-      fireEvent.click(screen.getByRole("button", { name: "Save setup" }));
-    });
-    await flush();
-    expect(api.studioSetPrefs).toHaveBeenCalledWith({
-      setups: [{ ...PRODUCT_SHOT, params: { quality: "high" }, extra: { moderation: "low" } }],
-    });
-    expect(screen.queryByRole("textbox", { name: "Setup name" })).toBeNull();
-    const menu = screen.getByRole("combobox", { name: "My setups" }) as HTMLSelectElement;
-    expect(menu.selectedOptions[0]?.textContent).toBe("Product shot");
-    // A change to the draft: the menu no longer names the setup.
-    act(() => useStudio.getState().setValue("image", "quality", "low"));
-    expect(menu.selectedOptions[0]?.textContent).toBe("None");
-  });
-
-  it("a setup saved under a name in use replaces it", async () => {
-    await renderPanel(flare, { prefs: { setups: [LOCAL_SQUARE, { ...PRODUCT_SHOT, params: { quality: "low" } }] } });
-    fireEvent.click(screen.getByRole("button", { name: "Save as setup…" }));
-    fireEvent.change(screen.getByRole("textbox", { name: "Setup name" }), { target: { value: "Product shot" } });
-    await act(async () => {
-      fireEvent.click(screen.getByRole("button", { name: "Save setup" }));
-    });
-    expect(api.studioSetPrefs).toHaveBeenCalledWith({ setups: [LOCAL_SQUARE, { ...PRODUCT_SHOT, params: {} }] });
-  });
-
-  it("a save that fails says why and what to do", async () => {
-    await renderPanel(flare);
-    vi.mocked(api.studioSetPrefs).mockRejectedValue({
-      code: "io",
-      message: "Studio's preferences could not be saved.",
-      nextStep: "Free up some disk space, then try again.",
-      details: "",
-    });
-    fireEvent.click(screen.getByRole("button", { name: "Save as setup…" }));
-    fireEvent.change(screen.getByRole("textbox", { name: "Setup name" }), { target: { value: "Product shot" } });
-    await act(async () => {
-      fireEvent.click(screen.getByRole("button", { name: "Save setup" }));
-    });
-    await flush();
-    screen.getByText("Studio's preferences could not be saved.");
-    screen.getByText("Free up some disk space, then try again.");
-  });
-
-  it("keeps at most 50 setups", async () => {
-    const fifty = Array.from({ length: 50 }, (_, i) => ({ ...PRODUCT_SHOT, name: `Setup ${i + 1}` }));
-    await renderPanel(flare, { prefs: { setups: fifty } });
-    fireEvent.click(screen.getByRole("button", { name: "Save as setup…" }));
-    fireEvent.change(screen.getByRole("textbox", { name: "Setup name" }), { target: { value: "One more" } });
-    await act(async () => {
-      fireEvent.click(screen.getByRole("button", { name: "Save setup" }));
-    });
-    screen.getByText("Keep at most 50 setups.");
-    expect(api.studioSetPrefs).not.toHaveBeenCalledWith(expect.objectContaining({ setups: expect.anything() }));
-  });
-
-  it("a name is needed", async () => {
-    await renderPanel(flare);
-    fireEvent.click(screen.getByRole("button", { name: "Save as setup…" }));
-    expect((screen.getByRole("button", { name: "Save setup" }) as HTMLButtonElement).disabled).toBe(true);
-    fireEvent.change(screen.getByRole("textbox", { name: "Setup name" }), { target: { value: "   " } });
-    expect((screen.getByRole("button", { name: "Save setup" }) as HTMLButtonElement).disabled).toBe(true);
-    fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
-    expect(screen.queryByRole("textbox", { name: "Setup name" })).toBeNull();
-  });
-
-  it("the menu lists the tab's setups, and picking one applies it", async () => {
-    const clip: Setup = { ...PRODUCT_SHOT, name: "A clip", kind: "video", model: veo.id, params: { duration: 8 } };
-    await renderPanel(flare, { prefs: { setups: [clip, LOCAL_SQUARE, PRODUCT_SHOT] } });
-    const menu = screen.getByRole("combobox", { name: "My setups" });
-    expect(within(menu).getAllByRole("option").map((o) => o.textContent)).toEqual(["None", "Local square", "Product shot"]);
-    fireEvent.change(menu, { target: { value: "0" } });
-    expect(useStudio.getState().drafts.image).toMatchObject({ target: "thisComputer", model: "flux2-klein-4b-q4" });
-    expect((menu as HTMLSelectElement).selectedOptions[0]?.textContent).toBe("Local square");
-  });
-
-  it("the menu still names the setup a tab was set from after another tab was shown", async () => {
-    const clip: Setup = { ...PRODUCT_SHOT, name: "A clip", kind: "video", model: veo.id, params: { duration: 8 } };
-    await load({
-      prefs: prefs({
-        lastModel: { image: { target: { endpoint: 1 }, model: flare.id }, video: { target: { endpoint: 1 }, model: veo.id } },
-        setups: [clip, PRODUCT_SHOT],
-      }),
-    });
-    useStudio.getState().showStudio("image");
-    let view: RenderResult | null = null;
-    await act(async () => {
-      view = render(<SettingsPanel tab="image" />);
-    });
-    await flush();
-    const rerender = async (tab: StudioTab) => {
-      await act(async () => {
-        view!.rerender(<SettingsPanel tab={tab} />);
-      });
-      await flush();
-    };
-    const menu = () => screen.getByRole("combobox", { name: "My setups" }) as HTMLSelectElement;
-    fireEvent.change(menu(), { target: { value: "0" } });
-    expect(menu().selectedOptions[0]?.textContent).toBe("Product shot");
-    const pictures = useStudio.getState().drafts.image;
-
-    // The same panel shows the Video tab: nothing was applied there yet.
-    await rerender("video");
-    expect(menu().selectedOptions[0]?.textContent).toBe("None");
-    fireEvent.change(menu(), { target: { value: "0" } });
-    expect(menu().selectedOptions[0]?.textContent).toBe("A clip");
-
-    // Back on Pictures, the draft is as Product shot left it, so the menu still names it.
-    await rerender("image");
-    expect(useStudio.getState().drafts.image).toBe(pictures);
-    expect(menu().selectedOptions[0]?.textContent).toBe("Product shot");
-    await rerender("video");
-    expect(menu().selectedOptions[0]?.textContent).toBe("A clip");
-  });
-
-  it("picking a setup that cannot run says why", async () => {
-    await renderPanel(flare, { prefs: { setups: [{ ...PRODUCT_SHOT, model: "acme/gone-1" }] } });
-    fireEvent.change(screen.getByRole("combobox", { name: "My setups" }), { target: { value: "0" } });
-    screen.getByText("OpenRouter no longer offers this setup's model.");
-    expect(useStudio.getState().drafts.image.model).toBe(flare.id);
   });
 });

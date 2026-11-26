@@ -73,9 +73,9 @@ export interface StudioLocalState {
   /** Sets an installed model up with `choice`, then reads the local models and downloads
    *  again. */
   setModelFiles(genModelId: string, choice: SetupChoice): Promise<SetModelFilesResult>;
-  /** The LoRAs, newest first; read by `loadLoras` (also once a LoRA's download is done) and kept
-   *  up by the actions below (which, with `loadLoras`, keep `local.loras`, Get models' list, up
-   *  too). */
+  /** The LoRAs, newest first: taken from the local models each time they are read, read by
+   *  `loadLoras` (also once a LoRA's download is done) and kept up by the actions below (which,
+   *  with `loadLoras`, keep `local.loras`, Get models' list, up too). */
   loras: Lora[];
   loadLoras(): Promise<void>;
   /** Downloads a searched LoRA file; returns the download group's ID (the LoRA joins `loras`

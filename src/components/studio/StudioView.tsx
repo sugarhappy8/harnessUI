@@ -3,7 +3,7 @@ import { Tabs } from "radix-ui";
 import { X } from "lucide-react";
 import * as ipc from "../../lib/ipc";
 import type { ErrorInfo } from "../../lib/types";
-import { STUDIO_COMPOSER, STUDIO_GRID, UI } from "../../lib/words";
+import { STUDIO_GRID, STUDIO_PANEL, UI } from "../../lib/words";
 import { toErrorInfo } from "../../store/app";
 import { DOCK_MIN_WIDTH, followStudioDownloads, useStudio, type StudioTab } from "../../store/studio";
 import { ErrorBanner } from "../ErrorBanner";
@@ -243,7 +243,7 @@ export function StudioView() {
         {docked && !localView && <DockedPanel tab={tab} focusIn={panelOpenedHere} onClose={() => setSettingsOpen(false)} />}
       </Tabs.Content>
       {!wide && !localView && (
-        <SlideOver open={settingsOpen} onOpenChange={setSettingsOpen} title={STUDIO_COMPOSER.settings} width="panel">
+        <SlideOver open={settingsOpen} onOpenChange={setSettingsOpen} title={STUDIO_PANEL.title} width="panel">
           <SettingsPanel tab={tab} />
         </SlideOver>
       )}
@@ -281,13 +281,13 @@ function DockedPanel(props: { tab: StudioTab; focusIn: boolean; onClose(): void 
   };
   return (
     <aside
-      aria-label={STUDIO_COMPOSER.settings}
+      aria-label={STUDIO_PANEL.title}
       data-studio-panel
       onKeyDown={onKeyDown}
       className="flex w-[22rem] shrink-0 flex-col border-l border-border bg-surface"
     >
       <div className="flex items-center justify-between gap-3 border-b border-border px-4 py-3">
-        <h2 className="text-title">{STUDIO_COMPOSER.settings}</h2>
+        <h2 className="text-title">{STUDIO_PANEL.title}</h2>
         <button
           ref={close}
           type="button"
@@ -298,7 +298,7 @@ function DockedPanel(props: { tab: StudioTab; focusIn: boolean; onClose(): void 
           <X className="size-4" aria-hidden />
         </button>
       </div>
-      <div className="min-h-0 flex-1 overflow-y-auto">
+      <div className="min-h-0 flex-1 overflow-y-auto p-4">
         <SettingsPanel tab={props.tab} />
       </div>
     </aside>

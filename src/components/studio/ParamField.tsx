@@ -1,47 +1,41 @@
-import { useEffect, useEffectEvent, useId, useState, type ReactNode } from "react";
-import { DropdownMenu } from "radix-ui";
-import { Check, ChevronDown, CircleHelp, Dices, Plus, RotateCcw } from "lucide-react";
-import { STUDIO_FIELDS } from "../../lib/words";
-import { BOX, CHIP_CHECKED } from "./styles";
+import { useEffect, useEffectEvent, useId, useState } from "react";
+import { RadioGroup } from "radix-ui";
+import { CircleHelp, Dices, RotateCcw } from "lucide-react";
+import { SETTING_WORDS, STUDIO_FIELDS } from "../../lib/words";
+import { CheckboxField } from "../ui/CheckboxField";
+import { SelectField } from "../ui/SelectField";
+import { SliderField } from "../ui/SliderField";
+import { SwitchField } from "../ui/SwitchField";
+import { Tip } from "../ui/Tip";
+import { BOX, CHOICE_CHIP, ICON_BUTTON } from "./styles";
 import type { Choice, ParamKind, ParamSpec, SizeRules } from "./types";
 
-// One of Studio's controls (0.1.0 Task B5; design 3, "Widgets"): every field is drawn from the
-// model's own `ParamSpec`, so there is no code per company. Shape and How many are chips
-// (Shape's first five values, the rest under More shapes; How many 1, 2 and 4, more in a number
-// box up to the model's maximum), a short list is a set of radios, a long one a select, a range
-// a slider with a number box, a boolean a switch, a seed a number box (under Advanced with its
-// dice and *Keep it*, Task B6), a custom size width and height boxes checked as they are typed,
-// a text a text box. An unset field reads "Automatic (company default)" ("Automatic" on this
-// computer) and is not sent; a set one offers its reset. Added pictures (RefTray.tsx) and Extra
-// fields (AdvancedDrawer.tsx) are drawn elsewhere.
+// One of Studio's controls (0.1.0 Task B5; design 3, "Widgets"; the app's styled Radix controls
+// since 0.2.0 Task U8, critique §2.8): every field is drawn from the model's own `ParamSpec`, so
+// there is no code per company. A short list is a row of chips (a radio group), a long one a
+// select, a range a slider with its value beside its name, a boolean a switch, a seed a number
+// box (under Advanced with its dice and *Keep it*, Task B6), a custom size width and height boxes
+// checked as they are typed, a text a text box. An unset field is not sent: it shows the
+// model's own default where the model names one, else "Automatic (company default)"
+// ("Automatic" on this computer) inside the control, as its first chip, its placeholder or its
+// value (critique §4.f: never a second label beside it); a set one offers its reset. Help is a
+// tooltip on a help button. Shape and How many are the composer's menus (ComposerMenus.tsx) and
+// never drawn here; added pictures (the composer), Extra fields (AdvancedDrawer.tsx) and LoRAs
+// (LorasSection.tsx) are drawn elsewhere.
 // Which fields show, and the values that no longer apply, are worked out in canonical.ts.
 
 /** How a field is drawn. */
-export type Widget =
-  | "chips"
-  | "segmented"
-  | "select"
-  | "slider"
-  | "switch"
-  | "seed"
-  | "drop"
-  | "size"
-  | "text"
-  | "json"
-  | "loras";
+export type Widget = "segmented" | "select" | "slider" | "switch" | "seed" | "drop" | "size" | "text" | "json" | "loras";
 
-/** The most values a list shows as radios; a longer list is a select. */
+/** The most values a list shows as chips; a longer list is a select. */
 const SEGMENTED_MAX = 5;
-/** How many shapes show as chips; the rest are under More shapes. */
-const SHAPES_SHOWN = 5;
-/** How many's chips (those the model's range takes); the simple layer stops at 4. */
-const COUNT_CHIPS = [1, 2, 4];
 
-/** The widget for `spec`: Shape and How many by their role, whatever their size, then by kind. */
+/** The value Automatic takes in a list: the model's choices take their index, so none is it. */
+const AUTOMATIC = "automatic";
+
+/** The widget for `spec`, by its kind. */
 export function widgetFor(spec: ParamSpec): Widget {
   const kind = spec.kind;
-  if (spec.canonical === "shape" && kind.type === "enum") return "chips";
-  if (spec.canonical === "count" && kind.type === "range") return "chips";
   switch (kind.type) {
     case "enum":
       return kind.values.length <= SEGMENTED_MAX ? "segmented" : "select";
@@ -68,15 +62,25 @@ function isSet(value: unknown): boolean {
   return value !== undefined && value !== null;
 }
 
+/** Whether Automatic is one of the field's choices: the model names no default for it, and
+ *  Studio starts it at no value of its own (a video's length), as the composer's menus do. */
+function takesAutomatic(spec: ParamSpec): boolean {
+  return !isSet(spec.companyDefault) && !isSet(spec.initial);
+}
+
+/** A number as a range shows it, with the field's unit ("80%", "500 ms", "7.5"). */
+function numberWords(n: number, unit: string | null | undefined): string {
+  return unit ? SETTING_WORDS.withUnit(String(n), unit) : String(n);
+}
+
 // ---- the field ------------------------------------------------------------------------------
 
-
 /**
- * One field: its label (with its help as a tooltip), "Automatic" while it is unset or its reset
- * once set, and its control. `local` says the model runs on this computer, where there is no
- * company default to name. `timeOf` gives a chip its time here ("2 s · about 3 min"). `seed`
- * gives a seed its dice (a new seed) and its lock (*Keep it*). Pictures (`drop`) and Extra fields
- * (`json`) are drawn by the tray and by Advanced, so nothing here.
+ * One field: its name (with its help as a tooltip), its reset once it is set, and its control.
+ * `local` says the model runs on this computer, where there is no company default to name.
+ * `timeOf` gives a chip its time here ("2 s · about 3 min"). `seed` gives a seed its dice (a new
+ * seed) and its lock (*Keep it*). Pictures (`drop`), Extra fields (`json`) and LoRAs are drawn
+ * by the composer, by Advanced and by the LoRAs section, so nothing here.
  */
 export function ParamField(props: {
   spec: ParamSpec;
@@ -97,43 +101,49 @@ export function ParamField(props: {
   if (widget === "drop" || widget === "json" || widget === "loras") return null;
   const set = isSet(value);
   const automatic = props.local ? STUDIO_FIELDS.automaticHere : STUDIO_FIELDS.automatic;
-  // A select names Automatic as its own first choice, and an unset seed's box says Random
-  // (Studio picks one for each run).
-  const namesUnset = widget === "select" || widget === "seed" || (spec.kind.type === "size" && spec.kind.values.length > 0);
+  const reset = set && (
+    <Tip content={STUDIO_FIELDS.reset(spec.label)}>
+      <button type="button" aria-label={STUDIO_FIELDS.reset(spec.label)} onClick={onReset} className={ICON_BUTTON}>
+        <RotateCcw size={14} aria-hidden />
+      </button>
+    </Tip>
+  );
 
+  if (widget === "switch") {
+    // A switch always shows a state (the model's default while unset): its help goes under it.
+    return (
+      <div role="group" aria-label={spec.label} data-param={spec.key} className="flex items-start gap-1">
+        <div className="min-w-0 flex-1">
+          <SwitchField
+            label={spec.label}
+            description={spec.help ?? undefined}
+            checked={set ? value === true : spec.companyDefault === true}
+            onChange={onChange}
+          />
+        </div>
+        {reset}
+      </div>
+    );
+  }
+
+  const readout = spec.kind.type === "range" ? rangeWords(spec.kind, value, spec.companyDefault, automatic) : null;
   return (
     <div
       role="group"
       aria-labelledby={labelId}
       aria-describedby={spec.help ? helpId : undefined}
       data-param={spec.key}
-      className="flex flex-col gap-1.5"
+      className="flex flex-col gap-2"
     >
-      <div className="flex min-h-5 items-center gap-1.5">
-        <span id={labelId} className="text-xs font-medium text-fg-muted">
+      <div className="flex min-h-7 items-center gap-1">
+        <span id={labelId} className="text-sm font-medium">
           {spec.label}
         </span>
-        {spec.help && (
-          <span title={spec.help} className="text-fg-muted">
-            <CircleHelp size={12} aria-hidden />
-            <span id={helpId} className="sr-only">
-              {spec.help}
-            </span>
-          </span>
-        )}
-        {set ? (
-          <button
-            type="button"
-            aria-label={STUDIO_FIELDS.reset(spec.label)}
-            title={STUDIO_FIELDS.reset(spec.label)}
-            onClick={onReset}
-            className="ml-auto rounded p-0.5 text-fg-muted hover:bg-bg-muted hover:text-fg"
-          >
-            <RotateCcw size={12} aria-hidden />
-          </button>
-        ) : (
-          !namesUnset && <span className="ml-auto text-xs text-fg-muted">{automatic}</span>
-        )}
+        {spec.help && <HelpButton id={helpId} label={spec.label} help={spec.help} />}
+        <span className="ml-auto flex items-center gap-1">
+          {readout !== null && <span className="text-sm text-fg-muted tabular-nums">{readout}</span>}
+          {reset}
+        </span>
       </div>
       <Control
         spec={spec}
@@ -141,6 +151,7 @@ export function ParamField(props: {
         labelId={labelId}
         value={value}
         automatic={automatic}
+        readout={readout}
         onChange={onChange}
         onReset={onReset}
         timeOf={props.timeOf}
@@ -149,6 +160,36 @@ export function ParamField(props: {
       />
     </div>
   );
+}
+
+/** A field's help: a button whose tooltip holds it (on hover and keyboard focus), and the same
+ *  words for a screen reader, which describe the field (`id`). */
+function HelpButton(props: { id: string; label: string; help: string }) {
+  return (
+    <>
+      <Tip content={props.help}>
+        <button type="button" aria-label={STUDIO_FIELDS.about(props.label)} className={`${ICON_BUTTON} size-6`}>
+          <CircleHelp size={14} aria-hidden />
+        </button>
+      </Tip>
+      <span id={props.id} className="sr-only">
+        {props.help}
+      </span>
+    </>
+  );
+}
+
+/** A range's value as its row says it: the value set, else the model's default, else
+ *  Automatic. */
+function rangeWords(
+  kind: Extract<ParamKind, { type: "range" }>,
+  value: unknown,
+  companyDefault: unknown,
+  automatic: string,
+): string {
+  if (typeof value === "number") return numberWords(value, kind.unit);
+  if (typeof companyDefault === "number") return numberWords(companyDefault, kind.unit);
+  return automatic;
 }
 
 /** A seed's dice and lock. */
@@ -167,6 +208,7 @@ function Control(props: {
   labelId: string;
   value: unknown;
   automatic: string;
+  readout: string | null;
   onChange(v: unknown): void;
   onReset(): void;
   timeOf?: (value: unknown) => string | null;
@@ -177,19 +219,25 @@ function Control(props: {
   const kind = spec.kind;
   const number = typeof value === "number" ? value : null;
   const orReset = (n: number | null) => (n === null ? onReset() : onChange(n));
-  if (widget === "chips" && kind.type === "enum") {
-    return <ShapeChips labelId={labelId} choices={kind.values} value={value} onChange={onChange} />;
-  }
-  if (widget === "chips" && kind.type === "range") {
-    return <CountChips labelId={labelId} kind={kind} value={number} onChange={orReset} />;
-  }
   if (widget === "segmented" && kind.type === "enum") {
-    return <Radios labelId={labelId} choices={kind.values} value={value} onChange={onChange} timeOf={props.timeOf} />;
+    return (
+      <Chips
+        labelId={labelId}
+        spec={spec}
+        choices={kind.values}
+        value={value}
+        automatic={props.automatic}
+        onChange={onChange}
+        onReset={onReset}
+        timeOf={props.timeOf}
+      />
+    );
   }
   if (widget === "select" && kind.type === "enum") {
     return (
       <ChoiceSelect
         labelId={labelId}
+        spec={spec}
         choices={kind.values}
         value={value}
         automatic={props.automatic}
@@ -199,56 +247,49 @@ function Control(props: {
     );
   }
   if (widget === "slider" && kind.type === "range") {
-    return <Slider labelId={labelId} kind={kind} value={number} companyDefault={spec.companyDefault} onChange={orReset} />;
-  }
-  if (widget === "switch") {
+    const resting = number ?? (typeof spec.companyDefault === "number" ? spec.companyDefault : kind.min);
     return (
-      <input
-        type="checkbox"
-        role="switch"
-        aria-labelledby={labelId}
-        checked={isSet(value) ? value === true : spec.companyDefault === true}
-        onChange={(e) => onChange(e.target.checked)}
-        className="self-start accent-[var(--accent)]"
+      <SliderField
+        label={spec.label}
+        hideLabel
+        min={kind.min}
+        max={kind.max}
+        step={kind.step && kind.step > 0 ? kind.step : (kind.max - kind.min) / 100}
+        value={resting}
+        onChange={(n) => orReset(fitNumber(n, kind.min, kind.max, kind.step))}
+        format={(n) => (number === null ? (props.readout ?? String(n)) : numberWords(n, kind.unit))}
       />
     );
   }
   if (widget === "seed" && kind.type === "seed") {
     const seed = props.seed;
     return (
-      <div className="flex items-center gap-2">
-        <NumberBox
-          labelledBy={labelId}
-          value={number}
-          min={0}
-          max={kind.max}
-          step={1}
-          placeholder={STUDIO_FIELDS.random}
-          onCommit={orReset}
-          className={`${BOX} w-36`}
-        />
-        {seed && (
-          <>
-            <button
-              type="button"
-              aria-label={STUDIO_FIELDS.newSeed}
-              title={STUDIO_FIELDS.newSeed}
-              onClick={seed.onNew}
-              className="rounded-md border border-border p-1 text-fg-muted hover:border-border-strong hover:text-fg"
-            >
-              <Dices size={14} aria-hidden />
-            </button>
-            <label className="flex items-center gap-1 text-xs">
-              <input
-                type="checkbox"
-                checked={seed.locked}
-                onChange={(e) => seed.onLock(e.target.checked)}
-                className="accent-[var(--accent)]"
-              />
-              {STUDIO_FIELDS.keepIt}
-            </label>
-          </>
-        )}
+      <div className="flex flex-wrap items-center gap-x-3 gap-y-2">
+        <div className="flex items-center gap-1.5">
+          <NumberBox
+            labelledBy={labelId}
+            value={number}
+            min={0}
+            max={kind.max}
+            step={1}
+            placeholder={STUDIO_FIELDS.random}
+            onCommit={orReset}
+            className={`${BOX} w-36 tabular-nums`}
+          />
+          {seed && (
+            <Tip content={STUDIO_FIELDS.newSeed}>
+              <button
+                type="button"
+                aria-label={STUDIO_FIELDS.newSeed}
+                onClick={seed.onNew}
+                className={`${ICON_BUTTON} size-8 border border-border bg-surface`}
+              >
+                <Dices size={15} aria-hidden />
+              </button>
+            </Tip>
+          )}
+        </div>
+        {seed && <CheckboxField label={STUDIO_FIELDS.keepIt} checked={seed.locked} onChange={seed.onLock} />}
       </div>
     );
   }
@@ -256,6 +297,7 @@ function Control(props: {
     return (
       <SizeField
         labelId={labelId}
+        label={spec.label}
         rules={kind.rules}
         listed={kind.values}
         value={typeof value === "string" ? value : null}
@@ -286,180 +328,80 @@ function chipWords(choice: Choice, timeOf?: (value: unknown) => string | null): 
   return time ? STUDIO_FIELDS.withTime(choice.label, time) : choice.label;
 }
 
-/** A list as radios; `children` follow them in the same row (Shape's More shapes). */
-function Radios(props: {
+/** A short list as chips, one chosen (a radio group: the arrow keys move along it): Automatic
+ *  first when the field takes it, chosen while unset, and choosing it resets the field; else
+ *  the model's default chosen while unset. */
+function Chips(props: {
   labelId: string;
+  spec: ParamSpec;
   choices: Choice[];
   value: unknown;
+  automatic: string;
   onChange(v: unknown): void;
+  onReset(): void;
   timeOf?: (value: unknown) => string | null;
-  children?: ReactNode;
 }) {
+  const { choices, value } = props;
+  const automatic = takesAutomatic(props.spec);
+  const shown = isSet(value) ? value : props.spec.companyDefault;
+  const index = choices.findIndex((c) => c.value === shown);
+  const current = index >= 0 ? String(index) : automatic && !isSet(value) ? AUTOMATIC : "";
   return (
-    <div role="radiogroup" aria-labelledby={props.labelId} className="flex flex-wrap gap-1">
-      {props.choices.map((choice) => (
-        <button
-          key={String(choice.value)}
-          type="button"
-          role="radio"
-          aria-checked={choice.value === props.value}
-          onClick={() => props.onChange(choice.value)}
-          className={CHIP_CHECKED}
-        >
+    <RadioGroup.Root
+      aria-labelledby={props.labelId}
+      value={current}
+      onValueChange={(v) => {
+        const choice = choices[Number(v)];
+        if (v === AUTOMATIC) props.onReset();
+        else if (choice) props.onChange(choice.value);
+      }}
+      className="flex flex-wrap gap-1.5"
+    >
+      {automatic && (
+        <RadioGroup.Item value={AUTOMATIC} className={CHOICE_CHIP}>
+          {props.automatic}
+        </RadioGroup.Item>
+      )}
+      {choices.map((choice, i) => (
+        <RadioGroup.Item key={String(choice.value)} value={String(i)} className={CHOICE_CHIP}>
           {chipWords(choice, props.timeOf)}
-        </button>
+        </RadioGroup.Item>
       ))}
-      {props.children}
-    </div>
+    </RadioGroup.Root>
   );
 }
 
-/** Shape: the first five shapes as chips, the rest under More shapes, which names the shape
- *  chosen there. */
-function ShapeChips(props: { labelId: string; choices: Choice[]; value: unknown; onChange(v: unknown): void }) {
-  const shown = props.choices.slice(0, SHAPES_SHOWN);
-  const rest = props.choices.slice(SHAPES_SHOWN);
-  const chosen = rest.findIndex((c) => c.value === props.value);
-  return (
-    <Radios labelId={props.labelId} choices={shown} value={props.value} onChange={props.onChange}>
-      {rest.length > 0 && (
-        <DropdownMenu.Root>
-          <DropdownMenu.Trigger asChild>
-            <button
-              type="button"
-              aria-label={STUDIO_FIELDS.moreShapes}
-              title={STUDIO_FIELDS.moreShapes}
-              className={`${CHIP_CHECKED} flex items-center gap-0.5 ${chosen >= 0 ? "border-accent text-accent" : ""}`}
-            >
-              {chosen >= 0 ? rest[chosen]?.label : <Plus size={12} aria-hidden />}
-              <ChevronDown size={12} aria-hidden />
-            </button>
-          </DropdownMenu.Trigger>
-          <DropdownMenu.Portal>
-            <DropdownMenu.Content
-              align="start"
-              sideOffset={4}
-              collisionPadding={8}
-              className="z-50 min-w-28 rounded-xl border border-border bg-surface p-1 text-sm shadow-pop"
-            >
-              <DropdownMenu.RadioGroup
-                value={chosen >= 0 ? String(chosen) : ""}
-                onValueChange={(i) => {
-                  const choice = rest[Number(i)];
-                  if (choice) props.onChange(choice.value);
-                }}
-              >
-                {rest.map((choice, i) => (
-                  <DropdownMenu.RadioItem
-                    key={String(choice.value)}
-                    value={String(i)}
-                    className="flex cursor-default items-center gap-2 rounded-lg px-2 py-1 outline-none data-[highlighted]:bg-bg-muted"
-                  >
-                    <span className="w-3.5">
-                      <DropdownMenu.ItemIndicator>
-                        <Check size={14} aria-hidden className="text-accent" />
-                      </DropdownMenu.ItemIndicator>
-                    </span>
-                    {choice.label}
-                  </DropdownMenu.RadioItem>
-                ))}
-              </DropdownMenu.RadioGroup>
-            </DropdownMenu.Content>
-          </DropdownMenu.Portal>
-        </DropdownMenu.Root>
-      )}
-    </Radios>
-  );
-}
-
-/** Whole numbers from `min` to `max` on `step`: whether any is not one of `chips`. */
-function moreThan(chips: number[], kind: { min: number; max: number; step?: number | null }): boolean {
-  const step = kind.step && kind.step > 0 ? kind.step : 1;
-  for (let n = kind.min; n <= kind.max; n += step) if (!chips.includes(n)) return true;
-  return false;
-}
-
-/** Whether the range takes `n`: within `min`..`max`, and on its steps from `min` when it has
- *  steps (`min + k × step`). */
-function takes(kind: { min: number; max: number; step?: number | null }, n: number): boolean {
-  if (n < kind.min || n > kind.max) return false;
-  if (!kind.step || kind.step <= 0) return true;
-  const steps = (n - kind.min) / kind.step;
-  return Math.abs(steps - Math.round(steps)) < 1e-9;
-}
-
-/** How many: 1, 2 and 4 (those the range takes) as chips, and More, a number box up to the
- *  model's maximum (open whenever the number set is not a chip). */
-function CountChips(props: {
-  labelId: string;
-  kind: Extract<ParamKind, { type: "range" }>;
-  value: number | null;
-  onChange(n: number | null): void;
-}) {
-  const { kind, value } = props;
-  const chips = COUNT_CHIPS.filter((n) => takes(kind, n));
-  const [more, setMore] = useState(false);
-  const open = more || (value !== null && !chips.includes(value));
-  const choices = chips.map((n) => ({ value: n, label: String(n) }));
-  return (
-    <div className="flex flex-col gap-1.5">
-      <Radios labelId={props.labelId} choices={choices} value={value} onChange={(v) => props.onChange(v as number)}>
-        {moreThan(chips, kind) && (
-          <button
-            type="button"
-            aria-label={STUDIO_FIELDS.more}
-            title={STUDIO_FIELDS.more}
-            aria-expanded={open}
-            onClick={() => setMore(!open)}
-            className={CHIP_CHECKED}
-          >
-            <Plus size={12} aria-hidden />
-          </button>
-        )}
-      </Radios>
-      {open && (
-        <NumberBox
-          labelledBy={props.labelId}
-          value={value}
-          min={kind.min}
-          max={kind.max}
-          step={kind.step}
-          onCommit={props.onChange}
-          className={`${BOX} w-20`}
-        />
-      )}
-    </div>
-  );
-}
-
-/** A long list: Automatic first, then the model's values. */
+/** A long list: the value set, else the model's default, else Automatic as its placeholder.
+ *  Once set, Automatic heads the list (when the field takes it) and puts the field back. */
 function ChoiceSelect(props: {
   labelId: string;
+  spec: ParamSpec;
   choices: Choice[];
   value: unknown;
   automatic: string;
   onChange(v: unknown): void;
   onReset(): void;
 }) {
-  const index = props.choices.findIndex((c) => c.value === props.value);
+  const { choices, value } = props;
+  const shown = isSet(value) ? value : props.spec.companyDefault;
+  const index = choices.findIndex((c) => c.value === shown);
+  const options = [
+    ...(isSet(value) && takesAutomatic(props.spec) ? [{ value: AUTOMATIC, label: props.automatic }] : []),
+    ...choices.map((choice, i) => ({ value: String(i), label: choice.label })),
+  ];
   return (
-    <select
-      aria-labelledby={props.labelId}
-      value={index < 0 ? "" : String(index)}
-      onChange={(e) => {
-        const choice = props.choices[Number(e.target.value)];
-        if (e.target.value === "" || !choice) props.onReset();
-        else props.onChange(choice.value);
+    <SelectField
+      label={props.spec.label}
+      labelledBy={props.labelId}
+      value={index < 0 ? null : String(index)}
+      placeholder={props.automatic}
+      options={options}
+      onChange={(v) => {
+        const choice = choices[Number(v)];
+        if (v === AUTOMATIC) props.onReset();
+        else if (choice) props.onChange(choice.value);
       }}
-      className={BOX}
-    >
-      <option value="">{props.automatic}</option>
-      {props.choices.map((choice, i) => (
-        <option key={String(choice.value)} value={String(i)}>
-          {choice.label}
-        </option>
-      ))}
-    </select>
+    />
   );
 }
 
@@ -469,43 +411,6 @@ function fitNumber(n: number, min: number, max: number, step?: number | null): n
   if (!step) return clamped;
   const stepped = min + Math.round((clamped - min) / step) * step;
   return Math.min(max, Number(stepped.toPrecision(12)));
-}
-
-/** A range: a slider (at the company's default, else the lowest, while unset) and a number
- *  box, with the field's unit. */
-function Slider(props: {
-  labelId: string;
-  kind: Extract<ParamKind, { type: "range" }>;
-  value: number | null;
-  companyDefault: unknown;
-  onChange(n: number | null): void;
-}) {
-  const { kind, value } = props;
-  const resting = typeof props.companyDefault === "number" ? props.companyDefault : kind.min;
-  return (
-    <div className="flex items-center gap-2">
-      <input
-        type="range"
-        aria-labelledby={props.labelId}
-        min={kind.min}
-        max={kind.max}
-        step={kind.step ?? "any"}
-        value={value ?? resting}
-        onChange={(e) => props.onChange(fitNumber(Number(e.target.value), kind.min, kind.max, kind.step))}
-        className="min-w-0 flex-1 accent-[var(--accent)]"
-      />
-      <NumberBox
-        labelledBy={props.labelId}
-        value={value}
-        min={kind.min}
-        max={kind.max}
-        step={kind.step}
-        onCommit={props.onChange}
-        className={`${BOX} w-16`}
-      />
-      {kind.unit && <span className="text-xs text-fg-muted">{kind.unit}</span>}
-    </div>
-  );
 }
 
 /** A number typed, taken when it is done (Enter, or leaving the box), moved into the field's
@@ -601,11 +506,16 @@ function sidesOf(value: string | null): [string, string] {
   return match ? [match[1] ?? "", match[2] ?? ""] : ["", ""];
 }
 
-/** A size: the model's listed sizes in a select (Automatic first, then Custom size) when it
- *  lists any, and width and height boxes for a custom one, checked as they are typed; a size
- *  is sent only once it fits. */
+/** The value Custom size takes in the size select. */
+const CUSTOM = "custom";
+
+/** A size: the model's listed sizes in a select (Automatic its placeholder, then the sizes and
+ *  Custom size; Automatic heads the list once a size or Custom size is chosen) when it lists
+ *  any, and width and height boxes for a custom one, checked as they are typed; a size is sent
+ *  only once it fits. */
 function SizeField(props: {
   labelId: string;
+  label: string;
   rules: SizeRules;
   listed: Choice[];
   value: string | null;
@@ -629,31 +539,29 @@ function SizeField(props: {
   // Everything else follows the size set and the field, whoever set it (a carry, a setup, the
   // store): a size not in the list is a custom one, and a field that lists none has only boxes.
   const custom = listed.length === 0 || (value !== null ? index < 0 : chosen);
+  const options = [
+    ...(value !== null || chosen ? [{ value: AUTOMATIC, label: props.automatic }] : []),
+    ...listed.map((choice, i) => ({ value: String(i), label: choice.label })),
+    { value: CUSTOM, label: STUDIO_FIELDS.customSize },
+  ];
   return (
-    <div className="flex flex-col gap-1.5">
+    <div className="flex flex-col gap-2">
       {listed.length > 0 && (
-        <select
-          aria-labelledby={props.labelId}
-          value={custom ? "custom" : index < 0 ? "" : String(index)}
-          onChange={(e) => {
-            const picked = e.target.value;
+        <SelectField
+          label={props.label}
+          labelledBy={props.labelId}
+          value={custom ? CUSTOM : index < 0 ? null : String(index)}
+          placeholder={props.automatic}
+          options={options}
+          onChange={(picked) => {
             const choice = listed[Number(picked)];
-            setChosen(picked === "custom");
+            setChosen(picked === CUSTOM);
             // Custom size starts with empty boxes: a listed size set goes, as nothing is
             // sent until a custom one fits.
-            if (picked === "" || (picked === "custom" && value !== null)) props.onReset();
-            else if (picked !== "custom" && choice) props.onChange(choice.value);
+            if (picked === AUTOMATIC || (picked === CUSTOM && value !== null)) props.onReset();
+            else if (picked !== CUSTOM && choice) props.onChange(choice.value);
           }}
-          className={BOX}
-        >
-          <option value="">{props.automatic}</option>
-          {listed.map((choice, i) => (
-            <option key={String(choice.value)} value={String(i)}>
-              {choice.label}
-            </option>
-          ))}
-          <option value="custom">{STUDIO_FIELDS.customSize}</option>
-        </select>
+        />
       )}
       {custom && (
         <SizeBoxes
@@ -711,10 +619,10 @@ function SizeBoxes(props: {
     const size = `${Number(w)}x${Number(h)}`;
     if (size !== value) props.onChange(size);
   };
-  const box = `${BOX} w-20`;
+  const box = `${BOX} w-24 tabular-nums`;
   return (
-    <div className="flex flex-col gap-1">
-      <div className="flex items-center gap-1.5 text-sm">
+    <div className="flex flex-col gap-1.5">
+      <div className="flex items-center gap-2 text-sm">
         <input
           type="number"
           inputMode="numeric"

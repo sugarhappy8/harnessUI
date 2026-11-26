@@ -366,6 +366,48 @@ const SCREENS = [
     },
   },
   {
+    id: "lr",
+    name: "l-loras",
+    run: async (page) => {
+      // SDXL picked from the model chip, then two LoRAs added from the composer's LoRAs button:
+      // the panel opens on its LoRAs. One is for SDXL, the other for Z-Image ("may not fit").
+      await open(page);
+      await openSheet(page);
+      await sheetRow(page, /^sd_xl_base_1\.0/).click();
+      await settle(page, 500);
+      await page.locator("[data-loras-button]").click();
+      await settle(page, 600);
+      const panel = page.getByRole("dialog", { name: "Settings" });
+      for (const name of ["pixel-art-xl", "anime-style-v2"]) {
+        await panel.getByRole("button", { name: "Add", exact: true }).click();
+        await settle(page, 300);
+        await page.getByRole("menuitem", { name: new RegExp(name) }).click();
+        await settle(page, 400);
+      }
+      // The first one a little weaker: its slider moved with the keyboard.
+      const strength = panel.getByRole("slider", { name: "Strength of pixel-art-xl" });
+      await strength.focus();
+      for (let i = 0; i < 4; i++) await strength.press("ArrowLeft");
+      await strength.blur();
+      await page.locator('[data-settings-section="loras"]').evaluate((el) => el.scrollIntoView({ block: "start" }));
+      await settle(page, 500);
+    },
+  },
+  {
+    id: "mf",
+    name: "m-model-files",
+    run: async (page) => {
+      // The untested model (flux-dev-copy, set up by hand as SDXL), its Files section in view.
+      await open(page);
+      await openSheet(page);
+      await sheetRow(page, /^flux-dev-copy/).click();
+      await settle(page, 500);
+      await openSettings(page);
+      await page.locator('[data-settings-section="files"]').evaluate((el) => el.scrollIntoView({ block: "start" }));
+      await settle(page, 600);
+    },
+  },
+  {
     id: "g",
     name: "g-gallery-grid",
     run: async (page) => {

@@ -1,6 +1,6 @@
 import { useEffect, useId, useMemo, useRef, useState, type KeyboardEvent } from "react";
-import { SlidersHorizontal, X } from "lucide-react";
-import { SETUP, STUDIO_ACTIONS, STUDIO_COMPOSER, STUDIO_DOCK, STUDIO_FIELDS } from "../../lib/words";
+import { Layers, SlidersHorizontal, X } from "lucide-react";
+import { LORAS, SETUP, STUDIO_ACTIONS, STUDIO_COMPOSER, STUDIO_DOCK, STUDIO_FIELDS } from "../../lib/words";
 import {
   draftModel,
   endpointOf,
@@ -33,7 +33,8 @@ import type { MediaModel, RefItem, RefRole } from "./types";
 // note of what a model switch changed (while the side panel is closed: the panel shows it when
 // open), and the changed settings as chips (ChipsRow). Then a toolbar: the model chip, which
 // opens the model sheet (ModelChip.tsx), Shape, How many and a video's Length as menus
-// (ComposerMenus.tsx), Settings, which opens the side panel, and at its end the price of the
+// (ComposerMenus.tsx), *LoRAs (n)* for a model on this computer that takes LoRAs, which opens the
+// side panel on its LoRAs (Task U8), Settings, which opens the side panel, and at its end the price of the
 // whole run (a cloud model, its colour a second cue) or the time here (a local one) beside
 // Create. Under the card, one quiet line says where the prompt goes; the chip's dot says it too.
 //
@@ -121,6 +122,17 @@ export function Composer(props: { tab: StudioTab }) {
       s.drafts[tab].target === "thisComputer" &&
       (s.local?.installed.some((m) => m.needsSetup && m.model.id === s.drafts[tab].model) ?? false),
   );
+  // How many LoRAs the draft attaches, for a model on this computer that takes them; `null`
+  // for any other model (no LoRAs button).
+  const loraCount = useStudio((s) => {
+    const d = s.drafts[tab];
+    if (d.target !== "thisComputer") return null;
+    const installed = s.local?.installed.find((m) => m.model.id === d.model);
+    const spec = installed?.model.params.find((p) => p.kind.type === "loras");
+    if (!installed?.takesLoras || installed.needsSetup || !spec) return null;
+    const held = d.values[spec.key];
+    return Array.isArray(held) ? held.length : 0;
+  });
   const promptRef = useRef<HTMLTextAreaElement>(null);
   // What Create would cost or take, and what holds it back, read out with it.
   const aboutId = useId();
@@ -319,12 +331,35 @@ export function Composer(props: { tab: StudioTab }) {
           role="toolbar"
           aria-label={STUDIO_COMPOSER.toolbar}
           onKeyDown={toolbarArrows}
-          className="flex flex-wrap items-center gap-1.5"
+          className="flex flex-wrap items-center gap-1.5 @max-2xl:gap-1"
         >
           <ModelChip tab={tab} />
           <ShapeMenu tab={tab} />
           <CountMenu tab={tab} />
           <LengthMenu tab={tab} />
+          {loraCount !== null && (
+            <Tip content={LORAS.lorasButton(loraCount)}>
+              <button
+                type="button"
+                data-loras-button
+                onClick={(e) => {
+                  // Focused first (WebKit), so the panel gives focus back here as it closes.
+                  e.currentTarget.focus();
+                  setSettingsOpen(true, "loras");
+                }}
+                className={`${COMPOSER_CHIP} @max-2xl:px-2`}
+              >
+                <Layers size={14} aria-hidden className={loraCount > 0 ? "text-accent" : "text-fg-muted"} />
+                {/* On a narrow composer, the icon with the count, and its tooltip. */}
+                <span className="tabular-nums @max-2xl:sr-only">{LORAS.lorasButton(loraCount)}</span>
+                {loraCount > 0 && (
+                  <span aria-hidden className="text-xs font-medium text-accent tabular-nums @2xl:hidden">
+                    {loraCount}
+                  </span>
+                )}
+              </button>
+            </Tip>
+          )}
           <Tip content={STUDIO_COMPOSER.settings}>
             <button
               type="button"
@@ -336,7 +371,7 @@ export function Composer(props: { tab: StudioTab }) {
                 e.currentTarget.focus();
                 setSettingsOpen(!settingsOpen);
               }}
-              className={COMPOSER_CHIP}
+              className={`${COMPOSER_CHIP} @max-2xl:px-2`}
             >
               <SlidersHorizontal size={14} aria-hidden className="text-fg-muted" />
               {/* On a narrow composer, the icon and its tooltip. */}

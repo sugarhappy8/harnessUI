@@ -4,13 +4,15 @@ import { etaText } from "./eta";
 import { ParamField } from "./ParamField";
 import type { Canonical, LocalFit, MediaModel, ParamSpec } from "./types";
 
-// One field of Studio's right panel, whichever layer draws it (0.1.0 Tasks B5 and B6): the
+// One field of Studio's side panel, whichever layer draws it (0.1.0 Tasks B5 and B6): the
 // simple fields (SettingsPanel.tsx) and the Advanced drawer (AdvancedDrawer.tsx) both draw each
-// field here, so a field looks and works the same in either. Pictures are added in the composer
-// (its strip and input zones, Task U3), so they draw nothing here; anything else goes through ParamField with
-// its reset, the seed with its dice and *Keep it*, and on this computer each Length and
-// Resolution chip of a clip with its own time here. Those times are asked for by the panel
-// (`clipAsks`, asked once per chip and size; nothing is sent) and read here.
+// field here, so a field looks and works the same in either, with the app's styled controls
+// (Task U8). Pictures are added in the composer (its strip and input zones, Task U3), so they
+// draw nothing here; anything else goes through ParamField with its reset, the seed with its
+// dice and *Keep it*, a field on this computer reading "Automatic" where unset, and on this
+// computer each Length and Resolution chip of a clip with its own time here. Those times are
+// asked for by the panel (`clipAsks`, asked once per chip and size; nothing is sent) and read
+// here.
 
 /** A `W:H` shape's two sides; `null` for anything else (`auto`). */
 function shapeOf(value: unknown): { w: number; h: number } | null {

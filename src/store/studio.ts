@@ -283,7 +283,8 @@ export interface StudioState extends StudioRunState, StudioResultsState, StudioL
   /** Field `key` of `tab` holds `problem`, or (`null`) nothing that cannot be sent. */
   setInvalid(tab: StudioTab, key: string, problem: string | null): void;
   /** *Reset all*: every Advanced field back to Automatic, no Extra fields and no routing (and
-   *  the seed no longer kept); then every value whose field no longer applies leaves the draft. */
+   *  the seed no longer kept); then every value whose field no longer applies leaves the draft.
+   *  The LoRAs attached stay: they are not Advanced's (the panel's LoRAs section has them). */
   resetAdvanced(tab: StudioTab): void;
   /** The dice: a new random seed, other than the one set, for a model that takes a seed. */
   newSeed(tab: StudioTab): void;
@@ -774,6 +775,8 @@ export const useStudio: UseBoundStore<StoreApi<StudioState>> = create<StudioStat
           set((s) => ({
             endpoints: newestLists(models.endpoints, since),
             local,
+            // The LoRAs come with the local models (`lorasFor` and the cards read them).
+            loras: local.loras,
             prefs,
             usage,
             // A panel left open is docked on a wide window; on a narrower one it would slide
@@ -802,7 +805,7 @@ export const useStudio: UseBoundStore<StoreApi<StudioState>> = create<StudioStat
         api.studioGetPrefs(),
         api.studioUsage(),
       ]);
-      set({ endpoints: newestLists(models.endpoints, since), local, prefs, usage });
+      set({ endpoints: newestLists(models.endpoints, since), local, loras: local.loras, prefs, usage });
       forgetFits();
       fillDrafts();
     },
@@ -815,7 +818,7 @@ export const useStudio: UseBoundStore<StoreApi<StudioState>> = create<StudioStat
     },
     refreshLocal: async () => {
       const local = await api.studioLocalModels();
-      set({ local });
+      set({ local, loras: local.loras });
       forgetFits();
       fillDrafts();
     },
@@ -987,7 +990,9 @@ export const useStudio: UseBoundStore<StoreApi<StudioState>> = create<StudioStat
       set((s) => {
         const draft = s.drafts[tab];
         const model = draftModel(s, tab);
-        const advanced = new Set(model?.params.filter((p) => p.layer === "advanced").map((p) => p.key));
+        const advanced = new Set(
+          model?.params.filter((p) => p.layer === "advanced" && p.kind.type !== "loras").map((p) => p.key),
+        );
         const kept = Object.fromEntries(Object.entries(draft.values).filter(([k]) => !advanced.has(k)));
         const values = model ? dropUnmet(model, kept) : kept;
         return { drafts: { ...s.drafts, [tab]: { ...draft, values, extra: {}, routing: null, seedLocked: false } } };

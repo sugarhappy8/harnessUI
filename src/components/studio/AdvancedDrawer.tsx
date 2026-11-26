@@ -1,26 +1,32 @@
 import { useEffect, useId, useMemo, useState } from "react";
-import { ChevronDown, ChevronRight, X } from "lucide-react";
+import clsx from "clsx";
+import { ChevronRight, Code2, Pencil, RotateCcw, X } from "lucide-react";
 import type { ErrorInfo } from "../../lib/types";
 import { SETTING_WORDS, STUDIO_ADVANCED, STUDIO_FIELDS } from "../../lib/words";
 import { toErrorInfo } from "../../store/app";
 import { draftModel, endpointOf, priceNotAsked, startRequestOf, useStudio, type StudioTab } from "../../store/studio";
 import { ErrorBanner } from "../ErrorBanner";
+import { CheckboxField } from "../ui/CheckboxField";
+import { SelectField } from "../ui/SelectField";
+import { FOCUS_RING } from "../ui/styles";
 import * as api from "./api";
 import { changedCount, changedKeys, nameOf, valueWords, visibleFields, type Values } from "./canonical";
 import { SettingField } from "./SettingField";
-import { BOX, SMALL_BUTTON } from "./styles";
+import { BOX, GHOST_BUTTON, PANEL_BUTTON } from "./styles";
 import type { EndpointCompany, MediaModel, ParamSpec, RequestPreview, Routing, StartRequest } from "./types";
 
-// Studio's Advanced drawer (0.1.0 Task B6; design Wireframe 2, opening inside the right panel):
-// its header counts the changes and offers *Reset all*; the model's Advanced fields follow in
-// its order, each drawn as the simple ones are (SettingField: its reset, the seed with its dice
-// and *Keep it*, a local clip's chips with their times);
+// Studio's Advanced drawer (0.1.0 Task B6; design Wireframe 2; a section of the side panel,
+// with the app's styled controls, since 0.2.0 Task U8): its header counts the changes and offers
+// *Reset all*; the model's Advanced fields follow in its order, each drawn as the simple ones are
+// (SettingField: its reset, the seed with its dice and *Keep it*, a local clip's chips with their
+// times; the sampler and scheduler as selects of the engine's full lists);
 // then, for an OpenRouter picture, which company runs it; Extra fields (JSON), only the names
 // the model lists; and *See the exact request*, what Create would send and to which host, with
 // the key removed. For a model on this computer there is no routing and no Extra fields (they
 // would become the engine's arguments), and the button is *See the exact command*. Whether the
 // drawer is open is kept in the preferences. Each change also shows as a chip under the prompt
-// (`ChipsRow`, which the composer mounts), and the chip removes it.
+// (`ChipsRow`, which the composer mounts), and the chip removes it. The LoRAs attached are not
+// Advanced's (`changedKeys`): the panel's LoRAs section has them.
 
 // ---- the chips ----------------------------------------------------------------------------
 
@@ -159,21 +165,22 @@ function ExtraFields(props: { tab: StudioTab; spec: ParamSpec; allowed: string[]
     close();
   };
   return (
-    <div role="group" aria-labelledby={labelId} className="flex flex-col gap-1.5">
-      <div className="flex min-h-5 items-center gap-1.5">
-        <span id={labelId} className="text-xs font-medium text-fg-muted">
+    <div role="group" aria-labelledby={labelId} className="flex flex-col gap-2">
+      <div className="flex min-h-7 items-center gap-2">
+        <span id={labelId} className="shrink-0 text-sm font-medium">
           {spec.label}
         </span>
         {text === null && (
           <>
-            <span className="min-w-0 truncate text-xs text-fg-muted">
+            <span className="min-w-0 truncate text-sm text-fg-muted">
               {names.length === 0 ? STUDIO_ADVANCED.noneSet : names.join(", ")}
             </span>
             <button
               type="button"
               onClick={() => setText(names.length === 0 ? "" : JSON.stringify(extra, null, 2))}
-              className={`${SMALL_BUTTON} ml-auto`}
+              className={`${PANEL_BUTTON} ml-auto shrink-0 py-1`}
             >
+              <Pencil size={13} aria-hidden className="text-fg-muted" />
               {STUDIO_ADVANCED.editJson}
             </button>
           </>
@@ -196,14 +203,10 @@ function ExtraFields(props: { tab: StudioTab; spec: ParamSpec; allowed: string[]
             </p>
           )}
           <div className="flex gap-1.5">
-            <button
-              type="button"
-              onClick={save}
-              className="rounded-md border border-border px-2 py-0.5 text-xs hover:border-border-strong"
-            >
+            <button type="button" onClick={save} className={`${PANEL_BUTTON} py-1`}>
               {STUDIO_ADVANCED.save}
             </button>
-            <button type="button" onClick={close} className={SMALL_BUTTON}>
+            <button type="button" onClick={close} className={GHOST_BUTTON}>
               {STUDIO_ADVANCED.cancel}
             </button>
           </div>
@@ -224,13 +227,16 @@ function routingOf(tag: string | null, allowFallbacks: boolean, zdr: boolean): R
   return { order: tag === null ? [] : [tag], only: false, allowFallbacks: tag === null || allowFallbacks, zdr };
 }
 
+/** The company list's value for OpenRouter's own choice (no company's tag is empty). */
+const OPENROUTER_CHOOSES = " openrouter";
+
 /** Which company runs an OpenRouter picture: one of those the model's price answer listed (by
  *  name, sent as its tag), or OpenRouter's choice. *Allow another company* comes back as last
  *  chosen when a company is picked again after OpenRouter chose. */
 function RoutingFields(props: { tab: StudioTab; title: string; companies: EndpointCompany[]; routing: Routing | null }) {
   const { tab, companies, routing } = props;
   const setRouting = useStudio((s) => s.setRouting);
-  const selectId = useId();
+  const companyId = useId();
   const tag = routing?.order[0] ?? null;
   const allow = routing?.allowFallbacks ?? true;
   const zdr = routing?.zdr ?? false;
@@ -242,45 +248,37 @@ function RoutingFields(props: { tab: StudioTab; title: string; companies: Endpoi
   // A company saved in a setup that the model's answer no longer lists keeps its tag, named in
   // words.
   const unlisted = tag !== null && !companies.some((c) => c.tag === tag);
+  const options = [
+    { value: OPENROUTER_CHOOSES, label: STUDIO_ADVANCED.openRouterChooses },
+    ...companies.map((c) => ({ value: c.tag, label: c.name })),
+    ...(unlisted ? [{ value: tag, label: STUDIO_ADVANCED.unlistedCompany }] : []),
+  ];
   return (
-    <div className="flex flex-col gap-1.5">
-      <p className="border-t border-border pt-3 text-xs font-medium">{props.title}</p>
-      <label htmlFor={selectId} className="text-xs font-medium text-fg-muted">
-        {STUDIO_ADVANCED.company}
-      </label>
-      <select
-        id={selectId}
-        value={tag ?? ""}
-        onChange={(e) => setRouting(tab, routingOf(e.target.value === "" ? null : e.target.value, chosenAllow, zdr))}
-        className={BOX}
-      >
-        <option value="">{STUDIO_ADVANCED.openRouterChooses}</option>
-        {companies.map((c) => (
-          <option key={c.tag} value={c.tag}>
-            {c.name}
-          </option>
-        ))}
-        {unlisted && <option value={tag}>{STUDIO_ADVANCED.unlistedCompany}</option>}
-      </select>
-      <label className="flex items-center gap-1.5 text-xs has-disabled:opacity-60">
-        <input
-          type="checkbox"
-          checked={allow}
-          disabled={tag === null}
-          onChange={(e) => setRouting(tab, routingOf(tag, e.target.checked, zdr))}
-          className="accent-[var(--accent)]"
+    <div className="flex flex-col gap-3 border-t border-border pt-4">
+      <p className="text-section">{props.title}</p>
+      <div className="flex flex-col gap-2">
+        <span id={companyId} className="text-sm font-medium">
+          {STUDIO_ADVANCED.company}
+        </span>
+        <SelectField
+          label={STUDIO_ADVANCED.company}
+          labelledBy={companyId}
+          value={tag ?? OPENROUTER_CHOOSES}
+          options={options}
+          onChange={(v) => setRouting(tab, routingOf(v === OPENROUTER_CHOOSES ? null : v, chosenAllow, zdr))}
         />
-        {STUDIO_ADVANCED.allowAnother}
-      </label>
-      <label className="flex items-center gap-1.5 text-xs">
-        <input
-          type="checkbox"
-          checked={zdr}
-          onChange={(e) => setRouting(tab, routingOf(tag, allow, e.target.checked))}
-          className="accent-[var(--accent)]"
-        />
-        {STUDIO_ADVANCED.zdr}
-      </label>
+      </div>
+      <CheckboxField
+        label={STUDIO_ADVANCED.allowAnother}
+        checked={allow}
+        disabled={tag === null}
+        onChange={(on) => setRouting(tab, routingOf(tag, on, zdr))}
+      />
+      <CheckboxField
+        label={STUDIO_ADVANCED.zdr}
+        checked={zdr}
+        onChange={(on) => setRouting(tab, routingOf(tag, allow, on))}
+      />
     </div>
   );
 }
@@ -381,13 +379,9 @@ function RequestPreviewButton(props: { tab: StudioTab; here: boolean }) {
     setOpen(!open);
   };
   return (
-    <div className="flex flex-col gap-2 border-t border-border pt-3">
-      <button
-        type="button"
-        aria-expanded={open}
-        onClick={toggle}
-        className="self-start rounded-lg border border-border px-2.5 py-1 text-xs hover:border-border-strong"
-      >
+    <div className="flex flex-col gap-2.5 border-t border-border pt-4">
+      <button type="button" aria-expanded={open} onClick={toggle} className={`${PANEL_BUTTON} self-start`}>
+        <Code2 size={14} aria-hidden className="text-fg-muted" />
         {props.here ? STUDIO_ADVANCED.seeCommand : STUDIO_ADVANCED.seeRequest}
       </button>
       {open &&
@@ -446,19 +440,26 @@ export function AdvancedDrawer(props: { tab: StudioTab }) {
   };
 
   return (
-    <div data-advanced className="flex flex-col gap-4 border-t border-border pt-3">
-      <div className="flex items-center gap-2">
-        <button
-          type="button"
-          aria-expanded={open}
-          onClick={toggle}
-          className="flex items-center gap-1 self-start text-sm font-medium hover:text-fg"
-        >
-          {open ? <ChevronDown size={14} aria-hidden /> : <ChevronRight size={14} aria-hidden />}
-          {changed > 0 ? STUDIO_FIELDS.advancedChanged(changed) : STUDIO_FIELDS.advanced}
-        </button>
+    <div data-advanced className="flex flex-col gap-5">
+      <div className="flex min-h-7 items-center gap-2">
+        <h3 className="min-w-0">
+          <button
+            type="button"
+            aria-expanded={open}
+            onClick={toggle}
+            className={`-ml-1 flex items-center gap-1 rounded-md px-1 py-0.5 text-section hover:text-fg ${FOCUS_RING}`}
+          >
+            <ChevronRight
+              size={16}
+              aria-hidden
+              className={clsx("shrink-0 text-fg-muted transition-transform", open && "rotate-90")}
+            />
+            {changed > 0 ? STUDIO_FIELDS.advancedChanged(changed) : STUDIO_FIELDS.advanced}
+          </button>
+        </h3>
         {open && (changed > 0 || draft.routing !== null) && (
-          <button type="button" onClick={resetAll} className={`${SMALL_BUTTON} ml-auto`}>
+          <button type="button" onClick={resetAll} className={`${GHOST_BUTTON} ml-auto`}>
+            <RotateCcw size={13} aria-hidden />
             {STUDIO_ADVANCED.resetAll}
           </button>
         )}

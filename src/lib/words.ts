@@ -1247,8 +1247,6 @@ export const STUDIO_FIELDS = {
   /** An unset field of a model on this computer. */
   automaticHere: "Automatic",
   reset: (label: string) => `Reset ${label}`,
-  moreShapes: "More shapes",
-  more: "More",
   /** An unset seed: Studio picks one for each run. */
   random: "Random",
   /** A chip with its time here: "2 s · about 3 min". */
@@ -1276,6 +1274,8 @@ export const STUDIO_FIELDS = {
   newSeed: "New seed",
   /** The seed's lock: it stays as it is for the next run. */
   keepIt: "Keep it",
+  /** A field's help button, whose tooltip holds the help (Task U8). */
+  about: (label: string) => `About ${label}`,
 } as const;
 
 /** The Advanced drawer (Task B6, design Wireframe 2): the chips under the prompt, Reset all, an
@@ -1475,6 +1475,16 @@ export const STUDIO_COMPOSER = {
   menuValue: (name: string, value: string) => `${name}: ${value}`,
   /** How many, on its trigger: "×2". */
   times: (n: string) => `×${n}`,
+} as const;
+
+/** Studio's side panel (0.2.0 Task U8, design 10.1): its title and its sections. Shape and How
+ *  many are never in it: they are the composer's. */
+export const STUDIO_PANEL = {
+  title: "Settings",
+  setups: "My setups",
+  advanced: "Advanced",
+  loras: "LoRAs",
+  files: "Files",
 } as const;
 
 /** Studio's top bar (0.2.0 Task U3). */
@@ -2181,6 +2191,42 @@ export const LORAS = {
   none: "No LoRAs yet",
   /** The heading over the LoRAs whose model type is not known: they are not judged. */
   unknownType: "LoRA for an unknown model type",
+  /** An attached LoRA's strength slider, named after it (Task U8). */
+  strengthOf: (name: string) => `Strength of ${name}`,
+  /** An attached LoRA's Remove button, named after it. */
+  removeOf: (name: string) => `Remove ${name}`,
+  getLoras: "Get LoRAs",
+  /** The composer's LoRAs button, with how many the draft attaches: "LoRAs (1)". */
+  lorasButton: (n: number) => (n > 0 ? `LoRAs (${n})` : "LoRAs"),
+  /** A LoRA whose file is gone: *Add* greys it out, and an attached one says so. */
+  missing: "Its file is gone from this computer.",
+} as const;
+
+/** The model's files in Studio's side panel (Task U8, design 7.5): *Change* for a part, with a
+ *  file on this computer, from disk or from a Hugging Face repository. *Change*, *Model type*
+ *  and "untested set-up" are `SETUP`'s. */
+export const FILES = {
+  installedFile: "A file on this computer",
+  diskFile: "A file from disk…",
+  hubFile: "A file from Hugging Face…",
+  repoLabel: "Repository",
+  needsSetup: "Choose the model type and its files to use this model.",
+  /** The Model type menu of a model that has none yet. */
+  chooseType: "Choose a type",
+  /** *A file on this computer* when no other installed model has a file for the part. */
+  noInstalled: "No other file on this computer for this part",
+  /** An installed file, by the model it belongs to: "from sd_xl_base_1.0". */
+  fromModel: (model: string) => `from ${model}`,
+  /** The Hugging Face dialog's title: "Decoder (VAE) from Hugging Face". */
+  hubTitle: (part: string) => `${part} from Hugging Face`,
+  repoHint: "owner/name",
+  showFiles: "Show its files",
+  readingRepo: "Reading the repository…",
+  noFiles: "This repository has no file Studio can use for this part.",
+  useFile: "Use this file",
+  cancel: "Cancel",
+  /** While the model's files are read (nothing is sent). */
+  reading: "Reading the model's files…",
 } as const;
 
 /** Adding a model or LoRA file from this computer (Phase U's dialog, Task U4). */
@@ -2338,7 +2384,7 @@ export const GET_MODELS = {
   /** Where a LoRA came from. */
   loraFrom: (repo: string) => `From ${repo}`,
   loraAdded: "Added from this computer",
-  loraMissing: "Its file is gone from this computer.",
+  loraMissing: LORAS.missing,
   deleteLoraTitle: (name: string) => `Delete ${name}?`,
   deleteLoraBody: "Its file is removed from this computer. Pictures and videos you made with it stay in the gallery.",
 } as const;

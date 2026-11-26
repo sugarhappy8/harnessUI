@@ -20,7 +20,7 @@ never committed: they go to `.cache/preview/` (ignored).
 | `vite.config.ts` | Vite with the app's plugins (React, Tailwind 4), **root = the repo**, port 5199 (`PREVIEW_PORT`). |
 | `index.html`, `main.tsx` | The page `/e2e/preview/index.html`: the app's own `main.tsx` with the mocks installed first. `?view=studio` opens Studio. |
 | `mock/ipc.ts` | The mocked backend: one `case` per Tauri command. Unknown commands answer `null`, are logged once (`[preview] unhandled command ...`) and collected in `window.__preview.unhandled`. |
-| `mock/data.ts` | The records, built from `src/components/studio/fixtures/models.ts`: its cloud models, installed models (a generic SDXL model, an untested one, one that needs set-up) and a LoRA; plus an SDXL inpainting model, a second LoRA, Hugging Face hits and repositories (a supported one, an OpenRAIL one, a Lumina 2 one that cannot run, a Wan 2.2 A14B one with 15 quantisations, a LoRA one), set-up plans, finished runs, one local run in progress, chats and a loaded chat model. |
+| `mock/data.ts` | The records, built from `src/components/studio/fixtures/models.ts`: its cloud models, installed models (a generic SDXL model, an untested one, one that needs set-up) and a LoRA; plus an SDXL inpainting model, a second and a third LoRA (one of an unknown model type), Hugging Face hits and repositories (a supported one, an OpenRAIL one, a Lumina 2 one that cannot run, a Wan 2.2 A14B one with 15 quantisations, a LoRA one), set-up plans, finished runs, one local run in progress, chats and a loaded chat model. |
 | `mock/pictures.ts` | Sample pictures, drawn on a canvas per output id (PNG full size, JPEG thumbnails). |
 | `shoot.mjs` | The Playwright script: each screen from a fresh page, driven by clicks and typing; measures each screen. |
 | `pairs.mjs` | One HTML page with each screen's before and after, side by side, in both themes. |
@@ -36,7 +36,7 @@ From the repo, with `node_modules` installed:
 
 ```bash
 npm run preview:serve &                       # http://127.0.0.1:5199/e2e/preview/index.html
-npm run preview:shoot                         # -> .cache/preview/after/ (70 PNGs) and a table
+npm run preview:shoot                         # -> .cache/preview/after/ (78 PNGs) and a table
 npm run preview:pairs -- .cache/preview/before .cache/preview/after   # -> .cache/preview/pairs.html
 pkill -f "e2e/preview/vite.config.ts"
 ```
@@ -82,7 +82,10 @@ open, listing a model downloading, a LoRA downloading and a model ready to use (
 `e4` the detail panel of an OpenRAIL model with two model types (SDXL) · `e5` a detail panel at
 900x650 ·
 `f` Advanced open (the side panel, from Settings) · `f2` the whole side panel, docked (tall
-1440 px viewport) · `g` gallery grid (top) · `g2` grid as it opens · `h` viewer · `i`, `i2`
+1440 px viewport) · `lr` (file `l-loras`) the side panel's LoRAs, opened from the composer's
+LoRAs button with two LoRAs added to SDXL, one of them for another model type (Task U8) · `mf`
+(file `m-model-files`) the side panel's Files for the untested model (flux-dev-copy, set up as
+SDXL) · `g` gallery grid (top) · `g2` grid as it opens · `h` viewer · `i`, `i2`
 Settings -> Studio · `j` main view at 900x650 · `k` Video tab · `o` the SDXL inpainting model
 chosen, with its Picture to change and Mask zones · `n` *Add a model file*, from the model
 sheet's foot, with the file read · `q` the model sheet at 900x650 (a full-height sheet) ·

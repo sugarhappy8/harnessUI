@@ -1,26 +1,39 @@
-import { useEffect, useId, useState } from "react";
-import { X } from "lucide-react";
-import { LOCAL_MARK, STUDIO_FIELDS, STUDIO_PICKER, STUDIO_PLACE, STUDIO_SETUPS } from "../../lib/words";
+import { useEffect, useId, useRef, useState } from "react";
+import { BookmarkPlus, X } from "lucide-react";
+import { LOCAL_MARK, STUDIO_FIELDS, STUDIO_PANEL, STUDIO_PICKER, STUDIO_PLACE, STUDIO_SETUPS } from "../../lib/words";
 import { toErrorInfo } from "../../store/app";
 import { draftModel, endpointOf, priceNotAsked, useStudio, type Draft, type StudioTab } from "../../store/studio";
 import { ErrorBanner } from "../ErrorBanner";
+import { SelectField } from "../ui/SelectField";
+import { FOCUS_RING } from "../ui/styles";
 import { AdvancedDrawer } from "./AdvancedDrawer";
 import { visibleFields } from "./canonical";
+import { LorasSection } from "./LorasSection";
+import { ModelFilesSection } from "./ModelFilesSection";
 import { localHint, priceHint } from "./sheetModels";
 import { clipAsks, SettingField } from "./SettingField";
-import { BOX, SMALL_BUTTON } from "./styles";
-import type { Setup } from "./types";
+import { BOX, GHOST_BUTTON, PANEL_BUTTON, PANEL_SECTION } from "./styles";
+import type { ParamSpec, Setup } from "./types";
 
-// Studio's right panel (0.1.0 Task B5; design Wireframe 1, local addendum "Right panel"): the
-// model's name with where it runs ("On this computer · <device>" or "via <endpoint> · Cloud")
-// and its price or time here, with *Get the price* (the model sheet, from the composer's model
-// chip, switches models since Task U4), the note of what changed, the model's simple fields in its own
-// order (a frame as a drop zone; reference pictures go in the tray), My setups and the Advanced
-// drawer with its change count (Task B6, AdvancedDrawer.tsx). Each field, in either layer, is
-// drawn by SettingField.tsx. On this computer, each Length and Resolution chip of a video shows
-// its own time here, asked here once per chip and size (nothing is sent).
+// Studio's side panel, Settings (0.1.0 Task B5; design Wireframe 1, local addendum "Right
+// panel"; rebuilt in 0.2.0 Task U8, design 10.1): the model's name with where it runs ("On this
+// computer · <device>" or "via <endpoint> · Cloud") and its price or time here, with *Get the
+// price* (the model sheet, from the composer's model chip, switches models since Task U4), the
+// note of what changed, and the model's other simple fields in its own order (Quality,
+// Resolution, a video's Length and Sound). Then its sections: My setups, Advanced (Task B6,
+// AdvancedDrawer.tsx), and for a model on this computer its LoRAs (LorasSection.tsx) and its
+// Files (ModelFilesSection.tsx). It never holds Shape or How many: they are the composer's
+// menus. Each field, in either layer, is drawn by SettingField.tsx with the app's styled
+// controls. Opened on a section (`settingsSection`: the composer's LoRAs button, *Set it up
+// yourself*), it scrolls to it. On this computer, each Length and Resolution chip of a video
+// shows its own time here, asked here once per chip and size (nothing is sent).
 
-/** The right panel of `tab`. */
+/** The composer's fields, never the panel's (design 10.1). */
+function composerField(spec: ParamSpec): boolean {
+  return spec.canonical === "shape" || spec.canonical === "count";
+}
+
+/** The side panel of `tab`. */
 export function SettingsPanel(props: { tab: StudioTab }) {
   const { tab } = props;
   const draft = useStudio((s) => s.drafts[tab]);
@@ -28,13 +41,20 @@ export function SettingsPanel(props: { tab: StudioTab }) {
   const local = useStudio((s) => s.local);
   const endpoint = useStudio((s) => endpointOf(s.drafts[tab].target, s.endpoints));
   const localFits = useStudio((s) => s.localFits);
+  const section = useStudio((s) => s.settingsSection);
   const dismissNote = useStudio((s) => s.dismissNote);
   const askLocalFit = useStudio((s) => s.askLocalFit);
   // Per tab, the setup its draft was set from: kept here, so it outlasts My setups being drawn
   // afresh for another tab (or while the tab has no model).
   const [fromByTab, setFromByTab] = useState<Partial<Record<StudioTab, SetupFrom>>>({});
+  const root = useRef<HTMLDivElement>(null);
   const here = draft.target === "thisComputer";
   const localVideo = here && model?.kind === "video";
+  // The model as this computer lists it: its LoRAs and its files.
+  const installed = here && model ? (local?.installed.find((m) => m.model.id === model.id) ?? null) : null;
+  const loras = installed !== null && installed.takesLoras && !installed.needsSetup;
+  // Which sections are drawn: one opened on appears with its model.
+  const drawn = `${model?.id ?? ""} ${loras} ${installed !== null}`;
 
   // A local clip's chips each ask for their time, once per size and length, whichever layer
   // draws their field (SettingField shows the answers): the store keeps the answers (and which
@@ -46,9 +66,15 @@ export function SettingsPanel(props: { tab: StudioTab }) {
     for (const ask of clipAsks(model, draft.values)) askLocalFit(model.id, ask.width, ask.height, ask.seconds);
   }, [model, localVideo, draft.values, localFits, askLocalFit]);
 
+  // Opened on a section: brought into view (also once it is drawn, as its model comes).
+  useEffect(() => {
+    if (section === null) return;
+    root.current?.querySelector(`[data-settings-section="${section}"]`)?.scrollIntoView?.({ block: "start" });
+  }, [section, drawn]);
+
   if (!model) {
     return (
-      <div data-settings-panel className="flex flex-col gap-4 p-3">
+      <div data-settings-panel className="flex flex-col gap-4">
         <p className="text-sm text-fg-muted">{STUDIO_PICKER.choose}</p>
       </div>
     );
@@ -61,32 +87,38 @@ export function SettingsPanel(props: { tab: StudioTab }) {
     : endpoint
       ? STUDIO_PLACE.cloud(endpoint.name)
       : null;
+  const fields = visibleFields(model.params, "simple", draft.values).filter(
+    (spec) => !composerField(spec) && spec.kind.type !== "images",
+  );
 
   return (
-    <div data-settings-panel className="flex flex-col gap-4 p-3">
-      <div className="flex flex-col gap-1">
-        <p className="text-sm font-medium">{model.displayName}</p>
-        {place && <p className="text-xs text-fg-muted">{place}</p>}
+    <div ref={root} data-settings-panel className="flex flex-col gap-5">
+      <div className="flex flex-col gap-0.5">
+        <p className="text-base leading-snug font-semibold">{model.displayName}</p>
+        {place && <p className="text-meta">{place}</p>}
         {/* Its state (a request on its way) belongs to the model it was for. */}
         <ChosenLine key={`${here ? "here" : JSON.stringify(draft.target)} ${model.id}`} tab={tab} />
       </div>
       {draft.note && (
-        <div role="status" className="flex items-start gap-1.5 rounded-lg bg-bg-muted px-2 py-1.5 text-xs">
+        <div role="status" className="flex items-start gap-1.5 rounded-lg bg-bg-muted px-3 py-2 text-sm">
           <p className="min-w-0 flex-1">{draft.note}</p>
           <button
             type="button"
             aria-label={STUDIO_FIELDS.putNoteAway}
-            title={STUDIO_FIELDS.putNoteAway}
             onClick={() => dismissNote(tab)}
-            className="rounded p-0.5 text-fg-muted hover:text-fg"
+            className={`rounded p-0.5 text-fg-muted hover:text-fg ${FOCUS_RING}`}
           >
-            <X size={12} aria-hidden />
+            <X size={14} aria-hidden />
           </button>
         </div>
       )}
-      {visibleFields(model.params, "simple", draft.values).map((spec) => (
-        <SettingField key={spec.key} tab={tab} spec={spec} />
-      ))}
+      {fields.length > 0 && (
+        <div className="flex flex-col gap-5">
+          {fields.map((spec) => (
+            <SettingField key={spec.key} tab={tab} spec={spec} />
+          ))}
+        </div>
+      )}
       {/* A name being typed, or a refusal, is for one tab: another tab starts afresh. The setup
           each tab was set from is kept by the panel, so coming back to a tab still names it. */}
       <MySetups
@@ -95,8 +127,20 @@ export function SettingsPanel(props: { tab: StudioTab }) {
         from={fromByTab[tab] ?? null}
         onFrom={(of, from) => setFromByTab((all) => ({ ...all, [of]: from }))}
       />
-      <AdvancedDrawer tab={tab} />
+      {/* A model with no type yet has no settings to show: its Files come first. */}
+      {!installed?.needsSetup && <AdvancedSection tab={tab} />}
+      {loras && installed && <LorasSection tab={tab} model={installed} />}
+      {installed && <ModelFilesSection key={installed.id} model={installed} />}
     </div>
+  );
+}
+
+/** Advanced, as a section of the panel: the drawer, whose toggle is its heading. */
+function AdvancedSection(props: { tab: StudioTab }) {
+  return (
+    <section aria-label={STUDIO_PANEL.advanced} data-settings-section="advanced" className={PANEL_SECTION}>
+      <AdvancedDrawer tab={props.tab} />
+    </section>
   );
 }
 
@@ -116,7 +160,7 @@ function ChosenLine(props: { tab: StudioTab }) {
   if (!model) return null;
   if (target === "thisComputer") {
     const installed = local?.installed.find((m) => m.model.id === model.id);
-    return installed ? <p className="text-xs text-fg-muted">{localHint(installed, tab)}</p> : null;
+    return installed ? <p className="text-meta">{localHint(installed, tab)}</p> : null;
   }
   if (!endpoint) return null;
 
@@ -128,15 +172,10 @@ function ChosenLine(props: { tab: StudioTab }) {
 
   return (
     <>
-      <p className="flex flex-wrap items-center gap-x-2 gap-y-1 text-xs text-fg-muted">
+      <p className="flex flex-wrap items-center gap-x-2 gap-y-1 text-meta">
         <span>{priceHint(model, endpoint.company)}</span>
         {priceNotAsked(model, endpoint.company) && (
-          <button
-            type="button"
-            disabled={busy}
-            onClick={getPrice}
-            className="rounded-md border border-border bg-bg px-1.5 py-0.5 text-fg hover:border-border-strong hover:bg-bg-muted disabled:opacity-60"
-          >
+          <button type="button" disabled={busy} onClick={getPrice} className={`${PANEL_BUTTON} px-2 py-0.5 text-xs text-fg`}>
             {STUDIO_PICKER.getPrice}
           </button>
         )}
@@ -153,11 +192,11 @@ const NO_SETUPS: Setup[] = [];
 type SetupFrom = { name: string; draft: Draft };
 
 /**
- * My setups: a menu of the tab's saved setups, which applies the one picked (or says why it
- * cannot), and *Save as setup…*, which keeps the model and every setting under a name. The menu
- * names the setup applied or saved last until the draft changes, then None. That setup is kept
- * by the panel (`from`, set through `onFrom` for the tab it was applied or saved on), so it is
- * still named after another tab was shown.
+ * My setups: a select of the tab's saved setups, which applies the one picked (or says why it
+ * cannot), and *Save as setup…*, which keeps the model and every setting under a name. The
+ * select names the setup applied or saved last until the draft changes, then None, its
+ * placeholder. That setup is kept by the panel (`from`, set through `onFrom` for the tab it was
+ * applied or saved on), so it is still named after another tab was shown.
  */
 function MySetups(props: {
   tab: StudioTab;
@@ -169,7 +208,7 @@ function MySetups(props: {
   const draft = useStudio((s) => s.drafts[tab]);
   const applySetup = useStudio((s) => s.applySetup);
   const saveSetup = useStudio((s) => s.saveSetup);
-  const menuId = useId();
+  const headingId = useId();
   // The name being typed (`null` while not saving), and why a pick or a save did not happen.
   const [name, setName] = useState<string | null>(null);
   const [message, setMessage] = useState<string | null>(null);
@@ -180,7 +219,7 @@ function MySetups(props: {
   const shown = from !== null && from.draft === draft ? setups.findIndex((s) => s.name === from.name) : -1;
 
   const pick = (value: string) => {
-    const setup = value === "" ? undefined : setups[Number(value)];
+    const setup = setups[Number(value)];
     if (!setup) return;
     const refused = applySetup(setup);
     setMessage(refused);
@@ -208,25 +247,19 @@ function MySetups(props: {
   };
 
   return (
-    <div className="flex flex-col gap-1.5">
-      <div className="flex items-center gap-2">
-        <label htmlFor={menuId} className="text-xs font-medium text-fg-muted">
-          {STUDIO_SETUPS.label}
-        </label>
-        <select
-          id={menuId}
-          value={shown < 0 ? "" : String(shown)}
-          onChange={(e) => pick(e.target.value)}
-          className={`${BOX} min-w-0 flex-1`}
-        >
-          <option value="">{STUDIO_SETUPS.none}</option>
-          {setups.map((setup, i) => (
-            <option key={`${i} ${setup.name}`} value={String(i)}>
-              {setup.name}
-            </option>
-          ))}
-        </select>
-      </div>
+    <section aria-labelledby={headingId} data-settings-section="setups" className={PANEL_SECTION}>
+      <h3 id={headingId} className="text-section">
+        {STUDIO_PANEL.setups}
+      </h3>
+      <SelectField
+        label={STUDIO_SETUPS.label}
+        labelledBy={headingId}
+        value={shown < 0 ? null : String(shown)}
+        placeholder={STUDIO_SETUPS.none}
+        options={setups.map((setup, i) => ({ value: String(i), label: setup.name }))}
+        onChange={pick}
+        disabled={setups.length === 0}
+      />
       {name === null ? (
         <button
           type="button"
@@ -234,8 +267,9 @@ function MySetups(props: {
             setName("");
             setMessage(null);
           }}
-          className={`${SMALL_BUTTON} self-start`}
+          className={`${PANEL_BUTTON} self-start`}
         >
+          <BookmarkPlus size={14} aria-hidden className="text-fg-muted" />
           {STUDIO_SETUPS.saveAs}
         </button>
       ) : (
@@ -252,13 +286,13 @@ function MySetups(props: {
                 void save();
               }
             }}
-            className={`${BOX} min-w-0 flex-1`}
+            className={`${BOX} min-w-0 flex-1 py-1.5`}
           />
           <button
             type="button"
             disabled={saving || name.trim() === ""}
             onClick={() => void save()}
-            className="rounded-md border border-border px-2 py-0.5 text-xs whitespace-nowrap hover:border-border-strong disabled:opacity-60"
+            className={`${PANEL_BUTTON} whitespace-nowrap`}
           >
             {STUDIO_SETUPS.save}
           </button>
@@ -269,14 +303,14 @@ function MySetups(props: {
               setMessage(null);
               setNextStep(null);
             }}
-            className={SMALL_BUTTON}
+            className={GHOST_BUTTON}
           >
             {STUDIO_SETUPS.cancel}
           </button>
         </div>
       )}
-      {message && <p className="text-xs text-warning">{message}</p>}
-      {message && nextStep && <p className="text-xs text-fg-muted">{nextStep}</p>}
-    </div>
+      {message && <p className="text-sm text-warning">{message}</p>}
+      {message && nextStep && <p className="text-sm text-fg-muted">{nextStep}</p>}
+    </section>
   );
 }

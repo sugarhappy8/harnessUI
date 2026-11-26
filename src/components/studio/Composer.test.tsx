@@ -185,6 +185,15 @@ async function show(
   vi.mocked(api.studioGetPrefs).mockResolvedValue(p);
   vi.mocked(api.studioSetPrefs).mockImplementation(async (patch) => ({ ...p, ...patch }));
   vi.mocked(api.studioUsage).mockResolvedValue(saved.usage ?? usage());
+  // The side panel's Files section reads a local model's files (Task U8; nothing is sent).
+  vi.mocked(api.studioModelFiles).mockImplementation(async (genModelId) => ({
+    genModelId,
+    recipe: null,
+    recipes: [],
+    slots: [],
+    untested: false,
+    canRun: true,
+  }));
   vi.mocked(api.studioLocalFit).mockResolvedValue(LOCAL.installed[1]!.fit);
   vi.mocked(api.studioEstimate).mockResolvedValue(saved.estimate ?? est());
   vi.mocked(api.studioStart).mockImplementation(async (req) => accepted(req));
