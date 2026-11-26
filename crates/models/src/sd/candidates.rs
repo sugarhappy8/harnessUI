@@ -14,6 +14,9 @@
 //! 6. under [`MIN_CANDIDATE_BYTES`] and no LoRA by name: not listed;
 //! 7. otherwise, a member of the group of its [`group_key`]: the quantisations of one model,
 //!    of which one header read labels all.
+//!
+//! The groups are read in the order [`read_order`] gives: one part of each model, then the
+//! second, then LoRAs, then what a read cannot make runnable.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::LazyLock;
@@ -23,6 +26,7 @@ use regex::Regex;
 use crate::files::{RepoFile, quant_span};
 use crate::gen_catalog::GenRole;
 use crate::sd::index::PICKLE_EXTENSIONS;
+use crate::sd::matching::{tokens, without_part_words};
 use crate::sd::names::{
     DiffusersFolder, companion_of, diffusers_folder, is_weights, looks_like_lora,
 };
@@ -49,8 +53,8 @@ pub struct Candidates {
     /// The SD 1.x, 2.x or XL diffusers folder, read as one model: its UNet and text
     /// encoders.
     pub folder: Option<DiffusersFolder>,
-    /// The groups to read, sorted by key: the first [`crate::sd::remote::MAX_FILES_PER_REPO`]
-    /// are read.
+    /// The groups to read, in the order the budget is spent ([`read_order`]): the first
+    /// [`crate::sd::remote::MAX_FILES_PER_REPO`] are read.
     pub groups: Vec<QuantGroup>,
     /// The labels the names decide, by path: never read, except a split file's first shard
     /// for its version.
@@ -69,13 +73,79 @@ static SHARD: LazyLock<Regex> = LazyLock::new(|| {
         .expect("the shard pattern compiles")
 });
 
-/// `path` lower-cased, without its quantisation label ([`crate::files::quant_label`]): the
-/// key the quantisations of one file share (`HighNoise/Wan-HighNoise-Q4_K_M.gguf` →
-/// `highnoise/wan-highnoise-.gguf`).
+/// A picture model's precision word in a file name, which the chat side's quantisation
+/// label does not know: `fp8`, `fp8_e4m3fn`, `fp8_e5m2`, each with or without `_scaled`,
+/// and `int8` or `int8_convrot` (Comfy-Org's and Kijai's safetensors variants).
+static PRECISION: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(
+        r"(?i)(?:^|[-._])(?P<p>fp8(?:[-_]e4m3fn|[-_]e5m2)?(?:[-_]scaled)?|int8(?:[-_]convrot)?)(?:[-._]|$)",
+    )
+    .expect("the precision pattern compiles")
+});
+
+/// `path` lower-cased, without its quantisation label ([`crate::files::quant_label`]) or a
+/// picture model's precision word ([`PRECISION`]): the key the quantisations of one file
+/// share (`HighNoise/Wan-HighNoise-Q4_K_M.gguf` → `highnoise/wan-highnoise-.gguf`;
+/// `wan2.2_t2v_high_noise_14B_fp16.safetensors` and its `_fp8_scaled` file →
+/// `wan2.2_t2v_high_noise_14b_.safetensors`). Their tensor names are the same, so one read
+/// labels them all.
 pub fn group_key(path: &str) -> String {
-    match quant_span(path) {
-        Some((start, end)) => format!("{}{}", &path[..start], &path[end..]).to_lowercase(),
-        None => path.to_lowercase(),
+    let key = match quant_span(path) {
+        Some((start, end)) => format!("{}{}", &path[..start], &path[end..]),
+        None => path.to_string(),
+    };
+    let at = key.rfind('/').map_or(0, |i| i + 1);
+    let name = &key[at..];
+    match PRECISION
+        .captures_iter(name)
+        .last()
+        .and_then(|c| c.name("p"))
+    {
+        Some(m) => format!("{}{}{}", &key[..at], &name[..m.start()], &name[m.end()..]),
+        None => key.clone(),
+    }
+    .to_lowercase()
+}
+
+/// The words of a name the matching table refuses whatever its header says: VACE, which
+/// needs control frames, and S2V, which needs audio (`matching::OUT_OF_SCOPE`).
+const REFUSED_WORDS: [&str; 2] = ["vace", "s2v"];
+
+/// The order the read budget is spent in (final review, area 1, I-2), as `(tier, round)`:
+/// - tier 0: model groups; tier 1: LoRA-named groups; tier 2: what a read cannot make
+///   runnable: names the matching table refuses ([`REFUSED_WORDS`]) and split files, read
+///   only for their version;
+/// - within a tier, round 0 holds the first group of each model, a high/low pair's halves
+///   being one model ([`without_part_words`]); round 1 the second; and so on.
+///
+/// So every model is read once before any is read twice, and every model before any LoRA.
+fn read_order(groups: &mut [QuantGroup], splits: &BTreeSet<String>) {
+    let tier = |g: &QuantGroup| {
+        let words = tokens(&g.key);
+        if splits.contains(&g.key) || words.iter().any(|w| REFUSED_WORDS.contains(&w.as_str())) {
+            2
+        } else if looks_like_lora(&g.key) {
+            1
+        } else {
+            0
+        }
+    };
+    groups.sort_by(|a, b| a.key.cmp(&b.key));
+    let mut seen: BTreeMap<(u8, Vec<String>), usize> = BTreeMap::new();
+    let mut ranked: Vec<((u8, usize), QuantGroup)> = groups
+        .iter()
+        .map(|g| {
+            let t = tier(g);
+            let round = seen.entry((t, without_part_words(&g.key))).or_insert(0);
+            let rank = (t, *round);
+            *round += 1;
+            (rank, g.clone())
+        })
+        .collect();
+    // Stable: within a rank, by key.
+    ranked.sort_by_key(|(rank, _)| *rank);
+    for (slot, (_, g)) in groups.iter_mut().zip(ranked) {
+        *slot = g;
     }
 }
 
@@ -243,9 +313,11 @@ pub fn candidates(files: &[RepoFile]) -> Candidates {
             }
         })
         .collect();
+    let mut split_keys = BTreeSet::new();
     for (base, mut shards) in splits {
         shards.sort_by(|a, b| a.path.cmp(&b.path));
         let index = format!("{base}.index.json");
+        split_keys.insert(index.to_lowercase());
         let mut members: Vec<String> = shards.iter().map(|f| f.path.clone()).collect();
         if indexes.contains(index.as_str()) {
             members.push(index.clone());
@@ -262,7 +334,7 @@ pub fn candidates(files: &[RepoFile]) -> Candidates {
             });
         }
     }
-    out.sort_by(|a, b| a.key.cmp(&b.key));
+    read_order(&mut out, &split_keys);
     Candidates {
         folder,
         groups: out,
@@ -331,10 +403,11 @@ mod tests {
                 version: None
             }
         );
-        assert_eq!(reads(&c), ["lora/style.safetensors", "m-Q4_0.gguf"]);
+        // The model before the LoRA (final review, area 1, I-2).
+        assert_eq!(reads(&c), ["m-Q4_0.gguf", "lora/style.safetensors"]);
         // A small file that is no LoRA is not listed at all.
         assert!(!c.by_name.contains_key("tiny.safetensors"));
-        assert_eq!(c.groups[1].members, ["m-Q4_0.gguf", "m-Q8_0.gguf"]);
+        assert_eq!(c.groups[0].members, ["m-Q4_0.gguf", "m-Q8_0.gguf"]);
         assert!(c.folder.is_none());
     }
 
@@ -729,6 +802,151 @@ mod tests {
                 }
             ]),
             Verdict::Unknown
+        );
+    }
+
+    // ---- Final review, area 1, I-2: how the read budget is spent -------------------------
+
+    const SPLIT: &str = "split_files/diffusion_models/";
+
+    /// The files whose groups the first [`MAX_FILES_PER_REPO`] reads label.
+    fn within_budget(c: &Candidates) -> BTreeSet<&str> {
+        c.groups
+            .iter()
+            .take(crate::sd::remote::MAX_FILES_PER_REPO)
+            .flat_map(|g| g.members.iter().map(String::as_str))
+            .collect()
+    }
+
+    #[test]
+    fn fp8_and_int8_variants_are_quantisations_of_their_model() {
+        for (a, b) in [
+            ("m_14B_fp16.safetensors", "m_14B_fp8_scaled.safetensors"),
+            ("m_14B_bf16.safetensors", "m_14B_int8_convrot.safetensors"),
+            ("m_fp16.safetensors", "m_fp8_e4m3fn.safetensors"),
+            ("m_fp16.safetensors", "m_fp8_e4m3fn_scaled.safetensors"),
+            ("m-fp16.safetensors", "m-fp8-e5m2.safetensors"),
+            ("dir/M.FP8.safetensors", "dir/M.BF16.safetensors"),
+            ("m_int8.safetensors", "m_fp16.safetensors"),
+        ] {
+            assert_eq!(group_key(a), group_key(b), "{a} and {b}");
+        }
+        // Only a whole word: a name that merely holds the letters keeps them.
+        assert_ne!(
+            group_key("fp8model.safetensors"),
+            group_key("model.safetensors")
+        );
+        assert_ne!(
+            group_key("a/fp8/m.safetensors"),
+            group_key("a/m.safetensors")
+        );
+        // The chat side's quantisation label is unchanged.
+        assert_eq!(crate::files::quant_label("m_fp8_scaled.safetensors"), None);
+    }
+
+    #[test]
+    fn comfys_wan_2_2_repo_reads_its_t2v_ti2v_and_lora_files_within_the_cap() {
+        let c = candidates(&crate::sd::testing::comfy_wan22_listing());
+        let read = within_budget(&c);
+        let must = [
+            "wan2.2_t2v_high_noise_14B_fp16.safetensors",
+            "wan2.2_t2v_high_noise_14B_fp8_scaled.safetensors",
+            "wan2.2_t2v_low_noise_14B_fp16.safetensors",
+            "wan2.2_t2v_low_noise_14B_fp8_scaled.safetensors",
+            "wan2.2_ti2v_5B_fp16.safetensors",
+            "wan2.2_i2v_high_noise_14B_fp16.safetensors",
+            "wan2.2_i2v_low_noise_14B_fp8_scaled.safetensors",
+        ];
+        for name in must {
+            assert!(
+                read.contains(format!("{SPLIT}{name}").as_str()),
+                "{name} is read"
+            );
+        }
+        for lora in [
+            "chronoedit_distill_lora.safetensors",
+            "wan2.2_animate_14B_relight_lora_bf16.safetensors",
+            "wan2.2_i2v_lightx2v_4steps_lora_v1_high_noise.safetensors",
+            "wan2.2_i2v_lightx2v_4steps_lora_v1_low_noise.safetensors",
+            "wan2.2_t2v_lightx2v_4steps_lora_v1.1_high_noise.safetensors",
+            "wan2.2_t2v_lightx2v_4steps_lora_v1.1_low_noise.safetensors",
+        ] {
+            assert!(
+                read.contains(format!("split_files/loras/{lora}").as_str()),
+                "{lora} is read"
+            );
+        }
+        // One read for the fp16 and fp8 files of a part, of the smaller.
+        let t2v_high = c
+            .groups
+            .iter()
+            .find(|g| {
+                g.members
+                    .iter()
+                    .any(|m| m.ends_with("t2v_high_noise_14B_fp16.safetensors"))
+            })
+            .unwrap();
+        assert_eq!(
+            t2v_high.members,
+            [
+                format!("{SPLIT}wan2.2_t2v_high_noise_14B_fp16.safetensors"),
+                format!("{SPLIT}wan2.2_t2v_high_noise_14B_fp8_scaled.safetensors")
+            ]
+        );
+        assert_eq!(
+            t2v_high.read,
+            format!("{SPLIT}wan2.2_t2v_high_noise_14B_fp8_scaled.safetensors")
+        );
+    }
+
+    #[test]
+    fn the_budget_reads_one_part_of_each_model_before_a_second_and_loras_after_models() {
+        let c = candidates(&crate::sd::testing::comfy_wan22_listing());
+        let order: Vec<&str> = c.groups.iter().map(|g| g.read.as_str()).collect();
+        let at = |needle: &str| {
+            order
+                .iter()
+                .position(|p| p.contains(needle))
+                .unwrap_or_else(|| panic!("{needle} in {order:#?}"))
+        };
+        // The first part of every model comes before the second part of any.
+        let firsts = [
+            "t2v_high",
+            "i2v_high",
+            "fun_camera_high",
+            "fun_control_high",
+            "ti2v_5B",
+        ];
+        let seconds = ["t2v_low", "i2v_low", "fun_camera_low", "fun_control_low"];
+        let last_first = firsts.iter().map(|n| at(n)).max().unwrap();
+        let first_second = seconds.iter().map(|n| at(n)).min().unwrap();
+        assert!(last_first < first_second, "{order:#?}");
+        // LoRAs after every model file Studio may run, and before what it refuses by name.
+        let loras = order.iter().filter(|p| p.contains("/loras/")).count();
+        assert_eq!(loras, 6);
+        let first_lora = order.iter().position(|p| p.contains("/loras/")).unwrap();
+        assert!(seconds.iter().all(|n| at(n) < first_lora), "{order:#?}");
+        assert!(
+            at("fun_vace") > first_lora && at("s2v") > first_lora,
+            "{order:#?}"
+        );
+    }
+
+    #[test]
+    fn a_small_repo_still_reads_every_group() {
+        let c = candidates(&[
+            f("b-model.safetensors", 7e9),
+            f("a-lora.safetensors", 2e8),
+            f("c_vace_model.safetensors", 7e9),
+        ]);
+        assert_eq!(c.groups.len(), 3);
+        assert_eq!(
+            reads(&c),
+            [
+                "b-model.safetensors",
+                "a-lora.safetensors",
+                "c_vace_model.safetensors"
+            ]
         );
     }
 }

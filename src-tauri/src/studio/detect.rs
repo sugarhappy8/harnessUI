@@ -122,8 +122,9 @@ impl DetectService {
     }
 
     /// Reads `detail`'s repo: its diffusers folder, if any, then the first groups of
-    /// quantisations up to [`MAX_FILES_PER_REPO`] files in all, [`PARALLEL_READS`] at a
-    /// time, each through the cache first. Each member of a group gets the label of the
+    /// quantisations, in the order the candidates give (models, then LoRAs, then names a read
+    /// cannot make runnable), up to [`MAX_FILES_PER_REPO`] files in all, [`PARALLEL_READS`]
+    /// at a time, each through the cache first. Each member of a group gets the label of the
     /// file read, with its own name's part. A gated repo and no token reads nothing: every
     /// file that would be read is `NotRead { NeedsToken }`.
     pub async fn read_repo(&self, hf: &HfClient, detail: &RepoDetail) -> RepoReading {
@@ -726,6 +727,77 @@ mod tests {
                 .count(),
             6
         );
+    }
+
+    /// Comfy-Org/Wan-2.2 as recorded (final review, area 1, I-2): its T2V A14B pair, its
+    /// TI2V-5B and its LoRAs are read within the 24-file budget, each fp8 file labelled by
+    /// its fp16 file's group, and nothing is left "not read" for the budget.
+    #[tokio::test]
+    async fn comfys_wan_2_2_repo_reads_its_t2v_ti2v_and_loras_within_the_budget() {
+        let mut repo = TestRepo::new("Comfy-Org/Wan-2.2");
+        repo.detail.files = models::sd::testing::comfy_wan22_listing();
+        let header = |path: &str| {
+            if path.contains("/loras/") {
+                Some("flux-lora-realism")
+            } else if path.contains("wan2.2_t2v_high_noise") {
+                Some("wan22-t2v-a14b-high")
+            } else if path.contains("wan2.2_t2v_low_noise") {
+                Some("wan22-t2v-a14b-low")
+            } else if path.contains("wan2.2_ti2v_5B") {
+                Some("wan22-ti2v-5b")
+            } else {
+                None
+            }
+        };
+        for f in &repo.detail.files {
+            if let Some(name) = header(&f.path) {
+                repo.served
+                    .insert(f.path.clone(), Served::Bytes(file_of(&fixture(name))));
+            }
+        }
+        let s = hub_server_with(repo).await;
+        let r = DetectService::new()
+            .read_repo(&s.client(), &s.detail())
+            .await;
+        let d = "split_files/diffusion_models/";
+        for (file, part) in [
+            ("wan2.2_t2v_high_noise_14B_fp16", NoisePart::High),
+            ("wan2.2_t2v_high_noise_14B_fp8_scaled", NoisePart::High),
+            ("wan2.2_t2v_low_noise_14B_fp16", NoisePart::Low),
+            ("wan2.2_t2v_low_noise_14B_fp8_scaled", NoisePart::Low),
+        ] {
+            assert!(
+                matches!(&r.labels[&format!("{d}{file}.safetensors")],
+                FileLabel::Works { recipe, part: Some(p), .. } if recipe == "wan22-t2v" && *p == part),
+                "{file}: {:?}",
+                r.labels[&format!("{d}{file}.safetensors")]
+            );
+        }
+        assert!(matches!(
+            &r.labels[&format!("{d}wan2.2_ti2v_5B_fp16.safetensors")],
+            FileLabel::Works { recipe, .. } if recipe == "wan22-ti2v-5b"
+        ));
+        let loras: Vec<_> = r
+            .labels
+            .iter()
+            .filter(|(path, _)| path.contains("/loras/"))
+            .collect();
+        assert_eq!(loras.len(), 6);
+        assert!(
+            loras
+                .iter()
+                .all(|(_, l)| matches!(l, FileLabel::Lora { .. })),
+            "{loras:?}"
+        );
+        assert!(
+            !r.labels.values().any(|l| *l
+                == FileLabel::NotRead {
+                    reason: NotRead::Budget
+                }),
+            "{:?}",
+            r.labels
+        );
+        assert!(s.header_requests() <= MAX_FILES_PER_REPO);
     }
 
     #[tokio::test]

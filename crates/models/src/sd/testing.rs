@@ -11,6 +11,26 @@ pub fn safetensors(header: &Value) -> Vec<u8> {
     out
 }
 
+/// Comfy-Org/Wan-2.2's listing as recorded (`tests/fixtures/hf/tree-comfy-wan-2.2.json`):
+/// every file, with its LFS SHA-256 when it has one.
+///
+/// # Panics
+/// When the fixture does not parse.
+pub fn comfy_wan22_listing() -> Vec<crate::files::RepoFile> {
+    let tree: Vec<Value> = serde_json::from_str(include_str!(
+        "../../tests/fixtures/hf/tree-comfy-wan-2.2.json"
+    ))
+    .expect("the recorded listing parses");
+    tree.iter()
+        .filter(|e| e["type"] == "file")
+        .map(|e| crate::files::RepoFile {
+            path: e["path"].as_str().expect("a path").to_string(),
+            size: e["size"].as_u64().expect("a size"),
+            sha256: e["lfs"]["oid"].as_str().map(str::to_string),
+        })
+        .collect()
+}
+
 /// A one-tensor header whose JSON is exactly `json_bytes` bytes, padded in `__metadata__`.
 ///
 /// # Panics

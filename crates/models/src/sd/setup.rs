@@ -29,7 +29,7 @@ use crate::sd::FileFacts;
 use crate::sd::companions::{Companion, CompanionTable};
 use crate::sd::detect::SdVersion;
 use crate::sd::inspect::{FileKind, Layout};
-use crate::sd::matching::{NoisePart, noise_part, recipes_for, tokens};
+use crate::sd::matching::{NoisePart, noise_part, recipes_for, without_part_words};
 use crate::sd::names::{
     DiffusersFolder, FolderFile, companion_of, is_shard, is_weights, looks_like_lora,
 };
@@ -820,15 +820,6 @@ fn companion_file(c: &Companion) -> PlannedFile {
         licence: LicenceRef::Companion(c.license.clone()),
         save_as: None,
     }
-}
-
-/// A path's words without the noise-part words, to tell a pair's two halves.
-fn without_part_words(path: &str) -> Vec<String> {
-    const PART_WORDS: [&str; 5] = ["high", "low", "noise", "highnoise", "lownoise"];
-    tokens(path)
-        .into_iter()
-        .filter(|w| !PART_WORDS.contains(&w.as_str()))
-        .collect()
 }
 
 #[cfg(test)]

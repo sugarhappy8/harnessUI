@@ -563,6 +563,15 @@ pub fn noise_part(name: &str) -> Option<NoisePart> {
     Name::new(name).part()
 }
 
+/// A path's words without the noise-part words, to tell a pair's two halves.
+pub(crate) fn without_part_words(path: &str) -> Vec<String> {
+    const PART_WORDS: [&str; 5] = ["high", "low", "noise", "highnoise", "lownoise"];
+    tokens(path)
+        .into_iter()
+        .filter(|w| !PART_WORDS.contains(&w.as_str()))
+        .collect()
+}
+
 // ---- Matching ------------------------------------------------------------------------
 
 struct File<'a> {
