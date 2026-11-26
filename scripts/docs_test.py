@@ -474,5 +474,106 @@ class StaleFrom0_1_xDocs(unittest.TestCase):
         self.assertIn("`jiff`", "\n".join(section("## 18. Dependencies")))
 
 
+class Studio0_2_0Docs(unittest.TestCase):
+    """0.2.0: any model the engine can run (7.10), what is read before a download, and the
+    fewer blocks, checked against the code and the lock they describe."""
+
+    def test_7_10_names_the_caps_the_code_keeps(self):
+        index = read("crates/models/src/sd/index.rs")
+        self.assertRegex(index, r"pub const SAFETENSORS_HEADER_CAP: u64 = 100 \* 1024 \* 1024;")
+        self.assertRegex(index, r"pub const GGUF_HEADER_CAP: u64 = 64 \* 1024 \* 1024;")
+        self.assertRegex(read("crates/models/src/sd/remote.rs"), r"pub const MAX_FILES_PER_REPO: usize = 24;")
+        self.assertRegex(read("src-tauri/src/studio/detect.rs"), r"pub const CACHE_ENTRIES: usize = 512;")
+        text = "\n".join(section("### 7.10 Any model the engine can run (0.2.0)"))
+        for words in ("100 MiB", "64 MiB", "24 files", "512 entries", "Range"):
+            self.assertIn(words, text)
+
+    def test_7_10_names_the_recipes_and_their_commit(self):
+        lock = json.loads(read("sd.lock.json"))["sd_cpp"]
+        text = "\n".join(section("### 7.10 Any model the engine can run (0.2.0)"))
+        self.assertIn("`catalog/sd-recipes.json`", text)
+        self.assertIn("`scripts/vendor_sd_recipes.py`", text)
+        self.assertIn(f"`{lock['tag'].rsplit('-', 1)[1]}`", text)
+        vendored = json.loads(read("catalog/sd-recipes.json"))
+        self.assertEqual(vendored["sdCommit"], lock["commit"])
+        # 94 run in Studio and 18 do not: the engine's 112.
+        self.assertEqual(len(vendored["recipes"]), 112)
+        for words in ("94 of the engine's 112 recipes", "the other 18"):
+            self.assertIn(words, text)
+
+    def test_7_10_says_what_the_code_does_with_a_file(self):
+        text = "\n".join(section("### 7.10 Any model the engine can run (0.2.0)"))
+        for words in ("`--lora-model-dir`", "`<models>/@loras`", "`<lora:NAME:W>`", "`--prompt-file`", "`--vae-tiling`",
+                      "`--offload-to-cpu`", "`@imported`", "Set it up yourself", "untested set-up",
+                      "Lumina 2", "LTX-Video 0.9", "HunyuanVideo", "never parsed"):
+            self.assertIn(words, text)
+        lora = read("crates/runtime/src/sd/lora_tags.rs")
+        self.assertRegex(lora, r"pub const MAX_LORAS: usize = 8;")
+        self.assertRegex(lora, r"LORA_WEIGHT_RANGE: RangeInclusive<f32> = -1\.0\.\.=2\.0;")
+
+    def test_7_9_says_a_fit_only_warns(self):
+        local = "\n".join(section("### 7.9 Studio on this computer (0.1.0)"))
+        self.assertIn("May not fit", local)
+        self.assertNotIn("is refused unless it is a picture", local)
+        self.assertNotIn("Not for this computer", local)
+        self.assertNotIn("family_from_tensors", local)
+
+    def test_13_6_says_when_studio_reads_file_headers(self):
+        row = paragraph(section("### 13.6 Network use"), "| Studio on this computer |")
+        for words in ("Range", "when a result opens", "each time Get models opens", "Popular"):
+            self.assertIn(words, row)
+
+    def test_13_6_qualifies_what_is_sent_with_nothing_clicked(self):
+        lines = section("### 13.6 Network use")
+        quiet = paragraph(lines, "- **No telemetry, no crash upload, no account.**")
+        for words in ("resume_interrupted", "cloud video"):
+            self.assertIn(words, quiet)
+        studio = paragraph(lines, "- **Studio (0.1.0).**")
+        self.assertIn("`resume_interrupted`", studio)
+        self.assertIn("Get models", studio)
+        self.assertNotIn("Opening Studio, Get local models or Settings", studio)
+
+    def test_13_6_names_every_settings_page_the_offline_test_visits(self):
+        self.assertIn('"Search"', read("e2e/m8_offline.py"))
+
+    def test_13_1_says_headers_are_untrusted_and_pickles_never_parsed(self):
+        lines = section("### 13.1 Trust boundaries")
+        row = paragraph(lines, "| Model file headers (0.2.0)")
+        for words in ("Untrusted input", "never executed", "100 MiB", "never parsed"):
+            self.assertIn(words, row)
+
+    def test_16_and_17_name_the_detection_fixtures_and_the_capture_script(self):
+        for heading in ("## 16. Packaging, CI and release", "## 17. Testing"):
+            text = "\n".join(section(heading))
+            self.assertIn("`scripts/capture_sd_fixtures.py`", text, heading)
+            self.assertIn("not run in CI", text, heading)
+        self.assertIn("`scripts/vendor_sd_recipes_test.py`", "\n".join(section("## 16. Packaging, CI and release")))
+        self.assertIn("scripts/vendor_sd_recipes_test.py", read(".github/workflows/ci.yml"))
+
+    def test_the_llama_server_signing_claim_waits_for_the_developer_id(self):
+        bullet = paragraph(section("### 7.1 Pinning and layout"), "- **macOS.**")
+        self.assertIn("once the Apple Developer ID exists", bullet)
+
+    def test_security_names_the_header_caps_and_the_prompt_bound(self):
+        text = read("SECURITY.md")
+        for words in ("100 MiB", "64 MiB", "24 files", "1 MiB", "16,384"):
+            self.assertIn(words, text)
+        self.assertNotIn("after its licence is shown", text)
+        folder = doc_paragraph("SECURITY.md", "Studio's LoRAs are kept")
+        for words in ("@loras", "never run"):
+            self.assertIn(words, folder)
+
+    def test_security_says_a_click_is_ignored_again_when_the_window_returns(self):
+        cards = doc_paragraph("SECURITY.md", "Cards are built to be read safely")
+        self.assertIn("window", cards)
+
+    def test_the_readme_says_any_model_the_engine_runs(self):
+        studio = doc_paragraph("README.md", "Studio makes pictures and short videos")
+        for words in ("LoRA", "Hugging Face", "Add a model file"):
+            self.assertIn(words, studio)
+        self.assertLess(studio.index("on this computer"), studio.index("OpenRouter"))
+        self.assertNotIn("Not for this computer", read("README.md"))
+
+
 if __name__ == "__main__":
     unittest.main()

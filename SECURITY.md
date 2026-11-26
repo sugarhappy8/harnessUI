@@ -94,7 +94,7 @@ marked always-ask.
 **Cards are built to be read safely.** Every string on a card was chosen by a model or a
 server. Control, right-to-left-override and zero-width characters are shown as visible
 escapes. *Allow* never has default focus or an Enter binding, and clicks are ignored for a
-short moment after a card appears.
+short moment after a card appears and again each time the app's window comes back on screen.
 
 ## Allow all and Full access
 
@@ -495,8 +495,11 @@ build machine, and its Windows and macOS jobs have not run at all.
   uploads nothing.) With no model downloaded and nothing clicked, the app makes one kind of
   network request: from 0.0.8, the check for updates, shortly after it starts and every 6 hours,
   to github.com (*Settings → General → Updates* turns it off). It carries nothing about you or
-  your chats. A newer version it finds is downloaded and its signature checked against the key
-  built into the app, and it is installed only when you click *Restart and update*. Every network use is listed in
+  your chats. The only other thing that can start by itself is work you already started: a
+  download you did not pause resumes when the app starts, and a cloud video still waiting is
+  checked again, with its endpoint's key sent to that endpoint only. A newer version it finds
+  is downloaded and its signature checked against the key built into the app, and it is
+  installed only when you click *Restart and update*. Every network use is listed in
   ARCHITECTURE.md 13.6. 0.0.6 adds two of its own, both only when you ask: Compare looks
   up the models you add on Hugging Face, and Settings → Reverse engineering downloads what
   you click. 0.0.7 adds one more, also only when you ask: Models → Installed offers a
@@ -545,12 +548,15 @@ build machine, and its Windows and macOS jobs have not run at all.
   reached as `localhost`, so no name server decides where it goes); anyone who can watch
   that network can read it.
 - **Studio (0.1.0).** A local Studio run sends nothing: the prompt, the pictures you add
-  and what it makes stay on this computer, and no company sees them. Get local models talks
-  to Hugging Face (`huggingface.co`, for search, model listings and model files, with the
-  token you already saved for a gated model, sent only to huggingface.co) and the Windows
-  Studio engine comes from GitHub, each only when you click: Search, opening a result, or
-  Download. Opening Studio, Get local models or Settings → Studio sends nothing. A cloud
-  run sends the prompt and the pictures you add to the company you picked, `openrouter.ai`
+  and what it makes stay on this computer, and no company sees them. Get models talks
+  to Hugging Face (`huggingface.co`, for search, model listings, the headers of model files
+  and the model files themselves, with the token you already saved for a gated model, sent
+  only to huggingface.co) and the Windows Studio engine comes from GitHub, each only when you
+  click: Search, opening a result, or Download. Opening Get models also asks Hugging Face for
+  its list of popular models, once for the kind you are looking at (Pictures, Video or LoRAs)
+  and once for each other kind you switch to, each time Get models opens.
+  Opening Studio or Settings → Studio sends nothing. A cloud run sends the prompt and the
+  pictures you add to the company you picked, `openrouter.ai`
   or `api.openai.com`, with that endpoint's key, which you saved in Settings → Endpoints;
   OpenRouter passes it on to the company that runs the model, whose own terms say what it
   keeps. A cloud result comes back from that company, or from the file host it points to,
@@ -580,6 +586,8 @@ build machine, and its Windows and macOS jobs have not run at all.
 
 ## Updates
 
+- Installing an update stops a picture or video being made on this computer, and the update
+  box says so before you click. The chat model is loaded again only if the install fails.
 - From 0.0.8 a release build asks github.com for a newer version shortly after it starts and
   every 6 hours (*Settings → General → Updates* turns that off). As with any visit to a
   website, GitHub sees the computer's IP address with each check and each download; nothing
@@ -652,9 +660,8 @@ Studio's local pictures and videos are made by one more program, the Studio engi
 (stable-diffusion.cpp's `sd-cli`), at one pinned build: the Windows pack pinned by size and
 SHA-256, the Mac build by commit with its three submodules, built in CI and, once the Apple
 Developer ID exists, signed and notarized with the app (README, Signing; until then it is
-ad-hoc signed like the app). It is not part of the Windows installer: it downloads with your first local model,
-from GitHub only, after its licence is shown, into its own folder, never the chat model
-runner's.
+ad-hoc signed like the app). It is not part of the Windows installer: it downloads with your
+first local model, from GitHub only, into its own folder, never the chat model runner's.
 
 - One engine process runs per job, through the same spawn helper as llama-server: its own
   process tree, which Stop kills whole, and almost none of your environment (no proxy
@@ -671,6 +678,37 @@ runner's.
   tensor table, after download and before every run, so a file whose name lies is never
   run. As with llama-server, a checksum proves where a file came from, not that the engine
   parses it safely.
+
+## Reading and adding model files (0.2.0)
+
+Studio runs any Hugging Face picture or video model its engine can run, and LoRAs. To tell
+what a file is, it reads the file's header (its list of tensor names and shapes), never the
+weights, and never runs anything in it.
+
+- A file on Hugging Face is read only when you open its repository or a result, with HTTP
+  Range requests on the address pinned to that revision. The token you saved for gated
+  repositories goes only to huggingface.co, never to the file host it redirects to, and a
+  redirect to any other site is refused. Reads are capped: a safetensors header of at most
+  100 MiB, at most 64 MiB of GGUF metadata and tensor table, and at most 24 files for each
+  repository you open. A larger header is refused, not read.
+- What a header says is untrusted. It is read as plain bytes and text, never executed and
+  never used as a file name or path. `.ckpt`, `.pt`, `.pth` and `.bin` files can run code
+  when they are loaded, so they are never opened, not even to read a header: Studio says
+  "Studio can't read .ckpt files".
+- Every file Studio downloads is pinned to its repository, revision, size and SHA-256 and
+  checked against the SHA-256 Hugging Face publishes. A file that publishes none is never
+  offered for a set-up.
+- *Add a model file* reads a file on this computer the same way. You choose whether Studio
+  copies it into its own models folder (`@imported`) or uses it where it is. It is never
+  moved, and it is never deleted unless it is Studio's own copy: Studio deletes nothing
+  outside its models folder.
+- Studio's LoRAs are kept in one folder, `@loras`, in the models folder, and the engine reads
+  them by their names in that folder. Typed text never reaches the engine as a tag: the
+  `<lora:...>` and `<image:...>` markers in a prompt are removed, and Studio writes the tags
+  of the LoRAs you attached. A LoRA's file is never run.
+- *Set it up yourself* runs a file with a recipe you chose, which nobody has tested for that
+  file; the run is marked "untested set-up". A model that may not fit this computer shows a
+  warning and may fail or be very slow, but it is not stopped.
 
 ## Content: what Studio makes (0.1.0)
 
