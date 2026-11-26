@@ -230,7 +230,7 @@ fn read_entry<R: Read + Seek>(r: &mut Reader<R>) -> Result<Option<(String, Value
 
 /// Tensor tables longer than this mean a damaged file (LTX-2.3 has 4,444 tensors, LoRA
 /// files reach tens of thousands; the caller's header cap is the real bound).
-const MAX_TENSORS: u64 = 262_144;
+pub const MAX_TENSORS: u64 = 262_144;
 /// Tensor names longer than this mean a damaged file (llama.cpp itself allows 63 bytes).
 const MAX_TENSOR_NAME: u64 = 256;
 /// Dimensions per tensor (ggml's `GGML_MAX_DIMS`).
@@ -465,8 +465,7 @@ fn read_raw_tensors<R: Read + Seek>(
     {
         return Err(GgufError::Corrupt(format!("{count} tensors")));
     }
-    // At most MAX_TENSORS by the check above.
-    let mut out = Vec::with_capacity(usize::try_from(count).unwrap_or(0));
+    let mut out = Vec::with_capacity(table_capacity(count, r.remaining()));
     for _ in 0..count {
         let name_len = r.u64()?;
         if name_len > MAX_TENSOR_NAME {
@@ -493,6 +492,13 @@ fn read_raw_tensors<R: Read + Seek>(
         });
     }
     Ok(out)
+}
+
+/// The entries to make room for before reading a table of `count` entries with `remaining`
+/// bytes in hand: at most what those bytes could hold, so a 24-byte prefix that claims
+/// [`MAX_TENSORS`] entries does not reserve room for all of them (final review I-1, R2).
+fn table_capacity(count: u64, remaining: u64) -> usize {
+    usize::try_from(count.min(remaining / MIN_TENSOR_ENTRY).min(MAX_TENSORS)).unwrap_or(0)
 }
 
 /// Sizes from the gaps between the offsets: the data section starts at `table_end`
@@ -1145,6 +1151,18 @@ mod tests {
                 bytes,
             })
             .collect()
+    }
+
+    #[test]
+    fn a_short_prefix_that_claims_many_tensors_reserves_only_what_it_could_hold() {
+        // A 24-byte prefix's claim of 262,144 entries used to reserve about 17 MB.
+        assert_eq!(table_capacity(MAX_TENSORS, 24), 1);
+        assert_eq!(table_capacity(MAX_TENSORS, 0), 0);
+        assert_eq!(table_capacity(3, 1024 * 1024), 3);
+        assert_eq!(
+            table_capacity(MAX_TENSORS, 64 * 1024 * 1024),
+            MAX_TENSORS as usize
+        );
     }
 
     #[test]

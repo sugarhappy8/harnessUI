@@ -10,8 +10,12 @@ use std::fs::File;
 use std::io::Read;
 use std::path::Path;
 
-use serde::{Deserialize, Serialize};
-use serde_json::{Map, Value};
+use std::fmt;
+use std::marker::PhantomData;
+
+use serde::de::{self, IgnoredAny, MapAccess, SeqAccess, Visitor};
+use serde::{Deserialize, Deserializer, Serialize};
+use serde_json::Value;
 
 use crate::gguf::{self, GgufError};
 
@@ -148,41 +152,182 @@ fn parse_safetensors(bytes: &[u8]) -> Result<TensorIndex, IndexError> {
     }
     // `need` is at most the cap plus 8, and `bytes` holds it.
     let json = &bytes[8..need as usize];
-    let map: Map<String, Value> =
-        serde_json::from_slice(json).map_err(|e| IndexError::Corrupt(e.to_string()))?;
-    let mut metadata = BTreeMap::new();
-    let mut tensors = Vec::with_capacity(map.len());
-    for (name, v) in map {
-        if name == "__metadata__" {
-            if let Value::Object(m) = v {
-                metadata.extend(
-                    m.into_iter()
-                        .filter_map(|(k, v)| v.as_str().map(|s| (k, s.to_string()))),
-                );
-            }
-            continue;
-        }
-        let bad = || IndexError::Corrupt(format!("tensor {name:?} has no dtype and shape"));
-        let dtype = v.get("dtype").and_then(Value::as_str).ok_or_else(bad)?;
-        let shape = v
-            .get("shape")
-            .and_then(Value::as_array)
-            .and_then(|a| a.iter().map(Value::as_u64).collect::<Option<Vec<_>>>())
-            .ok_or_else(bad)?;
-        tensors.push(TensorInfo {
-            dtype: dtype.to_string(),
-            shape,
+    let header = parse_header(json, gguf::MAX_TENSORS)?;
+    // A `BTreeMap`: sorted by name, the engine's order, and a repeated name keeps its last
+    // value, as the engine's `nlohmann::json` object does.
+    let tensors = header
+        .tensors
+        .into_iter()
+        .map(|(name, e)| TensorInfo {
             name,
-        });
-    }
-    // The engine's order, whatever the map keeps.
-    tensors.sort_by(|a, b| a.name.cmp(&b.name));
+            dtype: e.dtype,
+            shape: e.shape,
+        })
+        .collect();
+    let metadata = header.metadata;
     Ok(TensorIndex {
         format: FileFormat::Safetensors,
         tensors,
         metadata,
         parameters_hint: None,
     })
+}
+
+/// What the index keeps of a safetensors header. Only each tensor's dtype and shape and the
+/// metadata's string values are kept; every other field is skipped unread, so a header within
+/// the cap cannot take more memory than its tensors' names and shapes (final review I-1).
+struct Header {
+    /// Sorted by name; a repeated name keeps its last value, as `nlohmann::json` does.
+    tensors: BTreeMap<String, Entry>,
+    metadata: BTreeMap<String, String>,
+}
+
+/// One tensor's entry: `data_offsets` and anything else is skipped.
+#[derive(Deserialize)]
+struct Entry {
+    dtype: String,
+    shape: Vec<u64>,
+}
+
+/// The header in `json`, refused as damage past `max_tensors` entries, counted as they are
+/// read, before the rest is parsed.
+fn parse_header(json: &[u8], max_tensors: u64) -> Result<Header, IndexError> {
+    let mut d = serde_json::Deserializer::from_slice(json);
+    let header = d
+        .deserialize_map(HeaderVisitor { max_tensors })
+        .and_then(|h| d.end().map(|()| h))
+        .map_err(|e| IndexError::Corrupt(e.to_string()))?;
+    Ok(header)
+}
+
+struct HeaderVisitor {
+    max_tensors: u64,
+}
+
+impl<'de> Visitor<'de> for HeaderVisitor {
+    type Value = Header;
+
+    fn expecting(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        f.write_str("a safetensors header object")
+    }
+
+    fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<Header, A::Error> {
+        let mut tensors = BTreeMap::new();
+        let mut metadata = BTreeMap::new();
+        let mut seen = 0u64;
+        while let Some(name) = map.next_key::<String>()? {
+            if name == "__metadata__" {
+                // Not an object: ignored, as before.
+                let m: IfObject<BTreeMap<String, IfString>> = map.next_value()?;
+                metadata =
+                    m.0.unwrap_or_default()
+                        .into_iter()
+                        .filter_map(|(k, v)| v.0.map(|v| (k, v)))
+                        .collect();
+                continue;
+            }
+            seen += 1;
+            if seen > self.max_tensors {
+                return Err(de::Error::custom(format!(
+                    "more than {} tensors",
+                    self.max_tensors
+                )));
+            }
+            let entry: Entry = map.next_value()?;
+            tensors.insert(name, entry);
+        }
+        Ok(Header { tensors, metadata })
+    }
+}
+
+/// A `T` when the JSON value is an object; any other value is skipped unread.
+struct IfObject<T>(Option<T>);
+
+impl<'de, T: Deserialize<'de>> Deserialize<'de> for IfObject<T> {
+    fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        struct V<T>(PhantomData<T>);
+        impl<'de, T: Deserialize<'de>> Visitor<'de> for V<T> {
+            type Value = IfObject<T>;
+            fn expecting(&self, f: &mut fmt::Formatter) -> fmt::Result {
+                f.write_str("any value")
+            }
+            fn visit_map<A: MapAccess<'de>>(self, map: A) -> Result<Self::Value, A::Error> {
+                T::deserialize(de::value::MapAccessDeserializer::new(map))
+                    .map(|t| IfObject(Some(t)))
+            }
+            fn visit_seq<A: SeqAccess<'de>>(self, seq: A) -> Result<Self::Value, A::Error> {
+                skip_seq(seq).map(|()| IfObject(None))
+            }
+            fn visit_str<E: de::Error>(self, _: &str) -> Result<Self::Value, E> {
+                Ok(IfObject(None))
+            }
+            fn visit_bool<E: de::Error>(self, _: bool) -> Result<Self::Value, E> {
+                Ok(IfObject(None))
+            }
+            fn visit_i64<E: de::Error>(self, _: i64) -> Result<Self::Value, E> {
+                Ok(IfObject(None))
+            }
+            fn visit_u64<E: de::Error>(self, _: u64) -> Result<Self::Value, E> {
+                Ok(IfObject(None))
+            }
+            fn visit_f64<E: de::Error>(self, _: f64) -> Result<Self::Value, E> {
+                Ok(IfObject(None))
+            }
+            fn visit_unit<E: de::Error>(self) -> Result<Self::Value, E> {
+                Ok(IfObject(None))
+            }
+        }
+        d.deserialize_any(V(PhantomData))
+    }
+}
+
+/// A string value; any other value is skipped unread.
+struct IfString(Option<String>);
+
+impl<'de> Deserialize<'de> for IfString {
+    fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        struct V;
+        impl<'de> Visitor<'de> for V {
+            type Value = IfString;
+            fn expecting(&self, f: &mut fmt::Formatter) -> fmt::Result {
+                f.write_str("any value")
+            }
+            fn visit_str<E: de::Error>(self, s: &str) -> Result<IfString, E> {
+                Ok(IfString(Some(s.to_string())))
+            }
+            fn visit_string<E: de::Error>(self, s: String) -> Result<IfString, E> {
+                Ok(IfString(Some(s)))
+            }
+            fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<IfString, A::Error> {
+                while map.next_entry::<IgnoredAny, IgnoredAny>()?.is_some() {}
+                Ok(IfString(None))
+            }
+            fn visit_seq<A: SeqAccess<'de>>(self, seq: A) -> Result<IfString, A::Error> {
+                skip_seq(seq).map(|()| IfString(None))
+            }
+            fn visit_bool<E: de::Error>(self, _: bool) -> Result<IfString, E> {
+                Ok(IfString(None))
+            }
+            fn visit_i64<E: de::Error>(self, _: i64) -> Result<IfString, E> {
+                Ok(IfString(None))
+            }
+            fn visit_u64<E: de::Error>(self, _: u64) -> Result<IfString, E> {
+                Ok(IfString(None))
+            }
+            fn visit_f64<E: de::Error>(self, _: f64) -> Result<IfString, E> {
+                Ok(IfString(None))
+            }
+            fn visit_unit<E: de::Error>(self) -> Result<IfString, E> {
+                Ok(IfString(None))
+            }
+        }
+        d.deserialize_any(V)
+    }
+}
+
+fn skip_seq<'de, A: SeqAccess<'de>>(mut seq: A) -> Result<(), A::Error> {
+    while seq.next_element::<IgnoredAny>()?.is_some() {}
+    Ok(())
 }
 
 /// Reads the index of the local file at `path`, from its header only. A pickle extension is
@@ -353,6 +498,90 @@ mod tests {
                 cap: SAFETENSORS_HEADER_CAP
             })
         ));
+    }
+
+    /// A safetensors header of `n` one-element tensors, each with its `data_offsets`, and
+    /// `tail` written after the last entry, inside the object.
+    fn many_tensors(n: usize, tail: &str) -> Vec<u8> {
+        let mut json = String::from("{");
+        for i in 0..n {
+            json.push_str(&format!(
+                r#""t{i}":{{"dtype":"F16","shape":[1],"data_offsets":[{a},{b}]}},"#,
+                a = 2 * i,
+                b = 2 * i + 2
+            ));
+        }
+        json.push_str(tail);
+        json.push('}');
+        let mut out = (json.len() as u64).to_le_bytes().to_vec();
+        out.extend(json.into_bytes());
+        out
+    }
+
+    #[test]
+    fn a_safetensors_header_with_more_tensors_than_gguf_allows_is_refused() {
+        // Within the 100 MiB cap (about 13 MB), one tensor past GGUF's limit.
+        let n = gguf::MAX_TENSORS as usize + 1;
+        let file = many_tensors(n, r#""__metadata__":{}"#);
+        assert!((file.len() as u64) < SAFETENSORS_HEADER_CAP);
+        match parse_prefix(&file) {
+            Err(IndexError::Corrupt(why)) => assert!(why.contains("tensors"), "{why}"),
+            other => panic!(
+                "expected a refusal, got {:?}",
+                other.map(|ix| ix.tensors.len())
+            ),
+        }
+    }
+
+    #[test]
+    fn the_tensor_count_is_refused_as_it_is_counted_before_the_rest_is_parsed() {
+        // Damaged JSON after the entry past the limit: a parser that counted only at the end
+        // would report the syntax error, or keep every entry first.
+        let file = many_tensors(gguf::MAX_TENSORS as usize + 1, r#""broken": [1, 2,"#);
+        match parse_prefix(&file) {
+            Err(IndexError::Corrupt(why)) => {
+                assert!(why.contains("tensors"), "the count stops it first: {why}")
+            }
+            other => panic!(
+                "expected a refusal, got {:?}",
+                other.map(|ix| ix.tensors.len())
+            ),
+        }
+        // At the limit itself, the same entries parse.
+        let file = many_tensors(gguf::MAX_TENSORS as usize, r#""__metadata__":{"a":"b"}"#);
+        let ix = parse_prefix(&file).unwrap();
+        assert_eq!(ix.tensors.len(), gguf::MAX_TENSORS as usize);
+        assert_eq!(ix.metadata.get("a").map(String::as_str), Some("b"));
+    }
+
+    #[test]
+    fn a_safetensors_entry_keeps_only_its_dtype_and_shape_and_a_repeated_name_keeps_the_last() {
+        // nlohmann's object keeps the last value of a repeated key, as serde_json's map did.
+        let json = br#"{"a":{"dtype":"F16","shape":[2],"data_offsets":[0,4],"extra":{"deep":[1,{"x":2}]}},"a":{"dtype":"BF16","shape":[3],"data_offsets":[0,6]},"__metadata__":{"s":"v","n":3,"o":{"k":"v"}}}"#;
+        let mut file = (json.len() as u64).to_le_bytes().to_vec();
+        file.extend_from_slice(json);
+        let ix = parse_prefix(&file).unwrap();
+        assert_eq!(
+            ix.tensors,
+            [TensorInfo {
+                name: "a".into(),
+                dtype: "BF16".into(),
+                shape: vec![3]
+            }]
+        );
+        assert_eq!(
+            ix.metadata.into_iter().collect::<Vec<_>>(),
+            [("s".to_string(), "v".to_string())]
+        );
+        // An entry without a dtype or shape is still damage.
+        let json = br#"{"a":{"shape":[2]}}"#;
+        let mut file = (json.len() as u64).to_le_bytes().to_vec();
+        file.extend_from_slice(json);
+        assert!(matches!(parse_prefix(&file), Err(IndexError::Corrupt(_))));
+        let json = br#"{"a":{"dtype":"F16","shape":[-1]}}"#;
+        let mut file = (json.len() as u64).to_le_bytes().to_vec();
+        file.extend_from_slice(json);
+        assert!(matches!(parse_prefix(&file), Err(IndexError::Corrupt(_))));
     }
 
     #[test]
