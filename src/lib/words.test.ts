@@ -1309,3 +1309,25 @@ describe("Studio's download words (Task U7)", () => {
     );
   });
 });
+
+describe("the error boundaries' words (0.2.1)", () => {
+  it("keep the briefed wording, plain, with no code names", async () => {
+    const { CRASH } = await import("./words");
+    const { APP_NAME } = await import("./app");
+    expect(CRASH.title).toBe("Something went wrong drawing this screen");
+    expect(CRASH.safe).toBe("Your chats, models and downloads are safe.");
+    expect(CRASH.tryAgain).toBe("Try again");
+    expect(CRASH.reload).toBe(`Reload ${APP_NAME}`);
+    expect(CRASH.details).toBe("Details");
+    expect(CRASH.panel(CRASH.where.detail)).toBe("This model's page couldn't be shown.");
+    const all = [
+      CRASH.title, CRASH.safe, CRASH.next, CRASH.tryAgain, CRASH.reload, CRASH.details, CRASH.panelNext,
+      ...Object.values(CRASH.where).map((w) => CRASH.panel(w)),
+    ];
+    for (const text of all) {
+      plain(text);
+      // No component, file or error name on screen outside Details.
+      expect(text).not.toMatch(/[A-Z][a-z]+[A-Z]\w*View|Detail\b|Boundary|\.tsx|TypeError|render/);
+    }
+  });
+});

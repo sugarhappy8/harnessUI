@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useState, type ReactNode } from "react";
 import { Dialog, Tabs } from "radix-ui";
 import { X, RefreshCw } from "lucide-react";
 import { writeText } from "@tauri-apps/plugin-clipboard-manager";
@@ -10,6 +10,7 @@ import { APP_NAME } from "../lib/app";
 import { STUDIO_NAV } from "../lib/words";
 import { toErrorInfo, turnChatId, useApp } from "../store/app";
 import { listenInEffect } from "../lib/listen";
+import { PanelBoundary } from "./CrashNotice";
 import { askBeforeChange, backendWhenIdle, runChange } from "../store/modelChange";
 import { ErrorBanner } from "./ErrorBanner";
 import { visibleLines, visiblePath } from "./FolderChip";
@@ -656,6 +657,13 @@ export function Diagnostics() {
   );
 }
 
+/** One page of Settings, with its own error boundary: a page that fails to draw shows a notice
+ *  with Try again, and the other pages and the dialog keep working. Radix draws only the page
+ *  shown, so another page chosen starts afresh. */
+function Page(props: { children: ReactNode }) {
+  return <PanelBoundary where="settings">{props.children}</PanelBoundary>;
+}
+
 export function SettingsDialog(props: {
   open: boolean;
   onOpenChange: (open: boolean) => void;
@@ -702,22 +710,22 @@ export function SettingsDialog(props: {
               <Tabs.Trigger value="diagnostics" className={tabClass}>Diagnostics</Tabs.Trigger>
             </Tabs.List>
             <div className="min-w-0 flex-1 overflow-y-auto p-5">
-              <Tabs.Content value="general"><General /></Tabs.Content>
-              <Tabs.Content value="runtime"><LocalModels /><ModelCheck /></Tabs.Content>
-              <Tabs.Content value="reverse"><Reverse /></Tabs.Content>
-              <Tabs.Content value="otherApps"><OtherApps /></Tabs.Content>
-              <Tabs.Content value="endpoints"><Endpoints /></Tabs.Content>
-              <Tabs.Content value="studio"><StudioSettings /></Tabs.Content>
-              <Tabs.Content value="huggingface"><HuggingFace /></Tabs.Content>
-              <Tabs.Content value="mcp"><McpSettings /></Tabs.Content>
-              <Tabs.Content value="skills"><SkillsSettings /></Tabs.Content>
-              <Tabs.Content value="git"><GitSettings /></Tabs.Content>
-              <Tabs.Content value="browser"><BrowserSettings /></Tabs.Content>
-              <Tabs.Content value="computer"><ComputerSettings /></Tabs.Content>
-              <Tabs.Content value="search"><SearchSettings /></Tabs.Content>
-              <Tabs.Content value="permissions"><PermissionsSettings /></Tabs.Content>
-              <Tabs.Content value="audit"><AuditLogView /></Tabs.Content>
-              <Tabs.Content value="diagnostics"><Diagnostics /><Benchmarks /></Tabs.Content>
+              <Tabs.Content value="general"><Page><General /></Page></Tabs.Content>
+              <Tabs.Content value="runtime"><Page><LocalModels /><ModelCheck /></Page></Tabs.Content>
+              <Tabs.Content value="reverse"><Page><Reverse /></Page></Tabs.Content>
+              <Tabs.Content value="otherApps"><Page><OtherApps /></Page></Tabs.Content>
+              <Tabs.Content value="endpoints"><Page><Endpoints /></Page></Tabs.Content>
+              <Tabs.Content value="studio"><Page><StudioSettings /></Page></Tabs.Content>
+              <Tabs.Content value="huggingface"><Page><HuggingFace /></Page></Tabs.Content>
+              <Tabs.Content value="mcp"><Page><McpSettings /></Page></Tabs.Content>
+              <Tabs.Content value="skills"><Page><SkillsSettings /></Page></Tabs.Content>
+              <Tabs.Content value="git"><Page><GitSettings /></Page></Tabs.Content>
+              <Tabs.Content value="browser"><Page><BrowserSettings /></Page></Tabs.Content>
+              <Tabs.Content value="computer"><Page><ComputerSettings /></Page></Tabs.Content>
+              <Tabs.Content value="search"><Page><SearchSettings /></Page></Tabs.Content>
+              <Tabs.Content value="permissions"><Page><PermissionsSettings /></Page></Tabs.Content>
+              <Tabs.Content value="audit"><Page><AuditLogView /></Page></Tabs.Content>
+              <Tabs.Content value="diagnostics"><Page><Diagnostics /><Benchmarks /></Page></Tabs.Content>
             </div>
           </Tabs.Root>
         </Dialog.Content>

@@ -3,6 +3,7 @@ import { StrictMode } from "react";
 import { createRoot } from "react-dom/client";
 import App from "./App";
 import { UiProviders } from "./components/ui/UiProviders";
+import { AppRoot } from "./components/CrashNotice";
 import { applyTheme, loadTheme } from "./lib/theme";
 import { APP_NAME } from "./lib/app";
 import { installTrustedTypes } from "./lib/trustedTypes";
@@ -18,9 +19,13 @@ const root = document.getElementById("root");
 if (root) {
   createRoot(root).render(
     <StrictMode>
-      <UiProviders>
-        <App />
-      </UiProviders>
+      {/* An error drawing any part of the app shows a notice with Try again, never a blank
+          window (React removes everything up to the nearest error boundary). */}
+      <AppRoot>
+        <UiProviders>
+          <App />
+        </UiProviders>
+      </AppRoot>
     </StrictMode>,
   );
 }

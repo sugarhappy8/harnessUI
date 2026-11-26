@@ -11,6 +11,7 @@ import type { UpdatePlacement } from "./components/UpdateBox";
 import { StudioView } from "./components/studio/StudioView";
 import { StudioNotice } from "./components/studio/StudioNotice";
 import { QuitWhileMaking } from "./components/studio/QuitWhileMaking";
+import { PanelBoundary } from "./components/CrashNotice";
 import { followApprovals, followRunningTurn, turnChatId, useApp, toErrorInfo } from "./store/app";
 import { followStudio, useStudio } from "./store/studio";
 import * as ipc from "./lib/ipc";
@@ -34,6 +35,8 @@ export default function App() {
   // 0.1.0 Studio: shown in place of the chat, which stays mounted (hidden) so its reply keeps
   // running and its draft stays. Studio is mounted when first opened, then kept.
   const studioShown = useStudio((s) => s.view === "studio");
+  // Another chat opened draws the chat again after an error drawing it.
+  const activeChatId = useApp((s) => s.activeChatId);
   const [studioMounted, setStudioMounted] = useState(studioShown);
   if (studioShown && !studioMounted) setStudioMounted(true);
 
@@ -214,14 +217,22 @@ export default function App() {
           />
         )}
         <div className="relative flex min-w-0 flex-1" hidden={studioShown}>
-          <ChatView />
-          <Workbench />
+          {/* Each pane has its own error boundary: one that fails to draw shows a notice with
+              Try again in its place, and the sidebar and the other panes keep working. */}
+          <PanelBoundary where="chat" fill resetKeys={[activeChatId]}>
+            <ChatView />
+          </PanelBoundary>
+          <PanelBoundary where="workbench" resetKeys={[activeChatId]}>
+            <Workbench />
+          </PanelBoundary>
           {/* A video that finished while the chat was shown. */}
           <StudioNotice />
         </div>
         {studioMounted && (
           <div className="flex min-w-0 flex-1" hidden={!studioShown}>
-            <StudioView />
+            <PanelBoundary where="studio" fill>
+              <StudioView />
+            </PanelBoundary>
           </div>
         )}
       </div>
