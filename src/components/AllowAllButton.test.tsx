@@ -1,12 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import {
-  act,
-  cleanup,
-  fireEvent,
-  render,
-  screen,
-  within,
-} from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, within } from "@testing-library/react";
 import type { ApprovalModeName } from "../lib/ipc";
 
 // Radix positions the menu with ResizeObserver, which jsdom does not have.
@@ -21,20 +14,13 @@ let modeChanged: (chatId: number | null) => void = () => undefined;
 
 const ipcMock = vi.hoisted(() => ({
   getChatApprovalMode: vi.fn<(chatId: number) => Promise<ApprovalModeName>>(),
-  setChatApprovalMode:
-    vi.fn<
-      (chatId: number, mode: ApprovalModeName) => Promise<ApprovalModeName>
-    >(),
-  getDefaultApprovalMode: vi.fn<() => Promise<ApprovalModeName>>(
-    async () => "ask",
-  ),
+  setChatApprovalMode: vi.fn<(chatId: number, mode: ApprovalModeName) => Promise<ApprovalModeName>>(),
+  getDefaultApprovalMode: vi.fn<() => Promise<ApprovalModeName>>(async () => "ask"),
   setDefaultApprovalMode: vi.fn(async () => undefined),
-  onApprovalModeChanged: vi.fn(
-    async (handler: (chatId: number | null) => void) => {
-      modeChanged = handler;
-      return () => undefined;
-    },
-  ),
+  onApprovalModeChanged: vi.fn(async (handler: (chatId: number | null) => void) => {
+    modeChanged = handler;
+    return () => undefined;
+  }),
 }));
 vi.mock("../lib/ipc", () => ipcMock);
 
@@ -48,8 +34,12 @@ vi.mock("../lib/windowShown", () => ({
   },
 }));
 
-const { APPROVAL_HINTS, APPROVAL_MODES, ApprovalHint, ApprovalModeMenu } =
-  await import("./AllowAllButton");
+const {
+  APPROVAL_HINTS,
+  APPROVAL_MODES,
+  ApprovalHint,
+  ApprovalModeMenu,
+} = await import("./AllowAllButton");
 const { useApprovalMode } = await import("../lib/approvalMode");
 const { useApp } = await import("../store/app");
 
@@ -64,10 +54,7 @@ async function show(chatId = CHAT) {
 /** Opens the header menu the way a mouse does (Radix opens it on pointer down). */
 async function openMenu(current: string) {
   await act(async () => {
-    fireEvent.pointerDown(screen.getByRole("button", { name: current }), {
-      button: 0,
-      ctrlKey: false,
-    });
+    fireEvent.pointerDown(screen.getByRole("button", { name: current }), { button: 0, ctrlKey: false });
   });
   return screen.getByRole("menu");
 }
@@ -76,11 +63,7 @@ async function openMenu(current: string) {
 async function pick(current: string, label: string) {
   const menu = await openMenu(current);
   await act(async () => {
-    fireEvent.click(
-      within(menu).getByRole("menuitemradio", {
-        name: new RegExp(`^${label}`),
-      }),
-    );
+    fireEvent.click(within(menu).getByRole("menuitemradio", { name: new RegExp(`^${label}`) }));
   });
 }
 
@@ -89,9 +72,7 @@ describe("ApprovalModeMenu", () => {
     vi.useFakeTimers();
     vi.clearAllMocks();
     mode = {};
-    ipcMock.getChatApprovalMode.mockImplementation(
-      async (chatId) => mode[chatId] ?? "ask",
-    );
+    ipcMock.getChatApprovalMode.mockImplementation(async (chatId) => mode[chatId] ?? "ask");
     ipcMock.setChatApprovalMode.mockImplementation(async (chatId, next) => {
       mode[chatId] = next;
       return next;
@@ -117,14 +98,8 @@ describe("ApprovalModeMenu", () => {
     });
     const menu = screen.getByRole("menu");
     const items = within(menu).getAllByRole("menuitemradio");
-    expect(items.map((i) => i.textContent)).toEqual(
-      APPROVAL_MODES.map((m) => m.label + m.description),
-    );
-    expect(items.map((i) => i.getAttribute("aria-checked"))).toEqual([
-      "true",
-      "false",
-      "false",
-    ]);
+    expect(items.map((i) => i.textContent)).toEqual(APPROVAL_MODES.map((m) => m.label + m.description));
+    expect(items.map((i) => i.getAttribute("aria-checked"))).toEqual(["true", "false", "false"]);
     expect(APPROVAL_MODES.map((m) => m.description)).toEqual([
       "Asks before it changes anything.",
       "Asks only before deleting and a few other things.",
@@ -140,19 +115,13 @@ describe("ApprovalModeMenu", () => {
     expect(screen.queryByRole("dialog")).toBeNull();
     expect(screen.queryByRole("alertdialog")).toBeNull();
     expect(ipcMock.setChatApprovalMode).toHaveBeenCalledTimes(1);
-    expect(ipcMock.setChatApprovalMode).toHaveBeenLastCalledWith(
-      CHAT,
-      "allowAll",
-    );
+    expect(ipcMock.setChatApprovalMode).toHaveBeenLastCalledWith(CHAT, "allowAll");
     expect(screen.getByRole("button", { name: "Allow all" })).toBeTruthy();
     await pick("Allow all", "Full access");
     expect(screen.queryByRole("dialog")).toBeNull();
     expect(screen.queryByRole("alertdialog")).toBeNull();
     expect(ipcMock.setChatApprovalMode).toHaveBeenCalledTimes(2);
-    expect(ipcMock.setChatApprovalMode).toHaveBeenLastCalledWith(
-      CHAT,
-      "fullAccess",
-    );
+    expect(ipcMock.setChatApprovalMode).toHaveBeenLastCalledWith(CHAT, "fullAccess");
     expect(screen.getByRole("button", { name: "Full access" })).toBeTruthy();
   });
 
@@ -174,10 +143,7 @@ describe("ApprovalModeMenu", () => {
     await show();
     await pick("Full access", "Allow all");
     expect(screen.queryByRole("alertdialog")).toBeNull();
-    expect(ipcMock.setChatApprovalMode).toHaveBeenLastCalledWith(
-      CHAT,
-      "allowAll",
-    );
+    expect(ipcMock.setChatApprovalMode).toHaveBeenLastCalledWith(CHAT, "allowAll");
     await pick("Allow all", "Ask first");
     expect(screen.queryByRole("alertdialog")).toBeNull();
     expect(ipcMock.setChatApprovalMode).toHaveBeenLastCalledWith(CHAT, "ask");
@@ -199,16 +165,11 @@ describe("ApprovalModeMenu", () => {
       details: "",
     });
     await pick("Ask first", "Full access");
-    expect(ipcMock.setChatApprovalMode).toHaveBeenCalledWith(
-      CHAT,
-      "fullAccess",
-    );
+    expect(ipcMock.setChatApprovalMode).toHaveBeenCalledWith(CHAT, "fullAccess");
     expect(screen.getByRole("button", { name: "Ask first" })).toBeTruthy();
     expect(useApprovalMode.getState().modes[CHAT]).toBe("ask");
     expect(useApprovalMode.getState().modes[8]).toBe("fullAccess");
-    expect(useApp.getState().error?.message).toBe(
-      "That chat no longer exists.",
-    );
+    expect(useApp.getState().error?.message).toBe("That chat no longer exists.");
   });
 
   it("follows a change made elsewhere in the app, such as forgetting what was allowed", async () => {
@@ -231,14 +192,9 @@ describe("ApprovalModeMenu", () => {
 
   it("words the hint under the message box for the chat on screen", async () => {
     const ASK = "the model asks before it changes anything";
-    const ALL =
-      "Allow all is on: the model asks only before deleting and a few other things";
+    const ALL = "Allow all is on: the model asks only before deleting and a few other things";
     const FULL = "Full access is on: the model does everything without asking";
-    expect(APPROVAL_HINTS).toEqual({
-      ask: ASK,
-      allowAll: ALL,
-      fullAccess: FULL,
-    });
+    expect(APPROVAL_HINTS).toEqual({ ask: ASK, allowAll: ALL, fullAccess: FULL });
     useApp.setState({ activeChatId: CHAT });
     const { container } = render(<ApprovalHint />);
     await act(async () => {});
@@ -276,10 +232,7 @@ describe("ApprovalModeMenu", () => {
   });
 
   it("uses plain wording with no exclamation marks", () => {
-    const text = [
-      ...APPROVAL_MODES.map((m) => m.description),
-      ...Object.values(APPROVAL_HINTS),
-    ].join(" ");
+    const text = [...APPROVAL_MODES.map((m) => m.description), ...Object.values(APPROVAL_HINTS)].join(" ");
     expect(text).not.toContain("!");
   });
 });
