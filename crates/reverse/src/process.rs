@@ -48,7 +48,9 @@
 //! children lead ([`mcp_host::ManagedServer`]); on macOS Kuna or Java can then outlive rea
 //! the same way. On Windows the app's Job Object ends them in every case.
 
+use std::future::Future;
 use std::path::{Path, PathBuf};
+use std::pin::Pin;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex as StdMutex, Weak};
 use std::time::Duration;
@@ -64,9 +66,11 @@ use tokio::task::JoinHandle;
 use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 
+use crate::env::Flavor;
 use crate::install::Installer;
 use crate::layout::ReverseLayout;
 use crate::platform::{self, Platform};
+use crate::warmup::{self, WarmupError};
 use crate::{AppleTools, Component, ReverseError, RunState};
 
 /// Stopped after this long without a call.
@@ -110,7 +114,7 @@ impl RunConfig {
             && self.cwd == other.cwd
     }
 
-    fn var(&self, name: &str) -> Option<&str> {
+    pub(crate) fn var(&self, name: &str) -> Option<&str> {
         self.env
             .set
             .iter()
@@ -216,6 +220,24 @@ impl Rea for ManagedServer {
 /// Makes the server for one start.
 pub(crate) type Launch = Arc<dyn Fn(ManagedSpec, Option<Lifecycle>) -> Arc<dyn Rea> + Send + Sync>;
 
+/// Prepares rea's macOS process helper before a start ([`warmup::prepare_process_helper`];
+/// tests record the calls instead).
+pub(crate) type Prepare = Arc<
+    dyn Fn(
+            RunConfig,
+            PathBuf,
+            Flavor,
+        ) -> Pin<Box<dyn Future<Output = Result<(), WarmupError>> + Send>>
+        + Send
+        + Sync,
+>;
+
+fn prepare_real() -> Prepare {
+    Arc::new(|config, entry, flavor| {
+        Box::pin(async move { warmup::prepare_process_helper(&config, &entry, flavor).await })
+    })
+}
+
 fn launch_managed() -> Launch {
     Arc::new(|spec, lifecycle| -> Arc<dyn Rea> {
         Arc::new(ManagedServer::new(spec).with_lifecycle(lifecycle))
@@ -264,6 +286,8 @@ struct Shared {
     installer: StdMutex<Arc<Installer>>,
     log_file: StdMutex<Option<PathBuf>>,
     launch: Launch,
+    /// Prepares rea's macOS process helper before each start there.
+    prepare: StdMutex<Prepare>,
     /// Where Apple's tools are looked for ("/"; tests use a fake tree).
     apple_root: PathBuf,
     /// The starts that prepared rea's temporary folder outside the reverse folder
@@ -429,6 +453,47 @@ async fn wait_ended(server: &dyn Rea) {
     }
 }
 
+/// Before a start on macOS: rea's own `prepareOwnedCommand`, so that the first command rea
+/// owns (Kuna's 10 second `--version` probe) does not compile the process helper inside
+/// that deadline ([`crate::warmup`]). A failure or a timeout only goes to the log (one
+/// plain line, the reverse folder masked): the start goes on and rea reports what it finds.
+async fn prepare_helper(shared: &Shared, config: &RunConfig) {
+    let Some(entry) = config.args.first().map(PathBuf::from) else {
+        return;
+    };
+    let has_module = warmup::helper_module(&entry).is_some();
+    let cached = warmup::helper_cached(config);
+    let prepare = shared
+        .prepare
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .clone();
+    let began = Instant::now();
+    let result = prepare(config.clone(), entry, Flavor::Macos).await;
+    if !has_module {
+        // This rea has nothing to prepare.
+        return;
+    }
+    match result {
+        Ok(()) if cached => tracing::info!("rea's macOS process helper was already cached"),
+        Ok(()) => tracing::info!(
+            "rea's macOS process helper was prepared in {} s",
+            began.elapsed().as_secs()
+        ),
+        Err(WarmupError::TimedOut) => tracing::warn!(
+            "rea's macOS process helper was not ready within {} s; rea starts anyway",
+            warmup::HELPER_PREPARE_TIMEOUT.as_secs()
+        ),
+        Err(WarmupError::Failed { code, stderr_tail }) => {
+            let code = code.map_or_else(|| "no exit code".to_owned(), |c| format!("exit {c}"));
+            let tail = shared.clean(&stderr_tail.join(" | "));
+            tracing::warn!(
+                "rea's macOS process helper could not be prepared ({code}): {tail}; rea starts anyway"
+            );
+        }
+    }
+}
+
 /// The one rea process.
 pub struct ReaProcess {
     shared: Arc<Shared>,
@@ -470,6 +535,7 @@ impl ReaProcess {
                 generation: AtomicU64::new(0),
                 log_file: StdMutex::new(None),
                 launch,
+                prepare: StdMutex::new(prepare_real()),
                 apple_root,
                 run_tmp_starts: StdMutex::new(0),
                 #[cfg(test)]
@@ -722,6 +788,9 @@ impl ReaGuard {
         };
         #[cfg(test)]
         tests::Pause::at(&shared.after_prepare).await;
+        if Flavor::of(shared.platform) == Flavor::Macos {
+            prepare_helper(&shared, &config).await;
+        }
         let spec = ManagedSpec {
             name: SERVER_NAME.into(),
             program: config.program.clone(),
@@ -1849,6 +1918,131 @@ mod tests {
         std::fs::write(&swiftc, b"").unwrap();
         b.process.lock().await.ensure_started(config).await.unwrap();
         assert_eq!(b.count(), 1);
+    }
+
+    /// A macOS bench whose prepare run is recorded (with how many reas had been launched
+    /// when it ran) instead of run, and fails when `fail` is set.
+    fn mac_bench(fail: bool) -> (Bench, Arc<StdMutex<Vec<String>>>, tempfile::TempDir) {
+        let fake_root = tempfile::tempdir().unwrap();
+        let swiftc = fake_root
+            .path()
+            .join("Library/Developer/CommandLineTools/usr/bin/swiftc");
+        std::fs::create_dir_all(swiftc.parent().unwrap()).unwrap();
+        std::fs::write(&swiftc, b"").unwrap();
+        let b = bench_with(
+            Platform::MacosArm64,
+            true,
+            fake_root.path().to_path_buf(),
+            FakeRea::default,
+        );
+        let calls: Arc<StdMutex<Vec<String>>> = Arc::default();
+        let (record, launched) = (calls.clone(), b.launched.clone());
+        *b.process.shared.prepare.lock().unwrap() = Arc::new(move |config, _entry, flavor| {
+            assert_eq!(flavor, Flavor::Macos);
+            record.lock().unwrap().push(format!(
+                "prepare after {} reas, provider {}",
+                launched.lock().unwrap().len(),
+                config.var("REA_ANALYSIS_PROVIDER").unwrap_or_default()
+            ));
+            Box::pin(async move {
+                if fail {
+                    Err(WarmupError::Failed {
+                        code: Some(1),
+                        stderr_tail: vec!["boom".into()],
+                    })
+                } else {
+                    Ok(())
+                }
+            })
+        });
+        (b, calls, fake_root)
+    }
+
+    fn mac_config(b: &Bench) -> RunConfig {
+        run_config(
+            &b.layout,
+            &b.process.shared.installer().installation(),
+            Some(Decompiler::Kuna),
+            Flavor::Macos,
+            false,
+        )
+    }
+
+    #[tokio::test]
+    async fn the_helper_is_prepared_before_each_start_on_macos() {
+        let (b, calls, _root) = mac_bench(false);
+        b.process
+            .lock()
+            .await
+            .ensure_started(mac_config(&b))
+            .await
+            .unwrap();
+        assert_eq!(b.count(), 1);
+        assert_eq!(
+            *calls.lock().unwrap(),
+            ["prepare after 0 reas, provider kuna"]
+        );
+        // The same rea is reused without another prepare; a restart prepares again.
+        b.process
+            .lock()
+            .await
+            .ensure_started(mac_config(&b))
+            .await
+            .unwrap();
+        assert_eq!(calls.lock().unwrap().len(), 1);
+        b.process.restart(RestartReason::Updated).await;
+        b.process
+            .lock()
+            .await
+            .ensure_started(mac_config(&b))
+            .await
+            .unwrap();
+        assert_eq!(
+            *calls.lock().unwrap(),
+            [
+                "prepare after 0 reas, provider kuna",
+                "prepare after 1 reas, provider kuna"
+            ]
+        );
+        assert_eq!(b.count(), 2);
+    }
+
+    #[tokio::test]
+    async fn a_failed_prepare_does_not_stop_rea_and_rea_never_carries_the_helper_variable() {
+        let (b, calls, _root) = mac_bench(true);
+        b.process
+            .lock()
+            .await
+            .ensure_started(mac_config(&b))
+            .await
+            .unwrap();
+        assert_eq!(calls.lock().unwrap().len(), 1);
+        assert_eq!(b.count(), 1);
+        let spec = b.last().spec.lock().unwrap().clone().unwrap();
+        assert!(
+            !spec
+                .env
+                .set
+                .iter()
+                .any(|(k, _)| k == crate::env::PREPARE_ONLY_VARIABLE),
+            "rea's own environment carries the prepare run's variable"
+        );
+        assert_eq!(spec.args.last().map(String::as_str), Some("mcp"));
+    }
+
+    #[tokio::test]
+    async fn nothing_is_prepared_off_macos() {
+        let b = bench(false);
+        let record: Arc<StdMutex<u32>> = Arc::default();
+        let seen = record.clone();
+        *b.process.shared.prepare.lock().unwrap() = Arc::new(move |_, _, _| {
+            *seen.lock().unwrap() += 1;
+            Box::pin(async { Ok(()) })
+        });
+        run_call(&b.process, b.config(None), "open_binary")
+            .await
+            .unwrap();
+        assert_eq!(*record.lock().unwrap(), 0);
     }
 
     #[tokio::test(start_paused = true)]

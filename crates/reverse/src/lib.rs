@@ -35,6 +35,7 @@ pub mod results;
 pub mod server;
 pub mod session;
 pub mod walk;
+pub mod warmup;
 
 use serde::{Deserialize, Serialize};
 

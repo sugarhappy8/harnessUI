@@ -75,6 +75,12 @@ pub const NEVER: &[&str] = &[
     "REA_IDA_MCP_CONFIG",
 ];
 
+/// The one `REA_*` variable the app sets that is not part of rea's own environment: the
+/// `file://` URL of rea's `dist/process/OwnedCommand.js`, read by the short `node --eval`
+/// script that prepares rea's macOS process helper ([`crate::warmup`]). It is set for that
+/// run only; [`run_config`] never sets it, so rea itself, Kuna and Ghidra never see it.
+pub const PREPARE_ONLY_VARIABLE: &str = "REA_HELPER_MODULE";
+
 /// Variables that name a folder inside the reverse folder, created before rea starts.
 pub const FOLDER_VARIABLES: &[&str] = &[
     "HOME",
@@ -696,6 +702,27 @@ mod tests {
         assert!(is_never("NODE_OPTIONS") && is_never("https_proxy") && is_never("NO_PROXY"));
         assert!(is_never("REA_JEB_MCP_URL") && is_never("REA_HOPPER_COMMAND"));
         assert!(!is_never("REA_KUNA_COMMAND") && !is_never("PATH"));
+        // Allowed (the prepare run sets it), but never in rea's own environment.
+        assert!(!is_never(PREPARE_ONLY_VARIABLE));
+        for flavor in [Flavor::Windows, Flavor::Macos, Flavor::Linux] {
+            let config = run_config_with(
+                &lock(),
+                &ReverseLayout::new(ROOT),
+                &everything(),
+                Some(Decompiler::Kuna),
+                flavor,
+                false,
+                &|name| Some(format!("hostile value of {name}")),
+            );
+            assert!(config.var(PREPARE_ONLY_VARIABLE).is_none(), "{flavor:?}");
+            assert!(
+                !config
+                    .env
+                    .inherit
+                    .iter()
+                    .any(|n| n == PREPARE_ONLY_VARIABLE)
+            );
+        }
     }
 
     #[test]
