@@ -88,27 +88,92 @@ def finding(pid, text):
 
 # With strace -yy a socket prints as 5<UDP:[...]>, 5<UDPv6:[...]>, 5<TCP:[...]> or 5<UNIX:[...]>.
 UDP_CONNECT = re.compile(r"^connect\(\d+<UDP(?:v6)?:")
-PORT_0 = re.compile(r"sin6?_port=htons\(0\)")
 # The socket a call is made on, as -yy prints it: 3<UDP:[127.0.0.1:38426->192.0.2.1:0]>,
-# 6<UDPv6:[[::1]:5000->[2001:db8::1]:0]>, or 3<UDP:[5010653]> when strace shows no peer.
-SOCKET = re.compile(r"^\w+\(\d+<(UDP|UDPv6|TCP|TCPv6)(?::\[(.*)\])?>")
+# 6<UDPv6:[[::1]:5000->[2001:db8::1]:0]>, 3<UDP:[127.0.0.1:44779]> (bound, no peer), or
+# 3<UDP:[5010653]> when strace shows neither. Only strace's own address shapes match, so the
+# annotation can never run on into the call's arguments.
+HOST = r"(?:\[[0-9a-fA-F:.]+\]|[0-9.]+)"
+SOCKET = re.compile(r"^\w+\(\d+<(?:UDP|UDPv6|TCP|TCPv6):\[(?:" + HOST + r":\d+(?:->(" + HOST + r"):\d+)?|\d+)\]>")
+# Sockets that stay on this computer: 8<UNIX-STREAM:[11->12]>, 7<UNIX:[2]>, 9<NETLINK:[ROUTE:20573]>.
+LOCAL_SOCKET = re.compile(r"^\w+\(\d+<(?:UNIX|NETLINK)[-:]")
+# A token of strace's text: an escaped character, or a quoted string (to the end of the line
+# when it is cut off there).
+TOKEN = re.compile(r'\\.|"(?:[^"\\]|\\.)*(?:"|$)')
+# What strace prints just before a string that is an address it decoded from binary.
+ADDRESS_BEFORE = ("inet_addr(", "inet_pton(AF_INET, ", "inet_pton(AF_INET6, ")
+# A socket address as strace prints it: {sa_family=AF_INET, sin_port=htons(9),
+# sin_addr=inet_addr("127.0.0.1")} or {sa_family=AF_INET6, sin6_port=htons(9), ...,
+# inet_pton(AF_INET6, "::1", &sin6_addr), sin6_scope_id=0}.
+SOCKADDR = re.compile(r"\{sa_family=(AF_[A-Z0-9]+)([^{}]*)\}")
+HOST_IN = re.compile(r'inet_addr\("([^"]*)"\)|inet_pton\(AF_INET6?, "([^"]*)"')
+PORT_IN = re.compile(r"sin6?_port=htons\((\d+)\)")
+LOCAL_FAMILIES = ("AF_UNIX", "AF_LOCAL", "AF_NETLINK", "AF_UNSPEC")
 
 
-def peer_of(call):
-    """For a call on an IP socket that -yy printed: (kind, the peer's host or None)."""
-    m = SOCKET.match(call)
-    if not m:
-        return None, None
-    kind, inner = m.group(1), m.group(2) or ""
-    if "->" not in inner:
-        return kind, None
-    peer = inner.rsplit("->", 1)[1]
-    host = peer[1:].split("]", 1)[0] if peer.startswith("[") else peer.rsplit(":", 1)[0]
-    return kind, host
+def without_payload(call):
+    """The call with every quoted string emptied but the addresses strace decodes itself, so
+    no payload, path or name can read as an address or as a socket's peer."""
+    def keep(m):
+        t = m.group(0)
+        if t.startswith('"') and not call.endswith(ADDRESS_BEFORE, 0, m.start()):
+            return '""'
+        return t
+    return TOKEN.sub(keep, call)
+
+
+def peer_of(text):
+    """The socket a call is made on: ("local", None) for a Unix or netlink socket, ("ip", host)
+    for an IP socket whose peer -yy printed, and ("unknown", None) for any other (no -yy, no
+    peer shown, or a kind the checker does not know)."""
+    m = SOCKET.match(text)
+    if m and m.group(1):
+        return "ip", m.group(1).strip("[]")
+    if LOCAL_SOCKET.match(text):
+        return "local", None
+    return "unknown", None
 
 
 def loopback_host(host):
     return host.startswith("127.") or host == "::1" or host.startswith("::ffff:127.")
+
+
+def judge(name, part, peer, sent):
+    """What is wrong with one message of a call (one connect or bind, one sendto or sendmsg,
+    one message of a sendmmsg), or None. `part` holds no payload."""
+    if "sa_family=" not in part:
+        if name in ("connect", "bind"):
+            return None
+        # No address: the message goes to the socket's peer, which -yy prints (`write()` is not
+        # traced; the connect was). A UDP socket connected to port 0 does send, so the peer
+        # must be loopback; a peer that is not shown is unknown, and a sent message to it is a
+        # finding, as a port-0 connect on a socket of unknown kind is.
+        where, host = peer
+        if where == "local" or (host is not None and loopback_host(host)):
+            return None
+        if host is not None:
+            return "sends to a non-loopback address"
+        return "a send whose peer strace did not show" if sent else None
+    addresses = SOCKADDR.findall(part)
+    if not addresses:
+        return "an address the checker cannot read"
+    for family, fields in addresses:
+        if family in LOCAL_FAMILIES:
+            continue
+        port = PORT_IN.search(fields)
+        port = int(port.group(1)) if port else None
+        host = HOST_IN.search(fields)
+        host = (host.group(1) or host.group(2)) if host else None
+        if port == 53:
+            # sin_port=htons(53): a name lookup, even through the loopback resolver.
+            return "a name lookup"
+        if name == "connect" and UDP_CONNECT.match(part) and port == 0:
+            # glibc's getaddrinfo sorts a host name's addresses (RFC 6724) by connecting an
+            # unbound UDP socket to each and sends nothing. A later send on such a socket is
+            # judged by its peer.
+            continue
+        if family not in ("AF_INET", "AF_INET6") or host is None or not loopback_host(host):
+            return f"{'listens on' if name == 'bind' else 'reaches'} a non-loopback address"
+    return None
 
 
 for pid, call in records():
@@ -123,32 +188,22 @@ for pid, call in records():
     ok = code is not None and code >= 0
     if name in ("connect", "sendto", "sendmsg", "sendmmsg", "bind"):
         seen_net += 1
-        family = re.search(r"sa_family=(AF_[A-Z0-9]+)", call)
-        if family is None and name != "connect" and name != "bind":
-            # A send with no address goes to the socket's peer (`write()` is not traced; the
-            # connect was). A UDP socket connected to port 0 does send, so the peer is read
-            # from the -yy annotation: not loopback is a finding, and so is a UDP send that
-            # went out with no peer shown. Without -yy the kind is unknown, and every port-0
-            # connect is already a finding.
-            kind, host = peer_of(call)
-            if host is not None and not loopback_host(host):
-                finding(pid, f"sends to a non-loopback address: {call.strip()[:300]}")
-            elif host is None and kind in ("UDP", "UDPv6") and ok:
-                finding(pid, f"a UDP send whose peer strace did not show: {call.strip()[:300]}")
-            continue
-        if family is None or family.group(1) in ("AF_UNIX", "AF_LOCAL", "AF_NETLINK", "AF_UNSPEC"):
-            continue
-        loopback = re.search(r'inet_addr\("127\.|"::1"|"::ffff:127\.', call) is not None
-        if "htons(53)" in call:
-            lookups.append(call.strip())
-            finding(pid, f"a name lookup: {call.strip()}")
-        elif name == "connect" and UDP_CONNECT.match(call) and PORT_0.search(call):
-            # glibc's getaddrinfo sorts a host name's addresses (RFC 6724) by connecting an
-            # unbound UDP socket to each and sends nothing. A later send on such a socket is
-            # checked above, by its peer.
-            continue
-        elif family.group(1) not in ("AF_INET", "AF_INET6") or not loopback:
-            finding(pid, f"{'listens on' if name == 'bind' else 'reaches'} a non-loopback address: {call.strip()}")
+        text = without_payload(call)
+        peer = peer_of(text)
+        problems = []
+        if name == "sendmmsg":
+            # Each message carries its own address, or none; the first `code` were sent.
+            parts = text.split("{msg_hdr=")[1:]
+            if ok and code > len(parts):
+                problems.append("a sendmmsg with messages strace did not show")
+        else:
+            parts = [text]
+        for i, part in enumerate(parts):
+            problems.append(judge(name, part, peer, ok and (name != "sendmmsg" or i < code)))
+        for problem in dict.fromkeys(p for p in problems if p):
+            if problem == "a name lookup":
+                lookups.append(call.strip())
+            finding(pid, f"{problem}: {call.strip()}")
     elif name in ("execve", "execveat"):
         m = re.search(QUOTED, call)
         path = resolve(m.group(1), None, pid) if m else None

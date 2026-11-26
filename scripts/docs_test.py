@@ -180,6 +180,9 @@ class ReverseCiAsTheWorkflowsRunIt(unittest.TestCase):
         self.assertIn("UDP socket to port 0", self.bullet)
         # A send on such a socket is checked by its peer (final review, area 4, I1).
         self.assertIn("checked by its peer", self.bullet)
+        # Each message on its own, its address never read from a payload (security residuals).
+        self.assertIn("each message of a send is judged on its own", self.bullet)
+        self.assertIn("never from a payload", self.bullet)
         self.assertIn("a send on a UDP socket connected to port 0", self.bullet)
         self.assertIn("udp-port-0-send", self.reverse)
         self.assertIn("name lookup", self.sentences["13.6 stays offline"])

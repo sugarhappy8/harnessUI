@@ -259,6 +259,136 @@ class AddresslessSends(unittest.TestCase):
         self.assertIn("192.0.2.1", out)
 
 
+class PayloadsAndEveryMessage(unittest.TestCase):
+    """Addresses are read only from strace's own address structures, never from a payload, and
+    every message of a send is judged on its own (security residuals, item 2). The lines were
+    recorded with strace 6.8 under the job's options, in a network namespace whose loopback
+    also held 192.0.2.2/24, so nothing left it."""
+
+    CONNECT_0 = AddresslessSends.CONNECT_0
+
+    def test_a_payload_cannot_pose_as_the_sockets_peer(self):
+        # The peer annotation ends at the address shapes strace prints; the payload's
+        # "->127.0.0.1:1]>" is not the peer.
+        code, out = check(
+            start(),
+            self.CONNECT_0,
+            '100 sendto(3<UDP:[192.0.2.2:47340->192.0.2.1:0]>, "->127.0.0.1:1]>", 15, 0, NULL, 0) = 15',
+        )
+        self.assertEqual(code, 1, out)
+        self.assertIn("sends to a non-loopback address", out)
+
+    def test_an_addressless_message_in_a_mixed_sendmmsg_goes_to_the_peer(self):
+        code, out = check(
+            start(),
+            self.CONNECT_0,
+            "100 sendmmsg(3<UDP:[192.0.2.2:53156->192.0.2.1:0]>, [{msg_hdr={msg_name={sa_family=AF_INET, "
+            'sin_port=htons(9), sin_addr=inet_addr("127.0.0.1")}, msg_namelen=16, msg_iov=[{iov_base="a", '
+            "iov_len=1}], msg_iovlen=1, msg_controllen=0, msg_flags=0}, msg_len=1}, {msg_hdr={msg_name=NULL, "
+            'msg_namelen=0, msg_iov=[{iov_base="b", iov_len=1}], msg_iovlen=1, msg_controllen=0, msg_flags=0}, '
+            "msg_len=1}], 2, 0) = 2",
+        )
+        self.assertEqual(code, 1, out)
+        self.assertIn("sends to a non-loopback address", out)
+
+    def test_a_payload_cannot_pose_as_a_loopback_address(self):
+        for payload in (r'"\"::ffff:127."', r'"\"::1\""', r'"inet_addr(\"127.0.0.1\")"', r'"\\\"::1\""'):
+            code, out = check(
+                start(),
+                f"100 sendto(3<UDP:[5240869]>, {payload}, 12, 0, {V4(9, '192.0.2.1')}, 16) = 12",
+            )
+            self.assertEqual(code, 1, payload + out)
+            self.assertIn("reaches a non-loopback address", out)
+
+    def test_a_sendmmsg_mixing_loopback_and_non_loopback_addresses_fails(self):
+        code, out = check(
+            start(),
+            "100 sendmmsg(3<UDP:[5247947]>, [{msg_hdr={msg_name={sa_family=AF_INET, sin_port=htons(9), "
+            'sin_addr=inet_addr("127.0.0.1")}, msg_namelen=16, msg_iov=[{iov_base="a", iov_len=1}], '
+            "msg_iovlen=1, msg_controllen=0, msg_flags=0}, msg_len=1}, {msg_hdr={msg_name={sa_family=AF_INET, "
+            'sin_port=htons(9), sin_addr=inet_addr("192.0.2.1")}, msg_namelen=16, msg_iov=[{iov_base="b", '
+            "iov_len=1}], msg_iovlen=1, msg_controllen=0, msg_flags=0}, msg_len=1}], 2, 0) = 2",
+        )
+        self.assertEqual(code, 1, out)
+        self.assertIn("reaches a non-loopback address", out)
+
+    def test_a_sendmmsg_with_messages_strace_did_not_show_fails(self):
+        # strace prints at most 32 messages of a vector, then "...".
+        msg = (
+            '{msg_hdr={msg_name={sa_family=AF_INET, sin_port=htons(9), sin_addr=inet_addr("127.0.0.1")}, '
+            'msg_namelen=16, msg_iov=[{iov_base="m", iov_len=1}], msg_iovlen=1, msg_controllen=0, '
+            "msg_flags=0}, msg_len=1}"
+        )
+        shown = ", ".join([msg] * 32)
+        code, out = check(start(), f"100 sendmmsg(3<UDP:[5248537]>, [{shown}, ...], 40, 0) = 40")
+        self.assertEqual(code, 1, out)
+        self.assertIn("did not show", out)
+        code, out = check(start(), f"100 sendmmsg(3<UDP:[5248537]>, [{shown}], 32, 0) = 32")
+        self.assertEqual(code, 0, out)
+
+    def test_an_addressless_message_on_a_socket_whose_peer_is_not_shown_fails_once_sent(self):
+        line = (
+            "100 sendmmsg(3<UDP:[5]>, [{msg_hdr={msg_name={sa_family=AF_INET, sin_port=htons(9), "
+            'sin_addr=inet_addr("127.0.0.1")}, msg_namelen=16, msg_iov=[{iov_base="a", iov_len=1}], '
+            "msg_iovlen=1, msg_controllen=0, msg_flags=0}, msg_len=1}, {msg_hdr={msg_name=NULL, msg_namelen=0, "
+            'msg_iov=[{iov_base="b", iov_len=1}], msg_iovlen=1, msg_controllen=0, msg_flags=0}{len}}], 2, 0) = {sent}'
+        )
+        code, out = check(start(), line.replace("{len}", ", msg_len=1").replace("{sent}", "2"))
+        self.assertEqual(code, 1, out)
+        self.assertIn("peer", out)
+        # Only the first message went out: the second sent nothing.
+        code, out = check(start(), line.replace("{len}", "").replace("{sent}", "1"))
+        self.assertEqual(code, 0, out)
+
+    def test_a_send_with_no_address_on_a_socket_whose_peer_is_not_shown_fails_whatever_its_kind(self):
+        for sock in ("5<TCP:[1]>", "5<TCPv6:[[::1]:5000]>", "5<socket:[12]>", "5<RAW:[3]>", "5"):
+            code, out = check(start(), f'100 sendto({sock}, "x", 1, 0, NULL, 0) = 1')
+            self.assertEqual(code, 1, sock + out)
+            self.assertIn("peer", out)
+
+    def test_ipv6_addresses_as_strace_6_prints_them(self):
+        v6 = lambda port, addr: (
+            f'{{sa_family=AF_INET6, sin6_port=htons({port}), sin6_flowinfo=htonl(0), '
+            f'inet_pton(AF_INET6, "{addr}", &sin6_addr), sin6_scope_id=0}}'
+        )
+        code, out = check(
+            start(),
+            f'100 sendto(6<UDPv6:[7]>, "x", 1, 0, {v6(9, "::1")}, 28) = 1',
+            f'100 sendto(6<UDPv6:[7]>, "x", 1, 0, {v6(9, "::ffff:127.0.0.1")}, 28) = 1',
+            f"100 connect(6<UDPv6:[7]>, {v6(0, '2001:db8::1')}, 28) = 0",
+        )
+        self.assertEqual(code, 0, out)
+        code, out = check(start(), f'100 sendto(6<UDPv6:[7]>, "::1", 3, 0, {v6(9, "2001:db8::1")}, 28) = 3')
+        self.assertEqual(code, 1, out)
+        self.assertIn("2001:db8::1", out)
+
+    def test_recorded_loopback_and_unix_sends_pass(self):
+        code, out = check(
+            start(),
+            '100 sendto(3<UDP:[5247972]>, "x", 1, 0, {sa_family=AF_INET, sin_port=htons(9), sin_addr=inet_addr("127.0.0.1")}, 16) = 1',
+            '100 connect(4<UDP:[5247973]>, {sa_family=AF_INET, sin_port=htons(0), sin_addr=inet_addr("127.0.0.1")}, 16) = 0',
+            '100 sendto(4<UDP:[127.0.0.1:58661->127.0.0.1:0]>, "y", 1, 0, NULL, 0) = 1',
+            '100 sendto(3<UNIX-STREAM:[5247978->5247979]>, "x", 1, 0, NULL, 0) = 1',
+            '100 bind(3<UDP:[5251103]>, {sa_family=AF_INET, sin_port=htons(0), sin_addr=inet_addr("127.0.0.1")}, 16) = 0',
+            '100 sendto(3<UDP:[127.0.0.1:44779]>, "w", 1, 0, {sa_family=AF_INET, sin_port=htons(9), sin_addr=inet_addr("127.0.0.1")}, 16) = 1',
+            '100 sendto(3<UDP:[127.0.0.1:44779]>, "n", 1, 0, NULL, 0) = -1 EDESTADDRREQ (Destination address required)',
+            '100 connect(5<TCP:[5251105]>, {sa_family=AF_INET, sin_port=htons(44803), sin_addr=inet_addr("127.0.0.1")}, 16) = 0',
+            '100 sendto(5<TCP:[127.0.0.1:60990->127.0.0.1:44803]>, "tcp", 3, 0, NULL, 0) = 3',
+            '100 sendto(6<TCP:[127.0.0.1:44803->127.0.0.1:60990]>, "back", 4, 0, NULL, 0) = 4',
+            "100 sendto(7<NETLINK:[5251107]>, {nlmsg_len=0, nlmsg_type=0 /* NLMSG_??? */, nlmsg_flags=0, "
+            "nlmsg_seq=0, nlmsg_pid=0}, 16, 0, {sa_family=AF_NETLINK, nl_pid=0, nl_groups=00000000}, 12) = 16",
+            '100 bind(8<UNIX:[5251108]>, {sa_family=AF_UNIX, sun_path=@"probe-name"}, 13) = 0',
+            '100 sendto(9<UNIX:[5251109]>, "u", 1, 0, {sa_family=AF_UNIX, sun_path=@"probe-name"}, 13) = 1',
+            '100 sendto(10<UDP:[127.0.0.1:48181->127.0.0.1:9]>, "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"..., 100, 0, NULL, 0) = 100',
+            "100 sendmmsg(3<UDP:[127.0.0.1:55649->127.0.0.1:0]>, [{msg_hdr={msg_name={sa_family=AF_INET, "
+            'sin_port=htons(9), sin_addr=inet_addr("127.0.0.1")}, msg_namelen=16, msg_iov=[{iov_base="a", '
+            "iov_len=1}], msg_iovlen=1, msg_controllen=0, msg_flags=0}, msg_len=1}, {msg_hdr={msg_name=NULL, "
+            'msg_namelen=0, msg_iov=[{iov_base="b", iov_len=1}], msg_iovlen=1, msg_controllen=0, msg_flags=0}}], '
+            "2, 0) = 1",
+        )
+        self.assertEqual(code, 0, out)
+
+
 class FindingsNameTheirProgram(unittest.TestCase):
     def test_a_finding_names_its_program(self):
         code, out = check(
