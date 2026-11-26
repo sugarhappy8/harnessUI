@@ -778,7 +778,8 @@ mod tests {
             ]),
             Verdict::Works {
                 version: SdVersion::Flux,
-                kind: RecipeKind::Picture
+                kind: RecipeKind::Picture,
+                recipe: Some("x".into())
             }
         );
         assert_eq!(
@@ -947,6 +948,46 @@ mod tests {
                 "a-lora.safetensors",
                 "c_vace_model.safetensors"
             ]
+        );
+    }
+
+    /// Final review, area 3, I3: a Wan 2.2 A14B file detects as `wan2`, and only its recipe
+    /// says 2.2, so the verdict carries the recipe for the webview to name the type by.
+    #[test]
+    fn a_works_verdict_carries_its_recipe_in_camel_case() {
+        let label = FileLabel::Works {
+            version: SdVersion::Wan2,
+            recipe: "wan22-t2v".into(),
+            kind: RecipeKind::Video,
+            part: Some(NoisePart::High),
+            parameters: 14_000_000_000,
+            folder: false,
+        };
+        let verdict = verdict_of(&[label]);
+        assert_eq!(
+            verdict,
+            Verdict::Works {
+                version: SdVersion::Wan2,
+                kind: RecipeKind::Video,
+                recipe: Some("wan22-t2v".into())
+            }
+        );
+        assert_eq!(
+            serde_json::to_value(&verdict).unwrap(),
+            serde_json::json!({"works": {"version": "wan2", "kind": "video", "recipe": "wan22-t2v"}})
+        );
+        // A verdict saved without a recipe still reads.
+        let old: Verdict = serde_json::from_value(
+            serde_json::json!({"works": {"version": "wan2", "kind": "video"}}),
+        )
+        .unwrap();
+        assert_eq!(
+            old,
+            Verdict::Works {
+                version: SdVersion::Wan2,
+                kind: RecipeKind::Video,
+                recipe: None
+            }
         );
     }
 }

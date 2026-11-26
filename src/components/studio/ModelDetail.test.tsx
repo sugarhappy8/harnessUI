@@ -159,7 +159,7 @@ function supported(patch: Partial<LocalRepo> = {}): LocalRepo {
     commit: COMMIT,
     author: "someone",
     summary: "Z-Image Turbo as GGUF files: photo-real pictures in 8 steps.",
-    verdict: { works: { version: "z-image", kind: "picture" } },
+    verdict: { works: { version: "z-image", kind: "picture", recipe: null } },
     files: [Q8, Q5, Q4],
     loras: [],
     fileViews: [Q8, Q5, Q4].map((f) => view(f.file, f.plan.slots[0]!.part!.sizeBytes, works, f.quant)),
@@ -529,7 +529,7 @@ describe("a result's detail panel", () => {
       toFetchBytes: 6_940_000_000,
     };
     const panel = await openRepo(
-      supported({ repo: sdxl, verdict: { works: { version: "sdxl", kind: "picture" } }, files: [{ file, quant: "fp16", label, plan, best: true }], licence: openrail, licences: [openrail], fileViews: [] }),
+      supported({ repo: sdxl, verdict: { works: { version: "sdxl", kind: "picture", recipe: null } }, files: [{ file, quant: "fp16", label, plan, best: true }], licence: openrail, licences: [openrail], fileViews: [] }),
     );
     const licences = within(panel).getByRole("region", { name: "Licences" });
     const row = within(licences).getByText("Commercial use allowed, with use rules").closest<HTMLElement>("[data-licence]")!;
@@ -686,7 +686,7 @@ describe("gated files, in plain words with their next step (ruling S7)", () => {
       files: [],
       summary: null,
       gate: { mode: "auto", collects: ["username", "email"] },
-      verdict: { works: { version: "flux", kind: "pictureEdit" } },
+      verdict: { works: { version: "flux", kind: "pictureEdit", recipe: null } },
       fileViews: [view("flux1-kontext-dev.safetensors", 23_800_000_000, { notRead: { reason } })],
     });
 

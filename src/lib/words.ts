@@ -2178,7 +2178,8 @@ export function fileLabelWords(label: FileLabel, path: string): string {
 /** What a search result offers, in words; `null` when its name says nothing Studio knows. */
 export function verdictWords(verdict: StudioVerdict): string | null {
   if (verdict === "unknown") return null;
-  if ("works" in verdict) return FILE_LABEL.works(typeName(verdict.works.version, null), verdict.works.kind, null, 0);
+  if ("works" in verdict)
+    return FILE_LABEL.works(typeName(verdict.works.version, verdict.works.recipe), verdict.works.kind, null, 0);
   if ("lora" in verdict) return FILE_LABEL.lora(verdict.lora.base === null ? null : typeName(verdict.lora.base, null));
   return FILE_LABEL.cannotRun(verdict.cannotRun.reason);
 }
@@ -2571,7 +2572,7 @@ export const STUDIO_DOWNLOADS = {
 /** A result's verdict badge in words: exact (`exact`) or its name's hint. */
 export function verdictBadgeWords(verdict: StudioVerdict, exact: boolean): string {
   if (verdict === "unknown") return exact ? VERDICT.notRecognised : VERDICT.unknown;
-  if ("works" in verdict) return VERDICT.works(typeName(verdict.works.version, null));
+  if ("works" in verdict) return VERDICT.works(typeName(verdict.works.version, verdict.works.recipe));
   if ("lora" in verdict) return VERDICT.lora(verdict.lora.base === null ? null : typeName(verdict.lora.base, null));
   return VERDICT.cantRun(verdict.cannotRun.reason);
 }

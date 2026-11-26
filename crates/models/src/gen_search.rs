@@ -167,9 +167,27 @@ pub fn verdict_hint(repo_id: &str, pipeline_tag: Option<&str>) -> Verdict {
         Some(version) => Verdict::Works {
             version,
             kind: kind_hint(version, repo_id, pipeline_tag),
+            recipe: recipe_hint(version, &name),
         },
         None => Verdict::Unknown,
     }
+}
+
+/// The words a Wan 2.2 A14B name has: its files detect as `wan2`, Wan 2.1's version.
+const WAN22_WORDS: [&str; 4] = ["wan2.2", "wan22", "wan2-2", "wan-2.2"];
+
+/// The recipe a name says where its version alone would name the wrong type: a Wan 2.2 A14B
+/// repository (`wan2` with a Wan 2.2 word) is `wan22-i2v` with `i2v`, else `wan22-t2v`, so
+/// the search reads "Wan 2.2", never "Wan 2.1" (final review, area 3, I3). `None` otherwise.
+fn recipe_hint(version: SdVersion, name: &HintName) -> Option<String> {
+    (version == SdVersion::Wan2 && name.has_any(&WAN22_WORDS)).then(|| {
+        if name.has("i2v") {
+            "wan22-i2v"
+        } else {
+            "wan22-t2v"
+        }
+        .to_string()
+    })
 }
 
 /// The pipeline tags beside which a name's `xl` says SDXL (ruling S5-xl-3).
@@ -1062,7 +1080,11 @@ mod tests {
     // ---- search verdicts from names (0.2.0) ----------------------------------------------
 
     fn works(version: SdVersion, kind: RecipeKind) -> Verdict {
-        Verdict::Works { version, kind }
+        Verdict::Works {
+            version,
+            kind,
+            recipe: None,
+        }
     }
 
     #[test]
@@ -1080,8 +1102,34 @@ mod tests {
                 version: None
             }
         );
+        // Final review, area 3, I3: Wan 2.2 A14B reads as `wan2`; the hint's recipe says 2.2.
         assert_eq!(
             verdict_hint("QuantStack/Wan2.2-T2V-A14B-GGUF", Some("text-to-video")),
+            Verdict::Works {
+                version: SdVersion::Wan2,
+                kind: RecipeKind::Video,
+                recipe: Some("wan22-t2v".into())
+            }
+        );
+        assert_eq!(
+            verdict_hint("Comfy-Org/Wan_2.2_ComfyUI_Repackaged", None),
+            Verdict::Works {
+                version: SdVersion::Wan2,
+                kind: RecipeKind::Video,
+                recipe: Some("wan22-t2v".into())
+            }
+        );
+        assert_eq!(
+            verdict_hint("QuantStack/Wan2.2-I2V-A14B-GGUF", Some("image-to-video")),
+            Verdict::Works {
+                version: SdVersion::Wan2,
+                kind: RecipeKind::Video,
+                recipe: Some("wan22-i2v".into())
+            }
+        );
+        // Wan 2.1 keeps no recipe: its version names it.
+        assert_eq!(
+            verdict_hint("Wan-AI/Wan2.1-T2V-1.3B", Some("text-to-video")),
             works(SdVersion::Wan2, RecipeKind::Video)
         );
     }

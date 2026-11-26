@@ -89,7 +89,7 @@ describe("search", () => {
   });
 
   it("opening a repo makes its hit's verdict exact", async () => {
-    const verdict = { works: { version: "sdxl", kind: "picture" } } as const;
+    const verdict = { works: { version: "sdxl", kind: "picture", recipe: null } } as const;
     const repo = { repo: "someone/sdxl-GGUF", commit: "c".repeat(40), verdict } as unknown as LocalRepo;
     vi.mocked(api.studioLocalSearch).mockResolvedValue({
       items: [hit("someone/sdxl-GGUF"), hit("someone/other")],

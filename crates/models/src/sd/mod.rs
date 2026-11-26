@@ -110,9 +110,14 @@ pub enum FileLabel {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", rename_all_fields = "camelCase")]
 pub enum Verdict {
+    /// `recipe`: the recipe of the file that works, which names the model's type where its
+    /// version does not (Wan 2.2 A14B files detect as `wan2`; only `wan22-t2v` says 2.2);
+    /// `None` for a hint from a name that says no more than the version.
     Works {
         version: SdVersion,
         kind: RecipeKind,
+        #[serde(default)]
+        recipe: Option<String>,
     },
     Lora {
         base: Option<SdVersion>,
@@ -181,6 +186,7 @@ pub fn verdict_of(labels: &[FileLabel]) -> Verdict {
             version,
             kind,
             parameters,
+            recipe,
             ..
         } = label
             && best.as_ref().is_none_or(|(most, _)| parameters > most)
@@ -190,6 +196,7 @@ pub fn verdict_of(labels: &[FileLabel]) -> Verdict {
                 Verdict::Works {
                     version: *version,
                     kind: *kind,
+                    recipe: Some(recipe.clone()),
                 },
             ));
         }

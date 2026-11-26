@@ -107,7 +107,7 @@ function supported(patch: Partial<LocalRepo> = {}): LocalRepo {
     commit: "c".repeat(40),
     author: "someone",
     summary: null,
-    verdict: { works: { version: "z-image", kind: "picture" } },
+    verdict: { works: { version: "z-image", kind: "picture", recipe: null } },
     files: [{ file: "z-image-turbo-Q5_K_M.gguf", quant: "Q5_K_M", label: works, plan: plan(), best: true }],
     loras: [],
     fileViews: [],
@@ -137,7 +137,7 @@ function hit(repo: string, verdict: Verdict = "unknown", patch: Partial<LocalSea
   };
 }
 
-const sdxlHit = hit("stabilityai/stable-diffusion-xl-base-1.0", { works: { version: "sdxl", kind: "picture" } }, {
+const sdxlHit = hit("stabilityai/stable-diffusion-xl-base-1.0", { works: { version: "sdxl", kind: "picture", recipe: null } }, {
   downloads: 1_912_440,
   likes: 6_804,
   updatedAt: new Date(Date.now() - 3 * DAY).toISOString(),
@@ -551,7 +551,7 @@ describe("Get models", () => {
   });
 
   it("a hint becomes exact once the result was opened", async () => {
-    const hinted = hit("someone/Z-Image-Turbo-GGUF", { works: { version: "z-image", kind: "picture" } });
+    const hinted = hit("someone/Z-Image-Turbo-GGUF", { works: { version: "z-image", kind: "picture", recipe: null } });
     vi.mocked(api.studioLocalRepo).mockResolvedValue(supported());
     await showLocal(LOCAL, { popular: [hinted] });
     const badge = within(card(hinted.repo)).getByText("Works in Studio · Z-Image").closest("[data-verdict]")!;
@@ -770,7 +770,7 @@ describe("Get models", () => {
         files: [],
         gate: { mode: "auto", collects: [] },
         fileViews: [{ path: "flux1-kontext-dev.safetensors", sizeBytes: 23_800_000_000, quant: null, label: { notRead: { reason } } }],
-        verdict: { works: { version: "flux", kind: "pictureEdit" } },
+        verdict: { works: { version: "flux", kind: "pictureEdit", recipe: null } },
       });
     await showLocal();
     const panel = await openResult("black-forest-labs/FLUX.1-Kontext-dev", unread("needsToken"));
@@ -977,7 +977,7 @@ describe("Use it (Task U7)", () => {
     const id = `hf:${repo}:z-image-turbo-Q5_K_M.gguf`;
     vi.mocked(api.studioLocalRepo).mockResolvedValue(supported({ repo }));
     // From the results, with the content notice already accepted.
-    await showLocal({ ...LOCAL, noticeAccepted: true }, { open: false, popular: [hit(repo, { works: { version: "z-image", kind: "picture" } })] });
+    await showLocal({ ...LOCAL, noticeAccepted: true }, { open: false, popular: [hit(repo, { works: { version: "z-image", kind: "picture", recipe: null } })] });
     screen.getByRole("textbox", { name: "Prompt" });
     let clicks = 0;
     const press = async (el: HTMLElement) => {

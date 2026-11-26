@@ -680,7 +680,8 @@ mod tests {
             d.verdict("black-forest-labs/FLUX.1-dev"),
             Some(Verdict::Works {
                 version: SdVersion::Flux,
-                kind: RecipeKind::Picture
+                kind: RecipeKind::Picture,
+                recipe: Some("flux1-dev".into())
             })
         );
     }
@@ -701,7 +702,8 @@ mod tests {
             d.verdict("stabilityai/stable-diffusion-xl-base-1.0"),
             Some(Verdict::Works {
                 version: SdVersion::Sdxl,
-                kind: RecipeKind::Picture
+                kind: RecipeKind::Picture,
+                recipe: Some("sdxl-checkpoint".into())
             })
         );
     }

@@ -3107,7 +3107,8 @@ pub(crate) mod tests {
             r.verdict,
             Verdict::Works {
                 version: SdVersion::Flux,
-                kind: RecipeKind::PictureEdit
+                kind: RecipeKind::PictureEdit,
+                recipe: None
             }
         );
     }
@@ -3278,6 +3279,7 @@ pub(crate) mod tests {
         let z_image = Verdict::Works {
             version: SdVersion::ZImage,
             kind: RecipeKind::Picture,
+            recipe: None,
         };
         assert_eq!(
             page.items,

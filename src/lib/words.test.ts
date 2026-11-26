@@ -1118,7 +1118,13 @@ describe("a repository's file labels (Task S6)", () => {
   });
 
   it("a search hit's verdict reads as a file's label; a name that says nothing, nothing", () => {
-    expect(verdictWords({ works: { version: "sdxl", kind: "picture" } })).toBe("Works in Studio · SDXL picture model");
+    expect(verdictWords({ works: { version: "sdxl", kind: "picture", recipe: null } })).toBe(
+      "Works in Studio · SDXL picture model",
+    );
+    // Final review, area 3, I3: Wan 2.2 A14B reads as `wan2`; its recipe names it.
+    expect(verdictWords({ works: { version: "wan2", kind: "video", recipe: "wan22-t2v" } })).toBe(
+      "Works in Studio · Wan 2.2 video model",
+    );
     expect(verdictWords({ lora: { base: null } })).toBe("LoRA for an unknown model type");
     expect(verdictWords({ cannotRun: { reason: "svd", version: null } })).toBe(
       "Can't run in Studio: This is a Stable Video Diffusion model, which the Studio engine can't run",
@@ -1148,7 +1154,15 @@ describe("a repository's file labels (Task S6)", () => {
 
 describe("Get models' words (Task U5)", () => {
   it("a result's verdict badge says what Studio can do with it, in short, never the engine's words", () => {
-    expect(verdictBadgeWords({ works: { version: "sdxl", kind: "picture" } }, true)).toBe("Works in Studio · SDXL");
+    expect(verdictBadgeWords({ works: { version: "sdxl", kind: "picture", recipe: "sdxl-checkpoint" } }, true)).toBe(
+      "Works in Studio · SDXL",
+    );
+    expect(verdictBadgeWords({ works: { version: "wan2", kind: "video", recipe: "wan22-t2v" } }, true)).toBe(
+      "Works in Studio · Wan 2.2",
+    );
+    expect(verdictBadgeWords({ works: { version: "wan2", kind: "video", recipe: null } }, false)).toBe(
+      "Works in Studio · Wan 2.1",
+    );
     expect(verdictBadgeWords({ lora: { base: "flux" } }, false)).toBe("LoRA for FLUX.1");
     expect(verdictBadgeWords({ lora: { base: null } }, true)).toBe("LoRA for an unknown model type");
     expect(verdictBadgeWords({ cannotRun: { reason: "lumina2", version: null } }, true)).toBe("Can't run: Lumina 2");

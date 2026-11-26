@@ -659,9 +659,11 @@ export type FileLabel =
   | { cannotRun: { reason: CannotRunReason; version: SdVersion | null } }
   | { notRead: { reason: NotReadReason } };
 
-/** What a repository offers: from its files' labels, or its name's hint. */
+/** What a repository offers: from its files' labels, or its name's hint. A model that works
+ *  carries its file's recipe, which names its type where its version does not (Wan 2.2 A14B
+ *  reads as `wan2`); `null` for a name's hint that says no more than the version. */
 export type Verdict =
-  | { works: { version: SdVersion; kind: RecipeKind } }
+  | { works: { version: SdVersion; kind: RecipeKind; recipe: string | null } }
   | { lora: { base: SdVersion | null } }
   | { cannotRun: { reason: CannotRunReason; version: SdVersion | null } }
   | "unknown";
