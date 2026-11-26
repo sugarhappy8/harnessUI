@@ -259,7 +259,7 @@ def set_switch(s, label: str, on: bool):
 # (which opens the model sheet, Task U4), Shape, How many and a video's Length as menus, Settings and
 # Create; the side panel (Settings), with the model's other fields, is closed until Settings
 # opens it (a slide-over below 1400 px, docked beside the results from there).
-MODEL_CHIP = "return document.querySelector('[data-composer] [data-model-chip] button');"
+MODEL_CHIP = "return document.querySelector('[data-studio-view] [data-composer] [data-model-chip] button');"
 
 
 def pick_model(s, name: str):
@@ -283,7 +283,7 @@ def open_studio_settings(s):
     """Studio's side panel, opened from the composer's Settings, once it shows."""
     if not visible(s, "[data-settings-panel]"):
         pointer_click_found(
-            s, "return document.querySelector('[data-composer] [data-settings-button]');", what="the composer's Settings"
+            s, "return document.querySelector('[data-studio-view] [data-composer] [data-settings-button]');", what="the composer's Settings"
         )
     s.wait_for(lambda: visible(s, "[data-settings-panel]"), 10, "Studio's side panel")
 
@@ -327,7 +327,7 @@ def choose_chip(s, field: str, chip: str):
 # The button of the composer's menu named `arguments[0]` ("Length: 4 s"), as `trigger`.
 FIND_MENU = """
     const field = arguments[0];
-    const trigger = [...document.querySelectorAll('[data-composer] [role=toolbar] button')]
+    const trigger = [...document.querySelectorAll('[data-studio-view] [data-composer] [role=toolbar] button')]
       .find(b => (b.getAttribute('aria-label') || '').startsWith(field + ': '));
 """
 
@@ -352,18 +352,18 @@ def choose_menu(s, field: str, item: str):
 
 
 def write_prompt(s, text: str):
-    type_into(s, "[data-composer] textarea", text)
+    type_into(s, "[data-studio-view] [data-composer] textarea", text)
 
 
 def dock_text(s) -> str:
     """The composer's words with the privacy line under it (the card's parent holds both)."""
-    return s.execute("const d = document.querySelector('[data-composer]'); return d ? d.parentElement.innerText : '';")
+    return s.execute("const d = document.querySelector('[data-studio-view] [data-composer]'); return d ? d.parentElement.innerText : '';")
 
 
 def create_button(s):
     return s.execute(
         """
-        return [...document.querySelectorAll('[data-composer] button')]
+        return [...document.querySelectorAll('[data-studio-view] [data-composer] button')]
           .find(b => b.innerText.trim() === 'Create') || null;
         """
     )
@@ -372,12 +372,12 @@ def create_button(s):
 def press_create(s):
     s.wait_for(lambda: s.execute(
         """
-        const b = [...document.querySelectorAll('[data-composer] button')].find(b => b.innerText.trim() === 'Create');
+        const b = [...document.querySelectorAll('[data-studio-view] [data-composer] button')].find(b => b.innerText.trim() === 'Create');
         return !!b && !b.disabled;
         """), 15, "Create enabled")
     pointer_click_found(
         s,
-        "return [...document.querySelectorAll('[data-composer] button')].find(b => b.innerText.trim() === 'Create') || null;",
+        "return [...document.querySelectorAll('[data-studio-view] [data-composer] button')].find(b => b.innerText.trim() === 'Create') || null;",
         what="Create",
     )
 
@@ -624,7 +624,8 @@ def c_save_delete(c, notes):
         """
         const label = [...document.querySelectorAll('[role=dialog] label')]
           .find(l => l.innerText.includes('Also save the settings'));
-        return label.querySelector('input').checked;
+        // A Radix checkbox: a button (role=checkbox) the label points at.
+        return document.getElementById(label.htmlFor).getAttribute('aria-checked') === 'true';
         """
     )
     assert settings_box is False, "Also save the settings is ticked"

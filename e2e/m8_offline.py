@@ -256,7 +256,7 @@ def studio_part(s, home: pathlib.Path, con_path: pathlib.Path):
     s.wait_for(
         lambda: s.execute(
             """
-            const b = [...document.querySelectorAll('[data-composer] button')]
+            const b = [...document.querySelectorAll('[data-studio-view] [data-composer] button')]
               .find(b => b.innerText.trim() === 'Create');
             return !!b && !b.disabled;
             """
@@ -307,7 +307,7 @@ def c_generic_model_with_a_lora(s, home: pathlib.Path, con_path: pathlib.Path):
     close_settings(s)
 
     pointer_click_found(
-        s, "return document.querySelector('[data-composer] [data-model-chip] button');", what="the model chip"
+        s, "return document.querySelector('[data-studio-view] [data-composer] [data-model-chip] button');", what="the model chip"
     )
     pointer_click_found(
         s,
@@ -324,7 +324,7 @@ def c_generic_model_with_a_lora(s, home: pathlib.Path, con_path: pathlib.Path):
     # The side panel's LoRAs section: Add, the LoRA, then its strength from 1 to 0.8 (the slider's
     # step is 0.05).
     pointer_click_found(
-        s, "return document.querySelector('[data-composer] [data-settings-button]');", what="the composer's Settings"
+        s, "return document.querySelector('[data-studio-view] [data-composer] [data-settings-button]');", what="the composer's Settings"
     )
     section = "[data-settings-panel] [data-settings-section=loras]"
     pointer_click_found(
@@ -361,7 +361,7 @@ def c_generic_model_with_a_lora(s, home: pathlib.Path, con_path: pathlib.Path):
     s.wait_for(
         lambda: s.execute(
             """
-            const b = [...document.querySelectorAll('[data-composer] button')]
+            const b = [...document.querySelectorAll('[data-studio-view] [data-composer] button')]
               .find(b => b.innerText.trim() === 'Create');
             return !!b && !b.disabled;
             """
