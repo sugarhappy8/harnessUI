@@ -1315,13 +1315,19 @@ describe("the error boundaries' words (0.2.1)", () => {
     const { CRASH } = await import("./words");
     const { APP_NAME } = await import("./app");
     expect(CRASH.title).toBe("Something went wrong drawing this screen");
-    expect(CRASH.safe).toBe("Your chats, models and downloads are safe.");
+    expect(CRASH.safe).toBe("Your saved chats, models and downloads are safe.");
+    expect(CRASH.next).toBe(`Try again, or reload ${APP_NAME} if this keeps happening.`);
+    expect(CRASH.nextAgain).toBe(`It happened again. Reload ${APP_NAME} to start this window afresh.`);
+    expect(CRASH.panelAgain).toBe("It went wrong again. The rest of the app still works.");
+    expect(CRASH.backToStudio).toBe("Back to Studio");
+    expect(CRASH.panel(CRASH.where.workbench)).toBe("The side panel couldn't be shown.");
     expect(CRASH.tryAgain).toBe("Try again");
     expect(CRASH.reload).toBe(`Reload ${APP_NAME}`);
     expect(CRASH.details).toBe("Details");
     expect(CRASH.panel(CRASH.where.detail)).toBe("This model's page couldn't be shown.");
     const all = [
-      CRASH.title, CRASH.safe, CRASH.next, CRASH.tryAgain, CRASH.reload, CRASH.details, CRASH.panelNext,
+      CRASH.title, CRASH.safe, CRASH.next, CRASH.nextAgain, CRASH.tryAgain, CRASH.reload, CRASH.details,
+      CRASH.panelNext, CRASH.panelAgain, CRASH.backToStudio,
       ...Object.values(CRASH.where).map((w) => CRASH.panel(w)),
     ];
     for (const text of all) {

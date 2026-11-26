@@ -104,6 +104,55 @@ describe("ErrorBoundary", () => {
     expect(screen.getByRole("alert")).toBeTruthy();
   });
 
+  it("tells the fallback when a Try again failed, and forgets it once the children draw", () => {
+    box.broken = true;
+    const seen: boolean[] = [];
+    const tree = (label: string) => (
+      <ErrorBoundary
+        name="Child"
+        fallback={({ again, reset }) => {
+          seen.push(again);
+          return (
+            <button type="button" onClick={reset}>
+              Try again
+            </button>
+          );
+        }}
+      >
+        <Child label={label} />
+      </ErrorBoundary>
+    );
+    const { rerender } = render(tree("one"));
+    expect(seen.at(-1)).toBe(false);
+    fireEvent.click(screen.getByRole("button", { name: "Try again" }));
+    expect(seen.at(-1)).toBe(true);
+    box.broken = false;
+    fireEvent.click(screen.getByRole("button", { name: "Try again" }));
+    expect(screen.getByText("one")).toBeTruthy();
+    // A later error, after the children drew, is a first one again.
+    box.broken = true;
+    rerender(tree("two"));
+    expect(seen.at(-1)).toBe(false);
+  });
+
+  it("tells onReset whether Try again or a change of keys drew the children again", () => {
+    box.broken = true;
+    const onReset = vi.fn();
+    const { rerender } = render(
+      <ErrorBoundary name="Child" fallback={fallback} resetKeys={[1]} onReset={onReset}>
+        <Child />
+      </ErrorBoundary>,
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Try again" }));
+    expect(onReset).toHaveBeenLastCalledWith("user");
+    rerender(
+      <ErrorBoundary name="Child" fallback={fallback} resetKeys={[2]} onReset={onReset}>
+        <Child />
+      </ErrorBoundary>,
+    );
+    expect(onReset).toHaveBeenLastCalledWith("keys");
+  });
+
   it("turns anything thrown into an Error", () => {
     function Throws(): never {
       throw "a plain string";

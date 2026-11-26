@@ -5,7 +5,7 @@
 import { useEffect, useId, useRef, type ReactNode } from "react";
 import { RotateCcw, TriangleAlert } from "lucide-react";
 import clsx from "clsx";
-import { ErrorBoundary, type FallbackProps } from "./ErrorBoundary";
+import { ErrorBoundary, type FallbackProps, type ResetCause } from "./ErrorBoundary";
 import { crashSummary } from "../lib/crash";
 import { CRASH } from "../lib/words";
 import { FOCUS_RING } from "./ui/styles";
@@ -33,10 +33,13 @@ function Details(props: { error: Error }) {
   );
 }
 
-/** The whole window's notice: what happened, that nothing was lost, *Try again* (draws the app
- *  again) and *Reload harnessUI* (loads the window again), and the details, collapsed. It needs
- *  nothing the app sets up (no provider, no store), so it draws whatever failed. */
-export function AppCrash(props: FallbackProps) {
+/** What a notice is given: the boundary's FallbackProps, `again` optional (false). */
+type NoticeProps = Omit<FallbackProps, "again"> & { again?: boolean };
+
+/** The whole window's notice: what happened, that nothing saved was lost, *Try again* (draws
+ *  the app again) and *Reload harnessUI* (loads the window again), and the details, collapsed.
+ *  It needs nothing the app sets up (no provider, no store), so it draws whatever failed. */
+export function AppCrash(props: NoticeProps) {
   const titleId = useId();
   const again = useRef<HTMLButtonElement>(null);
   // Keyboard users land on the way out, not on the page that went away.
@@ -57,7 +60,7 @@ export function AppCrash(props: FallbackProps) {
               {CRASH.title}
             </h1>
             <p className="text-sm text-fg-muted">
-              {CRASH.safe} {CRASH.next}
+              {CRASH.safe} {props.again ? CRASH.nextAgain : CRASH.next}
             </p>
           </div>
         </div>
@@ -88,11 +91,23 @@ const COMPONENT: Record<CrashWhere, string> = {
   settings: "SettingsDialog",
 };
 
-/** A panel's notice: "<panel> couldn't be shown.", that the rest still works, *Try again* and
- *  the details. `fill` centres it in a large pane (Studio, the chat); otherwise it sits at the
- *  top of the panel it replaces (a dialog's content). */
-export function PanelCrash(props: FallbackProps & { where: CrashWhere; fill?: boolean }) {
+/** A panel's own way out, shown next to Try again (Studio's *Back to Studio*). */
+export type PanelAction = { label: string; run(): void };
+
+/** A panel's notice: "<panel> couldn't be shown.", that the rest still works, *Try again*, the
+ *  panel's own `action` if it has one, and the details. After a Try again that failed it says
+ *  so and offers *Reload harnessUI* too. `fill` centres it in a large pane (Studio, the chat);
+ *  otherwise it sits at the top of the panel it replaces (a dialog's content). */
+export function PanelCrash(props: NoticeProps & { where: CrashWhere; fill?: boolean; action?: PanelAction }) {
   const titleId = useId();
+  const again = useRef<HTMLButtonElement>(null);
+  // The panel that went away may have held the focus (the composer, a card's button): it then
+  // fell to the page, and a keyboard user would start over from the top. Never taken from
+  // anything else that has it.
+  useEffect(() => {
+    const now = document.activeElement;
+    if (now === null || now === document.body) again.current?.focus();
+  }, []);
   return (
     <div className={clsx(props.fill && "flex min-h-0 min-w-0 flex-1 items-center justify-center overflow-y-auto p-6 max-sm:p-4")}>
       <div
@@ -107,14 +122,24 @@ export function PanelCrash(props: FallbackProps & { where: CrashWhere; fill?: bo
             <p id={titleId} className="font-medium">
               {CRASH.panel(CRASH.where[props.where])}
             </p>
-            <p className="text-fg-muted">{CRASH.panelNext}</p>
+            <p className="text-fg-muted">{props.again ? CRASH.panelAgain : CRASH.panelNext}</p>
           </div>
         </div>
         <div className="flex flex-wrap items-center gap-x-4 gap-y-2 pl-6.5">
-          <button type="button" className={SECONDARY} onClick={props.reset}>
+          <button ref={again} type="button" className={SECONDARY} onClick={props.reset}>
             <RotateCcw className="size-4" aria-hidden />
             {CRASH.tryAgain}
           </button>
+          {props.action && (
+            <button type="button" className={SECONDARY} onClick={props.action.run}>
+              {props.action.label}
+            </button>
+          )}
+          {props.again && (
+            <button type="button" className={SECONDARY} onClick={() => window.location.reload()}>
+              {CRASH.reload}
+            </button>
+          )}
         </div>
         <div className="pl-6.5">
           <Details error={props.error} />
@@ -126,18 +151,38 @@ export function PanelCrash(props: FallbackProps & { where: CrashWhere; fill?: bo
 
 /** An error boundary around one independent panel: an error drawing it shows PanelCrash there
  *  and leaves the rest of the window as it was. `resetKeys` draw it again when what it shows
- *  changes (another model, another chat). */
+ *  changes (another model, another chat); `onReset` is told why it is drawn again; `action` is
+ *  the panel's own way out, shown on the notice (its `run` draws the panel again after it). */
 export function PanelBoundary(props: {
   where: CrashWhere;
   fill?: boolean;
   resetKeys?: readonly unknown[];
+  onReset?: (cause: ResetCause) => void;
+  action?: PanelAction;
   children: ReactNode;
 }) {
+  const { action } = props;
   return (
     <ErrorBoundary
       name={COMPONENT[props.where]}
       resetKeys={props.resetKeys}
-      fallback={(f) => <PanelCrash {...f} where={props.where} fill={props.fill} />}
+      onReset={props.onReset}
+      fallback={(f) => (
+        <PanelCrash
+          {...f}
+          where={props.where}
+          fill={props.fill}
+          action={
+            action && {
+              label: action.label,
+              run: () => {
+                action.run();
+                f.reset();
+              },
+            }
+          }
+        />
+      )}
     >
       {props.children}
     </ErrorBoundary>

@@ -1,8 +1,12 @@
 import { Component, type ReactNode } from "react";
 import { asError, reportCrash } from "../lib/crash";
 
-/** What a fallback is given: the error, and `reset`, which draws the children again. */
-export type FallbackProps = { error: Error; reset: () => void };
+/** What a fallback is given: the error; `reset`, which draws the children again (Try again);
+ *  and `again`, true when the error came from a Try again that failed. */
+export type FallbackProps = { error: Error; reset: () => void; again: boolean };
+
+/** Why the children are drawn again: Try again (`reset`), or a change of `resetKeys`. */
+export type ResetCause = "user" | "keys";
 
 type Props = {
   /** The part of the app it guards, as the console report names it ("ModelDetail"). */
@@ -12,12 +16,13 @@ type Props = {
   /** Values that, when any of them changes, draw the children again (a different model
    *  chosen, another chat opened), compared one by one with Object.is. */
   resetKeys?: readonly unknown[];
-  /** Called when the children are drawn again, by `reset` or a change of `resetKeys`. */
-  onReset?: () => void;
+  /** Called just before the children are drawn again, with why. */
+  onReset?: (cause: ResetCause) => void;
   children?: ReactNode;
 };
 
-type State = { error: Error | null };
+/** `retried`: the children are being drawn again by Try again, and have not drawn since. */
+type State = { error: Error | null; retried: boolean };
 
 function changed(a: readonly unknown[] = [], b: readonly unknown[] = []): boolean {
   return a.length !== b.length || a.some((v, i) => !Object.is(v, b[i]));
@@ -29,9 +34,9 @@ function changed(a: readonly unknown[] = [], b: readonly unknown[] = []): boolea
  *  the children again on `reset` or when `resetKeys` change. Errors in event handlers and
  *  promises never reach it; they are handled where they happen. */
 export class ErrorBoundary extends Component<Props, State> {
-  state: State = { error: null };
+  state: State = { error: null, retried: false };
 
-  static getDerivedStateFromError(thrown: unknown): State {
+  static getDerivedStateFromError(thrown: unknown): Partial<State> {
     return { error: asError(thrown) };
   }
 
@@ -43,18 +48,23 @@ export class ErrorBoundary extends Component<Props, State> {
   componentDidUpdate(prev: Props, prevState: State): void {
     // Only for an error already shown: the update that caught it may itself carry new keys.
     if (prevState.error !== null && this.state.error !== null && changed(prev.resetKeys, this.props.resetKeys)) {
-      this.reset();
+      this.restart("keys");
+    } else if (this.state.error === null && this.state.retried) {
+      // The children drew after Try again: a later error is a first one again.
+      this.setState({ retried: false });
     }
   }
 
-  reset = (): void => {
-    this.props.onReset?.();
-    this.setState({ error: null });
-  };
+  private restart(cause: ResetCause): void {
+    this.props.onReset?.(cause);
+    this.setState({ error: null, retried: cause === "user" });
+  }
+
+  reset = (): void => this.restart("user");
 
   render(): ReactNode {
-    const { error } = this.state;
-    if (error !== null) return this.props.fallback({ error, reset: this.reset });
+    const { error, retried } = this.state;
+    if (error !== null) return this.props.fallback({ error, reset: this.reset, again: retried });
     return this.props.children;
   }
 }

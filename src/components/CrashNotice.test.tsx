@@ -20,10 +20,17 @@ describe("the whole window's notice", () => {
   it("says what happened and that nothing is lost, in plain words, as an alert", () => {
     render(<AppCrash error={ERROR} reset={() => {}} />);
     const alert = screen.getByRole("alert", { name: CRASH.title });
-    expect(alert.textContent).toContain("Your chats, models and downloads are safe.");
+    expect(alert.textContent).toContain("Your saved chats, models and downloads are safe.");
     expect(screen.getByRole("heading", { name: "Something went wrong drawing this screen" })).toBeTruthy();
     expect(screen.getByRole("button", { name: "Try again" })).toBeTruthy();
     expect(screen.getByRole("button", { name: `Reload ${APP_NAME}` })).toBeTruthy();
+  });
+
+  it("after a Try again that failed, says it happened again", () => {
+    render(<AppCrash error={ERROR} reset={() => {}} again />);
+    expect(screen.getByRole("alert", { name: CRASH.title }).textContent).toContain(
+      `It happened again. Reload ${APP_NAME} to start this window afresh.`,
+    );
   });
 
   it("puts the keyboard on Try again, and Try again resets", () => {
@@ -54,6 +61,36 @@ describe("a panel's notice", () => {
     fireEvent.click(screen.getByRole("button", { name: "Try again" }));
     expect(reset).toHaveBeenCalledTimes(1);
     expect(alert.querySelector("details")!.open).toBe(false);
+  });
+
+  it("puts the keyboard on Try again when the panel took the focus with it, and leaves it alone otherwise", () => {
+    (document.activeElement as HTMLElement | null)?.blur();
+    render(<PanelCrash where="chat" error={ERROR} reset={() => {}} />);
+    expect(document.activeElement).toBe(screen.getByRole("button", { name: "Try again" }));
+    cleanup();
+
+    const elsewhere = document.body.appendChild(document.createElement("input"));
+    elsewhere.focus();
+    render(<PanelCrash where="chat" error={ERROR} reset={() => {}} />);
+    expect(document.activeElement).toBe(elsewhere);
+    elsewhere.remove();
+  });
+
+  it("after a Try again that failed, says so and offers Reload", () => {
+    render(<PanelCrash where="studio" error={ERROR} reset={() => {}} again />);
+    const alert = screen.getByRole("alert", { name: "Studio couldn't be shown." });
+    expect(alert.textContent).toContain("It went wrong again. The rest of the app still works.");
+    expect(screen.getByRole("button", { name: `Reload ${APP_NAME}` })).toBeTruthy();
+    cleanup();
+    render(<PanelCrash where="studio" error={ERROR} reset={() => {}} />);
+    expect(screen.queryByRole("button", { name: `Reload ${APP_NAME}` })).toBeNull();
+  });
+
+  it("shows a panel's own way out next to Try again", () => {
+    const home = vi.fn();
+    render(<PanelCrash where="studio" error={ERROR} reset={() => {}} action={{ label: "Back to Studio", run: home }} />);
+    fireEvent.click(screen.getByRole("button", { name: "Back to Studio" }));
+    expect(home).toHaveBeenCalledTimes(1);
   });
 
   it("has words for every panel", () => {
