@@ -86,6 +86,30 @@ The final review found these. Each was judged safe to ship and is listed for the
   - the chat Composer's own HTML5 drop on Windows (from before 0.1.0).
 - **An owner choice.** The usage line shows the full path, not "~".
 
+## The Linux `strace` checker, known gaps (0.2.0 final review)
+
+`scripts/check_strace.py` guards against a pack that reaches the network by mistake. The
+`reverse.yml` run inside a network namespace with no network is what stops traffic. The
+0.2.0 final review reproduced these ways for a program written to evade the checker, each
+with a real strace 6.8 log, and left them for later:
+
+- **A payload containing `) = -1`.** `result()` reads such a line as failed. That hides the
+  rest of a `sendmmsg` past the 32 messages strace prints, an `execve` and a file write. The
+  fix is to read the result only from the end of the line.
+- **`AF_UNSPEC`.** It is exempt everywhere, but Linux delivers a `sendto` with it on an IPv4
+  socket, and binds to 0.0.0.0 with it. The fix is to allow it in `connect` only.
+- **Stale `-yy` details.** After a reconnect to a non-loopback address on port 0, strace still
+  prints the old loopback peer, so an addressless `send` passes. The fix is to refuse port-0
+  connects to non-loopback addresses (the workflow pins the host name to 127.0.1.1), or to
+  judge an addressless send by the fd's last traced `connect`.
+- **IPv6 only.** A message is judged by its peer only when no `sa_family=` appears anywhere
+  in it, so a SOL_IP cmsg or an `AF_UNSPEC` `msg_name` can pass. This is from reading the
+  kernel's code; no IPv6 log was recorded.
+- **A false finding.** A loopback TCP client that binds before it connects is reported,
+  because strace's details go stale. Nothing in the nightly run does this today (run
+  45796320126 passed). The fix is to exempt TCP sends from the unknown-peer finding, since
+  every TCP connect is traced and judged.
+
 ## Owner decisions that remain
 
 - An Apple Developer membership. Signing, notarization, and keeping macOS permissions across
