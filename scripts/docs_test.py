@@ -177,6 +177,7 @@ class ReverseCiAsTheWorkflowsRunIt(unittest.TestCase):
         self.assertIn("htons(53)", read("scripts/check_strace.py"))
         self.assertIn("scripts/check_strace.py", self.reverse)
         self.assertIn("name lookup", self.bullet)
+        self.assertIn("UDP socket to port 0", self.bullet)
         self.assertIn("name lookup", self.sentences["13.6 stays offline"])
 
     def test_the_server_call_path_runs_with_the_real_rea(self):

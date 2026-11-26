@@ -50,6 +50,14 @@ for pid, call in records():
 
 cwd = {}
 first = None
+# The last program each process ran (its latest successful execve); a child starts as its parent.
+program = {}
+
+
+def program_of(pid):
+    while pid is not None and pid not in program:
+        pid = parent.get(pid)
+    return program[pid] if pid is not None else "unknown program"
 
 
 def cwd_of(pid):
@@ -72,6 +80,15 @@ def inside(path):
 
 
 bad, notes, lookups, programs, seen_net = [], [], [], Counter(), 0
+
+
+def finding(pid, text):
+    bad.append(f"{program_of(pid)} (pid {pid}): {text}")
+
+
+# With strace -yy a socket prints as 5<UDP:[...]>, 5<UDPv6:[...]>, 5<TCP:[...]> or 5<UNIX:[...]>.
+UDP_CONNECT = re.compile(r"^connect\(\d+<UDP(?:v6)?:")
+PORT_0 = re.compile(r"sin6?_port=htons\(0\)")
 for pid, call in records():
     if first is None:
         first = pid
@@ -90,9 +107,13 @@ for pid, call in records():
         loopback = re.search(r'inet_addr\("127\.|"::1"|"::ffff:127\.', call) is not None
         if "htons(53)" in call:
             lookups.append(call.strip())
-            bad.append(f"a name lookup: {call.strip()}")
+            finding(pid, f"a name lookup: {call.strip()}")
+        elif name == "connect" and UDP_CONNECT.match(call) and PORT_0.search(call):
+            # glibc's getaddrinfo sorts a host name's addresses (RFC 6724) by connecting an
+            # unbound UDP socket to each; port 0 sends nothing.
+            continue
         elif family.group(1) not in ("AF_INET", "AF_INET6") or not loopback:
-            bad.append(f"{'listens on' if name == 'bind' else 'reaches'} a non-loopback address: {call.strip()}")
+            finding(pid, f"{'listens on' if name == 'bind' else 'reaches'} a non-loopback address: {call.strip()}")
     elif name in ("execve", "execveat"):
         m = re.search(QUOTED, call)
         path = resolve(m.group(1), None, pid) if m else None
@@ -103,7 +124,8 @@ for pid, call in records():
         else:
             programs[path] += 1
             if path != test_bin and path not in EXEC_OK:
-                bad.append(f"started a program outside the pack: {call.strip()[:300]}")
+                finding(pid, f"started a program outside the pack: {call.strip()[:300]}")
+        program[pid] = path
     elif name in ("chdir", "fchdir"):
         if ok:
             if name == "chdir":
@@ -150,7 +172,7 @@ for pid, call in records():
         if target is None:
             notes.append(f"a write whose folder is not known: {call.strip()[:300]}")
         elif not inside(target) and not WRITE_OK.match(target):
-            bad.append(f"wrote outside the test's folder: {target} ({call.strip()[:200]})")
+            finding(pid, f"wrote outside the test's folder: {target} ({call.strip()[:200]})")
 
 print(f"{seen_net} connect/sendto/sendmsg/sendmmsg/bind calls recorded")
 print("Programs started (successful execve), with counts:")
