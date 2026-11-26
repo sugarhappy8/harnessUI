@@ -397,7 +397,81 @@ class StudioDocs(unittest.TestCase):
         self.assertTrue(entry, "missing 0.1.0 changelog entry")
         for words in ("Studio", "On this computer", "stable-diffusion.cpp", "Hugging Face", "$10", "$1 or more", "### Added", "### Known limits"):
             self.assertIn(words, entry)
-        self.assertLess(entry.index("On this computer"), entry.index("OpenRouter"))
+        added = entry.split("### Added", 1)[1].split("\n### ", 1)[0]
+        self.assertLess(added.index("On this computer"), added.index("OpenRouter"))
+
+
+class StaleFrom0_1_xDocs(unittest.TestCase):
+    """The 0.1.0 review's follow-ups (docs/dev/0.1.0/follow-ups.md, items 1 to 8): the process and
+    trust tables, the sidecar, the signing claims, README's first sentence, the VC++ DLLs and
+    7.9's removed 0.1.x gates."""
+
+    def test_section_4_lists_sd_cli(self):
+        row = paragraph(section("## 4. Process model"), "| `sd-cli`")
+        for words in ("one process per local Studio job", "spawn helper"):
+            self.assertIn(words, row)
+
+    def test_13_1_has_a_studio_engine_row(self):
+        lines = section("### 13.1 Trust boundaries")
+        row = paragraph(lines, "| `sd-cli`")
+        for words in ("Pinned build only", "the prompt by file", "`.ckpt`", "the checksum proves origin, not safety"):
+            self.assertIn(words, row)
+        self.assertIn("`sd-cli`", paragraph(lines, "| Model files"))
+
+    def test_13_6_names_what_runs_at_launch_and_what_the_engine_is_given(self):
+        row = paragraph(section("### 13.6 Network use"), "| Studio |")
+        for words in ("`resume_interrupted`", "still waiting or downloading", "the endpoint's key"):
+            self.assertIn(words, row)
+        bullet = paragraph(section("### 13.6 Network use"), "- **Studio (0.1.0).**")
+        for words in ("the pictures added to the run", "`--lora-model-dir`", "`--tokenizer`", "its prompt file"):
+            self.assertIn(words, bullet)
+        args = read("crates/runtime/src/sd/args.rs")
+        for flag in ("--lora-model-dir", "--tokenizer", "--prompt-file", "--negative-prompt-file", "--end-img", "--control-image"):
+            self.assertIn(f'"{flag}"', args)
+
+    def test_the_sidecar_is_said_to_hold_the_prompt(self):
+        security = doc_paragraph("SECURITY.md", "Results are kept in the gallery folder")
+        sentence = security.split("Results are kept in the gallery folder", 1)[1].split("Studio has no tool", 1)[0]
+        self.assertIn("record of its settings and its prompt beside it that never holds a key", sentence)
+        self.assertIn("The prompt is never written into a local result's file", sentence)
+        for doc in ("README.md", "CHANGELOG.md"):
+            self.assertIn("a small record of each run's settings and its prompt", doc_line(doc, "a small record of each run"), doc)
+
+    def test_the_signed_claims_wait_for_the_developer_id(self):
+        self.assertIn("once the Apple Developer ID exists", paragraph(section("### 7.1 Pinning and layout"), "- **The Studio engine (0.1.0)"))
+        self.assertIn("once the Apple Developer ID exists", doc_paragraph("SECURITY.md", "Studio's local pictures and videos are made by one more program"))
+
+    def test_the_readme_first_sentence_names_studio(self):
+        text = read("README.md")
+        first = text.split("\n\n", 2)[1]
+        self.assertIn("chat, tools, skills and MCP", first)
+        self.assertIn("Studio", first)
+        self.assertNotIn("early test builds", text)
+
+    def test_the_changelog_keeps_no_build_machine_sentence(self):
+        self.assertNotIn("The build machine has no graphics card", read("CHANGELOG.md"))
+
+    def test_the_vc_bullet_says_who_needs_which_dll(self):
+        bullet = paragraph(section("### 7.1 Pinning and layout"), "- **VC++ runtime.**")
+        self.assertIn("llama.cpp needs the first three; the Studio engine also needs `msvcp140_codecvt_ids.dll` and `vcomp140.dll`", bullet)
+        self.assertNotIn("Every llama.cpp binary needs them", bullet)
+
+    def test_7_9_has_no_0_1_0_licence_gate(self):
+        local = "\n".join(section("### 7.9 Studio on this computer (0.1.0)"))
+        self.assertNotIn("Not supported yet", local)
+        self.assertNotIn("after its licence is shown", local)
+        self.assertNotIn("once its licence is accepted", "\n".join(section("### 7.1 Pinning and layout")))
+
+    def test_the_dll_names_are_the_locks(self):
+        lock = read("llama.lock.json")
+        for dll in ("msvcp140_codecvt_ids.dll", "vcomp140.dll"):
+            self.assertIn(dll, lock)
+
+    def test_17_credits_each_local_and_cloud_e2e_to_its_script(self):
+        text = "\n".join(section("## 17. Testing"))
+        self.assertIn("cloud in `e2e/m12_studio.py`", text)
+        self.assertIn("`e2e/m8_offline.py`", text)
+        self.assertIn("`jiff`", "\n".join(section("## 18. Dependencies")))
 
 
 if __name__ == "__main__":

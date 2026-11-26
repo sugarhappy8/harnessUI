@@ -28,25 +28,25 @@ owner's computers can show. [rulings.md](rulings.md) lists every decision made o
 Two of its items are done: the release gate above, and the Wan 2.1 decoder and settings line in
 the owner checklist's benchmark section. These are all small:
 
-1. **ARCHITECTURE.md tables.** Section 4's process table has no `sd-cli` row. Section 13.1's
+1. **ARCHITECTURE.md tables.** *(Done in 0.2.0.)* Section 4's process table has no `sd-cli` row. Section 13.1's
    trust table has no Studio engine row, and its "Model files" row names only llama-server.
-2. **ARCHITECTURE.md 13.6.** The Studio row's triggers leave out what runs at launch:
+2. **ARCHITECTURE.md 13.6.** *(Done in 0.2.0.)* The Studio row's triggers leave out what runs at launch:
    `resume_interrupted` checks each cloud video still waiting or downloading, and downloads its
    result with the endpoint's key. Add it, with whatever else starts a request.
-3. **ARCHITECTURE.md accuracy.** Five statements no longer match the code. One example: "the
+3. **ARCHITECTURE.md accuracy.** *(Done in 0.2.0.)* Five statements no longer match the code. One example: "the
    engine is given only its model files, its prompt file and the run's folder", although added
    pictures are given too. The review lists all five.
-4. **The sidecar holds the prompt.** SECURITY.md (557–559), README.md (49) and CHANGELOG.md (24)
+4. **The sidecar holds the prompt.** *(Done in 0.2.0.)* SECURITY.md (557–559), README.md (49) and CHANGELOG.md (24)
    call each run's `.json` "a record of its settings". It holds the prompt too, so it should
    say so next to "the prompt is never written into a local record".
-5. **"Signed" claims.** SECURITY.md (648–650) and ARCHITECTURE.md (352) say `sd-cli` is signed
+5. **"Signed" claims.** *(Done in 0.2.0.)* SECURITY.md (648–650) and ARCHITECTURE.md (352) say `sd-cli` is signed
    and notarized with the app. That holds only once the Apple Developer ID exists. README.md
    (73) has it right.
-6. **CHANGELOG.md.** Line 49 ends with an internal sentence about the build machine, and two
+6. **CHANGELOG.md.** *(Done in 0.2.0.)* Line 49 ends with an internal sentence about the build machine, and two
    more C2 items are open.
-7. **README.md.** The first sentence still describes the app as chat, tools, skills and MCP,
+7. **README.md.** *(Done in 0.2.0.)* The first sentence still describes the app as chat, tools, skills and MCP,
    with no Studio. Line 58 still says "Versions 0.0.x are early test builds".
-8. **ARCHITECTURE.md 7.1, the VC++ bullet.** llama.cpp needs the first three DLLs. The Studio
+8. **ARCHITECTURE.md 7.1, the VC++ bullet.** *(Done in 0.2.0.)* llama.cpp needs the first three DLLs. The Studio
    engine also needs `msvcp140_codecvt_ids.dll` and `vcomp140.dll`.
 9. **e2e scripts.** m8's `SETTINGS_PAGES` lacks "Search". `install_klein` in m8 has small
     issues. The fake `sd-cli` should split only on `\n`, keeping line ends, as the Rust fake
@@ -55,7 +55,7 @@ the owner checklist's benchmark section. These are all small:
 10. **`wire_tests.rs`.** The mock should record and check the `Authorization` header, so the
     key is seen to reach the endpoint. Add a comment on the drop order of `WireHarness`'s
     fields.
-11. **`scripts/docs_test.py` (around 527).** Check local-before-cloud in the CHANGELOG's Added
+11. **`scripts/docs_test.py` (around 527).** *(Done in 0.2.0.)* Check local-before-cloud in the CHANGELOG's Added
     section, not in its opening paragraph.
 
 ## Kept for later, by choice

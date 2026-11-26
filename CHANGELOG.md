@@ -33,7 +33,7 @@ The picture and video update. The owner asked, word for word: "For the cloud upd
 - **Prices before you run.** *Create* shows a cloud run's price before you click it, in words and, from $1, in colour, and the card says what the run cost once it ends.
 - **Confirmation and the $10 daily limit.** Studio asks before every cloud video and any run of $1 or more or with an unknown price. A daily limit of $10 of cloud spending, on by default, stops a run that would go past it ("Daily limit reached: $X of $10 spent today"); *Settings → Studio* changes it. Deleting a result does not lower what was spent today. Runs on this computer cost nothing and never count.
 - **Videos that keep going after you close the app.** A cloud video takes a few minutes. You can keep working, switch to a chat or close harnessUI: on the next start Studio checks on the job and downloads the result. Studio never sends the same run twice, so you never pay twice for it.
-- **The gallery folder.** What you make is saved in the `harnessUI/studio` folder in your home folder (*Settings → Studio* can change it), by month, with a small record of each run's settings beside the files, never your key.
+- **The gallery folder.** What you make is saved in the `harnessUI/studio` folder in your home folder (*Settings → Studio* can change it), by month, with a small record of each run's settings and its prompt beside the files, never your key.
 - ***Send to chat* and *Open in Studio*.** *Send to chat* puts a picture you made into a chat's message box, and a picture in a chat has *Open in Studio*, which adds it to the pictures for your next Studio run.
 - **One audit row per run.** *Settings → Audit log* lists each Studio run with its model, where it ran, its status and cost, and the prompt's length, but never the prompt.
 
@@ -58,7 +58,7 @@ The picture and video update. The owner asked, word for word: "For the cloud upd
 - **How long OpenRouter keeps a finished video is not documented**, so a video finished while harnessUI was closed for a long time may be gone when it starts again.
 - **A video over 256 MiB opens from its folder instead of playing in the app** (*Show in folder*).
 - **Going back to 0.0.8 after 0.1.0 has opened the database is refused**, because 0.0.8 cannot read schema 3, the database layout that holds Studio's records.
-- **Built and tested on Linux, Windows and macOS from CI.** The build machine has no graphics card, so real local runs on Windows PCs and Macs, and the benchmark the first guesses come from, are left to the owner's computers.
+- **Built and tested on Linux, Windows and macOS from CI.**
 
 ## 0.0.8 (2026-11-16)
 

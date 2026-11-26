@@ -557,8 +557,9 @@ build machine, and its Windows and macOS jobs have not run at all.
   which harnessUI reads through the same guarded fetcher as web pages: the key never goes
   to a file host, or to any address but the endpoint's own. Results are kept in the gallery
   folder on this computer (by default `harnessUI/studio` in your home folder), each with a
-  record of its settings beside it that never holds a key, and the prompt is never written
-  into a local result. Studio has no tool: a chat model cannot start a run or read the
+  record of its settings and its prompt beside it that never holds a key. The prompt is
+  never written into a local result's file: the AI label and the engine's metadata do not
+  carry it. Studio has no tool: a chat model cannot start a run or read the
   gallery, and a picture reaches a chat only when you click *Send to chat*.
 - **Studio's spending rules (cloud runs).** Spending guards are off by default: a daily
   limit (suggested $10), asking before every video, before runs of $1 or more, and when the
@@ -649,8 +650,9 @@ Since 0.0.6:
 
 Studio's local pictures and videos are made by one more program, the Studio engine
 (stable-diffusion.cpp's `sd-cli`), at one pinned build: the Windows pack pinned by size and
-SHA-256, the Mac build by commit with its three submodules, built in CI and signed with the
-app. It is not part of the Windows installer: it downloads with your first local model,
+SHA-256, the Mac build by commit with its three submodules, built in CI and, once the Apple
+Developer ID exists, signed and notarized with the app (README, Signing; until then it is
+ad-hoc signed like the app). It is not part of the Windows installer: it downloads with your first local model,
 from GitHub only, after its licence is shown, into its own folder, never the chat model
 runner's.
 
