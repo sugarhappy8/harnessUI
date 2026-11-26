@@ -56,7 +56,12 @@ describe("the app's Trusted Types policy", () => {
       } catch {
         continue; // A package of types or helpers only.
       }
-      for (const m of code.matchAll(/__html:\s*(`[^`]*`|"[^"]*")/g)) written.push(m[1]!.slice(1, -1));
+      // A fixed string or a template with no `${}`; anything else (a variable, a concatenation)
+      // is a write this test cannot read, and fails below rather than being skipped.
+      const literals = [...code.matchAll(/__html:\s*(`[^`$]*`|"[^"]*"|'[^']*')\s*[,}]/g)];
+      for (const m of literals) written.push(m[1]!.slice(1, -1));
+      const all = code.match(/__html\b/g)?.length ?? 0;
+      expect(all, `${pkg} writes HTML this test cannot read`).toBe(literals.length);
     }
     expect(written).toContain(RADIX_SELECT_VIEWPORT_STYLE);
     for (const html of written) expect(ALLOWED_HTML, html).toContain(html);
@@ -70,7 +75,16 @@ describe("the app's Trusted Types policy", () => {
   });
 
   it("is made once where the browser has Trusted Types, and is nothing elsewhere", () => {
-    expect(installTrustedTypes()).toBe(false); // jsdom: no Trusted Types.
+    // Every test runs under the rule (the setup file); with no `trustedTypes`, as in WebKitGTK
+    // or plain jsdom, nothing is made.
+    const g = globalThis as { trustedTypes?: unknown };
+    const browser = g.trustedTypes;
+    g.trustedTypes = undefined;
+    try {
+      expect(installTrustedTypes()).toBe(false);
+    } finally {
+      g.trustedTypes = browser;
+    }
     const tt = enforceTrustedTypes();
     try {
       expect(installTrustedTypes()).toBe(true);
@@ -80,6 +94,31 @@ describe("the app's Trusted Types policy", () => {
       // eslint-disable-next-line no-restricted-properties -- the test checks this write is refused.
       expect(() => (div.innerHTML = "<p>not allowed</p>")).toThrow(TypeError);
       expect(div.childNodes.length).toBe(0);
+    } finally {
+      tt.stop();
+    }
+  });
+
+  it("the test stand-in refuses a plain string on every HTML sink, the empty one too, until a policy exists", () => {
+    const tt = enforceTrustedTypes();
+    try {
+      const host = document.createElement("div");
+      const child = host.appendChild(document.createElement("span"));
+      /* eslint-disable no-restricted-properties -- the test checks these writes are refused. */
+      expect(() => (host.innerHTML = "")).toThrow(TypeError);
+      expect(() => (child.outerHTML = "<b>x</b>")).toThrow(TypeError);
+      expect(() => host.insertAdjacentHTML("beforeend", "<b>x</b>")).toThrow(TypeError);
+      expect(tt.violations).toEqual([
+        '<div>.innerHTML = ""',
+        '<span>.outerHTML = "<b>x</b>"',
+        '<div>.insertAdjacentHTML = "<b>x</b>"',
+      ]);
+      tt.violations.length = 0; // Seen: not a failure of this test.
+      expect(installTrustedTypes()).toBe(true);
+      host.insertAdjacentHTML("beforeend", RADIX_SELECT_VIEWPORT_STYLE);
+      expect(() => (host.innerHTML = "<b>x</b>")).toThrow(TypeError);
+      /* eslint-enable no-restricted-properties */
+      expect(host.textContent).toContain("[data-radix-select-viewport]");
     } finally {
       tt.stop();
     }

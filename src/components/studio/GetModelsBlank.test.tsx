@@ -127,7 +127,9 @@ it.each([
   expect(tt.violations, "innerHTML set to a plain string (blocked by require-trusted-types-for)").toEqual([]);
   expect(uncaught.map(String)).toEqual([]);
   // The app is still drawn, with the repository's detail panel open and its Model type menu.
-  expect(document.body.textContent?.length ?? 0).toBeGreaterThan(100);
+  // Get models is still there behind the panel: its search and every card of the search.
+  expect(screen.getByRole("searchbox", { name: "Search Hugging Face", hidden: true })).toBeTruthy();
+  expect(screen.getAllByRole("article", { hidden: true })).toHaveLength(SEARCH.items.length);
   const dialog = screen.getByRole("dialog", { name: repo.repo });
   expect(within(dialog).getByRole("combobox")).toBeTruthy();
   // The policy that let Radix's style through still refuses any other HTML.

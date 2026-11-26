@@ -10,7 +10,7 @@
 //
 // The `default` policy below lets exactly the library's fixed strings through, and refuses
 // every other string as before, so the rule keeps guarding the page. It makes no scripts or
-// script URLs either: those stay refused. A test (trustedTypes.test.ts) reads the library's code
+// script URLs either: those stay refused. A test (trustedTypes.test.tsx) reads the library's code
 // and fails when it writes a string this list does not have, for example after an upgrade.
 
 /** The fixed `<style>` Radix Select's viewport writes (@radix-ui/react-select, SelectViewport). */
