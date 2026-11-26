@@ -2,7 +2,7 @@
 
 All notable changes, by milestone. Dates are UTC.
 
-## 0.2.1 (2026-11-26)
+## 0.2.1 (2026-11-27)
 
 A quick fix for 0.2.0, which could leave the whole window blank. The owner reported it with a picture: after clicking a model in *Get models*, the window showed only a dark background and the app's name.
 
