@@ -1207,6 +1207,34 @@ describe("Studio's words for LoRAs, importing and set-up (Task S12)", () => {
     expect(w.STUDIO_REFS.role).toBe(w.INPUT_ROLE.label);
   });
 
+  it("no wording says a model is not for this computer", async () => {
+    const w = (await import("./words")) as Record<string, unknown>;
+    const found: string[] = [];
+    const seen = new Set<unknown>();
+    // Every string reachable from the exports; a function is called with a few plain arguments.
+    const walk = (v: unknown, depth: number): void => {
+      if (typeof v === "string") found.push(v);
+      else if (depth > 6 || v === null || seen.has(v)) return;
+      else if (typeof v === "function") {
+        seen.add(v);
+        for (const args of [["x"], ["x", 1], [1, 2], [1], [null], []]) {
+          try {
+            walk((v as (...a: unknown[]) => unknown)(...args), depth + 1);
+          } catch {
+            // Not that shape of argument.
+          }
+        }
+      } else if (typeof v === "object") {
+        seen.add(v);
+        for (const x of Object.values(v)) walk(x, depth + 1);
+      }
+    };
+    for (const v of Object.values(w)) walk(v, 0);
+    expect(found.length).toBeGreaterThan(1000);
+    expect(found.filter((t) => /Not for this computer/i.test(t))).toEqual([]);
+    expect(found.filter((t) => t.includes("needs a graphics card or an Apple-silicon Mac"))).toEqual([]);
+  });
+
   it("word every reason a set-up can meet, none as its code", async () => {
     const w = await import("./words");
     for (const text of [...Object.values(w.SETUP.problem), ...Object.values(w.SETUP.source)]) {

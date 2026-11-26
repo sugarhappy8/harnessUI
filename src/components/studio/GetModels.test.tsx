@@ -581,14 +581,34 @@ describe("Get models", () => {
     const fits = screen.getByRole("switch", { name: "Fits this computer" });
     expect(fits.getAttribute("aria-checked")).toBe("false");
     const z = within(section("Recommended for this computer")).getByRole("article", { name: "Z-Image Turbo" });
-    within(z).getByText("Not for this computer");
-    within(z).getByText("needs 8 GB of graphics memory");
+    within(z).getByText("May not fit");
+    within(z).getByText("May not fit this computer: needs 8 GB of graphics memory. It may fail or be very slow.");
     // Download opens its detail panel, the warning said there too, Download kept (design 9.2).
     await click(within(z).getByRole("button", { name: "Download" }));
     expect(useStudio.getState().detail).toEqual({ entryId: zimage.id });
     const panel = screen.getByRole("dialog", { name: "Z-Image Turbo" });
     within(panel).getByText("May not fit this computer: needs 8 GB of graphics memory. It may fail or be very slow.");
     expect(within(panel).getByRole<HTMLButtonElement>("button", { name: "Download" }).disabled).toBe(false);
+  });
+
+  it("a card that may not fit shows the warning and still offers Download and Download again", async () => {
+    const row = LOCAL.installed[0]!;
+    const mayNot: InstalledLocal = { ...row, fit: { ...row.fit, word: "notHere", verdict: "red", reason: "needs 8 GB of graphics memory" } };
+    await showLocal({
+      ...LOCAL,
+      recommended: LOCAL.recommended.filter((e) => e.id !== zimage.id),
+      notHere: [tooBig(zimage)],
+      installed: [mayNot, ...LOCAL.installed.slice(1)],
+    });
+    const warning = "May not fit this computer: needs 8 GB of graphics memory. It may fail or be very slow.";
+    // The catalog card: the warning is a status line, Download is on.
+    const z = within(section("Recommended for this computer")).getByRole("article", { name: "Z-Image Turbo" });
+    expect(within(z).getByRole("status").textContent).toBe(warning);
+    expect(within(z).getByRole<HTMLButtonElement>("button", { name: "Download" }).disabled).toBe(false);
+    // The installed card: the same warning, and the button that downloads its files again.
+    const k = within(section("On this computer")).getByRole("article", { name: row.name });
+    expect(within(k).getByRole("status").textContent).toBe(warning);
+    expect(within(k).getByRole<HTMLButtonElement>("button", { name: "Repair" }).disabled).toBe(false);
   });
 
   it("Fits this computer hides opened results that have no file for this computer, and catalog models that may not fit", async () => {

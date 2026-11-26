@@ -281,9 +281,9 @@ describe("Studio's downloads (Task U7)", () => {
     // One that needs setting up can be chosen: its files are chosen there.
     const mystery = LOCAL.installed.find((m) => m.needsSetup)!;
     expect(canPick(LOCAL, mystery.id)).toBe(true);
-    // Video on a computer that cannot make it.
+    // Video on a computer that runs models on the processor is offered, with a warning.
     const wan = LOCAL.installed.find((m) => m.kind === "video")!;
-    expect(canPick({ ...LOCAL, videoOnProcessor: true }, wan.id)).toBe(false);
+    expect(canPick({ ...LOCAL, videoOnProcessor: true }, wan.id)).toBe(true);
     useStudio.setState({ local: LOCAL, tab: "image" });
     const before = useStudio.getState().drafts;
     useStudio.getState().pickNewModel("nothing-here");

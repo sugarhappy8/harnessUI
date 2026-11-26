@@ -38,7 +38,7 @@ import { BrowserLink, modelPage } from "./BrowserLink";
 import { LocalNotice } from "./LocalNotice";
 import { DownloadState, pickNewModelAndFocus, useShownDownload } from "./DownloadState";
 import { Licences, nameOf, PlanParts, Section, verdict, warningsFor } from "./PlanParts";
-import { FIT_DOT, GateLine, gateProblem, TONE_DOT, useTokenSaved, VerdictBadge } from "./ModelCard";
+import { fitDotClass, GateLine, gateProblem, useTokenSaved, VerdictBadge, WarningLines } from "./ModelCard";
 import { CARD_BUTTON } from "./styles";
 import type {
   Gate,
@@ -657,7 +657,7 @@ function ChoiceBody(props: { choice: MainChoice; mark: ReactNode }) {
         <span className="shrink-0 text-sm text-fg-muted tabular-nums">{formatBytes(c.sizeBytes)}</span>
       </span>
       <span className="flex items-start gap-1.5 pl-6 text-sm text-fg-muted">
-        <span className={`mt-1.5 inline-block size-2 shrink-0 rounded-full ${FIT_DOT[c.fit.word] ?? TONE_DOT.amber}`} aria-hidden />
+        <span className={`mt-1.5 inline-block size-2 shrink-0 rounded-full ${fitDotClass(c.fit)}`} aria-hidden />
         {LOCAL_FIT_WORDS[c.fit.word] ?? LOCAL_FIT_WORDS.notHere}
       </span>
       {c.best && (
@@ -705,12 +705,7 @@ function ActionBar(props: {
       data-action-bar
       className="sticky -bottom-4 z-10 -mx-4 mt-auto flex flex-col gap-2.5 border-t border-border bg-surface/95 px-4 pt-3 pb-4 backdrop-blur"
     >
-      {props.warnings.map((w) => (
-        <p key={w} className="flex items-start gap-2 text-sm text-warning">
-          <AlertTriangle size={15} aria-hidden className="mt-0.5 shrink-0" />
-          {w}
-        </p>
-      ))}
+      <WarningLines lines={props.warnings} />
       {props.error && <ErrorBanner error={props.error} onDismiss={props.onDismiss} />}
       {props.group ? (
         <DownloadState group={props.group} name={props.name} onUse={props.onUse} size="md" />

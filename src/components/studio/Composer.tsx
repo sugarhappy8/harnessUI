@@ -22,6 +22,7 @@ import { cloudBackup, COST_TONE_CLASS, costTone, createLabel, limitLine, placeLi
 import { etaText } from "./eta";
 import { InputZones } from "./InputZones";
 import { ModelChip } from "./ModelChip";
+import { fitWarnings, WarningLines } from "./ModelCard";
 import { RefTray } from "./RefTray";
 import { COMPOSER_CHIP, SECONDARY_BUTTON } from "./styles";
 import type { MediaModel, RefItem, RefRole } from "./types";
@@ -133,7 +134,14 @@ export function Composer(props: { tab: StudioTab }) {
     const held = d.values[spec.key];
     return Array.isArray(held) ? held.length : 0;
   });
+  // The fit of the draft's model on this computer, as its row says it: where a video made on
+  // the processor is told (the estimate has no word for it).
+  const rowFit = useStudio((s) => {
+    const d = s.drafts[tab];
+    return d.target === "thisComputer" ? (s.local?.installed.find((m) => m.model.id === d.model)?.fit ?? null) : null;
+  });
   const promptRef = useRef<HTMLTextAreaElement>(null);
+  const warnId = useId();
   // What Create would cost or take, and what holds it back, read out with it.
   const aboutId = useId();
   const whyId = useId();
@@ -193,9 +201,19 @@ export function Composer(props: { tab: StudioTab }) {
   // Cloud as the backup for a very slow local run (not for one that may not fit: Task G2).
   const backup = here && local?.verySlow ? cloudBackup(tab, known, endpoints) : null;
   const time = known ? createLabel(known) : "";
+  // A model that may not fit, or a video on the processor: a warning beside Create, which stays
+  // on (the run's own estimate is for the settings as they are now, so it comes first).
+  const fitLines = here
+    ? fitWarnings({
+        word: local?.fit ?? rowFit?.word ?? "fits",
+        reason: local ? local.reason : (rowFit?.reason ?? null),
+        videoOnProcessor: rowFit?.videoOnProcessor ?? false,
+      })
+    : [];
   // Create is described by its time or price, and by what holds it back.
   const describedBy = [
     time ? aboutId : "",
+    fitLines.length > 0 ? warnId : "",
     unusable !== null ? unusableId : "",
     promptRefused.length > 0 ? promptAboutId : "",
     inputsRefused.length > 0 || settingsRefused.length > 0 ? whyId : "",
@@ -309,6 +327,7 @@ export function Composer(props: { tab: StudioTab }) {
             </div>
           )}
           <ChipsRow tab={tab} />
+          <WarningLines lines={fitLines} id={warnId} />
           {longRun && <p className="text-xs text-warning">{STUDIO_DOCK.over15(longRun)}</p>}
           {backup === "useCloud" && (
             <div className="flex flex-wrap items-center gap-2 text-xs text-fg-muted">

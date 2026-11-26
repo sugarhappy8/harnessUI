@@ -1161,16 +1161,11 @@ const PREFERRED: Record<MediaKind, readonly string[]> = {
   video: ["google/veo-3.1-fast"],
 };
 
-/** `local` when this computer can make `tab`'s kind at all (video needs a usable graphics
- *  card or an Apple-silicon Mac, and is hidden otherwise); `null` too until it is read. */
-function localFor(tab: StudioTab, local: LocalModels | null): LocalModels | null {
-  return local && (tab === "image" || !local.videoOnProcessor) ? local : null;
-}
-
-/** The installed local models `tab` can use: this version can run them, and this computer
- *  can make the kind. */
+/** The installed local models `tab` can use: this version can run them. Fit never leaves one
+ *  out (a warning, never a refusal), and video is made on the processor where there is no
+ *  graphics card, very slowly. */
 export function localModelsFor(tab: StudioTab, local: LocalModels | null): InstalledLocal[] {
-  return localFor(tab, local)?.installed.filter((m) => m.kind === tab && m.model.usable === null) ?? [];
+  return local?.installed.filter((m) => m.kind === tab && m.model.usable === null) ?? [];
 }
 
 /** Whether *Use it* can choose installed model `genModelId` (`pickNewModel`): it is installed,
@@ -1184,10 +1179,10 @@ export function canPick(local: LocalModels | null, genModelId: string): boolean 
   );
 }
 
-/** The installed model `id` of `tab`'s kind that needs setting up (no recipe yet), where this
- *  computer can make the kind; `null` for any other. */
+/** The installed model `id` of `tab`'s kind that needs setting up (no recipe yet); `null` for
+ *  any other. */
 function toSetUp(tab: StudioTab, id: string, local: LocalModels | null): MediaModel | null {
-  return localFor(tab, local)?.installed.find((m) => m.kind === tab && m.needsSetup && m.model.id === id)?.model ?? null;
+  return local?.installed.find((m) => m.kind === tab && m.needsSetup && m.model.id === id)?.model ?? null;
 }
 
 /** An "Auto" model, which picks a model for you: Studio never offers one, as it would hide
@@ -1218,7 +1213,7 @@ export function cloudModelsFor(endpoint: StudioEndpoint, tab: StudioTab): MediaM
 
 /** The first recommended entry of `tab`'s kind that fits this computer. */
 export function fittingEntry(tab: StudioTab, local: LocalModels | null): LocalEntry | null {
-  return localFor(tab, local)?.recommended.find((e) => e.kind === tab && FITTING.has(e.fit.word)) ?? null;
+  return local?.recommended.find((e) => e.kind === tab && FITTING.has(e.fit.word)) ?? null;
 }
 
 /** Whether `endpoint`'s company makes `tab`'s kind, with or without its lists saved. */
@@ -1301,8 +1296,7 @@ export function defaultModel(
  * What `tab` shows in place of the card stream, by one ordered rule, the first that applies:
  * nothing when the tab has a model to use (an installed local model of its kind, or an
  * endpoint's, which needs a key); *Get local models* when a recommended entry of its kind
- * fits this computer (after the chat model is unloaded counts; video also needs a computer
- * that can make it); cloud as the backup when no endpoint is saved; nothing while an
+ * fits this computer (after the chat model is unloaded counts); cloud as the backup when no endpoint is saved; nothing while an
  * endpoint that makes the kind has no saved list (its *Get the list* stands in); else *add
  * an endpoint*: the saved ones make no such kind (the Video tab with only OpenAI), or offer
  * none Studio can use (no key, or no such model in their lists), and the card says which.

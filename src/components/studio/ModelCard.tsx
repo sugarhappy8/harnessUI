@@ -11,6 +11,7 @@ import {
   Layers,
   LockKeyhole,
   Trash2,
+  TriangleAlert,
   Wrench,
 } from "lucide-react";
 import { formatBytes } from "../../lib/format";
@@ -23,6 +24,7 @@ import {
   LICENCE_BADGE,
   LOCAL_FIT_WORDS,
   LOCAL_MODELS,
+  LOCAL_WARNING,
   MODEL_SHEET,
   REGIONAL_USE,
   revenueLimit,
@@ -158,6 +160,45 @@ export const FIT_DOT: Record<LocalFit["word"], string> = {
   notHere: TONE_DOT.red,
 };
 
+/** The colour of a fit dot, wherever one is drawn (the model sheet, a card, a file choice):
+ *  by the fit word (`FIT_DOT`). A video made on the processor never reads green, since its
+ *  warning says it is very slow. */
+export function fitDotClass(fit: Pick<LocalFit, "word" | "videoOnProcessor">): string {
+  if (fit.word === "fits" && fit.videoOnProcessor) return TONE_DOT.amber;
+  return FIT_DOT[fit.word] ?? TONE_DOT.amber;
+}
+
+/** What may go badly on this computer, as the warnings say it: a model that may not fit
+ *  ("May not fit this computer: needs 6 GB of graphics memory. It may fail or be very slow."),
+ *  a video made on the processor. Warnings, never refusals; nothing here turns a button off. */
+export function fitWarnings(fit: Pick<LocalFit, "word" | "reason" | "videoOnProcessor">): string[] {
+  const out: string[] = [];
+  if (fit.word === "notHere") out.push(fit.reason ? LOCAL_WARNING.mayNotFit(fit.reason) : LOCAL_FIT_WORDS.notHere);
+  if (fit.videoOnProcessor) out.push(LOCAL_WARNING.videoOnProcessor);
+  return out;
+}
+
+/** Warning lines, one per sentence, in one polite status region: beside Create, under a card's
+ *  fit and in the detail panel's plan. Nothing when there are none. */
+export function WarningLines(props: { lines: string[]; id?: string; className?: string }) {
+  if (props.lines.length === 0) return null;
+  return (
+    <div id={props.id} role="status" data-fit-warning className={clsx("flex flex-col gap-1", props.className)}>
+      {props.lines.map((line) => (
+        <p key={line} className="flex items-start gap-1.5 text-xs text-warning">
+          <TriangleAlert size={14} aria-hidden className="mt-px shrink-0" />
+          <span className="min-w-0">{line}</span>
+        </p>
+      ))}
+    </div>
+  );
+}
+
+/** The warning of a fit, if it has one. */
+export function FitWarning(props: { fit: Pick<LocalFit, "word" | "reason" | "videoOnProcessor">; id?: string; className?: string }) {
+  return <WarningLines lines={fitWarnings(props.fit)} id={props.id} className={props.className} />;
+}
+
 /** The licence badge: a colour dot and the words (never colour alone); its tooltip names the
  *  licence. */
 export function LicenceBadge(props: { licence: Licence }) {
@@ -180,12 +221,13 @@ export function LicenceBadge(props: { licence: Licence }) {
  *  body size on a card), then why it may not fit and at what size it would. */
 export function FitLine(props: { fit: LocalFit; kind?: MediaKind }) {
   const { fit, kind } = props;
-  const more = [fit.reason, fit.suggestion].filter((t): t is string => t !== null && t !== "");
+  // The reason of a model that may not fit is part of its warning, below; not said twice.
+  const more = [fit.word === "notHere" ? null : fit.reason, fit.suggestion].filter((t): t is string => t !== null && t !== "");
   const time = kind === undefined ? null : timeWords(fit, kind);
   return (
     <div className="flex flex-col gap-0.5 text-xs text-fg-muted">
       <p className={clsx("flex flex-wrap items-center gap-x-1.5", kind !== undefined && "text-sm")}>
-        <span className={`inline-block size-2 shrink-0 rounded-full ${FIT_DOT[fit.word] ?? TONE_DOT.amber}`} aria-hidden />
+        <span className={`inline-block size-2 shrink-0 rounded-full ${fitDotClass(fit)}`} aria-hidden />
         <span className="font-medium text-fg">{LOCAL_FIT_WORDS[fit.word] ?? LOCAL_FIT_WORDS.notHere}</span>
       </p>
       {time !== null && <p className="pl-3.5 text-sm">{time}</p>}
@@ -194,6 +236,7 @@ export function FitLine(props: { fit: LocalFit; kind?: MediaKind }) {
           {t}
         </p>
       ))}
+      <FitWarning fit={fit} className="pl-3.5" />
     </div>
   );
 }

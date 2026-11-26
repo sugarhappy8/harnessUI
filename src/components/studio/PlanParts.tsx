@@ -7,8 +7,6 @@ import {
   DOWNLOAD_LOCAL,
   engineSizeWords,
   licenceWord,
-  LOCAL_FIT_WORDS,
-  LOCAL_WARNING,
   MODEL_DETAIL,
   REGIONAL_USE,
   revenueLimit,
@@ -18,7 +16,7 @@ import { ErrorBanner } from "../ErrorBanner";
 import { visiblePath } from "../FolderChip";
 import { FOCUS_RING } from "../ui/styles";
 import { BrowserLink, modelPage } from "./BrowserLink";
-import { licenceBadge, TONE_DOT } from "./ModelCard";
+import { fitWarnings, licenceBadge, TONE_DOT } from "./ModelCard";
 import { CARD_BUTTON } from "./styles";
 import type { Gate, Licence, LocalFit, MediaKind, PartRole, PlannedSlot } from "./types";
 
@@ -95,9 +93,7 @@ function linkName(l: Licence): string {
 /** What may make a download go badly here, said by Download: a model that may not fit this
  *  computer, a video on the processor, little disk left. Warnings, never refusals (design 9.2). */
 export function warningsFor(fit: LocalFit, lowDisk: boolean): string[] {
-  const out: string[] = [];
-  if (fit.word === "notHere") out.push(fit.reason ? LOCAL_WARNING.mayNotFit(fit.reason) : LOCAL_FIT_WORDS.notHere);
-  if (fit.videoOnProcessor) out.push(LOCAL_WARNING.videoOnProcessor);
+  const out = fitWarnings(fit);
   if (lowDisk) out.push(DOWNLOAD_LOCAL.lowDisk);
   return out;
 }

@@ -208,11 +208,9 @@ function EmptyStateCard(props: { tab: StudioTab; state: Exclude<EmptyState, null
       />
     );
   }
-  // A model of this kind is installed but cannot be used here (video on a computer that runs
-  // models on its processor, before Task G2; or one still to be set up): the cloud, as before.
-  const text =
-    unusable ??
-    (tab === "video" && local !== null && local.videoOnProcessor ? STUDIO_EMPTY.noVideoHere : STUDIO_EMPTY.cloud[tab]);
+  // A model of this kind is installed but cannot be used yet (one still to be set up): the
+  // cloud, as before.
+  const text = unusable ?? STUDIO_EMPTY.cloud[tab];
   return (
     <EmptyCard icon={Cloud} actions={<OpenEndpoints primary />}>
       <p className="text-sm">{text}</p>

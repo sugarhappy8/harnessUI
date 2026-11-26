@@ -1119,9 +1119,6 @@ export const STUDIO_EMPTY = {
     video:
       "This computer cannot run local video models well. OpenRouter makes videos in the cloud: add it in Settings → Endpoints.",
   } satisfies Record<MediaKind, string>,
-  /** The Video tab on a computer that cannot make video here. */
-  noVideoHere:
-    "Video on this computer needs a graphics card or an Apple-silicon Mac. OpenRouter makes videos in the cloud: add it in Settings → Endpoints.",
   /** A saved endpoint makes the tab's kind but has no key, so none of its models can be used. */
   noKey: (name: string) => `${name} has no key, so Studio cannot use its models. Add a key in Settings → Endpoints.`,
   /** A saved endpoint makes the tab's kind, but its saved lists have no such model Studio can use. */
@@ -1162,12 +1159,12 @@ export function listsUpdatedWords(name: string, fetchedAt: number | null, now: n
 }
 
 /** A local model's fit word (Task B3): "Fits", "Slow here", "Fits after the chat model is
- *  unloaded", or not for this computer at all. */
+ *  unloaded", or "May not fit" (a warning, never a refusal: `LOCAL_WARNING` says why). */
 export const LOCAL_FIT_WORDS: Record<LocalFit["word"], string> = {
   fits: "Fits",
   slow: "Slow here",
   afterUnload: "Fits after the chat model is unloaded",
-  notHere: "Not for this computer",
+  notHere: "May not fit",
 };
 
 /** How long a local run takes (Task B3; `eta.ts` works out the figure): "about 4 min a picture",
@@ -1207,8 +1204,8 @@ export const STUDIO_PICKER = {
   goesTo: (host: string) => `Your prompt and added pictures go to ${host}.`,
   noKey: "Add a key in Settings → Endpoints",
   noLocalYet: (name: string, bytes: number) => `No local models yet. ${fitsThisComputer(name, bytes)}`,
-  /** No local model of either kind fits this computer, or the Video tab where it cannot make video. */
-  noLocalHere: "Local models need a graphics card or an Apple-silicon Mac; the cloud models below are the backup.",
+  /** Nothing installed, and no local model of either kind known to fit this computer. */
+  noLocalHere: "No local model is installed, and none is known to fit this computer; the cloud models below are the backup.",
   /** No local model of the tab's kind fits this computer, though one of the other kind does. */
   noKindHere: {
     image: "No picture model fits this computer yet; the cloud models below are the backup.",

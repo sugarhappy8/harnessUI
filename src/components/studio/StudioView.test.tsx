@@ -841,17 +841,24 @@ describe("StudioView", () => {
     screen.getByText("Or make videos with OpenRouter: add it in Settings → Endpoints.");
   });
 
-  it("on a computer without a usable graphics card, the Video tab is cloud only", async () => {
-    // addEndpoint
-    await show({ endpoints: [endpoint({ company: "openai" })], local: { ...LOCAL, videoOnProcessor: true } });
+  it("the Video tab is offered on a computer that runs models on the processor", async () => {
+    await show({
+      endpoints: [endpoint({ company: "openai" })],
+      local: { ...LOCAL, videoOnProcessor: true, installed: [] },
+    });
     await click(screen.getByRole("tab", { name: "Video" }));
-    screen.getByText(
-      "Video on this computer needs a graphics card or an Apple-silicon Mac. OpenRouter makes videos in the cloud: add it in Settings → Endpoints.",
-    );
-    // Models are on this computer (U9 fix round 1): the card never says otherwise, and offers no
-    // Get models beside a line that says video cannot be made here.
-    expect(screen.queryByText(/^No (video )?models on this computer yet$/)).toBeNull();
-    expect(within(screen.getByRole("main")).queryByRole("button", { name: "Get models" })).toBeNull();
+    expect(screen.getByRole("tab", { name: "Video" }).getAttribute("aria-selected")).toBe("true");
+    // Local video is what it offers first (not "cloud only"), and nothing says it needs a graphics card.
+    const video = LOCAL.recommended.find((e) => e.kind === "video")!;
+    screen.getByText(`${video.name} fits this computer (${formatBytes(video.sizeBytes)}).`);
+    expect(screen.queryByText(/graphics card or an Apple-silicon Mac/)).toBeNull();
+    // An installed video model is picked for the prompt, with its warning beside Create.
+    cleanup();
+    useStudio.setState(INITIAL, true);
+    await show({ endpoints: [], local: { ...LOCAL, videoOnProcessor: true } });
+    await click(screen.getByRole("tab", { name: "Video" }));
+    expect(useStudio.getState().drafts.video).toMatchObject({ target: "thisComputer" });
+    screen.getByRole("region", { name: "Make a video" });
   });
 
   describe("what is saved, read again", () => {

@@ -29,6 +29,7 @@ vi.mock("./api");
 const api = await import("./api");
 const { localHint, pickerGroups, priceHint, sheetSections } = await import("./sheetModels");
 const { ModelChip } = await import("./ModelChip");
+const { fitDotClass, fitWarnings } = await import("./ModelCard");
 const { recentChoices, recentModels, useStudio } = await import("../../store/studio");
 
 const INITIAL = useStudio.getState();
@@ -57,7 +58,7 @@ const unreachable = {
   nextStep: "Check the connection and try again.",
   details: "",
 };
-const graphicsCard = "Local models need a graphics card or an Apple-silicon Mac; the cloud models below are the backup.";
+const graphicsCard = "Local models need a graphics card or an Apple-silicon Mac; the cloud models below are the backup."; // gone (Task G2)
 
 /** OpenRouter with the fixture's models, as `studio_models` gives it. */
 function endpoint(patch: Partial<StudioEndpoint> = {}): StudioEndpoint {
@@ -250,9 +251,11 @@ describe("pickerGroups", () => {
     expect(ids("flux")).toEqual(["flux2-klein-4b-q4", "hf:someone/flux-dev-copy:flux-dev-copy.safetensors"]);
   });
 
-  it("lists local video only where this computer can make it", () => {
+  it("lists local video on a computer that runs models on the processor too", () => {
     expect(pickerGroups(LOCAL, [], "video", "", [], [])[0]!.models.map((m) => m.id)).toEqual(["wan22-ti2v-5b-fast-q6"]);
-    expect(pickerGroups({ ...LOCAL, videoOnProcessor: true }, [], "video", "", [], [])[0]!.models).toEqual([]);
+    expect(
+      pickerGroups({ ...LOCAL, videoOnProcessor: true }, [], "video", "", [], [])[0]!.models.map((m) => m.id),
+    ).toEqual(["wan22-ti2v-5b-fast-q6"]);
   });
 
   it("never offers an Auto model", () => {
@@ -486,6 +489,20 @@ describe("ModelSheet", () => {
     expect(useStudio.getState().drafts.image).toMatchObject({ target: { endpoint: 1 }, model: k3.id });
   });
 
+  it("one colour rule keys every fit dot by its fit word, and a video on the processor is never green", () => {
+    const fit = (word: InstalledLocal["fit"]["word"], videoOnProcessor = false) => ({ word, videoOnProcessor });
+    expect(fitDotClass(fit("fits"))).toBe("bg-success");
+    expect(fitDotClass(fit("slow"))).toBe("bg-warning");
+    expect(fitDotClass(fit("afterUnload"))).toBe("bg-warning");
+    expect(fitDotClass(fit("notHere"))).toBe("bg-danger");
+    expect(fitDotClass(fit("fits", true))).toBe("bg-warning");
+    expect(fitWarnings({ word: "fits", reason: null, videoOnProcessor: false })).toEqual([]);
+    expect(fitWarnings({ word: "notHere", reason: "needs 6 GB", videoOnProcessor: true })).toEqual([
+      "May not fit this computer: needs 6 GB. It may fail or be very slow.",
+      "Video on the processor is very slow",
+    ]);
+  });
+
   it("an installed row says its type, size and fit, with the warning in its tooltip", async () => {
     const reason = "needs about 9 GB of graphics memory";
     const tight: InstalledLocal = {
@@ -502,6 +519,11 @@ describe("ModelSheet", () => {
     expect(sdxl.getAttribute("aria-disabled")).toBeNull();
     const dot = within(sdxl.closest("li")!).getByRole("img", { name: /^May not fit this computer/ });
     expect(await tipOf(dot)).toBe(`May not fit this computer: ${reason}. It may fail or be very slow.`);
+    // One colour rule for every fit dot, by fit word: red here, green for the one that fits.
+    expect(dot.firstElementChild!.className).toContain(fitDotClass(tight.fit));
+    expect(dot.firstElementChild!.className).toContain("bg-danger");
+    const fitsDot = within(row(/^FLUX\.2 klein 4B/).closest("li")!).getByRole("img");
+    expect(fitsDot.firstElementChild!.className).toContain("bg-success");
     // One that fits says so, with its time here; an untested set-up says that too.
     const kleinDot = within(row(/^FLUX\.2 klein 4B/).closest("li")!).getByRole("img");
     expect(kleinDot.getAttribute("aria-label")).toBe(`Fits · ${localHint(kleinInstalled, "image")}`);
@@ -669,11 +691,12 @@ describe("ModelSheet", () => {
     sheet();
   });
 
-  it("where this computer cannot make video, the Video tab says local models need a graphics card", async () => {
+  it("on a computer that runs models on the processor, the Video tab lists its local video with the warning", async () => {
     await load({ local: { ...LOCAL, videoOnProcessor: true } });
     await renderChip("video");
     await openSheet();
-    within(sheet()).getByText(graphicsCard);
+    row(/^Wan 2\.2/);
+    expect(within(sheet()).queryByText(graphicsCard)).toBeNull();
   });
 
   it("picking an OpenRouter picture model asks for its price once", async () => {

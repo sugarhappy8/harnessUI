@@ -33,10 +33,10 @@ import {
   sheetSections,
   sizeWords,
   typeLabel,
-  warns,
   type SheetCloudGroup,
   type SheetModel,
 } from "./sheetModels";
+import { fitDotClass } from "./ModelCard";
 import { SECONDARY_BUTTON } from "./styles";
 import type { InstalledLocal } from "./types";
 
@@ -237,8 +237,7 @@ function SheetBody(props: {
     const usable = installedHere(local, tab).filter((m) => m.model.usable === null);
     const entry = fittingEntry(tab, local);
     const nothingFits =
-      (tab === "video" && local.videoOnProcessor) ||
-      (local.moreFit === 0 && !local.installed.some((m) => m.model.usable === null && FITTING.has(m.fit.word)));
+      local.moreFit === 0 && !local.installed.some((m) => m.model.usable === null && FITTING.has(m.fit.word));
     if (usable.length === 0) {
       localLine = entry
         ? STUDIO_PICKER.noLocalYet(entry.name, entry.sizeBytes)
@@ -582,16 +581,13 @@ export function SheetRow(props: { tab: StudioTab; row: SheetModel; onPick(row: S
   );
 }
 
-/** An installed model's fit dot: green when it fits, amber when slow or after the chat model is
- *  unloaded, red when it may not fit; its tooltip says which, or the warning. */
+/** An installed model's fit dot, coloured by its fit word as a card's is (`fitDotClass`): green
+ *  when it fits, amber when slow or after the chat model is unloaded, red when it may not fit;
+ *  its tooltip says which, or the warning. */
 function FitDot(props: { tab: StudioTab; installed: InstalledLocal }) {
   const { installed } = props;
   const words = fitWords(installed, props.tab);
-  const colour = warns(installed)
-    ? "bg-danger"
-    : installed.fit.verdict === "green"
-      ? "bg-success"
-      : "bg-warning";
+  const colour = fitDotClass(installed.fit);
   return (
     <Tip content={words}>
       <span role="img" tabIndex={0} aria-label={words} className={`grid size-6 place-items-center rounded-full ${FOCUS_RING}`}>

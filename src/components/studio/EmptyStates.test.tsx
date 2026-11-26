@@ -12,7 +12,7 @@ vi.mock("../../lib/ipc", () => ({ isTauri: () => true }));
 vi.mock("./api");
 
 const { Notices } = await import("./EmptyStates");
-const { useStudio } = await import("../../store/studio");
+const { emptyState, useStudio } = await import("../../store/studio");
 
 const INITIAL = useStudio.getState();
 /** The first recommended entry: FLUX.2 klein 4B, about 5.3 GB. */
@@ -131,15 +131,11 @@ describe("Studio's empty states", () => {
     expect(useStudio.getState().detail).toBeNull();
   });
 
-  it("with a video model installed that cannot run here yet, the Video tab keeps the cloud card", () => {
-    // Wan 2.2 is installed, but this computer makes no video on its processor before Task G2.
+  it("with a video model installed on a computer that runs models on the processor, the Video tab has a model to use", () => {
     show({ local: { ...LOCAL, videoOnProcessor: true }, tab: "video" });
-    expect(screen.queryByText(/^No (video )?models on this computer yet$/)).toBeNull();
-    expect(screen.queryByRole("button", { name: "Get models" })).toBeNull();
-    screen.getByText(
-      "Video on this computer needs a graphics card or an Apple-silicon Mac. OpenRouter makes videos in the cloud: add it in Settings → Endpoints.",
-    );
-    screen.getByRole("button", { name: "Open Endpoints" });
+    expect(emptyState("video", { ...LOCAL, videoOnProcessor: true }, [])).toBeNull();
+    expect(screen.queryByRole("button", { name: "Open Endpoints" })).toBeNull();
+    expect(screen.queryByText(/graphics card or an Apple-silicon Mac/)).toBeNull();
   });
 
   it("on first use it names the model that fits, and its button opens that model's detail panel", async () => {

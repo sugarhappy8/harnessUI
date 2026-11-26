@@ -671,6 +671,43 @@ describe("Composer", () => {
     expect(useStudio.getState().drafts.image.note).toBeNull();
   });
 
+  it("a model that may not fit keeps Create enabled and shows the warning", async () => {
+    await show({ estimate: here({ fit: "notHere", reason: "needs 6 GB of graphics memory" }, { eta: null }) });
+    typePrompt("a fox");
+    await estimated();
+    expect(createButton().disabled).toBe(false);
+    const region = screen.getByRole("region", { name: "Make a picture" });
+    const warning = within(region).getByText(
+      "May not fit this computer: needs 6 GB of graphics memory. It may fail or be very slow.",
+    );
+    expect(warning.closest("[role=status]")).not.toBeNull();
+    // Create is described by it.
+    expect(createButton().getAttribute("aria-describedby")).toContain(warning.closest("[role=status]")!.id);
+  });
+
+  it("a model that fits shows no warning", async () => {
+    await show({ estimate: here() });
+    typePrompt("a fox");
+    await estimated();
+    expect(screen.queryByText(/^May not fit this computer/)).toBeNull();
+    expect(screen.queryByText("Video on the processor is very slow")).toBeNull();
+  });
+
+  it("video on the processor shows its warning", async () => {
+    const wan = LOCAL.installed.find((m) => m.kind === "video")!;
+    const slow: LocalModels = {
+      ...LOCAL,
+      videoOnProcessor: true,
+      installed: LOCAL.installed.map((m) => (m.id === wan.id ? { ...m, fit: { ...m.fit, videoOnProcessor: true } } : m)),
+    };
+    await show({ tab: "video", local: slow, estimate: here({ verySlow: true }) });
+    act(() => useStudio.getState().chooseModel("video", "thisComputer", wan.model.id));
+    typePrompt("a fox");
+    await estimated();
+    expect(createButton().disabled).toBe(false);
+    within(screen.getByRole("region", { name: "Make a video" })).getByText("Video on the processor is very slow");
+  });
+
   it("a model that may not fit this computer never greys Create out", async () => {
     await show({ estimate: here({ fit: "notHere", reason: "needs 6 GB of graphics memory" }, { eta: null }) });
     typePrompt("a fox");

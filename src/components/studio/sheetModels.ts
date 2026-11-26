@@ -101,10 +101,10 @@ function matches(model: MediaModel, query: string): boolean {
   return text === "" || model.displayName.toLowerCase().includes(text) || model.id.toLowerCase().includes(text);
 }
 
-/** The installed models of `kind` this computer can make (video needs a usable graphics card
- *  or an Apple-silicon Mac), those this version cannot read included. */
+/** The installed models of `kind`, those this version cannot read included. Video is offered
+ *  on a computer that runs models on the processor too, with a warning. */
 export function installedHere(local: LocalModels, kind: StudioTab): InstalledLocal[] {
-  return kind === "image" || !local.videoOnProcessor ? local.installed.filter((m) => m.kind === kind) : [];
+  return local.installed.filter((m) => m.kind === kind);
 }
 
 /**

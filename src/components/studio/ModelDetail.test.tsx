@@ -302,7 +302,7 @@ describe("a result's detail panel", () => {
     ]);
     // Each with its own size and fit word.
     within(radio(panel, "Q8_0")).getByText("6.7 GB");
-    within(radio(panel, "Q8_0")).getByText("Not for this computer");
+    within(radio(panel, "Q8_0")).getByText("May not fit");
     within(radio(panel, "Q5_K_M")).getByText("4.3 GB");
     within(radio(panel, "Q4_K")).getByText("Fits");
     // The best for this computer is marked once, on the largest that fits.
@@ -599,6 +599,20 @@ describe("a result's detail panel", () => {
     expect(screen.queryByRole("dialog")).toBeNull();
     expect(useStudio.getState().detail).toBeNull();
     await waitFor(() => expect(document.activeElement).toBe(opener));
+  });
+
+  it("a choice that may not fit shows the warning and Download stays on", async () => {
+    const panel = await openRepo();
+    await click(radio(panel, "Q8_0"));
+    const warning = within(panel).getByText(
+      "May not fit this computer: it needs 8 GB of graphics memory. It may fail or be very slow.",
+    );
+    expect(warning.closest("[role=status]")).not.toBeNull();
+    expect(downloadButton(panel).disabled).toBe(false);
+    // A choice that fits has none.
+    await click(radio(panel, "Q5_K_M"));
+    expect(within(panel).queryByText(/^May not fit this computer/)).toBeNull();
+    expect(downloadButton(panel).disabled).toBe(false);
   });
 
   it("a main file that may not fit stays choosable, and Download stays on with the warning", async () => {
