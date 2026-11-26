@@ -35,9 +35,11 @@
 //! - **Stop** kills the engine's whole tree (`MediaProvider::cancel`); a run still waiting for
 //!   the card never starts. *Quit and stop* stops every local run for good
 //!   ([`StudioManager::stop_local`]); installing an update stops them too, and Studio stays
-//!   usable should the install fail ([`StudioManager::stop_local_for_update`]).
+//!   usable should the install fail ([`StudioManager::stop_local_for_update`]), when the chat
+//!   model is loaded again ([`StudioManager::resume_after_failed_update`]).
 //! - **The chat model** a grant unloaded is kept while the local queue has work; when the
-//!   queue empties and "Reload it after Studio" is on, it is loaded again, once.
+//!   queue empties and "Reload it after Studio" is on, it is loaded again, once; never while
+//!   the app is closing or an update installs.
 //! - **Restarts**: a local run the app left queued or running is `interrupted`, never
 //!   charged, and its `.partial/<run>` goes. At exit the engine is stopped and nothing is
 //!   recorded.
@@ -406,11 +408,25 @@ impl StudioManager {
 
     /// 0.2.0 (design 9.2): installing an update stops every local run, those waiting first,
     /// as *Quit and stop* does, once the update box has said so ("Installing stops the
-    /// picture being made"). The app is not closing yet: should the install fail, local runs
-    /// can start again, and the chat model a grant unloaded is loaded again as usual
-    /// ("Reload it after Studio").
+    /// picture being made"). The app is not closing yet, so local runs can still start (a
+    /// failed install leaves Studio usable). The chat model a grant unloaded is not loaded
+    /// again while the update installs: the install and the restart follow, and a reload
+    /// would start llama-server under them (ruling G3-no-reload-on-update). It stays kept for
+    /// [`StudioManager::resume_after_failed_update`].
     pub async fn stop_local_for_update(&self) {
+        self.inner.updating.store(true, Ordering::SeqCst);
         self.stop_every_local_run().await;
+    }
+
+    /// The update did not install: the chat model a grant unloaded is loaded again now, as
+    /// "Reload it after Studio" says, when no local run is left to do it at its end.
+    pub fn resume_after_failed_update(&self) {
+        self.inner.updating.store(false, Ordering::SeqCst);
+        if let Some(lane) = &self.inner.deps.local
+            && !self.local_running()
+        {
+            self.inner.after_local(lane);
+        }
     }
 
     /// Stops every local run, those waiting first, then the one running; returns once each
@@ -801,6 +817,11 @@ impl Inner {
     fn after_local(&self, lane: &LocalLane) {
         // The app is closing (*Quit and stop*): a reload would start just as it exits.
         if self.root.is_cancelled() || self.quitting.load(Ordering::SeqCst) {
+            return;
+        }
+        // An update installs: the model stays kept until the install fails
+        // (`resume_after_failed_update`).
+        if self.updating.load(Ordering::SeqCst) {
             return;
         }
         let empty = self

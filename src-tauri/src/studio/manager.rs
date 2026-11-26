@@ -237,6 +237,9 @@ struct Inner {
     local_unloaded: Mutex<Option<String>>,
     /// Set by *Quit and stop*: the app is closing, so no chat model is loaded again.
     quitting: AtomicBool,
+    /// Set while an update installs (ruling G3-no-reload-on-update): no chat model is loaded
+    /// again until the install fails, which clears it (the restart follows one that works).
+    updating: AtomicBool,
     /// The earlier gallery folders whose `refs/` still holds added pictures, oldest first
     /// ([`EARLIER_GALLERIES_KEY`]); read from the store the first time they are needed.
     earlier_galleries: tokio::sync::Mutex<Option<Vec<PathBuf>>>,
@@ -648,6 +651,7 @@ impl StudioManager {
                 local_live: Mutex::new(HashMap::new()),
                 local_unloaded: Mutex::new(None),
                 quitting: AtomicBool::new(false),
+                updating: AtomicBool::new(false),
                 earlier_galleries: tokio::sync::Mutex::new(None),
                 seq: AtomicU64::new(0),
             }),

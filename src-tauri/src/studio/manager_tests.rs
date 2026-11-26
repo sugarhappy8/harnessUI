@@ -5798,6 +5798,43 @@ async fn an_update_stops_the_waiting_runs_first_and_frees_their_model() {
     h.local.release_all();
 }
 
+/// Ruling G3-no-reload-on-update: with "Reload it after Studio" on, an update stop never starts
+/// the chat-model reload once its stopped runs end (the install and the restart follow, and a
+/// reload would start llama-server under them); only a failed install loads it again. Their
+/// model is free as they end, and Studio can start local runs again.
+#[tokio::test]
+async fn an_update_stop_reloads_the_chat_model_only_once_the_install_fails() {
+    let h = harness_with_local().await;
+    h.set_prefs(json!({"reloadChatAfter": true})).await;
+    h.lease.then(LeaseStep::Grant(Grant::AfterUnload {
+        unloaded: Some(CHAT.into()),
+    }));
+    h.local.hold();
+    let first = h.manager.start(h.local_req("one"), false).await.unwrap();
+    let second = h.manager.start(h.local_req("two"), false).await.unwrap();
+    h.wait_status(&first.id, "running").await;
+    crate::updates::stop_studio_for_update(Some(&h.manager)).await;
+    for id in [&first.id, &second.id] {
+        assert_eq!(h.run_dto(id).await.status, "cancelled");
+    }
+    assert!(!h.manager.local_running());
+    assert!(!h.manager.local_uses_model(KLEIN));
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert!(h.lease.reloads().is_empty(), "{:?}", h.lease.reloads());
+    // The install failed: the chat model is loaded again, once.
+    crate::updates::resume_studio_after_failed_install(Some(&h.manager));
+    eventually("the chat model reloads", || !h.lease.reloads().is_empty()).await;
+    assert_eq!(h.lease.reloads(), [CHAT]);
+    // Studio is usable again, and later runs keep the usual rule.
+    h.local.release_all();
+    let again = h.manager.start(h.local_req("three"), false).await.unwrap();
+    h.wait_status(&again.id, "done").await;
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert_eq!(h.lease.reloads(), [CHAT]);
+    // No Studio: nothing to do.
+    crate::updates::resume_studio_after_failed_install(None);
+}
+
 /// Ruling L16-delete-in-use: *Delete* on a local model is refused while a run on this
 /// computer waits for it or uses it (a file the engine has open cannot be deleted on
 /// Windows), and deletes nothing; another model is deleted meanwhile, and once the runs end,

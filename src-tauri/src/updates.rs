@@ -661,11 +661,24 @@ async fn start_again_after_failed_install(app: &AppHandle, state: &AppState) {
 /// 0.2.0 (design 9.2): installing stops a local Studio job first (`studio`'s
 /// `local_running`), as the update box warns while one runs ("Installing stops the picture
 /// being made"); 0.1.x refused to install instead. The restart would stop it anyway; stopped
-/// here, it ends as a stopped run. Studio is not closing, so should the install fail, local
-/// runs can start again. Without Studio there is nothing to stop.
+/// here, it ends as a stopped run. Studio is not closing, so local runs can start again, but
+/// no chat model is loaded again until the install fails
+/// ([`resume_studio_after_failed_install`]), even with no local run to stop. Without Studio
+/// there is nothing to stop.
 pub(crate) async fn stop_studio_for_update(studio: Option<&crate::studio::manager::StudioManager>) {
-    if let Some(studio) = studio.filter(|studio| studio.local_running()) {
+    if let Some(studio) = studio {
         studio.stop_local_for_update().await;
+    }
+}
+
+/// The install failed after [`stop_studio_for_update`]: Studio loads the chat model a local
+/// run unloaded again, as "Reload it after Studio" says; it did not while the update
+/// installed (ruling G3-no-reload-on-update). Without Studio there is nothing to do.
+pub(crate) fn resume_studio_after_failed_install(
+    studio: Option<&crate::studio::manager::StudioManager>,
+) {
+    if let Some(studio) = studio {
+        studio.resume_after_failed_update();
     }
 }
 
@@ -697,6 +710,7 @@ pub async fn install_update(app: AppHandle, state: State<'_, AppState>) -> AppRe
         if STOP_BEFORE_INSTALL {
             start_again_after_failed_install(&app, &state).await;
         }
+        resume_studio_after_failed_install(studio.as_deref().map(Arc::as_ref));
         // The package stays waiting, so the user can try again.
         return Err(err);
     }
