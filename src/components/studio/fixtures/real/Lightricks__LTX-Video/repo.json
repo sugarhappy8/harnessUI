@@ -1,0 +1,835 @@
+{
+  "repo": "Lightricks/LTX-Video",
+  "commit": "8984fa25007f376c1a299016d0957a37a2f797bb",
+  "author": "Lightricks",
+  "summary": "This model card focuses on the model associated with the LTX-Video model, codebase available [here](https://github.com/Lightricks/LTX-Video).",
+  "verdict": {
+    "lora": {
+      "base": "ltxav"
+    }
+  },
+  "files": [],
+  "loras": [
+    {
+      "path": "ltxv-13b-0.9.7-distilled-lora128.safetensors",
+      "sizeBytes": 1325666536,
+      "quant": null,
+      "label": {
+        "lora": {
+          "base": "ltxav"
+        }
+      }
+    }
+  ],
+  "fileViews": [
+    {
+      "path": "ltx-video-2b-v0.9.1.safetensors",
+      "sizeBytes": 5716863844,
+      "quant": null,
+      "label": {
+        "cannotRun": {
+          "reason": "ltxVideo09",
+          "version": "ltxav"
+        }
+      }
+    },
+    {
+      "path": "ltx-video-2b-v0.9.5.safetensors",
+      "sizeBytes": 6340729500,
+      "quant": null,
+      "label": {
+        "cannotRun": {
+          "reason": "ltxVideo09",
+          "version": "ltxav"
+        }
+      }
+    },
+    {
+      "path": "ltx-video-2b-v0.9.safetensors",
+      "sizeBytes": 9370442108,
+      "quant": null,
+      "label": {
+        "cannotRun": {
+          "reason": "ltxVideo09",
+          "version": "ltxav"
+        }
+      }
+    },
+    {
+      "path": "ltxv-13b-0.9.7-dev-fp8.safetensors",
+      "sizeBytes": 15694279916,
+      "quant": null,
+      "label": {
+        "cannotRun": {
+          "reason": "ltxVideo09",
+          "version": "ltxav"
+        }
+      }
+    },
+    {
+      "path": "ltxv-13b-0.9.7-dev.safetensors",
+      "sizeBytes": 28579183340,
+      "quant": null,
+      "label": {
+        "cannotRun": {
+          "reason": "ltxVideo09",
+          "version": "ltxav"
+        }
+      }
+    },
+    {
+      "path": "ltxv-13b-0.9.7-distilled-fp8.safetensors",
+      "sizeBytes": 15694280020,
+      "quant": null,
+      "label": {
+        "cannotRun": {
+          "reason": "ltxVideo09",
+          "version": "ltxav"
+        }
+      }
+    },
+    {
+      "path": "ltxv-13b-0.9.7-distilled-lora128.safetensors",
+      "sizeBytes": 1325666536,
+      "quant": null,
+      "label": {
+        "lora": {
+          "base": "ltxav"
+        }
+      }
+    },
+    {
+      "path": "ltxv-13b-0.9.7-distilled.safetensors",
+      "sizeBytes": 28579183444,
+      "quant": null,
+      "label": {
+        "cannotRun": {
+          "reason": "ltxVideo09",
+          "version": "ltxav"
+        }
+      }
+    },
+    {
+      "path": "ltxv-13b-0.9.8-dev-fp8.safetensors",
+      "sizeBytes": 15694279916,
+      "quant": null,
+      "label": {
+        "cannotRun": {
+          "reason": "ltxVideo09",
+          "version": "ltxav"
+        }
+      }
+    },
+    {
+      "path": "ltxv-13b-0.9.8-dev.safetensors",
+      "sizeBytes": 28579183340,
+      "quant": null,
+      "label": {
+        "cannotRun": {
+          "reason": "ltxVideo09",
+          "version": "ltxav"
+        }
+      }
+    },
+    {
+      "path": "ltxv-13b-0.9.8-distilled-fp8.safetensors",
+      "sizeBytes": 15694280140,
+      "quant": null,
+      "label": {
+        "cannotRun": {
+          "reason": "ltxVideo09",
+          "version": "ltxav"
+        }
+      }
+    },
+    {
+      "path": "ltxv-13b-0.9.8-distilled.safetensors",
+      "sizeBytes": 28579183564,
+      "quant": null,
+      "label": {
+        "cannotRun": {
+          "reason": "ltxVideo09",
+          "version": "ltxav"
+        }
+      }
+    },
+    {
+      "path": "ltxv-2b-0.9.6-dev-04-25.safetensors",
+      "sizeBytes": 6340743924,
+      "quant": null,
+      "label": {
+        "cannotRun": {
+          "reason": "ltxVideo09",
+          "version": "ltxav"
+        }
+      }
+    },
+    {
+      "path": "ltxv-2b-0.9.6-distilled-04-25.safetensors",
+      "sizeBytes": 6340744028,
+      "quant": null,
+      "label": {
+        "cannotRun": {
+          "reason": "ltxVideo09",
+          "version": "ltxav"
+        }
+      }
+    },
+    {
+      "path": "ltxv-2b-0.9.8-distilled-fp8.safetensors",
+      "sizeBytes": 4461695684,
+      "quant": null,
+      "label": {
+        "cannotRun": {
+          "reason": "ltxVideo09",
+          "version": "ltxav"
+        }
+      }
+    },
+    {
+      "path": "ltxv-2b-0.9.8-distilled.safetensors",
+      "sizeBytes": 6340744492,
+      "quant": null,
+      "label": {
+        "cannotRun": {
+          "reason": "ltxVideo09",
+          "version": "ltxav"
+        }
+      }
+    },
+    {
+      "path": "ltxv-spatial-upscaler-0.9.7.safetensors",
+      "sizeBytes": 505024432,
+      "quant": null,
+      "label": {
+        "cannotRun": {
+          "reason": "unknownWeights",
+          "version": null
+        }
+      }
+    },
+    {
+      "path": "ltxv-spatial-upscaler-0.9.8.safetensors",
+      "sizeBytes": 505024432,
+      "quant": null,
+      "label": {
+        "cannotRun": {
+          "reason": "unknownWeights",
+          "version": null
+        }
+      }
+    },
+    {
+      "path": "ltxv-temporal-upscaler-0.9.7.safetensors",
+      "sizeBytes": 523894768,
+      "quant": null,
+      "label": {
+        "cannotRun": {
+          "reason": "unknownWeights",
+          "version": null
+        }
+      }
+    },
+    {
+      "path": "ltxv-temporal-upscaler-0.9.8.safetensors",
+      "sizeBytes": 523894768,
+      "quant": null,
+      "label": {
+        "cannotRun": {
+          "reason": "unknownWeights",
+          "version": null
+        }
+      }
+    },
+    {
+      "path": "text_encoder/model-00001-of-00004.safetensors",
+      "sizeBytes": 4989319680,
+      "quant": null,
+      "label": {
+        "cannotRun": {
+          "reason": "folderModel",
+          "version": null
+        }
+      }
+    },
+    {
+      "path": "text_encoder/model-00002-of-00004.safetensors",
+      "sizeBytes": 4999830656,
+      "quant": null,
+      "label": {
+        "cannotRun": {
+          "reason": "folderModel",
+          "version": null
+        }
+      }
+    },
+    {
+      "path": "text_encoder/model-00003-of-00004.safetensors",
+      "sizeBytes": 4865612720,
+      "quant": null,
+      "label": {
+        "cannotRun": {
+          "reason": "folderModel",
+          "version": null
+        }
+      }
+    },
+    {
+      "path": "text_encoder/model-00004-of-00004.safetensors",
+      "sizeBytes": 4194506688,
+      "quant": null,
+      "label": {
+        "cannotRun": {
+          "reason": "folderModel",
+          "version": null
+        }
+      }
+    },
+    {
+      "path": "text_encoder/model.safetensors.index.json",
+      "sizeBytes": 19886,
+      "quant": null,
+      "label": {
+        "cannotRun": {
+          "reason": "folderModel",
+          "version": null
+        }
+      }
+    },
+    {
+      "path": "transformer/diffusion_pytorch_model-00001-of-00002.safetensors",
+      "sizeBytes": 4939189200,
+      "quant": null,
+      "label": {
+        "cannotRun": {
+          "reason": "folderModel",
+          "version": null
+        }
+      }
+    },
+    {
+      "path": "transformer/diffusion_pytorch_model-00002-of-00002.safetensors",
+      "sizeBytes": 2754433648,
+      "quant": null,
+      "label": {
+        "cannotRun": {
+          "reason": "folderModel",
+          "version": null
+        }
+      }
+    },
+    {
+      "path": "transformer/diffusion_pytorch_model.safetensors.index.json",
+      "sizeBytes": 72060,
+      "quant": null,
+      "label": {
+        "cannotRun": {
+          "reason": "folderModel",
+          "version": null
+        }
+      }
+    },
+    {
+      "path": "vae/diffusion_pytorch_model.safetensors",
+      "sizeBytes": 1676798532,
+      "quant": null,
+      "label": {
+        "cannotRun": {
+          "reason": "folderModel",
+          "version": null
+        }
+      }
+    }
+  ],
+  "licence": {
+    "id": "other",
+    "name": "The repository's own licence",
+    "url": "https://huggingface.co/Lightricks/LTX-Video/tree/8984fa25007f376c1a299016d0957a37a2f797bb",
+    "sha256": "11e87180f0746e298ef8ccb3145823235e5a0774c7099ae38b578d6e1c0b6408",
+    "badge": "red",
+    "commercial": "unclear",
+    "revenueLimitUsd": null,
+    "plainWords": "Check the licence before you use what you make.",
+    "obligations": []
+  },
+  "licences": [],
+  "labelMismatch": null,
+  "gate": {
+    "mode": "none",
+    "collects": []
+  },
+  "readFiles": 20,
+  "unreadFiles": 0,
+  "byHandRecipes": [
+    {
+      "id": "anima",
+      "name": "Anima",
+      "kind": "picture"
+    },
+    {
+      "id": "boogu-image",
+      "name": "Boogu Image Base",
+      "kind": "picture"
+    },
+    {
+      "id": "chroma",
+      "name": "Chroma",
+      "kind": "picture"
+    },
+    {
+      "id": "chroma-radiance",
+      "name": "Chroma Radiance",
+      "kind": "picture"
+    },
+    {
+      "id": "ernie-image",
+      "name": "ERNIE Image",
+      "kind": "picture"
+    },
+    {
+      "id": "ernie-image-turbo",
+      "name": "ERNIE Image Turbo",
+      "kind": "picture"
+    },
+    {
+      "id": "flux1-canny",
+      "name": "FLUX.1 Canny dev",
+      "kind": "picture"
+    },
+    {
+      "id": "flux1-depth",
+      "name": "FLUX.1 Depth dev",
+      "kind": "picture"
+    },
+    {
+      "id": "flux1-dev",
+      "name": "FLUX.1 dev",
+      "kind": "picture"
+    },
+    {
+      "id": "flux1-schnell",
+      "name": "FLUX.1 schnell",
+      "kind": "picture"
+    },
+    {
+      "id": "flux2-klein-4b",
+      "name": "FLUX.2 Klein 4B",
+      "kind": "picture"
+    },
+    {
+      "id": "flux2-klein-9b",
+      "name": "FLUX.2 Klein 9B",
+      "kind": "picture"
+    },
+    {
+      "id": "flux2-klein-base-4b",
+      "name": "FLUX.2 Klein Base 4B",
+      "kind": "picture"
+    },
+    {
+      "id": "flux2-klein-base-9b",
+      "name": "FLUX.2 Klein Base 9B",
+      "kind": "picture"
+    },
+    {
+      "id": "flux2-dev",
+      "name": "FLUX.2 dev",
+      "kind": "picture"
+    },
+    {
+      "id": "flux3-klein",
+      "name": "FLUX.3 Image Klein",
+      "kind": "picture"
+    },
+    {
+      "id": "flux3-klein-base",
+      "name": "FLUX.3 Image Klein Base",
+      "kind": "picture"
+    },
+    {
+      "id": "fibo2-dev",
+      "name": "Fibo 2.0 Dev",
+      "kind": "picture"
+    },
+    {
+      "id": "flex2",
+      "name": "Flex.2 Preview",
+      "kind": "picture"
+    },
+    {
+      "id": "hidream-o1-dev",
+      "name": "HiDream O1 Image dev",
+      "kind": "picture"
+    },
+    {
+      "id": "ideogram4",
+      "name": "Ideogram 4",
+      "kind": "picture"
+    },
+    {
+      "id": "iris-3b",
+      "name": "Iris 3B",
+      "kind": "picture"
+    },
+    {
+      "id": "krea2-raw",
+      "name": "Krea 2 Raw",
+      "kind": "picture"
+    },
+    {
+      "id": "krea2-turbo",
+      "name": "Krea 2 Turbo",
+      "kind": "picture"
+    },
+    {
+      "id": "lens",
+      "name": "LENS",
+      "kind": "picture"
+    },
+    {
+      "id": "lens-turbo",
+      "name": "LENS Turbo",
+      "kind": "picture"
+    },
+    {
+      "id": "llada-image",
+      "name": "LLaDA Image (base)",
+      "kind": "picture"
+    },
+    {
+      "id": "llada-image-turbo",
+      "name": "LLaDA Image Turbo",
+      "kind": "picture"
+    },
+    {
+      "id": "longcat-image",
+      "name": "LongCat Image",
+      "kind": "picture"
+    },
+    {
+      "id": "moss-image-base",
+      "name": "MOSS Image Base",
+      "kind": "picture"
+    },
+    {
+      "id": "moss-image-sft",
+      "name": "MOSS Image SFT",
+      "kind": "picture"
+    },
+    {
+      "id": "mage-flow",
+      "name": "Mage Flow",
+      "kind": "picture"
+    },
+    {
+      "id": "mage-flow-turbo",
+      "name": "Mage Flow Turbo",
+      "kind": "picture"
+    },
+    {
+      "id": "ming-image",
+      "name": "Ming Image 0.1",
+      "kind": "picture"
+    },
+    {
+      "id": "minit2i",
+      "name": "MiniT2I",
+      "kind": "picture"
+    },
+    {
+      "id": "nitrosd-realism",
+      "name": "NitroSD Realism",
+      "kind": "picture"
+    },
+    {
+      "id": "ovis-image",
+      "name": "Ovis Image",
+      "kind": "picture"
+    },
+    {
+      "id": "pixart-alpha-1024",
+      "name": "PixArt Alpha XL 1024",
+      "kind": "picture"
+    },
+    {
+      "id": "pixart-alpha-512",
+      "name": "PixArt Alpha XL 512",
+      "kind": "picture"
+    },
+    {
+      "id": "pixart-sigma",
+      "name": "PixArt Sigma XL 1024",
+      "kind": "picture"
+    },
+    {
+      "id": "qwen-image",
+      "name": "Qwen Image",
+      "kind": "picture"
+    },
+    {
+      "id": "qwen-image-21",
+      "name": "Qwen Image 2.1",
+      "kind": "picture"
+    },
+    {
+      "id": "qwen-image-21-turbo",
+      "name": "Qwen Image 2.1 Turbo",
+      "kind": "picture"
+    },
+    {
+      "id": "sd1-checkpoint",
+      "name": "SD 1.x",
+      "kind": "picture"
+    },
+    {
+      "id": "sd2-512-checkpoint",
+      "name": "SD 2.1 512",
+      "kind": "picture"
+    },
+    {
+      "id": "sd2-768-checkpoint",
+      "name": "SD 2.1 768",
+      "kind": "picture"
+    },
+    {
+      "id": "sd3-medium",
+      "name": "SD 3 Medium",
+      "kind": "picture"
+    },
+    {
+      "id": "sd35-large",
+      "name": "SD 3.5 Large",
+      "kind": "picture"
+    },
+    {
+      "id": "sd35-medium",
+      "name": "SD 3.5 Medium",
+      "kind": "picture"
+    },
+    {
+      "id": "sd-turbo",
+      "name": "SD Turbo",
+      "kind": "picture"
+    },
+    {
+      "id": "sdxl-checkpoint",
+      "name": "SDXL",
+      "kind": "picture"
+    },
+    {
+      "id": "sdxl-turbo",
+      "name": "SDXL Turbo",
+      "kind": "picture"
+    },
+    {
+      "id": "sdxs",
+      "name": "SDXS",
+      "kind": "picture"
+    },
+    {
+      "id": "sefi-image",
+      "name": "SeFi Image 5B RL",
+      "kind": "picture"
+    },
+    {
+      "id": "z-image",
+      "name": "Z-Image",
+      "kind": "picture"
+    },
+    {
+      "id": "z-image-l2p",
+      "name": "Z-Image L2P",
+      "kind": "picture"
+    },
+    {
+      "id": "z-image-turbo",
+      "name": "Z-Image Turbo",
+      "kind": "picture"
+    },
+    {
+      "id": "anima-edit",
+      "name": "Anima Edit (LoRA)",
+      "kind": "pictureEdit"
+    },
+    {
+      "id": "boogu-image-edit",
+      "name": "Boogu Image Edit",
+      "kind": "pictureEdit"
+    },
+    {
+      "id": "cosxl-edit",
+      "name": "CosXL Edit",
+      "kind": "pictureEdit"
+    },
+    {
+      "id": "flux1-fill",
+      "name": "FLUX.1 Fill dev",
+      "kind": "pictureEdit"
+    },
+    {
+      "id": "flux1-kontext",
+      "name": "FLUX.1 Kontext dev",
+      "kind": "pictureEdit"
+    },
+    {
+      "id": "fibo2-edit-turbo",
+      "name": "Fibo 2.0 Edit Turbo",
+      "kind": "pictureEdit"
+    },
+    {
+      "id": "instruct-pix2pix",
+      "name": "Instruct-Pix2Pix",
+      "kind": "pictureEdit"
+    },
+    {
+      "id": "krea2-raw-edit",
+      "name": "Krea 2 Raw Edit (LoRA)",
+      "kind": "pictureEdit"
+    },
+    {
+      "id": "krea2-turbo-edit",
+      "name": "Krea 2 Turbo Edit (LoRA)",
+      "kind": "pictureEdit"
+    },
+    {
+      "id": "longcat-image-edit",
+      "name": "LongCat Image Edit",
+      "kind": "pictureEdit"
+    },
+    {
+      "id": "mage-flow-edit",
+      "name": "Mage Flow Edit",
+      "kind": "pictureEdit"
+    },
+    {
+      "id": "minimax-h3-image",
+      "name": "MiniMax H3 Image",
+      "kind": "pictureEdit"
+    },
+    {
+      "id": "p-h3-image",
+      "name": "P-H3-Image",
+      "kind": "pictureEdit"
+    },
+    {
+      "id": "qwen-image-edit",
+      "name": "Qwen Image Edit",
+      "kind": "pictureEdit"
+    },
+    {
+      "id": "qwen-image-edit-2509",
+      "name": "Qwen Image Edit 2509",
+      "kind": "pictureEdit"
+    },
+    {
+      "id": "qwen-image-edit-2511",
+      "name": "Qwen Image Edit 2511",
+      "kind": "pictureEdit"
+    },
+    {
+      "id": "qwen-image-layered",
+      "name": "Qwen Image Layered",
+      "kind": "pictureEdit"
+    },
+    {
+      "id": "sd1-inpainting",
+      "name": "SD 1.5 Inpainting",
+      "kind": "pictureEdit"
+    },
+    {
+      "id": "sd2-inpainting",
+      "name": "SD 2 Inpainting",
+      "kind": "pictureEdit"
+    },
+    {
+      "id": "sdxl-inpainting",
+      "name": "SDXL Inpainting",
+      "kind": "pictureEdit"
+    },
+    {
+      "id": "hunyuan-video-15-i2v",
+      "name": "HunyuanVideo 1.5 I2V",
+      "kind": "video"
+    },
+    {
+      "id": "hunyuan-video-15-t2v",
+      "name": "HunyuanVideo 1.5 T2V",
+      "kind": "video"
+    },
+    {
+      "id": "hyperflow-h3-flash-fl2va",
+      "name": "HyperFlow H3 Flash FL2VA",
+      "kind": "video"
+    },
+    {
+      "id": "hyperflow-h3-flash-ref2va",
+      "name": "HyperFlow H3 Flash Ref2VA",
+      "kind": "video"
+    },
+    {
+      "id": "ltx23-distilled",
+      "name": "LTX 2.3 Distilled 1.1",
+      "kind": "video"
+    },
+    {
+      "id": "ltx23-dev",
+      "name": "LTX 2.3 dev",
+      "kind": "video"
+    },
+    {
+      "id": "ltx25-dev",
+      "name": "LTX 2.5 dev",
+      "kind": "video"
+    },
+    {
+      "id": "lingbot-video-dense",
+      "name": "LingBot Video Dense 1.3B",
+      "kind": "video"
+    },
+    {
+      "id": "lingbot-video-moe",
+      "name": "LingBot Video MoE 30B A3B",
+      "kind": "video"
+    },
+    {
+      "id": "minimax-h3-fl2va",
+      "name": "MiniMax H3 FL2VA",
+      "kind": "video"
+    },
+    {
+      "id": "minimax-h3-ref2va",
+      "name": "MiniMax H3 Ref2VA",
+      "kind": "video"
+    },
+    {
+      "id": "wan21-flf2v",
+      "name": "Wan 2.1 FLF2V 14B",
+      "kind": "video"
+    },
+    {
+      "id": "wan21-i2v",
+      "name": "Wan 2.1 I2V",
+      "kind": "video"
+    },
+    {
+      "id": "wan21-t2v",
+      "name": "Wan 2.1 T2V",
+      "kind": "video"
+    },
+    {
+      "id": "wan22-i2v",
+      "name": "Wan 2.2 I2V A14B",
+      "kind": "video"
+    },
+    {
+      "id": "wan22-t2v",
+      "name": "Wan 2.2 T2V A14B",
+      "kind": "video"
+    },
+    {
+      "id": "wan22-ti2v-5b",
+      "name": "Wan 2.2 TI2V 5B",
+      "kind": "video"
+    }
+  ]
+}

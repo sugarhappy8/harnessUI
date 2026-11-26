@@ -1,0 +1,78 @@
+{
+  "file": "qwen-image-2.1-step90000-NF4-bnb/diffusion_pytorch_model.safetensors",
+  "plan": {
+    "canDownload": false,
+    "fit": {
+      "eta": null,
+      "reason": null,
+      "suggestion": null,
+      "verdict": "green",
+      "verySlow": false,
+      "videoOnProcessor": false,
+      "word": "fits"
+    },
+    "licences": [
+      {
+        "badge": "red",
+        "commercial": "unclear",
+        "id": "qwen-research",
+        "name": "qwen-research",
+        "obligations": [],
+        "plainWords": "Check the licence before you use what you make.",
+        "revenueLimitUsd": null,
+        "sha256": "5f783423fd3de0c5b130d50d785b0522353910e2f291887c10c0a0cf7e12237a",
+        "url": "https://huggingface.co/chatrlabs/Qwen-Image-2.1-Uncensored-Omni-Quantized/blob/af0343c259513913de8056af85819c70f627d681/LICENSE"
+      }
+    ],
+    "lowDisk": false,
+    "needsEngine": false,
+    "recipe": {
+      "id": "qwen-image-21",
+      "kind": "picture",
+      "name": "Qwen Image 2.1"
+    },
+    "recipes": [
+      {
+        "id": "qwen-image-21",
+        "kind": "picture",
+        "name": "Qwen Image 2.1"
+      },
+      {
+        "id": "qwen-image-21-turbo",
+        "kind": "picture",
+        "name": "Qwen Image 2.1 Turbo"
+      }
+    ],
+    "slots": [
+      {
+        "part": {
+          "alreadyHere": false,
+          "licenceId": "qwen-research",
+          "local": false,
+          "path": "qwen-image-2.1-step90000-NF4-bnb/diffusion_pytorch_model.safetensors",
+          "repo": "chatrlabs/Qwen-Image-2.1-Uncensored-Omni-Quantized",
+          "role": "diffusion",
+          "sizeBytes": 3670960573
+        },
+        "required": true,
+        "role": "diffusion",
+        "source": "main"
+      },
+      {
+        "part": null,
+        "required": true,
+        "role": "llm",
+        "source": "missing"
+      },
+      {
+        "part": null,
+        "required": true,
+        "role": "vae",
+        "source": "missing"
+      }
+    ],
+    "toFetchBytes": 3670960573,
+    "totalBytes": 3670960573,
+    "untested": false
+  }
+}

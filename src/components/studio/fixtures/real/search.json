@@ -1,0 +1,578 @@
+{
+  "items": [
+    {
+      "repo": "AtomicChat/Qwen-Image-2.1-Turbo-Uncensored-GGUF",
+      "author": "AtomicChat",
+      "downloads": 604876,
+      "likes": 907,
+      "updatedAt": "2026-10-28T09:59:52.000Z",
+      "gated": "none",
+      "licenseLabel": "apache-2.0",
+      "verdict": {
+        "works": {
+          "version": "qwen-image",
+          "kind": "picture",
+          "recipe": null
+        }
+      },
+      "exact": false
+    },
+    {
+      "repo": "chatrlabs/Qwen-Image-2.1-Uncensored-Omni-Quantized",
+      "author": "chatrlabs",
+      "downloads": 515591,
+      "likes": 974,
+      "updatedAt": "2026-11-23T01:41:20.000Z",
+      "gated": "none",
+      "licenseLabel": "other",
+      "verdict": {
+        "works": {
+          "version": "qwen-image",
+          "kind": "picture",
+          "recipe": null
+        }
+      },
+      "exact": false
+    },
+    {
+      "repo": "Noctaluna/Noct-Q-Uncensored-Qwen-Image-2.1",
+      "author": "Noctaluna",
+      "downloads": 250617,
+      "likes": 707,
+      "updatedAt": "2026-09-30T15:08:43.000Z",
+      "gated": "none",
+      "licenseLabel": "other",
+      "verdict": {
+        "works": {
+          "version": "qwen-image",
+          "kind": "picture",
+          "recipe": null
+        }
+      },
+      "exact": false
+    },
+    {
+      "repo": "KasugaiSakura/Qwen-Image-2.1-Uncensored-Abenzerps-GGUF",
+      "author": "KasugaiSakura",
+      "downloads": 123061,
+      "likes": 313,
+      "updatedAt": "2026-09-29T20:01:31.000Z",
+      "gated": "none",
+      "licenseLabel": "other",
+      "verdict": {
+        "works": {
+          "version": "qwen-image",
+          "kind": "picture",
+          "recipe": null
+        }
+      },
+      "exact": false
+    },
+    {
+      "repo": "ChrisColeTech/qwen-image-edit-uncensored-GGUF",
+      "author": "ChrisColeTech",
+      "downloads": 102899,
+      "likes": 124,
+      "updatedAt": "2026-08-19T21:10:19.000Z",
+      "gated": "none",
+      "licenseLabel": "unknown",
+      "verdict": {
+        "works": {
+          "version": "qwen-image",
+          "kind": "pictureEdit",
+          "recipe": null
+        }
+      },
+      "exact": false
+    },
+    {
+      "repo": "Noctaluna/Noct-Q-Anime-Uncensored-Qwen-Image-2.1",
+      "author": "Noctaluna",
+      "downloads": 37339,
+      "likes": 135,
+      "updatedAt": "2026-09-30T11:45:25.000Z",
+      "gated": "none",
+      "licenseLabel": "other",
+      "verdict": {
+        "works": {
+          "version": "qwen-image",
+          "kind": "picture",
+          "recipe": null
+        }
+      },
+      "exact": false
+    },
+    {
+      "repo": "TechnoBaptist/Qwen-Image-2.1-Turbo-Uncensored-GGUF",
+      "author": "TechnoBaptist",
+      "downloads": 36913,
+      "likes": 1,
+      "updatedAt": "2026-10-09T22:42:30.000Z",
+      "gated": "none",
+      "licenseLabel": "apache-2.0",
+      "verdict": {
+        "works": {
+          "version": "qwen-image",
+          "kind": "picture",
+          "recipe": null
+        }
+      },
+      "exact": false
+    },
+    {
+      "repo": "0xSojalSec/Qwen-Image-2.1-Uncensored-GGUF",
+      "author": "0xSojalSec",
+      "downloads": 34684,
+      "likes": 98,
+      "updatedAt": "2026-09-20T20:04:32.000Z",
+      "gated": "none",
+      "licenseLabel": "other",
+      "verdict": {
+        "works": {
+          "version": "qwen-image",
+          "kind": "picture",
+          "recipe": null
+        }
+      },
+      "exact": false
+    },
+    {
+      "repo": "webmp3/Sakura-Qwen-Image-2.1-Turbo-Uncensored-GGUF",
+      "author": "webmp3",
+      "downloads": 22773,
+      "likes": 44,
+      "updatedAt": "2026-10-17T10:45:08.000Z",
+      "gated": "none",
+      "licenseLabel": "other",
+      "verdict": {
+        "works": {
+          "version": "qwen-image",
+          "kind": "picture",
+          "recipe": null
+        }
+      },
+      "exact": false
+    },
+    {
+      "repo": "basileleuwa/Qwen-Image-2.1-Uncensored-GGUF",
+      "author": "basileleuwa",
+      "downloads": 11819,
+      "likes": 11,
+      "updatedAt": "2026-09-24T18:05:41.000Z",
+      "gated": "none",
+      "licenseLabel": "other",
+      "verdict": {
+        "works": {
+          "version": "qwen-image",
+          "kind": "picture",
+          "recipe": null
+        }
+      },
+      "exact": false
+    },
+    {
+      "repo": "0xSojalSec/Qwen-Image-2.1-Uncensored-HF",
+      "author": "0xSojalSec",
+      "downloads": 10060,
+      "likes": 40,
+      "updatedAt": "2026-09-23T01:08:56.000Z",
+      "gated": "none",
+      "licenseLabel": "other",
+      "verdict": {
+        "works": {
+          "version": "qwen-image",
+          "kind": "picture",
+          "recipe": null
+        }
+      },
+      "exact": false
+    },
+    {
+      "repo": "YueFong/Qwen-Image-2.1-Turbo-Uncensored-GGUF",
+      "author": "YueFong",
+      "downloads": 8896,
+      "likes": 0,
+      "updatedAt": "2026-10-10T13:51:32.000Z",
+      "gated": "none",
+      "licenseLabel": "apache-2.0",
+      "verdict": {
+        "works": {
+          "version": "qwen-image",
+          "kind": "picture",
+          "recipe": null
+        }
+      },
+      "exact": false
+    },
+    {
+      "repo": "markimaxxi2/Qwen-Image-2.1-Uncensored-GGUF",
+      "author": "markimaxxi2",
+      "downloads": 8285,
+      "likes": 0,
+      "updatedAt": "2026-10-03T02:01:36.000Z",
+      "gated": "none",
+      "licenseLabel": "other",
+      "verdict": {
+        "works": {
+          "version": "qwen-image",
+          "kind": "picture",
+          "recipe": null
+        }
+      },
+      "exact": false
+    },
+    {
+      "repo": "ldov/Qwen-Image-2.1-Uncensored-GGUF",
+      "author": "ldov",
+      "downloads": 4909,
+      "likes": 1,
+      "updatedAt": "2026-09-28T15:39:06.000Z",
+      "gated": "none",
+      "licenseLabel": "other",
+      "verdict": {
+        "works": {
+          "version": "qwen-image",
+          "kind": "picture",
+          "recipe": null
+        }
+      },
+      "exact": false
+    },
+    {
+      "repo": "li1272/Qwen-Image-2.1-Turbo-Uncensored-GGUF",
+      "author": "li1272",
+      "downloads": 4449,
+      "likes": 3,
+      "updatedAt": "2026-10-11T00:08:33.000Z",
+      "gated": "none",
+      "licenseLabel": "apache-2.0",
+      "verdict": {
+        "works": {
+          "version": "qwen-image",
+          "kind": "picture",
+          "recipe": null
+        }
+      },
+      "exact": false
+    },
+    {
+      "repo": "Nivee2B/Qwen-Image-2.1-Uncensored-Quantized",
+      "author": "Nivee2B",
+      "downloads": 4408,
+      "likes": 8,
+      "updatedAt": "2026-10-29T19:27:20.000Z",
+      "gated": "none",
+      "licenseLabel": "other",
+      "verdict": {
+        "works": {
+          "version": "qwen-image",
+          "kind": "picture",
+          "recipe": null
+        }
+      },
+      "exact": false
+    },
+    {
+      "repo": "Guesswhosback/Qwen-Image-2.1-Uncensored-Quantized",
+      "author": "Guesswhosback",
+      "downloads": 4319,
+      "likes": 0,
+      "updatedAt": "2026-11-03T03:19:03.000Z",
+      "gated": "none",
+      "licenseLabel": "other",
+      "verdict": {
+        "works": {
+          "version": "qwen-image",
+          "kind": "picture",
+          "recipe": null
+        }
+      },
+      "exact": false
+    },
+    {
+      "repo": "developerjeremylive/Qwen-Image-2.1-Uncensored-GGUF-etheroi",
+      "author": "developerjeremylive",
+      "downloads": 4307,
+      "likes": 2,
+      "updatedAt": "2026-09-27T09:14:10.000Z",
+      "gated": "none",
+      "licenseLabel": "other",
+      "verdict": {
+        "works": {
+          "version": "qwen-image",
+          "kind": "picture",
+          "recipe": null
+        }
+      },
+      "exact": false
+    },
+    {
+      "repo": "Janchan123/Qwen-Image-2.1-Uncensored-GGUF",
+      "author": "Janchan123",
+      "downloads": 4241,
+      "likes": 6,
+      "updatedAt": "2026-09-21T05:40:46.000Z",
+      "gated": "none",
+      "licenseLabel": "other",
+      "verdict": {
+        "works": {
+          "version": "qwen-image",
+          "kind": "picture",
+          "recipe": null
+        }
+      },
+      "exact": false
+    },
+    {
+      "repo": "0Endzz/Qwen-Image-2.1-Uncensored-GGUF",
+      "author": "0Endzz",
+      "downloads": 3798,
+      "likes": 0,
+      "updatedAt": "2026-09-23T21:28:30.000Z",
+      "gated": "none",
+      "licenseLabel": "other",
+      "verdict": {
+        "works": {
+          "version": "qwen-image",
+          "kind": "picture",
+          "recipe": null
+        }
+      },
+      "exact": false
+    },
+    {
+      "repo": "KryptykAngel/qwen-image-edit-uncensored-GGUF",
+      "author": "KryptykAngel",
+      "downloads": 3771,
+      "likes": 4,
+      "updatedAt": "2026-11-04T19:56:00.000Z",
+      "gated": "none",
+      "licenseLabel": "unknown",
+      "verdict": {
+        "works": {
+          "version": "qwen-image",
+          "kind": "pictureEdit",
+          "recipe": null
+        }
+      },
+      "exact": false
+    },
+    {
+      "repo": "Riyan200324200324/Qwen-Image-2.1-Turbo-Uncensored-GGUF",
+      "author": "Riyan200324200324",
+      "downloads": 3471,
+      "likes": 0,
+      "updatedAt": "2026-10-22T11:29:38.000Z",
+      "gated": "none",
+      "licenseLabel": "apache-2.0",
+      "verdict": {
+        "works": {
+          "version": "qwen-image",
+          "kind": "picture",
+          "recipe": null
+        }
+      },
+      "exact": false
+    },
+    {
+      "repo": "Riyan200324200324/Qwen-Image-2.1-Uncensored-Quantized",
+      "author": "Riyan200324200324",
+      "downloads": 3328,
+      "likes": 2,
+      "updatedAt": "2026-10-23T09:45:39.000Z",
+      "gated": "none",
+      "licenseLabel": "other",
+      "verdict": {
+        "works": {
+          "version": "qwen-image",
+          "kind": "picture",
+          "recipe": null
+        }
+      },
+      "exact": false
+    },
+    {
+      "repo": "ZiangLi/Qwen-Image-2.1-Uncensored-GGUF",
+      "author": "ZiangLi",
+      "downloads": 3253,
+      "likes": 1,
+      "updatedAt": "2026-09-29T05:47:32.000Z",
+      "gated": "none",
+      "licenseLabel": "other",
+      "verdict": {
+        "works": {
+          "version": "qwen-image",
+          "kind": "picture",
+          "recipe": null
+        }
+      },
+      "exact": false
+    },
+    {
+      "repo": "TBT000/Qwen-Image-2.1-Uncensored-GGUF",
+      "author": "TBT000",
+      "downloads": 3130,
+      "likes": 8,
+      "updatedAt": "2026-09-21T09:09:36.000Z",
+      "gated": "none",
+      "licenseLabel": "other",
+      "verdict": {
+        "works": {
+          "version": "qwen-image",
+          "kind": "picture",
+          "recipe": null
+        }
+      },
+      "exact": false
+    },
+    {
+      "repo": "Mspanz88/Qwen-Image-2.1-Turbo-Uncensored-GGUF",
+      "author": "Mspanz88",
+      "downloads": 2638,
+      "likes": 0,
+      "updatedAt": "2026-11-07T19:14:03.000Z",
+      "gated": "none",
+      "licenseLabel": "apache-2.0",
+      "verdict": {
+        "works": {
+          "version": "qwen-image",
+          "kind": "picture",
+          "recipe": null
+        }
+      },
+      "exact": false
+    },
+    {
+      "repo": "andrewbobrov38/Qwen-Image-2.1-Uncensored-Abenzerps-GGUF",
+      "author": "andrewbobrov38",
+      "downloads": 2460,
+      "likes": 0,
+      "updatedAt": "2026-11-20T11:42:11.000Z",
+      "gated": "none",
+      "licenseLabel": "other",
+      "verdict": {
+        "works": {
+          "version": "qwen-image",
+          "kind": "picture",
+          "recipe": null
+        }
+      },
+      "exact": false
+    },
+    {
+      "repo": "Aero2026/Qwen-Image-2.1-Uncensored-GGUF",
+      "author": "Aero2026",
+      "downloads": 2435,
+      "likes": 0,
+      "updatedAt": "2026-10-04T13:23:45.000Z",
+      "gated": "none",
+      "licenseLabel": "other",
+      "verdict": {
+        "works": {
+          "version": "qwen-image",
+          "kind": "picture",
+          "recipe": null
+        }
+      },
+      "exact": false
+    },
+    {
+      "repo": "doometernalcum/Qwen-Image-2.1-Uncensored-GGUF",
+      "author": "doometernalcum",
+      "downloads": 2434,
+      "likes": 3,
+      "updatedAt": "2026-09-24T13:51:01.000Z",
+      "gated": "none",
+      "licenseLabel": "other",
+      "verdict": {
+        "works": {
+          "version": "qwen-image",
+          "kind": "picture",
+          "recipe": null
+        }
+      },
+      "exact": false
+    },
+    {
+      "repo": "suryatmodulus/Qwen-Image-2.1-Turbo-Uncensored-GGUF",
+      "author": "suryatmodulus",
+      "downloads": 2357,
+      "likes": 0,
+      "updatedAt": "2026-10-10T12:40:15.000Z",
+      "gated": "none",
+      "licenseLabel": "apache-2.0",
+      "verdict": {
+        "works": {
+          "version": "qwen-image",
+          "kind": "picture",
+          "recipe": null
+        }
+      },
+      "exact": false
+    },
+    {
+      "repo": "ChrisColeTech/qwen-image-edit-uncensored-v1.1-GGUF",
+      "author": "ChrisColeTech",
+      "downloads": 0,
+      "likes": 28,
+      "updatedAt": "2026-09-11T09:34:44.000Z",
+      "gated": "none",
+      "licenseLabel": "unknown",
+      "verdict": {
+        "works": {
+          "version": "qwen-image",
+          "kind": "pictureEdit",
+          "recipe": null
+        }
+      },
+      "exact": false
+    },
+    {
+      "repo": "rkcth/Radiance-IQ8R-from-Qwen-Image-2.1-Uncensored",
+      "author": "rkcth",
+      "downloads": 0,
+      "likes": 1,
+      "updatedAt": "2026-11-16T17:13:31.000Z",
+      "gated": "auto",
+      "licenseLabel": "other",
+      "verdict": {
+        "works": {
+          "version": "qwen-image",
+          "kind": "pictureEdit",
+          "recipe": null
+        }
+      },
+      "exact": false
+    },
+    {
+      "repo": "chatrlabs/Qwen-Image-2.1-Uncensored-Omni-LoRA-v0.1",
+      "author": "chatrlabs",
+      "downloads": 77478,
+      "likes": 137,
+      "updatedAt": "2026-11-22T19:30:51.000Z",
+      "gated": "none",
+      "licenseLabel": "other",
+      "verdict": {
+        "lora": {
+          "base": "qwen-image"
+        }
+      },
+      "exact": false
+    },
+    {
+      "repo": "JoyFusionAI/Qwen-Image-2.1-Uncensored-LoRA",
+      "author": "JoyFusionAI",
+      "downloads": 1970,
+      "likes": 4,
+      "updatedAt": "2026-09-28T09:20:14.000Z",
+      "gated": "none",
+      "licenseLabel": "other",
+      "verdict": {
+        "lora": {
+          "base": "qwen-image"
+        }
+      },
+      "exact": false
+    }
+  ]
+}
