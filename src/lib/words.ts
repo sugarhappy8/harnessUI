@@ -1984,6 +1984,13 @@ export const LOCAL_MODELS = {
   deleteTitle: (name: string) => `Delete ${name}?`,
   deleteBody:
     "Its files are removed from this computer, except parts another model still uses. Pictures and videos you made stay in the gallery.",
+  /** A model that uses a file of the person's own where it is (*Use it where it is*, or a file
+   *  chosen from this computer): Studio never deletes that file. */
+  deleteBodyOwn:
+    "Studio forgets this model and removes the files it downloaded or copied, except parts another model still uses. Your own file stays where it is. Pictures and videos you made stay in the gallery.",
+  /** A model copied in with *Add a model file*: Studio's copy goes, the file it came from stays. */
+  deleteBodyCopy:
+    "Studio's copy of its file and the files it downloaded are removed, except parts another model still uses. The file you added it from stays where it is. Pictures and videos you made stay in the gallery.",
   cancel: "Cancel",
   showInFolder: "Show in folder",
   notice: "Local models run only on this computer; no company checks prompts or results.",

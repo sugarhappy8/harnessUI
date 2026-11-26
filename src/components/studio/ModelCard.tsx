@@ -647,7 +647,13 @@ export function InstalledCard(props: { row: InstalledLocal; onError: (e: unknown
         )}
         <DeleteButton
           title={LOCAL_MODELS.deleteTitle(name)}
-          body={LOCAL_MODELS.deleteBody}
+          body={
+            row.inPlace
+              ? LOCAL_MODELS.deleteBodyOwn
+              : row.source === "import"
+                ? LOCAL_MODELS.deleteBodyCopy
+                : LOCAL_MODELS.deleteBody
+          }
           remove={() => deleteLocal(row.id)}
           onError={props.onError}
         />

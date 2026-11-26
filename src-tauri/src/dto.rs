@@ -1350,8 +1350,8 @@ pub struct InstalledLocalDto {
     pub lora_base: Option<SdVersion>,
     /// Where it came from: `catalog`, `search` or `import`.
     pub source: String,
-    /// A file from this computer used where it is (not Studio's copy of it): the person's
-    /// own, which deleting the model never deletes.
+    /// A file from this computer used where it is (not Studio's copy of it), its model file
+    /// or a part's: the person's own, which deleting the model never deletes.
     pub in_place: bool,
 }
 

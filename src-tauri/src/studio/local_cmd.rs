@@ -340,16 +340,14 @@ fn recipe_features(recipe_id: &str) -> (bool, bool) {
     })
 }
 
-/// Whether installed model `row`'s model file is a file from this computer used where it is
-/// (an import in place), not Studio's copy under `<models>/@imported/`.
+/// Whether installed model `row` uses a file from this computer where it is: its model file
+/// imported in place, or a file the person chose for a part, never Studio's copy under
+/// `<models>/@imported/`. Deleting the model never deletes such a file, and its Delete says so
+/// (final review, area 3, I4).
 fn in_place(models_dir: &Path, row: &store::GenModel) -> bool {
     row.parts.as_array().into_iter().flatten().any(|p| {
-        let model = matches!(
-            p.get("role").and_then(serde_json::Value::as_str),
-            Some("diffusion" | "model")
-        );
         let local = p.get("local").and_then(serde_json::Value::as_str);
-        model && local.is_some_and(|file| !is_studios_copy(models_dir, Path::new(file)))
+        local.is_some_and(|file| !is_studios_copy(models_dir, Path::new(file)))
     })
 }
 

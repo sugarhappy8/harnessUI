@@ -1360,6 +1360,28 @@ mod tests {
         assert_eq!(installed.recipe.as_ref().unwrap().id, "flux1-dev");
     }
 
+    /// Final review, area 3, I4: a part chosen from this computer is the person's own, as an
+    /// imported model file is: the model is listed as using a file where it is, so its Delete
+    /// says that file stays.
+    #[tokio::test]
+    async fn a_part_chosen_from_this_computer_lists_the_model_as_using_a_file_where_it_is() {
+        let mut t = harness_with(installed_generic_flux).await;
+        assert!(!t.local_models().await.installed[0].in_place);
+        let ae = t.outside_file("my ae.safetensors", fixture_bytes("ae-flux1"));
+        t.set_model_files(
+            FLUX,
+            choice_override(
+                GenRole::Vae,
+                SlotFile::Disk {
+                    path: ae.display().to_string(),
+                },
+            ),
+        )
+        .await
+        .unwrap();
+        assert!(t.local_models().await.installed[0].in_place);
+    }
+
     /// An imported model's file stays the person's own when its set-up changes: its part is
     /// still local, and the file stays where it is.
     #[tokio::test]

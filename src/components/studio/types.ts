@@ -786,7 +786,8 @@ export interface InstalledLocal {
   loraBase: SdVersion | null;
   /** Where it came from. */
   source: "catalog" | "search" | "import";
-  /** A file from this computer used where it is: the person's own, never deleted with it. */
+  /** A file from this computer used where it is (its model file or a part's): the person's own,
+   *  never deleted with it. */
   inPlace: boolean;
 }
 

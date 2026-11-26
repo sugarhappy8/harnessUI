@@ -638,6 +638,28 @@ describe("Get models", () => {
     card(noFile.repo);
   });
 
+  // Final review, area 3, I4: Delete says truly what goes, for a model whose file is the
+  // person's own (used where it is), one copied in, and one downloaded.
+  it("Delete says the person's own file stays, and what is removed otherwise", async () => {
+    const klein = LOCAL.installed.find((m) => m.id === "flux2-klein-4b-q4")!;
+    const own: InstalledLocal = { ...klein, id: "local:own", name: "my model", source: "import", inPlace: true };
+    const copied: InstalledLocal = { ...klein, id: "local:copy", name: "my copy", source: "import", inPlace: false };
+    await showLocal({ ...LOCAL, installed: [own, copied, ...LOCAL.installed] });
+    const here = section("On this computer");
+    const bodyOf = async (name: string) => {
+      await click(within(within(here).getByRole("article", { name })).getByRole("button", { name: "Delete" }));
+      const asked = screen.getByRole("alertdialog");
+      const text = asked.textContent ?? "";
+      await click(within(asked).getByRole("button", { name: "Cancel" }));
+      return text;
+    };
+    const ownText = await bodyOf("my model");
+    expect(ownText).toContain(LOCAL_MODELS.deleteBodyOwn);
+    expect(ownText).not.toContain(LOCAL_MODELS.deleteBody);
+    expect(await bodyOf("my copy")).toContain(LOCAL_MODELS.deleteBodyCopy);
+    expect(await bodyOf("FLUX.2 klein 4B")).toContain(LOCAL_MODELS.deleteBody);
+  });
+
   it("installed models and LoRAs offer Delete, and models offer Repair", async () => {
     vi.mocked(api.studioLoraDelete).mockResolvedValue(undefined);
     await showLocal();
