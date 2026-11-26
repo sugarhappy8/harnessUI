@@ -23,11 +23,11 @@ never committed: they go to `.cache/preview/` (ignored).
 | `mock/data.ts` | The records, built from `src/components/studio/fixtures/models.ts`: its cloud models, installed models (a generic SDXL model, an untested one, one that needs set-up) and a LoRA; plus an SDXL inpainting model, a second and a third LoRA (one of an unknown model type), Hugging Face hits and repositories (a supported one, an OpenRAIL one, a Lumina 2 one that cannot run, a Wan 2.2 A14B one with 15 quantisations, a LoRA one), set-up plans, finished runs, one local run in progress, chats and a loaded chat model. |
 | `mock/pictures.ts` | Sample pictures, drawn on a canvas per output id (PNG full size, JPEG thumbnails). |
 | `shoot.mjs` | The Playwright script: each screen from a fresh page, driven by clicks and typing; measures each screen. |
-| `pairs.mjs` | One HTML page with each screen's before and after, side by side, in both themes. |
+| `pairs.mjs` | One HTML page with each screen's before and after, side by side, in both themes: first the five pairs design 10.5 names for the owner (main view `a`, model sheet `b`, Get models `c`, a result's detail panel `d2`, grid `g`), then every screen. |
 
 Query flags: `?view=studio` (open Studio), `?empty=1` (first use: nothing installed, no
-endpoint, no runs), `?notice=0` (the local-model notice never accepted, so the first
-download shows it). `window.__preview` exposes `useStudio`, `useApp`, `state` (the mock's
+endpoint, no runs), `&fits=0` with it (nothing in the catalog fits this computer either),
+`?notice=0` (the local-model notice never accepted, so the first download shows it). `window.__preview` exposes `useStudio`, `useApp`, `state` (the mock's
 data) and `emit(event, payload)` to send a backend event such as `studio-progress`.
 
 ## Run it
@@ -36,7 +36,7 @@ From the repo, with `node_modules` installed:
 
 ```bash
 npm run preview:serve &                       # http://127.0.0.1:5199/e2e/preview/index.html
-npm run preview:shoot                         # -> .cache/preview/after/ (78 PNGs) and a table
+npm run preview:shoot                         # -> .cache/preview/after/ (one PNG per screen and theme) and a table
 npm run preview:pairs -- .cache/preview/before .cache/preview/after   # -> .cache/preview/pairs.html
 pkill -f "e2e/preview/vite.config.ts"
 ```
@@ -85,11 +85,13 @@ open, listing a model downloading, a LoRA downloading and a model ready to use (
 1440 px viewport) · `lr` (file `l-loras`) the side panel's LoRAs, opened from the composer's
 LoRAs button with two LoRAs added to SDXL, one of them for another model type (Task U8) · `mf`
 (file `m-model-files`) the side panel's Files for the untested model (flux-dev-copy, set up as
-SDXL), with Z-Image picked as its type: the plan of what that downloads, before it starts · `g` gallery grid (top) · `g2` grid as it opens · `h` viewer · `i`, `i2`
+SDXL), with Z-Image picked as its type: the plan of what that downloads, before it starts · `g` gallery grid (top) · `g2` grid as it opens · `g3` the grid's Select mode with two tiles ticked and its bar of actions (Task U9) · `g4` a tile's actions and prompt, shown as the keyboard reaches it (Task U9) · `h` viewer · `i`, `i2`
 Settings -> Studio · `j` main view at 900x650 · `k` Video tab · `o` the SDXL inpainting model
 chosen, with its Picture to change and Mask zones · `n` *Add a model file*, from the model
 sheet's foot, with the file read · `q` the model sheet at 900x650 (a full-height sheet) ·
-`z1`, `z2` first use (empty, the model sheet) · `x1` chat, `x2` chat model menu, `x3` Models dialog (for comparison).
+`z1`, `z2` first use (empty, the model sheet) · `z3` no model on this computer and none that fits
+(`?empty=1&fits=0`): *Get models* (Task U9) · `z4` first use's button, which opens the model that fits in
+its detail panel (Task U9) · `x1` chat, `x2` chat model menu, `x3` Models dialog (for comparison).
 
 ## Updating it for a redesign
 

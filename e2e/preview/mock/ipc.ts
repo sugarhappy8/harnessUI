@@ -31,6 +31,10 @@ type Args = Record<string, unknown> | undefined;
 
 /** `?empty=1`: Studio as a new user finds it: nothing installed, no endpoint, no runs. */
 const empty = new URLSearchParams(location.search).get("empty") === "1";
+/** `?fits=0` (with `empty=1`): nothing in the catalog fits this computer either, so the empty
+ *  state is "No models on this computer yet" with *Get models* (Task U9). */
+const nothingFits = new URLSearchParams(location.search).get("fits") === "0";
+const uninstalled = LOCAL_MODELS.recommended.map((e) => ({ ...e, installed: false }));
 
 const state = {
   prefs: (empty ? { ...PREFS, lastModel: {}, setups: [] } : { ...PREFS }) as StudioPrefs,
@@ -39,8 +43,9 @@ const state = {
         ...LOCAL_MODELS,
         installed: [],
         installedBytes: 0,
-        moreFit: 2,
-        recommended: LOCAL_MODELS.recommended.map((e) => ({ ...e, installed: false })),
+        moreFit: nothingFits ? 0 : 2,
+        recommended: nothingFits ? [] : uninstalled,
+        notHere: nothingFits ? [...uninstalled, ...LOCAL_MODELS.notHere] : LOCAL_MODELS.notHere,
       }
     : LOCAL_MODELS,
   endpoints: empty ? [] : ENDPOINTS,

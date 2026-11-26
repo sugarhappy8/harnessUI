@@ -1,5 +1,6 @@
 // Writes one page with every screen's before and after screenshot side by side, in both
-// themes, for the owner's review (design 10.5).
+// themes, for the owner's review (design 10.5): first the five pairs the design names, then
+// every screen.
 //
 //   node e2e/preview/pairs.mjs <before-dir> <after-dir> [--out .cache/preview/pairs.html]
 //
@@ -28,6 +29,16 @@ const order = (name) => {
 };
 names.sort((x, y) => order(x).localeCompare(order(y)));
 
+/** The pairs design 10.5 names for the owner, shown first: the main view, the model sheet, Get
+ *  models, a search result's detail panel and the grid. */
+const FOR_REVIEW = [
+  ["a-main-view", "The main view"],
+  ["b-model-picker-open", "The model sheet"],
+  ["c-get-local-models", "Get models"],
+  ["d2-hf-result-supported", "A search result's detail panel"],
+  ["g-gallery-grid", "The grid"],
+].filter(([name]) => names.includes(name));
+
 const esc = (t) => t.replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" })[c]);
 const rel = (dir, file) => encodeURI(path.relative(path.dirname(OUT), path.join(dir, file)).split(path.sep).join("/"));
 
@@ -39,14 +50,12 @@ const cell = (dir, label, name, theme) => {
   }</figure>`;
 };
 
-const sections = names
-  .map(
-    (name) =>
-      `<section id="${esc(name)}"><h2>${esc(name)}</h2>${THEMES.map(
-        (theme) => `<div class="row">${cell(before, "before", name, theme)}${cell(after, "after", name, theme)}</div>`,
-      ).join("")}</section>`,
-  )
-  .join("\n");
+const section = (name, id, title) =>
+  `<section id="${esc(id)}"><h2>${esc(title)}</h2>${THEMES.map(
+    (theme) => `<div class="row">${cell(before, "before", name, theme)}${cell(after, "after", name, theme)}</div>`,
+  ).join("")}</section>`;
+const review = FOR_REVIEW.map(([name, title]) => section(name, `review-${name}`, `${title} (${name})`)).join("\n");
+const sections = names.map((name) => section(name, name, name)).join("\n");
 
 const html = `<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
@@ -66,6 +75,7 @@ const html = `<!doctype html>
 <body>
 <h1>Studio, before (${esc(path.basename(before))}) and after (${esc(path.basename(after))})</h1>
 <nav>${names.map((n) => `<a href="#${esc(n)}">${esc(n.split("-")[0])}</a>`).join("")}</nav>
+${review ? `<h1>For review (design 10.5)</h1>\n${review}\n<h1>Every screen</h1>` : ""}
 ${sections}
 </body></html>
 `;

@@ -389,11 +389,12 @@ describe("ParamField", () => {
   it("a range is a slider on the field's steps, within its range, its value said beside its name", () => {
     const { onChange } = field(compression, undefined);
     const slider = screen.getByRole("slider", { name: "Compression" });
-    // Unset with no default named: it reads Automatic, resting at the lowest.
+    // Unset with no default named: it reads Automatic, resting mid-range (Task U9), and moves on
+    // from there.
     screen.getByText("Automatic (company default)");
     expect(slider.getAttribute("aria-valuetext")).toBe("Automatic (company default)");
     fireEvent.keyDown(slider, { key: "ArrowRight" });
-    expect(onChange).toHaveBeenLastCalledWith(1);
+    expect(onChange).toHaveBeenLastCalledWith(51);
     fireEvent.keyDown(slider, { key: "End" });
     expect(onChange).toHaveBeenLastCalledWith(100);
     cleanup();
@@ -407,6 +408,41 @@ describe("ParamField", () => {
     screen.getByText("5");
     expect(screen.getByRole("slider", { name: "Guidance" }).getAttribute("aria-valuenow")).toBe("5");
     expect(screen.queryByText("Automatic")).toBeNull();
+  });
+
+  // [0.2.0 U9, from U8's review] An unset slider whose thumb sat at the minimum read as the
+  // minimum chosen (screen f, Picture guidance).
+  it("an unset slider's thumb is not at its minimum: it rests greyed at the default, else mid-range, until moved", () => {
+    const guidance = spec({
+      key: "img_cfg_scale",
+      label: "Picture guidance",
+      layer: "advanced",
+      kind: { type: "range", min: 1, max: 20, step: 0.5 },
+    });
+    const { onChange } = field(guidance, undefined, { local: true });
+    let thumb = screen.getByRole("slider", { name: "Picture guidance" });
+    expect(thumb.getAttribute("aria-valuenow")).not.toBe("1");
+    expect(thumb.getAttribute("aria-valuenow")).toBe("10.5");
+    expect(thumb.getAttribute("aria-valuetext")).toBe("Automatic");
+    // Greyed, with no filled track behind it: nothing is chosen.
+    expect(thumb.hasAttribute("data-unset")).toBe(true);
+    expect(document.querySelector("[data-slider-range]")!.hasAttribute("data-unset")).toBe(true);
+    fireEvent.keyDown(thumb, { key: "ArrowLeft" });
+    expect(onChange).toHaveBeenLastCalledWith(10);
+    cleanup();
+    // With a default the model names (here the recipe's), it rests there, greyed too.
+    const steps = spec({ key: "steps", label: "Steps", kind: { type: "range", min: 1, max: 50, step: 1 }, companyDefault: 4 });
+    field(steps, undefined, { local: true });
+    thumb = screen.getByRole("slider", { name: "Steps" });
+    expect(thumb.getAttribute("aria-valuenow")).toBe("4");
+    expect(thumb.hasAttribute("data-unset")).toBe(true);
+    cleanup();
+    // Once set, it is the accent's, at its value.
+    field(guidance, 1, { local: true });
+    thumb = screen.getByRole("slider", { name: "Picture guidance" });
+    expect(thumb.getAttribute("aria-valuenow")).toBe("1");
+    expect(thumb.hasAttribute("data-unset")).toBe(false);
+    expect(document.querySelector("[data-slider-range]")!.hasAttribute("data-unset")).toBe(false);
   });
 
   it("a switch shows the company's default until set", () => {

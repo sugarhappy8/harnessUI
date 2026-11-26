@@ -1693,8 +1693,11 @@ export const STUDIO_TILE = {
   /** Its box in the grid, to select it with others (the prompt cut the same way). */
   select: (kind: MediaKind, n: number, of: number, prompt: string) =>
     tilePrompt(prompt) ? `Select ${resultName(kind, n, of)}: ${tilePrompt(prompt)}` : `Select ${resultName(kind, n, of)}`,
-  /** Its star on a card: "Star picture 2 of 4" (pressed while starred). */
+  /** Its star, on hover and focus (always shown while starred): "Star picture 2 of 4"
+   *  (pressed while starred). */
   star: (kind: MediaKind, n: number, of: number) => `Star ${resultName(kind, n, of)}`,
+  /** Its Delete in the grid, on hover and focus: "Delete picture 2 of 4". */
+  delete: (kind: MediaKind, n: number, of: number) => `Delete ${resultName(kind, n, of)}`,
 } as const;
 
 /** The gallery's grid (Task B9): its filters beside the top bar's search and Starred, Load
@@ -1713,10 +1716,25 @@ export const STUDIO_GRID = {
   loadMore: "Load more",
   empty: "Nothing here yet.",
   nothingMatches: "No results match.",
-  selected: (n: number) => `${n} selected`,
-  deleteSome: (n: number) => `Delete ${n}`,
   saveSome: (n: number) => `Save ${n}…`,
   clear: "Clear selection",
+} as const;
+
+/** Studio's results (0.2.0 Task U9, design 10.4): the grid's Select mode, which puts a box on
+ *  every tile and a bar of actions over the selection, and the empty state without a model on
+ *  this computer, with its one action. */
+export const STUDIO_RESULTS = {
+  select: "Select",
+  selected: (n: number) => `${n} selected`,
+  done: "Done",
+  noModels: "No models on this computer yet",
+  getModels: "Get models",
+  deleteSelected: (n: number) => `Delete ${n}`,
+  /** The first-use card's button, which opens the model that fits in its detail panel:
+   *  "Get FLUX.2 klein 4B". */
+  getModel: (name: string) => `Get ${name}`,
+  /** The bar of actions on the selection, for a screen reader. */
+  selection: "Selection",
 } as const;
 
 /** Deleting results, in the viewer or several from the grid (Task B9): the file and its record
@@ -1747,7 +1765,7 @@ export const STUDIO_REUSE = {
   goneHere: "This model is no longer on this computer.",
   endpointGone: "This run's endpoint was removed in Settings → Endpoints.",
   /** Again, or Run again, on such a run: what to do instead. */
-  endpointGoneNext: "Choose a model in the right panel, then press Create.",
+  endpointGoneNext: "Choose a model from the model chip under the prompt, then press Create.",
 } as const;
 
 /** Animate and Edit when the tab's model cannot take the picture (Task B9): another model is

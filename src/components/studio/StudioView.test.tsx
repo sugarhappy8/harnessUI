@@ -210,11 +210,13 @@ describe("StudioView", () => {
     screen.getByText("No good graphics card? Cloud models are the backup: OpenRouter or OpenAI."); // second, smaller
     await click(screen.getByRole("button", { name: "Open Endpoints" }));
     expect(opened).toEqual(["endpoints"]); // app:open-settings detail
-    // Get models takes the empty state's place (Task B13), worded as the top bar's button (U5).
+    // Get models takes the empty state's place (Task B13), opened on the model the card names,
+    // in its detail panel (Task U9).
     vi.mocked(api.studioLocalSearch).mockResolvedValue({ items: [] });
     const main = screen.getByRole("main");
-    await click(within(main).getByRole("button", { name: "Get models" }));
+    await click(within(main).getByRole("button", { name: `Get ${klein.name}` }));
     expect(useStudio.getState().localView).toBe(true);
+    expect(useStudio.getState().detail).toEqual({ entryId: klein.id });
     expect(screen.queryByText("Make pictures and videos on this computer: free, and nothing is sent.")).toBeNull();
   });
 
@@ -238,7 +240,10 @@ describe("StudioView", () => {
       "This computer cannot run local models well. Cloud models run on a company's computers instead: add OpenRouter or OpenAI.",
     );
     screen.getByRole("button", { name: "Open Endpoints" });
-    expect(within(screen.getByRole("main")).queryByRole("button", { name: "Get models" })).toBeNull();
+    // Since Task U9 the card says there is no model here yet and still offers Get models first
+    // (a model may run slowly rather than not at all), the cloud as its second line.
+    screen.getByText("No models on this computer yet");
+    within(screen.getByRole("main")).getByRole("button", { name: "Get models" });
   });
 
   it("the first-run suggestion leads with local models and can be put away", async () => {
@@ -674,6 +679,30 @@ describe("StudioView", () => {
       expect(document.querySelector('[data-run-card="older"]')).not.toBeNull();
       expect(screen.queryByRole("button", { name: "Load more" })).toBeNull();
       // Still 600 px from the bottom: the cards shown did not move.
+      expect(scroller.scrollTop).toBe(1000);
+    } finally {
+      if (main) Object.defineProperty(HTMLElement.prototype, "scrollHeight", main);
+      else delete (HTMLElement.prototype as { scrollHeight?: number }).scrollHeight;
+    }
+  });
+
+  it("the grid opens at its top", async () => {
+    // Critique §2.2 and g2: the grid kept the stream's scroll, so it opened at its bottom with its
+    // filters out of view.
+    vi.mocked(api.studioOutputBytes).mockReturnValue(new Promise(() => {}));
+    const main = Object.getOwnPropertyDescriptor(Element.prototype, "scrollHeight");
+    Object.defineProperty(HTMLElement.prototype, "scrollHeight", { configurable: true, get: () => 1000 });
+    try {
+      await show({ runs: [RUN] });
+      const scroller = document.querySelector("main")!;
+      // The stream opens at its newest card.
+      expect(scroller.scrollTop).toBe(1000);
+      await click(screen.getByRole("button", { name: "Grid" }));
+      expect(document.querySelector("[data-grid]")).not.toBeNull();
+      expect(scroller.scrollTop).toBe(0);
+      // Back to the cards, the stream is at its newest card again.
+      scroller.scrollTop = 300;
+      await click(screen.getByRole("button", { name: "Grid" }));
       expect(scroller.scrollTop).toBe(1000);
     } finally {
       if (main) Object.defineProperty(HTMLElement.prototype, "scrollHeight", main);

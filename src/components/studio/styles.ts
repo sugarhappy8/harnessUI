@@ -9,24 +9,24 @@ import { FOCUS_RING } from "../ui/styles";
 export const BOX = `rounded-md border border-border bg-bg px-2 py-1 text-sm focus:border-border-strong disabled:opacity-60 ${FOCUS_RING}`;
 
 /** A small text button: *Reset all*, *Edit JSON*, *Save as setup…*, *Cancel*. */
-export const SMALL_BUTTON = "rounded-md px-1.5 py-0.5 text-xs text-fg-muted hover:bg-bg-muted hover:text-fg";
+export const SMALL_BUTTON = `rounded-md px-1.5 py-0.5 text-xs text-fg-muted hover:bg-bg-muted hover:text-fg ${FOCUS_RING}`;
 
-/** A run card's button: Cancel, Stop, *Get it anyway*, Again… */
-export const CARD_BUTTON =
-  "rounded-lg border border-border bg-bg px-2.5 py-1 text-sm hover:border-border-strong hover:bg-bg-muted disabled:opacity-60";
+/** A run card's button: Cancel, Stop, *Check again*; the viewer's and the grid's buttons. With
+ *  the one focus ring (Task U9), not the browser's outline. */
+export const CARD_BUTTON = `rounded-lg border border-border bg-bg px-2.5 py-1 text-sm hover:border-border-strong hover:bg-bg-muted disabled:opacity-60 ${FOCUS_RING}`;
 
 /** The main action of a card: *Download* in Get models' cards and an opened result. */
 export const PRIMARY_BUTTON = "btn-primary rounded-lg px-3 py-1 text-sm font-medium";
 
 /** A secondary button: *Get the list*, *Open Settings*, the model notices' actions. */
-export const SECONDARY_BUTTON =
-  "rounded-lg border border-border bg-bg px-2.5 py-1.5 text-sm hover:border-border-strong hover:bg-bg-muted disabled:opacity-60";
+export const SECONDARY_BUTTON = `rounded-lg border border-border bg-bg px-2.5 py-1.5 text-sm hover:border-border-strong hover:bg-bg-muted disabled:opacity-60 ${FOCUS_RING}`;
 
-/** A run's card: a flex column. */
-export const RUN_CARD = "enter flex flex-col gap-1.5 rounded-xl border border-border bg-surface p-3.5 shadow-soft";
+/** A run's card: a flex column, its pictures first (Task U9). */
+export const RUN_CARD = "enter flex flex-col gap-3 rounded-2xl border border-border bg-surface p-4 shadow-soft";
 
-/** A notice's card above the card stream. */
-export const NOTICE_CARD = "enter rounded-xl border border-border bg-surface p-3.5 shadow-soft";
+/** A notice's card above the card stream, and an empty state's (Task U9: an icon, one line and
+ *  one primary action). */
+export const NOTICE_CARD = "enter rounded-2xl border border-border bg-surface p-4 shadow-soft";
 
 /** A row of a menu. */
 export const MENU_ITEM =

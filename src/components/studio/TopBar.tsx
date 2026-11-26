@@ -45,15 +45,16 @@ export function TopBar(props: { onError: (e: unknown) => void }) {
   return (
     <header className="glass @container z-10 flex flex-wrap items-center gap-x-2 gap-y-1 border-b border-border px-3 py-2">
       {/* At the window's smallest the chat list leaves Studio's middle column little room. */}
-      <button
-        type="button"
-        aria-label={STUDIO_BAR.chatList}
-        title={STUDIO_BAR.chatList}
-        onClick={() => window.dispatchEvent(new Event("app:toggle-sidebar"))}
-        className={`rounded-lg p-1.5 text-fg-muted hover:bg-bg-muted hover:text-fg ${FOCUS_RING}`}
-      >
-        <PanelLeft size={16} aria-hidden />
-      </button>
+      <Tip content={STUDIO_BAR.chatList} side="bottom">
+        <button
+          type="button"
+          aria-label={STUDIO_BAR.chatList}
+          onClick={() => window.dispatchEvent(new Event("app:toggle-sidebar"))}
+          className={`rounded-lg p-1.5 text-fg-muted hover:bg-bg-muted hover:text-fg ${FOCUS_RING}`}
+        >
+          <PanelLeft size={16} aria-hidden />
+        </button>
+      </Tip>
       <h1 className="mr-1 text-title">{STUDIO_NAV.name}</h1>
       {/* The grid's own kind toggles, or Get models' own filter, stand in for these. */}
       {!grid && !localView && <KindTabs onSelect={setTab} />}

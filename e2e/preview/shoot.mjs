@@ -84,6 +84,10 @@ async function openSettings(page) {
   await settle(page, 500);
 }
 
+/** The app's Settings, from the sidebar's gear: the first "Settings" button on the page (the
+ *  composer's own Settings, which opens Studio's side panel, comes after it since Task U3). */
+const openAppSettings = (page) => page.getByRole("button", { name: "Settings", exact: true }).first().click();
+
 /** Hugging Face searched from Get models' field, at the top of the view (Task U5). */
 async function search(page, words) {
   const box = page.getByRole("searchbox", { name: "Search Hugging Face" });
@@ -436,6 +440,36 @@ const SCREENS = [
     },
   },
   {
+    id: "g3",
+    name: "g3-gallery-grid-select",
+    run: async (page) => {
+      // Select mode (Task U9): a box on every tile, two ticked, and the bar of actions.
+      await open(page);
+      await page.getByRole("button", { name: "Grid" }).click();
+      await settle(page, 600);
+      await page.getByRole("button", { name: "Select", exact: true }).click();
+      await settle(page, 400);
+      for (const id of ["coast-o2", "coast-o3"]) {
+        await page.locator(`[data-output-tile="${id}"] [role=checkbox]`).click();
+        await settle(page, 200);
+      }
+      await settle(page, 600);
+    },
+  },
+  {
+    id: "g4",
+    name: "g4-gallery-grid-tile-actions",
+    run: async (page) => {
+      // A tile's actions and its prompt, shown as the keyboard reaches it (Task U9).
+      await open(page);
+      await page.getByRole("button", { name: "Grid" }).click();
+      await settle(page, 600);
+      await page.locator('[data-output-tile="coast-o2"] button').first().focus();
+      await page.keyboard.press("Tab");
+      await settle(page, 600);
+    },
+  },
+  {
     id: "h",
     name: "h-viewer",
     run: async (page) => {
@@ -453,7 +487,7 @@ const SCREENS = [
     name: "i-settings-studio",
     run: async (page) => {
       await open(page);
-      await page.getByRole("button", { name: "Settings", exact: true }).click();
+      await openAppSettings(page);
       await settle(page, 500);
       await page.getByRole("tab", { name: "Studio" }).click();
       await settle(page, 700);
@@ -464,7 +498,7 @@ const SCREENS = [
     name: "i2-settings-studio-lower",
     run: async (page) => {
       await open(page);
-      await page.getByRole("button", { name: "Settings", exact: true }).click();
+      await openAppSettings(page);
       await settle(page, 500);
       await page.getByRole("tab", { name: "Studio" }).click();
       await settle(page, 600);
@@ -511,6 +545,24 @@ const SCREENS = [
     name: "z1-first-use-empty",
     run: async (page) => {
       await open(page, "view=studio&empty=1");
+    },
+  },
+  {
+    id: "z3",
+    name: "z3-no-models-empty",
+    run: async (page) => {
+      // Nothing installed and nothing in the catalog fits: Get models first, the cloud second.
+      await open(page, "view=studio&empty=1&fits=0");
+    },
+  },
+  {
+    id: "z4",
+    name: "z4-first-use-opens-model",
+    run: async (page) => {
+      // First use: the card's button opens the model that fits in Get models' detail panel.
+      await open(page, "view=studio&empty=1");
+      await page.getByRole("main").getByRole("button", { name: /^Get FLUX\.2 klein/ }).click();
+      await settle(page, 900);
     },
   },
   {

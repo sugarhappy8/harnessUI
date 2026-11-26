@@ -247,7 +247,13 @@ function Control(props: {
     );
   }
   if (widget === "slider" && kind.type === "range") {
-    const resting = number ?? (typeof spec.companyDefault === "number" ? spec.companyDefault : kind.min);
+    // Unset, the thumb rests at the model's default (a recipe's own, on this computer), else in
+    // the middle, greyed until moved: at the lowest it read as the lowest chosen (U8's review).
+    const resting =
+      number ??
+      (typeof spec.companyDefault === "number"
+        ? spec.companyDefault
+        : fitNumber((kind.min + kind.max) / 2, kind.min, kind.max, kind.step));
     return (
       <SliderField
         label={spec.label}
@@ -256,6 +262,7 @@ function Control(props: {
         max={kind.max}
         step={kind.step && kind.step > 0 ? kind.step : (kind.max - kind.min) / 100}
         value={resting}
+        unset={number === null}
         onChange={(n) => orReset(fitNumber(n, kind.min, kind.max, kind.step))}
         format={(n) => (number === null ? (props.readout ?? String(n)) : numberWords(n, kind.unit))}
       />

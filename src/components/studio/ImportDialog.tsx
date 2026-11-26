@@ -439,7 +439,7 @@ function Adding(props: { total: number }) {
         aria-valuenow={pct}
         className="h-1.5 w-full overflow-hidden rounded-full bg-bg-muted"
       >
-        <div className="brand-gradient h-full rounded-full transition-[width] duration-300 ease-out" style={{ width: `${pct}%` }} />
+        <div className="h-full rounded-full bg-accent transition-[width] duration-300 ease-out" style={{ width: `${pct}%` }} />
       </div>
     </div>
   );

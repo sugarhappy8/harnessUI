@@ -183,7 +183,7 @@ export function DownloadState(props: { group: DownloadGroup; name: string; onUse
         aria-valuemax={100}
       >
         <div
-          className={clsx("h-full rounded-full transition-[width] duration-300 ease-out", stalled ? "bg-fg-muted/40" : "brand-gradient")}
+          className={clsx("h-full rounded-full transition-[width] duration-300 ease-out", stalled ? "bg-fg-muted/40" : "bg-accent")}
           style={{ width: `${pct}%` }}
         />
       </div>

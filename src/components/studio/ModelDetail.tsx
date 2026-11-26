@@ -661,7 +661,7 @@ function ChoiceBody(props: { choice: MainChoice; mark: ReactNode }) {
         {LOCAL_FIT_WORDS[c.fit.word] ?? LOCAL_FIT_WORDS.notHere}
       </span>
       {c.best && (
-        <span className="brand-gradient absolute -top-2.5 right-2.5 inline-flex items-center gap-1 rounded-full px-2 py-px text-xs font-medium text-accent-fg shadow-soft">
+        <span className="absolute -top-2.5 right-2.5 inline-flex items-center gap-1 rounded-full bg-accent px-2 py-px text-xs font-medium text-accent-fg shadow-soft">
           <Sparkles size={11} aria-hidden />
           {MODEL_DETAIL.best}
         </span>

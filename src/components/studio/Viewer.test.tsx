@@ -170,7 +170,11 @@ async function flush() {
 async function open(outputId = "o1") {
   const onClose = vi.fn();
   await act(async () => {
-    render(<Viewer outputId={outputId} onClose={onClose} />);
+    render(
+      <UiProviders>
+        <Viewer outputId={outputId} onClose={onClose} />
+      </UiProviders>,
+    );
   });
   await flush();
   return onClose;
@@ -485,6 +489,32 @@ describe("Viewer", () => {
     expect(api.studioExport).toHaveBeenLastCalledWith("o1", "/home/me/Pictures/lighthouse.png", true);
   });
 
+  // [0.2.0 U9] Design 10.4: the app's own checkbox, not the browser's, and help as a tooltip.
+  it("saving the settings as a .json file is a checkbox named for it", async () => {
+    setStore();
+    vi.mocked(dialog.save).mockResolvedValue("/home/me/Pictures/lighthouse.png");
+    vi.mocked(api.studioExport).mockResolvedValue("/home/me/Pictures/lighthouse.png");
+    await open("o1");
+    const box = screen.getByRole("checkbox", { name: "Also save the settings as a .json file" });
+    // A styled checkbox (Radix's, a button), not a native input.
+    expect(box.tagName).toBe("BUTTON");
+    expect(document.querySelector("[data-studio-viewer] input[type=checkbox]")).toBeNull();
+    expect(box.getAttribute("aria-checked")).toBe("false");
+    // Its words tick it too.
+    await click(screen.getByText("Also save the settings as a .json file"));
+    expect(box.getAttribute("aria-checked")).toBe("true");
+    await click(button("Save as…"));
+    expect(api.studioExport).toHaveBeenLastCalledWith("o1", "/home/me/Pictures/lighthouse.png", true);
+    // No help left in a native title: where a cloud run went is a tooltip on its chip.
+    expect(document.querySelector("[data-studio-viewer] [title]")).toBeNull();
+    const chip = document.querySelector<HTMLElement>("[data-studio-viewer] [data-cloud-mark]")!;
+    expect(chip.getAttribute("tabindex")).toBe("0");
+    await act(async () => {
+      chip.focus();
+    });
+    within(await screen.findByRole("tooltip")).getByText("Cloud: your prompt and added pictures go to openrouter.ai");
+  });
+
   it("Save as says where it saved, the path left to right with invisible characters as codes", async () => {
     setStore();
     vi.mocked(dialog.save).mockResolvedValue("/home/me/\u202Egnp.png");
@@ -501,7 +531,7 @@ describe("Viewer", () => {
   it("opened on another result, it never falls back to the result it showed before", async () => {
     setStore();
     const onClose = vi.fn();
-    const { rerender } = render(<Viewer outputId="o2" onClose={onClose} />);
+    const { rerender } = render(<Viewer outputId="o2" onClose={onClose} />, { wrapper: UiProviders });
     await flush();
     screen.getByText("2 / 4");
     // Opened on a result the store does not hold (deleted meanwhile): it closes, rather than

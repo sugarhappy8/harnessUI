@@ -1,7 +1,10 @@
-import { useEffect, useState } from "react";
+import { useEffect, useId, useState, type ReactNode } from "react";
+import { ArrowDownToLine, ChevronDown, CircleAlert, Info, MessageSquare, RotateCcw } from "lucide-react";
+import clsx from "clsx";
 import type { ErrorInfo } from "../../lib/types";
 import {
   engineDownloadWords,
+  SETUP,
   STUDIO_ACTIONS,
   STUDIO_CARD,
   STUDIO_CHAT_LINK,
@@ -14,11 +17,10 @@ import { switchModel } from "../../store/modelChange";
 import { listedModel, useStudio, type StudioState } from "../../store/studio";
 import { COST_TONE_CLASS, costTone, formatUsd } from "./cost";
 import { etaText, timeWords } from "./eta";
-import { ResultTile, resultsOf } from "./results";
+import { cardTileStyle, ResultTile, resultsOf } from "./results";
 import { settingsParts } from "./settingsLine";
-import { CARD_BUTTON } from "./styles";
-import { RUN_CARD } from "./styles";
-import type { Run } from "./types";
+import { CARD_BUTTON, GHOST_BUTTON, PANEL_BUTTON, RUN_CARD } from "./styles";
+import type { Run, RunError } from "./types";
 import { Working } from "./Working";
 
 export { localLine } from "./Working";
@@ -37,7 +39,11 @@ export { localLine } from "./Working";
 // chat on a finished card with one picture (with several, the viewer sends the one wanted; a
 // video is never sent). Esc never cancels a card. The card follows the run's newest state in
 // the store. The settings line is built in settingsLine.ts, the status line of a run still
-// working in Working.tsx.
+// working in Working.tsx. Since 0.2.0 Task U9 (design 10.4) the card leads with its pictures,
+// each at its own shape up to 256 px; the prompt is its heading, with the cost or time at its
+// right, and the model and settings one quiet line under it; progress is a thin bar over one
+// status line; and a run that failed says so in an inline alert holding its message, next step
+// and actions (a run stopped on purpose, quietly, in the same place).
 
 /** The parts of the queue strip, in its order. */
 const QUEUE_ORDER = ["making", "waiting", "done", "stopped", "failed"] as const;
@@ -224,6 +230,45 @@ function useNow(active: boolean): number {
 
 const LINK = "shrink-0 text-xs underline hover:text-fg disabled:opacity-60";
 
+/** A finished card's action, under its caption: quiet, its icon and words. */
+const CARD_ACTION = `${GHOST_BUTTON} first:-ml-2`;
+
+/** Why a run ended, with its next step, the charge line and its details when asked for, then
+ *  the card's actions (`children`): an alert when it failed or was refused, else said quietly
+ *  (stopped, or cut off by the app closing). */
+function EndNote(props: {
+  failed: boolean;
+  error: RunError;
+  charge: string | null;
+  detailsOpen: boolean;
+  children: ReactNode;
+}) {
+  const { failed, error } = props;
+  const Icon = failed ? CircleAlert : Info;
+  return (
+    <div
+      role={failed ? "alert" : "status"}
+      className={clsx(
+        "flex gap-2.5 rounded-xl border p-3",
+        failed ? "border-danger/25 bg-danger/[0.06]" : "border-border bg-bg-subtle",
+      )}
+    >
+      <Icon size={16} aria-hidden className={clsx("mt-0.5 shrink-0", failed ? "text-danger" : "text-fg-muted")} />
+      <div className="flex min-w-0 flex-1 flex-col gap-1">
+        <p className="text-sm font-medium break-words">{error.message}</p>
+        {error.nextStep && <p className="text-sm break-words text-fg-muted">{error.nextStep}</p>}
+        {props.charge && <p className="text-meta">{props.charge}</p>}
+        {props.detailsOpen && error.details && (
+          <pre className="mt-1 max-h-40 overflow-y-auto rounded-md border border-border bg-surface p-2 text-xs break-words whitespace-pre-wrap text-fg-muted">
+            {error.details}
+          </pre>
+        )}
+        {props.children}
+      </div>
+    </div>
+  );
+}
+
 /** One run's card. */
 export function RunCard(props: { run: Run }) {
   const run = useStudio((s) => s.live[props.run.id] ?? s.runs.find((r) => r.id === props.run.id)) ?? props.run;
@@ -233,6 +278,11 @@ export function RunCard(props: { run: Run }) {
   );
   const engine = useStudio((s) => s.local?.engine ?? null);
   const loras = useStudio((s) => s.loras);
+  // A set-up the person chose, which Studio never matched to the model.
+  const untested = useStudio(
+    (s) => local && (s.local?.installed.find((m) => m.model.id === run.model)?.untested ?? false),
+  );
+  const headingId = useId();
   const usual = useStudio((s) =>
     run.kind === "video" && !local ? (usualTimesOf(s).get(run.model) ?? null) : null,
   );
@@ -316,20 +366,129 @@ export function RunCard(props: { run: Run }) {
   // Send to chat: the card's one picture.
   const forChat = run.kind === "image" && run.status === "done" && run.outputs.length === 1 ? run.outputs[0] : null;
 
+  const failed = run.status === "failed" || run.status === "blocked";
+  // The card's actions once it is done or has ended: in the alert that says why it ended, else
+  // under the caption.
+  const inNote = ended && error !== null;
+  const actionClass = inNote ? PANEL_BUTTON : CARD_ACTION;
+  const actions = !working && run.status !== "waiting" && (
+    <div className={clsx("flex flex-wrap items-center gap-2", inNote && "mt-1.5")}>
+      {offerEngine && engine && (
+        <button
+          type="button"
+          className={actionClass}
+          title={engine.licenseName}
+          disabled={busy}
+          onClick={() => perform(() => store().downloadEngine())}
+        >
+          {engineDownloadWords(engine.downloadBytes, engine.licenseName)}
+        </button>
+      )}
+      {fileBad && !repairing && (
+        <button
+          type="button"
+          className={actionClass}
+          disabled={busy}
+          onClick={() =>
+            perform(async () => {
+              await store().repairLocal(run.model);
+              setRepairing(true);
+            })
+          }
+        >
+          {STUDIO_ACTIONS.downloadAgain}
+        </button>
+      )}
+      {canGetAnyway(run) && (
+        <button type="button" className={actionClass} disabled={busy} onClick={fetchAnyway}>
+          {STUDIO_CARD.getAnyway}
+        </button>
+      )}
+      {run.status === "blocked" ? (
+        <button type="button" className={actionClass} onClick={editPrompt}>
+          {STUDIO_CARD.editPrompt}
+        </button>
+      ) : (
+        <button type="button" className={actionClass} disabled={busy} onClick={again}>
+          <RotateCcw size={14} aria-hidden />
+          {local && ended ? STUDIO_CARD.runAgain : STUDIO_CARD.again}
+        </button>
+      )}
+      <button type="button" className={actionClass} onClick={reuse}>
+        <ArrowDownToLine size={14} aria-hidden />
+        {STUDIO_CARD.reuse}
+      </button>
+      {forChat && (
+        <button
+          type="button"
+          className={actionClass}
+          disabled={busy}
+          onClick={() => perform(() => store().sendToChat(forChat))}
+        >
+          <MessageSquare size={14} aria-hidden />
+          {STUDIO_CHAT_LINK.sendToChat}
+        </button>
+      )}
+      {ended && error?.details && (
+        <button
+          type="button"
+          className={`${GHOST_BUTTON} aria-expanded:text-fg`}
+          aria-expanded={detailsOpen}
+          onClick={() => setDetailsOpen((open) => !open)}
+        >
+          {STUDIO_CARD.details}
+          <ChevronDown size={14} aria-hidden className={clsx("transition-transform", detailsOpen && "rotate-180")} />
+        </button>
+      )}
+    </div>
+  );
+
   return (
-    <article data-run-card={run.id} className={RUN_CARD}>
-      {run.prompt && <p className="text-sm break-words">{STUDIO_CARD.prompt(run.prompt)}</p>}
-      <div className="flex flex-wrap items-baseline gap-x-3 text-xs text-fg-muted">
-        <p className="min-w-0 flex-1">
+    <article data-run-card={run.id} aria-labelledby={run.prompt ? headingId : undefined} className={RUN_CARD}>
+      {run.outputs.length > 0 && (
+        <div data-run-pictures className="flex flex-wrap gap-2">
+          {resultsOf(run).map((output) => (
+            <ResultTile
+              key={output.id}
+              run={run}
+              output={output}
+              onOpen={(id) => store().openViewer(id)}
+              onStar={() => perform(() => store().star(output.id, !output.starred))}
+              style={cardTileStyle(run, output)}
+              className="max-w-full"
+            />
+          ))}
+        </div>
+      )}
+      <div className="flex min-w-0 flex-col gap-0.5">
+        {/* The prompt, and at its right what the run cost or how long it took. */}
+        <div className="flex items-baseline gap-3">
+          {run.prompt && (
+            <h3 id={headingId} className="line-clamp-3 min-w-0 flex-1 text-section break-words">
+              {run.prompt}
+            </h3>
+          )}
+          {figure && (
+            <span data-run-figure className={`ml-auto shrink-0 text-sm tabular-nums ${figure.tone}`}>
+              {figure.text}
+            </span>
+          )}
+        </div>
+        <p data-settings-line className="text-meta break-words">
           <span>{settings}</span>
+          {untested && (
+            <>
+              {STUDIO_CARD.joiner}
+              <span className="text-warning">{SETUP.untested}</span>
+            </>
+          )}
           {local && (
             <>
-              <span>{STUDIO_CARD.joiner}</span>
+              {STUDIO_CARD.joiner}
               <span>{STUDIO_PRICE.free}</span>
             </>
           )}
         </p>
-        {figure && <span className={`text-sm tabular-nums ${figure.tone}`}>{figure.text}</span>}
       </div>
 
       {working && pct !== null && run.status !== "queued" && (
@@ -339,12 +498,10 @@ export function RunCard(props: { run: Run }) {
           aria-valuemin={0}
           aria-valuemax={100}
           aria-valuenow={pct}
-          className="h-1.5 w-full overflow-hidden rounded-full bg-bg-muted"
+          className="h-1 w-full overflow-hidden rounded-full bg-bg-muted"
         >
-          <div
-            className="brand-gradient h-full rounded-full transition-[width] duration-300 ease-out"
-            style={{ width: `${pct}%` }}
-          />
+          {/* The accent alone: the gradient is Create's and the primary buttons' (design 10.4). */}
+          <div className="h-full rounded-full bg-accent transition-[width] duration-300 ease-out" style={{ width: `${pct}%` }} />
         </div>
       )}
       {working && <Working run={run} now={now} usual={usual} busy={busy} perform={perform} onCancel={cancel} />}
@@ -364,8 +521,8 @@ export function RunCard(props: { run: Run }) {
 
       {local && working && (
         <>
-          {run.local?.alongside && <p className="text-xs text-fg-muted">{STUDIO_CARD.alongside}</p>}
-          {run.local?.onProcessor && <p className="text-xs text-fg-muted">{STUDIO_CARD.onProcessor}</p>}
+          {run.local?.alongside && <p className="text-meta">{STUDIO_CARD.alongside}</p>}
+          {run.local?.onProcessor && <p className="text-meta">{STUDIO_CARD.onProcessor}</p>}
           {run.local?.retrying && <p className="text-xs text-warning">{STUDIO_CARD.retrying}</p>}
           {stalled && !keepWaiting && (
             <div className="flex flex-wrap items-center gap-2 text-xs text-warning">
@@ -390,105 +547,15 @@ export function RunCard(props: { run: Run }) {
         </div>
       )}
 
-      {ended && error && (
-        <div className="flex flex-col gap-0.5 text-sm" role="status">
-          <p className="font-medium">{error.message}</p>
-          {error.nextStep && <p className="text-fg-muted">{error.nextStep}</p>}
-          {charge && <p className="text-xs text-fg-muted">{charge}</p>}
-          {detailsOpen && error.details && (
-            <pre className="mt-1 max-h-40 overflow-y-auto rounded-md border border-border bg-bg-subtle p-2 text-xs break-words whitespace-pre-wrap text-fg-muted">
-              {error.details}
-            </pre>
-          )}
-        </div>
+      {inNote ? (
+        <EndNote failed={failed} error={error} charge={charge} detailsOpen={detailsOpen}>
+          {actions}
+        </EndNote>
+      ) : (
+        actions
       )}
-      {engineMissing && engine?.state === "downloading" && (
-        <p className="text-xs text-fg-muted">{STUDIO_CARD.engineDownloading}</p>
-      )}
-      {fileBad && repairing && <p className="text-xs text-fg-muted">{STUDIO_CARD.repairing}</p>}
-
-      {run.outputs.length > 0 && (
-        <div className="flex flex-wrap gap-2">
-          {resultsOf(run).map((output) => (
-            <ResultTile
-              key={output.id}
-              run={run}
-              output={output}
-              onOpen={(id) => store().openViewer(id)}
-              onStar={() => perform(() => store().star(output.id, !output.starred))}
-              className="size-28"
-            />
-          ))}
-        </div>
-      )}
-
-      {!working && run.status !== "waiting" && (
-        <div className="flex flex-wrap items-center gap-2">
-          {offerEngine && engine && (
-            <button
-              type="button"
-              className={CARD_BUTTON}
-              title={engine.licenseName}
-              disabled={busy}
-              onClick={() => perform(() => store().downloadEngine())}
-            >
-              {engineDownloadWords(engine.downloadBytes, engine.licenseName)}
-            </button>
-          )}
-          {fileBad && !repairing && (
-            <button
-              type="button"
-              className={CARD_BUTTON}
-              disabled={busy}
-              onClick={() =>
-                perform(async () => {
-                  await store().repairLocal(run.model);
-                  setRepairing(true);
-                })
-              }
-            >
-              {STUDIO_ACTIONS.downloadAgain}
-            </button>
-          )}
-          {canGetAnyway(run) && (
-            <button type="button" className={CARD_BUTTON} disabled={busy} onClick={fetchAnyway}>
-              {STUDIO_CARD.getAnyway}
-            </button>
-          )}
-          {run.status === "blocked" ? (
-            <button type="button" className={CARD_BUTTON} onClick={editPrompt}>
-              {STUDIO_CARD.editPrompt}
-            </button>
-          ) : (
-            <button type="button" className={CARD_BUTTON} disabled={busy} onClick={again}>
-              {local && ended ? STUDIO_CARD.runAgain : STUDIO_CARD.again}
-            </button>
-          )}
-          <button type="button" className={CARD_BUTTON} onClick={reuse}>
-            {STUDIO_CARD.reuse}
-          </button>
-          {forChat && (
-            <button
-              type="button"
-              className={CARD_BUTTON}
-              disabled={busy}
-              onClick={() => perform(() => store().sendToChat(forChat))}
-            >
-              {STUDIO_CHAT_LINK.sendToChat}
-            </button>
-          )}
-          {ended && error?.details && (
-            <button
-              type="button"
-              className={LINK}
-              aria-expanded={detailsOpen}
-              onClick={() => setDetailsOpen((open) => !open)}
-            >
-              {STUDIO_CARD.details}
-            </button>
-          )}
-        </div>
-      )}
+      {engineMissing && engine?.state === "downloading" && <p className="text-meta">{STUDIO_CARD.engineDownloading}</p>}
+      {fileBad && repairing && <p className="text-meta">{STUDIO_CARD.repairing}</p>}
       {failure && (
         <div className="text-xs" role="alert">
           <p className="text-danger">{failure.message}</p>

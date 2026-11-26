@@ -43,7 +43,8 @@ import { Viewer } from "./Viewer";
 // GetModels.tsx) is a full view: it takes the whole page beside the top bar, without the
 // composer or the side panel, and opens at its top (critique §2 and §6: it kept the stream's
 // scroll and opened at its bottom); the top bar hides its tabs and the gallery's controls; Back
-// brings them all back, the stream at its newest card. *Add a model file* (ImportDialog.tsx,
+// brings them all back, the stream at its newest card. The grid opens at its top too (Task U9,
+// critique g2), wider than the stream so its tiles keep about 220 px. *Add a model file* (ImportDialog.tsx,
 // Task U4) opens over the view from the model sheet or Get models. From the moment Studio first
 // opens it follows the app's downloads (Task U7), so a model done while Get models is closed, or
 // while the chat is shown, is listed at once, and the top bar's indicator offers *Use it*.
@@ -149,11 +150,12 @@ export function StudioView() {
     const el = scroller.current;
     if (el && cards && loaded) el.scrollTop = el.scrollHeight;
   }, [cards, loaded, tab, shown]);
-  // Get models opens at its top, whatever the stream's scroll was.
+  // Get models and the grid open at their top, whatever the stream's scroll was (critique §2.2:
+  // they kept it, and opened at their bottom with their headers and filters out of view).
   useLayoutEffect(() => {
     const el = scroller.current;
-    if (el && localView) el.scrollTop = 0;
-  }, [localView]);
+    if (el && (localView || grid)) el.scrollTop = 0;
+  }, [localView, grid]);
 
   // A press accepted from Studio brings its new card into view (once each).
   const scrolledTo = useRef<string | null>(null);
@@ -207,9 +209,15 @@ export function StudioView() {
                 <GetModelsView />
               </>
             ) : (
-              <div className="mx-auto flex min-h-full max-w-4xl flex-col gap-3 px-4 pt-4 pb-3">
+              <div className={`mx-auto flex min-h-full flex-col gap-3 px-4 pt-4 pb-3 ${grid ? "max-w-6xl" : "max-w-4xl"}`}>
                 {error && <ErrorBanner error={error.info} onDismiss={() => setError(null)} />}
-                {loaded && <Notices tab={tab} onError={fail} />}
+                {loaded && (
+                  // With no card under them, the notices and empty states sit in the middle of the
+                  // page (a third of the way down), narrower; above cards, at the top, as wide.
+                  <div className={`flex flex-col gap-3 ${!grid && stream.length === 0 ? "mx-auto my-auto w-full max-w-2xl" : ""}`}>
+                    <Notices tab={tab} onError={fail} />
+                  </div>
+                )}
                 {grid ? (
                   <Grid onOpen={openViewer} />
                 ) : (

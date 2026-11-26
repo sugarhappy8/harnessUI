@@ -1,4 +1,4 @@
-import { useEffect, useEffectEvent, useRef, useState, type ReactNode, type RefObject } from "react";
+import { Fragment, useEffect, useEffectEvent, useRef, useState, type ReactNode, type RefObject } from "react";
 import { Dialog } from "radix-ui";
 import { save as saveDialog } from "@tauri-apps/plugin-dialog";
 import { writeText } from "@tauri-apps/plugin-clipboard-manager";
@@ -34,6 +34,8 @@ import {
 } from "../../store/studio";
 import { ErrorBanner } from "../ErrorBanner";
 import { PlaceMark } from "../PlaceMark";
+import { CheckboxField } from "../ui/CheckboxField";
+import { FOCUS_RING } from "../ui/styles";
 import { ExactCommand, ExactRequest } from "./AdvancedDrawer";
 import * as api from "./api";
 import { valueWords } from "./canonical";
@@ -244,7 +246,19 @@ function Row(props: { label: string; children: ReactNode }) {
   );
 }
 
-const ACTION = "rounded-lg px-2.5 py-1 text-sm hover:bg-bg-muted disabled:opacity-60 aria-pressed:text-accent";
+const ACTION = `rounded-lg px-2.5 py-1 text-sm hover:bg-bg-muted disabled:opacity-60 aria-pressed:text-accent ${FOCUS_RING}`;
+
+/** A file's path with a break allowed after each folder's slash, so a long path wraps between
+ *  folders rather than inside a name. */
+function PathBreaks(props: { path: string }) {
+  const parts = props.path.split(/(?<=[/\\])/);
+  return parts.map((part, i) => (
+    <Fragment key={i}>
+      {part}
+      {i < parts.length - 1 && <wbr />}
+    </Fragment>
+  ));
+}
 
 /** The viewer, open on result `outputId`; `onClose` closes it. */
 export function Viewer(props: { outputId: string; onClose(): void }) {
@@ -627,7 +641,7 @@ export function Viewer(props: { outputId: string; onClose(): void }) {
                   <Row label={STUDIO_VIEWER.model}>
                     <p>{run.modelLabel}</p>
                     {local ? (
-                      <LocalMark />
+                      <LocalMark tip />
                     ) : (
                       <div className="flex flex-wrap items-center gap-1.5">
                         <p className="text-fg-muted">
@@ -638,6 +652,7 @@ export function Viewer(props: { outputId: string; onClose(): void }) {
                           icon={Cloud}
                           label={cloudChipWords(run.providerHost)}
                           title={run.providerHost ? cloudGoesTo(run.providerHost) : undefined}
+                          tip
                         />
                       </div>
                     )}
@@ -646,8 +661,10 @@ export function Viewer(props: { outputId: string; onClose(): void }) {
                   {settings && <Row label={STUDIO_VIEWER.settings}>{settings}</Row>}
                   <Row label={STUDIO_VIEWER.made}>{madeWords(run.createdAt)}</Row>
                   <Row label={STUDIO_VIEWER.file}>
-                    <span title={output.path} className="font-mono text-xs break-all">
-                      {output.path}
+                    {/* Shown whole, so no tooltip; it breaks after a folder's slash before it
+                        breaks inside a name (critique h). */}
+                    <span className="font-mono text-xs [overflow-wrap:anywhere]">
+                      <PathBreaks path={output.path} />
                     </span>
                   </Row>
                 </dl>
@@ -695,10 +712,7 @@ export function Viewer(props: { outputId: string; onClose(): void }) {
                       </button>
                     )}
                   </div>
-                  <label className="flex items-center gap-2 text-xs">
-                    <input type="checkbox" checked={withSettings} onChange={(e) => setWithSettings(e.target.checked)} />
-                    {STUDIO_VIEWER.withSettings}
-                  </label>
+                  <CheckboxField label={STUDIO_VIEWER.withSettings} checked={withSettings} onChange={setWithSettings} />
                 </div>
                 {offer && (
                   <div role="status" className="flex flex-col gap-1.5 rounded-lg border border-border bg-bg-subtle p-2.5">
