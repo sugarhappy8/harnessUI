@@ -397,14 +397,22 @@ const SCREENS = [
     id: "mf",
     name: "m-model-files",
     run: async (page) => {
-      // The untested model (flux-dev-copy, set up by hand as SDXL), its Files section in view.
+      // The untested model (flux-dev-copy, set up by hand as SDXL), its Files section in view,
+      // with another model type picked: its plan shows before anything downloads (fix round 1).
       await open(page);
       await openSheet(page);
       await sheetRow(page, /^flux-dev-copy/).click();
       await settle(page, 500);
       await openSettings(page);
-      await page.locator('[data-settings-section="files"]').evaluate((el) => el.scrollIntoView({ block: "start" }));
-      await settle(page, 600);
+      const files = page.locator('[data-settings-section="files"]');
+      await files.evaluate((el) => el.scrollIntoView({ block: "start" }));
+      await settle(page, 300);
+      await files.getByRole("combobox", { name: "Model type" }).click();
+      await settle(page, 300);
+      await page.getByRole("option", { name: /^Z-Image/ }).click();
+      await settle(page, 700);
+      await files.evaluate((el) => el.scrollIntoView({ block: "start" }));
+      await settle(page, 500);
     },
   },
   {

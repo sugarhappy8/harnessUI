@@ -16,7 +16,7 @@ import type { InstalledLocal, Lora, LoraUse, ParamKind } from "./types";
 // R6-lora-none), then the others, each marked "may not fit this model", a warning and never a
 // refusal. A LoRA whose file is gone is greyed out there with its reason. Each attached LoRA is
 // a card: its name and what it is for, a strength slider within the model's own bounds (its
-// `loras` field), the High-noise part switch on a model with a high-noise part (Wan 2.2 A14B),
+// `loras` field), the High-noise part switch on a model with a high-noise part (a two-model video),
 // and Remove; one whose file went missing since says so ("a removed LoRA") and keeps only
 // Remove. Under them, *Add a LoRA file* and *Get LoRAs* (Get models on its LoRAs filter). The
 // composer's LoRAs button counts them and opens the panel here.

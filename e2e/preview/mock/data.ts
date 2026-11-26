@@ -782,6 +782,25 @@ export function planFor(installed: InstalledLocal[], source: LocalSource, choice
   } else if ("search" in source) {
     const { repo, file } = source.search;
     plan = repoFor(repo).files.find((f) => f.file === file)?.plan ?? zImagePlan(file, 3.6);
+  } else if (
+    "installed" in source &&
+    choice?.recipe &&
+    choice.recipe !== filesOf(installed, source.installed.genModelId).recipe?.id
+  ) {
+    // Another type for an installed model (the side panel's Files, Task U8's fix round 1): its
+    // own file, and that type's text encoder and decoder to download.
+    const files = filesOf(installed, source.installed.genModelId);
+    const main = files.slots.find((s) => s.source === "main")!.part!;
+    plan = planOf(
+      RECIPES.find((r) => r.id === choice.recipe) ?? RECIPES[0]!,
+      [
+        [main, "main"],
+        [zimage.parts[1]!, "companion"],
+        [zimage.parts[2]!, "companion"],
+      ],
+      [APACHE],
+      { recipes: files.recipes },
+    );
   } else if ("installed" in source) {
     const files = filesOf(installed, source.installed.genModelId);
     plan = planOf(

@@ -1050,11 +1050,17 @@ pub(crate) fn present_parts(
 
 /// A planned set-up that can be fetched: one that misses a part is `studio_setup_incomplete`,
 /// and one that fetches a gated repository's file with no Hugging Face token (`hf`) the Hub's
-/// own `hf_needs_token`.
+/// own `hf_needs_token` ([`token_for_gated`]).
 pub(crate) fn ready_to_fetch(planned: &Planned, hf: Option<&HfClient>) -> AppResult<()> {
     if !planned.plan.can_run() {
         return Err(errors::setup_incomplete(&planned.plan.missing()));
     }
+    token_for_gated(planned, hf)
+}
+
+/// A planned set-up that fetches a gated repository's file is `hf_needs_token` while no Hugging
+/// Face token (`hf`) is saved: Hugging Face would refuse the download.
+pub(crate) fn token_for_gated(planned: &Planned, hf: Option<&HfClient>) -> AppResult<()> {
     if !planned.gated.is_empty() && !hf.is_some_and(HfClient::has_token) {
         return Err(crate::hub::hf_error(HfError::NeedsToken));
     }

@@ -5,7 +5,10 @@
 //!   another recipe or files the person chose (`setup_plan::plan_source`). A file Studio does
 //!   not recognise, or one whose header was not read, can be set up with a recipe the person
 //!   chooses: untested. Any other file Studio can't run is refused with its label's words
-//!   (`studio_cannot_run`).
+//!   (`studio_cannot_run`). Of an installed model too, with the change the person is about to
+//!   make (`setup_plan::plan_installed`, as the change itself plans it): the side panel's Files
+//!   shows what it would download, its licences and the total before anything starts (design
+//!   7.4.3, Task U8's fix round 1).
 //! - **An installed model's files** ([`model_files`]): its recipe, the recipes it can be set
 //!   up as, and each slot with its file. Sends nothing.
 //! - **Changing them** ([`prepare_set_model_files`]): another recipe or another file for any
@@ -35,7 +38,7 @@ use super::local_models::{
 };
 use super::manager::StudioManager;
 use super::setup_plan::{
-    PlanDeps, Planned, own_parts, plan_installed, plan_source, ready_to_fetch,
+    PlanDeps, Planned, own_parts, plan_installed, plan_source, ready_to_fetch, token_for_gated,
 };
 use crate::commands::only_main_window;
 use crate::downloads::{
@@ -48,14 +51,27 @@ use crate::error::{AppError, AppResult};
 
 /// The set-up of the file `source` names (a searched file, at its repo's commit, or a file on
 /// this computer) with the person's `choice`: another recipe, files for some slots
-/// (`setup_plan::plan_source`).
+/// (`setup_plan::plan_source`). For an installed model, the set-up `choice` would give it,
+/// planned as *Set it up yourself* plans it (`setup_plan::plan_installed`: its own files kept,
+/// the choice on top), so what a change downloads is shown before it starts; one that fetches
+/// a gated repository's file with no Hugging Face token is `hf_needs_token`, as the change
+/// would be. Nothing is downloaded or changed. A catalog model is `studio_not_supported_yet`.
 pub async fn setup_plan(
     deps: &LocalCmdDeps,
     source: &LocalSource,
     choice: &SetupChoice,
 ) -> AppResult<SetupPlanDto> {
     let catalog = deps.catalog.gen_catalog().await;
-    let planned = plan_source(&plan_deps(deps, &catalog), source, choice).await?;
+    let pd = plan_deps(deps, &catalog);
+    let planned = match source {
+        LocalSource::Installed { gen_model_id } => {
+            let row = installed_row(deps, gen_model_id).await?;
+            let planned = plan_installed(&pd, &row, choice).await?;
+            token_for_gated(&planned, pd.hf)?;
+            planned
+        }
+        _ => plan_source(&pd, source, choice).await?,
+    };
     setup_plan_dto(deps, &planned).await
 }
 
@@ -876,6 +892,90 @@ mod tests {
         let installed = &t.local_models().await.installed[0];
         assert!(installed.untested && !installed.needs_setup);
         assert_eq!(installed.version, Some(SdVersion::Flux));
+    }
+
+    fn installed(id: &str) -> LocalSource {
+        LocalSource::Installed {
+            gen_model_id: id.into(),
+        }
+    }
+
+    /// Task U8's fix round 1 (design 7.4.3): a change of an installed model's set-up is planned
+    /// before anything starts, as the change itself plans it, so the side panel's Files can show
+    /// what it would download, its licences and the total first.
+    #[tokio::test]
+    async fn an_installed_models_change_is_planned_before_anything_downloads() {
+        let mut t = harness_with(installed_generic_flux).await;
+        let before = files_of(&t.row(FLUX).await);
+        let p = t.setup_plan(installed(FLUX), recipe("z-image")).await;
+        assert_eq!(p.recipe.id, "z-image");
+        assert!(p.untested && p.can_download);
+        assert_eq!(
+            p.slots
+                .iter()
+                .map(|s| (s.role, s.source))
+                .collect::<Vec<_>>(),
+            [
+                (GenRole::Diffusion, PartSource::Main),
+                (GenRole::Llm, PartSource::Companion),
+                (GenRole::Vae, PartSource::Installed)
+            ]
+        );
+        // Z-Image's encoder is what it fetches: its size is the total to download, and its
+        // licence is listed. The model's own files are already here.
+        let llm = p.slots[1].part.as_ref().unwrap();
+        assert!(!llm.already_here);
+        assert_eq!(p.to_fetch_bytes, llm.size_bytes);
+        assert!(
+            p.licences.iter().any(|l| l.id == llm.licence_id),
+            "{:?}",
+            p.licences
+        );
+        for i in [0, 2] {
+            assert!(
+                p.slots[i].part.as_ref().unwrap().already_here,
+                "{:?}",
+                p.slots[i]
+            );
+        }
+        // Nothing started, and the model is as it was.
+        assert_eq!(files_of(&t.row(FLUX).await), before);
+        assert!(t.deps.store.list_downloads(None).await.unwrap().is_empty());
+        // Planned as it is, it fetches nothing.
+        let same = t.setup_plan(installed(FLUX), SetupChoice::default()).await;
+        assert_eq!(same.recipe.id, "flux1-kontext");
+        assert_eq!(same.to_fetch_bytes, 0);
+        assert_eq!(
+            t.setup_plan_err(installed("hf:o/r:none"), SetupChoice::default())
+                .await
+                .code,
+            "not_found"
+        );
+    }
+
+    /// The plan of a change that fetches a gated repository's file, with no Hugging Face token,
+    /// is refused as the change would be: nothing is offered to download.
+    #[tokio::test]
+    async fn a_planned_change_that_fetches_a_gated_file_without_a_token_is_refused() {
+        let other = "3".repeat(40);
+        let t5 = TestRepo::new("someone/gated-t5")
+            .at(&other)
+            .file("t5xxl.safetensors", 4_893_934_904.0, None)
+            .gated();
+        let mut t = harness(vec![t5]).await;
+        let row = installed_generic_flux(&t.deps.models_dir);
+        t.deps.store.insert_gen_model(row).await.unwrap();
+        let choice = choice_override(
+            GenRole::T5xxl,
+            SlotFile::Hub {
+                repo: "someone/gated-t5".into(),
+                commit: other,
+                path: "t5xxl.safetensors".into(),
+            },
+        );
+        let e = t.setup_plan_err(installed(FLUX), choice).await;
+        assert_eq!(e.code, "hf_needs_token");
+        assert!(t.deps.store.list_downloads(None).await.unwrap().is_empty());
     }
 
     #[tokio::test]

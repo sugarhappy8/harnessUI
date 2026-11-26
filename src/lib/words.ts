@@ -2227,6 +2227,8 @@ export const FILES = {
   cancel: "Cancel",
   /** While the model's files are read (nothing is sent). */
   reading: "Reading the model's files…",
+  /** While the model's own download runs: why its files cannot be changed meanwhile. */
+  downloading: "Its files are downloading. You can change them again once the download is done.",
 } as const;
 
 /** Adding a model or LoRA file from this computer (Phase U's dialog, Task U4). */

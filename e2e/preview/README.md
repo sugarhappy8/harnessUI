@@ -85,7 +85,7 @@ open, listing a model downloading, a LoRA downloading and a model ready to use (
 1440 px viewport) · `lr` (file `l-loras`) the side panel's LoRAs, opened from the composer's
 LoRAs button with two LoRAs added to SDXL, one of them for another model type (Task U8) · `mf`
 (file `m-model-files`) the side panel's Files for the untested model (flux-dev-copy, set up as
-SDXL) · `g` gallery grid (top) · `g2` grid as it opens · `h` viewer · `i`, `i2`
+SDXL), with Z-Image picked as its type: the plan of what that downloads, before it starts · `g` gallery grid (top) · `g2` grid as it opens · `h` viewer · `i`, `i2`
 Settings -> Studio · `j` main view at 900x650 · `k` Video tab · `o` the SDXL inpainting model
 chosen, with its Picture to change and Mask zones · `n` *Add a model file*, from the model
 sheet's foot, with the file read · `q` the model sheet at 900x650 (a full-height sheet) ·
