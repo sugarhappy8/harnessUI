@@ -15,7 +15,8 @@ import { DownloadState, isRunning, isStudioDownload, pickNewModelAndFocus } from
 // together; once none runs, "1 ready" while finished ones are listed. Hidden with neither. Its
 // popover lists them, newest first, each a DownloadState with Pause and Cancel, and a finished
 // model *Use it* (a LoRA is attached in Settings, not chosen as a model: none for it). *Clear
-// finished* takes the finished ones off the list.
+// finished* takes the finished ones off the list. The list opens only when the indicator is
+// pressed, and closes when it empties.
 
 /** The downloads the indicator lists: Studio's that run, and those that finished while Studio
  *  followed them (`done`), in the download manager's order (newest first). */
@@ -64,9 +65,21 @@ export function DownloadIndicator() {
   // *Use it* puts the cursor in the prompt: focus does not go back to the indicator then.
   const used = useRef(false);
   const listed = useMemo(() => indicatorGroups(groups, done), [groups, done]);
+  // The list closes as it empties (*Clear finished*, the last download cancelled or used) and
+  // forgets that it was open: a download that starts later shows the indicator, closed, and
+  // never takes the focus (U7 review: it opened by itself, out of the prompt or the panel).
+  if (listed.length === 0 && open) setOpen(false);
   if (listed.length === 0) return null;
   const running = listed.filter(isRunning);
   const finished = listed.length - running.length;
+  /** *Clear finished*: with nothing running the list goes with them, and focus goes to *Get
+   *  models* beside the indicator rather than to the page. */
+  const clear = () => {
+    clearDone();
+    if (running.length > 0) return;
+    setOpen(false);
+    document.querySelector<HTMLElement>("[data-get-models-button]")?.focus();
+  };
   const stalled = running.every((g) => g.status === "paused" || g.status === "error");
   const words = running.length > 0 ? STUDIO_DOWNLOADS.indicator(running.length) : STUDIO_DOWNLOADS.indicatorReady(finished);
   return (
@@ -110,7 +123,7 @@ export function DownloadIndicator() {
             {finished > 0 && (
               <button
                 type="button"
-                onClick={clearDone}
+                onClick={clear}
                 className={`-mr-1.5 rounded-md px-1.5 py-0.5 text-sm text-fg-muted hover:bg-bg-muted hover:text-fg ${FOCUS_RING}`}
               >
                 {STUDIO_DOWNLOADS.clear}

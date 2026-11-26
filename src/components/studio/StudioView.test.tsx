@@ -447,6 +447,74 @@ describe("StudioView", () => {
     await waitFor(() => expect(document.activeElement).toBe(indicator));
   });
 
+  describe("the download list opens only when the indicator is pressed (U7 fix round 1)", () => {
+    /** A Studio download (Z-Image Turbo's unless `patch` says otherwise). */
+    const download = (patch: Partial<DownloadGroup>): DownloadGroup => ({
+      id: "g1",
+      repo: "leejet/Z-Image-Turbo-GGUF",
+      label: "Z-Image Turbo",
+      fileCount: 3,
+      bytesDone: 2_400_000_000,
+      bytesTotal: 6_700_000_000,
+      status: "downloading",
+      error: null,
+      bytesPerSecond: null,
+      unverified: false,
+      generatorKind: "image",
+      genModelId: "z-image-turbo-q4",
+      ...patch,
+    });
+
+    /** Lets Radix's focus moves, made on the next task, happen. */
+    const nextTask = () => act(() => new Promise<void>((resolve) => setTimeout(resolve, 0)));
+
+    /** The person is writing a prompt when another download starts: nothing pops open and the
+     *  cursor stays in the prompt. */
+    async function anotherDownloadStarts() {
+      expect(document.querySelector("[data-download-indicator]")).toBeNull();
+      promptBox().focus();
+      expect(document.activeElement).toBe(promptBox());
+      act(() => progress(download({ id: "g2", label: "FLUX.2 klein 4B", genModelId: "flux2-klein-4b-q4", bytesDone: 0 })));
+      await flush();
+      await nextTask();
+      within(screen.getByRole("banner")).getByRole("button", { name: "1 downloading" });
+      expect(screen.queryByRole("dialog", { name: "Downloads" })).toBeNull();
+      expect(document.activeElement).toBe(promptBox());
+    }
+
+    it("after Clear finished with nothing running, the next download does not open the list", async () => {
+      ipc.listDownloads.mockResolvedValue([download({})]);
+      await show();
+      // It finishes while Studio follows it: listed as ready.
+      act(() => progress(download({ status: "done", bytesDone: 6_700_000_000 })));
+      await flush();
+      await click(within(screen.getByRole("banner")).getByRole("button", { name: "1 ready" }));
+      const list = screen.getByRole("dialog", { name: "Downloads" });
+      await click(within(list).getByRole("button", { name: "Clear finished" }));
+      await nextTask();
+      expect(screen.queryByRole("dialog", { name: "Downloads" })).toBeNull();
+      // Focus is not lost with the list: it goes to Get models beside it.
+      expect(document.activeElement).toBe(within(screen.getByRole("banner")).getByRole("button", { name: "Get models" }));
+      await anotherDownloadStarts();
+    });
+
+    it("after the last download in the list is cancelled, the next download does not open the list", async () => {
+      ipc.listDownloads.mockResolvedValue([download({})]);
+      ipc.cancelDownload.mockResolvedValue(undefined);
+      await show();
+      await click(within(screen.getByRole("banner")).getByRole("button", { name: "1 downloading" }));
+      const list = screen.getByRole("dialog", { name: "Downloads" });
+      await click(within(list).getByRole("button", { name: "Cancel downloading Z-Image Turbo" }));
+      expect(ipc.cancelDownload).toHaveBeenCalledWith("g1");
+      act(() => progress(download({ status: "cancelling" })));
+      act(() => progress(download({ status: "cancelled", bytesDone: 0 })));
+      await flush();
+      await nextTask();
+      expect(screen.queryByRole("dialog", { name: "Downloads" })).toBeNull();
+      await anotherDownloadStarts();
+    });
+  });
+
   it("today's spend shows only while a daily limit is on", async () => {
     await show({ usage: usage({ spentTodayUsd: 0.84 }), prefs: prefs({ dailyLimitUsd: 10 }) });
     within(screen.getByRole("banner")).getByText("$0.84 today");
