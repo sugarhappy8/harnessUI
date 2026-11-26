@@ -1,5 +1,5 @@
 // What is kept of an error that stopped part of a screen from being drawn (0.2.1).
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { cleanMessage, crashSummary, MESSAGE_LIMIT } from "./crash";
 
 describe("cleanMessage", () => {
@@ -52,5 +52,61 @@ describe("crashSummary", () => {
     const odd = new Error("y");
     odd.name = "/home/alice/evil name";
     expect(crashSummary(odd).name).toBe("Error");
+  });
+});
+
+describe("the safety net never throws itself", () => {
+  it("names anything thrown, even a value that cannot be made a string", () => {
+    const bare = Object.create(null) as object;
+    const hostile = { toString: () => { throw new Error("no"); } };
+    expect(crashSummary(bare)).toEqual({ name: "Error", message: "Unknown error" });
+    expect(crashSummary(hostile)).toEqual({ name: "Error", message: "Unknown error" });
+    const odd = new Error("x");
+    (odd as unknown as { message: unknown }).message = { code: 3 };
+    expect(() => crashSummary(odd)).not.toThrow();
+    const odder = new Error("x");
+    Object.defineProperty(odder, "message", { get: () => { throw new Error("no"); } });
+    expect(crashSummary(odder)).toEqual({ name: "Error", message: "" });
+    (odder as unknown as { name: unknown }).name = 5;
+    expect(crashSummary(odder).name).toBe("Error");
+  });
+
+  it("leaves out a long quoted run, which can be the person's own text", () => {
+    const out = cleanMessage(`Unexpected token 'h', "here is my private prompt about my family" is not valid JSON`);
+    expect(out).toBe(`Unexpected token 'h', "…" is not valid JSON`);
+  });
+
+  it("reads only the start of a very long message", () => {
+    const long = "a-".repeat(200_000);
+    const started = performance.now();
+    const out = cleanMessage(long);
+    expect(performance.now() - started).toBeLessThan(200);
+    expect(out.length).toBeLessThanOrEqual(MESSAGE_LIMIT);
+  });
+});
+
+describe("the root's error handlers", () => {
+  it("report only through reportCrash, and draw a plain notice if even the root notice fails", async () => {
+    const { createRoot } = await import("react-dom/client");
+    const { createElement } = await import("react");
+    const { rootErrorHandlers } = await import("./crash");
+    const { CRASH } = await import("./words");
+    const logged: string[] = [];
+    const spy = vi.spyOn(console, "error").mockImplementation((...a: unknown[]) => void logged.push(a.map(String).join(" ")));
+    const container = document.body.appendChild(document.createElement("div"));
+    function Broken(): never {
+      throw new TypeError("could not open /home/alice/secret");
+    }
+    try {
+      const root = createRoot(container, rootErrorHandlers(container));
+      // Outside act, which would throw the error back here instead of handing it to the root.
+      root.render(createElement(Broken));
+      await vi.waitFor(() => expect(container.textContent).toContain(CRASH.title));
+      expect(container.querySelector("button")!.textContent).toBe(CRASH.reload);
+      expect(logged).toEqual(["[crash] App could not be drawn: TypeError: could not open …"]);
+    } finally {
+      spy.mockRestore();
+      container.remove();
+    }
   });
 });

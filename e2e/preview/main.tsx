@@ -7,7 +7,7 @@ import { installMocks } from "./mock/ipc";
 
 installMocks();
 
-const [{ StrictMode, createElement }, { createRoot }, { default: App }, { UiProviders }, { AppRoot }, trusted, theme, app, studioStore, appStore] =
+const [{ StrictMode, createElement }, { createRoot }, { default: App }, { UiProviders }, { AppRoot }, trusted, theme, app, studioStore, appStore, crash] =
   await Promise.all([
     import("react"),
     import("react-dom/client"),
@@ -19,6 +19,7 @@ const [{ StrictMode, createElement }, { createRoot }, { default: App }, { UiProv
     import("../../src/lib/app"),
     import("../../src/store/studio"),
     import("../../src/store/app"),
+    import("../../src/lib/crash"),
   ]);
 await import("../../src/styles.css");
 
@@ -38,4 +39,4 @@ function Crash(): never {
 }
 const drawn = params.get("crash") === "root" ? createElement(Crash) : createElement(App);
 const root = document.getElementById("root");
-if (root) createRoot(root).render(createElement(StrictMode, null, createElement(AppRoot, null, createElement(UiProviders, null, drawn))));
+if (root) createRoot(root, crash.rootErrorHandlers(root)).render(createElement(StrictMode, null, createElement(AppRoot, null, createElement(UiProviders, null, drawn))));

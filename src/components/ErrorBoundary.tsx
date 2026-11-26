@@ -41,6 +41,8 @@ export class ErrorBoundary extends Component<Props, State> {
   }
 
   // The component stack React passes as a second argument is left out: it names the app's files.
+  // React's own report of the raw error is turned off at the root (rootErrorHandlers in
+  // src/lib/crash.ts); a root made without those handlers would still write it.
   componentDidCatch(thrown: unknown): void {
     reportCrash(this.props.name, thrown);
   }
