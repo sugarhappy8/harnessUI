@@ -24,7 +24,8 @@
 //!   before it counts as starting, rea is never launched (that stop has removed the
 //!   temporary folder). On macOS the same holds while the start runs rea's helper
 //!   preparation ([`crate::warmup`], up to 180 s, the tab says Starting): a stop or quitting
-//!   drops that run at once, which kills its `node` and `swiftc`. After [`RestartReason::Quit`] nothing starts again. After a stop (and
+//!   drops that run at once, which kills its `node` and `swiftc`. After
+//!   [`RestartReason::Quit`] nothing starts again. After a stop (and
 //!   the idle stop), the temporary folder outside the reverse folder is removed unless rea
 //!   was started again meanwhile; it is also removed when the app starts
 //!   ([`ReaProcess::new`]), in case the app ended without a stop.
