@@ -2,6 +2,44 @@
 
 All notable changes, by milestone. Dates are UTC.
 
+## 0.2.0 (2026-11-26)
+
+Studio, opened up. The owner said: "I was mostly talking about how nothing from huggingface for video and image models is supported", and, about the limits in the app: "Work on fixing the app and removing ur set restrictions due to it being very not user friendly". So 0.2.0 lets Studio run any Hugging Face picture or video model the Studio engine can run, not only the few it was told about, and it takes out the limits that got in the way. The model list, the downloads and the composer were redesigned along the way.
+
+### Added
+- **Any Hugging Face picture or video model the Studio engine can run.** Search Hugging Face in *Get models*, or paste a repository name. Before you download, each model says *Works in Studio*, with its type, for example "Works in Studio · SDXL picture model". One *Download* fetches the model and the extra files it needs, such as a text encoder and a decoder, and shows the total size first.
+- **Add a model file.** A model file already on this computer can be added in place, with *Use it where it is*, or copied in. Studio reads the file's header, never runs it, to tell what kind of model it is.
+- **LoRAs.** Add a LoRA from Hugging Face or from a file, switch it on beside a model of the same family and set how strongly it applies.
+- **Set it up yourself.** For a model Studio is unsure about, *Set it up yourself* lets you say what the model type is and which files are which, then run it.
+- **The model type, and every sampler and scheduler.** A model's page now shows its type and offers the engine's full lists of samplers and schedulers under *Advanced*.
+- **Inpainting and Fill models.** Give them a picture and a mask picture, and they change only the masked part. FLUX.1 Canny, FLUX.1 Depth and Flex.2 take a control picture the same way.
+- **Licences with use rules.** A licence that allows commercial use but sets rules for what you may do with the model, such as an OpenRAIL licence, now reads "Commercial use allowed, with use rules".
+
+### Changed
+- **The spending limits are off by default.** The four spending switches in *Settings → Studio* are switches now, and all four start off. Prices are still always shown before a cloud run. Turn a switch on if you want the app to ask or stop for you.
+- **"May not fit this computer" is a warning, not a wall.** A model that may be too big for this computer can still be downloaded and tried.
+- **Video on the processor is offered.** A computer without a good graphics card can try local video, slowly.
+- **The 4,000-character prompt limit is gone.** A picture prompt can be up to 16,384 characters.
+- **Create finishes a pending price.** If a cloud model's price is still loading when you click *Create*, Studio waits for it and then goes on, instead of asking you to click again.
+- **An update no longer waits for a local job.** Installing an update now stops a picture or video being made on this computer, instead of refusing until it finishes.
+- **Chat modes stop asking.** Choosing *Allow all* or *Full access* applies at once, with no extra question. A start mode you have saved is not asked about again at launch. Chats still start in *Ask* unless you saved another start mode.
+- **One composer, with a model chip.** Studio has a single composer, and the model chip in it shows the model you are using and opens the model sheet to change it.
+- **The model sheet.** Picking a model, its settings and your saved setups sit in one sheet, with the models on this computer first.
+- **Get models is a full view.** It has a search box, a verdict on each model (*Works in Studio* or *Can't run in Studio*, with the reason) and a detail panel for the model you pick, with its files, licence and fit for this computer.
+- **Pause, Cancel and Use it on downloads.** Every model download can be paused, resumed or cancelled, from its card, the detail panel or the downloads list in the top bar. When a model is ready, *Use it* puts it in the composer.
+- **Bigger pictures.** Results open larger, and the results grid has *Select* for choosing several pictures at once.
+
+### Fixed
+- **Kuna on a slow Mac.** The first time it ran, Kuna could show as unavailable because a one-time set-up step ran out of time. It now waits long enough.
+- **The scheduled Reverse engineering self-test on Linux and macOS** now passes again.
+
+### Known limits
+- **Some models can't run in Studio.** The engine can't run Lumina 2, LTX-Video 0.9, HunyuanVideo v1, HiDream-I1 or Stable Video Diffusion, so they say *Can't run in Studio* and have no Download button.
+- **Adapter files are not offered.** ControlNet, IP-Adapter, PhotoMaker and other adapter files, upscalers and audio-driven video are not offered.
+- **Masks are added as black-and-white pictures.** Painting a mask in the app comes later.
+- **Pickle files are not read.** Files such as `.ckpt` can run code when opened, so Studio does not open them.
+- **Split files can't run.** A model saved as several numbered parts, which is called sharded, can't be run.
+
 ## 0.1.2 (2026-11-20)
 
 - Studio can download and run FLUX.3 Image Klein and the full Wan 2.2 TI2V-5B from Hugging Face. Each download includes the text encoder and decoder the model needs.

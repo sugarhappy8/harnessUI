@@ -400,6 +400,15 @@ class StudioDocs(unittest.TestCase):
         added = entry.split("### Added", 1)[1].split("\n### ", 1)[0]
         self.assertLess(added.index("On this computer"), added.index("OpenRouter"))
 
+    def test_the_changelog_tells_users_what_0_2_0_does(self):
+        entries = read("CHANGELOG.md").split("\n## ")[1:]
+        entry = next((item for item in entries if item.startswith("0.2.0 (")), "")
+        self.assertTrue(entry, "missing 0.2.0 changelog entry")
+        for words in ("Hugging Face", "LoRA", "Works in Studio", "off by default", "### Added", "### Changed", "### Known limits"):
+            self.assertIn(words, entry)
+        for words in ("Task ", ".rs", "CI"):
+            self.assertNotIn(words, entry)
+
 
 class StaleFrom0_1_xDocs(unittest.TestCase):
     """The 0.1.0 review's follow-ups (docs/dev/0.1.0/follow-ups.md, items 1 to 8): the process and
