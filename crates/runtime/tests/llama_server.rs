@@ -118,12 +118,25 @@ async fn starts_on_cpu_reports_progress_and_stops() {
     );
     assert!(server.props().chat_template_caps.supports_tool_calls);
     assert_eq!(server.base_url(), format!("http://127.0.0.1:{port}"));
-    let info = server.log_info();
-    assert!(info.model_loaded, "the log said 'model loaded'");
     assert!(
-        info.listening_url
+        server.log_info().model_loaded,
+        "the log said 'model loaded'"
+    );
+    // llama-server prints `listening on` just after `/health` starts answering, so the
+    // line can reach the log reader a moment after `start` returns.
+    let mut listening_url = None;
+    for _ in 0..50 {
+        listening_url = server.log_info().listening_url;
+        if listening_url.is_some() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    assert!(
+        listening_url
             .as_deref()
-            .is_some_and(|url| url.ends_with(&format!(":{port}")))
+            .is_some_and(|url| url.ends_with(&format!(":{port}"))),
+        "the log named the port within 5 s: {listening_url:?}"
     );
 
     let events = drain(&mut rx);
