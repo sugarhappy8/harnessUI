@@ -4708,8 +4708,9 @@ git commit -m "Docs: 0.2.0: any model the Studio engine can run, LoRAs, header r
 - [ ] **Step 3: Bump the five version places, run `cargo build`, and write the entry.**
 
 - [ ] **Step 4: Run them and see them pass.**
-  - Run: `cargo test -p app --lib the_version_is_the_same_everywhere && python3 -I scripts/docs_test.py && python3 -I scripts/release_notes_test.py && python3 -I scripts/release_notes.py app 0.2.0`
+  - Run: `cargo test -p app --lib the_version_is_the_same_everywhere && python3 -I scripts/docs_test.py && python3 -I scripts/release_notes_test.py && GITHUB_OUTPUT="$(mktemp)" python3 -I scripts/release_notes.py app`
   - Expected: PASS, and the release notes print the 0.2.0 entry.
+  - Corrected after the final review (area 4, M11): `app` takes no version (it reads `tauri.conf.json`) and writes into `GITHUB_OUTPUT`.
 
 - [ ] **Step 5: Commit.**
 ```bash
