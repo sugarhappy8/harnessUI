@@ -4,9 +4,10 @@
 // client token at a time (from the draft, or from a run's own settings), the confirmation a
 // cloud run may need (asked by the draft's estimate or by the backend), why a press was
 // refused, a seed the draft's press used given back to Random unless it is kept, the model used
-// last saved as a run starts, and today's spending read again as a cloud run starts. Also what
-// the backend would refuse in the prompt itself, judged on it as it is, apart from the rest of
-// what an estimate says.
+// last saved as a run starts, and today's spending read again as a cloud run starts. A press
+// while the draft's extra settings wait for the model's price finishes that price request
+// first (0.2.0, design 9.2). Also what the backend would refuse in the prompt itself, judged on
+// it as it is, apart from the rest of what an estimate says.
 import type { StoreApi } from "zustand";
 import * as api from "../components/studio/api";
 import type { Estimate, MediaModel, Run, RunTarget, StartRequest } from "../components/studio/types";
@@ -47,7 +48,10 @@ export interface StudioRunState {
    * `studio_needs_confirmation`, with the estimate asked for that press. A run on this computer
    * never asks. `confirmed` sends it as confirmed. Resolves with the run; `null` when there is
    * nothing to send, a press is already on its way, the confirmation opened, or it was refused
-   * (`refusal`). Never rejects.
+   * (`refusal`). Never rejects. A press of the draft while its extra settings wait for the
+   * model's price (`holding`) waits for that price first (`finishPrice`), a press on its way
+   * meanwhile, then sends the draft as it is then; when the price could not be read it goes
+   * without them, and the draft's note says so once it is accepted.
    */
   start(tab: StudioTab, confirmed: boolean, from?: Run): Promise<Run | null>;
   /** The confirmation's *Make video* or *Create*: sends `pending` as it is, confirmed, once
@@ -135,6 +139,19 @@ export function createRun(
   /** The press of the draft itself (not of a run) on its way, if any: once it is accepted, a seed
    *  the dice gave it is used up. */
   let draftPress: StartRequest | null = null;
+  /** That press, when it goes without the extra settings whose price could not be read: once
+   *  it is accepted, the draft's note says so. */
+  let pressWithoutExtra: StartRequest | null = null;
+
+  /** Adds to `tab`'s note that the press went without its extra settings (once). */
+  const sayWithoutExtra = (tab: StudioTab) =>
+    set((s) => {
+      const draft = s.drafts[tab];
+      const said = STUDIO_DOCK.sentWithoutExtra;
+      if (draft.note?.includes(said)) return {};
+      const note = draft.note ? `${draft.note} ${said}` : said;
+      return { drafts: { ...s.drafts, [tab]: { ...draft, note } } };
+    });
 
   /** After `tab`'s draft was sent as `req` and accepted: a seed it held that is not kept goes back
    *  to Random, so the next press gets a new one (a seed set since the press stays). */
@@ -176,6 +193,10 @@ export function createRun(
       draftPress = null;
       spendSeed(tab, req);
     }
+    if (req === pressWithoutExtra) {
+      pressWithoutExtra = null;
+      sayWithoutExtra(tab);
+    }
     rememberModel(tab, req.target, req.model);
     if (run.runsOn === "cloud") rereadUsage();
     return run;
@@ -203,10 +224,16 @@ export function createRun(
     refusal: { image: null, video: null },
     dismissRefusal: (tab) => set((s) => ({ refusal: { ...s.refusal, [tab]: null } })),
     start: async (tab, confirmed, from) => {
+      if (get().starting) return null;
+      // The draft's extra settings wait for its model's price (`holding`): the press finishes
+      // that price request first, as a press on its way (design 9.2).
+      let withoutExtra = false;
+      if (!from && get().holding[tab]) {
+        set({ starting: true });
+        withoutExtra = !(await get().finishPrice(tab));
+        set({ starting: false });
+      }
       const s = get();
-      if (s.starting) return null;
-      // The draft's extra settings wait for its model's price (`holding`): Create waits too.
-      if (!from && s.holding[tab]) return null;
       const token = crypto.randomUUID();
       let req: StartRequest | null;
       if (from) {
@@ -225,6 +252,7 @@ export function createRun(
       }
       if (!req) return null;
       draftPress = from ? null : req;
+      pressWithoutExtra = withoutExtra ? req : null;
       const kind = req.kind;
       set((st) => ({ starting: true, pending: req, refusal: { ...st.refusal, [kind]: null } }));
       // A draft for the cloud whose estimate, for it as it is, asks first opens the confirmation.
@@ -273,32 +301,31 @@ export function startRequestOf(tab: StudioTab, draft: Draft, clientToken: string
   };
 }
 
-/** The most characters a prompt may have, as the backend counts them: on this computer
- *  (`runtime::sd::args::PROMPT_MAX_CHARS`) and for the cloud (`media::spec`'s). */
-export const PROMPT_MAX_CHARS = { thisComputer: 4_000, cloud: 32_000 } as const;
+/** The hidden bounds on a prompt, as the backend keeps them (design 9.2: never shown as a
+ *  limit): on this computer, in characters, so the prompt check reads all of it
+ *  (`runtime::sd::args::LOCAL_PROMPT_MAX_CHARS`); for the cloud, in bytes of UTF-8
+ *  (`PROMPT_MAX_BYTES`, which a local prompt within its own bound never reaches). */
+export const PROMPT_BOUNDS = { localChars: 16_384, bytes: 1_048_576 } as const;
 
 /** The backend's sentences about the prompt itself, among an estimate's `invalid`. */
-const PROMPT_SENTENCES: ReadonlySet<string> = new Set([
-  STUDIO_DOCK.writePrompt,
-  STUDIO_DOCK.promptTooLong,
-  STUDIO_DOCK.promptTooLongHere,
-]);
+const PROMPT_SENTENCES: ReadonlySet<string> = new Set([STUDIO_DOCK.writePrompt, STUDIO_DOCK.promptTooLong]);
 
 /** Nothing but white space, as the backend's `trim` has it (Unicode's White_Space). */
 const BLANK = /^\p{White_Space}*$/u;
 
 /** What the backend would refuse in `prompt` for a run at `target`, in its words: an empty
- *  prompt, or one longer than the cap there, counted as it counts (characters, not UTF-16
- *  units). Judged on the prompt as it is, so Create never waits for an estimate to say it. */
+ *  prompt, or one past the hidden bound there, counted as it counts (characters on this
+ *  computer, not UTF-16 units; bytes of UTF-8 for the cloud). Judged on the prompt as it is, so
+ *  Create never waits for an estimate to say it. */
 export function promptProblems(prompt: string, target: RunTarget): string[] {
   if (BLANK.test(prompt)) return [STUDIO_DOCK.writePrompt];
-  const here = target === "thisComputer";
-  const max = here ? PROMPT_MAX_CHARS.thisComputer : PROMPT_MAX_CHARS.cloud;
-  // Never more characters than UTF-16 units: only a longer prompt needs counting.
-  if (prompt.length > max && Array.from(prompt).length > max) {
-    return [here ? STUDIO_DOCK.promptTooLongHere : STUDIO_DOCK.promptTooLong];
-  }
-  return [];
+  // Never more characters than UTF-16 units, nor more bytes than three per unit: only a longer
+  // prompt needs counting.
+  const tooLong =
+    target === "thisComputer"
+      ? prompt.length > PROMPT_BOUNDS.localChars && Array.from(prompt).length > PROMPT_BOUNDS.localChars
+      : prompt.length * 3 > PROMPT_BOUNDS.bytes && new TextEncoder().encode(prompt).length > PROMPT_BOUNDS.bytes;
+  return tooLong ? [STUDIO_DOCK.promptTooLong] : [];
 }
 
 /** What else `estimate` says the run would refuse (its settings, its pictures, a model that

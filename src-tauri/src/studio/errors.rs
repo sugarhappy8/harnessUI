@@ -368,7 +368,7 @@ pub fn invalid_sentences(problems: &[Invalid], model: &MediaModel) -> Vec<String
                 format!("\"{key}\" cannot be set under Extra fields: it has its own place.")
             }
             Invalid::EmptyPrompt => "Write a prompt first.".to_owned(),
-            Invalid::PromptTooLong => "Keep the prompt under 32,000 characters.".to_owned(),
+            Invalid::PromptTooLong => PROMPT_TOO_LONG.to_owned(),
             Invalid::NotUsable(reason) => reason.clone(),
         })
         .collect()
@@ -1170,16 +1170,18 @@ pub fn wont_make() -> AppError {
 
 // ---- a run on this computer: refusals ------------------------------------------------------
 
-/// A local prompt over `runtime::sd::args::PROMPT_MAX_CHARS`, as the estimate lists it among
-/// the settings the run would refuse.
-pub const PROMPT_TOO_LONG_HERE: &str = "Keep the prompt under 4,000 characters for local models.";
+/// A prompt over its hidden bound, local or cloud alike (design 9.2: never shown as a limit):
+/// a local one over `runtime::sd::args::LOCAL_PROMPT_MAX_CHARS` characters, as the estimate
+/// lists it among what the run would refuse, and any over `PROMPT_MAX_BYTES`
+/// (`Invalid::PromptTooLong`).
+pub const PROMPT_TOO_LONG: &str = "This prompt is too long.";
 
-/// A local prompt over 4,000 characters, refused before anything is recorded.
+/// A local prompt over its bound, refused before anything is recorded or checked.
 pub fn prompt_too_long_here() -> AppError {
     AppError::new(
         "studio_prompt_too_long_here",
-        PROMPT_TOO_LONG_HERE,
-        "Shorten it, or choose a cloud model.",
+        PROMPT_TOO_LONG,
+        "Shorten it.",
         String::new(),
     )
 }
@@ -1191,16 +1193,6 @@ pub fn chat_model_kept() -> AppError {
         "studio_chat_model_kept",
         "Not started: the chat model stays loaded.",
         "Press Again and choose Unload, or choose a cloud model.",
-        String::new(),
-    )
-}
-
-/// *Restart and update* while a local job works: the restart would stop it without asking.
-pub fn busy_for_update() -> AppError {
-    AppError::new(
-        "studio_busy_for_update",
-        "A picture or video is being made on this computer.",
-        "Stop it in Studio, or install the update when it finishes.",
         String::new(),
     )
 }
@@ -1621,10 +1613,9 @@ pub const LOCAL_PART_MISSING: &str = "A file of this model is missing.";
 pub const LOCAL_PART_CHANGED: &str = "A file of this model is not the size it was downloaded at.";
 /// The model file's own header is not a model its entry runs; the check's details follow.
 pub const LOCAL_NOT_ITS_MODEL: &str = "The model file is not the model it was downloaded as";
-/// A prompt over `runtime::sd::args::PROMPT_MAX_CHARS`.
-pub const LOCAL_PROMPT_TOO_LONG: &str = "The prompt is longer than 4,000 characters.";
-/// A negative prompt over `runtime::sd::args::PROMPT_MAX_CHARS`.
-pub const LOCAL_NEGATIVE_TOO_LONG: &str = "The negative prompt is longer than 4,000 characters.";
+/// A negative prompt over `runtime::sd::args::LOCAL_PROMPT_MAX_CHARS`, the local prompt's
+/// own bound (a prompt over its bound is [`PROMPT_TOO_LONG`]).
+pub const LOCAL_NEGATIVE_TOO_LONG: &str = "This negative prompt is too long.";
 /// A run started again with the folder of one still running.
 pub const LOCAL_ALREADY_RUNNING: &str = "This run is already running.";
 /// A result asked for that the run did not make, or not yet.
@@ -1669,7 +1660,7 @@ pub fn local_args_refused(e: &ArgsError) -> String {
         ArgsError::NotUnicode(_) => LOCAL_PATH_NOT_UNICODE.to_owned(),
         ArgsError::MaskWithoutPicture => MASK_NEEDS_PICTURE.to_owned(),
         ArgsError::EmptyPrompt => "The prompt is empty.".to_owned(),
-        ArgsError::PromptTooLong => LOCAL_PROMPT_TOO_LONG.to_owned(),
+        ArgsError::PromptTooLong => PROMPT_TOO_LONG.to_owned(),
         ArgsError::NoDiffusionPart => "The model has no main file.".to_owned(),
         ArgsError::BadSize { multiple } => {
             format!("The size is not a multiple of {multiple} from 64 to 2048.")
@@ -2153,7 +2144,6 @@ mod tests {
             model_incomplete(),
             wont_make(),
             prompt_too_long_here(),
-            busy_for_update(),
             engine_in_use(),
             local_model_missing(),
             size_not_offered(),
@@ -2469,26 +2459,16 @@ mod tests {
     #[test]
     fn a_local_run_says_why_it_was_refused() {
         let words = |e: AppError| (e.code, e.message, e.next_step);
+        // One copy for a prompt over its hidden bound, local or cloud (design 9.2).
         assert_eq!(
             words(prompt_too_long_here()),
             (
                 "studio_prompt_too_long_here".into(),
-                PROMPT_TOO_LONG_HERE.into(),
-                "Shorten it, or choose a cloud model.".into()
+                "This prompt is too long.".into(),
+                "Shorten it.".into()
             )
         );
-        assert_eq!(
-            PROMPT_TOO_LONG_HERE,
-            "Keep the prompt under 4,000 characters for local models."
-        );
-        assert_eq!(
-            words(busy_for_update()),
-            (
-                "studio_busy_for_update".into(),
-                "A picture or video is being made on this computer.".into(),
-                "Stop it in Studio, or install the update when it finishes.".into()
-            )
-        );
+        assert_eq!(PROMPT_TOO_LONG, "This prompt is too long.");
         assert_eq!(engine_in_use().code, "studio_engine_in_use");
         assert_eq!(local_model_missing().code, "studio_local_model_missing");
         assert_eq!(
@@ -2984,7 +2964,7 @@ mod tests {
                 "This model takes no end frames.",
                 "This model needs at least 2 reference pictures.",
                 "\"prompt\" cannot be set under Extra fields: it has its own place.",
-                "Keep the prompt under 32,000 characters.",
+                "This prompt is too long.",
                 "Needs a video to start from.",
             ]
         );

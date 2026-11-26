@@ -659,9 +659,14 @@ function SizeBoxes(props: {
   );
 }
 
+/** What is left of a text field's limit is shown only when fewer than this many characters
+ *  remain: the limit of a local negative prompt is a hidden bound (design 9.2), out of sight
+ *  for any real prompt. */
+const SHOW_LEFT_BELOW = 1_000;
+
 /** A text field, kept within the model's limit; emptied, it is unset. */
 function TextBox(props: { labelId: string; maxChars: number; value: string; onChange(v: unknown): void; onReset(): void }) {
-  const length = Array.from(props.value).length;
+  const left = props.maxChars - Array.from(props.value).length;
   return (
     <div className="flex flex-col gap-1">
       <textarea
@@ -675,7 +680,7 @@ function TextBox(props: { labelId: string; maxChars: number; value: string; onCh
         }}
         className={`${BOX} resize-y`}
       />
-      <span className="self-end text-xs text-fg-muted">{STUDIO_FIELDS.charsLeft(props.maxChars - length)}</span>
+      {left < SHOW_LEFT_BELOW && <span className="self-end text-xs text-fg-muted">{STUDIO_FIELDS.charsLeft(left)}</span>}
     </div>
   );
 }

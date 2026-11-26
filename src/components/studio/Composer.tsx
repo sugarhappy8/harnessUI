@@ -44,12 +44,13 @@ import type { MediaModel, RefItem, RefRole } from "./types";
 // that needs setting up, which says so with *Set it up yourself*: Settings → Files), the
 // prompt's own checks (judged here on the prompt as it is), a required input picture missing,
 // a mask without its picture to change, a setting the model refuses (from the answer shown, for
-// this model and place, or a field holding what cannot be sent), extra settings held for the
-// model's price, and a start on its way; for a cloud model the daily limit takes its place, and
-// the confirmation opens when the run needs one. A model that may not fit this computer never
-// holds it back (Task S11; Task G2 adds the warning line). A local run over 15 minutes says so
-// in amber, and cloud is offered as the backup when it is very slow (Studio never moves the
-// draft by itself). Other screens put the cursor in the prompt with `app:focus-studio-prompt`.
+// this model and place, or a field holding what cannot be sent), and a start on its way; for a
+// cloud model the daily limit takes its place, and the confirmation opens when the run needs
+// one. Extra settings held for the model's price no longer hold it back (0.2.0, design 9.2): a
+// press finishes that price first, and says so when it went without them. A model that may not
+// fit this computer never holds it back (Task S11; Task G2 adds the warning line). A local run
+// over 15 minutes says so in amber, and cloud is offered as the backup when it is very slow
+// (Studio never moves the draft by itself). Other screens put the cursor in the prompt with `app:focus-studio-prompt`.
 
 /** Settings on one of its pages. */
 function openSettings(page: "endpoints" | "studio") {
@@ -194,9 +195,9 @@ export function Composer(props: { tab: StudioTab }) {
   const promptFault = typed || refusedPresses > 0;
   // The daily limit has taken Create's place (Enter included).
   const overLimit = !here && known !== null && !known.limit.wouldPass;
-  // Extra settings held aside until the model's price says which it takes: Create waits for it.
-  const disabled =
-    model === null || unusable !== null || key === null || starting || blocked || overLimit || holding;
+  // Extra settings held aside until the model's price says which it takes do not hold Create
+  // back: a press finishes the price first (`start`).
+  const disabled = model === null || unusable !== null || key === null || starting || blocked || overLimit;
   const longRun = local?.over15Min ? etaText(known?.eta ?? null) : null;
   // Cloud as the backup for a very slow local run (not for one that may not fit: Task G2).
   const backup = here && local?.verySlow ? cloudBackup(tab, known, endpoints) : null;

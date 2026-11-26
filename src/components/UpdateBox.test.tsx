@@ -21,6 +21,8 @@ vi.mock("@tauri-apps/plugin-clipboard-manager", () => ({ writeText: vi.fn(async 
 const ipc = await import("../lib/ipc");
 const { UpdateBox } = await import("./UpdateBox");
 const { useApp } = await import("../store/app");
+const { useStudio } = await import("../store/studio");
+const { LOCAL_RUN } = await import("./studio/fixtures/models");
 
 function info(version: string, notes: string | null = "Fixes."): UpdateInfo {
   return { version, date: null, notes };
@@ -63,6 +65,7 @@ describe("the Update ready box", () => {
     installNow = async () => undefined;
     window.sessionStorage.clear();
     useApp.setState({ generation: null, runningTurn: null });
+    useStudio.setState({ live: {} });
     vi.mocked(ipc.installUpdate).mockClear();
   });
   afterEach(cleanup);
@@ -173,6 +176,30 @@ describe("the Update ready box", () => {
     expect(screen.queryByText("Updating stops the current reply.")).toBeNull();
     act(() => useApp.setState({ runningTurn: 3 }));
     expect(screen.getByText("Updating stops the current reply.")).toBeTruthy();
+  });
+
+  // 0.2.0 (design 9.2): installing stops a local Studio job instead of being refused, so the
+  // box says so first, as a note above the install button.
+  it("the warning line shows while a local job runs", async () => {
+    statusNow = status({ ready: info("0.0.9") });
+    await show();
+    const warning = "Installing stops the picture being made";
+    expect(screen.queryByText(warning)).toBeNull();
+    act(() => useStudio.setState({ live: { [LOCAL_RUN.id]: { ...LOCAL_RUN, status: "running" } } }));
+    const note = screen.getByRole("note");
+    expect(note.textContent).toBe(warning);
+    // Above the install button, which stays on.
+    const install = screen.getByRole("button", { name: "Restart and update" }) as HTMLButtonElement;
+    expect(note.compareDocumentPosition(install) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(install.disabled).toBe(false);
+    // A run waiting for its turn is stopped too.
+    act(() => useStudio.setState({ live: { [LOCAL_RUN.id]: { ...LOCAL_RUN, status: "queued" } } }));
+    expect(screen.getByRole("note").textContent).toBe(warning);
+    // A cloud run, or a local one that ended, is not stopped by installing.
+    act(() => useStudio.setState({ live: { [LOCAL_RUN.id]: { ...LOCAL_RUN, status: "done" } } }));
+    expect(screen.queryByText(warning)).toBeNull();
+    act(() => useStudio.setState({ live: { a: { ...LOCAL_RUN, id: "a", runsOn: "cloud", status: "running" } } }));
+    expect(screen.queryByText(warning)).toBeNull();
   });
 
   it("floats over the foot of the sidebar, narrower than the sidebar", async () => {

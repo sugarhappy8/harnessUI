@@ -21,6 +21,8 @@
 
 use std::collections::BTreeMap;
 
+// The prompt's one bound, in bytes of UTF-8, the same for every run (design 9.2).
+use runtime::sd::args::PROMPT_MAX_BYTES;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
@@ -40,9 +42,6 @@ pub const OPENAI_SIZE_RULES: SizeRules = SizeRules {
     min_pixels: 655_360,
     max_pixels: 8_294_400,
 };
-
-/// The longest prompt sent to a cloud company, in characters.
-const PROMPT_MAX_CHARS: usize = 32_000;
 
 /// Names an extra setting never takes: they belong to the request itself.
 const RESERVED: &[&str] = &["model", "prompt", "provider"];
@@ -327,7 +326,7 @@ pub enum Invalid {
     Reserved(String),
     /// The prompt is empty.
     EmptyPrompt,
-    /// The prompt is longer than 32,000 characters.
+    /// The prompt is longer than 1 MiB of UTF-8 ([`PROMPT_MAX_BYTES`]).
     PromptTooLong,
     /// The model cannot be used; the reason.
     NotUsable(String),
@@ -436,8 +435,9 @@ pub fn family_of(id: &str) -> String {
 /// Checks a request against the model's controls: every setting is one the model offers,
 /// with a value it takes; extra settings are ones it lists (a company setting also needs a
 /// company the routing allows that lists it), never a typed field's name, `model`, `prompt`
-/// or `provider`; the pictures of each role are within the model's limits; the prompt is
-/// 1 to 32,000 characters. A model that cannot be used is refused. A setting sent with its
+/// or `provider`; the pictures of each role are within the model's limits; the prompt is not
+/// empty and at most 1 MiB of UTF-8 ([`PROMPT_MAX_BYTES`], a safety bound never shown as a
+/// limit). A model that cannot be used is refused. A setting sent with its
 /// company default is the same as one left out, so what it requires is not checked.
 ///
 /// # Errors
@@ -449,7 +449,7 @@ pub fn validate(model: &MediaModel, req: &MediaRequest) -> Result<(), Vec<Invali
     let mut problems = Vec::new();
     if req.prompt.trim().is_empty() {
         problems.push(Invalid::EmptyPrompt);
-    } else if req.prompt.chars().count() > PROMPT_MAX_CHARS {
+    } else if req.prompt.len() > PROMPT_MAX_BYTES {
         problems.push(Invalid::PromptTooLong);
     }
 
@@ -1860,6 +1860,32 @@ mod tests {
         );
     }
 
+    /// 0.2.0 (design 9.2): the 32,000-character cap is gone; one hidden bound of 1 MiB of
+    /// UTF-8 stays.
+    #[test]
+    fn the_cloud_prompt_is_bounded_by_bytes_at_1_mib() {
+        let flare = image("openai/gpt-image-2.6-flare");
+        let p = |text: String| {
+            validate(
+                &flare,
+                &MediaRequest {
+                    prompt: text,
+                    ..request_p(json!({}))
+                },
+            )
+        };
+        assert!(p("a".repeat(40_000)).is_ok()); // past 0.1.2's 32,000 characters
+        assert_eq!(
+            p("a".repeat(PROMPT_MAX_BYTES + 1)),
+            Err(vec![Invalid::PromptTooLong])
+        );
+        assert!(p("é".repeat(PROMPT_MAX_BYTES / 2)).is_ok()); // bytes now, not characters
+        assert_eq!(
+            p("é".repeat(PROMPT_MAX_BYTES / 2 + 1)),
+            Err(vec![Invalid::PromptTooLong])
+        );
+    }
+
     #[test]
     fn validate_checks_the_prompt_the_picture_count_and_usability() {
         let flare = image("openai/gpt-image-2.6-flare");
@@ -1868,16 +1894,6 @@ mod tests {
             ..request_p(json!({}))
         };
         assert_eq!(validate(&flare, &blank), Err(vec![Invalid::EmptyPrompt]));
-        let long = MediaRequest {
-            prompt: "a".repeat(32_001),
-            ..request_p(json!({}))
-        };
-        assert_eq!(validate(&flare, &long), Err(vec![Invalid::PromptTooLong]));
-        let wide = MediaRequest {
-            prompt: "é".repeat(32_000),
-            ..request_p(json!({}))
-        };
-        assert!(validate(&flare, &wide).is_ok()); // characters, not bytes
         assert_eq!(
             validate(
                 &image("krea/k3-edit"),

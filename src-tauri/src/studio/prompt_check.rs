@@ -31,9 +31,13 @@
 //!    as "sexy" and "children", which reading 3 glues into "sexychildren".
 //!
 //! The fourth reading costs the engine's weighting, which grows with the square of the
-//! brackets, so it reads a prompt of at most `PROMPT_MAX_CHARS` characters and no longer:
-//! [`refuses`] expects its caller to have refused a longer prompt first, as the local lane
-//! does (`studio_prompt_too_long_here`).
+//! brackets, so it reads a prompt of at most `LOCAL_PROMPT_MAX_CHARS` (16,384) characters and
+//! no longer: [`refuses`] expects its caller to have refused a longer prompt first, as the
+//! local lane does (`studio_prompt_too_long_here`). At that length the worst bracket nesting
+//! is read in about 0.2 s (ruling G3-safety-bound); the 4,000-character cap of 0.1.x is gone,
+//! and every prompt up to the bound is read all four ways. The negative prompt is not
+//! checked (since 0.1.x: "no children"-style negatives would be refused), and is bounded the
+//! same way.
 //!
 //! The lists trade misses against harmless prompts refused. Bare "baby" and "minor" are left
 //! out of [`MINOR`] because they refuse too much that is harmless ("a sexy baby-blue dress",
@@ -50,7 +54,7 @@
 use std::collections::BTreeSet;
 
 use runtime::sd::args::{
-    PROMPT_MAX_CHARS, attention_text, parse_prompt_attention, strip_prompt_markers,
+    LOCAL_PROMPT_MAX_CHARS, attention_text, parse_prompt_attention, strip_prompt_markers,
 };
 
 /// Sexual words, as they read after folding (see the module's notes).
@@ -215,14 +219,14 @@ const LOOK_ALIKES: [(&str, char); 25] = [
 /// Whether `prompt` pairs a sexual word with a word for children, as typed, as the engine
 /// receives it ([`strip_prompt_markers`]), as the model reads that joined
 /// ([`attention_text`]), or as the engine's segments one word apart ([`segment_words`]). The
-/// last reading is made only for a prompt of at most [`PROMPT_MAX_CHARS`] characters, which
-/// the caller checks first (see the module's notes).
+/// last reading is made only for a prompt of at most [`LOCAL_PROMPT_MAX_CHARS`] characters,
+/// which the caller checks first (see the module's notes).
 pub fn refuses(prompt: &str) -> bool {
     let received = strip_prompt_markers(prompt);
     pairs(prompt)
         || pairs(&received)
         || pairs(&attention_text(&received))
-        || (prompt.chars().count() <= PROMPT_MAX_CHARS && pairs(&segment_words(&received)))
+        || (prompt.chars().count() <= LOCAL_PROMPT_MAX_CHARS && pairs(&segment_words(&received)))
 }
 
 /// The segments the engine encodes from `text` ([`parse_prompt_attention`]), joined with one
@@ -505,18 +509,86 @@ mod tests {
         }
     }
 
+    /// 0.2.0 (ruling G3-safety-bound): the 4,000-character cap is gone, and every local
+    /// prompt the lane accepts, up to LOCAL_PROMPT_MAX_CHARS characters, is read all four
+    /// ways: a phrase split across weights past the old cap is still refused.
+    #[test]
+    fn a_weight_change_past_4000_characters_is_still_read() {
+        let tail = " se()xy(children)";
+        let past = format!("{}{tail}", "a ".repeat(2_500));
+        let longest = format!("{}{tail}", "a".repeat(LOCAL_PROMPT_MAX_CHARS - tail.len()));
+        assert_eq!(longest.chars().count(), LOCAL_PROMPT_MAX_CHARS);
+        for prompt in [&past, &longest] {
+            assert!(prompt.chars().count() > 4_000);
+            let received = strip_prompt_markers(prompt);
+            assert!(
+                !pairs(prompt) && !pairs(&received) && !pairs(&attention_text(&received)),
+                "the first three readings alone pass it"
+            );
+            assert!(refuses(prompt), "the segments' reading refuses it");
+        }
+    }
+
     /// The fourth reading costs the engine's weighting, quadratic in the brackets, so it reads
-    /// a prompt of at most PROMPT_MAX_CHARS characters: the caller refuses a longer one first,
-    /// as the local lane does. Beyond the bound it is not made: this test would take minutes
-    /// if it were.
+    /// a prompt of at most LOCAL_PROMPT_MAX_CHARS characters: the caller refuses a longer one
+    /// first, as the local lane does. Beyond the bound it is not made: this test would take
+    /// minutes if it were.
     #[test]
     fn the_segment_reading_is_bounded_by_the_prompt_length() {
         let nested = format!("{}x", "(x".repeat(250_000));
         assert!(!refuses(&nested));
-        let tricked = format!("se()xy(children) {}", "a ".repeat(PROMPT_MAX_CHARS));
-        assert!(tricked.chars().count() > PROMPT_MAX_CHARS);
+        let tricked = format!("se()xy(children) {}", "a".repeat(LOCAL_PROMPT_MAX_CHARS));
+        assert!(tricked.chars().count() > LOCAL_PROMPT_MAX_CHARS);
         assert!(!refuses(&tricked), "read only up to the bound");
         assert!(refuses("se()xy(children)"));
+    }
+
+    /// The worst bracket nesting for the engine's weighting, at the longest local prompt: as
+    /// many brackets as segments, each bracket over every segment, round ones (weights that
+    /// overflow) and square ones (weights that sink into the subnormal floats). Each is read
+    /// all four ways in a bounded time, so a crafted prompt cannot make the check slow
+    /// (about 0.2 s at most in a release build; the bound here is for an unoptimised test
+    /// build on a slow machine). Square brackets cost about what round ones do: on a
+    /// processor with a slow path for subnormal floats, a plain `*=` made them about ten
+    /// times slower (`times` in `runtime::sd::prompt_view`).
+    #[test]
+    fn the_worst_bracket_nesting_at_the_longest_local_prompt_is_read_in_time() {
+        use std::time::{Duration, Instant};
+        let half = LOCAL_PROMPT_MAX_CHARS / 2;
+        let quarter = LOCAL_PROMPT_MAX_CHARS / 4;
+        let worst = [
+            format!("{}{}", "(".repeat(half), "B".repeat(half)),
+            format!("{}{}", "[".repeat(half), "B".repeat(half)),
+            format!("{}{}", "([".repeat(quarter), "B".repeat(half)),
+            "[B".repeat(half),
+            format!(
+                "{}{}{}",
+                "[".repeat(quarter),
+                "B".repeat(half),
+                "]".repeat(quarter)
+            ),
+        ];
+        let took: Vec<Duration> = worst
+            .iter()
+            .map(|prompt| {
+                assert_eq!(prompt.chars().count(), LOCAL_PROMPT_MAX_CHARS);
+                let started = Instant::now();
+                assert!(!refuses(prompt));
+                started.elapsed()
+            })
+            .collect();
+        for (prompt, took) in worst.iter().zip(&took) {
+            assert!(
+                *took < Duration::from_secs(5),
+                "{:?}…: {took:?}",
+                &prompt[..8]
+            );
+        }
+        let (round, square) = (took[0], took[1]);
+        assert!(
+            square < round * 4 + Duration::from_millis(100),
+            "square brackets {square:?}, round ones {round:?}"
+        );
     }
 
     /// The model's reading turns each `BREAK` into a space, where the engine may keep a run

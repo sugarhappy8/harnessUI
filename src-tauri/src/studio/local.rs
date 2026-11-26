@@ -45,9 +45,9 @@ use models::sd::matching::MAX_REFERENCES;
 use models::sd::recipes::{FrameRounding, Recipe, recipe};
 use rand::Rng;
 use runtime::sd::args::{
-    ArgsError, HighNoise, LORA_WEIGHT_DEFAULT, LORA_WEIGHT_RANGE, LORA_WEIGHT_STEP, LoraTag,
-    MAX_LORAS, OutputFormat, PROMPT_MAX_CHARS, PartRole, Sampler, Scheduler, SdJob, VaeFormat,
-    build_args, negative_file_text, prompt_file_text, strip_prompt_markers,
+    ArgsError, HighNoise, LOCAL_PROMPT_MAX_CHARS, LORA_WEIGHT_DEFAULT, LORA_WEIGHT_RANGE,
+    LORA_WEIGHT_STEP, LoraTag, MAX_LORAS, OutputFormat, PartRole, Sampler, Scheduler, SdJob,
+    VaeFormat, build_args, negative_file_text, prompt_file_text, strip_prompt_markers,
 };
 use runtime::sd::devices::{SdDevice, match_llama_device};
 use runtime::sd::engine::Engine;
@@ -871,7 +871,7 @@ impl LocalMediaProvider {
                     "Negative prompt",
                     Layer::Advanced,
                     ParamKind::Text {
-                        max_chars: u32::try_from(PROMPT_MAX_CHARS).unwrap_or(u32::MAX),
+                        max_chars: u32::try_from(LOCAL_PROMPT_MAX_CHARS).unwrap_or(u32::MAX),
                     },
                 )
             });
@@ -976,7 +976,7 @@ impl LocalMediaProvider {
             .map(str::to_owned);
         if negative
             .as_ref()
-            .is_some_and(|text| text.chars().count() > PROMPT_MAX_CHARS)
+            .is_some_and(|text| text.chars().count() > LOCAL_PROMPT_MAX_CHARS)
         {
             return Err(refused(
                 FailureKind::BadRequest,
@@ -1376,11 +1376,8 @@ impl LocalProvider for LocalMediaProvider {
         let engine = self
             .engine()
             .ok_or_else(|| refused(FailureKind::EngineMissing, errors::LOCAL_ENGINE_NOT_FOUND))?;
-        if req.prompt.chars().count() > PROMPT_MAX_CHARS {
-            return Err(refused(
-                FailureKind::BadRequest,
-                errors::LOCAL_PROMPT_TOO_LONG,
-            ));
+        if req.prompt.chars().count() > LOCAL_PROMPT_MAX_CHARS {
+            return Err(refused(FailureKind::BadRequest, errors::PROMPT_TOO_LONG));
         }
         let (model, entry) = self
             .entry_of(&req.model)
@@ -2833,7 +2830,7 @@ pub(crate) mod tests {
         );
         assert_eq!(cfg.company_default, Some(json!(3.5)));
         let negative = params.iter().find(|p| p.key == "negative_prompt").unwrap();
-        assert_eq!(negative.kind, ParamKind::Text { max_chars: 4_000 });
+        assert_eq!(negative.kind, ParamKind::Text { max_chars: 16_384 });
         assert_eq!(negative.layer, Layer::Advanced);
     }
 
@@ -3233,7 +3230,8 @@ pub(crate) mod tests {
     }
 
     /// The engine's numbers and texts at their edges: the largest seed and a negative prompt of
-    /// 4,000 characters go, one more of either is refused before the engine starts.
+    /// 16,384 characters (the local prompt's own bound) go, one more of either is refused
+    /// before the engine starts.
     #[test]
     fn numbers_and_texts_at_their_edges() {
         let dir = Scratch::new();
@@ -3261,13 +3259,15 @@ pub(crate) mod tests {
             bad(job(json!({"seed": SEED_MAX + 1}))),
             (FailureKind::BadRequest, Some(false))
         );
-        let longest = "n".repeat(4_000);
+        let longest = "n".repeat(LOCAL_PROMPT_MAX_CHARS);
         assert_eq!(
             job(json!({"negative_prompt": longest})).unwrap().negative,
             Some(longest)
         );
         assert_eq!(
-            bad(job(json!({"negative_prompt": "n".repeat(4_001)}))),
+            bad(job(
+                json!({"negative_prompt": "n".repeat(LOCAL_PROMPT_MAX_CHARS + 1)})
+            )),
             (FailureKind::BadRequest, Some(false))
         );
         // A blank negative prompt is none.
@@ -3290,10 +3290,11 @@ pub(crate) mod tests {
         let w = world("ok").await;
         let f = refusal(
             w.provider
-                .start(&req(&"a".repeat(4_001)), &w.partial())
+                .start(&req(&"a".repeat(LOCAL_PROMPT_MAX_CHARS + 1)), &w.partial())
                 .await,
         );
         assert_eq!((f.kind, f.charged), (FailureKind::BadRequest, Some(false)));
+        assert_eq!(f.message, "This prompt is too long.");
         // An exact size beyond the engine's 2048 is refused with the arguments' own sentence.
         let f = refusal(
             w.provider

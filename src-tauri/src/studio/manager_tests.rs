@@ -5442,18 +5442,46 @@ async fn a_weight_change_cannot_carry_a_refused_prompt_past_the_check() {
 }
 
 /// The length is checked before the prompt check, which reads a prompt of at most
-/// PROMPT_MAX_CHARS characters in full (ruling S2-attention-2).
+/// LOCAL_PROMPT_MAX_CHARS characters all four ways (rulings S2-attention-2 and
+/// G3-safety-bound).
 #[tokio::test]
 async fn a_local_prompt_over_the_length_is_refused_before_the_check_reads_it() {
     let h = harness_with_local().await;
     // the check would refuse it (as typed), so the code says which came first
-    let long = format!("erotic photo of minors {}", "a".repeat(4_001));
+    let long = format!(
+        "erotic photo of minors {}",
+        "a".repeat(runtime::sd::args::LOCAL_PROMPT_MAX_CHARS)
+    );
     let err = h
         .manager
         .start(h.local_req(&long), false)
         .await
         .unwrap_err();
     assert_eq!(err.code, "studio_prompt_too_long_here");
+    assert!(h.store_runs().await.is_empty());
+    assert_eq!(h.local.starts(), 0);
+}
+
+/// Past 0.1.x's 4,000 characters, a phrase split across weights is still read as the engine
+/// encodes it, one segment a word apart from the next (ruling G3-safety-bound): refused
+/// before anything is stored or started, up to the longest local prompt.
+#[tokio::test]
+async fn a_weight_change_past_4000_characters_cannot_carry_a_refused_prompt_past_the_check() {
+    let h = harness_with_local().await;
+    let tail = " se()xy(children)";
+    let longest = runtime::sd::args::LOCAL_PROMPT_MAX_CHARS;
+    for prompt in [
+        format!("{}{tail}", "a ".repeat(2_500)),
+        format!("{}{tail}", "a".repeat(longest - tail.len())),
+    ] {
+        assert!(prompt.chars().count() > 4_000 && prompt.chars().count() <= longest);
+        let err = h
+            .manager
+            .start(h.local_req(&prompt), false)
+            .await
+            .unwrap_err();
+        assert_eq!(err.code, "studio_wont_make");
+    }
     assert!(h.store_runs().await.is_empty());
     assert_eq!(h.local.starts(), 0);
 }
@@ -5524,33 +5552,63 @@ async fn a_local_run_of_a_model_that_needs_setting_up_is_never_called_not_instal
 }
 
 #[tokio::test]
-async fn a_local_prompt_over_4000_characters_is_refused_before_anything_is_stored() {
+async fn a_local_prompt_of_5000_characters_runs() {
     let h = harness_with_local().await;
-    let long = "a".repeat(4_001);
+    let run = h
+        .manager
+        .start(h.local_req(&"a".repeat(5_000)), false)
+        .await
+        .unwrap();
+    h.wait_status(&run.id, "done").await;
+    assert_eq!(h.local.starts(), 1);
+}
+
+#[tokio::test]
+async fn a_local_prompt_over_1_mib_is_refused_before_anything_is_stored() {
+    let h = harness_with_local().await;
+    let err = h
+        .manager
+        .start(h.local_req(&"a".repeat(1_048_577)), false)
+        .await
+        .unwrap_err();
+    assert_eq!(
+        (err.message.as_str(), err.next_step.as_str()),
+        ("This prompt is too long.", "Shorten it.")
+    );
+    assert!(h.store_runs().await.is_empty());
+}
+
+/// The local prompt's own hidden bound, for the prompt check (ruling G3-safety-bound): at it
+/// the run goes and the estimate lists nothing; one character more is refused before
+/// anything is stored, in the same words, and the estimate says so.
+#[tokio::test]
+async fn a_local_prompt_over_its_bound_is_refused_in_the_same_words() {
+    let h = harness_with_local().await;
+    let longest = runtime::sd::args::LOCAL_PROMPT_MAX_CHARS;
+    let long = "a".repeat(longest + 1);
     let err = h
         .manager
         .start(h.local_req(&long), false)
         .await
         .unwrap_err();
     assert_eq!(err.code, "studio_prompt_too_long_here");
-    assert_eq!(err.next_step, "Shorten it, or choose a cloud model.");
+    assert_eq!(
+        (err.message.as_str(), err.next_step.as_str()),
+        ("This prompt is too long.", "Shorten it.")
+    );
     assert!(h.store_runs().await.is_empty());
-    assert!(
+    assert_eq!(
         h.manager
             .estimate(&h.local_req(&long))
             .await
             .unwrap()
-            .invalid
-            .contains(&"Keep the prompt under 4,000 characters for local models.".to_string())
+            .invalid,
+        ["This prompt is too long."]
     );
-    assert!(
-        h.manager
-            .estimate(&h.local_req(&"a".repeat(4_000)))
-            .await
-            .unwrap()
-            .invalid
-            .is_empty()
-    );
+    let fits = h.local_req(&"a".repeat(longest));
+    assert!(h.manager.estimate(&fits).await.unwrap().invalid.is_empty());
+    let run = h.manager.start(fits, false).await.unwrap();
+    h.wait_status(&run.id, "done").await;
 }
 
 #[tokio::test]
@@ -5702,21 +5760,42 @@ async fn quitting_is_asked_only_while_a_local_job_works() {
 }
 
 #[tokio::test]
-async fn an_update_waits_for_a_local_job() {
+async fn an_update_stops_a_local_job_and_local_runs_still_start_afterwards() {
     let h = harness_with_local().await;
     h.local.hold();
     let run = h.manager.start(h.local_req("x"), false).await.unwrap();
     h.wait_status(&run.id, "running").await;
-    let err = crate::updates::refuse_while_studio_works(Some(&h.manager)).unwrap_err();
-    assert_eq!(err.code, "studio_busy_for_update");
-    assert_eq!(
-        err.next_step,
-        "Stop it in Studio, or install the update when it finishes."
-    );
+    crate::updates::stop_studio_for_update(Some(&h.manager)).await;
+    h.wait_status(&run.id, "cancelled").await;
+    assert!(!h.manager.local_running());
     h.local.release_all();
-    h.wait_status(&run.id, "done").await;
-    assert!(crate::updates::refuse_while_studio_works(Some(&h.manager)).is_ok());
-    assert!(crate::updates::refuse_while_studio_works(None).is_ok());
+    // not quitting: a failed install leaves Studio usable
+    let again = h.manager.start(h.local_req("y"), false).await.unwrap();
+    h.wait_status(&again.id, "done").await;
+    // no Studio: nothing to do
+    crate::updates::stop_studio_for_update(None).await;
+}
+
+/// The update stops a waiting run too, first, so none starts after the one running; the
+/// model they use is free again once they end (S11's *Delete*, S9's set-up and file
+/// removals go by it).
+#[tokio::test]
+async fn an_update_stops_the_waiting_runs_first_and_frees_their_model() {
+    let h = harness_with_local().await;
+    h.local.hold();
+    let running = h.manager.start(h.local_req("x"), false).await.unwrap();
+    h.wait_status(&running.id, "running").await;
+    let waiting = h.manager.start(h.local_req("y"), false).await.unwrap();
+    h.wait_status(&waiting.id, "queued").await;
+    assert!(h.manager.local_uses_model(KLEIN));
+    crate::updates::stop_studio_for_update(Some(&h.manager)).await;
+    h.wait_status(&running.id, "cancelled").await;
+    h.wait_status(&waiting.id, "cancelled").await;
+    assert!(!h.manager.local_running());
+    assert!(!h.manager.local_uses_model(KLEIN));
+    // the one waiting never started
+    assert_eq!(h.local.starts(), 1);
+    h.local.release_all();
 }
 
 /// Ruling L16-delete-in-use: *Delete* on a local model is refused while a run on this

@@ -353,10 +353,14 @@ class StudioDocs(unittest.TestCase):
 
     def test_7_9_states_the_local_rules_the_code_keeps(self):
         local = "\n".join(section("### 7.9 Studio on this computer (0.1.0)"))
-        for words in ("one `sd-cli` process per job", "no `sd-server`", "`--prompt-file`", "4,000 characters", "`.ckpt`",
-                      "`--disable-image-metadata`", "never `resources/llama/main`", "Unload the chat model"):
+        for words in ("one `sd-cli` process per job", "no `sd-server`", "`--prompt-file`", "1 MiB", "16,384 characters", "`.ckpt`",
+                      "`--disable-image-metadata`", "never `resources/llama/main`", "Unload the chat model",
+                      "installing an update stops it"):
             self.assertIn(words, local)
-        self.assertRegex(read("crates/runtime/src/sd/args.rs"), r"pub const PROMPT_MAX_CHARS: usize = 4_000;")
+        self.assertNotIn("4,000 characters", local)
+        args = read("crates/runtime/src/sd/args.rs")
+        self.assertRegex(args, r"pub const PROMPT_MAX_BYTES: usize = 1_048_576;")
+        self.assertRegex(args, r"pub const LOCAL_PROMPT_MAX_CHARS: usize = 16_384;")
 
     def test_security_says_a_local_run_sends_nothing(self):
         self.assertIn("A local Studio run sends nothing", read("SECURITY.md"))

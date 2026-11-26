@@ -78,7 +78,7 @@ import { createRun, targetOf, type StudioRunState } from "./studioRun";
 export {
   currentEstimate,
   ESTIMATE_DELAY_MS,
-  PROMPT_MAX_CHARS,
+  PROMPT_BOUNDS,
   promptProblems,
   requestFromRun,
   requestKey,
@@ -234,14 +234,20 @@ export interface StudioState extends StudioRunState, StudioResultsState, StudioL
    *  is never asked by itself); extra settings held for it are carried to it as it comes back.
    *  A failure goes to `priceError`, not to the caller. */
   fetchPrice(tab: StudioTab): Promise<void>;
+  /** Create pressed while `tab`'s extra settings wait for its model's price (`holding`, design
+   *  9.2): waits for that price request (the one on its way, or a new one when the last
+   *  failed) and carries them to the model as it comes back. Resolves `true` once they are
+   *  carried, or nothing is held any more (another model was picked meanwhile); `false` when
+   *  the request failed: they stay held, the failure in `priceError`. Never rejects. */
+  finishPrice(tab: StudioTab): Promise<boolean>;
   /** Each tab's failed price request, while the tab stays on the model it asked for (shown
    *  under the Model field, where *Get the price* asks again); put away by the next request
    *  and by a change of model. */
   priceError: Record<StudioTab, ErrorInfo | null>;
   dismissPriceError(tab: StudioTab): void;
   /** Each tab whose extra settings are held aside until its model's price answer brings the
-   *  model's Extra field (see `chooseModel`): Create waits while they are. A failed request
-   *  keeps them held, and *Get the price* asks again. */
+   *  model's Extra field (see `chooseModel`): a press of Create finishes that price first
+   *  (`finishPrice`). A failed request keeps them held, and *Get the price* asks again. */
   holding: Record<StudioTab, boolean>;
   setPrompt(tab: StudioTab, text: string): void;
   /** Sets field `key` of `tab`'s draft. A transparent background moves a file type that cannot
@@ -898,6 +904,17 @@ export const useStudio: UseBoundStore<StoreApi<StudioState>> = create<StudioStat
       const waiting = held[tab];
       if (priced && waiting && sameTarget(waiting.target, target) && waiting.model.id === model) {
         settleHeld(tab, waiting, priced);
+      }
+    },
+    finishPrice: async (tab) => {
+      const waiting = held[tab];
+      if (!waiting || waiting.target === "thisComputer") return true;
+      try {
+        settleHeld(tab, waiting, await priceFor(tab, waiting.target.endpoint, waiting.model.id));
+        return true;
+      } catch {
+        // Still held, unless the draft moved on meanwhile; the failure is in `priceError`.
+        return held[tab] !== waiting;
       }
     },
     priceError: { image: null, video: null },

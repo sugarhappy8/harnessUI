@@ -4,9 +4,10 @@
 //!
 //! - **Starting** ([`StudioManager::start`] with `RunTarget::ThisComputer`): the same press
 //!   sent twice gives the run it made; the prompt's length (at most
-//!   `runtime::sd::args::PROMPT_MAX_CHARS`, `studio_prompt_too_long_here`), then the prompt
-//!   check (`studio_wont_make`), which reads a prompt of at most that length in full (ruling
-//!   S2-attention-2); the model among the installed ones (`parse_catalog` of
+//!   `runtime::sd::args::LOCAL_PROMPT_MAX_CHARS`, a hidden bound,
+//!   `studio_prompt_too_long_here`), then the prompt check (`studio_wont_make`), which reads
+//!   every prompt of at most that length all four ways (rulings S2-attention-2 and
+//!   G3-safety-bound); the model among the installed ones (`parse_catalog` of
 //!   the provider's list), its settings checked (`spec::validate`) and a seed picked when
 //!   none is set; the run's fit and time ([`local_verdict`](super::local_verdict)), the time
 //!   where the lease would run it (on the processor rather than after an unload, as Create
@@ -32,7 +33,9 @@
 //!   never charged. The card is held from the grant until the task ends, an out-of-memory
 //!   retry inside the engine job included, and freed however it ends.
 //! - **Stop** kills the engine's whole tree (`MediaProvider::cancel`); a run still waiting for
-//!   the card never starts.
+//!   the card never starts. *Quit and stop* stops every local run for good
+//!   ([`StudioManager::stop_local`]); installing an update stops them too, and Studio stays
+//!   usable should the install fail ([`StudioManager::stop_local_for_update`]).
 //! - **The chat model** a grant unloaded is kept while the local queue has work; when the
 //!   queue empties and "Reload it after Studio" is on, it is loaded again, once.
 //! - **Restarts**: a local run the app left queued or running is `interrupted`, never
@@ -53,7 +56,7 @@ use agent::media::{
 use jiff::Timestamp;
 use models::gen_catalog::GenEntry;
 use models::gen_eta::{self, Eta, FitWord};
-use runtime::sd::args::PROMPT_MAX_CHARS;
+use runtime::sd::args::LOCAL_PROMPT_MAX_CHARS;
 use runtime::sd::progress::{LocalProgress, LocalStage};
 use serde_json::{Value, json};
 use tokio::sync::Notify;
@@ -328,7 +331,8 @@ fn audit_entry(
 }
 
 impl StudioManager {
-    /// Whether a local run is queued or running: quitting asks first, and an update waits.
+    /// Whether a local run is queued or running: quitting asks first, and installing an
+    /// update stops it.
     pub fn local_running(&self) -> bool {
         let lanes = self.inner.lanes();
         lanes.running.values().any(|r| r.lane == LaneKey::Local)
@@ -397,6 +401,21 @@ impl StudioManager {
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .take();
+        self.stop_every_local_run().await;
+    }
+
+    /// 0.2.0 (design 9.2): installing an update stops every local run, those waiting first,
+    /// as *Quit and stop* does, once the update box has said so ("Installing stops the
+    /// picture being made"). The app is not closing yet: should the install fail, local runs
+    /// can start again, and the chat model a grant unloaded is loaded again as usual
+    /// ("Reload it after Studio").
+    pub async fn stop_local_for_update(&self) {
+        self.stop_every_local_run().await;
+    }
+
+    /// Stops every local run, those waiting first, then the one running; returns once each
+    /// has ended (or was given up on: `cancel`'s wait).
+    async fn stop_every_local_run(&self) {
         let ids: Vec<String> = {
             let lanes = self.inner.lanes();
             let waiting = lanes
@@ -438,9 +457,9 @@ impl StudioManager {
             return Ok(inner.dto_of(&run, seq));
         }
         // The length first: the prompt check reads the engine's weighting of a prompt of at
-        // most PROMPT_MAX_CHARS characters, and that reading grows with the square of the
-        // brackets.
-        if req.prompt.chars().count() > PROMPT_MAX_CHARS {
+        // most LOCAL_PROMPT_MAX_CHARS characters, and that reading grows with the square of
+        // the brackets.
+        if req.prompt.chars().count() > LOCAL_PROMPT_MAX_CHARS {
             return Err(errors::prompt_too_long_here());
         }
         if prompt_check::refuses(&req.prompt) {
@@ -511,8 +530,8 @@ impl StudioManager {
         // Free: it never asks and always passes the limit.
         let billing = spend::billing_of(&Price::Free, Some(0.0));
         let mut invalid = errors::invalid_sentences(&problems, &model);
-        if req.prompt.chars().count() > PROMPT_MAX_CHARS {
-            invalid.push(errors::PROMPT_TOO_LONG_HERE.to_owned());
+        if req.prompt.chars().count() > LOCAL_PROMPT_MAX_CHARS {
+            invalid.push(errors::PROMPT_TOO_LONG.to_owned());
         }
         let verdict = verdict.as_ref();
         Ok(EstimateDto {

@@ -348,6 +348,93 @@ describe("why a press was refused, and the model it was for", () => {
   });
 });
 
+// 0.2.0 (design 9.2): Create no longer waits on a price. Pressed while extra settings wait for
+// the model's price, it finishes that request first, then sends; when the request fails, it
+// sends without them and says so.
+describe("Create while extra settings wait for the model's price", () => {
+  const endpoint: StudioEndpoint = {
+    providerId: 1,
+    name: "OpenRouter",
+    company: "openrouter",
+    host: "openrouter.ai",
+    cloud: true,
+    hasKey: true,
+    fetchedAt: 1794900000000,
+    models: MODELS,
+  };
+  const flare = MODELS.find((m) => m.id === "openai/gpt-image-2.6-flare")!;
+  const nano = MODELS.find((m) => m.id === "google/gemini-nano-banana-2.1")!;
+  /** Nano Banana's answer from OpenRouter's endpoints: priced, with an Extra field. */
+  const nanoAnswered = {
+    ...nano,
+    priceFetchedAt: 1794909600000,
+    params: [
+      ...nano.params,
+      { ...flare.params.find((p) => p.kind.type === "extra")!, kind: { type: "extra" as const, allowedKeys: ["moderation"] } },
+    ],
+  };
+  const unreachable = { code: "network", message: "OpenRouter could not be reached.", nextStep: "Try again.", details: "" };
+
+  beforeEach(() => {
+    vi.mocked(api.studioUsage).mockResolvedValue({ spentTodayUsd: 0, pendingUsd: 0, limitUsd: 10, folder: "", bytes: 0, pictures: 0, videos: 0 });
+    vi.mocked(api.studioGetPrefs).mockResolvedValue({ lastModel: {} } as unknown as StudioPrefs);
+    vi.mocked(api.studioSetPrefs).mockResolvedValue({ lastModel: {} } as unknown as StudioPrefs);
+    vi.mocked(api.studioStart).mockResolvedValue(run({ id: "new", status: "queued" }));
+    useStudio.setState({ local: LOCAL, endpoints: [endpoint] });
+    // On Flare (its price saved), with an extra setting and a prompt.
+    useStudio.getState().chooseModel("image", { endpoint: 1 }, flare.id);
+    useStudio.setState((s) => ({
+      drafts: { ...s.drafts, image: { ...s.drafts.image, prompt: "a fox", extra: { moderation: "low" } } },
+    }));
+  });
+
+  it("Create while a price is pending waits for it, then sends with the extras", async () => {
+    let answer: (m: typeof nanoAnswered) => void = () => undefined;
+    vi.mocked(api.studioModelPrice).mockReturnValue(new Promise((resolve) => (answer = resolve)));
+    useStudio.getState().chooseModel("image", { endpoint: 1 }, nano.id);
+    expect(useStudio.getState().holding.image).toBe(true);
+    const pressed = useStudio.getState().start("image", false);
+    await flush();
+    // Waiting for the price: nothing sent yet, and another press does nothing.
+    expect(api.studioStart).not.toHaveBeenCalled();
+    expect(useStudio.getState().starting).toBe(true);
+    expect(await useStudio.getState().start("image", false)).toBeNull();
+    answer(nanoAnswered);
+    expect((await pressed)?.id).toBe("new");
+    expect(api.studioModelPrice).toHaveBeenCalledTimes(1);
+    expect(api.studioStart).toHaveBeenCalledTimes(1);
+    expect(api.studioStart).toHaveBeenCalledWith(
+      expect.objectContaining({ model: nano.id, prompt: "a fox", extra: { moderation: "low" } }),
+      false,
+    );
+    expect(useStudio.getState().holding.image).toBe(false);
+    expect(useStudio.getState().drafts.image.note).toBeNull();
+    expect(useStudio.getState().starting).toBe(false);
+  });
+
+  it("Create sends without extras when the price request fails, and says so", async () => {
+    let fail: (e: unknown) => void = () => undefined;
+    vi.mocked(api.studioModelPrice).mockReturnValue(new Promise((_, reject) => (fail = reject)));
+    useStudio.getState().chooseModel("image", { endpoint: 1 }, nano.id);
+    const pressed = useStudio.getState().start("image", false);
+    await flush();
+    fail(unreachable);
+    expect((await pressed)?.id).toBe("new");
+    expect(api.studioModelPrice).toHaveBeenCalledTimes(1);
+    expect(api.studioStart).toHaveBeenCalledWith(expect.objectContaining({ model: nano.id, extra: {} }), false);
+    expect(useStudio.getState().drafts.image.note).toBe("Sent without the extra settings: their price couldn't be read.");
+    // They stay held, for Get the price; the failure is shown where it asks again.
+    expect(useStudio.getState().holding.image).toBe(true);
+    expect(useStudio.getState().priceError.image).toEqual(unreachable);
+    // A later press asks for the price again.
+    vi.mocked(api.studioModelPrice).mockResolvedValue(nanoAnswered);
+    await useStudio.getState().start("image", false);
+    expect(api.studioModelPrice).toHaveBeenCalledTimes(2);
+    expect(api.studioStart).toHaveBeenLastCalledWith(expect.objectContaining({ extra: { moderation: "low" } }), false);
+    expect(useStudio.getState().holding.image).toBe(false);
+  });
+});
+
 // A command's answer is read before the run's task goes on, so the task's own event can come
 // first: the copy the backend numbered higher stays, whichever comes last.
 describe("a command's answer and a newer event", () => {

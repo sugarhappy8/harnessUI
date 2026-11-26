@@ -27,9 +27,17 @@ pub use super::lora_tags::{
 };
 pub use super::prompt_view::{attention_text, parse_prompt_attention, strip_prompt_markers};
 
-/// The longest local prompt, in characters: a sanity cap, as the prompt goes by file and
-/// never in argv.
-pub const PROMPT_MAX_CHARS: usize = 4_000;
+/// The longest prompt, in bytes of UTF-8: 1 MiB, a safety bound against pathological input,
+/// never shown as a limit (design 9.2). The prompt goes by file, never in argv.
+pub const PROMPT_MAX_BYTES: usize = 1_048_576;
+
+/// The longest local prompt and negative prompt, in characters, also never shown as a limit
+/// (ruling G3-safety-bound). Studio's prompt check (`studio/prompt_check.rs`) reads every
+/// local prompt four times, the last through the engine's own weighting
+/// ([`parse_prompt_attention`]), whose time grows with the square of the brackets; at this
+/// length the worst bracket nesting reads in about 0.2 s. The local lane refuses a longer
+/// prompt before the check reads it, so no local prompt skips a reading.
+pub const LOCAL_PROMPT_MAX_CHARS: usize = 16_384;
 
 /// The sides the engine is given, in pixels.
 const SIZE_RANGE: RangeInclusive<u32> = 64..=2048;
@@ -481,8 +489,8 @@ pub enum ArgsError {
     /// white space.
     #[error("the prompt is empty")]
     EmptyPrompt,
-    /// The prompt is longer than [`PROMPT_MAX_CHARS`] characters.
-    #[error("the prompt is longer than {PROMPT_MAX_CHARS} characters")]
+    /// The prompt is longer than [`PROMPT_MAX_BYTES`] bytes.
+    #[error("the prompt is longer than {PROMPT_MAX_BYTES} bytes")]
     PromptTooLong,
     /// A path is not valid Unicode (it is never converted lossily).
     #[error("the path {} is not valid Unicode", .0.display())]
@@ -610,8 +618,8 @@ pub const FLAGS: &[&str] = &[
 ///    `--disable-image-metadata` (the engine's own record holds the prompt) and
 ///    `--log-level info` (the progress reader reads the info lines).
 ///
-/// The prompt is checked not to be empty without its typed LoRA tags, and never reaches
-/// argv. Refused, whatever checked them before: a size that is not a multiple of
+/// The prompt is checked to be at most [`PROMPT_MAX_BYTES`] bytes ([`ArgsError::PromptTooLong`])
+/// and not to be empty without its typed LoRA tags, and never reaches argv. Refused, whatever checked them before: a size that is not a multiple of
 /// `size_multiple` ([`ArgsError::BadSize`]), a number the engine cannot read
 /// ([`ArgsError::NumberOutOfRange`]), extra model arguments that are not `key=value` pairs
 /// ([`ArgsError::BadModelArgs`]), a mask without a picture to change
@@ -620,11 +628,12 @@ pub const FLAGS: &[&str] = &[
 /// read back ([`ArgsError::TokenizerPath`]; one with `=` goes as `main=<path>`), and an
 /// `out_stem` that is not one plain file name ([`ArgsError::BadOutputStem`]).
 pub fn build_args(job: &SdJob) -> Result<Vec<OsString>, ArgsError> {
+    // The bound first: nothing reads a pathological prompt.
+    if job.prompt.len() > PROMPT_MAX_BYTES {
+        return Err(ArgsError::PromptTooLong);
+    }
     if strip_prompt_markers(&job.prompt).trim().is_empty() {
         return Err(ArgsError::EmptyPrompt);
-    }
-    if job.prompt.chars().count() > PROMPT_MAX_CHARS {
-        return Err(ArgsError::PromptTooLong);
     }
     if !job
         .parts
@@ -1286,30 +1295,22 @@ mod tests {
         assert_eq!(prompt_files(&job).1, Some(job.out_dir.join("negative.txt")));
     }
 
+    /// One hidden bound of 1 MiB of UTF-8 against pathological input (design 9.2): no
+    /// character cap any more.
     #[test]
-    fn the_prompt_is_capped_at_4000_characters() {
-        assert!(
-            build_args(&SdJob {
-                prompt: "a".repeat(4_000),
-                ..klein_job()
-            })
-            .is_ok()
-        );
-        assert_eq!(
-            build_args(&SdJob {
-                prompt: "a".repeat(4_001),
-                ..klein_job()
-            }),
-            Err(ArgsError::PromptTooLong)
-        );
-        // Characters, not bytes: 4,000 three-byte characters are allowed.
-        assert!(
-            build_args(&SdJob {
-                prompt: "風".repeat(4_000),
-                ..klein_job()
-            })
-            .is_ok()
-        );
+    fn a_prompt_up_to_1_mib_is_accepted_and_one_byte_more_refused() {
+        let mut j = klein_job();
+        j.prompt = "a".repeat(5_000);
+        assert!(build_args(&j).is_ok());
+        j.prompt = "a".repeat(PROMPT_MAX_BYTES);
+        assert!(build_args(&j).is_ok());
+        j.prompt.push('a');
+        assert_eq!(build_args(&j), Err(ArgsError::PromptTooLong));
+        // Bytes, not characters: 349,525 three-byte characters fit, one more does not.
+        j.prompt = "風".repeat(PROMPT_MAX_BYTES / 3);
+        assert!(build_args(&j).is_ok());
+        j.prompt.push('風');
+        assert_eq!(build_args(&j), Err(ArgsError::PromptTooLong));
     }
 
     #[test]

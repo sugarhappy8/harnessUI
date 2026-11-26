@@ -48,7 +48,7 @@ const api = await import("./api");
 const { StudioView } = await import("./StudioView");
 const { UiProviders } = await import("../ui/UiProviders");
 const { cloudBackup } = await import("./cost");
-const { PROMPT_MAX_CHARS, promptProblems, settingsProblems, useStudio } = await import("../../store/studio");
+const { PROMPT_BOUNDS, promptProblems, settingsProblems, useStudio } = await import("../../store/studio");
 
 const INITIAL = useStudio.getState();
 
@@ -775,20 +775,18 @@ describe("Composer", () => {
       );
     });
 
-    it("Create waits while extra settings are held for the model's price, and says so", async () => {
+    // 0.2.0 (design 9.2): Create no longer waits on a price; pressed, it finishes the price
+    // request first (the store's tests follow that request).
+    it("Create stays on while extra settings are held for the model's price, which it says", async () => {
       await show({ prefs: prefs({ lastModel: CLOUD_LAST }) });
       typePrompt("a fox");
       await flush();
       act(() => useStudio.setState({ holding: { image: true, video: false } }));
-      expect(createButton().disabled).toBe(true);
+      expect(createButton().disabled).toBe(false);
       screen.getByText(STUDIO_DOCK.holdingExtra(false));
-      fireEvent.keyDown(promptBox(), { key: "Enter" });
-      await act(async () => {
-        await useStudio.getState().start("image", false);
-      });
-      expect(api.studioStart).not.toHaveBeenCalled();
       act(() => useStudio.setState({ holding: { image: false, video: false } }));
       expect(createButton().disabled).toBe(false);
+      expect(screen.queryByText(STUDIO_DOCK.holdingExtra(false))).toBeNull();
     });
 
     it("Create waits while a field shows a size that cannot be sent, and says why", async () => {
@@ -1002,20 +1000,25 @@ describe("Composer", () => {
       expect(screen.getByText("Write a prompt first.").parentElement!.className).toContain("text-danger");
     });
 
-    it("a prompt over 32,000 characters, or of white space only, says so before Create", async () => {
+    it("a prompt past its hidden bound, or of white space only, says so before Create", async () => {
       await show({ prefs: prefs({ lastModel: CLOUD_LAST }) });
       // Judged on the prompt as it is, before any answer for it.
       vi.mocked(api.studioEstimate).mockClear();
       typePrompt(" \n\u00A0\u0085\u2003");
       screen.getByText("Write a prompt first.");
       expect(createButton().disabled).toBe(true);
-      typePrompt("x".repeat(32_001));
-      screen.getByText("Keep the prompt under 32,000 characters.");
+      // 0.1.x's 32,000 characters are no cap any more (design 9.2).
+      typePrompt("x".repeat(40_000));
+      expect(screen.queryByText("This prompt is too long.")).toBeNull();
+      expect(createButton().disabled).toBe(false);
+      // Past 1 MiB of UTF-8, the one hidden bound.
+      typePrompt("x".repeat(1_048_577));
+      screen.getByText("This prompt is too long.");
       expect(createButton().disabled).toBe(true);
       fireEvent.keyDown(promptBox(), { key: "Enter" });
       expect(api.studioStart).not.toHaveBeenCalled();
-      typePrompt("x".repeat(32_000));
-      expect(screen.queryByText(/^Keep the prompt under/)).toBeNull();
+      typePrompt("x".repeat(1_048_576));
+      expect(screen.queryByText("This prompt is too long.")).toBeNull();
       expect(createButton().disabled).toBe(false);
       expect(api.studioEstimate).not.toHaveBeenCalled();
     });
@@ -1203,11 +1206,15 @@ describe("Composer", () => {
       expect(api.studioStart).toHaveBeenCalledTimes(1);
     });
 
-    it("a local prompt over 4,000 characters says so before Create", async () => {
-      const tooLong = "Keep the prompt under 4,000 characters for local models.";
+    it("a local prompt past its hidden bound says so before Create", async () => {
+      const tooLong = "This prompt is too long.";
       await show({ estimate: here() });
+      // 0.1.x's 4,000 characters are no cap any more (design 9.2).
+      typePrompt("x".repeat(5_000));
+      expect(screen.queryByText(tooLong)).toBeNull();
+      expect(createButton().disabled).toBe(false);
       vi.mocked(api.studioEstimate).mockResolvedValue(here({}, { invalid: [tooLong] }));
-      typePrompt("x".repeat(4_001));
+      typePrompt("x".repeat(16_385));
       // Said at once, on the prompt as it is.
       screen.getByText(tooLong);
       expect(createButton().disabled).toBe(true);
@@ -1216,9 +1223,9 @@ describe("Composer", () => {
       // The answer says the same; it is said once.
       await estimated();
       expect(screen.getAllByText(tooLong)).toHaveLength(1);
-      // Counted as the backend counts: 4,000 characters, however many UTF-16 units they take.
+      // Counted as the backend counts: 16,384 characters, however many UTF-16 units they take.
       // The answer shown, for the longer prompt, no longer holds Create back.
-      typePrompt("🦊".repeat(4_000));
+      typePrompt("🦊".repeat(16_384));
       expect(screen.queryByText(tooLong)).toBeNull();
       expect(createButton().disabled).toBe(false);
       fireEvent.keyDown(promptBox(), { key: "Enter" });
@@ -1504,29 +1511,36 @@ describe("the prompt's own checks", () => {
     return Number(found?.replace(/_/g, ""));
   }
 
-  it("are the backend's: the same caps, in the same words", () => {
-    expect(rustConst("crates/runtime/src/sd/args.rs", "PROMPT_MAX_CHARS")).toBe(PROMPT_MAX_CHARS.thisComputer);
-    expect(rustConst("crates/agent/src/media/spec.rs", "PROMPT_MAX_CHARS")).toBe(PROMPT_MAX_CHARS.cloud);
+  it("are the backend's: the same hidden bounds, in the same words", () => {
+    expect(rustConst("crates/runtime/src/sd/args.rs", "LOCAL_PROMPT_MAX_CHARS")).toBe(PROMPT_BOUNDS.localChars);
+    expect(rustConst("crates/runtime/src/sd/args.rs", "PROMPT_MAX_BYTES")).toBe(PROMPT_BOUNDS.bytes);
     const errors = readFileSync(resolve(process.cwd(), "src-tauri/src/studio/errors.rs"), "utf8");
-    for (const sentence of [STUDIO_DOCK.writePrompt, STUDIO_DOCK.promptTooLong, STUDIO_DOCK.promptTooLongHere]) {
+    for (const sentence of [STUDIO_DOCK.writePrompt, STUDIO_DOCK.promptTooLong]) {
       expect(errors).toContain(`"${sentence}"`);
     }
   });
 
-  it("count as the backend counts: white space as Unicode has it, characters not UTF-16 units", () => {
+  it("count as the backend counts: white space as Unicode has it, characters here, bytes for the cloud", () => {
     const cloud = { endpoint: 1 };
+    const tooLong = ["This prompt is too long."];
     expect(promptProblems("", "thisComputer")).toEqual(["Write a prompt first."]);
     // Rust's trim takes NEL (U+0085) and the line separator, and leaves U+FEFF.
     expect(promptProblems(" \t\n\u00A0\u0085\u2028\u3000", cloud)).toEqual(["Write a prompt first."]);
     expect(promptProblems("\uFEFF", cloud)).toEqual([]);
-    expect(promptProblems("x".repeat(4_000), "thisComputer")).toEqual([]);
-    expect(promptProblems("x".repeat(4_001), "thisComputer")).toEqual([
-      "Keep the prompt under 4,000 characters for local models.",
-    ]);
-    expect(promptProblems("🦊".repeat(4_000), "thisComputer")).toEqual([]);
-    expect(promptProblems("x".repeat(32_000), cloud)).toEqual([]);
-    expect(promptProblems("🦊".repeat(32_000), cloud)).toEqual([]);
-    expect(promptProblems("x".repeat(32_001), cloud)).toEqual(["Keep the prompt under 32,000 characters."]);
+    // The 0.1.x caps are gone: 5,000 characters go anywhere, 40,000 to the cloud.
+    expect(promptProblems("x".repeat(5_000), "thisComputer")).toEqual([]);
+    expect(promptProblems("x".repeat(40_000), cloud)).toEqual([]);
+    // On this computer, characters (not UTF-16 units) up to the bound the prompt check reads.
+    expect(promptProblems("x".repeat(16_384), "thisComputer")).toEqual([]);
+    expect(promptProblems("🦊".repeat(16_384), "thisComputer")).toEqual([]);
+    expect(promptProblems("x".repeat(16_385), "thisComputer")).toEqual(tooLong);
+    // For the cloud, bytes of UTF-8 up to 1 MiB: "é" takes two, "🦊" four.
+    expect(promptProblems("x".repeat(1_048_576), cloud)).toEqual([]);
+    expect(promptProblems("x".repeat(1_048_577), cloud)).toEqual(tooLong);
+    expect(promptProblems("é".repeat(524_288), cloud)).toEqual([]);
+    expect(promptProblems("é".repeat(524_289), cloud)).toEqual(tooLong);
+    expect(promptProblems("🦊".repeat(262_144), cloud)).toEqual([]);
+    expect(promptProblems("🦊".repeat(262_145), cloud)).toEqual(tooLong);
   });
 
   it("leave the prompt's sentences out of an estimate's, and keep the rest", () => {
@@ -1534,8 +1548,7 @@ describe("the prompt's own checks", () => {
       invalid: [
         "Write a prompt first.",
         "This model takes at most 8 reference pictures.",
-        "Keep the prompt under 32,000 characters.",
-        "Keep the prompt under 4,000 characters for local models.",
+        "This prompt is too long.",
       ],
     });
     expect(settingsProblems(answer)).toEqual(["This model takes at most 8 reference pictures."]);

@@ -1396,10 +1396,13 @@ export const STUDIO_COMPANY: Record<Company, string> = {
 export const STUDIO_DOCK = {
   create: "Create",
   /** Under the prompt, judged on it as it is: the backend's own words for the same checks
-   *  (`errors::invalid_sentences`, `errors::PROMPT_TOO_LONG_HERE`). */
+   *  (`errors::invalid_sentences`, `errors::PROMPT_TOO_LONG`). */
   writePrompt: "Write a prompt first.",
-  promptTooLong: "Keep the prompt under 32,000 characters.",
-  promptTooLongHere: "Keep the prompt under 4,000 characters for local models.",
+  /** A prompt over its hidden bound (design 9.2: never shown as a limit), local or cloud. */
+  promptTooLong: "This prompt is too long.",
+  /** Create pressed while the extra settings waited for the model's price, which could not
+   *  be read: the run went without them (they stay held for *Get the price*). */
+  sentWithoutExtra: "Sent without the extra settings: their price couldn't be read.",
   /** A cloud run's estimate for the whole run, on Create: "~ $0.16". */
   estimate: (usd: string) => `~ ${usd}`,
   /** The privacy line under the composer, for a model on this computer. */
@@ -2332,6 +2335,8 @@ export function setupProblem(code: string | null | undefined): SetupProblem | nu
 export const LOCAL_WARNING = {
   mayNotFit: (reason: string) => `May not fit this computer: ${reason}. It may fail or be very slow.`,
   videoOnProcessor: "Video on the processor is very slow",
+  /** In the update box while a local job runs: installing stops it (design 9.2). */
+  updateStopsIt: "Installing stops the picture being made",
 } as const;
 
 /** When a Hugging Face repository was last updated, as a result card says it: "today",

@@ -123,7 +123,11 @@ pub fn attention_text(text: &str) -> String {
 /// pieces always have equal weights and are joined back, so this reads them whole. Like the
 /// engine, it multiplies every segment a bracket holds when the bracket closes, so its time
 /// grows with the segments times the brackets; [`attention_text`] reads the same text in
-/// linear time.
+/// linear time. The weights multiply as the engine's floats do, bit for bit, but never take
+/// the processor's slow path for subnormal numbers ([`times`]), where many square brackets
+/// leave them (1/1.1 never takes a weight of five subnormal steps or fewer any lower): with
+/// it, 8,192 `[` before 8,192 segments took 2.2 s instead of 0.2 s (ruling
+/// G3-safety-bound).
 pub fn parse_prompt_attention(text: &str) -> Vec<(String, f32)> {
     let mut res: Vec<(String, f32)> = Vec::new();
     let mut round_brackets: Vec<usize> = Vec::new();
@@ -131,7 +135,7 @@ pub fn parse_prompt_attention(text: &str) -> Vec<(String, f32)> {
     let square_bracket_multiplier = 1.0 / ROUND_BRACKET_MULTIPLIER;
     let multiply_range = |res: &mut Vec<(String, f32)>, start: usize, multiplier: f32| {
         for segment in &mut res[start..] {
-            segment.1 *= multiplier;
+            segment.1 = times(segment.1, multiplier);
         }
     };
     for event in AttentionEvents::new(text) {
@@ -174,6 +178,49 @@ pub fn parse_prompt_attention(text: &str) -> Vec<(String, f32)> {
         }
     }
     merged
+}
+
+/// The smallest normal `f32`, 2^-126, as an `f64`.
+const F32_MIN_NORMAL: f64 = 1.0 / (1u128 << 126) as f64;
+
+/// 2^149: one step of the subnormal `f32`s, 2^-149, scaled to 1.
+const F32_SUBNORMAL_STEPS: f64 = (1u128 << 100) as f64 * (1u64 << 49) as f64;
+
+/// 2^52: a non-negative `f64` below it, plus this and minus it again, is rounded to a whole
+/// number, ties to even.
+const WHOLE: f64 = (1u64 << 52) as f64;
+
+/// `weight * multiplier` exactly as the engine's `float *=` gives it (rounded to nearest,
+/// ties to even, with gradual underflow and overflow to infinity), without the processor's
+/// slow path for a subnormal operand or result, which takes about a hundred times as long.
+///
+/// Both widen to `f64` exactly (a subnormal one from its bits), and their product is exact
+/// there: 24-bit significands make at most 48 bits, and the exponents stay far from `f64`'s
+/// limits. The product then rounds once to `f32`: by the conversion when it is at least the
+/// smallest normal `f32` (or 0, infinite or NaN), else to a whole number of subnormal steps.
+/// The `f64`s are never subnormal.
+fn times(weight: f32, multiplier: f32) -> f32 {
+    let product = wide(weight) * wide(multiplier);
+    let size = product.abs();
+    if size > 0.0 && size < F32_MIN_NORMAL {
+        // At most 2^23 steps: 2^23 itself is the smallest normal `f32`, as its bits say.
+        let steps = ((size * F32_SUBNORMAL_STEPS + WHOLE) - WHOLE) as u32;
+        return f32::from_bits(u32::from(product.is_sign_negative()) << 31 | steps);
+    }
+    // 0, NaN, infinity and the sizes of normal `f32`s convert as they are.
+    product as f32
+}
+
+/// `x` as an `f64`, the same number: a subnormal `f32` from its bits, never through the
+/// processor's slow path.
+fn wide(x: f32) -> f64 {
+    if x.is_subnormal() {
+        let bits = x.to_bits();
+        let size = f64::from(bits & 0x007f_ffff) / F32_SUBNORMAL_STEPS;
+        if bits >> 31 == 1 { -size } else { size }
+    } else {
+        f64::from(x)
+    }
 }
 
 /// A round `(` or square `[` bracket.
@@ -410,6 +457,130 @@ mod tests {
             exact("[(a:+.5)]"),
             [("a".to_owned(), (0.5f32 / 1.1).to_bits())]
         );
+    }
+
+    /// The weights multiply exactly as the engine's floats do (`float *=`, rounded to
+    /// nearest, ties to even, with gradual underflow), bit for bit, subnormal weights
+    /// included: only the processor's slow path for them is left out (ruling
+    /// G3-safety-bound).
+    #[test]
+    fn the_weights_multiply_as_the_engines_floats_do() {
+        let edges = [
+            0.0f32,
+            -0.0,
+            f32::from_bits(1),
+            f32::from_bits(2),
+            f32::from_bits(3),
+            f32::from_bits(0x0040_0000),
+            f32::from_bits(0x007f_ffff),
+            -f32::from_bits(1),
+            f32::MIN_POSITIVE,
+            f32::MIN_POSITIVE * 1.5,
+            1.0,
+            ROUND_BRACKET_MULTIPLIER,
+            1.0 / ROUND_BRACKET_MULTIPLIER,
+            0.5,
+            -1.0,
+            1.2,
+            f32::MAX,
+            f32::MIN,
+            f32::INFINITY,
+            f32::NEG_INFINITY,
+            f32::NAN,
+        ];
+        let same = |w: f32, m: f32| {
+            let (ours, native) = (times(w, m), w * m);
+            assert!(
+                ours.to_bits() == native.to_bits() || (ours.is_nan() && native.is_nan()),
+                "{w:e} ({:#010x}) * {m:e}: {ours:e} ({:#010x}), the engine's {native:e} ({:#010x})",
+                w.to_bits(),
+                ours.to_bits(),
+                native.to_bits()
+            );
+        };
+        for &w in &edges {
+            for &m in &edges {
+                same(w, m);
+            }
+        }
+        // Random bits, most of them near or below the smallest normal weight.
+        let mut state = 0x2545_f491_4f6c_dd1du64;
+        let mut next = move || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state
+        };
+        for _ in 0..200_000 {
+            let r = next();
+            let low = |bits: u64| f32::from_bits((bits as u32) & 0x81ff_ffff);
+            let w = if r & 1 == 0 {
+                low(r >> 1)
+            } else {
+                f32::from_bits((r >> 1) as u32)
+            };
+            let m = match (r >> 40) % 4 {
+                0 => ROUND_BRACKET_MULTIPLIER,
+                1 => 1.0 / ROUND_BRACKET_MULTIPLIER,
+                2 => f32::from_bits((next() >> 20) as u32),
+                _ => (next() % 4_000) as f32 / 1_000.0,
+            };
+            same(w, m);
+        }
+    }
+
+    /// Deep brackets carry a weight past the floats' range, into the subnormal weights (where
+    /// `1/1.1` stops changing a small one) and to infinity: the segments still split where
+    /// the engine's weights differ, bit for bit.
+    #[test]
+    fn deep_brackets_weigh_as_the_engines_floats_do() {
+        let exact = |text: &str| -> Vec<(String, u32)> {
+            parse_prompt_attention(text)
+                .into_iter()
+                .map(|(segment, weight)| (segment, weight.to_bits()))
+                .collect()
+        };
+        let native = |multipliers: &[f32]| multipliers.iter().fold(1.0f32, |w, m| w * m);
+        let square = 1.0 / ROUND_BRACKET_MULTIPLIER;
+        let one = 1.0f32.to_bits();
+        let closed = format!("{}a{}b", "[".repeat(1_200), "]".repeat(1_200));
+        assert_eq!(
+            exact(&closed),
+            [
+                ("a".to_owned(), native(&[square; 1_200]).to_bits()),
+                ("b".to_owned(), one)
+            ]
+        );
+        // Five steps of the smallest subnormal times 1/1.1 round back to five: it stays.
+        assert_eq!(native(&[square; 1_200]).to_bits(), 5);
+        assert_eq!(native(&[square; 1_201]).to_bits(), 5);
+        let unclosed = format!("{}a", "(".repeat(1_000));
+        assert_eq!(
+            exact(&unclosed),
+            [("a".to_owned(), f32::INFINITY.to_bits())]
+        );
+        // Unclosed brackets count at the end, the round ones first.
+        let mixed = format!("b{}a", "([".repeat(600));
+        let mut order = vec![ROUND_BRACKET_MULTIPLIER; 600];
+        order.extend([square; 600]);
+        assert_eq!(
+            exact(&mixed),
+            [
+                ("b".to_owned(), one),
+                ("a".to_owned(), native(&order).to_bits())
+            ]
+        );
+        // A weight just above the smallest normal one, then made smaller by a square bracket.
+        let tiny: f32 = "0.000000000000000000000000000000000000012".parse().unwrap();
+        let below = "[(a:0.000000000000000000000000000000000000012)]x";
+        assert_eq!(
+            exact(below),
+            [
+                ("a".to_owned(), native(&[tiny, square]).to_bits()),
+                ("x".to_owned(), one)
+            ]
+        );
+        assert!(native(&[tiny, square]).is_subnormal());
     }
 
     #[test]

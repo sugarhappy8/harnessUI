@@ -547,6 +547,18 @@ describe("ParamField", () => {
       expect(onReset).not.toHaveBeenCalled();
     });
 
+    // 0.2.0 (design 9.2): the limit is a hidden bound, so its count shows only near it.
+    it("shows what is left only when fewer than 1,000 characters remain", () => {
+      const long = spec({ ...negative, kind: { type: "text", maxChars: 16_384 } });
+      const left = () => screen.queryByText(/ left$/);
+      const { rerender } = render(<ParamField spec={long} value={undefined} onChange={vi.fn()} onReset={vi.fn()} />);
+      expect(left()).toBeNull();
+      rerender(<ParamField spec={long} value={"a".repeat(15_384)} onChange={vi.fn()} onReset={vi.fn()} />);
+      expect(left()).toBeNull();
+      rerender(<ParamField spec={long} value={"a".repeat(15_385)} onChange={vi.fn()} onReset={vi.fn()} />);
+      expect(left()?.textContent).toBe("999 left");
+    });
+
     it("emptied, the field is unset", () => {
       const { onChange, onReset } = field(negative, "blur");
       fireEvent.change(screen.getByRole("textbox", { name: "Leave out" }), { target: { value: "" } });
