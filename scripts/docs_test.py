@@ -561,8 +561,13 @@ class Studio0_2_0Docs(unittest.TestCase):
         self.assertRegex(index, r"pub const GGUF_HEADER_CAP: u64 = 64 \* 1024 \* 1024;")
         self.assertRegex(read("crates/models/src/sd/remote.rs"), r"pub const MAX_FILES_PER_REPO: usize = 24;")
         self.assertRegex(read("src-tauri/src/studio/detect.rs"), r"pub const CACHE_ENTRIES: usize = 512;")
+        # Security residuals, item 1: a safetensors header's metadata and shapes are bounded.
+        self.assertRegex(index, r"const MAX_KEPT_METADATA: u64 = 16 \* 1024 \* 1024;")
+        self.assertRegex(index, r"const MAX_METADATA_ENTRIES: usize = 65_536;")
+        self.assertRegex(index, r"const MAX_SHAPE_DIMS: usize = 8;")
         text = "\n".join(section("### 7.10 Any model the engine can run (0.2.0)"))
-        for words in ("100 MiB", "64 MiB", "24 files", "512 entries", "Range"):
+        for words in ("100 MiB", "64 MiB", "24 files", "512 entries", "Range",
+                      "more than 8 dimensions", "65,536 entries and 16 MiB of keys and values"):
             self.assertIn(words, text)
 
     def test_7_10_names_the_recipes_and_their_commit(self):

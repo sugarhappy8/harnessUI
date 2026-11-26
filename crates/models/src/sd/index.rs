@@ -11,9 +11,8 @@ use std::io::Read;
 use std::path::Path;
 
 use std::fmt;
-use std::marker::PhantomData;
 
-use serde::de::{self, IgnoredAny, MapAccess, SeqAccess, Visitor};
+use serde::de::{self, DeserializeSeed, IgnoredAny, MapAccess, SeqAccess, Visitor};
 use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::Value;
 
@@ -30,6 +29,14 @@ pub const READ_EXTENSIONS: [&str; 3] = [".safetensors", ".sft", ".gguf"];
 
 /// The first read of a local file.
 const FIRST_READ: u64 = 1024 * 1024;
+
+/// The most key and value bytes of a safetensors `__metadata__` kept, as GGUF keeps at most
+/// 16 MiB of metadata (`gguf::MAX_KEPT_TOTAL`); an entry that would go past it is read past.
+const MAX_KEPT_METADATA: u64 = 16 * 1024 * 1024;
+/// The most `__metadata__` entries kept; the rest are skipped unread. Real headers have tens.
+const MAX_METADATA_ENTRIES: usize = 65_536;
+/// A tensor shape longer than this is damage. The engine allows 5 (`SD_MAX_DIMS`).
+const MAX_SHAPE_DIMS: usize = 8;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -173,9 +180,13 @@ fn parse_safetensors(bytes: &[u8]) -> Result<TensorIndex, IndexError> {
     })
 }
 
-/// What the index keeps of a safetensors header. Only each tensor's dtype and shape and the
-/// metadata's string values are kept; every other field is skipped unread, so a header within
-/// the cap cannot take more memory than its tensors' names and shapes (final review I-1).
+/// What the index keeps of a safetensors header: each tensor's dtype and shape, and the
+/// metadata's string values within a budget. Every other field is skipped unread; more than
+/// `max_tensors` tensors, or a shape of more than [`MAX_SHAPE_DIMS`] dimensions, is refused as
+/// it is read; and `__metadata__` keeps at most [`MAX_METADATA_ENTRIES`] entries and
+/// [`MAX_KEPT_METADATA`] bytes of keys and values, reading past the rest. So what a header
+/// within the cap keeps is its tensors' names and dtypes, a fixed cost of a few hundred bytes
+/// for each of at most 262,144 tensors, and at most 16 MiB of metadata (final review I-1).
 struct Header {
     /// Sorted by name; a repeated name keeps its last value, as `nlohmann::json` does.
     tensors: BTreeMap<String, Entry>,
@@ -186,7 +197,32 @@ struct Header {
 #[derive(Deserialize)]
 struct Entry {
     dtype: String,
+    #[serde(deserialize_with = "bounded_shape")]
     shape: Vec<u64>,
+}
+
+/// A shape, refused as damage at its dimension past [`MAX_SHAPE_DIMS`].
+fn bounded_shape<'de, D: Deserializer<'de>>(d: D) -> Result<Vec<u64>, D::Error> {
+    struct V;
+    impl<'de> Visitor<'de> for V {
+        type Value = Vec<u64>;
+        fn expecting(&self, f: &mut fmt::Formatter) -> fmt::Result {
+            f.write_str("a tensor shape")
+        }
+        fn visit_seq<A: SeqAccess<'de>>(self, mut seq: A) -> Result<Vec<u64>, A::Error> {
+            let mut dims = Vec::new();
+            while let Some(d) = seq.next_element::<u64>()? {
+                if dims.len() == MAX_SHAPE_DIMS {
+                    return Err(de::Error::custom(format!(
+                        "a tensor with more than {MAX_SHAPE_DIMS} dimensions"
+                    )));
+                }
+                dims.push(d);
+            }
+            Ok(dims)
+        }
+    }
+    d.deserialize_seq(V)
 }
 
 /// The header in `json`, refused as damage past `max_tensors` entries, counted as they are
@@ -217,13 +253,7 @@ impl<'de> Visitor<'de> for HeaderVisitor {
         let mut seen = 0u64;
         while let Some(name) = map.next_key::<String>()? {
             if name == "__metadata__" {
-                // Not an object: ignored, as before.
-                let m: IfObject<BTreeMap<String, IfString>> = map.next_value()?;
-                metadata =
-                    m.0.unwrap_or_default()
-                        .into_iter()
-                        .filter_map(|(k, v)| v.0.map(|v| (k, v)))
-                        .collect();
+                map.next_value_seed(Metadata(&mut metadata))?;
                 continue;
             }
             seen += 1;
@@ -240,88 +270,127 @@ impl<'de> Visitor<'de> for HeaderVisitor {
     }
 }
 
-/// A `T` when the JSON value is an object; any other value is skipped unread.
-struct IfObject<T>(Option<T>);
+/// Reads a `__metadata__` value straight into the kept map, replacing what an earlier
+/// `__metadata__` left there, as a repeated key does. A value that is not an object keeps
+/// nothing, as before. Only `ss_base_model_version` is read from it (`lora::base`, a hint
+/// after the tensor names), so what does not fit the budget is read past, not refused.
+struct Metadata<'a>(&'a mut BTreeMap<String, String>);
 
-impl<'de, T: Deserialize<'de>> Deserialize<'de> for IfObject<T> {
-    fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
-        struct V<T>(PhantomData<T>);
-        impl<'de, T: Deserialize<'de>> Visitor<'de> for V<T> {
-            type Value = IfObject<T>;
-            fn expecting(&self, f: &mut fmt::Formatter) -> fmt::Result {
-                f.write_str("any value")
-            }
-            fn visit_map<A: MapAccess<'de>>(self, map: A) -> Result<Self::Value, A::Error> {
-                T::deserialize(de::value::MapAccessDeserializer::new(map))
-                    .map(|t| IfObject(Some(t)))
-            }
-            fn visit_seq<A: SeqAccess<'de>>(self, seq: A) -> Result<Self::Value, A::Error> {
-                skip_seq(seq).map(|()| IfObject(None))
-            }
-            fn visit_str<E: de::Error>(self, _: &str) -> Result<Self::Value, E> {
-                Ok(IfObject(None))
-            }
-            fn visit_bool<E: de::Error>(self, _: bool) -> Result<Self::Value, E> {
-                Ok(IfObject(None))
-            }
-            fn visit_i64<E: de::Error>(self, _: i64) -> Result<Self::Value, E> {
-                Ok(IfObject(None))
-            }
-            fn visit_u64<E: de::Error>(self, _: u64) -> Result<Self::Value, E> {
-                Ok(IfObject(None))
-            }
-            fn visit_f64<E: de::Error>(self, _: f64) -> Result<Self::Value, E> {
-                Ok(IfObject(None))
-            }
-            fn visit_unit<E: de::Error>(self) -> Result<Self::Value, E> {
-                Ok(IfObject(None))
-            }
-        }
-        d.deserialize_any(V(PhantomData))
+impl<'de> DeserializeSeed<'de> for Metadata<'_> {
+    type Value = ();
+
+    fn deserialize<D: Deserializer<'de>>(self, d: D) -> Result<(), D::Error> {
+        self.0.clear();
+        d.deserialize_any(self)
     }
 }
 
-/// A string value; any other value is skipped unread.
-struct IfString(Option<String>);
+impl<'de> Visitor<'de> for Metadata<'_> {
+    type Value = ();
 
-impl<'de> Deserialize<'de> for IfString {
-    fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
-        struct V;
-        impl<'de> Visitor<'de> for V {
-            type Value = IfString;
-            fn expecting(&self, f: &mut fmt::Formatter) -> fmt::Result {
-                f.write_str("any value")
+    fn expecting(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        f.write_str("any value")
+    }
+
+    /// Each string entry is kept while it fits [`MAX_KEPT_METADATA`]; one that does not is
+    /// read past, and once [`MAX_METADATA_ENTRIES`] are kept the rest are skipped unread.
+    fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<(), A::Error> {
+        let kept = self.0;
+        // The key and value bytes in `kept`.
+        let mut bytes = 0u64;
+        while kept.len() < MAX_METADATA_ENTRIES {
+            let Some(key) = map.next_key::<String>()? else {
+                return Ok(());
+            };
+            // A repeated key: the file's last value wins, so the earlier one goes either way.
+            if let Some(old) = kept.remove(&key) {
+                bytes -= kept_cost(&key, &old);
             }
-            fn visit_str<E: de::Error>(self, s: &str) -> Result<IfString, E> {
-                Ok(IfString(Some(s.to_string())))
-            }
-            fn visit_string<E: de::Error>(self, s: String) -> Result<IfString, E> {
-                Ok(IfString(Some(s)))
-            }
-            fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<IfString, A::Error> {
-                while map.next_entry::<IgnoredAny, IgnoredAny>()?.is_some() {}
-                Ok(IfString(None))
-            }
-            fn visit_seq<A: SeqAccess<'de>>(self, seq: A) -> Result<IfString, A::Error> {
-                skip_seq(seq).map(|()| IfString(None))
-            }
-            fn visit_bool<E: de::Error>(self, _: bool) -> Result<IfString, E> {
-                Ok(IfString(None))
-            }
-            fn visit_i64<E: de::Error>(self, _: i64) -> Result<IfString, E> {
-                Ok(IfString(None))
-            }
-            fn visit_u64<E: de::Error>(self, _: u64) -> Result<IfString, E> {
-                Ok(IfString(None))
-            }
-            fn visit_f64<E: de::Error>(self, _: f64) -> Result<IfString, E> {
-                Ok(IfString(None))
-            }
-            fn visit_unit<E: de::Error>(self) -> Result<IfString, E> {
-                Ok(IfString(None))
+            let value = match MAX_KEPT_METADATA.checked_sub(bytes + key.len() as u64) {
+                Some(room) => map.next_value_seed(StringWithin(room))?,
+                None => map.next_value::<IgnoredAny>().map(|_| None)?,
+            };
+            if let Some(value) = value {
+                bytes += kept_cost(&key, &value);
+                kept.insert(key, value);
             }
         }
-        d.deserialize_any(V)
+        while map.next_entry::<IgnoredAny, IgnoredAny>()?.is_some() {}
+        Ok(())
+    }
+    fn visit_seq<A: SeqAccess<'de>>(self, seq: A) -> Result<(), A::Error> {
+        skip_seq(seq)
+    }
+    fn visit_str<E: de::Error>(self, _: &str) -> Result<(), E> {
+        Ok(())
+    }
+    fn visit_bool<E: de::Error>(self, _: bool) -> Result<(), E> {
+        Ok(())
+    }
+    fn visit_i64<E: de::Error>(self, _: i64) -> Result<(), E> {
+        Ok(())
+    }
+    fn visit_u64<E: de::Error>(self, _: u64) -> Result<(), E> {
+        Ok(())
+    }
+    fn visit_f64<E: de::Error>(self, _: f64) -> Result<(), E> {
+        Ok(())
+    }
+    fn visit_unit<E: de::Error>(self) -> Result<(), E> {
+        Ok(())
+    }
+}
+
+/// What a kept metadata entry takes from [`MAX_KEPT_METADATA`].
+fn kept_cost(key: &str, value: &str) -> u64 {
+    (key.len() + value.len()) as u64
+}
+
+/// A string value of at most `.0` bytes; a longer string, or any other value, is skipped
+/// unkept and gives `None`.
+struct StringWithin(u64);
+
+impl<'de> DeserializeSeed<'de> for StringWithin {
+    type Value = Option<String>;
+
+    fn deserialize<D: Deserializer<'de>>(self, d: D) -> Result<Option<String>, D::Error> {
+        d.deserialize_any(self)
+    }
+}
+
+impl<'de> Visitor<'de> for StringWithin {
+    type Value = Option<String>;
+
+    fn expecting(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        f.write_str("any value")
+    }
+    fn visit_str<E: de::Error>(self, s: &str) -> Result<Option<String>, E> {
+        Ok((s.len() as u64 <= self.0).then(|| s.to_string()))
+    }
+    fn visit_string<E: de::Error>(self, s: String) -> Result<Option<String>, E> {
+        Ok((s.len() as u64 <= self.0).then_some(s))
+    }
+    fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<Option<String>, A::Error> {
+        while map.next_entry::<IgnoredAny, IgnoredAny>()?.is_some() {}
+        Ok(None)
+    }
+    fn visit_seq<A: SeqAccess<'de>>(self, seq: A) -> Result<Option<String>, A::Error> {
+        skip_seq(seq).map(|()| None)
+    }
+    fn visit_bool<E: de::Error>(self, _: bool) -> Result<Option<String>, E> {
+        Ok(None)
+    }
+    fn visit_i64<E: de::Error>(self, _: i64) -> Result<Option<String>, E> {
+        Ok(None)
+    }
+    fn visit_u64<E: de::Error>(self, _: u64) -> Result<Option<String>, E> {
+        Ok(None)
+    }
+    fn visit_f64<E: de::Error>(self, _: f64) -> Result<Option<String>, E> {
+        Ok(None)
+    }
+    fn visit_unit<E: de::Error>(self) -> Result<Option<String>, E> {
+        Ok(None)
     }
 }
 
@@ -582,6 +651,187 @@ mod tests {
         let mut file = (json.len() as u64).to_le_bytes().to_vec();
         file.extend_from_slice(json);
         assert!(matches!(parse_prefix(&file), Err(IndexError::Corrupt(_))));
+    }
+
+    /// A safetensors file whose header is `__metadata__` holding `entries` in this order,
+    /// then one tensor `t`.
+    fn metadata_heavy(entries: impl Iterator<Item = (String, String)>) -> Vec<u8> {
+        let mut json = String::from(r#"{"__metadata__":{"#);
+        for (i, (k, v)) in entries.enumerate() {
+            if i > 0 {
+                json.push(',');
+            }
+            json.push_str(&format!(r#""{k}":"{v}""#));
+        }
+        json.push_str(r#"},"t":{"dtype":"F16","shape":[2],"data_offsets":[0,4]}}"#);
+        let mut out = (json.len() as u64).to_le_bytes().to_vec();
+        out.extend(json.into_bytes());
+        out
+    }
+
+    /// The key and value bytes `metadata` keeps.
+    fn kept_bytes(metadata: &BTreeMap<String, String>) -> u64 {
+        metadata
+            .iter()
+            .map(|(k, v)| (k.len() + v.len()) as u64)
+            .sum()
+    }
+
+    #[test]
+    fn metadata_stops_being_kept_at_its_byte_budget() {
+        // Entries of exactly 1 KiB of key and value: the budget holds 16,384 of them, and the
+        // header (about 17.4 MB) is well within its 100 MiB cap.
+        const ENTRY: usize = 1024;
+        let fit = (MAX_KEPT_METADATA as usize) / ENTRY;
+        let key = |i: usize| format!("k{i:07}");
+        let file =
+            metadata_heavy((0..fit + 1000).map(|i| (key(i), "v".repeat(ENTRY - key(i).len()))));
+        assert!((file.len() as u64) < SAFETENSORS_HEADER_CAP);
+        let ix = parse_prefix(&file).unwrap();
+        assert_eq!(kept_bytes(&ix.metadata), MAX_KEPT_METADATA);
+        assert_eq!(ix.metadata.len(), fit);
+        assert!(ix.metadata.contains_key(&key(fit - 1)));
+        assert!(!ix.metadata.contains_key(&key(fit)));
+        // What follows the metadata still reads.
+        assert_eq!(ix.tensors.len(), 1);
+        assert_eq!(ix.tensors[0].shape, [2]);
+    }
+
+    #[test]
+    fn a_metadata_value_past_the_budget_is_read_past_and_later_ones_are_kept() {
+        // A kohya-style header whose tag list alone is over the budget still gives its base
+        // model, the one key the app reads (`lora::base`).
+        let huge = "x".repeat(MAX_KEPT_METADATA as usize + 1);
+        let file = metadata_heavy(
+            [
+                ("ss_tag_frequency".to_string(), huge),
+                ("ss_base_model_version".into(), "sdxl_base_v1-0".into()),
+            ]
+            .into_iter(),
+        );
+        let ix = parse_prefix(&file).unwrap();
+        assert_eq!(
+            ix.metadata.keys().collect::<Vec<_>>(),
+            ["ss_base_model_version"]
+        );
+        assert_eq!(ix.metadata["ss_base_model_version"], "sdxl_base_v1-0");
+    }
+
+    #[test]
+    fn metadata_stops_being_kept_at_its_entry_cap() {
+        // The re-review's shape, scaled down: many tiny entries, each nearly free in bytes.
+        let n = MAX_METADATA_ENTRIES + 5_000;
+        let key = |i: usize| format!("m{i:06}");
+        let file = metadata_heavy((0..n).map(|i| (key(i), String::new())));
+        let ix = parse_prefix(&file).unwrap();
+        assert_eq!(ix.metadata.len(), MAX_METADATA_ENTRIES);
+        assert!(ix.metadata.contains_key(&key(MAX_METADATA_ENTRIES - 1)));
+        assert!(!ix.metadata.contains_key(&key(MAX_METADATA_ENTRIES)));
+        assert_eq!(ix.tensors.len(), 1);
+    }
+
+    #[test]
+    fn a_shape_of_more_than_8_dimensions_is_damage() {
+        let file = |shape: &[u64]| {
+            safetensors(&json!({"t": {"dtype": "F16", "shape": shape, "data_offsets": [0, 2]}}))
+        };
+        let ix = parse_prefix(&file(&[1; 8])).unwrap();
+        assert_eq!(ix.tensors[0].shape, [1; 8]);
+        match parse_prefix(&file(&[1; 9])) {
+            Err(IndexError::Corrupt(why)) => assert!(why.contains("dimensions"), "{why}"),
+            other => panic!("expected a refusal, got {other:?}"),
+        }
+        // The engine's own limit (`SD_MAX_DIMS`) is 5, and a real 5-D file still reads.
+        let wan = crate::sd::testing::fixture("wan21-t2v-1.3b");
+        let ix = parse_prefix(&crate::sd::testing::file_of(&wan)).unwrap();
+        assert_eq!(ix.tensors.iter().map(|t| t.shape.len()).max(), Some(5));
+    }
+
+    /// The index the reader gave before its typed visitor, through a `serde_json::Value` map:
+    /// every entry but `__metadata__` a tensor, and the metadata's string values.
+    fn as_before(file: &[u8]) -> (Vec<TensorInfo>, BTreeMap<String, String>) {
+        let v: Value = serde_json::from_slice(&file[8..]).unwrap();
+        let obj = v.as_object().unwrap();
+        let mut tensors: Vec<TensorInfo> = obj
+            .iter()
+            .filter(|(k, _)| *k != "__metadata__")
+            .map(|(name, e)| TensorInfo {
+                name: name.clone(),
+                dtype: e["dtype"].as_str().unwrap().into(),
+                shape: e["shape"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .map(|d| d.as_u64().unwrap())
+                    .collect(),
+            })
+            .collect();
+        // By name, whichever map `serde_json` was built with.
+        tensors.sort_by(|a, b| a.name.cmp(&b.name));
+        let metadata = obj
+            .get("__metadata__")
+            .and_then(Value::as_object)
+            .map(|m| {
+                m.iter()
+                    .filter_map(|(k, v)| v.as_str().map(|v| (k.clone(), v.to_string())))
+                    .collect()
+            })
+            .unwrap_or_default();
+        (tensors, metadata)
+    }
+
+    #[test]
+    fn ordinary_headers_and_their_metadata_read_exactly_as_before() {
+        let raw = |json: &str| {
+            let mut file = (json.len() as u64).to_le_bytes().to_vec();
+            file.extend_from_slice(json.as_bytes());
+            file
+        };
+        // Every safetensors fixture of a real file, written back as a header.
+        let mut files: Vec<Vec<u8>> = [
+            "ae-flux1",
+            "clip-l",
+            "flux-lora-realism",
+            "flux1-dev",
+            "flux2-klein-4b",
+            "hunyuan-video-15",
+            "lumina2",
+            "sd14-diffusers-text-encoder",
+            "sd14-diffusers-unet",
+            "sd15",
+            "sd35-medium",
+            "sdxl-lora-pixel-art",
+            "sdxl",
+            "wan21-t2v-1.3b",
+            "z-image-turbo",
+        ]
+        .iter()
+        .map(|name| {
+            let ix = crate::sd::testing::fixture(name);
+            assert_eq!(ix.format, FileFormat::Safetensors, "{name}");
+            crate::sd::testing::file_of(&ix)
+        })
+        .collect();
+        // Kohya metadata with numbers, objects, lists and an escaped string among the strings,
+        // and a repeated key; a second `__metadata__` replaces the first, as a JSON object's
+        // repeated key does.
+        let kohya = raw(
+            r#"{"__metadata__":{"old":"gone"},"lora_unet_a.alpha":{"dtype":"F32","shape":[],"data_offsets":[0,4]},"__metadata__":{"ss_base_model_version":"sdxl_base_v1-0","ss_network_dim":"16","ss_tag_frequency":"{\"img\": {\"cat\": 3}}","n":3,"o":{"k":"v"},"l":["a"],"z":null,"t":true,"ss_output_name":"first","ss_output_name":"pixel \u00fc"},"lora_unet_a.lora_down.weight":{"dtype":"F16","shape":[16,320],"data_offsets":[4,10244]}}"#,
+        );
+        files.push(kohya.clone());
+        // `__metadata__` that is not an object is ignored, as before.
+        files.push(raw(
+            r#"{"__metadata__":"text","t":{"dtype":"F16","shape":[1],"data_offsets":[0,2]}}"#,
+        ));
+        for file in &files {
+            let ix = parse_prefix(file).unwrap();
+            assert_eq!((ix.tensors, ix.metadata), as_before(file));
+        }
+        let kohya = parse_prefix(&kohya).unwrap();
+        assert_eq!(kohya.metadata["ss_output_name"], "pixel \u{fc}");
+        assert_eq!(kohya.metadata["ss_tag_frequency"], r#"{"img": {"cat": 3}}"#);
+        assert!(!kohya.metadata.contains_key("old"));
+        assert!(!kohya.metadata.contains_key("n"));
     }
 
     #[test]
