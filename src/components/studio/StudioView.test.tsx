@@ -798,6 +798,10 @@ describe("StudioView", () => {
     screen.getByText(
       "Video on this computer needs a graphics card or an Apple-silicon Mac. OpenRouter makes videos in the cloud: add it in Settings → Endpoints.",
     );
+    // Models are on this computer (U9 fix round 1): the card never says otherwise, and offers no
+    // Get models beside a line that says video cannot be made here.
+    expect(screen.queryByText(/^No (video )?models on this computer yet$/)).toBeNull();
+    expect(within(screen.getByRole("main")).queryByRole("button", { name: "Get models" })).toBeNull();
   });
 
   describe("what is saved, read again", () => {

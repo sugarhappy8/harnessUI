@@ -1,5 +1,5 @@
 import { useState, type ReactNode } from "react";
-import { HardDriveDownload, ListRestart, Sparkles, type LucideIcon } from "lucide-react";
+import { Cloud, HardDriveDownload, ListRestart, Sparkles, type LucideIcon } from "lucide-react";
 import {
   fitsThisComputer,
   getListWords,
@@ -19,21 +19,32 @@ import {
 } from "../../store/studio";
 import { FOCUS_RING } from "../ui/styles";
 import { NOTICE_CARD, SECONDARY_BUTTON } from "./styles";
-import type { LocalEntry, StudioEndpoint } from "./types";
+import type { LocalEntry, SearchFilter, StudioEndpoint } from "./types";
 
 // What Studio shows above the card stream (0.1.0 Task B2): *Get the list* for an endpoint
 // whose lists are not saved yet, the tab's empty state, local first, and the one-time
 // suggestion of local models. Since 0.2.0 Task U9 (design 10.4) each is an icon, one line and
 // one primary action, with anything else as a quiet second line: with no model on this computer,
-// "No models on this computer yet" and *Get models*; on first use, the model that fits this
-// computer, named as 0.1.2 named it, and a button that opens that model's detail panel in Get
-// models.
+// "No models on this computer yet" and *Get models* (with models here but none of the tab's kind,
+// "No video models on this computer yet" and *Get models* on that kind, fix round 1); on first
+// use, the model that fits this computer, named as 0.1.2 named it, and a button that opens that
+// model's detail panel in Get models.
 
 const PRIMARY = `btn-primary inline-flex h-9 items-center gap-1.5 rounded-xl px-4 text-sm font-semibold ${FOCUS_RING}`;
 
 /** Settings on its Endpoints page, where OpenRouter and OpenAI are added. */
 function openEndpoints() {
   window.dispatchEvent(new CustomEvent("app:open-settings", { detail: "endpoints" }));
+}
+
+/** Get models' filter for each tab's kind. */
+const FILTER_OF: Record<StudioTab, SearchFilter> = { image: "pictures", video: "video" };
+
+/** Get models opened on `tab`'s kind. */
+function openGetModels(tab: StudioTab) {
+  const s = useStudio.getState();
+  s.showLocalModels(true);
+  s.setSearchFilter(FILTER_OF[tab]);
 }
 
 /** Get models opened on `entry`'s detail panel, where it downloads. */
@@ -47,7 +58,7 @@ function openEntry(entry: LocalEntry) {
  *  (`children`), its actions, and a quiet second line under a hairline (`foot`). */
 function EmptyCard(props: {
   icon: LucideIcon;
-  title: ReactNode;
+  title?: ReactNode;
   children?: ReactNode;
   actions?: ReactNode;
   foot?: ReactNode;
@@ -60,7 +71,7 @@ function EmptyCard(props: {
           <Icon size={20} aria-hidden />
         </span>
         <div className="flex min-w-0 flex-1 flex-col gap-1 pt-0.5">
-          <p className="text-title">{props.title}</p>
+          {props.title && <p className="text-title">{props.title}</p>}
           {props.children}
           {props.actions && <div className="mt-2.5 flex flex-wrap items-center gap-2">{props.actions}</div>}
         </div>
@@ -143,7 +154,6 @@ function EmptyStateCard(props: { tab: StudioTab; state: Exclude<EmptyState, null
   const { tab, state } = props;
   const local = useStudio((s) => s.local);
   const endpoints = useStudio((s) => s.endpoints);
-  const showLocalModels = useStudio((s) => s.showLocalModels);
   const entry = fittingEntry(tab, local);
   const unusable = unusableWords(tab, endpoints);
 
@@ -174,33 +184,46 @@ function EmptyStateCard(props: { tab: StudioTab; state: Exclude<EmptyState, null
       </EmptyCard>
     );
   }
-  // Nothing in the catalog fits this computer: a model may still run here slowly, so Get models
-  // comes first, and the cloud (or why a saved endpoint gives no model) after it.
+  const installed = local?.installed ?? [];
+  if (!installed.some((m) => m.kind === tab)) {
+    // Nothing in the catalog of this kind fits this computer, and none is installed: a model may
+    // still run here slowly, so Get models (on this kind) comes first, and the cloud (or why a
+    // saved endpoint gives no model) after it, as a warning, never a refusal (critique ruling
+    // U9-empty-local-first). The headline says nothing is here only while nothing at all is.
+    return (
+      <EmptyCard
+        icon={HardDriveDownload}
+        title={installed.length === 0 ? STUDIO_RESULTS.noModels : STUDIO_RESULTS.noModelsOfKind[tab]}
+        actions={
+          <button type="button" className={PRIMARY} onClick={() => openGetModels(tab)}>
+            {STUDIO_RESULTS.getModels}
+          </button>
+        }
+        foot={
+          <>
+            <p className="min-w-0 flex-1">{unusable ?? STUDIO_EMPTY.cloud[tab]}</p>
+            <OpenEndpoints />
+          </>
+        }
+      />
+    );
+  }
+  // A model of this kind is installed but cannot be used here (video on a computer that runs
+  // models on its processor, before Task G2; or one still to be set up): the cloud, as before.
   const text =
     unusable ??
     (tab === "video" && local !== null && local.videoOnProcessor ? STUDIO_EMPTY.noVideoHere : STUDIO_EMPTY.cloud[tab]);
   return (
-    <EmptyCard
-      icon={HardDriveDownload}
-      title={STUDIO_RESULTS.noModels}
-      actions={
-        <button type="button" className={PRIMARY} onClick={() => showLocalModels(true)}>
-          {STUDIO_RESULTS.getModels}
-        </button>
-      }
-      foot={
-        <>
-          <p className="min-w-0 flex-1">{text}</p>
-          <OpenEndpoints />
-        </>
-      }
-    />
+    <EmptyCard icon={Cloud} actions={<OpenEndpoints primary />}>
+      <p className="text-sm">{text}</p>
+    </EmptyCard>
   );
 }
 
-function OpenEndpoints() {
+/** *Open Endpoints*: a card's second action, or its only one (`primary`). */
+function OpenEndpoints(props: { primary?: boolean }) {
   return (
-    <button type="button" className={SECONDARY_BUTTON} onClick={openEndpoints}>
+    <button type="button" className={props.primary ? PRIMARY : SECONDARY_BUTTON} onClick={openEndpoints}>
       {STUDIO_ACTIONS.openEndpoints}
     </button>
   );

@@ -556,6 +556,17 @@ const SCREENS = [
     },
   },
   {
+    id: "z5",
+    name: "z5-no-video-models",
+    run: async (page) => {
+      // Picture models installed, no video model installed or fitting: the Video tab's card names
+      // its kind, never "No models on this computer yet" (U9 fix round 1).
+      await open(page, "view=studio&empty=1&pictures=1");
+      await page.getByRole("tab", { name: "Video" }).click();
+      await settle(page, 900);
+    },
+  },
+  {
     id: "z4",
     name: "z4-first-use-opens-model",
     run: async (page) => {

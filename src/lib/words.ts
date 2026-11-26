@@ -1727,7 +1727,13 @@ export const STUDIO_RESULTS = {
   select: "Select",
   selected: (n: number) => `${n} selected`,
   done: "Done",
+  /** Only while nothing at all is installed on this computer. */
   noModels: "No models on this computer yet",
+  /** Models are installed, but none of the tab's kind (U9 fix round 1). */
+  noModelsOfKind: {
+    image: "No picture models on this computer yet",
+    video: "No video models on this computer yet",
+  } satisfies Record<MediaKind, string>,
   getModels: "Get models",
   deleteSelected: (n: number) => `Delete ${n}`,
   /** The first-use card's button, which opens the model that fits in its detail panel:

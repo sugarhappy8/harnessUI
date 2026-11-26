@@ -27,6 +27,7 @@ never committed: they go to `.cache/preview/` (ignored).
 
 Query flags: `?view=studio` (open Studio), `?empty=1` (first use: nothing installed, no
 endpoint, no runs), `&fits=0` with it (nothing in the catalog fits this computer either),
+`&pictures=1` with it (the picture models stay installed; no video model is installed or fits),
 `?notice=0` (the local-model notice never accepted, so the first download shows it). `window.__preview` exposes `useStudio`, `useApp`, `state` (the mock's
 data) and `emit(event, payload)` to send a backend event such as `studio-progress`.
 
@@ -91,7 +92,8 @@ chosen, with its Picture to change and Mask zones · `n` *Add a model file*, fro
 sheet's foot, with the file read · `q` the model sheet at 900x650 (a full-height sheet) ·
 `z1`, `z2` first use (empty, the model sheet) · `z3` no model on this computer and none that fits
 (`?empty=1&fits=0`): *Get models* (Task U9) · `z4` first use's button, which opens the model that fits in
-its detail panel (Task U9) · `x1` chat, `x2` chat model menu, `x3` Models dialog (for comparison).
+its detail panel (Task U9) · `z5` the Video tab with picture models installed and no video model
+(`?empty=1&pictures=1`): "No video models on this computer yet" (U9 fix round 1) · `x1` chat, `x2` chat model menu, `x3` Models dialog (for comparison).
 
 ## Updating it for a redesign
 

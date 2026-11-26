@@ -34,20 +34,32 @@ const empty = new URLSearchParams(location.search).get("empty") === "1";
 /** `?fits=0` (with `empty=1`): nothing in the catalog fits this computer either, so the empty
  *  state is "No models on this computer yet" with *Get models* (Task U9). */
 const nothingFits = new URLSearchParams(location.search).get("fits") === "0";
+/** `?pictures=1` (with `empty=1`): the picture models stay installed, and no video model is
+ *  installed or fits, so the Video tab says "No video models on this computer yet" (U9 fix
+ *  round 1). */
+const picturesOnly = new URLSearchParams(location.search).get("pictures") === "1";
 const uninstalled = LOCAL_MODELS.recommended.map((e) => ({ ...e, installed: false }));
 
 const state = {
   prefs: (empty ? { ...PREFS, lastModel: {}, setups: [] } : { ...PREFS }) as StudioPrefs,
-  local: empty
-    ? {
-        ...LOCAL_MODELS,
-        installed: [],
-        installedBytes: 0,
-        moreFit: nothingFits ? 0 : 2,
-        recommended: nothingFits ? [] : uninstalled,
-        notHere: nothingFits ? [...uninstalled, ...LOCAL_MODELS.notHere] : LOCAL_MODELS.notHere,
-      }
-    : LOCAL_MODELS,
+  local:
+    empty && picturesOnly
+      ? {
+          ...LOCAL_MODELS,
+          installed: LOCAL_MODELS.installed.filter((m) => m.kind === "image"),
+          recommended: LOCAL_MODELS.recommended.filter((e) => e.kind === "image"),
+          notHere: [...LOCAL_MODELS.notHere, ...uninstalled.filter((e) => e.kind === "video")],
+        }
+      : empty
+        ? {
+            ...LOCAL_MODELS,
+            installed: [],
+            installedBytes: 0,
+            moreFit: nothingFits ? 0 : 2,
+            recommended: nothingFits ? [] : uninstalled,
+            notHere: nothingFits ? [...uninstalled, ...LOCAL_MODELS.notHere] : LOCAL_MODELS.notHere,
+          }
+        : LOCAL_MODELS,
   endpoints: empty ? [] : ENDPOINTS,
   runs: empty ? [] : RUNS.map((r) => ({ ...r })),
   live: empty ? [] : [liveRun()],
