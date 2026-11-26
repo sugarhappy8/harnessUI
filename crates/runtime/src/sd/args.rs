@@ -1962,6 +1962,16 @@ mod tests {
         }
     }
 
+    /// The end-to-end scripts' stand-in engine refuses a flag it does not know, so a flag added
+    /// to `FLAGS` and forgotten there would fail those scenarios.
+    #[test]
+    fn the_e2e_fake_engine_knows_every_flag() {
+        let fake = include_str!("../../../../e2e/fake_sd/sd-cli");
+        for f in FLAGS {
+            assert!(fake.contains(&format!("\"{f}\"")), "{f}");
+        }
+    }
+
     #[test]
     fn the_help_check_reads_option_names_and_choices_whole() {
         // `--fps-max` does not list `--fps`, nor does a description that mentions it.

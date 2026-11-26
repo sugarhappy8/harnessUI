@@ -48,11 +48,11 @@ the owner checklist's benchmark section. These are all small:
    with no Studio. Line 58 still says "Versions 0.0.x are early test builds".
 8. **ARCHITECTURE.md 7.1, the VC++ bullet.** *(Done in 0.2.0.)* llama.cpp needs the first three DLLs. The Studio
    engine also needs `msvcp140_codecvt_ids.dll` and `vcomp140.dll`.
-9. **e2e scripts.** m8's `SETTINGS_PAGES` lacks "Search". `install_klein` in m8 has small
+9. **e2e scripts.** *(Done in 0.2.0.)* m8's `SETTINGS_PAGES` lacks "Search". `install_klein` in m8 has small
     issues. The fake `sd-cli` should split only on `\n`, keeping line ends, as the Rust fake
     does. `settings_tab`, `close_settings` and `studio_tab` belong in `webdriver.py`, shared by
     m8 and m12.
-10. **`wire_tests.rs`.** The mock should record and check the `Authorization` header, so the
+10. **`wire_tests.rs`.** *(Done in 0.2.0.)* The mock should record and check the `Authorization` header, so the
     key is seen to reach the endpoint. Add a comment on the drop order of `WireHarness`'s
     fields.
 11. **`scripts/docs_test.py` (around 527).** *(Done in 0.2.0.)* Check local-before-cloud in the CHANGELOG's Added

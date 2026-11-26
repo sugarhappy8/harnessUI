@@ -2,9 +2,11 @@
 """Offline gate (ARCHITECTURE.md 17): the app, with every proxy variable pointing at a
 recording proxy that refuses everything, starts, loads a local model, answers a chat,
 opens Models → Installed with a model that has a Hugging Face repository, opens every
-settings page, opens Studio (both tabs, Get models and Settings → Studio again) and makes a
-picture on this computer with the stand-in engine (e2e/fake_sd/sd-cli) from an installed
-FLUX.2 klein 4B of tiny files, without a single outbound request other than Get models'
+settings page (Search included), opens Studio (both tabs, Get models and Settings → Studio
+again), makes a picture on this computer with the stand-in engine (e2e/fake_sd/sd-cli) from an
+installed FLUX.2 klein 4B of tiny files, and then another from a model the catalog does not
+list (a tiny SDXL file and a LoRA at strength 0.8, `c_generic_model_with_a_lora`), the
+engine's recorded arguments and prompt file checked, without a single outbound request other than Get models'
 Popular list, which the proxy refuses.
 
 Loopback is exempt (NO_PROXY): the UI is served from the dev server and llama-server
@@ -13,6 +15,7 @@ listens on 127.0.0.1. The app's loopback client never uses a proxy anyway.
     python3 -I e2e/m8_offline.py
 """
 
+import hashlib
 import json
 import os
 import pathlib
@@ -29,7 +32,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "e2e"))
-from webdriver import Session  # noqa: E402
+from webdriver import Session, close_settings, settings_tab, studio_tab  # noqa: E402
 
 APP = os.environ.get("APP_BIN", str(ROOT / "target" / "debug" / "app"))
 MODEL = os.environ.get("TEST_GGUF", "/home/user/llama-dev/Qwen3-0.6B-Q8_0.gguf")
@@ -44,6 +47,15 @@ FAKE_SD_DIR = ROOT / "e2e" / "fake_sd"
 KLEIN = "flux2-klein-4b-q4"
 KLEIN_TABLE = ROOT / "crates" / "models" / "tests" / "fixtures" / "gguf" / "klein4b-tensors.txt"
 STUDIO_PROMPT = "a lighthouse on a rock at dawn, seen from the sea"
+# The imported SDXL file and its LoRA (`install_generic`); the LoRA's name carries a non-ASCII
+# letter on purpose, as the engine's `<lora:NAME:W>` tag must.
+GENERIC_ID = "local:e2e0000000000000"
+GENERIC_NAME = "E2E SDXL file"
+LORA_NAME = "e2e style \u00fc"
+LORA_REL = f"local/{LORA_NAME}"
+GENERIC_PROMPT = "a paper boat on a pond, soft light"
+# Where the stand-in engine records its starts (e2e/fake_sd/sd-cli): `$HOME/fake-sd-record`.
+RECORD_FOLDER = "fake-sd-record"
 
 # Every tab of the settings dialog, in the order src/components/SettingsDialog.tsx shows them.
 SETTINGS_PAGES = [
@@ -59,6 +71,7 @@ SETTINGS_PAGES = [
     "Git",
     "Browser",
     "Computer use",
+    "Search",
     "Permissions",
     "Audit log",
     "Diagnostics",
@@ -120,83 +133,64 @@ def install_klein(con: sqlite3.Connection, models: pathlib.Path) -> str:
         parts.append({k: part[k] for k in ("role", "repo", "revision", "path", "sha256", "license")}
                      | {"file": str(file), "size": size})
     con.execute(
-        "INSERT INTO gen_models (id, catalog_id, name, kind, family, parts_json, size_bytes, source, added_at) "
-        "VALUES (?, ?, ?, ?, ?, ?, ?, 'catalog', ?)",
-        (KLEIN, KLEIN, entry["name"], entry["kind"], entry["family"], json.dumps(parts), total,
-         int(time.time() * 1000)),
+        "INSERT INTO gen_models (id, catalog_id, name, kind, family, recipe_id, parts_json, size_bytes, "
+        "source, added_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'catalog', ?)",
+        # The recipe a 0.1.x family runs with is the family's own id (`GenFamily::recipe_id`).
+        (KLEIN, KLEIN, entry["name"], entry["kind"], entry["family"], entry["family"], json.dumps(parts),
+         total, int(time.time() * 1000)),
     )
     con.commit()
     return entry["name"]
 
 
-def settings_tab(s, tab: str):
-    """Opens section `tab` of the open Settings dialog and waits until it shows. The tab is
-    found by its text among the dialog's own tabs and given a real pointer click: a button
-    elsewhere can carry the same name (the sidebar's Studio button comes first in the page and
-    sits under the dialog's overlay, where `click_button` would fall back to a DOM click on
-    it)."""
+def sdxl_header_file() -> bytes:
+    """A safetensors file with only a header (no tensor data) that the app reads as an SDXL
+    checkpoint: the five tensors the detection rows 36, 37, 40, 41, 43 and 48 look at
+    (`models::sd::detect`). Without the middle-block and output-block names it would read as
+    SDXL Vega."""
+    tensors = {
+        "model.diffusion_model.input_blocks.0.0.weight": [320, 4, 3, 3],
+        "model.diffusion_model.middle_block.1.proj_in.weight": [1],
+        "model.diffusion_model.output_blocks.3.1.transformer_blocks.1.attn1.to_k.weight": [1],
+        "conditioner.embedders.1.model.token_embedding.weight": [1],
+        "conditioner.embedders.0.transformer.text_model.embeddings.token_embedding.weight": [49408, 768],
+    }
+    header = json.dumps({name: {"dtype": "F16", "shape": shape, "data_offsets": [0, 0]}
+                         for name, shape in tensors.items()}).encode()
+    return struct.pack("<Q", len(header)) + header
 
-    def find():
-        el = s.execute(
-            """
-            return [...document.querySelectorAll(
-              '[role=dialog] [role=tablist][aria-label="Settings sections"] [role=tab]')]
-              .find(t => t.innerText.trim() === arguments[0]) || null;
-            """,
-            tab,
-        )
-        return el or False
 
-    el = s.wait_for(find, 10, f"settings tab {tab!r}")
-    s._pointer_click(find, el)
-    # The page must really open, or the gate would pass without loading it.
-    s.wait_for(
-        lambda: s.execute(
-            "return [...document.querySelectorAll('[role=tab][aria-selected=true]')]"
-            ".some(t => t.innerText.trim() === arguments[0]);",
-            tab,
-        ),
-        10,
-        f"settings page {tab!r}",
+def install_generic(con: sqlite3.Connection, models: pathlib.Path) -> str:
+    """Installs a model the catalog does not list, as importing a file leaves it: a tiny SDXL
+    checkpoint (`sdxl_header_file`) under `models`, its `gen_models` row (recipe
+    `sdxl-checkpoint`, family `sdxl`, source `import`, its one `model` part kept where it is),
+    and a LoRA `local/e2e style ü` with its file under `<models>/@loras/local/` and its
+    `gen_loras` row. Returns the model's name."""
+    now = int(time.time() * 1000)
+    file = models / "imported" / "e2e-sdxl.safetensors"
+    file.parent.mkdir(parents=True, exist_ok=True)
+    data = sdxl_header_file()
+    file.write_bytes(data)
+    part = {"role": "model", "repo": "", "revision": "", "path": file.name, "size": len(data),
+            "sha256": hashlib.sha256(data).hexdigest(), "license": "", "local": str(file), "file": str(file)}
+    con.execute(
+        "INSERT INTO gen_models (id, catalog_id, name, kind, family, recipe_id, parts_json, size_bytes, "
+        "source, added_at) VALUES (?, NULL, ?, 'image', 'sdxl', 'sdxl-checkpoint', ?, ?, 'import', ?)",
+        (GENERIC_ID, GENERIC_NAME, json.dumps([part]), len(data), now),
     )
-
-
-def close_settings(s):
-    s.execute("document.querySelector('[role=dialog] button[aria-label=\"Close settings\"]').click();")
-    s.wait_for(
-        lambda: s.execute("return !document.querySelector('[aria-label=\"Settings sections\"]');"),
-        10,
-        "Settings closed",
+    lora = models / "@loras" / "local" / f"{LORA_NAME}.safetensors"
+    lora.parent.mkdir(parents=True, exist_ok=True)
+    lora_data = json.dumps({"lora_unet_x.lora_down.weight": {"dtype": "F16", "shape": [1], "data_offsets": [0, 0]}}).encode()
+    lora_data = struct.pack("<Q", len(lora_data)) + lora_data
+    lora.write_bytes(lora_data)
+    sha = hashlib.sha256(lora_data).hexdigest()
+    con.execute(
+        "INSERT INTO gen_loras (id, name, file, rel_name, size_bytes, sha256, base_hint, format, source, "
+        "added_at) VALUES (?, ?, ?, ?, ?, ?, 'sdxl', 'kohya', 'import', ?)",
+        (f"local:{sha[:16]}", LORA_NAME, str(lora), LORA_REL, len(lora_data), sha, now),
     )
-
-
-def studio_tab(s, label: str):
-    """Studio's [Pictures | Video] tab `label` (the top bar's), with a real pointer click, once
-    it is chosen."""
-
-    def find():
-        el = s.execute(
-            """
-            return [...document.querySelectorAll('[role=tablist][aria-label="Pictures or video"] [role=tab]')]
-              .find(t => t.innerText.trim() === arguments[0]) || null;
-            """,
-            label,
-        )
-        return el or False
-
-    el = s.wait_for(find, 10, f"Studio tab {label!r}")
-    s._pointer_click(find, el)
-    s.wait_for(
-        lambda: s.execute(
-            """
-            return [...document.querySelectorAll('[role=tablist][aria-label="Pictures or video"] [role=tab]')]
-              .some(t => t.innerText.trim() === arguments[0] && t.getAttribute('aria-selected') === 'true');
-            """,
-            label,
-        ),
-        10,
-        f"Studio tab {label!r} chosen",
-    )
+    con.commit()
+    return GENERIC_NAME
 
 
 def studio_part(s, home: pathlib.Path, con_path: pathlib.Path):
@@ -283,10 +277,133 @@ def studio_part(s, home: pathlib.Path, con_path: pathlib.Path):
     assert pathlib.Path(run["outputs"][0]["path"]).is_file(), run["outputs"][0]
 
 
+def pointer_click_found(s, script: str, *args, what: str):
+    """A real pointer click on the element `script` returns (with `args`)."""
+
+    def find():
+        return s.execute(script, *args) or False
+
+    el = s.wait_for(find, 15, what)
+    s._pointer_click(find, el)
+
+
+def c_generic_model_with_a_lora(s, home: pathlib.Path, con_path: pathlib.Path):
+    """A model the catalog does not list, with a LoRA, through the stand-in engine: an SDXL file
+    (as an import leaves it) and a LoRA are added, the model is chosen in the model sheet, the
+    LoRA is attached at strength 0.8 in the side panel's LoRAs section, and Create runs it.
+    The engine's recorded start has `-m <the file>`, `--lora-model-dir <models>/@loras`,
+    `--steps 20`, `--cfg-scale 5` and no `--diffusion-model`, and its prompt file ends with
+    the LoRA's tag."""
+    models = home / "studio-models"
+    models.mkdir(parents=True, exist_ok=True)
+    # The LoRA folder the engine reads is in the models folder as Settings has it.
+    s.invoke("set_models_dir", {"path": str(models)})
+    con = sqlite3.connect(con_path)
+    name = install_generic(con, models)
+    con.close()
+    s.click_button("Settings")
+    settings_tab(s, "Studio")
+    time.sleep(1)
+    close_settings(s)
+
+    pointer_click_found(
+        s, "return document.querySelector('[data-composer] [data-model-chip] button');", what="the model chip"
+    )
+    pointer_click_found(
+        s,
+        """
+        return [...document.querySelectorAll('[data-model-sheet] [data-sheet-pick]')]
+          .find(o => o.querySelector('[data-sheet-name]').innerText.trim() === arguments[0]
+                     && o.getAttribute('aria-disabled') !== 'true') || null;
+        """,
+        name,
+        what=f"the model {name!r} in the model sheet",
+    )
+    s.wait_for(lambda: s.execute("return !document.querySelector('[data-model-sheet]');"), 10, "the model sheet closed")
+
+    # The side panel's LoRAs section: Add, the LoRA, then its strength from 1 to 0.8 (the slider's
+    # step is 0.05).
+    pointer_click_found(
+        s, "return document.querySelector('[data-composer] [data-settings-button]');", what="the composer's Settings"
+    )
+    section = "[data-settings-panel] [data-settings-section=loras]"
+    pointer_click_found(
+        s,
+        f"""
+        const section = document.querySelector('{section}');
+        return section ? [...section.querySelectorAll('button')].find(b => b.innerText.trim() === 'Add') || null : null;
+        """,
+        what="the LoRAs section's Add",
+    )
+    s.click_menu_item(LORA_NAME)
+    thumb = f'{section} [role=slider][aria-label="Strength of {LORA_NAME}"]'
+    s.wait_for(lambda: s.execute("return !!document.querySelector(arguments[0]);", thumb), 10, "the LoRA's strength")
+    s.type(s.find(thumb), "\ue012" * 4)
+    s.wait_for(
+        lambda: s.execute("return document.querySelector(arguments[0]).getAttribute('aria-valuenow');", thumb) == "0.8",
+        10,
+        "the strength 0.8",
+    )
+    pointer_click_found(
+        s,
+        """
+        const panel = document.querySelector('[data-settings-panel]');
+        const box = panel && panel.closest('[role=dialog], aside');
+        return box ? box.querySelector('button[aria-label="Close"]') : null;
+        """,
+        what="the side panel's Close",
+    )
+    s.wait_for(lambda: s.execute("return !document.querySelector('[data-settings-panel]');"), 10, "the side panel closed")
+
+    box = s.find("textarea[aria-label=Prompt]")
+    s.type(box, "\ue009a\ue000\ue003")
+    s.type(box, GENERIC_PROMPT)
+    s.wait_for(
+        lambda: s.execute(
+            """
+            const b = [...document.querySelectorAll('[data-composer] button')]
+              .find(b => b.innerText.trim() === 'Create');
+            return !!b && !b.disabled;
+            """
+        ),
+        15,
+        "Create enabled",
+    )
+    s.click_button("Create")
+    s.wait_for(
+        lambda: s.execute("return document.querySelectorAll('[data-run-card] [data-output-tile]').length;") == 2,
+        120,
+        "the second result tile",
+    )
+    runs = s.invoke("studio_runs", {"filter": {}, "before": None, "limit": 10})["runs"]
+    run = next(r for r in runs if r["model"] == GENERIC_ID)
+    assert (run["status"], run["runsOn"], len(run["outputs"])) == ("done", "local", 1), run
+
+    # The engine's last recorded start is this run's.
+    record = home / RECORD_FOLDER
+    starts = sorted(int(p.stem.split("-")[1]) for p in record.glob("argv-*.json"))
+    n = starts[-1]
+    argv = json.loads((record / f"argv-{n}.json").read_text(encoding="utf-8"))
+    part_file = str(models / "imported" / "e2e-sdxl.safetensors")
+
+    def after(flag: str) -> str:
+        assert flag in argv, (flag, argv)
+        return argv[argv.index(flag) + 1]
+
+    assert after("-m") == part_file, argv
+    assert after("--lora-model-dir") == str(models / "@loras"), argv
+    assert after("--steps") == "20" and after("--cfg-scale") == "5", argv
+    assert "--diffusion-model" not in argv, argv
+    prompt = (record / f"prompt-{n}.txt").read_text(encoding="utf-8")
+    assert prompt.endswith(f" <lora:{LORA_REL}:0.8>") and prompt.startswith(GENERIC_PROMPT), repr(prompt)
+
+
 def main() -> int:
     home = OUT / "home"
     shutil.rmtree(home, ignore_errors=True)
     home.mkdir(parents=True)
+    # The stand-in engine records each start in here (e2e/fake_sd/sd-cli).
+    (home / RECORD_FOLDER).mkdir()
     proxy_port = free_port()
     proxy = ThreadingHTTPServer(("127.0.0.1", proxy_port), Recorder)
     threading.Thread(target=proxy.serve_forever, daemon=True).start()
@@ -357,6 +474,7 @@ def main() -> int:
             time.sleep(0.6)
         close_settings(s)
         studio_part(s, home, home / "data" / IDENTIFIER / "app.db")
+        c_generic_model_with_a_lora(s, home, home / "data" / IDENTIFIER / "app.db")
         time.sleep(2)
         if SEEN:
             print("OUTBOUND REQUESTS:", *SEEN, sep="\n  ")

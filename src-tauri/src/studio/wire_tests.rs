@@ -77,6 +77,9 @@ struct MockOpenRouter {
 struct MockState {
     /// Each request's method and path, in the order they came.
     requests: Mutex<Vec<(String, String)>>,
+    /// Each request's method, path and `Authorization` header (None when it sent none), in
+    /// the order they came.
+    authorizations: Mutex<Vec<(String, String, Option<String>)>>,
     /// The video job may complete.
     video_ready: AtomicBool,
     /// Checks on the video job since it may complete.
@@ -130,6 +133,18 @@ impl MockOpenRouter {
     /// Every request so far: its method and path.
     fn requests(&self) -> Vec<(String, String)> {
         self.state.requests.lock().unwrap().clone()
+    }
+
+    /// The `Authorization` header of each `method` request for `path`, in the order they came.
+    fn authorizations(&self, method: &str, path: &str) -> Vec<Option<String>> {
+        self.state
+            .authorizations
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(m, p, _)| m == method && p == path)
+            .map(|(_, _, a)| a.clone())
+            .collect()
     }
 
     /// From now on video job [`JOB`] is pending once more, then completed.
@@ -211,14 +226,17 @@ async fn serve(socket: tokio::net::TcpStream, state: Arc<MockState>, base: Strin
         return;
     }
     let mut length = 0;
+    let mut authorization = None;
     loop {
         let mut header = String::new();
         match read.read_line(&mut header).await {
             Ok(n) if n > 0 && !header.trim_end().is_empty() => {
-                if let Some((name, value)) = header.split_once(':')
-                    && name.trim().eq_ignore_ascii_case("content-length")
-                {
-                    length = value.trim().parse().unwrap_or(0);
+                if let Some((name, value)) = header.split_once(':') {
+                    if name.trim().eq_ignore_ascii_case("content-length") {
+                        length = value.trim().parse().unwrap_or(0);
+                    } else if name.trim().eq_ignore_ascii_case("authorization") {
+                        authorization = Some(value.trim().to_owned());
+                    }
                 }
             }
             _ => break,
@@ -237,6 +255,11 @@ async fn serve(socket: tokio::net::TcpStream, state: Arc<MockState>, base: Strin
         .lock()
         .unwrap()
         .push((method.clone(), path.to_owned()));
+    state
+        .authorizations
+        .lock()
+        .unwrap()
+        .push((method.clone(), path.to_owned(), authorization));
     let reply = MockOpenRouter::answer(&state, &base, &method, path, query);
     let head = format!(
         "HTTP/1.1 {}\r\ncontent-type: {}\r\ncontent-length: {}\r\nconnection: close\r\n\r\n",
@@ -301,6 +324,10 @@ impl Drop for Managers {
 }
 
 /// The app's Studio as it is wired at start-up, with an OpenRouter endpoint at the mock.
+///
+/// Rust drops fields in the order they are declared, so `managers` must stay above `scratch`:
+/// every manager's tasks stop before the folder holding the gallery, the store's files and the
+/// fake engine's record goes. Moving `scratch` up would delete that folder under running tasks.
 struct WireHarness {
     manager: StudioManager,
     mock: MockOpenRouter,
@@ -749,6 +776,25 @@ async fn a_picture_and_a_video_through_a_mock_openrouter() {
     assert!(
         rows.iter()
             .all(|r| !r.arguments.to_string().contains(&h.prompt))
+    );
+}
+
+#[tokio::test]
+async fn the_key_reaches_the_endpoint_in_the_authorization_header() {
+    let mock = MockOpenRouter::start().await;
+    let h = WireHarness::new(&mock).await;
+    h.refresh_lists().await;
+    h.refresh_price(FLUX).await;
+    let pic = h
+        .manager
+        .start(h.picture(FLUX, json!({"resolution": "1K"})), false)
+        .await
+        .unwrap();
+    h.wait(&pic.id, "done").await;
+    // The create request carried the key the keychain holds, as a bearer token.
+    assert_eq!(
+        mock.authorizations("POST", "/api/v1/images"),
+        [Some(format!("Bearer {KEY}"))]
     );
 }
 

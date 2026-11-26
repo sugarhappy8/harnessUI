@@ -49,7 +49,7 @@ from urllib.parse import urlsplit
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "e2e"))
-from webdriver import Session, WebDriverError  # noqa: E402
+from webdriver import Session, WebDriverError, close_settings, settings_tab, studio_tab  # noqa: E402
 
 APP = os.environ.get("APP_BIN", str(ROOT / "target" / "debug" / "app"))
 LLAMA_DIR = os.environ.get("APP_DEV_LLAMA_DIR", str(ROOT / ".cache" / "llama-linux"))
@@ -228,42 +228,11 @@ def pointer_click_found(s, script: str, *args, what: str):
     s._pointer_click(find, el)
 
 
-def settings_tab(s, tab: str):
-    """Opens section `tab` of the open Settings dialog, found among the dialog's own tabs and
-    given a real pointer click (the sidebar's Studio button carries the same name, under the
-    dialog's overlay)."""
-    pointer_click_found(
-        s,
-        """
-        return [...document.querySelectorAll(
-          '[role=dialog] [role=tablist][aria-label="Settings sections"] [role=tab]')]
-          .find(t => t.innerText.trim() === arguments[0]) || null;
-        """,
-        tab,
-        what=f"settings tab {tab!r}",
-    )
-    s.wait_for(
-        lambda: s.execute(
-            "return [...document.querySelectorAll('[role=dialog] [role=tab][aria-selected=true]')]"
-            ".some(t => t.innerText.trim() === arguments[0]);",
-            tab,
-        ),
-        10,
-        f"settings page {tab!r}",
-    )
-
-
 def open_settings(s, tab: str):
     s.click_button("Settings")
     s.wait_for(lambda: s.execute("return !!document.querySelector('[aria-label=\"Settings sections\"]');"), 10,
                "Settings open")
     settings_tab(s, tab)
-
-
-def close_settings(s):
-    s.execute("document.querySelector('[role=dialog] button[aria-label=\"Close settings\"]').click();")
-    s.wait_for(lambda: s.execute("return !document.querySelector('[aria-label=\"Settings sections\"]');"), 10,
-               "Settings closed")
 
 
 def set_switch(s, label: str, on: bool):
@@ -284,21 +253,6 @@ def set_switch(s, label: str, on: bool):
     if s.execute(is_on, label) != on:
         pointer_click_found(s, find, label, what=f"the {label!r} switch")
     s.wait_for(lambda: s.execute(is_on, label) == on, 10, f"the {label!r} switch {'on' if on else 'off'}")
-
-
-def studio_tab(s, label: str):
-    """The top bar's [Pictures | Video] tab `label`, once it is chosen."""
-    script = """
-        return [...document.querySelectorAll('[data-studio-view] header [role=tablist] [role=tab]')]
-          .find(t => t.innerText.trim() === arguments[0]) || null;
-    """
-    pointer_click_found(s, script, label, what=f"Studio tab {label!r}")
-    s.wait_for(lambda: s.execute(
-        """
-        const t = [...document.querySelectorAll('[data-studio-view] header [role=tablist] [role=tab]')]
-          .find(t => t.innerText.trim() === arguments[0]);
-        return !!t && t.getAttribute('aria-selected') === 'true';
-        """, label), 10, f"Studio tab {label!r} chosen")
 
 
 # 0.2.0 (Task U3): the composer at the foot of Studio's results holds the prompt, the model chip
