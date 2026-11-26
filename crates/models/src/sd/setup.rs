@@ -438,7 +438,7 @@ impl Planner<'_, '_> {
         if matches!(self.input.main, MainFile::HubFolder { .. }) {
             return SlotId::Model;
         }
-        if self.input.part == Some(NoisePart::High)
+        if self.main_part() == Some(NoisePart::High)
             && recipe.slot(SlotId::HighNoiseDiffusionModel).is_some()
         {
             return SlotId::HighNoiseDiffusionModel;
@@ -454,6 +454,19 @@ impl Planner<'_, '_> {
             } => SlotId::DiffusionModel,
             _ => recipe.main_slot(),
         }
+    }
+
+    /// The main file's noise part: the one detection gave, else the one its name says (a
+    /// file planned by hand has no known part): a Hub file's path in its repo, a local
+    /// file's name, never the folders it is in on this computer (final review, area 1, I-3).
+    fn main_part(&self) -> Option<NoisePart> {
+        self.input.part.or_else(|| match self.input.main {
+            MainFile::Hub { file, .. } => noise_part(&file.path),
+            MainFile::Local { path, .. } => path
+                .file_name()
+                .and_then(|n| noise_part(&n.to_string_lossy())),
+            MainFile::HubFolder { .. } => None,
+        })
     }
 
     fn main_file(&self) -> PlannedFile {
@@ -541,6 +554,10 @@ impl Planner<'_, '_> {
         let depth = |path: &str| path.matches('/').count();
         let quant = quant_label(&main.path);
         let mirror = without_part_words(&main.path);
+        // Never a file of the main file's own part: two high-noise halves are no pair.
+        if noise_part(&main.path) == Some(want) {
+            return None;
+        }
         let others: Vec<&RepoFile> = self
             .input
             .listing
@@ -1800,6 +1817,161 @@ mod tests {
             hub_path(&p, SlotId::DiffusionModel),
             format!("{dir}/wan2.2_t2v_low_noise_14B_fp8_scaled.safetensors")
         );
+    }
+
+    const LOCAL_SHA: &str = "abababababababababababababababababababababababababababababababab";
+
+    /// A file planned by hand (*Set it up yourself*, a file not read): no facts, no part.
+    fn by_hand<'a>(
+        main: MainFile<'a>,
+        facts: &'a FileFacts,
+        recipe_id: &str,
+        listing: &'a [RepoFile],
+        companions: &'a CompanionTable,
+    ) -> SetupPlan {
+        plan_setup(&SetupInput {
+            main,
+            facts,
+            recipe: recipe(recipe_id).unwrap(),
+            version: None,
+            part: None,
+            listing,
+            listing_facts: &BTreeMap::new(),
+            installed: &[],
+            companions,
+            overrides: &[],
+            untested: true,
+        })
+    }
+
+    fn unread_facts() -> FileFacts {
+        FileFacts {
+            kind: FileKind::CannotRun {
+                reason: crate::sd::CannotRunReason::UnknownWeights,
+                version: None,
+            },
+            facts: MatchFacts::default(),
+            parameters: 0,
+            format: FileFormat::Safetensors,
+        }
+    }
+
+    /// Final review, area 1, I-3: a high-noise file set up by hand, with no known part,
+    /// goes in the high-noise slot by its name, and its sibling is its own model's low half,
+    /// never another high-noise file.
+    #[test]
+    fn a_high_noise_file_set_up_by_hand_takes_the_high_noise_slot_and_its_own_low_half() {
+        let listing = crate::sd::testing::comfy_wan22_listing();
+        let companions = table();
+        let facts = unread_facts();
+        let dir = "split_files/diffusion_models/";
+        let listed = |name: &str| {
+            listing
+                .iter()
+                .find(|f| f.path == format!("{dir}{name}"))
+                .unwrap()
+        };
+        let hub = |name: &str| MainFile::Hub {
+            repo: "Comfy-Org/Wan-2.2",
+            revision: REV,
+            file: listed(name),
+        };
+        let p = by_hand(
+            hub("wan2.2_t2v_high_noise_14B_fp16.safetensors"),
+            &facts,
+            "wan22-t2v",
+            &listing,
+            &companions,
+        );
+        assert_eq!(
+            hub_path(&p, SlotId::HighNoiseDiffusionModel),
+            format!("{dir}wan2.2_t2v_high_noise_14B_fp16.safetensors")
+        );
+        assert_eq!(
+            source(&p, SlotId::HighNoiseDiffusionModel),
+            PartSource::Main
+        );
+        assert_eq!(
+            hub_path(&p, SlotId::DiffusionModel),
+            format!("{dir}wan2.2_t2v_low_noise_14B_fp16.safetensors")
+        );
+        assert_eq!(source(&p, SlotId::DiffusionModel), PartSource::Sibling);
+
+        // The low half by hand: the low slot, and the T2V high half.
+        let p = by_hand(
+            hub("wan2.2_t2v_low_noise_14B_fp8_scaled.safetensors"),
+            &facts,
+            "wan22-t2v",
+            &listing,
+            &companions,
+        );
+        assert_eq!(source(&p, SlotId::DiffusionModel), PartSource::Main);
+        assert_eq!(
+            hub_path(&p, SlotId::HighNoiseDiffusionModel),
+            format!("{dir}wan2.2_t2v_high_noise_14B_fp8_scaled.safetensors")
+        );
+
+        // A file of this computer is placed by its file name, not its folders.
+        let path = Path::new("/home/high/wan2.2_t2v_low_noise_14B_fp16.safetensors");
+        let local = MainFile::Local {
+            path,
+            size: 28_577_095_592,
+            sha256: Some(LOCAL_SHA),
+        };
+        let p = by_hand(local, &facts, "wan22-t2v", &[], &companions);
+        assert_eq!(source(&p, SlotId::DiffusionModel), PartSource::Main);
+        assert_eq!(
+            source(&p, SlotId::HighNoiseDiffusionModel),
+            PartSource::Missing
+        );
+        let path = Path::new("/home/me/Wan2_2-T2V-A14B-HIGH_fp8_e4m3fn_scaled_KJ.safetensors");
+        let local = MainFile::Local {
+            path,
+            size: 15_000_000_000,
+            sha256: Some(LOCAL_SHA),
+        };
+        let p = by_hand(local, &facts, "wan22-t2v", &[], &companions);
+        assert_eq!(
+            source(&p, SlotId::HighNoiseDiffusionModel),
+            PartSource::Main
+        );
+        assert_eq!(p.missing(), [SlotId::DiffusionModel]);
+    }
+
+    #[test]
+    fn a_sibling_is_never_of_the_main_files_own_noise_part() {
+        // A caller that says "low" for a file named high noise: the file fills the low slot,
+        // and no other high-noise file is taken as its high half; the plan can't run.
+        let listing = crate::sd::testing::comfy_wan22_listing();
+        let main = listing
+            .iter()
+            .find(|f| {
+                f.path
+                    .ends_with("wan2.2_t2v_high_noise_14B_fp16.safetensors")
+            })
+            .unwrap();
+        let companions = table();
+        let facts = unread_facts();
+        let p = plan_setup(&SetupInput {
+            main: MainFile::Hub {
+                repo: "Comfy-Org/Wan-2.2",
+                revision: REV,
+                file: main,
+            },
+            facts: &facts,
+            recipe: recipe("wan22-t2v").unwrap(),
+            version: None,
+            part: Some(NoisePart::Low),
+            listing: &listing,
+            listing_facts: &BTreeMap::new(),
+            installed: &[],
+            companions: &companions,
+            overrides: &[],
+            untested: true,
+        });
+        assert_eq!(source(&p, SlotId::DiffusionModel), PartSource::Main);
+        assert_eq!(p.missing(), [SlotId::HighNoiseDiffusionModel]);
+        assert!(!p.can_run());
     }
 
     #[test]
