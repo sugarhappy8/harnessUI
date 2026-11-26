@@ -58,7 +58,10 @@ use super::engine_cmd::EngineNeed;
 use super::errors;
 use super::manager::StudioManager;
 use super::setup_plan::{PlanDeps, plan_source, present_parts, ready_to_fetch};
-use crate::downloads::{DownloadManager, GenGroup, GenGroupPart, GroupMeta, files_being_written};
+use crate::downloads::{
+    DownloadManager, GenGroup, GenGroupPart, GroupMeta, files_being_written,
+    register_present_gen_model,
+};
 use crate::dto::SetupChoice;
 use crate::error::{AppError, AppResult};
 use crate::state::AppState;
@@ -113,7 +116,7 @@ pub struct DownloadPlan {
     pub free_bytes: Option<u64>,
 }
 
-/// Below this much free space left after a download, Get local models says the disk is
+/// Below this much free space left after a download, Get models says the disk is
 /// nearly full.
 pub const LOW_DISK_BYTES: u64 = 10_000_000_000;
 
@@ -167,7 +170,7 @@ impl InstalledFiles {
 /// ([`folder_place`]). A place that already has its part's pinned size counts as here. With
 /// every licence to show, and what the Studio engine needs (`engine`,
 /// `engine_cmd::engine_need`): its pack comes too, with its licence; an engine that is neither
-/// here nor a pack changes nothing here (Get local models tells it from the engine's state).
+/// here nor a pack changes nothing here (Get models tells it from the engine's state).
 /// Refused with `studio_no_checksum` for a Hub file with no published SHA-256 (it could not
 /// be checked), and with `studio_disk_too_small` when what it fetches is more than
 /// `free_bytes` (when known).
@@ -801,6 +804,32 @@ pub(crate) struct PreparedDownload {
     pub needs_engine: bool,
 }
 
+/// How a model joins the installed ones: at once, or through a download.
+pub(crate) enum Added {
+    /// Every part was on this computer: added, with this id.
+    Now(String),
+    /// Some part is fetched first, by this download (not started yet), which adds it.
+    Download(Box<PreparedDownload>),
+}
+
+/// `prepared`, or, when it fetches nothing (every part is on this computer: *Repair* on a
+/// model added from a file), its model checked and added again at once, as an import or a
+/// set-up change is (`downloads::register_present_gen_model`; `in_use`: whether a run on this
+/// computer holds a model). A download of no files would never finish (final review, area 2,
+/// I1). A file of the person's own that was moved or changed is `studio_local_file_moved`.
+pub(crate) async fn add_now_if_present(
+    deps: &DownloadDeps<'_>,
+    prepared: PreparedDownload,
+    in_use: &(dyn Fn(&str) -> bool + Sync),
+) -> AppResult<Added> {
+    if !prepared.files.is_empty() {
+        return Ok(Added::Download(Box::new(prepared)));
+    }
+    register_present_gen_model(deps.store, deps.models_dir, &prepared.meta, in_use)
+        .await
+        .map(Added::Now)
+}
+
 /// The download `source` names, nothing started yet:
 /// - a searched file: its repo's listing at its commit read again, its files through the
 ///   readings (`DetectService`, kept from opening it), and its set-up planned with `choice`
@@ -899,12 +928,13 @@ pub(crate) fn prepared_download(
 
 /// Starts a new download, or checks and repairs the pinned files of an installed model
 /// ([`prepare_download`], with the person's `choice` for a searched file), once the note
-/// about local models was accepted; returns its download group.
+/// about local models was accepted; returns its download group, or `None` when nothing was to
+/// be fetched and the model was checked and added again at once ([`add_now_if_present`]).
 pub async fn start_local_download(
     app: &AppHandle,
     source: LocalSource,
     choice: Option<SetupChoice>,
-) -> AppResult<String> {
+) -> AppResult<Option<String>> {
     if app
         .state::<Arc<StudioManager>>()
         .prefs()
@@ -938,13 +968,19 @@ pub async fn start_local_download(
         engine: &engine,
     };
     let prepared = prepare_download(&deps, &source, choice.as_ref()).await?;
-    let downloads = app.state::<Arc<DownloadManager>>().inner().clone();
-    let group = downloads.start(app, prepared.meta, prepared.files).await?;
+    let needs_engine = prepared.needs_engine;
+    let studio = app.state::<Arc<StudioManager>>();
+    let in_use = |id: &str| studio.local_uses_model(id);
+    let group = match add_now_if_present(&deps, prepared, &in_use).await? {
+        Added::Now(_) => None,
+        Added::Download(d) => {
+            let downloads = app.state::<Arc<DownloadManager>>().inner().clone();
+            Some(downloads.start(app, d.meta, d.files).await?)
+        }
+    };
     // Refused only while an engine process runs from the folder it would replace: the
     // model downloads, and the engine's own button offers it again.
-    if prepared.needs_engine
-        && let Err(e) = super::engine_cmd::start_engine_download(app).await
-    {
+    if needs_engine && let Err(e) = super::engine_cmd::start_engine_download(app).await {
         tracing::warn!(code = %e.code, "the Studio engine did not download with the model");
     }
     Ok(group)
@@ -2357,7 +2393,7 @@ pub(crate) mod tests {
     use crate::studio::setup_cmd::setup_plan;
     use models::sd::testing::{file_of, fixture, safetensors};
 
-    /// Get local models asking a Hub on this computer that serves `repos` (its client has no
+    /// Get models asking a Hub on this computer that serves `repos` (its client has no
     /// Hugging Face token: `HfClient::for_test`), with the bundled catalog and its companion
     /// table, a models folder of its own and a download manager. Nothing is fetched: a group is
     /// recorded as `DownloadManager::start` records it, and [`T::complete`] puts its files in
@@ -2419,7 +2455,7 @@ pub(crate) mod tests {
                 .await
         }
 
-        /// The set-up plan Get local models shows for `source` with `choice`.
+        /// The set-up plan Get models shows for `source` with `choice`.
         async fn setup_plan(&mut self, source: LocalSource, choice: SetupChoice) -> SetupPlanDto {
             self.deps.installed_files = InstalledFiles::read(self.store()).await.unwrap();
             setup_plan(&self.deps, &source, &choice).await.unwrap()

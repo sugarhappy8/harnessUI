@@ -51,7 +51,7 @@ function deleteQuestion(m: InstalledModel, shown: string): string {
 
 /** Models → Installed: the models on this computer, with Use, their settings, Add to comparison and Delete.
  *  0.1.0 Studio: picture and video models are not on this list (nothing here can Use them); one
- *  line counts them and opens Studio's Get local models. */
+ *  line counts them and opens Studio's Get models. */
 export function Installed(props: { onClose: () => void }) {
   const [models, setModels] = useState<InstalledModel[] | null>(null);
   // How many picture and video models are installed, and the disk they take; `null` until read,
@@ -142,7 +142,7 @@ export function Installed(props: { onClose: () => void }) {
     };
   }, []);
 
-  /** *Manage in Studio*: Studio opens on Get local models, and this dialog closes as Use closes it. */
+  /** *Manage in Studio*: Studio opens on Get models, and this dialog closes as Use closes it. */
   function manageInStudio() {
     window.dispatchEvent(new CustomEvent("app:open-studio", { detail: "local" }));
     props.onClose();
@@ -239,7 +239,7 @@ export function Installed(props: { onClose: () => void }) {
           </li>
         )}
       </ul>
-      {/* With none yet ("Picture and video models: none yet") it still leads to Get local models. */}
+      {/* With none yet ("Picture and video models: none yet") it still leads to Get models. */}
       {pictureModels !== null && (
         <p className="text-xs text-fg-muted">
           {INSTALLED_STUDIO_LINE.lead(pictureModels.count, pictureModels.bytes)}

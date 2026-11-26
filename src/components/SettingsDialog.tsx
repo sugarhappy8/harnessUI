@@ -662,7 +662,7 @@ export function SettingsDialog(props: {
   initialTab?: string;
 }) {
   const { open, onOpenChange } = props;
-  // A page that opens Studio (Settings → Studio's Get local models) leaves Settings: Studio is
+  // A page that opens Studio (Settings → Studio's Get models) leaves Settings: Studio is
   // shown under it.
   useEffect(() => {
     if (!open) return;

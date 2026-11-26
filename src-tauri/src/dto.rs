@@ -1184,9 +1184,9 @@ pub struct EngineProgressDto {
     pub error: Option<AppError>,
 }
 
-// ---- Get local models (0.1.0) -----------------------------------------------------------------
+// ---- Get models (0.1.0) -----------------------------------------------------------------
 
-/// What Get local models' header says about this computer: "This computer: Radeon RX 7600, 8
+/// What Get models' header says about this computer: "This computer: Radeon RX 7600, 8
 /// GB graphics memory · 32 GB memory · 412 GB free".
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -1205,7 +1205,7 @@ pub struct HardwareLineDto {
     pub free_disk_bytes: Option<u64>,
 }
 
-/// A model licence as Get local models and the download dialog show it.
+/// A model licence as Get models and the download dialog show it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct LicenceDto {
@@ -1355,7 +1355,7 @@ pub struct InstalledLocalDto {
     pub in_place: bool,
 }
 
-/// Get local models (`studio_local_models`). Nothing in it comes from the network.
+/// Get models (`studio_local_models`). Nothing in it comes from the network.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct LocalModelsDto {
@@ -1381,7 +1381,7 @@ pub struct LocalModelsDto {
     pub loras: Vec<LoraDto>,
 }
 
-/// 0.2.0 (Task S10): a LoRA Studio's engine can apply (`studio::loras`), as Get local models
+/// 0.2.0 (Task S10): a LoRA Studio's engine can apply (`studio::loras`), as Get models
 /// and the LoRA picker list it.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]

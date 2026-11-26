@@ -27,7 +27,7 @@
 // into one folder: in ./studioResults, composed in here), the grid's filters and Load more.
 // Task B10: the Studio engine's state read again (Settings → Studio's engine line), and Delete
 // stopped and failed runs (in ./studioResults). Task B11: a picture attached in a chat opened
-// in Studio's Pictures tab, and Send to chat (in ./studioResults). Task B13: Get local models'
+// in Studio's Pictures tab, and Send to chat (in ./studioResults). Task B13: Get models'
 // tabs, hardware filter, Hugging Face search, download confirmation (since Task U6, the detail
 // panel), repairs and the local model notice are in ./studioLocal. Task U3 (0.2.0): whether the side panel (Settings) is open,
 // saved in the preferences. Task U4: whether the model sheet (on which filter) and *Add a model
@@ -101,7 +101,7 @@ export {
   type StudioResultsState,
 } from "./studioResults";
 
-// Get local models' state and actions live in ./studioLocal; they are used from here.
+// Get models' state and actions live in ./studioLocal; they are used from here.
 export type { StudioLocalState } from "./studioLocal";
 
 /** Studio's tabs: Pictures and Video. */
@@ -138,7 +138,7 @@ export interface StudioState extends StudioRunState, StudioResultsState, StudioL
   /** The id of a video that finished while the chat was shown. */
   readyNotice: string | null;
   /** Opens Studio. Given `tab` (*Open in Studio*, a finished video's *Open*), on that tab's
-   *  cards, closing Get local models if it was left open; else as it was left, on the tab and
+   *  cards, closing Get models if it was left open; else as it was left, on the tab and
    *  view shown last. */
   showStudio(tab?: StudioTab): void;
   /** Shows the chat; the viewer closes (it would stay over the chat). */
@@ -1312,7 +1312,7 @@ export function defaultModel(
 /**
  * What `tab` shows in place of the card stream, by one ordered rule, the first that applies:
  * nothing when the tab has a model to use (an installed local model of its kind, or an
- * endpoint's, which needs a key); *Get local models* when a recommended entry of its kind
+ * endpoint's, which needs a key); *Get models* when a recommended entry of its kind
  * fits this computer (after the chat model is unloaded counts); cloud as the backup when no endpoint is saved; nothing while an
  * endpoint that makes the kind has no saved list (its *Get the list* stands in); else *add
  * an endpoint*: the saved ones make no such kind (the Video tab with only OpenAI), or offer
@@ -1396,7 +1396,7 @@ export function followStudio(): () => void {
  *  and a picture or video model's, or a LoRA's, download that is done joins `doneDownloads` and
  *  reads the local models (`refreshLocal`) or the LoRAs (`loadLoras`) again. StudioView starts
  *  it as Studio first opens and keeps it while the app runs (App keeps Studio mounted), whatever
- *  Studio shows: 0.1.2 read the local models again only while Get local models was open, so a
+ *  Studio shows: 0.1.2 read the local models again only while Get models was open, so a
  *  model finished after Back was not listed (critique §2.7 and §6). Before Studio has read
  *  what is saved, that first read lists a model that is done. Returns the function that stops
  *  following; outside the app it follows nothing. */

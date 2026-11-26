@@ -73,7 +73,7 @@ export function Downloads() {
                     {/* 0.1.0 Studio: a picture or video model's download says so. */}
                     {g.generatorKind && <Badge>{DOWNLOAD_KIND_WORDS[g.generatorKind]}</Badge>}
                   </div>
-                  {/* 0.1.0 Studio: a picture or video model's row in Get local models says it too. */}
+                  {/* 0.1.0 Studio: a picture or video model's row in Get models says it too. */}
                   <p className="text-xs text-fg-muted">{downloadProgressWords(g, formatBytes)}</p>
                 </div>
                 {g.status === "done" && savedPath && (

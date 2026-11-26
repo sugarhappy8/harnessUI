@@ -1,4 +1,4 @@
-//! Get local models (studio-local-design.md, "Get local models"; 0.1.0 Task L16): Studio's
+//! Get models (studio-local-design.md, which calls it by its 0.1.x name; 0.1.0 Task L16): Studio's
 //! own view of the picture and video models this computer can run.
 //!
 //! - **The list** ([`local_models`]): what harnessUI detected, the Studio engine's state, the
@@ -20,7 +20,7 @@
 //!   [`start_local_download`] and [`delete_local_model`], and
 //!   [`StudioManager::accept_local_notice`].
 //!
-//! Every fit is the local lane's verdict ([`local_verdict`]), so Create and Get local models
+//! Every fit is the local lane's verdict ([`local_verdict`]), so Create and Get models
 //! say the same; this module only words it. Each command is a thin wrapper over a plain
 //! function taking what it reads ([`LocalCmdDeps`]), and checks that the main window called
 //! it.
@@ -73,7 +73,7 @@ use crate::state::AppState;
 /// A billion bytes: the GB the catalog's tiers count in.
 const GB: u64 = 1_000_000_000;
 
-/// What Get local models reads: each part a test can stand in for.
+/// What Get models reads: each part a test can stand in for.
 pub struct LocalCmdDeps {
     /// The installed models, this computer's measured runs.
     pub store: store::Store,
@@ -107,7 +107,7 @@ pub struct LocalCmdDeps {
 
 // ---- the list ---------------------------------------------------------------------------------
 
-/// Get local models: this computer, the engine, the installed models (newest first, each at
+/// Get models: this computer, the engine, the installed models (newest first, each at
 /// its default size; one this build cannot read is still listed, not for this computer, so it
 /// can be deleted), and the recommended list at each entry's default size, split by its fit
 /// word (`notHere` into `not_here`). Per kind, the first entry of the highest tier at or below
@@ -708,7 +708,7 @@ async fn repo_dto(deps: &LocalCmdDeps, read: &ReadRepo, card: Option<&str>) -> L
 
 // ---- set-up plans -----------------------------------------------------------------------------
 
-/// What planning reads in Get local models: its Hub client, readings, catalog and installed
+/// What planning reads in Get models: its Hub client, readings, catalog and installed
 /// files.
 pub(crate) fn plan_deps<'a>(
     deps: &'a LocalCmdDeps,
@@ -967,7 +967,7 @@ async fn deps_of(
     }
 }
 
-/// Get local models. Sends nothing.
+/// Get models. Sends nothing.
 #[tauri::command]
 pub async fn studio_local_models(
     window: tauri::WebviewWindow,
@@ -978,7 +978,7 @@ pub async fn studio_local_models(
     local_models(&app_deps(&app, &studio, None).await).await
 }
 
-/// Search (or Enter) in Get local models: Hugging Face's picture, video or LoRA
+/// Search (or Enter) in Get models: Hugging Face's picture, video or LoRA
 /// repositories matching `text`, with the stored token, so gated repositories are found.
 #[tauri::command]
 pub async fn studio_local_search(
@@ -1037,14 +1037,16 @@ pub async fn studio_local_fit(
 
 /// Starts a checked download of the model and returns its download group: a searched file
 /// with the files its set-up plan lists, with the person's `choice` (none: the plan as it
-/// comes), registered with its recipe once every file is checked.
+/// comes), registered with its recipe once every file is checked. `null` when nothing was to
+/// be fetched (*Repair* on a model whose every file is on this computer): the model was
+/// checked and added again at once.
 #[tauri::command]
 pub async fn studio_local_download(
     window: tauri::WebviewWindow,
     app: AppHandle,
     source: LocalSource,
     choice: Option<SetupChoice>,
-) -> AppResult<String> {
+) -> AppResult<Option<String>> {
     only_main_window(window.label())?;
     start_local_download(&app, source, choice).await
 }
@@ -1528,7 +1530,7 @@ pub(crate) mod tests {
         }
     }
 
-    /// Get local models' dependencies on `hardware`, with `catalog`, an empty store, a models
+    /// Get models' dependencies on `hardware`, with `catalog`, an empty store, a models
     /// folder of its own (in `scratch`), 500 GB free, 32 GB of memory and the engine built in.
     fn deps_with(
         catalog: GenCatalog,
@@ -1568,9 +1570,9 @@ pub(crate) mod tests {
             .unwrap_or_else(|| panic!("{id} is not in {:?}", ids(entries)))
     }
 
-    // ---- Get local models -----------------------------------------------------------------
+    // ---- Get models -----------------------------------------------------------------
 
-    /// Opening Get local models sends nothing: it reads the catalog, the store and this
+    /// Opening Get models sends nothing: it reads the catalog, the store and this
     /// computer.
     #[tokio::test]
     async fn opening_get_local_models_makes_no_request() {
@@ -2432,7 +2434,7 @@ pub(crate) mod tests {
         RepoHub { url, seen }
     }
 
-    /// Get local models on `hardware` asking `hub`, with the bundled catalog (its companion
+    /// Get models on `hardware` asking `hub`, with the bundled catalog (its companion
     /// table) and nothing installed.
     pub(crate) fn repo_deps(hub: &RepoHub, hardware: Fixed, scratch: &Scratch) -> LocalCmdDeps {
         deps_with(bundled(), hardware, scratch, Some(hub.client()))

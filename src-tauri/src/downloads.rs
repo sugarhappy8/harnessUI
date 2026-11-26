@@ -189,7 +189,12 @@ pub(crate) fn gen_model_from(
         let file = match &part.present {
             Some(present) => {
                 if !file_whole(Path::new(present), part.size) {
-                    return Err(studio_errors::model_incomplete());
+                    // The person's own file can only have been moved or changed.
+                    return Err(if part.local.is_some() {
+                        studio_errors::local_file_moved()
+                    } else {
+                        studio_errors::model_incomplete()
+                    });
                 }
                 present.clone()
             }
@@ -764,7 +769,7 @@ pub struct DownloadGroupDto {
     /// `image-edit` or `video`), so Downloads labels it; `None` for a chat model's group.
     pub generator_kind: Option<String>,
     /// 0.1.0 Studio: the installed id of the picture or video model this group downloads
-    /// ([`GenGroup::gen_model_id`]), so Get local models shows its progress on that model's
+    /// ([`GenGroup::gen_model_id`]), so Get models shows its progress on that model's
     /// row; `None` for a chat model's group.
     pub gen_model_id: Option<String>,
     /// 0.2.0 (Task S10): the id of the LoRA this group downloads ([`LoraGroup::id`]), so a
@@ -4261,7 +4266,7 @@ mod tests {
     }
 
     /// Downloads labels a picture or video model's group by what it makes, and the group says
-    /// which installed model it downloads (Get local models shows its progress on that row).
+    /// which installed model it downloads (Get models shows its progress on that row).
     #[tokio::test]
     async fn a_picture_or_video_models_download_says_what_it_makes() {
         let dir = Scratch::new();

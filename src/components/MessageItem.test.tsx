@@ -242,7 +242,7 @@ describe("Open in Studio", () => {
 
   it("Open in Studio puts an attached picture in the tray", async () => {
     studioOn(flare);
-    // Get local models was left open in Studio: the picture's tray is shown, not that view.
+    // Get models was left open in Studio: the picture's tray is shown, not that view.
     useStudio.setState({ localView: true });
     ipcMock.getAttachment.mockResolvedValueOnce("data:image/webp;base64,UklGRg==");
     await shown(user({ documents: [], mentions: [] }));

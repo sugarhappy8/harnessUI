@@ -24,7 +24,7 @@
 //!   only Studio's copy under `@imported` goes (`local_models::delete_files_of`).
 //!
 //! Each command is a thin wrapper over a plain function taking what it reads
-//! ([`LocalCmdDeps`]), as Get local models' are.
+//! ([`LocalCmdDeps`]), as Get models' are.
 
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
@@ -38,7 +38,7 @@ use tauri::{AppHandle, Emitter, Manager};
 
 use super::errors;
 use super::local_cmd::{LocalCmdDeps, app_deps_for_writing, plan_deps, setup_plan_dto};
-use super::local_models::{DownloadDeps, PreparedDownload, plan_download, prepared_download};
+use super::local_models::{Added, DownloadDeps, plan_download, prepared_download};
 use super::manager::StudioManager;
 use super::setup_plan::{DiskFile, disk_setup, plan_disk_with, read_disk_file, ready_to_fetch};
 use crate::downloads::{DownloadManager, inside_folder, register_present_gen_model};
@@ -168,14 +168,6 @@ pub(crate) struct PreparedImport {
     /// The mode the person was offered and chose, to offer first next time; `None` for a file
     /// inside the models folder, used where it is without asking.
     pub chosen: Option<ImportMode>,
-}
-
-/// How an imported model joins the installed ones.
-pub(crate) enum Added {
-    /// Every part was on this computer: added, with this id.
-    Now(String),
-    /// Its companions are fetched first, by this download (not started yet), which adds it.
-    Download(Box<PreparedDownload>),
 }
 
 /// *Add* on the model file at `path` (untrusted) with `mode` and the person's `choice` for
@@ -521,7 +513,9 @@ mod tests {
     use crate::downloads::{GroupMeta, files_being_written, finish_gen_group};
     use crate::studio::local_cmd::tests::{RepoHub, gpu, hub, repo_deps};
     use crate::studio::local_models::tests::{install_catalog_entry, small_weights};
-    use crate::studio::local_models::{InstalledFiles, delete_files_of};
+    use crate::studio::local_models::{
+        InstalledFiles, LocalSource, add_now_if_present, delete_files_of, prepare_download,
+    };
     use crate::studio::test_support::Scratch;
 
     /// A file whose header is the detection fixture `name`'s tensor list, with no tensor data:
@@ -541,7 +535,7 @@ mod tests {
         models::download::sha256_file(path).await.unwrap()
     }
 
-    /// *Add a model file* with Get local models' dependencies (the bundled catalog and its
+    /// *Add a model file* with Get models' dependencies (the bundled catalog and its
     /// companion table, a models folder of its own, 500 GB free, the note accepted), a download
     /// manager that records groups without running them, and the progress events kept.
     struct T {
@@ -1116,6 +1110,106 @@ mod tests {
         assert!(t.store().list_gen_models().await.unwrap().is_empty());
         // Used where it is, it takes no room.
         assert!(t.import(&src, ImportMode::InPlace, None).await.is_ok());
+    }
+
+    impl T {
+        /// What *Repair* on installed model `id` prepares: its download, nothing started.
+        async fn prepare_repair(&mut self, id: &str) -> AppResult<(GroupMeta, usize)> {
+            self.refresh().await;
+            let catalog = self.deps.catalog.gen_catalog().await;
+            let deps = DownloadDeps {
+                plan: plan_deps(&self.deps, &catalog),
+                store: &self.deps.store,
+                models_dir: &self.deps.models_dir,
+                free_bytes: None,
+                engine: &self.deps.engine_need,
+            };
+            let source = LocalSource::Installed {
+                gen_model_id: id.into(),
+            };
+            let prepared = prepare_download(&deps, &source, None).await?;
+            Ok((prepared.meta, prepared.files.len()))
+        }
+
+        /// *Repair* on installed model `id`, as `start_local_download` does, a download
+        /// recorded but not run.
+        async fn repair(&mut self, id: &str) -> AppResult<Added> {
+            self.refresh().await;
+            let catalog = self.deps.catalog.gen_catalog().await;
+            let deps = DownloadDeps {
+                plan: plan_deps(&self.deps, &catalog),
+                store: &self.deps.store,
+                models_dir: &self.deps.models_dir,
+                free_bytes: None,
+                engine: &self.deps.engine_need,
+            };
+            let source = LocalSource::Installed {
+                gen_model_id: id.into(),
+            };
+            let prepared = prepare_download(&deps, &source, None).await?;
+            add_now_if_present(&deps, prepared, &|_| false).await
+        }
+    }
+
+    /// Final review, area 2, I1: *Repair* on a model added from a file, every part of it on
+    /// this computer, has nothing to fetch. It is checked and added again at once, with no
+    /// download group (which would never finish), and a file of the person's own that was
+    /// moved says so, never "download it".
+    #[tokio::test]
+    async fn repair_on_an_in_place_import_checks_it_at_once() {
+        let mut t = harness().await;
+        let src = t.outside_file("m.safetensors", fixture_bytes("sd15"));
+        let id = t
+            .import(&src, ImportMode::InPlace, None)
+            .await
+            .unwrap()
+            .gen_model_id
+            .unwrap();
+        let (_, fetched) = t.prepare_repair(&id).await.unwrap();
+        assert_eq!(fetched, 0, "every part is the person's own");
+        let Added::Now(again) = t.repair(&id).await.unwrap() else {
+            panic!("nothing to fetch, so nothing to download");
+        };
+        assert_eq!(again, id);
+        assert!(t.store().list_downloads(None).await.unwrap().is_empty());
+        assert!(t.store().get_gen_model(&id).await.unwrap().is_some());
+
+        // The person's file moved: said as such, and the model and the file stay.
+        let moved = src.with_file_name("moved.safetensors");
+        std::fs::rename(&src, &moved).unwrap();
+        let Err(e) = t.repair(&id).await else {
+            panic!("a moved file is refused");
+        };
+        assert_eq!(e.code, "studio_local_file_moved");
+        assert!(!e.next_step.to_lowercase().contains("download"), "{e:?}");
+        assert!(t.store().list_downloads(None).await.unwrap().is_empty());
+        assert!(t.store().get_gen_model(&id).await.unwrap().is_some());
+        assert!(moved.exists());
+    }
+
+    /// A file of the person's own that changed is named as moved or changed, whatever adds
+    /// the model again (`register_present_gen_model`): an import's set-up, a set-up change, or
+    /// *Repair*.
+    #[tokio::test]
+    async fn a_changed_file_of_the_persons_own_is_said_to_be_moved_or_changed() {
+        let mut t = harness().await;
+        let src = t.outside_file("m.safetensors", fixture_bytes("sd15"));
+        let id = t
+            .import(&src, ImportMode::InPlace, None)
+            .await
+            .unwrap()
+            .gen_model_id
+            .unwrap();
+        let (meta, _) = t.prepare_repair(&id).await.unwrap();
+        std::fs::write(&src, b"shorter now").unwrap();
+        let e = register_present_gen_model(t.store(), t.models_dir(), &meta, &|_| false)
+            .await
+            .unwrap_err();
+        assert_eq!(e.code, "studio_local_file_moved");
+        assert_eq!(
+            e.message,
+            "A file of this model was moved or changed on this computer."
+        );
     }
 
     /// A file that is not the size it was when it was checked (still being written) is

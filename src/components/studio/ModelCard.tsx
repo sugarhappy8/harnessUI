@@ -547,12 +547,18 @@ export function ResultCard(props: { hit: LocalSearchHit; onOpen(): void }) {
 }
 
 /** *Repair*: the installed model's files are checked, and what is missing or damaged is
- *  fetched again. */
+ *  fetched again; a model whose files are all on this computer is checked at once. */
 function RepairButton(props: { id: string; onError: (e: unknown) => void }) {
   const repairLocal = useStudio((s) => s.repairLocal);
   const [busy, setBusy] = useState(false);
-  const [started, setStarted] = useState(false);
-  if (started) return <p className="text-xs text-fg-muted">{LOCAL_MODELS.repairing}</p>;
+  const [started, setStarted] = useState<"downloading" | "checked" | null>(null);
+  if (started !== null) {
+    return (
+      <p className="text-xs text-fg-muted">
+        {started === "downloading" ? LOCAL_MODELS.repairing : LOCAL_MODELS.repairedNow}
+      </p>
+    );
+  }
   return (
     <Tip content={GET_MODELS.repairHint}>
       <button
@@ -562,7 +568,7 @@ function RepairButton(props: { id: string; onError: (e: unknown) => void }) {
         onClick={() => {
           setBusy(true);
           repairLocal(props.id)
-            .then(() => setStarted(true), props.onError)
+            .then((group) => setStarted(group === null ? "checked" : "downloading"), props.onError)
             .finally(() => setBusy(false));
         }}
       >

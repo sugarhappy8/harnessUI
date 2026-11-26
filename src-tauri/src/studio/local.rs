@@ -534,6 +534,9 @@ struct InstalledPart {
     size: u64,
     #[serde(default)]
     folder: Option<String>,
+    /// A file of the person's own (a model added from a file), used where it is.
+    #[serde(default)]
+    local: Option<PathBuf>,
 }
 
 /// The LoRAs as the store has them, and the LoRA folder the engine reads them from (in the
@@ -2003,12 +2006,16 @@ fn installed_parts(model: &store::GenModel) -> Result<Vec<InstalledPart>, MediaE
 /// is a model the entry runs (`downloads::check_main_file`, read off the async runtime): a
 /// diffusers folder's as the folder the engine reads ([`job_parts`]), a model part in no
 /// folder as its own file, whatever folder its other parts are in. Otherwise `ModelFileBad`:
-/// download it again.
+/// download it again; for a file of the person's own that is gone or resized,
+/// [`errors::LOCAL_FILE_MOVED`], which no download brings back.
 async fn check_files(entry: &GenEntry, model: &store::GenModel) -> Result<(), MediaError> {
     let parts = installed_parts(model)?;
     for part in &parts {
         match tokio::fs::metadata(&part.file).await {
             Ok(meta) if meta.is_file() && meta.len() == part.size => {}
+            _ if part.local.is_some() => {
+                return Err(refused(FailureKind::ModelFileBad, errors::LOCAL_FILE_MOVED));
+            }
             Ok(_) => {
                 return Err(refused(
                     FailureKind::ModelFileBad,
@@ -3827,6 +3834,58 @@ pub(crate) mod tests {
         let f = refusal(provider_start(&w).await);
         assert_eq!(f.kind, FailureKind::ModelFileBad);
         assert!(no_argv_recorded(&w.rec()));
+    }
+
+    /// Final review, area 2, I1: a part of the person's own (`local`, a model added from a
+    /// file) that is gone or resized was moved or changed on this computer: said as such,
+    /// with no advice to download it. A Hub part keeps "download it again".
+    #[tokio::test]
+    async fn a_moved_file_of_the_persons_own_says_so_and_not_download_it() {
+        for change in ["remove", "resize"] {
+            let w = world("ok").await;
+            let mut row = w.store.get_gen_model(KLEIN).await.unwrap().unwrap();
+            let file = w.part_file(KLEIN, "llm").await;
+            for part in row.parts.as_array_mut().unwrap() {
+                if part["role"] == "llm" {
+                    part["local"] = json!(file.to_str().unwrap());
+                }
+            }
+            w.store
+                .insert_gen_model(store::NewGenModel {
+                    id: row.id.clone(),
+                    catalog_id: row.catalog_id.clone(),
+                    name: row.name.clone(),
+                    kind: row.kind.clone(),
+                    family: row.family.clone(),
+                    recipe_id: row.recipe_id.clone(),
+                    parts: row.parts.clone(),
+                    size_bytes: row.size_bytes,
+                    source: row.source,
+                })
+                .await
+                .unwrap();
+            if change == "remove" {
+                std::fs::remove_file(&file).unwrap();
+            } else {
+                std::fs::write(&file, b"short").unwrap();
+            }
+            let f = refusal(provider_start(&w).await);
+            assert_eq!(f.kind, FailureKind::ModelFileBad, "{change}");
+            assert_eq!(
+                f.message, "A file of this model was moved or changed on this computer.",
+                "{change}"
+            );
+            let e = errors::from_local_failure(&f, MediaKind::Image);
+            assert_eq!(e.code, "studio_local_file_moved");
+            assert!(!e.next_step.to_lowercase().contains("download"), "{e:?}");
+            assert!(no_argv_recorded(&w.rec()));
+        }
+        // A Hub part's damage still says to download it again, in Get models.
+        let w = world("ok").await;
+        std::fs::remove_file(w.part_file(KLEIN, "vae").await).unwrap();
+        let e = errors::from_local_failure(&refusal(provider_start(&w).await), MediaKind::Image);
+        assert_eq!(e.code, "studio_model_file_bad");
+        assert!(e.next_step.contains("Get models"), "{e:?}");
     }
 
     #[tokio::test]

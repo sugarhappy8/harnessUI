@@ -468,7 +468,7 @@ export interface RunsPage {
   next: RunsCursor | null;
 }
 
-// ---- the Studio engine and Get local models -----------------------------------------------
+// ---- the Studio engine and Get models -----------------------------------------------
 
 /** The Studio engine on this computer. */
 export interface EngineStatus {
@@ -491,7 +491,7 @@ export interface EngineProgress {
   error: ErrorInfo | null;
 }
 
-/** What Get local models' header says about this computer. */
+/** What Get models' header says about this computer. */
 export interface HardwareLine {
   device: string;
   graphicsBytes: number | null;
@@ -788,7 +788,7 @@ export interface InstalledLocal {
   inPlace: boolean;
 }
 
-/** Get local models. */
+/** Get models. */
 export interface LocalModels {
   hardware: HardwareLine;
   engine: EngineStatus;

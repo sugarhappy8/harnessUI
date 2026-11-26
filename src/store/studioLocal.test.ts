@@ -173,6 +173,18 @@ describe("setting a model up", () => {
     }
   });
 
+  it("repairLocal gives the download group, or null when the model was checked at once", async () => {
+    vi.mocked(api.studioLocalDownload).mockResolvedValue("group-3");
+    await expect(useStudio.getState().repairLocal("m1")).resolves.toBe("group-3");
+    expect(api.studioLocalDownload).toHaveBeenCalledWith({ installed: { genModelId: "m1" } }, null);
+    expect(api.studioLocalModels).not.toHaveBeenCalled();
+    // Every file on this computer (a model added from a file): nothing downloads, and the
+    // local models are read again.
+    vi.mocked(api.studioLocalDownload).mockResolvedValue(null);
+    await expect(useStudio.getState().repairLocal("m1")).resolves.toBeNull();
+    expect(api.studioLocalModels).toHaveBeenCalledTimes(1);
+  });
+
   it("setModelFiles sets the model up and reads the local models again", async () => {
     const result = { files: {}, downloadGroup: null } as never;
     vi.mocked(api.studioSetModelFiles).mockResolvedValue(result);

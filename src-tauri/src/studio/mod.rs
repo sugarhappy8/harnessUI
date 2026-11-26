@@ -26,7 +26,7 @@
 //! - [`detect`]: reading a Hugging Face repo's files when it opens (one header read per group
 //!   of quantisations, at most 24 a repo, kept in a small cache), each file's label and the
 //!   repo's verdict.
-//! - [`local_cmd`]: Get local models' commands: what this computer can run (the installed
+//! - [`local_cmd`]: Get models' commands: what this computer can run (the installed
 //!   models and the recommended list, each with its fit, licences and parts), Hugging Face
 //!   search and a repository's files, a fit at a size, download, delete and the note about
 //!   local models.

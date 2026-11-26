@@ -4673,7 +4673,7 @@ impl LocalHardware for FixedHardware {
         self.target.lock().unwrap().clone()
     }
 
-    /// Never read by the local lane (only Get local models' header shows it).
+    /// Never read by the local lane (only Get models' header shows it).
     async fn device_total_bytes(&self) -> Option<u64> {
         None
     }

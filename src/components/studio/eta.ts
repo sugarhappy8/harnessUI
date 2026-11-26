@@ -1,5 +1,5 @@
 // How long a local run takes, in words (0.1.0): the one place an `Eta` becomes text, so the
-// picker, the panel's time chips, the Create button, the run card and Get local models all say
+// picker, the panel's time chips, the Create button, the run card and Get models all say
 // the same ("about 4 min", "(first guess)" until it was measured on this computer).
 import { STUDIO_TIME } from "../../lib/words";
 import type { Eta } from "./types";

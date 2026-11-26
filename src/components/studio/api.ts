@@ -120,7 +120,7 @@ export const studioEngineDownload = (acceptLicense: boolean) =>
 export const studioEngineCancel = () => invoke<void>("studio_engine_cancel");
 export const studioEngineRemove = () => invoke<void>("studio_engine_remove");
 
-// ---- Get local models ---------------------------------------------------------------------
+// ---- Get models ---------------------------------------------------------------------
 
 /** What this computer can run. Sends nothing. */
 export const studioLocalModels = () => invoke<LocalModels>("studio_local_models");
@@ -138,8 +138,10 @@ export const studioLocalFit = (source: LocalSource, width: number, height: numbe
   invoke<LocalFit>("studio_local_fit", { source, width, height, seconds });
 /** Downloads a model and returns its download group ID: a searched file with the files its
  *  set-up plan lists, with the person's `choice` (`null`: the plan as it comes). */
+/** The download's group, or `null` when nothing was to be fetched: every file of the model
+ *  is on this computer (*Repair* on a model added from a file), so it was checked at once. */
 export const studioLocalDownload = (source: LocalSource, choice: SetupChoice | null) =>
-  invoke<string>("studio_local_download", { source, choice });
+  invoke<string | null>("studio_local_download", { source, choice });
 export const studioLocalDownloadFile = (repo: string, commit: string, file: string) =>
   invoke<string>("studio_local_download_file", { repo, commit, file });
 export const studioLocalDelete = (genModelId: string) => invoke<void>("studio_local_delete", { genModelId });

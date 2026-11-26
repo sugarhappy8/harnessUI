@@ -1507,7 +1507,7 @@ pub(crate) mod tests {
         "studio_engine_download",
         "studio_engine_cancel",
         "studio_engine_remove",
-        // Get local models (studio::local_cmd).
+        // Get models (studio::local_cmd).
         "studio_local_models",
         "studio_local_search",
         "studio_local_repo",

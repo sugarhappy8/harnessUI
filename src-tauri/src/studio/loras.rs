@@ -38,7 +38,7 @@
 //! What a LoRA's refusals say never calls it a model or a part (ruling S10-lora-words).
 //!
 //! Each command is a thin wrapper over a plain function taking what it reads
-//! ([`LocalCmdDeps`]), as Get local models' are.
+//! ([`LocalCmdDeps`]), as Get models' are.
 
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
@@ -731,7 +731,7 @@ mod tests {
             .unpinned("unpinned_lora.safetensors", 1_000, "flux-lora-realism")
     }
 
-    /// What the LoRA commands read in the app: Get local models' dependencies (a models folder
+    /// What the LoRA commands read in the app: Get models' dependencies (a models folder
     /// of its own, 500 GB free), a download manager that records groups without running them,
     /// the runs on this computer (the LoRAs one holds) and the progress events kept.
     struct TestApp {
@@ -1380,7 +1380,7 @@ mod tests {
 
     // ---- the list -----------------------------------------------------------------------------
 
-    /// Get local models lists the LoRAs, newest first, each saying whether its file is gone.
+    /// Get models lists the LoRAs, newest first, each saying whether its file is gone.
     #[tokio::test]
     async fn get_local_models_lists_the_loras_and_says_which_file_is_gone() {
         let t = harness().await;

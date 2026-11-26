@@ -57,7 +57,7 @@ export interface StudioLocalState {
   setupPlan(source: LocalSource, choice: SetupChoice): Promise<SetupPlan>;
   /** Downloads `source` set up as `choice` (`null`: as its plan comes), then reads the
    *  downloads and the local models again. Returns the download group's ID. */
-  downloadSetup(source: LocalSource, choice: SetupChoice | null): Promise<string>;
+  downloadSetup(source: LocalSource, choice: SetupChoice | null): Promise<string | null>;
   /** *Add a model file* / *Add a LoRA file*: the file chooser (.safetensors, .sft, .gguf);
    *  `null` when it was closed without a file. */
   chooseFile(kind: "model" | "lora"): Promise<string | null>;
@@ -90,8 +90,10 @@ export interface StudioLocalState {
    *  only leaves a trace: the files are gone all the same). Rejects when it was refused (while
    *  a run on this computer uses the model, `studio_model_in_use`). */
   deleteLocal(genModelId: string): Promise<void>;
-  /** Checks the installed model and starts a download of any missing or damaged files. */
-  repairLocal(genModelId: string): Promise<void>;
+  /** Checks the installed model and starts a download of any missing or damaged files: its
+   *  group. `null` when every file is on this computer (a model added from a file): it was
+   *  checked at once, and the local models are read again. */
+  repairLocal(genModelId: string): Promise<string | null>;
   /** The model Get models' detail panel shows (Task U6): a Hugging Face result by its repository,
    *  or a catalog model by its entry; `null` while the panel is closed. */
   detail: { repo: string } | { entryId: string } | null;
@@ -264,7 +266,13 @@ export function createLocal(
         .catch((e: unknown) => console.warn("Studio: the local models could not be read again", e));
     },
     repairLocal: async (genModelId) => {
-      await api.studioLocalDownload({ installed: { genModelId } }, null);
+      const group = await api.studioLocalDownload({ installed: { genModelId } }, null);
+      if (group === null) {
+        await get()
+          .refreshLocal()
+          .catch((e: unknown) => console.warn("Studio: the local models could not be read again", e));
+      }
+      return group;
     },
     detail: null,
     detailError: null,

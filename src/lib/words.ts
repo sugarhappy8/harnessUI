@@ -1071,7 +1071,7 @@ export function engineDownloadWords(bytes: number, licenseName: string): string 
   return `Download the Studio engine (${engineSizeWords(bytes, licenseName)})`;
 }
 
-/** The Studio engine's line (Settings → Studio and Get local models' footer, Tasks B10 and
+/** The Studio engine's line (Settings → Studio and Get models' footer, Tasks B10 and
  *  B13): built in on a Mac; on Windows a pack that comes with the first model, is missing,
  *  downloads or is installed. */
 export const ENGINE_LINE = {
@@ -1607,6 +1607,8 @@ export const STUDIO_CARD = {
   /** After the engine's or a damaged part's download started from the card. */
   engineDownloading: "The Studio engine is downloading. Press Run again when it is done.",
   repairing: "The model's damaged parts are downloading again. Press Run again when it is done.",
+  /** After *Download again* on a model whose files are all on this computer: checked at once. */
+  repairedNow: "The model's files were checked and are whole. Press Run again.",
 } as const;
 
 /** The strip above the card stream: this session's runs of the tab, by state ("1 making ·
@@ -1962,6 +1964,8 @@ export const LOCAL_MODELS = {
   downloading: (name: string) => `Downloading ${name}`,
   /** After *Repair*: what happens now. */
   repairing: "Its files are being checked; anything missing or damaged downloads again, with its progress here.",
+  /** After *Repair* on a model whose files are all on this computer: nothing downloads. */
+  repairedNow: "Its files were checked: they are all on this computer and whole.",
   deleteTitle: (name: string) => `Delete ${name}?`,
   deleteBody:
     "Its files are removed from this computer, except parts another model still uses. Pictures and videos you made stay in the gallery.",
@@ -2211,7 +2215,7 @@ export const DOWNLOAD_LOCAL = {
   excludedRegions: (licence: string, regions: string[]) => `${licence} excludes ${andList(regions)}.`,
 } as const;
 
-/** LoRAs, in the composer's LoRA section and in Get local models (Phase U). */
+/** LoRAs, in the composer's LoRA section and in Get models (Phase U). */
 export const LORAS = {
   title: "LoRAs",
   add: "Add",
@@ -2558,7 +2562,7 @@ export function verdictBadgeWords(verdict: StudioVerdict, exact: boolean): strin
 }
 
 /** The one-time note about local models (Task B14, local addendum L1), word for word: shown
- *  before the first local download, and again from Get local models' footer and Settings →
+ *  before the first local download, and again from Get models' footer and Settings →
  *  Studio. `lead` is its first sentence, in bold. */
 export const LOCAL_NOTICE = {
   lead: "Local models run only on your computer.",

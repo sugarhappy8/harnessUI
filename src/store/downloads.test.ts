@@ -1,4 +1,4 @@
-// The app's download groups as Get local models follows them (0.1.0 Task B14): the list read
+// The app's download groups as Get models follows them (0.1.0 Task B14): the list read
 // once listening, each download-progress event, and a list asked for before an event never
 // taking its place.
 import { beforeEach, describe, expect, it, vi } from "vitest";

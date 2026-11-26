@@ -1,11 +1,11 @@
 // The one-time content notice (0.1.0 Task B14, local addendum L1): shown before the first
 // local download, word for word, and accepted with *I understand* (recorded by the backend);
-// read again, read only, from Get local models' footer and from Settings → Studio.
+// read again, read only, from Get models' footer and from Settings → Studio.
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { LOCAL } from "./fixtures/models";
 
-// Get local models follows the app's downloads: none here.
+// Get models follows the app's downloads: none here.
 vi.mock("../../lib/ipc", () => ({
   isTauri: () => true,
   listDownloads: () => Promise.resolve([]),

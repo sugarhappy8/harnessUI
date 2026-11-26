@@ -1966,7 +1966,7 @@ mod tests {
         let e = diffusion_import_refusal(Some("flux"), &[]).unwrap();
         assert_eq!(e.code, "picture_model");
         assert_eq!(e.message, "This is a picture or video model.");
-        assert_eq!(e.next_step, "Add it in Studio → Get local models.");
+        assert_eq!(e.next_step, "Add it in Studio → Get models.");
         assert!(diffusion_import_refusal(None, &table("klein4b-tensors.txt")).is_some());
         assert!(diffusion_import_refusal(Some("qwen3"), &table("qwen3-4b-tensors.txt")).is_none());
         assert!(diffusion_import_refusal(None, &[]).is_none());

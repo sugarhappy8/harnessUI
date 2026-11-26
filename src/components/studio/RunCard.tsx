@@ -300,7 +300,8 @@ export function RunCard(props: { run: Run }) {
   // `perform` and is said at the card's foot with its next step.
   const [busy, setBusy] = useState(false);
   const [failure, setFailure] = useState<ErrorInfo | null>(null);
-  const [repairing, setRepairing] = useState(false);
+  // *Download again* on its way: its download started, or the files were checked at once.
+  const [repairing, setRepairing] = useState<"downloading" | "checked" | null>(null);
   // *Load it again* on its way.
   const [loadingChat, setLoadingChat] = useState(false);
   const [detailsOpen, setDetailsOpen] = useState(false);
@@ -384,15 +385,15 @@ export function RunCard(props: { run: Run }) {
           {engineDownloadWords(engine.downloadBytes, engine.licenseName)}
         </button>
       )}
-      {fileBad && !repairing && (
+      {fileBad && repairing === null && (
         <button
           type="button"
           className={actionClass}
           disabled={busy}
           onClick={() =>
             perform(async () => {
-              await store().repairLocal(run.model);
-              setRepairing(true);
+              const group = await store().repairLocal(run.model);
+              setRepairing(group === null ? "checked" : "downloading");
             })
           }
         >
@@ -555,7 +556,9 @@ export function RunCard(props: { run: Run }) {
         actions
       )}
       {engineMissing && engine?.state === "downloading" && <p className="text-meta">{STUDIO_CARD.engineDownloading}</p>}
-      {fileBad && repairing && <p className="text-meta">{STUDIO_CARD.repairing}</p>}
+      {fileBad && repairing !== null && (
+        <p className="text-meta">{repairing === "downloading" ? STUDIO_CARD.repairing : STUDIO_CARD.repairedNow}</p>
+      )}
       {failure && (
         <div className="text-xs" role="alert">
           <p className="text-danger">{failure.message}</p>

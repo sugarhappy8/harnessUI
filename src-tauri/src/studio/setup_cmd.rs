@@ -19,7 +19,7 @@
 //!   the models folder only; a file from this computer stays the person's own.
 //!
 //! Each command is a thin wrapper over a plain function taking what it reads
-//! ([`LocalCmdDeps`]), as Get local models' are, and checks that the main window called it.
+//! ([`LocalCmdDeps`]), as Get models' are, and checks that the main window called it.
 
 use std::sync::Arc;
 
@@ -361,7 +361,7 @@ mod tests {
     const FLUX: &str = "hf:o/r:f.gguf";
     const MYSTERY: &str = "someone/mystery-model";
 
-    /// Get local models asking a Hub on this computer that serves `repos`, with the bundled
+    /// Get models asking a Hub on this computer that serves `repos`, with the bundled
     /// catalog, a models folder of its own and a download manager that records groups (never
     /// runs them); `held` is the model a run on this computer uses, if any.
     struct T {

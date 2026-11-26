@@ -124,7 +124,7 @@ async function show(
     untested: false,
     canRun: true,
   }));
-  // Get local models' footer follows the engine's download (Task B13).
+  // Get models' footer follows the engine's download (Task B13).
   vi.mocked(api.onEngineProgress).mockResolvedValue(() => undefined);
   // The prompt dock asks for the draft's estimate (Task B7).
   vi.mocked(api.studioEstimate).mockResolvedValue({
@@ -371,7 +371,7 @@ describe("StudioView", () => {
     // The menu keeps Update model lists; Get models has its own button.
     await openMenu();
     screen.getByRole("menuitem", { name: "Update model lists" });
-    expect(screen.queryByRole("menuitem", { name: /Get local models/ })).toBeNull();
+    expect(screen.queryByRole("menuitem", { name: /Get models/ })).toBeNull();
     await act(async () => {
       fireEvent.keyDown(document.activeElement ?? document.body, { key: "Escape" });
     });

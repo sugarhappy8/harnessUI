@@ -894,6 +894,17 @@ describe("a model downloading", () => {
     within(section("On this computer")).getByRole("article", { name: "Z-Image Turbo" });
   });
 
+  it("Repair on a model whose files are all on this computer says they were checked", async () => {
+    // Final review, area 2, I1: nothing to fetch, so no download: the model was checked and
+    // added again at once, and the card says so, never "downloading".
+    await showLocal();
+    vi.mocked(api.studioLocalDownload).mockResolvedValue(null);
+    const k = within(section("On this computer")).getByRole("article", { name: "FLUX.2 klein 4B" });
+    await click(within(k).getByRole("button", { name: "Repair" }));
+    within(k).getByText(LOCAL_MODELS.repairedNow);
+    expect(within(k).queryByText(LOCAL_MODELS.repairing)).toBeNull();
+  });
+
   it("an installed model downloading again shows that in place of Repair", async () => {
     ipc.listDownloads.mockResolvedValue([
       group({ id: "group-2", genModelId: "flux2-klein-4b-q4", label: "FLUX.2 klein 4B", status: "paused" }),

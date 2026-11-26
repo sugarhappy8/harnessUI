@@ -8,6 +8,7 @@ import { act, cleanup, fireEvent, render, screen, within } from "@testing-librar
 import { COMPOSE_IMAGES_EVENT } from "../../lib/composeImages";
 import { LOCAL, LOCAL_RUN, MODELS, RUN } from "./fixtures/models";
 import type { LocalRun, Run, RunError, StudioPrefs } from "./types";
+import { STUDIO_CARD } from "../../lib/words";
 
 vi.mock("../../lib/ipc", () => ({ isTauri: () => true, loadLocalModel: vi.fn(), modelBusy: vi.fn() }));
 vi.mock("./api");
@@ -856,6 +857,37 @@ describe("RunCard", () => {
       await show(failed("studio_model_file_bad", "A model file is damaged."));
       await click(button("Download again"));
       expect(api.studioLocalDownload).toHaveBeenCalledWith({ installed: { genModelId: LOCAL_RUN.model } }, null);
+    });
+
+    it("Download again on a model checked at once says its files are whole", async () => {
+      vi.mocked(api.studioLocalDownload).mockResolvedValue(null);
+      await show(
+        localRun({
+          status: "failed",
+          outputs: [],
+          error: err({ code: "studio_model_file_bad", message: "A model file is damaged.", company: "local" }),
+        }),
+      );
+      await click(button("Download again"));
+      screen.getByText(STUDIO_CARD.repairedNow);
+      expect(screen.queryByText(STUDIO_CARD.repairing)).toBeNull();
+    });
+
+    it("a file of the person's own that moved offers no download", async () => {
+      await show(
+        localRun({
+          status: "failed",
+          outputs: [],
+          error: err({
+            code: "studio_local_file_moved",
+            message: "A file of this model was moved or changed on this computer.",
+            nextStep: "Add the file again with Add a model file in Get models, or delete this model.",
+            company: "local",
+          }),
+        }),
+      );
+      screen.getByText("A file of this model was moved or changed on this computer.");
+      noButton(/Download again/);
     });
 
     it("a refused repair says why on the card", async () => {

@@ -87,7 +87,7 @@ describe("Settings: the section list stays inside the dialog and scrolls", () =>
     expect(within(dialog).getByText("studio page")).toBeTruthy();
   });
 
-  it("closes when a page opens Studio (Settings → Studio's Get local models)", async () => {
+  it("closes when a page opens Studio (Settings → Studio's Get models)", async () => {
     const onOpenChange = vi.fn();
     await open("studio", onOpenChange);
     await act(async () => {

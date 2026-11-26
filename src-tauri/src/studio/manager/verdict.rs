@@ -2,7 +2,7 @@
 //! would go on this computer as it is now, its fit and its time there, its word, and what the
 //! graphics card's lease is asked for ([`local_verdict`]). Every fit Studio shows for a local
 //! model is this one: the local lane's start, estimate, preview and task, and every fit Get
-//! local models shows (Task L16), so Create and Get local models say the same. Also how a
+//! local models shows (Task L16), so Create and Get models say the same. Also how a
 //! device is named as a run records it, and how a time and a fit word are shown.
 
 use models::fit::Target;
@@ -50,7 +50,7 @@ pub(crate) struct LocalVerdict {
 
 /// `entry` at `size`, `steps` and `pictures` on this computer as it is now, judged where the
 /// run would go: [`LocalVerdict`]. Every fit Studio shows for a local model is this one, so
-/// Create and Get local models say the same. The measured times read are those of the device
+/// Create and Get models say the same. The measured times read are those of the device
 /// the run would use, as a run records it ("<device> (<backend>)", or "Processor").
 pub(crate) async fn local_verdict(
     entry: &GenEntry,

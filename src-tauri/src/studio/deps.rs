@@ -118,7 +118,7 @@ pub trait LocalHardware: Send + Sync {
     async fn target(&self) -> (Target, String, Option<String>);
 
     /// The graphics device's total memory, as the probe [`target`](Self::target) reads says
-    /// (`None` on the processor, or when the probe does not say): what Get local models'
+    /// (`None` on the processor, or when the probe does not say): what Get models'
     /// header shows for a graphics card.
     async fn device_total_bytes(&self) -> Option<u64>;
 
@@ -729,7 +729,7 @@ mod tests {
         );
     }
 
-    /// Get local models' header: the card's total as its probe says, never its free memory;
+    /// Get models' header: the card's total as its probe says, never its free memory;
     /// nothing for a device the probes do not have or whose probe gives no total.
     #[test]
     fn the_cards_total_is_the_one_its_probe_gives() {

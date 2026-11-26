@@ -309,7 +309,7 @@ pub fn no_local_engine() -> AppError {
     AppError::new(
         "studio_no_local_engine",
         "Local models are not set up on this computer.",
-        "Open Get local models to set them up.",
+        "Open Get models to set them up.",
         String::new(),
     )
 }
@@ -320,7 +320,7 @@ pub fn picture_model() -> AppError {
     AppError::new(
         "picture_model",
         "This is a picture or video model.",
-        "Add it in Studio → Get local models.",
+        "Add it in Studio → Get models.",
         String::new(),
     )
 }
@@ -1116,7 +1116,7 @@ pub fn notice_needed() -> AppError {
     AppError::new(
         "studio_notice_needed",
         "Read the note about local models first.",
-        "Open the note in Get local models.",
+        "Open the note in Get models.",
         String::new(),
     )
 }
@@ -1153,6 +1153,17 @@ pub fn model_incomplete() -> AppError {
         "studio_model_incomplete",
         "A part of this model is not downloaded yet.",
         "Resume the download in Models → Downloads to finish it.",
+        String::new(),
+    )
+}
+
+/// A file of the person's own that a model uses was moved or changed on this computer
+/// ([`LOCAL_FILE_MOVED`]): *Repair*, an import's set-up or a set-up change found it so.
+pub fn local_file_moved() -> AppError {
+    AppError::new(
+        "studio_local_file_moved",
+        LOCAL_FILE_MOVED,
+        LOCAL_FILE_MOVED_NEXT,
         String::new(),
     )
 }
@@ -1212,7 +1223,7 @@ pub fn local_model_missing() -> AppError {
     AppError::new(
         "studio_local_model_missing",
         LOCAL_NOT_INSTALLED,
-        "Choose another model, or get it again in Get local models.",
+        "Choose another model, or get it again in Get models.",
         String::new(),
     )
 }
@@ -1230,7 +1241,7 @@ pub fn needs_set_up() -> AppError {
     )
 }
 
-// ---- Get local models ------------------------------------------------------------------------
+// ---- Get models ------------------------------------------------------------------------
 
 /// *Set it up yourself* on a model a download not finished yet adds or replaces (an earlier
 /// set-up change, *Download again*): that download would replace the change, or the change the
@@ -1611,6 +1622,12 @@ pub const LOCAL_WRONG_KIND: &str = "This model does not make what was asked for.
 pub const LOCAL_PART_MISSING: &str = "A file of this model is missing.";
 /// A part file is not the size it was downloaded at.
 pub const LOCAL_PART_CHANGED: &str = "A file of this model is not the size it was downloaded at.";
+/// A file of the person's own (a part from this computer, `local`: a model added from a
+/// file) is gone or not the size it was added at: it was moved or changed outside Studio,
+/// and downloading cannot bring it back ([`local_file_moved`]).
+pub const LOCAL_FILE_MOVED: &str = "A file of this model was moved or changed on this computer.";
+const LOCAL_FILE_MOVED_NEXT: &str =
+    "Add the file again with Add a model file in Get models, or delete this model.";
 /// The model file's own header is not a model its entry runs; the check's details follow.
 pub const LOCAL_NOT_ITS_MODEL: &str = "The model file is not the model it was downloaded as";
 /// A negative prompt over `runtime::sd::args::NEGATIVE_MAX_CHARS` (262,144 characters; a
@@ -1838,7 +1855,7 @@ pub fn from_failure(company: Company, f: &MediaFailure) -> AppError {
         FailureKind::ModelFileBad => simple(
             "studio_model_file_bad",
             "A model file is damaged.",
-            "Download it again in Get local models.",
+            "Download it again with Repair in Get models.",
         ),
         FailureKind::EngineMissing => simple(
             "studio_engine_missing",
@@ -1897,6 +1914,12 @@ pub fn from_local_failure(f: &MediaFailure, kind: MediaKind) -> AppError {
             code: "studio_mask_needs_picture".to_owned(),
             message: MASK_NEEDS_PICTURE.to_owned(),
             next_step: "Add a picture to change, or remove the mask.".to_owned(),
+            ..error
+        },
+        FailureKind::ModelFileBad if f.message == LOCAL_FILE_MOVED => AppError {
+            code: "studio_local_file_moved".to_owned(),
+            message: LOCAL_FILE_MOVED.to_owned(),
+            next_step: LOCAL_FILE_MOVED_NEXT.to_owned(),
             ..error
         },
         FailureKind::BadRequest if f.message.starts_with(LORA_MISSING) => AppError {
@@ -2416,7 +2439,7 @@ mod tests {
         assert_eq!(poster_only_for_video().code, "bad_request");
     }
 
-    /// A local download's refusals, in the words Get local models shows.
+    /// A local download's refusals, in the words Get models shows.
     #[test]
     fn a_local_download_says_why_it_was_refused() {
         let words = |e: AppError| (e.code, e.message, e.next_step);
@@ -2502,7 +2525,7 @@ mod tests {
         assert_eq!(recipe_name("no-such-recipe"), "this model type");
     }
 
-    /// Why a model is not offered here, as the estimate and Get local models say it.
+    /// Why a model is not offered here, as the estimate and Get models say it.
     #[test]
     fn a_reason_names_what_this_computer_lacks() {
         use models::gen_fit::NotFor;
