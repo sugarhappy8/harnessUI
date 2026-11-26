@@ -36,8 +36,8 @@
 //! local lane does (`studio_prompt_too_long_here`). At that length the worst bracket nesting
 //! is read in about 0.2 s (ruling G3-safety-bound); the 4,000-character cap of 0.1.x is gone,
 //! and every prompt up to the bound is read all four ways. The negative prompt is not
-//! checked (since 0.1.x: "no children"-style negatives would be refused), and is bounded the
-//! same way.
+//! checked (since 0.1.x: "no children"-style negatives would be refused), so its own bound
+//! (`NEGATIVE_MAX_CHARS`, 262,144 characters) is only the 1 MiB one in characters.
 //!
 //! The lists trade misses against harmless prompts refused. Bare "baby" and "minor" are left
 //! out of [`MINOR`] because they refuse too much that is harmless ("a sexy baby-blue dress",

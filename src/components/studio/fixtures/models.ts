@@ -2686,7 +2686,7 @@ export const LOCAL: LocalModels = {
             "layer": "advanced",
             "kind": {
               "type": "text",
-              "maxChars": 16384
+              "maxChars": 262144
             },
             "companyDefault": null,
             "initial": null,
@@ -3133,7 +3133,7 @@ export const LOCAL: LocalModels = {
             "layer": "advanced",
             "kind": {
               "type": "text",
-              "maxChars": 16384
+              "maxChars": 262144
             },
             "companyDefault": null,
             "initial": null,

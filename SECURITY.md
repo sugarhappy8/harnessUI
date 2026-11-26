@@ -659,7 +659,8 @@ runner's.
   words from fixed lists. Nothing you type, and nothing in a model's listing, becomes a
   flag. The prompt is never on its command line, where other programs could read it: it is
   written to a file in the run's folder, which is deleted when the run ends. A local prompt
-  may be at most 4,000 characters.
+  may be at most 16,384 characters, so the child-safety check reads all of it; a negative
+  prompt may be at most 262,144 characters; and no prompt can be longer than 1 MiB.
 - Model files must be `.gguf` or `.safetensors`. `.ckpt`, `.pt` and `.pth` files are
   refused everywhere, because they can run code when they are loaded. Every file is checked
   against its published size and SHA-256, and a GGUF model file is checked by its own

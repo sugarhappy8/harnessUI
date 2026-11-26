@@ -353,7 +353,8 @@ class StudioDocs(unittest.TestCase):
 
     def test_7_9_states_the_local_rules_the_code_keeps(self):
         local = "\n".join(section("### 7.9 Studio on this computer (0.1.0)"))
-        for words in ("one `sd-cli` process per job", "no `sd-server`", "`--prompt-file`", "1 MiB", "16,384 characters", "`.ckpt`",
+        for words in ("one `sd-cli` process per job", "no `sd-server`", "`--prompt-file`", "1 MiB", "16,384 characters",
+                      "262,144 characters", "`.ckpt`",
                       "`--disable-image-metadata`", "never `resources/llama/main`", "Unload the chat model",
                       "installing an update stops it"):
             self.assertIn(words, local)
@@ -361,9 +362,17 @@ class StudioDocs(unittest.TestCase):
         args = read("crates/runtime/src/sd/args.rs")
         self.assertRegex(args, r"pub const PROMPT_MAX_BYTES: usize = 1_048_576;")
         self.assertRegex(args, r"pub const LOCAL_PROMPT_MAX_CHARS: usize = 16_384;")
+        self.assertRegex(args, r"pub const NEGATIVE_MAX_CHARS: usize = PROMPT_MAX_BYTES / 4;")
 
     def test_security_says_a_local_run_sends_nothing(self):
         self.assertIn("A local Studio run sends nothing", read("SECURITY.md"))
+
+    def test_security_states_the_prompt_bounds_the_code_keeps(self):
+        engine = doc_paragraph("SECURITY.md", "The prompt is never on its command line")
+        for words in ("at most 16,384 characters, so the child-safety check reads all of it",
+                      "at most 262,144 characters", "longer than 1 MiB"):
+            self.assertIn(words, engine)
+        self.assertNotIn("4,000 characters", engine)
 
     def test_the_readme_leads_studio_with_this_computer(self):
         studio = doc_paragraph("README.md", "Studio makes pictures and short videos")

@@ -31,13 +31,20 @@ pub use super::prompt_view::{attention_text, parse_prompt_attention, strip_promp
 /// never shown as a limit (design 9.2). The prompt goes by file, never in argv.
 pub const PROMPT_MAX_BYTES: usize = 1_048_576;
 
-/// The longest local prompt and negative prompt, in characters, also never shown as a limit
-/// (ruling G3-safety-bound). Studio's prompt check (`studio/prompt_check.rs`) reads every
-/// local prompt four times, the last through the engine's own weighting
+/// The longest local prompt, in characters, also never shown as a limit (ruling
+/// G3-safety-bound). Studio's prompt check (`studio/prompt_check.rs`) reads every local
+/// prompt four times, the last through the engine's own weighting
 /// ([`parse_prompt_attention`]), whose time grows with the square of the brackets; at this
 /// length the worst bracket nesting reads in about 0.2 s. The local lane refuses a longer
 /// prompt before the check reads it, so no local prompt skips a reading.
 pub const LOCAL_PROMPT_MAX_CHARS: usize = 16_384;
+
+/// The longest local negative prompt, in characters: the most that always fit in
+/// [`PROMPT_MAX_BYTES`] of UTF-8 (four bytes each), so the 1 MiB bound holds while the field
+/// counts characters. The prompt check does not read a negative prompt (since 0.1.x), so it
+/// needs no bound of its own; only its typed markers are removed
+/// ([`strip_prompt_markers`], linear).
+pub const NEGATIVE_MAX_CHARS: usize = PROMPT_MAX_BYTES / 4;
 
 /// The sides the engine is given, in pixels.
 const SIZE_RANGE: RangeInclusive<u32> = 64..=2048;

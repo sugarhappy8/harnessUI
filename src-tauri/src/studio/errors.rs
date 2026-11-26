@@ -1613,8 +1613,8 @@ pub const LOCAL_PART_MISSING: &str = "A file of this model is missing.";
 pub const LOCAL_PART_CHANGED: &str = "A file of this model is not the size it was downloaded at.";
 /// The model file's own header is not a model its entry runs; the check's details follow.
 pub const LOCAL_NOT_ITS_MODEL: &str = "The model file is not the model it was downloaded as";
-/// A negative prompt over `runtime::sd::args::LOCAL_PROMPT_MAX_CHARS`, the local prompt's
-/// own bound (a prompt over its bound is [`PROMPT_TOO_LONG`]).
+/// A negative prompt over `runtime::sd::args::NEGATIVE_MAX_CHARS` (262,144 characters; a
+/// prompt over its bound is [`PROMPT_TOO_LONG`]).
 pub const LOCAL_NEGATIVE_TOO_LONG: &str = "This negative prompt is too long.";
 /// A run started again with the folder of one still running.
 pub const LOCAL_ALREADY_RUNNING: &str = "This run is already running.";

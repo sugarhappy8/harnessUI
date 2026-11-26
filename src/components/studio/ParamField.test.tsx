@@ -549,13 +549,13 @@ describe("ParamField", () => {
 
     // 0.2.0 (design 9.2): the limit is a hidden bound, so its count shows only near it.
     it("shows what is left only when fewer than 1,000 characters remain", () => {
-      const long = spec({ ...negative, kind: { type: "text", maxChars: 16_384 } });
+      const long = spec({ ...negative, kind: { type: "text", maxChars: 262_144 } });
       const left = () => screen.queryByText(/ left$/);
       const { rerender } = render(<ParamField spec={long} value={undefined} onChange={vi.fn()} onReset={vi.fn()} />);
       expect(left()).toBeNull();
-      rerender(<ParamField spec={long} value={"a".repeat(15_384)} onChange={vi.fn()} onReset={vi.fn()} />);
+      rerender(<ParamField spec={long} value={"a".repeat(261_144)} onChange={vi.fn()} onReset={vi.fn()} />);
       expect(left()).toBeNull();
-      rerender(<ParamField spec={long} value={"a".repeat(15_385)} onChange={vi.fn()} onReset={vi.fn()} />);
+      rerender(<ParamField spec={long} value={"a".repeat(261_145)} onChange={vi.fn()} onReset={vi.fn()} />);
       expect(left()?.textContent).toBe("999 left");
     });
 
