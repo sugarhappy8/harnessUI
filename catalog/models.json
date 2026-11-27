@@ -1480,6 +1480,100 @@
           "Keep the licence and copyright notices with the files."
         ],
         "plainWords": "Free for any use, including commercial."
+      },
+      "minimax-h3-community": {
+        "name": "MiniMax H3 Community License Agreement",
+        "url": "https://huggingface.co/MiniMaxAI/MiniMax-H3/blob/12253298adb81e36757eabebb81d2ba1c0cc70cc/LICENSE",
+        "sha256": "59b99642b95ea21630e311198ddbfffbfe05aadba0c2f5d884cbdf4efcc90f44",
+        "commercialOutputs": "underRevenue",
+        "revenueLimitUsd": 20000000,
+        "excludedRegions": [
+          "the European Union",
+          "the United Kingdom",
+          "South Korea",
+          "the United States"
+        ],
+        "obligations": [
+          "Ask MiniMax first if your products earn over $20 million a year.",
+          "Show the name MiniMax H3 in any commercial product that uses it.",
+          "Follow MiniMax's use policy and pass it on to anyone you share the files with."
+        ],
+        "plainWords": "Commercial use only under $20,000,000 a year in revenue. Not for use in the European Union, the United Kingdom, South Korea or the United States."
+      },
+      "minimax-h3-image-community": {
+        "name": "MiniMax-H3-Image Community License Agreement",
+        "url": "https://huggingface.co/MiniMaxAI/MiniMax-H3-Image/blob/8ced60068623def5b74b4d10558117cb61d6482d/LICENSE",
+        "sha256": "0ec3bb5e6d9e885fa2aaf15e84689e50fd51f42b53fa24d3a64ed9d8c76d423b",
+        "commercialOutputs": "underRevenue",
+        "revenueLimitUsd": 1000000,
+        "excludedRegions": [
+          "the European Union",
+          "the United Kingdom",
+          "South Korea",
+          "the United States"
+        ],
+        "obligations": [
+          "Ask MiniMax first if you or your affiliates earn over $1 million a year, or if you offer it to others as a service.",
+          "Show the name MiniMax-H3-Image in any commercial product that uses it.",
+          "Follow MiniMax's use policy and pass it on to anyone you share the files with."
+        ],
+        "plainWords": "Commercial use only under $1,000,000 a year in revenue. Not for use in the European Union, the United Kingdom, South Korea or the United States."
+      },
+      "gemma-terms-of-use": {
+        "name": "Gemma Terms of Use",
+        "url": "https://huggingface.co/unsloth/gemma-3-12b-it-GGUF/blob/d15e4c7dc21dc55d56bf8549db57a71ad8a2a35d/README.md",
+        "sha256": "5a5435b4b5586d651573549827240348cb457b27e713432500433915408e30b5",
+        "commercialOutputs": "withUseRules",
+        "revenueLimitUsd": null,
+        "excludedRegions": [],
+        "obligations": [
+          "Keep to Google's list of banned uses.",
+          "Pass the Gemma terms on with any copy you share."
+        ],
+        "plainWords": "Commercial use is allowed, except for the uses Google's policy bans."
+      },
+      "ltx-2-community": {
+        "name": "LTX-2 Community License Agreement",
+        "url": "https://huggingface.co/unsloth/LTX-2.3-GGUF/blob/96e8ed4925ead3db9ff4d0084f165ef6a74f28d0/LICENSE",
+        "sha256": "e28ef68d90e17b06308e4c5cba5c9a967b70c3d67f87ddc3dfc46a312cb6a134",
+        "commercialOutputs": "underRevenue",
+        "revenueLimitUsd": 10000000,
+        "excludedRegions": [],
+        "obligations": [
+          "Companies with $10,000,000 a year in revenue or more need a paid licence from Lightricks.",
+          "Keep to the licence's list of banned uses."
+        ],
+        "plainWords": "Commercial use only under $10,000,000 a year in revenue."
+      },
+      "ltx-2x-community": {
+        "name": "LTX-2.x Community License Agreement",
+        "url": "https://huggingface.co/unsloth/LTX-2.5-GGUF/blob/ac3c540c6025903784336e99b2dc179385c4c3b7/LICENSE",
+        "sha256": "be75acae5c99b0fb16ed6cfbf8f731e5121a729bef112d20337699407e796451",
+        "commercialOutputs": "underRevenue",
+        "revenueLimitUsd": 10000000,
+        "excludedRegions": [],
+        "obligations": [
+          "Companies with $10,000,000 a year in revenue or more need a paid licence from Lightricks.",
+          "Keep to the licence's list of banned uses."
+        ],
+        "plainWords": "Commercial use only under $10,000,000 a year in revenue."
+      },
+      "tencent-hunyuan-community": {
+        "name": "Tencent Hunyuan Community License",
+        "url": "https://huggingface.co/tencent/HunyuanVideo-1.5/blob/9b49404b3f5df2a8f0b31df27a0c7ab872e7b038/LICENSE",
+        "sha256": "c38236952096107a4adbc164f44cd1768745b0a20090ea858e0954c96a6b8391",
+        "commercialOutputs": "yes",
+        "revenueLimitUsd": null,
+        "excludedRegions": [
+          "the European Union",
+          "the United Kingdom",
+          "South Korea"
+        ],
+        "obligations": [
+          "Keep to Tencent's rules for acceptable use.",
+          "Companies with over 100 million monthly users need a licence from Tencent."
+        ],
+        "plainWords": "Free for commercial use, except in the European Union, the United Kingdom and South Korea."
       }
     },
     "files": [
@@ -2060,19 +2154,6 @@
         "license": "apache-2.0"
       },
       {
-        "id": "qwen3-0.6b-base-bf16",
-        "slot": "llm",
-        "versions": [
-          "anima"
-        ],
-        "repo": "Qwen/Qwen3-0.6B-Base",
-        "revision": "da87bfb608c14b7cf20ba1ce41287e8de496c0cd",
-        "path": "model.safetensors",
-        "size": 1192135096,
-        "sha256": "cd2a512003e2f9f3cd3c32a9c3573f820bb28c940f73c57b1ddaa983d9223eba",
-        "license": "apache-2.0"
-      },
-      {
         "id": "qwen3-vl-4b-mmproj",
         "slot": "llm_vision",
         "versions": [
@@ -2347,6 +2428,166 @@
         "size": 19989325,
         "sha256": "06b9509352d2af50381ab2247e083b80d32d5c0aba91c272ca9ff729b6a0e523",
         "license": "apache-2.0"
+      },
+      {
+        "id": "p-h3-text-encoder-int8",
+        "slot": "llm",
+        "versions": [
+          "minimax-h3",
+          "minimax-h3-image",
+          "p-h3-image"
+        ],
+        "repo": "PrunaAI/P-Image-OSS-Comfy",
+        "revision": "177745a635feb2f0adf3db3693297cb63fea3dda",
+        "path": "text_encoders/p-h3-image_text_encoder_int8_convrot.safetensors",
+        "size": 5120870504,
+        "sha256": "fb42c9ff0597e61729475d0b48b69b591ffe06d0b442a79dde22b14fadbe1c0f",
+        "license": "minimax-h3-community"
+      },
+      {
+        "id": "minimax-h3-video-vae",
+        "slot": "vae",
+        "versions": [
+          "minimax-h3"
+        ],
+        "repo": "Comfy-Org/MiniMax-H3",
+        "revision": "4b53a35191437de05370da548e59aeabe2a5a09a",
+        "path": "vae/minimax_h3_video_vae_fp16.safetensors",
+        "size": 5207808496,
+        "sha256": "7c1f131492e7eddacaac9069a61b81bdd39de5cc96561e677c5eab1cdce5e522",
+        "license": "minimax-h3-community"
+      },
+      {
+        "id": "minimax-h3-image-vae",
+        "slot": "vae",
+        "versions": [
+          "minimax-h3-image"
+        ],
+        "repo": "Comfy-Org/MiniMax-H3-Image",
+        "revision": "a70325ac34ca5c0c83df578bb5e02237460c1d8d",
+        "path": "vae/minimax_h3_image_vae_fp16.safetensors",
+        "size": 1168505312,
+        "sha256": "d80e9c2e5cfc9844869961ff5a58c9a9e52182df6bfb30b26018dd7f348721af",
+        "license": "minimax-h3-image-community"
+      },
+      {
+        "id": "p-h3-image-vae",
+        "slot": "vae",
+        "versions": [
+          "minimax-h3",
+          "minimax-h3-image",
+          "p-h3-image"
+        ],
+        "repo": "PrunaAI/P-Image-OSS-Comfy",
+        "revision": "177745a635feb2f0adf3db3693297cb63fea3dda",
+        "path": "vae/p-h3-image_vae_bf16.safetensors",
+        "size": 5559036680,
+        "sha256": "a1f2a7a98d0f2d1e761656fc5701dd43d7cf46d1bbdaa5d866a3e961e97487d7",
+        "license": "minimax-h3-community"
+      },
+      {
+        "id": "gemma3-12b-q8",
+        "slot": "llm",
+        "versions": [
+          "ltxav"
+        ],
+        "repo": "unsloth/gemma-3-12b-it-GGUF",
+        "revision": "d15e4c7dc21dc55d56bf8549db57a71ad8a2a35d",
+        "path": "gemma-3-12b-it-Q8_0.gguf",
+        "size": 12510212576,
+        "sha256": "a774cd9c6f289a6159f4a3f92a7ebca887e15073f92016d53c3593cb440a5982",
+        "license": "gemma-terms-of-use"
+      },
+      {
+        "id": "gemma3-12b-q4km",
+        "slot": "llm",
+        "versions": [
+          "ltxav"
+        ],
+        "repo": "unsloth/gemma-3-12b-it-GGUF",
+        "revision": "d15e4c7dc21dc55d56bf8549db57a71ad8a2a35d",
+        "path": "gemma-3-12b-it-Q4_K_M.gguf",
+        "size": 7300778336,
+        "sha256": "15b8fd9d8672cd4240c178c217ca781409291f34e353d2e913b29c7602ceb3ff",
+        "license": "gemma-terms-of-use"
+      },
+      {
+        "id": "ltx23-connectors",
+        "slot": "embeddings_connectors",
+        "versions": [
+          "ltxav"
+        ],
+        "repo": "unsloth/LTX-2.3-GGUF",
+        "revision": "96e8ed4925ead3db9ff4d0084f165ef6a74f28d0",
+        "path": "text_encoders/ltx-2.3-22b-dev_embeddings_connectors.safetensors",
+        "size": 2312144712,
+        "sha256": "a5c5148788d8d9d5d1e650e4cbf3502a46a2f7f975ce70c59082732c8905a8ae",
+        "license": "ltx-2-community"
+      },
+      {
+        "id": "ltx23-vae",
+        "slot": "vae",
+        "versions": [
+          "ltxav"
+        ],
+        "repo": "unsloth/LTX-2.3-GGUF",
+        "revision": "96e8ed4925ead3db9ff4d0084f165ef6a74f28d0",
+        "path": "vae/ltx-2.3-22b-dev_video_vae.safetensors",
+        "size": 1452256522,
+        "sha256": "8732bb70cf4343541815f45c9f90f5ff0519d679bd63483afc27bf79a08d3f4e",
+        "license": "ltx-2-community"
+      },
+      {
+        "id": "ltx25-gemma4-bf16",
+        "slot": "llm",
+        "versions": [
+          "ltxav"
+        ],
+        "repo": "unsloth/LTX-2.5-GGUF",
+        "revision": "ac3c540c6025903784336e99b2dc179385c4c3b7",
+        "path": "text_encoders/gemma4-12b-with-proj-ltx-2.5-bf16.safetensors",
+        "size": 26263858182,
+        "sha256": "ef7243612fdae7a75cb4d5cee9433e81380675fb6c213bd98ae74a9cd16561d1",
+        "license": "ltx-2x-community"
+      },
+      {
+        "id": "ltx25-vae",
+        "slot": "vae",
+        "versions": [
+          "ltxav"
+        ],
+        "repo": "unsloth/LTX-2.5-GGUF",
+        "revision": "ac3c540c6025903784336e99b2dc179385c4c3b7",
+        "path": "vae/ltx-2.5-video-vae-conv-bf16.safetensors",
+        "size": 1452269922,
+        "sha256": "685b06ee3d9b2039647698fc4ea33175112462fc374e2777312c907897dfce8d",
+        "license": "ltx-2x-community"
+      },
+      {
+        "id": "byt5-small-glyphxl",
+        "slot": "t5xxl",
+        "versions": [
+          "hunyuan-video"
+        ],
+        "repo": "Comfy-Org/Hunyuan-Video-1.5",
+        "revision": "1405a2b738c29b890cf6d03fc038d8d3e92eeed7",
+        "path": "split_files/text_encoders/byt5_small_glyphxl_fp16.safetensors",
+        "size": 438643184,
+        "sha256": "516910bb4c9b225370290e40585d1b0e6c8cd3583690f7eec2f7fb593990fb48",
+        "license": "tencent-hunyuan-community"
+      },
+      {
+        "id": "hunyuan15-vae",
+        "slot": "vae",
+        "versions": [
+          "hunyuan-video"
+        ],
+        "repo": "Comfy-Org/Hunyuan-Video-1.5",
+        "revision": "1405a2b738c29b890cf6d03fc038d8d3e92eeed7",
+        "path": "split_files/vae/hunyuanvideo15_vae_fp16.safetensors",
+        "size": 2521292758,
+        "sha256": "e7c3091949c27e2d55ae6d5df917b99dadfebbf308e5a50d0ade0d16c90297ae",
+        "license": "tencent-hunyuan-community"
       }
     ],
     "byVersion": {
@@ -2397,7 +2638,9 @@
         "vae": "ae-flux1"
       },
       "hunyuan-video": {
-        "llm": "qwen2.5-vl-7b-q8"
+        "llm": "qwen2.5-vl-7b-q8",
+        "t5xxl": "byt5-small-glyphxl",
+        "vae": "hunyuan15-vae"
       },
       "anima": {
         "vae": "qwen-image-vae",
@@ -2560,6 +2803,23 @@
         "llm": "ling-mini-2-bf16",
         "tokenizer": "ling-tokenizer",
         "vae": "ming-image-vae"
+      },
+      "minimax-h3": {
+        "llm": "p-h3-text-encoder-int8",
+        "vae": "minimax-h3-video-vae"
+      },
+      "minimax-h3-image": {
+        "llm": "p-h3-text-encoder-int8",
+        "vae": "minimax-h3-image-vae"
+      },
+      "p-h3-image": {
+        "llm": "p-h3-text-encoder-int8",
+        "vae": "p-h3-image-vae"
+      },
+      "ltxav": {
+        "llm": "gemma3-12b-q8",
+        "embeddings_connectors": "ltx23-connectors",
+        "vae": "ltx23-vae"
       }
     },
     "byRecipe": {
@@ -2585,6 +2845,14 @@
       "llada-image-turbo": {
         "llm": "llada-image-turbo-te-q8",
         "embeddings_connectors": "llada-image-turbo-connectors-edit"
+      },
+      "p-h3-image": {
+        "llm": "p-h3-text-encoder-int8",
+        "vae": "p-h3-image-vae"
+      },
+      "ltx25-dev": {
+        "llm": "ltx25-gemma4-bf16",
+        "vae": "ltx25-vae"
       }
     }
   }

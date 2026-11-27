@@ -1428,6 +1428,109 @@ mod tests {
         );
     }
 
+    /// The video models that planned an encoder or decoder the table did not name: MiniMax H3
+    /// and its picture and P-H3 cousins, LTX-2.3 and 2.5 (two encoder families under one engine
+    /// version, so by recipe) and HunyuanVideo 1.5 (a glyph encoder beside its language model,
+    /// and its own decoder).
+    #[test]
+    fn the_video_models_get_their_encoders_and_decoders() {
+        for (version, recipe_id, parts) in [
+            (
+                SdVersion::MinimaxH3,
+                "minimax-h3-fl2va",
+                vec![
+                    (
+                        SlotId::Llm,
+                        "text_encoders/p-h3-image_text_encoder_int8_convrot.safetensors",
+                    ),
+                    (SlotId::Vae, "vae/minimax_h3_video_vae_fp16.safetensors"),
+                ],
+            ),
+            (
+                SdVersion::MinimaxH3Image,
+                "minimax-h3-image",
+                vec![
+                    (
+                        SlotId::Llm,
+                        "text_encoders/p-h3-image_text_encoder_int8_convrot.safetensors",
+                    ),
+                    (SlotId::Vae, "vae/minimax_h3_image_vae_fp16.safetensors"),
+                ],
+            ),
+            (
+                SdVersion::PH3Image,
+                "p-h3-image",
+                vec![
+                    (
+                        SlotId::Llm,
+                        "text_encoders/p-h3-image_text_encoder_int8_convrot.safetensors",
+                    ),
+                    (SlotId::Vae, "vae/p-h3-image_vae_bf16.safetensors"),
+                ],
+            ),
+            (
+                SdVersion::Ltxav,
+                "ltx23-dev",
+                vec![
+                    (SlotId::Llm, "gemma-3-12b-it-Q8_0.gguf"),
+                    (SlotId::Vae, "vae/ltx-2.3-22b-dev_video_vae.safetensors"),
+                    (
+                        SlotId::EmbeddingsConnectors,
+                        "text_encoders/ltx-2.3-22b-dev_embeddings_connectors.safetensors",
+                    ),
+                ],
+            ),
+            (
+                SdVersion::Ltxav,
+                "ltx25-dev",
+                vec![
+                    (
+                        SlotId::Llm,
+                        "text_encoders/gemma4-12b-with-proj-ltx-2.5-bf16.safetensors",
+                    ),
+                    (SlotId::Vae, "vae/ltx-2.5-video-vae-conv-bf16.safetensors"),
+                ],
+            ),
+            (
+                SdVersion::HunyuanVideo,
+                "hunyuan-video-15-t2v",
+                vec![
+                    (SlotId::Llm, "Qwen2.5-VL-7B-Instruct-Q8_0.gguf"),
+                    (
+                        SlotId::T5xxl,
+                        "split_files/text_encoders/byt5_small_glyphxl_fp16.safetensors",
+                    ),
+                    (
+                        SlotId::Vae,
+                        "split_files/vae/hunyuanvideo15_vae_fp16.safetensors",
+                    ),
+                ],
+            ),
+        ] {
+            let p = plan(lone(version, "video-Q8_0.gguf"), recipe_id, &[], &[]);
+            assert!(p.can_run(), "{recipe_id}: {:?}", p.missing());
+            for (slot_id, path) in parts {
+                assert_eq!(
+                    source(&p, slot_id),
+                    PartSource::Companion,
+                    "{recipe_id} {slot_id:?}"
+                );
+                assert_eq!(hub_path(&p, slot_id), path, "{recipe_id} {slot_id:?}");
+            }
+        }
+        // LTX-2.5's encoder carries its own projection, so it takes no connectors file. The
+        // sound decoder is optional ("for silent video", say the engine's recipes) and the
+        // table gives no optional slot but the vision encoders, so a video is silent.
+        let p = plan(
+            lone(SdVersion::Ltxav, "ltx-Q8_0.gguf"),
+            "ltx25-dev",
+            &[],
+            &[],
+        );
+        assert!(slot(&p, SlotId::EmbeddingsConnectors).is_none());
+        assert!(slot(&p, SlotId::AudioVae).is_none());
+    }
+
     #[test]
     fn an_sd15_checkpoint_needs_nothing_else_and_shows_its_own_vae() {
         let p = plan(
@@ -2568,15 +2671,20 @@ mod tests {
 
     #[test]
     fn a_slot_nothing_can_fill_is_missing_and_the_plan_cannot_run() {
+        // Ideogram 4's second model file (the unconditional one) is a model slot: the table
+        // refuses companions for it, so a lone file leaves it missing.
         let p = plan(
-            main_hub("o/HunyuanVideo-1.5-GGUF", "h-Q4_0.gguf", "hunyuan-video-15"),
-            "hunyuan-video-15-t2v",
+            lone(SdVersion::Ideogram4, "ideogram4-Q4_0.gguf"),
+            "ideogram4",
             &[],
             &[],
         );
-        assert_eq!(p.missing(), [SlotId::T5xxl, SlotId::Vae]);
+        assert_eq!(p.missing(), [SlotId::UncondDiffusionModel]);
         assert!(!p.can_run());
-        assert!(slot(&p, SlotId::Vae).unwrap().required);
+        assert!(slot(&p, SlotId::UncondDiffusionModel).unwrap().required);
+        // Its text encoder and decoder do come from the table.
+        assert_eq!(source(&p, SlotId::Llm), PartSource::Companion);
+        assert_eq!(source(&p, SlotId::Vae), PartSource::Companion);
     }
 
     #[test]

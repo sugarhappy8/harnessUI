@@ -701,6 +701,27 @@ mod tests {
         );
     }
 
+    /// No row of the table is dead weight: each is the default of some version or recipe, or a
+    /// variant of one (the same slot, from the same repository, for a version the default
+    /// serves), which the planner reuses when it is already installed
+    /// (`setup::Planner::installed`). A row nothing can pick would only make the catalog longer.
+    #[test]
+    fn every_row_is_a_default_or_a_variant_of_one() {
+        let t = bundled();
+        for c in &t.files {
+            let used = SdVersion::ALL.into_iter().any(|v| {
+                let defaults = recipes_for(v)
+                    .into_iter()
+                    .filter_map(|r| t.default_for(r, v, c.slot));
+                c.versions.contains(&v)
+                    && defaults
+                        .into_iter()
+                        .any(|d| d.id == c.id || d.repo == c.repo)
+            });
+            assert!(used, "{}: no default uses it or is its variant", c.id);
+        }
+    }
+
     /// The allowlist holds only slots that really have no default, each with its reason: an
     /// entry the table now covers is stale and must go, so the page never says Studio cannot
     /// find a file it can.
@@ -768,9 +789,14 @@ mod tests {
             .revenue_limit_usd,
             Some(1_000_000)
         );
+        // A model slot never has a companion: Ideogram 4's second model file is not one.
         assert!(
-            t.default_for("hunyuan-video-15-t2v", SdVersion::HunyuanVideo, SlotId::Vae)
-                .is_none()
+            t.default_for(
+                "ideogram4",
+                SdVersion::Ideogram4,
+                SlotId::UncondDiffusionModel
+            )
+            .is_none()
         );
     }
 
