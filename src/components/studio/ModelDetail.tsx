@@ -41,6 +41,7 @@ import { DownloadState, pickNewModelAndFocus, useShownDownload } from "./Downloa
 import { Licences, nameOf, PlanParts, Section, verdict, warningsFor } from "./PlanParts";
 import { fitDotClass, GateLine, gateProblem, useTokenSaved, VerdictBadge, WarningLines } from "./ModelCard";
 import { CARD_BUTTON } from "./styles";
+import { PanelBoundary } from "../CrashNotice";
 import type {
   Gate,
   Licence,
@@ -179,21 +180,25 @@ export function ModelDetail() {
   const title = detail === null ? "" : "repo" in detail ? visiblePath(detail.repo) : (entry?.name ?? "");
   return (
     <SlideOver open={detail !== null} onOpenChange={(open) => !open && closeDetail()} title={title} width="half">
-      {detail !== null && "repo" in detail && (
-        <div className="flex min-h-full flex-col gap-4">
-          {detailError && <ErrorBanner error={detailError} onDismiss={closeDetail} />}
-          {repo && local ? (
-            <RepoReview key={`${repo.repo}@${repo.commit}`} repo={repo} local={local} />
-          ) : (
-            !detailError && (
-              <p role="status" className="text-sm text-fg-muted">
-                {MODEL_DETAIL.reading}
-              </p>
-            )
-          )}
-        </div>
-      )}
-      {entry && local && <EntryReview key={entry.id} entry={entry} local={local} />}
+      {/* An error drawing a model's page shows a notice here: Get models' list behind the panel
+          and the rest of the app keep working. Another model (or commit) draws it again. */}
+      <PanelBoundary where="detail" resetKeys={[title, repo?.commit ?? null, entryId]}>
+        {detail !== null && "repo" in detail && (
+          <div className="flex min-h-full flex-col gap-4">
+            {detailError && <ErrorBanner error={detailError} onDismiss={closeDetail} />}
+            {repo && local ? (
+              <RepoReview key={`${repo.repo}@${repo.commit}`} repo={repo} local={local} />
+            ) : (
+              !detailError && (
+                <p role="status" className="text-sm text-fg-muted">
+                  {MODEL_DETAIL.reading}
+                </p>
+              )
+            )}
+          </div>
+        )}
+        {entry && local && <EntryReview key={entry.id} entry={entry} local={local} />}
+      </PanelBoundary>
     </SlideOver>
   );
 }

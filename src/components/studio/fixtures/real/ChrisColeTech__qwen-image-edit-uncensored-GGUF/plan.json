@@ -1,0 +1,118 @@
+{
+  "file": "split/diffusion_models/qwen-image-edit-2511-uncensored-Q4_K_M.gguf",
+  "plan": {
+    "canDownload": true,
+    "fit": {
+      "eta": null,
+      "reason": null,
+      "suggestion": null,
+      "verdict": "yellow",
+      "verySlow": false,
+      "videoOnProcessor": false,
+      "word": "fits"
+    },
+    "licences": [
+      {
+        "badge": "red",
+        "commercial": "unclear",
+        "id": "unknown",
+        "name": "unknown",
+        "obligations": [],
+        "plainWords": "Check the licence before you use what you make.",
+        "revenueLimitUsd": null,
+        "sha256": "2f72b2e9d9e209901e40377f05e11a92afee5324751e10057d5a7f852d88a93e",
+        "url": "https://huggingface.co/ChrisColeTech/qwen-image-edit-uncensored-GGUF/tree/e457782c5687631f44e457134d7bbbb7daf6f072"
+      }
+    ],
+    "lowDisk": false,
+    "needsEngine": false,
+    "recipe": {
+      "id": "qwen-image-edit-2511",
+      "kind": "pictureEdit",
+      "name": "Qwen Image Edit 2511"
+    },
+    "recipes": [
+      {
+        "id": "qwen-image",
+        "kind": "picture",
+        "name": "Qwen Image"
+      },
+      {
+        "id": "qwen-image-edit-2511",
+        "kind": "pictureEdit",
+        "name": "Qwen Image Edit 2511"
+      },
+      {
+        "id": "qwen-image-edit-2509",
+        "kind": "pictureEdit",
+        "name": "Qwen Image Edit 2509"
+      },
+      {
+        "id": "qwen-image-edit",
+        "kind": "pictureEdit",
+        "name": "Qwen Image Edit"
+      }
+    ],
+    "slots": [
+      {
+        "part": {
+          "alreadyHere": false,
+          "licenceId": "unknown",
+          "local": false,
+          "path": "split/diffusion_models/qwen-image-edit-2511-uncensored-Q4_K_M.gguf",
+          "repo": "ChrisColeTech/qwen-image-edit-uncensored-GGUF",
+          "role": "diffusion",
+          "sizeBytes": 11657701984
+        },
+        "required": true,
+        "role": "diffusion",
+        "source": "main"
+      },
+      {
+        "part": {
+          "alreadyHere": false,
+          "licenceId": "unknown",
+          "local": false,
+          "path": "split/text_encoders/Qwen2.5-VL-7B-Instruct-q4_0.gguf",
+          "repo": "ChrisColeTech/qwen-image-edit-uncensored-GGUF",
+          "role": "llm",
+          "sizeBytes": 4431389248
+        },
+        "required": true,
+        "role": "llm",
+        "source": "repo"
+      },
+      {
+        "part": {
+          "alreadyHere": false,
+          "licenceId": "unknown",
+          "local": false,
+          "path": "split/text_encoders/Qwen2.5-VL-7B-Instruct-mmproj-f16.gguf",
+          "repo": "ChrisColeTech/qwen-image-edit-uncensored-GGUF",
+          "role": "llm-vision",
+          "sizeBytes": 1354162944
+        },
+        "required": false,
+        "role": "llm-vision",
+        "source": "repo"
+      },
+      {
+        "part": {
+          "alreadyHere": false,
+          "licenceId": "unknown",
+          "local": false,
+          "path": "split/vae/qwen_image_vae.safetensors",
+          "repo": "ChrisColeTech/qwen-image-edit-uncensored-GGUF",
+          "role": "vae",
+          "sizeBytes": 253806246
+        },
+        "required": true,
+        "role": "vae",
+        "source": "repo"
+      }
+    ],
+    "toFetchBytes": 17697060422,
+    "totalBytes": 17697060422,
+    "untested": false
+  }
+}

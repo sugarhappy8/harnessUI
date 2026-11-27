@@ -3,10 +3,17 @@ import { Select } from "radix-ui";
 import { Check, ChevronDown } from "lucide-react";
 import clsx from "clsx";
 import { FIELD, OPTION, POPUP } from "./styles";
+import { installTrustedTypes } from "../../lib/trustedTypes";
 
 /** A closed list of options that opens as a styled popup (Radix Select), named by its label.
  *  `labelledBy` names it by a label its owner draws instead (a Studio field's row), and then it
- *  draws none of its own. */
+ *  draws none of its own.
+ *
+ *  Radix draws the list's viewport with a fixed `<style>` written as HTML, even while closed,
+ *  which the window's Trusted Types rule refuses without the app's policy (the blank window of
+ *  0.2.0). The app makes that policy before it draws anything (main.tsx); a SelectField makes
+ *  sure of it too (once, and nothing where the browser has no Trusted Types), so it can never be
+ *  drawn without it. */
 export function SelectField<T extends string>(props: {
   label: string;
   hideLabel?: boolean;
@@ -17,6 +24,7 @@ export function SelectField<T extends string>(props: {
   onChange(v: T): void;
   disabled?: boolean;
 }) {
+  installTrustedTypes();
   const id = useId();
   return (
     <div className="flex flex-col gap-1">

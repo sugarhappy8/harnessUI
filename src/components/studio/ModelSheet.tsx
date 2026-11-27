@@ -23,6 +23,7 @@ import { FITTING, fittingEntry, makesKind, useStudio, type SheetFilter, type Stu
 import { ErrorBanner } from "../ErrorBanner";
 import { ChipGroup } from "../ui/ChipGroup";
 import { SlideOver } from "../ui/SlideOver";
+import { PanelBoundary } from "../CrashNotice";
 import { FOCUS_RING } from "../ui/styles";
 import { Tip } from "../ui/Tip";
 import {
@@ -107,21 +108,25 @@ export function ModelSheet(props: { tab: StudioTab; anchor: RefObject<HTMLElemen
   const leftFocus = useRef(false);
   const chipButton = () => anchor.current?.querySelector<HTMLElement>("button") ?? null;
 
+  // An error drawing the list shows a notice in the sheet; the composer under it keeps working.
+  // Opening the sheet again draws the list again.
   const body = (
-    <SheetBody
-      tab={tab}
-      layout={narrow ? "sheet" : "popover"}
-      query={query}
-      onQuery={setQuery}
-      filter={filter}
-      onFilter={setFilter}
-      searchRef={searchRef}
-      onClose={() => openSheet(false)}
-      onHandOff={() => {
-        leftFocus.current = true;
-      }}
-      chipButton={chipButton}
-    />
+    <PanelBoundary where="sheet" resetKeys={[open]}>
+      <SheetBody
+        tab={tab}
+        layout={narrow ? "sheet" : "popover"}
+        query={query}
+        onQuery={setQuery}
+        filter={filter}
+        onFilter={setFilter}
+        searchRef={searchRef}
+        onClose={() => openSheet(false)}
+        onHandOff={() => {
+          leftFocus.current = true;
+        }}
+        chipButton={chipButton}
+      />
+    </PanelBoundary>
   );
 
   if (narrow) {

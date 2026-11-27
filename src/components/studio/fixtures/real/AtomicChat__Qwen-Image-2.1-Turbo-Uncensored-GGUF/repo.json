@@ -1,0 +1,121 @@
+{
+  "repo": "AtomicChat/Qwen-Image-2.1-Turbo-Uncensored-GGUF",
+  "commit": "881a778e306c44920e42536def3e52c3a3ecc7cd",
+  "author": "AtomicChat",
+  "summary": "Qwen-Image 2.1 makes a picture with three parts. Only one of them is changed here.",
+  "verdict": "unknown",
+  "files": [],
+  "loras": [],
+  "fileViews": [
+    {
+      "path": "Qwen-Image-2.1-Turbo-Uncensored-AD-Q2_K.gguf",
+      "sizeBytes": 3336289216,
+      "quant": "Q2_K",
+      "label": {
+        "extra": {
+          "role": "llm"
+        }
+      }
+    },
+    {
+      "path": "Qwen-Image-2.1-Turbo-Uncensored-AD-Q3_K.gguf",
+      "sizeBytes": 4184140736,
+      "quant": "Q3_K",
+      "label": {
+        "extra": {
+          "role": "llm"
+        }
+      }
+    },
+    {
+      "path": "Qwen-Image-2.1-Turbo-Uncensored-AD-Q4_K.gguf",
+      "sizeBytes": 5287517120,
+      "quant": "Q4_K",
+      "label": {
+        "extra": {
+          "role": "llm"
+        }
+      }
+    },
+    {
+      "path": "Qwen-Image-2.1-Turbo-Uncensored-AD-Q5_K.gguf",
+      "sizeBytes": 6281292736,
+      "quant": "Q5_K",
+      "label": {
+        "extra": {
+          "role": "llm"
+        }
+      }
+    },
+    {
+      "path": "Qwen-Image-2.1-Turbo-Uncensored-AD-Q6_K.gguf",
+      "sizeBytes": 7490550720,
+      "quant": "Q6_K",
+      "label": {
+        "extra": {
+          "role": "llm"
+        }
+      }
+    },
+    {
+      "path": "Qwen-Image-2.1-Turbo-Uncensored-BF16.gguf",
+      "sizeBytes": 16388045536,
+      "quant": "BF16",
+      "label": {
+        "extra": {
+          "role": "llm"
+        }
+      }
+    },
+    {
+      "path": "Qwen-Image-2.1-Turbo-Uncensored-Q8_0.gguf",
+      "sizeBytes": 8709520096,
+      "quant": "Q8_0",
+      "label": {
+        "extra": {
+          "role": "llm"
+        }
+      }
+    },
+    {
+      "path": "mmproj-Qwen-Image-2.1-Turbo-Uncensored-BF16.gguf",
+      "sizeBytes": 1162568928,
+      "quant": "BF16",
+      "label": {
+        "extra": {
+          "role": "llm-vision"
+        }
+      }
+    },
+    {
+      "path": "mmproj-Qwen-Image-2.1-Turbo-Uncensored-F16.gguf",
+      "sizeBytes": 1159029984,
+      "quant": "F16",
+      "label": {
+        "extra": {
+          "role": "llm-vision"
+        }
+      }
+    }
+  ],
+  "licence": {
+    "id": "apache-2.0",
+    "name": "Apache License 2.0",
+    "url": "https://huggingface.co/AtomicChat/Qwen-Image-2.1-Turbo-Uncensored-GGUF/tree/881a778e306c44920e42536def3e52c3a3ecc7cd",
+    "sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30",
+    "badge": "green",
+    "commercial": "yes",
+    "revenueLimitUsd": null,
+    "plainWords": "Free for any use, including commercial.",
+    "obligations": []
+  },
+  "licences": [],
+  "labelMismatch": null,
+  "gate": {
+    "mode": "none",
+    "collects": []
+  },
+  "readFiles": 3,
+  "unreadFiles": 0,
+  "byHandRecipes": []
+}

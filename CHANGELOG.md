@@ -2,6 +2,19 @@
 
 All notable changes, by milestone. Dates are UTC.
 
+## 0.2.1 (2026-11-27)
+
+A quick fix for 0.2.0, which could leave the whole window blank. The owner reported it with a picture: after clicking a model in *Get models*, the window showed only a dark background and the app's name.
+
+### Fixed
+- **The blank window when a menu in Studio was drawn.** In 0.2.0, opening a model that has more than one *Model type* in *Get models* left an empty window. That is most Stable Diffusion XL and FLUX GGUF models and many repackaged ones, for example `chatrlabs/Qwen-Image-2.1-Uncensored-Omni-Quantized`. The same happened after *Set it up yourself* on some models and when Studio's *Settings* side panel was opened. Those menus now open normally. It was reported on Windows. The cause is a security rule in the app's window, so a Mac whose system web view enforces the same rule could have been affected too.
+
+### Changed
+- **A part of the app that fails to draw no longer blanks the window.** A short notice appears in that spot, with *Try again*, and the sidebar and the rest of the app keep working. If trying again fails too, the notice also offers *Reload harnessUI*. Studio's notice has *Back to Studio*, which takes you back to your results. If the whole window is affected, the notice says your chats, models and downloads are safe, and the error is under *Details*.
+
+### Known limits
+- **Some models' pages still read oddly.** The summary can show raw badge text, several choices can share one file name, and a text encoder or decoder can say *No file yet* while the model says *Works in Studio*. This fix did not change them.
+
 ## 0.2.0 (2026-11-26)
 
 Studio, opened up. The owner said: "I was mostly talking about how nothing from huggingface for video and image models is supported", and, about the limits in the app: "Work on fixing the app and removing ur set restrictions due to it being very not user friendly". So 0.2.0 lets Studio run any Hugging Face picture or video model the Studio engine can run, not only the few it was told about, and it takes out the limits that got in the way. The model list, the downloads and the composer were redesigned along the way.

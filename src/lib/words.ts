@@ -2655,3 +2655,33 @@ export function abilitiesWords(media: { image: boolean; video: boolean } | undef
 export const UI = {
   close: "Close",
 } as const;
+
+/** What the app says when part of a screen could not be drawn (0.2.1: the error boundaries,
+ *  `src/components/ErrorBoundary.tsx` and `CrashNotice.tsx`). The whole window's notice first,
+ *  then a panel's smaller one, which keeps the rest of the app working. */
+export const CRASH = {
+  title: "Something went wrong drawing this screen",
+  safe: "Your saved chats, models and downloads are safe.",
+  next: `Try again, or reload ${APP_NAME} if this keeps happening.`,
+  /** After a Try again that failed. */
+  nextAgain: `It happened again. Reload ${APP_NAME} to start this window afresh.`,
+  tryAgain: "Try again",
+  reload: `Reload ${APP_NAME}`,
+  details: "Details",
+  /** A panel's notice: "This model's page couldn't be shown." */
+  panel: (what: string) => `${what} couldn't be shown.`,
+  panelNext: "Something went wrong drawing it. The rest of the app still works.",
+  /** A panel's notice after a Try again that failed (it then offers Reload too). */
+  panelAgain: "It went wrong again. The rest of the app still works.",
+  /** Studio's own way out: leaves Get models and a model's page, back at the results. */
+  backToStudio: "Back to Studio",
+  /** What each panel with its own notice is called in it. */
+  where: {
+    studio: "Studio",
+    chat: "This chat",
+    workbench: "The side panel",
+    detail: "This model's page",
+    sheet: "The model list",
+    settings: "This page of Settings",
+  },
+} as const;

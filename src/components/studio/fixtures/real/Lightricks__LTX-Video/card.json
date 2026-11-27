@@ -1,0 +1,15 @@
+{
+  "repo": "Lightricks/LTX-Video",
+  "author": "Lightricks",
+  "downloads": 1439197,
+  "likes": 2438,
+  "updatedAt": "2025-07-16T14:32:35.000Z",
+  "gated": "none",
+  "licenseLabel": "other",
+  "verdict": {
+    "lora": {
+      "base": "ltxav"
+    }
+  },
+  "exact": true
+}

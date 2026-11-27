@@ -225,7 +225,7 @@ mod tests {
     #[test]
     fn the_version_is_the_same_everywhere() {
         let v = env!("CARGO_PKG_VERSION");
-        assert_eq!(v, "0.2.0");
+        assert_eq!(v, "0.2.1");
         let conf: serde_json::Value =
             serde_json::from_str(include_str!("../tauri.conf.json")).unwrap();
         let pkg: serde_json::Value =
