@@ -99,7 +99,8 @@ function ModelCard(props: { onOpenModels: () => void }) {
     );
   }
 
-  const recent = options.slice(0, 3);
+  // A model this version can't use is not one click away: the picker lists it with its reason.
+  const recent = options.filter((o) => !o.cantOpen).slice(0, 3);
   return (
     <div className="enter w-full rounded-xl border border-border bg-surface p-3.5 shadow-soft">
       <p className="mb-2 text-sm font-medium">{recent.length > 0 ? "Pick up where you left off" : "Start with a model"}</p>

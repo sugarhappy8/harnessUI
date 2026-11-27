@@ -353,6 +353,12 @@ export const CANT_OPEN = {
     speech: "Not checked. It is not a chat model.",
     layout: "Not checked. This file is in an early layout this version can't read.",
   },
+  /** The chat's model picker, beside a model it will not pick: true of every cause (a kind the
+   *  runner has not learned, a speech or picture model, an early layout), and no promise. */
+  picker: {
+    short: "can't be used",
+    title: "This version can't use this model. Its settings say why.",
+  },
   /** Where the memory sentence would be: no verdict is given for a model that cannot open. */
   memory: "Memory use is worked out once this version can open the model.",
   /** Compare's "Will it fit on this computer?". */

@@ -270,6 +270,8 @@ export interface ModelOption {
   /** [0.0.6 item 8] A local file used recently; installed models never used are left without
    *  it. The list starts with these, then the endpoints' models, then the other installed ones. */
   recent?: boolean;
+  /** An installed file whose kind this version's model runner cannot open: dimmed, not picked. */
+  cantOpen?: boolean;
 }
 
 /**
