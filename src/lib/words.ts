@@ -313,9 +313,9 @@ export const CANT_OPEN = {
     after: `” model. The model runner in this version of ${APP_NAME} does not know that kind yet. Nothing is wrong with your computer.`,
   },
   /** A file that names no kind at all (an imported file, say): an update cannot help it. */
-  noKind: "This file does not say what kind of model it is, so this version can't open it.",
+  noKind: "This file does not say what kind of model it is, so this version can't open it. Pick another file.",
   /** What to do, and what is not done meanwhile (a repository's page). */
-  next: `Newer versions of ${APP_NAME} come with a newer model runner, and the model may work then. Nothing is downloaded until it can open.`,
+  next: `Newer versions of ${APP_NAME} come with a newer model runner, and the model may work then. Download is switched off until then.`,
   check: "Check for updates",
   checking: "Checking for updates…",
   /** After a check found nothing newer. */
@@ -363,6 +363,8 @@ export const CANT_OPEN = {
   memory: "Memory use is worked out once this version can open the model.",
   /** Compare's "Will it fit on this computer?". */
   compareFit: "Not checked. This version can't open this model yet.",
+  /** The same for a file that names no kind at all: it is not "yet", nothing says what it is. */
+  compareNoKind: "Not checked. This file does not say what kind of model it is.",
   /** An installed model's row: the kind goes between the halves. */
   row: {
     before: `Can't open yet: this version of ${APP_NAME} does not know the “`,

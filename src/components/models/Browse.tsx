@@ -25,7 +25,9 @@ function ResultRow(props: { repo: RepoSummary; onOpen: () => void }) {
       >
         {/* The hint sits under the name, not beside it: a long name keeps its room at any width. */}
         <span className="min-w-0 flex-1">
-          <span className="block truncate">{r.id}</span>
+          <span className="block truncate" title={r.id}>
+            {r.id}
+          </span>
           {r.unknownArchitecture && (
             <span className="mt-0.5 block">
               <CantOpenHint kind={r.unknownArchitecture} />

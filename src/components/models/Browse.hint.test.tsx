@@ -104,3 +104,12 @@ describe("a search card for a model this version can't open yet", () => {
     expect(card(NEW).textContent).not.toMatch(/not supported|cannot load|llama|architecture|\bwill\b/i);
   });
 });
+
+describe("a long repository name on a card", () => {
+  /** The owner's own photo cut the name off ("...Brilliance-50X-V2-AGI...") with no way to read it. */
+  it("can be read in full: the name carries itself as its tooltip", async () => {
+    const long = "DavidAU/Inkling-2-Mini-26B-Heretic-Uncensored-Turbo-Brilliance-50X-V2-AGI-NEO-GGUF";
+    await results([hit(long)]);
+    expect(screen.getByText(long).getAttribute("title")).toBe(long);
+  });
+});

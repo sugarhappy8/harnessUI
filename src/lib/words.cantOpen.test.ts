@@ -27,12 +27,15 @@ describe("the words for a model this version can't open yet", () => {
     expect(CANT_OPEN.body.before + "sample" + CANT_OPEN.body.after).toBe(
       `It is a “sample” model. The model runner in this version of ${APP_NAME} does not know that kind yet. Nothing is wrong with your computer.`,
     );
-    expect(CANT_OPEN.noKind).toBe("This file does not say what kind of model it is, so this version can't open it.");
+    // A file with no kind has a next step of its own: no update changes what it is.
+    expect(CANT_OPEN.noKind).toBe(
+      "This file does not say what kind of model it is, so this version can't open it. Pick another file.",
+    );
   });
 
   it("says what to do next, and promises only what is true", () => {
     expect(CANT_OPEN.next).toBe(
-      `Newer versions of ${APP_NAME} come with a newer model runner, and the model may work then. Nothing is downloaded until it can open.`,
+      `Newer versions of ${APP_NAME} come with a newer model runner, and the model may work then. Download is switched off until then.`,
     );
     expect(CANT_OPEN.check).toBe("Check for updates");
     // "may work", never "will": nobody knows what a later version knows.
@@ -42,6 +45,8 @@ describe("the words for a model this version can't open yet", () => {
   it("names no memory figure and offers no download for a model that cannot open", () => {
     expect(CANT_OPEN.memory).toBe("Memory use is worked out once this version can open the model.");
     expect(CANT_OPEN.compareFit).toBe("Not checked. This version can't open this model yet.");
+    // A file with no kind is not "yet" either.
+    expect(CANT_OPEN.compareNoKind).toBe("Not checked. This file does not say what kind of model it is.");
     for (const text of everyPhrase()) expect(text).not.toMatch(/download anyway|fits|too large/i);
   });
 

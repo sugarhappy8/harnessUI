@@ -173,7 +173,7 @@ describe("the page of a model this version can't open yet", () => {
     expect(within(box).getByText("This version can't open this model yet")).toBeTruthy();
     expect(box.textContent).toContain("It is a “futurearch” model.");
     expect(box.textContent).toContain("Nothing is wrong with your computer.");
-    expect(box.textContent).toContain("the model may work then. Nothing is downloaded until it can open.");
+    expect(box.textContent).toContain("the model may work then. Download is switched off until then.");
     // The words the owner met: the library's name and "architecture".
     expect(document.body.textContent).not.toMatch(/llama\.cpp|architecture|Pick a different model/i);
     // Said once: no second box and no alert.

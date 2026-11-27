@@ -997,6 +997,19 @@ describe("Compare: a model this version can't open yet", () => {
     expect(cell("Will it fit on this computer?", 0).textContent).toBe("Not checked. It is not a chat model.");
   });
 
+  it("says a file with no kind is not 'yet': nothing in it says what it is", async () => {
+    factsFor = (item, ctx) =>
+      facts(item, ctx, {
+        fit: fit("yellow", { sentence: "Fits with limits." }),
+        fileFacts: fileFacts({ architecture: null, engineKnows: false }),
+      });
+    useCompare.setState({ entries: [CANT] });
+    await show();
+    const text = cell("Will it fit on this computer?", 0).textContent;
+    expect(text).toBe("Not checked. This file does not say what kind of model it is.");
+    expect(text).not.toMatch(/yet|update|version/i);
+  });
+
   it("says an early layout can't be read, with no promise of an update", async () => {
     factsFor = (item, ctx) =>
       facts(item, ctx, {

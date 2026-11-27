@@ -847,7 +847,7 @@ class ModelsCantOpenDocs(unittest.TestCase):
             "`src/lib/words.ts`",
             "Check for updates",
             "installs nothing",
-            "nothing is downloaded until it can open",
+            "download is switched off until then",
             "memory verdict",
             "image-file offer",
             "*Can't open yet*",

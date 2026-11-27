@@ -320,7 +320,13 @@ function willItFit(f: CompareFacts): Answer | null {
     // A picture or speech model is not for chat, and an early layout is the file's: an update
     // would not change either.
     const why = f.fileFacts.cantOpenWhy;
-    return { node: why ? CANT_OPEN.compareWhy[why] : CANT_OPEN.compareFit, source: null };
+    // A file that names no kind is not "yet" either.
+    const words = why
+      ? CANT_OPEN.compareWhy[why]
+      : f.fileFacts.architecture
+        ? CANT_OPEN.compareFit
+        : CANT_OPEN.compareNoKind;
+    return { node: words, source: null };
   }
   return f.fit ? { node: <FitBadge fit={f.fit} />, source: fitSource(f.ctx) } : null;
 }
