@@ -49,6 +49,10 @@ pub struct ModelSummary {
     pub recurrent_layers: Vec<bool>,
     /// Bytes of each of those layers' recurrent state (`crate::kv`, f32).
     pub recurrent_state_bytes: u64,
+    /// Further cache slots that copy each block's memory, one entry per block: the layers
+    /// inside the loop of a looped model (Inkling 2 Mini) keep each pass's cache and state
+    /// in a slot of their own. Empty for every other model.
+    pub kv_extra_slots: Vec<u64>,
     pub expert_count: Option<u64>,
     pub expert_used_count: Option<u64>,
     pub vocab_size: Option<u64>,
@@ -146,6 +150,7 @@ impl ModelSummary {
             kv_values: memory.values,
             recurrent_layers: memory.recurrent_layers,
             recurrent_state_bytes: memory.state_bytes,
+            kv_extra_slots: memory.extra_slots,
             expert_count: h.arch_u64("expert_count").filter(|&n| n > 0),
             expert_used_count: h.arch_u64("expert_used_count").filter(|&n| n > 0),
             vocab_size,
@@ -186,6 +191,7 @@ impl ModelSummary {
                     } else {
                         0
                     },
+                    extra_slots: self.kv_extra_slots.get(il).copied().unwrap_or(0),
                 }
             })
             .collect();

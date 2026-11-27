@@ -5,7 +5,10 @@
 //! (`crates/runtime/src/llama/launch.rs`).
 //!
 //! Ported from llama.cpp b12110, commit cd959bae99ff4bed22bef2604f45241c09bbb8c8 (file and
-//! function names below are that commit's):
+//! function names below are that commit's), and checked against b12774 (v1.1.0, commit
+//! 171527522610996f5f0acf12334e185156ca8f44): `llama-fit-params` gives the same figures
+//! for the pinned test model at four launch words, and the rules added for Inkling 2 (below)
+//! come from b12774, whose `src/models/inkling2.cpp` and `inkling2-loop.cpp` they name.
 //!
 //! - Every layer that keeps its own memory gets a key tensor of `n_embd_k_gqa(il)` values
 //!   and, unless the model stores keys only (MLA), a value tensor of `n_embd_v_gqa(il)`
@@ -48,6 +51,17 @@
 //!   `llama_memory_recurrent` constructor; `src/llama-hparams.cpp`, `n_embd_r`,
 //!   `n_embd_s`), on the layer's device like its other memory. See [`state_bytes`].
 //!
+//! - Inkling 2 (`inkling2`, `inkling2_loop`) is hybrid in the Falcon-H1 way: every layer has
+//!   its attention (a window and a pattern array of one entry per layer, both required) and
+//!   a short-convolution state of `n_sconv_channels × (l_cache − 1)` f32 values, where
+//!   `n_sconv_channels` is the widest layer's `2 × n_embd_k_gqa + 2 × n_embd` (see
+//!   [`inkling_channels`]). The looped model runs layers `loop.start` to `loop.end` `loop.count`
+//!   times and keeps each pass's cache and state in a slot of its own, so those layers' memory
+//!   is counted `loop.count` times ([`LayerKv::extra_slots`], [`loop_extra_slots`]). Each block's
+//!   entry holds its passes' slots, so the total is exact; which device a slot lands on is
+//!   llama.cpp's by slot number, not by block, so a partial offload of such a model is only
+//!   approximate here (the measurement, when there is one, replaces it).
+//!
 //! llama-server also keeps saved copies ("context checkpoints") of what it cannot roll
 //! back, in computer memory while a chat goes on, so it can go back to an earlier point of
 //! the conversation without reading it all again (`tools/server/server-context.cpp`,
@@ -68,6 +82,13 @@
 //! beside their recurrent state (`ple_conv_state`). Qwen4-Exp's indexer cache
 //! (`llama_memory_hybrid_idx`: a pooled key row on each attention layer) is left out
 //! altogether, a slight under-count; its attention and recurrent layers are counted.
+//!
+//! Also not ported, of the 13 architectures llama.cpp b12774 learned: ZAYA1 (a CCA state
+//! in every layer, beside its attention), Kimi K3.1, Raon-1 mini (recurrent and MLA
+//! layers), Xing 4.0 (MLA), HY-V4 Flash (flash pools), and the speech models Kokoro, Tiny
+//! Voca, Zonos 3 and Moshi, whose files the chat cannot use anyway. None had a file small
+//! enough to measure here, or one a header-only copy could measure (an MLA model stops
+//! `llama-fit-params` on such a copy with a backend assertion, on b12110 and b12774 alike).
 //!
 //! Every number from the header is untrusted: products and sums saturate, a window is cut
 //! to llama.cpp's 32 bits, at most [`MAX_BLOCKS`] layers are built and nothing is
@@ -155,9 +176,21 @@ pub struct LayerKv {
     /// Bytes of the layer's recurrent state ([`state_bytes`]): a recurrent layer of a
     /// recurrent or hybrid model; 0 for every other layer.
     pub recurrent: u64,
+    /// Further cache slots that hold a copy of this layer's memory besides its own: 0 for
+    /// every layer but one inside the loop of a looped model (Inkling 2 Mini), which runs
+    /// the same weights `passes` times and keeps each pass's cache and state in a slot of
+    /// its own (`llama_model_inkling2_loop::load_arch_hparams`: `n_slot = n_phys +
+    /// (n_passes - 1) * (core_end - core_start)`). Every figure of the layer is counted
+    /// `1 + extra_slots` times.
+    pub extra_slots: u64,
 }
 
 impl LayerKv {
+    /// How many cache slots hold this layer's memory.
+    fn slots(&self) -> u64 {
+        self.extra_slots.saturating_add(1)
+    }
+
     fn key_values(&self) -> u64 {
         self.heads.saturating_mul(self.key_length)
     }
@@ -265,6 +298,7 @@ impl KvShape {
                     window: false,
                     own: true,
                     recurrent: 0,
+                    extra_slots: 0,
                 };
                 layers
             ],
@@ -351,7 +385,7 @@ impl KvShape {
             .iter()
             .map(|layer| {
                 if !layer.own {
-                    return layer.recurrent;
+                    return layer.recurrent.saturating_mul(layer.slots());
                 }
                 let (key, value) = self.rows(layer, layout, widest);
                 let cells = if layer.window {
@@ -366,6 +400,8 @@ impl KvShape {
                     .saturating_add(rot_value)
                     // Falcon-H1's layers have both.
                     .saturating_add(layer.recurrent)
+                    // A looped layer's passes each keep all of it.
+                    .saturating_mul(layer.slots())
             })
             .collect()
     }
@@ -389,14 +425,18 @@ impl KvShape {
         };
         // The recurrent state: allocated whatever the context, and all of it in each copy.
         for layer in &self.layers {
-            size.fixed = size.fixed.saturating_add(layer.recurrent);
-            size.copy_fixed = size.copy_fixed.saturating_add(layer.recurrent);
+            let state = layer.recurrent.saturating_mul(layer.slots());
+            size.fixed = size.fixed.saturating_add(state);
+            size.copy_fixed = size.copy_fixed.saturating_add(state);
         }
         for layer in self.layers.iter().filter(|l| l.own) {
+            let slots = layer.slots();
             let (key, value) = self.rows(layer, layout, widest);
-            let row = key.saturating_add(value);
+            let row = key.saturating_add(value).saturating_mul(slots);
             let (rot_key, rot_value) = rotation[usize::from(layer.window)];
-            size.fixed = size.fixed.saturating_add(rot_key).saturating_add(rot_value);
+            size.fixed = size
+                .fixed
+                .saturating_add(rot_key.saturating_add(rot_value).saturating_mul(slots));
             if layer.window {
                 size.window_per_cell = size.window_per_cell.saturating_add(row);
                 // A saved copy holds each layer's own rows (`state_write_data`).
@@ -407,7 +447,7 @@ impl KvShape {
                 };
                 size.checkpoint_per_cell = size
                     .checkpoint_per_cell
-                    .saturating_add(key.saturating_add(own_value));
+                    .saturating_add(key.saturating_add(own_value).saturating_mul(slots));
             } else {
                 size.per_cell = size.per_cell.saturating_add(row);
             }
@@ -434,6 +474,9 @@ pub(crate) struct ArchKv {
     pub recurrent_layers: Vec<bool>,
     /// Bytes of each of those layers' state ([`state_bytes`]).
     pub state_bytes: u64,
+    /// Further cache slots that copy each block's memory ([`LayerKv::extra_slots`]); empty
+    /// for every architecture but a looped one.
+    pub extra_slots: Vec<u64>,
 }
 
 /// Recurrent architectures (`llm_arch_is_recurrent`): every layer keeps a recurrent state
@@ -491,6 +534,8 @@ const HYBRID: &[&str] = &[
     "deepseek4",
     "deepseek41",
     "minimax-01",
+    "inkling2",
+    "inkling2_loop",
 ];
 
 /// Hybrid architectures whose linear-attention layers are set by
@@ -612,18 +657,24 @@ impl Reader<'_> {
         }
     }
 
-    /// The pattern array with exactly one entry per block and at least one short-memory
-    /// layer (Beam and Maion-Coder refuse anything else).
-    fn pattern_array_per_block(&self) -> Option<Vec<bool>> {
+    /// The pattern array with exactly one entry per block (Inkling 2 refuses anything
+    /// else, `n_pattern != hparams.n_layer()`).
+    fn pattern_array_of_every_block(&self) -> Option<Vec<bool>> {
         match self.get("attention.sliding_window_pattern") {
             Some(Value::Array(items))
                 if u64::try_from(items.len()).ok() == Some(self.block_count) =>
             {
-                let layers = flags(items, self.blocks);
-                layers.contains(&true).then_some(layers)
+                Some(flags(items, self.blocks))
             }
             _ => None,
         }
+    }
+
+    /// [`Self::pattern_array_of_every_block`] with at least one short-memory layer (Beam
+    /// and Maion-Coder refuse anything else).
+    fn pattern_array_per_block(&self) -> Option<Vec<bool>> {
+        self.pattern_array_of_every_block()
+            .filter(|layers| layers.contains(&true))
     }
 }
 
@@ -664,7 +715,10 @@ fn sliding(r: &Reader, head_count_kv: &[u64]) -> Option<(u64, Vec<bool>)> {
         "cohere2moe" => (window?, r.pattern(4, true)),
         // The window and the pattern array are required.
         "gemma4" | "flint" | "granite_swa" | "maple" | "mimo2" | "muse-spark" | "spark2_5"
-        | "step35" => (window?, r.pattern_array()?),
+        | "step35" | "domynedge" => (window?, r.pattern_array()?),
+        // ricursive.cpp: a window above 0 is required; the pattern array is optional and
+        // every 5th layer is global without it.
+        "ricursive" => (positive?, r.pattern(5, false)),
         "kolibri1" => (positive?, r.pattern_array()?),
         "lfm3" => {
             let layers = r.pattern_array()?;
@@ -672,6 +726,9 @@ fn sliding(r: &Reader, head_count_kv: &[u64]) -> Option<(u64, Vec<bool>)> {
             (window?, layers)
         }
         "beam" | "maion-coder" => (positive?, r.pattern_array_per_block()?),
+        // inkling2.cpp: a window above 0 and a pattern entry for every physical layer, both
+        // required; the looped model's extra cache slots copy their layer's flag.
+        "inkling2" | "inkling2_loop" => (positive?, r.pattern_array_of_every_block()?),
         // lfm2.cpp: with a window, every attention layer is short-memory.
         "lfm2" => {
             let main = r.main_layers;
@@ -783,9 +840,14 @@ pub(crate) fn read_arch(
             .is_some_and(|n| n > 0);
     let recurrent_layers = recurrent_layers(&r, head_count_kv, &linear);
     let state_bytes = if recurrent_layers.contains(&true) {
-        state_bytes(&r)
+        state_bytes(&r, head_count_kv, &swa_layers)
     } else {
         0
+    };
+    let extra_slots = if arch == "inkling2_loop" {
+        loop_extra_slots(&r)
+    } else {
+        Vec::new()
     };
     ArchKv {
         window,
@@ -794,12 +856,82 @@ pub(crate) fn read_arch(
         values: !mla,
         recurrent_layers,
         state_bytes,
+        extra_slots,
     }
+}
+
+/// The further cache slots each block of a looped model has (`inkling2_loop`:
+/// `llama_model_inkling2_loop::load_arch_hparams`): the layers `loop.start` up to (not
+/// including) `loop.end` run `loop.count` times with the same weights, and each pass keeps
+/// its own cache and state in a slot of its own, `n_slot = n_phys + (n_passes - 1) *
+/// (core_end - core_start)` in all. Empty when the file's loop is one llama.cpp refuses
+/// (fewer than 2 passes, or 1 for a variable loop, a core that starts at the first layer
+/// or ends past the last, more slots than it can hold); the estimate is then not asked
+/// for. A file whose core does not start and end on a multiple of `attn_res.block_size`
+/// is refused as well, and counted here all the same.
+fn loop_extra_slots(r: &Reader) -> Vec<u64> {
+    let (Some(start), Some(end), Some(passes)) = (
+        r.number("loop.start"),
+        r.number("loop.end"),
+        r.number("loop.count"),
+    ) else {
+        return Vec::new();
+    };
+    let varying = r.get("loop.varying").is_some_and(truthy);
+    let min_passes = if varying { 1 } else { 2 };
+    if passes < min_passes || start == 0 || start >= end || end > r.block_count {
+        return Vec::new();
+    }
+    let extra = passes - 1;
+    let slots = r
+        .block_count
+        .saturating_add(extra.saturating_mul(end - start));
+    if slots > MAX_BLOCKS {
+        return Vec::new();
+    }
+    (0..r.blocks)
+        .map(|il| {
+            let il = u64::try_from(il).unwrap_or(u64::MAX);
+            if (start..end).contains(&il) { extra } else { 0 }
+        })
+        .collect()
+}
+
+/// `n_sconv_channels` of Inkling 2 (`load_arch_hparams`): its convolution state keeps the
+/// keys, the values, the attention output and the feed-forward output of the widest layer,
+/// `2 × n_embd_k_gqa(il) + 2 × n_embd`, whichever layer has most. The head size is the
+/// short-memory layers' own where the layer is one.
+fn inkling_channels(r: &Reader, head_count_kv: &[u64], swa_layers: &[bool]) -> u64 {
+    let n_embd = r.number("embedding_length").unwrap_or(0);
+    let widest_head_count = r
+        .per_block("attention.head_count")
+        .into_iter()
+        .max()
+        .unwrap_or(0);
+    let key_full = r
+        .number("attention.key_length")
+        .unwrap_or_else(|| n_embd.checked_div(widest_head_count).unwrap_or(0));
+    let key_swa = r.number("attention.key_length_swa").unwrap_or(key_full);
+    (0..r.blocks)
+        .map(|il| {
+            let key = if swa_layers.get(il).copied().unwrap_or(false) {
+                key_swa
+            } else {
+                key_full
+            };
+            let heads = head_count_kv.get(il).copied().unwrap_or(0);
+            key.saturating_mul(heads)
+                .saturating_add(n_embd)
+                .saturating_mul(2)
+        })
+        .max()
+        .unwrap_or(0)
 }
 
 /// The layers that keep a recurrent state (`llama_memory_recurrent`'s layer filter over
 /// `n_layer()`, so never an extra prediction layer): every layer of a recurrent
-/// architecture and of Falcon-H1; the linear-attention layers `linear` of the Qwen3-Next
+/// architecture, of Falcon-H1 and of Inkling 2 (a short convolution in each layer, beside
+/// its attention); the linear-attention layers `linear` of the Qwen3-Next
 /// kind; Nemotron-H's layers without key/value heads and without a feed-forward part;
 /// every other hybrid's layers without key/value heads (`is_recr`). Empty for any other
 /// architecture, and for the hybrids whose memory is not ported (DeepSeek V4).
@@ -810,7 +942,7 @@ fn recurrent_layers(r: &Reader, head_count_kv: &[u64], linear: &[bool]) -> Vec<b
     let layers = |rule: &dyn Fn(usize) -> bool| -> Vec<bool> {
         (0..r.blocks).map(|il| main(il) && rule(il)).collect()
     };
-    if RECURRENT.contains(&arch) || arch == "falcon-h1" {
+    if RECURRENT.contains(&arch) || matches!(arch, "falcon-h1" | "inkling2" | "inkling2_loop") {
         return layers(&|_| true);
     }
     if !HYBRID.contains(&arch) || matches!(arch, "deepseek4" | "deepseek41") {
@@ -831,14 +963,15 @@ fn recurrent_layers(r: &Reader, head_count_kv: &[u64], linear: &[bool]) -> Vec<b
 /// (`ssm.*`, `wkv.head_size`, `token_shift_count`, `shortconv.l_cache`, `kda.head_dim`;
 /// MiniMax-01's linear-attention head size is its key head size):
 ///
-/// - `n_embd_r`: RWKV `token_shift_count × n_embd`; LFM2 `n_embd × (l_cache − 1)`; Kimi's
+/// - `n_embd_r`: RWKV `token_shift_count × n_embd`; Inkling 2 `n_sconv_channels × (l_cache
+///   − 1)` ([`inkling_channels`]); LFM2 `n_embd × (l_cache − 1)`; Kimi's
 ///   KDA `3 × (d_conv − 1, or 3 without it) × n_head × head_dim`; else Mamba's
 ///   `(d_conv − 1) × (d_inner + 2 × n_group × d_state)` (0 without a convolution).
 /// - `n_embd_s`: RWKV `n_embd × head_size`; KDA `head_dim² × n_head`; MiniMax-01
 ///   `head_dim² × n_head`; else Mamba's `d_state × d_inner`.
 ///
 /// `n_head` is the first layer's head count (`n_head()`). Every product saturates.
-fn state_bytes(r: &Reader) -> u64 {
+fn state_bytes(r: &Reader, head_count_kv: &[u64], swa_layers: &[bool]) -> u64 {
     let n = |suffix: &str| r.number(suffix).unwrap_or(0);
     let n_embd = n("embedding_length");
     let n_head = r
@@ -866,7 +999,11 @@ fn state_bytes(r: &Reader) -> u64 {
         let shift = r.number("token_shift_count").unwrap_or(TOKEN_SHIFT_DEFAULT);
         (shift.saturating_mul(n_embd), n_embd.saturating_mul(wkv))
     } else {
-        let r_values = if shortconv != 0 {
+        let r_values = if matches!(r.arch, "inkling2" | "inkling2_loop") {
+            // Checked before LFM2's, as they set `shortconv.l_cache` too.
+            inkling_channels(r, head_count_kv, swa_layers)
+                .saturating_mul(shortconv.saturating_sub(1))
+        } else if shortconv != 0 {
             n_embd.saturating_mul(shortconv - 1)
         } else if kda != 0 {
             let conv = if d_conv > 0 { d_conv - 1 } else { 3 };
@@ -944,6 +1081,250 @@ mod tests {
             w = w.bool_array("gemma4.attention.sliding_window_pattern", &pattern);
         }
         w
+    }
+
+    /// The header of the owner's Inkling 2 Mini file (`DavidAU/Inkling-2-Mini-26B-Heretic-
+    /// Uncensored-Turbo-Brilliance-50X-V2-AGI-NEO-GGUF`, Q5_K_M, read from Hugging Face):
+    /// 24 layers of 24 heads and 8 KV heads of 128, in groups of five short-memory layers
+    /// and one full layer (a window of 1,024), a short convolution of 4 columns in each
+    /// layer, and, for `inkling2_loop`, the layers 6 up to 18 run 3 times. `arch` is
+    /// `inkling2_loop` or `inkling2`; the loop keys are only written for the first.
+    fn inkling2_mini(arch: &str) -> Writer {
+        let pattern: Vec<bool> = (0..24).map(|il| il % 6 != 5).collect();
+        let mut w = Writer::new().str("general.architecture", arch);
+        for (key, value) in [
+            ("block_count", 24),
+            ("context_length", 1_048_576),
+            ("embedding_length", 2304),
+            ("feed_forward_length", 1152),
+            ("expert_count", 128),
+            ("expert_used_count", 8),
+            ("attention.key_length", 128),
+            ("attention.value_length", 128),
+            ("attention.key_length_swa", 128),
+            ("attention.value_length_swa", 128),
+            ("attention.sliding_window", 1024),
+            ("shortconv.l_cache", 4),
+            ("attn_res.block_size", 6),
+            ("vocab_size", 201_024),
+        ] {
+            w = w.u32(&format!("{arch}.{key}"), value);
+        }
+        w = w
+            .u32_array(&format!("{arch}.attention.head_count"), &[24; 24])
+            .u32_array(&format!("{arch}.attention.head_count_kv"), &[8; 24])
+            .bool_array(
+                &format!("{arch}.attention.sliding_window_pattern"),
+                &pattern,
+            );
+        if arch == "inkling2_loop" {
+            for (key, value) in [("start", 6), ("end", 18), ("count", 3), ("gate_rank", 64)] {
+                w = w.u32(&format!("{arch}.loop.{key}"), value);
+            }
+            w = w.bool(&format!("{arch}.loop.varying"), false);
+        }
+        w
+    }
+
+    /// The owner's Inkling 2 Mini, against what llama.cpp b12774 (v1.1.0) allocates for the
+    /// real file's header (`llama-fit-params -c N -np 1 --device none -ngl all`, whole MiB,
+    /// from a copy of the Q5_K_M file that holds its header and tensor table and nothing
+    /// else): 371 MiB at 4,096 tokens, 1,267 at 32,768 and 8,435 at 262,144 in f16; 202, 678
+    /// and 4,486 with Save memory's q8_0.
+    ///
+    /// The model runs 24 layers of weights, but the loop makes 48 cache slots of them (the
+    /// layers 6 to 17 three times): 8 full slots (the layers 5 and 23, and 11 and 17 three
+    /// times each), 40 short-memory slots, and a convolution state in all 48 of
+    /// `(2 × 8 × 128 + 2 × 2,304) × 3 × 4` = 79,872 bytes.
+    #[test]
+    fn inkling2_mini_is_counted_as_llama_cpp_allocates_it() {
+        let s = summary(inkling2_mini("inkling2_loop"));
+        assert_eq!(s.sliding_window, 1024);
+        assert_eq!(s.swa_layers.iter().filter(|&&w| w).count(), 20);
+        assert_eq!(s.kv_layers, vec![true; 24]);
+        assert_eq!(s.recurrent_layers, vec![true; 24]);
+        assert_eq!(s.recurrent_state_bytes, 79_872);
+        let want: Vec<u64> = (0..24)
+            .map(|il| if (6..18).contains(&il) { 2 } else { 0 })
+            .collect();
+        assert_eq!(s.kv_extra_slots, want);
+        // 8 full slots × 4,096 bytes (K and V of 8 × 128 values in f16) a cell; 40
+        // short-memory slots; 48 conversation states.
+        let size = s.kv_size(F16);
+        assert_eq!(
+            size,
+            KvSize {
+                per_cell: 32_768,
+                window_per_cell: 163_840,
+                window: 1024,
+                fixed: 3_833_856,
+                checkpoint_per_cell: 163_840,
+                copy_fixed: 3_833_856,
+            }
+        );
+        // The real header's numbers (llama-fit-params rounds down to whole MiB).
+        for (ctx, f16_mib, q8_mib) in [(4096, 371, 202), (32_768, 1267, 678), (262_144, 8435, 4486)]
+        {
+            assert_eq!(s.kv_bytes(ctx, F16) / MIB, f16_mib, "{ctx} tokens in f16");
+            assert_eq!(s.kv_bytes(ctx, Q8) / MIB, q8_mib, "{ctx} tokens in q8_0");
+        }
+        // Exactly: 8 × 4,096 × 4,096 + 40 × 4,096 × 1,536 + 3,833,856.
+        assert_eq!(s.kv_bytes(4096, F16), 389_709_824);
+        // Layer by layer the same total, each block holding its passes' slots.
+        let per = crate::placement::kv_per_layer(&s, 4096, F16);
+        assert_eq!(per.len(), 24);
+        assert_eq!(per.iter().sum::<u64>(), 389_709_824);
+        // A short-memory layer outside the loop: 4,096 × 1,536 + 79,872; inside it, three
+        // times that. The full layer 5: 4,096 × 4,096 + 79,872.
+        assert_eq!(per[0], 4096 * 1536 + 79_872);
+        assert_eq!(per[6], 3 * (4096 * 1536 + 79_872));
+        assert_eq!(per[5], 4096 * 4096 + 79_872);
+        assert_eq!(per[11], 3 * (4096 * 4096 + 79_872));
+        // The context the file claims to remember (1,048,576 tokens) in f16 is 32,768 ×
+        // 1,048,576 + 251,658,240 + 3,833,856 bytes, 32 GiB and a bit; the plain estimate
+        // for the same header (every layer full, no loop) said 96 GiB.
+        assert_eq!(
+            s.kv_bytes(1_048_576, F16),
+            32_768 * 1_048_576 + 251_658_240 + 3_833_856
+        );
+    }
+
+    /// Without the loop (`inkling2`) every layer has one slot. Counted by the same rules,
+    /// not measured: no file of this kind is small enough to measure here.
+    #[test]
+    fn inkling2_without_a_loop_has_one_slot_per_layer() {
+        let s = summary(inkling2_mini("inkling2"));
+        assert!(s.kv_extra_slots.is_empty());
+        assert_eq!(s.recurrent_layers, vec![true; 24]);
+        // 4 full layers, 20 short-memory layers, 24 states.
+        assert_eq!(
+            s.kv_size(F16),
+            KvSize {
+                per_cell: 16_384,
+                window_per_cell: 81_920,
+                window: 1024,
+                fixed: 24 * 79_872,
+                checkpoint_per_cell: 81_920,
+                copy_fixed: 24 * 79_872,
+            }
+        );
+        assert_eq!(
+            s.kv_bytes(4096, F16),
+            16_384 * 4096 + 81_920 * 1536 + 24 * 79_872
+        );
+    }
+
+    /// The header of Ripple 65B Preview (`AtomicChat/Ripple-65B-Preview-GGUF`, read from
+    /// Hugging Face): 80 layers with 8 KV heads of 128, a window of 1,024 and every fifth
+    /// layer global (`ricursive`, new in llama.cpp b12774).
+    fn ripple_65b(pattern: bool) -> Writer {
+        let swa: Vec<bool> = (0..80).map(|il| il % 5 != 4).collect();
+        let mut w = Writer::new().str("general.architecture", "ricursive");
+        for (key, value) in [
+            ("block_count", 80),
+            ("context_length", 2_097_152),
+            ("embedding_length", 5120),
+            ("feed_forward_length", 40_960),
+            ("attention.key_length", 128),
+            ("attention.value_length", 128),
+            ("attention.sliding_window", 1024),
+            ("vocab_size", 100_352),
+        ] {
+            w = w.u32(&format!("ricursive.{key}"), value);
+        }
+        w = w
+            .u32("ricursive.attention.head_count", 80)
+            .u32("ricursive.attention.head_count_kv", 8);
+        if pattern {
+            w = w.bool_array("ricursive.attention.sliding_window_pattern", &swa);
+        }
+        w
+    }
+
+    /// Ripple 65B Preview against what llama.cpp b12774 allocates for the real file's
+    /// header (`llama-fit-params -c N -np 1 --device none -ngl all` on a copy of the
+    /// Q4_K_M file that holds its header and tensor table only): 640 MiB at 4,096 tokens
+    /// and 4,480 at 65,536 in f16, 346 and 2,386 with Save memory's q8_0. 16 full layers
+    /// and 64 short-memory layers of 4,096 bytes a cell. Without the pattern array the
+    /// default is the same (every fifth layer global); without a window the file is refused.
+    #[test]
+    fn ripple_65b_is_counted_as_llama_cpp_allocates_it() {
+        for pattern in [true, false] {
+            let s = summary(ripple_65b(pattern));
+            assert_eq!(s.sliding_window, 1024, "{pattern}");
+            assert_eq!(s.swa_layers.iter().filter(|&&w| w).count(), 64, "{pattern}");
+            for (ctx, f16_mib, q8_mib) in [(4096, 640, 346), (65_536, 4480, 2386)] {
+                assert_eq!(s.kv_bytes(ctx, F16) / MIB, f16_mib, "{ctx} in f16");
+                assert_eq!(s.kv_bytes(ctx, Q8) / MIB, q8_mib, "{ctx} in q8_0");
+            }
+            // 16 × 4,096 × 4,096 + 64 × 4,096 × 1,536.
+            assert_eq!(s.kv_bytes(4096, F16), 640 * MIB);
+        }
+        // No window: the architecture refuses the file, and nothing is short-memory here.
+        let no_window = Writer::new()
+            .str("general.architecture", "ricursive")
+            .u32("ricursive.block_count", 4)
+            .u32("ricursive.attention.head_count", 8)
+            .u32("ricursive.attention.head_count_kv", 8);
+        assert!(summary(no_window).swa_layers.is_empty());
+    }
+
+    /// Domyn Edge (`domynedge`, new in llama.cpp b12774) needs a window and a pattern array
+    /// (`domyn-edge.cpp`, `ml.get_arr` without `false`): counted by that rule, not measured
+    /// (no file of this kind was at hand).
+    #[test]
+    fn domyn_edge_takes_its_pattern_from_the_file() {
+        let pattern: Vec<bool> = (0..36).map(|il| il % 4 != 3).collect();
+        let w = Writer::new()
+            .str("general.architecture", "domynedge")
+            .u32("domynedge.block_count", 36)
+            .u32("domynedge.attention.head_count", 16)
+            .u32("domynedge.attention.head_count_kv", 4)
+            .u32("domynedge.attention.key_length", 128)
+            .u32("domynedge.attention.value_length", 128)
+            .u32("domynedge.attention.sliding_window", 2048)
+            .bool_array("domynedge.attention.sliding_window_pattern", &pattern);
+        let s = summary(w);
+        assert_eq!(s.sliding_window, 2048);
+        assert_eq!(s.swa_layers.iter().filter(|&&w| w).count(), 27);
+        // Without the array llama.cpp refuses the file: no short-memory layer.
+        let without = Writer::new()
+            .str("general.architecture", "domynedge")
+            .u32("domynedge.block_count", 36)
+            .u32("domynedge.attention.sliding_window", 2048);
+        assert!(summary(without).swa_layers.is_empty());
+    }
+
+    /// A loop llama.cpp refuses (`llama_model_inkling2_loop::load_arch_hparams`) gives no
+    /// extra slots, and a header that is nonsense never allocates by its words.
+    #[test]
+    fn a_loop_llama_cpp_refuses_adds_no_slots() {
+        let with = |start: u32, end: u32, count: u32, varying: bool| {
+            let mut w = inkling2_mini("inkling2_loop");
+            for (key, value) in [("start", start), ("end", end), ("count", count)] {
+                w = w.u32(&format!("inkling2_loop.loop.{key}"), value);
+            }
+            summary(w.bool("inkling2_loop.loop.varying", varying)).kv_extra_slots
+        };
+        let one_each = |extra: u64| -> Vec<u64> {
+            (0..24)
+                .map(|il| if (6..18).contains(&il) { extra } else { 0 })
+                .collect()
+        };
+        // A fixed loop needs 2 passes, a varying one 1.
+        assert_eq!(with(6, 18, 2, false), one_each(1));
+        assert!(with(6, 18, 1, false).is_empty());
+        assert_eq!(with(6, 18, 1, true), one_each(0));
+        assert!(with(6, 18, 0, true).is_empty());
+        // A core that starts at the first layer, is empty or ends past the last.
+        assert!(with(0, 18, 3, false).is_empty());
+        assert!(with(18, 6, 3, false).is_empty());
+        assert!(with(6, 25, 3, false).is_empty());
+        // More slots than the 512 llama.cpp holds.
+        assert!(with(6, 18, 100, false).is_empty());
+        assert!(with(1, 24, u32::MAX, false).is_empty());
+        // The plain architecture has no loop at all, whatever the keys say.
+        assert!(summary(inkling2_mini("inkling2")).kv_extra_slots.is_empty());
     }
 
     /// The owner's model, against what llama.cpp b12110 allocates for this header
