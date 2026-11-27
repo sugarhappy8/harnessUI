@@ -28,7 +28,7 @@ never committed: they go to `.cache/preview/` (ignored).
 Query flags: `?view=studio` (open Studio), `?empty=1` (first use: nothing installed, no
 endpoint, no runs), `&fits=0` with it (nothing in the catalog fits this computer either),
 `&pictures=1` with it (the picture models stay installed; no video model is installed or fits),
-`?notice=0` (the local-model notice never accepted, so the first download shows it).
+`?cantopen=1` opens Models (`window.dispatchEvent(new CustomEvent("app:open-models", { detail: "browse" }))`, or `installed`, `compare`) on the owner's Inkling 2 repository with its real file list and a made-up kind this version does not know (`mock/chatModels.ts`): a search card with the hint, the repository's page, an Installed row and a Compare column for a model that cannot open yet, beside one that opens, `?notice=0` (the local-model notice never accepted, so the first download shows it).
 `?real=1` answers Get models with real backend answers captured from Hugging Face
 (`src/components/studio/fixtures/real/`: the search for "qwen image uncensored" and the
 repositories saved there), and `&crash=detail` with it takes the parts out of their plans, so a
