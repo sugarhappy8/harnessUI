@@ -188,8 +188,13 @@ struct Capture {
 
 impl Capture {
     /// Starts the real server with `model` and `mmproj` as the app would on the processor,
-    /// expects it to fail, and writes its stderr as `name`.
-    async fn failing_start(&self, name: &str, model: Option<&Path>, mmproj: Option<&Path>) {
+    /// expects it to fail, and writes its stderr as `name`. Returns what it wrote.
+    async fn failing_start(
+        &self,
+        name: &str,
+        model: Option<&Path>,
+        mmproj: Option<&Path>,
+    ) -> String {
         let (tx, _rx) = unbounded_channel();
         let spec = StartSpec {
             backend: backend(&self.bin),
@@ -216,8 +221,31 @@ impl Capture {
         let tail = tail
             .replace(self.dir.path().to_string_lossy().as_ref(), SAMPLE_DIR)
             .replace(self.model.to_string_lossy().as_ref(), MODEL_PATH);
-        std::fs::write(self.out.join(name), format!("{tail}\n")).expect("write the capture");
+        let written = format!("{tail}\n");
+        std::fs::write(self.out.join(name), &written).expect("write the capture");
         eprintln!("recorded {name}: {error}");
+        written
+    }
+
+    /// [`Self::failing_start`] again until what the server said holds no line that `unwanted`
+    /// finds (25 tries). A failure that ends in an abort races ggml's asynchronous logger: the
+    /// abort cuts it off, so the same file records the abort line alone on one run and three
+    /// allocation lines after it on the next, and a re-record by the documented procedure could
+    /// silently turn the harder case into the easier one.
+    async fn failing_start_without(
+        &self,
+        name: &str,
+        model: Option<&Path>,
+        mmproj: Option<&Path>,
+        unwanted: &str,
+    ) {
+        for _ in 0..25 {
+            let written = self.failing_start(name, model, mmproj).await;
+            if !written.contains(unwanted) {
+                return;
+            }
+        }
+        panic!("{name}: every one of 25 runs printed a line with {unwanted:?} before the abort");
     }
 
     fn file(&self, name: &str) -> PathBuf {
@@ -327,7 +355,9 @@ async fn record_the_image_file_fixtures() {
     // The image file's weights do not fit in memory: a last tensor of terabytes, which the
     // file does not hold (the reader checks each offset against the sizes before it, so
     // the huge one comes last). The build does not check the allocation, so it ends in an
-    // assertion and an abort.
+    // assertion and an abort. The abort cuts the logger off, so the capture is repeated until
+    // it holds the abort line alone, the harder case (the committed file): see
+    // `failing_start_without`.
     let huge = capture.file("huge.mmproj-f16.gguf");
     pixtral("pixtral")
         .tensor("v.patch_embd.weight", &[16, 16, 3, 64])
@@ -336,6 +366,11 @@ async fn record_the_image_file_fixtures() {
         .tensor("mm.2.weight", &[1 << 22, 1 << 22])
         .write(&huge);
     capture
-        .failing_start("stderr_image_file_out_of_memory.txt", None, Some(&huge))
+        .failing_start_without(
+            "stderr_image_file_out_of_memory.txt",
+            None,
+            Some(&huge),
+            "failed to allocate",
+        )
         .await;
 }
