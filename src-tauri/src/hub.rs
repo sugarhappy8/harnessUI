@@ -372,13 +372,16 @@ pub async fn hub_repo(
             has_checksum: v.files.iter().all(|f| f.sha256.is_some()),
         });
     }
-    let architecture = summary
-        .as_ref()
-        .map(|s| s.architecture.clone())
-        .or_else(|| detail.gguf.as_ref().and_then(|g| g.architecture.clone()));
+    // The page claims "this version can't open it" only on evidence that holds together: the
+    // smallest file's header and Hugging Face's listing (`arch::page_architecture`). A header
+    // with no kind is not read, and two that disagree claim nothing.
+    let judged = models::arch::page_architecture(
+        summary.as_ref().map(|s| s.architecture.as_str()),
+        detail.gguf.as_ref().and_then(|g| g.architecture.as_deref()),
+    );
     Ok(RepoView {
-        architecture_supported: architecture.as_deref().map(models::arch::is_supported),
-        architecture,
+        architecture_supported: judged.supported,
+        architecture: judged.name,
         context_length: summary
             .as_ref()
             .and_then(|s| s.context_length)

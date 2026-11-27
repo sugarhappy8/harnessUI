@@ -17,6 +17,47 @@ pub fn is_supported(architecture: &str) -> bool {
         .any(|l| l.trim() == a)
 }
 
+/// What a repository's page says about the kind of its model, and whether the engine knows it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PageArchitecture {
+    /// The name the page shows: the file's own, else the listing's; `None` when neither was read.
+    pub name: Option<String>,
+    /// `Some(false)` only when the page has enough evidence to say the engine cannot open the
+    /// model; `None` when nothing was read or the two witnesses disagree.
+    pub supported: Option<bool>,
+}
+
+/// A name that was actually read: a file without `general.architecture` reads "unknown" and an
+/// empty value is no value, and neither is a verdict.
+fn read_name(name: Option<&str>) -> Option<&str> {
+    name.map(str::trim)
+        .filter(|n| !n.is_empty() && *n != "unknown")
+}
+
+/// What the page of a repository may say, from two witnesses: `header`, the kind in the header
+/// of the repository's smallest file, and `listing`, Hugging Face's own `gguf.architecture`
+/// (its first file). Either may be a helper (a draft model, a control vector, a patch file), so
+/// a verdict needs the evidence to hold together: a witness that read nothing says nothing, one
+/// witness decides, two that agree decide, two that disagree about whether the engine knows the
+/// kind claim nothing (the name the engine knows is shown, so the page never labels a good
+/// repository with a helper's kind). Nothing here blocks one file: the header of the file
+/// itself is the exact witness, read when it is downloaded or loaded.
+pub fn page_architecture(header: Option<&str>, listing: Option<&str>) -> PageArchitecture {
+    let (header, listing) = (read_name(header), read_name(listing));
+    let (name, supported) = match (header, listing) {
+        (None, None) => (None, None),
+        (Some(a), None) | (None, Some(a)) => (Some(a), Some(is_supported(a))),
+        (Some(h), Some(l)) if is_supported(h) == is_supported(l) => {
+            (Some(h), Some(is_supported(h)))
+        }
+        (Some(h), Some(l)) => (Some(if is_supported(h) { h } else { l }), None),
+    };
+    PageArchitecture {
+        name: name.map(str::to_string),
+        supported,
+    }
+}
+
 /// `general.architecture` values of picture and video models (stable-diffusion.cpp's, and
 /// the GGUF converters' for them), which llama-server cannot load. Most diffusion files
 /// carry no architecture at all, so this is a hint when present, never proof.
@@ -133,6 +174,89 @@ mod tests {
             rocm_pack()["build"].as_str().unwrap(),
             lacking.len(),
             lacking.join(" ")
+        );
+    }
+
+    fn page(header: Option<&str>, listing: Option<&str>) -> (Option<String>, Option<bool>) {
+        let p = page_architecture(header, listing);
+        (p.name, p.supported)
+    }
+
+    fn some(name: &str, supported: Option<bool>) -> (Option<String>, Option<bool>) {
+        (Some(name.to_string()), supported)
+    }
+
+    /// A file with no `general.architecture` key reads "unknown". That is "not read", never a
+    /// verdict: Huihui-Qwen3.8-27B-abliterated-GGUF's smallest file is a patch file with no
+    /// key, and its repository is `qwen35`, which the engine knows.
+    #[test]
+    fn a_header_without_a_kind_is_not_read_and_the_listing_decides() {
+        assert_eq!(
+            page(Some("unknown"), Some("qwen35")),
+            some("qwen35", Some(true))
+        );
+        assert_eq!(page(Some(""), Some("qwen35")), some("qwen35", Some(true)));
+        assert_eq!(
+            page(Some(" unknown "), Some("futurearch")),
+            some("futurearch", Some(false))
+        );
+        // Nothing read at all: nothing to say, so no box.
+        assert_eq!(page(Some("unknown"), None), (None, None));
+        assert_eq!(page(None, None), (None, None));
+        assert_eq!(page(Some("unknown"), Some("  ")), (None, None));
+    }
+
+    #[test]
+    fn one_witness_is_enough_when_the_other_is_silent() {
+        // Header only (the listing has no gguf block), listing only (the header read failed).
+        assert_eq!(page(Some("qwen3"), None), some("qwen3", Some(true)));
+        assert_eq!(
+            page(Some("futurearch"), None),
+            some("futurearch", Some(false))
+        );
+        assert_eq!(page(None, Some("inkling2")), some("inkling2", Some(true)));
+        assert_eq!(
+            page(None, Some("futurearch")),
+            some("futurearch", Some(false))
+        );
+    }
+
+    #[test]
+    fn two_witnesses_that_agree_decide() {
+        assert_eq!(
+            page(Some("futurearch"), Some("futurearch")),
+            some("futurearch", Some(false))
+        );
+        assert_eq!(
+            page(Some("qwen2"), Some("qwen3")),
+            some("qwen2", Some(true))
+        );
+        // Both say the engine does not know it, by different names: the file's own name shows.
+        assert_eq!(
+            page(Some("futurearch"), Some("otherarch")),
+            some("futurearch", Some(false))
+        );
+    }
+
+    /// The smallest file of a repository is often a helper (a draft model, a control vector,
+    /// a patch) and the listing describes the repository's first file: when they disagree
+    /// about whether the engine knows the kind, one of them looked at a helper, so the page
+    /// claims nothing and shows the name the engine knows. The click on one file decides.
+    #[test]
+    fn two_witnesses_that_disagree_claim_nothing() {
+        // Huihui-DeepSeek-V4-Flash-abliterated-ds4: a helper file's kind, then the model's.
+        assert_eq!(
+            page(Some("deepseek4_mtp_support"), Some("deepseek4")),
+            some("deepseek4", None)
+        );
+        // Inkling-2-Mini-Maya: the listing looked at a control vector.
+        assert_eq!(
+            page(Some("inkling2"), Some("controlvector")),
+            some("inkling2", None)
+        );
+        assert_eq!(
+            page(Some("controlvector"), Some("inkling2")),
+            some("inkling2", None)
         );
     }
 
