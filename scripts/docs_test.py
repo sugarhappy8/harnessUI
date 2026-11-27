@@ -828,5 +828,58 @@ class Studio0_2_0Docs(unittest.TestCase):
         self.assertNotIn("Not for this computer", read("README.md"))
 
 
+class ModelsCantOpenDocs(unittest.TestCase):
+    """What ARCHITECTURE.md says about a model this version cannot open yet is what the code
+    and its words do, and names only what exists."""
+
+    def paragraph(self) -> str:
+        return doc_paragraph("ARCHITECTURE.md", "**A model this version can't open yet.**")
+
+    def test_the_search_paragraph_no_longer_promises_a_check_per_backend(self):
+        search = doc_paragraph("ARCHITECTURE.md", "**Search.** `GET https://huggingface.co/api/models")
+        self.assertNotIn("the selected backend's llama.cpp build doesn't know", search)
+        self.assertIn("A model this version can't open yet", search)
+
+    def test_it_says_what_every_screen_says_and_what_none_shows(self):
+        text = self.paragraph()
+        for words in (
+            "`CANT_OPEN`",
+            "`src/lib/words.ts`",
+            "Check for updates",
+            "installs nothing",
+            "nothing is downloaded until it can open",
+            "memory verdict",
+            "image-file offer",
+            "*Can't open yet*",
+            "Add it in Studio",
+        ):
+            self.assertIn(words, text)
+
+    def test_it_names_the_cost_of_the_card_hint_and_why_it_is_only_a_hint(self):
+        text = self.paragraph()
+        for words in ("`gguf` block", "0.8 MB", "25 KB", "a hint, never a verdict"):
+            self.assertIn(words, text)
+
+    def test_it_names_the_evidence_rule_and_the_two_things_not_done(self):
+        text = self.paragraph()
+        for words in ("`models::arch::page_architecture`", "claim nothing", "`engineKnows`", "model picker", "`UnknownArchitecture`"):
+            self.assertIn(words, text)
+
+    def test_what_it_names_exists(self):
+        text = self.paragraph()
+        self.assertIn("pub fn page_architecture", read("crates/models/src/arch.rs"))
+        self.assertIn("export const CANT_OPEN", read("src/lib/words.ts"))
+        self.assertTrue((ROOT / "src/components/models/CantOpen.tsx").exists())
+        self.assertIn("engineKnows", read("src/lib/types.ts"))
+        self.assertIn("unknownArchitecture", read("src/lib/types.ts"))
+        self.assertIn("pub engine_knows", read("src-tauri/src/dto.rs"))
+        self.assertIn("pub unknown_architecture", read("crates/models/src/hf.rs"))
+        self.assertIn("cantopen", read("e2e/preview/mock/ipc.ts"))
+        self.assertIn("?cantopen=1", text)
+        # Only the chat search asks for the listing's gguf block.
+        hf = read("crates/models/src/hf.rs")
+        self.assertIn("fn chat_search_url", hf)
+
+
 if __name__ == "__main__":
     unittest.main()
