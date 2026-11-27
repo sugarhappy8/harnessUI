@@ -78,7 +78,7 @@ export function UpdateCheck(props: { look: "button" | "link" }) {
       ? "btn-primary rounded-lg px-3 py-1 text-sm font-medium"
       : "underline hover:text-fg disabled:no-underline disabled:opacity-50";
   return (
-    <span className="flex flex-wrap items-center gap-x-3 gap-y-1">
+    <span className="inline-flex flex-wrap items-center gap-x-3 gap-y-1 align-middle">
       <button type="button" disabled={busy} onClick={() => void check()} className={className}>
         {CANT_OPEN.check}
       </button>
@@ -151,23 +151,26 @@ export function CantOpenBox(props: { architecture: string | null; picture?: bool
 export function CantOpenLine(props: { id: string; architecture: string | null | undefined }) {
   const kind = kindName(props.architecture);
   return (
-    <div className="mt-1 flex flex-wrap items-center gap-x-3 gap-y-1 text-xs">
-      <p id={props.id} className="flex items-start gap-1.5">
-        <CircleSlash size={12} className="mt-0.5 shrink-0 text-warning" aria-hidden />
-        <span>
-          {kind === null ? (
-            CANT_OPEN.noKind
-          ) : (
-            <>
-              {CANT_OPEN.row.before}
-              <Outside text={kind} cap={60} />
-              {CANT_OPEN.row.after}
-            </>
-          )}
-        </span>
-      </p>
-      {kind !== null && <UpdateCheck look="link" />}
-    </div>
+    <p className="mt-1 text-xs">
+      <CircleSlash size={12} className="mr-1.5 inline align-text-bottom text-warning" aria-hidden />
+      <span id={props.id}>
+        {kind === null ? (
+          CANT_OPEN.noKind
+        ) : (
+          <>
+            {CANT_OPEN.row.before}
+            <Outside text={kind} cap={60} />
+            {CANT_OPEN.row.after}
+          </>
+        )}
+      </span>
+      {kind !== null && (
+        <>
+          {" "}
+          <UpdateCheck look="link" />
+        </>
+      )}
+    </p>
   );
 }
 

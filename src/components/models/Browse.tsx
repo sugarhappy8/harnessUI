@@ -23,9 +23,16 @@ function ResultRow(props: { repo: RepoSummary; onOpen: () => void }) {
         onClick={props.onOpen}
         className="flex min-w-0 flex-1 items-center gap-2 rounded-md px-2 py-1.5 text-left text-sm hover:bg-bg-muted"
       >
-        <span className="min-w-0 flex-1 truncate">{r.id}</span>
+        {/* The hint sits under the name, not beside it: a long name keeps its room at any width. */}
+        <span className="min-w-0 flex-1">
+          <span className="block truncate">{r.id}</span>
+          {r.unknownArchitecture && (
+            <span className="mt-0.5 block">
+              <CantOpenHint kind={r.unknownArchitecture} />
+            </span>
+          )}
+        </span>
         {r.gated !== "no" && <Lock size={12} className="text-fg-muted" aria-label="gated" />}
-        {r.unknownArchitecture && <CantOpenHint kind={r.unknownArchitecture} />}
         {r.license && (
           <Badge>
             <Outside text={licenseWords(r.license)} cap={60} />
