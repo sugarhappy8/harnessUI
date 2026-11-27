@@ -962,6 +962,13 @@ export interface DeviceOption {
 
 /** Everything the model settings panel shows about one model file (`model_load_info`). */
 export interface ModelLoadInfo {
+  /** The kind the file's own header names; absent when it could not be read. */
+  architecture?: string | null;
+  /** False when this version's model runner cannot open the file: the panel then gives no
+   *  memory verdict. Null or left out: not known (or a development engine that may know more). */
+  architectureSupported?: boolean | null;
+  /** With `architectureSupported` false: why no update would change it. */
+  cantOpenWhy?: CantOpenWhy | null;
   path: string;
   fileName: string;
   sizeBytes: number;
