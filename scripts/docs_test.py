@@ -390,6 +390,24 @@ class LlamaPinDocs(unittest.TestCase):
         self.assertIn("Browser requests must go through the router", launch)
         self.assertIn("request_origin_is_allowed", launch)
 
+    def test_the_fixture_recording_the_docs_name_exists(self):
+        howto = "\n".join(section(self.HOWTO))
+        self.assertIn("`crates/runtime/tests/llama_capture.rs`", howto)
+        capture = read("crates/runtime/tests/llama_capture.rs")
+        self.assertIn("LLAMA_CAPTURE_DIR", capture)
+        self.assertIn("LLAMA_CAPTURE_DIR", howto)
+        fixtures = ROOT / "crates/runtime/tests/fixtures"
+        for name in ("stderr_image_file_broken.txt", "stderr_image_file_broken_b12110.txt", "stderr_image_file_garbage_b12110.txt"):
+            self.assertTrue((fixtures / name).is_file(), f"{name}")
+            self.assertIn(name, read("crates/runtime/src/llama/failure.rs"), f"failure.rs reads {name}")
+
+    def test_the_looped_model_slots_the_docs_name_exist(self):
+        placement = paragraph(section("## 11. Model manager and first run"), "Since 0.0.6, for a local file, the marks")
+        self.assertIn("`LayerKv::extra_slots`", placement)
+        kv = read("crates/models/src/kv.rs")
+        self.assertIn("pub extra_slots: u64", kv)
+        self.assertIn("fn loop_extra_slots", kv)
+
     def test_the_list_is_said_to_be_checked_by_a_test_that_exists(self):
         bullet = paragraph(section("### 7.1 Pinning and layout"), "- **The architecture list.**")
         self.assertIn("`catalog/llama-architectures.txt`", bullet)
