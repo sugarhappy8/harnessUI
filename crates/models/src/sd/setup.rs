@@ -1371,6 +1371,63 @@ mod tests {
         }
     }
 
+    /// Lens, LLaDA-Image, Ming-Image and MOSS-Image need a tokenizer file the engine has none
+    /// of its own for: it is planned like any other part (a `.json` file, `--tokenizer`), and
+    /// LLaDA's Base and Turbo recipes each take their own text encoder and connectors (the
+    /// engine's docs say mixing them degrades the picture silently).
+    #[test]
+    fn a_model_that_needs_a_tokenizer_gets_one_and_llada_keeps_its_pairs() {
+        let p = plan(lone(SdVersion::Lens, "lens-Q8_0.gguf"), "lens", &[], &[]);
+        assert!(p.can_run(), "{:?}", p.missing());
+        assert_eq!(source(&p, SlotId::Tokenizer), PartSource::Companion);
+        assert_eq!(hub_path(&p, SlotId::Tokenizer), "tokenizer.json");
+        assert_eq!(hub_path(&p, SlotId::Llm), "gpt-oss-20b-Q8_0.gguf");
+        for (recipe_id, tokenizer) in [
+            ("ming-image", "mllm/tokenizer.json"),
+            ("moss-image-base", "tokenizer/tokenizer.json"),
+        ] {
+            let version = if recipe_id == "ming-image" {
+                SdVersion::MingImage
+            } else {
+                SdVersion::MossImage
+            };
+            let p = plan(lone(version, "model-Q8_0.gguf"), recipe_id, &[], &[]);
+            assert!(p.can_run(), "{recipe_id}: {:?}", p.missing());
+            assert_eq!(hub_path(&p, SlotId::Tokenizer), tokenizer, "{recipe_id}");
+        }
+        let llada = |recipe_id| {
+            plan(
+                lone(SdVersion::LladaImage, "llada-Q8_0.gguf"),
+                recipe_id,
+                &[],
+                &[],
+            )
+        };
+        let base = llada("llada-image");
+        let turbo = llada("llada-image-turbo");
+        assert!(base.can_run() && turbo.can_run());
+        assert_eq!(
+            hub_path(&base, SlotId::Llm),
+            "llada-image-text_encoder-q8_0.gguf"
+        );
+        assert_eq!(
+            hub_path(&turbo, SlotId::Llm),
+            "llada-image-turbo-text_encoder-q8_0.gguf"
+        );
+        assert_eq!(
+            hub_path(&base, SlotId::EmbeddingsConnectors),
+            "llada-image-connectors-edit.safetensors"
+        );
+        assert_eq!(
+            hub_path(&turbo, SlotId::EmbeddingsConnectors),
+            "llada-image-turbo-connectors-edit.safetensors"
+        );
+        assert_eq!(
+            hub_path(&base, SlotId::Tokenizer),
+            hub_path(&turbo, SlotId::Tokenizer)
+        );
+    }
+
     #[test]
     fn an_sd15_checkpoint_needs_nothing_else_and_shows_its_own_vae() {
         let p = plan(

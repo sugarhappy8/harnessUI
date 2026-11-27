@@ -1468,6 +1468,18 @@
           "Keep the licence and copyright notice with the files."
         ],
         "plainWords": "Free for any use, including commercial."
+      },
+      "mit-inclusionai": {
+        "name": "MIT License",
+        "url": "https://huggingface.co/inclusionAI/Ming-Image-0.1-Design/blob/c57c49689d12ef7d4e24a170014f1dc43d3ce258/LICENSE",
+        "sha256": "b772c54f1f150a680e7c083a92431c518cf62821a407f6cccdf53f6a07bcf702",
+        "commercialOutputs": "yes",
+        "revenueLimitUsd": null,
+        "excludedRegions": [],
+        "obligations": [
+          "Keep the licence and copyright notices with the files."
+        ],
+        "plainWords": "Free for any use, including commercial."
       }
     },
     "files": [
@@ -2114,6 +2126,227 @@
         "size": 453974304,
         "sha256": "30ba2c7dd3127a4561b6cba9d13d0f711c91bdb38742e2f56d73c8cb596bd06d",
         "license": "apache-2.0"
+      },
+      {
+        "id": "gpt-oss-20b-q8",
+        "slot": "llm",
+        "versions": [
+          "lens"
+        ],
+        "repo": "unsloth/gpt-oss-20b-GGUF",
+        "revision": "d449b42d93e1c2c7bda5312f5c25c8fb91dfa9b4",
+        "path": "gpt-oss-20b-Q8_0.gguf",
+        "size": 12109567168,
+        "sha256": "bcd455d4034ec02f71a875b46cb17df44a97911d7258291973be4d21f98329f3",
+        "license": "apache-2.0"
+      },
+      {
+        "id": "gpt-oss-tokenizer",
+        "slot": "tokenizer",
+        "versions": [
+          "lens"
+        ],
+        "repo": "openai/gpt-oss-20b",
+        "revision": "6cee5e81ee83917806bbde320786a8fb61efebee",
+        "path": "tokenizer.json",
+        "size": 27868174,
+        "sha256": "0614fe83cadab421296e664e1f48f4261fa8fef6e03e63bb75c20f38e37d07d3",
+        "license": "apache-2.0"
+      },
+      {
+        "id": "llada-image-te-q8",
+        "slot": "llm",
+        "versions": [
+          "llada-image"
+        ],
+        "repo": "fszontagh/LLaDA-Image-GGUF",
+        "revision": "1fb867edc454da1f9e8f9215a8a4c376d3b1b867",
+        "path": "llada-image-text_encoder-q8_0.gguf",
+        "size": 17676202624,
+        "sha256": "694979f6959e298c1eade599d1da04396d0ca06651ff0bf77e0e7c7a6fbfdf1a",
+        "license": "apache-2.0"
+      },
+      {
+        "id": "llada-image-te-q4k",
+        "slot": "llm",
+        "versions": [
+          "llada-image"
+        ],
+        "repo": "fszontagh/LLaDA-Image-GGUF",
+        "revision": "1fb867edc454da1f9e8f9215a8a4c376d3b1b867",
+        "path": "llada-image-text_encoder-q4_K.gguf",
+        "size": 9692566528,
+        "sha256": "7ec5f251659c41971f8a10a598245fa64bee6f7badbbaf1461dc4e0d18029374",
+        "license": "apache-2.0"
+      },
+      {
+        "id": "llada-image-turbo-te-q8",
+        "slot": "llm",
+        "versions": [
+          "llada-image"
+        ],
+        "repo": "fszontagh/LLaDA-Image-Turbo-GGUF",
+        "revision": "73e2e2adecb76bcf1f89fc37a636912c551349a9",
+        "path": "llada-image-turbo-text_encoder-q8_0.gguf",
+        "size": 17676202624,
+        "sha256": "dc95123508eeb92593c2e63c5f0dbd7e678e3694766fcbbaa792da3e740ca6f0",
+        "license": "apache-2.0"
+      },
+      {
+        "id": "llada-image-turbo-te-q4k",
+        "slot": "llm",
+        "versions": [
+          "llada-image"
+        ],
+        "repo": "fszontagh/LLaDA-Image-Turbo-GGUF",
+        "revision": "73e2e2adecb76bcf1f89fc37a636912c551349a9",
+        "path": "llada-image-turbo-text_encoder-q4_K.gguf",
+        "size": 9692566528,
+        "sha256": "3efd1f42856ab18f2e2d4a0ac277943801336e5641b21905c2131a04e96b8a40",
+        "license": "apache-2.0"
+      },
+      {
+        "id": "llada-image-connectors-edit",
+        "slot": "embeddings_connectors",
+        "versions": [
+          "llada-image"
+        ],
+        "repo": "fszontagh/LLaDA-Image-GGUF",
+        "revision": "1fb867edc454da1f9e8f9215a8a4c376d3b1b867",
+        "path": "llada-image-connectors-edit.safetensors",
+        "size": 3348225976,
+        "sha256": "9e06899e1b020ca9ddf6c20293279f1a44a58944a5358d6db6781b3826bb386d",
+        "license": "apache-2.0"
+      },
+      {
+        "id": "llada-image-connectors",
+        "slot": "embeddings_connectors",
+        "versions": [
+          "llada-image"
+        ],
+        "repo": "fszontagh/LLaDA-Image-GGUF",
+        "revision": "1fb867edc454da1f9e8f9215a8a4c376d3b1b867",
+        "path": "llada-image-connectors.safetensors",
+        "size": 754208344,
+        "sha256": "bd79340488b21f7a3160c01b20d1f4000dabac0ef066a151b8c148e04cc65b4d",
+        "license": "apache-2.0"
+      },
+      {
+        "id": "llada-image-turbo-connectors-edit",
+        "slot": "embeddings_connectors",
+        "versions": [
+          "llada-image"
+        ],
+        "repo": "fszontagh/LLaDA-Image-Turbo-GGUF",
+        "revision": "73e2e2adecb76bcf1f89fc37a636912c551349a9",
+        "path": "llada-image-turbo-connectors-edit.safetensors",
+        "size": 3348225976,
+        "sha256": "e0e88841b1a9eb7b11f813f3f139507438b541a585fc6aa4a7bf842e732304ca",
+        "license": "apache-2.0"
+      },
+      {
+        "id": "llada-image-turbo-connectors",
+        "slot": "embeddings_connectors",
+        "versions": [
+          "llada-image"
+        ],
+        "repo": "fszontagh/LLaDA-Image-Turbo-GGUF",
+        "revision": "73e2e2adecb76bcf1f89fc37a636912c551349a9",
+        "path": "llada-image-turbo-connectors.safetensors",
+        "size": 754208344,
+        "sha256": "c367d9409e34ac7fbd6224055cb39821823f6d3e449962137127a2f0c4a46660",
+        "license": "apache-2.0"
+      },
+      {
+        "id": "llada-tokenizer",
+        "slot": "tokenizer",
+        "versions": [
+          "llada-image"
+        ],
+        "repo": "inclusionAI/LLaDA-Image",
+        "revision": "e4e2703f410f7ddb6ee8d6b09dac6a8ec5093039",
+        "path": "tokenizer/tokenizer.json",
+        "size": 15297062,
+        "sha256": "2197aeddaf09785316673451ca6fb86dcfcfdb108972a3145d106b8fa4c927e6",
+        "license": "apache-2.0"
+      },
+      {
+        "id": "ling-mini-2-bf16",
+        "slot": "llm",
+        "versions": [
+          "ming-image"
+        ],
+        "repo": "Comfy-Org/Ming-Image",
+        "revision": "23e15275f1e8d9ba50e36d596f584327071be444",
+        "path": "text_encoders/ming_image_0.1_ling_mini_2.0_bf16.safetensors",
+        "size": 36677768245,
+        "sha256": "7eccad21934f2e6d9103b5c589a448082e89f7b5b73a6b9c6d0332be7de26c1e",
+        "license": "mit-inclusionai"
+      },
+      {
+        "id": "ling-tokenizer",
+        "slot": "tokenizer",
+        "versions": [
+          "ming-image"
+        ],
+        "repo": "inclusionAI/Ming-Image-0.1-Design",
+        "revision": "c57c49689d12ef7d4e24a170014f1dc43d3ce258",
+        "path": "mllm/tokenizer.json",
+        "size": 12210709,
+        "sha256": "e7ff01708d504f7bf4dbf7f5815adde57bab9a40e7f563ab6ad1acace4464917",
+        "license": "mit-inclusionai"
+      },
+      {
+        "id": "ming-image-vae",
+        "slot": "vae",
+        "versions": [
+          "ming-image"
+        ],
+        "repo": "Comfy-Org/Ming-Image",
+        "revision": "23e15275f1e8d9ba50e36d596f584327071be444",
+        "path": "vae/ming_image_vae_bf16.safetensors",
+        "size": 253816696,
+        "sha256": "7f5bed402dc8c77dc2e0ab1929a85d4df433b7cf7b599dfa8c353da98db0b90a",
+        "license": "mit-inclusionai"
+      },
+      {
+        "id": "qwen3.5-9b-q8",
+        "slot": "llm",
+        "versions": [
+          "moss-image"
+        ],
+        "repo": "unsloth/Qwen3.5-9B-GGUF",
+        "revision": "3885219b6810b007914f3a7950a8d1b469d598a5",
+        "path": "Qwen3.5-9B-Q8_0.gguf",
+        "size": 9527502048,
+        "sha256": "809626574d0cb43d4becfa56169980da2bb448f2299270f7be443cb89d0a6ae4",
+        "license": "apache-2.0"
+      },
+      {
+        "id": "qwen3.5-9b-q4km",
+        "slot": "llm",
+        "versions": [
+          "moss-image"
+        ],
+        "repo": "unsloth/Qwen3.5-9B-GGUF",
+        "revision": "3885219b6810b007914f3a7950a8d1b469d598a5",
+        "path": "Qwen3.5-9B-Q4_K_M.gguf",
+        "size": 5680522464,
+        "sha256": "03b74727a860a56338e042c4420bb3f04b2fec5734175f4cb9fa853daf52b7e8",
+        "license": "apache-2.0"
+      },
+      {
+        "id": "moss-tokenizer",
+        "slot": "tokenizer",
+        "versions": [
+          "moss-image"
+        ],
+        "repo": "OpenMOSS-Team/MOSS-Image-Base",
+        "revision": "85975793d8b3d432f1b6e27f352abaa4c2a4c0d3",
+        "path": "tokenizer/tokenizer.json",
+        "size": 19989325,
+        "sha256": "06b9509352d2af50381ab2247e083b80d32d5c0aba91c272ca9ff729b6a0e523",
+        "license": "apache-2.0"
       }
     ],
     "byVersion": {
@@ -2225,10 +2458,14 @@
         "llm": "ministral-3-3b"
       },
       "lens": {
-        "vae": "flux2-vae"
+        "vae": "flux2-vae",
+        "llm": "gpt-oss-20b-q8",
+        "tokenizer": "gpt-oss-tokenizer"
       },
       "moss-image": {
-        "vae": "flux2-vae"
+        "vae": "flux2-vae",
+        "llm": "qwen3.5-9b-q8",
+        "tokenizer": "moss-tokenizer"
       },
       "sefi-image": {
         "vae": "flux2-vae",
@@ -2239,7 +2476,8 @@
         "llm": "qwen3-vl-8b-q8"
       },
       "llada-image": {
-        "vae": "flux2-vae"
+        "vae": "flux2-vae",
+        "tokenizer": "llada-tokenizer"
       },
       "krea2": {
         "llm": "qwen3-vl-4b-q4km",
@@ -2317,6 +2555,11 @@
       },
       "minit2i": {
         "t5xxl": "flan-t5-large"
+      },
+      "ming-image": {
+        "llm": "ling-mini-2-bf16",
+        "tokenizer": "ling-tokenizer",
+        "vae": "ming-image-vae"
       }
     },
     "byRecipe": {
@@ -2334,6 +2577,14 @@
       },
       "pixart-sigma": {
         "vae": "sdxl-vae-fp16-fix"
+      },
+      "llada-image": {
+        "llm": "llada-image-te-q8",
+        "embeddings_connectors": "llada-image-connectors-edit"
+      },
+      "llada-image-turbo": {
+        "llm": "llada-image-turbo-te-q8",
+        "embeddings_connectors": "llada-image-turbo-connectors-edit"
       }
     }
   }

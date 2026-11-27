@@ -682,7 +682,7 @@ pub struct GenCatalog {
 pub const ALLOWED_PART_EXTENSIONS: [&str; 3] = crate::sd::index::READ_EXTENSIONS;
 
 /// The one more file type a `tokenizer` part may be.
-const TOKENIZER_EXTENSION: &str = ".json";
+pub(crate) const TOKENIZER_EXTENSION: &str = ".json";
 
 /// Canonical licence texts bundled with the app (third_party/licenses/models/), by licence
 /// id: the catalog pins their SHA-256.

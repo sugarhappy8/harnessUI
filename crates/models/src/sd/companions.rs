@@ -11,7 +11,9 @@ use serde::de::IntoDeserializer;
 use serde_json::Value;
 
 use crate::catalog::{Catalog, is_hex};
-use crate::gen_catalog::{ALLOWED_PART_EXTENSIONS, Commercial, GenLicence, check_licences, keyed};
+use crate::gen_catalog::{
+    ALLOWED_PART_EXTENSIONS, Commercial, GenLicence, TOKENIZER_EXTENSION, check_licences, keyed,
+};
 use crate::hf::{validate_repo_id, validate_repo_path};
 use crate::sd::detect::SdVersion;
 use crate::sd::matching::{out_of_scope, recipes_for};
@@ -190,7 +192,8 @@ impl CompanionTable {
     /// Refused, naming what is wrong, when:
     /// - a licence does not read otherwise, or one with bundled text does not pin it;
     /// - a repo id or path is not valid, a revision is not 40 hex, a SHA-256 not 64 hex, a
-    ///   size 0, an extension not in [`ALLOWED_PART_EXTENSIONS`], or an id listed twice;
+    ///   size 0, an extension not in [`ALLOWED_PART_EXTENSIONS`] (a tokenizer's may be
+    ///   `.json`), or an id listed twice;
     /// - a file fills a model slot, or names a licence that is not listed;
     /// - a default names no companion, or one of another slot, or one whose `versions`
     ///   leave out the version (for `byRecipe`, every version whose recipes include it);
@@ -376,9 +379,10 @@ impl CompanionTable {
                 "not a valid repo id"
             } else if validate_repo_path(&c.path).is_err() {
                 "not a valid path"
-            } else if !ALLOWED_PART_EXTENSIONS
-                .iter()
-                .any(|ext| path.ends_with(ext))
+            } else if !(c.slot == SlotId::Tokenizer && path.ends_with(TOKENIZER_EXTENSION))
+                && !ALLOWED_PART_EXTENSIONS
+                    .iter()
+                    .any(|ext| path.ends_with(ext))
             {
                 "not a .safetensors, .sft or .gguf file"
             } else if !is_hex(&c.revision, 40) {
@@ -509,6 +513,45 @@ mod tests {
             skipped: Vec::new(),
             ..t.clone()
         }
+    }
+
+    /// A tokenizer is a `.json` file (the engine's `--tokenizer`), which no other companion
+    /// may be: a part is only ever weights, or a tokenizer's `.json`
+    /// (`gen_catalog::check_parts` says the same of a catalog entry's parts). Lens, LLaDA-Image,
+    /// Ming-Image and MOSS-Image need one and the engine has none of its own.
+    #[test]
+    fn only_a_tokenizer_may_be_a_json_file() {
+        let row = |slot: &str, path: &str| {
+            changed(|v| {
+                let mut one = v["files"][at(v, "clip-l")].clone();
+                one["id"] = json!("probe");
+                one["slot"] = json!(slot);
+                one["path"] = json!(path);
+                one["versions"] = json!(["lens"]);
+                v["files"].as_array_mut().unwrap().push(one);
+            })
+        };
+        let t = row("tokenizer", "tokenizer.json").unwrap();
+        assert_eq!(
+            t.files.last().map(|c| (c.slot, c.path.as_str())),
+            Some((SlotId::Tokenizer, "tokenizer.json"))
+        );
+        // Not under another slot, and not any other pickle-like or text file.
+        let err = row("llm", "tokenizer.json").unwrap_err();
+        assert!(
+            err.contains("not a .safetensors, .sft or .gguf file"),
+            "{err}"
+        );
+        let err = row("tokenizer", "tokenizer.model").unwrap_err();
+        assert!(
+            err.contains("not a .safetensors, .sft or .gguf file"),
+            "{err}"
+        );
+        let err = row("tokenizer", "tokenizer.bin").unwrap_err();
+        assert!(
+            err.contains("not a .safetensors, .sft or .gguf file"),
+            "{err}"
+        );
     }
 
     /// Decoders that look alike are not interchangeable (design 7.4: a file suits a version
