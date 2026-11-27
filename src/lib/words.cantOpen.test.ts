@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
-import { CANT_OPEN, cantOpenCardTip } from "./words";
+import { CANT_OPEN, cantOpenCardTip, updateLine } from "./words";
+import type { UpdateStatus } from "./types";
 import { APP_NAME } from "./app";
 
 // The one set of words for a model whose kind this version of the app cannot open yet. Every
@@ -61,6 +62,27 @@ describe("the words for a model this version can't open yet", () => {
       "This copy can't update itself. New versions are on the project's GitHub releases page.",
     );
     expect(CANT_OPEN.checking).toBe("Checking for updates…");
+  });
+
+  it("tells the person which button to click again, on the page that has that button", () => {
+    const failed: UpdateStatus = {
+      configured: true,
+      autoCheck: false,
+      currentVersion: "0.2.1",
+      checking: false,
+      checked: false,
+      downloading: null,
+      available: null,
+      ready: null,
+      error: "Could not reach github.com.",
+    };
+    // Settings keeps its own words ...
+    expect(updateLine(failed)).toBe("Could not reach github.com. Click Check now to try again.");
+    // ... and a page whose button is named otherwise names it.
+    expect(updateLine(failed, CANT_OPEN.tryAgain)).toBe(
+      "Could not reach github.com. Click Check for updates to try again.",
+    );
+    expect(CANT_OPEN.readyHint).toBe("Close this window and use the update box.");
   });
 
   it("has no jargon, no exclamation mark and no raw identifier on screen", () => {

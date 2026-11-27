@@ -40,6 +40,7 @@ import type {
   Placement,
   Reading,
   ThinkingLimit,
+  UpdateStatus,
   UsageGap,
   UsageNow,
   Verdict,
@@ -303,6 +304,10 @@ export const CANT_OPEN = {
   /** After a check found nothing newer. */
   latest: (version: string) =>
     `You have the latest version (${version}). It can't open this model yet, so check again later.`,
+  /** After a check that did not work, when the automatic check is off. */
+  tryAgain: "Click Check for updates to try again.",
+  /** After a version is ready: its box is behind the Models window. */
+  readyHint: "Close this window and use the update box.",
   /** An app that cannot update itself (a build without the updater). */
   noUpdates: "This copy can't update itself. New versions are on the project's GitHub releases page.",
   /** Where the memory sentence would be: no verdict is given for a model that cannot open. */
@@ -315,6 +320,22 @@ export const CANT_OPEN = {
     after: "” kind of model. A newer version may open it.",
   },
 } as const;
+
+/**
+ * What the updater is doing or found since the app started, in one line: Settings → General →
+ * Updates puts it under "Check now", and a model's page that cannot open yet puts it under
+ * "Check for updates" (`retry` names that button). `null` before any check.
+ */
+export function updateLine(s: UpdateStatus, retry = "Click Check now to try again."): string | null {
+  if (s.ready) return `Version ${s.ready.version} is ready to install.`;
+  if (s.downloading) return `Downloading version ${s.downloading}…`;
+  if (s.checking) return "Checking for updates…";
+  // Only the automatic check tries again on its own.
+  if (s.error) return `${s.error} ${s.autoCheck ? "The app tries again at the next check." : retry}`;
+  if (s.available) return `Version ${s.available.version} is available.`;
+  if (s.checked) return `You have the latest version (${s.currentVersion}).`;
+  return null;
+}
 
 /** A search card's hint, which is a guess from Hugging Face's listing (the page checks). */
 export function cantOpenCardTip(kind: string): string {
