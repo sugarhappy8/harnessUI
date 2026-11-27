@@ -261,6 +261,55 @@ async fn a_broken_model_file_is_classified() {
     }
 }
 
+/// A GGUF that names a kind llama.cpp has not learned ("unknown model architecture"): the file
+/// is fine, only newer builds open it, so it is its own failure with its own words, never the
+/// "download it again" of a broken file, and no backend's step-down (the real server, so a new
+/// build that moves the line is caught here).
+#[tokio::test(flavor = "multi_thread")]
+async fn a_kind_the_runner_does_not_know_is_its_own_failure() {
+    let Some((bin, _)) = env_paths("a_kind_the_runner_does_not_know_is_its_own_failure") else {
+        return;
+    };
+    let dir = tempfile::tempdir().expect("tempdir");
+    let future = dir.path().join("future.gguf");
+    let text = |out: &mut Vec<u8>, s: &str| {
+        out.extend_from_slice(&(s.len() as u64).to_le_bytes());
+        out.extend_from_slice(s.as_bytes());
+    };
+    let mut bytes = b"GGUF".to_vec();
+    bytes.extend_from_slice(&3_u32.to_le_bytes());
+    bytes.extend_from_slice(&0_u64.to_le_bytes());
+    bytes.extend_from_slice(&1_u64.to_le_bytes());
+    text(&mut bytes, "general.architecture");
+    bytes.extend_from_slice(&8_u32.to_le_bytes());
+    text(&mut bytes, "futurearch");
+    std::fs::write(&future, bytes).expect("write");
+    let (tx, _rx) = unbounded_channel();
+    let spec = StartSpec {
+        backend: backend(&bin, BackendKind::Cpu),
+        launch: launch(future),
+        load_timeout: Duration::from_secs(60),
+    };
+    match start(spec, tx)
+        .await
+        .expect_err("an unknown kind cannot load")
+    {
+        StartError::Exited {
+            failure,
+            stderr_tail,
+            ..
+        } => {
+            assert_eq!(
+                failure,
+                LoadFailure::UnknownArchitecture,
+                "{stderr_tail:#?}"
+            );
+            assert!(!failure.may_succeed_on_another_backend());
+        }
+        other => panic!("unexpected error: {other:?}"),
+    }
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn cpu_probe_reports_the_synthetic_cpu_device() {
     let Some((bin, _)) = env_paths("cpu_probe_reports_the_synthetic_cpu_device") else {

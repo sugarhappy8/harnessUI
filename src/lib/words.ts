@@ -119,6 +119,8 @@ export const LOAD_FAILURE_WORDS: Record<LoadFailure["code"], string> = {
   missing_runtime_dll: "is missing a file it needs",
   port_in_use: "could not get the connection it needs",
   model_file_invalid: "could not load this model",
+  // Never a reason to step down (it fails the same everywhere); listed so every failure has words.
+  unknown_architecture: "does not know this kind of model",
   context_too_large: "ran out of memory",
   // [0.0.7 P2] Never a reason to step down; listed so every failure has words.
   image_file_invalid: "could not read the image file",
@@ -131,6 +133,7 @@ export function stepDownAction(reason: LoadFailure): "reload" | "settings" | nul
     case "invalid_device":
       return "settings";
     case "model_file_invalid":
+    case "unknown_architecture":
       return null;
     default:
       return "reload";

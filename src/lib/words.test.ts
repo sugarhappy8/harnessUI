@@ -97,6 +97,7 @@ const FAILURES: Record<LoadFailure["code"], LoadFailure> = {
   missing_runtime_dll: { code: "missing_runtime_dll" },
   port_in_use: { code: "port_in_use" },
   model_file_invalid: { code: "model_file_invalid" },
+  unknown_architecture: { code: "unknown_architecture" },
   context_too_large: { code: "context_too_large" },
   image_file_invalid: { code: "image_file_invalid" },
   unknown: { code: "unknown" },
@@ -273,6 +274,8 @@ describe("plain words", () => {
     expect(stepDownAction({ code: "context_too_large" })).toBe("reload");
     expect(stepDownAction({ code: "invalid_device", device: "Vulkan1" })).toBe("settings");
     expect(stepDownAction({ code: "model_file_invalid" })).toBeNull();
+    // A kind this version does not know fails the same on every backend: nothing to reload.
+    expect(stepDownAction({ code: "unknown_architecture" })).toBeNull();
     // Reload only where the sentence says to.
     for (const f of Object.values(FAILURES)) {
       expect(adjustmentWords(down(f))?.includes("Reload") ?? false, f.code).toBe(stepDownAction(f) === "reload");

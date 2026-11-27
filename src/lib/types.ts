@@ -868,6 +868,8 @@ export type LoadFailure =
   | { code: "missing_runtime_dll" }
   | { code: "port_in_use" }
   | { code: "model_file_invalid" }
+  // The file names a kind of model this version's runner has not learned: an update may help.
+  | { code: "unknown_architecture" }
   | { code: "context_too_large" }
   // [0.0.7 P2] The model loaded, its image file could not be read.
   | { code: "image_file_invalid" }

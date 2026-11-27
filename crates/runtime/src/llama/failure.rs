@@ -21,8 +21,13 @@ pub enum LoadFailure {
     MissingRuntimeDll,
     /// The chosen port was taken.
     PortInUse,
-    /// The model file is missing, truncated or not a GGUF file.
+    /// The model file is missing, truncated, not a GGUF file, or does not match the layout the
+    /// runner builds for its kind (a tensor or a key it needs is not in it).
     ModelFileInvalid,
+    /// The file names a kind of model this version's llama.cpp has not learned ("unknown model
+    /// architecture"). The file is fine: a newer version of the app comes with a newer runner.
+    /// It fails the same on every backend of this build, so it is no step-down.
+    UnknownArchitecture,
     /// The weights loaded but the context (KV cache, compute buffers) did not fit.
     ContextTooLarge,
     /// 0.0.7: the model and its context loaded, then the image file given with `--mmproj`
@@ -46,8 +51,9 @@ impl LoadFailure {
             Self::MissingRuntimeDll => "A file the model runner needs is missing or damaged.",
             Self::PortInUse => "Another program is using the network port the model runner needs.",
             Self::ModelFileInvalid => {
-                "The model file couldn't be read. It may be incomplete, damaged, not a GGUF model, or a kind of model this version can't run."
+                "The model file couldn't be read. It may be incomplete or damaged, not a GGUF model, or made in an early or unusual layout."
             }
+            Self::UnknownArchitecture => "This version can't open this kind of model yet.",
             Self::ContextTooLarge => {
                 "The model loaded, but there isn't enough memory left for how much it should remember."
             }
@@ -74,7 +80,12 @@ impl LoadFailure {
                 "Reinstall the app. For a downloaded backend, remove it in Settings and download it again."
             }
             Self::PortInUse => "Restart the app.",
-            Self::ModelFileInvalid => "Download the model again, or choose a different file.",
+            Self::ModelFileInvalid => {
+                "Download the model again, or choose a different file, such as a newer upload of the same model."
+            }
+            Self::UnknownArchitecture => {
+                "Newer versions come with a newer model runner. Check for updates, or pick another model."
+            }
             Self::ContextTooLarge => {
                 "In Model settings, lower How much it can remember, or turn on Save memory if it is off."
             }
@@ -112,7 +123,10 @@ impl LoadFailure {
     pub fn may_succeed_on_another_backend(&self) -> bool {
         !matches!(
             self,
-            Self::ModelFileInvalid | Self::PortInUse | Self::ImageFileInvalid
+            Self::ModelFileInvalid
+                | Self::UnknownArchitecture
+                | Self::PortInUse
+                | Self::ImageFileInvalid
         )
     }
 
@@ -183,8 +197,18 @@ const MODEL_FILE_SIGNATURES: &[&str] = &[
     "failed to open gguf file",
     "invalid magic characters",
     "model is corrupted or incomplete",
-    "unknown model architecture",
+    // The file does not match what the runner builds for its kind: a tensor it needs is not in
+    // it, has another shape, or the count differs (the early Inkling 2 uploads: 24 of 48
+    // blocks, `src/llama-model-loader.cpp` v1.1.0), or a key it needs is absent.
+    "check_tensor_dims: tensor",
+    "done_getting_tensors: wrong number of tensors",
+    "missing tensor",
+    "key not found in model",
 ];
+
+/// The file names a kind this llama.cpp has not learned (`src/llama-model.cpp`). Apart from
+/// [`MODEL_FILE_SIGNATURES`]: the file is fine, and the words say that an update may help.
+const UNKNOWN_ARCHITECTURE_SIGNATURES: &[&str] = &["unknown model architecture"];
 
 /// The functions of ggml's GGUF reader, whose every line is about a file it could not
 /// read: the model's, or the image file's while the server measures it (0.0.7).
@@ -267,6 +291,9 @@ pub fn classify_load(
     if loading().any(|line| line.func.starts_with(GGUF_READER) || line.says(MODEL_FILE_SIGNATURES))
     {
         return LoadFailure::ModelFileInvalid;
+    }
+    if loading().any(|line| line.says(UNKNOWN_ARCHITECTURE_SIGNATURES)) {
+        return LoadFailure::UnknownArchitecture;
     }
     LoadFailure::Unknown
 }
@@ -701,13 +728,91 @@ mod tests {
     fn file_signatures_from_the_model_loader_are_model_file_invalid() {
         for line in [
             "E llama_model_load: error loading model: tensor 'blk.0.attn_q.weight' data is not within the file bounds, model is corrupted or incomplete",
-            "E llama_model_load: error loading model: error loading model architecture: unknown model architecture: 'newarch'",
             "E gguf_init_from_file_impl: failed to read header",
             "E gguf_init_from_reader: failed to read tensor info",
         ] {
             assert_eq!(
                 classify(&lines(line), Some(1)),
                 LoadFailure::ModelFileInvalid,
+                "{line}"
+            );
+        }
+    }
+
+    /// A kind the pinned llama.cpp has not learned: captured from the real server (b12774) on a
+    /// file that names "futurearch". Not a damaged file, and not one another backend would
+    /// open: an update brings a newer runner, so the words say that, and "download it again"
+    /// (what a broken file gets) would be false advice for a 23 GB file that is fine.
+    #[test]
+    fn captured_unknown_architecture_is_its_own_failure_with_its_own_words() {
+        let tail = fixture(include_bytes!(
+            "../../tests/fixtures/stderr_unknown_architecture.txt"
+        ));
+        let failure = classify(&tail, Some(1));
+        assert_eq!(failure, LoadFailure::UnknownArchitecture);
+        assert!(!failure.may_succeed_on_another_backend());
+        let (message, step) = (failure.user_message(), failure.next_step());
+        assert_eq!(message, "This version can't open this kind of model yet.");
+        assert!(step.contains("Check for updates"), "{step}");
+        assert!(step.contains("pick another model"), "{step}");
+        for words in [message, step] {
+            assert!(!words.contains("damaged"), "{words}");
+            assert!(!words.contains("Download the model again"), "{words}");
+        }
+        assert_eq!(failure.next_step_on(BackendKind::Vulkan), step);
+        // The failure's JSON is what the window reads.
+        assert_eq!(
+            serde_json::to_string(&failure).unwrap(),
+            r#"{"code":"unknown_architecture"}"#
+        );
+    }
+
+    /// The early Inkling 2 uploads (arch "inkling2", 24 of 48 blocks in the file): captured
+    /// from the real server on a copy of onemunanoyo's file with its header and tensor table.
+    /// The name is known and the file does not match what the runner builds from it: it fails
+    /// the same on every backend, so it is a file problem, not one for a step-down, and not
+    /// the unknown failure ("try a different download") it was filed under before.
+    #[test]
+    fn captured_missing_tensor_is_model_file_invalid() {
+        let tail = fixture(include_bytes!(
+            "../../tests/fixtures/stderr_tensor_not_found.txt"
+        ));
+        let failure = classify(&tail, Some(1));
+        assert_eq!(failure, LoadFailure::ModelFileInvalid);
+        assert!(!failure.may_succeed_on_another_backend());
+        assert!(
+            failure.next_step().contains("newer upload"),
+            "{}",
+            failure.next_step()
+        );
+    }
+
+    /// What llama.cpp's loader says when a file does not match the layout it builds for the
+    /// file's kind (v1.1.0, `src/llama-model-loader.cpp`): all are the file's, on any backend.
+    #[test]
+    fn a_file_that_does_not_match_its_kind_is_model_file_invalid() {
+        for line in [
+            "0.00.577.545 E llama_model_load: error loading model: check_tensor_dims: tensor 'blk.24.attn_q.weight' not found",
+            "0.00.577.545 E llama_model_load: error loading model: check_tensor_dims: tensor 'output.weight' has wrong shape; expected  2048, 32000, got  4096, 32000",
+            "0.00.577.545 E llama_model_load: error loading model: done_getting_tensors: wrong number of tensors; expected 734, got 704",
+            "0.00.577.545 E llama_model_load: error loading model: missing tensor 'blk.3.ffn_gate.weight'",
+            "0.00.577.545 E llama_model_load: error loading model: key not found in model: inkling2_loop.loop.start",
+        ] {
+            assert_eq!(
+                classify(&lines(line), Some(1)),
+                LoadFailure::ModelFileInvalid,
+                "{line}"
+            );
+        }
+        // A graphics backend's own exception is not a file problem, and a name from a file
+        // that looks like one of these messages does not make it one.
+        for line in [
+            "0.00.100.000 E ggml_vulkan: device lost: 'check_tensor_dims: tensor x not found'",
+            "0.00.100.000 E llama_model_load: error loading model: vk::Device::createBuffer: ErrorDeviceLost 'key not found in model: x'",
+        ] {
+            assert_eq!(
+                classify(&lines(line), Some(1)),
+                LoadFailure::Unknown,
                 "{line}"
             );
         }
@@ -1054,7 +1159,7 @@ mod tests {
                     "0.00.020.000 E llama_model_load: error loading model: error loading model architecture: unknown model architecture: 'failed to load multimodal model'\n\
                      0.00.020.001 E llama_model_load_from_file_impl: failed to load model"
                 ),
-                LoadFailure::ModelFileInvalid
+                LoadFailure::UnknownArchitecture
             );
             assert_eq!(
                 load(
