@@ -526,6 +526,11 @@ pub struct HubFacts {
 #[serde(rename_all = "camelCase")]
 pub struct FileFacts {
     pub architecture: Option<String>,
+    /// Whether this version's model runner knows the file's kind. `Some(false)` is the file's
+    /// own header (or the listing's kind, for a repository whose header could not be read), and
+    /// the comparison then gives no "will it fit" verdict: the memory estimate has no rule for
+    /// a kind the runner does not know, and the model cannot open anyway. `None`: not known.
+    pub engine_knows: Option<bool>,
     pub parameters: Option<u64>,
     /// The context the model was trained for ("Longest conversation it was made for").
     pub context_length: Option<u64>,

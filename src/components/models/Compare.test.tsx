@@ -946,3 +946,69 @@ describe("Compare: suggested models", () => {
     expect(items[1]!.textContent).not.toContain("Fits");
   });
 });
+
+// ---- A model this version can't open yet ---------------------------------------------
+//
+// "Will it fit on this computer?" asked about a model the model runner cannot open gave a
+// verdict (a guess, since the memory estimate has no rule for a kind it does not know), and the
+// Change menu's "Picked for you: the largest file that fits" said a file fits that cannot open.
+
+describe("Compare: a model this version can't open yet", () => {
+  const OPENS = { catalogId: "one" } as const;
+  const CANT = { catalogId: "two" } as const;
+
+  beforeEach(() => {
+    factsFor = (item, ctx) =>
+      "catalogId" in item && item.catalogId === "two"
+        ? facts(item, ctx, {
+            fit: fit("yellow", { sentence: "Fits with limits." }),
+            fileFacts: fileFacts({ architecture: "futurearch", engineKnows: false }),
+          })
+        : facts(item, ctx, { fileFacts: fileFacts({ engineKnows: true }) });
+  });
+
+  it("says the fit is not checked, and keeps the verdict of the model that can open", async () => {
+    useCompare.setState({ entries: [OPENS, CANT] });
+    await show();
+    const open = cell("Will it fit on this computer?", 0);
+    expect(open.textContent).toContain("Fits");
+    expect(open.textContent).toContain("Estimate for this computer");
+    const cant = cell("Will it fit on this computer?", 1);
+    expect(cant.textContent).toBe("Not checked. This version can't open this model yet.");
+    expect(cant.querySelector("[class*='bg-']")).toBeNull();
+  });
+
+  it("answers the other questions as before, since they are facts of the file", async () => {
+    useCompare.setState({ entries: [CANT] });
+    await show();
+    expect(cell("Download size").textContent).toContain("2.7 GB");
+    expect(cell("Longest conversation it was made for").textContent).toContain("32,768");
+  });
+
+  it("is as before when nobody knows (null) or the runner knows", async () => {
+    factsFor = (item, ctx) => facts(item, ctx, { fileFacts: fileFacts({ engineKnows: null }) });
+    useCompare.setState({ entries: [OPENS, CANT] });
+    await show();
+    for (const column of [0, 1]) expect(cell("Will it fit on this computer?", column).textContent).toContain("Fits");
+  });
+
+  it("lists a repository's files without fit words, and picks nothing for the person", async () => {
+    ipcMock.hubRepo.mockImplementation(async (repo, ctx) => ({
+      ...repoView(repo, ctx ?? 8192, [variant("Q2_K", 2e9, "green"), variant("Q4_K_M", 4e9, "yellow"), variant("Q8_0", 8e9, "red")]),
+      architecture: "futurearch",
+      architectureSupported: false,
+    }));
+    useCompare.setState({ entries: [{ repo: "someone/alpha-GGUF", file: null }] });
+    await show();
+    // The choice was made all the same (a column needs a file), but nothing says it fits.
+    expect(screen.queryByText(/Picked for you/)).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "Change" }));
+    const files = screen.getByRole("group", { name: "Files in this repository" });
+    const options = within(files).getAllByRole("button").map((b) => b.textContent);
+    expect(options).toEqual([
+      "Q2_K: very small file, noticeably lower quality · 2.0 GB",
+      "Q4_K_M: smaller file, good quality · 4.0 GB",
+      "Q8_0: large file, almost the original quality · 8.0 GB",
+    ]);
+  });
+});

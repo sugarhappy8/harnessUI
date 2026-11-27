@@ -1037,6 +1037,9 @@ export interface HubFacts {
 /** From the GGUF header. */
 export interface FileFacts {
   architecture: string | null;
+  /** Whether this version's model runner knows the file's kind; false: it cannot open the
+   *  file yet, so no "will it fit" verdict is given. Null or left out: not known. */
+  engineKnows?: boolean | null;
   parameters: number | null;
   contextLength: number | null;
   tools: boolean;
