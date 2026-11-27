@@ -1,16 +1,17 @@
 import { useEffect, useRef, useState } from "react";
-import { ArrowLeft, Check, Download, ExternalLink, Lock } from "lucide-react";
+import { ArrowLeft, Check, CircleSlash, Download, ExternalLink, Lock } from "lucide-react";
 import * as ipc from "../../lib/ipc";
 import type { ErrorInfo, RepoView, VariantView } from "../../lib/types";
 import { licenseWords } from "../../lib/abilities";
 import { formatBytes, formatParams } from "../../lib/format";
-import { tokensWithWords } from "../../lib/words";
+import { CANT_OPEN, tokensWithWords } from "../../lib/words";
 import { toErrorInfo } from "../../store/app";
 import { COMPARE_FULL, COMPARE_LIMIT, useAddToComparison, useCompare } from "../../store/compare";
 import { ErrorBanner } from "../ErrorBanner";
 import { FitBadge } from "../FitBadge";
 import { SafeLink } from "../Markdown";
 import { Badge } from "./Badge";
+import { CantOpenBox } from "./CantOpen";
 import { AddToComparison, Outside, shown } from "./Compare";
 
 /** The most of a model card shown (the backend reads at most 256 KB of it). */
@@ -39,7 +40,12 @@ function CompareVariant(props: { view: RepoView; variant: VariantView }) {
   );
 }
 
-/** One Hugging Face repository: its files with a fit badge each, and Download. */
+/**
+ * One Hugging Face repository: its files with a fit badge each, and Download. For a model this
+ * version cannot open yet (the model runner it comes with does not know its kind) the page says
+ * that once, in a box, and nothing contradicts it: no memory verdict, no image-file offer, and
+ * words where Download would be, never a dimmed button.
+ */
 export function RepoDetail(props: { repoId: string; onBack: () => void; onStarted: () => void }) {
   const [view, setView] = useState<RepoView | null>(null);
   const [error, setError] = useState<ErrorInfo | null>(null);
@@ -62,8 +68,10 @@ export function RepoDetail(props: { repoId: string; onBack: () => void; onStarte
     };
   }, [props.repoId]);
 
+  const cantOpen = view?.architectureSupported === false;
+
   async function download(v: VariantView) {
-    if (!view || startingRef.current) return;
+    if (!view || cantOpen || startingRef.current) return;
     startingRef.current = true;
     setStarting(true);
     try {
@@ -90,7 +98,8 @@ export function RepoDetail(props: { repoId: string; onBack: () => void; onStarte
           {view && (
             <div className="mt-1 flex flex-wrap gap-1">
               {view.architecture && (
-                <Badge>
+                <Badge tone={cantOpen ? "danger" : undefined}>
+                  {cantOpen && <CircleSlash size={10} className="mr-0.5 inline" aria-hidden />}
                   <Outside text={view.architecture} cap={60} />
                 </Badge>
               )}
@@ -118,23 +127,18 @@ export function RepoDetail(props: { repoId: string; onBack: () => void; onStarte
           <ExternalLink size={11} aria-hidden />
         </span>
       </div>
-      {view?.architectureSupported === false && (
-        <p className="rounded-md border border-danger/40 bg-danger/10 px-3 py-2 text-sm">
-          The llama.cpp build in this app does not know the “<Outside text={view.architecture ?? ""} cap={60} />” architecture, so
-          these files would not load. Pick a different model.
-        </p>
-      )}
+      {view && cantOpen && <CantOpenBox architecture={view.architecture} />}
       {!view && !error && <p className="text-sm text-fg-muted">Loading files…</p>}
       {view && (
         <>
-          {view.projector && (
+          {view.projector && !cantOpen && (
             <label className="flex items-center gap-2 text-xs">
               <input type="checkbox" checked={withProjector} onChange={(e) => setWithProjector(e.target.checked)} />
               Also download the image file ({formatBytes(view.projector.size)}) so the model can read images
             </label>
           )}
           <p className="text-xs text-fg-muted">
-            Memory estimates assume the model remembers {tokensWithWords(view.fitContext)}.
+            {cantOpen ? CANT_OPEN.memory : `Memory estimates assume the model remembers ${tokensWithWords(view.fitContext)}.`}
           </p>
           {compareFull && <p className="text-xs text-fg-muted">{COMPARE_FULL}</p>}
           <ul className="space-y-2">
@@ -148,7 +152,7 @@ export function RepoDetail(props: { repoId: string; onBack: () => void; onStarte
                       {v.files.length > 1 ? ` · ${v.files.length} parts` : ""}
                     </span>
                   </p>
-                  {v.fit && <FitBadge fit={v.fit} />}
+                  {v.fit && !cantOpen && <FitBadge fit={v.fit} />}
                   {!v.hasChecksum && (
                     <p className="text-xs text-fg-muted">No checksum is published for this file.</p>
                   )}
@@ -158,11 +162,15 @@ export function RepoDetail(props: { repoId: string; onBack: () => void; onStarte
                   <span className="flex items-center gap-1 text-xs text-success">
                     <Check size={12} aria-hidden /> Installed
                   </span>
+                ) : cantOpen ? (
+                  <span title={CANT_OPEN.title} className="text-xs text-fg-muted">
+                    {CANT_OPEN.short}
+                  </span>
                 ) : (
                   <button
                     type="button"
                     onClick={() => void download(v)}
-                    disabled={view.architectureSupported === false || starting}
+                    disabled={starting}
                     className="flex items-center gap-1 rounded-md bg-accent px-3 py-1 text-xs text-accent-fg disabled:opacity-40"
                   >
                     <Download size={12} aria-hidden /> Download
