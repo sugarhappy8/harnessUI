@@ -2193,6 +2193,7 @@ export function verdictWords(verdict: StudioVerdict): string | null {
   if (verdict === "unknown") return null;
   if ("works" in verdict)
     return FILE_LABEL.works(typeName(verdict.works.version, verdict.works.recipe), verdict.works.kind, null, 0);
+  if ("needsFiles" in verdict) return VERDICT.needsFiles(typeName(verdict.needsFiles.version, verdict.needsFiles.recipe));
   if ("lora" in verdict) return FILE_LABEL.lora(verdict.lora.base === null ? null : typeName(verdict.lora.base, null));
   return FILE_LABEL.cannotRun(verdict.cannotRun.reason);
 }
@@ -2498,9 +2499,34 @@ export const VERDICT = {
   unknown: "Open to check",
   /** Opened, and none of its files is one Studio knows. */
   notRecognised: "Not recognised",
+  /** Opened, and Studio knows the model but has no file for a part it needs: not "Works". */
+  needsFiles: (type: string) => `Needs files · ${type}`,
+  /** Its tooltip. */
+  needsFilesTip: "Studio knows this model, but it has no file for a part the model needs. Choose the files below.",
   /** A hint's tooltip. */
   hint: "From the name: opening it reads the files",
 } as const;
+
+/** What a part is in a sentence about one that has no file ("Choose a file for the text
+ *  encoder first."). */
+const MISSING_PART_WORD: Record<PartRole, string> = {
+  model: "model file",
+  diffusion: "model file",
+  "high-noise-diffusion": "high-noise model file",
+  "uncond-diffusion": "unconditional model file",
+  "clip-l": "CLIP-L text encoder",
+  "clip-g": "CLIP-G text encoder",
+  t5xxl: "text encoder",
+  llm: "text encoder",
+  "llm-vision": "picture encoder",
+  "clip-vision": "picture encoder",
+  tokenizer: "tokenizer",
+  vae: "decoder",
+  tae: "tiny decoder",
+  "audio-vae": "sound decoder",
+  "audio-encoder": "sound encoder",
+  "embeddings-connectors": "connectors file",
+};
 
 /** A result's or a catalog model's detail panel in Get models (Task U6, design 10.3): the review
  *  before a download, with its main file (one per quantisation, the best for this computer
@@ -2510,14 +2536,28 @@ export const MODEL_DETAIL = {
   mainFile: "Main file",
   best: "Best for this computer",
   extras: "Extra files Studio adds",
+  /** The same section while a part the model needs has no file: the promise above does not hold. */
+  extrasNeeded: "Files this model needs",
   alreadyHere: "already on this computer",
   chooseFile: "Choose a file",
   /** "Total to download: 4.6 GB": the files not on this computer yet (and the Studio engine
    *  when it comes with the model). */
   total: (size: string) => `Total to download: ${size}`,
   download: "Download",
-  /** Why Download is off while a part has no file. */
-  missingWhy: SETUP.problem.studio_setup_incomplete,
+  /** Why Download is off while a part has no file, naming the parts: "Choose a file for the text
+   *  encoder and the decoder first." */
+  missingWhy: (roles: PartRole[]) => {
+    const words = [...new Set(roles.map((r) => `the ${MISSING_PART_WORD[r] ?? "part"}`))];
+    if (words.length === 0) return SETUP.problem.studio_setup_incomplete;
+    const list = words.length === 1 ? words[0]! : `${words.slice(0, -1).join(", ")} and ${words[words.length - 1]!}`;
+    return `Choose a file for ${list} first.`;
+  },
+  /** The total of a set-up with a part still missing: a floor, which says it is one. */
+  totalSoFar: (size: string, missing: number) =>
+    `At least ${size}, and more once you choose the ${missing === 1 ? "missing file" : `${missing} missing files`}.`,
+  /** Under the files to choose from while a set-up lacks a part: no fit is said for a model that
+   *  would not start. */
+  fitLater: "Fit is checked once every file is chosen.",
   /** Why Download is off for a gated model while no Hugging Face token is saved. */
   needsToken: SETUP.problem.hf_needs_token,
   downloadLora: "Download LoRA",
@@ -2528,8 +2568,8 @@ export const MODEL_DETAIL = {
   licences: "Licences",
   /** A repository that names no licence at all. */
   noLicence: `This repository names no licence. ${LICENCE_BADGE.unclear} before you use what you make.`,
-  /** A part with no file yet. */
-  noFile: "No file yet",
+  /** A part nothing fills, and Studio does not add. */
+  noFile: "Studio can't add this one. Choose a file.",
   /** A part the person chose from this computer: "Chosen by you · t5xxl.safetensors". */
   chosen: (name: string) => `Chosen by you · ${name}`,
   /** A repository with no model Studio can set up (its files are listed below). */
@@ -2600,6 +2640,7 @@ export const STUDIO_DOWNLOADS = {
 export function verdictBadgeWords(verdict: StudioVerdict, exact: boolean): string {
   if (verdict === "unknown") return exact ? VERDICT.notRecognised : VERDICT.unknown;
   if ("works" in verdict) return VERDICT.works(typeName(verdict.works.version, verdict.works.recipe));
+  if ("needsFiles" in verdict) return VERDICT.needsFiles(typeName(verdict.needsFiles.version, verdict.needsFiles.recipe));
   if ("lora" in verdict) return VERDICT.lora(verdict.lora.base === null ? null : typeName(verdict.lora.base, null));
   return VERDICT.cantRun(verdict.cannotRun.reason);
 }

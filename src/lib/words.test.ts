@@ -1295,14 +1295,41 @@ describe("the detail panel's words (Task U6)", () => {
       alreadyHere: "already on this computer",
       chooseFile: "Choose a file",
       download: "Download",
-      missingWhy: "Choose a file for each part first.",
       needsToken: w.SETUP.problem.hf_needs_token,
       downloadLora: "Download LoRA",
     });
     expect(w.MODEL_DETAIL.total("4.6 GB")).toBe("Total to download: 4.6 GB");
+    // The refused download's own sentence stays what it was (the backend's words).
+    expect(w.SETUP.problem.studio_setup_incomplete).toBe("Choose a file for each part first.");
     expect(w.MODEL_DETAIL.duty("Keep the licence with the files.")).toBe("The licence asks you to keep the licence with the files.");
     expect(w.SETUP.anyway).toBe("Download file anyway");
     expect(w.SETUP.modelType).toBe("Model type");
+  });
+
+  it("name what is missing, and what is not known, instead of promising what Studio adds", async () => {
+    const w = await import("./words");
+    // The sentence under a Download that is off names the parts, each once, in plain words.
+    expect(w.MODEL_DETAIL.missingWhy(["llm"])).toBe("Choose a file for the text encoder first.");
+    expect(w.MODEL_DETAIL.missingWhy(["llm", "vae"])).toBe("Choose a file for the text encoder and the decoder first.");
+    expect(w.MODEL_DETAIL.missingWhy(["llm", "t5xxl", "vae"])).toBe(
+      "Choose a file for the text encoder and the decoder first.",
+    );
+    expect(w.MODEL_DETAIL.missingWhy(["clip-l", "clip-g", "vae"])).toBe(
+      "Choose a file for the CLIP-L text encoder, the CLIP-G text encoder and the decoder first.",
+    );
+    expect(w.MODEL_DETAIL.missingWhy([])).toBe(w.SETUP.problem.studio_setup_incomplete);
+    // A total with a part missing is a floor, and says so.
+    expect(w.MODEL_DETAIL.totalSoFar("7.7 GB", 2)).toBe("At least 7.7 GB, and more once you choose the 2 missing files.");
+    expect(w.MODEL_DETAIL.totalSoFar("7.7 GB", 1)).toBe("At least 7.7 GB, and more once you choose the missing file.");
+    expect(w.MODEL_DETAIL.extrasNeeded).toBe("Files this model needs");
+    expect(w.MODEL_DETAIL.noFile).toBe("Studio can't add this one. Choose a file.");
+    expect(w.MODEL_DETAIL.noFile).not.toMatch(/yet/);
+    expect(w.MODEL_DETAIL.fitLater).toBe("Fit is checked once every file is chosen.");
+    // A recognised model with a part missing is not "Works".
+    const needs = { needsFiles: { version: "qwen-image-2.1", kind: "picture", recipe: "qwen-image-21" } } as const;
+    expect(w.verdictBadgeWords(needs, true)).toBe("Needs files · Qwen-Image 2.1");
+    expect(w.verdictWords(needs)).toBe("Needs files · Qwen-Image 2.1");
+    expect(w.verdictBadgeWords(needs, true)).not.toMatch(/Works/);
   });
 
   it("a set-up problem is found by its own code only", async () => {

@@ -12,6 +12,7 @@ import { act, cleanup, fireEvent, screen, waitFor, within } from "@testing-libra
 import { formatBytes } from "../../lib/format";
 import type { DownloadGroup } from "../../lib/types";
 import { LOCAL } from "./fixtures/models";
+import qwen21RepoJson from "./fixtures/real/chatrlabs__Qwen-Image-2.1-Uncensored-Omni-Quantized/repo.json";
 import type {
   FileLabel,
   Licence,
@@ -404,12 +405,12 @@ describe("a result's detail panel", () => {
     const panel = await openRepo(supported({ files: [{ ...Q5, plan: missing }] }));
     const row = partRow(panel, "t5xxl");
     within(row).getByText("Text encoder (T5-XXL)");
-    within(row).getByText("No file yet");
+    within(row).getByText("Studio can't add this one. Choose a file.");
     const choose = within(row).getByRole("button", { name: "Choose a file" });
     expect(choose.getAttribute("aria-describedby")).toBe(within(row).getByText("Text encoder (T5-XXL)").id);
     const download = downloadButton(panel);
     expect(download.disabled).toBe(true);
-    const why = within(panel).getByText("Choose a file for each part first.");
+    const why = within(panel).getByText("Choose a file for the text encoder first.");
     expect(document.getElementById(download.getAttribute("aria-describedby")!)!.contains(why)).toBe(true);
     // A file from this computer: only .safetensors, .sft and .gguf are offered (ruling S9).
     const chooseFile = vi.fn<(kind: "model" | "lora") => Promise<string | null>>().mockResolvedValue("/m/t5xxl.safetensors");
@@ -425,10 +426,150 @@ describe("a result's detail panel", () => {
     const override = { recipe: null, overrides: [{ role: "t5xxl", file: { disk: { path: "/m/t5xxl.safetensors" } } }] };
     expect(api.studioSetupPlan).toHaveBeenCalledWith(source(Q5.file), override);
     within(partRow(panel, "t5xxl")).getByText("Chosen by you · t5xxl.safetensors");
-    expect(within(panel).queryByText("Choose a file for each part first.")).toBeNull();
+    expect(within(panel).queryByText("Choose a file for the text encoder first.")).toBeNull();
     expect(downloadButton(panel).disabled).toBe(false);
     await click(downloadButton(panel));
     expect(api.studioLocalDownload).toHaveBeenCalledWith(source(Q5.file), override);
+  });
+
+  // ---- The Qwen Image 2.1 page of 0.2.1: a model that did not list the files it needs --------
+  //
+  // 0.2.1 said "Works in Studio" and "Fits" for the owner's repository, listed a 3.7 GB file it
+  // cannot run, showed a text encoder and a decoder as "No file yet" under "Extra files Studio
+  // adds" and a total of one file's size over a Download that could not start. The data below is
+  // what the real planner now answers for that repository (fixtures/real/).
+
+  const QWEN21 = qwen21RepoJson as unknown as LocalRepo;
+  const Q21_Q8 = "qwen-image-2.1-step90000-Q8_0.gguf";
+
+  it("the Qwen Image 2.1 page lists its text encoder, picture encoder and decoder with their sizes, one total and an enabled Download", async () => {
+    const panel = await openRepo(QWEN21);
+    within(panel).getByText("Works in Studio · Qwen-Image 2.1");
+    // The best file for this computer is chosen first, as before.
+    expect(radio(panel, "Q8_0").getAttribute("aria-checked")).toBe("true");
+    const extras = within(panel).getByRole("region", { name: "Extra files Studio adds" });
+    const encoder = partRow(extras, "llm");
+    within(encoder).getByText("Text encoder (language model)");
+    within(encoder).getByText("8.7 GB");
+    within(encoder).getByText("Apache License 2.0");
+    const decoder = partRow(extras, "vae");
+    within(decoder).getByText("Decoder (VAE)");
+    within(decoder).getByText("676 MB");
+    within(decoder).getByText("Qwen Research License Agreement");
+    within(partRow(extras, "llm-vision")).getByText("1.2 GB");
+    for (const row of [encoder, decoder]) {
+      expect(within(row).queryByRole("button", { name: "Choose a file" })).toBeNull();
+      expect(within(row).queryByText(/No file yet|can't add/)).toBeNull();
+    }
+    // The total is every file Download fetches: the picture model, both encoders, the decoder.
+    const plan = QWEN21.files.find((f) => f.file === Q21_Q8)!.plan;
+    const parts = plan.slots.map((s) => s.part!.sizeBytes).reduce((a, b) => a + b, 0);
+    expect(plan.toFetchBytes).toBe(parts);
+    within(panel).getByText(`Total to download: ${formatBytes(parts)}`);
+    expect(formatBytes(parts)).toBe("18.2 GB");
+    expect(downloadButton(panel).disabled).toBe(false);
+    expect(within(panel).queryByText(/Choose a file for/)).toBeNull();
+  });
+
+  it("the Qwen Image 2.1 page does not offer the files Studio can't run as choices, and says why for each", async () => {
+    const panel = await openRepo(QWEN21);
+    const main = within(panel).getByRole("radiogroup", { name: "Main file" });
+    // Nine files can run; the four packed for another program (NF4 and INT8 by bitsandbytes,
+    // FP8 by torchao, NVFP4) are not among the choices, whatever their names say they are.
+    expect(within(main).getAllByRole("radio")).toHaveLength(9);
+    expect(within(main).queryByText(/NF4|bnb|torchao|NVFP4/)).toBeNull();
+    const files = within(panel).getByRole("region", { name: "Other files in this repository" });
+    const nf4 = "qwen-image-2.1-step90000-NF4-bnb/diffusion_pytorch_model.safetensors";
+    within(files).getByText(
+      "Can't run in Studio: This file is packed in a 4-bit format made for another program (bitsandbytes), which the Studio engine can't read · 3.7 GB",
+    );
+    within(files).getByText(/packed in an 8-bit format made for another program \(bitsandbytes\)/);
+    within(files).getByText(/packed in a format made for another program \(torchao\)/);
+    within(files).getByText(/packed in a 4-bit format made for another program \(NVFP4\)/);
+    // Each keeps the quiet plain download, for another program.
+    const anyway = within(files).getAllByRole("button", { name: "Download file anyway" });
+    expect(anyway).toHaveLength(4);
+    await click(anyway.find((b) => b.getAttribute("aria-describedby") !== null && true) ?? anyway[0]!);
+    expect(api.studioLocalDownloadFile).toHaveBeenCalledTimes(1);
+    expect(vi.mocked(api.studioLocalDownloadFile).mock.calls[0]![0]).toBe(QWEN21.repo);
+    expect(QWEN21.fileViews.some((v) => v.path === nf4 && "cannotRun" in v.label)).toBe(true);
+  });
+
+  /** The Q8_0 file's plan with its text encoder and decoder missing: what 0.2.1 showed, and what
+   *  a model Studio can't find files for still shows (the catalog lists it on purpose). */
+  function needsFiles(): LocalRepo {
+    const q8 = QWEN21.files.find((f) => f.file === Q21_Q8)!;
+    const main = q8.plan.slots.find((s) => s.source === "main")!;
+    const slots: PlannedSlot[] = [
+      main,
+      {
+        role: "llm",
+        required: true,
+        source: "missing",
+        part: null,
+        why: "This model needs a text encoder Studio can't pick for you yet. Choose it yourself.",
+      },
+      { role: "vae", required: true, source: "missing", part: null },
+    ];
+    const plan: SetupPlan = {
+      ...q8.plan,
+      slots,
+      canDownload: false,
+      totalBytes: main.part!.sizeBytes,
+      toFetchBytes: main.part!.sizeBytes,
+    };
+    return {
+      ...QWEN21,
+      verdict: { needsFiles: { version: "qwen-image-2.1", kind: "picture", recipe: "qwen-image-21" } },
+      files: [{ ...q8, plan }],
+    };
+  }
+
+  it("a model with a part Studio can't find says so: no Works, no Fits, no firm total, and why Download is off", async () => {
+    const panel = await openRepo(needsFiles());
+    // The badge says what is true.
+    const badge = panel.querySelector<HTMLElement>("[data-verdict]")!;
+    expect(badge.getAttribute("data-verdict")).toBe("needsFiles");
+    expect(badge.textContent).toBe("Needs files · Qwen-Image 2.1");
+    expect(within(panel).queryByText(/^Works in Studio/)).toBeNull();
+    // The section is not the 0.2.0 promise ("Extra files Studio adds") over a case where it
+    // does not hold; its rows say what Studio can't do, in place of "No file yet".
+    expect(within(panel).queryByRole("region", { name: "Extra files Studio adds" })).toBeNull();
+    const needs = within(panel).getByRole("region", { name: "Files this model needs" });
+    within(partRow(needs, "llm")).getByText("This model needs a text encoder Studio can't pick for you yet. Choose it yourself.");
+    within(partRow(needs, "vae")).getByText("Studio can't add this one. Choose a file.");
+    expect(within(needs).getAllByRole("button", { name: "Choose a file" })).toHaveLength(2);
+    // No fit word and no green dot for a model that does not exist yet, and one muted line.
+    expect(within(panel).queryByText("Fits")).toBeNull();
+    const mainFile = within(panel).getByRole("region", { name: "Main file" });
+    expect(mainFile.querySelector(".bg-success, .bg-warning, .bg-danger")).toBeNull();
+    within(mainFile).getByText("Fit is checked once every file is chosen.");
+    // The total counts what it knows and says what is missing, not "Total to download".
+    expect(within(panel).queryByText(/^Total to download/)).toBeNull();
+    within(panel).getByText("At least 7.7 GB, and more once you choose the 2 missing files.");
+    // Download is off, with one plain sentence that names the parts, and Choose a file stays.
+    const download = downloadButton(panel);
+    expect(download.disabled).toBe(true);
+    const why = within(panel).getByText("Choose a file for the text encoder and the decoder first.");
+    expect(document.getElementById(download.getAttribute("aria-describedby")!)!.contains(why)).toBe(true);
+  });
+
+  it("choosing a file for each missing part makes it work: the badge, the total and Download follow the plan", async () => {
+    const repo = needsFiles();
+    const panel = await openRepo(repo);
+    const full = QWEN21.files.find((f) => f.file === Q21_Q8)!.plan;
+    const chooseFile = vi.fn<(kind: "model" | "lora") => Promise<string | null>>().mockResolvedValue("/m/part.gguf");
+    act(() => useStudio.setState({ chooseFile }));
+    vi.mocked(api.studioSetupPlan).mockResolvedValue(full);
+    await click(within(partRow(panel, "llm")).getByRole("button", { name: "Choose a file" }));
+    // The plan made with the person's files is the whole one: it works now, the total is firm.
+    expect(panel.querySelector("[data-verdict]")!.getAttribute("data-verdict")).toBe("works");
+    within(panel).getByText("Works in Studio · Qwen-Image 2.1");
+    within(panel).getByText("Total to download: 18.2 GB");
+    expect(downloadButton(panel).disabled).toBe(false);
+    expect(within(panel).queryByText(/more once you choose/)).toBeNull();
+    // And the fit is the plan's, now that it is whole.
+    within(panel).getByText("Fits");
   });
 
   it("Download starts the download with the choice, with no other dialog", async () => {

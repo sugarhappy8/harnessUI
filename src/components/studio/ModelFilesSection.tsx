@@ -377,6 +377,8 @@ function PlanReview(props: {
   const plan = review.plan;
   const engineBytes = plan?.needsEngine && engine ? engine.downloadBytes : null;
   const total = plan ? plan.toFetchBytes + (engineBytes ?? 0) : null;
+  // A set-up with a part still lacking a file has no firm total: what is known is a floor.
+  const lacking = plan ? plan.slots.filter((s) => s.required && s.source === "missing") : [];
   const off = props.busy || review.gate !== null || plan === null || !plan.canDownload;
   return (
     <div data-files-review className="flex flex-col gap-4 rounded-xl border border-accent/30 bg-accent/5 p-3">
@@ -396,12 +398,20 @@ function PlanReview(props: {
               {w}
             </p>
           ))}
-          {!plan.canDownload && <p className="text-sm font-medium text-warning">{SETUP.problem.studio_setup_incomplete}</p>}
+          {!plan.canDownload && (
+            <p className="text-sm font-medium text-warning">{MODEL_DETAIL.missingWhy(lacking.map((s) => s.role))}</p>
+          )}
         </>
       )}
       {review.gate !== null && <GateLine problem={review.gate} repo={review.repo} size="sm" />}
       <div className="flex flex-wrap items-center justify-between gap-x-3 gap-y-2">
-        {total !== null && <p className="text-sm font-semibold tabular-nums">{MODEL_DETAIL.total(formatBytes(total))}</p>}
+        {total !== null && (
+          <p className="text-sm font-semibold tabular-nums">
+            {lacking.length > 0
+              ? MODEL_DETAIL.totalSoFar(formatBytes(total), lacking.length)
+              : MODEL_DETAIL.total(formatBytes(total))}
+          </p>
+        )}
         <div className="ml-auto flex gap-2">
           <button type="button" onClick={props.onCancel} disabled={props.busy} className={GHOST_BUTTON}>
             {FILES.cancel}

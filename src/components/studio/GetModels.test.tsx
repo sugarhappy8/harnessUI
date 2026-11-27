@@ -576,6 +576,22 @@ describe("Get models", () => {
     within(card("someone/mystery")).getByText("Open to check");
   });
 
+  it("a result whose files all lack a part Studio can't find says so on its card once it was opened, never Works", async () => {
+    const hinted = hit("someone/Z-Image-Turbo-GGUF", { works: { version: "z-image", kind: "picture", recipe: null } });
+    vi.mocked(api.studioLocalRepo).mockResolvedValue(
+      supported({ verdict: { needsFiles: { version: "z-image", kind: "picture", recipe: "z-image-turbo" } } }),
+    );
+    await showLocal(LOCAL, { popular: [hinted] });
+    await click(within(card(hinted.repo)).getByRole("button", { name: hinted.repo }));
+    await click(screen.getByRole("button", { name: "Close" }));
+    const badge = within(card(hinted.repo)).getByText("Needs files · Z-Image").closest("[data-verdict]")!;
+    expect(badge.getAttribute("data-verdict")).toBe("needsFiles");
+    expect(badge.getAttribute("data-exact")).toBe("true");
+    expect(badge.className).toContain("text-warning");
+    expect(badge.className).not.toContain("text-success");
+    expect(within(card(hinted.repo)).queryByText(/Works in Studio/)).toBeNull();
+  });
+
   it("Fits this computer is off by default, so catalog models that may not fit are listed with Download", async () => {
     await showLocal({ ...LOCAL, recommended: LOCAL.recommended.filter((e) => e.id !== zimage.id), notHere: [tooBig(zimage)] });
     expect(useStudio.getState().fitsOnly).toBe(false);

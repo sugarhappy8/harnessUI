@@ -1,1415 +1,1615 @@
 {
-  "repo": "chatrlabs/Qwen-Image-2.1-Uncensored-Omni-Quantized",
-  "commit": "af0343c259513913de8056af85819c70f627d681",
   "author": "chatrlabs",
-  "summary": "[![Try the Playground](https://img.shields.io/badge/Playground-Try_it_live-2563eb?style=for-the-badge)](https://thechatr.ai/playground) [![Base model](https://img.shields.io/badge/Hugging_Face-Base_model-ffcc4d?style=for-the-badge)](https://huggingface.co/Qwen/Qwen-Image-2.1) [![Chatr AI](https://img.shields.io/static/v1?label=CHATR%20AI&message=SUPPORT%20OUR%20RESEARCH&color=8B5CF6&labelColor=55…",
-  "verdict": {
-    "works": {
-      "version": "qwen-image-2.1",
-      "kind": "picture",
-      "recipe": "qwen-image-21"
-    }
-  },
-  "files": [
-    {
-      "file": "qwen-image-2.1-step90000-BF16.gguf",
-      "quant": "BF16",
-      "label": {
-        "works": {
-          "version": "qwen-image-2.1",
-          "recipe": "qwen-image-21",
-          "kind": "picture",
-          "part": null,
-          "parameters": 7115124736,
-          "folder": false
-        }
-      },
-      "plan": {
-        "recipe": {
-          "id": "qwen-image-21",
-          "name": "Qwen Image 2.1",
-          "kind": "picture"
-        },
-        "recipes": [
-          {
-            "id": "qwen-image-21",
-            "name": "Qwen Image 2.1",
-            "kind": "picture"
-          },
-          {
-            "id": "qwen-image-21-turbo",
-            "name": "Qwen Image 2.1 Turbo",
-            "kind": "picture"
-          }
-        ],
-        "slots": [
-          {
-            "role": "diffusion",
-            "required": true,
-            "source": "main",
-            "part": {
-              "role": "diffusion",
-              "repo": "chatrlabs/Qwen-Image-2.1-Uncensored-Omni-Quantized",
-              "path": "qwen-image-2.1-step90000-BF16.gguf",
-              "sizeBytes": 14230297376,
-              "licenceId": "qwen-research",
-              "alreadyHere": false,
-              "local": false
-            }
-          },
-          {
-            "role": "llm",
-            "required": true,
-            "source": "missing",
-            "part": null
-          },
-          {
-            "role": "vae",
-            "required": true,
-            "source": "missing",
-            "part": null
-          }
-        ],
-        "licences": [
-          {
-            "id": "qwen-research",
-            "name": "qwen-research",
-            "url": "https://huggingface.co/chatrlabs/Qwen-Image-2.1-Uncensored-Omni-Quantized/blob/af0343c259513913de8056af85819c70f627d681/LICENSE",
-            "sha256": "5f783423fd3de0c5b130d50d785b0522353910e2f291887c10c0a0cf7e12237a",
-            "badge": "red",
-            "commercial": "unclear",
-            "revenueLimitUsd": null,
-            "plainWords": "Check the licence before you use what you make.",
-            "obligations": []
-          }
-        ],
-        "totalBytes": 14230297376,
-        "toFetchBytes": 14230297376,
-        "fit": {
-          "word": "slow",
-          "verdict": "yellow",
-          "reason": null,
-          "suggestion": null,
-          "eta": null,
-          "verySlow": false,
-          "videoOnProcessor": false
-        },
-        "canDownload": false,
-        "lowDisk": false,
-        "needsEngine": false,
-        "untested": false
-      },
-      "best": false
-    },
-    {
-      "file": "qwen-image-2.1-step90000-BF16/diffusion_pytorch_model.safetensors",
-      "quant": "BF16",
-      "label": {
-        "works": {
-          "version": "qwen-image-2.1",
-          "recipe": "qwen-image-21",
-          "kind": "picture",
-          "part": null,
-          "parameters": 7115124736,
-          "folder": false
-        }
-      },
-      "plan": {
-        "recipe": {
-          "id": "qwen-image-21",
-          "name": "Qwen Image 2.1",
-          "kind": "picture"
-        },
-        "recipes": [
-          {
-            "id": "qwen-image-21",
-            "name": "Qwen Image 2.1",
-            "kind": "picture"
-          },
-          {
-            "id": "qwen-image-21-turbo",
-            "name": "Qwen Image 2.1 Turbo",
-            "kind": "picture"
-          }
-        ],
-        "slots": [
-          {
-            "role": "diffusion",
-            "required": true,
-            "source": "main",
-            "part": {
-              "role": "diffusion",
-              "repo": "chatrlabs/Qwen-Image-2.1-Uncensored-Omni-Quantized",
-              "path": "qwen-image-2.1-step90000-BF16/diffusion_pytorch_model.safetensors",
-              "sizeBytes": 14230284680,
-              "licenceId": "qwen-research",
-              "alreadyHere": false,
-              "local": false
-            }
-          },
-          {
-            "role": "llm",
-            "required": true,
-            "source": "missing",
-            "part": null
-          },
-          {
-            "role": "vae",
-            "required": true,
-            "source": "missing",
-            "part": null
-          }
-        ],
-        "licences": [
-          {
-            "id": "qwen-research",
-            "name": "qwen-research",
-            "url": "https://huggingface.co/chatrlabs/Qwen-Image-2.1-Uncensored-Omni-Quantized/blob/af0343c259513913de8056af85819c70f627d681/LICENSE",
-            "sha256": "5f783423fd3de0c5b130d50d785b0522353910e2f291887c10c0a0cf7e12237a",
-            "badge": "red",
-            "commercial": "unclear",
-            "revenueLimitUsd": null,
-            "plainWords": "Check the licence before you use what you make.",
-            "obligations": []
-          }
-        ],
-        "totalBytes": 14230284680,
-        "toFetchBytes": 14230284680,
-        "fit": {
-          "word": "slow",
-          "verdict": "yellow",
-          "reason": null,
-          "suggestion": null,
-          "eta": null,
-          "verySlow": false,
-          "videoOnProcessor": false
-        },
-        "canDownload": false,
-        "lowDisk": false,
-        "needsEngine": false,
-        "untested": false
-      },
-      "best": false
-    },
-    {
-      "file": "qwen-image-2.1-step90000-Q8_0.gguf",
-      "quant": "Q8_0",
-      "label": {
-        "works": {
-          "version": "qwen-image-2.1",
-          "recipe": "qwen-image-21",
-          "kind": "picture",
-          "part": null,
-          "parameters": 7115124736,
-          "folder": false
-        }
-      },
-      "plan": {
-        "recipe": {
-          "id": "qwen-image-21",
-          "name": "Qwen Image 2.1",
-          "kind": "picture"
-        },
-        "recipes": [
-          {
-            "id": "qwen-image-21",
-            "name": "Qwen Image 2.1",
-            "kind": "picture"
-          },
-          {
-            "id": "qwen-image-21-turbo",
-            "name": "Qwen Image 2.1 Turbo",
-            "kind": "picture"
-          }
-        ],
-        "slots": [
-          {
-            "role": "diffusion",
-            "required": true,
-            "source": "main",
-            "part": {
-              "role": "diffusion",
-              "repo": "chatrlabs/Qwen-Image-2.1-Uncensored-Omni-Quantized",
-              "path": "qwen-image-2.1-step90000-Q8_0.gguf",
-              "sizeBytes": 7687183136,
-              "licenceId": "qwen-research",
-              "alreadyHere": false,
-              "local": false
-            }
-          },
-          {
-            "role": "llm",
-            "required": true,
-            "source": "missing",
-            "part": null
-          },
-          {
-            "role": "vae",
-            "required": true,
-            "source": "missing",
-            "part": null
-          }
-        ],
-        "licences": [
-          {
-            "id": "qwen-research",
-            "name": "qwen-research",
-            "url": "https://huggingface.co/chatrlabs/Qwen-Image-2.1-Uncensored-Omni-Quantized/blob/af0343c259513913de8056af85819c70f627d681/LICENSE",
-            "sha256": "5f783423fd3de0c5b130d50d785b0522353910e2f291887c10c0a0cf7e12237a",
-            "badge": "red",
-            "commercial": "unclear",
-            "revenueLimitUsd": null,
-            "plainWords": "Check the licence before you use what you make.",
-            "obligations": []
-          }
-        ],
-        "totalBytes": 7687183136,
-        "toFetchBytes": 7687183136,
-        "fit": {
-          "word": "fits",
-          "verdict": "green",
-          "reason": null,
-          "suggestion": null,
-          "eta": null,
-          "verySlow": false,
-          "videoOnProcessor": false
-        },
-        "canDownload": false,
-        "lowDisk": false,
-        "needsEngine": false,
-        "untested": false
-      },
-      "best": false
-    },
-    {
-      "file": "qwen-image-2.1-step90000-INT8-ConvRot-comfy.safetensors",
-      "quant": "",
-      "label": {
-        "works": {
-          "version": "qwen-image-2.1",
-          "recipe": "qwen-image-21",
-          "kind": "picture",
-          "part": null,
-          "parameters": 4061675264,
-          "folder": false
-        }
-      },
-      "plan": {
-        "recipe": {
-          "id": "qwen-image-21",
-          "name": "Qwen Image 2.1",
-          "kind": "picture"
-        },
-        "recipes": [
-          {
-            "id": "qwen-image-21",
-            "name": "Qwen Image 2.1",
-            "kind": "picture"
-          },
-          {
-            "id": "qwen-image-21-turbo",
-            "name": "Qwen Image 2.1 Turbo",
-            "kind": "picture"
-          }
-        ],
-        "slots": [
-          {
-            "role": "diffusion",
-            "required": true,
-            "source": "main",
-            "part": {
-              "role": "diffusion",
-              "repo": "chatrlabs/Qwen-Image-2.1-Uncensored-Omni-Quantized",
-              "path": "qwen-image-2.1-step90000-INT8-ConvRot-comfy.safetensors",
-              "sizeBytes": 7256791144,
-              "licenceId": "qwen-research",
-              "alreadyHere": false,
-              "local": false
-            }
-          },
-          {
-            "role": "llm",
-            "required": true,
-            "source": "missing",
-            "part": null
-          },
-          {
-            "role": "vae",
-            "required": true,
-            "source": "missing",
-            "part": null
-          }
-        ],
-        "licences": [
-          {
-            "id": "qwen-research",
-            "name": "qwen-research",
-            "url": "https://huggingface.co/chatrlabs/Qwen-Image-2.1-Uncensored-Omni-Quantized/blob/af0343c259513913de8056af85819c70f627d681/LICENSE",
-            "sha256": "5f783423fd3de0c5b130d50d785b0522353910e2f291887c10c0a0cf7e12237a",
-            "badge": "red",
-            "commercial": "unclear",
-            "revenueLimitUsd": null,
-            "plainWords": "Check the licence before you use what you make.",
-            "obligations": []
-          }
-        ],
-        "totalBytes": 7256791144,
-        "toFetchBytes": 7256791144,
-        "fit": {
-          "word": "fits",
-          "verdict": "green",
-          "reason": null,
-          "suggestion": null,
-          "eta": null,
-          "verySlow": false,
-          "videoOnProcessor": false
-        },
-        "canDownload": false,
-        "lowDisk": false,
-        "needsEngine": false,
-        "untested": false
-      },
-      "best": false
-    },
-    {
-      "file": "qwen-image-2.1-step90000-FP8-torchao/diffusion_pytorch_model.safetensors",
-      "quant": "",
-      "label": {
-        "works": {
-          "version": "qwen-image-2.1",
-          "recipe": "qwen-image-21",
-          "kind": "picture",
-          "part": null,
-          "parameters": 7116607552,
-          "folder": false
-        }
-      },
-      "plan": {
-        "recipe": {
-          "id": "qwen-image-21",
-          "name": "Qwen Image 2.1",
-          "kind": "picture"
-        },
-        "recipes": [
-          {
-            "id": "qwen-image-21",
-            "name": "Qwen Image 2.1",
-            "kind": "picture"
-          },
-          {
-            "id": "qwen-image-21-turbo",
-            "name": "Qwen Image 2.1 Turbo",
-            "kind": "picture"
-          }
-        ],
-        "slots": [
-          {
-            "role": "diffusion",
-            "required": true,
-            "source": "main",
-            "part": {
-              "role": "diffusion",
-              "repo": "chatrlabs/Qwen-Image-2.1-Uncensored-Omni-Quantized",
-              "path": "qwen-image-2.1-step90000-FP8-torchao/diffusion_pytorch_model.safetensors",
-              "sizeBytes": 7121232808,
-              "licenceId": "qwen-research",
-              "alreadyHere": false,
-              "local": false
-            }
-          },
-          {
-            "role": "llm",
-            "required": true,
-            "source": "missing",
-            "part": null
-          },
-          {
-            "role": "vae",
-            "required": true,
-            "source": "missing",
-            "part": null
-          }
-        ],
-        "licences": [
-          {
-            "id": "qwen-research",
-            "name": "qwen-research",
-            "url": "https://huggingface.co/chatrlabs/Qwen-Image-2.1-Uncensored-Omni-Quantized/blob/af0343c259513913de8056af85819c70f627d681/LICENSE",
-            "sha256": "5f783423fd3de0c5b130d50d785b0522353910e2f291887c10c0a0cf7e12237a",
-            "badge": "red",
-            "commercial": "unclear",
-            "revenueLimitUsd": null,
-            "plainWords": "Check the licence before you use what you make.",
-            "obligations": []
-          }
-        ],
-        "totalBytes": 7121232808,
-        "toFetchBytes": 7121232808,
-        "fit": {
-          "word": "fits",
-          "verdict": "green",
-          "reason": null,
-          "suggestion": null,
-          "eta": null,
-          "verySlow": false,
-          "videoOnProcessor": false
-        },
-        "canDownload": false,
-        "lowDisk": false,
-        "needsEngine": false,
-        "untested": false
-      },
-      "best": false
-    },
-    {
-      "file": "qwen-image-2.1-step90000-INT8-bnb/diffusion_pytorch_model.safetensors",
-      "quant": "",
-      "label": {
-        "works": {
-          "version": "qwen-image-2.1",
-          "recipe": "qwen-image-21",
-          "kind": "picture",
-          "part": null,
-          "parameters": 7116607784,
-          "folder": false
-        }
-      },
-      "plan": {
-        "recipe": {
-          "id": "qwen-image-21",
-          "name": "Qwen Image 2.1",
-          "kind": "picture"
-        },
-        "recipes": [
-          {
-            "id": "qwen-image-21",
-            "name": "Qwen Image 2.1",
-            "kind": "picture"
-          },
-          {
-            "id": "qwen-image-21-turbo",
-            "name": "Qwen Image 2.1 Turbo",
-            "kind": "picture"
-          }
-        ],
-        "slots": [
-          {
-            "role": "diffusion",
-            "required": true,
-            "source": "main",
-            "part": {
-              "role": "diffusion",
-              "repo": "chatrlabs/Qwen-Image-2.1-Uncensored-Omni-Quantized",
-              "path": "qwen-image-2.1-step90000-INT8-bnb/diffusion_pytorch_model.safetensors",
-              "sizeBytes": 7121153192,
-              "licenceId": "qwen-research",
-              "alreadyHere": false,
-              "local": false
-            }
-          },
-          {
-            "role": "llm",
-            "required": true,
-            "source": "missing",
-            "part": null
-          },
-          {
-            "role": "vae",
-            "required": true,
-            "source": "missing",
-            "part": null
-          }
-        ],
-        "licences": [
-          {
-            "id": "qwen-research",
-            "name": "qwen-research",
-            "url": "https://huggingface.co/chatrlabs/Qwen-Image-2.1-Uncensored-Omni-Quantized/blob/af0343c259513913de8056af85819c70f627d681/LICENSE",
-            "sha256": "5f783423fd3de0c5b130d50d785b0522353910e2f291887c10c0a0cf7e12237a",
-            "badge": "red",
-            "commercial": "unclear",
-            "revenueLimitUsd": null,
-            "plainWords": "Check the licence before you use what you make.",
-            "obligations": []
-          }
-        ],
-        "totalBytes": 7121153192,
-        "toFetchBytes": 7121153192,
-        "fit": {
-          "word": "fits",
-          "verdict": "green",
-          "reason": null,
-          "suggestion": null,
-          "eta": null,
-          "verySlow": false,
-          "videoOnProcessor": false
-        },
-        "canDownload": false,
-        "lowDisk": false,
-        "needsEngine": false,
-        "untested": false
-      },
-      "best": false
-    },
-    {
-      "file": "qwen-image-2.1-step90000-FP8-comfy.safetensors",
-      "quant": "",
-      "label": {
-        "works": {
-          "version": "qwen-image-2.1",
-          "recipe": "qwen-image-21",
-          "kind": "picture",
-          "part": null,
-          "parameters": 4061675264,
-          "folder": false
-        }
-      },
-      "plan": {
-        "recipe": {
-          "id": "qwen-image-21",
-          "name": "Qwen Image 2.1",
-          "kind": "picture"
-        },
-        "recipes": [
-          {
-            "id": "qwen-image-21",
-            "name": "Qwen Image 2.1",
-            "kind": "picture"
-          },
-          {
-            "id": "qwen-image-21-turbo",
-            "name": "Qwen Image 2.1 Turbo",
-            "kind": "picture"
-          }
-        ],
-        "slots": [
-          {
-            "role": "diffusion",
-            "required": true,
-            "source": "main",
-            "part": {
-              "role": "diffusion",
-              "repo": "chatrlabs/Qwen-Image-2.1-Uncensored-Omni-Quantized",
-              "path": "qwen-image-2.1-step90000-FP8-comfy.safetensors",
-              "sizeBytes": 7116789419,
-              "licenceId": "qwen-research",
-              "alreadyHere": false,
-              "local": false
-            }
-          },
-          {
-            "role": "llm",
-            "required": true,
-            "source": "missing",
-            "part": null
-          },
-          {
-            "role": "vae",
-            "required": true,
-            "source": "missing",
-            "part": null
-          }
-        ],
-        "licences": [
-          {
-            "id": "qwen-research",
-            "name": "qwen-research",
-            "url": "https://huggingface.co/chatrlabs/Qwen-Image-2.1-Uncensored-Omni-Quantized/blob/af0343c259513913de8056af85819c70f627d681/LICENSE",
-            "sha256": "5f783423fd3de0c5b130d50d785b0522353910e2f291887c10c0a0cf7e12237a",
-            "badge": "red",
-            "commercial": "unclear",
-            "revenueLimitUsd": null,
-            "plainWords": "Check the licence before you use what you make.",
-            "obligations": []
-          }
-        ],
-        "totalBytes": 7116789419,
-        "toFetchBytes": 7116789419,
-        "fit": {
-          "word": "fits",
-          "verdict": "green",
-          "reason": null,
-          "suggestion": null,
-          "eta": null,
-          "verySlow": false,
-          "videoOnProcessor": false
-        },
-        "canDownload": false,
-        "lowDisk": false,
-        "needsEngine": false,
-        "untested": false
-      },
-      "best": false
-    },
-    {
-      "file": "qwen-image-2.1-step90000-Q6_K.gguf",
-      "quant": "Q6_K",
-      "label": {
-        "works": {
-          "version": "qwen-image-2.1",
-          "recipe": "qwen-image-21",
-          "kind": "picture",
-          "part": null,
-          "parameters": 7115124736,
-          "folder": false
-        }
-      },
-      "plan": {
-        "recipe": {
-          "id": "qwen-image-21",
-          "name": "Qwen Image 2.1",
-          "kind": "picture"
-        },
-        "recipes": [
-          {
-            "id": "qwen-image-21",
-            "name": "Qwen Image 2.1",
-            "kind": "picture"
-          },
-          {
-            "id": "qwen-image-21-turbo",
-            "name": "Qwen Image 2.1 Turbo",
-            "kind": "picture"
-          }
-        ],
-        "slots": [
-          {
-            "role": "diffusion",
-            "required": true,
-            "source": "main",
-            "part": {
-              "role": "diffusion",
-              "repo": "chatrlabs/Qwen-Image-2.1-Uncensored-Omni-Quantized",
-              "path": "qwen-image-2.1-step90000-Q6_K.gguf",
-              "sizeBytes": 5996878624,
-              "licenceId": "qwen-research",
-              "alreadyHere": false,
-              "local": false
-            }
-          },
-          {
-            "role": "llm",
-            "required": true,
-            "source": "missing",
-            "part": null
-          },
-          {
-            "role": "vae",
-            "required": true,
-            "source": "missing",
-            "part": null
-          }
-        ],
-        "licences": [
-          {
-            "id": "qwen-research",
-            "name": "qwen-research",
-            "url": "https://huggingface.co/chatrlabs/Qwen-Image-2.1-Uncensored-Omni-Quantized/blob/af0343c259513913de8056af85819c70f627d681/LICENSE",
-            "sha256": "5f783423fd3de0c5b130d50d785b0522353910e2f291887c10c0a0cf7e12237a",
-            "badge": "red",
-            "commercial": "unclear",
-            "revenueLimitUsd": null,
-            "plainWords": "Check the licence before you use what you make.",
-            "obligations": []
-          }
-        ],
-        "totalBytes": 5996878624,
-        "toFetchBytes": 5996878624,
-        "fit": {
-          "word": "fits",
-          "verdict": "green",
-          "reason": null,
-          "suggestion": null,
-          "eta": null,
-          "verySlow": false,
-          "videoOnProcessor": false
-        },
-        "canDownload": false,
-        "lowDisk": false,
-        "needsEngine": false,
-        "untested": false
-      },
-      "best": false
-    },
-    {
-      "file": "qwen-image-2.1-step90000-Q5_K_M.gguf",
-      "quant": "Q5_K_M",
-      "label": {
-        "works": {
-          "version": "qwen-image-2.1",
-          "recipe": "qwen-image-21",
-          "kind": "picture",
-          "part": null,
-          "parameters": 7115124736,
-          "folder": false
-        }
-      },
-      "plan": {
-        "recipe": {
-          "id": "qwen-image-21",
-          "name": "Qwen Image 2.1",
-          "kind": "picture"
-        },
-        "recipes": [
-          {
-            "id": "qwen-image-21",
-            "name": "Qwen Image 2.1",
-            "kind": "picture"
-          },
-          {
-            "id": "qwen-image-21-turbo",
-            "name": "Qwen Image 2.1 Turbo",
-            "kind": "picture"
-          }
-        ],
-        "slots": [
-          {
-            "role": "diffusion",
-            "required": true,
-            "source": "main",
-            "part": {
-              "role": "diffusion",
-              "repo": "chatrlabs/Qwen-Image-2.1-Uncensored-Omni-Quantized",
-              "path": "qwen-image-2.1-step90000-Q5_K_M.gguf",
-              "sizeBytes": 5212543776,
-              "licenceId": "qwen-research",
-              "alreadyHere": false,
-              "local": false
-            }
-          },
-          {
-            "role": "llm",
-            "required": true,
-            "source": "missing",
-            "part": null
-          },
-          {
-            "role": "vae",
-            "required": true,
-            "source": "missing",
-            "part": null
-          }
-        ],
-        "licences": [
-          {
-            "id": "qwen-research",
-            "name": "qwen-research",
-            "url": "https://huggingface.co/chatrlabs/Qwen-Image-2.1-Uncensored-Omni-Quantized/blob/af0343c259513913de8056af85819c70f627d681/LICENSE",
-            "sha256": "5f783423fd3de0c5b130d50d785b0522353910e2f291887c10c0a0cf7e12237a",
-            "badge": "red",
-            "commercial": "unclear",
-            "revenueLimitUsd": null,
-            "plainWords": "Check the licence before you use what you make.",
-            "obligations": []
-          }
-        ],
-        "totalBytes": 5212543776,
-        "toFetchBytes": 5212543776,
-        "fit": {
-          "word": "fits",
-          "verdict": "green",
-          "reason": null,
-          "suggestion": null,
-          "eta": null,
-          "verySlow": false,
-          "videoOnProcessor": false
-        },
-        "canDownload": false,
-        "lowDisk": false,
-        "needsEngine": false,
-        "untested": false
-      },
-      "best": false
-    },
-    {
-      "file": "qwen-image-2.1-step90000-Q4_K_M.gguf",
-      "quant": "Q4_K_M",
-      "label": {
-        "works": {
-          "version": "qwen-image-2.1",
-          "recipe": "qwen-image-21",
-          "kind": "picture",
-          "part": null,
-          "parameters": 7115124736,
-          "folder": false
-        }
-      },
-      "plan": {
-        "recipe": {
-          "id": "qwen-image-21",
-          "name": "Qwen Image 2.1",
-          "kind": "picture"
-        },
-        "recipes": [
-          {
-            "id": "qwen-image-21",
-            "name": "Qwen Image 2.1",
-            "kind": "picture"
-          },
-          {
-            "id": "qwen-image-21-turbo",
-            "name": "Qwen Image 2.1 Turbo",
-            "kind": "picture"
-          }
-        ],
-        "slots": [
-          {
-            "role": "diffusion",
-            "required": true,
-            "source": "main",
-            "part": {
-              "role": "diffusion",
-              "repo": "chatrlabs/Qwen-Image-2.1-Uncensored-Omni-Quantized",
-              "path": "qwen-image-2.1-step90000-Q4_K_M.gguf",
-              "sizeBytes": 4474346272,
-              "licenceId": "qwen-research",
-              "alreadyHere": false,
-              "local": false
-            }
-          },
-          {
-            "role": "llm",
-            "required": true,
-            "source": "missing",
-            "part": null
-          },
-          {
-            "role": "vae",
-            "required": true,
-            "source": "missing",
-            "part": null
-          }
-        ],
-        "licences": [
-          {
-            "id": "qwen-research",
-            "name": "qwen-research",
-            "url": "https://huggingface.co/chatrlabs/Qwen-Image-2.1-Uncensored-Omni-Quantized/blob/af0343c259513913de8056af85819c70f627d681/LICENSE",
-            "sha256": "5f783423fd3de0c5b130d50d785b0522353910e2f291887c10c0a0cf7e12237a",
-            "badge": "red",
-            "commercial": "unclear",
-            "revenueLimitUsd": null,
-            "plainWords": "Check the licence before you use what you make.",
-            "obligations": []
-          }
-        ],
-        "totalBytes": 4474346272,
-        "toFetchBytes": 4474346272,
-        "fit": {
-          "word": "fits",
-          "verdict": "green",
-          "reason": null,
-          "suggestion": null,
-          "eta": null,
-          "verySlow": false,
-          "videoOnProcessor": false
-        },
-        "canDownload": false,
-        "lowDisk": false,
-        "needsEngine": false,
-        "untested": false
-      },
-      "best": false
-    },
-    {
-      "file": "qwen-image-2.1-step90000-NVFP4-comfy.safetensors",
-      "quant": "NVFP4",
-      "label": {
-        "works": {
-          "version": "qwen-image-2.1",
-          "recipe": "qwen-image-21",
-          "kind": "picture",
-          "part": null,
-          "parameters": 4061675264,
-          "folder": false
-        }
-      },
-      "plan": {
-        "recipe": {
-          "id": "qwen-image-21",
-          "name": "Qwen Image 2.1",
-          "kind": "picture"
-        },
-        "recipes": [
-          {
-            "id": "qwen-image-21",
-            "name": "Qwen Image 2.1",
-            "kind": "picture"
-          },
-          {
-            "id": "qwen-image-21-turbo",
-            "name": "Qwen Image 2.1 Turbo",
-            "kind": "picture"
-          }
-        ],
-        "slots": [
-          {
-            "role": "diffusion",
-            "required": true,
-            "source": "main",
-            "part": {
-              "role": "diffusion",
-              "repo": "chatrlabs/Qwen-Image-2.1-Uncensored-Omni-Quantized",
-              "path": "qwen-image-2.1-step90000-NVFP4-comfy.safetensors",
-              "sizeBytes": 4197574792,
-              "licenceId": "qwen-research",
-              "alreadyHere": false,
-              "local": false
-            }
-          },
-          {
-            "role": "llm",
-            "required": true,
-            "source": "missing",
-            "part": null
-          },
-          {
-            "role": "vae",
-            "required": true,
-            "source": "missing",
-            "part": null
-          }
-        ],
-        "licences": [
-          {
-            "id": "qwen-research",
-            "name": "qwen-research",
-            "url": "https://huggingface.co/chatrlabs/Qwen-Image-2.1-Uncensored-Omni-Quantized/blob/af0343c259513913de8056af85819c70f627d681/LICENSE",
-            "sha256": "5f783423fd3de0c5b130d50d785b0522353910e2f291887c10c0a0cf7e12237a",
-            "badge": "red",
-            "commercial": "unclear",
-            "revenueLimitUsd": null,
-            "plainWords": "Check the licence before you use what you make.",
-            "obligations": []
-          }
-        ],
-        "totalBytes": 4197574792,
-        "toFetchBytes": 4197574792,
-        "fit": {
-          "word": "fits",
-          "verdict": "green",
-          "reason": null,
-          "suggestion": null,
-          "eta": null,
-          "verySlow": false,
-          "videoOnProcessor": false
-        },
-        "canDownload": false,
-        "lowDisk": false,
-        "needsEngine": false,
-        "untested": false
-      },
-      "best": false
-    },
-    {
-      "file": "qwen-image-2.1-step90000-Q4_0.gguf",
-      "quant": "Q4_0",
-      "label": {
-        "works": {
-          "version": "qwen-image-2.1",
-          "recipe": "qwen-image-21",
-          "kind": "picture",
-          "part": null,
-          "parameters": 7115124736,
-          "folder": false
-        }
-      },
-      "plan": {
-        "recipe": {
-          "id": "qwen-image-21",
-          "name": "Qwen Image 2.1",
-          "kind": "picture"
-        },
-        "recipes": [
-          {
-            "id": "qwen-image-21",
-            "name": "Qwen Image 2.1",
-            "kind": "picture"
-          },
-          {
-            "id": "qwen-image-21-turbo",
-            "name": "Qwen Image 2.1 Turbo",
-            "kind": "picture"
-          }
-        ],
-        "slots": [
-          {
-            "role": "diffusion",
-            "required": true,
-            "source": "main",
-            "part": {
-              "role": "diffusion",
-              "repo": "chatrlabs/Qwen-Image-2.1-Uncensored-Omni-Quantized",
-              "path": "qwen-image-2.1-step90000-Q4_0.gguf",
-              "sizeBytes": 4197522208,
-              "licenceId": "qwen-research",
-              "alreadyHere": false,
-              "local": false
-            }
-          },
-          {
-            "role": "llm",
-            "required": true,
-            "source": "missing",
-            "part": null
-          },
-          {
-            "role": "vae",
-            "required": true,
-            "source": "missing",
-            "part": null
-          }
-        ],
-        "licences": [
-          {
-            "id": "qwen-research",
-            "name": "qwen-research",
-            "url": "https://huggingface.co/chatrlabs/Qwen-Image-2.1-Uncensored-Omni-Quantized/blob/af0343c259513913de8056af85819c70f627d681/LICENSE",
-            "sha256": "5f783423fd3de0c5b130d50d785b0522353910e2f291887c10c0a0cf7e12237a",
-            "badge": "red",
-            "commercial": "unclear",
-            "revenueLimitUsd": null,
-            "plainWords": "Check the licence before you use what you make.",
-            "obligations": []
-          }
-        ],
-        "totalBytes": 4197522208,
-        "toFetchBytes": 4197522208,
-        "fit": {
-          "word": "fits",
-          "verdict": "green",
-          "reason": null,
-          "suggestion": null,
-          "eta": null,
-          "verySlow": false,
-          "videoOnProcessor": false
-        },
-        "canDownload": false,
-        "lowDisk": false,
-        "needsEngine": false,
-        "untested": false
-      },
-      "best": false
-    },
-    {
-      "file": "qwen-image-2.1-step90000-NF4-bnb/diffusion_pytorch_model.safetensors",
-      "quant": "",
-      "label": {
-        "works": {
-          "version": "qwen-image-2.1",
-          "recipe": "qwen-image-21",
-          "kind": "picture",
-          "part": null,
-          "parameters": 3669279461,
-          "folder": false
-        }
-      },
-      "plan": {
-        "recipe": {
-          "id": "qwen-image-21",
-          "name": "Qwen Image 2.1",
-          "kind": "picture"
-        },
-        "recipes": [
-          {
-            "id": "qwen-image-21",
-            "name": "Qwen Image 2.1",
-            "kind": "picture"
-          },
-          {
-            "id": "qwen-image-21-turbo",
-            "name": "Qwen Image 2.1 Turbo",
-            "kind": "picture"
-          }
-        ],
-        "slots": [
-          {
-            "role": "diffusion",
-            "required": true,
-            "source": "main",
-            "part": {
-              "role": "diffusion",
-              "repo": "chatrlabs/Qwen-Image-2.1-Uncensored-Omni-Quantized",
-              "path": "qwen-image-2.1-step90000-NF4-bnb/diffusion_pytorch_model.safetensors",
-              "sizeBytes": 3670960573,
-              "licenceId": "qwen-research",
-              "alreadyHere": false,
-              "local": false
-            }
-          },
-          {
-            "role": "llm",
-            "required": true,
-            "source": "missing",
-            "part": null
-          },
-          {
-            "role": "vae",
-            "required": true,
-            "source": "missing",
-            "part": null
-          }
-        ],
-        "licences": [
-          {
-            "id": "qwen-research",
-            "name": "qwen-research",
-            "url": "https://huggingface.co/chatrlabs/Qwen-Image-2.1-Uncensored-Omni-Quantized/blob/af0343c259513913de8056af85819c70f627d681/LICENSE",
-            "sha256": "5f783423fd3de0c5b130d50d785b0522353910e2f291887c10c0a0cf7e12237a",
-            "badge": "red",
-            "commercial": "unclear",
-            "revenueLimitUsd": null,
-            "plainWords": "Check the licence before you use what you make.",
-            "obligations": []
-          }
-        ],
-        "totalBytes": 3670960573,
-        "toFetchBytes": 3670960573,
-        "fit": {
-          "word": "fits",
-          "verdict": "green",
-          "reason": null,
-          "suggestion": null,
-          "eta": null,
-          "verySlow": false,
-          "videoOnProcessor": false
-        },
-        "canDownload": false,
-        "lowDisk": false,
-        "needsEngine": false,
-        "untested": false
-      },
-      "best": false
-    }
-  ],
-  "loras": [],
+  "byHandRecipes": [],
+  "commit": "af0343c259513913de8056af85819c70f627d681",
   "fileViews": [
     {
+      "label": {
+        "works": {
+          "folder": false,
+          "kind": "picture",
+          "parameters": 7115124736,
+          "part": null,
+          "recipe": "qwen-image-21",
+          "version": "qwen-image-2.1"
+        }
+      },
       "path": "qwen-image-2.1-step90000-BF16.gguf",
-      "sizeBytes": 14230297376,
       "quant": "BF16",
-      "label": {
-        "works": {
-          "version": "qwen-image-2.1",
-          "recipe": "qwen-image-21",
-          "kind": "picture",
-          "part": null,
-          "parameters": 7115124736,
-          "folder": false
-        }
-      }
+      "sizeBytes": 14230297376
     },
     {
+      "label": {
+        "works": {
+          "folder": false,
+          "kind": "picture",
+          "parameters": 7115124736,
+          "part": null,
+          "recipe": "qwen-image-21",
+          "version": "qwen-image-2.1"
+        }
+      },
       "path": "qwen-image-2.1-step90000-BF16/diffusion_pytorch_model.safetensors",
-      "sizeBytes": 14230284680,
       "quant": "BF16",
-      "label": {
-        "works": {
-          "version": "qwen-image-2.1",
-          "recipe": "qwen-image-21",
-          "kind": "picture",
-          "part": null,
-          "parameters": 7115124736,
-          "folder": false
-        }
-      }
+      "sizeBytes": 14230284680
     },
     {
+      "label": {
+        "works": {
+          "folder": false,
+          "kind": "picture",
+          "parameters": 4061675264,
+          "part": null,
+          "recipe": "qwen-image-21",
+          "version": "qwen-image-2.1"
+        }
+      },
       "path": "qwen-image-2.1-step90000-FP8-comfy.safetensors",
-      "sizeBytes": 7116789419,
       "quant": null,
-      "label": {
-        "works": {
-          "version": "qwen-image-2.1",
-          "recipe": "qwen-image-21",
-          "kind": "picture",
-          "part": null,
-          "parameters": 4061675264,
-          "folder": false
-        }
-      }
+      "sizeBytes": 7116789419
     },
     {
+      "label": {
+        "cannotRun": {
+          "reason": "torchao",
+          "version": "qwen-image-2.1"
+        }
+      },
       "path": "qwen-image-2.1-step90000-FP8-torchao/diffusion_pytorch_model.safetensors",
-      "sizeBytes": 7121232808,
       "quant": null,
-      "label": {
-        "works": {
-          "version": "qwen-image-2.1",
-          "recipe": "qwen-image-21",
-          "kind": "picture",
-          "part": null,
-          "parameters": 7116607552,
-          "folder": false
-        }
-      }
+      "sizeBytes": 7121232808
     },
     {
+      "label": {
+        "works": {
+          "folder": false,
+          "kind": "picture",
+          "parameters": 4061675264,
+          "part": null,
+          "recipe": "qwen-image-21",
+          "version": "qwen-image-2.1"
+        }
+      },
       "path": "qwen-image-2.1-step90000-INT8-ConvRot-comfy.safetensors",
-      "sizeBytes": 7256791144,
       "quant": null,
-      "label": {
-        "works": {
-          "version": "qwen-image-2.1",
-          "recipe": "qwen-image-21",
-          "kind": "picture",
-          "part": null,
-          "parameters": 4061675264,
-          "folder": false
-        }
-      }
+      "sizeBytes": 7256791144
     },
     {
+      "label": {
+        "cannotRun": {
+          "reason": "bnb8",
+          "version": "qwen-image-2.1"
+        }
+      },
       "path": "qwen-image-2.1-step90000-INT8-bnb/diffusion_pytorch_model.safetensors",
-      "sizeBytes": 7121153192,
       "quant": null,
-      "label": {
-        "works": {
-          "version": "qwen-image-2.1",
-          "recipe": "qwen-image-21",
-          "kind": "picture",
-          "part": null,
-          "parameters": 7116607784,
-          "folder": false
-        }
-      }
+      "sizeBytes": 7121153192
     },
     {
+      "label": {
+        "cannotRun": {
+          "reason": "bnb4",
+          "version": "qwen-image-2.1"
+        }
+      },
       "path": "qwen-image-2.1-step90000-NF4-bnb/diffusion_pytorch_model.safetensors",
-      "sizeBytes": 3670960573,
       "quant": null,
-      "label": {
-        "works": {
-          "version": "qwen-image-2.1",
-          "recipe": "qwen-image-21",
-          "kind": "picture",
-          "part": null,
-          "parameters": 3669279461,
-          "folder": false
-        }
-      }
+      "sizeBytes": 3670960573
     },
     {
+      "label": {
+        "cannotRun": {
+          "reason": "nvfp4",
+          "version": "qwen-image-2.1"
+        }
+      },
       "path": "qwen-image-2.1-step90000-NVFP4-comfy.safetensors",
-      "sizeBytes": 4197574792,
       "quant": "NVFP4",
-      "label": {
-        "works": {
-          "version": "qwen-image-2.1",
-          "recipe": "qwen-image-21",
-          "kind": "picture",
-          "part": null,
-          "parameters": 4061675264,
-          "folder": false
-        }
-      }
+      "sizeBytes": 4197574792
     },
     {
+      "label": {
+        "works": {
+          "folder": false,
+          "kind": "picture",
+          "parameters": 7115124736,
+          "part": null,
+          "recipe": "qwen-image-21",
+          "version": "qwen-image-2.1"
+        }
+      },
       "path": "qwen-image-2.1-step90000-Q4_0.gguf",
-      "sizeBytes": 4197522208,
       "quant": "Q4_0",
-      "label": {
-        "works": {
-          "version": "qwen-image-2.1",
-          "recipe": "qwen-image-21",
-          "kind": "picture",
-          "part": null,
-          "parameters": 7115124736,
-          "folder": false
-        }
-      }
+      "sizeBytes": 4197522208
     },
     {
+      "label": {
+        "works": {
+          "folder": false,
+          "kind": "picture",
+          "parameters": 7115124736,
+          "part": null,
+          "recipe": "qwen-image-21",
+          "version": "qwen-image-2.1"
+        }
+      },
       "path": "qwen-image-2.1-step90000-Q4_K_M.gguf",
-      "sizeBytes": 4474346272,
       "quant": "Q4_K_M",
-      "label": {
-        "works": {
-          "version": "qwen-image-2.1",
-          "recipe": "qwen-image-21",
-          "kind": "picture",
-          "part": null,
-          "parameters": 7115124736,
-          "folder": false
-        }
-      }
+      "sizeBytes": 4474346272
     },
     {
+      "label": {
+        "works": {
+          "folder": false,
+          "kind": "picture",
+          "parameters": 7115124736,
+          "part": null,
+          "recipe": "qwen-image-21",
+          "version": "qwen-image-2.1"
+        }
+      },
       "path": "qwen-image-2.1-step90000-Q5_K_M.gguf",
-      "sizeBytes": 5212543776,
       "quant": "Q5_K_M",
-      "label": {
-        "works": {
-          "version": "qwen-image-2.1",
-          "recipe": "qwen-image-21",
-          "kind": "picture",
-          "part": null,
-          "parameters": 7115124736,
-          "folder": false
-        }
-      }
+      "sizeBytes": 5212543776
     },
     {
+      "label": {
+        "works": {
+          "folder": false,
+          "kind": "picture",
+          "parameters": 7115124736,
+          "part": null,
+          "recipe": "qwen-image-21",
+          "version": "qwen-image-2.1"
+        }
+      },
       "path": "qwen-image-2.1-step90000-Q6_K.gguf",
-      "sizeBytes": 5996878624,
       "quant": "Q6_K",
-      "label": {
-        "works": {
-          "version": "qwen-image-2.1",
-          "recipe": "qwen-image-21",
-          "kind": "picture",
-          "part": null,
-          "parameters": 7115124736,
-          "folder": false
-        }
-      }
+      "sizeBytes": 5996878624
     },
     {
-      "path": "qwen-image-2.1-step90000-Q8_0.gguf",
-      "sizeBytes": 7687183136,
-      "quant": "Q8_0",
       "label": {
         "works": {
-          "version": "qwen-image-2.1",
-          "recipe": "qwen-image-21",
+          "folder": false,
           "kind": "picture",
-          "part": null,
           "parameters": 7115124736,
-          "folder": false
+          "part": null,
+          "recipe": "qwen-image-21",
+          "version": "qwen-image-2.1"
         }
-      }
+      },
+      "path": "qwen-image-2.1-step90000-Q8_0.gguf",
+      "quant": "Q8_0",
+      "sizeBytes": 7687183136
     }
   ],
+  "files": [
+    {
+      "best": false,
+      "file": "qwen-image-2.1-step90000-BF16.gguf",
+      "label": {
+        "works": {
+          "folder": false,
+          "kind": "picture",
+          "parameters": 7115124736,
+          "part": null,
+          "recipe": "qwen-image-21",
+          "version": "qwen-image-2.1"
+        }
+      },
+      "plan": {
+        "canDownload": true,
+        "fit": {
+          "eta": null,
+          "reason": null,
+          "suggestion": null,
+          "verdict": "yellow",
+          "verySlow": false,
+          "videoOnProcessor": false,
+          "word": "slow"
+        },
+        "licences": [
+          {
+            "badge": "red",
+            "commercial": "unclear",
+            "id": "qwen-research",
+            "name": "qwen-research",
+            "obligations": [],
+            "plainWords": "Check the licence before you use what you make.",
+            "revenueLimitUsd": null,
+            "sha256": "5f783423fd3de0c5b130d50d785b0522353910e2f291887c10c0a0cf7e12237a",
+            "url": "https://huggingface.co/chatrlabs/Qwen-Image-2.1-Uncensored-Omni-Quantized/blob/af0343c259513913de8056af85819c70f627d681/LICENSE"
+          },
+          {
+            "badge": "green",
+            "commercial": "yes",
+            "id": "apache-2.0",
+            "name": "Apache License 2.0",
+            "obligations": [
+              "Keep the licence and copyright notices with the files."
+            ],
+            "plainWords": "Free for any use, including commercial.",
+            "revenueLimitUsd": null,
+            "sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30",
+            "url": "https://www.apache.org/licenses/LICENSE-2.0.txt"
+          },
+          {
+            "badge": "red",
+            "commercial": "no",
+            "id": "qwen-research-2",
+            "name": "Qwen Research License Agreement",
+            "obligations": [
+              "Give a copy of the licence to anyone you pass the files to.",
+              "Keep Qwen's copyright notice with the files."
+            ],
+            "plainWords": "For research and testing only. Using it to make money needs a separate licence from Qwen.",
+            "revenueLimitUsd": null,
+            "sha256": "8dc973f024ff95966bea25866efa443fd16776dcb1001e681e3d467ea572b28d",
+            "url": "https://huggingface.co/Qwen/Qwen-Image-2.1/blob/d26bb61231c349cf6b7896fa83353113880e1ba3/LICENSE"
+          }
+        ],
+        "lowDisk": false,
+        "needsEngine": false,
+        "recipe": {
+          "id": "qwen-image-21",
+          "kind": "picture",
+          "name": "Qwen Image 2.1"
+        },
+        "recipes": [
+          {
+            "id": "qwen-image-21",
+            "kind": "picture",
+            "name": "Qwen Image 2.1"
+          },
+          {
+            "id": "qwen-image-21-turbo",
+            "kind": "picture",
+            "name": "Qwen Image 2.1 Turbo"
+          }
+        ],
+        "slots": [
+          {
+            "part": {
+              "alreadyHere": false,
+              "licenceId": "qwen-research",
+              "local": false,
+              "path": "qwen-image-2.1-step90000-BF16.gguf",
+              "repo": "chatrlabs/Qwen-Image-2.1-Uncensored-Omni-Quantized",
+              "role": "diffusion",
+              "sizeBytes": 14230297376
+            },
+            "required": true,
+            "role": "diffusion",
+            "source": "main",
+            "why": null
+          },
+          {
+            "part": {
+              "alreadyHere": false,
+              "licenceId": "apache-2.0",
+              "local": false,
+              "path": "Qwen3VL-8B-Instruct-Q8_0.gguf",
+              "repo": "Qwen/Qwen3-VL-8B-Instruct-GGUF",
+              "role": "llm",
+              "sizeBytes": 8709519456
+            },
+            "required": true,
+            "role": "llm",
+            "source": "companion",
+            "why": null
+          },
+          {
+            "part": {
+              "alreadyHere": false,
+              "licenceId": "apache-2.0",
+              "local": false,
+              "path": "mmproj-Qwen3VL-8B-Instruct-F16.gguf",
+              "repo": "Qwen/Qwen3-VL-8B-Instruct-GGUF",
+              "role": "llm-vision",
+              "sizeBytes": 1159029824
+            },
+            "required": false,
+            "role": "llm-vision",
+            "source": "companion",
+            "why": null
+          },
+          {
+            "part": {
+              "alreadyHere": false,
+              "licenceId": "qwen-research-2",
+              "local": false,
+              "path": "vae/qwen_image_2.1_vae_bf16.safetensors",
+              "repo": "Comfy-Org/Qwen-Image-2.1",
+              "role": "vae",
+              "sizeBytes": 675509688
+            },
+            "required": true,
+            "role": "vae",
+            "source": "companion",
+            "why": null
+          }
+        ],
+        "toFetchBytes": 24774356344,
+        "totalBytes": 24774356344,
+        "untested": false
+      },
+      "quant": "BF16"
+    },
+    {
+      "best": false,
+      "file": "qwen-image-2.1-step90000-BF16/diffusion_pytorch_model.safetensors",
+      "label": {
+        "works": {
+          "folder": false,
+          "kind": "picture",
+          "parameters": 7115124736,
+          "part": null,
+          "recipe": "qwen-image-21",
+          "version": "qwen-image-2.1"
+        }
+      },
+      "plan": {
+        "canDownload": true,
+        "fit": {
+          "eta": null,
+          "reason": null,
+          "suggestion": null,
+          "verdict": "yellow",
+          "verySlow": false,
+          "videoOnProcessor": false,
+          "word": "slow"
+        },
+        "licences": [
+          {
+            "badge": "red",
+            "commercial": "unclear",
+            "id": "qwen-research",
+            "name": "qwen-research",
+            "obligations": [],
+            "plainWords": "Check the licence before you use what you make.",
+            "revenueLimitUsd": null,
+            "sha256": "5f783423fd3de0c5b130d50d785b0522353910e2f291887c10c0a0cf7e12237a",
+            "url": "https://huggingface.co/chatrlabs/Qwen-Image-2.1-Uncensored-Omni-Quantized/blob/af0343c259513913de8056af85819c70f627d681/LICENSE"
+          },
+          {
+            "badge": "green",
+            "commercial": "yes",
+            "id": "apache-2.0",
+            "name": "Apache License 2.0",
+            "obligations": [
+              "Keep the licence and copyright notices with the files."
+            ],
+            "plainWords": "Free for any use, including commercial.",
+            "revenueLimitUsd": null,
+            "sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30",
+            "url": "https://www.apache.org/licenses/LICENSE-2.0.txt"
+          },
+          {
+            "badge": "red",
+            "commercial": "no",
+            "id": "qwen-research-2",
+            "name": "Qwen Research License Agreement",
+            "obligations": [
+              "Give a copy of the licence to anyone you pass the files to.",
+              "Keep Qwen's copyright notice with the files."
+            ],
+            "plainWords": "For research and testing only. Using it to make money needs a separate licence from Qwen.",
+            "revenueLimitUsd": null,
+            "sha256": "8dc973f024ff95966bea25866efa443fd16776dcb1001e681e3d467ea572b28d",
+            "url": "https://huggingface.co/Qwen/Qwen-Image-2.1/blob/d26bb61231c349cf6b7896fa83353113880e1ba3/LICENSE"
+          }
+        ],
+        "lowDisk": false,
+        "needsEngine": false,
+        "recipe": {
+          "id": "qwen-image-21",
+          "kind": "picture",
+          "name": "Qwen Image 2.1"
+        },
+        "recipes": [
+          {
+            "id": "qwen-image-21",
+            "kind": "picture",
+            "name": "Qwen Image 2.1"
+          },
+          {
+            "id": "qwen-image-21-turbo",
+            "kind": "picture",
+            "name": "Qwen Image 2.1 Turbo"
+          }
+        ],
+        "slots": [
+          {
+            "part": {
+              "alreadyHere": false,
+              "licenceId": "qwen-research",
+              "local": false,
+              "path": "qwen-image-2.1-step90000-BF16/diffusion_pytorch_model.safetensors",
+              "repo": "chatrlabs/Qwen-Image-2.1-Uncensored-Omni-Quantized",
+              "role": "diffusion",
+              "sizeBytes": 14230284680
+            },
+            "required": true,
+            "role": "diffusion",
+            "source": "main",
+            "why": null
+          },
+          {
+            "part": {
+              "alreadyHere": false,
+              "licenceId": "apache-2.0",
+              "local": false,
+              "path": "Qwen3VL-8B-Instruct-Q8_0.gguf",
+              "repo": "Qwen/Qwen3-VL-8B-Instruct-GGUF",
+              "role": "llm",
+              "sizeBytes": 8709519456
+            },
+            "required": true,
+            "role": "llm",
+            "source": "companion",
+            "why": null
+          },
+          {
+            "part": {
+              "alreadyHere": false,
+              "licenceId": "apache-2.0",
+              "local": false,
+              "path": "mmproj-Qwen3VL-8B-Instruct-F16.gguf",
+              "repo": "Qwen/Qwen3-VL-8B-Instruct-GGUF",
+              "role": "llm-vision",
+              "sizeBytes": 1159029824
+            },
+            "required": false,
+            "role": "llm-vision",
+            "source": "companion",
+            "why": null
+          },
+          {
+            "part": {
+              "alreadyHere": false,
+              "licenceId": "qwen-research-2",
+              "local": false,
+              "path": "vae/qwen_image_2.1_vae_bf16.safetensors",
+              "repo": "Comfy-Org/Qwen-Image-2.1",
+              "role": "vae",
+              "sizeBytes": 675509688
+            },
+            "required": true,
+            "role": "vae",
+            "source": "companion",
+            "why": null
+          }
+        ],
+        "toFetchBytes": 24774343648,
+        "totalBytes": 24774343648,
+        "untested": false
+      },
+      "quant": "BF16"
+    },
+    {
+      "best": true,
+      "file": "qwen-image-2.1-step90000-Q8_0.gguf",
+      "label": {
+        "works": {
+          "folder": false,
+          "kind": "picture",
+          "parameters": 7115124736,
+          "part": null,
+          "recipe": "qwen-image-21",
+          "version": "qwen-image-2.1"
+        }
+      },
+      "plan": {
+        "canDownload": true,
+        "fit": {
+          "eta": null,
+          "reason": null,
+          "suggestion": null,
+          "verdict": "yellow",
+          "verySlow": false,
+          "videoOnProcessor": false,
+          "word": "fits"
+        },
+        "licences": [
+          {
+            "badge": "red",
+            "commercial": "unclear",
+            "id": "qwen-research",
+            "name": "qwen-research",
+            "obligations": [],
+            "plainWords": "Check the licence before you use what you make.",
+            "revenueLimitUsd": null,
+            "sha256": "5f783423fd3de0c5b130d50d785b0522353910e2f291887c10c0a0cf7e12237a",
+            "url": "https://huggingface.co/chatrlabs/Qwen-Image-2.1-Uncensored-Omni-Quantized/blob/af0343c259513913de8056af85819c70f627d681/LICENSE"
+          },
+          {
+            "badge": "green",
+            "commercial": "yes",
+            "id": "apache-2.0",
+            "name": "Apache License 2.0",
+            "obligations": [
+              "Keep the licence and copyright notices with the files."
+            ],
+            "plainWords": "Free for any use, including commercial.",
+            "revenueLimitUsd": null,
+            "sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30",
+            "url": "https://www.apache.org/licenses/LICENSE-2.0.txt"
+          },
+          {
+            "badge": "red",
+            "commercial": "no",
+            "id": "qwen-research-2",
+            "name": "Qwen Research License Agreement",
+            "obligations": [
+              "Give a copy of the licence to anyone you pass the files to.",
+              "Keep Qwen's copyright notice with the files."
+            ],
+            "plainWords": "For research and testing only. Using it to make money needs a separate licence from Qwen.",
+            "revenueLimitUsd": null,
+            "sha256": "8dc973f024ff95966bea25866efa443fd16776dcb1001e681e3d467ea572b28d",
+            "url": "https://huggingface.co/Qwen/Qwen-Image-2.1/blob/d26bb61231c349cf6b7896fa83353113880e1ba3/LICENSE"
+          }
+        ],
+        "lowDisk": false,
+        "needsEngine": false,
+        "recipe": {
+          "id": "qwen-image-21",
+          "kind": "picture",
+          "name": "Qwen Image 2.1"
+        },
+        "recipes": [
+          {
+            "id": "qwen-image-21",
+            "kind": "picture",
+            "name": "Qwen Image 2.1"
+          },
+          {
+            "id": "qwen-image-21-turbo",
+            "kind": "picture",
+            "name": "Qwen Image 2.1 Turbo"
+          }
+        ],
+        "slots": [
+          {
+            "part": {
+              "alreadyHere": false,
+              "licenceId": "qwen-research",
+              "local": false,
+              "path": "qwen-image-2.1-step90000-Q8_0.gguf",
+              "repo": "chatrlabs/Qwen-Image-2.1-Uncensored-Omni-Quantized",
+              "role": "diffusion",
+              "sizeBytes": 7687183136
+            },
+            "required": true,
+            "role": "diffusion",
+            "source": "main",
+            "why": null
+          },
+          {
+            "part": {
+              "alreadyHere": false,
+              "licenceId": "apache-2.0",
+              "local": false,
+              "path": "Qwen3VL-8B-Instruct-Q8_0.gguf",
+              "repo": "Qwen/Qwen3-VL-8B-Instruct-GGUF",
+              "role": "llm",
+              "sizeBytes": 8709519456
+            },
+            "required": true,
+            "role": "llm",
+            "source": "companion",
+            "why": null
+          },
+          {
+            "part": {
+              "alreadyHere": false,
+              "licenceId": "apache-2.0",
+              "local": false,
+              "path": "mmproj-Qwen3VL-8B-Instruct-F16.gguf",
+              "repo": "Qwen/Qwen3-VL-8B-Instruct-GGUF",
+              "role": "llm-vision",
+              "sizeBytes": 1159029824
+            },
+            "required": false,
+            "role": "llm-vision",
+            "source": "companion",
+            "why": null
+          },
+          {
+            "part": {
+              "alreadyHere": false,
+              "licenceId": "qwen-research-2",
+              "local": false,
+              "path": "vae/qwen_image_2.1_vae_bf16.safetensors",
+              "repo": "Comfy-Org/Qwen-Image-2.1",
+              "role": "vae",
+              "sizeBytes": 675509688
+            },
+            "required": true,
+            "role": "vae",
+            "source": "companion",
+            "why": null
+          }
+        ],
+        "toFetchBytes": 18231242104,
+        "totalBytes": 18231242104,
+        "untested": false
+      },
+      "quant": "Q8_0"
+    },
+    {
+      "best": false,
+      "file": "qwen-image-2.1-step90000-INT8-ConvRot-comfy.safetensors",
+      "label": {
+        "works": {
+          "folder": false,
+          "kind": "picture",
+          "parameters": 4061675264,
+          "part": null,
+          "recipe": "qwen-image-21",
+          "version": "qwen-image-2.1"
+        }
+      },
+      "plan": {
+        "canDownload": true,
+        "fit": {
+          "eta": null,
+          "reason": null,
+          "suggestion": null,
+          "verdict": "yellow",
+          "verySlow": false,
+          "videoOnProcessor": false,
+          "word": "fits"
+        },
+        "licences": [
+          {
+            "badge": "red",
+            "commercial": "unclear",
+            "id": "qwen-research",
+            "name": "qwen-research",
+            "obligations": [],
+            "plainWords": "Check the licence before you use what you make.",
+            "revenueLimitUsd": null,
+            "sha256": "5f783423fd3de0c5b130d50d785b0522353910e2f291887c10c0a0cf7e12237a",
+            "url": "https://huggingface.co/chatrlabs/Qwen-Image-2.1-Uncensored-Omni-Quantized/blob/af0343c259513913de8056af85819c70f627d681/LICENSE"
+          },
+          {
+            "badge": "green",
+            "commercial": "yes",
+            "id": "apache-2.0",
+            "name": "Apache License 2.0",
+            "obligations": [
+              "Keep the licence and copyright notices with the files."
+            ],
+            "plainWords": "Free for any use, including commercial.",
+            "revenueLimitUsd": null,
+            "sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30",
+            "url": "https://www.apache.org/licenses/LICENSE-2.0.txt"
+          },
+          {
+            "badge": "red",
+            "commercial": "no",
+            "id": "qwen-research-2",
+            "name": "Qwen Research License Agreement",
+            "obligations": [
+              "Give a copy of the licence to anyone you pass the files to.",
+              "Keep Qwen's copyright notice with the files."
+            ],
+            "plainWords": "For research and testing only. Using it to make money needs a separate licence from Qwen.",
+            "revenueLimitUsd": null,
+            "sha256": "8dc973f024ff95966bea25866efa443fd16776dcb1001e681e3d467ea572b28d",
+            "url": "https://huggingface.co/Qwen/Qwen-Image-2.1/blob/d26bb61231c349cf6b7896fa83353113880e1ba3/LICENSE"
+          }
+        ],
+        "lowDisk": false,
+        "needsEngine": false,
+        "recipe": {
+          "id": "qwen-image-21",
+          "kind": "picture",
+          "name": "Qwen Image 2.1"
+        },
+        "recipes": [
+          {
+            "id": "qwen-image-21",
+            "kind": "picture",
+            "name": "Qwen Image 2.1"
+          },
+          {
+            "id": "qwen-image-21-turbo",
+            "kind": "picture",
+            "name": "Qwen Image 2.1 Turbo"
+          }
+        ],
+        "slots": [
+          {
+            "part": {
+              "alreadyHere": false,
+              "licenceId": "qwen-research",
+              "local": false,
+              "path": "qwen-image-2.1-step90000-INT8-ConvRot-comfy.safetensors",
+              "repo": "chatrlabs/Qwen-Image-2.1-Uncensored-Omni-Quantized",
+              "role": "diffusion",
+              "sizeBytes": 7256791144
+            },
+            "required": true,
+            "role": "diffusion",
+            "source": "main",
+            "why": null
+          },
+          {
+            "part": {
+              "alreadyHere": false,
+              "licenceId": "apache-2.0",
+              "local": false,
+              "path": "Qwen3VL-8B-Instruct-Q8_0.gguf",
+              "repo": "Qwen/Qwen3-VL-8B-Instruct-GGUF",
+              "role": "llm",
+              "sizeBytes": 8709519456
+            },
+            "required": true,
+            "role": "llm",
+            "source": "companion",
+            "why": null
+          },
+          {
+            "part": {
+              "alreadyHere": false,
+              "licenceId": "apache-2.0",
+              "local": false,
+              "path": "mmproj-Qwen3VL-8B-Instruct-F16.gguf",
+              "repo": "Qwen/Qwen3-VL-8B-Instruct-GGUF",
+              "role": "llm-vision",
+              "sizeBytes": 1159029824
+            },
+            "required": false,
+            "role": "llm-vision",
+            "source": "companion",
+            "why": null
+          },
+          {
+            "part": {
+              "alreadyHere": false,
+              "licenceId": "qwen-research-2",
+              "local": false,
+              "path": "vae/qwen_image_2.1_vae_bf16.safetensors",
+              "repo": "Comfy-Org/Qwen-Image-2.1",
+              "role": "vae",
+              "sizeBytes": 675509688
+            },
+            "required": true,
+            "role": "vae",
+            "source": "companion",
+            "why": null
+          }
+        ],
+        "toFetchBytes": 17800850112,
+        "totalBytes": 17800850112,
+        "untested": false
+      },
+      "quant": ""
+    },
+    {
+      "best": false,
+      "file": "qwen-image-2.1-step90000-FP8-comfy.safetensors",
+      "label": {
+        "works": {
+          "folder": false,
+          "kind": "picture",
+          "parameters": 4061675264,
+          "part": null,
+          "recipe": "qwen-image-21",
+          "version": "qwen-image-2.1"
+        }
+      },
+      "plan": {
+        "canDownload": true,
+        "fit": {
+          "eta": null,
+          "reason": null,
+          "suggestion": null,
+          "verdict": "yellow",
+          "verySlow": false,
+          "videoOnProcessor": false,
+          "word": "fits"
+        },
+        "licences": [
+          {
+            "badge": "red",
+            "commercial": "unclear",
+            "id": "qwen-research",
+            "name": "qwen-research",
+            "obligations": [],
+            "plainWords": "Check the licence before you use what you make.",
+            "revenueLimitUsd": null,
+            "sha256": "5f783423fd3de0c5b130d50d785b0522353910e2f291887c10c0a0cf7e12237a",
+            "url": "https://huggingface.co/chatrlabs/Qwen-Image-2.1-Uncensored-Omni-Quantized/blob/af0343c259513913de8056af85819c70f627d681/LICENSE"
+          },
+          {
+            "badge": "green",
+            "commercial": "yes",
+            "id": "apache-2.0",
+            "name": "Apache License 2.0",
+            "obligations": [
+              "Keep the licence and copyright notices with the files."
+            ],
+            "plainWords": "Free for any use, including commercial.",
+            "revenueLimitUsd": null,
+            "sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30",
+            "url": "https://www.apache.org/licenses/LICENSE-2.0.txt"
+          },
+          {
+            "badge": "red",
+            "commercial": "no",
+            "id": "qwen-research-2",
+            "name": "Qwen Research License Agreement",
+            "obligations": [
+              "Give a copy of the licence to anyone you pass the files to.",
+              "Keep Qwen's copyright notice with the files."
+            ],
+            "plainWords": "For research and testing only. Using it to make money needs a separate licence from Qwen.",
+            "revenueLimitUsd": null,
+            "sha256": "8dc973f024ff95966bea25866efa443fd16776dcb1001e681e3d467ea572b28d",
+            "url": "https://huggingface.co/Qwen/Qwen-Image-2.1/blob/d26bb61231c349cf6b7896fa83353113880e1ba3/LICENSE"
+          }
+        ],
+        "lowDisk": false,
+        "needsEngine": false,
+        "recipe": {
+          "id": "qwen-image-21",
+          "kind": "picture",
+          "name": "Qwen Image 2.1"
+        },
+        "recipes": [
+          {
+            "id": "qwen-image-21",
+            "kind": "picture",
+            "name": "Qwen Image 2.1"
+          },
+          {
+            "id": "qwen-image-21-turbo",
+            "kind": "picture",
+            "name": "Qwen Image 2.1 Turbo"
+          }
+        ],
+        "slots": [
+          {
+            "part": {
+              "alreadyHere": false,
+              "licenceId": "qwen-research",
+              "local": false,
+              "path": "qwen-image-2.1-step90000-FP8-comfy.safetensors",
+              "repo": "chatrlabs/Qwen-Image-2.1-Uncensored-Omni-Quantized",
+              "role": "diffusion",
+              "sizeBytes": 7116789419
+            },
+            "required": true,
+            "role": "diffusion",
+            "source": "main",
+            "why": null
+          },
+          {
+            "part": {
+              "alreadyHere": false,
+              "licenceId": "apache-2.0",
+              "local": false,
+              "path": "Qwen3VL-8B-Instruct-Q8_0.gguf",
+              "repo": "Qwen/Qwen3-VL-8B-Instruct-GGUF",
+              "role": "llm",
+              "sizeBytes": 8709519456
+            },
+            "required": true,
+            "role": "llm",
+            "source": "companion",
+            "why": null
+          },
+          {
+            "part": {
+              "alreadyHere": false,
+              "licenceId": "apache-2.0",
+              "local": false,
+              "path": "mmproj-Qwen3VL-8B-Instruct-F16.gguf",
+              "repo": "Qwen/Qwen3-VL-8B-Instruct-GGUF",
+              "role": "llm-vision",
+              "sizeBytes": 1159029824
+            },
+            "required": false,
+            "role": "llm-vision",
+            "source": "companion",
+            "why": null
+          },
+          {
+            "part": {
+              "alreadyHere": false,
+              "licenceId": "qwen-research-2",
+              "local": false,
+              "path": "vae/qwen_image_2.1_vae_bf16.safetensors",
+              "repo": "Comfy-Org/Qwen-Image-2.1",
+              "role": "vae",
+              "sizeBytes": 675509688
+            },
+            "required": true,
+            "role": "vae",
+            "source": "companion",
+            "why": null
+          }
+        ],
+        "toFetchBytes": 17660848387,
+        "totalBytes": 17660848387,
+        "untested": false
+      },
+      "quant": ""
+    },
+    {
+      "best": false,
+      "file": "qwen-image-2.1-step90000-Q6_K.gguf",
+      "label": {
+        "works": {
+          "folder": false,
+          "kind": "picture",
+          "parameters": 7115124736,
+          "part": null,
+          "recipe": "qwen-image-21",
+          "version": "qwen-image-2.1"
+        }
+      },
+      "plan": {
+        "canDownload": true,
+        "fit": {
+          "eta": null,
+          "reason": null,
+          "suggestion": null,
+          "verdict": "yellow",
+          "verySlow": false,
+          "videoOnProcessor": false,
+          "word": "fits"
+        },
+        "licences": [
+          {
+            "badge": "red",
+            "commercial": "unclear",
+            "id": "qwen-research",
+            "name": "qwen-research",
+            "obligations": [],
+            "plainWords": "Check the licence before you use what you make.",
+            "revenueLimitUsd": null,
+            "sha256": "5f783423fd3de0c5b130d50d785b0522353910e2f291887c10c0a0cf7e12237a",
+            "url": "https://huggingface.co/chatrlabs/Qwen-Image-2.1-Uncensored-Omni-Quantized/blob/af0343c259513913de8056af85819c70f627d681/LICENSE"
+          },
+          {
+            "badge": "green",
+            "commercial": "yes",
+            "id": "apache-2.0",
+            "name": "Apache License 2.0",
+            "obligations": [
+              "Keep the licence and copyright notices with the files."
+            ],
+            "plainWords": "Free for any use, including commercial.",
+            "revenueLimitUsd": null,
+            "sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30",
+            "url": "https://www.apache.org/licenses/LICENSE-2.0.txt"
+          },
+          {
+            "badge": "red",
+            "commercial": "no",
+            "id": "qwen-research-2",
+            "name": "Qwen Research License Agreement",
+            "obligations": [
+              "Give a copy of the licence to anyone you pass the files to.",
+              "Keep Qwen's copyright notice with the files."
+            ],
+            "plainWords": "For research and testing only. Using it to make money needs a separate licence from Qwen.",
+            "revenueLimitUsd": null,
+            "sha256": "8dc973f024ff95966bea25866efa443fd16776dcb1001e681e3d467ea572b28d",
+            "url": "https://huggingface.co/Qwen/Qwen-Image-2.1/blob/d26bb61231c349cf6b7896fa83353113880e1ba3/LICENSE"
+          }
+        ],
+        "lowDisk": false,
+        "needsEngine": false,
+        "recipe": {
+          "id": "qwen-image-21",
+          "kind": "picture",
+          "name": "Qwen Image 2.1"
+        },
+        "recipes": [
+          {
+            "id": "qwen-image-21",
+            "kind": "picture",
+            "name": "Qwen Image 2.1"
+          },
+          {
+            "id": "qwen-image-21-turbo",
+            "kind": "picture",
+            "name": "Qwen Image 2.1 Turbo"
+          }
+        ],
+        "slots": [
+          {
+            "part": {
+              "alreadyHere": false,
+              "licenceId": "qwen-research",
+              "local": false,
+              "path": "qwen-image-2.1-step90000-Q6_K.gguf",
+              "repo": "chatrlabs/Qwen-Image-2.1-Uncensored-Omni-Quantized",
+              "role": "diffusion",
+              "sizeBytes": 5996878624
+            },
+            "required": true,
+            "role": "diffusion",
+            "source": "main",
+            "why": null
+          },
+          {
+            "part": {
+              "alreadyHere": false,
+              "licenceId": "apache-2.0",
+              "local": false,
+              "path": "Qwen3VL-8B-Instruct-Q8_0.gguf",
+              "repo": "Qwen/Qwen3-VL-8B-Instruct-GGUF",
+              "role": "llm",
+              "sizeBytes": 8709519456
+            },
+            "required": true,
+            "role": "llm",
+            "source": "companion",
+            "why": null
+          },
+          {
+            "part": {
+              "alreadyHere": false,
+              "licenceId": "apache-2.0",
+              "local": false,
+              "path": "mmproj-Qwen3VL-8B-Instruct-F16.gguf",
+              "repo": "Qwen/Qwen3-VL-8B-Instruct-GGUF",
+              "role": "llm-vision",
+              "sizeBytes": 1159029824
+            },
+            "required": false,
+            "role": "llm-vision",
+            "source": "companion",
+            "why": null
+          },
+          {
+            "part": {
+              "alreadyHere": false,
+              "licenceId": "qwen-research-2",
+              "local": false,
+              "path": "vae/qwen_image_2.1_vae_bf16.safetensors",
+              "repo": "Comfy-Org/Qwen-Image-2.1",
+              "role": "vae",
+              "sizeBytes": 675509688
+            },
+            "required": true,
+            "role": "vae",
+            "source": "companion",
+            "why": null
+          }
+        ],
+        "toFetchBytes": 16540937592,
+        "totalBytes": 16540937592,
+        "untested": false
+      },
+      "quant": "Q6_K"
+    },
+    {
+      "best": false,
+      "file": "qwen-image-2.1-step90000-Q5_K_M.gguf",
+      "label": {
+        "works": {
+          "folder": false,
+          "kind": "picture",
+          "parameters": 7115124736,
+          "part": null,
+          "recipe": "qwen-image-21",
+          "version": "qwen-image-2.1"
+        }
+      },
+      "plan": {
+        "canDownload": true,
+        "fit": {
+          "eta": null,
+          "reason": null,
+          "suggestion": null,
+          "verdict": "yellow",
+          "verySlow": false,
+          "videoOnProcessor": false,
+          "word": "fits"
+        },
+        "licences": [
+          {
+            "badge": "red",
+            "commercial": "unclear",
+            "id": "qwen-research",
+            "name": "qwen-research",
+            "obligations": [],
+            "plainWords": "Check the licence before you use what you make.",
+            "revenueLimitUsd": null,
+            "sha256": "5f783423fd3de0c5b130d50d785b0522353910e2f291887c10c0a0cf7e12237a",
+            "url": "https://huggingface.co/chatrlabs/Qwen-Image-2.1-Uncensored-Omni-Quantized/blob/af0343c259513913de8056af85819c70f627d681/LICENSE"
+          },
+          {
+            "badge": "green",
+            "commercial": "yes",
+            "id": "apache-2.0",
+            "name": "Apache License 2.0",
+            "obligations": [
+              "Keep the licence and copyright notices with the files."
+            ],
+            "plainWords": "Free for any use, including commercial.",
+            "revenueLimitUsd": null,
+            "sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30",
+            "url": "https://www.apache.org/licenses/LICENSE-2.0.txt"
+          },
+          {
+            "badge": "red",
+            "commercial": "no",
+            "id": "qwen-research-2",
+            "name": "Qwen Research License Agreement",
+            "obligations": [
+              "Give a copy of the licence to anyone you pass the files to.",
+              "Keep Qwen's copyright notice with the files."
+            ],
+            "plainWords": "For research and testing only. Using it to make money needs a separate licence from Qwen.",
+            "revenueLimitUsd": null,
+            "sha256": "8dc973f024ff95966bea25866efa443fd16776dcb1001e681e3d467ea572b28d",
+            "url": "https://huggingface.co/Qwen/Qwen-Image-2.1/blob/d26bb61231c349cf6b7896fa83353113880e1ba3/LICENSE"
+          }
+        ],
+        "lowDisk": false,
+        "needsEngine": false,
+        "recipe": {
+          "id": "qwen-image-21",
+          "kind": "picture",
+          "name": "Qwen Image 2.1"
+        },
+        "recipes": [
+          {
+            "id": "qwen-image-21",
+            "kind": "picture",
+            "name": "Qwen Image 2.1"
+          },
+          {
+            "id": "qwen-image-21-turbo",
+            "kind": "picture",
+            "name": "Qwen Image 2.1 Turbo"
+          }
+        ],
+        "slots": [
+          {
+            "part": {
+              "alreadyHere": false,
+              "licenceId": "qwen-research",
+              "local": false,
+              "path": "qwen-image-2.1-step90000-Q5_K_M.gguf",
+              "repo": "chatrlabs/Qwen-Image-2.1-Uncensored-Omni-Quantized",
+              "role": "diffusion",
+              "sizeBytes": 5212543776
+            },
+            "required": true,
+            "role": "diffusion",
+            "source": "main",
+            "why": null
+          },
+          {
+            "part": {
+              "alreadyHere": false,
+              "licenceId": "apache-2.0",
+              "local": false,
+              "path": "Qwen3VL-8B-Instruct-Q8_0.gguf",
+              "repo": "Qwen/Qwen3-VL-8B-Instruct-GGUF",
+              "role": "llm",
+              "sizeBytes": 8709519456
+            },
+            "required": true,
+            "role": "llm",
+            "source": "companion",
+            "why": null
+          },
+          {
+            "part": {
+              "alreadyHere": false,
+              "licenceId": "apache-2.0",
+              "local": false,
+              "path": "mmproj-Qwen3VL-8B-Instruct-F16.gguf",
+              "repo": "Qwen/Qwen3-VL-8B-Instruct-GGUF",
+              "role": "llm-vision",
+              "sizeBytes": 1159029824
+            },
+            "required": false,
+            "role": "llm-vision",
+            "source": "companion",
+            "why": null
+          },
+          {
+            "part": {
+              "alreadyHere": false,
+              "licenceId": "qwen-research-2",
+              "local": false,
+              "path": "vae/qwen_image_2.1_vae_bf16.safetensors",
+              "repo": "Comfy-Org/Qwen-Image-2.1",
+              "role": "vae",
+              "sizeBytes": 675509688
+            },
+            "required": true,
+            "role": "vae",
+            "source": "companion",
+            "why": null
+          }
+        ],
+        "toFetchBytes": 15756602744,
+        "totalBytes": 15756602744,
+        "untested": false
+      },
+      "quant": "Q5_K_M"
+    },
+    {
+      "best": false,
+      "file": "qwen-image-2.1-step90000-Q4_K_M.gguf",
+      "label": {
+        "works": {
+          "folder": false,
+          "kind": "picture",
+          "parameters": 7115124736,
+          "part": null,
+          "recipe": "qwen-image-21",
+          "version": "qwen-image-2.1"
+        }
+      },
+      "plan": {
+        "canDownload": true,
+        "fit": {
+          "eta": null,
+          "reason": null,
+          "suggestion": null,
+          "verdict": "yellow",
+          "verySlow": false,
+          "videoOnProcessor": false,
+          "word": "fits"
+        },
+        "licences": [
+          {
+            "badge": "red",
+            "commercial": "unclear",
+            "id": "qwen-research",
+            "name": "qwen-research",
+            "obligations": [],
+            "plainWords": "Check the licence before you use what you make.",
+            "revenueLimitUsd": null,
+            "sha256": "5f783423fd3de0c5b130d50d785b0522353910e2f291887c10c0a0cf7e12237a",
+            "url": "https://huggingface.co/chatrlabs/Qwen-Image-2.1-Uncensored-Omni-Quantized/blob/af0343c259513913de8056af85819c70f627d681/LICENSE"
+          },
+          {
+            "badge": "green",
+            "commercial": "yes",
+            "id": "apache-2.0",
+            "name": "Apache License 2.0",
+            "obligations": [
+              "Keep the licence and copyright notices with the files."
+            ],
+            "plainWords": "Free for any use, including commercial.",
+            "revenueLimitUsd": null,
+            "sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30",
+            "url": "https://www.apache.org/licenses/LICENSE-2.0.txt"
+          },
+          {
+            "badge": "red",
+            "commercial": "no",
+            "id": "qwen-research-2",
+            "name": "Qwen Research License Agreement",
+            "obligations": [
+              "Give a copy of the licence to anyone you pass the files to.",
+              "Keep Qwen's copyright notice with the files."
+            ],
+            "plainWords": "For research and testing only. Using it to make money needs a separate licence from Qwen.",
+            "revenueLimitUsd": null,
+            "sha256": "8dc973f024ff95966bea25866efa443fd16776dcb1001e681e3d467ea572b28d",
+            "url": "https://huggingface.co/Qwen/Qwen-Image-2.1/blob/d26bb61231c349cf6b7896fa83353113880e1ba3/LICENSE"
+          }
+        ],
+        "lowDisk": false,
+        "needsEngine": false,
+        "recipe": {
+          "id": "qwen-image-21",
+          "kind": "picture",
+          "name": "Qwen Image 2.1"
+        },
+        "recipes": [
+          {
+            "id": "qwen-image-21",
+            "kind": "picture",
+            "name": "Qwen Image 2.1"
+          },
+          {
+            "id": "qwen-image-21-turbo",
+            "kind": "picture",
+            "name": "Qwen Image 2.1 Turbo"
+          }
+        ],
+        "slots": [
+          {
+            "part": {
+              "alreadyHere": false,
+              "licenceId": "qwen-research",
+              "local": false,
+              "path": "qwen-image-2.1-step90000-Q4_K_M.gguf",
+              "repo": "chatrlabs/Qwen-Image-2.1-Uncensored-Omni-Quantized",
+              "role": "diffusion",
+              "sizeBytes": 4474346272
+            },
+            "required": true,
+            "role": "diffusion",
+            "source": "main",
+            "why": null
+          },
+          {
+            "part": {
+              "alreadyHere": false,
+              "licenceId": "apache-2.0",
+              "local": false,
+              "path": "Qwen3VL-8B-Instruct-Q8_0.gguf",
+              "repo": "Qwen/Qwen3-VL-8B-Instruct-GGUF",
+              "role": "llm",
+              "sizeBytes": 8709519456
+            },
+            "required": true,
+            "role": "llm",
+            "source": "companion",
+            "why": null
+          },
+          {
+            "part": {
+              "alreadyHere": false,
+              "licenceId": "apache-2.0",
+              "local": false,
+              "path": "mmproj-Qwen3VL-8B-Instruct-F16.gguf",
+              "repo": "Qwen/Qwen3-VL-8B-Instruct-GGUF",
+              "role": "llm-vision",
+              "sizeBytes": 1159029824
+            },
+            "required": false,
+            "role": "llm-vision",
+            "source": "companion",
+            "why": null
+          },
+          {
+            "part": {
+              "alreadyHere": false,
+              "licenceId": "qwen-research-2",
+              "local": false,
+              "path": "vae/qwen_image_2.1_vae_bf16.safetensors",
+              "repo": "Comfy-Org/Qwen-Image-2.1",
+              "role": "vae",
+              "sizeBytes": 675509688
+            },
+            "required": true,
+            "role": "vae",
+            "source": "companion",
+            "why": null
+          }
+        ],
+        "toFetchBytes": 15018405240,
+        "totalBytes": 15018405240,
+        "untested": false
+      },
+      "quant": "Q4_K_M"
+    },
+    {
+      "best": false,
+      "file": "qwen-image-2.1-step90000-Q4_0.gguf",
+      "label": {
+        "works": {
+          "folder": false,
+          "kind": "picture",
+          "parameters": 7115124736,
+          "part": null,
+          "recipe": "qwen-image-21",
+          "version": "qwen-image-2.1"
+        }
+      },
+      "plan": {
+        "canDownload": true,
+        "fit": {
+          "eta": null,
+          "reason": null,
+          "suggestion": null,
+          "verdict": "yellow",
+          "verySlow": false,
+          "videoOnProcessor": false,
+          "word": "fits"
+        },
+        "licences": [
+          {
+            "badge": "red",
+            "commercial": "unclear",
+            "id": "qwen-research",
+            "name": "qwen-research",
+            "obligations": [],
+            "plainWords": "Check the licence before you use what you make.",
+            "revenueLimitUsd": null,
+            "sha256": "5f783423fd3de0c5b130d50d785b0522353910e2f291887c10c0a0cf7e12237a",
+            "url": "https://huggingface.co/chatrlabs/Qwen-Image-2.1-Uncensored-Omni-Quantized/blob/af0343c259513913de8056af85819c70f627d681/LICENSE"
+          },
+          {
+            "badge": "green",
+            "commercial": "yes",
+            "id": "apache-2.0",
+            "name": "Apache License 2.0",
+            "obligations": [
+              "Keep the licence and copyright notices with the files."
+            ],
+            "plainWords": "Free for any use, including commercial.",
+            "revenueLimitUsd": null,
+            "sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30",
+            "url": "https://www.apache.org/licenses/LICENSE-2.0.txt"
+          },
+          {
+            "badge": "red",
+            "commercial": "no",
+            "id": "qwen-research-2",
+            "name": "Qwen Research License Agreement",
+            "obligations": [
+              "Give a copy of the licence to anyone you pass the files to.",
+              "Keep Qwen's copyright notice with the files."
+            ],
+            "plainWords": "For research and testing only. Using it to make money needs a separate licence from Qwen.",
+            "revenueLimitUsd": null,
+            "sha256": "8dc973f024ff95966bea25866efa443fd16776dcb1001e681e3d467ea572b28d",
+            "url": "https://huggingface.co/Qwen/Qwen-Image-2.1/blob/d26bb61231c349cf6b7896fa83353113880e1ba3/LICENSE"
+          }
+        ],
+        "lowDisk": false,
+        "needsEngine": false,
+        "recipe": {
+          "id": "qwen-image-21",
+          "kind": "picture",
+          "name": "Qwen Image 2.1"
+        },
+        "recipes": [
+          {
+            "id": "qwen-image-21",
+            "kind": "picture",
+            "name": "Qwen Image 2.1"
+          },
+          {
+            "id": "qwen-image-21-turbo",
+            "kind": "picture",
+            "name": "Qwen Image 2.1 Turbo"
+          }
+        ],
+        "slots": [
+          {
+            "part": {
+              "alreadyHere": false,
+              "licenceId": "qwen-research",
+              "local": false,
+              "path": "qwen-image-2.1-step90000-Q4_0.gguf",
+              "repo": "chatrlabs/Qwen-Image-2.1-Uncensored-Omni-Quantized",
+              "role": "diffusion",
+              "sizeBytes": 4197522208
+            },
+            "required": true,
+            "role": "diffusion",
+            "source": "main",
+            "why": null
+          },
+          {
+            "part": {
+              "alreadyHere": false,
+              "licenceId": "apache-2.0",
+              "local": false,
+              "path": "Qwen3VL-8B-Instruct-Q8_0.gguf",
+              "repo": "Qwen/Qwen3-VL-8B-Instruct-GGUF",
+              "role": "llm",
+              "sizeBytes": 8709519456
+            },
+            "required": true,
+            "role": "llm",
+            "source": "companion",
+            "why": null
+          },
+          {
+            "part": {
+              "alreadyHere": false,
+              "licenceId": "apache-2.0",
+              "local": false,
+              "path": "mmproj-Qwen3VL-8B-Instruct-F16.gguf",
+              "repo": "Qwen/Qwen3-VL-8B-Instruct-GGUF",
+              "role": "llm-vision",
+              "sizeBytes": 1159029824
+            },
+            "required": false,
+            "role": "llm-vision",
+            "source": "companion",
+            "why": null
+          },
+          {
+            "part": {
+              "alreadyHere": false,
+              "licenceId": "qwen-research-2",
+              "local": false,
+              "path": "vae/qwen_image_2.1_vae_bf16.safetensors",
+              "repo": "Comfy-Org/Qwen-Image-2.1",
+              "role": "vae",
+              "sizeBytes": 675509688
+            },
+            "required": true,
+            "role": "vae",
+            "source": "companion",
+            "why": null
+          }
+        ],
+        "toFetchBytes": 14741581176,
+        "totalBytes": 14741581176,
+        "untested": false
+      },
+      "quant": "Q4_0"
+    }
+  ],
+  "gate": {
+    "collects": [],
+    "mode": "none"
+  },
+  "labelMismatch": null,
   "licence": {
-    "id": "qwen-research",
-    "name": "qwen-research",
-    "url": "https://huggingface.co/chatrlabs/Qwen-Image-2.1-Uncensored-Omni-Quantized/blob/af0343c259513913de8056af85819c70f627d681/LICENSE",
-    "sha256": "5f783423fd3de0c5b130d50d785b0522353910e2f291887c10c0a0cf7e12237a",
     "badge": "red",
     "commercial": "unclear",
-    "revenueLimitUsd": null,
+    "id": "qwen-research",
+    "name": "qwen-research",
+    "obligations": [],
     "plainWords": "Check the licence before you use what you make.",
-    "obligations": []
+    "revenueLimitUsd": null,
+    "sha256": "5f783423fd3de0c5b130d50d785b0522353910e2f291887c10c0a0cf7e12237a",
+    "url": "https://huggingface.co/chatrlabs/Qwen-Image-2.1-Uncensored-Omni-Quantized/blob/af0343c259513913de8056af85819c70f627d681/LICENSE"
   },
   "licences": [
     {
-      "id": "qwen-research",
-      "name": "qwen-research",
-      "url": "https://huggingface.co/chatrlabs/Qwen-Image-2.1-Uncensored-Omni-Quantized/blob/af0343c259513913de8056af85819c70f627d681/LICENSE",
-      "sha256": "5f783423fd3de0c5b130d50d785b0522353910e2f291887c10c0a0cf7e12237a",
       "badge": "red",
       "commercial": "unclear",
-      "revenueLimitUsd": null,
+      "id": "qwen-research",
+      "name": "qwen-research",
+      "obligations": [],
       "plainWords": "Check the licence before you use what you make.",
-      "obligations": []
+      "revenueLimitUsd": null,
+      "sha256": "5f783423fd3de0c5b130d50d785b0522353910e2f291887c10c0a0cf7e12237a",
+      "url": "https://huggingface.co/chatrlabs/Qwen-Image-2.1-Uncensored-Omni-Quantized/blob/af0343c259513913de8056af85819c70f627d681/LICENSE"
+    },
+    {
+      "badge": "green",
+      "commercial": "yes",
+      "id": "apache-2.0",
+      "name": "Apache License 2.0",
+      "obligations": [
+        "Keep the licence and copyright notices with the files."
+      ],
+      "plainWords": "Free for any use, including commercial.",
+      "revenueLimitUsd": null,
+      "sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30",
+      "url": "https://www.apache.org/licenses/LICENSE-2.0.txt"
+    },
+    {
+      "badge": "red",
+      "commercial": "no",
+      "id": "qwen-research-2",
+      "name": "Qwen Research License Agreement",
+      "obligations": [
+        "Give a copy of the licence to anyone you pass the files to.",
+        "Keep Qwen's copyright notice with the files."
+      ],
+      "plainWords": "For research and testing only. Using it to make money needs a separate licence from Qwen.",
+      "revenueLimitUsd": null,
+      "sha256": "8dc973f024ff95966bea25866efa443fd16776dcb1001e681e3d467ea572b28d",
+      "url": "https://huggingface.co/Qwen/Qwen-Image-2.1/blob/d26bb61231c349cf6b7896fa83353113880e1ba3/LICENSE"
     }
   ],
-  "labelMismatch": null,
-  "gate": {
-    "mode": "none",
-    "collects": []
-  },
-  "readFiles": 6,
+  "loras": [],
+  "readFiles": 7,
+  "repo": "chatrlabs/Qwen-Image-2.1-Uncensored-Omni-Quantized",
+  "summary": "[![Try the Playground](https://img.shields.io/badge/Playground-Try_it_live-2563eb?style=for-the-badge)](https://thechatr.ai/playground) [![Base model](https://img.shields.io/badge/Hugging_Face-Base_model-ffcc4d?style=for-the-badge)](https://huggingface.co/Qwen/Qwen-Image-2.1) [![Chatr AI](https://img.shields.io/static/v1?label=CHATR%20AI&message=SUPPORT%20OUR%20RESEARCH&color=8B5CF6&labelColor=55…",
   "unreadFiles": 0,
-  "byHandRecipes": []
+  "verdict": {
+    "works": {
+      "kind": "picture",
+      "recipe": "qwen-image-21",
+      "version": "qwen-image-2.1"
+    }
+  }
 }

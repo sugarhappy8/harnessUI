@@ -130,9 +130,11 @@ export function PlanParts(props: {
   const rows = extraSlots(props.slots);
   const licenceOf = new Map(props.licences.map((l) => [l.id, l]));
   if (rows.length === 0) return null;
+  // "Extra files Studio adds" is a promise: while a part has no file, it does not hold.
+  const lacking = rows.some((s) => s.part === null);
   return (
     <Section
-      title={MODEL_DETAIL.extras}
+      title={lacking ? MODEL_DETAIL.extrasNeeded : MODEL_DETAIL.extras}
       note={
         props.busy && (
           <p role="status" className="text-sm text-fg-muted">
@@ -162,7 +164,7 @@ function PartRow(props: { slot: PlannedSlot; licence: string | null; onChoose?(r
   const { slot: s } = props;
   const labelId = useId();
   const p = s.part;
-  const detail = p === null ? MODEL_DETAIL.noFile : p.local ? MODEL_DETAIL.chosen(visiblePath(nameOf(p.path))) : props.licence;
+  const detail = p === null ? (s.why ?? MODEL_DETAIL.noFile) : p.local ? MODEL_DETAIL.chosen(visiblePath(nameOf(p.path))) : props.licence;
   return (
     <li data-part={s.role} className="flex items-center gap-3 px-3 py-2.5">
       <div className="min-w-0 flex-1">

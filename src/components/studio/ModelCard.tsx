@@ -256,17 +256,19 @@ export function TimeLine(props: { fit: LocalFit; kind: MediaKind }) {
 }
 
 /** What a verdict is, for its badge's colour and icon. */
-type VerdictTone = "works" | "lora" | "cantRun" | "unknown";
+type VerdictTone = "works" | "needsFiles" | "lora" | "cantRun" | "unknown";
 
 function verdictTone(verdict: Verdict): VerdictTone {
   if (verdict === "unknown") return "unknown";
   if ("works" in verdict) return "works";
+  if ("needsFiles" in verdict) return "needsFiles";
   if ("lora" in verdict) return "lora";
   return "cantRun";
 }
 
 const VERDICT_STYLE: Record<VerdictTone, { exact: string; hint: string; icon: typeof CircleCheck }> = {
   works: { exact: "border-success/30 bg-success/10 text-success", hint: "border-success/40 text-success", icon: CircleCheck },
+  needsFiles: { exact: "border-warning/30 bg-warning/10 text-warning", hint: "border-warning/40 text-warning", icon: TriangleAlert },
   lora: { exact: "border-accent/30 bg-accent/10 text-accent", hint: "border-accent/40 text-accent", icon: Layers },
   cantRun: { exact: "border-danger/30 bg-danger/10 text-danger", hint: "border-danger/40 text-danger", icon: CircleSlash },
   unknown: { exact: "border-border bg-bg-muted text-fg-muted", hint: "border-border-strong text-fg-muted", icon: CircleHelp },
@@ -286,7 +288,9 @@ export function VerdictBadge(props: { verdict: Verdict; exact: boolean }) {
     ? VERDICT.hint
     : verdict !== "unknown" && "cannotRun" in verdict
       ? FILE_LABEL.cannotRun(verdict.cannotRun.reason)
-      : null;
+      : verdict !== "unknown" && "needsFiles" in verdict
+        ? VERDICT.needsFilesTip
+        : null;
   const badge = (
     <span
       data-verdict={tone}
