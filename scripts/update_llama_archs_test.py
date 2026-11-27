@@ -31,9 +31,51 @@ class Parse(unittest.TestCase):
             mod.parse_names(source(["a", "b"]))
 
     def test_render_names_the_build_and_the_commit(self):
-        text = mod.render("b1", "c" * 40, ["llama", "qwen3"])
+        text = mod.render("llama.cpp b1", "c" * 40, ["llama", "qwen3"])
         self.assertTrue(text.startswith("# general.architecture values known to llama.cpp b1 (" + "c" * 40 + ")."))
         self.assertEqual(mod.names_in(text), ["llama", "qwen3"])
+
+
+class Targets(unittest.TestCase):
+    """Which list is made from which commit: the main pin, or the ROCm download's."""
+
+    LOCK = {
+        "llama_cpp": {"tag": "b9", "commit": "a" * 40},
+        "packs": [
+            {"id": "cuda", "build": "b9"},
+            {"id": "rocm", "build": "lemonade-b7", "upstream_llama_cpp_commit": "b" * 40},
+        ],
+    }
+
+    def test_the_main_list_comes_from_the_pin(self):
+        what, commit, out = mod.target(self.LOCK, "main")
+        self.assertEqual((what, commit, out.name), ("llama.cpp b9", "a" * 40, "llama-architectures.txt"))
+
+    def test_the_rocm_list_comes_from_the_commit_of_the_download(self):
+        what, commit, out = mod.target(self.LOCK, "rocm")
+        self.assertEqual(
+            (what, commit, out.name),
+            ("llama.cpp in the ROCm download lemonade-b7", "b" * 40, "llama-architectures-rocm.txt"),
+        )
+
+    def test_a_short_or_missing_commit_is_refused(self):
+        for bad in ("0eebb6edd", "", None, "Z" * 40):
+            lock = {**self.LOCK, "packs": [{"id": "rocm", "build": "lemonade-b7", "upstream_llama_cpp_commit": bad}]}
+            with self.assertRaises(SystemExit) as e:
+                mod.target(lock, "rocm")
+            self.assertIn("40-character", str(e.exception))
+
+    def test_a_lock_without_the_pack_is_refused(self):
+        with self.assertRaises(SystemExit):
+            mod.target({**self.LOCK, "packs": []}, "rocm")
+
+    def test_the_header_names_what_the_list_is_from(self):
+        text = mod.render("llama.cpp in the ROCm download lemonade-b7", "b" * 40, ["llama"])
+        self.assertTrue(
+            text.startswith(
+                "# general.architecture values known to llama.cpp in the ROCm download lemonade-b7 (" + "b" * 40 + ")."
+            )
+        )
 
 
 class Checkout(unittest.TestCase):
