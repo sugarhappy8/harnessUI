@@ -163,6 +163,16 @@ pub async fn load_local_model(
         state.runtime.cancel_waiting();
         return result;
     }
+    // A kind this version's runner does not know is refused before anything is stopped: the
+    // model that works stays loaded, and the words say what is true (not "download it again").
+    if let Some(refusal) = unknown_kind_refusal(
+        &model,
+        plan.resolved.backend.as_deref(),
+        crate::hub::dev_engine(),
+    ) {
+        state.runtime.cancel_waiting();
+        return Err(refusal);
+    }
     let waited = after_backend_check(
         state.runtime.check_backend(&plan.resolved),
         state
@@ -177,6 +187,42 @@ pub async fn load_local_model(
         plan
     };
     run_load(&state, model, &plan).await
+}
+
+/// Why a model file must not be loaded because of the kind its own header names, or `None`.
+/// What loads the same on every backend of this build: a kind the list of the pinned build does
+/// not have ends in "unknown model architecture" after the loaded model was stopped, so it is
+/// refused first, in the words of that failure ([`runtime::LoadFailure::UnknownArchitecture`]);
+/// a speech or picture kind the runner does not know gets the page's words for it (no update
+/// brings those). Left to the load itself: a header that cannot be read, a file that names no
+/// kind, a development engine (`dev_engine`: it may know more) and the ROCm download (its
+/// build is newer than the list's, so it may know kinds the list lacks).
+fn unknown_kind_refusal(
+    model: &std::path::Path,
+    backend: Option<&str>,
+    dev_engine: bool,
+) -> Option<AppError> {
+    if dev_engine || backend == Some("rocm") {
+        return None;
+    }
+    let header = models::read_file(model).ok()?;
+    let kind = header.architecture()?.trim();
+    if kind.is_empty() || models::arch::is_supported(kind) {
+        return None;
+    }
+    Some(match models::arch::not_for_chat(Some(kind), None) {
+        Some(models::arch::Why::Speech) => crate::studio::errors::speech_model(),
+        Some(models::arch::Why::Picture) => crate::studio::errors::picture_model(),
+        _ => {
+            let failure = runtime::LoadFailure::UnknownArchitecture;
+            AppError::new(
+                "load_failed",
+                failure.user_message(),
+                failure.next_step(),
+                format!("unknown model architecture: {kind}"),
+            )
+        }
+    })
 }
 
 /// Unloads the model ("Unload to free memory"), and remembers it in `unloaded_path` for
@@ -812,6 +858,65 @@ fn diagnostic_load(backend: &str, device: Option<String>) -> load::ResolvedLoad 
 
 #[cfg(test)]
 mod tests {
+    use std::path::PathBuf;
+
+    fn model_of(kind: Option<&str>) -> PathBuf {
+        let path = std::env::temp_dir().join(format!("kind-{}.gguf", uuid::Uuid::new_v4()));
+        let mut w = models::gguf::testing::Writer::new().u32("general.file_type", 15);
+        if let Some(kind) = kind {
+            w = w.str("general.architecture", kind);
+        }
+        std::fs::write(&path, w.build()).unwrap();
+        path
+    }
+
+    /// The owner's chat: picking a model whose kind the runner does not know stopped the loaded
+    /// model, failed, and said "download it again". It is refused before anything is stopped,
+    /// with the words of the failure it would have ended in.
+    #[test]
+    fn a_kind_the_runner_does_not_know_is_refused_before_anything_stops() {
+        let refusal = |kind: Option<&str>, backend: Option<&str>, dev: bool| {
+            let path = model_of(kind);
+            let r = super::unknown_kind_refusal(&path, backend, dev);
+            let _ = std::fs::remove_file(path);
+            r
+        };
+        let e = refusal(Some("futurearch"), None, false).unwrap();
+        assert_eq!(e.code, "load_failed");
+        assert_eq!(e.message, "This version can't open this kind of model yet.");
+        assert!(e.next_step.contains("Check for updates"), "{}", e.next_step);
+        assert!(!e.next_step.contains("Download the model again"));
+        // Models the runner opens, and ones the load itself judges.
+        assert!(refusal(Some("qwen3"), None, false).is_none());
+        assert!(refusal(Some("inkling2_loop"), Some("vulkan"), false).is_none());
+        assert!(
+            refusal(None, None, false).is_none(),
+            "no kind: llama.cpp says so itself"
+        );
+        assert!(
+            refusal(Some("futurearch"), Some("rocm"), false).is_none(),
+            "ROCm may know it"
+        );
+        assert!(
+            refusal(Some("futurearch"), None, true).is_none(),
+            "a development engine may"
+        );
+        // A kind no update brings gets the page's words, not a promise.
+        assert_eq!(
+            refusal(Some("whisper"), None, false).unwrap().code,
+            "speech_model"
+        );
+        assert_eq!(
+            refusal(Some("flux"), None, false).unwrap().code,
+            "picture_model"
+        );
+        // A file that is not GGUF at all: the load's own failure.
+        let junk = std::env::temp_dir().join(format!("junk-{}.gguf", uuid::Uuid::new_v4()));
+        std::fs::write(&junk, b"not a model").unwrap();
+        assert!(super::unknown_kind_refusal(&junk, None, false).is_none());
+        let _ = std::fs::remove_file(junk);
+    }
+
     /// 0.0.7 (P6b review m6): a load or reload whose backend cannot run here stops nothing.
     /// Before, "Stop and restart" stopped the reply first and the backend was refused only
     /// then.

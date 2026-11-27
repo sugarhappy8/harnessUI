@@ -1083,7 +1083,7 @@ pub async fn list_installed_models(
 
 /// Whether a development runtime directory is in use (`APP_DEV_LLAMA_DIR`): its engine may know
 /// more kinds than the list of the pinned build does.
-fn dev_engine() -> bool {
+pub(crate) fn dev_engine() -> bool {
     std::env::var_os(runtime::llama::backend::DEV_OVERRIDE_ENV).is_some_and(|v| !v.is_empty())
 }
 

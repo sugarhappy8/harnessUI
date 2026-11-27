@@ -865,6 +865,29 @@ class ModelsCantOpenDocs(unittest.TestCase):
         for words in ("`models::arch::page_architecture`", "claim nothing", "`engineKnows`", "model picker", "`UnknownArchitecture`"):
             self.assertIn(words, text)
 
+    def test_it_names_the_file_checks_and_they_exist(self):
+        text = self.paragraph()
+        for words in (
+            "`hub::download_refusal`",
+            "`models_cmd::unknown_kind_refusal`",
+            "`ModelSummary.older_layout`",
+            "`models::summary::early_layout`",
+            "`LoadFailure::UnknownArchitecture`",
+            "`ModelFileInvalid`",
+            "`Why`",
+            "`cantOpenWhy`",
+            "cannot say whether one particular file loads",
+        ):
+            self.assertIn(words, text)
+        self.assertIn("pub(crate) fn download_refusal", read("src-tauri/src/hub.rs"))
+        self.assertIn("fn unknown_kind_refusal", read("src-tauri/src/models_cmd.rs"))
+        self.assertIn("pub fn early_layout", read("crates/models/src/summary.rs"))
+        self.assertIn("pub older_layout", read("crates/models/src/summary.rs"))
+        self.assertIn("UnknownArchitecture,", read("crates/runtime/src/llama/failure.rs"))
+        self.assertIn("pub enum Why", read("crates/models/src/arch.rs"))
+        for fixture in ("stderr_tensor_not_found.txt", "stderr_unknown_architecture.txt"):
+            self.assertTrue((ROOT / "crates/runtime/tests/fixtures" / fixture).exists(), fixture)
+
     def test_what_it_names_exists(self):
         text = self.paragraph()
         self.assertIn("pub fn page_architecture", read("crates/models/src/arch.rs"))
