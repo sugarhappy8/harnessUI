@@ -142,7 +142,7 @@
       "build": "b12774",
       "dir": "cuda-b12774",
       "title": "NVIDIA CUDA 13",
-      "requirements": "NVIDIA RTX 20 / GTX 16 series or newer, driver 580 or newer",
+      "requirements": "NVIDIA RTX 30 series or newer, driver 580 or newer. RTX 20 and GTX 16 cards may need driver 620 or newer.",
       "license_name": "NVIDIA CUDA Toolkit End User License Agreement (runtime libraries); llama.cpp MIT",
       "license_url": "https://docs.nvidia.com/cuda/eula/index.html",
       "files": [

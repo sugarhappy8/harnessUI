@@ -43,7 +43,7 @@ pub struct Props {
     pub n_ctx: u32,
     /// The model path the server loaded.
     pub model_path: String,
-    /// Build string, for example `b12110-cd959bae9`.
+    /// Build string, for example `b12774-171527522`.
     pub build_info: Option<String>,
     /// Number of slots.
     pub total_slots: Option<u32>,
