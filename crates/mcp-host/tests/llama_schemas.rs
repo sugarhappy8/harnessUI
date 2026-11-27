@@ -97,15 +97,23 @@ fn odd_schemas() -> Vec<(&'static str, Value)> {
 }
 
 /// The odd schemas the pinned llama-server answers with HTTP 400 when they are sent as they
-/// are, checked on b12110 and on b12774. Only the ones that fail fast are named here: the
-/// three that make it expand a grammar (`large_min_length`, `large_min_items`,
-/// `min_length_above_max`) are never sent raw.
-const REFUSED_AS_SENT: [&str; 8] = [
+/// are, on every processor: checked on b12110 and on b12774 on x86-64 Linux, and their
+/// refusals come from the schema's own words, not from the machine. Only the ones that fail
+/// fast are named here: the three that make it expand a grammar (`large_min_length`,
+/// `large_min_items`, `min_length_above_max`) are never sent raw.
+///
+/// `huge_integer_bound` is left out on purpose. llama.cpp reads a bound that is not a
+/// whole number with `(int64_t) std::floor(d)` (`common/json-schema.cpp`, `get_bound`), and
+/// for `1e20` that cast is undefined. An x86-64 processor gives the lowest integer, so the
+/// server refuses the schema; an Apple processor (ARM64) gives the highest, which the
+/// converter reads as "no upper bound", so it accepts it (seen on the macOS CI job at
+/// b12774, HTTP 200). b12110 has the same line. Its simplified copy, which has no such
+/// bound, is still checked below on every machine.
+const REFUSED_AS_SENT: [&str; 7] = [
     "false_field",
     "empty_enum",
     "negative_min_items",
     "fractional_min_length",
-    "huge_integer_bound",
     "missing_definition",
     "anchor_reference",
     "remote_reference",
