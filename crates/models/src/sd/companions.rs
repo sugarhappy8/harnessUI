@@ -39,6 +39,20 @@ pub struct Companion {
     pub license: String,
 }
 
+/// A slot of a recipe the table gives no default for on purpose, and why: a file the person
+/// has to choose, or one Studio cannot make run. The guard test
+/// (`every_recipe_studio_runs_is_covered_or_says_why`) fails for any other recipe whose
+/// required slot has no default, so a gap is never shipped by accident; and a set-up plan
+/// says the reason beside the slot, in place of a promise that Studio adds the file.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NotCovered {
+    pub recipe: String,
+    pub slot: SlotId,
+    /// One plain sentence for the person, in the voice of `src/lib/words.ts`.
+    pub reason: String,
+}
+
 /// The catalog's `companions` section, checked ([`CompanionTable::from_catalog`]).
 #[derive(Debug, Clone, PartialEq, Default, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
@@ -50,6 +64,8 @@ pub struct CompanionTable {
     pub by_version: BTreeMap<SdVersion, BTreeMap<SlotId, String>>,
     /// Defaults for one recipe, which win over its version's.
     pub by_recipe: BTreeMap<String, BTreeMap<SlotId, String>>,
+    /// The slots no default is given for, on purpose ([`NotCovered`]).
+    pub not_covered: Vec<NotCovered>,
     /// What [`CompanionTable::from_catalog`] left out, each also logged as a warning.
     #[serde(skip)]
     pub skipped: Vec<Skipped>,
@@ -90,6 +106,16 @@ struct TableRaw {
     files: Vec<CompanionRaw>,
     by_version: BTreeMap<String, BTreeMap<String, String>>,
     by_recipe: BTreeMap<String, BTreeMap<String, String>>,
+    not_covered: Vec<NotCoveredRaw>,
+}
+
+/// A [`NotCovered`] as the catalog writes it: the slot word is a string, so that one a
+/// newer catalog adds is skipped.
+#[derive(Deserialize)]
+struct NotCoveredRaw {
+    recipe: String,
+    slot: String,
+    reason: String,
 }
 
 /// The value of a unit enum a word names, by the enum's own serde names; `None` for a word
@@ -158,7 +184,8 @@ impl CompanionTable {
     /// - an unknown version word in a file's `versions`; a file left with no known version,
     ///   or with an unknown slot word or an adapter slot;
     /// - a `byVersion` row of an unknown version, a `byRecipe` row of an unknown recipe or
-    ///   of one Studio leaves out, and a default of an unknown slot or naming a skipped file.
+    ///   of one Studio leaves out, and a default of an unknown slot or naming a skipped file;
+    /// - a `notCovered` entry of an unknown slot or recipe, or of one Studio leaves out.
     ///
     /// Refused, naming what is wrong, when:
     /// - a licence does not read otherwise, or one with bundled text does not pin it;
@@ -166,7 +193,8 @@ impl CompanionTable {
     ///   size 0, an extension not in [`ALLOWED_PART_EXTENSIONS`], or an id listed twice;
     /// - a file fills a model slot, or names a licence that is not listed;
     /// - a default names no companion, or one of another slot, or one whose `versions`
-    ///   leave out the version (for `byRecipe`, every version whose recipes include it).
+    ///   leave out the version (for `byRecipe`, every version whose recipes include it);
+    /// - a `notCovered` entry with no reason, or listed twice.
     pub fn from_catalog(catalog: &Catalog) -> Result<CompanionTable, String> {
         let raw = Value::Object(catalog.companions.clone().into_iter().collect());
         let raw: TableRaw = serde_json::from_value(raw)
@@ -254,6 +282,25 @@ impl CompanionTable {
             }
         }
 
+        let mut not_covered = Vec::new();
+        for n in raw.not_covered {
+            let place = format!("notCovered {} {}", n.recipe, n.slot);
+            match known::<SlotId>(&n.slot) {
+                None => skips.skip(place, "a slot this build does not know".into()),
+                Some(_) if recipe(&n.recipe).is_none() => {
+                    skips.skip(place, "a recipe this build does not know".into())
+                }
+                Some(_) if out_of_scope(&n.recipe).is_some() => {
+                    skips.skip(place, "a recipe Studio leaves out".into())
+                }
+                Some(slot) => not_covered.push(NotCovered {
+                    recipe: n.recipe,
+                    slot,
+                    reason: n.reason,
+                }),
+            }
+        }
+
         for s in &skips.list {
             tracing::warn!(
                 place = %s.place,
@@ -266,6 +313,7 @@ impl CompanionTable {
             files,
             by_version,
             by_recipe,
+            not_covered,
             skipped: skips.list,
         };
         table.check()?;
@@ -288,6 +336,15 @@ impl CompanionTable {
             .chain(by_version)
             .filter_map(|id| self.file(id))
             .find(|c| c.versions.contains(&version))
+    }
+
+    /// Why the table gives a recipe no default for `slot` ([`NotCovered`]), if it is one of
+    /// the slots it leaves out on purpose.
+    pub fn not_covered_reason(&self, recipe_id: &str, slot: SlotId) -> Option<&str> {
+        self.not_covered
+            .iter()
+            .find(|n| n.recipe == recipe_id && n.slot == slot)
+            .map(|n| n.reason.as_str())
     }
 
     /// The companion with this SHA-256, whatever repo it was installed from.
@@ -338,6 +395,16 @@ impl CompanionTable {
                 continue;
             };
             return Err(format!("companion {id}: {fault}"));
+        }
+        let mut seen = BTreeSet::new();
+        for n in &self.not_covered {
+            let place = format!("notCovered {} {}", n.recipe, n.slot.word());
+            if n.reason.trim().is_empty() {
+                return Err(format!("{place}: no reason"));
+            }
+            if !seen.insert((n.recipe.as_str(), n.slot)) {
+                return Err(format!("{place}: listed twice"));
+            }
         }
         for (version, slots) in &self.by_version {
             let place = format!("byVersion {}", version.word());
@@ -430,6 +497,139 @@ mod tests {
         CompanionTable {
             skipped: Vec::new(),
             ..t.clone()
+        }
+    }
+
+    // ---- The guard: no recipe Studio runs may be a dead end ----------------------------------
+
+    /// The recipe's slots that stay empty when its model is one lone file: no other file in
+    /// its repository, nothing installed, nothing the file carries (a diffusion model alone,
+    /// the worst case). Each is a place where Studio would show *Choose a file* and nothing
+    /// else, and the model could not start. A high/low pair is given its sibling file, so the
+    /// pair does not hide a gap in the companions.
+    fn gaps(table: &CompanionTable) -> BTreeMap<(String, SlotId), Vec<SdVersion>> {
+        use crate::files::RepoFile;
+        use crate::sd::FileFacts;
+        use crate::sd::index::FileFormat;
+        use crate::sd::inspect::{FileKind, Layout, MatchFacts};
+        use crate::sd::matching::{NoisePart, in_scope_recipes};
+        use crate::sd::setup::{MainFile, PartSource, SetupInput, plan_setup};
+
+        let file = |path: &str| RepoFile {
+            path: path.into(),
+            size: 1000,
+            sha256: Some("a".repeat(64)),
+        };
+        let mut found: BTreeMap<(String, SlotId), Vec<SdVersion>> = BTreeMap::new();
+        for id in in_scope_recipes() {
+            let r = recipe(id).unwrap();
+            let paired = r.slot(SlotId::HighNoiseDiffusionModel).is_some();
+            let (main, listing, part) = if paired {
+                (
+                    file("wan2.2_t2v_high_noise_14B_fp8.safetensors"),
+                    vec![file("wan2.2_t2v_low_noise_14B_fp8.safetensors")],
+                    Some(NoisePart::High),
+                )
+            } else {
+                (file("model.safetensors"), Vec::new(), None)
+            };
+            for v in SdVersion::ALL
+                .into_iter()
+                .filter(|v| recipes_for(*v).contains(&id))
+            {
+                let facts = FileFacts {
+                    kind: FileKind::Model {
+                        version: v,
+                        layout: Layout::DiffusionOnly,
+                        embeds: Vec::new(),
+                    },
+                    facts: MatchFacts::default(),
+                    parameters: 1_000_000_000,
+                    format: FileFormat::Safetensors,
+                };
+                let plan = plan_setup(&SetupInput {
+                    main: MainFile::Hub {
+                        repo: "someone/model",
+                        revision: "0123456789abcdef0123456789abcdef01234567",
+                        file: &main,
+                    },
+                    facts: &facts,
+                    recipe: r,
+                    version: Some(v),
+                    part,
+                    listing: &listing,
+                    listing_facts: &BTreeMap::new(),
+                    installed: &[],
+                    companions: table,
+                    overrides: &[],
+                    untested: false,
+                });
+                for p in plan
+                    .parts
+                    .iter()
+                    .filter(|p| p.source == PartSource::Missing)
+                {
+                    let versions = found.entry((id.to_owned(), p.slot)).or_default();
+                    if !versions.contains(&v) {
+                        versions.push(v);
+                    }
+                }
+            }
+        }
+        found
+    }
+
+    /// Every recipe Studio runs can start from its main file alone: each required slot, and
+    /// the VAE or tiny decoder a required pair asks for, has a default in the table for every
+    /// version that reaches the recipe (`byVersion`, or `byRecipe` for one recipe), unless the
+    /// recipe and slot are listed in the catalog's `notCovered` with a reason. This is what
+    /// stops a release from offering "Works in Studio" for a model that then asks the person
+    /// for a file Studio could have named (design section 4: no dead end).
+    #[test]
+    fn every_recipe_studio_runs_is_covered_or_says_why() {
+        let t = bundled();
+        let mut dead_ends = Vec::new();
+        for ((recipe_id, slot), versions) in gaps(&t) {
+            if t.not_covered_reason(&recipe_id, slot).is_some() {
+                continue;
+            }
+            let words: Vec<&str> = versions.iter().map(|v| v.word()).collect();
+            dead_ends.push(format!(
+                "{recipe_id} ({}) has no default for {}",
+                words.join(", "),
+                slot.word()
+            ));
+        }
+        assert!(
+            dead_ends.is_empty(),
+            "{} slots would leave a model that cannot start, and no way to fix it in the app. \
+             Add a verified companion to catalog/models.json (byVersion or byRecipe), or list the \
+             recipe and slot under companions.notCovered with a plain reason:\n{}",
+            dead_ends.len(),
+            dead_ends.join("\n")
+        );
+    }
+
+    /// The allowlist holds only slots that really have no default, each with its reason: an
+    /// entry the table now covers is stale and must go, so the page never says Studio cannot
+    /// find a file it can.
+    #[test]
+    fn the_allowlist_holds_only_real_gaps_with_reasons() {
+        let t = bundled();
+        let gaps = gaps(&t);
+        for n in &t.not_covered {
+            assert!(
+                gaps.contains_key(&(n.recipe.clone(), n.slot)),
+                "notCovered {} {}: the table gives it a default now, so remove the entry",
+                n.recipe,
+                n.slot.word()
+            );
+            assert!(
+                n.reason.ends_with('.') && n.reason.len() < 200,
+                "notCovered {} {}: the reason is one short sentence",
+                n.recipe,
+                n.slot.word()
+            );
         }
     }
 
