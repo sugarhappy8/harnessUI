@@ -129,6 +129,16 @@ pub enum Verdict {
         #[serde(default)]
         recipe: Option<String>,
     },
+    /// A model Studio recognises and has a recipe for, none of whose files can start: each
+    /// lacks a part nothing fills (the companion table has none for it, and the repository
+    /// none), so it is not *Works in Studio*. Made only where the plans are (a repository's
+    /// opening), never by [`verdict_of`], which reads labels.
+    NeedsFiles {
+        version: SdVersion,
+        kind: RecipeKind,
+        #[serde(default)]
+        recipe: Option<String>,
+    },
     Lora {
         base: Option<SdVersion>,
     },

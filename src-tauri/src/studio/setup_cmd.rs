@@ -221,6 +221,7 @@ fn unplaced_files(row: &store::GenModel) -> AppResult<ModelFilesDto> {
                     already_here: true,
                     local: part.local.is_some(),
                 }),
+                why: None,
             }
         })
         .collect();

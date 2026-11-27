@@ -1426,6 +1426,9 @@ pub struct PlannedSlotDto {
     pub source: PartSource,
     /// `None` when the main file carries the part (`embedded`) and when nothing fills it.
     pub part: Option<PartDto>,
+    /// Why Studio can't fill the slot, for a `missing` one the catalog lists on purpose
+    /// (`companions.notCovered`); `None` for any other.
+    pub why: Option<String>,
 }
 
 /// What setting a model up takes (`studio_setup_plan`, and each file of a repository): its

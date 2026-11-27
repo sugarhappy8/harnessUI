@@ -227,7 +227,7 @@ impl GenSearchKind {
     /// run; never a name that says nothing (a chat model).
     fn keeps(self, hint: &Verdict) -> bool {
         match hint {
-            Verdict::Works { kind, .. } => match self {
+            Verdict::Works { kind, .. } | Verdict::NeedsFiles { kind, .. } => match self {
                 Self::Pictures => *kind != RecipeKind::Video,
                 Self::Video => *kind == RecipeKind::Video,
                 Self::Loras => true,
@@ -243,10 +243,12 @@ impl GenSearchKind {
     fn rank(self, hint: &Verdict) -> u8 {
         match (self, hint) {
             (Self::Loras, Verdict::Lora { .. }) => 0,
-            (Self::Loras, Verdict::Works { .. }) => 1,
-            (_, Verdict::Works { .. }) if self.keeps(hint) => 0,
+            (Self::Loras, Verdict::Works { .. } | Verdict::NeedsFiles { .. }) => 1,
+            // A hint is never "needs files" (only an opened repository is), but it ranks as a
+            // model of its kind all the same.
+            (_, Verdict::Works { .. } | Verdict::NeedsFiles { .. }) if self.keeps(hint) => 0,
             (_, Verdict::Lora { .. }) => 1,
-            (_, Verdict::Works { .. } | Verdict::Unknown) => 2,
+            (_, Verdict::Works { .. } | Verdict::NeedsFiles { .. } | Verdict::Unknown) => 2,
             (_, Verdict::CannotRun { .. }) => 3,
         }
     }
