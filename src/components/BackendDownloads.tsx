@@ -5,6 +5,7 @@ import { openUrl } from "@tauri-apps/plugin-opener";
 import * as ipc from "../lib/ipc";
 import type { ErrorInfo, PackInfo, PackProgress } from "../lib/types";
 import { formatBytes } from "../lib/format";
+import { PACK_OLDER } from "../lib/words";
 import { toErrorInfo } from "../store/app";
 import { ErrorBanner } from "./ErrorBanner";
 
@@ -74,6 +75,15 @@ export function BackendDownloads(props: { onChanged: () => void }) {
     }
   }
 
+  async function removeOlder(p: PackInfo) {
+    try {
+      await ipc.removePack(p.id, true);
+      await load();
+    } catch (err) {
+      setError(toErrorInfo(err));
+    }
+  }
+
   if (packs.length === 0) return null;
   return (
     <section>
@@ -97,6 +107,19 @@ export function BackendDownloads(props: { onChanged: () => void }) {
                     {p.requirements} · {formatBytes(p.downloadBytes)}
                   </p>
                   {p.reason && <p className="text-xs text-fg-muted">{p.reason}</p>}
+                  {p.olderBytes > 0 && (
+                    <p className="text-xs text-fg-muted">
+                      {p.state === "installed" ? PACK_OLDER.leftover(formatBytes(p.olderBytes)) : PACK_OLDER.stale}{" "}
+                      <button
+                        type="button"
+                        aria-label={PACK_OLDER.removeLabel(p.title)}
+                        onClick={() => void removeOlder(p)}
+                        className="underline hover:text-fg"
+                      >
+                        {PACK_OLDER.remove}
+                      </button>
+                    </p>
+                  )}
                 </div>
                 {p.state === "installed" ? (
                   <button

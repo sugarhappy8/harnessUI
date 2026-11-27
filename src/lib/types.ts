@@ -571,6 +571,8 @@ export interface PackInfo {
   downloadBytes: number;
   state: "notInstalled" | "partial" | "downloading" | "installed";
   bytesDone: number;
+  /** Bytes an older build of this pack still takes (0: none): an update leaves them unused. */
+  olderBytes: number;
   available: boolean;
   reason: string | null;
 }

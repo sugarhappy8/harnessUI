@@ -275,6 +275,20 @@ export function imageFileProgress(done: number, total: number): string {
 }
 
 /**
+ * Settings → Local models → Backend downloads, when an older build of a download is on disk.
+ * A download's folder carries the build, so an app update that moves the build leaves the old
+ * one unused and the new one to download; the load says the same in Rust (`older_build_error`).
+ */
+export const PACK_OLDER = {
+  /** The chosen backend's download is from before the update: it can't be used. */
+  stale: "The download on this computer is from an older version of the app, so it can't be used. Download it again to use it.",
+  /** The new download is there, and the old one still takes room. */
+  leftover: (size: string) => `An older download from before the update still takes up ${size}.`,
+  remove: "Remove the old download",
+  removeLabel: (title: string) => `Remove the old ${title} download`,
+} as const;
+
+/**
  * A model whose kind this version of the app cannot open yet: the model runner it comes with
  * (the pinned llama-server) does not know the model's architecture, and only a newer version
  * brings a newer runner. The search card, the repository page, Installed and Compare say it in
