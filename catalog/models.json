@@ -1,8 +1,8 @@
 {
   "schemaVersion": 1,
   "sequence": 5,
-  "generated": "2026-11-24",
-  "note": "Pinned commits, sizes and SHA-256 were HEAD-verified on 2026-11-10 (docs/research/huggingface.md). 'tested' records a passing scripts/catalog_test.py run (template shapes and a real tool-call round trip) under the pinned llama.cpp. The picture and video parts (generators, generatorFamilies) were pinned from their Hugging Face listings on 2026-11-18 and 2026-11-20 (recorded in crates/models/tests/fixtures/hf/); each licence pins the SHA-256 of its text. The companions (shared text encoders, decoders and CLIP vision files) were pinned from their Hugging Face listings on 2026-11-24.",
+  "generated": "2026-11-27",
+  "note": "Pinned commits, sizes and SHA-256 were HEAD-verified on 2026-11-10 (docs/research/huggingface.md). 'tested' records a passing scripts/catalog_test.py run (template shapes and a real tool-call round trip) under the pinned llama.cpp. The picture and video parts (generators, generatorFamilies) were pinned from their Hugging Face listings on 2026-11-18 and 2026-11-20 (recorded in crates/models/tests/fixtures/hf/); each licence pins the SHA-256 of its text. The companions (shared text encoders, decoders and CLIP vision files) were pinned from their Hugging Face listings on 2026-11-24 and, for every recipe of 0.2.1 that lacked its files, on 2026-11-27, each checked again against the listing's size and SHA-256, the resolve headers and its licence's text.",
   "tiers": {
     "8": {
       "recommendedCtx": 16384,
