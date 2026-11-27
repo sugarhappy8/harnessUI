@@ -48,6 +48,30 @@ mod tests {
         assert!(!is_supported("# general.architecture values"));
     }
 
+    /// The model that showed the red box while the pin was v0.9.0: its architecture came
+    /// into llama.cpp after that build.
+    #[test]
+    fn inkling_two_is_known_since_the_v1_1_0_pin() {
+        assert!(is_supported("inkling2"));
+        assert!(is_supported("inkling2_loop"));
+    }
+
+    /// A pin change without `python3 scripts/update_llama_archs.py` leaves the list of
+    /// the old build in the app: every newer architecture would show the red box.
+    #[test]
+    fn the_list_was_made_from_the_pinned_commit() {
+        let lock: serde_json::Value =
+            serde_json::from_str(include_str!("../../../llama.lock.json")).unwrap();
+        let tag = lock["llama_cpp"]["tag"].as_str().unwrap();
+        let commit = lock["llama_cpp"]["commit"].as_str().unwrap();
+        let header = LIST.lines().next().unwrap();
+        assert!(
+            header.contains(&format!("llama.cpp {tag} ({commit})")),
+            "catalog/llama-architectures.txt is not from the pinned build {tag}; \
+             run python3 scripts/update_llama_archs.py (header: {header})"
+        );
+    }
+
     #[test]
     fn picture_and_video_architectures_are_known() {
         for a in [
