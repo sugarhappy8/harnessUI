@@ -108,7 +108,7 @@ mod tests {
             Props::parse(include_str!("../../tests/fixtures/props.json")).expect("fixture parses");
         assert_eq!(props.n_ctx, 4096);
         assert_eq!(props.model_path, "Qwen3-0.6B-Q8_0.gguf");
-        assert_eq!(props.build_info.as_deref(), Some("b12110-cd959bae9"));
+        assert_eq!(props.build_info.as_deref(), Some("b12774-171527522"));
         assert_eq!(props.total_slots, Some(1));
         assert_eq!(
             props.chat_template_caps,
