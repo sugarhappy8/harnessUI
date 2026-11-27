@@ -352,6 +352,37 @@ class LlamaPinDocs(unittest.TestCase):
         numbers = paragraph(section("### 1.1 Installer and GPU backends"), "| CUDA 13 |")
         self.assertIn(f"| {download:.2f} GB |", numbers, "Backends in numbers: the CUDA download is the lock's sizes added")
 
+    def rocm(self) -> dict:
+        return next(pack for pack in self.lock()["packs"] if pack["id"] == "rocm")
+
+    def test_the_rocm_download_the_docs_name_is_the_locks(self):
+        rocm = self.rocm()
+        layout = "\n".join(section("### 7.1 Pinning and layout"))
+        for entry in rocm["files"]:
+            self.assertIn(f"`{entry['name']}`", layout, "7.1's table names the ROCm archive the lock pins")
+        self.assertIn(f"`<local data>/backends/{rocm['dir']}/`", layout)
+        download = sum(f["size"] for f in rocm["files"]) / 1e9
+        numbers = paragraph(section("### 1.1 Installer and GPU backends"), "| ROCm |")
+        self.assertIn(f"| {download:.2f} GB |", numbers, "Backends in numbers: the ROCm download is the lock's size")
+        bullet = paragraph(section("### 7.1 Pinning and layout"), "- **One build per directory.**")
+        commit = rocm["upstream_llama_cpp_commit"]
+        self.assertRegex(commit, r"^[0-9a-f]{40}$", "the lock writes the commit of the ROCm build in full")
+        self.assertIn(f"`{commit[:9]}`", bullet, "7.1 names the llama.cpp commit the ROCm build comes from")
+
+    def test_the_rocm_list_is_said_to_be_checked_by_tests_that_exist(self):
+        bullet = paragraph(section("### 7.1 Pinning and layout"), "- **The architecture list.**")
+        arch = read("crates/models/src/arch.rs")
+        for words in ("`catalog/llama-architectures-rocm.txt`", "`--pack rocm`", "a second llama.cpp", "no step down to Vulkan"):
+            self.assertIn(words, bullet)
+        for test in ("the_rocm_download_knows_every_architecture_the_list_claims", "the_rocm_list_was_made_from_the_commit_of_the_download"):
+            self.assertIn(f"fn {test}", arch)
+            self.assertIn(f"`{test}`", bullet)
+        self.assertNotIn("knows fewer names than the list; the list does not know that", bullet)
+        step = paragraph(section(self.HOWTO), "8. **The ROCm download")
+        for words in ("`qualification-data`", "`upstream_sha`", "`--pack rocm`", "`ROCM_MAX_DIR_CHARS`", "checksums.txt"):
+            self.assertIn(words, step)
+        self.assertIn("pub const ROCM_MAX_DIR_CHARS", read("crates/runtime/src/packs.rs"))
+
     def test_the_bump_list_names_files_that_exist(self):
         text = "\n".join(section(self.HOWTO))
         self.assertGreater(len(text), 1000, "the how-to-bump list is missing")
@@ -363,7 +394,7 @@ class LlamaPinDocs(unittest.TestCase):
     def test_the_bump_list_names_flags_and_tests_that_exist(self):
         text = "\n".join(section(self.HOWTO))
         script = read("scripts/update_llama_archs.py")
-        for flag in ("--source", "--check"):
+        for flag in ("--source", "--check", "--pack"):
             self.assertIn(flag, text)
             self.assertIn(f'"{flag}"', script, f"update_llama_archs.py has no {flag}")
         crates = {"runtime": "crates/runtime", "agent": "crates/agent", "mcp-host": "crates/mcp-host"}
