@@ -99,7 +99,7 @@ pub struct Backend {
     pub server: PathBuf,
     /// The `llama-fit-params` executable, when present.
     pub fit_params: Option<PathBuf>,
-    /// The llama.cpp build in the directory (`b12110`, `lemonade-b1372`, `dev`).
+    /// The llama.cpp build in the directory (`b12774`, `lemonade-b1372`, `dev`).
     pub build: String,
     /// Where the directory came from.
     pub source: BackendSource,
