@@ -27,6 +27,10 @@ pub enum Why {
     /// A speech or sound model ([`is_speech`], or an author's task of that kind): it can't chat,
     /// and nothing in this app uses it.
     Speech,
+    /// A file in an early layout of a kind the engine does know ([`summary::early_layout`]
+    /// (crate::summary::early_layout)): its maker uploaded it before the format was final, the
+    /// runner cannot read it, and an update will not change that. A newer upload may work.
+    Layout,
 }
 
 /// What a repository's page says about the kind of its model, and whether the engine knows it.
@@ -40,6 +44,19 @@ pub struct PageArchitecture {
     /// Set with `supported == Some(false)` when no newer version would change it: "not yet"
     /// would promise what is not true.
     pub why: Option<Why>,
+}
+
+impl PageArchitecture {
+    /// The page with what the file's own header says about its layout: an early layout the
+    /// runner cannot read is not "a kind it does not know yet" (the name is known), and no
+    /// update brings it. The header is the smallest file's, the page's witness for the files.
+    pub fn with_layout(mut self, early_layout: bool) -> Self {
+        if early_layout {
+            self.supported = Some(false);
+            self.why = Some(Why::Layout);
+        }
+        self
+    }
 }
 
 /// A name that was actually read: a file without `general.architecture` reads "unknown" and an
@@ -442,6 +459,23 @@ mod tests {
             ),
             (None, None)
         );
+    }
+
+    /// The engine knows the name `inkling2` and still cannot load the early uploads of it, so
+    /// "can't open yet, a newer version may" would be wrong twice: it is not the kind that is
+    /// new, and no update changes what the file holds.
+    #[test]
+    fn an_early_layout_of_a_known_kind_is_not_for_an_update_to_fix() {
+        let p = page_architecture(Some("inkling2"), Some("inkling2"), None);
+        assert_eq!((p.supported, p.why), (Some(true), None));
+        let p = p.with_layout(true);
+        assert_eq!(
+            (p.name.as_deref(), p.supported, p.why),
+            (Some("inkling2"), Some(false), Some(Why::Layout))
+        );
+        // Nothing to say about the layout: the page is as it was.
+        let p = page_architecture(Some("qwen3"), None, None).with_layout(false);
+        assert_eq!((p.supported, p.why), (Some(true), None));
     }
 
     fn some(name: &str, supported: Option<bool>) -> (Option<String>, Option<bool>) {

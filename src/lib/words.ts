@@ -337,8 +337,19 @@ export const CANT_OPEN = {
     body: "It can't chat, and nothing in this app uses it.",
     short: "Not for chat",
   },
-  /** Compare's "Will it fit on this computer?" for a picture, video or speech file. */
-  compareNotChat: "Not checked. It is not a chat model.",
+  /** A file in an early layout of a kind the engine knows (an early Inkling 2 upload): its maker
+   *  uploaded it before the format was final. A newer upload of the same model may work. */
+  layout: {
+    title: "This file is in an early layout",
+    body: "Its maker uploaded it before the format was final, so this version can't read it, and an update won't change that. Look for a newer upload of the same model.",
+    short: "Can't be read",
+  },
+  /** Compare's "Will it fit on this computer?" for a picture, video, speech or early-layout file. */
+  compareWhy: {
+    picture: "Not checked. It is not a chat model.",
+    speech: "Not checked. It is not a chat model.",
+    layout: "Not checked. This file is in an early layout this version can't read.",
+  },
   /** Where the memory sentence would be: no verdict is given for a model that cannot open. */
   memory: "Memory use is worked out once this version can open the model.",
   /** Compare's "Will it fit on this computer?". */

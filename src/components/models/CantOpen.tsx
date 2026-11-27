@@ -2,7 +2,7 @@ import { useEffect, useId, useState } from "react";
 import { CircleSlash } from "lucide-react";
 import * as ipc from "../../lib/ipc";
 import { listenInEffect } from "../../lib/listen";
-import type { ErrorInfo, UpdateStatus } from "../../lib/types";
+import type { CantOpenWhy, ErrorInfo, UpdateStatus } from "../../lib/types";
 import { CANT_OPEN, cantOpenCardTip, updateLine } from "../../lib/words";
 import { toErrorInfo } from "../../store/app";
 import { Outside, shown } from "./Compare";
@@ -103,7 +103,7 @@ export function UpdateCheck(props: { look: "button" | "link" }) {
  * a card click unmounts the card and leaves focus nowhere, and this is the one sentence that
  * says why nothing can be downloaded.
  */
-export function CantOpenBox(props: { architecture: string | null; why?: "picture" | "speech" | null }) {
+export function CantOpenBox(props: { architecture: string | null; why?: CantOpenWhy | null }) {
   const kind = kindName(props.architecture);
   const headingId = useId();
   if (props.why) {

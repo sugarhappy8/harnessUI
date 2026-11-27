@@ -409,6 +409,10 @@ export interface VariantView {
   hasChecksum: boolean;
 }
 
+/** Why a model cannot be opened and no update would change it: a picture or video model, a
+ *  speech or sound model (neither is for chat), or a file in an early layout of its kind. */
+export type CantOpenWhy = "picture" | "speech" | "layout";
+
 export interface RepoView {
   id: string;
   commit: string;
@@ -419,8 +423,9 @@ export interface RepoView {
   architectureSupported: boolean | null;
   /** With `architectureSupported` false: why no update will change it. A picture or video model,
    *  or a speech or sound one, is not for chat (by its kind, or by what its author says it
-   *  does). Absent: a newer version may open it. */
-  cantOpenWhy?: "picture" | "speech" | null;
+   *  does); a file in an early layout of its kind cannot be read. Absent: a newer version may
+   *  open it. */
+  cantOpenWhy?: CantOpenWhy | null;
   contextLength: number | null;
   parameters: number | null;
   templateTools: boolean;
@@ -1044,9 +1049,9 @@ export interface FileFacts {
   /** Whether this version's model runner knows the file's kind; false: it cannot open the
    *  file yet, so no "will it fit" verdict is given. Null or left out: not known. */
   engineKnows?: boolean | null;
-  /** With `engineKnows` false: a picture, video or speech model is not for chat, whatever a
-   *  newer version brings. */
-  cantOpenWhy?: "picture" | "speech" | null;
+  /** With `engineKnows` false: why no newer version would change it (not for chat, or an
+   *  early layout of the file). */
+  cantOpenWhy?: CantOpenWhy | null;
   parameters: number | null;
   contextLength: number | null;
   tools: boolean;

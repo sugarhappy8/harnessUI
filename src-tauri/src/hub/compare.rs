@@ -737,7 +737,11 @@ fn file_facts(
 ) -> FileFacts {
     let (label_total, label_active) = size_label_parameters(s.size_label.as_deref());
     let moe = s.is_moe();
-    let why = models::arch::not_for_chat(Some(&s.architecture), None);
+    let why = if s.older_layout {
+        Some(models::arch::Why::Layout)
+    } else {
+        models::arch::not_for_chat(Some(&s.architecture), None)
+    };
     FileFacts {
         architecture: architecture_text(&s.architecture),
         // The file's own header: no kind at all cannot be opened either, and a picture or

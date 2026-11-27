@@ -69,8 +69,9 @@ export function RepoDetail(props: { repoId: string; onBack: () => void; onStarte
   }, [props.repoId]);
 
   const cantOpen = view?.architectureSupported === false;
-  // Picture, video, speech: no update would change it, so the words say what it is instead.
-  const notChat = cantOpen && view?.cantOpenWhy ? CANT_OPEN[view.cantOpenWhy] : null;
+  // Picture, video, speech, an early layout: no update would change it, so the words say what
+  // it is instead.
+  const noUpdate = cantOpen && view?.cantOpenWhy ? CANT_OPEN[view.cantOpenWhy] : null;
 
   async function download(v: VariantView) {
     if (!view || cantOpen || startingRef.current) return;
@@ -141,9 +142,9 @@ export function RepoDetail(props: { repoId: string; onBack: () => void; onStarte
               Also download the image file ({formatBytes(view.projector.size)}) so the model can read images
             </label>
           )}
-          {/* A picture, video or speech model gets no memory line: "once this version can open it"
+          {/* A model no update would open gets no memory line: "once this version can open it"
               would promise what is not true. */}
-          {!notChat && (
+          {!noUpdate && (
             <p className="text-xs text-fg-muted">
               {cantOpen
                 ? CANT_OPEN.memory
@@ -173,8 +174,8 @@ export function RepoDetail(props: { repoId: string; onBack: () => void; onStarte
                     <Check size={12} aria-hidden /> Installed
                   </span>
                 ) : cantOpen ? (
-                  <span title={notChat ? notChat.title : CANT_OPEN.title} className="text-xs text-fg-muted">
-                    {notChat ? notChat.short : CANT_OPEN.short}
+                  <span title={noUpdate ? noUpdate.title : CANT_OPEN.title} className="text-xs text-fg-muted">
+                    {noUpdate ? noUpdate.short : CANT_OPEN.short}
                   </span>
                 ) : (
                   <button

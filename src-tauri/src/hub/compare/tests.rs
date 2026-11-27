@@ -1176,6 +1176,17 @@ fn the_facts_of_a_picture_or_speech_file_say_it_is_not_for_chat() {
     }
     assert_eq!(facts("kokoro").engine_knows, Some(false));
     assert_eq!(facts("qwen3").engine_knows, Some(true));
+    // An early Inkling 2 upload: the runner knows the name and cannot read the file.
+    let early = models::gguf::testing::Writer::new()
+        .str("general.architecture", "inkling2")
+        .u32("inkling2.block_count", 48)
+        .u32("inkling2.num_loops", 2)
+        .build();
+    let ff = file_facts(&summary(&early), None, false, None);
+    assert_eq!(
+        (ff.engine_knows, ff.cant_open_why),
+        (Some(false), Some(models::arch::Why::Layout))
+    );
     let stored = |arch: &str| StoredSummary {
         architecture: Some(arch.into()),
         ..StoredSummary::default()

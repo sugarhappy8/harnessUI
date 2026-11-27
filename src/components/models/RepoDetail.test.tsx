@@ -360,6 +360,37 @@ describe("the page of a speech or sound model", () => {
   });
 });
 
+/**
+ * An early upload of a kind the engine knows (Inkling 2's, before llama.cpp settled the format):
+ * the name is known, the file still fails to load, and no update changes what the file holds.
+ * After the bump these repositories lost their red box and were offered as 9 to 17 GB downloads
+ * that failed afterwards.
+ */
+describe("the page of a file in an early layout", () => {
+  const EARLY: RepoView = { ...CANT_OPEN_VIEW, architecture: "inkling2", cantOpenWhy: "layout" };
+
+  it("says why, and that an update will not change it, with no update button", async () => {
+    await open(EARLY);
+    const box = screen.getByRole("status", { name: "This file is in an early layout" });
+    expect(box.textContent).toContain("before the format was final");
+    expect(box.textContent).toContain("won't change that");
+    expect(box.textContent).toContain("newer upload of the same model");
+    expect(box.textContent).not.toMatch(/may work|newer version/i);
+    expect(within(box).queryByRole("button")).toBeNull();
+    expect(screen.queryByRole("button", { name: "Check for updates" })).toBeNull();
+  });
+
+  it("puts 'Can't be read' where Download would be, with no verdict and no memory line", async () => {
+    await open(EARLY);
+    for (const row of screen.getAllByRole("listitem")) {
+      expect(within(row).getByText("Can't be read")).toBeTruthy();
+      expect(within(row).queryByRole("button", { name: "Download" })).toBeNull();
+    }
+    expect(screen.queryByText(/Fits|Too large|Memory/)).toBeNull();
+    expect(screen.queryByRole("checkbox")).toBeNull();
+  });
+});
+
 describe("the page of a model this version can open", () => {
   it("is as it was: image file offered, fit shown, Download on", async () => {
     await open({ ...VIEW, variants: VIEW.variants.map((v) => ({ ...v, fit: yellow })) });

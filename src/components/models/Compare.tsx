@@ -317,8 +317,10 @@ function willItFit(f: CompareFacts): Answer | null {
   // The model runner cannot open the file: the memory estimate has no rule for its kind, so a
   // verdict would be a guess that says the opposite of the truth.
   if (f.fileFacts?.engineKnows === false) {
-    // A picture or speech model is not for chat, and an update would not change that.
-    return { node: f.fileFacts.cantOpenWhy ? CANT_OPEN.compareNotChat : CANT_OPEN.compareFit, source: null };
+    // A picture or speech model is not for chat, and an early layout is the file's: an update
+    // would not change either.
+    const why = f.fileFacts.cantOpenWhy;
+    return { node: why ? CANT_OPEN.compareWhy[why] : CANT_OPEN.compareFit, source: null };
   }
   return f.fit ? { node: <FitBadge fit={f.fit} />, source: fitSource(f.ctx) } : null;
 }
