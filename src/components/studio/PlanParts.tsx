@@ -171,7 +171,8 @@ function PartRow(props: { slot: PlannedSlot; licence: string | null; onChoose?(r
         <p id={labelId} className="text-sm font-medium">
           {SLOT_LABEL[s.role]}
         </p>
-        {detail && <p className={clsx("truncate text-xs", p === null ? "text-warning" : "text-fg-muted")}>{detail}</p>}
+        {/* A part with no file says why in a whole sentence: it wraps instead of being cut off. */}
+        {detail && <p className={clsx("text-xs", p === null ? "text-warning" : "truncate text-fg-muted")}>{detail}</p>}
       </div>
       {p === null ? (
         props.onChoose && (
