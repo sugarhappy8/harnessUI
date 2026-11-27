@@ -83,13 +83,25 @@ static PRECISION: LazyLock<Regex> = LazyLock::new(|| {
     .expect("the precision pattern compiles")
 });
 
+/// A word of a file's name (or its folder's) that says its weights are packed for another
+/// program (`nf4`, `fp4`, `nvfp4`, `mxfp4`, `bnb`, `bitsandbytes`, `torchao`, `awq`, `w4a8`,
+/// `w6a8`): tensors the engine does not read, which no other file of the model shares.
+static PACKED_WORD: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"(?i)(?:^|[-._/\s])(?:nf4|fp4|nvfp4|mxfp4|bnb|bitsandbytes|torchao|awq|w4a8|w6a8)(?:[-._/\s]|$)")
+        .expect("the packed-word pattern compiles")
+});
+
 /// `path` lower-cased, without its quantisation label ([`crate::files::quant_label`]) or a
 /// picture model's precision word ([`PRECISION`]): the key the quantisations of one file
-/// share (`HighNoise/Wan-HighNoise-Q4_K_M.gguf` → `highnoise/wan-highnoise-.gguf`;
+/// share, except that a file whose name says it is packed for another program
+/// ([`PACKED_WORD`]) is a group of its own, read by itself (`HighNoise/Wan-HighNoise-Q4_K_M.gguf` → `highnoise/wan-highnoise-.gguf`;
 /// `wan2.2_t2v_high_noise_14B_fp16.safetensors` and its `_fp8_scaled` file →
 /// `wan2.2_t2v_high_noise_14b_.safetensors`). Their tensor names are the same, so one read
 /// labels them all.
 pub fn group_key(path: &str) -> String {
+    if PACKED_WORD.is_match(path) {
+        return path.to_lowercase();
+    }
     let key = match quant_span(path) {
         Some((start, end)) => format!("{}{}", &path[..start], &path[end..]),
         None => path.to_string(),
@@ -370,6 +382,48 @@ mod tests {
 
     fn reads(c: &Candidates) -> Vec<&str> {
         c.groups.iter().map(|g| g.read.as_str()).collect()
+    }
+
+    /// One header read labels every quantisation of a group, because their tensor names are the
+    /// same. A file packed for another program (NF4, NVFP4, bitsandbytes, torchao) has
+    /// different tensors, so it never shares a group: else the smallest file's reading, often
+    /// the packed one, would call the bf16 file unrunnable, or the other way round call the
+    /// packed one *Works in Studio*.
+    #[test]
+    fn a_file_packed_for_another_program_is_read_by_itself() {
+        let c = candidates(&[
+            f("qwen_image_2.1_bf16.safetensors", 40e9),
+            f("qwen_image_2.1_fp8_scaled.safetensors", 20e9),
+            f("qwen_image_2.1_nvfp4.safetensors", 11e9),
+            f("qwen_image_2.1_int8_convrot.safetensors", 21e9),
+            f("model-NF4-bnb/diffusion_pytorch_model.safetensors", 3.7e9),
+            f("model-FP8-torchao/diffusion_pytorch_model.safetensors", 7e9),
+            f("model-INT8-bnb/diffusion_pytorch_model.safetensors", 7e9),
+        ]);
+        let group_of = |path: &str| {
+            c.groups
+                .iter()
+                .find(|g| g.members.iter().any(|m| m == path))
+                .map(|g| g.members.clone())
+                .unwrap()
+        };
+        // The runnable precisions still share one reading.
+        assert_eq!(
+            group_of("qwen_image_2.1_bf16.safetensors"),
+            [
+                "qwen_image_2.1_bf16.safetensors",
+                "qwen_image_2.1_fp8_scaled.safetensors",
+                "qwen_image_2.1_int8_convrot.safetensors"
+            ]
+        );
+        for packed in [
+            "qwen_image_2.1_nvfp4.safetensors",
+            "model-NF4-bnb/diffusion_pytorch_model.safetensors",
+            "model-FP8-torchao/diffusion_pytorch_model.safetensors",
+            "model-INT8-bnb/diffusion_pytorch_model.safetensors",
+        ] {
+            assert_eq!(group_of(packed), [packed], "{packed}");
+        }
     }
 
     #[test]

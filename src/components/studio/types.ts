@@ -637,7 +637,11 @@ export type CannotRunReason =
   | "upscaler"
   | "folderModel"
   | "notThisEngine"
-  | "ltx2";
+  | "ltx2"
+  | "bnb4"
+  | "bnb8"
+  | "torchao"
+  | "nvfp4";
 
 /** Why a file of a repository was not read when it opened. */
 export type NotReadReason = "needsToken" | "needsTerms" | "budget" | "failed";

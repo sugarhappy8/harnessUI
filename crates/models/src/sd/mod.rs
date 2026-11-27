@@ -46,6 +46,16 @@ pub enum CannotRunReason {
     FolderModel,
     NotThisEngine,
     Ltx2,
+    /// Packed in bitsandbytes' 4-bit formats (NF4 or FP4), made for another program: the
+    /// engine drops the packed weights, so nothing loads.
+    Bnb4,
+    /// Packed in bitsandbytes' 8-bit format (LLM.int8): the engine reads its weights without
+    /// their row scales, so the picture would be noise.
+    Bnb8,
+    /// Packed by torchao (float8 and other tensor subclasses): the engine has no such weights.
+    Torchao,
+    /// Packed in ComfyUI's 4-bit block format (NVFP4, MXFP4): the engine drops or refuses it.
+    Nvfp4,
 }
 
 /// What a file is, the facts recipe matching reads, and its size.

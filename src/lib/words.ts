@@ -2133,6 +2133,12 @@ const CANNOT_RUN_WORDS: Record<CannotRunReason, (ext: string) => string> = {
   folderModel: () => "This model comes as a folder of parts, which the Studio engine can't load",
   notThisEngine: () => "The Studio engine can't run this kind of model",
   ltx2: () => "This is an LTX-2 model, which the Studio engine can't run",
+  // Weights packed for another program: the engine reads none of them, so the file is never
+  // "Works in Studio", whatever model its names say it is.
+  bnb4: () => "This file is packed in a 4-bit format made for another program (bitsandbytes), which the Studio engine can't read",
+  bnb8: () => "This file is packed in an 8-bit format made for another program (bitsandbytes), which the Studio engine can't read",
+  torchao: () => "This file is packed in a format made for another program (torchao), which the Studio engine can't read",
+  nvfp4: () => "This file is packed in a 4-bit format made for another program (NVFP4), which the Studio engine can't read",
 };
 
 /** Why a file of a repository was not read, as one sentence. */
@@ -2473,6 +2479,10 @@ const CANT_RUN_SHORT: Record<CannotRunReason, string> = {
   folderModel: "folder of parts",
   notThisEngine: "unsupported type",
   ltx2: "LTX-2",
+  bnb4: "4-bit bitsandbytes",
+  bnb8: "8-bit bitsandbytes",
+  torchao: "torchao file",
+  nvfp4: "4-bit NVFP4",
 };
 
 /** A Hugging Face result's Studio verdict, as its badge says it (Task U5, design 10.3): from

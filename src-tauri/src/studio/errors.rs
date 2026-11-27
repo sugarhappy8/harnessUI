@@ -1353,6 +1353,10 @@ pub fn cannot_run(reason: CannotRunReason) -> AppError {
         CannotRunReason::NotThisEngine => {
             "The Studio engine can't run this kind of model.".to_owned()
         }
+        CannotRunReason::Bnb4 => packed_file("a 4-bit format", "bitsandbytes"),
+        CannotRunReason::Bnb8 => packed_file("an 8-bit format", "bitsandbytes"),
+        CannotRunReason::Torchao => packed_file("a format", "torchao"),
+        CannotRunReason::Nvfp4 => packed_file("a 4-bit format", "NVFP4"),
     };
     let details = match serde_json::to_value(reason) {
         Ok(serde_json::Value::String(word)) => word,
@@ -1364,6 +1368,15 @@ pub fn cannot_run(reason: CannotRunReason) -> AppError {
         _ => "Download the file anyway to use it elsewhere.",
     };
     AppError::new("studio_cannot_run", message, next_step, details)
+}
+
+/// "This file is packed in <a format> made for another program (<name>), which the Studio
+/// engine can't read."
+fn packed_file(format: &str, name: &str) -> String {
+    format!(
+        "This file is packed in {format} made for another program ({name}), which the Studio \
+         engine can't read."
+    )
 }
 
 /// "This is <a model>, which the Studio engine can't run."
@@ -2621,9 +2634,31 @@ mod tests {
                 CannotRunReason::LtxVideo09,
                 "This is an LTX-Video 0.9 model, which the Studio engine can't run.",
             ),
+            // A file packed for another program is named by its format, never by a model.
+            (
+                CannotRunReason::Bnb4,
+                "This file is packed in a 4-bit format made for another program (bitsandbytes), which the Studio engine can't read.",
+            ),
+            (
+                CannotRunReason::Bnb8,
+                "This file is packed in an 8-bit format made for another program (bitsandbytes), which the Studio engine can't read.",
+            ),
+            (
+                CannotRunReason::Torchao,
+                "This file is packed in a format made for another program (torchao), which the Studio engine can't read.",
+            ),
+            (
+                CannotRunReason::Nvfp4,
+                "This file is packed in a 4-bit format made for another program (NVFP4), which the Studio engine can't read.",
+            ),
         ] {
             assert_eq!(cannot_run(reason).message, message);
         }
+        let e = cannot_run(CannotRunReason::Bnb4);
+        assert_eq!(
+            (e.next_step.as_str(), e.details.as_str()),
+            ("Download the file anyway to use it elsewhere.", "bnb4")
+        );
     }
 
     /// Ruling S10-lora-words: what a LoRA's refusals say never names a model or a part (the

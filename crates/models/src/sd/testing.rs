@@ -553,6 +553,11 @@ const FIXTURE_FILES: &[(&str, &str)] = &[
     ),
 ];
 
+/// The names of every detection fixture.
+pub fn fixture_names() -> Vec<&'static str> {
+    FIXTURE_FILES.iter().map(|(name, _)| *name).collect()
+}
+
 fn fixture_file(name: &str) -> FixtureFile {
     let (_, json) = FIXTURE_FILES
         .iter()

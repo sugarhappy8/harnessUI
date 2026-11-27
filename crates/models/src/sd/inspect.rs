@@ -138,12 +138,71 @@ pub fn inspect(index: &TensorIndex) -> FileFacts {
             }
         }
     };
+    // A file packed in a format made for another program is never one that works, however
+    // plainly its names say what model it is: the engine detects it and then cannot load it.
+    let kind = match (packed_format(index), kind) {
+        (Some(reason), FileKind::Model { version, .. }) => FileKind::CannotRun {
+            reason,
+            version: Some(version),
+        },
+        (Some(reason), FileKind::Extra { .. } | FileKind::CannotRun { .. }) => {
+            FileKind::CannotRun {
+                reason,
+                version: None,
+            }
+        }
+        (_, kind) => kind,
+    };
     FileFacts {
         kind,
         facts: match_facts(index, layout),
         parameters: index.parameters(),
         format: index.format,
     }
+}
+
+/// The packed weight format of a safetensors file the pinned engine cannot load, from the
+/// tensor names, dtypes and metadata (the audit of `src/model_io/safetensors_io.cpp` and
+/// `src/model_manager.cpp` at the pinned commit; a file's `.comfy_quant` with an `I8` or `F8`
+/// weight is the engine's own format and is read):
+/// - bitsandbytes 4-bit (NF4, FP4): a `.quant_state.bitsandbytes__` tensor, or `.absmax` beside
+///   `.quant_map`; the engine skips every `U8` tensor, so each packed weight is missing;
+/// - bitsandbytes 8-bit (LLM.int8): a `.SCB` tensor, the row scales the engine never reads;
+/// - torchao: a `._weight_qdata` tensor, or a `._weight_scale` with a `__metadata__` value that
+///   is a JSON object of `_type` (`Float8Tensor`): no `.weight` exists for those layers;
+/// - ComfyUI's 4-bit blocks (NVFP4, MXFP4): a `U8` `.weight` beside its `.comfy_quant`.
+///
+/// `None` for a GGUF file and for every format the engine reads.
+fn packed_format(index: &TensorIndex) -> Option<CannotRunReason> {
+    if index.format != FileFormat::Safetensors {
+        return None;
+    }
+    let names: BTreeSet<&str> = index.tensors.iter().map(|t| t.name.as_str()).collect();
+    let any = |f: &dyn Fn(&str) -> bool| names.iter().any(|n| f(n));
+    if any(&|n| n.contains(".quant_state.bitsandbytes__"))
+        || (any(&|n| n.ends_with(".absmax")) && any(&|n| n.ends_with(".quant_map")))
+    {
+        return Some(CannotRunReason::Bnb4);
+    }
+    if any(&|n| n.ends_with(".SCB")) {
+        return Some(CannotRunReason::Bnb8);
+    }
+    let torchao_metadata = index
+        .metadata
+        .values()
+        .any(|v| v.trim_start().starts_with("{\"_type\""));
+    if any(&|n| n.contains("._weight_qdata"))
+        || (torchao_metadata && any(&|n| n.contains("._weight_scale")))
+    {
+        return Some(CannotRunReason::Torchao);
+    }
+    let packed_with_flag = index.tensors.iter().any(|t| {
+        t.dtype == "U8"
+            && t.name
+                .strip_suffix(".weight")
+                .is_some_and(|module| names.contains(format!("{module}.comfy_quant").as_str()))
+    });
+    packed_with_flag.then_some(CannotRunReason::Nvfp4)
 }
 
 /// What a diffusers folder of `parts` is: detected as the engine detects it
@@ -486,6 +545,198 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    /// `index` with the tensors (name, dtype, shape) and `__metadata__` strings a packed format
+    /// adds to a real file's table.
+    fn packed(
+        index: &TensorIndex,
+        extra: &[(&str, &str, &[u64])],
+        metadata: &[(&str, &str)],
+    ) -> TensorIndex {
+        let mut index = index.clone();
+        for (name, dtype, shape) in extra {
+            index.tensors.push(TensorInfo {
+                name: (*name).into(),
+                dtype: (*dtype).into(),
+                shape: shape.to_vec(),
+            });
+        }
+        for (k, v) in metadata {
+            index.metadata.insert((*k).into(), (*v).into());
+        }
+        index
+    }
+
+    /// A model the file of `name` is, then what it says once it is packed in a format made for
+    /// another program: the engine reads none of these (audit of the pinned engine,
+    /// `src/model_io/safetensors_io.cpp`, `src/model_manager.cpp`, `src/ggml_extensions`), so the
+    /// file is never offered as one that works, whatever its names say.
+    fn refused_when_packed(
+        name: &str,
+        extra: &[(&str, &str, &[u64])],
+        metadata: &[(&str, &str)],
+        reason: CannotRunReason,
+    ) {
+        let plain = fixture(name);
+        let FileKind::Model { version, .. } = inspect(&plain).kind else {
+            panic!("{name} is a model");
+        };
+        assert_eq!(
+            inspect(&packed(&plain, extra, metadata)).kind,
+            FileKind::CannotRun {
+                reason,
+                version: Some(version)
+            },
+            "{reason:?}"
+        );
+    }
+
+    /// bitsandbytes NF4 and FP4 (the owner's `diffusion_pytorch_model.safetensors`, 3.7 GB):
+    /// per quantised linear a packed U8 `.weight`, its `.absmax`, `.quant_map`, the nested
+    /// scales and a JSON `.quant_state.bitsandbytes__nf4` blob. The engine detects the model
+    /// (its BF16 norms survive) and then fails at load: every packed weight is dropped.
+    #[test]
+    fn bitsandbytes_four_bit_files_are_refused() {
+        for kind in ["nf4", "fp4"] {
+            let state = format!("blocks.0.attn.to_q.weight.quant_state.bitsandbytes__{kind}");
+            refused_when_packed(
+                "flux1-dev",
+                &[
+                    ("blocks.0.attn.to_q.weight", "U8", &[6291456, 1]),
+                    ("blocks.0.attn.to_q.weight.absmax", "U8", &[98304]),
+                    ("blocks.0.attn.to_q.weight.quant_map", "F32", &[16]),
+                    ("blocks.0.attn.to_q.weight.nested_absmax", "F32", &[384]),
+                    ("blocks.0.attn.to_q.weight.nested_quant_map", "F32", &[256]),
+                    (&state, "U8", &[190]),
+                ],
+                &[],
+                CannotRunReason::Bnb4,
+            );
+        }
+    }
+
+    /// bitsandbytes LLM.int8 (the same repo's INT8 file, 7.1 GB): dense-shaped I8 weights with
+    /// F32 row scales in `.SCB`. Worse than the 4-bit file: nothing in the engine refuses it,
+    /// it would load, ignore the scales and draw noise.
+    #[test]
+    fn bitsandbytes_eight_bit_files_are_refused() {
+        refused_when_packed(
+            "flux1-dev",
+            &[
+                ("blocks.0.attn.to_q.weight", "I8", &[3072, 3072]),
+                ("blocks.0.attn.to_q.SCB", "F32", &[3072]),
+                ("blocks.0.attn.to_q.weight_format", "U8", &[]),
+            ],
+            &[],
+            CannotRunReason::Bnb8,
+        );
+    }
+
+    /// torchao (the same repo's FP8 file): the quantised layers have no `.weight`, only
+    /// `._weight_qdata` and `._weight_scale`, and `__metadata__` holds a JSON string per module.
+    #[test]
+    fn torchao_files_are_refused() {
+        refused_when_packed(
+            "flux1-dev",
+            &[
+                ("blocks.0.attn.to_q._weight_qdata", "F8_E4M3", &[3072, 3072]),
+                ("blocks.0.attn.to_q._weight_scale", "F32", &[3072, 1]),
+            ],
+            &[(
+                "blocks.0.attn.to_q.weight",
+                r#"{"_type": "Float8Tensor", "_tensor_data_names": ["qdata", "scale"]}"#,
+            )],
+            CannotRunReason::Torchao,
+        );
+    }
+
+    /// ComfyUI's NVFP4 (the same repo's NVFP4 file): a `.comfy_quant` flag beside a packed U8
+    /// `.weight`, with block scales in `.weight_scale` that the engine rejects by shape.
+    #[test]
+    fn comfy_four_bit_block_files_are_refused() {
+        refused_when_packed(
+            "flux1-dev",
+            &[
+                ("blocks.0.attn.to_q.weight", "U8", &[3072, 1536]),
+                ("blocks.0.attn.to_q.comfy_quant", "U8", &[40]),
+                ("blocks.0.attn.to_q.weight_scale", "F8_E4M3", &[3072, 192]),
+                ("blocks.0.attn.to_q.weight_scale_2", "F32", &[]),
+            ],
+            &[("quant", "nvfp4")],
+            CannotRunReason::Nvfp4,
+        );
+    }
+
+    /// What the engine does read stays: ComfyUI's `.comfy_quant` beside an I8 (int8 tensorwise,
+    /// ConvRot) or an F8 weight is the format its loader supports, and no committed real file
+    /// (25 of them, every kind Studio runs) is refused by any of these rules.
+    #[test]
+    fn formats_the_engine_reads_are_not_refused() {
+        let plain = fixture("flux1-dev");
+        for dtype in ["I8", "F8_E4M3"] {
+            let index = packed(
+                &plain,
+                &[
+                    ("blocks.0.attn.to_q.weight", dtype, &[3072, 3072]),
+                    ("blocks.0.attn.to_q.comfy_quant", "U8", &[40]),
+                    ("blocks.0.attn.to_q.weight_scale", "F32", &[1]),
+                ],
+                &[("quant", "int8")],
+            );
+            assert!(
+                matches!(inspect(&index).kind, FileKind::Model { .. }),
+                "{dtype}: {:?}",
+                inspect(&index).kind
+            );
+        }
+        for name in crate::sd::testing::fixture_names() {
+            let kind = inspect(&fixture(name)).kind;
+            assert!(
+                !matches!(
+                    kind,
+                    FileKind::CannotRun {
+                        reason: CannotRunReason::Bnb4
+                            | CannotRunReason::Bnb8
+                            | CannotRunReason::Torchao
+                            | CannotRunReason::Nvfp4,
+                        ..
+                    }
+                ),
+                "{name}: {kind:?}"
+            );
+        }
+    }
+
+    /// A packed text encoder or decoder is no extra file either: the planner would otherwise
+    /// take it from a repository's listing ahead of the table's file.
+    #[test]
+    fn a_packed_extra_file_is_refused_too() {
+        let clip = fixture("clip-l");
+        assert!(matches!(inspect(&clip).kind, FileKind::Extra { .. }));
+        let index = packed(
+            &clip,
+            &[
+                (
+                    "text_model.encoder.layers.0.self_attn.q_proj.weight",
+                    "U8",
+                    &[1, 1],
+                ),
+                (
+                    "text_model.encoder.layers.0.self_attn.q_proj.weight.quant_state.bitsandbytes__nf4",
+                    "U8",
+                    &[190],
+                ),
+            ],
+            &[],
+        );
+        assert_eq!(
+            inspect(&index).kind,
+            FileKind::CannotRun {
+                reason: CannotRunReason::Bnb4,
+                version: None
+            }
+        );
     }
 
     #[test]

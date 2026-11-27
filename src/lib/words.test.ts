@@ -1102,6 +1102,31 @@ describe("a repository's file labels (Task S6)", () => {
     expect(FILE_LABEL.notRead("failed")).toBe("Couldn't read this file");
   });
 
+  it("says a file packed for another program can't run, by its format and never as a model that works", () => {
+    // The 0.2.1 page called the owner's 3.7 GB bitsandbytes file "Fits", and offered it.
+    expect(FILE_LABEL.cannotRun("bnb4")).toBe(
+      "Can't run in Studio: This file is packed in a 4-bit format made for another program (bitsandbytes), which the Studio engine can't read",
+    );
+    expect(FILE_LABEL.cannotRun("bnb8")).toBe(
+      "Can't run in Studio: This file is packed in an 8-bit format made for another program (bitsandbytes), which the Studio engine can't read",
+    );
+    expect(FILE_LABEL.cannotRun("torchao")).toBe(
+      "Can't run in Studio: This file is packed in a format made for another program (torchao), which the Studio engine can't read",
+    );
+    expect(FILE_LABEL.cannotRun("nvfp4")).toBe(
+      "Can't run in Studio: This file is packed in a 4-bit format made for another program (NVFP4), which the Studio engine can't read",
+    );
+    expect(verdictBadgeWords({ cannotRun: { reason: "bnb4", version: "qwen-image-2.1" } }, true)).toBe(
+      "Can't run: 4-bit bitsandbytes",
+    );
+    expect(verdictBadgeWords({ cannotRun: { reason: "bnb8", version: null } }, true)).toBe("Can't run: 8-bit bitsandbytes");
+    expect(verdictBadgeWords({ cannotRun: { reason: "torchao", version: null } }, true)).toBe("Can't run: torchao file");
+    expect(verdictBadgeWords({ cannotRun: { reason: "nvfp4", version: null } }, true)).toBe("Can't run: 4-bit NVFP4");
+    expect(fileLabelWords({ cannotRun: { reason: "bnb4", version: "qwen-image-2.1" } }, "nf4/model.safetensors")).not.toMatch(
+      /Works|Fits/,
+    );
+  });
+
   it("names a pickle file's own extension, and a file's type by its recipe first", () => {
     expect(fileLabelWords({ cannotRun: { reason: "pickle", version: null } }, "weights/model.PTH")).toBe(
       "Can't run in Studio: Studio can't read .pth files",
@@ -1170,7 +1195,8 @@ describe("Get models' words (Task U5)", () => {
     expect(verdictBadgeWords("unknown", true)).toBe("Not recognised");
     const reasons = [
       "lumina2", "ltxVideo09", "hunyuanVideo1", "svd", "unknownWeights", "sharded", "pickle", "noSha", "adapter",
-      "needsControlFrames", "needsAudio", "upscaler", "folderModel", "notThisEngine", "ltx2",
+      "needsControlFrames", "needsAudio", "upscaler", "folderModel", "notThisEngine", "ltx2", "bnb4", "bnb8", "torchao",
+      "nvfp4",
     ] as const;
     for (const reason of reasons) {
       const words = VERDICT.cantRun(reason);
