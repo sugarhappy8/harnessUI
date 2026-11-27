@@ -105,8 +105,11 @@ def render() -> str:
         "## Bundled native components",
         "",
     ]
+    # The build comes from the lock, so a pin change cannot leave the old one here.
+    llama_tag = json.loads((ROOT / "llama.lock.json").read_text())["llama_cpp"]["tag"]
     for title, f, note in [
-        ("llama.cpp (llama-server, llama-fit-params) — MIT", "llama.cpp-LICENSE", "Pinned build b12110; see llama.lock.json."),
+        ("llama.cpp (llama-server, llama-fit-params) — MIT", "llama.cpp-LICENSE",
+         f"Pinned build {llama_tag}; see llama.lock.json."),
         ("stable-diffusion.cpp (the Studio engine, sd-cli) — MIT", "stable-diffusion.cpp-LICENSE",
          "Pinned build master-1106-532d2c1; see sd.lock.json. On macOS sd-cli is built into the app from the pinned commit with "
          "its ggml, libwebp and libwebm submodules. On Windows the Studio engine is the upstream Vulkan build of the same commit "
