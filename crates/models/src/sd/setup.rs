@@ -1167,6 +1167,26 @@ mod tests {
         inspect(&index)
     }
 
+    /// A lone diffusion model of `version`, as a person finds one in a repository of GGUF
+    /// files: it embeds nothing, so every encoder and the decoder come from elsewhere.
+    fn lone(version: SdVersion, path: &str) -> Main {
+        Main {
+            repo: "someone/model-GGUF".into(),
+            file: rf(path, 5_000_000_000),
+            facts: FileFacts {
+                kind: FileKind::Model {
+                    version,
+                    layout: Layout::DiffusionOnly,
+                    embeds: Vec::new(),
+                },
+                facts: MatchFacts::default(),
+                parameters: 5_000_000_000,
+                format: FileFormat::Gguf,
+            },
+            part: None,
+        }
+    }
+
     /// An SDXL folder without its `vae/`.
     fn sdxl_folder_without_vae() -> (DiffusersFolder, FileFacts) {
         let folder = diffusers_folder(&[
@@ -1309,6 +1329,45 @@ mod tests {
                 companion("qwen-image-vae").sha256,
                 companion("qwen-image-21-vae").sha256
             );
+        }
+    }
+
+    /// A model's picture-editing recipe takes the vision projector its GGUF text encoder
+    /// needs for reference pictures (the engine otherwise runs it as text-to-picture, or
+    /// refuses), and the plain recipe does not download it.
+    #[test]
+    fn only_the_editing_recipe_takes_the_vision_projector() {
+        for (version, plain, edit, mmproj) in [
+            (
+                SdVersion::BooguImage,
+                "boogu-image",
+                "boogu-image-edit",
+                "mmproj-Qwen3VL-8B-Instruct-F16.gguf",
+            ),
+            (
+                SdVersion::MageFlow,
+                "mage-flow",
+                "mage-flow-edit",
+                "mmproj-Qwen3VL-4B-Instruct-F16.gguf",
+            ),
+            (
+                SdVersion::Krea2,
+                "krea2-raw",
+                "krea2-raw-edit",
+                "mmproj-Qwen3VL-4B-Instruct-Q8_0.gguf",
+            ),
+        ] {
+            let p = plan(lone(version, "model-Q8_0.gguf"), plain, &[], &[]);
+            assert!(
+                p.can_run() && slot(&p, SlotId::LlmVision).is_none(),
+                "{plain}"
+            );
+            let p = plan(lone(version, "model-Q8_0.gguf"), edit, &[], &[]);
+            assert!(p.can_run(), "{edit}: {:?}", p.missing());
+            assert_eq!(source(&p, SlotId::LlmVision), PartSource::Companion);
+            assert_eq!(hub_path(&p, SlotId::LlmVision), mmproj, "{edit}");
+            // Optional: the plan runs without it, so a person's clearing it is fine.
+            assert!(!slot(&p, SlotId::LlmVision).unwrap().required);
         }
     }
 
