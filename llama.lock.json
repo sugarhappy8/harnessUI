@@ -164,9 +164,9 @@
       "id": "rocm",
       "backend": "rocm",
       "platform": "windows-x86_64",
-      "build": "lemonade-b1372",
-      "upstream_llama_cpp_commit": "0eebb6edd",
-      "dir": "rocm-b1372",
+      "build": "lemonade-b1390",
+      "upstream_llama_cpp_commit": "15fcfc7357f8de73671d39e7d8c594e1beb3052d",
+      "dir": "rocm-b1390",
       "title": "AMD ROCm (RX 9000 series)",
       "requirements": "AMD Radeon RX 9000 series (gfx1200/gfx1201) on Windows 11 25H2 with a current Adrenalin driver",
       "license_name": "llama.cpp MIT; ROCm components MIT, BSD-2-Clause, Apache-2.0 with LLVM exception, NCSA",
@@ -174,10 +174,10 @@
       "keep_all": true,
       "files": [
         {
-          "name": "llama-b1372-windows-rocm-gfx120X-x64.zip",
-          "url": "https://github.com/lemonade-sdk/llamacpp-rocm/releases/download/b1372/llama-b1372-windows-rocm-gfx120X-x64.zip",
-          "size": 688519474,
-          "sha256": "a98bbeee2e130ccffe73bea94492e097ac1dc753dcd7b7c1a42479dbe29ba897"
+          "name": "llama-b1390-windows-rocm-gfx120X-x64.zip",
+          "url": "https://github.com/lemonade-sdk/llamacpp-rocm/releases/download/b1390/llama-b1390-windows-rocm-gfx120X-x64.zip",
+          "size": 697776569,
+          "sha256": "2dffb248f99a0707436296e3aa1aeaffb19194f58bed0787b2071e3a09d079b7"
         }
       ]
     }
