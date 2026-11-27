@@ -1,6 +1,14 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
-import type { DownloadGroup, ImageFileOffer, InstalledModel, ModelBusy, ModelLoadInfo, RuntimeStatus } from "../../lib/types";
+import type {
+  DownloadGroup,
+  ImageFileOffer,
+  InstalledModel,
+  ModelBusy,
+  ModelLoadInfo,
+  RuntimeStatus,
+  UpdateStatus,
+} from "../../lib/types";
 import { FINE_LAUNCH_NONE, fineFacts, processorPicture } from "../fine.fixtures";
 import type { LocalModels } from "../studio/types";
 import { LOCAL } from "../studio/fixtures/models";
@@ -25,6 +33,10 @@ const ipcMock = vi.hoisted(() => ({
   imageFileOffer: vi.fn<(path: string) => Promise<ImageFileOffer>>(async () => ({ kind: "none" })),
   downloadImageFile: vi.fn<(path: string) => Promise<string>>(async () => "group"),
   onDownloadProgress: vi.fn<(h: (g: DownloadGroup) => void) => Promise<() => void>>(async () => () => undefined),
+  // A model this version can't open yet: its row's "Check for updates".
+  checkForUpdate: vi.fn<() => Promise<unknown>>(async () => null),
+  updateStatus: vi.fn<() => Promise<UpdateStatus>>(),
+  onUpdateState: vi.fn(async () => () => undefined),
 }));
 vi.mock("../../lib/ipc", () => ipcMock);
 vi.mock("@tauri-apps/plugin-dialog", () => ({ open: vi.fn() }));
@@ -511,5 +523,144 @@ describe("Models → Installed", () => {
     await show();
     expect(screen.queryByText(/^Picture and video models:/)).toBeNull();
     expect(screen.queryByRole("button", { name: "Manage in Studio" })).toBeNull();
+  });
+});
+
+// ---- A model this version can't open yet ---------------------------------------------
+//
+// The owner's Installed row said "The bundled llama.cpp cannot load inkling2_loop." in red,
+// then, in the same row, "Fits with limits", an enabled "Download the image file (639 MB)" and
+// "Use" dimmed with no word of why.
+
+const FUTURE: InstalledModel = {
+  id: 7,
+  path: "/models/someone/inkling-next-GGUF/next-Q6_K.gguf",
+  repo: "someone/inkling-next-GGUF",
+  fileName: "next-Q6_K.gguf",
+  sizeBytes: 23_490_083_680,
+  source: "download",
+  projectorPath: null,
+  summary: {
+    architecture: "futurearch",
+    quantization: "Q6_K",
+    sizeLabel: "26B",
+    contextLength: 1_048_576,
+    templateTools: true,
+    templateThinking: false,
+    isMoe: true,
+  },
+  architectureSupported: false,
+  imageFileOffer: { kind: "available", file: "mmproj-F16.gguf", sizeBytes: 639_348_160 },
+};
+
+const UPDATES: UpdateStatus = {
+  configured: true,
+  autoCheck: true,
+  currentVersion: "0.2.1",
+  checking: false,
+  checked: true,
+  downloading: null,
+  available: null,
+  ready: null,
+  error: null,
+};
+
+async function rowOf(m: InstalledModel) {
+  await show();
+  const row = screen.getByText(m.fileName).closest("li");
+  if (!row) throw new Error("no row");
+  return row;
+}
+
+describe("Models → Installed: a model this version can't open yet", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    ipcMock.listInstalledModels.mockResolvedValue([SMALL, FUTURE]);
+    // What the memory check says is a guess for a kind it does not know: yellow here.
+    ipcMock.modelLoadInfo.mockImplementation(async (path) =>
+      path === FUTURE.path ? info(path, { fit: "yellow" }) : info(path),
+    );
+    ipcMock.updateStatus.mockResolvedValue(UPDATES);
+    useApp.setState({ runtime: null, activeChatId: 3, detail: null, error: null });
+    useCompare.setState({ entries: [] });
+    studioApi.studioLocalModels.mockResolvedValue(LOCAL);
+  });
+  afterEach(cleanup);
+
+  it("says in plain words that it can't open yet, and that a newer version may", async () => {
+    const row = await rowOf(FUTURE);
+    expect(row.textContent).toContain(
+      "Can't open yet: this version of harnessUI does not know the “futurearch” kind of model. A newer version may open it.",
+    );
+    expect(row.textContent).not.toMatch(/llama|architecture|bundled/i);
+  });
+
+  it("gives no memory verdict for it, and keeps the verdict of the model that can open", async () => {
+    const row = await rowOf(FUTURE);
+    expect(row.textContent).not.toMatch(/Fits|Too large/);
+    expect(screen.getAllByText("Fits")).toHaveLength(1);
+  });
+
+  it("offers no image file for it, not even one its repository has", async () => {
+    const row = await rowOf(FUTURE);
+    expect(row.textContent).not.toMatch(/image file/i);
+    expect(ipcMock.imageFileOffer).not.toHaveBeenCalled();
+    expect(ipcMock.downloadImageFile).not.toHaveBeenCalled();
+  });
+
+  it("turns Use off with the reason beside it, readable by a screen reader", async () => {
+    const row = await rowOf(FUTURE);
+    const use = Array.from(row.querySelectorAll("button")).find((b) => b.textContent === "Use") as HTMLButtonElement;
+    expect(use.disabled).toBe(true);
+    expect(use.getAttribute("title")).toBe("This version can't open this model yet");
+    const why = row.querySelector(`[id="${use.getAttribute("aria-describedby")}"]`);
+    expect(why?.textContent).toContain("Can't open yet: this version of harnessUI");
+    // The model that can open keeps a plain Use.
+    const other = screen.getByText("small.gguf").closest("li")!;
+    const useOther = Array.from(other.querySelectorAll("button")).find((b) => b.textContent === "Use") as HTMLButtonElement;
+    expect(useOther.disabled).toBe(false);
+    expect(useOther.getAttribute("aria-describedby")).toBeNull();
+  });
+
+  it("keeps Add to comparison, Settings and Delete, so a model can be compared or removed", async () => {
+    const row = await rowOf(FUTURE);
+    for (const name of [`Add to comparison: ${FUTURE.fileName}`, `Settings for this model: ${FUTURE.fileName}`, `Delete ${FUTURE.fileName}`]) {
+      const b = row.querySelector(`button[aria-label="${name}"]`) as HTMLButtonElement | null;
+      expect(b, name).not.toBeNull();
+      expect(b!.disabled).toBe(false);
+    }
+  });
+
+  it("checks for updates from the row, and says what it found", async () => {
+    const row = await rowOf(FUTURE);
+    const link = Array.from(row.querySelectorAll("button")).find((b) => b.textContent === "Check for updates")!;
+    await click(link);
+    expect(ipcMock.checkForUpdate).toHaveBeenCalledTimes(1);
+    expect(row.textContent).toContain("You have the latest version (0.2.1). It can't open this model yet, so check again later.");
+  });
+
+  it("says plainly when the file names no kind, with no update to wait for", async () => {
+    const kindless = { ...FUTURE, summary: { ...FUTURE.summary!, architecture: "unknown" } };
+    ipcMock.listInstalledModels.mockResolvedValue([kindless]);
+    const row = await rowOf(kindless);
+    expect(row.textContent).toContain("This file does not say what kind of model it is, so this version can't open it.");
+    expect(row.textContent).not.toContain("A newer version may open it");
+    expect(Array.from(row.querySelectorAll("button")).some((b) => b.textContent === "Check for updates")).toBe(false);
+  });
+
+  it("shows the kind's own text with its invisible characters made visible", async () => {
+    const odd = { ...FUTURE, summary: { ...FUTURE.summary!, architecture: "fu\u202Eture" } };
+    ipcMock.listInstalledModels.mockResolvedValue([odd]);
+    const row = await rowOf(odd);
+    expect(row.textContent).toContain("the “fu[U+202E]ture” kind of model");
+  });
+
+  it("leaves a row whose kind nobody knows (null) as it was", async () => {
+    const unknown = { ...FUTURE, architectureSupported: null, fileName: "maybe.gguf" };
+    ipcMock.listInstalledModels.mockResolvedValue([unknown]);
+    const row = await rowOf(unknown);
+    expect(row.textContent).not.toContain("Can't open yet");
+    const use = Array.from(row.querySelectorAll("button")).find((b) => b.textContent === "Use") as HTMLButtonElement;
+    expect(use.disabled).toBe(false);
   });
 });

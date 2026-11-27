@@ -1,10 +1,10 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useId, useState } from "react";
 import { Check, FolderOpen, Plus, Settings2, Trash2 } from "lucide-react";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import * as ipc from "../../lib/ipc";
 import type { DiskUsage, ErrorInfo, InstalledModel, ModelLoadInfo, Verdict } from "../../lib/types";
 import { formatBytes } from "../../lib/format";
-import { FIT_WORDS, INSTALLED_STUDIO_LINE, tokensWithWords } from "../../lib/words";
+import { CANT_OPEN, FIT_WORDS, INSTALLED_STUDIO_LINE, tokensWithWords } from "../../lib/words";
 import { toErrorInfo, useApp } from "../../store/app";
 import { COMPARE_FULL, COMPARE_LIMIT, sameEntry, useAddToComparison, useCompare } from "../../store/compare";
 import { askTooLarge, isLoadedNow, unloadModel } from "../../store/modelChange";
@@ -12,6 +12,7 @@ import { ErrorBanner } from "../ErrorBanner";
 import { visiblePath } from "../FolderChip";
 import { ModelSettings } from "../ModelSettings";
 import { Badge } from "./Badge";
+import { CantOpenLine } from "./CantOpen";
 import { ImageFileLine, seesImages } from "./ImageFile";
 import * as studioApi from "../studio/api";
 
@@ -271,7 +272,11 @@ function Row(props: {
 }) {
   const { model: m, info } = props;
   const compare = useAddToComparison({ installedPath: m.path });
-  const verdict: Verdict | null = info ? (info.tooLarge ? "red" : info.fit) : null;
+  // This version's model runner does not know the file's kind (the list is of the pinned build,
+  // judged from the file's own header): nothing that says it could run is shown with it.
+  const cantOpen = m.architectureSupported === false;
+  const whyId = useId();
+  const verdict: Verdict | null = info && !cantOpen ? (info.tooLarge ? "red" : info.fit) : null;
   // File names, folders and what the file says about itself can hold any character: shown
   // with invisible and direction-changing characters as codes, so one file cannot pose as another.
   const name = visiblePath(m.fileName);
@@ -297,13 +302,9 @@ function Row(props: {
             </Badge>
           )}
           {m.source === "import" && <Badge>imported</Badge>}
-          {m.architectureSupported === false && (
-            <span className="text-xs text-danger">
-              The bundled llama.cpp cannot load {visiblePath(m.summary?.architecture ?? "this model")}.
-            </span>
-          )}
         </div>
-        <ImageFileLine model={m} onChanged={props.onChanged} />
+        {cantOpen && <CantOpenLine id={whyId} architecture={m.summary?.architecture} />}
+        {!cantOpen && <ImageFileLine model={m} onChanged={props.onChanged} />}
         <div className="mt-1 flex flex-wrap items-center gap-3 text-xs text-fg-muted">
           {info && verdict && (
             <span
@@ -349,7 +350,9 @@ function Row(props: {
       <button
         type="button"
         onClick={props.onUse}
-        disabled={m.architectureSupported === false}
+        disabled={cantOpen}
+        title={cantOpen ? CANT_OPEN.title : undefined}
+        aria-describedby={cantOpen ? whyId : undefined}
         className="rounded-md bg-accent px-3 py-1 text-xs text-accent-fg disabled:opacity-40"
       >
         Use

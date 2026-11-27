@@ -1,4 +1,5 @@
 import { useEffect, useId, useState } from "react";
+import { CircleSlash } from "lucide-react";
 import * as ipc from "../../lib/ipc";
 import { listenInEffect } from "../../lib/listen";
 import type { ErrorInfo, UpdateStatus } from "../../lib/types";
@@ -126,5 +127,32 @@ export function CantOpenBox(props: { architecture: string | null }) {
         </>
       )}
     </section>
+  );
+}
+
+/**
+ * An installed model's row: the same news in one line, with the update check beside it as a
+ * link. `id` is the line's, for Use's `aria-describedby`: Use is off, and this says why.
+ */
+export function CantOpenLine(props: { id: string; architecture: string | null | undefined }) {
+  const kind = kindName(props.architecture);
+  return (
+    <div className="mt-1 flex flex-wrap items-center gap-x-3 gap-y-1 text-xs">
+      <p id={props.id} className="flex items-start gap-1.5">
+        <CircleSlash size={12} className="mt-0.5 shrink-0 text-warning" aria-hidden />
+        <span>
+          {kind === null ? (
+            CANT_OPEN.noKind
+          ) : (
+            <>
+              {CANT_OPEN.row.before}
+              <Outside text={kind} cap={60} />
+              {CANT_OPEN.row.after}
+            </>
+          )}
+        </span>
+      </p>
+      {kind !== null && <UpdateCheck look="link" />}
+    </div>
   );
 }
