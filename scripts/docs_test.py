@@ -318,6 +318,75 @@ class FitParamsLimitAsTheCodeSetsIt(unittest.TestCase):
         self.assertIn(f"killed after {self.secs} s", measurement, "7.7: the measurement")
 
 
+class LlamaPinDocs(unittest.TestCase):
+    """What ARCHITECTURE.md says about the llama.cpp pin is the lock's, and its how-to-bump list
+    names only files, flags and tests that exist."""
+
+    HOWTO = "#### How to bump the llama.cpp pin"
+
+    def lock(self) -> dict:
+        return json.loads(read("llama.lock.json"))
+
+    def cuda(self) -> dict:
+        return next(pack for pack in self.lock()["packs"] if pack["id"] == "cuda")
+
+    def test_the_pin_the_docs_name_is_the_locks(self):
+        pin = self.lock()["llama_cpp"]
+        design = paragraph(section("## 2. What the research changed"), "- **llama.cpp** now has stable version tags.")
+        self.assertIn(f"pins **v{pin['version']}** (build `{pin['tag']}`)", design)
+        layout = "\n".join(section("### 7.1 Pinning and layout"))
+        self.assertIn(f"pins llama.cpp **v{pin['version']} (`{pin['tag']}`)**", layout)
+
+    def test_the_file_names_in_the_7_1_table_are_the_locks(self):
+        layout = "\n".join(section("### 7.1 Pinning and layout"))
+        for entry in self.lock()["installer"]["windows-x86_64"]["files"] + self.cuda()["files"]:
+            self.assertIn(f"`{entry['name']}`", layout, "7.1's table names the archives the lock pins")
+        self.assertIn(f"`<local data>/backends/{self.cuda()['dir']}/`", layout)
+
+    def test_the_cuda_version_and_size_are_the_locks(self):
+        cuda = self.cuda()
+        version = re.search(r"cuda-(\d+\.\d+)-x64", cuda["files"][0]["name"]).group(1)
+        row = paragraph(section("### 1.1 Installer and GPU backends"), "| D4 |")
+        self.assertIn(f"pinned llama.cpp ({version})", row)
+        download = sum(f["size"] for f in cuda["files"]) / 1e9
+        numbers = paragraph(section("### 1.1 Installer and GPU backends"), "| CUDA 13 |")
+        self.assertIn(f"| {download:.2f} GB |", numbers, "Backends in numbers: the CUDA download is the lock's sizes added")
+
+    def test_the_bump_list_names_files_that_exist(self):
+        text = "\n".join(section(self.HOWTO))
+        self.assertGreater(len(text), 1000, "the how-to-bump list is missing")
+        paths = set(re.findall(r"(?<![\w./-])((?:scripts|crates|catalog|third_party)/[\w./-]+[\w/])", text))
+        self.assertIn("scripts/update_llama_archs.py", paths)
+        for rel in sorted(paths):
+            self.assertTrue((ROOT / rel).exists(), f"the how-to-bump list names {rel}, which does not exist")
+
+    def test_the_bump_list_names_flags_and_tests_that_exist(self):
+        text = "\n".join(section(self.HOWTO))
+        script = read("scripts/update_llama_archs.py")
+        for flag in ("--source", "--check"):
+            self.assertIn(flag, text)
+            self.assertIn(f'"{flag}"', script, f"update_llama_archs.py has no {flag}")
+        crates = {"runtime": "crates/runtime", "agent": "crates/agent", "mcp-host": "crates/mcp-host"}
+        seen = 0
+        for crate, tests in re.findall(r"cargo test -p (\S+)((?: --test \w+)+)", text):
+            for name in re.findall(r"--test (\w+)", tests):
+                seen += 1
+                self.assertTrue((ROOT / crates[crate] / "tests" / f"{name}.rs").is_file(), f"{crate}: no test file {name}.rs")
+        self.assertGreaterEqual(seen, 6)
+        for name in ("mentions", "load_settings"):
+            self.assertIn("LLAMA_SERVER_BIN", read(f"src-tauri/src/{name}.rs"), f"{name}.rs does not read LLAMA_SERVER_BIN")
+        ci = read(".github/workflows/ci.yml")
+        for test in ("fetch_llama_test.py", "update_llama_archs_test.py", "docs_test.py"):
+            self.assertIn(test, text)
+            self.assertIn(f"scripts/{test}", ci, f"CI does not run {test}")
+
+    def test_the_list_is_said_to_be_checked_by_a_test_that_exists(self):
+        bullet = paragraph(section("### 7.1 Pinning and layout"), "- **The architecture list.**")
+        self.assertIn("`catalog/llama-architectures.txt`", bullet)
+        self.assertIn("the_list_was_made_from_the_pinned_commit", read("crates/models/src/arch.rs"))
+        self.assertIn("first line", bullet)
+
+
 class StudioDocs(unittest.TestCase):
     """What the docs say about Studio matches the code: hosts, money rules, audit row, CSP, scope note,
     and the 0.1.0 changelog entry."""
