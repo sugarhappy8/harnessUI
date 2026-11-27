@@ -483,6 +483,17 @@ mod tests {
             .unwrap()
     }
 
+    /// How many entries of the bundled catalog's `companions` section `key` holds, as the
+    /// catalog writes them: what a table that skips nothing keeps.
+    fn raw_len(key: &str) -> usize {
+        let c = Catalog::bundled();
+        match &c.companions[key] {
+            Value::Array(a) => a.len(),
+            Value::Object(o) => o.len(),
+            other => panic!("companions.{key} is {other}"),
+        }
+    }
+
     fn id(c: Option<&Companion>) -> Option<&str> {
         c.map(|c| c.id.as_str())
     }
@@ -642,7 +653,7 @@ mod tests {
     #[test]
     fn the_bundled_table_is_valid_and_complete() {
         let t = CompanionTable::from_catalog(&Catalog::bundled()).unwrap();
-        assert_eq!(t.files.len(), 22);
+        assert_eq!(t.files.len(), raw_len("files"));
         assert_eq!(
             t.default_for("flux1-dev", SdVersion::Flux, SlotId::T5xxl)
                 .unwrap()
@@ -931,10 +942,14 @@ mod tests {
                 .push(json!("flux9"));
         })
         .unwrap();
-        assert_eq!(t.files.len(), 22);
+        assert_eq!(t.files.len(), raw_len("files"));
         let clip = t.files.iter().find(|c| c.id == "clip-l").unwrap();
         use SdVersion::*;
-        assert_eq!(clip.versions, [Flux, FluxFill, FluxControls, Flex2, Sd3]);
+        assert_eq!(clip.versions, bundled().files[0].versions);
+        assert_eq!(
+            &clip.versions[..5],
+            [Flux, FluxFill, FluxControls, Flex2, Sd3]
+        );
         assert_eq!(
             id(t.default_for("flux1-dev", Flux, SlotId::ClipL)),
             Some("clip-l")
@@ -966,7 +981,7 @@ mod tests {
             v["byRecipe"]["flux1-dev"] = json!({ "t5xxl": "encoder-9" });
         })
         .unwrap();
-        assert_eq!(t.files.len(), 22);
+        assert_eq!(t.files.len(), raw_len("files"));
         assert!(
             t.files
                 .iter()
@@ -1012,7 +1027,10 @@ mod tests {
             v["byRecipe"]["flux9-dev"] = json!({ "t5xxl": "t5xxl-fp8" });
         })
         .unwrap();
-        assert_eq!((t.files.len(), t.by_version.len()), (22, 33));
+        assert_eq!(
+            (t.files.len(), t.by_version.len()),
+            (raw_len("files"), raw_len("byVersion"))
+        );
         assert_eq!(
             t.by_version[&SdVersion::Flux]
                 .keys()
@@ -1052,7 +1070,14 @@ mod tests {
             v["licenses"]["stabilityai-ai-community"]["commercialOutputs"] = json!("attribution");
         })
         .unwrap();
-        assert_eq!(t.files.len(), 21);
+        // The files under the skipped licence go, and nothing else.
+        let under_it = Catalog::bundled().companions["files"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|f| f["license"] == "stabilityai-ai-community")
+            .count();
+        assert_eq!(t.files.len(), raw_len("files") - under_it);
         assert!(t.licence("stabilityai-ai-community").is_none());
         assert!(t.files.iter().all(|c| c.id != "clip-g"));
         assert_eq!(

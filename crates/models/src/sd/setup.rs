@@ -1233,6 +1233,73 @@ mod tests {
         assert_eq!(p.to_fetch().len(), 4);
     }
 
+    /// The 0.2.1 report: Qwen Image 2.1's page showed a text encoder and a decoder with "No
+    /// file yet", and a Download that could not start, because the table had nothing for the
+    /// version. A lone diffusion file (the NF4 or Q8_0 file of the report) now plans all
+    /// three: Qwen 3 VL 8B as the text encoder, Qwen Image 2.1's own decoder (not Qwen Image
+    /// 1's: another file) and the vision projector the GGUF encoder needs for reference
+    /// pictures, and the Turbo recipe plans the same files.
+    #[test]
+    fn a_qwen_image_21_file_gets_its_encoder_decoder_and_vision_projector() {
+        let facts = FileFacts {
+            kind: FileKind::Model {
+                version: SdVersion::QwenImage21,
+                layout: Layout::DiffusionOnly,
+                embeds: Vec::new(),
+            },
+            facts: MatchFacts::default(),
+            parameters: 20_000_000_000,
+            format: FileFormat::Gguf,
+        };
+        let main = || Main {
+            repo: "chatrlabs/Qwen-Image-2.1-Uncensored-Omni-Quantized".into(),
+            file: rf("qwen-image-2.1-step90000-Q8_0.gguf", 7_687_183_136),
+            facts: facts.clone(),
+            part: None,
+        };
+        for recipe_id in ["qwen-image-21", "qwen-image-21-turbo"] {
+            let p = plan(main(), recipe_id, &[], &[]);
+            assert!(p.can_run(), "{recipe_id}: {:?}", p.missing());
+            assert_eq!(
+                sources(&p),
+                [
+                    (SlotId::DiffusionModel, PartSource::Main),
+                    (SlotId::Llm, PartSource::Companion),
+                    (SlotId::LlmVision, PartSource::Companion),
+                    (SlotId::Vae, PartSource::Companion),
+                ],
+                "{recipe_id}"
+            );
+            assert_eq!(hub_path(&p, SlotId::Llm), "Qwen3VL-8B-Instruct-Q8_0.gguf");
+            assert_eq!(
+                hub_path(&p, SlotId::LlmVision),
+                "mmproj-Qwen3VL-8B-Instruct-F16.gguf"
+            );
+            assert_eq!(
+                hub_path(&p, SlotId::Vae),
+                "vae/qwen_image_2.1_vae_bf16.safetensors"
+            );
+            // The decoder is Qwen Image 2.1's own, under Qwen's research licence; the
+            // encoder and projector are Apache-2.0.
+            let licence = |s| match &slot(&p, s).unwrap().file {
+                Some(PlannedFile::Hub { licence, .. }) => licence.clone(),
+                other => panic!("{other:?}"),
+            };
+            assert_eq!(
+                licence(SlotId::Vae),
+                LicenceRef::Companion("qwen-research".into())
+            );
+            assert_eq!(
+                licence(SlotId::Llm),
+                LicenceRef::Companion("apache-2.0".into())
+            );
+            assert_ne!(
+                companion("qwen-image-vae").sha256,
+                companion("qwen-image-21-vae").sha256
+            );
+        }
+    }
+
     #[test]
     fn an_sd15_checkpoint_needs_nothing_else_and_shows_its_own_vae() {
         let p = plan(

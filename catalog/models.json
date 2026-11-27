@@ -1419,6 +1419,19 @@
           "Register with Stability AI before any commercial use."
         ],
         "plainWords": "Commercial use only under $1,000,000 a year in revenue."
+      },
+      "qwen-research": {
+        "name": "Qwen Research License Agreement",
+        "url": "https://huggingface.co/Qwen/Qwen-Image-2.1/blob/d26bb61231c349cf6b7896fa83353113880e1ba3/LICENSE",
+        "sha256": "8dc973f024ff95966bea25866efa443fd16776dcb1001e681e3d467ea572b28d",
+        "commercialOutputs": "no",
+        "revenueLimitUsd": null,
+        "excludedRegions": [],
+        "obligations": [
+          "Give a copy of the licence to anyone you pass the files to.",
+          "Keep Qwen's copyright notice with the files."
+        ],
+        "plainWords": "For research and testing only. Using it to make money needs a separate licence from Qwen."
       }
     },
     "files": [
@@ -1760,6 +1773,58 @@
         "size": 5140950080,
         "sha256": "f453ee5e7a25cb23cf2adf7aae3e5b405f22097cb67f2cfcca029688cb3f740d",
         "license": "apache-2.0"
+      },
+      {
+        "id": "qwen3-vl-8b-q8",
+        "slot": "llm",
+        "versions": [
+          "qwen-image-2.1"
+        ],
+        "repo": "Qwen/Qwen3-VL-8B-Instruct-GGUF",
+        "revision": "f982a07559d4a2f6c8744d840bf6fccab30eea96",
+        "path": "Qwen3VL-8B-Instruct-Q8_0.gguf",
+        "size": 8709519456,
+        "sha256": "0d264b3941185d00a74f75c4245521dae088ff1efc90ab8d1754e83f5844adb0",
+        "license": "apache-2.0"
+      },
+      {
+        "id": "qwen3-vl-8b-q4km",
+        "slot": "llm",
+        "versions": [
+          "qwen-image-2.1"
+        ],
+        "repo": "Qwen/Qwen3-VL-8B-Instruct-GGUF",
+        "revision": "f982a07559d4a2f6c8744d840bf6fccab30eea96",
+        "path": "Qwen3VL-8B-Instruct-Q4_K_M.gguf",
+        "size": 5027784800,
+        "sha256": "67d1659bfe71b89d50b45a4ad1a9e5b997e5bb16ce5da66a6a6167abd569e9e2",
+        "license": "apache-2.0"
+      },
+      {
+        "id": "qwen3-vl-8b-mmproj",
+        "slot": "llm_vision",
+        "versions": [
+          "qwen-image-2.1"
+        ],
+        "repo": "Qwen/Qwen3-VL-8B-Instruct-GGUF",
+        "revision": "f982a07559d4a2f6c8744d840bf6fccab30eea96",
+        "path": "mmproj-Qwen3VL-8B-Instruct-F16.gguf",
+        "size": 1159029824,
+        "sha256": "ca524100ebf825c9a870db1c580d03879e0da0ab2541697e2458e64891cf9d38",
+        "license": "apache-2.0"
+      },
+      {
+        "id": "qwen-image-21-vae",
+        "slot": "vae",
+        "versions": [
+          "qwen-image-2.1"
+        ],
+        "repo": "Comfy-Org/Qwen-Image-2.1",
+        "revision": "aacf31a6d48e707f352ecba714cee0680da3479b",
+        "path": "vae/qwen_image_2.1_vae_bf16.safetensors",
+        "size": 675509688,
+        "sha256": "bb21f7473051e1ac368515dd3f2e15cd44d7a11748ee8823e1ddca3e4876b7c9",
+        "license": "qwen-research"
       }
     ],
     "byVersion": {
@@ -1888,6 +1953,11 @@
       },
       "iris": {
         "llm": "qwen3-vl-4b-q4km"
+      },
+      "qwen-image-2.1": {
+        "llm": "qwen3-vl-8b-q8",
+        "vae": "qwen-image-21-vae",
+        "llm_vision": "qwen3-vl-8b-mmproj"
       }
     },
     "byRecipe": {
