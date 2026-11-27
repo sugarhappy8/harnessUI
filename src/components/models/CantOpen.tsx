@@ -3,9 +3,9 @@ import { CircleSlash } from "lucide-react";
 import * as ipc from "../../lib/ipc";
 import { listenInEffect } from "../../lib/listen";
 import type { ErrorInfo, UpdateStatus } from "../../lib/types";
-import { CANT_OPEN, updateLine } from "../../lib/words";
+import { CANT_OPEN, cantOpenCardTip, updateLine } from "../../lib/words";
 import { toErrorInfo } from "../../store/app";
-import { Outside } from "./Compare";
+import { Outside, shown } from "./Compare";
 
 // A model whose kind this version of the app cannot open yet (the model runner it comes with
 // does not know it). The words are words.ts's CANT_OPEN; this file is the pieces the
@@ -154,5 +154,26 @@ export function CantOpenLine(props: { id: string; architecture: string | null | 
       </p>
       {kind !== null && <UpdateCheck look="link" />}
     </div>
+  );
+}
+
+/**
+ * A search card's hint that this version may not know the model's kind. Dashed and without a
+ * fill, like Studio's hints from a name: it is a guess from Hugging Face's listing, and the
+ * page checks the files. The tooltip says so, and so does the text a screen reader gets (a
+ * tooltip is not read to it). It sits inside the card's button, so it is text, not a control.
+ */
+export function CantOpenHint(props: { kind: string }) {
+  const tip = cantOpenCardTip(shown(props.kind, 60));
+  return (
+    <span
+      data-hint="listing"
+      title={tip}
+      className="inline-flex shrink-0 items-center gap-1 rounded-full border border-dashed border-danger/40 px-2 py-0.5 text-[11px] text-danger"
+    >
+      <CircleSlash size={11} aria-hidden />
+      {CANT_OPEN.short}
+      <span className="sr-only"> ({tip})</span>
+    </span>
   );
 }

@@ -8,6 +8,7 @@ import { toErrorInfo } from "../../store/app";
 import { COMPARE_FULL, COMPARE_LIMIT, useCompare, useRepoInComparison } from "../../store/compare";
 import { ErrorBanner } from "../ErrorBanner";
 import { Badge } from "./Badge";
+import { CantOpenHint } from "./CantOpen";
 import { AddToComparison, Outside } from "./Compare";
 import { RepoDetail } from "./RepoDetail";
 
@@ -24,6 +25,7 @@ function ResultRow(props: { repo: RepoSummary; onOpen: () => void }) {
       >
         <span className="min-w-0 flex-1 truncate">{r.id}</span>
         {r.gated !== "no" && <Lock size={12} className="text-fg-muted" aria-label="gated" />}
+        {r.unknownArchitecture && <CantOpenHint kind={r.unknownArchitecture} />}
         {r.license && (
           <Badge>
             <Outside text={licenseWords(r.license)} cap={60} />

@@ -340,6 +340,10 @@ export interface RepoSummary {
   license: string | null;
   lastModified: string | null;
   pipelineTag: string | null;
+  /** The kind Hugging Face's listing names for the repository, only when this version's model
+   *  runner does not know it. A hint from the repository's first file, not a verdict: the
+   *  page reads the files. Null or left out: nothing to say. */
+  unknownArchitecture?: string | null;
 }
 
 export interface SearchPage {
