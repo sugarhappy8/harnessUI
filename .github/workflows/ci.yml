@@ -76,6 +76,9 @@ jobs:
       - run: python3 scripts/notices.py --check
       # The macOS llama.cpp build needs a Mac; its plan, file names and checks do not.
       - run: python3 scripts/fetch_llama_test.py
+      # The script that makes catalog/llama-architectures.txt from the pinned commit, offline.
+      # (That the committed list is from the pinned commit is a test in crates/models.)
+      - run: python3 -I scripts/update_llama_archs_test.py
       # The same for the Studio engine (sd.lock.json): its Mac build, its Linux development
       # build and the Windows pack check, with stand-ins for the tools.
       - run: python3 scripts/fetch_sd_test.py
