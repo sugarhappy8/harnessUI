@@ -25,6 +25,9 @@ pub struct PageArchitecture {
     /// `Some(false)` only when the page has enough evidence to say the engine cannot open the
     /// model; `None` when nothing was read or the two witnesses disagree.
     pub supported: Option<bool>,
+    /// The kind is a picture or video model's ([`is_diffusion`]): no newer version of the model
+    /// runner will chat with it, so "not yet" would promise what is not true.
+    pub picture: bool,
 }
 
 /// A name that was actually read: a file without `general.architecture` reads "unknown" and an
@@ -53,6 +56,7 @@ pub fn page_architecture(header: Option<&str>, listing: Option<&str>) -> PageArc
         (Some(h), Some(l)) => (Some(if is_supported(h) { h } else { l }), None),
     };
     PageArchitecture {
+        picture: name.is_some_and(is_diffusion),
         name: name.map(str::to_string),
         supported,
     }
@@ -180,6 +184,28 @@ mod tests {
     fn page(header: Option<&str>, listing: Option<&str>) -> (Option<String>, Option<bool>) {
         let p = page_architecture(header, listing);
         (p.name, p.supported)
+    }
+
+    /// "Not yet" is for chat models only: a newer version will not chat with a picture or video
+    /// model, so the page says what it is instead of promising an update.
+    #[test]
+    fn a_picture_or_video_kind_is_marked_so_the_page_does_not_promise_an_update() {
+        for (header, listing) in [
+            (Some("flux"), None),
+            (None, Some("wan")),
+            (Some("sd3"), Some("sd3")),
+        ] {
+            let p = page_architecture(header, listing);
+            assert!(p.picture, "{header:?} {listing:?}");
+            assert_eq!(p.supported, Some(false), "{header:?} {listing:?}");
+        }
+        for (header, listing) in [
+            (Some("qwen3"), None),
+            (Some("futurearch"), None),
+            (None, None),
+        ] {
+            assert!(!page_architecture(header, listing).picture, "{header:?}");
+        }
     }
 
     fn some(name: &str, supported: Option<bool>) -> (Option<String>, Option<bool>) {

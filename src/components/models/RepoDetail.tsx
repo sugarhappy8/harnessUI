@@ -127,7 +127,7 @@ export function RepoDetail(props: { repoId: string; onBack: () => void; onStarte
           <ExternalLink size={11} aria-hidden />
         </span>
       </div>
-      {view && cantOpen && <CantOpenBox architecture={view.architecture} />}
+      {view && cantOpen && <CantOpenBox architecture={view.architecture} picture={view.pictureModel} />}
       {!view && !error && <p className="text-sm text-fg-muted">Loading files…</p>}
       {view && (
         <>
@@ -163,8 +163,11 @@ export function RepoDetail(props: { repoId: string; onBack: () => void; onStarte
                     <Check size={12} aria-hidden /> Installed
                   </span>
                 ) : cantOpen ? (
-                  <span title={CANT_OPEN.title} className="text-xs text-fg-muted">
-                    {CANT_OPEN.short}
+                  <span
+                    title={view.pictureModel ? CANT_OPEN.picture.title : CANT_OPEN.title}
+                    className="text-xs text-fg-muted"
+                  >
+                    {view.pictureModel ? CANT_OPEN.picture.short : CANT_OPEN.short}
                   </span>
                 ) : (
                   <button

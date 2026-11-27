@@ -269,6 +269,9 @@ pub struct RepoView {
     pub license: Option<String>,
     pub architecture: Option<String>,
     pub architecture_supported: Option<bool>,
+    /// The model is a picture or video model (by its kind): the page says what it is, not that a
+    /// newer version may open it.
+    pub picture_model: bool,
     pub context_length: Option<u64>,
     pub parameters: Option<u64>,
     pub template_tools: bool,
@@ -381,6 +384,7 @@ pub async fn hub_repo(
     );
     Ok(RepoView {
         architecture_supported: judged.supported,
+        picture_model: judged.picture,
         architecture: judged.name,
         context_length: summary
             .as_ref()

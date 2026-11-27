@@ -310,6 +310,13 @@ export const CANT_OPEN = {
   readyHint: "Close this window and use the update box.",
   /** An app that cannot update itself (a build without the updater). */
   noUpdates: "This copy can't update itself. New versions are on the project's GitHub releases page.",
+  /** A picture or video model opened from Browse (Show all GGUF repositories): an update
+   *  would not change it, so none is promised. The same sentences as an import's refusal. */
+  picture: {
+    title: "This is a picture or video model",
+    body: "It can't chat. Add it in Studio → Get models.",
+    short: "Not for chat",
+  },
   /** Where the memory sentence would be: no verdict is given for a model that cannot open. */
   memory: "Memory use is worked out once this version can open the model.",
   /** Compare's "Will it fit on this computer?". */

@@ -417,6 +417,8 @@ export interface RepoView {
   architecture: string | null;
   /** False when the bundled llama.cpp cannot load this architecture; null if unknown. */
   architectureSupported: boolean | null;
+  /** A picture or video model (by its kind): not for chat, and no update will change that. */
+  pictureModel?: boolean;
   contextLength: number | null;
   parameters: number | null;
   templateTools: boolean;

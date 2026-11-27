@@ -295,6 +295,30 @@ describe("the page of a model this version can't open yet", () => {
   });
 });
 
+describe("the page of a picture or video model", () => {
+  const PICTURE: RepoView = { ...CANT_OPEN_VIEW, architecture: "flux", pictureModel: true, projector: null };
+
+  it("says what it is, not that an update may open it", async () => {
+    await open(PICTURE);
+    const box = screen.getByRole("region", { name: "This is a picture or video model" });
+    expect(box.textContent).toContain("It can't chat. Add it in Studio → Get models.");
+    expect(box.textContent).not.toMatch(/newer|update|runner|yet/i);
+    expect(within(box).queryByRole("button")).toBeNull();
+    expect(screen.queryByText("This version can't open this model yet")).toBeNull();
+  });
+
+  it("puts 'Not for chat' where Download would be, with no memory verdict", async () => {
+    await open(PICTURE);
+    const rows = screen.getAllByRole("listitem");
+    for (const row of rows) {
+      expect(within(row).getByText("Not for chat")).toBeTruthy();
+      expect(within(row).queryByRole("button", { name: "Download" })).toBeNull();
+    }
+    expect(screen.queryByText(/Fits|Too large|Can't open yet/)).toBeNull();
+    expect(screen.queryByRole("checkbox")).toBeNull();
+  });
+});
+
 describe("the page of a model this version can open", () => {
   it("is as it was: image file offered, fit shown, Download on", async () => {
     await open({ ...VIEW, variants: VIEW.variants.map((v) => ({ ...v, fit: yellow })) });
