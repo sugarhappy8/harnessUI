@@ -3,9 +3,11 @@
 //! llama-server turns every offered tool schema into a grammar, and one schema it cannot
 //! convert fails the whole request. Each schema below is valid JSON Schema but was seen
 //! to fail a request on llama-server b12110 as is (one of them, a `minLength` above its
-//! `maxLength`, made it exhaust its memory). Their simplified copies must all be
-//! accepted, one at a time and all together, and the copies the host offers for a
-//! built-in server with such tools too.
+//! `maxLength`, made it exhaust its memory). b12774 (llama.cpp v1.1.0) reads a bare `true`
+//! as "any value", so the three schemas that only used one are accepted as they are now;
+//! `false` and every other case below are still refused, and the memory ones still fail
+//! as a grammar. Their simplified copies must all be accepted, one at a time and all
+//! together, and the copies the host offers for a built-in server with such tools too.
 //!
 //! Needs `LLAMA_SERVER_BIN` (a llama-server binary) and `TEST_GGUF` (a small model with
 //! a tool-calling chat template); skipped with a note when either is unset.
@@ -21,8 +23,10 @@ use mcp_host::{
 use runtime::spawn::{SpawnSpec, StdioMode};
 use serde_json::{Map, Value, json};
 
-/// Valid schemas that break a request on llama-server b12110 unless simplified. None of
-/// them may be sent to the server as is: some exhaust its memory.
+/// Valid schemas that broke a request on llama-server b12110 unless simplified (all but
+/// `boolean_field`, `items_true` and `boolean_in_one_of` still do on b12774, see
+/// [`REFUSED_AS_SENT`]). None of them may be sent to the server as is: some exhaust its
+/// memory.
 fn odd_schemas() -> Vec<(&'static str, Value)> {
     let field = |schema: Value| json!({"type": "object", "properties": {"f": schema}});
     vec![
@@ -91,6 +95,21 @@ fn odd_schemas() -> Vec<(&'static str, Value)> {
         ),
     ]
 }
+
+/// The odd schemas the pinned llama-server answers with HTTP 400 when they are sent as they
+/// are, checked on b12110 and on b12774. Only the ones that fail fast are named here: the
+/// three that make it expand a grammar (`large_min_length`, `large_min_items`,
+/// `min_length_above_max`) are never sent raw.
+const REFUSED_AS_SENT: [&str; 8] = [
+    "false_field",
+    "empty_enum",
+    "negative_min_items",
+    "fractional_min_length",
+    "huge_integer_bound",
+    "missing_definition",
+    "anchor_reference",
+    "remote_reference",
+];
 
 struct OddTools;
 
@@ -238,17 +257,21 @@ async fn simplified_schemas_are_accepted_by_llama_server() {
     };
     let server = start_server(&bin, &model).await;
 
-    // The server does check schemas: a safe one of the odd cases, as is, is refused.
-    let raw = odd_schemas()
-        .into_iter()
-        .find(|(name, _)| *name == "items_true")
-        .map(|(_, schema)| schema)
-        .expect("case");
-    let (status, _) = server.offer(&[("raw".into(), raw)]).await;
-    assert_eq!(
-        status, 400,
-        "llama-server accepted a schema it used to refuse"
-    );
+    // The server does check schemas: these odd cases, as they are, are refused. (A bare
+    // `true` is accepted since llama.cpp v1.1.0, so `items_true` is no proof any more; a
+    // bare `false` is not.)
+    for name in REFUSED_AS_SENT {
+        let raw = odd_schemas()
+            .into_iter()
+            .find(|(case, _)| *case == name)
+            .map(|(_, schema)| schema)
+            .expect("case");
+        let (status, body) = server.offer(&[(name.to_owned(), raw)]).await;
+        assert_eq!(
+            status, 400,
+            "llama-server accepted {name} as it is, which it used to refuse: {body}"
+        );
+    }
 
     // Each simplified copy on its own.
     let mut all = Vec::new();
