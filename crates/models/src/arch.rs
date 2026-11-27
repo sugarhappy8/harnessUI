@@ -1,5 +1,10 @@
 //! Architectures the pinned llama.cpp build can load (`catalog/llama-architectures.txt`,
 //! generated from the pinned commit by `scripts/update_llama_archs.py`).
+//!
+//! The ROCm download is a second llama.cpp, built from another commit. The list above
+//! serves every backend, so the other build must know every name in it:
+//! `catalog/llama-architectures-rocm.txt` (made by `update_llama_archs.py --pack rocm`)
+//! exists for a test that says so, and fails the day a bump of the pin outruns ROCm.
 
 const LIST: &str = include_str!("../../../catalog/llama-architectures.txt");
 
@@ -69,6 +74,65 @@ mod tests {
             header.contains(&format!("llama.cpp {tag} ({commit})")),
             "catalog/llama-architectures.txt is not from the pinned build {tag}; \
              run python3 scripts/update_llama_archs.py (header: {header})"
+        );
+    }
+
+    /// The names the ROCm download's llama.cpp knows, from the commit its lock entry
+    /// records.
+    const ROCM_LIST: &str = include_str!("../../../catalog/llama-architectures-rocm.txt");
+
+    fn names(list: &str) -> Vec<&str> {
+        list.lines()
+            .map(str::trim)
+            .filter(|l| !l.is_empty() && !l.starts_with('#'))
+            .collect()
+    }
+
+    fn rocm_pack() -> serde_json::Value {
+        let lock: serde_json::Value =
+            serde_json::from_str(include_str!("../../../llama.lock.json")).unwrap();
+        lock["packs"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|p| p["id"] == "rocm")
+            .expect("the lock has a ROCm pack")
+            .clone()
+    }
+
+    /// A ROCm pack change without `python3 scripts/update_llama_archs.py --pack rocm`
+    /// leaves the names of the old build in the file, and the next test proves nothing.
+    #[test]
+    fn the_rocm_list_was_made_from_the_commit_of_the_download() {
+        let pack = rocm_pack();
+        let build = pack["build"].as_str().unwrap();
+        let commit = pack["upstream_llama_cpp_commit"].as_str().unwrap();
+        let header = ROCM_LIST.lines().next().unwrap();
+        assert!(
+            header.contains(&format!("the ROCm download {build} ({commit})")),
+            "catalog/llama-architectures-rocm.txt is not from the ROCm download {build}; \
+             run python3 scripts/update_llama_archs.py --pack rocm (header: {header})"
+        );
+    }
+
+    /// Whatever the list claims, the ROCm download can load: a name it lacks would show a
+    /// green Download for a model that fails to open on the backend the user chose.
+    #[test]
+    fn the_rocm_download_knows_every_architecture_the_list_claims() {
+        let rocm = names(ROCM_LIST);
+        let lacking: Vec<&str> = names(LIST)
+            .into_iter()
+            .filter(|n| !rocm.contains(n))
+            .collect();
+        assert!(
+            lacking.is_empty(),
+            "the ROCm download ({}) cannot load {} architectures the model browser calls \
+             supported: {}. Move the ROCm pack in llama.lock.json to a lemonade build of a \
+             newer llama.cpp commit, then run python3 scripts/update_llama_archs.py --pack rocm \
+             (ARCHITECTURE.md 7.1, \"How to bump the llama.cpp pin\", step 8)",
+            rocm_pack()["build"].as_str().unwrap(),
+            lacking.len(),
+            lacking.join(" ")
         );
     }
 
