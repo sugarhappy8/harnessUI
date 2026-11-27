@@ -511,6 +511,43 @@ mod tests {
         }
     }
 
+    /// Decoders that look alike are not interchangeable (design 7.4: a file suits a version
+    /// only through its `versions`): PixArt alpha takes the SD 1.x-style VAE and Sigma the SDXL
+    /// one (a different scale), SDXS only its own tiny decoder, and SD3 its own 16-channel VAE
+    /// (never FLUX's, which is also 16-channel with different weights).
+    #[test]
+    fn look_alike_decoders_stay_with_their_models() {
+        let t = bundled();
+        use SdVersion::*;
+        for (recipe, version, slot, want) in [
+            ("pixart-alpha-512", Pixart, SlotId::Vae, "sd-vae-ft-ema"),
+            ("pixart-alpha-1024", Pixart, SlotId::Vae, "sd-vae-ft-ema"),
+            ("pixart-sigma", Pixart, SlotId::Vae, "sdxl-vae-fp16-fix"),
+            ("pixart-sigma", Pixart, SlotId::T5xxl, "t5xxl-fp8"),
+            ("sdxs", Sdxs512Ds, SlotId::Vae, "sdxs-vae"),
+            ("sdxs", Sdxs09, SlotId::Vae, "sdxs-vae"),
+            ("sd1-checkpoint", Sd1, SlotId::Vae, "sd-vae-ft-mse"),
+            ("sdxl-checkpoint", Sdxl, SlotId::Vae, "sdxl-vae-fp16-fix"),
+            ("sdxl-checkpoint", Sdxl, SlotId::ClipG, "clip-g-sdxl"),
+            ("sd35-medium", Sd3, SlotId::Vae, "sd3-vae"),
+            ("minit2i", Minit2i, SlotId::T5xxl, "flan-t5-large"),
+        ] {
+            assert_eq!(
+                id(t.default_for(recipe, version, slot)),
+                Some(want),
+                "{recipe} {slot:?}"
+            );
+        }
+        let by = |id: &str| t.files.iter().find(|c| c.id == id).unwrap();
+        assert!(!by("sd-vae-ft-mse").versions.contains(&Sdxs512Ds));
+        assert!(!by("sd3-vae").versions.contains(&Flux));
+        assert!(!by("ae-flux1").versions.contains(&Sd3));
+        // SDXL's own CLIP-G is the same bytes as SD3's, under its own licence.
+        assert_eq!(by("clip-g-sdxl").sha256, by("clip-g").sha256);
+        assert_eq!(by("clip-g-sdxl").license, "openrail++");
+        assert_eq!(by("clip-g").license, "stabilityai-ai-community");
+    }
+
     // ---- The guard: no recipe Studio runs may be a dead end ----------------------------------
 
     /// The recipe's slots that stay empty when its model is one lone file: no other file in
@@ -779,8 +816,8 @@ mod tests {
             .filter(|c| c.license == sai.id)
             .map(|c| c.id.as_str())
             .collect();
-        assert_eq!(under_sai, ["clip-g"]);
-        assert!(t.licence("mit").is_none());
+        assert_eq!(under_sai, ["clip-g", "sd3-vae"]);
+        assert!(t.licence("unlisted-licence").is_none());
 
         let err = refused(|v| v["licenses"]["apache-2.0"]["sha256"] = json!("0".repeat(64)));
         assert!(err.contains("licence text does not match"), "{err}");
@@ -841,7 +878,11 @@ mod tests {
                 "the SHA-256 is not 64 hex",
             ),
             ("size", json!(0), "no size"),
-            ("license", json!("mit"), "its licence is not listed"),
+            (
+                "license",
+                json!("unlisted-licence"),
+                "its licence is not listed",
+            ),
             ("slot", json!("diffusion_model"), "fills a model slot"),
             (
                 "id",
@@ -1106,8 +1147,13 @@ mod tests {
                     "file clip-g",
                     "its licence stabilityai-ai-community is skipped"
                 ),
+                (
+                    "file sd3-vae",
+                    "its licence stabilityai-ai-community is skipped"
+                ),
                 ("file ip-adapter-x", "an adapter slot: ip_adapter"),
                 ("byVersion sd3 clip_g", "names the skipped file clip-g"),
+                ("byVersion sd3 vae", "names the skipped file sd3-vae"),
                 (
                     "byVersion sdxl ip_adapter",
                     "names the skipped file ip-adapter-x"

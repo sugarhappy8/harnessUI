@@ -1432,6 +1432,30 @@
           "Keep Qwen's copyright notice with the files."
         ],
         "plainWords": "For research and testing only. Using it to make money needs a separate licence from Qwen."
+      },
+      "mit": {
+        "name": "MIT License",
+        "url": "https://huggingface.co/stabilityai/sd-vae-ft-ema/blob/f04b2c4b98319346dad8c65879f680b1997b204a/README.md",
+        "sha256": "814a88d18bd11ff1d8fe5ee9848562b779226a32d96c3aabfc9f58aac2e57f24",
+        "commercialOutputs": "yes",
+        "revenueLimitUsd": null,
+        "excludedRegions": [],
+        "obligations": [
+          "Keep the licence and copyright notices with the files."
+        ],
+        "plainWords": "Free for any use, including commercial."
+      },
+      "openrail++": {
+        "name": "Open RAIL++-M",
+        "url": "https://huggingface.co/stabilityai/stable-diffusion-xl-base-1.0/blob/462165984030d82259a11f4367a4eed129e94a7b/LICENSE.md",
+        "sha256": "19b6998b569b53ac1fc2158a8a3202c8699a9a4605b47075715d9c96be7fb6d0",
+        "commercialOutputs": "withUseRules",
+        "revenueLimitUsd": null,
+        "excludedRegions": [],
+        "obligations": [
+          "Do not use the files for the uses the licence forbids."
+        ],
+        "plainWords": "Commercial use allowed, with use rules"
       }
     },
     "files": [
@@ -1443,7 +1467,12 @@
           "flux-fill",
           "flux-controls",
           "flex-2",
-          "sd3"
+          "sd3",
+          "sdxl",
+          "sdxl-inpaint",
+          "sdxl-pix2pix",
+          "sdxl-vega",
+          "sdxl-ssd1b"
         ],
         "repo": "comfyanonymous/flux_text_encoders",
         "revision": "6af2a98e3f615bdfa612fbd85da93d1ed5f69ef5",
@@ -1462,7 +1491,8 @@
           "flex-2",
           "chroma",
           "chroma-radiance",
-          "sd3"
+          "sd3",
+          "pixart"
         ],
         "repo": "comfyanonymous/flux_text_encoders",
         "revision": "6af2a98e3f615bdfa612fbd85da93d1ed5f69ef5",
@@ -1481,7 +1511,8 @@
           "flex-2",
           "chroma",
           "chroma-radiance",
-          "sd3"
+          "sd3",
+          "pixart"
         ],
         "repo": "comfyanonymous/flux_text_encoders",
         "revision": "6af2a98e3f615bdfa612fbd85da93d1ed5f69ef5",
@@ -1825,6 +1856,165 @@
         "size": 675509688,
         "sha256": "bb21f7473051e1ac368515dd3f2e15cd44d7a11748ee8823e1ddca3e4876b7c9",
         "license": "qwen-research"
+      },
+      {
+        "id": "sd-vae-ft-mse",
+        "slot": "vae",
+        "versions": [
+          "sd1",
+          "sd1-inpaint",
+          "sd1-pix2pix",
+          "sd1-tiny-unet",
+          "sd2",
+          "sd2-inpaint",
+          "sd2-tiny-unet"
+        ],
+        "repo": "stabilityai/sd-vae-ft-mse",
+        "revision": "31f26fdeee1355a5c34592e401dd41e45d25a493",
+        "path": "diffusion_pytorch_model.safetensors",
+        "size": 334643276,
+        "sha256": "a1d993488569e928462932c8c38a0760b874d166399b14414135bd9c42df5815",
+        "license": "mit"
+      },
+      {
+        "id": "sdxl-vae-fp16-fix",
+        "slot": "vae",
+        "versions": [
+          "sdxl",
+          "sdxl-inpaint",
+          "sdxl-pix2pix",
+          "sdxl-vega",
+          "sdxl-ssd1b",
+          "pixart"
+        ],
+        "repo": "madebyollin/sdxl-vae-fp16-fix",
+        "revision": "207b116dae70ace3637169f1ddd2434b91b3a8cd",
+        "path": "diffusion_pytorch_model.safetensors",
+        "size": 334643238,
+        "sha256": "1b909373b28f2137098b0fd9dbc6f97f8410854f31f84ddc9fa04b077b0ace2c",
+        "license": "mit"
+      },
+      {
+        "id": "sdxs-vae",
+        "slot": "vae",
+        "versions": [
+          "sdxs-512-ds",
+          "sdxs-09"
+        ],
+        "repo": "IDKiro/sdxs-512-dreamshaper",
+        "revision": "76f720262bb051da75666b22c902a78c8e16c763",
+        "path": "vae/diffusion_pytorch_model.safetensors",
+        "size": 9793292,
+        "sha256": "d7956d561b1efbd861ad9b03fd8f01510f9e87eddc07bdfd20837009433f6ee5",
+        "license": "openrail++"
+      },
+      {
+        "id": "clip-g-sdxl",
+        "slot": "clip_g",
+        "versions": [
+          "sdxl",
+          "sdxl-inpaint",
+          "sdxl-pix2pix",
+          "sdxl-vega",
+          "sdxl-ssd1b"
+        ],
+        "repo": "stabilityai/stable-diffusion-xl-base-1.0",
+        "revision": "462165984030d82259a11f4367a4eed129e94a7b",
+        "path": "text_encoder_2/model.fp16.safetensors",
+        "size": 1389382176,
+        "sha256": "ec310df2af79c318e24d20511b601a591ca8cd4f1fce1d8dff822a356bcdb1f4",
+        "license": "openrail++"
+      },
+      {
+        "id": "clip-l-vega",
+        "slot": "clip_l",
+        "versions": [
+          "sdxl-vega"
+        ],
+        "repo": "segmind/Segmind-Vega",
+        "revision": "7714c4363e5856ff974a4f4b068e8691f26d0b40",
+        "path": "text_encoder/model.fp16.safetensors",
+        "size": 246144152,
+        "sha256": "1e090d6a828fd92401be5f83e615fd7b4fb1f4a22e9af9040a38f602e839317c",
+        "license": "apache-2.0"
+      },
+      {
+        "id": "clip-g-vega",
+        "slot": "clip_g",
+        "versions": [
+          "sdxl-vega"
+        ],
+        "repo": "segmind/Segmind-Vega",
+        "revision": "7714c4363e5856ff974a4f4b068e8691f26d0b40",
+        "path": "text_encoder_2/model.fp16.safetensors",
+        "size": 1389382176,
+        "sha256": "5b98e4a57a9292eeb819d67e2d2100f66f17db723cde4ecea27a7c3741160d0c",
+        "license": "apache-2.0"
+      },
+      {
+        "id": "clip-l-ssd1b",
+        "slot": "clip_l",
+        "versions": [
+          "sdxl-ssd1b"
+        ],
+        "repo": "segmind/SSD-1B",
+        "revision": "60987f37e94cd59c36b1cba832b9f97b57395a10",
+        "path": "text_encoder/model.fp16.safetensors",
+        "size": 246144864,
+        "sha256": "5487ea0eee9c9a9bff8abd097908d4deff3ae1fa87b3b67397f8b9538139d447",
+        "license": "apache-2.0"
+      },
+      {
+        "id": "clip-g-ssd1b",
+        "slot": "clip_g",
+        "versions": [
+          "sdxl-ssd1b"
+        ],
+        "repo": "segmind/SSD-1B",
+        "revision": "60987f37e94cd59c36b1cba832b9f97b57395a10",
+        "path": "text_encoder_2/model.fp16.safetensors",
+        "size": 1389382880,
+        "sha256": "d3df577f6e3799c8e1bd9b40e30133710e02e8e25d0ce48cdcc790e7dfe12d6d",
+        "license": "apache-2.0"
+      },
+      {
+        "id": "sd3-vae",
+        "slot": "vae",
+        "versions": [
+          "sd3"
+        ],
+        "repo": "adamo1139/stable-diffusion-3.5-medium-ungated",
+        "revision": "1cb9becf522803da9d25c2713d1a82b41bc6198d",
+        "path": "vae/diffusion_pytorch_model.safetensors",
+        "size": 167666902,
+        "sha256": "8f53304a79335b55e13ec50f63e5157fee4deb2f30d5fae0654e2b2653c109dc",
+        "license": "stabilityai-ai-community"
+      },
+      {
+        "id": "sd-vae-ft-ema",
+        "slot": "vae",
+        "versions": [
+          "pixart"
+        ],
+        "repo": "stabilityai/sd-vae-ft-ema",
+        "revision": "f04b2c4b98319346dad8c65879f680b1997b204a",
+        "path": "diffusion_pytorch_model.safetensors",
+        "size": 334643276,
+        "sha256": "32db726da04f06c1b6b14c0043ce115cc87a501482945c5add89a40d838fcb46",
+        "license": "mit"
+      },
+      {
+        "id": "flan-t5-large",
+        "slot": "t5xxl",
+        "versions": [
+          "minit2i"
+        ],
+        "repo": "google/flan-t5-large",
+        "revision": "0613663d0d48ea86ba8cb3d7a44f0f65dc596a2a",
+        "path": "model.safetensors",
+        "size": 3132668804,
+        "sha256": "a9dd06ce490f139af36e9eb77dd3758b4fd07a08a73d5a1abe5ff2591e2d388e",
+        "license": "apache-2.0"
       }
     ],
     "byVersion": {
@@ -1858,7 +2048,8 @@
       "sd3": {
         "clip_l": "clip-l",
         "clip_g": "clip-g",
-        "t5xxl": "t5xxl-fp8"
+        "t5xxl": "t5xxl-fp8",
+        "vae": "sd3-vae"
       },
       "qwen-image": {
         "llm": "qwen2.5-vl-7b-q8",
@@ -1958,6 +2149,65 @@
         "llm": "qwen3-vl-8b-q8",
         "vae": "qwen-image-21-vae",
         "llm_vision": "qwen3-vl-8b-mmproj"
+      },
+      "sd1": {
+        "vae": "sd-vae-ft-mse"
+      },
+      "sd1-inpaint": {
+        "vae": "sd-vae-ft-mse"
+      },
+      "sd1-pix2pix": {
+        "vae": "sd-vae-ft-mse"
+      },
+      "sd1-tiny-unet": {
+        "vae": "sd-vae-ft-mse"
+      },
+      "sd2": {
+        "vae": "sd-vae-ft-mse"
+      },
+      "sd2-inpaint": {
+        "vae": "sd-vae-ft-mse"
+      },
+      "sd2-tiny-unet": {
+        "vae": "sd-vae-ft-mse"
+      },
+      "sdxs-512-ds": {
+        "vae": "sdxs-vae"
+      },
+      "sdxs-09": {
+        "vae": "sdxs-vae"
+      },
+      "sdxl": {
+        "clip_l": "clip-l",
+        "clip_g": "clip-g-sdxl",
+        "vae": "sdxl-vae-fp16-fix"
+      },
+      "sdxl-inpaint": {
+        "clip_l": "clip-l",
+        "clip_g": "clip-g-sdxl",
+        "vae": "sdxl-vae-fp16-fix"
+      },
+      "sdxl-pix2pix": {
+        "clip_l": "clip-l",
+        "clip_g": "clip-g-sdxl",
+        "vae": "sdxl-vae-fp16-fix"
+      },
+      "sdxl-vega": {
+        "clip_l": "clip-l-vega",
+        "clip_g": "clip-g-vega",
+        "vae": "sdxl-vae-fp16-fix"
+      },
+      "sdxl-ssd1b": {
+        "clip_l": "clip-l-ssd1b",
+        "clip_g": "clip-g-ssd1b",
+        "vae": "sdxl-vae-fp16-fix"
+      },
+      "pixart": {
+        "t5xxl": "t5xxl-fp8",
+        "vae": "sdxl-vae-fp16-fix"
+      },
+      "minit2i": {
+        "t5xxl": "flan-t5-large"
       }
     },
     "byRecipe": {
@@ -1966,6 +2216,15 @@
       },
       "flux2-klein-base-9b": {
         "llm": "qwen3-8b-q8"
+      },
+      "pixart-alpha-512": {
+        "vae": "sd-vae-ft-ema"
+      },
+      "pixart-alpha-1024": {
+        "vae": "sd-vae-ft-ema"
+      },
+      "pixart-sigma": {
+        "vae": "sdxl-vae-fp16-fix"
       }
     }
   }

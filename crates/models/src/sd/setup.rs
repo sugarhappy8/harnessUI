@@ -858,6 +858,18 @@ mod tests {
         CompanionTable::from_catalog(&Catalog::bundled()).unwrap()
     }
 
+    /// The bundled table without the defaults of `versions` for `slots`: what a set-up gets
+    /// when the table has nothing for them, which is what a plan that cannot start looks like.
+    fn table_without(versions: &[SdVersion], slots: &[SlotId]) -> CompanionTable {
+        let mut t = table();
+        for v in versions {
+            if let Some(row) = t.by_version.get_mut(v) {
+                row.retain(|s, _| !slots.contains(s));
+            }
+        }
+        t
+    }
+
     /// The bundled table's companion `id`.
     fn companion(id: &str) -> Companion {
         table().files.into_iter().find(|c| c.id == id).unwrap()
@@ -1512,7 +1524,8 @@ mod tests {
                 embeds: vec![]
             }
         );
-        // The table has SD3's encoders and no SD3 VAE.
+        // The table has SD3's three encoders and its VAE (a file with none of them, so a
+        // GGUF SD3.5, used to stop at the VAE).
         let p = plan(main(sd3.clone()), "sd35-medium", &[], &[]);
         assert_eq!(
             sources(&p),
@@ -1521,11 +1534,22 @@ mod tests {
                 (SlotId::ClipL, PartSource::Companion),
                 (SlotId::ClipG, PartSource::Companion),
                 (SlotId::T5xxl, PartSource::Companion),
-                (SlotId::Vae, PartSource::Missing)
+                (SlotId::Vae, PartSource::Companion)
             ]
         );
-        assert!(slot(&p, SlotId::Model).is_none() && !p.can_run());
+        assert!(slot(&p, SlotId::Model).is_none() && p.can_run());
         assert!(p.parts.iter().all(|x| x.required));
+        // Without a default for the VAE, it is missing and the plan cannot run.
+        let p = plan_given(
+            &main(sd3.clone()),
+            "sd35-medium",
+            With {
+                companions: Some(table_without(&[SdVersion::Sd3], &[SlotId::Vae])),
+                ..With::default()
+            },
+        );
+        assert_eq!(source(&p, SlotId::Vae), PartSource::Missing);
+        assert!(!p.can_run());
 
         // The repo's own files, a diffusers VAE among them.
         let listing = [
@@ -1606,8 +1630,40 @@ mod tests {
                 ..
             }
         ));
-        // The table has no SDXL encoders or VAE: all three are missing.
+        // The table has SDXL's two encoders and its VAE (0.2.1's did not: all three were
+        // missing, and a GGUF or UNet-only SDXL file could not start).
         let p = plan(main("sdxl"), "sdxl-checkpoint", &[], &[]);
+        assert_eq!(
+            sources(&p),
+            [
+                (SlotId::DiffusionModel, PartSource::Main),
+                (SlotId::Vae, PartSource::Companion),
+                (SlotId::ClipL, PartSource::Companion),
+                (SlotId::ClipG, PartSource::Companion)
+            ]
+        );
+        assert!(p.parts.iter().all(|x| x.required) && p.can_run());
+        assert_eq!(
+            hub_path(&p, SlotId::Vae),
+            "diffusion_pytorch_model.safetensors"
+        );
+
+        // Without defaults for them (a table that knows nothing of SDXL): all three are
+        // missing.
+        let bare = || {
+            table_without(
+                &[SdVersion::Sdxl, SdVersion::Sd1],
+                &[SlotId::Vae, SlotId::ClipL, SlotId::ClipG],
+            )
+        };
+        let p = plan_given(
+            &main("sdxl"),
+            "sdxl-checkpoint",
+            With {
+                companions: Some(bare()),
+                ..With::default()
+            },
+        );
         assert_eq!(
             sources(&p),
             [
@@ -1630,6 +1686,7 @@ mod tests {
             &main("sdxl"),
             "sdxl-checkpoint",
             With {
+                companions: Some(bare()),
                 overrides: vec![vae.clone()],
                 ..With::default()
             },
@@ -1640,6 +1697,7 @@ mod tests {
             &main("sdxl"),
             "sdxl-checkpoint",
             With {
+                companions: Some(bare()),
                 overrides: vec![
                     vae,
                     (SlotId::ClipL, local("/d/clip_l.safetensors")),
@@ -1658,6 +1716,7 @@ mod tests {
             &main("sdxl"),
             "sdxl-checkpoint",
             With {
+                companions: Some(bare()),
                 overrides: vec![(SlotId::ClipG, SlotChoice::Empty)],
                 ..With::default()
             },
@@ -1698,8 +1757,25 @@ mod tests {
             },
             ..main("sdxl")
         };
+        // The table gives SD 1.x its VAE; the text encoder of a bare UNet is the person's
+        // (the guard test lists it among the slots Studio says it cannot fill).
         assert_eq!(
-            sources(&plan(sd1, "sd1-checkpoint", &[], &[])),
+            sources(&plan_given(&sd1, "sd1-checkpoint", With::default())),
+            [
+                (SlotId::DiffusionModel, PartSource::Main),
+                (SlotId::Vae, PartSource::Companion),
+                (SlotId::ClipL, PartSource::Missing)
+            ]
+        );
+        assert_eq!(
+            sources(&plan_given(
+                &sd1,
+                "sd1-checkpoint",
+                With {
+                    companions: Some(bare()),
+                    ..With::default()
+                }
+            )),
             [
                 (SlotId::DiffusionModel, PartSource::Main),
                 (SlotId::Vae, PartSource::Missing),
@@ -1730,26 +1806,46 @@ mod tests {
 
     #[test]
     fn an_sdxl_folder_without_a_vae_needs_one() {
+        // The table gives it SDXL's own (fp16-safe) VAE.
         let p = plan_folder("o/sdxl-base", &sdxl_folder_without_vae(), "sdxl-checkpoint");
         assert_eq!(
             sources(&p),
             [
                 (SlotId::Model, PartSource::Main),
-                (SlotId::Vae, PartSource::Missing),
+                (SlotId::Vae, PartSource::Companion),
                 (SlotId::ClipL, PartSource::Folder),
                 (SlotId::ClipG, PartSource::Folder)
             ]
         );
-        assert!(slot(&p, SlotId::Vae).unwrap().required && !p.can_run());
-        // The folder's files decide, never facts that say it embeds a VAE.
+        assert!(slot(&p, SlotId::Vae).unwrap().required && p.can_run());
+        // A table with no default for it leaves the VAE missing, and the folder's files
+        // decide, never facts that say it embeds a VAE.
         let (folder, mut facts) = sdxl_folder_without_vae();
         facts.kind = FileKind::Model {
             version: SdVersion::Sdxl,
             layout: Layout::Folder,
             embeds: vec![SlotId::ClipL, SlotId::ClipG, SlotId::Vae],
         };
-        let p = plan_folder("o/sdxl-base", &(folder, facts), "sdxl-checkpoint");
+        let bare = table_without(&[SdVersion::Sdxl], &[SlotId::Vae]);
+        let p = plan_setup(&SetupInput {
+            main: MainFile::HubFolder {
+                repo: "o/sdxl-base",
+                revision: REV,
+                folder: &folder,
+            },
+            facts: &facts,
+            recipe: recipe("sdxl-checkpoint").unwrap(),
+            version: version_of(&facts),
+            part: None,
+            listing: &[],
+            listing_facts: &BTreeMap::new(),
+            installed: &[],
+            companions: &bare,
+            overrides: &[],
+            untested: false,
+        });
         assert_eq!(source(&p, SlotId::Vae), PartSource::Missing);
+        assert!(slot(&p, SlotId::Vae).unwrap().required && !p.can_run());
     }
 
     #[test]
@@ -2575,8 +2671,7 @@ mod tests {
         assert_eq!(hub_path(&p, SlotId::Vae), companion("ae-flux1").path);
         assert!(p.can_run() && p.untested);
 
-        // A file of no known version, set up as SDXL: the table has no SDXL decoder, so the
-        // vae it needs comes from the person.
+        // A file of no known version, set up as SDXL: it takes SDXL's decoder from the table.
         let unknown = FileFacts {
             kind: FileKind::CannotRun {
                 reason: crate::sd::CannotRunReason::UnknownWeights,
@@ -2608,8 +2703,12 @@ mod tests {
             sources(&p),
             [
                 (SlotId::Model, PartSource::Main),
-                (SlotId::Vae, PartSource::Missing)
+                (SlotId::Vae, PartSource::Companion)
             ]
+        );
+        assert_eq!(
+            hub_path(&p, SlotId::Vae),
+            companion("sdxl-vae-fp16-fix").path
         );
     }
 
@@ -2641,8 +2740,8 @@ mod tests {
                 .count()
         };
 
-        // A full SDXL checkpoint, its `model` replaced by a diffusion model alone: the empty
-        // table has no SDXL VAE or encoders.
+        // A full SDXL checkpoint, its `model` replaced by a diffusion model alone: the VAE and
+        // both encoders it no longer carries come from the table.
         let sdxl = main_hub(
             "stabilityai/stable-diffusion-xl-base-1.0",
             "sd_xl_base_1.0.safetensors",
@@ -2660,12 +2759,12 @@ mod tests {
             sources(&p),
             [
                 (SlotId::Model, PartSource::Chosen),
-                (SlotId::Vae, PartSource::Missing),
-                (SlotId::ClipL, PartSource::Missing),
-                (SlotId::ClipG, PartSource::Missing)
+                (SlotId::Vae, PartSource::Companion),
+                (SlotId::ClipL, PartSource::Companion),
+                (SlotId::ClipG, PartSource::Companion)
             ]
         );
-        assert!(p.parts.iter().all(|x| x.required) && !p.can_run());
+        assert!(p.parts.iter().all(|x| x.required) && p.can_run());
 
         // A FLUX checkpoint with its encoders and VAE, replaced in the recipe's own
         // `diffusion_model`: they come from the table.
@@ -2713,11 +2812,13 @@ mod tests {
             "sd1-checkpoint",
             &[(SlotId::Model, local("/d/sd14-unet.gguf"))],
         );
+        // The table gives the VAE; the folder's own text encoder went with its replaced UNet,
+        // and nothing in the table can stand in for it.
         assert_eq!(
             sources(&p),
             [
                 (SlotId::Model, PartSource::Chosen),
-                (SlotId::Vae, PartSource::Missing),
+                (SlotId::Vae, PartSource::Companion),
                 (SlotId::ClipL, PartSource::Missing)
             ]
         );
