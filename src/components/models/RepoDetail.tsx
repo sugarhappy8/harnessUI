@@ -137,9 +137,15 @@ export function RepoDetail(props: { repoId: string; onBack: () => void; onStarte
               Also download the image file ({formatBytes(view.projector.size)}) so the model can read images
             </label>
           )}
-          <p className="text-xs text-fg-muted">
-            {cantOpen ? CANT_OPEN.memory : `Memory estimates assume the model remembers ${tokensWithWords(view.fitContext)}.`}
-          </p>
+          {/* A picture or video model gets no memory line: "once this version can open it" would
+              promise what is not true. */}
+          {!view.pictureModel && (
+            <p className="text-xs text-fg-muted">
+              {cantOpen
+                ? CANT_OPEN.memory
+                : `Memory estimates assume the model remembers ${tokensWithWords(view.fitContext)}.`}
+            </p>
+          )}
           {compareFull && <p className="text-xs text-fg-muted">{COMPARE_FULL}</p>}
           <ul className="space-y-2">
             {view.variants.map((v) => (

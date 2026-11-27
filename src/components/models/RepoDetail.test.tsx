@@ -316,6 +316,8 @@ describe("the page of a picture or video model", () => {
     }
     expect(screen.queryByText(/Fits|Too large|Can't open yet/)).toBeNull();
     expect(screen.queryByRole("checkbox")).toBeNull();
+    // "Worked out once this version can open the model" would promise what is not true.
+    expect(screen.queryByText(/Memory/)).toBeNull();
   });
 });
 
