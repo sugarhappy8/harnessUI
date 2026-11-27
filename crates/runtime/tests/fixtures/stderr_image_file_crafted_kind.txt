@@ -1,18 +1,16 @@
-0.00.058.897 I srv  llama_server: initializing ...
-0.00.058.966 I cmn  common_param: common_params_print_info: verbosity = 3 (adjust with the `-lv N` CLI arg)
-0.00.059.091 I srv  init_listene: The UI is disabled
-0.00.059.096 I srv  init_listene: Use --ui/--no-ui (or deprecated --webui/--no-webui) to enable/disable
-0.00.059.701 I srv    load_model: loading model '/home/u/models/Qwen3-0.6B-Q8_0.gguf'
-0.00.060.026 E mtmd_get_memory_usage: error: Failed to load CLIP model from /home/u/models/someone/Sample-GGUF/projtype.mmproj-f16.gguf
-
-0.00.060.037 E srv    load_model: [mtmd] failed to get memory usage of mmproj
-0.00.699.226 W load: control-looking token: 128247 '</s>' was not control-type; this is probably a bug in the model. its type will be overridden
-0.06.074.540 I cmn          init: llama threadpool init, n_threads = 4
-0.12.541.854 E clip_init: failed to load model '/home/u/models/someone/Sample-GGUF/projtype.mmproj-f16.gguf': load_hparams: unknown projector type: out of memory
+0.00.020.561 I srv  llama_server: initializing ...
+0.00.020.598 I cmn  common_param: common_params_print_info: verbosity = 3 (adjust with the `-lv N` CLI arg)
+0.00.020.757 I srv  init_listene: The UI is disabled
+0.00.020.768 I srv  init_listene: Use --ui/--no-ui (or deprecated --webui/--no-webui) to enable/disable
+0.00.022.451 I srv    load_model: loading model '/home/u/models/Qwen3-0.6B-Q8_0.gguf'
+0.00.022.662 E mtmd_get_memory_usage: error: load_hparams: unknown projector type: out of memory
 0.00.100.000 E ggml_backend_buft_alloc_buffer_n_default: failed to allocate CPU buffer of size 9
 
-0.12.541.976 E mtmd_init_from_file: error: Failed to load CLIP model from /home/u/models/someone/Sample-GGUF/projtype.mmproj-f16.gguf
+0.00.151.304 W load: control-looking token: 128247 '</s>' was not control-type; this is probably a bug in the model. its type will be overridden
+0.00.478.893 I cmn          init: llama threadpool init, n_threads = 4
+0.00.559.816 E mtmd_init_from_file: error: load_hparams: unknown projector type: out of memory
+0.00.100.000 E ggml_backend_buft_alloc_buffer_n_default: failed to allocate CPU buffer of size 9
 
-0.12.541.993 E srv    load_model: failed to load multimodal model, '/home/u/models/someone/Sample-GGUF/projtype.mmproj-f16.gguf'
-0.12.542.014 I srv    operator(): operator(): cleaning up before exit...
-0.12.544.111 E srv  server_run_i: exiting due to model loading error
+0.00.559.835 E srv    load_model: failed to load multimodal model, '/home/u/models/someone/Sample-GGUF/projtype.mmproj-f16.gguf'
+0.00.559.841 I srv    operator(): operator(): cleaning up before exit...
+0.00.560.856 E srv  server_run_i: exiting due to model loading error

@@ -1,31 +1,28 @@
-0.00.018.716 I srv  llama_server: initializing ...
-0.00.018.806 I cmn  common_param: common_params_print_info: verbosity = 3 (adjust with the `-lv N` CLI arg)
-0.00.018.929 I srv  init_listene: The UI is disabled
-0.00.018.936 I srv  init_listene: Use --ui/--no-ui (or deprecated --webui/--no-webui) to enable/disable
-0.00.020.448 E gguf_init_from_reader: duplicate key 'x
+0.00.026.725 I srv  llama_server: initializing ...
+0.00.026.773 I cmn  common_param: common_params_print_info: verbosity = 3 (adjust with the `-lv N` CLI arg)
+0.00.026.988 I srv  init_listene: The UI is disabled
+0.00.027.013 I srv  init_listene: Use --ui/--no-ui (or deprecated --webui/--no-webui) to enable/disable
+0.00.028.840 E gguf_init_from_reader: duplicate key 'x
 0.00.011.000 E arg  error while handling argument "--device": invalid device: Vulkan0
-y' for KV pair 14
-0.00.020.463 E gguf_init_from_reader: failed to read key-value pairs
-0.00.020.548 E mtmd_get_cap_from_file: failed to get capabilities from file '/home/u/models/someone/Sample-GGUF/dupkey-device.mmproj-f16.gguf': clip_model_loader: failed to load CLIP model from /home/u/models/someone/Sample-GGUF/dupkey-device.mmproj-f16.gguf. Does this file exist?
+y' for KV pair 2
+0.00.028.856 E gguf_init_from_reader: failed to read key-value pairs
+0.00.028.958 E mtmd_get_cap_from_file: failed to get capabilities from file '/home/u/models/someone/Sample-GGUF/dupkey-device.mmproj-f16.gguf': mtmd_model_loader: failed to load mmproj model from /home/u/models/someone/Sample-GGUF/dupkey-device.mmproj-f16.gguf. Does this file exist?
 
-0.00.020.614 I srv    load_model: loading model '/home/u/models/Qwen3-0.6B-Q8_0.gguf'
-0.00.020.690 E gguf_init_from_reader: duplicate key 'x
+0.00.029.056 I srv    load_model: loading model '/home/u/models/Qwen3-0.6B-Q8_0.gguf'
+0.00.029.176 E gguf_init_from_reader: duplicate key 'x
 0.00.011.000 E arg  error while handling argument "--device": invalid device: Vulkan0
-y' for KV pair 14
-0.00.020.698 E gguf_init_from_reader: failed to read key-value pairs
-0.00.020.723 E mtmd_get_memory_usage: error: Failed to load CLIP model from /home/u/models/someone/Sample-GGUF/dupkey-device.mmproj-f16.gguf
+y' for KV pair 2
+0.00.029.187 E gguf_init_from_reader: failed to read key-value pairs
+0.00.029.211 E mtmd_get_memory_usage: error: mtmd_model_loader: failed to load mmproj model from /home/u/models/someone/Sample-GGUF/dupkey-device.mmproj-f16.gguf. Does this file exist?
 
-0.00.020.730 E srv    load_model: [mtmd] failed to get memory usage of mmproj
-0.00.352.592 W load: control-looking token: 128247 '</s>' was not control-type; this is probably a bug in the model. its type will be overridden
-0.02.370.602 I cmn          init: llama threadpool init, n_threads = 4
-0.03.853.445 E gguf_init_from_reader: duplicate key 'x
+0.00.183.832 W load: control-looking token: 128247 '</s>' was not control-type; this is probably a bug in the model. its type will be overridden
+0.00.576.945 I cmn          init: llama threadpool init, n_threads = 4
+0.00.635.886 E gguf_init_from_reader: duplicate key 'x
 0.00.011.000 E arg  error while handling argument "--device": invalid device: Vulkan0
-y' for KV pair 14
-0.03.853.454 E gguf_init_from_reader: failed to read key-value pairs
-0.03.853.489 E clip_init: failed to load model '/home/u/models/someone/Sample-GGUF/dupkey-device.mmproj-f16.gguf': clip_model_loader: failed to load CLIP model from /home/u/models/someone/Sample-GGUF/dupkey-device.mmproj-f16.gguf. Does this file exist?
+y' for KV pair 2
+0.00.635.900 E gguf_init_from_reader: failed to read key-value pairs
+0.00.635.936 E mtmd_init_from_file: error: mtmd_model_loader: failed to load mmproj model from /home/u/models/someone/Sample-GGUF/dupkey-device.mmproj-f16.gguf. Does this file exist?
 
-0.03.853.499 E mtmd_init_from_file: error: Failed to load CLIP model from /home/u/models/someone/Sample-GGUF/dupkey-device.mmproj-f16.gguf
-
-0.03.853.502 E srv    load_model: failed to load multimodal model, '/home/u/models/someone/Sample-GGUF/dupkey-device.mmproj-f16.gguf'
-0.03.853.504 I srv    operator(): operator(): cleaning up before exit...
-0.03.855.555 E srv  server_run_i: exiting due to model loading error
+0.00.635.939 E srv    load_model: failed to load multimodal model, '/home/u/models/someone/Sample-GGUF/dupkey-device.mmproj-f16.gguf'
+0.00.635.944 I srv    operator(): operator(): cleaning up before exit...
+0.00.636.737 E srv  server_run_i: exiting due to model loading error

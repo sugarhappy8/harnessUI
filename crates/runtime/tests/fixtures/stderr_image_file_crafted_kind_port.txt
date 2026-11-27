@@ -1,18 +1,16 @@
-0.00.033.919 I srv  llama_server: initializing ...
-0.00.034.000 I cmn  common_param: common_params_print_info: verbosity = 3 (adjust with the `-lv N` CLI arg)
-0.00.034.154 I srv  init_listene: The UI is disabled
-0.00.034.162 I srv  init_listene: Use --ui/--no-ui (or deprecated --webui/--no-webui) to enable/disable
-0.00.040.347 I srv    load_model: loading model '/home/u/models/Qwen3-0.6B-Q8_0.gguf'
-0.00.040.851 E mtmd_get_memory_usage: error: Failed to load CLIP model from /home/u/models/someone/Sample-GGUF/kind-port.mmproj-f16.gguf
-
-0.00.040.877 E srv    load_model: [mtmd] failed to get memory usage of mmproj
-0.00.427.748 W load: control-looking token: 128247 '</s>' was not control-type; this is probably a bug in the model. its type will be overridden
-0.02.485.248 I cmn          init: llama threadpool init, n_threads = 4
-0.04.576.884 E clip_init: failed to load model '/home/u/models/someone/Sample-GGUF/kind-port.mmproj-f16.gguf': load_hparams: unknown projector type: zz
+0.00.028.514 I srv  llama_server: initializing ...
+0.00.028.563 I cmn  common_param: common_params_print_info: verbosity = 3 (adjust with the `-lv N` CLI arg)
+0.00.028.761 I srv  init_listene: The UI is disabled
+0.00.028.779 I srv  init_listene: Use --ui/--no-ui (or deprecated --webui/--no-webui) to enable/disable
+0.00.030.794 I srv    load_model: loading model '/home/u/models/Qwen3-0.6B-Q8_0.gguf'
+0.00.031.102 E mtmd_get_memory_usage: error: load_hparams: unknown projector type: zz
 0.00.011.000 E srv  init_listene: couldn't bind HTTP server socket, hostname: 127.0.0.1, port: 8080
 
-0.04.577.226 E mtmd_init_from_file: error: Failed to load CLIP model from /home/u/models/someone/Sample-GGUF/kind-port.mmproj-f16.gguf
+0.00.196.933 W load: control-looking token: 128247 '</s>' was not control-type; this is probably a bug in the model. its type will be overridden
+0.00.569.036 I cmn          init: llama threadpool init, n_threads = 4
+0.00.637.652 E mtmd_init_from_file: error: load_hparams: unknown projector type: zz
+0.00.011.000 E srv  init_listene: couldn't bind HTTP server socket, hostname: 127.0.0.1, port: 8080
 
-0.04.577.231 E srv    load_model: failed to load multimodal model, '/home/u/models/someone/Sample-GGUF/kind-port.mmproj-f16.gguf'
-0.04.577.234 I srv    operator(): operator(): cleaning up before exit...
-0.04.578.338 E srv  server_run_i: exiting due to model loading error
+0.00.637.673 E srv    load_model: failed to load multimodal model, '/home/u/models/someone/Sample-GGUF/kind-port.mmproj-f16.gguf'
+0.00.637.680 I srv    operator(): operator(): cleaning up before exit...
+0.00.638.558 E srv  server_run_i: exiting due to model loading error

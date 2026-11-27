@@ -1,0 +1,14 @@
+0.00.018.295 I srv  llama_server: initializing ...
+0.00.018.328 I cmn  common_param: common_params_print_info: verbosity = 3 (adjust with the `-lv N` CLI arg)
+0.00.018.486 I srv  init_listene: The UI is disabled
+0.00.018.495 I srv  init_listene: Use --ui/--no-ui (or deprecated --webui/--no-webui) to enable/disable
+0.00.020.253 I srv    load_model: loading model '/home/u/models/Qwen3-0.6B-Q8_0.gguf'
+0.00.020.651 E mtmd_get_memory_usage: error: operator(): unable to find tensor v.token_embd.img_break
+
+0.00.174.461 W load: control-looking token: 128247 '</s>' was not control-type; this is probably a bug in the model. its type will be overridden
+0.00.942.061 I cmn          init: llama threadpool init, n_threads = 4
+0.01.007.417 E mtmd_init_from_file: error: operator(): unable to find tensor v.token_embd.img_break
+
+0.01.007.434 E srv    load_model: failed to load multimodal model, '/home/u/models/someone/Sample-GGUF/Sample.mmproj-f16.gguf'
+0.01.007.439 I srv    operator(): operator(): cleaning up before exit...
+0.01.008.212 E srv  server_run_i: exiting due to model loading error
