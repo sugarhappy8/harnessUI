@@ -1282,9 +1282,11 @@ async fn ready_reports_where_the_model_went() {
 /// build cannot use, to `path`.
 ///
 /// With `encoder` it claims a vision encoder of the kind Mistral's models use (`pixtral`)
-/// with every setting that kind reads, and two of its three projection tensors, but not
+/// with every setting that kind reads, the patch embedding every vision encoder needs
+/// first (llama.cpp v1.1.0 asks for it before anything of the kind, and names it when it
+/// is missing), and two of its three projection tensors, but not
 /// `v.token_embd.img_break`: the owner's Ministral image file failed on exactly that tensor.
-/// Without `encoder` it claims no encoder at all. About 270 KB, all weights zero.
+/// Without `encoder` it claims no encoder at all. About 470 KB, all weights zero.
 fn write_broken_image_file(path: &Path, encoder: bool) {
     fn text(out: &mut Vec<u8>, s: &str) {
         out.extend_from_slice(&(s.len() as u64).to_le_bytes());
@@ -1342,6 +1344,7 @@ fn write_broken_image_file(path: &Path, encoder: bool) {
         );
         kv("clip.vision.image_mean", ARRAY, floats(&[0.5; 3]));
         kv("clip.vision.image_std", ARRAY, floats(&[0.5; 3]));
+        tensors.push(("v.patch_embd.weight", vec![16, 16, 3, 64]));
         tensors.push(("mm.1.weight", vec![64, 64]));
         tensors.push(("mm.2.weight", vec![64, 1024]));
     }
@@ -1377,8 +1380,9 @@ fn write_broken_image_file(path: &Path, encoder: bool) {
 /// read, through real llama-server processes at the pinned build.
 ///
 /// A start with such a file fails with [`LoadFailure::ImageFileInvalid`], which no other
-/// backend could fix, for a file that misses a tensor (the pinned build names it in a
-/// `clip_init` line) and for one without an encoder (no `clip_init` line). Then the real
+/// backend could fix, for a file that misses a tensor (the pinned build names it in the
+/// `mtmd_init_from_file: error:` line) and for one without an encoder (the same line says
+/// it "Failed to load mmproj model"; b12110 said "CLIP"). Then the real
 /// supervisor, as the app runs it ([`runtime::Supervisor::run`]): the first start fails,
 /// it loads the model again once on the same backend without the image file, with a typed
 /// stage, and the model runs (it cannot see images then). The attempt that failed reports
@@ -1400,9 +1404,13 @@ async fn a_broken_image_file_is_classified_and_the_model_loads_without_it() {
         (
             "Model.mmproj-f16.gguf",
             true,
-            "unable to find tensor v.token_embd.img_break",
+            "mtmd_init_from_file: error: operator(): unable to find tensor v.token_embd.img_break",
         ),
-        ("mmproj-empty.gguf", false, "Failed to load CLIP model from"),
+        (
+            "mmproj-empty.gguf",
+            false,
+            "mtmd_init_from_file: error: Failed to load mmproj model from",
+        ),
     ] {
         let image = dir.path().join(name);
         write_broken_image_file(&image, encoder);
