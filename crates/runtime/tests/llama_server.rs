@@ -211,6 +211,61 @@ async fn starts_on_cpu_reports_progress_and_stops() {
     );
 }
 
+/// What keeps a web page in a browser from talking to the model runner on this computer: since
+/// v1.1.0 llama-server answers 403 to a `Host` that is not a local name (DNS rebinding), to an
+/// `Origin` and to `Sec-Fetch-Site`, and a server started the way this app starts it (managed, with
+/// `--cors-origins none`) to every request that carries any of those, key or no key. The app's own
+/// client sends none of them. launch.rs and ARCHITECTURE.md say so; this makes the next pin that
+/// drops a guard fail here instead of silently.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_request_a_browser_page_would_send_is_refused_even_with_the_key() {
+    let Some((bin, gguf)) =
+        env_paths("a_request_a_browser_page_would_send_is_refused_even_with_the_key")
+    else {
+        return;
+    };
+    let (tx, _rx) = unbounded_channel();
+    let spec = StartSpec {
+        backend: backend(&bin, BackendKind::Cpu),
+        launch: launch(gguf),
+        load_timeout: LOAD_TIMEOUT,
+    };
+    let server = match start(spec, tx).await {
+        Ok(server) => server,
+        Err(error) => panic!("start failed: {error}\n{}", error.stderr_tail().join("\n")),
+    };
+    let client = loopback_client_builder().build().expect("client");
+    let url = format!("{}/props", server.base_url());
+    // The app's own request: the key and nothing else.
+    let ok = client
+        .get(&url)
+        .bearer_auth(server.api_key())
+        .send()
+        .await
+        .expect("props");
+    assert_eq!(ok.status(), 200);
+    for (name, value) in [
+        ("Host", "evil.example"),
+        ("Origin", "https://evil.example"),
+        ("Sec-Fetch-Site", "cross-site"),
+        ("Sec-Fetch-Mode", "cors"),
+    ] {
+        let refused = client
+            .get(&url)
+            .bearer_auth(server.api_key())
+            .header(name, value)
+            .send()
+            .await
+            .expect("props");
+        assert_eq!(
+            refused.status(),
+            403,
+            "a request with {name}: {value} must be refused, key or not"
+        );
+    }
+    server.stop().await;
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn a_broken_model_file_is_classified() {
     let Some((bin, _)) = env_paths("a_broken_model_file_is_classified") else {
