@@ -2854,6 +2854,53 @@
         "llm": "ltx25-gemma4-bf16",
         "vae": "ltx25-vae"
       }
-    }
+    },
+    "notCovered": [
+      {
+        "recipe": "ideogram4",
+        "slot": "uncond_diffusion_model",
+        "reason": "This model needs a second model file, the unconditional one, and Studio can't pick it for you yet. Choose it yourself."
+      },
+      {
+        "recipe": "instruct-pix2pix",
+        "slot": "clip_l",
+        "reason": "Studio runs this type from a full checkpoint, which has its text encoder inside the file. A file without one can't be set up here."
+      },
+      {
+        "recipe": "sd-turbo",
+        "slot": "clip_l",
+        "reason": "Studio runs this type from a full checkpoint, which has its text encoder inside the file. A file without one can't be set up here."
+      },
+      {
+        "recipe": "sd1-checkpoint",
+        "slot": "clip_l",
+        "reason": "Studio runs this type from a full checkpoint, which has its text encoder inside the file. A file without one can't be set up here."
+      },
+      {
+        "recipe": "sd1-inpainting",
+        "slot": "clip_l",
+        "reason": "Studio runs this type from a full checkpoint, which has its text encoder inside the file. A file without one can't be set up here."
+      },
+      {
+        "recipe": "sd2-512-checkpoint",
+        "slot": "clip_l",
+        "reason": "Studio runs this type from a full checkpoint, which has its text encoder inside the file. A file without one can't be set up here."
+      },
+      {
+        "recipe": "sd2-768-checkpoint",
+        "slot": "clip_l",
+        "reason": "Studio runs this type from a full checkpoint, which has its text encoder inside the file. A file without one can't be set up here."
+      },
+      {
+        "recipe": "sd2-inpainting",
+        "slot": "clip_l",
+        "reason": "Studio runs this type from a full checkpoint, which has its text encoder inside the file. A file without one can't be set up here."
+      },
+      {
+        "recipe": "sdxs",
+        "slot": "clip_l",
+        "reason": "Studio runs this type from a full checkpoint, which has its text encoder inside the file. A file without one can't be set up here."
+      }
+    ]
   }
 }

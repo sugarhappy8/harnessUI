@@ -722,6 +722,47 @@ mod tests {
         }
     }
 
+    /// `notCovered` reads like the rest of the table: what a newer catalog adds that this
+    /// build cannot use is skipped, and a mistake in the one we ship is refused.
+    #[test]
+    fn the_allowlist_is_read_skipped_and_refused_like_the_rest() {
+        let t = bundled();
+        assert_eq!(
+            t.not_covered_reason("ideogram4", SlotId::UncondDiffusionModel)
+                .map(|r| r.contains("second model file")),
+            Some(true)
+        );
+        assert_eq!(t.not_covered_reason("ideogram4", SlotId::Vae), None);
+        assert_eq!(t.not_covered_reason("flux1-dev", SlotId::ClipL), None);
+
+        let t = changed(|v| {
+            let rows = v["notCovered"].as_array_mut().unwrap();
+            rows.push(json!({"recipe": "flux1-dev", "slot": "text_encoder_9", "reason": "x."}));
+            rows.push(json!({"recipe": "flux9-dev", "slot": "vae", "reason": "x."}));
+            rows.push(json!({"recipe": "sd1-controlnet", "slot": "vae", "reason": "x."}));
+        })
+        .unwrap();
+        assert_eq!(t.not_covered.len(), raw_len("notCovered"));
+        assert_eq!(
+            places(&t),
+            [
+                "notCovered flux1-dev text_encoder_9",
+                "notCovered flux9-dev vae",
+                "notCovered sd1-controlnet vae"
+            ]
+        );
+        let err = refused(|v| v["notCovered"][0]["reason"] = json!("  "));
+        assert!(
+            err.contains("notCovered ideogram4 uncond_diffusion_model: no reason"),
+            "{err}"
+        );
+        let err = refused(|v| {
+            let first = v["notCovered"][0].clone();
+            v["notCovered"].as_array_mut().unwrap().push(first);
+        });
+        assert!(err.contains("listed twice"), "{err}");
+    }
+
     /// The allowlist holds only slots that really have no default, each with its reason: an
     /// entry the table now covers is stale and must go, so the page never says Studio cannot
     /// find a file it can.
