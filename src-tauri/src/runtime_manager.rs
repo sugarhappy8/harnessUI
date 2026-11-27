@@ -2342,7 +2342,7 @@ mod tests {
 
         // The current build is installed and still unusable: another cause, as it was.
         std::fs::write(folder.join(".complete"), b"{}").unwrap();
-        let current = &old.join(&cuda.dir);
+        let current = old.join(&cuda.dir);
         std::fs::create_dir_all(&current).unwrap();
         std::fs::write(current.join(".complete"), b"{}").unwrap();
         assert_eq!(ask(&old).message, plain.message);
