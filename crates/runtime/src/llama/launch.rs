@@ -31,6 +31,14 @@ use crate::spawn::EnvSpec;
 /// The pinned build treats the argument as a literal comma-separated allow-list and answers
 /// with `Access-Control-Allow-Origin: none`, which no page origin equals, so browsers refuse
 /// every cross-origin response. Verified against b12110 on 2026-11-10.
+///
+/// b12774 (llama.cpp v1.1.0) also refuses the request itself, checked on 2026-11-27: a
+/// request with another `Origin` or a `Sec-Fetch-Site` header, or with a `Host` that is not
+/// a local name (`server-http.cpp`: `request_host_is_allowed`, `request_origin_is_allowed`),
+/// gets 403, where b12110 served it. A server started with [`ROUTER_PORT_ENV`] (the managed
+/// mode this app uses) answers 403 "Browser requests must go through the router" to every
+/// request that carries `Origin`, `Sec-Fetch-Site` or `Sec-Fetch-Mode`. The app's own
+/// client sends none of those, and nothing that talks to the server may forward them.
 pub const CORS_ORIGINS_NONE: &str = "none";
 
 /// Environment variable that puts llama-server in managed-child mode: progress lines on

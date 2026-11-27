@@ -380,6 +380,16 @@ class LlamaPinDocs(unittest.TestCase):
             self.assertIn(test, text)
             self.assertIn(f"scripts/{test}", ci, f"CI does not run {test}")
 
+    def test_what_the_server_does_with_foreign_headers_is_said_as_checked(self):
+        # b12774 answers 403 to a foreign Origin, Sec-Fetch-Site or Host, and in the managed mode to
+        # every browser header at all; b12110 served those requests. Checked on the real servers.
+        exposure = paragraph(section("### 7.3 Launch"), "- **Exposure.**")
+        for words in ("v1.1.0 (b12774)", "gets 403", "Browser requests must go through the router", "managed mode (7.4"):
+            self.assertIn(words, exposure)
+        launch = read("crates/runtime/src/llama/launch.rs")
+        self.assertIn("Browser requests must go through the router", launch)
+        self.assertIn("request_origin_is_allowed", launch)
+
     def test_the_list_is_said_to_be_checked_by_a_test_that_exists(self):
         bullet = paragraph(section("### 7.1 Pinning and layout"), "- **The architecture list.**")
         self.assertIn("`catalog/llama-architectures.txt`", bullet)
