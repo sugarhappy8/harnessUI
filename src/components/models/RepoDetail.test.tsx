@@ -169,7 +169,7 @@ async function open(view: RepoView) {
 describe("the page of a model this version can't open yet", () => {
   it("says it once, in plain words, and whose fault it is not", async () => {
     await open(CANT_OPEN_VIEW);
-    const box = screen.getByRole("region", { name: "This version can't open this model yet" });
+    const box = screen.getByRole("status", { name: "This version can't open this model yet" });
     expect(within(box).getByText("This version can't open this model yet")).toBeTruthy();
     expect(box.textContent).toContain("It is a “futurearch” model.");
     expect(box.textContent).toContain("Nothing is wrong with your computer.");
@@ -231,13 +231,13 @@ describe("the page of a model this version can't open yet", () => {
 
   it("shows the kind's own text with its invisible characters made visible", async () => {
     await open({ ...CANT_OPEN_VIEW, architecture: "fu\u202Eture" });
-    const box = screen.getByRole("region", { name: "This version can't open this model yet" });
+    const box = screen.getByRole("status", { name: "This version can't open this model yet" });
     expect(box.textContent).toContain("It is a “fu[U+202E]ture” model.");
   });
 
   it("says plainly when the file names no kind, and offers no update for that", async () => {
     await open({ ...CANT_OPEN_VIEW, architecture: null });
-    const box = screen.getByRole("region", { name: "This version can't open this model yet" });
+    const box = screen.getByRole("status", { name: "This version can't open this model yet" });
     expect(box.textContent).toContain("This file does not say what kind of model it is, so this version can't open it.");
     expect(box.textContent).not.toContain("a newer model runner");
     expect(within(box).queryByRole("button", { name: "Check for updates" })).toBeNull();
@@ -295,12 +295,21 @@ describe("the page of a model this version can't open yet", () => {
   });
 });
 
+describe("a long repository name", () => {
+  /** The owner's own photo cut it off ("...Brilliance-50X-V2-AGI...") with no way to read it. */
+  it("can be read in full: the heading carries it as its tooltip", async () => {
+    await open(CANT_OPEN_VIEW);
+    const heading = screen.getByRole("heading", { name: "someone/inkling-next-GGUF" });
+    expect(heading.getAttribute("title")).toBe("someone/inkling-next-GGUF");
+  });
+});
+
 describe("the page of a picture or video model", () => {
-  const PICTURE: RepoView = { ...CANT_OPEN_VIEW, architecture: "flux", pictureModel: true, projector: null };
+  const PICTURE: RepoView = { ...CANT_OPEN_VIEW, architecture: "flux", cantOpenWhy: "picture", projector: null };
 
   it("says what it is, not that an update may open it", async () => {
     await open(PICTURE);
-    const box = screen.getByRole("region", { name: "This is a picture or video model" });
+    const box = screen.getByRole("status", { name: "This is a picture or video model" });
     expect(box.textContent).toContain("It can't chat. Add it in Studio → Get models.");
     expect(box.textContent).not.toMatch(/newer|update|runner|yet/i);
     expect(within(box).queryByRole("button")).toBeNull();
@@ -321,10 +330,40 @@ describe("the page of a picture or video model", () => {
   });
 });
 
+/**
+ * A speech or sound model: the engine may know its kind (text-to-speech Kokoro) or not (whisper's),
+ * and either way it can't chat and no newer version changes that. Fourteen of the 48 repositories
+ * a default search would still have red-boxed were speech models, under "a newer version may open
+ * it".
+ */
+describe("the page of a speech or sound model", () => {
+  const SPEECH: RepoView = { ...CANT_OPEN_VIEW, architecture: "kokoro", cantOpenWhy: "speech", projector: null };
+
+  it("says what it is, not that an update may open it", async () => {
+    await open(SPEECH);
+    const box = screen.getByRole("status", { name: "This is a speech or sound model" });
+    expect(box.textContent).toContain("It can't chat, and nothing in this app uses it.");
+    expect(box.textContent).not.toMatch(/newer|update|runner|yet|Studio/i);
+    expect(within(box).queryByRole("button")).toBeNull();
+    expect(screen.queryByRole("button", { name: "Check for updates" })).toBeNull();
+    expect(screen.queryByText("This version can't open this model yet")).toBeNull();
+  });
+
+  it("puts 'Not for chat' where Download would be, with no verdict, no memory line, no image box", async () => {
+    await open(SPEECH);
+    for (const row of screen.getAllByRole("listitem")) {
+      expect(within(row).getByText("Not for chat")).toBeTruthy();
+      expect(within(row).queryByRole("button", { name: "Download" })).toBeNull();
+    }
+    expect(screen.queryByText(/Fits|Too large|Can't open yet|Memory/)).toBeNull();
+    expect(screen.queryByRole("checkbox")).toBeNull();
+  });
+});
+
 describe("the page of a model this version can open", () => {
   it("is as it was: image file offered, fit shown, Download on", async () => {
     await open({ ...VIEW, variants: VIEW.variants.map((v) => ({ ...v, fit: yellow })) });
-    expect(screen.queryByRole("region", { name: "This version can't open this model yet" })).toBeNull();
+    expect(screen.queryByRole("status", { name: "This version can't open this model yet" })).toBeNull();
     expect(screen.getByRole("checkbox")).toBeTruthy();
     expect(screen.getByText(/Memory estimates assume the model remembers 8,192 tokens/)).toBeTruthy();
     expect(screen.getAllByText("Fits with limits.", { exact: false }).length).toBeGreaterThan(0);
@@ -335,7 +374,7 @@ describe("the page of a model this version can open", () => {
 
   it("is as it was when nobody knows (null), too", async () => {
     await open({ ...VIEW, architectureSupported: null });
-    expect(screen.queryByRole("region", { name: "This version can't open this model yet" })).toBeNull();
+    expect(screen.queryByRole("status", { name: "This version can't open this model yet" })).toBeNull();
     expect(screen.getAllByRole("button", { name: "Download" })).toHaveLength(2);
   });
 });

@@ -98,27 +98,32 @@ export function UpdateCheck(props: { look: "button" | "link" }) {
  * The one box on the page of a model this version cannot open: what is wrong, that nobody
  * is at fault, and what to do next. The same shape as the app's other notices (nothing is
  * broken: the app stopped on purpose), with the update check beside it. A file that names no
- * kind gets its own sentence and no update to wait for, and a picture or video model says what
- * it is (an update would not change that).
+ * kind gets its own sentence and no update to wait for, and a picture, video or speech model says
+ * what it is (an update would not change that). A live region, as the app's other notices are:
+ * a card click unmounts the card and leaves focus nowhere, and this is the one sentence that
+ * says why nothing can be downloaded.
  */
-export function CantOpenBox(props: { architecture: string | null; picture?: boolean }) {
+export function CantOpenBox(props: { architecture: string | null; why?: "picture" | "speech" | null }) {
   const kind = kindName(props.architecture);
   const headingId = useId();
-  if (props.picture) {
+  if (props.why) {
+    const words = CANT_OPEN[props.why];
     return (
       <section
+        role="status"
         aria-labelledby={headingId}
         className="enter space-y-1 rounded-xl border border-warning/40 bg-warning/10 px-3.5 py-2.5 text-sm shadow-soft"
       >
         <h4 id={headingId} className="font-medium">
-          {CANT_OPEN.picture.title}
+          {words.title}
         </h4>
-        <p>{CANT_OPEN.picture.body}</p>
+        <p>{words.body}</p>
       </section>
     );
   }
   return (
     <section
+      role="status"
       aria-labelledby={headingId}
       className="enter space-y-1 rounded-xl border border-warning/40 bg-warning/10 px-3.5 py-2.5 text-sm shadow-soft"
     >

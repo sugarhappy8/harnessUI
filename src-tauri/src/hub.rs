@@ -269,9 +269,10 @@ pub struct RepoView {
     pub license: Option<String>,
     pub architecture: Option<String>,
     pub architecture_supported: Option<bool>,
-    /// The model is a picture or video model (by its kind): the page says what it is, not that a
-    /// newer version may open it.
-    pub picture_model: bool,
+    /// Set with `architecture_supported == Some(false)` when no newer version would change it
+    /// (a picture, video or speech model): the page says what it is, not that a newer version
+    /// may open it.
+    pub cant_open_why: Option<models::arch::Why>,
     pub context_length: Option<u64>,
     pub parameters: Option<u64>,
     pub template_tools: bool,
@@ -381,10 +382,11 @@ pub async fn hub_repo(
     let judged = models::arch::page_architecture(
         summary.as_ref().map(|s| s.architecture.as_str()),
         detail.gguf.as_ref().and_then(|g| g.architecture.as_deref()),
+        detail.info.pipeline_tag.as_deref(),
     );
     Ok(RepoView {
         architecture_supported: judged.supported,
-        picture_model: judged.picture,
+        cant_open_why: judged.why,
         architecture: judged.name,
         context_length: summary
             .as_ref()
@@ -1067,11 +1069,15 @@ pub async fn list_installed_models(
 
 /// 0.1.0 Studio: why a file cannot join the chat list as a model: it is a picture or video
 /// model, by its architecture (when it names one) or its own tensor table (most such files
-/// name none).
+/// name none), or a speech or sound model, by its architecture (the runner opens some of
+/// those, and the chat then fails on its first message).
 pub(crate) fn diffusion_import_refusal(
     arch: Option<&str>,
     shapes: &[models::TensorShape],
 ) -> Option<AppError> {
+    if arch.is_some_and(models::arch::is_speech) {
+        return Some(crate::studio::errors::speech_model());
+    }
     (arch.is_some_and(models::arch::is_diffusion)
         || models::gen_search::looks_like_diffusion(shapes))
     .then(crate::studio::errors::picture_model)
@@ -1977,6 +1983,21 @@ mod tests {
         assert!(diffusion_import_refusal(None, &table("klein4b-tensors.txt")).is_some());
         assert!(diffusion_import_refusal(Some("qwen3"), &table("qwen3-4b-tensors.txt")).is_none());
         assert!(diffusion_import_refusal(None, &[]).is_none());
+    }
+
+    /// A speech or sound model is not a chat model either, and the runner opens some of them
+    /// (Kokoro, Moshi): the chat would load it and fail on the first message.
+    #[test]
+    fn importing_a_speech_model_says_it_can_not_chat() {
+        for arch in ["kokoro", "whisper", "moshi"] {
+            let e = diffusion_import_refusal(Some(arch), &[]).unwrap();
+            assert_eq!(e.code, "speech_model", "{arch}");
+            assert_eq!(e.message, "This is a speech or sound model.");
+            assert_eq!(
+                e.next_step,
+                "It can't chat, and nothing in this app uses it."
+            );
+        }
     }
 
     /// The import reads the file's own architecture and tensor table.

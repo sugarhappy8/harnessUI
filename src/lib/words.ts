@@ -331,6 +331,14 @@ export const CANT_OPEN = {
     body: "It can't chat. Add it in Studio → Get models.",
     short: "Not for chat",
   },
+  /** A speech or sound model: the same, and Studio does not make those either. */
+  speech: {
+    title: "This is a speech or sound model",
+    body: "It can't chat, and nothing in this app uses it.",
+    short: "Not for chat",
+  },
+  /** Compare's "Will it fit on this computer?" for a picture, video or speech file. */
+  compareNotChat: "Not checked. It is not a chat model.",
   /** Where the memory sentence would be: no verdict is given for a model that cannot open. */
   memory: "Memory use is worked out once this version can open the model.",
   /** Compare's "Will it fit on this computer?". */

@@ -316,7 +316,10 @@ function howBig(f: CompareFacts): Answer | null {
 function willItFit(f: CompareFacts): Answer | null {
   // The model runner cannot open the file: the memory estimate has no rule for its kind, so a
   // verdict would be a guess that says the opposite of the truth.
-  if (f.fileFacts?.engineKnows === false) return { node: CANT_OPEN.compareFit, source: null };
+  if (f.fileFacts?.engineKnows === false) {
+    // A picture or speech model is not for chat, and an update would not change that.
+    return { node: f.fileFacts.cantOpenWhy ? CANT_OPEN.compareNotChat : CANT_OPEN.compareFit, source: null };
+  }
   return f.fit ? { node: <FitBadge fit={f.fit} />, source: fitSource(f.ctx) } : null;
 }
 

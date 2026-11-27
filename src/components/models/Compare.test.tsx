@@ -978,6 +978,25 @@ describe("Compare: a model this version can't open yet", () => {
     expect(cant.querySelector("[class*='bg-']")).toBeNull();
   });
 
+  /** The runner may even know the kind (Kokoro, a speech model): an update changes nothing. */
+  it("says it is not a chat model, with no promise of an update, for a picture or speech file", async () => {
+    factsFor = (item, ctx) =>
+      facts(item, ctx, {
+        fit: fit("yellow", { sentence: "Fits with limits." }),
+        fileFacts: fileFacts({ architecture: "kokoro", engineKnows: false, cantOpenWhy: "speech" }),
+      });
+    useCompare.setState({ entries: [CANT] });
+    await show();
+    const text = cell("Will it fit on this computer?", 0).textContent;
+    expect(text).toBe("Not checked. It is not a chat model.");
+    expect(text).not.toMatch(/yet|version|update/i);
+    factsFor = (item, ctx) =>
+      facts(item, ctx, { fileFacts: fileFacts({ architecture: "flux", engineKnows: false, cantOpenWhy: "picture" }) });
+    cleanup();
+    await show();
+    expect(cell("Will it fit on this computer?", 0).textContent).toBe("Not checked. It is not a chat model.");
+  });
+
   it("answers the other questions as before, since they are facts of the file", async () => {
     useCompare.setState({ entries: [CANT] });
     await show();

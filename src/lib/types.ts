@@ -415,10 +415,12 @@ export interface RepoView {
   gated: Gated;
   license: string | null;
   architecture: string | null;
-  /** False when the bundled llama.cpp cannot load this architecture; null if unknown. */
+  /** False when the model runner in this version cannot open this model; null if unknown. */
   architectureSupported: boolean | null;
-  /** A picture or video model (by its kind): not for chat, and no update will change that. */
-  pictureModel?: boolean;
+  /** With `architectureSupported` false: why no update will change it. A picture or video model,
+   *  or a speech or sound one, is not for chat (by its kind, or by what its author says it
+   *  does). Absent: a newer version may open it. */
+  cantOpenWhy?: "picture" | "speech" | null;
   contextLength: number | null;
   parameters: number | null;
   templateTools: boolean;
@@ -1042,6 +1044,9 @@ export interface FileFacts {
   /** Whether this version's model runner knows the file's kind; false: it cannot open the
    *  file yet, so no "will it fit" verdict is given. Null or left out: not known. */
   engineKnows?: boolean | null;
+  /** With `engineKnows` false: a picture, video or speech model is not for chat, whatever a
+   *  newer version brings. */
+  cantOpenWhy?: "picture" | "speech" | null;
   parameters: number | null;
   contextLength: number | null;
   tools: boolean;

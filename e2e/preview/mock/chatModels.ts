@@ -139,7 +139,7 @@ export function pictureView(): RepoView {
     license: "other",
     architecture: "flux",
     architectureSupported: false,
-    pictureModel: true,
+    cantOpenWhy: "picture",
     contextLength: null,
     parameters: 11_900_000_000,
     templateTools: false,

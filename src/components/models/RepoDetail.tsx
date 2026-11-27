@@ -69,6 +69,8 @@ export function RepoDetail(props: { repoId: string; onBack: () => void; onStarte
   }, [props.repoId]);
 
   const cantOpen = view?.architectureSupported === false;
+  // Picture, video, speech: no update would change it, so the words say what it is instead.
+  const notChat = cantOpen && view?.cantOpenWhy ? CANT_OPEN[view.cantOpenWhy] : null;
 
   async function download(v: VariantView) {
     if (!view || cantOpen || startingRef.current) return;
@@ -94,7 +96,9 @@ export function RepoDetail(props: { repoId: string; onBack: () => void; onStarte
       {error && <ErrorBanner error={error} onDismiss={() => setError(null)} />}
       <div className="flex items-start justify-between gap-3">
         <div className="min-w-0">
-          <h3 className="truncate text-base font-semibold">{props.repoId}</h3>
+          <h3 className="truncate text-base font-semibold" title={props.repoId}>
+            {props.repoId}
+          </h3>
           {view && (
             <div className="mt-1 flex flex-wrap gap-1">
               {view.architecture && (
@@ -127,7 +131,7 @@ export function RepoDetail(props: { repoId: string; onBack: () => void; onStarte
           <ExternalLink size={11} aria-hidden />
         </span>
       </div>
-      {view && cantOpen && <CantOpenBox architecture={view.architecture} picture={view.pictureModel} />}
+      {view && cantOpen && <CantOpenBox architecture={view.architecture} why={view.cantOpenWhy} />}
       {!view && !error && <p className="text-sm text-fg-muted">Loading files…</p>}
       {view && (
         <>
@@ -137,9 +141,9 @@ export function RepoDetail(props: { repoId: string; onBack: () => void; onStarte
               Also download the image file ({formatBytes(view.projector.size)}) so the model can read images
             </label>
           )}
-          {/* A picture or video model gets no memory line: "once this version can open it" would
-              promise what is not true. */}
-          {!view.pictureModel && (
+          {/* A picture, video or speech model gets no memory line: "once this version can open it"
+              would promise what is not true. */}
+          {!notChat && (
             <p className="text-xs text-fg-muted">
               {cantOpen
                 ? CANT_OPEN.memory
@@ -169,11 +173,8 @@ export function RepoDetail(props: { repoId: string; onBack: () => void; onStarte
                     <Check size={12} aria-hidden /> Installed
                   </span>
                 ) : cantOpen ? (
-                  <span
-                    title={view.pictureModel ? CANT_OPEN.picture.title : CANT_OPEN.title}
-                    className="text-xs text-fg-muted"
-                  >
-                    {view.pictureModel ? CANT_OPEN.picture.short : CANT_OPEN.short}
+                  <span title={notChat ? notChat.title : CANT_OPEN.title} className="text-xs text-fg-muted">
+                    {notChat ? notChat.short : CANT_OPEN.short}
                   </span>
                 ) : (
                   <button

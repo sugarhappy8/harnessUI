@@ -531,6 +531,10 @@ pub struct FileFacts {
     /// the comparison then gives no "will it fit" verdict: the memory estimate has no rule for
     /// a kind the runner does not know, and the model cannot open anyway. `None`: not known.
     pub engine_knows: Option<bool>,
+    /// Set with `engine_knows == Some(false)` when no newer version would change it: a picture,
+    /// video or speech model. The comparison then says what it is, not "can't open it yet".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cant_open_why: Option<models::arch::Why>,
     pub parameters: Option<u64>,
     /// The context the model was trained for ("Longest conversation it was made for").
     pub context_length: Option<u64>,

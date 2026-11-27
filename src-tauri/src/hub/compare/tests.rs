@@ -1159,6 +1159,40 @@ fn the_facts_of_a_file_say_whether_the_model_runner_knows_its_kind() {
     assert_eq!((ff.architecture, ff.engine_knows), (None, Some(false)));
 }
 
+/// A picture or speech model is not for chat whether or not the runner knows its kind (it knows
+/// kokoro, a speech model): the comparison says what it is instead of "this version can't open
+/// it yet", which promises an update that would change nothing.
+#[test]
+fn the_facts_of_a_picture_or_speech_file_say_it_is_not_for_chat() {
+    let facts = |arch: &str| file_facts(&summary(&bytes_of(arch)), None, false, None);
+    for (arch, why) in [
+        ("kokoro", Some(models::arch::Why::Speech)),
+        ("whisper", Some(models::arch::Why::Speech)),
+        ("flux", Some(models::arch::Why::Picture)),
+        ("qwen3", None),
+        ("futurearch", None),
+    ] {
+        assert_eq!(facts(arch).cant_open_why, why, "{arch}");
+    }
+    assert_eq!(facts("kokoro").engine_knows, Some(false));
+    assert_eq!(facts("qwen3").engine_knows, Some(true));
+    let stored = |arch: &str| StoredSummary {
+        architecture: Some(arch.into()),
+        ..StoredSummary::default()
+    };
+    let saved = stored_file_facts(&stored("kokoro"), false).unwrap();
+    assert_eq!(
+        (saved.engine_knows, saved.cant_open_why),
+        (Some(false), Some(models::arch::Why::Speech))
+    );
+    assert_eq!(
+        stored_file_facts(&stored("qwen3"), false)
+            .unwrap()
+            .cant_open_why,
+        None
+    );
+}
+
 /// What was saved when a model was installed is that file's header too.
 #[test]
 fn the_saved_facts_of_an_installed_file_say_it_too() {

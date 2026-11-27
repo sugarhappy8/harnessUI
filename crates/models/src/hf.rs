@@ -1213,8 +1213,9 @@ fn parse_search_items(arr: &[serde_json::Value]) -> Vec<RepoSummary> {
 
 /// The kind a search item's `gguf` block names, when the model runner does not know it. The
 /// name is the uploader's text: control characters are dropped and a long one is cut. A name
-/// that is empty or "unknown" is not one, and a picture or video model's kind is not "not yet":
-/// no newer version will chat with it.
+/// that is empty or "unknown" is not one, and neither is a picture, video or speech model's
+/// (by its kind or by the author's task): no newer version will chat with it, so the card must
+/// not hint that one might.
 fn unknown_kind(item: &serde_json::Value) -> Option<String> {
     let name = item.get("gguf")?.get("architecture")?.as_str()?;
     let name: String = name
@@ -1223,10 +1224,11 @@ fn unknown_kind(item: &serde_json::Value) -> Option<String> {
         .filter(|c| !c.is_control())
         .take(64)
         .collect();
+    let task = item.get("pipeline_tag").and_then(|t| t.as_str());
     (!name.is_empty()
         && name != "unknown"
         && !crate::arch::is_supported(&name)
-        && !crate::arch::is_diffusion(&name))
+        && crate::arch::not_for_chat(Some(&name), task).is_none())
     .then_some(name)
 }
 
@@ -2207,6 +2209,34 @@ mod tests {
     fn a_picture_model_gets_no_hint() {
         assert_eq!(hint("a/flux-GGUF", Some(kind("flux"))), None);
         assert_eq!(hint("a/wan-GGUF", Some(kind("wan"))), None);
+    }
+
+    /// The same for a speech or sound model of another engine (whisper.cpp's, parakeet's), and
+    /// for any kind the engine does not know that its author tags as a picture, video or speech
+    /// model: of the 48 repositories a default search would have red-boxed after the v1.1.0
+    /// bump, 14 were speech models, and "may not know this kind of model" hinted at an update
+    /// that never comes. A chat task, or none, keeps the hint.
+    #[test]
+    fn a_speech_model_or_one_tagged_so_gets_no_hint() {
+        assert_eq!(hint("a/whisper-GGUF", Some(kind("whisper"))), None);
+        assert_eq!(hint("a/audio-GGUF", Some(kind("audiocpp"))), None);
+        let tagged = |kind_name: &str, task: &str| {
+            let mut item = listed("a/x-GGUF", Some(kind(kind_name)));
+            item["pipeline_tag"] = serde_json::json!(task);
+            parse_search_items(&[item]).remove(0).unknown_architecture
+        };
+        assert_eq!(tagged("futurearch", "text-to-speech"), None);
+        assert_eq!(tagged("futurearch", "automatic-speech-recognition"), None);
+        assert_eq!(tagged("futurearch", "text-to-image"), None);
+        assert_eq!(tagged("futurearch", "image-to-video"), None);
+        assert_eq!(
+            tagged("futurearch", "text-generation").as_deref(),
+            Some("futurearch")
+        );
+        assert_eq!(
+            tagged("futurearch", "image-text-to-text").as_deref(),
+            Some("futurearch")
+        );
     }
 
     /// The name is the uploader's text and a card shows it: control characters go and a long

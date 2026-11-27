@@ -325,6 +325,17 @@ pub fn picture_model() -> AppError {
     )
 }
 
+/// Models → Import: the file is a speech or sound model (its architecture says so). It can't
+/// chat, and nothing in the app uses it; the same words as the repository page's box.
+pub fn speech_model() -> AppError {
+    AppError::new(
+        "speech_model",
+        "This is a speech or sound model.",
+        "It can't chat, and nothing in this app uses it.",
+        String::new(),
+    )
+}
+
 /// The settings `spec::validate` refused (or an extra setting no routed company takes), each
 /// in a sentence that names the field by its label.
 pub fn invalid_settings(problems: &[Invalid], model: &MediaModel) -> AppError {
