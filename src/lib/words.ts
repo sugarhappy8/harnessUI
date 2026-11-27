@@ -273,6 +273,54 @@ export function imageFileProgress(done: number, total: number): string {
   return `Downloading the image file… ${pct}%`;
 }
 
+/**
+ * A model whose kind this version of the app cannot open yet: the model runner it comes with
+ * (the pinned llama-server) does not know the model's architecture, and only a newer version
+ * brings a newer runner. The search card, the repository page, Installed and Compare say it in
+ * these words and no others: what is wrong, that it is nobody's fault, and what to do next.
+ * Nothing that contradicts it is shown with it (no memory verdict, no image-file offer, no
+ * button that does nothing without saying why).
+ *
+ * The kind's name is the file's or Hugging Face's own text: a screen puts it between `before`
+ * and `after` inside its `Outside`, never inside these strings.
+ */
+export const CANT_OPEN = {
+  /** The hint on a search card, the slot where Download would be, and the header's badge. */
+  short: "Can't open yet",
+  /** The box's title, and a tooltip. */
+  title: "This version can't open this model yet",
+  /** The box's second line: the kind goes between the halves. */
+  body: {
+    before: "It is a “",
+    after: `” model. The model runner in this version of ${APP_NAME} does not know that kind yet. Nothing is wrong with your computer.`,
+  },
+  /** A file that names no kind at all (an imported file, say): an update cannot help it. */
+  noKind: "This file does not say what kind of model it is, so this version can't open it.",
+  /** What to do, and what is not done meanwhile (a repository's page). */
+  next: `Newer versions of ${APP_NAME} come with a newer model runner, and the model may work then. Nothing is downloaded until it can open.`,
+  check: "Check for updates",
+  checking: "Checking for updates…",
+  /** After a check found nothing newer. */
+  latest: (version: string) =>
+    `You have the latest version (${version}). It can't open this model yet, so check again later.`,
+  /** An app that cannot update itself (a build without the updater). */
+  noUpdates: "This copy can't update itself. New versions are on the project's GitHub releases page.",
+  /** Where the memory sentence would be: no verdict is given for a model that cannot open. */
+  memory: "Memory use is worked out once this version can open the model.",
+  /** Compare's "Will it fit on this computer?". */
+  compareFit: "Not checked. This version can't open this model yet.",
+  /** An installed model's row: the kind goes between the halves. */
+  row: {
+    before: `Can't open yet: this version of ${APP_NAME} does not know the “`,
+    after: "” kind of model. A newer version may open it.",
+  },
+} as const;
+
+/** A search card's hint, which is a guess from Hugging Face's listing (the page checks). */
+export function cantOpenCardTip(kind: string): string {
+  return `From the listing: this version of ${APP_NAME} may not know this kind of model (“${kind}”). Open it to check.`;
+}
+
 /** Generation speed in words per second (three quarters of the tokens). */
 export function wordsPerSecond(tokensPerSecond: number): string {
   const words = Math.round(Math.max(0, tokensPerSecond) * 0.75);
