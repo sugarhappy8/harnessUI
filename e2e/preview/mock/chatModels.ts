@@ -124,8 +124,42 @@ export function opensView(): RepoView {
   };
 }
 
+/** A picture model, as "Show all GGUF repositories" lists one: not for chat, whatever the version. */
+export const PICTURE_REPO = "city96/FLUX.1-dev-gguf";
+
+export function pictureView(): RepoView {
+  const sizes: [string, number][] = [
+    ["Q8_0", 12_700_000_000],
+    ["Q5_K_S", 8_300_000_000],
+    ["Q4_K_S", 6_800_000_000],
+  ];
+  return {
+    ...opensView(),
+    id: PICTURE_REPO,
+    license: "other",
+    architecture: "flux",
+    architectureSupported: false,
+    pictureModel: true,
+    contextLength: null,
+    parameters: 11_900_000_000,
+    templateTools: false,
+    templateThinking: false,
+    variants: sizes.map(([label, size]) => ({
+      label,
+      files: [{ path: `flux1-dev-${label}.gguf`, size, sha256: "0".repeat(64) }],
+      totalSize: size,
+      bits: null,
+      fit: fitOf("green", size * 1.1),
+      installed: false,
+      hasChecksum: true,
+    })),
+  };
+}
+
 export function repoViewFor(repo: string): RepoView {
-  return repo === CANT_OPEN_REPO ? cantOpenView() : { ...opensView(), id: repo };
+  if (repo === CANT_OPEN_REPO) return cantOpenView();
+  if (repo === PICTURE_REPO) return pictureView();
+  return { ...opensView(), id: repo };
 }
 
 function hit(id: string, downloads: number, patch: Partial<RepoSummary> = {}): RepoSummary {
@@ -149,6 +183,7 @@ export function searchPage(): SearchPage {
       hit("bartowski/gemma-3-12b-it-GGUF", 1_204_551, { license: "gemma" }),
       hit(CANT_OPEN_REPO, 39_177, { pipelineTag: "image-text-to-text", unknownArchitecture: NEW_KIND }),
       hit("ggml-org/gpt-oss-20b-GGUF", 902_118),
+      hit(PICTURE_REPO, 311_204, { license: "other", pipelineTag: "text-to-image" }),
     ],
     next: null,
   };
