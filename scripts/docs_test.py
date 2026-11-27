@@ -605,6 +605,37 @@ class Studio0_2_0Docs(unittest.TestCase):
         self.assertRegex(lora, r"pub const MAX_LORAS: usize = 8;")
         self.assertRegex(lora, r"LORA_WEIGHT_RANGE: RangeInclusive<f32> = -1\.0\.\.=2\.0;")
 
+    def test_7_10_says_every_recipe_has_its_files_or_a_reason_and_what_guards_it(self):
+        text = "\n".join(section("### 7.10 Any model the engine can run (0.2.0)"))
+        companions = paragraph(section("### 7.10 Any model the engine can run (0.2.0)"), "- **The companion table.**")
+        for words in ("`every_recipe_studio_runs_is_covered_or_says_why`", "`companions.notCovered`",
+                      "every recipe Studio runs", "packed for another program", "Needs files"):
+            self.assertIn(words, text)
+        # The tokenizer rows are a `.json` file only under the tokenizer slot, and the doc warns
+        # that older builds refuse them: a refresh that carries them must not reach those builds.
+        for words in ("`.json`", "0.2.0 and 0.2.1", "tokenizer"):
+            self.assertIn(words, companions)
+        # What it names exists: the guard test, its allowlist (each entry with a reason) and the
+        # catalog key it reads.
+        code = read("crates/models/src/sd/companions.rs")
+        self.assertIn("fn every_recipe_studio_runs_is_covered_or_says_why()", code)
+        self.assertIn("fn the_allowlist_holds_only_real_gaps_with_reasons()", code)
+        catalog = json.loads(read("catalog/models.json"))["companions"]
+        self.assertTrue(catalog["notCovered"])
+        for entry in catalog["notCovered"]:
+            self.assertTrue(entry["reason"].endswith("."), entry)
+            self.assertIn(entry["slot"], {"clip_l", "uncond_diffusion_model"}, entry)
+
+    def test_7_10_says_a_file_packed_for_another_program_cannot_run(self):
+        text = "\n".join(section("### 7.10 Any model the engine can run (0.2.0)"))
+        for words in ("bitsandbytes", "torchao", "NVFP4", "`.quant_state.bitsandbytes__`", "`.SCB`",
+                      "`._weight_qdata`", "`.comfy_quant`", "Can't run in Studio", "a group of its own"):
+            self.assertIn(words, text)
+        inspect = read("crates/models/src/sd/inspect.rs")
+        for names in ("fn packed_format(", ".quant_state.bitsandbytes__", '".SCB"', "._weight_qdata", ".comfy_quant"):
+            self.assertIn(names, inspect)
+        self.assertIn("static PACKED_WORD", read("crates/models/src/sd/candidates.rs"))
+
     def test_7_9_says_a_fit_only_warns(self):
         local = "\n".join(section("### 7.9 Studio on this computer (0.1.0)"))
         self.assertIn("May not fit", local)
