@@ -152,6 +152,12 @@ pub struct RepoSummary {
     pub pipeline_tag: Option<String>,
     /// 0.1.0 Studio: tagged `not-for-all-audiences`.
     pub not_for_all_audiences: bool,
+    /// The kind Hugging Face's listing names for the repository (`gguf.architecture`), only
+    /// when this app's model runner does not know it, so the card can say so before the page
+    /// is opened. A hint from the listing (the repository's first file), never a verdict: the
+    /// page reads the files. Only the chat search asks for it, so a picture or video search,
+    /// and a picture or video kind, carry none.
+    pub unknown_architecture: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -834,6 +840,14 @@ impl HfClient {
 
     /// One page of GGUF repositories matching the query.
     pub async fn search(&self, q: &SearchQuery) -> Result<SearchPage, HfError> {
+        self.search_url(self.chat_search_url(q)).await
+    }
+
+    /// The chat search's address. Besides [`SEARCH_EXPAND`] it asks for `gguf`, for each
+    /// repository's kind ([`RepoSummary::unknown_architecture`]). The field cannot be narrowed
+    /// to the name (`expand[]=gguf.architecture` is refused), and the chat template's text
+    /// comes with it: about 0.8 MB for a page of 50 against 25 KB without it.
+    fn chat_search_url(&self, q: &SearchQuery) -> Url {
         let text = q.text.trim();
         let mut url = self.url("/api/models");
         {
@@ -847,11 +861,11 @@ impl HfClient {
             }
             p.append_pair("sort", q.sort.as_str());
             p.append_pair("limit", "50");
-            for e in SEARCH_EXPAND {
+            for e in SEARCH_EXPAND.iter().chain(&["gguf"]) {
                 p.append_pair("expand[]", e);
             }
         }
-        self.search_url(url).await
+        url
     }
 
     /// Search both media pipeline tags across formats, plus repositories without a tag whose
@@ -876,6 +890,7 @@ impl HfClient {
                         pipeline_tag: repo.info.pipeline_tag,
                         last_modified: repo.info.last_modified,
                         not_for_all_audiences: repo.not_for_all_audiences,
+                        unknown_architecture: None,
                     }]);
                 }
                 Err(HfError::NotFound) => {}
@@ -1189,10 +1204,30 @@ fn parse_search_items(arr: &[serde_json::Value]) -> Vec<RepoSummary> {
                     .and_then(|d| d.as_str())
                     .map(str::to_string),
                 not_for_all_audiences: not_for_all_audiences(m.get("tags")),
+                unknown_architecture: unknown_kind(m),
                 id,
             })
         })
         .collect()
+}
+
+/// The kind a search item's `gguf` block names, when the model runner does not know it. The
+/// name is the uploader's text: control characters are dropped and a long one is cut. A name
+/// that is empty or "unknown" is not one, and a picture or video model's kind is not "not yet":
+/// no newer version will chat with it.
+fn unknown_kind(item: &serde_json::Value) -> Option<String> {
+    let name = item.get("gguf")?.get("architecture")?.as_str()?;
+    let name: String = name
+        .trim()
+        .chars()
+        .filter(|c| !c.is_control())
+        .take(64)
+        .collect();
+    (!name.is_empty()
+        && name != "unknown"
+        && !crate::arch::is_supported(&name)
+        && !crate::arch::is_diffusion(&name))
+    .then_some(name)
 }
 
 /// Merge media search pages when no exact repository was requested.
@@ -2110,6 +2145,142 @@ mod tests {
         assert_eq!(found.len(), items(GEN_IMAGE_TO_VIDEO).len() + 7);
     }
 
+    /// One search answer item as Hugging Face sends it for `expand[]=gguf` (real keys; the
+    /// chat template's text is shortened).
+    fn listed(id: &str, gguf: Option<serde_json::Value>) -> serde_json::Value {
+        let mut m = serde_json::json!({
+            "_id": "6b03c90407272a8488d9d0b0",
+            "id": id,
+            "downloads": 39177,
+            "likes": 44,
+            "gated": false,
+            "tags": ["gguf", "conversational", "license:apache-2.0"],
+            "lastModified": "2026-11-24T02:39:11.000Z",
+            "pipeline_tag": "image-text-to-text",
+        });
+        if let Some(g) = gguf {
+            m["gguf"] = g;
+        }
+        m
+    }
+
+    fn kind(name: &str) -> serde_json::Value {
+        serde_json::json!({
+            "total": 26070385152u64,
+            "architecture": name,
+            "context_length": 1048576,
+            "chat_template": "{% for m in messages %}...{% endfor %}",
+            "eos_token": "<|end|>",
+        })
+    }
+
+    fn hint(id: &str, gguf: Option<serde_json::Value>) -> Option<String> {
+        parse_search_items(&[listed(id, gguf)])
+            .remove(0)
+            .unknown_architecture
+    }
+
+    /// The owner's photo: the search card said nothing, so the person opened the page to find
+    /// out the model could not open. The listing already says the kind, for 0.8 MB a page.
+    #[test]
+    fn a_card_carries_the_kind_the_engine_does_not_know() {
+        // Newer than the pinned build (the list is of v1.1.0's names).
+        assert_eq!(
+            hint("a/new-GGUF", Some(kind("futurearch"))).as_deref(),
+            Some("futurearch")
+        );
+        // Known: no hint. Not listed, or nothing named: no hint.
+        assert_eq!(hint("a/ok-GGUF", Some(kind("qwen3"))), None);
+        assert_eq!(hint("a/ok-GGUF", Some(kind("inkling2_loop"))), None);
+        assert_eq!(hint("a/none-GGUF", None), None);
+        assert_eq!(hint("a/blank-GGUF", Some(kind("  "))), None);
+        assert_eq!(hint("a/unnamed-GGUF", Some(kind("unknown"))), None);
+        assert_eq!(
+            hint("a/no-key-GGUF", Some(serde_json::json!({"total": 1}))),
+            None
+        );
+    }
+
+    /// A picture or video model is not "not yet": no newer version will chat with it, and
+    /// Studio has its own words for it.
+    #[test]
+    fn a_picture_model_gets_no_hint() {
+        assert_eq!(hint("a/flux-GGUF", Some(kind("flux"))), None);
+        assert_eq!(hint("a/wan-GGUF", Some(kind("wan"))), None);
+    }
+
+    /// The name is the uploader's text and a card shows it: control characters go and a long
+    /// one is cut, whatever Hugging Face sends.
+    #[test]
+    fn the_kind_on_a_card_is_short_and_without_control_characters() {
+        let long = "x".repeat(500);
+        assert_eq!(
+            hint("a/long-GGUF", Some(kind(&long))).unwrap(),
+            "x".repeat(64)
+        );
+        assert_eq!(
+            hint("a/ctl-GGUF", Some(kind("fu\u{0}\n\u{7}ture"))).as_deref(),
+            Some("future")
+        );
+    }
+
+    #[test]
+    fn the_hint_reaches_the_window_under_its_own_name() {
+        let items = parse_search_items(&[listed("a/new-GGUF", Some(kind("futurearch")))]);
+        let json = serde_json::to_value(&items[0]).unwrap();
+        assert_eq!(json["unknownArchitecture"], "futurearch");
+        let items = parse_search_items(&[listed("a/ok-GGUF", None)]);
+        assert!(serde_json::to_value(&items[0]).unwrap()["unknownArchitecture"].is_null());
+    }
+
+    fn expanded(url: &Url) -> Vec<String> {
+        url.query_pairs()
+            .filter(|(k, _)| k == "expand[]")
+            .map(|(_, v)| v.into_owned())
+            .collect()
+    }
+
+    /// Only the chat search asks for the kind: the answer carries each repository's chat
+    /// template with it, and a picture or video search has no use for any of it.
+    #[test]
+    fn only_the_chat_search_asks_for_the_kind() {
+        let c = client();
+        let chat = c.chat_search_url(&SearchQuery {
+            text: "inkling".into(),
+            sort: Sort::Downloads,
+            all_gguf: false,
+        });
+        let mut want: Vec<String> = SEARCH_EXPAND.iter().map(|e| e.to_string()).collect();
+        want.push("gguf".into());
+        assert_eq!(expanded(&chat), want);
+        assert_eq!(chat.path(), "/api/models");
+        let q = query(&chat);
+        for (k, v) in [
+            ("filter", "gguf"),
+            ("filter", "conversational"),
+            ("search", "inkling"),
+            ("sort", "downloads"),
+            ("limit", "50"),
+        ] {
+            assert!(q.contains(&(k.into(), v.into())), "{k}={v}: {chat}");
+        }
+        let all = c.chat_search_url(&SearchQuery {
+            text: String::new(),
+            sort: Sort::Likes,
+            all_gguf: true,
+        });
+        assert!(!query(&all).contains(&("filter".into(), "conversational".into())));
+        for kind in [
+            GenSearchKind::Pictures,
+            GenSearchKind::Video,
+            GenSearchKind::Loras,
+        ] {
+            for u in c.generator_search_urls("wan", kind) {
+                assert!(!expanded(&u).iter().any(|e| e == "gguf"), "{u}");
+            }
+        }
+    }
+
     fn client() -> HfClient {
         HfClient::new(HfConfig::default()).unwrap()
     }
@@ -2124,6 +2295,7 @@ mod tests {
             last_modified: None,
             pipeline_tag: pipeline_tag.map(str::to_string),
             not_for_all_audiences: false,
+            unknown_architecture: None,
         }
     }
 

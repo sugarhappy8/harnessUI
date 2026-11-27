@@ -3470,6 +3470,7 @@ pub(crate) mod tests {
             last_modified: updated.map(str::to_owned),
             pipeline_tag: tag.map(str::to_owned),
             not_for_all_audiences: false,
+            unknown_architecture: None,
         }
     }
 
