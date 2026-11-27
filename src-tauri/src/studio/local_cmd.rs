@@ -1198,6 +1198,25 @@ pub(crate) mod tests {
         )
     }
 
+    /// The bundled catalog whose companion table has no default for `slots` of `version`: a
+    /// model the table knows nothing of, which is what a plan that cannot start looks like now
+    /// that the guard test keeps every model Studio runs covered.
+    pub(crate) fn bundled_lacking(
+        version: SdVersion,
+        slots: &[models::sd::recipes::SlotId],
+    ) -> GenCatalog {
+        let mut catalog = bundled();
+        if let Some(row) = catalog.companions.by_version.get_mut(&version) {
+            row.retain(|slot, _| !slots.contains(slot));
+        }
+        catalog
+    }
+
+    /// `deps` taking its companions from `catalog`.
+    pub(crate) fn with_catalog(deps: &mut LocalCmdDeps, catalog: GenCatalog) {
+        deps.catalog = Arc::new(TestCatalog(catalog));
+    }
+
     /// The bundled Apache-2.0 licence, with the SHA-256 of its canonical text.
     fn apache() -> GenLicence {
         bundled().entries[KLEIN].licenses["apache-2.0"].clone()
@@ -2649,10 +2668,11 @@ pub(crate) mod tests {
     }
 
     /// "Best for this computer" goes to a choice whose plan can download (S6 minor): the
-    /// largest that fits here, a Hunyuan Video 1.5 file with no text encoder anywhere, is
-    /// passed over for the next.
+    /// largest that fits here, a Hunyuan Video 1.5 file with no text encoder or decoder anywhere
+    /// (the table is given none for it here), is passed over for the next.
     #[tokio::test]
     async fn the_best_choice_is_one_whose_plan_can_download() {
+        use models::sd::recipes::SlotId;
         let scratch = Scratch::new();
         let mut hunyuan = fixture("hunyuan-video-15");
         hunyuan.format = models::sd::index::FileFormat::Gguf;
@@ -2664,12 +2684,12 @@ pub(crate) mod tests {
                 Some("flux1-kontext"),
             );
         let hub = hub(vec![repo]).await;
-        let r = local_repo(
-            &repo_deps(&hub, gpu(80, 128), &scratch),
-            "someone/two-models",
-        )
-        .await
-        .unwrap();
+        let mut deps = repo_deps(&hub, gpu(80, 128), &scratch);
+        with_catalog(
+            &mut deps,
+            bundled_lacking(SdVersion::HunyuanVideo, &[SlotId::T5xxl, SlotId::Vae]),
+        );
+        let r = local_repo(&deps, "someone/two-models").await.unwrap();
         let first = &r.files[0];
         assert_eq!(first.file, "h-Q4_0.gguf");
         assert!(matches!(

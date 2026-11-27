@@ -597,7 +597,9 @@ mod tests {
 
     use super::*;
     use crate::downloads::{GroupMeta, finish_gen_group};
-    use crate::studio::local_cmd::tests::{RepoHub, gpu, hub, repo_deps};
+    use crate::studio::local_cmd::tests::{
+        RepoHub, bundled_lacking, gpu, hub, repo_deps, with_catalog,
+    };
     use crate::studio::local_models::tests::{install_catalog_entry, small_weights};
     use crate::studio::local_models::{
         InstalledFiles, LocalSource, add_now_if_present, delete_files_of, prepare_download,
@@ -1183,6 +1185,17 @@ mod tests {
     #[tokio::test]
     async fn an_import_is_refused_before_anything_is_copied() {
         let mut t = harness().await;
+        // A Hunyuan Video 1.5 file the table has no glyph encoder or decoder for.
+        with_catalog(
+            &mut t.deps,
+            bundled_lacking(
+                models::sd::detect::SdVersion::HunyuanVideo,
+                &[
+                    models::sd::recipes::SlotId::T5xxl,
+                    models::sd::recipes::SlotId::Vae,
+                ],
+            ),
+        );
         let bare = t.outside_file("h-Q4_0.gguf", gguf_bytes("hunyuan-video-15"));
         let e = t.import(&bare, ImportMode::Copy, None).await.unwrap_err();
         assert_eq!(e.code, "studio_setup_incomplete");

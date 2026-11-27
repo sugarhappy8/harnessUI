@@ -2387,8 +2387,8 @@ pub(crate) mod tests {
     use crate::dto::{SetupPlanDto, SlotOverride};
     use crate::studio::local_cmd::LocalCmdDeps;
     use crate::studio::local_cmd::tests::{
-        COMMIT, KONTEXT, RepoHub, TestRepo, bundled, flux_kontext_repo, gpu, hub, repo_deps,
-        sd14_diffusers_repo, search_source, wan_a14b_repo,
+        COMMIT, KONTEXT, RepoHub, TestRepo, bundled, bundled_lacking, flux_kontext_repo, gpu, hub,
+        repo_deps, sd14_diffusers_repo, search_source, wan_a14b_repo,
     };
     use crate::studio::setup_cmd::setup_plan;
     use models::sd::testing::{file_of, fixture, safetensors};
@@ -2435,7 +2435,16 @@ pub(crate) mod tests {
             source: LocalSource,
             choice: Option<SetupChoice>,
         ) -> AppResult<String> {
-            let catalog = bundled();
+            self.start_with(bundled(), source, choice).await
+        }
+
+        /// [`T::start`] with the companions of `catalog`.
+        async fn start_with(
+            &self,
+            catalog: GenCatalog,
+            source: LocalSource,
+            choice: Option<SetupChoice>,
+        ) -> AppResult<String> {
             let installed = InstalledFiles::read(self.store()).await.unwrap();
             let deps = DownloadDeps {
                 plan: PlanDeps {
@@ -2579,7 +2588,7 @@ pub(crate) mod tests {
     }
 
     /// A Hunyuan Video 1.5 GGUF alone in its repo (its detection fixture's tensors as a
-    /// GGUF): no text encoder or VAE beside it, and none in the companion table.
+    /// GGUF): no glyph encoder or VAE beside it (a test takes them from the table, or not).
     fn bare_hunyuan_gguf_repo() -> TestRepo {
         let mut index = fixture("hunyuan-video-15");
         index.format = models::sd::index::FileFormat::Gguf;
@@ -2692,9 +2701,16 @@ pub(crate) mod tests {
 
     #[tokio::test]
     async fn a_set_up_with_a_missing_required_file_is_refused() {
+        use models::sd::recipes::SlotId;
         let t = harness(vec![bare_hunyuan_gguf_repo()]).await;
+        // The table is given no glyph encoder or decoder for Hunyuan Video 1.5 here.
+        let catalog = bundled_lacking(
+            models::sd::detect::SdVersion::HunyuanVideo,
+            &[SlotId::T5xxl, SlotId::Vae],
+        );
         let e = t
-            .start(
+            .start_with(
+                catalog,
                 search_source("someone/HunyuanVideo-1.5-GGUF", "h-Q4_0.gguf"),
                 None,
             )
