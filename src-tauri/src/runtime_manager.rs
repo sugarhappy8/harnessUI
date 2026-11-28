@@ -637,7 +637,15 @@ impl RuntimeManager {
                 format!("{:?}", self.layout),
             ));
         }
-        first_candidate(&found, settings)
+        first_candidate(&found, settings).map_err(|e| {
+            older_build_error(
+                e,
+                settings.backend.as_deref(),
+                runtime::llama::lock::embedded(),
+                runtime::llama::lock::current_platform(),
+                &self.layout.packs_dir,
+            )
+        })
     }
 
     /// 0.1.0 Studio, before a load picks its backend: while a local Studio job holds the
@@ -1314,6 +1322,55 @@ fn first_candidate(
         })?,
     };
     Ok((first, candidates))
+}
+
+/// A backend chosen in Settings that is not usable, when the reason is that the app moved to
+/// a newer build since it was downloaded. A pack's folder carries the build, so after an update
+/// the lock names a folder that is not there yet while the old one sits unused beside it; the
+/// error then says so, and what to do, instead of blaming the computer. It stays an error, never
+/// a quiet switch to another backend, and nothing is downloaded without a click: the download is
+/// hundreds of megabytes. Any other error comes back as it was.
+fn older_build_error(
+    err: AppError,
+    choice: Option<&str>,
+    lock: &runtime::llama::lock::LlamaLock,
+    platform: &str,
+    packs_dir: &Path,
+) -> AppError {
+    if err.code != "backend_unavailable" {
+        return err;
+    }
+    let Some(pack) = choice.and_then(|c| {
+        lock.packs
+            .iter()
+            .find(|p| p.platform == platform && kind_name(p.backend) == c)
+    }) else {
+        return err;
+    };
+    if runtime::packs::state(pack, packs_dir) == runtime::packs::PackState::Installed
+        || !runtime::packs::older_builds(pack, packs_dir)
+            .iter()
+            .any(|o| o.complete)
+    {
+        return err;
+    }
+    let size = pack.download_size();
+    let size = if size >= 1_000_000_000 {
+        format!("{:.1} GB", size as f64 / 1e9)
+    } else {
+        format!("{} MB", (size as f64 / 1e6).round())
+    };
+    AppError::new(
+        "backend_unavailable",
+        format!(
+            "The {} download on this computer is from an older version of the app, so it can't be used.",
+            pack.title
+        ),
+        format!(
+            "Download it again in Settings → Local models → Backend downloads ({size}), or pick Auto."
+        ),
+        format!("{} is not installed; {}", pack.dir, err.details),
+    )
 }
 
 /// The backend a load would start on: the user's choice (`backend`), or Auto's pick.
@@ -2233,6 +2290,79 @@ mod tests {
         };
         let err = first_candidate(&found, &settings).unwrap_err();
         assert_eq!(err.code, "backend_unavailable");
+    }
+
+    /// An app update moves the CUDA and ROCm builds, and their folders carry the build: a
+    /// person who picked one in Settings has the old folder and no new one. The load says that
+    /// in plain words and names the download, and stays an error (never a quiet switch).
+    #[test]
+    fn a_backend_whose_download_is_from_an_older_build_says_so() {
+        let lock = runtime::llama::lock::embedded();
+        let platform = "windows-x86_64";
+        let cuda = lock.packs.iter().find(|p| p.id == "cuda").unwrap();
+        let found = vec![usable(BackendKind::Cpu, Vec::new())];
+        let chosen = ResolvedLoad {
+            backend: Some("cuda".into()),
+            ..resolved(GpuUse::All, false, false)
+        };
+        let plain = first_candidate(&found, &chosen).unwrap_err();
+        assert_eq!(plain.code, "backend_unavailable");
+        let ask = |dir: &Path| older_build_error(plain.clone(), Some("cuda"), lock, platform, dir);
+
+        // Nothing on disk: the error as it was.
+        let scratch = |name: &str| {
+            let dir = std::env::temp_dir().join(format!("{name}-{}", uuid::Uuid::new_v4()));
+            std::fs::create_dir_all(&dir).unwrap();
+            dir
+        };
+        let empty = scratch("packs-empty");
+        assert_eq!(ask(&empty).message, plain.message);
+
+        // The older build is there, complete: the words say what happened and what to do.
+        let old = scratch("packs-old");
+        let folder = old.join("cuda-b12110");
+        std::fs::create_dir_all(&folder).unwrap();
+        std::fs::write(folder.join(".complete"), b"{}").unwrap();
+        let err = ask(&old);
+        assert_eq!(err.code, "backend_unavailable");
+        assert!(err.message.contains(&cuda.title), "{}", err.message);
+        assert!(err.message.contains("older version"), "{}", err.message);
+        assert!(!err.message.contains("computer is not"), "{}", err.message);
+        assert!(
+            err.next_step.contains("Backend downloads"),
+            "{}",
+            err.next_step
+        );
+        assert!(err.next_step.contains("653 MB"), "{}", err.next_step);
+        assert!(err.next_step.contains("pick Auto"), "{}", err.next_step);
+
+        // An install that never ended is not "the download from before".
+        std::fs::remove_file(folder.join(".complete")).unwrap();
+        assert_eq!(ask(&old).message, plain.message);
+
+        // The current build is installed and still unusable: another cause, as it was.
+        std::fs::write(folder.join(".complete"), b"{}").unwrap();
+        let current = old.join(&cuda.dir);
+        std::fs::create_dir_all(&current).unwrap();
+        std::fs::write(current.join(".complete"), b"{}").unwrap();
+        assert_eq!(ask(&old).message, plain.message);
+
+        // Another error, or another backend's choice, passes through.
+        let other = AppError::new("no_runtime", "m", "n", "d");
+        assert_eq!(
+            older_build_error(other, Some("cuda"), lock, platform, &old).code,
+            "no_runtime"
+        );
+        assert_eq!(
+            older_build_error(plain.clone(), Some("vulkan"), lock, platform, &old).message,
+            plain.message
+        );
+        assert_eq!(
+            older_build_error(plain.clone(), None, lock, platform, &old).message,
+            plain.message
+        );
+        let _ = std::fs::remove_dir_all(&old);
+        let _ = std::fs::remove_dir_all(&empty);
     }
 
     /// 0.1.0 Studio: a chat load waits while a local Studio job holds the graphics card, and

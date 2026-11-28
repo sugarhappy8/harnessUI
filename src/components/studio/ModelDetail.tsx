@@ -57,6 +57,7 @@ import type {
   RepoFileView,
   SetupChoice,
   SetupPlan,
+  Verdict,
 } from "./types";
 
 // A result's or a catalog model's detail panel (0.2.0 Task U6, design 10.3): the review before a
@@ -103,6 +104,28 @@ const MAKES_THE_PICTURE: ReadonlySet<PartRole> = new Set(["diffusion", "high-noi
 /** The slot a plan's main file fills. */
 function mainSlot(slots: PlannedSlot[]): PlannedSlot | null {
   return slots.find((s) => s.source === "main") ?? null;
+}
+
+/** The verdict a panel shows for the file chosen: "Works in Studio" only while that file's plan
+ *  can start, "Needs files" while a part has no file, so the badge follows the person's choices
+ *  (design section 4: no model that says Works and then cannot start). Any other verdict is
+ *  the repository's own. */
+export function shownVerdict(verdict: Verdict, plan: SetupPlan | null): Verdict {
+  if (plan === null || verdict === "unknown") return verdict;
+  const model = "works" in verdict ? verdict.works : "needsFiles" in verdict ? verdict.needsFiles : null;
+  if (model === null) return verdict;
+  return plan.canDownload ? { works: model } : { needsFiles: model };
+}
+
+/** The roles of a plan's required parts nothing fills. */
+function missingRoles(plan: SetupPlan): PartRole[] {
+  return plan.slots.filter((s) => s.required && s.source === "missing").map((s) => s.role);
+}
+
+/** Whether a plan's fit is worth saying: a set-up that cannot start has no fit yet, except a
+ *  "May not fit", which the files known already make true (more files only add to it). */
+function fitKnown(plan: SetupPlan): boolean {
+  return plan.canDownload || plan.fit.word === "notHere";
 }
 
 /** A searched file's own size (the main part), as its choice says it. */
@@ -332,7 +355,7 @@ function RepoReview(props: { repo: LocalRepo; local: LocalModels }) {
     ) : refused === "hf_needs_token" || refused === "hf_needs_terms" ? (
       <GateLine problem={refused} repo={repo.repo} size="sm" />
     ) : plan !== null && (!plan.canDownload || refused === "studio_setup_incomplete") ? (
-      <Why>{MODEL_DETAIL.missingWhy}</Why>
+      <Why>{MODEL_DETAIL.missingWhy(missingRoles(plan))}</Why>
     ) : null;
   // A refusal said in `why` keeps Download on (to try again), except for a missing part.
   const off = gate !== null || (plan !== null && !plan.canDownload) || planning;
@@ -347,7 +370,7 @@ function RepoReview(props: { repo: LocalRepo; local: LocalModels }) {
   return (
     <div className="flex min-h-full flex-col gap-6">
       <Summary
-        badge={<VerdictBadge verdict={repo.verdict} exact />}
+        badge={<VerdictBadge verdict={shownVerdict(repo.verdict, plan)} exact />}
         by={visiblePath(repo.author)}
         summary={repo.summary}
         note={repo.labelMismatch}
@@ -361,6 +384,7 @@ function RepoReview(props: { repo: LocalRepo; local: LocalModels }) {
               label: labels.get(f.file) ?? f.file,
               sizeBytes: sizeOf(repo, f),
               fit: f === chosen ? plan.fit : f.plan.fit,
+              fitKnown: fitKnown(f === chosen ? plan : f.plan),
               best: f.best,
             }))}
             value={chosen.file}
@@ -397,6 +421,7 @@ function RepoReview(props: { repo: LocalRepo; local: LocalModels }) {
           />
           <ActionBar
             total={plan.toFetchBytes + (plan.needsEngine ? local.engine.downloadBytes : 0)}
+            missing={missingRoles(plan).length}
             warnings={warningsFor(plan.fit, plan.lowDisk)}
             why={why}
             off={off}
@@ -523,7 +548,7 @@ function ByHandSetup(props: { repo: LocalRepo; file: string; local: LocalModels;
     refused === "hf_needs_token" || refused === "hf_needs_terms" ? (
       <GateLine problem={refused} repo={repo.repo} size="sm" />
     ) : plan !== null && (!plan.canDownload || refused === "studio_setup_incomplete") ? (
-      <Why>{MODEL_DETAIL.missingWhy}</Why>
+      <Why>{MODEL_DETAIL.missingWhy(missingRoles(plan))}</Why>
     ) : null;
   return (
     <Section title={SETUP.yourself} note={<p className="text-sm text-fg-muted">{MODEL_DETAIL.byHandFor(name)}</p>}>
@@ -557,6 +582,7 @@ function ByHandSetup(props: { repo: LocalRepo; file: string; local: LocalModels;
           />
           <ActionBar
             total={plan.toFetchBytes + (plan.needsEngine ? local.engine.downloadBytes : 0)}
+            missing={missingRoles(plan).length}
             warnings={warningsFor(plan.fit, plan.lowDisk)}
             why={why}
             off={!plan.canDownload || planning}
@@ -708,6 +734,8 @@ interface MainChoice {
   label: string;
   sizeBytes: number;
   fit: LocalFit;
+  /** `false` while the file's set-up lacks a part: its fit is not said (default: said). */
+  fitKnown?: boolean;
   best: boolean;
 }
 
@@ -762,6 +790,9 @@ export function MainFileList(props: {
           ))}
         </div>
       )}
+      {props.choices.some((c) => c.fitKnown === false) && (
+        <p className="text-xs text-fg-muted">{MODEL_DETAIL.fitLater}</p>
+      )}
       {!said && (
         <p className="truncate text-xs text-fg-muted" title={path}>
           <bdi dir="ltr">{path}</bdi>
@@ -796,10 +827,12 @@ function ChoiceBody(props: { choice: MainChoice; mark: ReactNode }) {
         </span>
         <span className="shrink-0 text-sm text-fg-muted tabular-nums">{formatBytes(c.sizeBytes)}</span>
       </span>
-      <span className="flex items-start gap-1.5 pl-6 text-sm text-fg-muted">
-        <span className={`mt-1.5 inline-block size-2 shrink-0 rounded-full ${fitDotClass(c.fit)}`} aria-hidden />
-        {LOCAL_FIT_WORDS[c.fit.word] ?? LOCAL_FIT_WORDS.notHere}
-      </span>
+      {c.fitKnown !== false && (
+        <span className="flex items-start gap-1.5 pl-6 text-sm text-fg-muted">
+          <span className={`mt-1.5 inline-block size-2 shrink-0 rounded-full ${fitDotClass(c.fit)}`} aria-hidden />
+          {LOCAL_FIT_WORDS[c.fit.word] ?? LOCAL_FIT_WORDS.notHere}
+        </span>
+      )}
       {c.best && (
         <span className="absolute -top-2.5 right-2.5 inline-flex items-center gap-1 rounded-full bg-accent px-2 py-px text-xs font-medium text-accent-fg shadow-soft">
           <Sparkles size={11} aria-hidden />
@@ -826,6 +859,8 @@ function Why(props: { children: ReactNode }) {
  *  once it is done, "Ready" with *Use it*. */
 function ActionBar(props: {
   total: number | null;
+  /** How many required parts have no file: with any, the total is a floor and says so. */
+  missing?: number;
   warnings: string[];
   why: ReactNode;
   off: boolean;
@@ -852,7 +887,11 @@ function ActionBar(props: {
       ) : (
         <div className="flex flex-wrap items-center justify-between gap-x-4 gap-y-2">
           {props.total !== null && !props.installed && (
-            <p className="text-sm font-semibold tabular-nums">{MODEL_DETAIL.total(formatBytes(props.total))}</p>
+            <p className="text-sm font-semibold tabular-nums">
+              {props.missing
+                ? MODEL_DETAIL.totalSoFar(formatBytes(props.total), props.missing)
+                : MODEL_DETAIL.total(formatBytes(props.total))}
+            </p>
           )}
           {props.installed ? (
             <>

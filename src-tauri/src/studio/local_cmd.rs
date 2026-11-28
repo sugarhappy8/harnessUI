@@ -679,6 +679,21 @@ async fn repo_dto(deps: &LocalCmdDeps, read: &ReadRepo, card: Option<&str>) -> L
     }
     let labels: Vec<FileLabel> = reading.labels.values().cloned().collect();
     let verdict = match verdict_of(&labels) {
+        // Works in Studio only while some file can start: a recognised model whose every plan
+        // has a part nothing fills needs files (design section 4). The search keeps it too.
+        Verdict::Works {
+            version,
+            kind,
+            recipe,
+        } if !files.is_empty() && files.iter().all(|f| !f.plan.can_download) => {
+            let needs = Verdict::NeedsFiles {
+                version,
+                kind,
+                recipe,
+            };
+            deps.detect.remember_verdict(&detail.id, needs.clone());
+            needs
+        }
         v @ (Verdict::Works { .. } | Verdict::Lora { .. }) => v,
         v if reading.unread == 0 => v,
         _ => verdict_hint(&detail.id, detail.info.pipeline_tag.as_deref()),
@@ -791,6 +806,7 @@ pub(crate) fn slots_dto(planned: &Planned, download: &DownloadPlan) -> Vec<Plann
                 required: p.required,
                 source: p.source,
                 part: at.and_then(|i| parts.get(i).cloned()),
+                why: planned.not_covered.get(&p.slot).cloned(),
             })
         })
         .collect()
@@ -1196,6 +1212,25 @@ pub(crate) mod tests {
             &Catalog::bundled(),
             runtime::sd::lock::embedded().sd_cpp.build,
         )
+    }
+
+    /// The bundled catalog whose companion table has no default for `slots` of `version`: a
+    /// model the table knows nothing of, which is what a plan that cannot start looks like now
+    /// that the guard test keeps every model Studio runs covered.
+    pub(crate) fn bundled_lacking(
+        version: SdVersion,
+        slots: &[models::sd::recipes::SlotId],
+    ) -> GenCatalog {
+        let mut catalog = bundled();
+        if let Some(row) = catalog.companions.by_version.get_mut(&version) {
+            row.retain(|slot, _| !slots.contains(slot));
+        }
+        catalog
+    }
+
+    /// `deps` taking its companions from `catalog`.
+    pub(crate) fn with_catalog(deps: &mut LocalCmdDeps, catalog: GenCatalog) {
+        deps.catalog = Arc::new(TestCatalog(catalog));
     }
 
     /// The bundled Apache-2.0 licence, with the SHA-256 of its canonical text.
@@ -2649,10 +2684,11 @@ pub(crate) mod tests {
     }
 
     /// "Best for this computer" goes to a choice whose plan can download (S6 minor): the
-    /// largest that fits here, a Hunyuan Video 1.5 file with no text encoder anywhere, is
-    /// passed over for the next.
+    /// largest that fits here, a Hunyuan Video 1.5 file with no text encoder or decoder anywhere
+    /// (the table is given none for it here), is passed over for the next.
     #[tokio::test]
     async fn the_best_choice_is_one_whose_plan_can_download() {
+        use models::sd::recipes::SlotId;
         let scratch = Scratch::new();
         let mut hunyuan = fixture("hunyuan-video-15");
         hunyuan.format = models::sd::index::FileFormat::Gguf;
@@ -2664,12 +2700,12 @@ pub(crate) mod tests {
                 Some("flux1-kontext"),
             );
         let hub = hub(vec![repo]).await;
-        let r = local_repo(
-            &repo_deps(&hub, gpu(80, 128), &scratch),
-            "someone/two-models",
-        )
-        .await
-        .unwrap();
+        let mut deps = repo_deps(&hub, gpu(80, 128), &scratch);
+        with_catalog(
+            &mut deps,
+            bundled_lacking(SdVersion::HunyuanVideo, &[SlotId::T5xxl, SlotId::Vae]),
+        );
+        let r = local_repo(&deps, "someone/two-models").await.unwrap();
         let first = &r.files[0];
         assert_eq!(first.file, "h-Q4_0.gguf");
         assert!(matches!(
@@ -2685,6 +2721,101 @@ pub(crate) mod tests {
                 .collect::<Vec<_>>(),
             ["flux1-kontext-dev-Q4_K_M.gguf"]
         );
+    }
+
+    /// A model whose every choice has a part nothing fills is not "Works in Studio" (design
+    /// section 4: no model that says Works and then cannot start): its repository, its
+    /// search hit once it was read, and the card that follows say "needs files". A model
+    /// with its files still works.
+    #[tokio::test]
+    async fn a_repo_none_of_whose_files_can_start_says_it_needs_files() {
+        use models::sd::recipes::SlotId;
+        let scratch = Scratch::new();
+        let mut hunyuan = fixture("hunyuan-video-15");
+        hunyuan.format = models::sd::index::FileFormat::Gguf;
+        let repo = TestRepo::new("someone/hunyuan-gguf")
+            .tagged("text-to-video")
+            .serving("h-Q4_0.gguf", 5_000_000_000, file_of(&hunyuan));
+        let hub = hub(vec![repo]).await;
+
+        // The table has its glyph encoder and decoder: it works.
+        let deps = repo_deps(&hub, gpu(80, 128), &scratch);
+        let r = local_repo(&deps, "someone/hunyuan-gguf").await.unwrap();
+        assert!(r.files[0].plan.can_download);
+        assert!(
+            matches!(r.verdict, Verdict::Works { .. }),
+            "{:?}",
+            r.verdict
+        );
+
+        // Without them no file can start: the verdict, and the hit a later search shows.
+        let mut deps = repo_deps(&hub, gpu(80, 128), &scratch);
+        with_catalog(
+            &mut deps,
+            bundled_lacking(SdVersion::HunyuanVideo, &[SlotId::T5xxl, SlotId::Vae]),
+        );
+        let r = local_repo(&deps, "someone/hunyuan-gguf").await.unwrap();
+        assert!(r.files.iter().all(|f| !f.plan.can_download));
+        let Verdict::NeedsFiles { version, kind, .. } = r.verdict else {
+            panic!("{:?}", r.verdict);
+        };
+        assert_eq!(
+            (version, kind),
+            (SdVersion::HunyuanVideo, RecipeKind::Video)
+        );
+        let hit = search_page(
+            vec![summary("someone/hunyuan-gguf", Some("text-to-video"), None)],
+            &deps.detect,
+        );
+        assert_eq!(hit.items[0].verdict, r.verdict);
+        assert!(hit.items[0].exact);
+        // It reads as the kind of verdict the webview words: `needsFiles` in camelCase.
+        assert_eq!(
+            serde_json::to_value(&r.verdict).unwrap()["needsFiles"]["version"],
+            "hunyuan-video"
+        );
+    }
+
+    /// A slot the table leaves out on purpose (`notCovered`) says why in its plan, and one
+    /// that is only missing says nothing of the kind.
+    #[tokio::test]
+    async fn a_slot_left_out_on_purpose_says_why_in_the_plan() {
+        use models::sd::companions::NotCovered;
+        use models::sd::recipes::SlotId;
+        let scratch = Scratch::new();
+        let mut hunyuan = fixture("hunyuan-video-15");
+        hunyuan.format = models::sd::index::FileFormat::Gguf;
+        let hub = hub(vec![
+            TestRepo::new("someone/hunyuan-gguf")
+                .tagged("text-to-video")
+                .serving("h-Q4_0.gguf", 5_000_000_000, file_of(&hunyuan)),
+        ])
+        .await;
+        let mut catalog = bundled_lacking(SdVersion::HunyuanVideo, &[SlotId::T5xxl, SlotId::Vae]);
+        catalog.companions.not_covered.push(NotCovered {
+            recipe: "hunyuan-video-15-t2v".into(),
+            slot: SlotId::T5xxl,
+            reason: "This model needs a glyph encoder Studio can't pick for you.".into(),
+        });
+        let mut deps = repo_deps(&hub, gpu(80, 128), &scratch);
+        with_catalog(&mut deps, catalog);
+        let r = local_repo(&deps, "someone/hunyuan-gguf").await.unwrap();
+        let slots = &r.files[0].plan.slots;
+        let why = |role| {
+            slots
+                .iter()
+                .find(|s| s.role == role)
+                .map(|s| (s.source, s.why.as_deref()))
+        };
+        assert_eq!(
+            why(GenRole::T5xxl),
+            Some((
+                PartSource::Missing,
+                Some("This model needs a glyph encoder Studio can't pick for you.")
+            ))
+        );
+        assert_eq!(why(GenRole::Vae), Some((PartSource::Missing, None)));
+        assert_eq!(why(GenRole::Diffusion), Some((PartSource::Main, None)));
     }
 
     #[tokio::test]
@@ -3339,6 +3470,7 @@ pub(crate) mod tests {
             last_modified: updated.map(str::to_owned),
             pipeline_tag: tag.map(str::to_owned),
             not_for_all_audiences: false,
+            unknown_architecture: None,
         }
     }
 

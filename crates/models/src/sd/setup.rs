@@ -858,6 +858,18 @@ mod tests {
         CompanionTable::from_catalog(&Catalog::bundled()).unwrap()
     }
 
+    /// The bundled table without the defaults of `versions` for `slots`: what a set-up gets
+    /// when the table has nothing for them, which is what a plan that cannot start looks like.
+    fn table_without(versions: &[SdVersion], slots: &[SlotId]) -> CompanionTable {
+        let mut t = table();
+        for v in versions {
+            if let Some(row) = t.by_version.get_mut(v) {
+                row.retain(|s, _| !slots.contains(s));
+            }
+        }
+        t
+    }
+
     /// The bundled table's companion `id`.
     fn companion(id: &str) -> Companion {
         table().files.into_iter().find(|c| c.id == id).unwrap()
@@ -1155,6 +1167,26 @@ mod tests {
         inspect(&index)
     }
 
+    /// A lone diffusion model of `version`, as a person finds one in a repository of GGUF
+    /// files: it embeds nothing, so every encoder and the decoder come from elsewhere.
+    fn lone(version: SdVersion, path: &str) -> Main {
+        Main {
+            repo: "someone/model-GGUF".into(),
+            file: rf(path, 5_000_000_000),
+            facts: FileFacts {
+                kind: FileKind::Model {
+                    version,
+                    layout: Layout::DiffusionOnly,
+                    embeds: Vec::new(),
+                },
+                facts: MatchFacts::default(),
+                parameters: 5_000_000_000,
+                format: FileFormat::Gguf,
+            },
+            part: None,
+        }
+    }
+
     /// An SDXL folder without its `vae/`.
     fn sdxl_folder_without_vae() -> (DiffusersFolder, FileFacts) {
         let folder = diffusers_folder(&[
@@ -1231,6 +1263,272 @@ mod tests {
         // The vae fills `required_any [vae, tae]`, so the plan needs it.
         assert!(p.parts.iter().all(|x| x.required));
         assert_eq!(p.to_fetch().len(), 4);
+    }
+
+    /// The 0.2.1 report: Qwen Image 2.1's page showed a text encoder and a decoder with "No
+    /// file yet", and a Download that could not start, because the table had nothing for the
+    /// version. A lone diffusion file (the NF4 or Q8_0 file of the report) now plans all
+    /// three: Qwen 3 VL 8B as the text encoder, Qwen Image 2.1's own decoder (not Qwen Image
+    /// 1's: another file) and the vision projector the GGUF encoder needs for reference
+    /// pictures, and the Turbo recipe plans the same files.
+    #[test]
+    fn a_qwen_image_21_file_gets_its_encoder_decoder_and_vision_projector() {
+        let facts = FileFacts {
+            kind: FileKind::Model {
+                version: SdVersion::QwenImage21,
+                layout: Layout::DiffusionOnly,
+                embeds: Vec::new(),
+            },
+            facts: MatchFacts::default(),
+            parameters: 20_000_000_000,
+            format: FileFormat::Gguf,
+        };
+        let main = || Main {
+            repo: "chatrlabs/Qwen-Image-2.1-Uncensored-Omni-Quantized".into(),
+            file: rf("qwen-image-2.1-step90000-Q8_0.gguf", 7_687_183_136),
+            facts: facts.clone(),
+            part: None,
+        };
+        for recipe_id in ["qwen-image-21", "qwen-image-21-turbo"] {
+            let p = plan(main(), recipe_id, &[], &[]);
+            assert!(p.can_run(), "{recipe_id}: {:?}", p.missing());
+            assert_eq!(
+                sources(&p),
+                [
+                    (SlotId::DiffusionModel, PartSource::Main),
+                    (SlotId::Llm, PartSource::Companion),
+                    (SlotId::LlmVision, PartSource::Companion),
+                    (SlotId::Vae, PartSource::Companion),
+                ],
+                "{recipe_id}"
+            );
+            assert_eq!(hub_path(&p, SlotId::Llm), "Qwen3VL-8B-Instruct-Q8_0.gguf");
+            assert_eq!(
+                hub_path(&p, SlotId::LlmVision),
+                "mmproj-Qwen3VL-8B-Instruct-F16.gguf"
+            );
+            assert_eq!(
+                hub_path(&p, SlotId::Vae),
+                "vae/qwen_image_2.1_vae_bf16.safetensors"
+            );
+            // The decoder is Qwen Image 2.1's own, under Qwen's research licence; the
+            // encoder and projector are Apache-2.0.
+            let licence = |s| match &slot(&p, s).unwrap().file {
+                Some(PlannedFile::Hub { licence, .. }) => licence.clone(),
+                other => panic!("{other:?}"),
+            };
+            assert_eq!(
+                licence(SlotId::Vae),
+                LicenceRef::Companion("qwen-research".into())
+            );
+            assert_eq!(
+                licence(SlotId::Llm),
+                LicenceRef::Companion("apache-2.0".into())
+            );
+            assert_ne!(
+                companion("qwen-image-vae").sha256,
+                companion("qwen-image-21-vae").sha256
+            );
+        }
+    }
+
+    /// A model's picture-editing recipe takes the vision projector its GGUF text encoder
+    /// needs for reference pictures (the engine otherwise runs it as text-to-picture, or
+    /// refuses), and the plain recipe does not download it.
+    #[test]
+    fn only_the_editing_recipe_takes_the_vision_projector() {
+        for (version, plain, edit, mmproj) in [
+            (
+                SdVersion::BooguImage,
+                "boogu-image",
+                "boogu-image-edit",
+                "mmproj-Qwen3VL-8B-Instruct-F16.gguf",
+            ),
+            (
+                SdVersion::MageFlow,
+                "mage-flow",
+                "mage-flow-edit",
+                "mmproj-Qwen3VL-4B-Instruct-F16.gguf",
+            ),
+            (
+                SdVersion::Krea2,
+                "krea2-raw",
+                "krea2-raw-edit",
+                "mmproj-Qwen3VL-4B-Instruct-Q8_0.gguf",
+            ),
+        ] {
+            let p = plan(lone(version, "model-Q8_0.gguf"), plain, &[], &[]);
+            assert!(
+                p.can_run() && slot(&p, SlotId::LlmVision).is_none(),
+                "{plain}"
+            );
+            let p = plan(lone(version, "model-Q8_0.gguf"), edit, &[], &[]);
+            assert!(p.can_run(), "{edit}: {:?}", p.missing());
+            assert_eq!(source(&p, SlotId::LlmVision), PartSource::Companion);
+            assert_eq!(hub_path(&p, SlotId::LlmVision), mmproj, "{edit}");
+            // Optional: the plan runs without it, so a person's clearing it is fine.
+            assert!(!slot(&p, SlotId::LlmVision).unwrap().required);
+        }
+    }
+
+    /// Lens, LLaDA-Image, Ming-Image and MOSS-Image need a tokenizer file the engine has none
+    /// of its own for: it is planned like any other part (a `.json` file, `--tokenizer`), and
+    /// LLaDA's Base and Turbo recipes each take their own text encoder and connectors (the
+    /// engine's docs say mixing them degrades the picture silently).
+    #[test]
+    fn a_model_that_needs_a_tokenizer_gets_one_and_llada_keeps_its_pairs() {
+        let p = plan(lone(SdVersion::Lens, "lens-Q8_0.gguf"), "lens", &[], &[]);
+        assert!(p.can_run(), "{:?}", p.missing());
+        assert_eq!(source(&p, SlotId::Tokenizer), PartSource::Companion);
+        assert_eq!(hub_path(&p, SlotId::Tokenizer), "tokenizer.json");
+        assert_eq!(hub_path(&p, SlotId::Llm), "gpt-oss-20b-Q8_0.gguf");
+        for (recipe_id, tokenizer) in [
+            ("ming-image", "mllm/tokenizer.json"),
+            ("moss-image-base", "tokenizer/tokenizer.json"),
+        ] {
+            let version = if recipe_id == "ming-image" {
+                SdVersion::MingImage
+            } else {
+                SdVersion::MossImage
+            };
+            let p = plan(lone(version, "model-Q8_0.gguf"), recipe_id, &[], &[]);
+            assert!(p.can_run(), "{recipe_id}: {:?}", p.missing());
+            assert_eq!(hub_path(&p, SlotId::Tokenizer), tokenizer, "{recipe_id}");
+        }
+        let llada = |recipe_id| {
+            plan(
+                lone(SdVersion::LladaImage, "llada-Q8_0.gguf"),
+                recipe_id,
+                &[],
+                &[],
+            )
+        };
+        let base = llada("llada-image");
+        let turbo = llada("llada-image-turbo");
+        assert!(base.can_run() && turbo.can_run());
+        assert_eq!(
+            hub_path(&base, SlotId::Llm),
+            "llada-image-text_encoder-q8_0.gguf"
+        );
+        assert_eq!(
+            hub_path(&turbo, SlotId::Llm),
+            "llada-image-turbo-text_encoder-q8_0.gguf"
+        );
+        assert_eq!(
+            hub_path(&base, SlotId::EmbeddingsConnectors),
+            "llada-image-connectors-edit.safetensors"
+        );
+        assert_eq!(
+            hub_path(&turbo, SlotId::EmbeddingsConnectors),
+            "llada-image-turbo-connectors-edit.safetensors"
+        );
+        assert_eq!(
+            hub_path(&base, SlotId::Tokenizer),
+            hub_path(&turbo, SlotId::Tokenizer)
+        );
+    }
+
+    /// The video models that planned an encoder or decoder the table did not name: MiniMax H3
+    /// and its picture and P-H3 cousins, LTX-2.3 and 2.5 (two encoder families under one engine
+    /// version, so by recipe) and HunyuanVideo 1.5 (a glyph encoder beside its language model,
+    /// and its own decoder).
+    #[test]
+    fn the_video_models_get_their_encoders_and_decoders() {
+        for (version, recipe_id, parts) in [
+            (
+                SdVersion::MinimaxH3,
+                "minimax-h3-fl2va",
+                vec![
+                    (
+                        SlotId::Llm,
+                        "text_encoders/p-h3-image_text_encoder_int8_convrot.safetensors",
+                    ),
+                    (SlotId::Vae, "vae/minimax_h3_video_vae_fp16.safetensors"),
+                ],
+            ),
+            (
+                SdVersion::MinimaxH3Image,
+                "minimax-h3-image",
+                vec![
+                    (
+                        SlotId::Llm,
+                        "text_encoders/p-h3-image_text_encoder_int8_convrot.safetensors",
+                    ),
+                    (SlotId::Vae, "vae/minimax_h3_image_vae_fp16.safetensors"),
+                ],
+            ),
+            (
+                SdVersion::PH3Image,
+                "p-h3-image",
+                vec![
+                    (
+                        SlotId::Llm,
+                        "text_encoders/p-h3-image_text_encoder_int8_convrot.safetensors",
+                    ),
+                    (SlotId::Vae, "vae/p-h3-image_vae_bf16.safetensors"),
+                ],
+            ),
+            (
+                SdVersion::Ltxav,
+                "ltx23-dev",
+                vec![
+                    (SlotId::Llm, "gemma-3-12b-it-Q8_0.gguf"),
+                    (SlotId::Vae, "vae/ltx-2.3-22b-dev_video_vae.safetensors"),
+                    (
+                        SlotId::EmbeddingsConnectors,
+                        "text_encoders/ltx-2.3-22b-dev_embeddings_connectors.safetensors",
+                    ),
+                ],
+            ),
+            (
+                SdVersion::Ltxav,
+                "ltx25-dev",
+                vec![
+                    (
+                        SlotId::Llm,
+                        "text_encoders/gemma4-12b-with-proj-ltx-2.5-bf16.safetensors",
+                    ),
+                    (SlotId::Vae, "vae/ltx-2.5-video-vae-conv-bf16.safetensors"),
+                ],
+            ),
+            (
+                SdVersion::HunyuanVideo,
+                "hunyuan-video-15-t2v",
+                vec![
+                    (SlotId::Llm, "Qwen2.5-VL-7B-Instruct-Q8_0.gguf"),
+                    (
+                        SlotId::T5xxl,
+                        "split_files/text_encoders/byt5_small_glyphxl_fp16.safetensors",
+                    ),
+                    (
+                        SlotId::Vae,
+                        "split_files/vae/hunyuanvideo15_vae_fp16.safetensors",
+                    ),
+                ],
+            ),
+        ] {
+            let p = plan(lone(version, "video-Q8_0.gguf"), recipe_id, &[], &[]);
+            assert!(p.can_run(), "{recipe_id}: {:?}", p.missing());
+            for (slot_id, path) in parts {
+                assert_eq!(
+                    source(&p, slot_id),
+                    PartSource::Companion,
+                    "{recipe_id} {slot_id:?}"
+                );
+                assert_eq!(hub_path(&p, slot_id), path, "{recipe_id} {slot_id:?}");
+            }
+        }
+        // LTX-2.5's encoder carries its own projection, so it takes no connectors file. The
+        // sound decoder is optional ("for silent video", say the engine's recipes) and the
+        // table gives no optional slot but the vision encoders, so a video is silent.
+        let p = plan(
+            lone(SdVersion::Ltxav, "ltx-Q8_0.gguf"),
+            "ltx25-dev",
+            &[],
+            &[],
+        );
+        assert!(slot(&p, SlotId::EmbeddingsConnectors).is_none());
+        assert!(slot(&p, SlotId::AudioVae).is_none());
     }
 
     #[test]
@@ -1445,7 +1743,8 @@ mod tests {
                 embeds: vec![]
             }
         );
-        // The table has SD3's encoders and no SD3 VAE.
+        // The table has SD3's three encoders and its VAE (a file with none of them, so a
+        // GGUF SD3.5, used to stop at the VAE).
         let p = plan(main(sd3.clone()), "sd35-medium", &[], &[]);
         assert_eq!(
             sources(&p),
@@ -1454,11 +1753,22 @@ mod tests {
                 (SlotId::ClipL, PartSource::Companion),
                 (SlotId::ClipG, PartSource::Companion),
                 (SlotId::T5xxl, PartSource::Companion),
-                (SlotId::Vae, PartSource::Missing)
+                (SlotId::Vae, PartSource::Companion)
             ]
         );
-        assert!(slot(&p, SlotId::Model).is_none() && !p.can_run());
+        assert!(slot(&p, SlotId::Model).is_none() && p.can_run());
         assert!(p.parts.iter().all(|x| x.required));
+        // Without a default for the VAE, it is missing and the plan cannot run.
+        let p = plan_given(
+            &main(sd3.clone()),
+            "sd35-medium",
+            With {
+                companions: Some(table_without(&[SdVersion::Sd3], &[SlotId::Vae])),
+                ..With::default()
+            },
+        );
+        assert_eq!(source(&p, SlotId::Vae), PartSource::Missing);
+        assert!(!p.can_run());
 
         // The repo's own files, a diffusers VAE among them.
         let listing = [
@@ -1539,8 +1849,40 @@ mod tests {
                 ..
             }
         ));
-        // The table has no SDXL encoders or VAE: all three are missing.
+        // The table has SDXL's two encoders and its VAE (0.2.1's did not: all three were
+        // missing, and a GGUF or UNet-only SDXL file could not start).
         let p = plan(main("sdxl"), "sdxl-checkpoint", &[], &[]);
+        assert_eq!(
+            sources(&p),
+            [
+                (SlotId::DiffusionModel, PartSource::Main),
+                (SlotId::Vae, PartSource::Companion),
+                (SlotId::ClipL, PartSource::Companion),
+                (SlotId::ClipG, PartSource::Companion)
+            ]
+        );
+        assert!(p.parts.iter().all(|x| x.required) && p.can_run());
+        assert_eq!(
+            hub_path(&p, SlotId::Vae),
+            "diffusion_pytorch_model.safetensors"
+        );
+
+        // Without defaults for them (a table that knows nothing of SDXL): all three are
+        // missing.
+        let bare = || {
+            table_without(
+                &[SdVersion::Sdxl, SdVersion::Sd1],
+                &[SlotId::Vae, SlotId::ClipL, SlotId::ClipG],
+            )
+        };
+        let p = plan_given(
+            &main("sdxl"),
+            "sdxl-checkpoint",
+            With {
+                companions: Some(bare()),
+                ..With::default()
+            },
+        );
         assert_eq!(
             sources(&p),
             [
@@ -1563,6 +1905,7 @@ mod tests {
             &main("sdxl"),
             "sdxl-checkpoint",
             With {
+                companions: Some(bare()),
                 overrides: vec![vae.clone()],
                 ..With::default()
             },
@@ -1573,6 +1916,7 @@ mod tests {
             &main("sdxl"),
             "sdxl-checkpoint",
             With {
+                companions: Some(bare()),
                 overrides: vec![
                     vae,
                     (SlotId::ClipL, local("/d/clip_l.safetensors")),
@@ -1591,6 +1935,7 @@ mod tests {
             &main("sdxl"),
             "sdxl-checkpoint",
             With {
+                companions: Some(bare()),
                 overrides: vec![(SlotId::ClipG, SlotChoice::Empty)],
                 ..With::default()
             },
@@ -1631,8 +1976,25 @@ mod tests {
             },
             ..main("sdxl")
         };
+        // The table gives SD 1.x its VAE; the text encoder of a bare UNet is the person's
+        // (the guard test lists it among the slots Studio says it cannot fill).
         assert_eq!(
-            sources(&plan(sd1, "sd1-checkpoint", &[], &[])),
+            sources(&plan_given(&sd1, "sd1-checkpoint", With::default())),
+            [
+                (SlotId::DiffusionModel, PartSource::Main),
+                (SlotId::Vae, PartSource::Companion),
+                (SlotId::ClipL, PartSource::Missing)
+            ]
+        );
+        assert_eq!(
+            sources(&plan_given(
+                &sd1,
+                "sd1-checkpoint",
+                With {
+                    companions: Some(bare()),
+                    ..With::default()
+                }
+            )),
             [
                 (SlotId::DiffusionModel, PartSource::Main),
                 (SlotId::Vae, PartSource::Missing),
@@ -1663,26 +2025,46 @@ mod tests {
 
     #[test]
     fn an_sdxl_folder_without_a_vae_needs_one() {
+        // The table gives it SDXL's own (fp16-safe) VAE.
         let p = plan_folder("o/sdxl-base", &sdxl_folder_without_vae(), "sdxl-checkpoint");
         assert_eq!(
             sources(&p),
             [
                 (SlotId::Model, PartSource::Main),
-                (SlotId::Vae, PartSource::Missing),
+                (SlotId::Vae, PartSource::Companion),
                 (SlotId::ClipL, PartSource::Folder),
                 (SlotId::ClipG, PartSource::Folder)
             ]
         );
-        assert!(slot(&p, SlotId::Vae).unwrap().required && !p.can_run());
-        // The folder's files decide, never facts that say it embeds a VAE.
+        assert!(slot(&p, SlotId::Vae).unwrap().required && p.can_run());
+        // A table with no default for it leaves the VAE missing, and the folder's files
+        // decide, never facts that say it embeds a VAE.
         let (folder, mut facts) = sdxl_folder_without_vae();
         facts.kind = FileKind::Model {
             version: SdVersion::Sdxl,
             layout: Layout::Folder,
             embeds: vec![SlotId::ClipL, SlotId::ClipG, SlotId::Vae],
         };
-        let p = plan_folder("o/sdxl-base", &(folder, facts), "sdxl-checkpoint");
+        let bare = table_without(&[SdVersion::Sdxl], &[SlotId::Vae]);
+        let p = plan_setup(&SetupInput {
+            main: MainFile::HubFolder {
+                repo: "o/sdxl-base",
+                revision: REV,
+                folder: &folder,
+            },
+            facts: &facts,
+            recipe: recipe("sdxl-checkpoint").unwrap(),
+            version: version_of(&facts),
+            part: None,
+            listing: &[],
+            listing_facts: &BTreeMap::new(),
+            installed: &[],
+            companions: &bare,
+            overrides: &[],
+            untested: false,
+        });
         assert_eq!(source(&p, SlotId::Vae), PartSource::Missing);
+        assert!(slot(&p, SlotId::Vae).unwrap().required && !p.can_run());
     }
 
     #[test]
@@ -2289,15 +2671,20 @@ mod tests {
 
     #[test]
     fn a_slot_nothing_can_fill_is_missing_and_the_plan_cannot_run() {
+        // Ideogram 4's second model file (the unconditional one) is a model slot: the table
+        // refuses companions for it, so a lone file leaves it missing.
         let p = plan(
-            main_hub("o/HunyuanVideo-1.5-GGUF", "h-Q4_0.gguf", "hunyuan-video-15"),
-            "hunyuan-video-15-t2v",
+            lone(SdVersion::Ideogram4, "ideogram4-Q4_0.gguf"),
+            "ideogram4",
             &[],
             &[],
         );
-        assert_eq!(p.missing(), [SlotId::T5xxl, SlotId::Vae]);
+        assert_eq!(p.missing(), [SlotId::UncondDiffusionModel]);
         assert!(!p.can_run());
-        assert!(slot(&p, SlotId::Vae).unwrap().required);
+        assert!(slot(&p, SlotId::UncondDiffusionModel).unwrap().required);
+        // Its text encoder and decoder do come from the table.
+        assert_eq!(source(&p, SlotId::Llm), PartSource::Companion);
+        assert_eq!(source(&p, SlotId::Vae), PartSource::Companion);
     }
 
     #[test]
@@ -2508,8 +2895,7 @@ mod tests {
         assert_eq!(hub_path(&p, SlotId::Vae), companion("ae-flux1").path);
         assert!(p.can_run() && p.untested);
 
-        // A file of no known version, set up as SDXL: the table has no SDXL decoder, so the
-        // vae it needs comes from the person.
+        // A file of no known version, set up as SDXL: it takes SDXL's decoder from the table.
         let unknown = FileFacts {
             kind: FileKind::CannotRun {
                 reason: crate::sd::CannotRunReason::UnknownWeights,
@@ -2541,8 +2927,12 @@ mod tests {
             sources(&p),
             [
                 (SlotId::Model, PartSource::Main),
-                (SlotId::Vae, PartSource::Missing)
+                (SlotId::Vae, PartSource::Companion)
             ]
+        );
+        assert_eq!(
+            hub_path(&p, SlotId::Vae),
+            companion("sdxl-vae-fp16-fix").path
         );
     }
 
@@ -2574,8 +2964,8 @@ mod tests {
                 .count()
         };
 
-        // A full SDXL checkpoint, its `model` replaced by a diffusion model alone: the empty
-        // table has no SDXL VAE or encoders.
+        // A full SDXL checkpoint, its `model` replaced by a diffusion model alone: the VAE and
+        // both encoders it no longer carries come from the table.
         let sdxl = main_hub(
             "stabilityai/stable-diffusion-xl-base-1.0",
             "sd_xl_base_1.0.safetensors",
@@ -2593,12 +2983,12 @@ mod tests {
             sources(&p),
             [
                 (SlotId::Model, PartSource::Chosen),
-                (SlotId::Vae, PartSource::Missing),
-                (SlotId::ClipL, PartSource::Missing),
-                (SlotId::ClipG, PartSource::Missing)
+                (SlotId::Vae, PartSource::Companion),
+                (SlotId::ClipL, PartSource::Companion),
+                (SlotId::ClipG, PartSource::Companion)
             ]
         );
-        assert!(p.parts.iter().all(|x| x.required) && !p.can_run());
+        assert!(p.parts.iter().all(|x| x.required) && p.can_run());
 
         // A FLUX checkpoint with its encoders and VAE, replaced in the recipe's own
         // `diffusion_model`: they come from the table.
@@ -2646,11 +3036,13 @@ mod tests {
             "sd1-checkpoint",
             &[(SlotId::Model, local("/d/sd14-unet.gguf"))],
         );
+        // The table gives the VAE; the folder's own text encoder went with its replaced UNet,
+        // and nothing in the table can stand in for it.
         assert_eq!(
             sources(&p),
             [
                 (SlotId::Model, PartSource::Chosen),
-                (SlotId::Vae, PartSource::Missing),
+                (SlotId::Vae, PartSource::Companion),
                 (SlotId::ClipL, PartSource::Missing)
             ]
         );

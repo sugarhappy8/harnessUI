@@ -620,12 +620,81 @@ pub async fn install_files(
     Ok(final_dir)
 }
 
-/// Removes an installed pack and any partial download.
+/// A folder of this pack from an older build.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OlderBuild {
+    /// The folder.
+    pub dir: PathBuf,
+    /// It was installed whole (`.complete` is in it): the person had this backend before the
+    /// app moved to a newer build. A folder without the marker is an install that never ended.
+    pub complete: bool,
+}
+
+/// The folders of `pack` from older builds. A pack's folder carries the build
+/// (`cuda-b12110`), so an app update that moves the pin leaves the old folder on disk, where
+/// discovery never looks: only the folder the lock names is a backend. These are the folders
+/// named `<id>-<build>` next to it; the staging folder (`.tmp-…`) and the download folder
+/// (`.downloads`) start with a dot and are not among them.
+pub fn older_builds(pack: &PackSpec, packs_dir: &Path) -> Vec<OlderBuild> {
+    let prefix = format!("{}-", pack.id);
+    let Ok(entries) = std::fs::read_dir(packs_dir) else {
+        return Vec::new();
+    };
+    entries
+        .filter_map(Result::ok)
+        .filter_map(|entry| {
+            let name = entry.file_name().to_string_lossy().into_owned();
+            let ours = name.starts_with(&prefix)
+                && name != pack.dir
+                && crate::llama::backend::is_plain_dir_name(&name)
+                && entry.file_type().is_ok_and(|t| t.is_dir());
+            ours.then(|| {
+                let dir = entry.path();
+                let complete = dir.join(PACK_COMPLETE_MARKER).is_file();
+                OlderBuild { dir, complete }
+            })
+        })
+        .collect()
+}
+
+/// Bytes the older builds of `pack` take on disk.
+pub fn older_bytes(pack: &PackSpec, packs_dir: &Path) -> u64 {
+    older_builds(pack, packs_dir)
+        .iter()
+        .map(|o| folder_bytes(&o.dir, 8))
+        .sum()
+}
+
+/// The size of the files under `dir`, `depth` folders deep (a symbolic link is not followed).
+fn folder_bytes(dir: &Path, depth: u32) -> u64 {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return 0;
+    };
+    entries
+        .filter_map(Result::ok)
+        .map(|entry| match entry.file_type() {
+            Ok(t) if t.is_dir() && depth > 0 => folder_bytes(&entry.path(), depth - 1),
+            Ok(t) if t.is_file() => entry.metadata().map_or(0, |m| m.len()),
+            _ => 0,
+        })
+        .sum()
+}
+
+/// Removes the older builds of `pack`, and nothing else: the build that works stays.
+pub async fn remove_older(pack: &PackSpec, packs_dir: &Path) -> Result<(), PackError> {
+    for older in older_builds(pack, packs_dir) {
+        tokio::fs::remove_dir_all(&older.dir).await?;
+    }
+    Ok(())
+}
+
+/// Removes an installed pack, its older builds ([`older_builds`]) and any partial download.
 pub async fn remove(pack: &PackSpec, packs_dir: &Path) -> Result<(), PackError> {
     let dir = packs_dir.join(&pack.dir);
     if dir.exists() {
         tokio::fs::remove_dir_all(&dir).await?;
     }
+    remove_older(pack, packs_dir).await?;
     let _ = tokio::fs::remove_dir_all(packs_dir.join(format!(".tmp-{}", pack.dir))).await;
     for f in &pack.files {
         let _ = tokio::fs::remove_file(downloads_dir(packs_dir).join(part_name(f))).await;
@@ -900,6 +969,85 @@ mod tests {
         std::fs::create_dir_all(dir.path().join(&pack.dir)).unwrap();
         std::fs::write(dir.path().join(&pack.dir).join(PACK_COMPLETE_MARKER), b"{}").unwrap();
         assert_eq!(state(pack, dir.path()), PackState::Installed);
+    }
+
+    /// A pack's folder carries the build (`cuda-b12110`), so an app update that moves the
+    /// pin leaves the old folder behind, unused: the lock names a new folder.
+    fn leftover(root: &Path, name: &str, complete: bool, bytes: usize) {
+        let dir = root.join(name);
+        std::fs::create_dir_all(dir.join("sub")).unwrap();
+        std::fs::write(dir.join("sub").join("kernel.bin"), vec![0u8; bytes]).unwrap();
+        if complete {
+            std::fs::write(dir.join(PACK_COMPLETE_MARKER), b"{}").unwrap();
+        }
+    }
+
+    #[test]
+    fn a_folder_of_an_older_build_is_found_by_the_packs_id() {
+        let dir = tempfile::tempdir().unwrap();
+        let lock = crate::llama::lock::embedded();
+        let cuda = lock.packs.iter().find(|p| p.id == "cuda").unwrap();
+        assert!(older_builds(cuda, dir.path()).is_empty());
+
+        leftover(dir.path(), "cuda-b12110", true, 700);
+        leftover(dir.path(), "cuda-b11000", false, 5);
+        // Not this pack's: another pack, the current build, the staging and download folders,
+        // and a plain file that happens to start the same way.
+        leftover(dir.path(), "rocm-b1372", true, 1000);
+        leftover(dir.path(), &cuda.dir, true, 900);
+        leftover(dir.path(), &format!(".tmp-{}", cuda.dir), false, 3);
+        leftover(dir.path(), ".downloads", false, 3);
+        leftover(dir.path(), "cudafoo", true, 3);
+        std::fs::write(dir.path().join("cuda-notes.txt"), b"x").unwrap();
+
+        let mut found: Vec<(String, bool)> = older_builds(cuda, dir.path())
+            .into_iter()
+            .map(|o| {
+                (
+                    o.dir.file_name().unwrap().to_string_lossy().into_owned(),
+                    o.complete,
+                )
+            })
+            .collect();
+        found.sort();
+        assert_eq!(
+            found,
+            vec![
+                ("cuda-b11000".to_string(), false),
+                ("cuda-b12110".to_string(), true)
+            ]
+        );
+        // 700 + 5 of kernel files and the two bytes of the finished one's marker.
+        assert_eq!(older_bytes(cuda, dir.path()), 707);
+    }
+
+    /// Removing a backend takes its older builds with it, so Settings can reclaim them, and
+    /// "only the older" keeps the build that works.
+    #[tokio::test]
+    async fn removing_a_pack_takes_the_older_builds_too_or_only_them() {
+        let dir = tempfile::tempdir().unwrap();
+        let lock = crate::llama::lock::embedded();
+        let cuda = lock.packs.iter().find(|p| p.id == "cuda").unwrap();
+        leftover(dir.path(), "cuda-b12110", true, 10);
+        leftover(dir.path(), &cuda.dir, true, 10);
+        leftover(dir.path(), "rocm-b1372", true, 10);
+
+        remove_older(cuda, dir.path()).await.unwrap();
+        assert!(!dir.path().join("cuda-b12110").exists());
+        assert!(
+            dir.path().join(&cuda.dir).exists(),
+            "the build that works stays"
+        );
+        assert!(
+            dir.path().join("rocm-b1372").exists(),
+            "another pack's folder stays"
+        );
+
+        leftover(dir.path(), "cuda-b12110", true, 10);
+        remove(cuda, dir.path()).await.unwrap();
+        assert!(!dir.path().join("cuda-b12110").exists());
+        assert!(!dir.path().join(&cuda.dir).exists());
+        assert!(dir.path().join("rocm-b1372").exists());
     }
 
     #[test]

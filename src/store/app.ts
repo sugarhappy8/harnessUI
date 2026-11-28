@@ -464,7 +464,8 @@ export const useApp = create<AppState>((set, get) => {
       const rt = get().runtime;
       const loaded =
         rt && rt.modelPath && (rt.state === "ready" || rt.state === "starting") ? `local:${rt.modelPath}` : null;
-      const lastUsed = get().detail?.chat.modelRef ?? loaded ?? options[0]?.ref ?? null;
+      // The most recent that this version can open: a chat started on one it cannot is stuck.
+      const lastUsed = get().detail?.chat.modelRef ?? loaded ?? options.find((o) => !o.cantOpen)?.ref ?? null;
       const chat = await ipc.createChat(lastUsed);
       await get().refreshChats();
       await get().openChat(chat.id);

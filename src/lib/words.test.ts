@@ -97,6 +97,7 @@ const FAILURES: Record<LoadFailure["code"], LoadFailure> = {
   missing_runtime_dll: { code: "missing_runtime_dll" },
   port_in_use: { code: "port_in_use" },
   model_file_invalid: { code: "model_file_invalid" },
+  unknown_architecture: { code: "unknown_architecture" },
   context_too_large: { code: "context_too_large" },
   image_file_invalid: { code: "image_file_invalid" },
   unknown: { code: "unknown" },
@@ -273,6 +274,8 @@ describe("plain words", () => {
     expect(stepDownAction({ code: "context_too_large" })).toBe("reload");
     expect(stepDownAction({ code: "invalid_device", device: "Vulkan1" })).toBe("settings");
     expect(stepDownAction({ code: "model_file_invalid" })).toBeNull();
+    // A kind this version does not know fails the same on every backend: nothing to reload.
+    expect(stepDownAction({ code: "unknown_architecture" })).toBeNull();
     // Reload only where the sentence says to.
     for (const f of Object.values(FAILURES)) {
       expect(adjustmentWords(down(f))?.includes("Reload") ?? false, f.code).toBe(stepDownAction(f) === "reload");
@@ -1102,6 +1105,31 @@ describe("a repository's file labels (Task S6)", () => {
     expect(FILE_LABEL.notRead("failed")).toBe("Couldn't read this file");
   });
 
+  it("says a file packed for another program can't run, by its format and never as a model that works", () => {
+    // The 0.2.1 page called the owner's 3.7 GB bitsandbytes file "Fits", and offered it.
+    expect(FILE_LABEL.cannotRun("bnb4")).toBe(
+      "Can't run in Studio: This file is packed in a 4-bit format made for another program (bitsandbytes), which the Studio engine can't read",
+    );
+    expect(FILE_LABEL.cannotRun("bnb8")).toBe(
+      "Can't run in Studio: This file is packed in an 8-bit format made for another program (bitsandbytes), which the Studio engine can't read",
+    );
+    expect(FILE_LABEL.cannotRun("torchao")).toBe(
+      "Can't run in Studio: This file is packed in a format made for another program (torchao), which the Studio engine can't read",
+    );
+    expect(FILE_LABEL.cannotRun("nvfp4")).toBe(
+      "Can't run in Studio: This file is packed in a 4-bit format made for another program (NVFP4), which the Studio engine can't read",
+    );
+    expect(verdictBadgeWords({ cannotRun: { reason: "bnb4", version: "qwen-image-2.1" } }, true)).toBe(
+      "Can't run: 4-bit bitsandbytes",
+    );
+    expect(verdictBadgeWords({ cannotRun: { reason: "bnb8", version: null } }, true)).toBe("Can't run: 8-bit bitsandbytes");
+    expect(verdictBadgeWords({ cannotRun: { reason: "torchao", version: null } }, true)).toBe("Can't run: torchao file");
+    expect(verdictBadgeWords({ cannotRun: { reason: "nvfp4", version: null } }, true)).toBe("Can't run: 4-bit NVFP4");
+    expect(fileLabelWords({ cannotRun: { reason: "bnb4", version: "qwen-image-2.1" } }, "nf4/model.safetensors")).not.toMatch(
+      /Works|Fits/,
+    );
+  });
+
   it("names a pickle file's own extension, and a file's type by its recipe first", () => {
     expect(fileLabelWords({ cannotRun: { reason: "pickle", version: null } }, "weights/model.PTH")).toBe(
       "Can't run in Studio: Studio can't read .pth files",
@@ -1170,7 +1198,8 @@ describe("Get models' words (Task U5)", () => {
     expect(verdictBadgeWords("unknown", true)).toBe("Not recognised");
     const reasons = [
       "lumina2", "ltxVideo09", "hunyuanVideo1", "svd", "unknownWeights", "sharded", "pickle", "noSha", "adapter",
-      "needsControlFrames", "needsAudio", "upscaler", "folderModel", "notThisEngine", "ltx2",
+      "needsControlFrames", "needsAudio", "upscaler", "folderModel", "notThisEngine", "ltx2", "bnb4", "bnb8", "torchao",
+      "nvfp4",
     ] as const;
     for (const reason of reasons) {
       const words = VERDICT.cantRun(reason);
@@ -1269,14 +1298,41 @@ describe("the detail panel's words (Task U6)", () => {
       alreadyHere: "already on this computer",
       chooseFile: "Choose a file",
       download: "Download",
-      missingWhy: "Choose a file for each part first.",
       needsToken: w.SETUP.problem.hf_needs_token,
       downloadLora: "Download LoRA",
     });
     expect(w.MODEL_DETAIL.total("4.6 GB")).toBe("Total to download: 4.6 GB");
+    // The refused download's own sentence stays what it was (the backend's words).
+    expect(w.SETUP.problem.studio_setup_incomplete).toBe("Choose a file for each part first.");
     expect(w.MODEL_DETAIL.duty("Keep the licence with the files.")).toBe("The licence asks you to keep the licence with the files.");
     expect(w.SETUP.anyway).toBe("Download file anyway");
     expect(w.SETUP.modelType).toBe("Model type");
+  });
+
+  it("name what is missing, and what is not known, instead of promising what Studio adds", async () => {
+    const w = await import("./words");
+    // The sentence under a Download that is off names the parts, each once, in plain words.
+    expect(w.MODEL_DETAIL.missingWhy(["llm"])).toBe("Choose a file for the text encoder first.");
+    expect(w.MODEL_DETAIL.missingWhy(["llm", "vae"])).toBe("Choose a file for the text encoder and the decoder first.");
+    expect(w.MODEL_DETAIL.missingWhy(["llm", "t5xxl", "vae"])).toBe(
+      "Choose a file for the text encoder and the decoder first.",
+    );
+    expect(w.MODEL_DETAIL.missingWhy(["clip-l", "clip-g", "vae"])).toBe(
+      "Choose a file for the CLIP-L text encoder, the CLIP-G text encoder and the decoder first.",
+    );
+    expect(w.MODEL_DETAIL.missingWhy([])).toBe(w.SETUP.problem.studio_setup_incomplete);
+    // A total with a part missing is a floor, and says so.
+    expect(w.MODEL_DETAIL.totalSoFar("7.7 GB", 2)).toBe("At least 7.7 GB, and more once you choose the 2 missing files.");
+    expect(w.MODEL_DETAIL.totalSoFar("7.7 GB", 1)).toBe("At least 7.7 GB, and more once you choose the missing file.");
+    expect(w.MODEL_DETAIL.extrasNeeded).toBe("Files this model needs");
+    expect(w.MODEL_DETAIL.noFile).toBe("Studio can't add this one. Choose a file.");
+    expect(w.MODEL_DETAIL.noFile).not.toMatch(/yet/);
+    expect(w.MODEL_DETAIL.fitLater).toBe("Fit is checked once every file is chosen.");
+    // A recognised model with a part missing is not "Works".
+    const needs = { needsFiles: { version: "qwen-image-2.1", kind: "picture", recipe: "qwen-image-21" } } as const;
+    expect(w.verdictBadgeWords(needs, true)).toBe("Needs files · Qwen-Image 2.1");
+    expect(w.verdictWords(needs)).toBe("Needs files · Qwen-Image 2.1");
+    expect(w.verdictBadgeWords(needs, true)).not.toMatch(/Works/);
   });
 
   it("a set-up problem is found by its own code only", async () => {

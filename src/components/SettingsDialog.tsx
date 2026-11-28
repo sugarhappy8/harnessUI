@@ -7,7 +7,7 @@ import * as ipc from "../lib/ipc";
 import type { AppInfo } from "../lib/ipc";
 import type { FirstRunInfo, UpdateStatus } from "../lib/types";
 import { APP_NAME } from "../lib/app";
-import { STUDIO_NAV } from "../lib/words";
+import { STUDIO_NAV, updateLine } from "../lib/words";
 import { toErrorInfo, turnChatId, useApp } from "../store/app";
 import { listenInEffect } from "../lib/listen";
 import { PanelBoundary } from "./CrashNotice";
@@ -287,18 +287,6 @@ function ModelCatalog() {
       {error && <ErrorBanner error={error} onDismiss={() => setError(null)} />}
     </section>
   );
-}
-
-/** The line under "Check now": what the updater is doing or found since the app started. */
-function updateLine(s: UpdateStatus): string | null {
-  if (s.ready) return `Version ${s.ready.version} is ready to install.`;
-  if (s.downloading) return `Downloading version ${s.downloading}…`;
-  if (s.checking) return "Checking for updates…";
-  // Only the automatic check tries again on its own.
-  if (s.error) return `${s.error} ${s.autoCheck ? "The app tries again at the next check." : "Click Check now to try again."}`;
-  if (s.available) return `Version ${s.available.version} is available.`;
-  if (s.checked) return `You have the latest version (${s.currentVersion}).`;
-  return null;
 }
 
 /**

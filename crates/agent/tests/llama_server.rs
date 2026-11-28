@@ -3,7 +3,7 @@
 //! Gated on two environment variables, and skipped (with a note) when either is unset so CI
 //! without a model passes:
 //!
-//! - `LLAMA_SERVER_BIN`: path to the pinned llama-server (b12110);
+//! - `LLAMA_SERVER_BIN`: path to the pinned llama-server;
 //! - `TEST_GGUF`: a small chat model with tool support, e.g. Qwen3-0.6B-Q8_0.gguf.
 //!
 //! The server is started in managed mode (`LLAMA_SERVER_ROUTER_PORT` set, stdin piped), as the

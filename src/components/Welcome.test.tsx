@@ -53,6 +53,21 @@ describe("the welcome screen", () => {
     expect(pickModel).toHaveBeenCalledWith("local:/models/b.gguf");
   });
 
+  /** One click on a model this version cannot use would stop nothing and fail; the card offers the ones that open. */
+  it("does not offer a model this version can't use", () => {
+    useApp.setState({
+      runtime: null,
+      modelOptions: [
+        { ref: "local:/models/new.gguf", label: "new.gguf", source: "local", contextLength: null, cantOpen: true },
+        { ref: "local:/models/b.gguf", label: "b.gguf", source: "local", contextLength: null },
+      ],
+      pickModel: vi.fn(async () => undefined),
+    });
+    render(<Welcome />);
+    expect(screen.queryByRole("button", { name: "new.gguf" })).toBeNull();
+    expect(screen.getByRole("button", { name: "b.gguf" })).toBeTruthy();
+  });
+
   it("shows the loaded model and starts a chat with it", () => {
     const pickModel = vi.fn(async () => undefined);
     useApp.setState({ runtime: ready, modelOptions: [], pickModel });

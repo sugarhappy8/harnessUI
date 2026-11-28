@@ -46,6 +46,16 @@ pub enum CannotRunReason {
     FolderModel,
     NotThisEngine,
     Ltx2,
+    /// Packed in bitsandbytes' 4-bit formats (NF4 or FP4), made for another program: the
+    /// engine drops the packed weights, so nothing loads.
+    Bnb4,
+    /// Packed in bitsandbytes' 8-bit format (LLM.int8): the engine reads its weights without
+    /// their row scales, so the picture would be noise.
+    Bnb8,
+    /// Packed by torchao (float8 and other tensor subclasses): the engine has no such weights.
+    Torchao,
+    /// Packed in ComfyUI's 4-bit block format (NVFP4, MXFP4): the engine drops or refuses it.
+    Nvfp4,
 }
 
 /// What a file is, the facts recipe matching reads, and its size.
@@ -114,6 +124,16 @@ pub enum Verdict {
     /// version does not (Wan 2.2 A14B files detect as `wan2`; only `wan22-t2v` says 2.2);
     /// `None` for a hint from a name that says no more than the version.
     Works {
+        version: SdVersion,
+        kind: RecipeKind,
+        #[serde(default)]
+        recipe: Option<String>,
+    },
+    /// A model Studio recognises and has a recipe for, none of whose files can start: each
+    /// lacks a part nothing fills (the companion table has none for it, and the repository
+    /// none), so it is not *Works in Studio*. Made only where the plans are (a repository's
+    /// opening), never by [`verdict_of`], which reads labels.
+    NeedsFiles {
         version: SdVersion,
         kind: RecipeKind,
         #[serde(default)]

@@ -211,6 +211,61 @@ async fn starts_on_cpu_reports_progress_and_stops() {
     );
 }
 
+/// What keeps a web page in a browser from talking to the model runner on this computer: since
+/// v1.1.0 llama-server answers 403 to a `Host` that is not a local name (DNS rebinding), to an
+/// `Origin` and to `Sec-Fetch-Site`, and a server started the way this app starts it (managed, with
+/// `--cors-origins none`) to every request that carries any of those, key or no key. The app's own
+/// client sends none of them. launch.rs and ARCHITECTURE.md say so; this makes the next pin that
+/// drops a guard fail here instead of silently.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_request_a_browser_page_would_send_is_refused_even_with_the_key() {
+    let Some((bin, gguf)) =
+        env_paths("a_request_a_browser_page_would_send_is_refused_even_with_the_key")
+    else {
+        return;
+    };
+    let (tx, _rx) = unbounded_channel();
+    let spec = StartSpec {
+        backend: backend(&bin, BackendKind::Cpu),
+        launch: launch(gguf),
+        load_timeout: LOAD_TIMEOUT,
+    };
+    let server = match start(spec, tx).await {
+        Ok(server) => server,
+        Err(error) => panic!("start failed: {error}\n{}", error.stderr_tail().join("\n")),
+    };
+    let client = loopback_client_builder().build().expect("client");
+    let url = format!("{}/props", server.base_url());
+    // The app's own request: the key and nothing else.
+    let ok = client
+        .get(&url)
+        .bearer_auth(server.api_key())
+        .send()
+        .await
+        .expect("props");
+    assert_eq!(ok.status(), 200);
+    for (name, value) in [
+        ("Host", "evil.example"),
+        ("Origin", "https://evil.example"),
+        ("Sec-Fetch-Site", "cross-site"),
+        ("Sec-Fetch-Mode", "cors"),
+    ] {
+        let refused = client
+            .get(&url)
+            .bearer_auth(server.api_key())
+            .header(name, value)
+            .send()
+            .await
+            .expect("props");
+        assert_eq!(
+            refused.status(),
+            403,
+            "a request with {name}: {value} must be refused, key or not"
+        );
+    }
+    server.stop().await;
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn a_broken_model_file_is_classified() {
     let Some((bin, _)) = env_paths("a_broken_model_file_is_classified") else {
@@ -258,6 +313,55 @@ async fn a_broken_model_file_is_classified() {
                 LoadFailure::ModelFileInvalid
             )))
         );
+    }
+}
+
+/// A GGUF that names a kind llama.cpp has not learned ("unknown model architecture"): the file
+/// is fine, only newer builds open it, so it is its own failure with its own words, never the
+/// "download it again" of a broken file, and no backend's step-down (the real server, so a new
+/// build that moves the line is caught here).
+#[tokio::test(flavor = "multi_thread")]
+async fn a_kind_the_runner_does_not_know_is_its_own_failure() {
+    let Some((bin, _)) = env_paths("a_kind_the_runner_does_not_know_is_its_own_failure") else {
+        return;
+    };
+    let dir = tempfile::tempdir().expect("tempdir");
+    let future = dir.path().join("future.gguf");
+    let text = |out: &mut Vec<u8>, s: &str| {
+        out.extend_from_slice(&(s.len() as u64).to_le_bytes());
+        out.extend_from_slice(s.as_bytes());
+    };
+    let mut bytes = b"GGUF".to_vec();
+    bytes.extend_from_slice(&3_u32.to_le_bytes());
+    bytes.extend_from_slice(&0_u64.to_le_bytes());
+    bytes.extend_from_slice(&1_u64.to_le_bytes());
+    text(&mut bytes, "general.architecture");
+    bytes.extend_from_slice(&8_u32.to_le_bytes());
+    text(&mut bytes, "futurearch");
+    std::fs::write(&future, bytes).expect("write");
+    let (tx, _rx) = unbounded_channel();
+    let spec = StartSpec {
+        backend: backend(&bin, BackendKind::Cpu),
+        launch: launch(future),
+        load_timeout: Duration::from_secs(60),
+    };
+    match start(spec, tx)
+        .await
+        .expect_err("an unknown kind cannot load")
+    {
+        StartError::Exited {
+            failure,
+            stderr_tail,
+            ..
+        } => {
+            assert_eq!(
+                failure,
+                LoadFailure::UnknownArchitecture,
+                "{stderr_tail:#?}"
+            );
+            assert!(!failure.may_succeed_on_another_backend());
+        }
+        other => panic!("unexpected error: {other:?}"),
     }
 }
 
@@ -1282,9 +1386,11 @@ async fn ready_reports_where_the_model_went() {
 /// build cannot use, to `path`.
 ///
 /// With `encoder` it claims a vision encoder of the kind Mistral's models use (`pixtral`)
-/// with every setting that kind reads, and two of its three projection tensors, but not
+/// with every setting that kind reads, the patch embedding every vision encoder needs
+/// first (llama.cpp v1.1.0 asks for it before anything of the kind, and names it when it
+/// is missing), and two of its three projection tensors, but not
 /// `v.token_embd.img_break`: the owner's Ministral image file failed on exactly that tensor.
-/// Without `encoder` it claims no encoder at all. About 270 KB, all weights zero.
+/// Without `encoder` it claims no encoder at all. About 470 KB, all weights zero.
 fn write_broken_image_file(path: &Path, encoder: bool) {
     fn text(out: &mut Vec<u8>, s: &str) {
         out.extend_from_slice(&(s.len() as u64).to_le_bytes());
@@ -1342,6 +1448,7 @@ fn write_broken_image_file(path: &Path, encoder: bool) {
         );
         kv("clip.vision.image_mean", ARRAY, floats(&[0.5; 3]));
         kv("clip.vision.image_std", ARRAY, floats(&[0.5; 3]));
+        tensors.push(("v.patch_embd.weight", vec![16, 16, 3, 64]));
         tensors.push(("mm.1.weight", vec![64, 64]));
         tensors.push(("mm.2.weight", vec![64, 1024]));
     }
@@ -1377,8 +1484,9 @@ fn write_broken_image_file(path: &Path, encoder: bool) {
 /// read, through real llama-server processes at the pinned build.
 ///
 /// A start with such a file fails with [`LoadFailure::ImageFileInvalid`], which no other
-/// backend could fix, for a file that misses a tensor (the pinned build names it in a
-/// `clip_init` line) and for one without an encoder (no `clip_init` line). Then the real
+/// backend could fix, for a file that misses a tensor (the pinned build names it in the
+/// `mtmd_init_from_file: error:` line) and for one without an encoder (the same line says
+/// it "Failed to load mmproj model"; b12110 said "CLIP"). Then the real
 /// supervisor, as the app runs it ([`runtime::Supervisor::run`]): the first start fails,
 /// it loads the model again once on the same backend without the image file, with a typed
 /// stage, and the model runs (it cannot see images then). The attempt that failed reports
@@ -1400,9 +1508,13 @@ async fn a_broken_image_file_is_classified_and_the_model_loads_without_it() {
         (
             "Model.mmproj-f16.gguf",
             true,
-            "unable to find tensor v.token_embd.img_break",
+            "mtmd_init_from_file: error: operator(): unable to find tensor v.token_embd.img_break",
         ),
-        ("mmproj-empty.gguf", false, "Failed to load CLIP model from"),
+        (
+            "mmproj-empty.gguf",
+            false,
+            "mtmd_init_from_file: error: Failed to load mmproj model from",
+        ),
     ] {
         let image = dir.path().join(name);
         write_broken_image_file(&image, encoder);

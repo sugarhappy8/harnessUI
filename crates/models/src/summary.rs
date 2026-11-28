@@ -49,6 +49,10 @@ pub struct ModelSummary {
     pub recurrent_layers: Vec<bool>,
     /// Bytes of each of those layers' recurrent state (`crate::kv`, f32).
     pub recurrent_state_bytes: u64,
+    /// Further cache slots that copy each block's memory, one entry per block: the layers
+    /// inside the loop of a looped model (Inkling 2 Mini) keep each pass's cache and state
+    /// in a slot of their own. Empty for every other model.
+    pub kv_extra_slots: Vec<u64>,
     pub expert_count: Option<u64>,
     pub expert_used_count: Option<u64>,
     pub vocab_size: Option<u64>,
@@ -62,6 +66,21 @@ pub struct ModelSummary {
     pub is_projector: bool,
     /// `split.count` when the model is split across several files.
     pub split_count: Option<u64>,
+    /// The file is in a layout of its kind that was never final and the pinned runner does
+    /// not read (an early Inkling 2 upload, [`early_layout`]): the engine knows the kind's
+    /// name, and the file still cannot load. Not saved with an installed model.
+    pub older_layout: bool,
+}
+
+/// Whether the header is of an early layout the pinned runner cannot read. Judged from its
+/// keys, since the tensor table is not in the header prefix the page reads: today only the
+/// early Inkling 2 uploads (arch `inkling2` with the loop under `num_loops` and
+/// `loop.core_start`/`loop.core_end`, which v1.1.0 does not read for that kind).
+pub fn early_layout(h: &GgufHeader) -> bool {
+    h.architecture() == Some("inkling2")
+        && ["num_loops", "loop.core_start", "loop.core_end"]
+            .iter()
+            .any(|key| h.get(&format!("inkling2.{key}")).is_some())
 }
 
 /// Bytes per KV-cache element for the default f16 cache type.
@@ -146,6 +165,7 @@ impl ModelSummary {
             kv_values: memory.values,
             recurrent_layers: memory.recurrent_layers,
             recurrent_state_bytes: memory.state_bytes,
+            kv_extra_slots: memory.extra_slots,
             expert_count: h.arch_u64("expert_count").filter(|&n| n > 0),
             expert_used_count: h.arch_u64("expert_used_count").filter(|&n| n > 0),
             vocab_size,
@@ -158,6 +178,7 @@ impl ModelSummary {
             has_chat_template: template.is_some(),
             is_projector,
             split_count: h.get_u64("split.count").filter(|&n| n > 1),
+            older_layout: early_layout(h),
         }
     }
 
@@ -186,6 +207,7 @@ impl ModelSummary {
                     } else {
                         0
                     },
+                    extra_slots: self.kv_extra_slots.get(il).copied().unwrap_or(0),
                 }
             })
             .collect();
@@ -284,6 +306,48 @@ mod tests {
     fn summary(bytes: Vec<u8>) -> ModelSummary {
         let len = bytes.len() as u64;
         ModelSummary::from_header(&crate::gguf::read(Cursor::new(bytes), len).unwrap())
+    }
+
+    /// Before llama.cpp v1.1.0 settled Inkling 2's format, converters wrote the looped model
+    /// as `inkling2` with the loop under other keys (`num_loops`, `loop.core_start`,
+    /// `loop.core_end`), `block_count` counting every pass (48) and tensors for the physical
+    /// layers only (24). v1.1.0 reads a loop only as `inkling2_loop.loop.start/end/count`, so
+    /// such a file fails to load ("tensor 'blk.24.attn_q.weight' not found"), and the engine
+    /// knowing the name `inkling2` says nothing about it. The keys below are the real ones of
+    /// JoaoZaokk/Inkling-2-Mini-Heretic-GGUF and onemunanoyo/Inkling-2-Mini-Abliterated-GGUF
+    /// (5 repositories, about 65,000 downloads, of the 2026-11-27 sweep).
+    #[test]
+    fn an_early_inkling_two_file_is_told_by_its_loop_keys() {
+        let early = |w: Writer| {
+            summary(
+                w.str("general.architecture", "inkling2")
+                    .u32("inkling2.block_count", 48)
+                    .build(),
+            )
+        };
+        assert!(early(Writer::new().u32("inkling2.num_loops", 2)).older_layout);
+        assert!(early(Writer::new().u32("inkling2.loop.core_start", 6)).older_layout);
+        assert!(early(Writer::new().u32("inkling2.loop.core_end", 18)).older_layout);
+        // The settled formats are fine: no loop at all, and the looped one's own keys.
+        assert!(!early(Writer::new()).older_layout);
+        let settled = summary(
+            Writer::new()
+                .str("general.architecture", "inkling2_loop")
+                .u32("inkling2_loop.block_count", 24)
+                .u32("inkling2_loop.loop.start", 6)
+                .u32("inkling2_loop.loop.end", 18)
+                .u32("inkling2_loop.loop.count", 3)
+                .build(),
+        );
+        assert!(!settled.older_layout);
+        // Another kind with a key of that name is not Inkling 2.
+        let other = summary(
+            Writer::new()
+                .str("general.architecture", "llama")
+                .u32("llama.num_loops", 2)
+                .build(),
+        );
+        assert!(!other.older_layout);
     }
 
     #[test]

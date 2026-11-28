@@ -269,6 +269,10 @@ pub struct RepoView {
     pub license: Option<String>,
     pub architecture: Option<String>,
     pub architecture_supported: Option<bool>,
+    /// Set with `architecture_supported == Some(false)` when no newer version would change it
+    /// (a picture, video or speech model): the page says what it is, not that a newer version
+    /// may open it.
+    pub cant_open_why: Option<models::arch::Why>,
     pub context_length: Option<u64>,
     pub parameters: Option<u64>,
     pub template_tools: bool,
@@ -372,13 +376,21 @@ pub async fn hub_repo(
             has_checksum: v.files.iter().all(|f| f.sha256.is_some()),
         });
     }
-    let architecture = summary
-        .as_ref()
-        .map(|s| s.architecture.clone())
-        .or_else(|| detail.gguf.as_ref().and_then(|g| g.architecture.clone()));
+    // The page claims "this version can't open it" only on evidence that holds together: the
+    // smallest file's header and Hugging Face's listing (`arch::page_architecture`). A header
+    // with no kind is not read, and two that disagree claim nothing.
+    let judged = models::arch::page_architecture(
+        summary.as_ref().map(|s| s.architecture.as_str()),
+        detail.gguf.as_ref().and_then(|g| g.architecture.as_deref()),
+        detail.info.pipeline_tag.as_deref(),
+    )
+    // A file in an early layout of a kind the engine knows (an early Inkling 2 upload) still
+    // cannot load; no update brings it, and the name alone would have said it can.
+    .with_layout(summary.as_ref().is_some_and(|s| s.older_layout));
     Ok(RepoView {
-        architecture_supported: architecture.as_deref().map(models::arch::is_supported),
-        architecture,
+        architecture_supported: judged.supported,
+        cant_open_why: judged.why,
+        architecture: judged.name,
         context_length: summary
             .as_ref()
             .and_then(|s| s.context_length)
@@ -579,6 +591,17 @@ pub async fn download_start(
         .iter()
         .find(|v| v.label == label)
         .ok_or_else(|| AppError::not_found("model file"))?;
+    // The click judges the file: its own header is the exact witness, where the page judged by
+    // the smallest file's and the listing's. A header that cannot be read (offline, rate
+    // limited) says nothing, and the load will still check it.
+    let live = LiveHub::new(Some(client.clone()));
+    if let Ok(head) = live
+        .head(&detail.id, &detail.commit, &variant.first_file().path)
+        .await
+        && let Some(refusal) = download_refusal(&head, dev_engine())
+    {
+        return Err(refusal);
+    }
     // The repository's image file that goes with the chosen model (0.0.7: a repository
     // may hold several models' image files), as Installed offers it.
     let projector = if with_projector {
@@ -1058,13 +1081,69 @@ pub async fn list_installed_models(
     Ok(out)
 }
 
+/// Whether a development runtime directory is in use (`APP_DEV_LLAMA_DIR`): its engine may know
+/// more kinds than the list of the pinned build does.
+pub(crate) fn dev_engine() -> bool {
+    std::env::var_os(runtime::llama::backend::DEV_OVERRIDE_ENV).is_some_and(|v| !v.is_empty())
+}
+
+/// Why a file must not be downloaded as a chat model, from its own header (the exact witness):
+/// nothing is downloaded for what the chat cannot open. `None`: it may be. The words are the
+/// page's (`CANT_OPEN` in `words.ts`), each with "Nothing was downloaded". With a development
+/// engine (`dev_engine`) a kind the list lacks is let through: that engine may know it.
+pub(crate) fn download_refusal(s: &ModelSummary, dev_engine: bool) -> Option<AppError> {
+    let kind = s.architecture.trim();
+    if kind.is_empty() || kind == "unknown" {
+        return Some(AppError::new(
+            "cant_open",
+            "This file does not say what kind of model it is, so this version can't open it.",
+            "Pick another file. Nothing was downloaded.",
+            String::new(),
+        ));
+    }
+    if models::arch::is_speech(kind) {
+        return Some(crate::studio::errors::speech_model());
+    }
+    if models::arch::is_diffusion(kind) {
+        return Some(crate::studio::errors::picture_model());
+    }
+    if s.older_layout {
+        let mut e = early_layout_refusal();
+        e.next_step.push_str(" Nothing was downloaded.");
+        return Some(e);
+    }
+    if !dev_engine && !models::arch::is_supported(kind) {
+        return Some(AppError::new(
+            "cant_open",
+            "This version can't open this model yet.",
+            "Check for updates, or pick another model. Nothing was downloaded.",
+            kind.to_string(),
+        ));
+    }
+    None
+}
+
+/// A file in an early layout (an early Inkling 2 upload): an update does not change it.
+fn early_layout_refusal() -> AppError {
+    AppError::new(
+        "cant_open",
+        "This file is in an early layout this version can't read.",
+        "Its maker uploaded it before the format was final, so an update won't change that. Look for a newer upload of the same model.",
+        String::new(),
+    )
+}
+
 /// 0.1.0 Studio: why a file cannot join the chat list as a model: it is a picture or video
 /// model, by its architecture (when it names one) or its own tensor table (most such files
-/// name none).
+/// name none), or a speech or sound model, by its architecture (the runner opens some of
+/// those, and the chat then fails on its first message).
 pub(crate) fn diffusion_import_refusal(
     arch: Option<&str>,
     shapes: &[models::TensorShape],
 ) -> Option<AppError> {
+    if arch.is_some_and(models::arch::is_speech) {
+        return Some(crate::studio::errors::speech_model());
+    }
     (arch.is_some_and(models::arch::is_diffusion)
         || models::gen_search::looks_like_diffusion(shapes))
     .then(crate::studio::errors::picture_model)
@@ -1075,9 +1154,11 @@ pub(crate) fn diffusion_import_refusal(
 /// says it is a chat model, and a picture model's table can hold what the reader refuses
 /// (a tensor of five dimensions).
 fn refuse_picture_model(path: &Path) -> AppResult<()> {
-    let arch = models::read_file(path)
-        .ok()
-        .and_then(|h| h.architecture().map(str::to_string));
+    let header = models::read_file(path).ok();
+    if header.as_ref().is_some_and(models::summary::early_layout) {
+        return Err(early_layout_refusal());
+    }
+    let arch = header.and_then(|h| h.architecture().map(str::to_string));
     let shapes = match models::read_tensor_shapes(path) {
         Ok(shapes) => shapes,
         Err(e) if arch.is_none() => return Err(not_gguf(e)),
@@ -1970,6 +2051,109 @@ mod tests {
         assert!(diffusion_import_refusal(None, &table("klein4b-tensors.txt")).is_some());
         assert!(diffusion_import_refusal(Some("qwen3"), &table("qwen3-4b-tensors.txt")).is_none());
         assert!(diffusion_import_refusal(None, &[]).is_none());
+    }
+
+    /// A speech or sound model is not a chat model either, and the runner opens some of them
+    /// (Kokoro, Moshi): the chat would load it and fail on the first message.
+    #[test]
+    fn importing_a_speech_model_says_it_can_not_chat() {
+        for arch in ["kokoro", "whisper", "moshi"] {
+            let e = diffusion_import_refusal(Some(arch), &[]).unwrap();
+            assert_eq!(e.code, "speech_model", "{arch}");
+            assert_eq!(e.message, "This is a speech or sound model.");
+            assert_eq!(
+                e.next_step,
+                "It can't chat, and nothing in this app uses it."
+            );
+        }
+    }
+
+    fn summary_of(bytes: Vec<u8>) -> ModelSummary {
+        ModelSummary::from_header(&models::gguf::read_prefix(&bytes).unwrap())
+    }
+
+    fn header_of(arch: &str) -> models::gguf::testing::Writer {
+        models::gguf::testing::Writer::new()
+            .str("general.architecture", arch)
+            .u32(&format!("{arch}.block_count"), 8)
+    }
+
+    /// The click judges the file by its own header: what the chat cannot open is not
+    /// downloaded, in the page's words, and the model that opens is let through.
+    #[test]
+    fn the_click_judges_the_file_by_its_own_header() {
+        let refusal = |w: models::gguf::testing::Writer, dev: bool| {
+            download_refusal(&summary_of(w.build()), dev)
+        };
+        // A model that opens.
+        assert!(refusal(header_of("qwen3"), false).is_none());
+        assert!(refusal(header_of("inkling2_loop"), false).is_none());
+        // A kind the runner does not know: an update may help; nothing is downloaded.
+        let e = refusal(header_of("futurearch"), false).unwrap();
+        assert_eq!(e.message, "This version can't open this model yet.");
+        assert_eq!(
+            e.next_step,
+            "Check for updates, or pick another model. Nothing was downloaded."
+        );
+        // A development engine may know it.
+        assert!(refusal(header_of("futurearch"), true).is_none());
+        // A file with no kind (a patch file, a picture file with no metadata) cannot open, and
+        // no update changes what it is.
+        let e = refusal(
+            models::gguf::testing::Writer::new().u32("general.file_type", 15),
+            false,
+        )
+        .unwrap();
+        assert_eq!(
+            e.message,
+            "This file does not say what kind of model it is, so this version can't open it."
+        );
+        assert_eq!(e.next_step, "Pick another file. Nothing was downloaded.");
+        // Not for chat: the same words as the page's box and the import's refusal.
+        assert_eq!(
+            refusal(header_of("kokoro"), false).unwrap().code,
+            "speech_model"
+        );
+        assert_eq!(
+            refusal(header_of("flux"), true).unwrap().code,
+            "picture_model"
+        );
+    }
+
+    /// The engine knows the name `inkling2`; the early uploads of it still fail to load
+    /// (5 repositories, about 65,000 downloads, were offered after the bump as 9 to 17 GB
+    /// downloads that would have failed afterwards). The click refuses them, with the reason
+    /// and no promise of an update, and so does an import.
+    #[test]
+    fn an_early_inkling_two_file_is_refused_with_its_own_words() {
+        let early = header_of("inkling2")
+            .u32("inkling2.num_loops", 2)
+            .u32("inkling2.loop.core_start", 6)
+            .u32("inkling2.loop.core_end", 18)
+            .build();
+        let e = download_refusal(&summary_of(early.clone()), false).unwrap();
+        assert_eq!(
+            e.message,
+            "This file is in an early layout this version can't read."
+        );
+        assert!(e.next_step.contains("won't change that"), "{}", e.next_step);
+        assert!(e.next_step.contains("newer upload"), "{}", e.next_step);
+        assert!(
+            e.next_step.ends_with("Nothing was downloaded."),
+            "{}",
+            e.next_step
+        );
+        // Even a development engine: the file's own keys are what v1.1.0 does not read.
+        assert!(download_refusal(&summary_of(early.clone()), true).is_some());
+        // The settled looped format, and a plain Inkling 2, are fine.
+        let settled = header_of("inkling2_loop").u32("inkling2_loop.loop.start", 6);
+        assert!(download_refusal(&summary_of(settled.build()), false).is_none());
+        assert!(download_refusal(&summary_of(header_of("inkling2").build()), false).is_none());
+
+        let dir = scratch();
+        let file = dir.0.join("early.gguf");
+        std::fs::write(&file, &early).unwrap();
+        assert_eq!(refuse_picture_model(&file).unwrap_err().code, "cant_open");
     }
 
     /// The import reads the file's own architecture and tensor table.

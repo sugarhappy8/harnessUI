@@ -96,6 +96,9 @@ pub(crate) struct Planned {
     /// The repos of the Hub files it fetches whose listing says they are gated (a companion's
     /// repo is not, the table's files being open): Hugging Face serves them only with a token.
     pub gated: BTreeSet<String>,
+    /// Why Studio can't fill a slot nothing fills, where the catalog lists it on purpose
+    /// (`companions.notCovered`), by slot.
+    pub not_covered: BTreeMap<SlotId, String>,
 }
 
 /// The set-up of the file `source` names, with the person's `choice`: a searched file of
@@ -641,11 +644,24 @@ fn plan_with(
         gate: named.gate,
         untested,
     });
+    let not_covered = plan
+        .parts
+        .iter()
+        .filter(|p| p.source == PartSource::Missing)
+        .filter_map(|p| {
+            let why = deps
+                .catalog
+                .companions
+                .not_covered_reason(&plan.recipe_id, p.slot)?;
+            Some((p.slot, why.to_owned()))
+        })
+        .collect();
     Ok(Planned {
         plan,
         entry,
         part_of,
         gated,
+        not_covered,
     })
 }
 

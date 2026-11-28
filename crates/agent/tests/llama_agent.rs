@@ -1,6 +1,6 @@
 //! The agent loop against a real llama-server with a small tool-calling model.
 //!
-//! Gated on `LLAMA_SERVER_BIN` (the pinned llama-server, b12110) and `TEST_GGUF` (for example
+//! Gated on `LLAMA_SERVER_BIN` (the pinned llama-server) and `TEST_GGUF` (for example
 //! Qwen3-0.6B-Q8_0.gguf); skipped with a note when either is unset.
 //!
 //! Checks: the sanitiser finds the model's control tokens through `/tokenize` and sanitised

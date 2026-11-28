@@ -218,6 +218,15 @@ impl DetectService {
             .cloned()
     }
 
+    /// Keeps `verdict` for `repo` in place of the last reading's: what a repository's opening
+    /// says once its plans are known (`Verdict::NeedsFiles`), which the next search shows.
+    pub fn remember_verdict(&self, repo: &str, verdict: Verdict) {
+        self.verdicts
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(repo.to_owned(), verdict);
+    }
+
     fn cache(&self) -> std::sync::MutexGuard<'_, Cache> {
         self.cache.lock().unwrap_or_else(|e| e.into_inner())
     }

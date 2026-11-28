@@ -318,6 +318,134 @@ class FitParamsLimitAsTheCodeSetsIt(unittest.TestCase):
         self.assertIn(f"killed after {self.secs} s", measurement, "7.7: the measurement")
 
 
+class LlamaPinDocs(unittest.TestCase):
+    """What ARCHITECTURE.md says about the llama.cpp pin is the lock's, and its how-to-bump list
+    names only files, flags and tests that exist."""
+
+    HOWTO = "#### How to bump the llama.cpp pin"
+
+    def lock(self) -> dict:
+        return json.loads(read("llama.lock.json"))
+
+    def cuda(self) -> dict:
+        return next(pack for pack in self.lock()["packs"] if pack["id"] == "cuda")
+
+    def test_the_pin_the_docs_name_is_the_locks(self):
+        pin = self.lock()["llama_cpp"]
+        design = paragraph(section("## 2. What the research changed"), "- **llama.cpp** now has stable version tags.")
+        self.assertIn(f"pins **v{pin['version']}** (build `{pin['tag']}`)", design)
+        layout = "\n".join(section("### 7.1 Pinning and layout"))
+        self.assertIn(f"pins llama.cpp **v{pin['version']} (`{pin['tag']}`)**", layout)
+
+    def test_the_file_names_in_the_7_1_table_are_the_locks(self):
+        layout = "\n".join(section("### 7.1 Pinning and layout"))
+        for entry in self.lock()["installer"]["windows-x86_64"]["files"] + self.cuda()["files"]:
+            self.assertIn(f"`{entry['name']}`", layout, "7.1's table names the archives the lock pins")
+        self.assertIn(f"`<local data>/backends/{self.cuda()['dir']}/`", layout)
+
+    def test_the_cuda_version_and_size_are_the_locks(self):
+        cuda = self.cuda()
+        version = re.search(r"cuda-(\d+\.\d+)-x64", cuda["files"][0]["name"]).group(1)
+        row = paragraph(section("### 1.1 Installer and GPU backends"), "| D4 |")
+        self.assertIn(f"pinned llama.cpp ({version})", row)
+        download = sum(f["size"] for f in cuda["files"]) / 1e9
+        numbers = paragraph(section("### 1.1 Installer and GPU backends"), "| CUDA 13 |")
+        self.assertIn(f"| {download:.2f} GB |", numbers, "Backends in numbers: the CUDA download is the lock's sizes added")
+
+    def rocm(self) -> dict:
+        return next(pack for pack in self.lock()["packs"] if pack["id"] == "rocm")
+
+    def test_the_rocm_download_the_docs_name_is_the_locks(self):
+        rocm = self.rocm()
+        layout = "\n".join(section("### 7.1 Pinning and layout"))
+        for entry in rocm["files"]:
+            self.assertIn(f"`{entry['name']}`", layout, "7.1's table names the ROCm archive the lock pins")
+        self.assertIn(f"`<local data>/backends/{rocm['dir']}/`", layout)
+        download = sum(f["size"] for f in rocm["files"]) / 1e9
+        numbers = paragraph(section("### 1.1 Installer and GPU backends"), "| ROCm |")
+        self.assertIn(f"| {download:.2f} GB |", numbers, "Backends in numbers: the ROCm download is the lock's size")
+        bullet = paragraph(section("### 7.1 Pinning and layout"), "- **One build per directory.**")
+        commit = rocm["upstream_llama_cpp_commit"]
+        self.assertRegex(commit, r"^[0-9a-f]{40}$", "the lock writes the commit of the ROCm build in full")
+        self.assertIn(f"`{commit[:9]}`", bullet, "7.1 names the llama.cpp commit the ROCm build comes from")
+
+    def test_the_rocm_list_is_said_to_be_checked_by_tests_that_exist(self):
+        bullet = paragraph(section("### 7.1 Pinning and layout"), "- **The architecture list.**")
+        arch = read("crates/models/src/arch.rs")
+        for words in ("`catalog/llama-architectures-rocm.txt`", "`--pack rocm`", "a second llama.cpp", "no step down to Vulkan"):
+            self.assertIn(words, bullet)
+        for test in ("the_rocm_download_knows_every_architecture_the_list_claims", "the_rocm_list_was_made_from_the_commit_of_the_download"):
+            self.assertIn(f"fn {test}", arch)
+            self.assertIn(f"`{test}`", bullet)
+        self.assertNotIn("knows fewer names than the list; the list does not know that", bullet)
+        step = paragraph(section(self.HOWTO), "8. **The ROCm download")
+        for words in ("`qualification-data`", "`upstream_sha`", "`--pack rocm`", "`ROCM_MAX_DIR_CHARS`", "checksums.txt"):
+            self.assertIn(words, step)
+        self.assertIn("pub const ROCM_MAX_DIR_CHARS", read("crates/runtime/src/packs.rs"))
+
+    def test_the_bump_list_names_files_that_exist(self):
+        text = "\n".join(section(self.HOWTO))
+        self.assertGreater(len(text), 1000, "the how-to-bump list is missing")
+        paths = set(re.findall(r"(?<![\w./-])((?:scripts|crates|catalog|third_party)/[\w./-]+[\w/])", text))
+        self.assertIn("scripts/update_llama_archs.py", paths)
+        for rel in sorted(paths):
+            self.assertTrue((ROOT / rel).exists(), f"the how-to-bump list names {rel}, which does not exist")
+
+    def test_the_bump_list_names_flags_and_tests_that_exist(self):
+        text = "\n".join(section(self.HOWTO))
+        script = read("scripts/update_llama_archs.py")
+        for flag in ("--source", "--check", "--pack"):
+            self.assertIn(flag, text)
+            self.assertIn(f'"{flag}"', script, f"update_llama_archs.py has no {flag}")
+        crates = {"runtime": "crates/runtime", "agent": "crates/agent", "mcp-host": "crates/mcp-host"}
+        seen = 0
+        for crate, tests in re.findall(r"cargo test -p (\S+)((?: --test \w+)+)", text):
+            for name in re.findall(r"--test (\w+)", tests):
+                seen += 1
+                self.assertTrue((ROOT / crates[crate] / "tests" / f"{name}.rs").is_file(), f"{crate}: no test file {name}.rs")
+        self.assertGreaterEqual(seen, 6)
+        for name in ("mentions", "load_settings"):
+            self.assertIn("LLAMA_SERVER_BIN", read(f"src-tauri/src/{name}.rs"), f"{name}.rs does not read LLAMA_SERVER_BIN")
+        ci = read(".github/workflows/ci.yml")
+        for test in ("fetch_llama_test.py", "update_llama_archs_test.py", "docs_test.py"):
+            self.assertIn(test, text)
+            self.assertIn(f"scripts/{test}", ci, f"CI does not run {test}")
+
+    def test_what_the_server_does_with_foreign_headers_is_said_as_checked(self):
+        # b12774 answers 403 to a foreign Origin, Sec-Fetch-Site or Host, and in the managed mode to
+        # every browser header at all; b12110 served those requests. Checked on the real servers.
+        exposure = paragraph(section("### 7.3 Launch"), "- **Exposure.**")
+        for words in ("v1.1.0 (b12774)", "gets 403", "Browser requests must go through the router", "managed mode (7.4"):
+            self.assertIn(words, exposure)
+        launch = read("crates/runtime/src/llama/launch.rs")
+        self.assertIn("Browser requests must go through the router", launch)
+        self.assertIn("request_origin_is_allowed", launch)
+
+    def test_the_fixture_recording_the_docs_name_exists(self):
+        howto = "\n".join(section(self.HOWTO))
+        self.assertIn("`crates/runtime/tests/llama_capture.rs`", howto)
+        capture = read("crates/runtime/tests/llama_capture.rs")
+        self.assertIn("LLAMA_CAPTURE_DIR", capture)
+        self.assertIn("LLAMA_CAPTURE_DIR", howto)
+        fixtures = ROOT / "crates/runtime/tests/fixtures"
+        for name in ("stderr_image_file_broken.txt", "stderr_image_file_broken_b12110.txt", "stderr_image_file_garbage_b12110.txt"):
+            self.assertTrue((fixtures / name).is_file(), f"{name}")
+            self.assertIn(name, read("crates/runtime/src/llama/failure.rs"), f"failure.rs reads {name}")
+
+    def test_the_looped_model_slots_the_docs_name_exist(self):
+        placement = paragraph(section("## 11. Model manager and first run"), "Since 0.0.6, for a local file, the marks")
+        self.assertIn("`LayerKv::extra_slots`", placement)
+        kv = read("crates/models/src/kv.rs")
+        self.assertIn("pub extra_slots: u64", kv)
+        self.assertIn("fn loop_extra_slots", kv)
+
+    def test_the_list_is_said_to_be_checked_by_a_test_that_exists(self):
+        bullet = paragraph(section("### 7.1 Pinning and layout"), "- **The architecture list.**")
+        self.assertIn("`catalog/llama-architectures.txt`", bullet)
+        self.assertIn("the_list_was_made_from_the_pinned_commit", read("crates/models/src/arch.rs"))
+        self.assertIn("first line", bullet)
+
+
 class StudioDocs(unittest.TestCase):
     """What the docs say about Studio matches the code: hosts, money rules, audit row, CSP, scope note,
     and the 0.1.0 changelog entry."""
@@ -605,6 +733,37 @@ class Studio0_2_0Docs(unittest.TestCase):
         self.assertRegex(lora, r"pub const MAX_LORAS: usize = 8;")
         self.assertRegex(lora, r"LORA_WEIGHT_RANGE: RangeInclusive<f32> = -1\.0\.\.=2\.0;")
 
+    def test_7_10_says_every_recipe_has_its_files_or_a_reason_and_what_guards_it(self):
+        text = "\n".join(section("### 7.10 Any model the engine can run (0.2.0)"))
+        companions = paragraph(section("### 7.10 Any model the engine can run (0.2.0)"), "- **The companion table.**")
+        for words in ("`every_recipe_studio_runs_is_covered_or_says_why`", "`companions.notCovered`",
+                      "every recipe Studio runs", "packed for another program", "Needs files"):
+            self.assertIn(words, text)
+        # The tokenizer rows are a `.json` file only under the tokenizer slot, and the doc warns
+        # that older builds refuse them: a refresh that carries them must not reach those builds.
+        for words in ("`.json`", "0.2.0 and 0.2.1", "tokenizer"):
+            self.assertIn(words, companions)
+        # What it names exists: the guard test, its allowlist (each entry with a reason) and the
+        # catalog key it reads.
+        code = read("crates/models/src/sd/companions.rs")
+        self.assertIn("fn every_recipe_studio_runs_is_covered_or_says_why()", code)
+        self.assertIn("fn the_allowlist_holds_only_real_gaps_with_reasons()", code)
+        catalog = json.loads(read("catalog/models.json"))["companions"]
+        self.assertTrue(catalog["notCovered"])
+        for entry in catalog["notCovered"]:
+            self.assertTrue(entry["reason"].endswith("."), entry)
+            self.assertIn(entry["slot"], {"clip_l", "uncond_diffusion_model"}, entry)
+
+    def test_7_10_says_a_file_packed_for_another_program_cannot_run(self):
+        text = "\n".join(section("### 7.10 Any model the engine can run (0.2.0)"))
+        for words in ("bitsandbytes", "torchao", "NVFP4", "`.quant_state.bitsandbytes__`", "`.SCB`",
+                      "`._weight_qdata`", "`.comfy_quant`", "Can't run in Studio", "a group of its own"):
+            self.assertIn(words, text)
+        inspect = read("crates/models/src/sd/inspect.rs")
+        for names in ("fn packed_format(", ".quant_state.bitsandbytes__", '".SCB"', "._weight_qdata", ".comfy_quant"):
+            self.assertIn(names, inspect)
+        self.assertIn("static PACKED_WORD", read("crates/models/src/sd/candidates.rs"))
+
     def test_7_9_says_a_fit_only_warns(self):
         local = "\n".join(section("### 7.9 Studio on this computer (0.1.0)"))
         self.assertIn("May not fit", local)
@@ -667,6 +826,82 @@ class Studio0_2_0Docs(unittest.TestCase):
             self.assertIn(words, studio)
         self.assertLess(studio.index("on this computer"), studio.index("OpenRouter"))
         self.assertNotIn("Not for this computer", read("README.md"))
+
+
+class ModelsCantOpenDocs(unittest.TestCase):
+    """What ARCHITECTURE.md says about a model this version cannot open yet is what the code
+    and its words do, and names only what exists."""
+
+    def paragraph(self) -> str:
+        return doc_paragraph("ARCHITECTURE.md", "**A model this version can't open yet.**")
+
+    def test_the_search_paragraph_no_longer_promises_a_check_per_backend(self):
+        search = doc_paragraph("ARCHITECTURE.md", "**Search.** `GET https://huggingface.co/api/models")
+        self.assertNotIn("the selected backend's llama.cpp build doesn't know", search)
+        self.assertIn("A model this version can't open yet", search)
+
+    def test_it_says_what_every_screen_says_and_what_none_shows(self):
+        text = self.paragraph()
+        for words in (
+            "`CANT_OPEN`",
+            "`src/lib/words.ts`",
+            "Check for updates",
+            "installs nothing",
+            "download is switched off until then",
+            "memory verdict",
+            "image-file offer",
+            "*Can't open yet*",
+            "Add it in Studio",
+        ):
+            self.assertIn(words, text)
+
+    def test_it_names_the_cost_of_the_card_hint_and_why_it_is_only_a_hint(self):
+        text = self.paragraph()
+        for words in ("`gguf` block", "0.8 MB", "25 KB", "a hint, never a verdict"):
+            self.assertIn(words, text)
+
+    def test_it_names_the_evidence_rule_and_the_two_things_not_done(self):
+        text = self.paragraph()
+        for words in ("`models::arch::page_architecture`", "claim nothing", "`engineKnows`", "model picker", "`UnknownArchitecture`"):
+            self.assertIn(words, text)
+
+    def test_it_names_the_file_checks_and_they_exist(self):
+        text = self.paragraph()
+        for words in (
+            "`hub::download_refusal`",
+            "`models_cmd::unknown_kind_refusal`",
+            "`ModelSummary.older_layout`",
+            "`models::summary::early_layout`",
+            "`LoadFailure::UnknownArchitecture`",
+            "`ModelFileInvalid`",
+            "`Why`",
+            "`cantOpenWhy`",
+            "cannot say whether one particular file loads",
+        ):
+            self.assertIn(words, text)
+        self.assertIn("pub(crate) fn download_refusal", read("src-tauri/src/hub.rs"))
+        self.assertIn("fn unknown_kind_refusal", read("src-tauri/src/models_cmd.rs"))
+        self.assertIn("pub fn early_layout", read("crates/models/src/summary.rs"))
+        self.assertIn("pub older_layout", read("crates/models/src/summary.rs"))
+        self.assertIn("UnknownArchitecture,", read("crates/runtime/src/llama/failure.rs"))
+        self.assertIn("pub enum Why", read("crates/models/src/arch.rs"))
+        for fixture in ("stderr_tensor_not_found.txt", "stderr_unknown_architecture.txt"):
+            self.assertTrue((ROOT / "crates/runtime/tests/fixtures" / fixture).exists(), fixture)
+
+    def test_what_it_names_exists(self):
+        text = self.paragraph()
+        self.assertIn("pub fn page_architecture", read("crates/models/src/arch.rs"))
+        self.assertIn("export const CANT_OPEN", read("src/lib/words.ts"))
+        self.assertTrue((ROOT / "src/components/models/CantOpen.tsx").exists())
+        self.assertIn("engineKnows", read("src/lib/types.ts"))
+        self.assertIn("unknownArchitecture", read("src/lib/types.ts"))
+        self.assertIn("pub engine_knows", read("src-tauri/src/dto.rs"))
+        self.assertIn("pub unknown_architecture", read("crates/models/src/hf.rs"))
+        self.assertIn("cantopen", read("e2e/preview/mock/ipc.ts"))
+        self.assertIn("?cantopen=1", text)
+        # Only the chat search asks for the listing's gguf block.
+        hf = read("crates/models/src/hf.rs")
+        self.assertIn("fn chat_search_url", hf)
 
 
 if __name__ == "__main__":

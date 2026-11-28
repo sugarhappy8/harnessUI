@@ -39,9 +39,9 @@ pub struct LlamaLock {
 /// The pinned upstream llama.cpp release.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LlamaPin {
-    /// Build tag, for example `b12110`.
+    /// Build tag, for example `b12774`.
     pub tag: String,
-    /// Semver release the build corresponds to, for example `0.9.0`.
+    /// Semver release the build corresponds to, for example `1.1.0`.
     pub version: String,
     /// Full commit hash.
     pub commit: String,

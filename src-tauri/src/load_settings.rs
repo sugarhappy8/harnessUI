@@ -620,6 +620,13 @@ pub struct ModelLoadInfo {
     /// "Where the model goes" for these choices: the instant estimate, from the same split,
     /// memory and verdict as the marks above (item 6, section 4.1).
     pub picture: crate::offload::OffloadPreview,
+    /// The kind the file's own header names (set by `models_cmd`; `None` when not read).
+    pub architecture: Option<String>,
+    /// `Some(false)` when this version's runner cannot open the file: the panel then gives no
+    /// memory verdict. `None`: not read, or a development engine that may know more.
+    pub architecture_supported: Option<bool>,
+    /// With `architecture_supported` false: why no update would change it.
+    pub cant_open_why: Option<models::arch::Why>,
 }
 
 fn most_copies() -> u32 {
@@ -1738,6 +1745,9 @@ pub fn build_info(
         fine_facts: fine_facts(facts, machine),
         picture,
         resolved,
+        architecture: None,
+        architecture_supported: None,
+        cant_open_why: None,
     }
 }
 

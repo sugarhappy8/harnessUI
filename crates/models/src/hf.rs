@@ -152,6 +152,12 @@ pub struct RepoSummary {
     pub pipeline_tag: Option<String>,
     /// 0.1.0 Studio: tagged `not-for-all-audiences`.
     pub not_for_all_audiences: bool,
+    /// The kind Hugging Face's listing names for the repository (`gguf.architecture`), only
+    /// when this app's model runner does not know it, so the card can say so before the page
+    /// is opened. A hint from the listing (the repository's first file), never a verdict: the
+    /// page reads the files. Only the chat search asks for it, so a picture or video search,
+    /// and a picture or video kind, carry none.
+    pub unknown_architecture: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -227,7 +233,7 @@ impl GenSearchKind {
     /// run; never a name that says nothing (a chat model).
     fn keeps(self, hint: &Verdict) -> bool {
         match hint {
-            Verdict::Works { kind, .. } => match self {
+            Verdict::Works { kind, .. } | Verdict::NeedsFiles { kind, .. } => match self {
                 Self::Pictures => *kind != RecipeKind::Video,
                 Self::Video => *kind == RecipeKind::Video,
                 Self::Loras => true,
@@ -243,10 +249,12 @@ impl GenSearchKind {
     fn rank(self, hint: &Verdict) -> u8 {
         match (self, hint) {
             (Self::Loras, Verdict::Lora { .. }) => 0,
-            (Self::Loras, Verdict::Works { .. }) => 1,
-            (_, Verdict::Works { .. }) if self.keeps(hint) => 0,
+            (Self::Loras, Verdict::Works { .. } | Verdict::NeedsFiles { .. }) => 1,
+            // A hint is never "needs files" (only an opened repository is), but it ranks as a
+            // model of its kind all the same.
+            (_, Verdict::Works { .. } | Verdict::NeedsFiles { .. }) if self.keeps(hint) => 0,
             (_, Verdict::Lora { .. }) => 1,
-            (_, Verdict::Works { .. } | Verdict::Unknown) => 2,
+            (_, Verdict::Works { .. } | Verdict::NeedsFiles { .. } | Verdict::Unknown) => 2,
             (_, Verdict::CannotRun { .. }) => 3,
         }
     }
@@ -832,6 +840,14 @@ impl HfClient {
 
     /// One page of GGUF repositories matching the query.
     pub async fn search(&self, q: &SearchQuery) -> Result<SearchPage, HfError> {
+        self.search_url(self.chat_search_url(q)).await
+    }
+
+    /// The chat search's address. Besides [`SEARCH_EXPAND`] it asks for `gguf`, for each
+    /// repository's kind ([`RepoSummary::unknown_architecture`]). The field cannot be narrowed
+    /// to the name (`expand[]=gguf.architecture` is refused), and the chat template's text
+    /// comes with it: about 0.8 MB for a page of 50 against 25 KB without it.
+    fn chat_search_url(&self, q: &SearchQuery) -> Url {
         let text = q.text.trim();
         let mut url = self.url("/api/models");
         {
@@ -845,11 +861,11 @@ impl HfClient {
             }
             p.append_pair("sort", q.sort.as_str());
             p.append_pair("limit", "50");
-            for e in SEARCH_EXPAND {
+            for e in SEARCH_EXPAND.iter().chain(&["gguf"]) {
                 p.append_pair("expand[]", e);
             }
         }
-        self.search_url(url).await
+        url
     }
 
     /// Search both media pipeline tags across formats, plus repositories without a tag whose
@@ -874,6 +890,7 @@ impl HfClient {
                         pipeline_tag: repo.info.pipeline_tag,
                         last_modified: repo.info.last_modified,
                         not_for_all_audiences: repo.not_for_all_audiences,
+                        unknown_architecture: None,
                     }]);
                 }
                 Err(HfError::NotFound) => {}
@@ -1187,10 +1204,32 @@ fn parse_search_items(arr: &[serde_json::Value]) -> Vec<RepoSummary> {
                     .and_then(|d| d.as_str())
                     .map(str::to_string),
                 not_for_all_audiences: not_for_all_audiences(m.get("tags")),
+                unknown_architecture: unknown_kind(m),
                 id,
             })
         })
         .collect()
+}
+
+/// The kind a search item's `gguf` block names, when the model runner does not know it. The
+/// name is the uploader's text: control characters are dropped and a long one is cut. A name
+/// that is empty or "unknown" is not one, and neither is a picture, video or speech model's
+/// (by its kind or by the author's task): no newer version will chat with it, so the card must
+/// not hint that one might.
+fn unknown_kind(item: &serde_json::Value) -> Option<String> {
+    let name = item.get("gguf")?.get("architecture")?.as_str()?;
+    let name: String = name
+        .trim()
+        .chars()
+        .filter(|c| !c.is_control())
+        .take(64)
+        .collect();
+    let task = item.get("pipeline_tag").and_then(|t| t.as_str());
+    (!name.is_empty()
+        && name != "unknown"
+        && !crate::arch::is_supported(&name)
+        && crate::arch::not_for_chat(Some(&name), task).is_none())
+    .then_some(name)
 }
 
 /// Merge media search pages when no exact repository was requested.
@@ -2108,6 +2147,170 @@ mod tests {
         assert_eq!(found.len(), items(GEN_IMAGE_TO_VIDEO).len() + 7);
     }
 
+    /// One search answer item as Hugging Face sends it for `expand[]=gguf` (real keys; the
+    /// chat template's text is shortened).
+    fn listed(id: &str, gguf: Option<serde_json::Value>) -> serde_json::Value {
+        let mut m = serde_json::json!({
+            "_id": "6b03c90407272a8488d9d0b0",
+            "id": id,
+            "downloads": 39177,
+            "likes": 44,
+            "gated": false,
+            "tags": ["gguf", "conversational", "license:apache-2.0"],
+            "lastModified": "2026-11-24T02:39:11.000Z",
+            "pipeline_tag": "image-text-to-text",
+        });
+        if let Some(g) = gguf {
+            m["gguf"] = g;
+        }
+        m
+    }
+
+    fn kind(name: &str) -> serde_json::Value {
+        serde_json::json!({
+            "total": 26070385152u64,
+            "architecture": name,
+            "context_length": 1048576,
+            "chat_template": "{% for m in messages %}...{% endfor %}",
+            "eos_token": "<|end|>",
+        })
+    }
+
+    fn hint(id: &str, gguf: Option<serde_json::Value>) -> Option<String> {
+        parse_search_items(&[listed(id, gguf)])
+            .remove(0)
+            .unknown_architecture
+    }
+
+    /// The owner's photo: the search card said nothing, so the person opened the page to find
+    /// out the model could not open. The listing already says the kind, for 0.8 MB a page.
+    #[test]
+    fn a_card_carries_the_kind_the_engine_does_not_know() {
+        // Newer than the pinned build (the list is of v1.1.0's names).
+        assert_eq!(
+            hint("a/new-GGUF", Some(kind("futurearch"))).as_deref(),
+            Some("futurearch")
+        );
+        // Known: no hint. Not listed, or nothing named: no hint.
+        assert_eq!(hint("a/ok-GGUF", Some(kind("qwen3"))), None);
+        assert_eq!(hint("a/ok-GGUF", Some(kind("inkling2_loop"))), None);
+        assert_eq!(hint("a/none-GGUF", None), None);
+        assert_eq!(hint("a/blank-GGUF", Some(kind("  "))), None);
+        assert_eq!(hint("a/unnamed-GGUF", Some(kind("unknown"))), None);
+        assert_eq!(
+            hint("a/no-key-GGUF", Some(serde_json::json!({"total": 1}))),
+            None
+        );
+    }
+
+    /// A picture or video model is not "not yet": no newer version will chat with it, and
+    /// Studio has its own words for it.
+    #[test]
+    fn a_picture_model_gets_no_hint() {
+        assert_eq!(hint("a/flux-GGUF", Some(kind("flux"))), None);
+        assert_eq!(hint("a/wan-GGUF", Some(kind("wan"))), None);
+    }
+
+    /// The same for a speech or sound model of another engine (whisper.cpp's, parakeet's), and
+    /// for any kind the engine does not know that its author tags as a picture, video or speech
+    /// model: of the 48 repositories a default search would have red-boxed after the v1.1.0
+    /// bump, 14 were speech models, and "may not know this kind of model" hinted at an update
+    /// that never comes. A chat task, or none, keeps the hint.
+    #[test]
+    fn a_speech_model_or_one_tagged_so_gets_no_hint() {
+        assert_eq!(hint("a/whisper-GGUF", Some(kind("whisper"))), None);
+        assert_eq!(hint("a/audio-GGUF", Some(kind("audiocpp"))), None);
+        let tagged = |kind_name: &str, task: &str| {
+            let mut item = listed("a/x-GGUF", Some(kind(kind_name)));
+            item["pipeline_tag"] = serde_json::json!(task);
+            parse_search_items(&[item]).remove(0).unknown_architecture
+        };
+        assert_eq!(tagged("futurearch", "text-to-speech"), None);
+        assert_eq!(tagged("futurearch", "automatic-speech-recognition"), None);
+        assert_eq!(tagged("futurearch", "text-to-image"), None);
+        assert_eq!(tagged("futurearch", "image-to-video"), None);
+        assert_eq!(
+            tagged("futurearch", "text-generation").as_deref(),
+            Some("futurearch")
+        );
+        assert_eq!(
+            tagged("futurearch", "image-text-to-text").as_deref(),
+            Some("futurearch")
+        );
+    }
+
+    /// The name is the uploader's text and a card shows it: control characters go and a long
+    /// one is cut, whatever Hugging Face sends.
+    #[test]
+    fn the_kind_on_a_card_is_short_and_without_control_characters() {
+        let long = "x".repeat(500);
+        assert_eq!(
+            hint("a/long-GGUF", Some(kind(&long))).unwrap(),
+            "x".repeat(64)
+        );
+        assert_eq!(
+            hint("a/ctl-GGUF", Some(kind("fu\u{0}\n\u{7}ture"))).as_deref(),
+            Some("future")
+        );
+    }
+
+    #[test]
+    fn the_hint_reaches_the_window_under_its_own_name() {
+        let items = parse_search_items(&[listed("a/new-GGUF", Some(kind("futurearch")))]);
+        let json = serde_json::to_value(&items[0]).unwrap();
+        assert_eq!(json["unknownArchitecture"], "futurearch");
+        let items = parse_search_items(&[listed("a/ok-GGUF", None)]);
+        assert!(serde_json::to_value(&items[0]).unwrap()["unknownArchitecture"].is_null());
+    }
+
+    fn expanded(url: &Url) -> Vec<String> {
+        url.query_pairs()
+            .filter(|(k, _)| k == "expand[]")
+            .map(|(_, v)| v.into_owned())
+            .collect()
+    }
+
+    /// Only the chat search asks for the kind: the answer carries each repository's chat
+    /// template with it, and a picture or video search has no use for any of it.
+    #[test]
+    fn only_the_chat_search_asks_for_the_kind() {
+        let c = client();
+        let chat = c.chat_search_url(&SearchQuery {
+            text: "inkling".into(),
+            sort: Sort::Downloads,
+            all_gguf: false,
+        });
+        let mut want: Vec<String> = SEARCH_EXPAND.iter().map(|e| e.to_string()).collect();
+        want.push("gguf".into());
+        assert_eq!(expanded(&chat), want);
+        assert_eq!(chat.path(), "/api/models");
+        let q = query(&chat);
+        for (k, v) in [
+            ("filter", "gguf"),
+            ("filter", "conversational"),
+            ("search", "inkling"),
+            ("sort", "downloads"),
+            ("limit", "50"),
+        ] {
+            assert!(q.contains(&(k.into(), v.into())), "{k}={v}: {chat}");
+        }
+        let all = c.chat_search_url(&SearchQuery {
+            text: String::new(),
+            sort: Sort::Likes,
+            all_gguf: true,
+        });
+        assert!(!query(&all).contains(&("filter".into(), "conversational".into())));
+        for kind in [
+            GenSearchKind::Pictures,
+            GenSearchKind::Video,
+            GenSearchKind::Loras,
+        ] {
+            for u in c.generator_search_urls("wan", kind) {
+                assert!(!expanded(&u).iter().any(|e| e == "gguf"), "{u}");
+            }
+        }
+    }
+
     fn client() -> HfClient {
         HfClient::new(HfConfig::default()).unwrap()
     }
@@ -2122,6 +2325,7 @@ mod tests {
             last_modified: None,
             pipeline_tag: pipeline_tag.map(str::to_string),
             not_for_all_audiences: false,
+            unknown_architecture: None,
         }
     }
 

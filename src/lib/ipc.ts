@@ -306,7 +306,8 @@ export const listPacks = () => invoke<PackInfo[]>("list_packs");
 export const downloadPack = (id: string, acceptLicense: boolean) =>
   invoke<void>("download_pack", { id, acceptLicense });
 export const cancelPackDownload = (id: string) => invoke<void>("cancel_pack_download", { id });
-export const removePack = (id: string) => invoke<void>("remove_pack", { id });
+/** `olderOnly`: remove only the builds an update left unused, and keep the one that works. */
+export const removePack = (id: string, olderOnly?: boolean) => invoke<void>("remove_pack", { id, olderOnly });
 export function onPackProgress(handler: (p: PackProgress) => void): Promise<UnlistenFn> {
   return listen<PackProgress>("pack-progress", (e) => handler(e.payload));
 }

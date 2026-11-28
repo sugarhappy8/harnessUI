@@ -637,7 +637,11 @@ export type CannotRunReason =
   | "upscaler"
   | "folderModel"
   | "notThisEngine"
-  | "ltx2";
+  | "ltx2"
+  | "bnb4"
+  | "bnb8"
+  | "torchao"
+  | "nvfp4";
 
 /** Why a file of a repository was not read when it opened. */
 export type NotReadReason = "needsToken" | "needsTerms" | "budget" | "failed";
@@ -664,6 +668,8 @@ export type FileLabel =
  *  reads as `wan2`); `null` for a name's hint that says no more than the version. */
 export type Verdict =
   | { works: { version: SdVersion; kind: RecipeKind; recipe: string | null } }
+  /** A recognised model none of whose files can start: each lacks a part nothing fills. */
+  | { needsFiles: { version: SdVersion; kind: RecipeKind; recipe: string | null } }
   | { lora: { base: SdVersion | null } }
   | { cannotRun: { reason: CannotRunReason; version: SdVersion | null } }
   | "unknown";
@@ -703,6 +709,8 @@ export interface PlannedSlot {
   required: boolean;
   source: PartSource;
   part: Part | null;
+  /** Why Studio can't fill a `missing` slot, when the catalog lists it on purpose. */
+  why?: string | null;
 }
 
 /** What setting a model up takes: its recipe, each slot's file, the licences, the sizes and

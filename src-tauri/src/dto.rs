@@ -526,6 +526,15 @@ pub struct HubFacts {
 #[serde(rename_all = "camelCase")]
 pub struct FileFacts {
     pub architecture: Option<String>,
+    /// Whether this version's model runner knows the file's kind. `Some(false)` is the file's
+    /// own header (or the listing's kind, for a repository whose header could not be read), and
+    /// the comparison then gives no "will it fit" verdict: the memory estimate has no rule for
+    /// a kind the runner does not know, and the model cannot open anyway. `None`: not known.
+    pub engine_knows: Option<bool>,
+    /// Set with `engine_knows == Some(false)` when no newer version would change it: a picture,
+    /// video or speech model. The comparison then says what it is, not "can't open it yet".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cant_open_why: Option<models::arch::Why>,
     pub parameters: Option<u64>,
     /// The context the model was trained for ("Longest conversation it was made for").
     pub context_length: Option<u64>,
@@ -1426,6 +1435,9 @@ pub struct PlannedSlotDto {
     pub source: PartSource,
     /// `None` when the main file carries the part (`embedded`) and when nothing fills it.
     pub part: Option<PartDto>,
+    /// Why Studio can't fill the slot, for a `missing` one the catalog lists on purpose
+    /// (`companions.notCovered`); `None` for any other.
+    pub why: Option<String>,
 }
 
 /// What setting a model up takes (`studio_setup_plan`, and each file of a repository): its

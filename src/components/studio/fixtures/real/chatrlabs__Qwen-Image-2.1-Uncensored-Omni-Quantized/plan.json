@@ -1,12 +1,12 @@
 {
-  "file": "qwen-image-2.1-step90000-NF4-bnb/diffusion_pytorch_model.safetensors",
+  "file": "qwen-image-2.1-step90000-Q8_0.gguf",
   "plan": {
-    "canDownload": false,
+    "canDownload": true,
     "fit": {
       "eta": null,
       "reason": null,
       "suggestion": null,
-      "verdict": "green",
+      "verdict": "yellow",
       "verySlow": false,
       "videoOnProcessor": false,
       "word": "fits"
@@ -22,6 +22,33 @@
         "revenueLimitUsd": null,
         "sha256": "5f783423fd3de0c5b130d50d785b0522353910e2f291887c10c0a0cf7e12237a",
         "url": "https://huggingface.co/chatrlabs/Qwen-Image-2.1-Uncensored-Omni-Quantized/blob/af0343c259513913de8056af85819c70f627d681/LICENSE"
+      },
+      {
+        "badge": "green",
+        "commercial": "yes",
+        "id": "apache-2.0",
+        "name": "Apache License 2.0",
+        "obligations": [
+          "Keep the licence and copyright notices with the files."
+        ],
+        "plainWords": "Free for any use, including commercial.",
+        "revenueLimitUsd": null,
+        "sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30",
+        "url": "https://www.apache.org/licenses/LICENSE-2.0.txt"
+      },
+      {
+        "badge": "red",
+        "commercial": "no",
+        "id": "qwen-research-2",
+        "name": "Qwen Research License Agreement",
+        "obligations": [
+          "Give a copy of the licence to anyone you pass the files to.",
+          "Keep Qwen's copyright notice with the files."
+        ],
+        "plainWords": "For research and testing only. Using it to make money needs a separate licence from Qwen.",
+        "revenueLimitUsd": null,
+        "sha256": "8dc973f024ff95966bea25866efa443fd16776dcb1001e681e3d467ea572b28d",
+        "url": "https://huggingface.co/Qwen/Qwen-Image-2.1/blob/d26bb61231c349cf6b7896fa83353113880e1ba3/LICENSE"
       }
     ],
     "lowDisk": false,
@@ -49,30 +76,64 @@
           "alreadyHere": false,
           "licenceId": "qwen-research",
           "local": false,
-          "path": "qwen-image-2.1-step90000-NF4-bnb/diffusion_pytorch_model.safetensors",
+          "path": "qwen-image-2.1-step90000-Q8_0.gguf",
           "repo": "chatrlabs/Qwen-Image-2.1-Uncensored-Omni-Quantized",
           "role": "diffusion",
-          "sizeBytes": 3670960573
+          "sizeBytes": 7687183136
         },
         "required": true,
         "role": "diffusion",
-        "source": "main"
+        "source": "main",
+        "why": null
       },
       {
-        "part": null,
+        "part": {
+          "alreadyHere": false,
+          "licenceId": "apache-2.0",
+          "local": false,
+          "path": "Qwen3VL-8B-Instruct-Q8_0.gguf",
+          "repo": "Qwen/Qwen3-VL-8B-Instruct-GGUF",
+          "role": "llm",
+          "sizeBytes": 8709519456
+        },
         "required": true,
         "role": "llm",
-        "source": "missing"
+        "source": "companion",
+        "why": null
       },
       {
-        "part": null,
+        "part": {
+          "alreadyHere": false,
+          "licenceId": "apache-2.0",
+          "local": false,
+          "path": "mmproj-Qwen3VL-8B-Instruct-F16.gguf",
+          "repo": "Qwen/Qwen3-VL-8B-Instruct-GGUF",
+          "role": "llm-vision",
+          "sizeBytes": 1159029824
+        },
+        "required": false,
+        "role": "llm-vision",
+        "source": "companion",
+        "why": null
+      },
+      {
+        "part": {
+          "alreadyHere": false,
+          "licenceId": "qwen-research-2",
+          "local": false,
+          "path": "vae/qwen_image_2.1_vae_bf16.safetensors",
+          "repo": "Comfy-Org/Qwen-Image-2.1",
+          "role": "vae",
+          "sizeBytes": 675509688
+        },
         "required": true,
         "role": "vae",
-        "source": "missing"
+        "source": "companion",
+        "why": null
       }
     ],
-    "toFetchBytes": 3670960573,
-    "totalBytes": 3670960573,
+    "toFetchBytes": 18231242104,
+    "totalBytes": 18231242104,
     "untested": false
   }
 }

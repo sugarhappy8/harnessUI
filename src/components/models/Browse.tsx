@@ -8,6 +8,7 @@ import { toErrorInfo } from "../../store/app";
 import { COMPARE_FULL, COMPARE_LIMIT, useCompare, useRepoInComparison } from "../../store/compare";
 import { ErrorBanner } from "../ErrorBanner";
 import { Badge } from "./Badge";
+import { CantOpenHint } from "./CantOpen";
 import { AddToComparison, Outside } from "./Compare";
 import { RepoDetail } from "./RepoDetail";
 
@@ -22,7 +23,17 @@ function ResultRow(props: { repo: RepoSummary; onOpen: () => void }) {
         onClick={props.onOpen}
         className="flex min-w-0 flex-1 items-center gap-2 rounded-md px-2 py-1.5 text-left text-sm hover:bg-bg-muted"
       >
-        <span className="min-w-0 flex-1 truncate">{r.id}</span>
+        {/* The hint sits under the name, not beside it: a long name keeps its room at any width. */}
+        <span className="min-w-0 flex-1">
+          <span className="block truncate" title={r.id}>
+            {r.id}
+          </span>
+          {r.unknownArchitecture && (
+            <span className="mt-0.5 block">
+              <CantOpenHint kind={r.unknownArchitecture} />
+            </span>
+          )}
+        </span>
         {r.gated !== "no" && <Lock size={12} className="text-fg-muted" aria-label="gated" />}
         {r.license && (
           <Badge>

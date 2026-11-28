@@ -373,8 +373,10 @@ fn json_type(value: &Value) -> &'static str {
 ///   unresolvable references become unconstrained;
 /// - `pattern`, `format` and keywords llama.cpp cannot express are dropped, and nesting
 ///   is cut at [`LLAMA_MAX_DEPTH`];
-/// - boolean subschemas become `{}` (except `additionalProperties: true/false`);
-/// - values llama.cpp b12110 was seen to refuse are dropped: empty `enum`, `anyOf`,
+/// - boolean subschemas become `{}` (except `additionalProperties: true/false`); llama.cpp
+///   refused every boolean one until b12774, which reads `true` as "any value" and still
+///   refuses `false`;
+/// - values llama.cpp b12110 and b12774 were seen to refuse are dropped: empty `enum`, `anyOf`,
 ///   `oneOf`, `allOf` or `type` lists, unknown type names, counts that are not
 ///   non-negative integers, a minimum count above 1000, a minimum count above the maximum
 ///   (with `minLength` it can exhaust llama-server's memory), numeric bounds beyond 2^53;
@@ -562,7 +564,8 @@ impl Simplifier<'_> {
 }
 
 /// Drops what llama.cpp refuses in an otherwise valid schema; each of these fails the
-/// whole chat request (checked against llama-server b12110). See [`simplify_for_llama`].
+/// whole chat request (checked against llama-server b12110 and b12774). See
+/// [`simplify_for_llama`].
 fn repair(out: &mut Map<String, Value>) {
     for key in ["enum", "anyOf", "oneOf", "allOf", "prefixItems"] {
         if out
@@ -1040,7 +1043,8 @@ mod tests {
     }
 
     /// Each case failed a whole chat request on llama-server b12110 before it was
-    /// simplified (see `tests/llama_schemas.rs` for the check against the real server).
+    /// simplified; on b12774 all but the bare `true` ones still do (see
+    /// `tests/llama_schemas.rs` for the check against the real server).
     #[test]
     fn simplify_removes_what_llama_server_refuses() {
         let p = |field: Value| {

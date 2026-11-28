@@ -21,8 +21,13 @@ pub enum LoadFailure {
     MissingRuntimeDll,
     /// The chosen port was taken.
     PortInUse,
-    /// The model file is missing, truncated or not a GGUF file.
+    /// The model file is missing, truncated, not a GGUF file, or does not match the layout the
+    /// runner builds for its kind (a tensor or a key it needs is not in it).
     ModelFileInvalid,
+    /// The file names a kind of model this version's llama.cpp has not learned ("unknown model
+    /// architecture"). The file is fine: a newer version of the app comes with a newer runner.
+    /// It fails the same on every backend of this build, so it is no step-down.
+    UnknownArchitecture,
     /// The weights loaded but the context (KV cache, compute buffers) did not fit.
     ContextTooLarge,
     /// 0.0.7: the model and its context loaded, then the image file given with `--mmproj`
@@ -46,8 +51,9 @@ impl LoadFailure {
             Self::MissingRuntimeDll => "A file the model runner needs is missing or damaged.",
             Self::PortInUse => "Another program is using the network port the model runner needs.",
             Self::ModelFileInvalid => {
-                "The model file couldn't be read. It may be incomplete, damaged, not a GGUF model, or a kind of model this version can't run."
+                "The model file couldn't be read. It may be incomplete or damaged, not a GGUF model, or made in an early or unusual layout."
             }
+            Self::UnknownArchitecture => "This version can't open this kind of model yet.",
             Self::ContextTooLarge => {
                 "The model loaded, but there isn't enough memory left for how much it should remember."
             }
@@ -74,7 +80,12 @@ impl LoadFailure {
                 "Reinstall the app. For a downloaded backend, remove it in Settings and download it again."
             }
             Self::PortInUse => "Restart the app.",
-            Self::ModelFileInvalid => "Download the model again, or choose a different file.",
+            Self::ModelFileInvalid => {
+                "Download the model again, or choose a different file, such as a newer upload of the same model."
+            }
+            Self::UnknownArchitecture => {
+                "Newer versions come with a newer model runner. Check for updates, or pick another model."
+            }
             Self::ContextTooLarge => {
                 "In Model settings, lower How much it can remember, or turn on Save memory if it is off."
             }
@@ -112,7 +123,10 @@ impl LoadFailure {
     pub fn may_succeed_on_another_backend(&self) -> bool {
         !matches!(
             self,
-            Self::ModelFileInvalid | Self::PortInUse | Self::ImageFileInvalid
+            Self::ModelFileInvalid
+                | Self::UnknownArchitecture
+                | Self::PortInUse
+                | Self::ImageFileInvalid
         )
     }
 
@@ -183,8 +197,18 @@ const MODEL_FILE_SIGNATURES: &[&str] = &[
     "failed to open gguf file",
     "invalid magic characters",
     "model is corrupted or incomplete",
-    "unknown model architecture",
+    // The file does not match what the runner builds for its kind: a tensor it needs is not in
+    // it, has another shape, or the count differs (the early Inkling 2 uploads: 24 of 48
+    // blocks, `src/llama-model-loader.cpp` v1.1.0), or a key it needs is absent.
+    "check_tensor_dims: tensor",
+    "done_getting_tensors: wrong number of tensors",
+    "missing tensor",
+    "key not found in model",
 ];
+
+/// The file names a kind this llama.cpp has not learned (`src/llama-model.cpp`). Apart from
+/// [`MODEL_FILE_SIGNATURES`]: the file is fine, and the words say that an update may help.
+const UNKNOWN_ARCHITECTURE_SIGNATURES: &[&str] = &["unknown model architecture"];
 
 /// The functions of ggml's GGUF reader, whose every line is about a file it could not
 /// read: the model's, or the image file's while the server measures it (0.0.7).
@@ -268,30 +292,37 @@ pub fn classify_load(
     {
         return LoadFailure::ModelFileInvalid;
     }
+    if loading().any(|line| line.says(UNKNOWN_ARCHITECTURE_SIGNATURES)) {
+        return LoadFailure::UnknownArchitecture;
+    }
     LoadFailure::Unknown
 }
 
 /// Whether the load failed because of `image`, the image file it was given (0.0.7), and
 /// how to treat it.
 ///
-/// At the pinned build (b12110, `tools/server/server-context.cpp`, `tools/mtmd/mtmd.cpp`,
-/// `tools/mtmd/clip.cpp`) a failed `mtmd_init_from_file` prints "mtmd_init_from_file:
-/// error: …", the server then "failed to load multimodal model, '<file>'" and exits; an
-/// exception inside `clip_init` (a missing tensor, a key, a mismatch) is printed first as
-/// "clip_init: failed to load model '<file>': …" (captured in
-/// `tests/fixtures/stderr_image_file_broken.txt`; an older build printed the exception on
-/// the `mtmd_init_from_file` line itself, `stderr_image_file_owner_windows.txt`).
+/// At the pinned build (b12774, llama.cpp v1.1.0: `tools/server/server-context.cpp`,
+/// `tools/mtmd/mtmd.cpp`, `tools/mtmd/mtmd-model.cpp`) a failed `mtmd_init_from_file`
+/// prints one line, "mtmd_init_from_file: error: <reason>" (a missing tensor, a key, a
+/// mismatch, a kind it cannot use: captured in `tests/fixtures/stderr_image_file_broken.txt`),
+/// and the server then "failed to load multimodal model, '<file>'" and exits. b12110 and
+/// older builds printed an exception from the image-file reader first, as "clip_init:
+/// failed to load model '<file>': <reason>", and put "Failed to load CLIP model" on the
+/// `mtmd_init_from_file` line (`stderr_image_file_broken_b12110.txt`); the oldest, the
+/// exception on the `mtmd_init_from_file` line itself, as v1.1.0 does again
+/// (`stderr_image_file_owner_windows.txt`). Both forms are read, so a runtime folder from
+/// before the bump still gets its failure told right.
 ///
 /// Only the server's line decides that the image file failed, and only for the file it
 /// was given: a line that is exactly that, after the timestamp and the level. The lines
-/// before it say why. `clip_init` prints every exception it catches, so a graphics card's
-/// own error while the image file loads (a Vulkan exception, a backend that would not
-/// start) is not the file's fault: it is [`LoadFailure::Unknown`], which another backend
-/// may load, and running out of memory there is [`LoadFailure::OutOfMemory`]. Only the
-/// start of a reason is looked at, where llama.cpp names what failed; a kind or a name
-/// from the file comes after it. "mtmd_get_memory_usage: error: …" and "Failed to load
-/// CLIP model" also appear when the server measures the file before the model loads, and
-/// the load goes on after them; `clip_init` is silenced while it measures.
+/// before it say why. A graphics card's own error while the image file loads (a Vulkan
+/// exception, a backend that would not start) is not the file's fault: it is
+/// [`LoadFailure::Unknown`], which another backend may load, and running out of memory
+/// there is [`LoadFailure::OutOfMemory`]. Only the start of a reason is looked at, where
+/// llama.cpp names what failed; a kind or a name from the file, or the file's own path
+/// (b12774 prints it unquoted in "failed to load mmproj model from <path>"), comes after
+/// it. "mtmd_get_memory_usage: error: …" and "mtmd_get_cap_from_file: …" also appear when
+/// the server measures the file before the model loads, and the load goes on after them.
 fn image_file_failure(lines: &[Line<'_>], image: &str) -> Option<LoadFailure> {
     let failed = lines.iter().any(|line| {
         line.func == "load_model"
@@ -308,10 +339,12 @@ fn image_file_failure(lines: &[Line<'_>], image: &str) -> Option<LoadFailure> {
     let mut why = Why::File;
     for line in lines {
         let reason = match line.func {
+            // b12110 and older.
             "clip_init" => line
                 .text
                 .strip_prefix("failed to load model '")
                 .and_then(|rest| clip_init_reason(rest, image)),
+            // The only line b12774 prints about why, and the owner's older build too.
             "mtmd_init_from_file" => line.text.strip_prefix("error: "),
             _ => None,
         };
@@ -383,8 +416,9 @@ impl Why {
         ) {
             return Self::Memory;
         }
-        // clip.cpp: "failed to initialize CPU backend" and "clip_ctx: failed to initialize
-        // \"<device>\" backend"; CUDA, HIP and Vulkan's C names, should one reach here.
+        // "failed to initialize CPU backend" and "failed to initialize \"<device>\" backend",
+        // with the function that threw it in front ("clip_ctx" at b12110, "mtmd_backends" at
+        // b12774); CUDA, HIP and Vulkan's C names, should one reach here.
         let after_function = match reason.split_once(": ") {
             Some((function, rest)) if is_function(function) => rest,
             _ => reason.as_str(),
@@ -542,7 +576,9 @@ fn without_quotes(text: &str) -> String {
 
 /// Lines the pinned build logs when the **model** cannot take Save memory's settings
 /// (`-fa on -ctk q8_0 -ctv q8_0`), on every backend, the processor included
-/// (`llama_init_from_model` and `llama_context` in `src/llama-context.cpp` at b12110):
+/// (`llama_init_from_model` and `llama_context` in `src/llama-context.cpp`, the same words
+/// at b12110 and b12774; the contract test `a_model_that_refuses_save_memory_is_retried_once_without_it`
+/// reads them from a real server):
 /// - a q8_0 block of 32 values does not divide the model's attention head size (80 in
 ///   some model families): "K cache type q8_0 with block size 32 does not divide
 ///   n_embd_head_k=80", and the same for V;
@@ -692,13 +728,91 @@ mod tests {
     fn file_signatures_from_the_model_loader_are_model_file_invalid() {
         for line in [
             "E llama_model_load: error loading model: tensor 'blk.0.attn_q.weight' data is not within the file bounds, model is corrupted or incomplete",
-            "E llama_model_load: error loading model: error loading model architecture: unknown model architecture: 'newarch'",
             "E gguf_init_from_file_impl: failed to read header",
             "E gguf_init_from_reader: failed to read tensor info",
         ] {
             assert_eq!(
                 classify(&lines(line), Some(1)),
                 LoadFailure::ModelFileInvalid,
+                "{line}"
+            );
+        }
+    }
+
+    /// A kind the pinned llama.cpp has not learned: captured from the real server (b12774) on a
+    /// file that names "futurearch". Not a damaged file, and not one another backend would
+    /// open: an update brings a newer runner, so the words say that, and "download it again"
+    /// (what a broken file gets) would be false advice for a 23 GB file that is fine.
+    #[test]
+    fn captured_unknown_architecture_is_its_own_failure_with_its_own_words() {
+        let tail = fixture(include_bytes!(
+            "../../tests/fixtures/stderr_unknown_architecture.txt"
+        ));
+        let failure = classify(&tail, Some(1));
+        assert_eq!(failure, LoadFailure::UnknownArchitecture);
+        assert!(!failure.may_succeed_on_another_backend());
+        let (message, step) = (failure.user_message(), failure.next_step());
+        assert_eq!(message, "This version can't open this kind of model yet.");
+        assert!(step.contains("Check for updates"), "{step}");
+        assert!(step.contains("pick another model"), "{step}");
+        for words in [message, step] {
+            assert!(!words.contains("damaged"), "{words}");
+            assert!(!words.contains("Download the model again"), "{words}");
+        }
+        assert_eq!(failure.next_step_on(BackendKind::Vulkan), step);
+        // The failure's JSON is what the window reads.
+        assert_eq!(
+            serde_json::to_string(&failure).unwrap(),
+            r#"{"code":"unknown_architecture"}"#
+        );
+    }
+
+    /// The early Inkling 2 uploads (arch "inkling2", 24 of 48 blocks in the file): captured
+    /// from the real server on a copy of onemunanoyo's file with its header and tensor table.
+    /// The name is known and the file does not match what the runner builds from it: it fails
+    /// the same on every backend, so it is a file problem, not one for a step-down, and not
+    /// the unknown failure ("try a different download") it was filed under before.
+    #[test]
+    fn captured_missing_tensor_is_model_file_invalid() {
+        let tail = fixture(include_bytes!(
+            "../../tests/fixtures/stderr_tensor_not_found.txt"
+        ));
+        let failure = classify(&tail, Some(1));
+        assert_eq!(failure, LoadFailure::ModelFileInvalid);
+        assert!(!failure.may_succeed_on_another_backend());
+        assert!(
+            failure.next_step().contains("newer upload"),
+            "{}",
+            failure.next_step()
+        );
+    }
+
+    /// What llama.cpp's loader says when a file does not match the layout it builds for the
+    /// file's kind (v1.1.0, `src/llama-model-loader.cpp`): all are the file's, on any backend.
+    #[test]
+    fn a_file_that_does_not_match_its_kind_is_model_file_invalid() {
+        for line in [
+            "0.00.577.545 E llama_model_load: error loading model: check_tensor_dims: tensor 'blk.24.attn_q.weight' not found",
+            "0.00.577.545 E llama_model_load: error loading model: check_tensor_dims: tensor 'output.weight' has wrong shape; expected  2048, 32000, got  4096, 32000",
+            "0.00.577.545 E llama_model_load: error loading model: done_getting_tensors: wrong number of tensors; expected 734, got 704",
+            "0.00.577.545 E llama_model_load: error loading model: missing tensor 'blk.3.ffn_gate.weight'",
+            "0.00.577.545 E llama_model_load: error loading model: key not found in model: inkling2_loop.loop.start",
+        ] {
+            assert_eq!(
+                classify(&lines(line), Some(1)),
+                LoadFailure::ModelFileInvalid,
+                "{line}"
+            );
+        }
+        // A graphics backend's own exception is not a file problem, and a name from a file
+        // that looks like one of these messages does not make it one.
+        for line in [
+            "0.00.100.000 E ggml_vulkan: device lost: 'check_tensor_dims: tensor x not found'",
+            "0.00.100.000 E llama_model_load: error loading model: vk::Device::createBuffer: ErrorDeviceLost 'key not found in model: x'",
+        ] {
+            assert_eq!(
+                classify(&lines(line), Some(1)),
+                LoadFailure::Unknown,
                 "{line}"
             );
         }
@@ -716,12 +830,13 @@ mod tests {
     }
 
     /// 0.0.7: the image file failed after the model loaded, captured from the pinned build
-    /// with an image file that misses a tensor its kind needs (`v.token_embd.img_break`,
-    /// as in the owner's report) and with one that is not a GGUF file at all. The second
-    /// log also holds the GGUF reader's "invalid magic characters", which alone names a
-    /// broken model file: here it is about the image file, and the model is not blamed.
-    /// Only a load given that image file can fail because of it: without one, or with
-    /// another, the same log is not the image file's failure.
+    /// (b12774) with an image file that misses a tensor its kind needs
+    /// (`v.token_embd.img_break`, as in the owner's report) and with one that is not a GGUF
+    /// file at all, and the same two from b12110, which printed more lines. The second log
+    /// also holds the GGUF reader's "invalid magic characters", which alone names a broken
+    /// model file: here it is about the image file, and the model is not blamed. Only a
+    /// load given that image file can fail because of it: without one, or with another, the
+    /// same log is not the image file's failure.
     #[test]
     fn captured_broken_image_files_are_image_file_invalid() {
         for (tail, image) in [
@@ -734,6 +849,18 @@ mod tests {
             (
                 fixture(include_bytes!(
                     "../../tests/fixtures/stderr_image_file_garbage.txt"
+                )),
+                GARBAGE,
+            ),
+            (
+                fixture(include_bytes!(
+                    "../../tests/fixtures/stderr_image_file_broken_b12110.txt"
+                )),
+                BROKEN,
+            ),
+            (
+                fixture(include_bytes!(
+                    "../../tests/fixtures/stderr_image_file_garbage_b12110.txt"
                 )),
                 GARBAGE,
             ),
@@ -752,8 +879,9 @@ mod tests {
     }
 
     /// The owner's log (Windows, every backend failing the same way): the exception is on
-    /// the `mtmd_init_from_file` line itself, without a `clip_init` line. The user folder is
-    /// replaced and the folder the report left out is the one downloads use.
+    /// the `mtmd_init_from_file` line itself, without a `clip_init` line, the form b12774
+    /// prints again. The user folder is replaced and the folder the report left out is the
+    /// one downloads use.
     #[test]
     fn the_owners_log_is_image_file_invalid() {
         let tail = fixture(include_bytes!(
@@ -784,7 +912,11 @@ mod tests {
             with_image(&lines(&server), path),
             LoadFailure::ImageFileInvalid
         );
-        for alone in [&clip, &mtmd] {
+        // The form b12774 prints: the reason is on the `mtmd_init_from_file` line.
+        let reason = "0.03.927.960 E mtmd_init_from_file: error: operator(): unable to find tensor v.token_embd.img_break".to_owned();
+        let new = lines(&format!("{reason}\n{server}"));
+        assert_eq!(with_image(&new, path), LoadFailure::ImageFileInvalid);
+        for alone in [&clip, &mtmd, &reason] {
             assert_eq!(
                 with_image(&lines(alone), path),
                 LoadFailure::Unknown,
@@ -809,14 +941,20 @@ mod tests {
         assert_eq!(with_image(&echoed, path), LoadFailure::Unknown);
     }
 
-    /// M1: a graphics card's own error while the image file loads (clip_init prints every
+    /// M1: a graphics card's own error while the image file loads (the reader prints every
     /// exception it catches) is not the file's fault: it is not an image file failure, so
     /// it is not remembered, and another backend may load the model with it. Running out of
     /// the card's memory there is running out of memory.
+    ///
+    /// Both forms: b12110 printed the exception on a `clip_init` line and "Failed to load
+    /// CLIP model" on the `mtmd_init_from_file` line; b12774 prints the exception on the
+    /// `mtmd_init_from_file` line alone (`mtmd_backends` is the constructor that throws the
+    /// backend failures, `tools/mtmd/mtmd-subcontext.cpp`). The card errors here are from
+    /// the sources of those builds, not captured: the container has no graphics card.
     #[test]
     fn a_device_error_while_the_image_file_loads_is_not_the_files_fault() {
         let path = "/m/mmproj-F16.gguf";
-        let tail = |what: &str| {
+        let b12110 = |what: &str| {
             lines(&format!(
                 "0.03.927.960 E clip_init: failed to load model '{path}': {what}\n\
                  0.03.927.961 E mtmd_init_from_file: error: Failed to load CLIP model from {path}\n\
@@ -824,37 +962,71 @@ mod tests {
                  0.03.929.912 E srv  server_run_i: exiting due to model loading error"
             ))
         };
-        for what in [
-            "vk::Queue::submit: ErrorDeviceLost",
-            "vk::Device::createComputePipeline: ErrorUnknown",
-            "clip_ctx: failed to initialize \"Vulkan0\" backend",
-            "clip_ctx: failed to initialize CPU backend",
-        ] {
-            let failure = with_image(&tail(what), path);
-            assert_eq!(failure, LoadFailure::Unknown, "{what}");
-            assert!(failure.may_succeed_on_another_backend());
-        }
-        assert_eq!(
-            with_image(
-                &tail("vk::Device::allocateMemory: ErrorOutOfDeviceMemory"),
-                path
+        let b12774 = |what: &str| {
+            lines(&format!(
+                "0.03.927.960 E mtmd_init_from_file: error: {what}\n\
+                 0.03.927.966 E srv    load_model: failed to load multimodal model, '{path}'\n\
+                 0.03.929.912 E srv  server_run_i: exiting due to model loading error"
+            ))
+        };
+        for (what, new) in [
+            ("vk::Queue::submit: ErrorDeviceLost", None),
+            ("vk::Device::createComputePipeline: ErrorUnknown", None),
+            (
+                "clip_ctx: failed to initialize \"Vulkan0\" backend",
+                Some("mtmd_backends: failed to initialize \"Vulkan0\" backend"),
             ),
-            LoadFailure::OutOfMemory
-        );
+            (
+                "clip_ctx: failed to initialize CPU backend",
+                Some("failed to initialize CPU backend"),
+            ),
+        ] {
+            for tail in [b12110(what), b12774(new.unwrap_or(what))] {
+                let failure = with_image(&tail, path);
+                assert_eq!(failure, LoadFailure::Unknown, "{what}");
+                assert!(failure.may_succeed_on_another_backend());
+            }
+        }
+        for tail in [
+            b12110("vk::Device::allocateMemory: ErrorOutOfDeviceMemory"),
+            b12774("vk::Device::allocateMemory: ErrorOutOfDeviceMemory"),
+            b12774("std::bad_alloc"),
+        ] {
+            assert_eq!(with_image(&tail, path), LoadFailure::OutOfMemory);
+        }
         // The file's own faults stay its own.
         for what in [
             "operator(): unable to find tensor v.token_embd.img_break",
+            "operator(): unable to find tensor v.patch_embd.weight",
             "load_hparams: unknown projector type: newkind",
             "Key not found: clip.vision.image_size",
             "clip_model_loader: failed to load CLIP model from /m/mmproj-F16.gguf. Does this file exist?",
         ] {
             assert_eq!(
-                with_image(&tail(what), path),
+                with_image(&b12110(what), path),
+                LoadFailure::ImageFileInvalid,
+                "{what}"
+            );
+            assert_eq!(
+                with_image(&b12774(what), path),
                 LoadFailure::ImageFileInvalid,
                 "{what}"
             );
         }
-        // The mismatch llama.cpp checks after clip_init, on the mtmd line.
+        // What b12774 says for a file that is not GGUF, with no encoder, or that holds no
+        // model it can use: the file's own path is in the line, and does not decide.
+        for what in [
+            format!("mtmd_model_loader: failed to load mmproj model from {path}. Does this file exist?"),
+            format!("Failed to load mmproj model from {path}"),
+            "mtmd_model_loader: failed to load mmproj model from /m/failed to initialize the Vulkan0 backend.gguf. Does this file exist?".to_owned(),
+        ] {
+            assert_eq!(
+                with_image(&b12774(&what), path),
+                LoadFailure::ImageFileInvalid,
+                "{what}"
+            );
+        }
+        // The mismatch llama.cpp checks after the reader, on the mtmd line.
         let mismatch = lines(&format!(
             "E mtmd_init_from_file: error: mismatch between text model (n_embd = 5120) and mmproj (n_embd = 4096)\n\
              E srv    load_model: failed to load multimodal model, '{path}'"
@@ -897,26 +1069,31 @@ mod tests {
     /// it decides.
     #[test]
     fn measuring_the_image_file_is_not_a_failure_of_it() {
-        let measured = "E mtmd_get_memory_usage: error: Failed to load CLIP model from /m/mmproj.gguf\n\
+        let b12110 = "E mtmd_get_memory_usage: error: Failed to load CLIP model from /m/mmproj.gguf\n\
                         E mtmd_get_cap_from_file: failed to get capabilities from file '/m/mmproj.gguf': clip_model_loader: failed to load CLIP model from /m/mmproj.gguf. Does this file exist?\n\
                         E srv    load_model: [mtmd] failed to get memory usage of mmproj";
-        for image in [None, Some("/m/mmproj.gguf")] {
-            let load = |tail: &[String]| classify_load(tail, Some(1), image, image.is_some());
-            assert_eq!(load(&lines(measured)), LoadFailure::Unknown);
-            let weights = lines(&format!(
-                "{measured}\nE alloc_tensor_range: failed to allocate CUDA0 buffer of size 9437184000\n\
+        // b12774 prints the loader's own reason after the same two function names.
+        let b12774 = "E mtmd_get_memory_usage: error: mtmd_model_loader: failed to load mmproj model from /m/mmproj.gguf. Does this file exist?\n\
+                      E mtmd_get_cap_from_file: failed to get capabilities from file '/m/mmproj.gguf': mtmd_model_loader: failed to load mmproj model from /m/mmproj.gguf. Does this file exist?";
+        for measured in [b12110, b12774] {
+            for image in [None, Some("/m/mmproj.gguf")] {
+                let load = |tail: &[String]| classify_load(tail, Some(1), image, image.is_some());
+                assert_eq!(load(&lines(measured)), LoadFailure::Unknown);
+                let weights = lines(&format!(
+                    "{measured}\nE alloc_tensor_range: failed to allocate CUDA0 buffer of size 9437184000\n\
                  E llama_model_load_from_file_impl: failed to load model"
-            ));
-            assert_eq!(load(&weights), LoadFailure::OutOfMemory);
-            let model = lines(&format!(
-                "{measured}\nE gguf_init_from_file_impl: failed to read header\n\
+                ));
+                assert_eq!(load(&weights), LoadFailure::OutOfMemory);
+                let model = lines(&format!(
+                    "{measured}\nE gguf_init_from_file_impl: failed to read header\n\
                  E llama_model_load_from_file_impl: failed to load model"
-            ));
-            assert_eq!(load(&model), LoadFailure::ModelFileInvalid);
-            let context = lines(&format!(
-                "{measured}\nE common_init_result: failed to create context with model 'm.gguf'"
-            ));
-            assert_eq!(load(&context), LoadFailure::ContextTooLarge);
+                ));
+                assert_eq!(load(&model), LoadFailure::ModelFileInvalid);
+                let context = lines(&format!(
+                    "{measured}\nE common_init_result: failed to create context with model 'm.gguf'"
+                ));
+                assert_eq!(load(&context), LoadFailure::ContextTooLarge);
+            }
         }
 
         // The real capture of a file that is not GGUF, up to where the model loads: the GGUF
@@ -982,7 +1159,7 @@ mod tests {
                     "0.00.020.000 E llama_model_load: error loading model: error loading model architecture: unknown model architecture: 'failed to load multimodal model'\n\
                      0.00.020.001 E llama_model_load_from_file_impl: failed to load model"
                 ),
-                LoadFailure::ModelFileInvalid
+                LoadFailure::UnknownArchitecture
             );
             assert_eq!(
                 load(
@@ -1395,7 +1572,7 @@ mod tests {
         }
     }
 
-    /// The lines the pinned build (b12110, `llama_init_from_model` and `llama_context` in
+    /// The lines the pinned build (b12110 and b12774, `llama_init_from_model` and `llama_context` in
     /// `src/llama-context.cpp`) logs when the model refuses flash attention with a q8_0
     /// memory, on any backend; and lines that look alike but are not a refusal.
     #[test]

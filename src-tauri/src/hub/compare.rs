@@ -737,8 +737,17 @@ fn file_facts(
 ) -> FileFacts {
     let (label_total, label_active) = size_label_parameters(s.size_label.as_deref());
     let moe = s.is_moe();
+    let why = if s.older_layout {
+        Some(models::arch::Why::Layout)
+    } else {
+        models::arch::not_for_chat(Some(&s.architecture), None)
+    };
     FileFacts {
         architecture: architecture_text(&s.architecture),
+        // The file's own header: no kind at all cannot be opened either, and a picture or
+        // speech model is not for chat even where the runner knows its kind.
+        engine_knows: Some(why.is_none() && models::arch::is_supported(&s.architecture)),
+        cant_open_why: why,
         parameters: parameters.or(label_total),
         context_length: s.context_length,
         tools: s.template_tools,
@@ -758,6 +767,10 @@ fn stored_file_facts(st: &StoredSummary, vision: bool) -> Option<FileFacts> {
     let (label_total, label_active) = size_label_parameters(st.size_label.as_deref());
     Some(FileFacts {
         architecture: st.architecture.as_deref().and_then(architecture_text),
+        engine_knows: st.architecture.as_deref().map(|a| {
+            models::arch::not_for_chat(Some(a), None).is_none() && models::arch::is_supported(a)
+        }),
+        cant_open_why: models::arch::not_for_chat(st.architecture.as_deref(), None),
         parameters: st.parameters.or(label_total),
         context_length: st.context_length,
         tools: st.template_tools,
@@ -1196,8 +1209,16 @@ async fn repo_item<P: Plans>(
             f.problem.get_or_insert(problem_of(&err));
             // What the listing says about the files, when the header cannot be read.
             if let Some(g) = &d.gguf {
+                let judged = models::arch::page_architecture(
+                    None,
+                    g.architecture.as_deref(),
+                    d.info.pipeline_tag.as_deref(),
+                );
                 f.file_facts = Some(FileFacts {
                     architecture: g.architecture.as_deref().and_then(architecture_text),
+                    // A hint from the repository's first file: it may say "no", never "yes".
+                    engine_knows: judged.supported.filter(|known| !known),
+                    cant_open_why: judged.why,
                     parameters: g.parameters,
                     context_length: g.context_length,
                     tools: d.template_tools,

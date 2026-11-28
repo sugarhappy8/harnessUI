@@ -21,7 +21,7 @@ import {
   sizeAnswer,
   tagWords,
 } from "../../lib/abilities";
-import { backendWords, FIT_WORDS, tokensWithWords } from "../../lib/words";
+import { backendWords, CANT_OPEN, FIT_WORDS, tokensWithWords } from "../../lib/words";
 import {
   COMPARE_FULL,
   COMPARE_LIMIT,
@@ -314,6 +314,20 @@ function howBig(f: CompareFacts): Answer | null {
 }
 
 function willItFit(f: CompareFacts): Answer | null {
+  // The model runner cannot open the file: the memory estimate has no rule for its kind, so a
+  // verdict would be a guess that says the opposite of the truth.
+  if (f.fileFacts?.engineKnows === false) {
+    // A picture or speech model is not for chat, and an early layout is the file's: an update
+    // would not change either.
+    const why = f.fileFacts.cantOpenWhy;
+    // A file that names no kind is not "yet" either.
+    const words = why
+      ? CANT_OPEN.compareWhy[why]
+      : f.fileFacts.architecture
+        ? CANT_OPEN.compareFit
+        : CANT_OPEN.compareNoKind;
+    return { node: words, source: null };
+  }
   return f.fit ? { node: <FitBadge fit={f.fit} />, source: fitSource(f.ctx) } : null;
 }
 
@@ -984,6 +998,9 @@ function FileChange(props: {
   const [error, setError] = useState<ErrorInfo | null>(null);
   const view = props.repoView?.ctx === props.ctx ? props.repoView.view : null;
   const picked = view?.variants.find((v) => v.files[0]?.path === props.file);
+  // The model runner cannot open this repository's files: no file "fits" and none is "picked
+  // for you" because it does.
+  const cantOpen = view?.architectureSupported === false;
 
   function toggle() {
     const next = !open;
@@ -994,7 +1011,7 @@ function FileChange(props: {
 
   return (
     <div className="text-xs">
-      {props.auto && picked && (
+      {props.auto && picked && !cantOpen && (
         <p className="text-fg-muted">
           {picked.fit?.verdict === "green"
             ? "Picked for you: the largest file that fits."
@@ -1026,7 +1043,7 @@ function FileChange(props: {
                 {current && <Check size={11} className="mr-1 inline" aria-hidden />}
                 {/* A label without a quantisation is the uploader's file name. */}
                 <Outside text={fileWords(v.label) ?? v.label} cap={80} /> · {formatBytes(v.totalSize)}
-                {v.fit ? ` · ${FIT_WORDS[v.fit.verdict]}` : ""}
+                {v.fit && !cantOpen ? ` · ${FIT_WORDS[v.fit.verdict]}` : ""}
               </button>
             );
           })}

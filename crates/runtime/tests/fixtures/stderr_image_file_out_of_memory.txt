@@ -1,8 +1,6 @@
-0.00.020.635 I srv  llama_server: initializing ...
-0.00.020.673 I cmn  common_param: common_params_print_info: verbosity = 3 (adjust with the `-lv N` CLI arg)
-0.00.020.794 I srv  init_listene: The UI is disabled
-0.00.020.794 I srv  init_listene: Use --ui/--no-ui (or deprecated --webui/--no-webui) to enable/disable
-0.00.023.909 I srv    load_model: loading model '/home/u/models/ggml-org/SmolVLM-256M-Instruct-GGUF/SmolVLM-256M-Instruct-Q8_0.gguf'
-0.00.303.221 I cmn          init: llama threadpool init, n_threads = 2
-0.00.319.987 W load_tensors: ffn up/down are swapped
-/home/runner/work/llama.cpp/llama.cpp/ggml/src/ggml-backend.cpp:328: GGML_ASSERT(buffer) failed
+0.00.017.332 I srv  llama_server: initializing ...
+0.00.017.364 I cmn  common_param: common_params_print_info: verbosity = 3 (adjust with the `-lv N` CLI arg)
+0.00.017.560 I srv  init_listene: The UI is disabled
+0.00.017.570 I srv  init_listene: Use --ui/--no-ui (or deprecated --webui/--no-webui) to enable/disable
+0.00.019.256 I srv    load_model: loading model '/home/u/models/Qwen3-0.6B-Q8_0.gguf'
+/home/runner/work/llama.cpp/llama.cpp/ggml/src/ggml-backend.cpp:329: GGML_ASSERT(buffer) failed

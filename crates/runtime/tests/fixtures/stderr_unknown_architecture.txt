@@ -1,0 +1,15 @@
+0.00.003.253 I srv  llama_server: initializing ...
+0.00.018.914 I cmn  common_param: common_params_print_info: verbosity = 3 (adjust with the `-lv N` CLI arg)
+0.00.019.156 I srv  init_listene: The UI is disabled
+0.00.019.169 I srv  init_listene: Use --ui/--no-ui (or deprecated --webui/--no-webui) to enable/disable
+0.00.019.286 W srv  server_setup: security: no API key is set and CORS allows all origins (see https://github.com/ggml-org/llama.cpp/pull/25655)
+0.00.021.058 I srv    load_model: loading model 'Future-Model-Q4_K_M.gguf'
+0.00.022.133 E llama_model_load: error loading model: unknown model architecture: 'futurearch'
+0.00.022.159 E llama_model_load_from_file_impl: failed to load model
+0.00.022.196 E common_fit_params: encountered an error while trying to fit params to free device memory: failed to load model
+0.00.022.294 E llama_model_load: error loading model: unknown model architecture: 'futurearch'
+0.00.022.308 E llama_model_load_from_file_impl: failed to load model
+0.00.022.312 E cmn  common_init_: failed to load model 'Future-Model-Q4_K_M.gguf'
+0.00.022.316 E srv    load_model: failed to load model, 'Future-Model-Q4_K_M.gguf'
+0.00.022.334 I srv    operator(): operator(): cleaning up before exit...
+0.00.023.090 E srv  server_run_i: exiting due to model loading error

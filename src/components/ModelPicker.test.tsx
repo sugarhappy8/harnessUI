@@ -97,3 +97,40 @@ describe("ModelPicker: a gear on each local model", () => {
     expect(pickModel).toHaveBeenCalledWith("local:/models/b.gguf");
   });
 });
+
+describe("ModelPicker: a model this version can't open yet", () => {
+  const pickModel = vi.fn(async () => undefined);
+  beforeEach(() => {
+    vi.clearAllMocks();
+    useApp.setState({
+      detail: null,
+      pickModel,
+      refreshModelOptions: async () => undefined,
+      modelOptions: [
+        { ref: "local:/models/ok.gguf", label: "ok.gguf", source: "local", contextLength: null },
+        { ref: "local:/models/new.gguf", label: "new.gguf", source: "local", contextLength: null, cantOpen: true },
+      ],
+    });
+  });
+  afterEach(cleanup);
+
+  /** The Installed row switches Use off and says why; the picker listed the same model with no
+   *  hint, and choosing it stopped the working model and failed. */
+  it("says so beside its name and does not pick it", async () => {
+    await openMenu();
+    const items = screen.getAllByRole("menuitem").filter((el) => !/^Settings for this model/.test(el.getAttribute("aria-label") ?? ""));
+    const dim = items.find((el) => el.textContent?.includes("new.gguf"));
+    expect(dim?.textContent).toContain("can't be used");
+    expect(dim?.getAttribute("title")).toContain("Its settings say why");
+    expect(dim?.getAttribute("aria-disabled")).toBe("true");
+    await act(async () => {
+      fireEvent.click(dim as HTMLElement);
+    });
+    expect(pickModel).not.toHaveBeenCalled();
+    const ok = items.find((el) => el.textContent?.includes("ok.gguf"));
+    expect(ok?.textContent).not.toContain("can't be used");
+    expect(ok?.getAttribute("aria-disabled")).toBeNull();
+    // Its settings stay reachable: they say why.
+    expect(screen.getByRole("menuitem", { name: "Settings for this model: new.gguf" })).toBeTruthy();
+  });
+});

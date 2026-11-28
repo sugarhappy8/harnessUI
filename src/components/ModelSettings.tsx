@@ -50,6 +50,7 @@ import { ErrorBanner } from "./ErrorBanner";
 import { FINE_AUTO, FineControl, fineIsAuto, hasCustomPlacement } from "./FineControl";
 import { visiblePath } from "./FolderChip";
 import { OffloadPicture } from "./OffloadPicture";
+import { CantOpenBox } from "./models/CantOpen";
 
 // ---- Shared controls (also used by Settings → Local models) ------------------------------
 
@@ -217,6 +218,10 @@ export function ModelSettings(props: { path: string; onClose: () => void; onSave
 
   const name = info?.fileName ?? path.split(/[\\/]/).pop() ?? path;
   const loaded = !!info && (info.loaded || (runtime?.state === "ready" && runtime.modelPath === path));
+  // A model this version cannot open gets no memory verdict and nothing to load with (the
+  // estimate has no rule for its kind); its reason instead. A loaded one opens, whatever the list
+  // says (a development engine).
+  const cantOpen = !!info && !loaded && info.architectureSupported === false;
   const dirty = !!info && !!draft && !same(draft, info.overrides);
   const draftKey = draft ? JSON.stringify(draft) : null;
   const savedKey = info ? JSON.stringify(info.overrides) : null;
@@ -439,7 +444,8 @@ export function ModelSettings(props: { path: string; onClose: () => void; onSave
           <div className="min-h-0 flex-1 space-y-4 overflow-y-auto px-5 py-4">
             {error && <ErrorBanner error={error} onDismiss={() => setError(null)} />}
             {!info && !error && <p className="text-sm text-fg-muted">Reading the model file…</p>}
-            {facts && draft && (
+            {cantOpen && info && <CantOpenBox architecture={info.architecture ?? null} why={info.cantOpenWhy} />}
+            {facts && draft && !cantOpen && (
               <Controls
                 info={facts}
                 draft={draft}
@@ -455,7 +461,7 @@ export function ModelSettings(props: { path: string; onClose: () => void; onSave
               />
             )}
           </div>
-          {info && draft && (
+          {info && draft && !cantOpen && (
             <div className="space-y-2 border-t border-border px-5 py-3">
               {loaded && info.olderSettingsLoaded && (
                 <p className="text-xs text-warning">Settings changed. Restart the model to use them.</p>

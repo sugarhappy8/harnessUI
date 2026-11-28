@@ -40,6 +40,7 @@ import type {
   Placement,
   Reading,
   ThinkingLimit,
+  UpdateStatus,
   UsageGap,
   UsageNow,
   Verdict,
@@ -118,6 +119,8 @@ export const LOAD_FAILURE_WORDS: Record<LoadFailure["code"], string> = {
   missing_runtime_dll: "is missing a file it needs",
   port_in_use: "could not get the connection it needs",
   model_file_invalid: "could not load this model",
+  // Never a reason to step down (it fails the same everywhere); listed so every failure has words.
+  unknown_architecture: "does not know this kind of model",
   context_too_large: "ran out of memory",
   // [0.0.7 P2] Never a reason to step down; listed so every failure has words.
   image_file_invalid: "could not read the image file",
@@ -130,6 +133,7 @@ export function stepDownAction(reason: LoadFailure): "reload" | "settings" | nul
     case "invalid_device":
       return "settings";
     case "model_file_invalid":
+    case "unknown_architecture":
       return null;
     default:
       return "reload";
@@ -271,6 +275,122 @@ export function imageFileProgress(done: number, total: number): string {
   if (!(total > 0) || !Number.isFinite(done)) return "Downloading the image file…";
   const pct = Math.min(100, Math.max(0, Math.floor((done / total) * 100)));
   return `Downloading the image file… ${pct}%`;
+}
+
+/**
+ * Settings → Local models → Backend downloads, when an older build of a download is on disk.
+ * A download's folder carries the build, so an app update that moves the build leaves the old
+ * one unused and the new one to download; the load says the same in Rust (`older_build_error`).
+ */
+export const PACK_OLDER = {
+  /** The chosen backend's download is from before the update: it can't be used. */
+  stale: "The download on this computer is from an older version of the app, so it can't be used. Download it again to use it.",
+  /** The new download is there, and the old one still takes room. */
+  leftover: (size: string) => `An older download from before the update still takes up ${size}.`,
+  remove: "Remove the old download",
+  removeLabel: (title: string) => `Remove the old ${title} download`,
+} as const;
+
+/**
+ * A model whose kind this version of the app cannot open yet: the model runner it comes with
+ * (the pinned llama-server) does not know the model's architecture, and only a newer version
+ * brings a newer runner. The search card, the repository page, Installed and Compare say it in
+ * these words and no others: what is wrong, that it is nobody's fault, and what to do next.
+ * Nothing that contradicts it is shown with it (no memory verdict, no image-file offer, no
+ * button that does nothing without saying why).
+ *
+ * The kind's name is the file's or Hugging Face's own text: a screen puts it between `before`
+ * and `after` inside its `Outside`, never inside these strings.
+ */
+export const CANT_OPEN = {
+  /** The hint on a search card, the slot where Download would be, and the header's badge. */
+  short: "Can't open yet",
+  /** The box's title, and a tooltip. */
+  title: "This version can't open this model yet",
+  /** The box's second line: the kind goes between the halves. */
+  body: {
+    before: "It is a “",
+    after: `” model. The model runner in this version of ${APP_NAME} does not know that kind yet. Nothing is wrong with your computer.`,
+  },
+  /** A file that names no kind at all (an imported file, say): an update cannot help it. */
+  noKind: "This file does not say what kind of model it is, so this version can't open it. Pick another file.",
+  /** What to do, and what is not done meanwhile (a repository's page). */
+  next: `Newer versions of ${APP_NAME} come with a newer model runner, and the model may work then. Download is switched off until then.`,
+  check: "Check for updates",
+  checking: "Checking for updates…",
+  /** After a check found nothing newer. */
+  latest: (version: string) =>
+    `You have the latest version (${version}). It can't open this model yet, so check again later.`,
+  /** After a check that did not work, when the automatic check is off. */
+  tryAgain: "Click Check for updates to try again.",
+  /** After a version is ready: its box is behind the Models window. */
+  readyHint: "Close this window and use the update box.",
+  /** An app that cannot update itself (a build without the updater). */
+  noUpdates: "This copy can't update itself. New versions are on the project's GitHub releases page.",
+  /** A picture or video model opened from Browse (Show all GGUF repositories): an update
+   *  would not change it, so none is promised. The same sentences as an import's refusal. */
+  picture: {
+    title: "This is a picture or video model",
+    body: "It can't chat. Add it in Studio → Get models.",
+    short: "Not for chat",
+  },
+  /** A speech or sound model: the same, and Studio does not make those either. */
+  speech: {
+    title: "This is a speech or sound model",
+    body: "It can't chat, and nothing in this app uses it.",
+    short: "Not for chat",
+  },
+  /** A file in an early layout of a kind the engine knows (an early Inkling 2 upload): its maker
+   *  uploaded it before the format was final. A newer upload of the same model may work. */
+  layout: {
+    title: "This file is in an early layout",
+    body: "Its maker uploaded it before the format was final, so this version can't read it, and an update won't change that. Look for a newer upload of the same model.",
+    short: "Can't be read",
+  },
+  /** Compare's "Will it fit on this computer?" for a picture, video, speech or early-layout file. */
+  compareWhy: {
+    picture: "Not checked. It is not a chat model.",
+    speech: "Not checked. It is not a chat model.",
+    layout: "Not checked. This file is in an early layout this version can't read.",
+  },
+  /** The chat's model picker, beside a model it will not pick: true of every cause (a kind the
+   *  runner has not learned, a speech or picture model, an early layout), and no promise. */
+  picker: {
+    short: "can't be used",
+    title: "This version can't use this model. Its settings say why.",
+  },
+  /** Where the memory sentence would be: no verdict is given for a model that cannot open. */
+  memory: "Memory use is worked out once this version can open the model.",
+  /** Compare's "Will it fit on this computer?". */
+  compareFit: "Not checked. This version can't open this model yet.",
+  /** The same for a file that names no kind at all: it is not "yet", nothing says what it is. */
+  compareNoKind: "Not checked. This file does not say what kind of model it is.",
+  /** An installed model's row: the kind goes between the halves. */
+  row: {
+    before: `Can't open yet: this version of ${APP_NAME} does not know the “`,
+    after: "” kind of model. A newer version may open it.",
+  },
+} as const;
+
+/**
+ * What the updater is doing or found since the app started, in one line: Settings → General →
+ * Updates puts it under "Check now", and a model's page that cannot open yet puts it under
+ * "Check for updates" (`retry` names that button). `null` before any check.
+ */
+export function updateLine(s: UpdateStatus, retry = "Click Check now to try again."): string | null {
+  if (s.ready) return `Version ${s.ready.version} is ready to install.`;
+  if (s.downloading) return `Downloading version ${s.downloading}…`;
+  if (s.checking) return "Checking for updates…";
+  // Only the automatic check tries again on its own.
+  if (s.error) return `${s.error} ${s.autoCheck ? "The app tries again at the next check." : retry}`;
+  if (s.available) return `Version ${s.available.version} is available.`;
+  if (s.checked) return `You have the latest version (${s.currentVersion}).`;
+  return null;
+}
+
+/** A search card's hint, which is a guess from Hugging Face's listing (the page checks). */
+export function cantOpenCardTip(kind: string): string {
+  return `From the listing: this version of ${APP_NAME} may not know this kind of model (“${kind}”). Open it to check.`;
 }
 
 /** Generation speed in words per second (three quarters of the tokens). */
@@ -2133,6 +2253,12 @@ const CANNOT_RUN_WORDS: Record<CannotRunReason, (ext: string) => string> = {
   folderModel: () => "This model comes as a folder of parts, which the Studio engine can't load",
   notThisEngine: () => "The Studio engine can't run this kind of model",
   ltx2: () => "This is an LTX-2 model, which the Studio engine can't run",
+  // Weights packed for another program: the engine reads none of them, so the file is never
+  // "Works in Studio", whatever model its names say it is.
+  bnb4: () => "This file is packed in a 4-bit format made for another program (bitsandbytes), which the Studio engine can't read",
+  bnb8: () => "This file is packed in an 8-bit format made for another program (bitsandbytes), which the Studio engine can't read",
+  torchao: () => "This file is packed in a format made for another program (torchao), which the Studio engine can't read",
+  nvfp4: () => "This file is packed in a 4-bit format made for another program (NVFP4), which the Studio engine can't read",
 };
 
 /** Why a file of a repository was not read, as one sentence. */
@@ -2187,6 +2313,7 @@ export function verdictWords(verdict: StudioVerdict): string | null {
   if (verdict === "unknown") return null;
   if ("works" in verdict)
     return FILE_LABEL.works(typeName(verdict.works.version, verdict.works.recipe), verdict.works.kind, null, 0);
+  if ("needsFiles" in verdict) return VERDICT.needsFiles(typeName(verdict.needsFiles.version, verdict.needsFiles.recipe));
   if ("lora" in verdict) return FILE_LABEL.lora(verdict.lora.base === null ? null : typeName(verdict.lora.base, null));
   return FILE_LABEL.cannotRun(verdict.cannotRun.reason);
 }
@@ -2473,6 +2600,10 @@ const CANT_RUN_SHORT: Record<CannotRunReason, string> = {
   folderModel: "folder of parts",
   notThisEngine: "unsupported type",
   ltx2: "LTX-2",
+  bnb4: "4-bit bitsandbytes",
+  bnb8: "8-bit bitsandbytes",
+  torchao: "torchao file",
+  nvfp4: "4-bit NVFP4",
 };
 
 /** A Hugging Face result's Studio verdict, as its badge says it (Task U5, design 10.3): from
@@ -2488,9 +2619,34 @@ export const VERDICT = {
   unknown: "Open to check",
   /** Opened, and none of its files is one Studio knows. */
   notRecognised: "Not recognised",
+  /** Opened, and Studio knows the model but has no file for a part it needs: not "Works". */
+  needsFiles: (type: string) => `Needs files · ${type}`,
+  /** Its tooltip. */
+  needsFilesTip: "Studio knows this model, but it has no file for a part the model needs. Choose the files below.",
   /** A hint's tooltip. */
   hint: "From the name: opening it reads the files",
 } as const;
+
+/** What a part is in a sentence about one that has no file ("Choose a file for the text
+ *  encoder first."). */
+const MISSING_PART_WORD: Record<PartRole, string> = {
+  model: "model file",
+  diffusion: "model file",
+  "high-noise-diffusion": "high-noise model file",
+  "uncond-diffusion": "unconditional model file",
+  "clip-l": "CLIP-L text encoder",
+  "clip-g": "CLIP-G text encoder",
+  t5xxl: "text encoder",
+  llm: "text encoder",
+  "llm-vision": "picture encoder",
+  "clip-vision": "picture encoder",
+  tokenizer: "tokenizer",
+  vae: "decoder",
+  tae: "tiny decoder",
+  "audio-vae": "sound decoder",
+  "audio-encoder": "sound encoder",
+  "embeddings-connectors": "connectors file",
+};
 
 /** A result's or a catalog model's detail panel in Get models (Task U6, design 10.3): the review
  *  before a download, with its main file (one per quantisation, the best for this computer
@@ -2500,14 +2656,28 @@ export const MODEL_DETAIL = {
   mainFile: "Main file",
   best: "Best for this computer",
   extras: "Extra files Studio adds",
+  /** The same section while a part the model needs has no file: the promise above does not hold. */
+  extrasNeeded: "Files this model needs",
   alreadyHere: "already on this computer",
   chooseFile: "Choose a file",
   /** "Total to download: 4.6 GB": the files not on this computer yet (and the Studio engine
    *  when it comes with the model). */
   total: (size: string) => `Total to download: ${size}`,
   download: "Download",
-  /** Why Download is off while a part has no file. */
-  missingWhy: SETUP.problem.studio_setup_incomplete,
+  /** Why Download is off while a part has no file, naming the parts: "Choose a file for the text
+   *  encoder and the decoder first." */
+  missingWhy: (roles: PartRole[]) => {
+    const words = [...new Set(roles.map((r) => `the ${MISSING_PART_WORD[r] ?? "part"}`))];
+    if (words.length === 0) return SETUP.problem.studio_setup_incomplete;
+    const list = words.length === 1 ? words[0]! : `${words.slice(0, -1).join(", ")} and ${words[words.length - 1]!}`;
+    return `Choose a file for ${list} first.`;
+  },
+  /** The total of a set-up with a part still missing: a floor, which says it is one. */
+  totalSoFar: (size: string, missing: number) =>
+    `At least ${size}, and more once you choose the ${missing === 1 ? "missing file" : `${missing} missing files`}.`,
+  /** Under the files to choose from while a set-up lacks a part: no fit is said for a model that
+   *  would not start. */
+  fitLater: "Fit is checked once every file is chosen.",
   /** Why Download is off for a gated model while no Hugging Face token is saved. */
   needsToken: SETUP.problem.hf_needs_token,
   downloadLora: "Download LoRA",
@@ -2518,8 +2688,8 @@ export const MODEL_DETAIL = {
   licences: "Licences",
   /** A repository that names no licence at all. */
   noLicence: `This repository names no licence. ${LICENCE_BADGE.unclear} before you use what you make.`,
-  /** A part with no file yet. */
-  noFile: "No file yet",
+  /** A part nothing fills, and Studio does not add. */
+  noFile: "Studio can't add this one. Choose a file.",
   /** A part the person chose from this computer: "Chosen by you · t5xxl.safetensors". */
   chosen: (name: string) => `Chosen by you · ${name}`,
   /** A repository with no model Studio can set up (its files are listed below). */
@@ -2590,6 +2760,7 @@ export const STUDIO_DOWNLOADS = {
 export function verdictBadgeWords(verdict: StudioVerdict, exact: boolean): string {
   if (verdict === "unknown") return exact ? VERDICT.notRecognised : VERDICT.unknown;
   if ("works" in verdict) return VERDICT.works(typeName(verdict.works.version, verdict.works.recipe));
+  if ("needsFiles" in verdict) return VERDICT.needsFiles(typeName(verdict.needsFiles.version, verdict.needsFiles.recipe));
   if ("lora" in verdict) return VERDICT.lora(verdict.lora.base === null ? null : typeName(verdict.lora.base, null));
   return VERDICT.cantRun(verdict.cannotRun.reason);
 }

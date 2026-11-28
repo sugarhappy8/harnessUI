@@ -485,6 +485,29 @@ describe("ModelFilesSection", () => {
     expect(api.studioSetModelFiles).toHaveBeenCalledWith(sdxl.id, choice);
   });
 
+  it("a plan with a part no file fills says what it has, what is missing and why Download is off", async () => {
+    await renderSection();
+    const missing = slot("t5xxl", "missing", null);
+    vi.mocked(api.studioSetupPlan).mockResolvedValue(
+      planOf(LIGHTNING, [...LIGHTNING_FILES.slots, missing], { canDownload: false }),
+    );
+    press(screen.getByRole("combobox", { name: "Model type" }));
+    await act(async () => {
+      fireEvent.click(screen.getByRole("option", { name: /^SDXL Lightning/ }));
+    });
+    await flush();
+    const review = document.querySelector<HTMLElement>("[data-files-review]")!;
+    // The section is not "Extra files Studio adds" while a part has no file, and the part says so.
+    expect(within(review).queryByRole("region", { name: "Extra files Studio adds" })).toBeNull();
+    const needs = within(review).getByRole("region", { name: "Files this model needs" });
+    within(needs).getByText("Studio can't add this one. Choose a file.");
+    // A floor, not a total, and the one sentence that names what to choose.
+    expect(within(review).queryByText(/^Total to download/)).toBeNull();
+    within(review).getByText("At least 335 MB, and more once you choose the missing file.");
+    within(review).getByText("Choose a file for the text encoder first.");
+    expect(within(review).getByRole<HTMLButtonElement>("button", { name: "Download" }).disabled).toBe(true);
+  });
+
   it("a gated file stops the plan's Download, with what to do", async () => {
     await renderSection();
     vi.mocked(api.studioSetupPlan).mockRejectedValue({

@@ -270,6 +270,8 @@ export interface ModelOption {
   /** [0.0.6 item 8] A local file used recently; installed models never used are left without
    *  it. The list starts with these, then the endpoints' models, then the other installed ones. */
   recent?: boolean;
+  /** An installed file whose kind this version's model runner cannot open: dimmed, not picked. */
+  cantOpen?: boolean;
 }
 
 /**
@@ -340,6 +342,10 @@ export interface RepoSummary {
   license: string | null;
   lastModified: string | null;
   pipelineTag: string | null;
+  /** The kind Hugging Face's listing names for the repository, only when this version's model
+   *  runner does not know it. A hint from the repository's first file, not a verdict: the
+   *  page reads the files. Null or left out: nothing to say. */
+  unknownArchitecture?: string | null;
 }
 
 export interface SearchPage {
@@ -405,14 +411,23 @@ export interface VariantView {
   hasChecksum: boolean;
 }
 
+/** Why a model cannot be opened and no update would change it: a picture or video model, a
+ *  speech or sound model (neither is for chat), or a file in an early layout of its kind. */
+export type CantOpenWhy = "picture" | "speech" | "layout";
+
 export interface RepoView {
   id: string;
   commit: string;
   gated: Gated;
   license: string | null;
   architecture: string | null;
-  /** False when the bundled llama.cpp cannot load this architecture; null if unknown. */
+  /** False when the model runner in this version cannot open this model; null if unknown. */
   architectureSupported: boolean | null;
+  /** With `architectureSupported` false: why no update will change it. A picture or video model,
+   *  or a speech or sound one, is not for chat (by its kind, or by what its author says it
+   *  does); a file in an early layout of its kind cannot be read. Absent: a newer version may
+   *  open it. */
+  cantOpenWhy?: CantOpenWhy | null;
   contextLength: number | null;
   parameters: number | null;
   templateTools: boolean;
@@ -565,6 +580,8 @@ export interface PackInfo {
   downloadBytes: number;
   state: "notInstalled" | "partial" | "downloading" | "installed";
   bytesDone: number;
+  /** Bytes an older build of this pack still takes (0: none): an update leaves them unused. */
+  olderBytes: number;
   available: boolean;
   reason: string | null;
 }
@@ -853,6 +870,8 @@ export type LoadFailure =
   | { code: "missing_runtime_dll" }
   | { code: "port_in_use" }
   | { code: "model_file_invalid" }
+  // The file names a kind of model this version's runner has not learned: an update may help.
+  | { code: "unknown_architecture" }
   | { code: "context_too_large" }
   // [0.0.7 P2] The model loaded, its image file could not be read.
   | { code: "image_file_invalid" }
@@ -945,6 +964,13 @@ export interface DeviceOption {
 
 /** Everything the model settings panel shows about one model file (`model_load_info`). */
 export interface ModelLoadInfo {
+  /** The kind the file's own header names; absent when it could not be read. */
+  architecture?: string | null;
+  /** False when this version's model runner cannot open the file: the panel then gives no
+   *  memory verdict. Null or left out: not known (or a development engine that may know more). */
+  architectureSupported?: boolean | null;
+  /** With `architectureSupported` false: why no update would change it. */
+  cantOpenWhy?: CantOpenWhy | null;
   path: string;
   fileName: string;
   sizeBytes: number;
@@ -1031,6 +1057,12 @@ export interface HubFacts {
 /** From the GGUF header. */
 export interface FileFacts {
   architecture: string | null;
+  /** Whether this version's model runner knows the file's kind; false: it cannot open the
+   *  file yet, so no "will it fit" verdict is given. Null or left out: not known. */
+  engineKnows?: boolean | null;
+  /** With `engineKnows` false: why no newer version would change it (not for chat, or an
+   *  early layout of the file). */
+  cantOpenWhy?: CantOpenWhy | null;
   parameters: number | null;
   contextLength: number | null;
   tools: boolean;

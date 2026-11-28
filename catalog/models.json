@@ -1,8 +1,8 @@
 {
   "schemaVersion": 1,
   "sequence": 5,
-  "generated": "2026-11-24",
-  "note": "Pinned commits, sizes and SHA-256 were HEAD-verified on 2026-11-10 (docs/research/huggingface.md). 'tested' records a passing scripts/catalog_test.py run (template shapes and a real tool-call round trip) under the pinned llama.cpp. The picture and video parts (generators, generatorFamilies) were pinned from their Hugging Face listings on 2026-11-18 and 2026-11-20 (recorded in crates/models/tests/fixtures/hf/); each licence pins the SHA-256 of its text. The companions (shared text encoders, decoders and CLIP vision files) were pinned from their Hugging Face listings on 2026-11-24.",
+  "generated": "2026-11-27",
+  "note": "Pinned commits, sizes and SHA-256 were HEAD-verified on 2026-11-10 (docs/research/huggingface.md). 'tested' records a passing scripts/catalog_test.py run (template shapes and a real tool-call round trip) under the pinned llama.cpp. The picture and video parts (generators, generatorFamilies) were pinned from their Hugging Face listings on 2026-11-18 and 2026-11-20 (recorded in crates/models/tests/fixtures/hf/); each licence pins the SHA-256 of its text. The companions (shared text encoders, decoders and CLIP vision files) were pinned from their Hugging Face listings on 2026-11-24 and, for every recipe of 0.2.1 that lacked its files, on 2026-11-27, each checked again against the listing's size and SHA-256, the resolve headers and its licence's text.",
   "tiers": {
     "8": {
       "recommendedCtx": 16384,
@@ -1419,6 +1419,161 @@
           "Register with Stability AI before any commercial use."
         ],
         "plainWords": "Commercial use only under $1,000,000 a year in revenue."
+      },
+      "qwen-research": {
+        "name": "Qwen Research License Agreement",
+        "url": "https://huggingface.co/Qwen/Qwen-Image-2.1/blob/d26bb61231c349cf6b7896fa83353113880e1ba3/LICENSE",
+        "sha256": "8dc973f024ff95966bea25866efa443fd16776dcb1001e681e3d467ea572b28d",
+        "commercialOutputs": "no",
+        "revenueLimitUsd": null,
+        "excludedRegions": [],
+        "obligations": [
+          "Give a copy of the licence to anyone you pass the files to.",
+          "Keep Qwen's copyright notice with the files."
+        ],
+        "plainWords": "For research and testing only. Using it to make money needs a separate licence from Qwen."
+      },
+      "mit": {
+        "name": "MIT License",
+        "url": "https://huggingface.co/stabilityai/sd-vae-ft-ema/blob/f04b2c4b98319346dad8c65879f680b1997b204a/README.md",
+        "sha256": "814a88d18bd11ff1d8fe5ee9848562b779226a32d96c3aabfc9f58aac2e57f24",
+        "commercialOutputs": "yes",
+        "revenueLimitUsd": null,
+        "excludedRegions": [],
+        "obligations": [
+          "Keep the licence and copyright notices with the files."
+        ],
+        "plainWords": "Free for any use, including commercial."
+      },
+      "openrail++": {
+        "name": "Open RAIL++-M",
+        "url": "https://huggingface.co/stabilityai/stable-diffusion-xl-base-1.0/blob/462165984030d82259a11f4367a4eed129e94a7b/LICENSE.md",
+        "sha256": "19b6998b569b53ac1fc2158a8a3202c8699a9a4605b47075715d9c96be7fb6d0",
+        "commercialOutputs": "withUseRules",
+        "revenueLimitUsd": null,
+        "excludedRegions": [],
+        "obligations": [
+          "Do not use the files for the uses the licence forbids."
+        ],
+        "plainWords": "Commercial use allowed, with use rules"
+      },
+      "mit-microsoft-mage": {
+        "name": "MIT License",
+        "url": "https://raw.githubusercontent.com/microsoft/Mage/ebe8581c2b28581ee204e94685b23dc5f65b3437/LICENSE",
+        "sha256": "275b4dd619de4e16a017b10d0beec72abbbbf14ee8a2fc68f8bdb398e821f623",
+        "commercialOutputs": "yes",
+        "revenueLimitUsd": null,
+        "excludedRegions": [],
+        "obligations": [
+          "Keep the licence and copyright notice with the files."
+        ],
+        "plainWords": "Free for any use, including commercial."
+      },
+      "mit-inclusionai": {
+        "name": "MIT License",
+        "url": "https://huggingface.co/inclusionAI/Ming-Image-0.1-Design/blob/c57c49689d12ef7d4e24a170014f1dc43d3ce258/LICENSE",
+        "sha256": "b772c54f1f150a680e7c083a92431c518cf62821a407f6cccdf53f6a07bcf702",
+        "commercialOutputs": "yes",
+        "revenueLimitUsd": null,
+        "excludedRegions": [],
+        "obligations": [
+          "Keep the licence and copyright notices with the files."
+        ],
+        "plainWords": "Free for any use, including commercial."
+      },
+      "minimax-h3-community": {
+        "name": "MiniMax H3 Community License Agreement",
+        "url": "https://huggingface.co/MiniMaxAI/MiniMax-H3/blob/12253298adb81e36757eabebb81d2ba1c0cc70cc/LICENSE",
+        "sha256": "59b99642b95ea21630e311198ddbfffbfe05aadba0c2f5d884cbdf4efcc90f44",
+        "commercialOutputs": "underRevenue",
+        "revenueLimitUsd": 20000000,
+        "excludedRegions": [
+          "the European Union",
+          "the United Kingdom",
+          "South Korea",
+          "the United States"
+        ],
+        "obligations": [
+          "Ask MiniMax first if your products earn over $20 million a year.",
+          "Show the name MiniMax H3 in any commercial product that uses it.",
+          "Follow MiniMax's use policy and pass it on to anyone you share the files with."
+        ],
+        "plainWords": "Commercial use only under $20,000,000 a year in revenue. Not for use in the European Union, the United Kingdom, South Korea or the United States."
+      },
+      "minimax-h3-image-community": {
+        "name": "MiniMax-H3-Image Community License Agreement",
+        "url": "https://huggingface.co/MiniMaxAI/MiniMax-H3-Image/blob/8ced60068623def5b74b4d10558117cb61d6482d/LICENSE",
+        "sha256": "0ec3bb5e6d9e885fa2aaf15e84689e50fd51f42b53fa24d3a64ed9d8c76d423b",
+        "commercialOutputs": "underRevenue",
+        "revenueLimitUsd": 1000000,
+        "excludedRegions": [
+          "the European Union",
+          "the United Kingdom",
+          "South Korea",
+          "the United States"
+        ],
+        "obligations": [
+          "Ask MiniMax first if you or your affiliates earn over $1 million a year, or if you offer it to others as a service.",
+          "Show the name MiniMax-H3-Image in any commercial product that uses it.",
+          "Follow MiniMax's use policy and pass it on to anyone you share the files with."
+        ],
+        "plainWords": "Commercial use only under $1,000,000 a year in revenue. Not for use in the European Union, the United Kingdom, South Korea or the United States."
+      },
+      "gemma-terms-of-use": {
+        "name": "Gemma Terms of Use",
+        "url": "https://huggingface.co/unsloth/gemma-3-12b-it-GGUF/blob/d15e4c7dc21dc55d56bf8549db57a71ad8a2a35d/README.md",
+        "sha256": "5a5435b4b5586d651573549827240348cb457b27e713432500433915408e30b5",
+        "commercialOutputs": "withUseRules",
+        "revenueLimitUsd": null,
+        "excludedRegions": [],
+        "obligations": [
+          "Keep to Google's list of banned uses.",
+          "Pass the Gemma terms on with any copy you share."
+        ],
+        "plainWords": "Commercial use is allowed, except for the uses Google's policy bans."
+      },
+      "ltx-2-community": {
+        "name": "LTX-2 Community License Agreement",
+        "url": "https://huggingface.co/unsloth/LTX-2.3-GGUF/blob/96e8ed4925ead3db9ff4d0084f165ef6a74f28d0/LICENSE",
+        "sha256": "e28ef68d90e17b06308e4c5cba5c9a967b70c3d67f87ddc3dfc46a312cb6a134",
+        "commercialOutputs": "underRevenue",
+        "revenueLimitUsd": 10000000,
+        "excludedRegions": [],
+        "obligations": [
+          "Companies with $10,000,000 a year in revenue or more need a paid licence from Lightricks.",
+          "Keep to the licence's list of banned uses."
+        ],
+        "plainWords": "Commercial use only under $10,000,000 a year in revenue."
+      },
+      "ltx-2x-community": {
+        "name": "LTX-2.x Community License Agreement",
+        "url": "https://huggingface.co/unsloth/LTX-2.5-GGUF/blob/ac3c540c6025903784336e99b2dc179385c4c3b7/LICENSE",
+        "sha256": "be75acae5c99b0fb16ed6cfbf8f731e5121a729bef112d20337699407e796451",
+        "commercialOutputs": "underRevenue",
+        "revenueLimitUsd": 10000000,
+        "excludedRegions": [],
+        "obligations": [
+          "Companies with $10,000,000 a year in revenue or more need a paid licence from Lightricks.",
+          "Keep to the licence's list of banned uses."
+        ],
+        "plainWords": "Commercial use only under $10,000,000 a year in revenue."
+      },
+      "tencent-hunyuan-community": {
+        "name": "Tencent Hunyuan Community License",
+        "url": "https://huggingface.co/tencent/HunyuanVideo-1.5/blob/9b49404b3f5df2a8f0b31df27a0c7ab872e7b038/LICENSE",
+        "sha256": "c38236952096107a4adbc164f44cd1768745b0a20090ea858e0954c96a6b8391",
+        "commercialOutputs": "yes",
+        "revenueLimitUsd": null,
+        "excludedRegions": [
+          "the European Union",
+          "the United Kingdom",
+          "South Korea"
+        ],
+        "obligations": [
+          "Keep to Tencent's rules for acceptable use.",
+          "Companies with over 100 million monthly users need a licence from Tencent."
+        ],
+        "plainWords": "Free for commercial use, except in the European Union, the United Kingdom and South Korea."
       }
     },
     "files": [
@@ -1430,7 +1585,12 @@
           "flux-fill",
           "flux-controls",
           "flex-2",
-          "sd3"
+          "sd3",
+          "sdxl",
+          "sdxl-inpaint",
+          "sdxl-pix2pix",
+          "sdxl-vega",
+          "sdxl-ssd1b"
         ],
         "repo": "comfyanonymous/flux_text_encoders",
         "revision": "6af2a98e3f615bdfa612fbd85da93d1ed5f69ef5",
@@ -1449,7 +1609,8 @@
           "flex-2",
           "chroma",
           "chroma-radiance",
-          "sd3"
+          "sd3",
+          "pixart"
         ],
         "repo": "comfyanonymous/flux_text_encoders",
         "revision": "6af2a98e3f615bdfa612fbd85da93d1ed5f69ef5",
@@ -1468,7 +1629,8 @@
           "flex-2",
           "chroma",
           "chroma-radiance",
-          "sd3"
+          "sd3",
+          "pixart"
         ],
         "repo": "comfyanonymous/flux_text_encoders",
         "revision": "6af2a98e3f615bdfa612fbd85da93d1ed5f69ef5",
@@ -1726,7 +1888,8 @@
           "mage-flow",
           "iris",
           "lingbot-video",
-          "fibo2"
+          "fibo2",
+          "sefi-image"
         ],
         "repo": "Qwen/Qwen3-VL-4B-Instruct-GGUF",
         "revision": "1cd86afb9a95c410a6038ab3b40d8b578c892266",
@@ -1760,6 +1923,671 @@
         "size": 5140950080,
         "sha256": "f453ee5e7a25cb23cf2adf7aae3e5b405f22097cb67f2cfcca029688cb3f740d",
         "license": "apache-2.0"
+      },
+      {
+        "id": "qwen3-vl-8b-q8",
+        "slot": "llm",
+        "versions": [
+          "qwen-image-2.1",
+          "boogu-image",
+          "ideogram4"
+        ],
+        "repo": "Qwen/Qwen3-VL-8B-Instruct-GGUF",
+        "revision": "f982a07559d4a2f6c8744d840bf6fccab30eea96",
+        "path": "Qwen3VL-8B-Instruct-Q8_0.gguf",
+        "size": 8709519456,
+        "sha256": "0d264b3941185d00a74f75c4245521dae088ff1efc90ab8d1754e83f5844adb0",
+        "license": "apache-2.0"
+      },
+      {
+        "id": "qwen3-vl-8b-q4km",
+        "slot": "llm",
+        "versions": [
+          "qwen-image-2.1",
+          "boogu-image",
+          "ideogram4"
+        ],
+        "repo": "Qwen/Qwen3-VL-8B-Instruct-GGUF",
+        "revision": "f982a07559d4a2f6c8744d840bf6fccab30eea96",
+        "path": "Qwen3VL-8B-Instruct-Q4_K_M.gguf",
+        "size": 5027784800,
+        "sha256": "67d1659bfe71b89d50b45a4ad1a9e5b997e5bb16ce5da66a6a6167abd569e9e2",
+        "license": "apache-2.0"
+      },
+      {
+        "id": "qwen3-vl-8b-mmproj",
+        "slot": "llm_vision",
+        "versions": [
+          "qwen-image-2.1",
+          "boogu-image"
+        ],
+        "repo": "Qwen/Qwen3-VL-8B-Instruct-GGUF",
+        "revision": "f982a07559d4a2f6c8744d840bf6fccab30eea96",
+        "path": "mmproj-Qwen3VL-8B-Instruct-F16.gguf",
+        "size": 1159029824,
+        "sha256": "ca524100ebf825c9a870db1c580d03879e0da0ab2541697e2458e64891cf9d38",
+        "license": "apache-2.0"
+      },
+      {
+        "id": "qwen-image-21-vae",
+        "slot": "vae",
+        "versions": [
+          "qwen-image-2.1"
+        ],
+        "repo": "Comfy-Org/Qwen-Image-2.1",
+        "revision": "aacf31a6d48e707f352ecba714cee0680da3479b",
+        "path": "vae/qwen_image_2.1_vae_bf16.safetensors",
+        "size": 675509688,
+        "sha256": "bb21f7473051e1ac368515dd3f2e15cd44d7a11748ee8823e1ddca3e4876b7c9",
+        "license": "qwen-research"
+      },
+      {
+        "id": "sd-vae-ft-mse",
+        "slot": "vae",
+        "versions": [
+          "sd1",
+          "sd1-inpaint",
+          "sd1-pix2pix",
+          "sd1-tiny-unet",
+          "sd2",
+          "sd2-inpaint",
+          "sd2-tiny-unet"
+        ],
+        "repo": "stabilityai/sd-vae-ft-mse",
+        "revision": "31f26fdeee1355a5c34592e401dd41e45d25a493",
+        "path": "diffusion_pytorch_model.safetensors",
+        "size": 334643276,
+        "sha256": "a1d993488569e928462932c8c38a0760b874d166399b14414135bd9c42df5815",
+        "license": "mit"
+      },
+      {
+        "id": "sdxl-vae-fp16-fix",
+        "slot": "vae",
+        "versions": [
+          "sdxl",
+          "sdxl-inpaint",
+          "sdxl-pix2pix",
+          "sdxl-vega",
+          "sdxl-ssd1b",
+          "pixart"
+        ],
+        "repo": "madebyollin/sdxl-vae-fp16-fix",
+        "revision": "207b116dae70ace3637169f1ddd2434b91b3a8cd",
+        "path": "diffusion_pytorch_model.safetensors",
+        "size": 334643238,
+        "sha256": "1b909373b28f2137098b0fd9dbc6f97f8410854f31f84ddc9fa04b077b0ace2c",
+        "license": "mit"
+      },
+      {
+        "id": "sdxs-vae",
+        "slot": "vae",
+        "versions": [
+          "sdxs-512-ds",
+          "sdxs-09"
+        ],
+        "repo": "IDKiro/sdxs-512-dreamshaper",
+        "revision": "76f720262bb051da75666b22c902a78c8e16c763",
+        "path": "vae/diffusion_pytorch_model.safetensors",
+        "size": 9793292,
+        "sha256": "d7956d561b1efbd861ad9b03fd8f01510f9e87eddc07bdfd20837009433f6ee5",
+        "license": "openrail++"
+      },
+      {
+        "id": "clip-g-sdxl",
+        "slot": "clip_g",
+        "versions": [
+          "sdxl",
+          "sdxl-inpaint",
+          "sdxl-pix2pix",
+          "sdxl-vega",
+          "sdxl-ssd1b"
+        ],
+        "repo": "stabilityai/stable-diffusion-xl-base-1.0",
+        "revision": "462165984030d82259a11f4367a4eed129e94a7b",
+        "path": "text_encoder_2/model.fp16.safetensors",
+        "size": 1389382176,
+        "sha256": "ec310df2af79c318e24d20511b601a591ca8cd4f1fce1d8dff822a356bcdb1f4",
+        "license": "openrail++"
+      },
+      {
+        "id": "clip-l-vega",
+        "slot": "clip_l",
+        "versions": [
+          "sdxl-vega"
+        ],
+        "repo": "segmind/Segmind-Vega",
+        "revision": "7714c4363e5856ff974a4f4b068e8691f26d0b40",
+        "path": "text_encoder/model.fp16.safetensors",
+        "size": 246144152,
+        "sha256": "1e090d6a828fd92401be5f83e615fd7b4fb1f4a22e9af9040a38f602e839317c",
+        "license": "apache-2.0"
+      },
+      {
+        "id": "clip-g-vega",
+        "slot": "clip_g",
+        "versions": [
+          "sdxl-vega"
+        ],
+        "repo": "segmind/Segmind-Vega",
+        "revision": "7714c4363e5856ff974a4f4b068e8691f26d0b40",
+        "path": "text_encoder_2/model.fp16.safetensors",
+        "size": 1389382176,
+        "sha256": "5b98e4a57a9292eeb819d67e2d2100f66f17db723cde4ecea27a7c3741160d0c",
+        "license": "apache-2.0"
+      },
+      {
+        "id": "clip-l-ssd1b",
+        "slot": "clip_l",
+        "versions": [
+          "sdxl-ssd1b"
+        ],
+        "repo": "segmind/SSD-1B",
+        "revision": "60987f37e94cd59c36b1cba832b9f97b57395a10",
+        "path": "text_encoder/model.fp16.safetensors",
+        "size": 246144864,
+        "sha256": "5487ea0eee9c9a9bff8abd097908d4deff3ae1fa87b3b67397f8b9538139d447",
+        "license": "apache-2.0"
+      },
+      {
+        "id": "clip-g-ssd1b",
+        "slot": "clip_g",
+        "versions": [
+          "sdxl-ssd1b"
+        ],
+        "repo": "segmind/SSD-1B",
+        "revision": "60987f37e94cd59c36b1cba832b9f97b57395a10",
+        "path": "text_encoder_2/model.fp16.safetensors",
+        "size": 1389382880,
+        "sha256": "d3df577f6e3799c8e1bd9b40e30133710e02e8e25d0ce48cdcc790e7dfe12d6d",
+        "license": "apache-2.0"
+      },
+      {
+        "id": "sd3-vae",
+        "slot": "vae",
+        "versions": [
+          "sd3"
+        ],
+        "repo": "adamo1139/stable-diffusion-3.5-medium-ungated",
+        "revision": "1cb9becf522803da9d25c2713d1a82b41bc6198d",
+        "path": "vae/diffusion_pytorch_model.safetensors",
+        "size": 167666902,
+        "sha256": "8f53304a79335b55e13ec50f63e5157fee4deb2f30d5fae0654e2b2653c109dc",
+        "license": "stabilityai-ai-community"
+      },
+      {
+        "id": "sd-vae-ft-ema",
+        "slot": "vae",
+        "versions": [
+          "pixart"
+        ],
+        "repo": "stabilityai/sd-vae-ft-ema",
+        "revision": "f04b2c4b98319346dad8c65879f680b1997b204a",
+        "path": "diffusion_pytorch_model.safetensors",
+        "size": 334643276,
+        "sha256": "32db726da04f06c1b6b14c0043ce115cc87a501482945c5add89a40d838fcb46",
+        "license": "mit"
+      },
+      {
+        "id": "flan-t5-large",
+        "slot": "t5xxl",
+        "versions": [
+          "minit2i"
+        ],
+        "repo": "google/flan-t5-large",
+        "revision": "0613663d0d48ea86ba8cb3d7a44f0f65dc596a2a",
+        "path": "model.safetensors",
+        "size": 3132668804,
+        "sha256": "a9dd06ce490f139af36e9eb77dd3758b4fd07a08a73d5a1abe5ff2591e2d388e",
+        "license": "apache-2.0"
+      },
+      {
+        "id": "qwen3-0.6b-base-q8",
+        "slot": "llm",
+        "versions": [
+          "anima"
+        ],
+        "repo": "mradermacher/Qwen3-0.6B-Base-GGUF",
+        "revision": "b8b11a6dbbb14c739e25018f3f77abac860c28f4",
+        "path": "Qwen3-0.6B-Base.Q8_0.gguf",
+        "size": 639447232,
+        "sha256": "4b088f1793f6cba9f0c2f77ab835ef6734f205c2159168698c6e1a51b7df168a",
+        "license": "apache-2.0"
+      },
+      {
+        "id": "qwen3-vl-4b-mmproj",
+        "slot": "llm_vision",
+        "versions": [
+          "mage-flow",
+          "krea2",
+          "fibo2"
+        ],
+        "repo": "Qwen/Qwen3-VL-4B-Instruct-GGUF",
+        "revision": "1cd86afb9a95c410a6038ab3b40d8b578c892266",
+        "path": "mmproj-Qwen3VL-4B-Instruct-F16.gguf",
+        "size": 836180256,
+        "sha256": "256f3a43bd4205ffef48d6b92715e1e70b5b0e9aef06522584967513a9985331",
+        "license": "apache-2.0"
+      },
+      {
+        "id": "ministral-3-3b",
+        "slot": "llm",
+        "versions": [
+          "ernie-image"
+        ],
+        "repo": "Comfy-Org/ERNIE-Image",
+        "revision": "50509a88bc4fb9e89583a98605f4c81dc221eb8c",
+        "path": "text_encoders/ministral-3-3b.safetensors",
+        "size": 7717637511,
+        "sha256": "49a750a128863854eac7d85e1a277a7b44bf6ec3646405b84686dfeeca3708ca",
+        "license": "apache-2.0"
+      },
+      {
+        "id": "mage-flow-vae",
+        "slot": "vae",
+        "versions": [
+          "mage-flow"
+        ],
+        "repo": "Comfy-Org/Mage-Flow",
+        "revision": "6ff68fbf3c667325e961d551691b246791d5eec0",
+        "path": "vae/mage_flow_vae_bf16.safetensors",
+        "size": 345053056,
+        "sha256": "34e076dc1e8a15321e1e07be5111d59cf16dd10b804b7c7e20b4de29013427e0",
+        "license": "mit-microsoft-mage"
+      },
+      {
+        "id": "qwen3-vl-4b-mmproj-q8",
+        "slot": "llm_vision",
+        "versions": [
+          "krea2",
+          "fibo2"
+        ],
+        "repo": "Qwen/Qwen3-VL-4B-Instruct-GGUF",
+        "revision": "1cd86afb9a95c410a6038ab3b40d8b578c892266",
+        "path": "mmproj-Qwen3VL-4B-Instruct-Q8_0.gguf",
+        "size": 453974304,
+        "sha256": "30ba2c7dd3127a4561b6cba9d13d0f711c91bdb38742e2f56d73c8cb596bd06d",
+        "license": "apache-2.0"
+      },
+      {
+        "id": "gpt-oss-20b-q8",
+        "slot": "llm",
+        "versions": [
+          "lens"
+        ],
+        "repo": "unsloth/gpt-oss-20b-GGUF",
+        "revision": "d449b42d93e1c2c7bda5312f5c25c8fb91dfa9b4",
+        "path": "gpt-oss-20b-Q8_0.gguf",
+        "size": 12109567168,
+        "sha256": "bcd455d4034ec02f71a875b46cb17df44a97911d7258291973be4d21f98329f3",
+        "license": "apache-2.0"
+      },
+      {
+        "id": "gpt-oss-tokenizer",
+        "slot": "tokenizer",
+        "versions": [
+          "lens"
+        ],
+        "repo": "openai/gpt-oss-20b",
+        "revision": "6cee5e81ee83917806bbde320786a8fb61efebee",
+        "path": "tokenizer.json",
+        "size": 27868174,
+        "sha256": "0614fe83cadab421296e664e1f48f4261fa8fef6e03e63bb75c20f38e37d07d3",
+        "license": "apache-2.0"
+      },
+      {
+        "id": "llada-image-te-q8",
+        "slot": "llm",
+        "versions": [
+          "llada-image"
+        ],
+        "repo": "fszontagh/LLaDA-Image-GGUF",
+        "revision": "1fb867edc454da1f9e8f9215a8a4c376d3b1b867",
+        "path": "llada-image-text_encoder-q8_0.gguf",
+        "size": 17676202624,
+        "sha256": "694979f6959e298c1eade599d1da04396d0ca06651ff0bf77e0e7c7a6fbfdf1a",
+        "license": "apache-2.0"
+      },
+      {
+        "id": "llada-image-te-q4k",
+        "slot": "llm",
+        "versions": [
+          "llada-image"
+        ],
+        "repo": "fszontagh/LLaDA-Image-GGUF",
+        "revision": "1fb867edc454da1f9e8f9215a8a4c376d3b1b867",
+        "path": "llada-image-text_encoder-q4_K.gguf",
+        "size": 9692566528,
+        "sha256": "7ec5f251659c41971f8a10a598245fa64bee6f7badbbaf1461dc4e0d18029374",
+        "license": "apache-2.0"
+      },
+      {
+        "id": "llada-image-turbo-te-q8",
+        "slot": "llm",
+        "versions": [
+          "llada-image"
+        ],
+        "repo": "fszontagh/LLaDA-Image-Turbo-GGUF",
+        "revision": "73e2e2adecb76bcf1f89fc37a636912c551349a9",
+        "path": "llada-image-turbo-text_encoder-q8_0.gguf",
+        "size": 17676202624,
+        "sha256": "dc95123508eeb92593c2e63c5f0dbd7e678e3694766fcbbaa792da3e740ca6f0",
+        "license": "apache-2.0"
+      },
+      {
+        "id": "llada-image-turbo-te-q4k",
+        "slot": "llm",
+        "versions": [
+          "llada-image"
+        ],
+        "repo": "fszontagh/LLaDA-Image-Turbo-GGUF",
+        "revision": "73e2e2adecb76bcf1f89fc37a636912c551349a9",
+        "path": "llada-image-turbo-text_encoder-q4_K.gguf",
+        "size": 9692566528,
+        "sha256": "3efd1f42856ab18f2e2d4a0ac277943801336e5641b21905c2131a04e96b8a40",
+        "license": "apache-2.0"
+      },
+      {
+        "id": "llada-image-connectors-edit",
+        "slot": "embeddings_connectors",
+        "versions": [
+          "llada-image"
+        ],
+        "repo": "fszontagh/LLaDA-Image-GGUF",
+        "revision": "1fb867edc454da1f9e8f9215a8a4c376d3b1b867",
+        "path": "llada-image-connectors-edit.safetensors",
+        "size": 3348225976,
+        "sha256": "9e06899e1b020ca9ddf6c20293279f1a44a58944a5358d6db6781b3826bb386d",
+        "license": "apache-2.0"
+      },
+      {
+        "id": "llada-image-connectors",
+        "slot": "embeddings_connectors",
+        "versions": [
+          "llada-image"
+        ],
+        "repo": "fszontagh/LLaDA-Image-GGUF",
+        "revision": "1fb867edc454da1f9e8f9215a8a4c376d3b1b867",
+        "path": "llada-image-connectors.safetensors",
+        "size": 754208344,
+        "sha256": "bd79340488b21f7a3160c01b20d1f4000dabac0ef066a151b8c148e04cc65b4d",
+        "license": "apache-2.0"
+      },
+      {
+        "id": "llada-image-turbo-connectors-edit",
+        "slot": "embeddings_connectors",
+        "versions": [
+          "llada-image"
+        ],
+        "repo": "fszontagh/LLaDA-Image-Turbo-GGUF",
+        "revision": "73e2e2adecb76bcf1f89fc37a636912c551349a9",
+        "path": "llada-image-turbo-connectors-edit.safetensors",
+        "size": 3348225976,
+        "sha256": "e0e88841b1a9eb7b11f813f3f139507438b541a585fc6aa4a7bf842e732304ca",
+        "license": "apache-2.0"
+      },
+      {
+        "id": "llada-image-turbo-connectors",
+        "slot": "embeddings_connectors",
+        "versions": [
+          "llada-image"
+        ],
+        "repo": "fszontagh/LLaDA-Image-Turbo-GGUF",
+        "revision": "73e2e2adecb76bcf1f89fc37a636912c551349a9",
+        "path": "llada-image-turbo-connectors.safetensors",
+        "size": 754208344,
+        "sha256": "c367d9409e34ac7fbd6224055cb39821823f6d3e449962137127a2f0c4a46660",
+        "license": "apache-2.0"
+      },
+      {
+        "id": "llada-tokenizer",
+        "slot": "tokenizer",
+        "versions": [
+          "llada-image"
+        ],
+        "repo": "inclusionAI/LLaDA-Image",
+        "revision": "e4e2703f410f7ddb6ee8d6b09dac6a8ec5093039",
+        "path": "tokenizer/tokenizer.json",
+        "size": 15297062,
+        "sha256": "2197aeddaf09785316673451ca6fb86dcfcfdb108972a3145d106b8fa4c927e6",
+        "license": "apache-2.0"
+      },
+      {
+        "id": "ling-mini-2-bf16",
+        "slot": "llm",
+        "versions": [
+          "ming-image"
+        ],
+        "repo": "Comfy-Org/Ming-Image",
+        "revision": "23e15275f1e8d9ba50e36d596f584327071be444",
+        "path": "text_encoders/ming_image_0.1_ling_mini_2.0_bf16.safetensors",
+        "size": 36677768245,
+        "sha256": "7eccad21934f2e6d9103b5c589a448082e89f7b5b73a6b9c6d0332be7de26c1e",
+        "license": "mit-inclusionai"
+      },
+      {
+        "id": "ling-tokenizer",
+        "slot": "tokenizer",
+        "versions": [
+          "ming-image"
+        ],
+        "repo": "inclusionAI/Ming-Image-0.1-Design",
+        "revision": "c57c49689d12ef7d4e24a170014f1dc43d3ce258",
+        "path": "mllm/tokenizer.json",
+        "size": 12210709,
+        "sha256": "e7ff01708d504f7bf4dbf7f5815adde57bab9a40e7f563ab6ad1acace4464917",
+        "license": "mit-inclusionai"
+      },
+      {
+        "id": "ming-image-vae",
+        "slot": "vae",
+        "versions": [
+          "ming-image"
+        ],
+        "repo": "Comfy-Org/Ming-Image",
+        "revision": "23e15275f1e8d9ba50e36d596f584327071be444",
+        "path": "vae/ming_image_vae_bf16.safetensors",
+        "size": 253816696,
+        "sha256": "7f5bed402dc8c77dc2e0ab1929a85d4df433b7cf7b599dfa8c353da98db0b90a",
+        "license": "mit-inclusionai"
+      },
+      {
+        "id": "qwen3.5-9b-q8",
+        "slot": "llm",
+        "versions": [
+          "moss-image"
+        ],
+        "repo": "unsloth/Qwen3.5-9B-GGUF",
+        "revision": "3885219b6810b007914f3a7950a8d1b469d598a5",
+        "path": "Qwen3.5-9B-Q8_0.gguf",
+        "size": 9527502048,
+        "sha256": "809626574d0cb43d4becfa56169980da2bb448f2299270f7be443cb89d0a6ae4",
+        "license": "apache-2.0"
+      },
+      {
+        "id": "qwen3.5-9b-q4km",
+        "slot": "llm",
+        "versions": [
+          "moss-image"
+        ],
+        "repo": "unsloth/Qwen3.5-9B-GGUF",
+        "revision": "3885219b6810b007914f3a7950a8d1b469d598a5",
+        "path": "Qwen3.5-9B-Q4_K_M.gguf",
+        "size": 5680522464,
+        "sha256": "03b74727a860a56338e042c4420bb3f04b2fec5734175f4cb9fa853daf52b7e8",
+        "license": "apache-2.0"
+      },
+      {
+        "id": "moss-tokenizer",
+        "slot": "tokenizer",
+        "versions": [
+          "moss-image"
+        ],
+        "repo": "OpenMOSS-Team/MOSS-Image-Base",
+        "revision": "85975793d8b3d432f1b6e27f352abaa4c2a4c0d3",
+        "path": "tokenizer/tokenizer.json",
+        "size": 19989325,
+        "sha256": "06b9509352d2af50381ab2247e083b80d32d5c0aba91c272ca9ff729b6a0e523",
+        "license": "apache-2.0"
+      },
+      {
+        "id": "p-h3-text-encoder-int8",
+        "slot": "llm",
+        "versions": [
+          "minimax-h3",
+          "minimax-h3-image",
+          "p-h3-image"
+        ],
+        "repo": "PrunaAI/P-Image-OSS-Comfy",
+        "revision": "177745a635feb2f0adf3db3693297cb63fea3dda",
+        "path": "text_encoders/p-h3-image_text_encoder_int8_convrot.safetensors",
+        "size": 5120870504,
+        "sha256": "fb42c9ff0597e61729475d0b48b69b591ffe06d0b442a79dde22b14fadbe1c0f",
+        "license": "minimax-h3-community"
+      },
+      {
+        "id": "minimax-h3-video-vae",
+        "slot": "vae",
+        "versions": [
+          "minimax-h3"
+        ],
+        "repo": "Comfy-Org/MiniMax-H3",
+        "revision": "4b53a35191437de05370da548e59aeabe2a5a09a",
+        "path": "vae/minimax_h3_video_vae_fp16.safetensors",
+        "size": 5207808496,
+        "sha256": "7c1f131492e7eddacaac9069a61b81bdd39de5cc96561e677c5eab1cdce5e522",
+        "license": "minimax-h3-community"
+      },
+      {
+        "id": "minimax-h3-image-vae",
+        "slot": "vae",
+        "versions": [
+          "minimax-h3-image"
+        ],
+        "repo": "Comfy-Org/MiniMax-H3-Image",
+        "revision": "a70325ac34ca5c0c83df578bb5e02237460c1d8d",
+        "path": "vae/minimax_h3_image_vae_fp16.safetensors",
+        "size": 1168505312,
+        "sha256": "d80e9c2e5cfc9844869961ff5a58c9a9e52182df6bfb30b26018dd7f348721af",
+        "license": "minimax-h3-image-community"
+      },
+      {
+        "id": "p-h3-image-vae",
+        "slot": "vae",
+        "versions": [
+          "minimax-h3",
+          "minimax-h3-image",
+          "p-h3-image"
+        ],
+        "repo": "PrunaAI/P-Image-OSS-Comfy",
+        "revision": "177745a635feb2f0adf3db3693297cb63fea3dda",
+        "path": "vae/p-h3-image_vae_bf16.safetensors",
+        "size": 5559036680,
+        "sha256": "a1f2a7a98d0f2d1e761656fc5701dd43d7cf46d1bbdaa5d866a3e961e97487d7",
+        "license": "minimax-h3-community"
+      },
+      {
+        "id": "gemma3-12b-q8",
+        "slot": "llm",
+        "versions": [
+          "ltxav"
+        ],
+        "repo": "unsloth/gemma-3-12b-it-GGUF",
+        "revision": "d15e4c7dc21dc55d56bf8549db57a71ad8a2a35d",
+        "path": "gemma-3-12b-it-Q8_0.gguf",
+        "size": 12510212576,
+        "sha256": "a774cd9c6f289a6159f4a3f92a7ebca887e15073f92016d53c3593cb440a5982",
+        "license": "gemma-terms-of-use"
+      },
+      {
+        "id": "gemma3-12b-q4km",
+        "slot": "llm",
+        "versions": [
+          "ltxav"
+        ],
+        "repo": "unsloth/gemma-3-12b-it-GGUF",
+        "revision": "d15e4c7dc21dc55d56bf8549db57a71ad8a2a35d",
+        "path": "gemma-3-12b-it-Q4_K_M.gguf",
+        "size": 7300778336,
+        "sha256": "15b8fd9d8672cd4240c178c217ca781409291f34e353d2e913b29c7602ceb3ff",
+        "license": "gemma-terms-of-use"
+      },
+      {
+        "id": "ltx23-connectors",
+        "slot": "embeddings_connectors",
+        "versions": [
+          "ltxav"
+        ],
+        "repo": "unsloth/LTX-2.3-GGUF",
+        "revision": "96e8ed4925ead3db9ff4d0084f165ef6a74f28d0",
+        "path": "text_encoders/ltx-2.3-22b-dev_embeddings_connectors.safetensors",
+        "size": 2312144712,
+        "sha256": "a5c5148788d8d9d5d1e650e4cbf3502a46a2f7f975ce70c59082732c8905a8ae",
+        "license": "ltx-2-community"
+      },
+      {
+        "id": "ltx23-vae",
+        "slot": "vae",
+        "versions": [
+          "ltxav"
+        ],
+        "repo": "unsloth/LTX-2.3-GGUF",
+        "revision": "96e8ed4925ead3db9ff4d0084f165ef6a74f28d0",
+        "path": "vae/ltx-2.3-22b-dev_video_vae.safetensors",
+        "size": 1452256522,
+        "sha256": "8732bb70cf4343541815f45c9f90f5ff0519d679bd63483afc27bf79a08d3f4e",
+        "license": "ltx-2-community"
+      },
+      {
+        "id": "ltx25-gemma4-bf16",
+        "slot": "llm",
+        "versions": [
+          "ltxav"
+        ],
+        "repo": "unsloth/LTX-2.5-GGUF",
+        "revision": "ac3c540c6025903784336e99b2dc179385c4c3b7",
+        "path": "text_encoders/gemma4-12b-with-proj-ltx-2.5-bf16.safetensors",
+        "size": 26263858182,
+        "sha256": "ef7243612fdae7a75cb4d5cee9433e81380675fb6c213bd98ae74a9cd16561d1",
+        "license": "ltx-2x-community"
+      },
+      {
+        "id": "ltx25-vae",
+        "slot": "vae",
+        "versions": [
+          "ltxav"
+        ],
+        "repo": "unsloth/LTX-2.5-GGUF",
+        "revision": "ac3c540c6025903784336e99b2dc179385c4c3b7",
+        "path": "vae/ltx-2.5-video-vae-conv-bf16.safetensors",
+        "size": 1452269922,
+        "sha256": "685b06ee3d9b2039647698fc4ea33175112462fc374e2777312c907897dfce8d",
+        "license": "ltx-2x-community"
+      },
+      {
+        "id": "byt5-small-glyphxl",
+        "slot": "t5xxl",
+        "versions": [
+          "hunyuan-video"
+        ],
+        "repo": "Comfy-Org/Hunyuan-Video-1.5",
+        "revision": "1405a2b738c29b890cf6d03fc038d8d3e92eeed7",
+        "path": "split_files/text_encoders/byt5_small_glyphxl_fp16.safetensors",
+        "size": 438643184,
+        "sha256": "516910bb4c9b225370290e40585d1b0e6c8cd3583690f7eec2f7fb593990fb48",
+        "license": "tencent-hunyuan-community"
+      },
+      {
+        "id": "hunyuan15-vae",
+        "slot": "vae",
+        "versions": [
+          "hunyuan-video"
+        ],
+        "repo": "Comfy-Org/Hunyuan-Video-1.5",
+        "revision": "1405a2b738c29b890cf6d03fc038d8d3e92eeed7",
+        "path": "split_files/vae/hunyuanvideo15_vae_fp16.safetensors",
+        "size": 2521292758,
+        "sha256": "e7c3091949c27e2d55ae6d5df917b99dadfebbf308e5a50d0ade0d16c90297ae",
+        "license": "tencent-hunyuan-community"
       }
     ],
     "byVersion": {
@@ -1793,7 +2621,8 @@
       "sd3": {
         "clip_l": "clip-l",
         "clip_g": "clip-g",
-        "t5xxl": "t5xxl-fp8"
+        "t5xxl": "t5xxl-fp8",
+        "vae": "sd3-vae"
       },
       "qwen-image": {
         "llm": "qwen2.5-vl-7b-q8",
@@ -1809,10 +2638,13 @@
         "vae": "ae-flux1"
       },
       "hunyuan-video": {
-        "llm": "qwen2.5-vl-7b-q8"
+        "llm": "qwen2.5-vl-7b-q8",
+        "t5xxl": "byt5-small-glyphxl",
+        "vae": "hunyuan15-vae"
       },
       "anima": {
-        "vae": "qwen-image-vae"
+        "vae": "qwen-image-vae",
+        "llm": "qwen3-0.6b-base-q8"
       },
       "wan2": {
         "t5xxl": "umt5-xxl-q8",
@@ -1852,42 +2684,142 @@
       },
       "fibo2": {
         "llm": "qwen3-vl-4b-q4km",
-        "vae": "flux2-vae"
+        "vae": "flux2-vae",
+        "llm_vision": "qwen3-vl-4b-mmproj-q8"
       },
       "ovis-image": {
         "llm": "ovis-2.5",
         "vae": "ae-flux1"
       },
       "boogu-image": {
-        "vae": "ae-flux1"
+        "vae": "ae-flux1",
+        "llm": "qwen3-vl-8b-q8",
+        "llm_vision": "qwen3-vl-8b-mmproj"
       },
       "ernie-image": {
-        "vae": "flux2-vae"
+        "vae": "flux2-vae",
+        "llm": "ministral-3-3b"
       },
       "lens": {
-        "vae": "flux2-vae"
+        "vae": "flux2-vae",
+        "llm": "gpt-oss-20b-q8",
+        "tokenizer": "gpt-oss-tokenizer"
       },
       "moss-image": {
-        "vae": "flux2-vae"
+        "vae": "flux2-vae",
+        "llm": "qwen3.5-9b-q8",
+        "tokenizer": "moss-tokenizer"
       },
       "sefi-image": {
-        "vae": "flux2-vae"
+        "vae": "flux2-vae",
+        "llm": "qwen3-vl-4b-q4km"
       },
       "ideogram4": {
-        "vae": "flux2-vae"
+        "vae": "flux2-vae",
+        "llm": "qwen3-vl-8b-q8"
       },
       "llada-image": {
-        "vae": "flux2-vae"
+        "vae": "flux2-vae",
+        "tokenizer": "llada-tokenizer"
       },
       "krea2": {
         "llm": "qwen3-vl-4b-q4km",
-        "vae": "wan21-vae"
+        "vae": "wan21-vae",
+        "llm_vision": "qwen3-vl-4b-mmproj-q8"
       },
       "mage-flow": {
-        "llm": "qwen3-vl-4b-q4km"
+        "llm": "qwen3-vl-4b-q4km",
+        "vae": "mage-flow-vae",
+        "llm_vision": "qwen3-vl-4b-mmproj"
       },
       "iris": {
         "llm": "qwen3-vl-4b-q4km"
+      },
+      "qwen-image-2.1": {
+        "llm": "qwen3-vl-8b-q8",
+        "vae": "qwen-image-21-vae",
+        "llm_vision": "qwen3-vl-8b-mmproj"
+      },
+      "sd1": {
+        "vae": "sd-vae-ft-mse"
+      },
+      "sd1-inpaint": {
+        "vae": "sd-vae-ft-mse"
+      },
+      "sd1-pix2pix": {
+        "vae": "sd-vae-ft-mse"
+      },
+      "sd1-tiny-unet": {
+        "vae": "sd-vae-ft-mse"
+      },
+      "sd2": {
+        "vae": "sd-vae-ft-mse"
+      },
+      "sd2-inpaint": {
+        "vae": "sd-vae-ft-mse"
+      },
+      "sd2-tiny-unet": {
+        "vae": "sd-vae-ft-mse"
+      },
+      "sdxs-512-ds": {
+        "vae": "sdxs-vae"
+      },
+      "sdxs-09": {
+        "vae": "sdxs-vae"
+      },
+      "sdxl": {
+        "clip_l": "clip-l",
+        "clip_g": "clip-g-sdxl",
+        "vae": "sdxl-vae-fp16-fix"
+      },
+      "sdxl-inpaint": {
+        "clip_l": "clip-l",
+        "clip_g": "clip-g-sdxl",
+        "vae": "sdxl-vae-fp16-fix"
+      },
+      "sdxl-pix2pix": {
+        "clip_l": "clip-l",
+        "clip_g": "clip-g-sdxl",
+        "vae": "sdxl-vae-fp16-fix"
+      },
+      "sdxl-vega": {
+        "clip_l": "clip-l-vega",
+        "clip_g": "clip-g-vega",
+        "vae": "sdxl-vae-fp16-fix"
+      },
+      "sdxl-ssd1b": {
+        "clip_l": "clip-l-ssd1b",
+        "clip_g": "clip-g-ssd1b",
+        "vae": "sdxl-vae-fp16-fix"
+      },
+      "pixart": {
+        "t5xxl": "t5xxl-fp8",
+        "vae": "sdxl-vae-fp16-fix"
+      },
+      "minit2i": {
+        "t5xxl": "flan-t5-large"
+      },
+      "ming-image": {
+        "llm": "ling-mini-2-bf16",
+        "tokenizer": "ling-tokenizer",
+        "vae": "ming-image-vae"
+      },
+      "minimax-h3": {
+        "llm": "p-h3-text-encoder-int8",
+        "vae": "minimax-h3-video-vae"
+      },
+      "minimax-h3-image": {
+        "llm": "p-h3-text-encoder-int8",
+        "vae": "minimax-h3-image-vae"
+      },
+      "p-h3-image": {
+        "llm": "p-h3-text-encoder-int8",
+        "vae": "p-h3-image-vae"
+      },
+      "ltxav": {
+        "llm": "gemma3-12b-q8",
+        "embeddings_connectors": "ltx23-connectors",
+        "vae": "ltx23-vae"
       }
     },
     "byRecipe": {
@@ -1896,7 +2828,79 @@
       },
       "flux2-klein-base-9b": {
         "llm": "qwen3-8b-q8"
+      },
+      "pixart-alpha-512": {
+        "vae": "sd-vae-ft-ema"
+      },
+      "pixart-alpha-1024": {
+        "vae": "sd-vae-ft-ema"
+      },
+      "pixart-sigma": {
+        "vae": "sdxl-vae-fp16-fix"
+      },
+      "llada-image": {
+        "llm": "llada-image-te-q8",
+        "embeddings_connectors": "llada-image-connectors-edit"
+      },
+      "llada-image-turbo": {
+        "llm": "llada-image-turbo-te-q8",
+        "embeddings_connectors": "llada-image-turbo-connectors-edit"
+      },
+      "p-h3-image": {
+        "llm": "p-h3-text-encoder-int8",
+        "vae": "p-h3-image-vae"
+      },
+      "ltx25-dev": {
+        "llm": "ltx25-gemma4-bf16",
+        "vae": "ltx25-vae"
       }
-    }
+    },
+    "notCovered": [
+      {
+        "recipe": "ideogram4",
+        "slot": "uncond_diffusion_model",
+        "reason": "This model needs a second model file, the unconditional one, and Studio can't pick it for you yet. Choose it yourself."
+      },
+      {
+        "recipe": "instruct-pix2pix",
+        "slot": "clip_l",
+        "reason": "Studio runs this type from a full checkpoint, which has its text encoder inside the file. A file without one can't be set up here."
+      },
+      {
+        "recipe": "sd-turbo",
+        "slot": "clip_l",
+        "reason": "Studio runs this type from a full checkpoint, which has its text encoder inside the file. A file without one can't be set up here."
+      },
+      {
+        "recipe": "sd1-checkpoint",
+        "slot": "clip_l",
+        "reason": "Studio runs this type from a full checkpoint, which has its text encoder inside the file. A file without one can't be set up here."
+      },
+      {
+        "recipe": "sd1-inpainting",
+        "slot": "clip_l",
+        "reason": "Studio runs this type from a full checkpoint, which has its text encoder inside the file. A file without one can't be set up here."
+      },
+      {
+        "recipe": "sd2-512-checkpoint",
+        "slot": "clip_l",
+        "reason": "Studio runs this type from a full checkpoint, which has its text encoder inside the file. A file without one can't be set up here."
+      },
+      {
+        "recipe": "sd2-768-checkpoint",
+        "slot": "clip_l",
+        "reason": "Studio runs this type from a full checkpoint, which has its text encoder inside the file. A file without one can't be set up here."
+      },
+      {
+        "recipe": "sd2-inpainting",
+        "slot": "clip_l",
+        "reason": "Studio runs this type from a full checkpoint, which has its text encoder inside the file. A file without one can't be set up here."
+      },
+      {
+        "recipe": "sdxs",
+        "slot": "clip_l",
+        "reason": "Studio runs this type from a full checkpoint, which has its text encoder inside the file. A file without one can't be set up here."
+      }
+    ]
   }
 }

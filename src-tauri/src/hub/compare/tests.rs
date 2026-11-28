@@ -1128,6 +1128,125 @@ async fn an_installed_item_whose_file_is_gone() {
     assert_eq!(f.fit, None);
 }
 
+// ---- A model this version's model runner cannot open yet -----------------------------
+
+/// A header naming `arch`, with the sizes of a small dense model.
+fn bytes_of(arch: &str) -> Vec<u8> {
+    models::gguf::testing::Writer::new()
+        .str("general.architecture", arch)
+        .u32(&format!("{arch}.context_length"), 8192)
+        .u32(&format!("{arch}.block_count"), 8)
+        .u32(&format!("{arch}.embedding_length"), 512)
+        .u32(&format!("{arch}.attention.head_count"), 8)
+        .u32(&format!("{arch}.attention.head_count_kv"), 2)
+        .build()
+}
+
+/// The comparison's "Will it fit on this computer?" must not give a verdict for a file the
+/// model runner cannot open, so its facts say whether the runner knows the file's kind, from
+/// the file's own header (the exact witness).
+#[test]
+fn the_facts_of_a_file_say_whether_the_model_runner_knows_its_kind() {
+    let facts = |arch: &str| file_facts(&summary(&bytes_of(arch)), None, false, None);
+    assert_eq!(facts("qwen3").engine_knows, Some(true));
+    assert_eq!(facts("inkling2_loop").engine_knows, Some(true));
+    assert_eq!(facts("futurearch").engine_knows, Some(false));
+    // A header with no kind cannot be opened either, and that is the file's own word.
+    let nameless = models::gguf::testing::Writer::new()
+        .u32("general.file_type", 15)
+        .build();
+    let ff = file_facts(&summary(&nameless), None, false, None);
+    assert_eq!((ff.architecture, ff.engine_knows), (None, Some(false)));
+}
+
+/// A picture or speech model is not for chat whether or not the runner knows its kind (it knows
+/// kokoro, a speech model): the comparison says what it is instead of "this version can't open
+/// it yet", which promises an update that would change nothing.
+#[test]
+fn the_facts_of_a_picture_or_speech_file_say_it_is_not_for_chat() {
+    let facts = |arch: &str| file_facts(&summary(&bytes_of(arch)), None, false, None);
+    for (arch, why) in [
+        ("kokoro", Some(models::arch::Why::Speech)),
+        ("whisper", Some(models::arch::Why::Speech)),
+        ("flux", Some(models::arch::Why::Picture)),
+        ("qwen3", None),
+        ("futurearch", None),
+    ] {
+        assert_eq!(facts(arch).cant_open_why, why, "{arch}");
+    }
+    assert_eq!(facts("kokoro").engine_knows, Some(false));
+    assert_eq!(facts("qwen3").engine_knows, Some(true));
+    // An early Inkling 2 upload: the runner knows the name and cannot read the file.
+    let early = models::gguf::testing::Writer::new()
+        .str("general.architecture", "inkling2")
+        .u32("inkling2.block_count", 48)
+        .u32("inkling2.num_loops", 2)
+        .build();
+    let ff = file_facts(&summary(&early), None, false, None);
+    assert_eq!(
+        (ff.engine_knows, ff.cant_open_why),
+        (Some(false), Some(models::arch::Why::Layout))
+    );
+    let stored = |arch: &str| StoredSummary {
+        architecture: Some(arch.into()),
+        ..StoredSummary::default()
+    };
+    let saved = stored_file_facts(&stored("kokoro"), false).unwrap();
+    assert_eq!(
+        (saved.engine_knows, saved.cant_open_why),
+        (Some(false), Some(models::arch::Why::Speech))
+    );
+    assert_eq!(
+        stored_file_facts(&stored("qwen3"), false)
+            .unwrap()
+            .cant_open_why,
+        None
+    );
+}
+
+/// What was saved when a model was installed is that file's header too.
+#[test]
+fn the_saved_facts_of_an_installed_file_say_it_too() {
+    let stored = |arch: &str| StoredSummary {
+        architecture: Some(arch.into()),
+        ..StoredSummary::default()
+    };
+    assert_eq!(
+        stored_file_facts(&stored("futurearch"), false)
+            .unwrap()
+            .engine_knows,
+        Some(false)
+    );
+    assert_eq!(
+        stored_file_facts(&stored("qwen3"), false)
+            .unwrap()
+            .engine_knows,
+        Some(true)
+    );
+}
+
+/// The listing's kind is a hint (the repository's first file): with no header to read, what
+/// it names is all there is, and a kind the runner does not know says so.
+#[tokio::test]
+async fn a_listing_alone_says_what_it_can() {
+    let k = known(Vec::new(), Vec::new());
+    let gated = FakeHub::default()
+        .with_listing(FULL)
+        .failing_head("example-quants/Sample-7B-GGUF", Fail::Gated);
+    let f = facts_for(
+        &gated,
+        &k,
+        repo_item("example-quants/Sample-7B-GGUF", "Sample-7B-Q4_K_M.gguf"),
+        CTX,
+    )
+    .await;
+    let ff = f.file_facts.expect("the listing's facts");
+    // The fixture's listing names a kind that is not in the list.
+    assert_eq!(ff.architecture.as_deref(), Some("sample"));
+    assert_eq!(ff.engine_knows, Some(false));
+    assert_eq!(f.fit, None);
+}
+
 // ---- "Will it fit on this computer?" for an installed file (compare-fit-words) ----------
 
 /// What Settings for this model shows for `plan` with its context fixed at `ctx`: the
@@ -1669,6 +1788,8 @@ async fn the_json_has_every_contract_field() {
         serde_json::json!(["chat", "coding", "long-documents"])
     );
     assert_eq!(v["fileFacts"]["expertCount"], serde_json::Value::Null);
+    // The made-up kind of the fixtures is not one the model runner knows.
+    assert_eq!(v["fileFacts"]["engineKnows"], false);
     assert_eq!(v["hub"]["pipelineTag"], "text-generation");
 }
 

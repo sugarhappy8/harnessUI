@@ -30,6 +30,9 @@ pub struct PackDto {
     /// "notInstalled", "partial", "downloading", "installed".
     pub state: String,
     pub bytes_done: u64,
+    /// Bytes an older build of this pack still takes on disk (0: none). A pack's folder
+    /// carries the build, so an app update that moves the pin leaves the old one unused.
+    pub older_bytes: u64,
     /// False when this computer cannot use the pack; `reason` says why.
     pub available: bool,
     pub reason: Option<String>,
@@ -150,6 +153,7 @@ pub async fn list_packs(app: AppHandle, state: State<'_, AppState>) -> AppResult
             download_bytes: pack.download_size(),
             state: state_name.to_string(),
             bytes_done: bytes,
+            older_bytes: runtime::packs::older_bytes(pack, &dir),
             available,
             reason,
         });
@@ -284,12 +288,26 @@ pub async fn cancel_pack_download(app: AppHandle, id: String) -> AppResult<()> {
     Ok(())
 }
 
+/// Removes a backend download with its older builds, or with `older_only` only the older
+/// builds (an update left them unused: the build that works stays, and so does a model
+/// running on it).
 #[tauri::command]
-pub async fn remove_pack(app: AppHandle, state: State<'_, AppState>, id: String) -> AppResult<()> {
+pub async fn remove_pack(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    id: String,
+    older_only: Option<bool>,
+) -> AppResult<()> {
     let lock = runtime::llama::lock::embedded();
     let pack = lock
         .pack(&id)
         .ok_or_else(|| AppError::not_found("backend"))?;
+    if older_only == Some(true) {
+        runtime::packs::remove_older(pack, &packs_dir(&app))
+            .await
+            .map_err(|e| pack_error(&e))?;
+        return Ok(());
+    }
     // Stop the model first if it runs on this pack.
     if state.runtime.status().backend.as_deref() == Some(pack.backend.as_str()) {
         state.runtime.unload().await;

@@ -26,6 +26,7 @@ import {
   zimageDownload,
 } from "./data";
 import { pictureBytes } from "./pictures";
+import { compareFacts, INSTALLED_CANT_OPEN, repoViewFor, searchPage } from "./chatModels";
 
 type RealRepo = { repo: string; files: { file: string; plan: { slots: unknown } | null }[] };
 /** `?real=1`: Get models answers with real backend answers captured from Hugging Face
@@ -47,6 +48,11 @@ function realRepo(repo: string): RealRepo | undefined {
 }
 
 type Args = Record<string, unknown> | undefined;
+
+/** `?cantopen=1`: Models -> Browse, Installed and Compare hold a model whose kind this version
+ *  does not know (the owner's Inkling 2 repository, with its real file list), beside one that
+ *  opens. Models are opened from the page with `app:open-models` (detail: the tab). */
+const cantOpen = new URLSearchParams(location.search).get("cantopen") === "1";
 
 /** `?empty=1`: Studio as a new user finds it: nothing installed, no endpoint, no runs. */
 const empty = new URLSearchParams(location.search).get("empty") === "1";
@@ -291,7 +297,18 @@ async function handle(cmd: string, args: Args): Promise<unknown> {
       return null;
     }
     case "list_installed_models":
-      return INSTALLED_CHAT_MODELS;
+      return cantOpen ? [...INSTALLED_CHAT_MODELS, INSTALLED_CANT_OPEN] : INSTALLED_CHAT_MODELS;
+    // Models -> Browse and Compare (`?cantopen=1`); without the flag they answer nothing, as before.
+    case "hub_search":
+      return cantOpen ? searchPage() : null;
+    case "hub_search_next":
+      return cantOpen ? { items: [], next: null } : null;
+    case "hub_repo":
+      return cantOpen ? repoViewFor(String(a.repoId)) : null;
+    case "compare_facts":
+      return cantOpen ? (a.items as Record<string, string>[]).map(compareFacts) : null;
+    case "catalog_list":
+      return cantOpen ? [] : null;
     case "disk_usage":
       return { modelsDir: "/home/me/models", totalBytes: 12_327_783_488 };
     case "get_setting":

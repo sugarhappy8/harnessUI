@@ -933,3 +933,60 @@ describe("ModelSettings: Fine control and where the model goes (0.0.6 item 6)", 
     expect(select("How much it can remember").value).toBe("default");
   });
 });
+
+/**
+ * The dialog behind the settings icon (the Installed row's and the chat picker's) still showed
+ * memory verdicts ("· Fits", "Automatic: too large for this computer", a too-large alert) for a
+ * model this version cannot open, where every other screen had stopped: the estimate has no rule
+ * for a kind the runner does not know, so it is a guess that says the opposite.
+ */
+describe("ModelSettings: a model this version can't open yet", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    ipcMock.modelBusy.mockResolvedValue(IDLE);
+  });
+  afterEach(cleanup);
+
+  const cant = (patch: Partial<ModelLoadInfo> = {}): ModelLoadInfo => ({
+    ...sample(),
+    tooLarge: true,
+    architecture: "futurearch",
+    architectureSupported: false,
+    ...patch,
+  });
+
+  it("says why instead of giving verdicts, and offers nothing to load", async () => {
+    await openPanel(cant());
+    const box = await screen.findByRole("status", { name: "This version can't open this model yet" });
+    expect(box.textContent).toContain("futurearch");
+    // No fit marks, no too-large alert, no settings to load with.
+    expect(document.body.textContent).not.toMatch(/Fits|Too large|too large|Automatic: /);
+    expect(screen.queryByRole("alert")).toBeNull();
+    expect(screen.queryByLabelText("How much it can remember")).toBeNull();
+    expect(screen.queryByRole("button", { name: "Load with these settings" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Save" })).toBeNull();
+    expect(screen.getByRole("button", { name: "Close" })).toBeTruthy();
+  });
+
+  it("says what a picture or speech model is, with no update to wait for", async () => {
+    await openPanel(cant({ architecture: "kokoro", cantOpenWhy: "speech" }));
+    const box = await screen.findByRole("status", { name: "This is a speech or sound model" });
+    expect(box.textContent).not.toMatch(/newer|update/i);
+    expect(screen.queryByRole("button", { name: "Check for updates" })).toBeNull();
+  });
+
+  it("is as it was for the model that is loaded, whatever the list says (a development engine)", async () => {
+    await openPanel(cant({ loaded: true }));
+    expect(screen.queryByRole("status", { name: "This version can't open this model yet" })).toBeNull();
+    expect(select("How much it can remember")).toBeTruthy();
+  });
+
+  it("is as it was when nobody knows, and when the runner knows", async () => {
+    for (const supported of [null, true] as const) {
+      await openPanel(cant({ architectureSupported: supported, tooLarge: false }));
+      expect(select("How much it can remember")).toBeTruthy();
+      expect(screen.queryByRole("status", { name: "This version can't open this model yet" })).toBeNull();
+      cleanup();
+    }
+  });
+});

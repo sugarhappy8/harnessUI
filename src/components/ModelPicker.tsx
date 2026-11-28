@@ -3,6 +3,7 @@ import { DropdownMenu } from "radix-ui";
 import { Boxes, ChevronDown, FolderOpen, HardDrive, Globe, Settings2 } from "lucide-react";
 import { refreshModelsAfterDownloads, useApp } from "../store/app";
 import type { ModelOption } from "../lib/types";
+import { CANT_OPEN } from "../lib/words";
 import { visiblePath } from "./FolderChip";
 import { openModelSettings } from "./ModelSettings";
 
@@ -101,10 +102,19 @@ export function ModelPicker() {
             <div key={o.ref} className="flex items-center gap-0.5">
               <DropdownMenu.Item
                 onSelect={() => void choose(o.ref)}
-                title={visiblePath(o.ref.slice("local:".length))}
-                className="flex min-w-0 flex-1 cursor-default items-center gap-2 rounded-lg px-2.5 py-1.5 text-sm outline-none data-[highlighted]:bg-bg-muted"
+                // A model this version cannot open is not picked: a pick would stop the model
+                // that works and fail. Its settings (the gear) say why.
+                disabled={o.cantOpen}
+                title={o.cantOpen ? CANT_OPEN.picker.title : visiblePath(o.ref.slice("local:".length))}
+                className="flex min-w-0 flex-1 cursor-default items-center gap-2 rounded-lg px-2.5 py-1.5 text-sm outline-none data-[disabled]:opacity-60 data-[highlighted]:bg-bg-muted"
               >
                 <HardDrive size={14} aria-hidden /> <span className="truncate">{visiblePath(o.label)}</span>
+                {o.cantOpen && (
+                  <>
+                    {" "}
+                    <span className="shrink-0 text-xs text-fg-muted">· {CANT_OPEN.picker.short}</span>
+                  </>
+                )}
                 {o.hint && (
                   <>
                     {" "}

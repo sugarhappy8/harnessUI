@@ -115,6 +115,11 @@ pub struct ModelOptionEntry {
     pub hint: Option<String>,
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub recent: bool,
+    /// An installed file whose kind this version's runner cannot open (sent only when true):
+    /// the picker dims it, as Models → Installed switches Use off, instead of letting a pick
+    /// stop the working model and fail.
+    #[serde(rename = "cantOpen", skip_serializing_if = "std::ops::Not::not")]
+    pub cant_open: bool,
 }
 
 impl ModelOptionEntry {
@@ -124,7 +129,30 @@ impl ModelOptionEntry {
             option,
             hint: None,
             recent: false,
+            cant_open: false,
         }
+    }
+}
+
+/// Marks the entries whose installed file names a kind the runner cannot open (`kinds`: the
+/// architecture saved with each installed row, by path; a file not in it is not marked). A
+/// speech or picture kind is not for chat whatever the list says; with a development engine
+/// (`dev_engine`) a kind the list lacks may open, so only those stay marked.
+pub fn mark_cant_open(
+    entries: &mut [ModelOptionEntry],
+    kinds: &HashMap<String, String>,
+    dev_engine: bool,
+) {
+    for entry in entries {
+        let Some(path) = entry.option.reference.strip_prefix("local:") else {
+            continue;
+        };
+        let Some(kind) = kinds.get(path).map(|k| k.trim()) else {
+            continue;
+        };
+        let not_chat = models::arch::not_for_chat(Some(kind), None).is_some();
+        let unknown = !dev_engine && !kind.is_empty() && !models::arch::is_supported(kind);
+        entry.cant_open = not_chat || unknown;
     }
 }
 
@@ -277,6 +305,7 @@ pub fn local_entries(
             },
             hint: hint.map(|h| visible(&h)),
             recent,
+            cant_open: false,
         })
         .collect()
 }
@@ -419,20 +448,26 @@ pub async fn local_options(
     chat: Option<&str>,
 ) -> Result<Vec<ModelOptionEntry>, store::StoreError> {
     let recent = read_recent(store).await;
-    let installed: Vec<String> = store
-        .list_models()
-        .await?
-        .into_iter()
-        .map(|m| m.path)
+    let rows = store.list_models().await?;
+    // What each row saved about its file's kind, so the list can say which cannot open yet.
+    let kinds: HashMap<String, String> = rows
+        .iter()
+        .filter_map(|m| {
+            let kind = m.gguf_summary.get("architecture")?.as_str()?;
+            Some((m.path.clone(), kind.to_owned()))
+        })
         .collect();
-    Ok(local_entries(
+    let installed: Vec<String> = rows.into_iter().map(|m| m.path).collect();
+    let mut entries = local_entries(
         &recent,
         &installed,
         loaded,
         chat,
         PathRule::this_system(),
         locate,
-    ))
+    );
+    mark_cant_open(&mut entries, &kinds, crate::hub::dev_engine());
+    Ok(entries)
 }
 
 /// The row of Models → Installed for the file at `path`, under any spelling of it (see
@@ -814,6 +849,68 @@ mod tests {
         assert_eq!(out.len(), RECENT_LIMIT);
         assert_eq!(out[0], "/m/new.gguf");
         assert_eq!(out[1], "/m/0.gguf");
+    }
+
+    /// The picker lists an installed model whose kind the runner does not know as one that
+    /// cannot open yet, from the architecture saved with its row, so choosing it is not a
+    /// load that stops the working model and fails.
+    #[test]
+    fn a_model_the_runner_does_not_know_is_marked_in_the_list() {
+        let mut out = local_entries(
+            &[],
+            &strings(&[
+                "/m/new.gguf",
+                "/m/ok.gguf",
+                "/m/unread.gguf",
+                "/m/voice.gguf",
+            ]),
+            None,
+            None,
+            PathRule::Unix,
+            all_there,
+        );
+        assert!(out.iter().all(|e| !e.cant_open));
+        let kinds: HashMap<String, String> = [
+            ("/m/new.gguf", "futurearch"),
+            ("/m/ok.gguf", "qwen3"),
+            ("/m/voice.gguf", "kokoro"),
+        ]
+        .into_iter()
+        .map(|(p, k)| (p.to_owned(), k.to_owned()))
+        .collect();
+        mark_cant_open(&mut out, &kinds, false);
+        let marked: Vec<(&str, bool)> = out
+            .iter()
+            .map(|e| (e.option.reference.as_str(), e.cant_open))
+            .collect();
+        assert_eq!(
+            marked,
+            vec![
+                ("local:/m/new.gguf", true),
+                ("local:/m/ok.gguf", false),
+                ("local:/m/unread.gguf", false),
+                ("local:/m/voice.gguf", true),
+            ]
+        );
+        // A development engine may know a kind the list lacks: only what is not for chat stays.
+        let mut out = local_entries(
+            &[],
+            &strings(&["/m/new.gguf", "/m/voice.gguf"]),
+            None,
+            None,
+            PathRule::Unix,
+            all_there,
+        );
+        mark_cant_open(&mut out, &kinds, true);
+        assert_eq!(
+            out.iter().map(|e| e.cant_open).collect::<Vec<_>>(),
+            vec![false, true]
+        );
+        // The wire: sent only when true.
+        let json = serde_json::to_value(&out[1]).unwrap();
+        assert_eq!(json["cantOpen"], true);
+        let json = serde_json::to_value(&out[0]).unwrap();
+        assert!(json.get("cantOpen").is_none());
     }
 
     /// The model loaded now is listed under the spelling it was loaded with (a link, a mapped
